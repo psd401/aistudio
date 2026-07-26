@@ -163,6 +163,107 @@ export interface CanvaTokenData {
   obtained_at: string
 }
 
+export interface AistudioOAuthTokenData {
+  access_token: string
+  refresh_token: string
+  token_type: "Bearer"
+  scope: string
+  expires_at: string
+  obtained_at: string
+}
+
+export function aistudioOAuthSecretId(ownerEmail: string): string {
+  if (!SAFE_EMAIL_RE.test(ownerEmail)) {
+    throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)
+  }
+  const environment =
+    process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+  return `psd-agent-creds/${environment}/user/${ownerEmail}/aistudio_oauth`
+}
+
+export async function storeAistudioOAuthTokens(
+  ownerEmail: string,
+  tokenData: AistudioOAuthTokenData
+): Promise<string | null> {
+  const secretId = aistudioOAuthSecretId(ownerEmail)
+  const environment =
+    process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+  if (process.env.NODE_ENV === "development") {
+    log.info("Local dev mode — skipping AI Studio OAuth secret write", {
+      secretId,
+    })
+    return null
+  }
+  const {
+    PutSecretValueCommand,
+    CreateSecretCommand,
+    DescribeSecretCommand,
+    ResourceNotFoundException,
+  } = await import("@aws-sdk/client-secrets-manager")
+  const client = await getSecretsManagerClient()
+  const secretString = JSON.stringify(tokenData)
+  try {
+    const response = await client.send(
+      new PutSecretValueCommand({ SecretId: secretId, SecretString: secretString })
+    )
+    return response.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+  } catch (error) {
+    if (!(error instanceof ResourceNotFoundException)) throw error
+    try {
+      const response = await client.send(
+        new CreateSecretCommand({
+          Name: secretId,
+          SecretString: secretString,
+          Description: `AI Studio OAuth tokens for ${ownerEmail}`,
+          Tags: [
+            { Key: "Environment", Value: environment },
+            { Key: "ManagedBy", Value: "aistudio" },
+            { Key: "OwnerEmail", Value: ownerEmail },
+          ],
+        })
+      )
+      return response.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+    } catch (createError) {
+      if (
+        createError instanceof Error &&
+        createError.name === "ResourceExistsException"
+      ) {
+        const response = await client.send(
+          new PutSecretValueCommand({
+            SecretId: secretId,
+            SecretString: secretString,
+          })
+        )
+        return response.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+      }
+      throw createError
+    }
+  }
+}
+
+export async function deleteAistudioOAuthSecret(
+  ownerEmail: string
+): Promise<boolean> {
+  const secretId = aistudioOAuthSecretId(ownerEmail)
+  if (process.env.NODE_ENV === "development") return false
+  const { DeleteSecretCommand, ResourceNotFoundException } = await import(
+    "@aws-sdk/client-secrets-manager"
+  )
+  const client = await getSecretsManagerClient()
+  try {
+    await client.send(
+      new DeleteSecretCommand({
+        SecretId: secretId,
+        ForceDeleteWithoutRecovery: true,
+      })
+    )
+    return true
+  } catch (error) {
+    if (error instanceof ResourceNotFoundException) return false
+    throw error
+  }
+}
+
 export function canvaSecretId(ownerEmail: string): string {
   if (!SAFE_EMAIL_RE.test(ownerEmail)) {
     throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)

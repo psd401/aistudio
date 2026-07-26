@@ -19,6 +19,7 @@
 import { and, eq } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { psdAgentSkills } from "@/lib/db/schema/tables/agent-skills";
+import { skillRepositoryBindings } from "@/lib/db/schema/tables/skill-repository-bindings";
 import { parseToolRef } from "@/lib/tools/catalog/version-resolver";
 
 /**
@@ -121,6 +122,8 @@ export interface ApprovedSkillSession {
   allowedTools: string[];
   /** S3 prefix of the promoted skill folder (SKILL.md lives under it). */
   s3Key: string;
+  /** Canonical repositories bound when the skill was published. */
+  repositoryIds: number[];
 }
 
 /**
@@ -170,10 +173,19 @@ export async function getApprovedSkillSession(
   );
   const row = rows[0];
   if (!row) return null;
+  const repositoryRows = await executeQuery(
+    (db) =>
+      db
+        .select({ repositoryId: skillRepositoryBindings.repositoryId })
+        .from(skillRepositoryBindings)
+        .where(eq(skillRepositoryBindings.skillId, skillId)),
+    "skillEnforcement.repositories"
+  );
   return {
     name: row.name,
     allowedTools: Array.isArray(row.allowedTools) ? row.allowedTools : [],
     s3Key: row.s3Key,
+    repositoryIds: repositoryRows.map((binding) => binding.repositoryId),
   };
 }
 

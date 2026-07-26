@@ -355,6 +355,102 @@ test('get-decision-graph requires --node-id (exit 1)', async () => {
   expect(code).toBe(1);
 });
 
+test('repositories-list maps filters to repositories_list', async () => {
+  await run(
+    'repositories-list',
+    '--user',
+    'a@b.co',
+    '--query',
+    'policy',
+    '--limit',
+    '7'
+  );
+  expect(toolCalls[0]).toEqual({
+    toolName: 'repositories_list',
+    toolArgs: { query: 'policy', limit: 7 },
+    callerEmail: 'a@b.co',
+  });
+});
+
+test('repositories-search maps ids, mode, modalities, and limit', async () => {
+  await run(
+    'repositories-search',
+    '--user',
+    'a@b.co',
+    '--query',
+    'graduation',
+    '--repository-ids',
+    '4,9',
+    '--mode',
+    'hybrid',
+    '--modalities',
+    'text,table',
+    '--limit',
+    '8'
+  );
+  expect(toolCalls[0]).toEqual({
+    toolName: 'repositories_search',
+    toolArgs: {
+      query: 'graduation',
+      repositoryIds: [4, 9],
+      mode: 'hybrid',
+      modalities: ['text', 'table'],
+      limit: 8,
+    },
+    callerEmail: 'a@b.co',
+  });
+});
+
+test('repositories-source and changes use numeric ids and cursor', async () => {
+  await run(
+    'repositories-source',
+    '--repository-id',
+    '4',
+    '--item-id',
+    '11',
+    '--chunk-id',
+    '22'
+  );
+  expect(toolCalls[0].toolName).toBe('repositories_get_source');
+  expect(toolCalls[0].toolArgs).toEqual({
+    repositoryId: 4,
+    itemId: 11,
+    chunkId: 22,
+  });
+
+  await run(
+    'repositories-changes',
+    '--repository-ids',
+    '4,9',
+    '--cursor',
+    'opaque',
+    '--limit',
+    '5'
+  );
+  expect(toolCalls[1].toolName).toBe('repositories_list_changes');
+  expect(toolCalls[1].toolArgs).toEqual({
+    repositoryIds: [4, 9],
+    cursor: 'opaque',
+    limit: 5,
+  });
+});
+
+test('repository ids reject non-positive and non-integer values', async () => {
+  let code;
+  try {
+    await run(
+      'repositories-search',
+      '--query',
+      'x',
+      '--repository-ids',
+      '1,nope'
+    );
+  } catch (error) {
+    code = error.code;
+  }
+  expect(code).toBe(1);
+});
+
 // ── generic ────────────────────────────────────────────────────────────────────
 
 test('an action subcommand surfaces a tool-level isError (non-execute) as tool-error, exit 12', async () => {

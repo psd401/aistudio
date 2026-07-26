@@ -101,6 +101,76 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     requiredScope: "platform:read",
     internalScopes: ["platform:read"],
   },
+  repositories_list: {
+    identifier: "repositories.list",
+    requiredScope: "repositories:list",
+    internalScopes: ["repositories:list"],
+    rest: {
+      scopes: ["repositories:list"],
+      binding: {
+        method: "get",
+        path: "/api/v1/repositories",
+        summary: "List accessible repositories",
+        operationId: "listRepositories",
+      },
+    },
+  },
+  repositories_describe: {
+    identifier: "repositories.describe",
+    requiredScope: "repositories:list",
+    internalScopes: ["repositories:list"],
+    rest: {
+      scopes: ["repositories:list"],
+      binding: {
+        method: "get",
+        path: "/api/v1/repositories/{id}",
+        summary: "Describe an accessible repository",
+        operationId: "describeRepository",
+      },
+    },
+  },
+  repositories_search: {
+    identifier: "repositories.search",
+    requiredScope: "repositories:search",
+    internalScopes: ["repositories:search"],
+    rest: {
+      scopes: ["repositories:search"],
+      binding: {
+        method: "post",
+        path: "/api/v1/repositories/search",
+        summary: "Search accessible repositories",
+        operationId: "searchRepositories",
+      },
+    },
+  },
+  repositories_get_source: {
+    identifier: "repositories.get_source",
+    requiredScope: "repositories:read",
+    internalScopes: ["repositories:read"],
+    rest: {
+      scopes: ["repositories:read"],
+      binding: {
+        method: "get",
+        path: "/api/v1/repositories/{id}/source",
+        summary: "Get authorized repository source segments",
+        operationId: "getRepositorySource",
+      },
+    },
+  },
+  repositories_list_changes: {
+    identifier: "repositories.list_changes",
+    requiredScope: "repositories:changes",
+    internalScopes: ["repositories:changes"],
+    rest: {
+      scopes: ["repositories:changes"],
+      binding: {
+        method: "get",
+        path: "/api/v1/repositories/changes",
+        summary: "List authorized repository changes",
+        operationId: "listRepositoryChanges",
+      },
+    },
+  },
   search_decisions: {
     identifier: "decisions.search",
     requiredScope: "mcp:search_decisions",

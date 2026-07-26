@@ -31,6 +31,10 @@ All `/api/v1/graph/*` endpoints require authentication. Two modes are supported:
 |-------|--------|
 | `graph:read` | List nodes, get node, list edges, get connections |
 | `graph:write` | Create/update/delete nodes, create/delete edges |
+| `repositories:list` | List and describe repositories currently accessible to the principal |
+| `repositories:read` | Disclose current immutable source segments and citations |
+| `repositories:search` | Run retrieval v2 over currently authorized repositories |
+| `repositories:changes` | Poll the authorized repository item change feed |
 
 API keys are created in **Settings > API Keys**. Administrators receive all scopes; staff receives `graph:read` by default.
 
@@ -486,6 +490,101 @@ Delete a single edge. Requires `graph:write`.
 ```
 
 **Response `404`** — Edge not found.
+
+---
+
+### Repository catalog and retrieval — Issue #1266
+
+The repository API is the REST equivalent of the
+`repositories_list`, `repositories_describe`, `repositories_search`,
+`repositories_get_source`, and `repositories_list_changes` MCP tools. Each
+operation has its own API-key scope. Holding a scope never grants repository
+access: the executing user must also pass the live repository ACL, and
+source/search disclosure additionally enforces segment ACLs, current immutable
+item versions, and the active index generation.
+
+Inaccessible resources are omitted from lists/searches and masked as
+`404 NOT_FOUND` on direct reads. System-managed, ephemeral, expired, and
+non-active repositories are not part of the external catalog.
+
+#### `GET /api/v1/repositories`
+
+Requires `repositories:list`. Optional query parameters:
+
+| Name | Type | Description |
+|---|---|---|
+| `query` | string (max 200) | Case-insensitive name/description filter |
+| `limit` | integer (1-50) | Maximum entries; default 50 |
+
+```bash
+curl -H "Authorization: Bearer sk-your-key" \
+  "https://your-domain/api/v1/repositories?query=policy&limit=20"
+```
+
+Each entry includes `id`, `name`, `description`, `ownerName`, `visibility`,
+`itemCount`, `activeIndexGenerationId`, and update timestamps.
+
+#### `GET /api/v1/repositories/{id}`
+
+Requires `repositories:list`. Returns the same catalog projection for one
+currently accessible repository. Missing and inaccessible ids both return 404.
+
+#### `POST /api/v1/repositories/search`
+
+Requires `repositories:search`. Omit `repositoryIds` to search all accessible
+durable repositories.
+
+```json
+{
+  "query": "What is the current graduation policy?",
+  "repositoryIds": [42],
+  "mode": "hybrid",
+  "modalities": ["text", "table"],
+  "limit": 5,
+  "threshold": 0.2
+}
+```
+
+`mode` is `keyword`, `vector`, or `hybrid`; modalities are `text`, `image`,
+`audio`, `video`, or `table`. Results use retrieval v2 and include immutable
+source citations. Unauthorized requested ids produce no results from those
+repositories; they never disclose whether the id exists.
+
+#### `GET /api/v1/repositories/{id}/source`
+
+Requires `repositories:read`. `itemId` is required; `chunkId` and a 1-50
+`limit` are optional. This is the exact-source step after search:
+
+```bash
+curl -H "Authorization: Bearer sk-your-key" \
+  "https://your-domain/api/v1/repositories/42/source?itemId=87&chunkId=901"
+```
+
+The response contains `chunkId`, stable/current item and version identifiers,
+`versionNumber`, modality, content, context prefix, and exact source locator.
+The final SQL disclosure rechecks repository and segment access in the same
+statement. No accessible current segment returns 404.
+
+#### `GET /api/v1/repositories/changes`
+
+Requires `repositories:changes`. `repositoryIds` is a required comma-separated
+list of at most 50 ids. `limit` is 1-100; `cursor` is the opaque
+`meta.nextCursor` from the previous response.
+
+```bash
+curl -H "Authorization: Bearer sk-your-key" \
+  "https://your-domain/api/v1/repositories/changes?repositoryIds=42,51&limit=50"
+```
+
+Changes are ordered by `(updatedAt,itemId)`, which makes the cursor stable when
+timestamps tie. Each page rechecks current ACLs; access revocation therefore
+takes effect without rebuilding an agent. A malformed cursor returns
+`400 VALIDATION_ERROR`.
+
+Common errors are `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`/`INVALID_TOKEN`,
+`403 INSUFFICIENT_SCOPE`, `404 NOT_FOUND`, `429 RATE_LIMIT_EXCEEDED`, and
+`500 INTERNAL_ERROR`. Every response retains the standard request-id and
+rate-limit headers described above.
 
 ---
 

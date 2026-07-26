@@ -80,6 +80,8 @@ tags:
     description: High-level decision capture (creates nodes + edges in one call)
   - name: Assistants
     description: Assistant listing, execution, and multi-turn conversations
+  - name: Repositories
+    description: Permission-aware durable repository discovery, retrieval, source disclosure, and changes
   - name: Jobs
     description: Async job polling and cancellation
   - name: Voice
@@ -663,6 +665,341 @@ paths:
               $ref: "#/components/headers/X-RateLimit-Remaining"
             X-RateLimit-Reset:
               $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ============================================
+  # Repositories
+  # ============================================
+
+  /repositories:
+    get:
+      operationId: listRepositories
+      tags: [Repositories]
+      summary: List accessible repositories
+      description: |
+        Lists active, unexpired, durable repositories the current principal can
+        access. System-managed repositories are never projected. Requires
+        `repositories:list`; repository ACLs are evaluated for every call.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: query
+          in: query
+          schema:
+            type: string
+            maxLength: 200
+          description: Case-insensitive name or description filter.
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 50
+      responses:
+        "200":
+          description: Accessible repository catalog.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RepositoryCatalogEntry"
+                  meta:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+                      count: { type: integer }
+              example:
+                data:
+                  - id: 42
+                    name: District policies
+                    description: Current board and administrative policies
+                    ownerName: Policy Office
+                    visibility: private
+                    itemCount: 18
+                    activeIndexGenerationId: 11111111-2222-4333-8444-555555555555
+                    lastUpdated: "2026-07-26T18:00:00.000Z"
+                meta: { requestId: req_abc123, count: 1 }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /repositories/{id}:
+    get:
+      operationId: describeRepository
+      tags: [Repositories]
+      summary: Describe an accessible repository
+      description: |
+        Returns one catalog entry after a current ACL check. Requires
+        `repositories:list`; inaccessible and missing repositories both return
+        `404 NOT_FOUND`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: Repository description.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RepositoryCatalogEntry"
+                  meta:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /repositories/search:
+    post:
+      operationId: searchRepositories
+      tags: [Repositories]
+      summary: Search accessible repositories
+      description: |
+        Runs retrieval v2 against the requested repositories, or every
+        accessible durable repository when `repositoryIds` is omitted. Current
+        repository and segment ACLs, immutable item versions, and the active
+        index generation are enforced before disclosure. Requires
+        `repositories:search`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RepositorySearchRequest"
+            example:
+              query: What is the current graduation policy?
+              repositoryIds: [42]
+              mode: hybrid
+              modalities: [text, table]
+              limit: 5
+      responses:
+        "200":
+          description: Ranked retrieval results with exact citations.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  meta:
+                    type: object
+                    additionalProperties: true
+              example:
+                data:
+                  - repositoryId: 42
+                    itemId: 87
+                    itemVersionId: 33333333-4444-4555-8666-777777777777
+                    context: [{ content: "Students must...", citation: { page: 4 } }]
+                meta:
+                  requestId: req_abc123
+                  repositoriesRequested: 1
+                  repositoriesAuthorized: 1
+                  returnedResults: 1
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /repositories/{id}/source:
+    get:
+      operationId: getRepositorySource
+      tags: [Repositories]
+      summary: Get authorized source segments
+      description: |
+        Returns exact source segments only from the item's current immutable
+        version and the repository's active index generation. Repository and
+        segment ACLs are re-evaluated in the disclosure query. Requires
+        `repositories:read`; inaccessible and missing sources both return
+        `404 NOT_FOUND`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+        - name: itemId
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+        - name: chunkId
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        "200":
+          description: Current authorized source segments.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RepositorySourceSegment"
+                  meta:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+                      count: { type: integer }
+              example:
+                data:
+                  - chunkId: 901
+                    itemId: 87
+                    itemStableId: 55555555-6666-4777-8888-999999999999
+                    itemName: Graduation policy
+                    itemVersionId: 33333333-4444-4555-8666-777777777777
+                    versionNumber: 4
+                    chunkIndex: 8
+                    modality: text
+                    content: Students must...
+                    contextPrefix: Page 4
+                    sourceLocator: { page: 4 }
+                meta: { requestId: req_abc123, count: 1 }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /repositories/changes:
+    get:
+      operationId: listRepositoryChanges
+      tags: [Repositories]
+      summary: List authorized repository changes
+      description: |
+        Lists changed repository items in stable `(updatedAt,itemId)` order.
+        Pass the opaque `nextCursor` unchanged to resume. Current repository
+        ACLs are evaluated in the change query, so revocation takes effect
+        without rebuilding or restarting an agent. Requires
+        `repositories:changes`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: repositoryIds
+          in: query
+          required: true
+          description: Comma-separated repository ids (maximum 50).
+          schema:
+            type: string
+            example: 42,51
+        - name: cursor
+          in: query
+          description: Opaque cursor returned in the previous response.
+          schema:
+            type: string
+            maxLength: 2048
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: Authorized change page.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RepositoryChange"
+                  meta:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+                      nextCursor:
+                        type: [string, "null"]
+              example:
+                data:
+                  - repositoryId: 42
+                    repositoryName: District policies
+                    itemId: 87
+                    itemStableId: 55555555-6666-4777-8888-999999999999
+                    itemName: Graduation policy
+                    lifecycleStatus: active
+                    currentVersionId: 33333333-4444-4555-8666-777777777777
+                    updatedAt: "2026-07-26T18:00:00.000Z"
+                meta:
+                  requestId: req_abc123
+                  nextCursor: eyJ1cGRhdGVkQXQiOi...
         "400":
           $ref: "#/components/responses/ValidationError"
         "401":
@@ -2795,6 +3132,100 @@ components:
 
   # ---- Schemas ----
   schemas:
+    # -- Repository catalog --
+    RepositoryCatalogEntry:
+      type: object
+      required: [id, name, visibility, itemCount]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        description: { type: [string, "null"] }
+        ownerName: { type: [string, "null"] }
+        visibility:
+          type: string
+          enum: [public, private]
+        itemCount: { type: integer }
+        activeIndexGenerationId: { type: [string, "null"], format: uuid }
+        lastUpdated: { type: [string, "null"], format: date-time }
+        createdAt: { type: [string, "null"], format: date-time }
+        updatedAt: { type: [string, "null"], format: date-time }
+
+    RepositorySearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        repositoryIds:
+          type: array
+          maxItems: 50
+          items: { type: integer, minimum: 1 }
+        mode:
+          type: string
+          enum: [keyword, vector, hybrid]
+          default: hybrid
+        modalities:
+          type: array
+          maxItems: 5
+          items:
+            type: string
+            enum: [text, image, audio, video, table]
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+        threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+
+    RepositorySourceSegment:
+      type: object
+      required:
+        - chunkId
+        - itemId
+        - itemStableId
+        - itemName
+        - itemVersionId
+        - versionNumber
+        - chunkIndex
+        - modality
+        - content
+        - contextPrefix
+        - sourceLocator
+      properties:
+        chunkId: { type: integer }
+        itemId: { type: integer }
+        itemStableId: { type: string, format: uuid }
+        itemName: { type: string }
+        itemVersionId: { type: string, format: uuid }
+        versionNumber: { type: integer }
+        chunkIndex: { type: integer }
+        modality:
+          type: string
+          enum: [text, image, audio, video, table]
+        content: { type: string }
+        contextPrefix: { type: string }
+        sourceLocator:
+          type: object
+          additionalProperties: true
+
+    RepositoryChange:
+      type: object
+      properties:
+        repositoryId: { type: integer }
+        repositoryName: { type: string }
+        activeIndexGenerationId: { type: [string, "null"], format: uuid }
+        itemId: { type: integer }
+        itemStableId: { type: string, format: uuid }
+        itemName: { type: string }
+        lifecycleStatus: { type: string }
+        currentVersionId: { type: [string, "null"], format: uuid }
+        updatedAt: { type: [string, "null"], format: date-time }
+
     # -- Assistants --
     AssistantListItem:
       type: object

@@ -133,6 +133,7 @@
     "136-google-content-connectors.sql",
     "137-nexus-conversation-retention.sql",
     "138-atrium-capture-browser-registration.sql",
+    "139-unified-content-agents-projects.sql",
     "140-agent-identities-name-unique.sql",
     "141-oneroster-core.sql",
     "146-api-rate-limit-reservations.sql",

@@ -15,6 +15,9 @@ jest.mock("@/lib/db/drizzle-client", () => ({
 jest.mock("@/lib/db/schema/tables/agent-skills", () => ({
   psdAgentSkills: {},
 }))
+jest.mock("@/lib/db/schema/tables/skill-repository-bindings", () => ({
+  skillRepositoryBindings: {},
+}))
 jest.mock("drizzle-orm", () => ({
   and: (...a: unknown[]) => a,
   eq: (...a: unknown[]) => a,

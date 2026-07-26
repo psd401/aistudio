@@ -5,6 +5,8 @@ import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from '@/components/ui/drawer'
 import { Plus } from 'lucide-react'
+import { FolderKanban } from 'lucide-react'
+import Link from 'next/link'
 import { cn } from '@/lib/utils'
 import { navigateToNewConversation } from '@/lib/nexus/conversation-navigation'
 import type { SidebarMode } from '@/lib/hooks/use-sidebar-state'
@@ -69,6 +71,12 @@ export function NexusSidebar({
                 <Plus className="h-4 w-4" />
                 New Chat
               </Button>
+              <Button asChild variant="ghost" size="sm">
+                <Link href="/nexus/projects">
+                  <FolderKanban className="mr-1.5 h-4 w-4" />
+                  Projects
+                </Link>
+              </Button>
             </div>
           </DrawerHeader>
           <div className="flex-1 overflow-y-auto px-4 pb-4 pt-2">
@@ -95,6 +103,12 @@ export function NexusSidebar({
               >
                 <Plus className="h-4 w-4" />
                 New Chat
+              </Button>
+              <Button asChild variant="ghost" size="sm">
+                <Link href="/nexus/projects">
+                  <FolderKanban className="mr-1.5 h-4 w-4" />
+                  Projects
+                </Link>
               </Button>
             </div>
           </SheetHeader>
@@ -127,6 +141,14 @@ export function NexusSidebar({
             >
               <Plus className="h-4 w-4" />
               New Chat
+            </Button>
+          </div>
+          <div className="border-b px-3 py-2">
+            <Button asChild variant="ghost" size="sm" className="w-full justify-start">
+              <Link href="/nexus/projects">
+                <FolderKanban className="mr-2 h-4 w-4" />
+                Projects
+              </Link>
             </Button>
           </div>
 

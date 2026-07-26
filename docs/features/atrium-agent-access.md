@@ -73,18 +73,20 @@ mint the key to an accountable staff/service identity. True agent-identity write
 
 ## Path 2 — PSD AI Agents (OpenClaw on AgentCore)
 
-**Today:** the deployed `psd-aistudio` skill
-(`infra/agent-image/skills/psd-aistudio/`) is **discovery-only**. It calls the
-`describe_capabilities` meta-tool over `/api/mcp` with a `platform:read`-scoped
-key (from `AISTUDIO_MCP_API_KEY` or Secrets Manager via
-`AISTUDIO_MCP_API_KEY_SECRET_ID`) so the agent always knows what AI Studio can
-do — it deliberately does not execute content actions. That `platform:read` key
-is **zero-touch provisioned** exactly like the content key (see below) — the two
-were previously conflated; the MCP key now has its own secret + service user.
+The deployed `psd-aistudio` skill
+(`infra/agent-image/skills/psd-aistudio/`) discovers platform capabilities and,
+after per-user AI Studio OAuth consent, lists, describes, searches, reads exact
+sources from, and polls changes in the repositories that user can access. The
+credential priority is delegated OAuth, the legacy per-user personal API key,
+then the shared `platform:read` discovery key. The shared key remains
+**discovery-only** and is zero-touch provisioned exactly like the content key
+(see below); it has its own secret and service user. Repository commands never
+borrow the shared identity's content access and instead prompt the user to run
+`psd-aistudio connect`.
 
 **Gotcha:** `AGENT_INTERNAL_API_KEY` is a pre-shared key for the internal agent
 endpoints — it is **not scope-aware and cannot authenticate to `/api/mcp`**.
-Content access needs its own `sk-` key.
+Content/repository access needs a scoped `sk-` key or the per-user OAuth grant.
 
 **The `psd-atrium` skill** (`infra/agent-image/skills/psd-atrium/`) gives the
 agents Atrium abilities. It calls the fixed `/api/agent/atrium` broker surface,
@@ -140,9 +142,10 @@ The `psd-aistudio` discovery skill's `platform:read` key is provisioned by the
 
 **The only remaining human steps:**
 
-1. **`cdk deploy`** — applies the current migrations and provisions the
-   `psd-aistudio` discovery key. Atrium workspace operations use signed-owner
-   broker authority rather than the legacy content service key.
+1. **`cdk deploy`** — applies the current migrations, including migration 139
+   for repository OAuth and Nexus Projects, and provisions the `psd-aistudio`
+   discovery key. Atrium workspace operations use signed-owner broker authority
+   rather than the legacy content service key.
 2. **Rebuild + redeploy the agent image** — the agent discovers the skill only
    after `infra/agent-image` is rebuilt and the AgentCore runtime redeployed.
 
@@ -191,6 +194,7 @@ Boot-log check: `Local: http://localhost:3000` = healthy;
 | 401 from `/api/mcp` using `AGENT_INTERNAL_API_KEY` | Wrong credential class — mint an `sk-` key (see gotcha above) |
 | `psd-atrium` exits 11 (unauthorized / not configured) | The signed invocation proof is missing/invalid, or its owner no longer resolves to an active Atrium requester. Check the agent broker proof configuration and the owner's user/capability records. |
 | `psd-aistudio` exits 11 (no credential configured) | The `platform:read` MCP key isn't in the secret. It is auto-provisioned by the `AistudioMcpKeyProvisioner` custom resource on `cdk deploy` — check its CloudWatch logs (`/aws/lambda/psd-agent-aistudio-mcp-key-bootstrap-<env>`); confirm migration 108 applied. A re-deploy re-mints. (`AISTUDIO_MCP_API_KEY` may be set directly for local/dev.) |
+| A `psd-aistudio repositories-*` command reports insufficient scope | Run `psd-aistudio connect --user <email>` and complete the one-time AI Studio consent. The shared discovery key intentionally has no repository scopes. |
 | `psd-atrium publish` returns `approval_required` | Public destination without `content:publish_public` — expected; relay the message so the user knows it's queued |
 | 403 `INSUFFICIENT_SCOPE` on a content tool | Key lacks the scope in the table above |
 | `publish_content` returns `approval_required` | Public destination — needs human/admin `content:publish_public`; internal destinations publish directly |

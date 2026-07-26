@@ -15,6 +15,12 @@ interface CreateNexusAttachmentToolsInput {
   tokenMappingSink: TokenMappingSink;
 }
 
+interface CreateNexusRepositorySearchToolsInput
+  extends CreateNexusAttachmentToolsInput {
+  toolName: string;
+  description: string;
+}
+
 class NexusAttachmentSafetyUnavailableError extends Error {
   constructor() {
     super("Attachment search results could not be safety-checked");
@@ -67,6 +73,17 @@ async function protectRetrievedChunk(input: {
 export function createNexusAttachmentTools(
   input: CreateNexusAttachmentToolsInput
 ): ToolSet {
+  return createNexusRepositorySearchTools({
+    ...input,
+    toolName: "searchNexusAttachments",
+    description:
+      "Search the documents attached to this Nexus conversation. Use this before answering questions about attachments and cite the returned source labels.",
+  });
+}
+
+export function createNexusRepositorySearchTools(
+  input: CreateNexusRepositorySearchToolsInput
+): ToolSet {
   const repositoryIds = [...new Set(input.repositoryIds)].filter(
     (id) => Number.isSafeInteger(id) && id > 0
   );
@@ -77,9 +94,8 @@ export function createNexusAttachmentTools(
   });
 
   return {
-    searchNexusAttachments: tool({
-      description:
-        "Search the documents attached to this Nexus conversation. Use this before answering questions about attachments and cite the returned source labels.",
+    [input.toolName]: tool({
+      description: input.description,
       inputSchema: z.object({
         query: z.string().trim().min(1).max(4_000),
         limit: z.number().int().min(1).max(10).optional().default(5),

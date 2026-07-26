@@ -35,10 +35,17 @@ export const psdAgentWorkspaceConsentNonces = pgTable("psd_agent_workspace_conse
   //  - 'canva'         = Canva Connect OAuth refresh-token capture (confidential
   //                      client, PKCE). Migration 101 widens the CHECK constraint.
   tokenKind: varchar("token_kind", { length: 16 })
-    .$type<"agent_account" | "user_account" | "cognito_data" | "plaud" | "canva">()
+    .$type<
+      | "agent_account"
+      | "user_account"
+      | "cognito_data"
+      | "plaud"
+      | "canva"
+      | "aistudio"
+    >()
     .notNull()
     .default("agent_account"),
-  // PKCE (S256) code_verifier for the PKCE kinds ('plaud', 'canva') — generated
+  // PKCE (S256) code_verifier for the PKCE kinds ('plaud', 'canva', 'aistudio') — generated
   // at mint time, read back at the callback to exchange the auth code. Never
   // placed in a URL (only the S256 challenge is). Null for the non-PKCE kinds.
   codeVerifier: varchar("code_verifier", { length: 128 }),

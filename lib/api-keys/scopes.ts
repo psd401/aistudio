@@ -28,6 +28,10 @@ export const API_SCOPES = {
   // the platform can do via the `describe_capabilities` MCP meta-tool. It exposes
   // no user data, only the shape of the app.
   "platform:read": "Read the AI Studio capability catalog (actions, features, scopes)",
+  "repositories:list": "List and describe repositories the caller can access",
+  "repositories:read": "Read authorized repository source segments and citations",
+  "repositories:search": "Search authorized repositories",
+  "repositories:changes": "Read authorized repository change feeds",
   "documents:read": "Read documents and attachments",
   "documents:write": "Upload and manage documents",
   "graph:read": "Read context graph nodes and edges",
@@ -83,6 +87,10 @@ export const ROLE_SCOPES: Record<string, ApiScope[]> = {
     "models:read",
     "tools:read",
     "platform:read",
+    "repositories:list",
+    "repositories:read",
+    "repositories:search",
+    "repositories:changes",
     "documents:read",
     "graph:read",
     "mcp:search_decisions",
