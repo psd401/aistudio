@@ -294,7 +294,12 @@ describe('ECS task role — mint Lambda invoke-only grant (#1232)', () => {
       const actions = Array.isArray(statement.Action)
         ? statement.Action
         : [statement.Action];
-      return actions.includes('s3:DeleteObjectVersion');
+      return (
+        actions.includes('s3:DeleteObjectVersion') &&
+        JSON.stringify(statement.Resource ?? '').includes(
+          `aistudio-${ENV}-documents`
+        )
+      );
     });
 
     expect(versionDeletionStatements).toHaveLength(1);
@@ -338,6 +343,35 @@ describe('ECS task role — mint Lambda invoke-only grant (#1232)', () => {
     );
     expect(JSON.stringify(versionListingStatements[0]!.Resource)).not.toContain(
       '/repositories/*'
+    );
+  });
+
+  it('grants the storage broker only the object actions required for verified promotion', () => {
+    const statements = allStatements(template);
+    const brokerObjects = statements.find(
+      (statement) => statement.Sid === 'AgentWorkspaceStorageBrokerObjects'
+    );
+
+    expect(brokerObjects).toMatchObject({
+      Effect: 'Allow',
+      Action: expect.arrayContaining([
+        's3:GetObject',
+        's3:GetObjectVersion',
+        's3:PutObject',
+        's3:PutObjectTagging',
+        's3:DeleteObjectVersion',
+      ]),
+    });
+    const actions = Array.isArray(brokerObjects!.Action)
+      ? brokerObjects!.Action
+      : [brokerObjects!.Action];
+    expect(actions).toHaveLength(5);
+    expect(actions).not.toEqual(expect.arrayContaining([
+      's3:DeleteObject',
+      's3:ListBucketVersions',
+    ]));
+    expect(JSON.stringify(brokerObjects!.Resource)).toContain(
+      `aistudio-${ENV}-agent-workspace/*`
     );
   });
 

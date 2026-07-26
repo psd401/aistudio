@@ -48,6 +48,29 @@ describe("trusted Workspace command policy", () => {
     ).not.toThrow()
   })
 
+  it.each([
+    ["long flag", "--output", "/app/.next/cache/poisoned"],
+    ["long equals", "--output=/app/.next/cache/poisoned"],
+    ["short flag", "-o", "/app/.next/cache/poisoned"],
+    ["short equals", "-o=/app/.next/cache/poisoned"],
+    ["short attached", "-o/app/.next/cache/poisoned"],
+    ["mixed case", "--OuTpUt=/app/.next/cache/poisoned"],
+  ])("rejects caller-selected response files via %s", (_name, ...flags) => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: [
+          "drive",
+          "files",
+          "export",
+          "--params",
+          '{"fileId":"drive-controlled"}',
+          ...flags,
+        ],
+      })
+    ).toThrow(/cannot write response data to a file/)
+  })
+
   it("rejects a mutation token hidden before a read action", () => {
     expect(() =>
       validateWorkspaceCommand({

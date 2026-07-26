@@ -1,4 +1,7 @@
 import { execFile } from "node:child_process"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 export type WorkspaceExecutionScope = "agent" | "user"
 
@@ -106,6 +109,18 @@ function hasUnsafeControlCharacter(value: string): boolean {
     }
   }
   return false
+}
+
+function writesResponseToCallerPath(argv: readonly string[]): boolean {
+  return argv.some((value) => {
+    const normalized = value.toLowerCase()
+    return (
+      normalized === "--output" ||
+      normalized.startsWith("--output=") ||
+      normalized === "-o" ||
+      (normalized.length > 2 && normalized.startsWith("-o"))
+    )
+  })
 }
 
 function operationTokens(argv: readonly string[]): string[] {
@@ -251,6 +266,9 @@ export function validateWorkspaceCommand(command: WorkspaceCommand): void {
   if (totalLength > MAX_TOTAL_LENGTH) {
     throw new Error("Workspace command is too large")
   }
+  if (writesResponseToCallerPath(argv)) {
+    throw new Error("Workspace command cannot write response data to a file")
+  }
 
   const { operation, action, tokens } = normalizedOperation(argv)
   if (READ_ACTIONS.has(action)) {
@@ -335,29 +353,63 @@ export async function executeWorkspaceCommand(
 ): Promise<WorkspaceCommandResult> {
   validateWorkspaceCommand(command)
   const binary = process.env.GWS_EXECUTABLE || "/usr/local/bin/gws"
+  // The pinned gws binary writes non-JSON responses to `download.<ext>` even
+  // when the caller does not pass --output. Execute it in an empty, private
+  // directory and delete that directory before returning so model-controlled
+  // reads can never write into the web application or its writable cache.
+  const commandDirectory = await mkdtemp(
+    join(tmpdir(), "aistudio-workspace-cli-"),
+  )
   return new Promise((resolve, reject) => {
-    execFile(
-      binary,
-      command.argv,
-      {
-        env: {
-          HOME: "/tmp",
-          LANG: "C.UTF-8",
-          NODE_ENV: process.env.NODE_ENV,
-          PATH: "/usr/local/bin:/usr/bin:/bin",
-          GOOGLE_WORKSPACE_CLI_TOKEN: accessToken,
-        },
-        encoding: "utf8",
-        maxBuffer: 2 * 1024 * 1024,
-        timeout: 30_000,
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          reject(new Error(`Workspace CLI failed: ${stderr.slice(0, 500) || error.message}`))
-          return
-        }
-        resolve({ stdout, stderr })
+    const finish = async (
+      error: Error | null,
+      stdout: string,
+      stderr: string,
+    ): Promise<void> => {
+      try {
+        await rm(commandDirectory, { recursive: true, force: true })
+      } catch {
+        reject(new Error("Workspace CLI temporary directory cleanup failed"))
+        return
       }
-    )
+      if (error) {
+        reject(
+          new Error(
+            `Workspace CLI failed: ${stderr.slice(0, 500) || error.message}`,
+          ),
+        )
+        return
+      }
+      resolve({ stdout, stderr })
+    }
+
+    try {
+      execFile(
+        binary,
+        command.argv,
+        {
+          cwd: commandDirectory,
+          env: {
+            HOME: commandDirectory,
+            LANG: "C.UTF-8",
+            NODE_ENV: process.env.NODE_ENV,
+            PATH: "/usr/local/bin:/usr/bin:/bin",
+            GOOGLE_WORKSPACE_CLI_TOKEN: accessToken,
+          },
+          encoding: "utf8",
+          maxBuffer: 2 * 1024 * 1024,
+          timeout: 30_000,
+        },
+        (error, stdout, stderr) => {
+          void finish(error, stdout, stderr)
+        },
+      )
+    } catch (error) {
+      void finish(
+        error instanceof Error ? error : new Error("Workspace CLI failed"),
+        "",
+        "",
+      )
+    }
   })
 }
