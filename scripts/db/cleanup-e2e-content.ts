@@ -55,6 +55,17 @@ const TOKENED_TITLE_REGEX =
 /** Seeded reference fixtures (tests/e2e/fixtures/*.sql) — never deleted. */
 const FIXTURE_ID_PREFIX = "a7100000-%";
 
+/**
+ * Graph nodes created by the decision/graph E2E specs. Every node those specs
+ * create carries an "E2E-<TAG>-<Date.now()>" token in its name (decision text
+ * AND decidedBy actor names), so the anchored tag+timestamp shape is safe to
+ * match on name alone across node types. Accumulation here breaks the semantic
+ * search spec directly: each run adds a near-identical "zeppelin" decision, and
+ * the fresh one must beat all its prior twins into the top-25 similarity
+ * window — at ~100 twins it reliably loses (observed 2026-07-26).
+ */
+const GRAPH_E2E_NAME_REGEX = "E2E-[A-Z]+-[0-9]{12,}";
+
 interface CandidateRow {
   id: string;
   title: string;
@@ -141,7 +152,14 @@ async function main(): Promise<void> {
        ORDER BY created_at
     `;
 
-    if (candidates.length === 0) {
+    const graphCandidates = await sql<{ id: string }[]>`
+      SELECT id
+        FROM graph_nodes
+       WHERE name ~ ${GRAPH_E2E_NAME_REGEX}
+         AND created_at < now() - make_interval(mins => ${minAgeMinutes})
+    `;
+
+    if (candidates.length === 0 && graphCandidates.length === 0) {
       log.success("Nothing to clean up — no E2E-pattern rows older than the age guard.");
       return;
     }
@@ -162,19 +180,36 @@ async function main(): Promise<void> {
       log.info(`  … and ${candidates.length - 15} more`);
     }
 
+    log.info(
+      `Matched ${graphCandidates.length} graph_nodes rows (E2E-tagged decision/graph fixtures)`
+    );
+
     if (!yes) {
       log.info("Dry run — nothing deleted. Re-run with --yes to delete these rows.");
       return;
     }
 
-    const deleted = await sql<{ id: string }[]>`
-      DELETE FROM content_objects
-       WHERE id IN ${sql(candidates.map((c) => c.id))}
-       RETURNING id
-    `;
-    log.success(
-      `Deleted ${deleted.length} content_objects rows (children removed via ON DELETE CASCADE).`
-    );
+    if (candidates.length > 0) {
+      const deleted = await sql<{ id: string }[]>`
+        DELETE FROM content_objects
+         WHERE id IN ${sql(candidates.map((c) => c.id))}
+         RETURNING id
+      `;
+      log.success(
+        `Deleted ${deleted.length} content_objects rows (children removed via ON DELETE CASCADE).`
+      );
+    }
+
+    if (graphCandidates.length > 0) {
+      const deletedGraph = await sql<{ id: string }[]>`
+        DELETE FROM graph_nodes
+         WHERE id IN ${sql(graphCandidates.map((g) => g.id))}
+         RETURNING id
+      `;
+      log.success(
+        `Deleted ${deletedGraph.length} graph_nodes rows (edges removed via ON DELETE CASCADE).`
+      );
+    }
   } finally {
     await sql.end();
   }
