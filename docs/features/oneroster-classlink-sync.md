@@ -1,9 +1,10 @@
 # ClassLink OneRoster synchronization
 
-Status: v1 ingestion foundation implemented by Epic
+Status: v1 ingestion foundation and administrator control surface implemented by Epic
 [#1308](https://github.com/psd401/aistudio/issues/1308), Issue
-[#1310](https://github.com/psd401/aistudio/issues/1310). The administrator UI,
-role mapping, room provisioning, and reporting are separate workstreams.
+[#1310](https://github.com/psd401/aistudio/issues/1310), and Issue
+[#1311](https://github.com/psd401/aistudio/issues/1311). Role mapping, room
+provisioning, and reporting are separate workstreams.
 
 ## Scope and data boundary
 
@@ -129,9 +130,36 @@ All values are database-first. The Next.js accessors in
 | `ONEROSTER_API_VERSION` | no | `v1p1` | `v1p1` or `v1p2`. |
 | `ONEROSTER_PAGE_SIZE` | no | `10000` | Integer from 1 through 10,000. |
 | `ONEROSTER_LAST_PERM_REV` | internal | none | Last fully applied ClassLink revision; do not edit during normal operation. |
+| `ONEROSTER_SYNC_STATUS` | internal | none | Sanitized queued/running/terminal status used by `/admin/rosters`; do not edit during normal operation. |
 
 Set the URL, auth mode, secret ARN, version, and page size before enabling the
 schedule. A missing or incomplete configuration safely skips the invocation.
+
+## Administrator control surface
+
+`/admin/rosters` is administrator-only at both the page and server-action
+layers. It has three tabs:
+
+- **Settings** stores the six operator-managed values above in one database
+  transaction. The base URL must use HTTPS, the auth mode is limited to
+  `oauth1` or `proxy`, the API path is limited to `v1p1` or `v1p2`, the page
+  size is 1–10,000, and the secret ARN must match the
+  `aistudio-{environment}-oneroster-*` family. There is intentionally no token
+  URL or generic client-credentials configuration.
+- **Sync** shows active/inactive totals and last-sync timestamps for all six
+  collections. **Sync now** writes a unique queued run ID, invokes the same
+  Lambda used by EventBridge, and polls `ONEROSTER_SYNC_STATUS` until that run
+  succeeds, fails, skips, or times out. A client-side in-flight ref prevents
+  two same-tick clicks from dispatching duplicate runs.
+- **Roster browser** lazily reads schools, their classes (including active term,
+  teacher-of-record, and student count), and each class's student enrollments.
+  It never edits sync-owned rows.
+
+The status value contains timestamps, state, collection counts, and a bounded
+sanitized error message only. It never contains credentials, response bodies,
+or roster records. Failure to write dashboard status does not fail an otherwise
+safe roster reconciliation; Lambda error and staleness alarms remain the
+fallback.
 
 ## Consistency and deletion invariants
 
@@ -198,13 +226,14 @@ Manual invocation uses an asynchronous event:
 ```json
 {
   "trigger": "manual",
-  "requestedByUserId": 123
+  "requestedByUserId": 123,
+  "runId": "3a67d19e-..."
 }
 ```
 
 Use `triggerOneRosterSyncNow()` from application code so the deterministic
-function name and audit payload stay consistent. The ECS task role has invoke
-permission only for that named function (alongside its existing explicit
+function name, run ID, and audit payload stay consistent. The ECS task role has
+invoke permission only for that named function (alongside its existing explicit
 Lambda grants).
 
 ## Verification
@@ -248,9 +277,15 @@ Roll out disabled:
    changed.
 5. Set `ROSTER_SYNC_ENABLED=true`.
 
-To stop ingestion, set `ROSTER_SYNC_ENABLED=false`. Existing roster rows remain
+To stop ingestion, set `ROSTER_SYNC_ENABLED=false` in `/admin/rosters`.
+Existing roster rows remain
 as the last-known-good snapshot. For a code rollback, deploy the previous
 Processing stack version; migration 141 and the `oneroster_*` tables are
 additive and may remain in place. Do not clear rows or the revision checkpoint
 as part of routine rollback. If a credential may be exposed, rotate it in
 ClassLink and Secrets Manager before re-enabling the integration.
+
+To remove only the administrator UI, remove its `ADMIN_SECTIONS` registry entry
+and route. The settings and last-known-good roster snapshot can remain. Older
+Lambda versions ignore `ONEROSTER_SYNC_STATUS`; removing that internal settings
+row is optional and must not be coupled to roster-row deletion.

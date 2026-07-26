@@ -188,5 +188,5 @@ export async function runOneRosterSync(
 
 function safeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message.length > 500 ? `${message.slice(0, 500)}…` : message;
+  return message.length > 500 ? `${message.slice(0, 499)}…` : message;
 }
