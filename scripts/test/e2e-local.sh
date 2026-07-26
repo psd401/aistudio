@@ -100,8 +100,28 @@ trap 'exit 143' TERM
 while ! mkdir "$LOCK_DIR" 2>/dev/null; do
   holder_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
   if [ -n "$holder_pid" ] && ! kill -0 "$holder_pid" 2>/dev/null; then
-    echo "e2e-local: stale lock (pid $holder_pid is gone) — taking over."
-    rm -rf "$LOCK_DIR"
+    # Steal under a dedicated steal-token so the destructive rm is serialized:
+    # with a bare "check pid → rm → mkdir" steal, two waiters can both judge the
+    # lock stale and the second's rm deletes the FIRST's freshly-created lock —
+    # both then run concurrently, defeating the whole point. Only the waiter
+    # holding the token may rm, and it re-verifies staleness inside the token.
+    if mkdir "$LOCK_DIR.steal" 2>/dev/null; then
+      pid_now="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
+      if [ "$pid_now" = "$holder_pid" ]; then
+        echo "e2e-local: stale lock (pid $holder_pid is gone) — taking over."
+        rm -rf "$LOCK_DIR"
+      elif [ -z "$pid_now" ] && [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
+        # No pid file: either a FRESH lock whose winner hasn't written yet
+        # (do not touch), or a creator that died between mkdir and the pid
+        # write. Only age distinguishes them — steal only the old one.
+        echo "e2e-local: stale lock (no pid recorded, dir is old) — taking over."
+        rm -rf "$LOCK_DIR"
+      fi
+      rmdir "$LOCK_DIR.steal" 2>/dev/null
+    elif [ -n "$(find "$LOCK_DIR.steal" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
+      # A stealer died inside the (milliseconds-wide) token window; reclaim.
+      rmdir "$LOCK_DIR.steal" 2>/dev/null
+    fi
     continue
   fi
   echo "e2e-local: another run (pid ${holder_pid:-unknown}, root: $(cat "$LOCK_DIR/root" 2>/dev/null || echo unknown)) is in progress — waiting 30s (bypass once with SKIP_E2E=1)…"
@@ -147,21 +167,31 @@ port_owner_cwd() {
   lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | awk '/^n/ { print substr($0, 2); exit }'
 }
 
+# Two passes: prefer REUSING this worktree's own healthy server anywhere in the
+# range over starting a fresh one on a lower free port (a redundant boot wastes
+# a bun install + server start). Health probes carry --max-time: a server that
+# accepts TCP but never answers /api/healthz (the wedged-server shape from the
+# incident) must fail the probe fast, not stall the scan.
 REUSE=0
 CHOSEN_PORT=""
 for port in $(seq "$E2E_PORT" $((E2E_PORT + 9))); do
-  if curl -sf "http://localhost:${port}/api/healthz" >/dev/null 2>&1; then
-    owner="$(port_owner_cwd "$port")"
-    if [ -n "$owner" ] && [ "$owner" = "$ROOT_CANON" ]; then
-      REUSE=1; CHOSEN_PORT="$port"; break
-    fi
-    echo "e2e-local: :$port serves ${owner:-an unknown directory}, not this worktree — can't gate this push on it."
-  elif [ -n "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null)" ]; then
-    echo "e2e-local: :$port is occupied by a non-healthy listener — skipping."
-  else
-    CHOSEN_PORT="$port"; break
+  if curl -sf --max-time 3 "http://localhost:${port}/api/healthz" >/dev/null 2>&1 &&
+     [ "$(port_owner_cwd "$port")" = "$ROOT_CANON" ]; then
+    REUSE=1; CHOSEN_PORT="$port"; break
   fi
 done
+if [ "$REUSE" != "1" ]; then
+  for port in $(seq "$E2E_PORT" $((E2E_PORT + 9))); do
+    if curl -sf --max-time 3 "http://localhost:${port}/api/healthz" >/dev/null 2>&1; then
+      owner="$(port_owner_cwd "$port")"
+      echo "e2e-local: :$port serves ${owner:-an unknown directory}, not this worktree — can't gate this push on it."
+    elif [ -n "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null)" ]; then
+      echo "e2e-local: :$port is occupied by a non-healthy listener — skipping."
+    else
+      CHOSEN_PORT="$port"; break
+    fi
+  done
+fi
 if [ -z "$CHOSEN_PORT" ]; then
   echo "❌ e2e-local: no usable port in $E2E_PORT-$((E2E_PORT + 9)) (all owned by other worktrees/processes)."
   echo "   Stop one of those servers, or rerun with E2E_PORT=<free port>."
@@ -208,7 +238,7 @@ else
   echo -n "e2e-local: waiting for $BASE "
   ready=0
   for attempt in $(seq 1 90); do
-    curl -sf "$BASE/api/healthz" >/dev/null 2>&1 && { ready=1; echo "— ready"; break; }
+    curl -sf --max-time 3 "$BASE/api/healthz" >/dev/null 2>&1 && { ready=1; echo "— ready"; break; }
     echo -n "."; sleep 2
   done
   if [ "$ready" != "1" ]; then
