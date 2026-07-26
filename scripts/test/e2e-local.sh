@@ -67,8 +67,14 @@ ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT" || exit 1
 # "<distDir>/types" to the tsconfig include), and the machine-wide run lock.
 STARTED_PID=""
 LOCK_ACQUIRED=0
+CLEANED=0
 LOCK_DIR="/tmp/aistudio-e2e-local.lock"
 on_exit() {
+  # One-shot: cleanup must run exactly once. By the time a second invocation
+  # could fire, a NEWER run may own the lock — releasing it again would strand
+  # that run unprotected.
+  [ "$CLEANED" = "1" ] && return 0
+  CLEANED=1
   if [ -n "$STARTED_PID" ]; then
     kill "$STARTED_PID" >/dev/null 2>&1
     git checkout -- tsconfig.json >/dev/null 2>&1
@@ -76,7 +82,13 @@ on_exit() {
   [ "$LOCK_ACQUIRED" = "1" ] && rm -rf "$LOCK_DIR"
   return 0
 }
-trap on_exit EXIT INT TERM
+trap on_exit EXIT
+# Signals must become a real exit, not just run the handler: bash RESUMES a
+# script after a trapped-signal handler returns, so a Ctrl-C during the lock
+# wait would keep waiting, and a mid-suite INT would release the lock while
+# this run kept going. exit fires the EXIT trap, so cleanup still runs once.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- One run at a time per machine --------------------------------------------------
 # Two concurrent e2e-local runs (e.g. pushes from two worktrees) share ONE local
@@ -117,6 +129,15 @@ fi
 # @codemirror/state crash no branch contained). Reuse only when the listener's
 # cwd is this worktree; when a foreigner owns the port, scan for a free one.
 ROOT_CANON="$(cd "$ROOT" && pwd -P)"
+
+# The ownership check depends on lsof. Without it every healthy server would
+# silently read as foreign (a pointless second server) and an occupied-but-dead
+# port would read as free (a 3-minute startup stall) — fail actionably instead.
+if ! command -v lsof >/dev/null 2>&1; then
+  echo "❌ e2e-local: lsof is required (it verifies which worktree owns the dev server on a port)."
+  echo "   Install lsof, or bypass this push with SKIP_E2E=1."
+  exit 1
+fi
 
 # cwd of the process listening on TCP <port> ('' when none / undetermined).
 port_owner_cwd() {
