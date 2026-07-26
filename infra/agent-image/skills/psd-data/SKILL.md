@@ -9,10 +9,10 @@ allowed-tools: Bash(node:*)
 
 Access to the PSD data warehouse (Redshift) via the `psd-data-mcp` server.
 
-**Every command requires `--user <caller-email>`** (the email from the
-`[caller: Name <email>]` header at the top of each user turn). The skill
-uses that email to look up the caller's stored Cognito refresh token,
-mint a fresh id_token, and authenticate to the MCP server as the user.
+Caller identity comes from the signed invocation context. Never pass `--user`
+or another identity selector; the CLI rejects model-supplied authority. The
+trusted broker uses the signed owner to resolve the caller's stored Cognito
+refresh token, mint a fresh id_token, and authenticate to the MCP server.
 
 ## Authentication
 
@@ -57,7 +57,7 @@ limited to them.
 ### `list` — discover available MCP tools
 
 ```bash
-node /opt/psd-skills/psd-data/run.js list --user <caller-email>
+node /opt/psd-skills/psd-data/run.js list
 ```
 
 Returns the MCP server's current `tools/list` response: every tool name,
@@ -70,7 +70,7 @@ description, and JSON-Schema `inputSchema`. **Use this first** if:
 ### `call` — generic passthrough to any MCP tool
 
 ```bash
-node /opt/psd-skills/psd-data/run.js call --user <caller-email> \
+node /opt/psd-skills/psd-data/run.js call \
   --tool <tool-name> \
   --args '{"arg1": "value", "arg2": 42}'
 ```
@@ -82,7 +82,7 @@ typed subcommand doesn't exist for the tool you need.
 ### `tables` — list every table the user can see
 
 ```bash
-node /opt/psd-skills/psd-data/run.js tables --user <caller-email> [--detailed]
+node /opt/psd-skills/psd-data/run.js tables [--detailed]
 ```
 
 `--detailed` adds the table descriptions to the listing. Use this first
@@ -91,18 +91,18 @@ when the user asks "do we have data on X?".
 ### `schema` — inspect one or more tables' columns
 
 ```bash
-node /opt/psd-skills/psd-data/run.js schema --user <caller-email> \
+node /opt/psd-skills/psd-data/run.js schema \
   --table students
 
 # multiple tables in one call:
-node /opt/psd-skills/psd-data/run.js schema --user <caller-email> \
+node /opt/psd-skills/psd-data/run.js schema \
   --table '["students","enrollments"]'
 ```
 
 ### `permissions` — show the user's row-level filters on a table
 
 ```bash
-node /opt/psd-skills/psd-data/run.js permissions --user <caller-email> \
+node /opt/psd-skills/psd-data/run.js permissions \
   --table students
 ```
 
@@ -112,7 +112,7 @@ have access to the rows they expect.
 ### `query` — run a SELECT query
 
 ```bash
-node /opt/psd-skills/psd-data/run.js query --user <caller-email> \
+node /opt/psd-skills/psd-data/run.js query \
   --reason "Headcount sanity check before report" \
   --sql "SELECT COUNT(*) FROM students WHERE active = true"
 ```
@@ -158,7 +158,7 @@ non-obvious that future invocations should know.
 **Save a lesson** (only after you've actually learned it):
 
 ```bash
-node /opt/psd-skills/psd-data/run.js lesson-save --user <caller-email> \
+node /opt/psd-skills/psd-data/run.js lesson-save \
   --lesson "When querying student enrollments, filter exit_date IS NULL for active students. Otherwise counts double on re-enrollees." \
   --tables '["students","enrollments"]' \
   --task "headcount queries" \
@@ -172,7 +172,7 @@ Categories: `data_quality`, `schema`, `query_pattern`, `domain_knowledge`,
 **Check for relevant lessons** before running a query you're unsure about:
 
 ```bash
-node /opt/psd-skills/psd-data/run.js lesson-check --user <caller-email> \
+node /opt/psd-skills/psd-data/run.js lesson-check \
   --task "headcount of active students" \
   --tables '["students"]'
 ```
@@ -182,17 +182,17 @@ node /opt/psd-skills/psd-data/run.js lesson-check --user <caller-email> \
 `--feedback` is **required** when `--rating unhelpful`; optional (but encouraged) for `helpful`.
 
 ```bash
-node /opt/psd-skills/psd-data/run.js lesson-rate --user <caller-email> \
+node /opt/psd-skills/psd-data/run.js lesson-rate \
   --id 42 --rating helpful
 
-node /opt/psd-skills/psd-data/run.js lesson-rate --user <caller-email> \
+node /opt/psd-skills/psd-data/run.js lesson-rate \
   --id 42 --rating unhelpful --feedback "The lesson was about a different table"
 ```
 
 **Delete a lesson** you saved within the last 24 hours:
 
 ```bash
-node /opt/psd-skills/psd-data/run.js lesson-delete --user <caller-email> \
+node /opt/psd-skills/psd-data/run.js lesson-delete \
   --uuid <uuid-from-save-response>
 ```
 
@@ -214,16 +214,16 @@ User: "How many students were enrolled in PSD as of last Tuesday?"
 
 ```bash
 # First, check what's known about this kind of query
-node /opt/psd-skills/psd-data/run.js lesson-check --user hagelk@psd401.net \
+node /opt/psd-skills/psd-data/run.js lesson-check \
   --task "active student headcount on a specific date" \
   --tables '["students","enrollments"]'
 
 # Then inspect the schema
-node /opt/psd-skills/psd-data/run.js schema --user hagelk@psd401.net \
+node /opt/psd-skills/psd-data/run.js schema \
   --table '["students","enrollments"]'
 
 # Run the query
-node /opt/psd-skills/psd-data/run.js query --user hagelk@psd401.net \
+node /opt/psd-skills/psd-data/run.js query \
   --reason "Active enrollment count as of 2026-05-06 per user request" \
   --sql "SELECT COUNT(DISTINCT student_id) FROM enrollments
          WHERE enroll_date <= '2026-05-06'

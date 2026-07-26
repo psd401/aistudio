@@ -107,6 +107,22 @@ afterAll(() => {
 })
 
 describe("owner-only operation credential broker", () => {
+  it("rejects destructive or newly introduced Plaud tools", async () => {
+    const fetchMock = jest.fn()
+    globalThis.fetch = fetchMock as typeof fetch
+    await expect(
+      executePlaudOperation({
+        ownerEmail: "owner@psd401.net",
+        sessionId: "session-1",
+        method: "tools/call",
+        toolName: "logout",
+        toolArgs: {},
+      })
+    ).rejects.toThrow("Unsupported Plaud tool")
+    expect(getUserOnlyMock).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it("fails closed without an owner Plaud credential", async () => {
     getUserOnlyMock.mockResolvedValueOnce(null)
     const fetchMock = jest.fn()

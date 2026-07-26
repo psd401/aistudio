@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { buildTaskInvocationPayload, parseAgentReply } from "./agentcore";
 
 describe("task invocation authority", () => {
-  test("binds the email-triage gesture to its owner, session, and workspace", () => {
+  test("binds the gesture to its owner without granting workspace authority", () => {
     const payload = buildTaskInvocationPayload(
       {
         userEmail: "Owner@PSD401.NET",
@@ -26,10 +26,11 @@ describe("task invocation authority", () => {
       audience: "psd-agent-internal",
       actorEmail: "owner@psd401.net",
       ownerEmail: "owner@psd401.net",
-      mode: "owner",
+      mode: "email-task",
       sessionId: "owner-prefix-task-message-1234567890",
-      workspacePrefix: "owner-prefix",
+      workspacePrefix: "",
     });
+    expect(payload.workspace_prefix).toBe("");
     expect(payload.invocation_request_proof_key.length).toBeGreaterThan(32);
     expect(payload.source).toBe("email-triage-task");
   });

@@ -8,6 +8,7 @@ import {
 import { getFreshAccessTokenForUser } from "@/lib/agent/workspace-token"
 import {
   executeWorkspaceCommand,
+  validateEmailTaskWorkspaceCommand,
   type WorkspaceCommand,
 } from "@/lib/agent-workspace/command-executor"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
@@ -29,7 +30,7 @@ function isCommand(value: unknown): value is WorkspaceCommand {
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId()
   const context = await verifyAgentInvocationContext(request, {
-    allowedModes: ["owner", "scheduled"],
+    allowedModes: ["owner", "scheduled", "email-task"],
   })
   if (!context) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 })
@@ -43,6 +44,21 @@ export async function POST(request: NextRequest) {
   }
   if (!isCommand(body)) {
     return NextResponse.json({ error: "Invalid Workspace command" }, { status: 400 })
+  }
+  if (context.mode === "email-task") {
+    try {
+      validateEmailTaskWorkspaceCommand(body)
+    } catch (error) {
+      return NextResponse.json(
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Email task command rejected",
+        },
+        { status: 400 },
+      )
+    }
   }
 
   try {

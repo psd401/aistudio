@@ -22,7 +22,7 @@ function token(
   overrides: Partial<{
     actorEmail: string
     ownerEmail: string
-    mode: "owner" | "consultation" | "scheduled"
+    mode: "owner" | "consultation" | "scheduled" | "email-task"
     issuedAt: number
     expiresAt: number
     nonce: string

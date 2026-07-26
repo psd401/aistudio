@@ -168,6 +168,37 @@ export function validateGitHubCommand(argv: readonly string[]): void {
   }
 }
 
+const EMAIL_TASK_GITHUB_FLAGS = new Set([
+  "-R",
+  "--repo",
+  "--title",
+  "--body",
+  "--label",
+])
+
+export function validateEmailTaskGitHubCommand(
+  argv: readonly string[],
+): void {
+  validateGitHubCommand(argv)
+  if (
+    argv[0]?.toLowerCase() !== "issue" ||
+    argv[1]?.toLowerCase() !== "create"
+  ) {
+    throw new Error("Email tasks may only create a GitHub issue")
+  }
+  for (let index = 2; index < argv.length; index += 1) {
+    const arg = argv[index]
+    if (!arg?.startsWith("-")) {
+      throw new Error("Email task issue creation does not accept positionals")
+    }
+    const name = flagName(arg)
+    if (!EMAIL_TASK_GITHUB_FLAGS.has(name)) {
+      throw new Error(`Email task GitHub flag is not allowed: ${name}`)
+    }
+    if (!arg.includes("=")) index += 1
+  }
+}
+
 export function redactGitHubToken(value: string, token: string): string {
   let redacted = value
   if (token) redacted = redacted.split(token).join("[REDACTED]")

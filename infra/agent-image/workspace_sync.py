@@ -34,6 +34,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import stat
@@ -55,6 +56,9 @@ MAX_SYNC_FILES = 1_000
 SYNC_WORKERS = 4
 TRANSFER_CHUNK_BYTES = 64 * 1024
 WORKSPACE_UPLOAD_CONTENT_TYPE = "application/octet-stream"
+WORKSPACE_FLUSH_TOKEN_PATH = (
+    "/run/psd-agent-authority/workspace-flush-token"
+)
 _uploaded_state: dict[tuple[str, str], tuple[int, int]] = {}
 
 
@@ -310,11 +314,13 @@ def _open_regular_no_follow(relative: str):
 def _broker_request(payload: dict) -> dict:
     """Call the trusted storage broker with the opaque signed owner context."""
     body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    headers.update(_workspace_flush_headers())
     request = urllib.request.Request(
         "http://127.0.0.1:18791/agent-broker/api/agent/workspace-storage",
         data=body,
         method="POST",
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
@@ -327,6 +333,21 @@ def _broker_request(payload: dict) -> dict:
     if not isinstance(result, dict):
         raise RuntimeError("workspace broker returned invalid JSON")
     return result
+
+
+def _workspace_flush_headers() -> dict[str, str]:
+    """Return root-only final-flush authority, never model-readable state."""
+    if os.geteuid() != 0:
+        return {}
+    try:
+        token = Path(WORKSPACE_FLUSH_TOKEN_PATH).read_text(
+            encoding="ascii"
+        ).strip()
+    except FileNotFoundError:
+        return {}
+    if not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
+        raise RuntimeError("workspace flush authority is malformed")
+    return {"X-Agent-Workspace-Flush": token}
 
 
 def _download_spec(relative: str) -> tuple[str, int, dict[str, str]]:
@@ -644,39 +665,6 @@ def push_workspace(prefix: str) -> int:
         return 0
     if not WORKSPACE_DIR.exists():
         return 0
-    if os.geteuid() == 0:
-        child_env = {
-            key: value
-            for key, value in os.environ.items()
-            if key not in {
-                "AGENT_INVOCATION_SIGNING_SECRET",
-                "AGENT_INVOCATION_SIGNING_SECRET_ID",
-                "PSD_INVOCATION_CONTEXT_FILE",
-                "PSD_INVOCATION_REQUEST_PROOF_KEY_FILE",
-            }
-        }
-        result = subprocess.run(
-            [sys.executable, __file__, "--push-as-node", prefix],
-            check=False,
-            capture_output=True,
-            text=True,
-            env=child_env,
-            user="node",
-            group="node",
-            extra_groups=[],
-            umask=0o077,
-            cwd=str(WORKSPACE_DIR),
-            timeout=120,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"node workspace push failed ({result.returncode}): "
-                f"{result.stderr[:500]}"
-            )
-        try:
-            return int(result.stdout.strip())
-        except ValueError as exc:
-            raise RuntimeError("node workspace push returned invalid output") from exc
 
     # Parallelized for the same reason as pull: 10k+ files over a serial
     # upload blocks both the idle-push background thread and the final
@@ -838,9 +826,3 @@ def stop_periodic_push() -> None:
                 "periodic workspace push did not stop before authority change"
             )
     _periodic_thread = None
-
-
-if __name__ == "__main__":
-    if len(sys.argv) != 3 or sys.argv[1] != "--push-as-node":
-        raise SystemExit(2)
-    sys.stdout.write(str(push_workspace(sys.argv[2])))

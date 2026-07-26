@@ -2,20 +2,24 @@
 
 import { beforeAll, beforeEach, describe, expect, it, jest } from "@jest/globals"
 
-const verifyContextMock = jest.fn<() => Promise<
+const verifyContextMock = jest.fn<(...args: unknown[]) => Promise<
   | {
       ownerEmail: string
       actorEmail: string
-      mode: "owner" | "consultation" | "scheduled"
+      mode: "owner" | "consultation" | "scheduled" | "email-task"
       sessionId: string
+      nonce: string
     }
   | null
 >>()
 const getSecretStringMock = jest.fn<() => Promise<string | null>>()
 const fetchMock = jest.fn<typeof fetch>()
-const acquireAdmissionMock = jest.fn()
-const finishAdmissionMock = jest.fn()
-const releaseAdmissionMock = jest.fn()
+const acquireAdmissionMock =
+  jest.fn<(...args: unknown[]) => Promise<unknown>>()
+const finishAdmissionMock =
+  jest.fn<(...args: unknown[]) => Promise<unknown>>()
+const releaseAdmissionMock =
+  jest.fn<(...args: unknown[]) => Promise<unknown>>()
 
 jest.mock("@/lib/agent-workspace/invocation-context", () => ({
   verifyAgentInvocationContext: verifyContextMock,
@@ -61,11 +65,14 @@ function request(body: unknown) {
 describe("Agent model credential broker", () => {
   let POST: typeof import("@/app/api/agent/model-proxy/[...path]/route").POST
   let readBoundedModelRequest:
-    typeof import("@/app/api/agent/model-proxy/[...path]/route").readBoundedModelRequest
+    typeof import("@/lib/agent-workspace/bounded-model-request").readBoundedModelRequest
 
   beforeAll(async () => {
-    ;({ POST, readBoundedModelRequest } = await import(
+    ;({ POST } = await import(
       "@/app/api/agent/model-proxy/[...path]/route"
+    ))
+    ;({ readBoundedModelRequest } = await import(
+      "@/lib/agent-workspace/bounded-model-request"
     ))
     global.fetch = fetchMock
   })
@@ -126,6 +133,7 @@ describe("Agent model credential broker", () => {
       actorEmail: "delegate@example.com",
       mode: "consultation",
       sessionId: "consultation-session",
+      nonce: "consultation-nonce",
     })
     const consultationRequest = request({
       model: "us.anthropic.claude-sonnet-5",
@@ -140,7 +148,7 @@ describe("Agent model credential broker", () => {
     expect(response.status).toBe(200)
     expect(verifyContextMock).toHaveBeenCalledWith(
       consultationRequest,
-      { allowedModes: ["owner", "consultation", "scheduled"] },
+      { allowedModes: ["owner", "consultation", "scheduled", "email-task"] },
     )
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })

@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import signal
 import subprocess
 import sys
@@ -79,6 +80,7 @@ def _safe_header_value(value: str, limit: int = 100) -> str:
 _AUTHORITY_DIRECTORY = "/run/psd-agent-authority"
 _INVOCATION_CONTEXT_PATH = f"{_AUTHORITY_DIRECTORY}/invocation-context"
 _REQUEST_PROOF_KEY_PATH = f"{_AUTHORITY_DIRECTORY}/request-proof-key"
+_WORKSPACE_FLUSH_TOKEN_PATH = f"{_AUTHORITY_DIRECTORY}/workspace-flush-token"
 _INVOCATION_CONTEXT_RE = re.compile(
     r"^v1\.[A-Za-z0-9_-]{40,3500}\.[A-Za-z0-9_-]{43}$"
 )
@@ -137,11 +139,35 @@ def _invocation_authority_is_installed() -> bool:
     )
 
 
+def _install_workspace_flush_lock() -> None:
+    """Block model-originated relay calls while root flushes owner state."""
+    os.makedirs(_AUTHORITY_DIRECTORY, mode=0o700, exist_ok=True)
+    os.chmod(_AUTHORITY_DIRECTORY, 0o700)
+    temporary_path = f"{_WORKSPACE_FLUSH_TOKEN_PATH}.{os.getpid()}.tmp"
+    with open(temporary_path, "w", encoding="ascii") as handle:
+        handle.write(secrets.token_urlsafe(32))
+        handle.write("\n")
+    os.chmod(temporary_path, 0o600)
+    os.replace(temporary_path, _WORKSPACE_FLUSH_TOKEN_PATH)
+
+
+def _remove_workspace_flush_lock() -> None:
+    try:
+        os.unlink(_WORKSPACE_FLUSH_TOKEN_PATH)
+    except FileNotFoundError:
+        pass
+
+
 async def _finalize_invocation_authority() -> None:
-    """Stop background work, flush once with current authority, then revoke it."""
+    """Lock the relay, flush once as root, then revoke all turn authority."""
     loop = asyncio.get_running_loop()
     periodic_stopped = False
     try:
+        try:
+            _install_workspace_flush_lock()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("turn-final relay lock failed: %s", exc)
+            return
         try:
             await loop.run_in_executor(None, workspace_sync.stop_periodic_push)
             periodic_stopped = True
@@ -162,19 +188,29 @@ async def _finalize_invocation_authority() -> None:
                 logger.warning("turn-final workspace push failed: %s", exc)
     finally:
         _revoke_invocation_authority()
+        _remove_workspace_flush_lock()
 
 
 def _serialize_invocations(function):
-    """Hold one owner's authority at a time and revoke it after every turn."""
+    """Hold one owner's authority and revoke it before the terminal result."""
     async def serialized(*args, **kwargs):
+        finalized = False
         async with _invocation_lock:
             try:
                 async for event in function(*args, **kwargs):
+                    if (
+                        not finalized
+                        and isinstance(event, dict)
+                        and "result" in event
+                    ):
+                        await _finalize_invocation_authority()
+                        finalized = True
                     yield event
             finally:
                 # Async-generator finalization also runs this path when the
                 # streaming client disconnects or the invocation raises.
-                await _finalize_invocation_authority()
+                if not finalized:
+                    await _finalize_invocation_authority()
     return serialized
 
 

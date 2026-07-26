@@ -172,6 +172,16 @@ export function validateWorkspaceCommand(command: WorkspaceCommand): void {
   if (operation === "gmail users messages modify") validateGmailModify(argv)
 }
 
+export function validateEmailTaskWorkspaceCommand(
+  command: WorkspaceCommand,
+): void {
+  validateWorkspaceCommand(command)
+  const { operation } = normalizedOperation(command.argv)
+  if (command.scope !== "user" || operation !== "tasks tasks insert") {
+    throw new Error("Email tasks may only insert a user-owned Google task")
+  }
+}
+
 export async function executeWorkspaceCommand(
   command: WorkspaceCommand,
   accessToken: string

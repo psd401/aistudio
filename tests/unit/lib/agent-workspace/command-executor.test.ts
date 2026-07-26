@@ -1,6 +1,38 @@
-import { validateWorkspaceCommand } from "@/lib/agent-workspace/command-executor"
+import {
+  validateEmailTaskWorkspaceCommand,
+  validateWorkspaceCommand,
+} from "@/lib/agent-workspace/command-executor"
 
 describe("trusted Workspace command policy", () => {
+  it("limits sender-influenced email tasks to one task-insert operation", () => {
+    expect(() =>
+      validateEmailTaskWorkspaceCommand({
+        scope: "user",
+        argv: [
+          "tasks",
+          "tasks",
+          "insert",
+          "--params",
+          '{"tasklist":"@default"}',
+          "--json",
+          '{"title":"Review email"}',
+        ],
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateEmailTaskWorkspaceCommand({
+        scope: "user",
+        argv: ["gmail", "users", "messages", "list"],
+      })
+    ).toThrow("only insert")
+    expect(() =>
+      validateEmailTaskWorkspaceCommand({
+        scope: "agent",
+        argv: ["tasks", "tasks", "insert"],
+      })
+    ).toThrow("only insert")
+  })
+
   it("allows bounded read operations", () => {
     expect(() =>
       validateWorkspaceCommand({

@@ -3,6 +3,7 @@ import { verifyAgentInvocationContext } from "@/lib/agent-workspace/invocation-c
 import { getSecretString } from "@/lib/agent-workspace/secrets-manager"
 import {
   executeGitHubCommand,
+  validateEmailTaskGitHubCommand,
   validateGitHubCommand,
 } from "@/lib/agent-github/command-executor"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
@@ -12,7 +13,7 @@ const log = createLogger({ module: "agent-github-execute" })
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId()
   const context = await verifyAgentInvocationContext(request, {
-    allowedModes: ["owner"],
+    allowedModes: ["owner", "email-task"],
   })
   if (!context) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   let raw: unknown
@@ -33,7 +34,11 @@ export async function POST(request: NextRequest) {
   }
   const argv = (raw as { argv: string[] }).argv
   try {
-    validateGitHubCommand(argv)
+    if (context.mode === "email-task") {
+      validateEmailTaskGitHubCommand(argv)
+    } else {
+      validateGitHubCommand(argv)
+    }
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "GitHub command rejected" },

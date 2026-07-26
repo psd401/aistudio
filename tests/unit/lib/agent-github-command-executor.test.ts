@@ -11,10 +11,46 @@ import {
   buildGitHubExecutionEnvironment,
   executeGitHubCommand,
   redactGitHubToken,
+  validateEmailTaskGitHubCommand,
   validateGitHubCommand,
 } from "@/lib/agent-github/command-executor"
 
 describe("GitHub command boundary", () => {
+  it("limits sender-influenced email tasks to issue creation", () => {
+    expect(() =>
+      validateEmailTaskGitHubCommand([
+        "issue",
+        "create",
+        "--repo",
+        "owner/tasks",
+        "--title",
+        "Review email",
+        "--body",
+        "Sender-controlled email excerpt",
+        "--label",
+        "source:email",
+      ])
+    ).not.toThrow()
+    expect(() =>
+      validateEmailTaskGitHubCommand([
+        "pr",
+        "create",
+        "--repo",
+        "owner/tasks",
+      ])
+    ).toThrow("only create a GitHub issue")
+    expect(() =>
+      validateEmailTaskGitHubCommand([
+        "issue",
+        "create",
+        "--repo",
+        "owner/tasks",
+        "--assignee",
+        "admin",
+      ])
+    ).toThrow("flag is not allowed")
+  })
+
   it.each([
     [["auth", "status"]],
     [["issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title"]],

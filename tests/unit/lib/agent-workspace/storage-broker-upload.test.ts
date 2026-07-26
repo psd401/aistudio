@@ -9,13 +9,15 @@ import {
   jest,
 } from "@jest/globals"
 
-const s3SendMock = jest.fn()
-const signedUrlMock = jest.fn()
-const executeQueryMock = jest.fn()
-const executeTransactionMock = jest.fn()
-const acquireMock = jest.fn()
-const finishMock = jest.fn()
-const releaseMock = jest.fn()
+type AsyncUnknownMock = (...args: unknown[]) => Promise<unknown>
+
+const s3SendMock = jest.fn<AsyncUnknownMock>()
+const signedUrlMock = jest.fn<AsyncUnknownMock>()
+const executeQueryMock = jest.fn<AsyncUnknownMock>()
+const executeTransactionMock = jest.fn<AsyncUnknownMock>()
+const acquireMock = jest.fn<AsyncUnknownMock>()
+const finishMock = jest.fn<AsyncUnknownMock>()
+const releaseMock = jest.fn<AsyncUnknownMock>()
 
 jest.mock("@aws-sdk/client-s3", () => {
   class Command {
@@ -96,14 +98,14 @@ beforeEach(() => {
   releaseMock.mockReset()
   s3SendMock.mockReset()
   signedUrlMock.mockReset()
-  process.env.NODE_ENV = "test"
   process.env.AGENT_WORKSPACE_BUCKET = "workspace-bucket"
   resetWorkspaceStorageClientForTests()
   acquireMock
     .mockResolvedValueOnce({ allowed: true, leaseId: BYTE_LEASE })
     .mockResolvedValueOnce({ allowed: true, leaseId: OBJECT_LEASE })
   executeTransactionMock.mockImplementation(
-    async (_callback: unknown, label: string) => {
+    async (...args: unknown[]) => {
+      const label = args[1]
       if (label === "createWorkspaceUploadReservation") {
         return {
           id: RESERVATION,
@@ -170,6 +172,25 @@ describe("verified workspace upload reservations", () => {
     ).rejects.toThrow("content type")
     expect(executeQueryMock).not.toHaveBeenCalled()
     expect(acquireMock).not.toHaveBeenCalled()
+  })
+
+  it("accepts the UTF-8 HTML MIME used by the artifact publishers", async () => {
+    const prepared = await createPublicArtifactUpload(
+      OWNER,
+      "report.html",
+      "text/html; charset=utf-8",
+      4,
+      "session:nonce",
+      "idempotency-html",
+      CHECKSUM,
+    )
+    expect(prepared.requiredHeaders["Content-Type"]).toBe(
+      "text/html; charset=utf-8",
+    )
+    const put = signedUrlMock.mock.calls[0]?.[1] as {
+      input: Record<string, unknown>
+    }
+    expect(put.input.ContentType).toBe("text/html; charset=utf-8")
   })
 
   it("uncharges an old public commit only after exact-version absence is proven", async () => {

@@ -4,7 +4,7 @@ const INVOCATION_CONTEXT_AUDIENCE = "psd-agent-internal";
 const INVOCATION_CONTEXT_VERSION = 1;
 const DEFAULT_TTL_SECONDS = 15 * 60;
 
-export function createOwnerInvocationContextToken(
+export function createEmailTaskInvocationContextToken(
   secret: string,
   input: {
     ownerEmail: string;
@@ -34,7 +34,7 @@ export function createOwnerInvocationContextToken(
     audience: INVOCATION_CONTEXT_AUDIENCE,
     actorEmail: ownerEmail,
     ownerEmail,
-    mode: "owner",
+    mode: "email-task",
     sessionId: input.sessionId,
     workspacePrefix: input.workspacePrefix,
     issuedAt: nowSeconds,

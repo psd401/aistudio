@@ -15,9 +15,10 @@ Manager — never a shared account.
 
 ## Invoke
 
-    node /opt/psd-skills/psd-plaud/run.js --user <caller-email> <subcommand> [flags]
+    node /opt/psd-skills/psd-plaud/run.js <subcommand> [flags]
 
-`<caller-email>` is the email in the `[caller: Name <email>]` header of the turn.
+Caller identity comes from the signed invocation context. Never pass `--user`
+or another identity selector; the CLI rejects model-supplied authority.
 
 | Subcommand | Purpose | Flags |
 |---|---|---|

@@ -49,6 +49,7 @@ from mantle_proxy import (  # noqa: E402
     AgentBrokerResponseTooLarge,
     _read_bounded_agent_broker_response,
     _resolve_agent_broker_route,
+    _workspace_flush_request_allowed,
     _extract_usage,
     _is_anthropic_model,
     inject_include_usage,
@@ -77,6 +78,41 @@ class TestAgentBrokerRoute(unittest.TestCase):
         )
         self.assertIsNone(_resolve_agent_broker_route("credentials"))
         self.assertIsNone(_resolve_agent_broker_route("api/agent/not-allowed"))
+
+    def test_final_flush_accepts_only_token_bound_private_workspace_writes(self):
+        token = "a" * 43
+        self.assertTrue(
+            _workspace_flush_request_allowed(
+                "/api/agent/workspace-storage",
+                {"operation": "upload"},
+                token,
+                token,
+            )
+        )
+        self.assertFalse(
+            _workspace_flush_request_allowed(
+                "/api/agent/workspace-storage",
+                {"operation": "publish"},
+                token,
+                token,
+            )
+        )
+        self.assertFalse(
+            _workspace_flush_request_allowed(
+                "/api/agent/credentials",
+                {"operation": "upload"},
+                token,
+                token,
+            )
+        )
+        self.assertFalse(
+            _workspace_flush_request_allowed(
+                "/api/agent/workspace-storage",
+                {"operation": "upload"},
+                None,
+                token,
+            )
+        )
 
 
 class _FakeResponseContent:

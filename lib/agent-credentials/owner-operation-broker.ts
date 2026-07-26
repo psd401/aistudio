@@ -331,15 +331,22 @@ export async function executePlaudOperation(input: {
   toolName: unknown
   toolArgs: unknown
 }): Promise<OperationResult> {
+  const allowedTools = new Set([
+    "get_current_user",
+    "list_files",
+    "get_file",
+    "get_note",
+    "get_transcript",
+  ])
   if (input.method !== "tools/call" && input.method !== "tools/list") {
     throw new Error("Unsupported Plaud MCP method")
   }
   if (
     input.method === "tools/call" &&
     (typeof input.toolName !== "string" ||
-      !/^[A-Za-z0-9_.-]{1,128}$/.test(input.toolName))
+      !allowedTools.has(input.toolName))
   ) {
-    throw new Error("Invalid Plaud tool name")
+    throw new Error("Unsupported Plaud tool")
   }
   const toolArgs = boundedRecord(input.toolArgs ?? {}, "Plaud tool arguments")
   const broker = new AgentCredentialBroker()

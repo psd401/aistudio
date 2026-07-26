@@ -7,7 +7,6 @@ import {
 
 describe("workspace upload signer", () => {
   it("binds length, MIME type, and checksum with the real AWS signer", async () => {
-    process.env.NODE_ENV = "test"
     process.env.AWS_REGION = "us-east-1"
     process.env.AWS_ACCESS_KEY_ID = "AKIATESTSIGNERONLY"
     process.env.AWS_SECRET_ACCESS_KEY = "test-secret-access-key"

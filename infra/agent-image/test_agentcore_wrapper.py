@@ -106,6 +106,7 @@ class TestInvocationContextInstaller(unittest.TestCase):
                 key_file.write("proof")
             with mock.patch.multiple(
                 agentcore_wrapper,
+                _AUTHORITY_DIRECTORY=directory,
                 _INVOCATION_CONTEXT_PATH=context_path,
                 _REQUEST_PROOF_KEY_PATH=key_path,
             ):
@@ -177,6 +178,7 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             context_path = os.path.join(directory, "invocation-context")
             key_path = os.path.join(directory, "request-proof-key")
+            flush_path = os.path.join(directory, "workspace-flush-token")
             with open(context_path, "w", encoding="ascii") as context_file:
                 context_file.write("context")
             with open(key_path, "w", encoding="ascii") as key_file:
@@ -189,8 +191,10 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
             serialized = agentcore_wrapper._serialize_invocations(invocation)
             with mock.patch.multiple(
                 agentcore_wrapper,
+                _AUTHORITY_DIRECTORY=directory,
                 _INVOCATION_CONTEXT_PATH=context_path,
                 _REQUEST_PROOF_KEY_PATH=key_path,
+                _WORKSPACE_FLUSH_TOKEN_PATH=flush_path,
                 _current_workspace_prefix="owner-prefix",
             ), mock.patch.object(
                 agentcore_wrapper.workspace_sync,
@@ -200,9 +204,16 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
                 "push_workspace",
                 return_value=1,
             ) as push:
-                events = [event async for event in serialized()]
+                stream = serialized()
+                self.assertEqual(await anext(stream), {"type": "start"})
+                self.assertTrue(os.path.exists(context_path))
+                self.assertEqual(await anext(stream), {"result": "done"})
+                self.assertFalse(os.path.exists(context_path))
+                self.assertFalse(os.path.exists(key_path))
+                self.assertFalse(os.path.exists(flush_path))
+                with self.assertRaises(StopAsyncIteration):
+                    await anext(stream)
 
-            self.assertEqual(events[-1], {"result": "done"})
             stop.assert_called_once_with()
             push.assert_called_once_with("owner-prefix")
             self.assertFalse(os.path.exists(context_path))
@@ -215,6 +226,7 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             context_path = os.path.join(directory, "invocation-context")
             key_path = os.path.join(directory, "request-proof-key")
+            flush_path = os.path.join(directory, "workspace-flush-token")
             for path in (context_path, key_path):
                 with open(path, "w", encoding="ascii") as authority_file:
                     authority_file.write("authority")
@@ -226,8 +238,10 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
             serialized = agentcore_wrapper._serialize_invocations(invocation)
             with mock.patch.multiple(
                 agentcore_wrapper,
+                _AUTHORITY_DIRECTORY=directory,
                 _INVOCATION_CONTEXT_PATH=context_path,
                 _REQUEST_PROOF_KEY_PATH=key_path,
+                _WORKSPACE_FLUSH_TOKEN_PATH=flush_path,
                 _current_workspace_prefix="owner-prefix",
             ), mock.patch.object(
                 agentcore_wrapper.workspace_sync,
@@ -447,6 +461,10 @@ class TestPullFiles(unittest.TestCase):
         import workspace_sync
 
         class FakeResponse(io.BytesIO):
+            def __init__(self, body):
+                super().__init__(body)
+                self.headers = {"Content-Length": str(len(body))}
+
             def __enter__(self):
                 return self
 
@@ -456,13 +474,17 @@ class TestPullFiles(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             downloaded = []
 
-            def fake_download_url(relative):
+            def fake_download_spec(relative):
                 downloaded.append(relative)
-                return f"https://download.invalid/{relative}"
+                return (
+                    f"https://download.invalid/{relative}",
+                    1,
+                    {"Range": "bytes=0-0"},
+                )
 
             with mock.patch.object(workspace_sync, "WORKSPACE_DIR", Path(tmp)), \
                  mock.patch.object(
-                     workspace_sync, "_download_url", side_effect=fake_download_url
+                     workspace_sync, "_download_spec", side_effect=fake_download_spec
                  ), \
                  mock.patch.object(
                      workspace_sync.urllib.request,

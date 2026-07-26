@@ -299,6 +299,46 @@ class BoundedTransferTests(unittest.TestCase):
             (metadata.st_size, metadata.st_mtime_ns),
         )
 
+    def test_root_push_keeps_the_prefix_cache_in_the_long_lived_process(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        (workspace / "note.txt").write_bytes(b"same")
+        workspace_sync._uploaded_state.clear()
+        self.addCleanup(workspace_sync._uploaded_state.clear)
+        with mock.patch.object(workspace_sync, "WORKSPACE_DIR", workspace), \
+                mock.patch.object(workspace_sync.os, "geteuid", return_value=0), \
+                mock.patch.object(
+                    workspace_sync, "_upload_spec", return_value=None
+                ) as prepare, \
+                mock.patch.object(workspace_sync.subprocess, "run") as spawn:
+            self.assertEqual(workspace_sync.push_workspace("owner"), 1)
+            self.assertEqual(workspace_sync.push_workspace("owner"), 0)
+        prepare.assert_called_once()
+        spawn.assert_not_called()
+
+    def test_only_root_can_attach_final_flush_authority(self):
+        token_path = self.root / "workspace-flush-token"
+        token_path.write_text("a" * 43)
+        with mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_FLUSH_TOKEN_PATH",
+            str(token_path),
+        ), mock.patch.object(
+            workspace_sync.os, "geteuid", return_value=0
+        ):
+            self.assertEqual(
+                workspace_sync._workspace_flush_headers(),
+                {"X-Agent-Workspace-Flush": "a" * 43},
+            )
+        with mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_FLUSH_TOKEN_PATH",
+            str(token_path),
+        ), mock.patch.object(
+            workspace_sync.os, "geteuid", return_value=1000
+        ):
+            self.assertEqual(workspace_sync._workspace_flush_headers(), {})
+
     def test_upload_spec_rejects_untrusted_or_mismatched_headers(self):
         valid = {
             "uploadUrl": "https://upload.invalid/note",

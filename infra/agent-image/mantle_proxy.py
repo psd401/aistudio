@@ -51,6 +51,7 @@ UPSTREAM = APP_BASE_URL + "/api/agent/model-proxy"
 AUTHORITY_DIRECTORY = "/run/psd-agent-authority"
 INVOCATION_CONTEXT_PATH = f"{AUTHORITY_DIRECTORY}/invocation-context"
 REQUEST_PROOF_KEY_PATH = f"{AUTHORITY_DIRECTORY}/request-proof-key"
+WORKSPACE_FLUSH_TOKEN_PATH = f"{AUTHORITY_DIRECTORY}/workspace-flush-token"
 ALLOWED_AGENT_BROKER_ROUTES = frozenset({
     "/api/agent/account-request",
     "/api/agent/aistudio",
@@ -103,6 +104,34 @@ def _authority_headers(method: str, route: str, body: bytes) -> dict:
         "X-Agent-Request-Proof-Body-Sha256": body_sha256,
         "X-Agent-Request-Proof-Signature": signature,
     }
+
+
+def _read_workspace_flush_token() -> str | None:
+    try:
+        with open(WORKSPACE_FLUSH_TOKEN_PATH, "r", encoding="ascii") as handle:
+            token = handle.read().strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return ""
+    return token if re.fullmatch(r"[A-Za-z0-9_-]{43}", token) else ""
+
+
+def _workspace_flush_request_allowed(
+    route: str,
+    payload: dict,
+    supplied_token: str | None,
+    flush_token: str | None,
+) -> bool:
+    if flush_token is None:
+        return True
+    return (
+        route == "/api/agent/workspace-storage"
+        and payload.get("operation") in {"upload", "complete-upload"}
+        and isinstance(supplied_token, str)
+        and bool(flush_token)
+        and hmac.compare_digest(supplied_token, flush_token)
+    )
 
 # ---------------------------------------------------------------------------
 # Cumulative token-usage accounting (issue #1083)
@@ -993,6 +1022,13 @@ async def handle_agent_broker(request: web.Request) -> web.StreamResponse:
         return web.json_response({"error": "Invalid JSON body"}, status=400)
     if not isinstance(parsed, dict):
         return web.json_response({"error": "Invalid request body"}, status=400)
+    if not _workspace_flush_request_allowed(
+        route,
+        parsed,
+        request.headers.get("X-Agent-Workspace-Flush"),
+        _read_workspace_flush_token(),
+    ):
+        return web.json_response({"error": "Unsupported agent operation"}, status=404)
     try:
         headers = {
             "Content-Type": "application/json",
@@ -1028,6 +1064,8 @@ async def handle_agent_broker(request: web.Request) -> web.StreamResponse:
 
 
 async def handle_proxy(request: web.Request) -> web.StreamResponse:
+    if _read_workspace_flush_token() is not None:
+        return web.json_response({"error": "Turn is finalizing"}, status=503)
     path = request.match_info.get("path", "")
     url = f"{UPSTREAM}/{path}"
     req_id = f"{int(time.time()*1000)}-{id(request) % 100000}"

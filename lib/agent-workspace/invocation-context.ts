@@ -21,7 +21,11 @@ const SHA256_HEX_RE = /^[0-9a-f]{64}$/
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
-export type AgentInvocationMode = "owner" | "consultation" | "scheduled"
+export type AgentInvocationMode =
+  | "owner"
+  | "consultation"
+  | "scheduled"
+  | "email-task"
 
 export interface AgentInvocationContext {
   version: 1
@@ -37,7 +41,12 @@ export interface AgentInvocationContext {
 }
 
 function isInvocationMode(value: unknown): value is AgentInvocationMode {
-  return value === "owner" || value === "consultation" || value === "scheduled"
+  return (
+    value === "owner" ||
+    value === "consultation" ||
+    value === "scheduled" ||
+    value === "email-task"
+  )
 }
 
 function isValidClaims(value: unknown): value is AgentInvocationContext {

@@ -198,16 +198,16 @@ Agent skill (in the container, env injected by `agent-platform-stack.ts`):
 The `@psd/Task` label is a fourth default label the user can apply
 manually in Gmail. The classifier never assigns it. When the polling
 Lambda detects a user-applied `@psd/Task` label, it (optionally)
-invokes AgentCore so the user's agent creates a task in their
-preferred task system (Life OS, Google Tasks, anything they've
-configured a skill for).
+invokes AgentCore in a restricted `email-task` mode so the user's agent
+creates either a GitHub issue or a Google Task. Sender-controlled email
+content cannot access the owner's workspace or any other privileged skill.
 
 ### Behaviour matrix
 
 | `tasksMode` | Behaviour on `@psd/Task` label |
 |-------------|--------------------------------|
 | `none` (default) | Lambda does nothing. The message keeps the `@psd/Task` label. Useful for users who want the label as a manual holding bay with no automation. |
-| `invoke-agent` | Lambda invokes AgentCore with the email metadata. The user's agent reads their `MEMORY.md` to determine how to create the task (which skill, which system, which labels). On success: email is archived (both `INBOX` and `@psd/Task` removed) — end state is All Mail only. On failure: email is left alone and a Chat card surfaces the failure reason. |
+| `invoke-agent` | Lambda invokes AgentCore with the email metadata in restricted `email-task` mode. The user's saved instructions choose GitHub issue creation or Google Task insertion. No persistent workspace is mounted. On success: email is archived (both `INBOX` and `@psd/Task` removed) — end state is All Mail only. On failure: email is left alone and a Chat card surfaces the failure reason. |
 
 ### Required agent-side configuration
 

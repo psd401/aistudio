@@ -29,7 +29,7 @@ import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 
 import { fetchTaskInstructions } from "./memory";
 import {
-  createOwnerInvocationContextToken,
+  createEmailTaskInvocationContextToken,
   deriveOwnerRequestProofKey,
 } from "./invocation-context";
 
@@ -215,20 +215,23 @@ function buildPrompt(ctx: TaskCreationContext, userInstructions: string): string
 }
 
 export function buildTaskInvocationPayload(
-  ctx: Pick<TaskCreationContext, "userEmail" | "workspacePrefix">,
+  ctx: Pick<TaskCreationContext, "userEmail">,
   prompt: string,
   sessionId: string,
   signingSecret: string,
 ): Record<string, string> {
-  const invocationContext = createOwnerInvocationContextToken(signingSecret, {
+  // Email headers and bodies are sender-controlled. This invocation gets no
+  // persistent workspace and carries a distinct mode that only model access
+  // plus narrowly validated task-creation operations accept.
+  const invocationContext = createEmailTaskInvocationContextToken(signingSecret, {
     ownerEmail: ctx.userEmail,
     sessionId,
-    workspacePrefix: ctx.workspacePrefix,
+    workspacePrefix: "",
   });
   return {
     prompt,
     user_email: ctx.userEmail,
-    workspace_prefix: ctx.workspacePrefix,
+    workspace_prefix: "",
     invocation_context: invocationContext,
     invocation_request_proof_key: deriveOwnerRequestProofKey(
       signingSecret,

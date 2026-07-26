@@ -2,6 +2,10 @@ import { createHash } from "node:crypto"
 import { NextRequest, NextResponse } from "next/server"
 import { verifyAgentInvocationContext } from "@/lib/agent-workspace/invocation-context"
 import { getSecretString } from "@/lib/agent-workspace/secrets-manager"
+import {
+  ModelRequestBodyError,
+  readBoundedModelRequest,
+} from "@/lib/agent-workspace/bounded-model-request"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 import {
   acquireResourceAdmission,
@@ -14,7 +18,6 @@ export const runtime = "nodejs"
 const log = createLogger({ module: "agent-model-proxy" })
 const UPSTREAM = "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic/v1/messages"
 const ALLOWED_MODELS = new Set(["us.anthropic.claude-sonnet-5"])
-const MAX_REQUEST_BYTES = 4 * 1024 * 1024
 const MAX_INPUT_TOKEN_UPPER_BOUND = 200_000
 const MAX_OUTPUT_TOKENS = 32_768
 const MODEL_PROXY_CALL_LIMITS = {
@@ -46,77 +49,6 @@ const MODEL_PROXY_COST_LIMITS = {
 } as const
 const SONNET_INPUT_COST_MICROCENTS_PER_TOKEN = 300
 const SONNET_OUTPUT_COST_MICROCENTS_PER_TOKEN = 1_500
-
-class ModelRequestBodyError extends Error {
-  constructor(
-    message: string,
-    readonly status: 400 | 413,
-  ) {
-    super(message)
-    this.name = "ModelRequestBodyError"
-  }
-}
-
-function parseDeclaredLength(headers: Headers): number | null {
-  const raw = headers.get("content-length")
-  if (raw === null) return null
-  if (!/^\d+$/.test(raw)) {
-    throw new ModelRequestBodyError("Invalid Content-Length", 400)
-  }
-  const length = Number(raw)
-  if (!Number.isSafeInteger(length)) {
-    throw new ModelRequestBodyError("Invalid Content-Length", 400)
-  }
-  if (length > MAX_REQUEST_BYTES) {
-    throw new ModelRequestBodyError("Model request is too large", 413)
-  }
-  return length
-}
-
-/** Read at most MAX_REQUEST_BYTES, cancelling before an over-limit body is joined. */
-export async function readBoundedModelRequest(
-  request: Pick<NextRequest, "body" | "headers">,
-): Promise<Uint8Array> {
-  const contentType = request.headers.get("content-type")
-  if (
-    contentType &&
-    contentType.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
-  ) {
-    throw new ModelRequestBodyError("Model request must be JSON", 400)
-  }
-  const declaredLength = parseDeclaredLength(request.headers)
-  if (!request.body) {
-    throw new ModelRequestBodyError("Invalid model request size", 400)
-  }
-  const reader = request.body.getReader()
-  const chunks: Uint8Array[] = []
-  let total = 0
-  try {
-    for (;;) {
-      const { value, done } = await reader.read()
-      if (done) break
-      if (!value) continue
-      total += value.byteLength
-      if (total > MAX_REQUEST_BYTES) {
-        await reader.cancel("request body limit exceeded")
-        throw new ModelRequestBodyError("Model request is too large", 413)
-      }
-      chunks.push(value)
-    }
-  } finally {
-    reader.releaseLock()
-  }
-  if (total === 0 || (declaredLength !== null && total !== declaredLength)) {
-    throw new ModelRequestBodyError("Invalid model request size", 400)
-  }
-  const body = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) {
-    body.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return body
-}
 
 type ModelRequest = {
   model?: unknown
@@ -170,7 +102,7 @@ export async function POST(
 ) {
   const requestId = generateRequestId()
   const context = await verifyAgentInvocationContext(request, {
-    allowedModes: ["owner", "consultation", "scheduled"],
+    allowedModes: ["owner", "consultation", "scheduled", "email-task"],
   })
   if (!context) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 })

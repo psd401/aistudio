@@ -215,10 +215,19 @@ function expectedChecksum(value: string): string {
 
 function expectedContentType(value?: string): string {
   const normalized = (value ?? "application/octet-stream").trim().toLowerCase()
-  if (normalized.length > 255 || !CONTENT_TYPE_RE.test(normalized)) {
+  if (normalized.length > 255) {
     throw new Error("Invalid content type")
   }
-  return normalized
+  const parts = normalized.split(";").map((part) => part.trim())
+  const mediaType = parts.shift() ?? ""
+  if (
+    !CONTENT_TYPE_RE.test(mediaType) ||
+    parts.length > 1 ||
+    (parts.length === 1 && parts[0] !== "charset=utf-8")
+  ) {
+    throw new Error("Invalid content type")
+  }
+  return parts.length === 1 ? `${mediaType}; charset=utf-8` : mediaType
 }
 
 function assertPublicArtifactContentType(
@@ -228,7 +237,8 @@ function assertPublicArtifactContentType(
   const extensionIndex = fileName.lastIndexOf(".")
   const extension =
     extensionIndex === -1 ? "" : fileName.slice(extensionIndex).toLowerCase()
-  if (!PUBLIC_CONTENT_TYPES.get(extension)?.has(contentType)) {
+  const mediaType = contentType.split(";", 1)[0] ?? ""
+  if (!PUBLIC_CONTENT_TYPES.get(extension)?.has(mediaType)) {
     throw new Error("Invalid content type for public artifact extension")
   }
 }
