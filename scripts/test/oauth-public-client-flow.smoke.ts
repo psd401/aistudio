@@ -263,7 +263,7 @@ async function main(): Promise<void> {
   }
   const clientId = "ae781263-20c0-4b0c-8a34-8be01ab72fb1"
   const redirectUri =
-    "https://jldnpmcpimhabiphcglkbgmbffpoocpo.chromiumapp.org/atrium"
+    "https://eomlblaiglafndhplfhilmdcaofhkkbj.chromiumapp.org/atrium"
   const nativeClientId = "fbdaa815-1b0f-435b-805f-1732805720c1"
   const nativeRedirectUri =
     "org.psd401.atrium-capture:/oauth/callback"
@@ -724,8 +724,17 @@ async function main(): Promise<void> {
       authorizationUrl({
         clientId,
         redirectUri:
-          "https://jldnpmcpimhabiphcglkbgmbffpoocpo.chromiumapp.org/wrong",
+          "https://eomlblaiglafndhplfhilmdcaofhkkbj.chromiumapp.org/wrong",
         state: "callback-mismatch",
+      }),
+      "invalid_redirect_uri"
+    )
+    await assertAuthorizationRejected(
+      authorizationUrl({
+        clientId,
+        redirectUri:
+          "https://jldnpmcpimhabiphcglkbgmbffpoocpo.chromiumapp.org/atrium",
+        state: "retired-extension-callback",
       }),
       "invalid_redirect_uri"
     )
