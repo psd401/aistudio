@@ -171,6 +171,41 @@ class TestInvocationContextInstaller(unittest.TestCase):
 
 
 class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
+    async def test_second_drain_failure_restarts_stuck_proxy_again(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            context_path = os.path.join(directory, "invocation-context")
+            key_path = os.path.join(directory, "request-proof-key")
+            flush_path = os.path.join(directory, "workspace-flush-token")
+            for path in (context_path, key_path):
+                with open(path, "w", encoding="ascii") as authority_file:
+                    authority_file.write("authority")
+
+            with mock.patch.multiple(
+                agentcore_wrapper,
+                _AUTHORITY_DIRECTORY=directory,
+                _INVOCATION_CONTEXT_PATH=context_path,
+                _REQUEST_PROOF_KEY_PATH=key_path,
+                _WORKSPACE_FLUSH_TOKEN_PATH=flush_path,
+                _current_workspace_prefix=None,
+            ), mock.patch.object(
+                agentcore_wrapper,
+                "_set_proxy_finalization",
+                side_effect=RuntimeError("drain failed"),
+            ) as transition, mock.patch.object(
+                agentcore_wrapper,
+                "_restart_mantle_proxy",
+            ) as restart:
+                await agentcore_wrapper._finalize_invocation_authority()
+
+            self.assertEqual(transition.call_count, 2)
+            self.assertEqual(restart.call_count, 2)
+            self.assertFalse(os.path.exists(context_path))
+            self.assertFalse(os.path.exists(key_path))
+            self.assertFalse(os.path.exists(flush_path))
+
     async def test_post_turn_relay_authority_is_gone_after_final_push(self):
         import os
         import tempfile
@@ -203,7 +238,10 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
                 agentcore_wrapper.workspace_sync,
                 "push_workspace",
                 return_value=1,
-            ) as push:
+            ) as push, mock.patch.object(
+                agentcore_wrapper,
+                "_set_proxy_finalization",
+            ) as transition:
                 stream = serialized()
                 self.assertEqual(await anext(stream), {"type": "start"})
                 self.assertTrue(os.path.exists(context_path))
@@ -215,7 +253,15 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
                     await anext(stream)
 
             stop.assert_called_once_with()
-            push.assert_called_once_with("owner-prefix")
+            self.assertEqual(push.call_args.args, ("owner-prefix",))
+            self.assertGreater(
+                push.call_args.kwargs["deadline_monotonic"],
+                agentcore_wrapper.time.monotonic(),
+            )
+            self.assertEqual(
+                [call.args[0] for call in transition.call_args_list],
+                ["begin", "end"],
+            )
             self.assertFalse(os.path.exists(context_path))
             self.assertFalse(os.path.exists(key_path))
 
@@ -250,6 +296,9 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
                 agentcore_wrapper.workspace_sync,
                 "push_workspace",
                 return_value=1,
+            ), mock.patch.object(
+                agentcore_wrapper,
+                "_set_proxy_finalization",
             ):
                 stream = serialized()
                 self.assertEqual(await anext(stream), {"type": "start"})

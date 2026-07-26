@@ -53,6 +53,12 @@ WORKSPACE_DIR = Path("/home/node/.openclaw")
 MAX_SYNC_FILE_BYTES = 64 * 1024 * 1024
 MAX_SYNC_TOTAL_BYTES = 256 * 1024 * 1024
 MAX_SYNC_FILES = 1_000
+# Count every directory entry, including directories, symlinks, sockets, and
+# other unsafe objects.  A model-controlled tree must not turn the privileged
+# final flush into an unbounded traversal even when none of those entries are
+# eligible for upload.
+MAX_SYNC_ENTRIES = 4_000
+MAX_SYNC_DEPTH = 64
 SYNC_WORKERS = 4
 TRANSFER_CHUNK_BYTES = 64 * 1024
 WORKSPACE_UPLOAD_CONTENT_TYPE = "application/octet-stream"
@@ -311,7 +317,23 @@ def _open_regular_no_follow(relative: str):
     return os.fdopen(file_fd, "rb"), metadata
 
 
-def _broker_request(payload: dict) -> dict:
+def _remaining_timeout(
+    deadline_monotonic: float | None,
+    maximum_seconds: float,
+) -> float:
+    """Return a positive operation timeout bounded by an optional deadline."""
+    if deadline_monotonic is None:
+        return maximum_seconds
+    remaining = deadline_monotonic - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("workspace sync deadline exceeded")
+    return min(maximum_seconds, remaining)
+
+
+def _broker_request(
+    payload: dict,
+    deadline_monotonic: float | None = None,
+) -> dict:
     """Call the trusted storage broker with the opaque signed owner context."""
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
@@ -323,7 +345,10 @@ def _broker_request(payload: dict) -> dict:
         headers=headers,
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(
+            request,
+            timeout=_remaining_timeout(deadline_monotonic, 20),
+        ) as response:
             result = json.loads(response.read())
     except urllib.error.HTTPError as exc:
         detail = exc.read(500).decode("utf-8", errors="replace")
@@ -373,6 +398,7 @@ def _upload_spec(
     content_length: int,
     idempotency_key: str,
     checksum_sha256: str,
+    deadline_monotonic: float | None = None,
 ) -> Optional[tuple[str, str, dict[str, str]]]:
     result = _broker_request({
         "operation": "upload",
@@ -381,7 +407,7 @@ def _upload_spec(
         "contentLength": content_length,
         "idempotencyKey": idempotency_key,
         "checksumSha256": checksum_sha256,
-    })
+    }, deadline_monotonic)
     url = result.get("uploadUrl")
     if result.get("unchanged") is True and isinstance(result.get("key"), str):
         return None
@@ -443,6 +469,7 @@ def _stream_upload(
     relative: str,
     content_length: int,
     required_headers: dict[str, str],
+    deadline_monotonic: float | None = None,
 ) -> None:
     parsed = urllib.parse.urlsplit(url)
     local_http = parsed.scheme == "http" and parsed.hostname in {
@@ -455,7 +482,11 @@ def _stream_upload(
         http.client.HTTPSConnection if parsed.scheme == "https"
         else http.client.HTTPConnection
     )
-    connection = connection_type(parsed.hostname, parsed.port, timeout=60)
+    connection = connection_type(
+        parsed.hostname,
+        parsed.port,
+        timeout=_remaining_timeout(deadline_monotonic, 60),
+    )
     target = urllib.parse.urlunsplit(("", "", parsed.path, parsed.query, ""))
     try:
         connection.putrequest("PUT", target)
@@ -469,6 +500,7 @@ def _stream_upload(
             raise RuntimeError("workspace file changed during upload")
         with source:
             while True:
+                _remaining_timeout(deadline_monotonic, 60)
                 chunk = source.read(TRANSFER_CHUNK_BYTES)
                 if not chunk:
                     break
@@ -659,23 +691,111 @@ def pull_files(prefix: str, relative_paths: list) -> int:
     return pulled
 
 
-def push_workspace(prefix: str) -> int:
+def _iter_workspace_files(
+    deadline_monotonic: float | None = None,
+):
+    """Yield bounded regular-file paths without following any symlink.
+
+    The traversal is rooted in an O_NOFOLLOW directory descriptor, and every
+    visited entry consumes the same global budget whether or not it is safe or
+    uploadable. This makes symlink farms and special-file farms cheap to reject.
+    """
+    def _open_directory(relative: str) -> int:
+        parts = Path(relative).parts if relative else ()
+        if len(parts) > MAX_SYNC_DEPTH:
+            raise OSError("workspace directory depth limit exceeded")
+        directory_fd = os.open(
+            WORKSPACE_DIR,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        try:
+            for part in parts:
+                _remaining_timeout(deadline_monotonic, 60)
+                next_fd = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+                os.close(directory_fd)
+                directory_fd = next_fd
+            return directory_fd
+        except Exception:
+            os.close(directory_fd)
+            raise
+
+    stack: list[str] = [""]
+    visited = 0
+    while stack:
+        relative_directory = stack.pop()
+        try:
+            directory_fd = _open_directory(relative_directory)
+        except TimeoutError:
+            raise
+        except OSError as exc:
+            logger.warning(
+                "workspace push skip unsafe directory %s: %s",
+                relative_directory or ".",
+                exc,
+            )
+            continue
+        try:
+            with os.scandir(directory_fd) as entries:
+                for entry in entries:
+                    _remaining_timeout(deadline_monotonic, 60)
+                    visited += 1
+                    if visited > MAX_SYNC_ENTRIES:
+                        logger.warning(
+                            "workspace push entry-count limit reached"
+                        )
+                        return
+                    relative = (
+                        f"{relative_directory}/{entry.name}"
+                        if relative_directory
+                        else entry.name
+                    )
+                    if _should_skip_relative(relative):
+                        continue
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if len(Path(relative).parts) <= MAX_SYNC_DEPTH:
+                                stack.append(relative)
+                            else:
+                                logger.warning(
+                                    "workspace push skip over-deep directory %s",
+                                    relative,
+                                )
+                        elif entry.is_file(follow_symlinks=False):
+                            yield relative
+                        else:
+                            logger.warning(
+                                "workspace push skip unsafe entry %s",
+                                relative,
+                            )
+                    except OSError as exc:
+                        logger.warning(
+                            "workspace push skip unsafe entry %s: %s",
+                            relative,
+                            exc,
+                        )
+        finally:
+            os.close(directory_fd)
+
+
+def push_workspace(
+    prefix: str,
+    deadline_monotonic: float | None = None,
+) -> int:
     """Upload current /home/node/.openclaw/ contents to s3://bucket/prefix/."""
     if not prefix:
         return 0
-    if not WORKSPACE_DIR.exists():
-        return 0
-
     # Parallelized for the same reason as pull: 10k+ files over a serial
     # upload blocks both the idle-push background thread and the final
     # shutdown flush, so state can be lost if the microVM is torn down
     # mid-push.
     to_upload: list[tuple[str, str, int, int, str]] = []
     total_bytes = 0
-    for path in WORKSPACE_DIR.rglob("*"):
-        if path.is_dir() or _should_skip(path):
-            continue
-        relative = path.relative_to(WORKSPACE_DIR).as_posix()
+    for relative in _iter_workspace_files(deadline_monotonic):
+        path = WORKSPACE_DIR / relative
         try:
             source, metadata = _open_regular_no_follow(relative)
         except OSError as exc:
@@ -705,6 +825,7 @@ def push_workspace(prefix: str) -> int:
         digest = hashlib.sha256()
         with source:
             while True:
+                _remaining_timeout(deadline_monotonic, 60)
                 chunk = source.read(TRANSFER_CHUNK_BYTES)
                 if not chunk:
                     break
@@ -729,6 +850,7 @@ def push_workspace(prefix: str) -> int:
                 content_length,
                 str(uuid.uuid4()),
                 checksum_sha256,
+                deadline_monotonic,
             )
             if prepared is None:
                 _uploaded_state[(prefix, relative)] = (
@@ -738,12 +860,16 @@ def push_workspace(prefix: str) -> int:
                 return None
             upload_url, reservation_id, required_headers = prepared
             _stream_upload(
-                upload_url, relative, content_length, required_headers
+                upload_url,
+                relative,
+                content_length,
+                required_headers,
+                deadline_monotonic,
             )
             completed = _broker_request({
                 "operation": "complete-upload",
                 "reservationId": reservation_id,
-            })
+            }, deadline_monotonic)
             if not isinstance(completed.get("key"), str):
                 raise RuntimeError("workspace broker did not verify upload")
             _uploaded_state[(prefix, relative)] = (

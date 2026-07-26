@@ -21,6 +21,7 @@ cross signed, owner-bound broker boundaries in the trusted web tier.
 """
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -86,6 +87,7 @@ _INVOCATION_CONTEXT_RE = re.compile(
 )
 _REQUEST_PROOF_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _invocation_lock = asyncio.Lock()
+FINAL_WORKSPACE_FLUSH_SECONDS = 120
 
 
 def _install_invocation_authority(token, request_proof_key) -> bool:
@@ -139,16 +141,18 @@ def _invocation_authority_is_installed() -> bool:
     )
 
 
-def _install_workspace_flush_lock() -> None:
+def _install_workspace_flush_lock() -> str:
     """Block model-originated relay calls while root flushes owner state."""
     os.makedirs(_AUTHORITY_DIRECTORY, mode=0o700, exist_ok=True)
     os.chmod(_AUTHORITY_DIRECTORY, 0o700)
     temporary_path = f"{_WORKSPACE_FLUSH_TOKEN_PATH}.{os.getpid()}.tmp"
+    token = secrets.token_urlsafe(32)
     with open(temporary_path, "w", encoding="ascii") as handle:
-        handle.write(secrets.token_urlsafe(32))
+        handle.write(token)
         handle.write("\n")
     os.chmod(temporary_path, 0o600)
     os.replace(temporary_path, _WORKSPACE_FLUSH_TOKEN_PATH)
+    return token
 
 
 def _remove_workspace_flush_lock() -> None:
@@ -158,16 +162,91 @@ def _remove_workspace_flush_lock() -> None:
         pass
 
 
+def _set_proxy_finalization(action: str, token: str) -> None:
+    """Ask the loopback proxy to atomically drain or reopen privileged calls."""
+    import urllib.error
+    import urllib.request
+
+    if action not in {"begin", "end"}:
+        raise ValueError("invalid proxy finalization transition")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:18791/internal/finalization/{action}",
+        data=b"",
+        method="POST",
+        headers={"X-Agent-Workspace-Flush": token},
+    )
+    timeout = FINAL_WORKSPACE_FLUSH_SECONDS + 5 if action == "begin" else 5
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                raise RuntimeError(
+                    f"proxy finalization {action} returned {response.status}"
+                )
+    except urllib.error.HTTPError as exc:
+        exc.read(500)
+        raise RuntimeError(
+            f"proxy finalization {action} returned {exc.code}"
+        ) from exc
+
+
+def _restart_mantle_proxy() -> None:
+    """Cancel stuck relay calls and replace the proxy with an empty drain set."""
+    global _mantle_proxy_process
+    process = _mantle_proxy_process
+    if process is not None and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+    _mantle_proxy_process = None
+    start_mantle_proxy()
+
+
 async def _finalize_invocation_authority() -> None:
     """Lock the relay, flush once as root, then revoke all turn authority."""
     loop = asyncio.get_running_loop()
     periodic_stopped = False
+    proxy_finalizing = False
+    proxy_needs_recovery = False
+    flush_token: str | None = None
     try:
         try:
-            _install_workspace_flush_lock()
+            flush_token = _install_workspace_flush_lock()
         except Exception as exc:  # noqa: BLE001
             logger.error("turn-final relay lock failed: %s", exc)
             return
+        try:
+            await loop.run_in_executor(
+                None,
+                _set_proxy_finalization,
+                "begin",
+                flush_token,
+            )
+            proxy_finalizing = True
+        except Exception as exc:  # noqa: BLE001
+            # A timed-out drain remains closed in the old proxy. Terminating it
+            # cancels those in-flight signed calls; the fresh proxy begins with
+            # an empty active set and is immediately moved into finalization.
+            logger.warning("turn-final proxy drain failed; restarting: %s", exc)
+            proxy_needs_recovery = True
+            try:
+                await loop.run_in_executor(None, _restart_mantle_proxy)
+                await loop.run_in_executor(
+                    None,
+                    _set_proxy_finalization,
+                    "begin",
+                    flush_token,
+                )
+                proxy_finalizing = True
+                proxy_needs_recovery = False
+            except Exception as restart_exc:  # noqa: BLE001
+                logger.error(
+                    "turn-final proxy restart/drain failed: %s",
+                    restart_exc,
+                )
+                return
         try:
             await loop.run_in_executor(None, workspace_sync.stop_periodic_push)
             periodic_stopped = True
@@ -179,15 +258,51 @@ async def _finalize_invocation_authority() -> None:
             and _invocation_authority_is_installed()
         ):
             try:
-                await loop.run_in_executor(
-                    None,
+                deadline = time.monotonic() + FINAL_WORKSPACE_FLUSH_SECONDS
+                push = functools.partial(
                     workspace_sync.push_workspace,
                     _current_workspace_prefix,
+                    deadline_monotonic=deadline,
                 )
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, push),
+                    timeout=FINAL_WORKSPACE_FLUSH_SECONDS + 5,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("turn-final workspace push exceeded deadline")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("turn-final workspace push failed: %s", exc)
     finally:
         _revoke_invocation_authority()
+        if proxy_finalizing and flush_token is not None:
+            try:
+                await loop.run_in_executor(
+                    None,
+                    _set_proxy_finalization,
+                    "end",
+                    flush_token,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Do not leave the next turn behind a permanently closed gate.
+                logger.warning(
+                    "turn-final proxy reopen failed; restarting: %s",
+                    exc,
+                )
+                try:
+                    await loop.run_in_executor(None, _restart_mantle_proxy)
+                except Exception as restart_exc:  # noqa: BLE001
+                    logger.error(
+                        "turn-final proxy recovery failed: %s",
+                        restart_exc,
+                    )
+        elif proxy_needs_recovery:
+            try:
+                await loop.run_in_executor(None, _restart_mantle_proxy)
+            except Exception as restart_exc:  # noqa: BLE001
+                logger.error(
+                    "turn-final stuck proxy recovery failed: %s",
+                    restart_exc,
+                )
         _remove_workspace_flush_lock()
 
 
@@ -239,11 +354,10 @@ def start_mantle_proxy() -> None:
     deadline = time.time() + 20
     while time.time() < deadline:
         if _mantle_proxy_process.poll() is not None:
-            logger.error(
-                "Mantle proxy exited during startup (rc=%s)",
-                _mantle_proxy_process.returncode,
+            raise RuntimeError(
+                "Mantle proxy exited during startup "
+                f"(rc={_mantle_proxy_process.returncode})"
             )
-            sys.exit(1)
         try:
             with urllib.request.urlopen(
                 "http://127.0.0.1:18791/health", timeout=2
@@ -255,8 +369,7 @@ def start_mantle_proxy() -> None:
             pass
         time.sleep(0.5)
 
-    logger.error("Mantle proxy did not become ready within 20s")
-    sys.exit(1)
+    raise RuntimeError("Mantle proxy did not become ready within 20s")
 
 def resolve_model_call_count(proxy_model_calls: int, tool_call_count: int) -> int:
     """Resolve a per-turn model-call count from broker telemetry or events."""

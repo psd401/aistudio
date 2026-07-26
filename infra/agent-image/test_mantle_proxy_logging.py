@@ -31,11 +31,16 @@ if "aiohttp" not in sys.modules:
         def __init__(self, payload):
             self.payload = payload
 
+    def _middleware(function):
+        function.__middleware_version__ = 1
+        return function
+
     _aiohttp.web = types.SimpleNamespace(
         Request=object, Response=object, StreamResponse=object,
         Application=object,
         json_response=lambda payload, *a, **k: _FakeJsonResponse(payload),
         run_app=lambda *a, **k: None,
+        middleware=_middleware,
     )
     _aiohttp.ClientSession = object
     _aiohttp.ClientTimeout = object

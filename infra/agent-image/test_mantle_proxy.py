@@ -18,6 +18,7 @@ the parsing logic, not the HTTP server.
 import sys
 import types
 import unittest
+from unittest import mock
 
 # Stub aiohttp BEFORE importing mantle_proxy so the module-level
 # `from aiohttp import web, ClientSession, ClientTimeout` succeeds without the
@@ -32,11 +33,16 @@ if "aiohttp" not in sys.modules:
         def __init__(self, payload):
             self.payload = payload
 
+    def _middleware(function):
+        function.__middleware_version__ = 1
+        return function
+
     _aiohttp.web = types.SimpleNamespace(
         Request=object, Response=object, StreamResponse=object,
         Application=object,
         json_response=lambda payload, *a, **k: _FakeJsonResponse(payload),
         run_app=lambda *a, **k: None,
+        middleware=_middleware,
     )
     _aiohttp.ClientSession = object
     _aiohttp.ClientTimeout = object
@@ -113,6 +119,101 @@ class TestAgentBrokerRoute(unittest.TestCase):
                 token,
             )
         )
+
+
+class TestFinalizationGate(unittest.IsolatedAsyncioTestCase):
+    def test_aiohttp_uses_modern_middleware_calling_convention(self):
+        self.assertEqual(
+            mantle_proxy.finalization_gate_middleware.__middleware_version__,
+            1,
+        )
+
+    async def test_begin_blocks_new_calls_and_drains_in_flight_call(self):
+        gate = mantle_proxy._FinalizationGate()
+        self.assertTrue(await gate.enter())
+
+        begin = asyncio.create_task(gate.begin())
+        await asyncio.sleep(0)
+        self.assertFalse(begin.done())
+        self.assertFalse(await gate.enter())
+        self.assertFalse(await gate.enter(final_flush=True))
+
+        await gate.leave()
+        await asyncio.wait_for(begin, timeout=1)
+
+        # The root-only flush may run only after begin has acknowledged the
+        # empty active set; normal model and broker traffic remains closed.
+        self.assertTrue(await gate.enter(final_flush=True))
+        self.assertFalse(await gate.enter())
+        await gate.leave()
+
+        await gate.end()
+        self.assertTrue(await gate.enter())
+        await gate.leave()
+
+    async def test_bogus_slow_body_is_denied_before_read_during_drain(self):
+        gate = mantle_proxy._FinalizationGate()
+        self.assertTrue(await gate.enter())
+        begin = asyncio.create_task(gate.begin())
+        await asyncio.sleep(0)
+
+        class SlowRequest:
+            path = "/agent-broker/api/agent/workspace-storage"
+            headers = {"X-Agent-Workspace-Flush": "b" * 43}
+
+            def __init__(self):
+                self.read_called = False
+                self.release = asyncio.Event()
+
+            async def read(self):
+                self.read_called = True
+                await self.release.wait()
+                return b'{"operation":"upload"}'
+
+        request = SlowRequest()
+        handler_called = False
+
+        async def handler(_request):
+            nonlocal handler_called
+            handler_called = True
+            return object()
+
+        with mock.patch.object(
+            mantle_proxy, "_finalization_gate", gate
+        ), mock.patch.object(
+            mantle_proxy,
+            "_read_workspace_flush_token",
+            return_value="a" * 43,
+        ):
+            await asyncio.wait_for(
+                mantle_proxy.finalization_gate_middleware(request, handler),
+                timeout=1,
+            )
+
+        self.assertFalse(request.read_called)
+        self.assertFalse(handler_called)
+        await gate.leave()
+        await asyncio.wait_for(begin, timeout=1)
+
+    async def test_unrouted_internal_prefix_is_not_exempt_from_gate(self):
+        gate = mantle_proxy._FinalizationGate()
+        await gate.begin()
+
+        request = types.SimpleNamespace(
+            path="/internal/finalization/not-a-route/extra",
+            headers={},
+        )
+        handler_called = False
+
+        async def handler(_request):
+            nonlocal handler_called
+            handler_called = True
+            return object()
+
+        with mock.patch.object(mantle_proxy, "_finalization_gate", gate):
+            await mantle_proxy.finalization_gate_middleware(request, handler)
+
+        self.assertFalse(handler_called)
 
 
 class _FakeResponseContent:

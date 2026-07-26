@@ -170,6 +170,50 @@ class PullTraversalTests(unittest.TestCase):
         broker.assert_not_called()
         self.assertEqual(authority.read_text(), "do-not-upload")
 
+    def test_push_rejects_symlinked_workspace_root(self):
+        outside = self.root.parent / "outside-workspace"
+        outside.mkdir()
+        (outside / "secret").write_text("do-not-upload")
+        linked_workspace = self.root.parent / "linked-workspace"
+        linked_workspace.symlink_to(outside, target_is_directory=True)
+        broker = mock.Mock()
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", linked_workspace
+        ), mock.patch.object(workspace_sync, "_broker_request", broker):
+            self.assertEqual(workspace_sync.push_workspace("owner"), 0)
+
+        broker.assert_not_called()
+
+    def test_unsafe_entries_consume_the_traversal_budget(self):
+        for index in range(10):
+            (self.root / f"unsafe-{index}").symlink_to("/dev/null")
+        broker = mock.Mock()
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync, "MAX_SYNC_ENTRIES", 3
+        ), mock.patch.object(workspace_sync, "_broker_request", broker):
+            self.assertEqual(workspace_sync.push_workspace("owner"), 0)
+
+        broker.assert_not_called()
+
+    def test_expired_final_flush_deadline_stops_before_upload(self):
+        (self.root / "memory.md").write_text("state")
+        broker = mock.Mock()
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(workspace_sync, "_broker_request", broker):
+            with self.assertRaisesRegex(TimeoutError, "deadline exceeded"):
+                workspace_sync.push_workspace(
+                    "owner",
+                    deadline_monotonic=workspace_sync.time.monotonic() - 1,
+                )
+
+        broker.assert_not_called()
+
 
 class BoundedTransferTests(unittest.TestCase):
     def setUp(self):

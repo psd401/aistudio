@@ -52,6 +52,7 @@ AUTHORITY_DIRECTORY = "/run/psd-agent-authority"
 INVOCATION_CONTEXT_PATH = f"{AUTHORITY_DIRECTORY}/invocation-context"
 REQUEST_PROOF_KEY_PATH = f"{AUTHORITY_DIRECTORY}/request-proof-key"
 WORKSPACE_FLUSH_TOKEN_PATH = f"{AUTHORITY_DIRECTORY}/workspace-flush-token"
+FINALIZATION_DRAIN_TIMEOUT_SECONDS = 120
 ALLOWED_AGENT_BROKER_ROUTES = frozenset({
     "/api/agent/account-request",
     "/api/agent/aistudio",
@@ -132,6 +133,117 @@ def _workspace_flush_request_allowed(
         and bool(flush_token)
         and hmac.compare_digest(supplied_token, flush_token)
     )
+
+
+class _FinalizationGate:
+    """Drain privileged traffic before granting the root-only final flush."""
+
+    def __init__(self) -> None:
+        self._condition = asyncio.Condition()
+        self._state = "open"
+        self._active_requests = 0
+
+    async def enter(self, *, final_flush: bool = False) -> bool:
+        async with self._condition:
+            if self._state == "draining":
+                return False
+            if self._state == "flushing" and not final_flush:
+                return False
+            self._active_requests += 1
+            return True
+
+    async def leave(self) -> None:
+        async with self._condition:
+            if self._active_requests <= 0:
+                raise RuntimeError("finalization gate request count underflow")
+            self._active_requests -= 1
+            if self._active_requests == 0:
+                self._condition.notify_all()
+
+    async def begin(self) -> None:
+        async with self._condition:
+            self._state = "draining"
+            while self._active_requests:
+                await self._condition.wait()
+            self._state = "flushing"
+
+    async def end(self) -> None:
+        async with self._condition:
+            self._state = "open"
+            self._condition.notify_all()
+
+
+_finalization_gate = _FinalizationGate()
+
+
+def _valid_finalization_token(supplied_token: str | None) -> bool:
+    expected_token = _read_workspace_flush_token()
+    return (
+        isinstance(supplied_token, str)
+        and bool(expected_token)
+        and hmac.compare_digest(supplied_token, expected_token)
+    )
+
+
+async def handle_finalization_transition(
+    request: web.Request,
+) -> web.Response:
+    """Root-authenticated begin/end transition for the proxy-owned drain gate."""
+    if not _valid_finalization_token(
+        request.headers.get("X-Agent-Workspace-Flush")
+    ):
+        return web.json_response({"error": "Not found"}, status=404)
+    action = request.match_info.get("action", "")
+    if action == "begin":
+        try:
+            await asyncio.wait_for(
+                _finalization_gate.begin(),
+                timeout=FINALIZATION_DRAIN_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            # Stay closed. The wrapper will terminate this proxy, which cancels
+            # the stuck requests, start a fresh proxy, and retry the transition.
+            return web.json_response(
+                {"error": "Privileged request drain timed out"},
+                status=503,
+            )
+        return web.json_response({"finalizing": True})
+    if action == "end":
+        await _finalization_gate.end()
+        return web.json_response({"finalizing": False})
+    return web.json_response({"error": "Not found"}, status=404)
+
+
+@web.middleware
+async def finalization_gate_middleware(request, handler):
+    """Count every authority-bearing request for an atomic drain boundary."""
+    if request.path in {
+        "/internal/finalization/begin",
+        "/internal/finalization/end",
+    }:
+        return await handler(request)
+    if request.path in {"/health", "/usage"}:
+        return await handler(request)
+
+    final_flush = False
+    if request.path == "/agent-broker/api/agent/workspace-storage":
+        flush_token = _read_workspace_flush_token()
+        supplied_token = request.headers.get("X-Agent-Workspace-Flush")
+        # Classify before reading the potentially slow, attacker-controlled
+        # body. The unguessable root token is sufficient for gate admission;
+        # handle_agent_broker still validates the exact operation after read.
+        final_flush = (
+            isinstance(supplied_token, str)
+            and bool(flush_token)
+            and hmac.compare_digest(supplied_token, flush_token)
+        )
+
+    if not await _finalization_gate.enter(final_flush=final_flush):
+        return web.json_response({"error": "Turn is finalizing"}, status=503)
+    try:
+        return await handler(request)
+    finally:
+        await _finalization_gate.leave()
 
 # ---------------------------------------------------------------------------
 # Cumulative token-usage accounting (issue #1083)
@@ -1570,9 +1682,16 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 def main() -> None:
     if not UPSTREAM.startswith(("https://", "http://127.0.0.1", "http://localhost")):
         raise RuntimeError("APP_BASE_URL is not a trusted model broker URL")
-    app = web.Application(client_max_size=50 * 1024 * 1024)
+    app = web.Application(
+        client_max_size=50 * 1024 * 1024,
+        middlewares=[finalization_gate_middleware],
+    )
     app.router.add_get("/health", handle_health)
     app.router.add_get("/usage", handle_usage)
+    app.router.add_post(
+        "/internal/finalization/{action}",
+        handle_finalization_transition,
+    )
     app.router.add_route("*", "/agent-broker/{route:.*}", handle_agent_broker)
     app.router.add_route("*", "/{path:.*}", handle_proxy)
     log.info(j("starting", host="127.0.0.1", port=18791, upstream=UPSTREAM))
