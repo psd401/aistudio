@@ -45,6 +45,13 @@ describe("OAuth client browser-origin policy", () => {
       grantType: "authorization_code",
     },
     {
+      name: "retired extension",
+      clientId: ATRIUM_CAPTURE_BROWSER_CLIENT_ID,
+      origin: "chrome-extension://jldnpmcpimhabiphcglkbgmbffpoocpo",
+      route: "token",
+      grantType: "authorization_code",
+    },
+    {
       name: "origin suffix",
       clientId: ATRIUM_CAPTURE_BROWSER_CLIENT_ID,
       origin: `${ATRIUM_CAPTURE_EXTENSION_ORIGIN}.example`,
@@ -54,7 +61,7 @@ describe("OAuth client browser-origin policy", () => {
     {
       name: "redirect origin",
       clientId: ATRIUM_CAPTURE_BROWSER_CLIENT_ID,
-      origin: "https://jldnpmcpimhabiphcglkbgmbffpoocpo.chromiumapp.org",
+      origin: "https://eomlblaiglafndhplfhilmdcaofhkkbj.chromiumapp.org",
       route: "token",
       grantType: "authorization_code",
     },
