@@ -12,10 +12,10 @@ GitHub CLI access for the agent. `gh` is baked into the image at
 
 ## Authentication
 
-You do not need to authenticate `gh` yourself. The agent wrapper writes
-`~/.config/gh/hosts.yml` from the caller's per-user `github_pat`
-credential at the start of every invocation (see `hydrate_github_auth`
-in `agentcore_wrapper.py`). If the caller has not provisioned a PAT,
+You do not need to authenticate `gh` yourself. The owner-bound broker injects
+the caller's per-user `github_pat` into an invocation-private, noninteractive
+CLI environment and removes that environment after the command. If the caller
+has not provisioned a PAT,
 `gh` calls will fail with an auth error — that is the user's signal to
 add their PAT via `psd-credentials`.
 
@@ -73,11 +73,8 @@ gh search repos "<query>" --json name,owner,url
 gh search issues "<query>" --repo <owner/repo>
 ```
 
-### Raw API
-
-```bash
-gh api repos/<owner>/<repo>/issues/<num>/comments
-```
+Raw `gh api`, browser/editor modes, file-backed body flags, extensions, and
+forwarded git arguments are intentionally unavailable at this boundary.
 
 ## Rules
 

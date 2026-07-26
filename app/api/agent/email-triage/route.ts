@@ -11,6 +11,12 @@ import {
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb"
 import { verifyAgentInvocationContext } from "@/lib/agent-workspace/invocation-context"
 import { getFreshAccessTokenForUser } from "@/lib/agent/workspace-token"
+import {
+  createTrustedEmailTriageLabelMapping,
+  EMAIL_TRIAGE_LABELS,
+  type EmailTriageLabelKey,
+  type GmailLabelDescriptor,
+} from "@/lib/agent/email-triage-label-map"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 
 const log = createLogger({ module: "agent-email-triage" })
@@ -38,8 +44,6 @@ const SAFE_STATE_FIELDS = new Set([
   "escalationConfidenceThreshold",
   "escalationMode",
   "internalDomain",
-  "labelIdsByKey",
-  "labels",
   "lastHistoryId",
   "lastPollAt",
   "learnedPatterns",
@@ -95,6 +99,81 @@ async function gmailJson(response: Response): Promise<unknown> {
   }
   if (response.status === 204) return {}
   return response.json()
+}
+
+async function ensureTrustedLabels(
+  token: string,
+  ownerEmail: string
+): Promise<ReturnType<typeof createTrustedEmailTriageLabelMapping>> {
+  const listed = objectBody(await gmailJson(await gmail(token, "/labels")))
+  const liveLabels = Array.isArray(listed?.labels)
+    ? (listed.labels as GmailLabelDescriptor[])
+    : []
+  const labelIdsByKey = Object.create(null) as Record<
+    EmailTriageLabelKey,
+    string
+  >
+
+  for (const key of Object.keys(EMAIL_TRIAGE_LABELS) as EmailTriageLabelKey[]) {
+    const expectedName = EMAIL_TRIAGE_LABELS[key]
+    const matches = liveLabels.filter(
+      (label) => label.name === expectedName && label.type === "user"
+    )
+    if (matches.length > 1) {
+      throw new Error(`Duplicate Gmail label for ${key}`)
+    }
+    let id = matches[0]?.id
+    if (id === undefined) {
+      const created = objectBody(
+        await gmailJson(
+          await gmail(token, "/labels", {
+            method: "POST",
+            body: JSON.stringify({
+              name: expectedName,
+              labelListVisibility: "labelShow",
+              messageListVisibility: "show",
+            }),
+          })
+        )
+      )
+      id = created?.id
+    }
+    if (typeof id !== "string") {
+      throw new TypeError(`Gmail did not return a label id for ${key}`)
+    }
+    labelIdsByKey[key] = id
+  }
+
+  const mapping = createTrustedEmailTriageLabelMapping({
+    ownerEmail,
+    labelIdsByKey,
+  })
+  await ddb.send(
+    new UpdateCommand({
+      TableName: tableName(),
+      Key: { userEmail: ownerEmail },
+      UpdateExpression:
+        "SET #labels = :labels, #ids = :ids, #version = :version, " +
+        "#provenance = :provenance, #owner = :owner, #resolved = :resolved",
+      ExpressionAttributeNames: {
+        "#labels": "labels",
+        "#ids": "labelIdsByKey",
+        "#version": "labelMappingVersion",
+        "#provenance": "labelMappingProvenance",
+        "#owner": "labelMappingOwnerEmail",
+        "#resolved": "labelMappingResolvedAt",
+      },
+      ExpressionAttributeValues: {
+        ":labels": mapping.labels,
+        ":ids": mapping.labelIdsByKey,
+        ":version": mapping.labelMappingVersion,
+        ":provenance": mapping.labelMappingProvenance,
+        ":owner": mapping.labelMappingOwnerEmail,
+        ":resolved": mapping.labelMappingResolvedAt,
+      },
+    })
+  )
+  return mapping
 }
 
 export async function POST(request: NextRequest) {
@@ -183,6 +262,15 @@ export async function POST(request: NextRequest) {
     let result: unknown
     if (body.operation === "gmail-profile") {
       result = await gmailJson(await gmail(token, "/profile"))
+    } else if (body.operation === "ensure-labels") {
+      if (context.mode !== "owner" || Object.keys(body).length !== 1) {
+        return NextResponse.json({ error: "Invalid label resolution request" }, { status: 400 })
+      }
+      const mapping = await ensureTrustedLabels(token, context.ownerEmail)
+      result = {
+        labels: mapping.labels,
+        labelIdsByKey: mapping.labelIdsByKey,
+      }
     } else if (body.operation === "list-labels") {
       result = await gmailJson(await gmail(token, "/labels"))
     } else if (body.operation === "create-label" && typeof body.name === "string") {

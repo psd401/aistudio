@@ -15,12 +15,17 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const {
+  APP_BASE_URL,
   splitCommand,
   resolvePayloadFiles,
   extractJsonArg,
   injectMarkers,
   enforcePhase1Gates,
 } = require('./common');
+
+test('module exports the configured workspace broker URL', () => {
+  expect(typeof APP_BASE_URL).toBe('string');
+});
 
 function tmpFile(content, ext = '.json') {
   const p = path.join(

@@ -194,6 +194,21 @@ export class AccessAnalyzerStack extends cdk.Stack {
       remediationFunction.addToRolePolicy(
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,
+          actions: ["iam:UpdateAssumeRolePolicy"],
+          resources: [
+            `arn:${cdk.Aws.PARTITION}:iam::${cdk.Aws.ACCOUNT_ID}:role/*`,
+          ],
+          conditions: {
+            StringEquals: {
+              "aws:ResourceTag/Environment": "dev",
+              "aws:ResourceTag/ManagedBy": "BaseIAMRole",
+            },
+          },
+        })
+      )
+      remediationFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
           actions: [
             "iam:DeleteRolePolicy",
             "iam:PutRolePolicy",

@@ -28,6 +28,7 @@ import {
   getCurrentHistoryId,
   getMessageFullBody,
   getMessageMetadata,
+  listLabels,
   listHistory,
   modifyMessage,
   modifyThread,
@@ -63,9 +64,17 @@ import type {
   DecisionRecord,
   TriageRow,
 } from "./types";
+import {
+  resolveTrustedTriageLabelMapping,
+  validateStoredTriageLabelMapping,
+} from "./label-mapping";
 
 const ENV = process.env.ENVIRONMENT ?? "dev";
 const REGION = process.env.AWS_REGION ?? "us-east-1";
+const validatedLabelMappings = new WeakMap<
+  TriageRow,
+  Promise<Record<"important" | "later" | "news" | "task", string> | null>
+>();
 
 export function log(
   level: "INFO" | "WARN" | "ERROR",
@@ -120,6 +129,29 @@ export async function acquireUserAccessToken(
   }
 }
 
+async function trustedLabelIdsForRow(
+  row: TriageRow,
+  accessToken: string,
+): Promise<Record<"important" | "later" | "news" | "task", string> | null> {
+  let pending = validatedLabelMappings.get(row);
+  if (!pending) {
+    const stored = validateStoredTriageLabelMapping(row);
+    if (!stored.valid) {
+      log("ERROR", "untrusted_label_mapping", {
+        user: row.userEmail,
+        reason: stored.reason,
+      });
+      return null;
+    }
+    pending = resolveTrustedTriageLabelMapping(
+      row,
+      () => listLabels(accessToken)
+    );
+    validatedLabelMappings.set(row, pending);
+  }
+  return pending;
+}
+
 /**
  * Process one enabled user's live-triage tick. Exported for the SQS worker
  * (worker.ts) which invokes it once per `poll` message.
@@ -130,6 +162,9 @@ export async function processUser(row: TriageRow): Promise<void> {
   // Acquire access token.
   const accessToken = await acquireUserAccessToken(row.userEmail);
   if (!accessToken) return;
+  const trustedLabelIds = await trustedLabelIdsForRow(row, accessToken);
+  if (!trustedLabelIds) return;
+  row = { ...row, labelIdsByKey: trustedLabelIds };
 
   // Anchor cursor — when missing or on first run we capture "now" so we
   // only classify forward.
@@ -357,6 +392,10 @@ export async function classifyAndLabel(
   msgRef: { id: string; threadId: string; labelIds?: string[] },
   opts: { suppressEscalation?: boolean } = {},
 ): Promise<{ decision: DecisionRecord; escalated: boolean } | null> {
+  const trustedLabelIds = await trustedLabelIdsForRow(row, accessToken);
+  if (!trustedLabelIds) return null;
+  row = { ...row, labelIdsByKey: trustedLabelIds };
+
   // Fetch metadata — needed for sender + subject + snippet.
   const meta = await getMessageMetadata(accessToken, msgRef.id);
   if (!meta) return null;
@@ -425,15 +464,9 @@ export async function classifyAndLabel(
     log("WARN", "missing_label_id", { user: row.userEmail, key: result.label });
     return null;
   }
-  // Always archive — INBOX comes off for every classification, not
-  // just later/news. User treats labels as folders (each message lives
-  // in exactly one place), so Important goes to @psd/Important AND is
-  // removed from Inbox. Chat escalation is the "you need to look at
-  // this NOW" signal; the @psd/Important label is the home folder.
-  // Updated 2026-05-22 per user feedback — original design kept Important
-  // dual-labelled in Inbox, which doubled the user's review surface.
-  const removeLabelIds = ["INBOX"];
-  await modifyMessage(accessToken, msgRef.id, [labelId], removeLabelIds);
+  // The mapping has been provenance-checked and confirmed against live Gmail
+  // above, so preserving the product's folder semantics is safe here.
+  await modifyMessage(accessToken, msgRef.id, [labelId], ["INBOX"]);
 
   const record: DecisionRecord = {
     messageId: msgRef.id,
@@ -610,8 +643,7 @@ export { detectCorrection };
  *      create the task in their preferred system. We deliver metadata,
  *      the agent does the work.
  *   3. Parse the agent's terse reply for success/failure.
- *   4. On success: archive (remove INBOX + remove @psd/Task) so the
- *      message ends up in All Mail only — exactly one home.
+ *   4. On success: archive and remove @psd/Task.
  *   5. On success: record an audit trail entry (recentTaskCreations).
  *   6. On success: optional confirmation card if tasksNotifySuccess=true.
  *   7. On failure: leave the email as-is (still in Inbox + @psd/Task)
@@ -721,14 +753,15 @@ async function processTaskGesture(
   }
 
   if (result.ok) {
-    // Archive the WHOLE THREAD: drop INBOX + remove @psd/Task from
+    // Archive the whole thread and clear the verified @psd/Task label.
     // every message in the thread. Modifying just the one message
     // would leave other messages in the thread still tagged, which
     // (a) confuses the user and (b) lets the next tick re-fire on
     // those other messages' labelsAdded events.
     const taskLabelId = row.labelIdsByKey?.task;
-    const removeLabelIds = ["INBOX"];
-    if (taskLabelId) removeLabelIds.push(taskLabelId);
+    const removeLabelIds = taskLabelId
+      ? ["INBOX", taskLabelId]
+      : ["INBOX"];
     try {
       await modifyThread(accessToken, meta.threadId, [], removeLabelIds);
     } catch (err) {

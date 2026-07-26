@@ -167,18 +167,12 @@ async function modifyMessage(accessToken, messageId, addLabelIds, removeLabelIds
  * Idempotent — if the label already exists, we keep the existing one.
  */
 async function ensureLabels(accessToken, labels) {
-  const existing = await listLabels(accessToken);
-  const byName = new Map(existing.map((l) => [l.name, l]));
-  const ids = {};
-  for (const [key, name] of Object.entries(labels)) {
-    if (byName.has(name)) {
-      ids[key] = byName.get(name).id;
-    } else {
-      const created = await createLabel(accessToken, name);
-      ids[key] = created.id;
-    }
-  }
-  return ids;
+  void accessToken;
+  void labels;
+  const response = await requestAgentBroker('/api/agent/email-triage', {
+    operation: 'ensure-labels',
+  });
+  return response.result.labelIdsByKey;
 }
 
 // =====================================================================

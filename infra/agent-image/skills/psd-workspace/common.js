@@ -10,6 +10,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const APP_BASE_URL = process.env.APP_BASE_URL || '';
 
 // Strict email regex — must stay in sync with lib/agent-workspace/validation.ts.
 // The email is interpolated into a Secrets Manager path, so we reject anything

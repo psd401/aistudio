@@ -4,35 +4,32 @@ import fs from "node:fs"
 import path from "node:path"
 
 describe("Nexus attachment privacy gate ordering", () => {
-  it("scans before any message persistence or attachment upload", () => {
+  it("scans before every specialist or durable/external sink", () => {
     const source = fs.readFileSync(
       path.join(process.cwd(), "app/api/nexus/chat/route.ts"),
       "utf8",
     )
-    const turnStart = source.indexOf(
-      "const messagesWithParts = convertMessagesToPartsFormat(",
-    )
-    const turnEnd = source.indexOf(
-      "// 8. Resolve MCP connector tools",
-      turnStart,
-    )
+    const turnStart = source.indexOf("const inlineSafetyResult =")
+    const turnEnd = source.indexOf("// 9. Execute streaming", turnStart)
     const turn = source.slice(turnStart, turnEnd)
 
-    expect(turn.indexOf("await scanAttachmentPII(")).toBeGreaterThanOrEqual(0)
-    expect(turn.indexOf("await scanAttachmentPII(")).toBeLessThan(
-      turn.indexOf("await bindAttachmentReferencesOrError("),
-    )
-    expect(turn.indexOf("await scanAttachmentPII(")).toBeLessThan(
-      turn.indexOf("await persistLastUserMessage("),
-    )
-    expect(turn.indexOf("await scanAttachmentPII(")).toBeLessThan(
-      turn.indexOf("await processMessagesWithAttachments("),
-    )
+    const scan = turn.indexOf("await scanCanonicalInlineAttachments(")
+    expect(scan).toBeGreaterThanOrEqual(0)
+    for (const sink of [
+      "await routeSpecialModel(",
+      "await setupConversation(",
+      "await bindAttachmentReferencesOrError(",
+      "await persistLastUserMessage(",
+      "await processMessagesWithAttachments(",
+      "await resolveConnectorTools(",
+    ]) {
+      expect(scan).toBeLessThan(turn.indexOf(sink))
+    }
   })
 
   it("uses the fail-closed required scan helper", () => {
     const source = fs.readFileSync(
-      path.join(process.cwd(), "app/api/nexus/chat/route.ts"),
+      path.join(process.cwd(), "lib/nexus/inline-attachment-security.ts"),
       "utf8",
     )
     expect(source).toContain("await runRequiredSecurityScan(")

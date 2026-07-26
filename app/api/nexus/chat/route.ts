@@ -10,7 +10,6 @@ import type { StreamRequest } from '@/lib/streaming/types';
 import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { getContentSafetyService } from '@/lib/safety';
 import type { TokenMapping } from '@/lib/safety/types';
-import { runRequiredSecurityScan } from '@/lib/security/required-security-scan';
 import {
   createTokenMappingSink,
   type TokenMappingSink,
@@ -38,6 +37,12 @@ import {
   preflightNexusAttachmentReferences,
   type NexusAttachmentRequestPreflight,
 } from '@/lib/nexus/request-attachment-preflight';
+import {
+  applyProcessedInlineAttachmentValues,
+  canonicalizeInlineAttachmentMessages,
+  NexusInlineAttachmentValidationError,
+  scanCanonicalInlineAttachments,
+} from '@/lib/nexus/inline-attachment-security';
 
 import {
   extractImagePrompt,
@@ -968,11 +973,12 @@ function withProtectedLastUserText(
       if (!part || typeof part !== 'object') return true;
       return (part as Record<string, unknown>).type !== 'text';
     });
-    return {
+    const updated = {
       ...message,
-      content: protectedText,
       parts: [{ type: 'text', text: protectedText }, ...nonTextParts],
     };
+    delete updated.content;
+    return updated;
   });
 }
 
@@ -1211,6 +1217,7 @@ async function bindAttachmentReferencesOrError(params: {
 async function preflightAttachmentReferencesOrError(params: {
   ownerId: number;
   messages: z.infer<typeof ChatRequestSchema>['messages'];
+  inlineAttachmentCount: number;
   requestId: string;
   timer: (data: Record<string, unknown>) => void;
 }): Promise<
@@ -1221,6 +1228,7 @@ async function preflightAttachmentReferencesOrError(params: {
     const preflight = await preflightNexusAttachmentReferences({
       ownerId: params.ownerId,
       messages: params.messages,
+      additionalAttachmentCount: params.inlineAttachmentCount,
     });
     if (preflight) return { preflight };
     params.timer({ status: "error", reason: "attachment_not_found" });
@@ -1254,6 +1262,41 @@ async function preflightAttachmentReferencesOrError(params: {
   }
 }
 
+function canonicalizeInlineAttachmentsOrError(params: {
+  messages: z.infer<typeof ChatRequestSchema>['messages'];
+  requestId: string;
+  timer: (data: Record<string, unknown>) => void;
+  log: ReturnType<typeof createLogger>;
+}):
+  | {
+      messages: z.infer<typeof ChatRequestSchema>['messages'];
+      inlineAttachmentCount: number;
+    }
+  | { error: Response } {
+  try {
+    const canonical = canonicalizeInlineAttachmentMessages(params.messages);
+    return {
+      messages: canonical.messages,
+      inlineAttachmentCount: canonical.inlineAttachmentCount,
+    };
+  } catch (error) {
+    if (!(error instanceof NexusInlineAttachmentValidationError)) throw error;
+    params.log.warn('Invalid inline attachment payload rejected', {
+      reason: error.message,
+    });
+    params.timer({ status: 'error', reason: 'invalid_inline_attachment' });
+    return {
+      error: new Response(
+        JSON.stringify({
+          error: 'Invalid inline attachment payload',
+          requestId: params.requestId,
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      ),
+    };
+  }
+}
+
 async function persistLastUserMessage(params: {
   conversationId: string;
   messages: z.infer<typeof ChatRequestSchema>['messages'];
@@ -1277,165 +1320,6 @@ async function persistLastUserMessage(params: {
       await saveUserMessage({ conversationId, content, parts, dbModelId });
     }
   }
-}
-
-/**
- * Extract plain text from a single message part (document or file type).
- * Returns null when the part has no accessible text (e.g. an S3-only reference).
- */
-function extractPartText(part: Record<string, unknown>): string | null {
-  const raw = part.content ?? part.data;
-  if (typeof raw === 'string' && raw.trim()) return raw;
-  if (Array.isArray(raw)) {
-    const segments = raw
-      .filter(
-        (cp): cp is { type: string; text: string } =>
-          typeof cp === 'object' && cp !== null &&
-          (cp as Record<string, unknown>).type === 'text' &&
-          typeof (cp as Record<string, unknown>).text === 'string'
-      )
-      .map(cp => cp.text);
-    if (segments.length > 0) return segments.join('\n');
-  }
-  return null;
-}
-
-/**
- * Collect extractable text from document/file parts of a message, paired with
- * their part index. Extracted from scanAttachmentPII to keep that function's
- * cyclomatic complexity within bounds.
- */
-function collectAttachmentTexts(
-  parts: unknown[]
-): Array<{ partIdx: number; text: string }> {
-  const out: Array<{ partIdx: number; text: string }> = [];
-  for (const [partIdx, part] of parts.entries()) {
-    const p = part as Record<string, unknown>;
-    if (p.type === 'document' || p.type === 'file') {
-      const text = extractPartText(p);
-      if (text) out.push({ partIdx, text });
-    }
-  }
-  return out;
-}
-
-function applyAttachmentTokenMappings(
-  messagesWithParts: UIMessage[],
-  tokens: TokenMapping[],
-): void {
-  if (tokens.length === 0) return;
-  const reversedIdx = [...messagesWithParts].reverse().findIndex(
-    (message) => message.role === 'user'
-  );
-  if (reversedIdx === -1) return;
-  const lastUserIdx = messagesWithParts.length - 1 - reversedIdx;
-  const lastUserMsg = messagesWithParts[lastUserIdx];
-  if (!Array.isArray(lastUserMsg.parts)) return;
-  const attachmentTexts = collectAttachmentTexts(lastUserMsg.parts);
-  const replacements = new Map(
-    tokens.map((token) => [token.original, token.placeholder])
-  );
-  const updatedParts = [...lastUserMsg.parts];
-
-  for (const { partIdx, text } of attachmentTexts) {
-    let tokenizedText = text;
-    for (const [original, placeholder] of replacements) {
-      tokenizedText = tokenizedText.replaceAll(original, placeholder);
-    }
-    if (tokenizedText === text) continue;
-
-    const originalPart = updatedParts[partIdx] as Record<string, unknown>;
-    const field = originalPart.content !== undefined ? 'content' : 'data';
-    const rawValue = originalPart[field];
-    if (typeof rawValue === 'string') {
-      updatedParts[partIdx] = {
-        ...originalPart,
-        [field]: tokenizedText,
-      } as typeof updatedParts[number];
-    } else if (Array.isArray(rawValue)) {
-      const tokenizedArray = rawValue.map((contentPart) => {
-        const contentRecord = contentPart as Record<string, unknown>;
-        if (
-          contentRecord.type === 'text'
-          && typeof contentRecord.text === 'string'
-        ) {
-          let tokenizedSegment = contentRecord.text;
-          for (const [original, placeholder] of replacements) {
-            tokenizedSegment = tokenizedSegment.replaceAll(original, placeholder);
-          }
-          return { ...contentRecord, text: tokenizedSegment };
-        }
-        return contentPart;
-      });
-      updatedParts[partIdx] = {
-        ...originalPart,
-        [field]: tokenizedArray,
-      } as typeof updatedParts[number];
-    }
-  }
-  messagesWithParts[lastUserIdx] = { ...lastUserMsg, parts: updatedParts };
-}
-
-/**
- * Scan PII in file / document attachment parts of the last user message BEFORE
- * processMessagesWithAttachments moves their content to S3. Returns token
- * mappings produced by the scan and mutates `messagesWithParts` in-place so
- * that document text is tokenized before being stored.
- *
- * This runs at the route level so that:
- * 1. The extracted document text is available (not yet replaced with s3:// refs).
- * 2. Token mappings can be passed to executeStreaming as `precomputedInputTokenMappings`
- *    and merged with inline-text tokens from the streaming service's own scan.
- */
-async function scanAttachmentPII(
-  messagesWithParts: UIMessage[],
-  sessionId: string,
-  log: ReturnType<typeof createLogger>,
-  requestId: string
-): Promise<TokenMapping[]> {
-  const contentSafetyService = getContentSafetyService();
-  if (!contentSafetyService.isPiiTokenizationEnabled()) return [];
-
-  // findIndex returns -1 when no user message exists; check before computing the index
-  // to avoid the silent out-of-bounds: length-1-(-1) = length (always positive).
-  const reversedIdx = [...messagesWithParts].reverse().findIndex(m => m.role === 'user');
-  if (reversedIdx === -1) return [];
-  const lastUserIdx = messagesWithParts.length - 1 - reversedIdx;
-
-  const lastUserMsg = messagesWithParts[lastUserIdx];
-  if (!Array.isArray(lastUserMsg.parts)) return [];
-
-  const attachmentTexts = collectAttachmentTexts(lastUserMsg.parts);
-
-  if (attachmentTexts.length === 0) return [];
-
-  const combinedText = attachmentTexts.map(a => a.text).join('\n');
-  log.info('Running pre-flight PII scan on attachment text', {
-    requestId,
-    attachmentCount: attachmentTexts.length,
-    combinedLength: combinedText.length,
-  });
-
-  const scanResult = await runRequiredSecurityScan(
-    () => contentSafetyService.processInput(combinedText, sessionId),
-    (err: unknown) => {
-      log.error('Pre-flight attachment PII scan failed — attachment quarantined', {
-        requestId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    },
-    'Attachment privacy scan failed; the attachment was not processed',
-  );
-
-  if (!scanResult.tokens || scanResult.tokens.length === 0) return [];
-
-  applyAttachmentTokenMappings(messagesWithParts, scanResult.tokens);
-  log.info('Pre-flight attachment PII tokenized', {
-    requestId,
-    tokenCount: scanResult.tokens.length,
-  });
-
-  return scanResult.tokens;
 }
 
 /**
@@ -1734,7 +1618,7 @@ export async function POST(req: Request) {
     if (!validation.valid) return validation.error;
 
     const {
-      messages,
+      messages: requestMessages,
       modelId: fallbackModelId,
       conversationId: existingConversationId,
       enabledTools = [],
@@ -1751,7 +1635,7 @@ export async function POST(req: Request) {
     if (convIdError) return convIdError;
 
     log.info('Request parsed', sanitizeForLogging({
-      messageCount: messages.length, fallbackModelId, nexusMode, modelFamily,
+      messageCount: requestMessages.length, fallbackModelId, nexusMode, modelFamily,
       hasConversationId: !!conversationIdValue, enabledTools,
     }));
 
@@ -1760,6 +1644,19 @@ export async function POST(req: Request) {
     if ('error' in authResult) return authResult.error;
     const { userId, userRoleNames, session } = authResult;
 
+    // Reject ambiguous inline payloads and collapse the accepted shape to one
+    // bounded `data` value before routing or any durable/external side effect.
+    const canonicalInlineResult = canonicalizeInlineAttachmentsOrError({
+      messages: requestMessages,
+      requestId,
+      timer,
+      log,
+    });
+    if ('error' in canonicalInlineResult) {
+      return canonicalInlineResult.error;
+    }
+    const messages = canonicalInlineResult.messages;
+
     // Resolve the current turn's opaque references before routing or creating a
     // conversation. Forged, expired, and foreign markers therefore leave no
     // durable conversation/message side effects.
@@ -1767,6 +1664,8 @@ export async function POST(req: Request) {
       await preflightAttachmentReferencesOrError({
         ownerId: userId,
         messages,
+        inlineAttachmentCount:
+          canonicalInlineResult.inlineAttachmentCount,
         requestId,
         timer,
       });
@@ -1862,6 +1761,43 @@ export async function POST(req: Request) {
       );
     }
 
+    // Inline document text crosses the required content-safety boundary
+    // before special routes, conversation creation, persistence, upload, tool
+    // resolution, or provider dispatch. Every downstream representation is
+    // rewritten from the exact approved output.
+    const inlineSafetyResult = await scanCanonicalInlineAttachments({
+      messages: convertMessagesToPartsFormat(
+        safeModelMessages as UIMessage[]
+      ),
+      sessionId: session.sub,
+      safetyProcessor: getContentSafetyService(),
+      onFailure: (error) => {
+        log.error(
+          'Pre-flight attachment privacy scan failed — attachment quarantined',
+          {
+            requestId,
+            error: error instanceof Error ? error.message : 'Unknown error',
+          }
+        );
+      },
+    });
+    const messagesWithParts = inlineSafetyResult.messages;
+    const precomputedInputTokenMappings = inlineSafetyResult.tokens;
+    const persistenceMessagesWithParts =
+      applyProcessedInlineAttachmentValues(
+        convertMessagesToPartsFormat(
+          safePersistenceMessages as UIMessage[]
+        ),
+        inlineSafetyResult.processedValues
+      );
+    const specialRouteMessagesWithParts =
+      applyProcessedInlineAttachmentValues(
+        convertMessagesToPartsFormat(
+          specialRouteMessages as UIMessage[]
+        ),
+        inlineSafetyResult.processedValues
+      );
+
     // Deep Research uses a provider-specific polling API and has no repository
     // tool loop. Canonical inputs must never be silently persisted as opaque
     // prompt text while their repositories remain unbound. Image generation is
@@ -1885,8 +1821,14 @@ export async function POST(req: Request) {
     // the standard streaming pipeline.
     const specialRoute = await routeSpecialModel({
       isImageGenerationModel, isDeepResearchModel,
-      messages: specialRouteMessages,
-      persistenceMessages: safePersistenceMessages,
+      messages:
+        specialRouteMessagesWithParts as z.infer<
+          typeof ChatRequestSchema
+        >['messages'],
+      persistenceMessages:
+        persistenceMessagesWithParts as z.infer<
+          typeof ChatRequestSchema
+        >['messages'],
       attachmentReferences: attachmentPreflight.references,
       modelConfig, modelId, dbModelId, userId,
       existingConversationId: conversationIdValue,
@@ -1898,7 +1840,12 @@ export async function POST(req: Request) {
 
     // 6. Setup conversation and save user message
     const convSetup = await setupConversation({
-      conversationIdValue, messages: safeModelMessages, userId, provider: modelConfig.provider,
+      conversationIdValue,
+      messages:
+        messagesWithParts as z.infer<
+          typeof ChatRequestSchema
+        >['messages'],
+      userId, provider: modelConfig.provider,
       modelId, requestId, log
     });
     if ('error' in convSetup) return convSetup.error;
@@ -1906,26 +1853,8 @@ export async function POST(req: Request) {
       convSetup;
 
     try {
-    // 7. Convert messages and process attachments.
-    // Run a pre-flight PII scan on attachment text BEFORE calling
-    // processMessagesWithAttachments so we can tokenize document content while
-    // it is still accessible (the call below replaces it with S3 references).
-    const messagesWithParts = convertMessagesToPartsFormat(
-      safeModelMessages as UIMessage[]
-    );
-    // This security gate precedes binding, message persistence, attachment
-    // upload, and provider/tool dispatch. Scanner failure therefore leaves no
-    // raw attachment text in durable storage.
-    const precomputedInputTokenMappings = await scanAttachmentPII(
-      messagesWithParts, session.sub, log, requestId
-    );
-    const persistenceMessagesWithParts = convertMessagesToPartsFormat(
-      safePersistenceMessages as UIMessage[]
-    );
-    applyAttachmentTokenMappings(
-      persistenceMessagesWithParts,
-      precomputedInputTokenMappings,
-    );
+    // 7. Bind repository references, persist the exact approved representation,
+    // then replace inline bodies with lightweight S3 references.
     const bindingError = await bindAttachmentReferencesOrError({
       ownerId: userId,
       conversationId,
