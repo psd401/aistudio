@@ -18,7 +18,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { apiKeyUsage, apiKeys, apiRateLimitReservations } from "@/lib/db/schema";
-import { eq, count, lt, sql } from "drizzle-orm";
+import { and, count, eq, gte, lt, sql } from "drizzle-orm";
 import { createLogger } from "@/lib/logger";
 import type { ApiAuthContext } from "./auth-middleware";
 import { createErrorResponse } from "./auth-middleware";
@@ -53,8 +53,7 @@ const WINDOW_MS = 60 * 1000; // 1 minute sliding window
  * Returns a RateLimitResult indicating whether the request is allowed.
  * Only applies to api_key auth — session auth is not rate-limited here.
  *
- * Uses a simple count-based sliding window:
- * COUNT(*) FROM api_key_usage WHERE api_key_id = ? AND request_at > NOW() - 1 min
+ * Uses a count-based sliding window over durable pre-dispatch reservations.
  */
 export async function checkRateLimit(
   auth: ApiAuthContext
@@ -95,8 +94,10 @@ export async function checkRateLimit(
           .select({ value: count() })
           .from(apiRateLimitReservations)
           .where(
-            sql`${apiRateLimitReservations.principalHash} = ${principalHash}
-                AND ${apiRateLimitReservations.requestAt} >= ${windowStart}`
+            and(
+              eq(apiRateLimitReservations.principalHash, principalHash),
+              gte(apiRateLimitReservations.requestAt, windowStart)
+            )
           );
         const used = usage?.value ?? 0;
         if (used < rpm) {

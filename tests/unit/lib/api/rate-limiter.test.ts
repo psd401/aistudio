@@ -57,8 +57,10 @@ jest.mock("@/lib/db/schema", () => ({
 }))
 
 jest.mock("drizzle-orm", () => ({
+  and: jest.fn(),
   eq: jest.fn(),
   count: jest.fn(),
+  gte: jest.fn(),
   lt: jest.fn(),
   sql: jest.fn((parts: TemplateStringsArray) => parts.join("?")),
 }))
@@ -168,6 +170,14 @@ describe("Rate Limiter", () => {
       expect(result.allowed).toBe(true)
       expect(result.limit).toBe(60)
       expect(result.remaining).toBe(29) // 60 - 30 - 1 (current)
+      // The typed operator applies the timestamp column encoder. A raw SQL
+      // interpolation passes Date directly to postgres.js and fails closed.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { gte } = require("drizzle-orm") as { gte: jest.Mock }
+      expect(gte).toHaveBeenCalledWith(
+        "request_at",
+        expect.any(Date)
+      )
     })
 
     it("should deny requests exceeding limit", async () => {
