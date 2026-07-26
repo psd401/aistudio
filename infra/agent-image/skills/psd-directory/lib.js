@@ -165,6 +165,18 @@ async function callPeople(url, accessToken, fetchImpl) {
 }
 
 /**
+ * Every address on a directory record, lowercased — primary AND aliases.
+ * Matching uses this; the shaped record still reports the primary as the
+ * canonical `email`.
+ */
+function addressesOf(person) {
+  if (!person || !Array.isArray(person.emailAddresses)) return [];
+  return person.emailAddresses
+    .map((e) => (e && typeof e.value === 'string' ? e.value.trim().toLowerCase() : null))
+    .filter(Boolean);
+}
+
+/**
  * Shape a People API person into the flat record the agent actually wants.
  * Returns null when the payload carries no usable identity, so an empty
  * response is reported as "not found" rather than as a person with no name.
@@ -219,14 +231,26 @@ async function resolveEmail(email, accessToken, opts = {}) {
   const body = await callPeople(url, accessToken, opts.fetchImpl);
 
   const candidates = Array.isArray(body.people) ? body.people : [];
-  const shaped = candidates.map(shapePerson).filter(Boolean);
   // Exact-address match only. searchDirectoryPeople is a prefix/substring
   // search, so "kris@" can return several people; picking [0] would be a
   // confident wrong answer.
-  const match = shaped.find((p) => p.email && p.email.toLowerCase() === normalized) || null;
+  //
+  // Match against EVERY address on the record, not just the primary. A
+  // directory profile can carry aliases (a firstname.lastname form, or a
+  // pre-name-change address kept as an alias), and those are exactly the
+  // addresses a human is most likely to hand the agent. Comparing only the
+  // primary — which is what shapePerson leaves behind — would report
+  // found:false for a person Google had already returned correctly, then
+  // cache that miss.
+  const match = candidates.find((p) => addressesOf(p).includes(normalized)) || null;
+  const shaped = match ? shapePerson(match) : null;
 
-  const result = match
-    ? { found: true, ...match }
+  // When the query matched an alias, say so rather than silently answering
+  // about a different-looking address than the one that was asked about.
+  const matchedAlias = shaped && shaped.email && shaped.email.toLowerCase() !== normalized ? normalized : null;
+
+  const result = shaped
+    ? { found: true, ...shaped, ...(matchedAlias ? { matchedAlias } : {}) }
     : { found: false, query: normalized, reason: candidates.length ? 'no exact address match' : 'not in directory' };
   writeCache(key, result, now);
   return result;
@@ -270,6 +294,7 @@ async function resolvePersonId(rawId, accessToken, opts = {}) {
 
 module.exports = {
   resolveEmail,
+  addressesOf,
   resolvePersonId,
   shapePerson,
   normalizeEmail,

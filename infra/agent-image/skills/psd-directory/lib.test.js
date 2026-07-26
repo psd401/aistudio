@@ -107,6 +107,46 @@ describe('resolveEmail', () => {
     expect(r.reason).toBe('no exact address match');
   });
 
+  test('an ALIAS address resolves to the person (codex P2)', async () => {
+    // A directory profile can carry aliases — a firstname.lastname form, or a
+    // pre-name-change address kept as an alias — and those are exactly the
+    // addresses a human is most likely to hand the agent. Matching only the
+    // PRIMARY address would report found:false for a person Google had
+    // already returned correctly, and then cache that miss.
+    const rec = person('116', 'Kris Hagel', 'hagelk@psd401.net', null);
+    rec.emailAddresses.push({ metadata: { primary: false }, value: 'kris.hagel@psd401.net' });
+    const fetchImpl = stubFetch(() => ({ body: { people: [rec] } }));
+
+    const r = await lib.resolveEmail('kris.hagel@psd401.net', 'tok', { fetchImpl });
+    expect(r.found).toBe(true);
+    expect(r.personId).toBe('116');
+    // The canonical address is still reported as `email`...
+    expect(r.email).toBe('hagelk@psd401.net');
+    // ...and the alias that was actually asked about is surfaced, so the
+    // answer cannot look like it is about a different person.
+    expect(r.matchedAlias).toBe('kris.hagel@psd401.net');
+  });
+
+  test('matchedAlias is absent when the primary address was the query', async () => {
+    const fetchImpl = stubFetch(() => ({
+      body: { people: [person('116', 'Kris Hagel', 'hagelk@psd401.net', null)] },
+    }));
+    const r = await lib.resolveEmail('hagelk@psd401.net', 'tok', { fetchImpl });
+    expect(r.found).toBe(true);
+    expect(r.matchedAlias).toBeUndefined();
+  });
+
+  test('an alias on the WRONG record still does not match', async () => {
+    // Widening the comparison to every address must not weaken the
+    // exact-match rule that stops a fuzzy hit being reported as the person.
+    const other = person('2', 'Someone Else', 'else@psd401.net', null);
+    other.emailAddresses.push({ metadata: { primary: false }, value: 'se@psd401.net' });
+    const fetchImpl = stubFetch(() => ({ body: { people: [other] } }));
+    const r = await lib.resolveEmail('hagel@psd401.net', 'tok', { fetchImpl });
+    expect(r.found).toBe(false);
+    expect(r.reason).toBe('no exact address match');
+  });
+
   test('matches case-insensitively', async () => {
     const fetchImpl = stubFetch(() => ({
       body: { people: [person('116', 'Kris Hagel', 'HagelK@psd401.net', null)] },

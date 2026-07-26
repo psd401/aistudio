@@ -47,6 +47,12 @@ person whose address matches *exactly*. The underlying Google search is a
 prefix/substring search, so a partial address can return several people —
 resolving to the wrong human is worse than resolving to nobody.
 
+**Aliases resolve, and say so.** The match considers every address on a
+record, not only the primary, so a `firstname.lastname` alias or a
+pre-name-change address finds the right person. When the query was an alias,
+the reply adds `"matchedAlias"` alongside the canonical `email` — mention the
+person by name rather than implying the two addresses are different people.
+
 **`title` and `department` come from ClassLink OneSync**, so they are as
 current as the last sync, not live HR data. Treat them as descriptive, not
 authoritative, for anything consequential.
