@@ -255,10 +255,12 @@ describe("AI Studio OAuth callback", () => {
     }
   );
 
-  it("rejects malformed state before querying or exchanging a code", async () => {
+  it("rejects unknown state through the single-use nonce lookup", async () => {
+    mockNonceAvailable = false;
+
     const result = await handleAistudioCallback("authorization-code", "bad");
     expect(result.data).toMatchObject({ success: false });
-    expect(mockExecutedLabels).toEqual([]);
+    expect(mockExecutedLabels).toEqual(["lookupAistudioCallbackNonce"]);
     expect(global.fetch).not.toHaveBeenCalled();
   });
 });
