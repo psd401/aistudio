@@ -33,7 +33,47 @@ describe("createInvocationContextToken", () => {
     });
   });
 
-  test("rejects short secrets and overlong lifetimes", () => {
+  test("keeps the default lifetime at 15 minutes", () => {
+    const token = createInvocationContextToken(
+      SECRET,
+      {
+        actorEmail: "a@psd401.net",
+        ownerEmail: "a@psd401.net",
+        mode: "owner",
+        sessionId: "s",
+        workspacePrefix: "p",
+      },
+      { nowSeconds: 100, nonce: "default-lifetime" }
+    );
+    const payload = token.split(".")[1]!;
+    const claims = JSON.parse(
+      Buffer.from(payload, "base64url").toString("utf8")
+    ) as { issuedAt: number; expiresAt: number };
+
+    expect(claims.expiresAt - claims.issuedAt).toBe(900);
+  });
+
+  test("accepts the bounded two-hour job lifetime", () => {
+    const token = createInvocationContextToken(
+      SECRET,
+      {
+        actorEmail: "a@psd401.net",
+        ownerEmail: "a@psd401.net",
+        mode: "owner",
+        sessionId: "job-session",
+        workspacePrefix: "p",
+      },
+      { nowSeconds: 100, ttlSeconds: 7200, nonce: "job-lifetime" }
+    );
+    const payload = token.split(".")[1]!;
+    const claims = JSON.parse(
+      Buffer.from(payload, "base64url").toString("utf8")
+    ) as { issuedAt: number; expiresAt: number };
+
+    expect(claims.expiresAt - claims.issuedAt).toBe(7200);
+  });
+
+  test("rejects short secrets and lifetimes beyond the job ceiling", () => {
     expect(() =>
       createInvocationContextToken("short", {
         actorEmail: "a@psd401.net",
@@ -54,8 +94,8 @@ describe("createInvocationContextToken", () => {
           sessionId: "s",
           workspacePrefix: "p",
         },
-        { ttlSeconds: 901 }
+        { ttlSeconds: 7201 }
       )
-    ).toThrow("between 30 and 900");
+    ).toThrow("between 30 and 7200");
   });
 });

@@ -144,6 +144,52 @@ describe("verifyAgentInvocationContext request authority", () => {
     )
   })
 
+  it("accepts fresh broker proofs throughout a bounded two-hour job", async () => {
+    const jobContext = token({
+      issuedAt: 100,
+      expiresAt: 7300,
+      nonce: "job-invocation-nonce",
+    })
+    const result = await verifyAgentInvocationContext(
+      request({
+        context: jobContext,
+        timestamp: 7200,
+      }),
+      {
+        nowSeconds: 7200,
+        allowedModes: ["owner"],
+        consumeNonce: consumed,
+      }
+    )
+
+    expect(result).toMatchObject({
+      ownerEmail: "owner@psd401.net",
+      issuedAt: 100,
+      expiresAt: 7300,
+    })
+  })
+
+  it("rejects invocation contexts beyond the two-hour ceiling", async () => {
+    const overlongContext = token({
+      issuedAt: 100,
+      expiresAt: 7301,
+      nonce: "overlong-invocation-nonce",
+    })
+
+    await expect(
+      verifyAgentInvocationContext(
+        request({
+          context: overlongContext,
+          timestamp: 120,
+        }),
+        {
+          nowSeconds: 120,
+          consumeNonce: consumed,
+        }
+      )
+    ).resolves.toBeNull()
+  })
+
   it.each([
     ["changed body", { body: "{}", signBody: BODY }],
     ["cross-route replay", { route: "/api/agent/canva", signRoute: ROUTE }],

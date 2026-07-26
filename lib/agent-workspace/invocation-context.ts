@@ -13,7 +13,10 @@ export const AGENT_REQUEST_PROOF_NONCE_HEADER = "x-agent-request-proof-nonce"
 export const AGENT_REQUEST_PROOF_BODY_SHA256_HEADER = "x-agent-request-proof-body-sha256"
 export const AGENT_REQUEST_PROOF_SIGNATURE_HEADER = "x-agent-request-proof-signature"
 export const AGENT_INVOCATION_CONTEXT_AUDIENCE = "psd-agent-internal"
-const MAX_TOKEN_TTL_SECONDS = 15 * 60
+// Interactive contexts still default to 15 minutes at the trusted issuer.
+// The verifier permits the bounded two-hour job-runner ceiling so a promoted
+// AgentCore turn does not lose broker authority partway through execution.
+const MAX_TOKEN_TTL_SECONDS = 2 * 60 * 60
 const MAX_CLOCK_SKEW_SECONDS = 30
 const REQUEST_PROOF_VERSION = "v1"
 const MAX_PROOF_BODY_BYTES = 32 * 1024 * 1024

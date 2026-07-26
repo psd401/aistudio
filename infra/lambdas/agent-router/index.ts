@@ -82,6 +82,7 @@ import {
   deriveInvocationRequestProofKey,
   type InvocationMode,
 } from './invocation-context';
+import { buildAccountRequestBody } from './account-request-payload';
 import { canInvokeOwnerAgent } from './delegation-policy';
 
 // ---------------------------------------------------------------------------
@@ -864,9 +865,16 @@ async function issueInvocationContext(input: {
   mode: InvocationMode;
   sessionId: string;
   workspacePrefix: string;
-}): Promise<{ token: string; requestProofKey: string }> {
+}, options: { ttlSeconds?: number } = {}): Promise<{
+  token: string;
+  requestProofKey: string;
+}> {
   const secret = await getInvocationSigningSecret();
-  const token = createInvocationContextToken(secret, input);
+  const token = createInvocationContextToken(secret, input, {
+    ...(options.ttlSeconds === undefined
+      ? {}
+      : { ttlSeconds: options.ttlSeconds }),
+  });
   return {
     token,
     requestProofKey: deriveInvocationRequestProofKey(secret, token),
@@ -960,7 +968,7 @@ async function maybeProvisionAgentAccount(
       sessionId: `account-provision:${user.googleIdentity}`,
       workspacePrefix: user.workspacePrefix,
     });
-    const requestBody = JSON.stringify({ ownerEmail: senderEmail });
+    const requestBody = buildAccountRequestBody();
     const resp = await fetch(`${APP_BASE_URL.replace(/\/+$/, '')}/api/agent/account-request`, {
       method: 'POST',
       headers: {
@@ -1586,6 +1594,13 @@ async function invokeAgentCore(
       mode: userContext?.invokedBy ? 'consultation' : 'owner',
       sessionId,
       workspacePrefix: userContext?.workspacePrefix ?? '',
+    }, {
+      // Interactive turns retain the 15-minute default. The background job
+      // runner passes its bounded two-hour deadline so owner-bound broker
+      // authority remains valid for the entire resumed turn.
+      ...(userContext?.deadlineS === undefined
+        ? {}
+        : { ttlSeconds: userContext.deadlineS }),
     });
     const body = JSON.stringify({
       prompt: message,
