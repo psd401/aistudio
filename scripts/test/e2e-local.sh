@@ -21,9 +21,15 @@
 #   check below would latch onto that container, which answers healthz fine but
 #   rejects the minted cookie (every authed spec dies on a /dashboard redirect).
 #   If a healthy server is already on :3100 (e.g. a prior harness run), it is
-#   reused; otherwise the runner starts its own — in an isolated build dir
+#   reused ONLY when it belongs to this worktree (the listener's cwd matches this
+#   repo root) — a healthy server from ANOTHER worktree/checkout serves different
+#   code and a different node_modules, so gating this push on it is meaningless
+#   at best (see the 2026-07-26 duplicate-@codemirror/state incident, where a
+#   foreign server failed code-tab-renders 3/3 on every branch that reused it).
+#   When a foreigner owns the port, the runner scans the next few ports for a
+#   free one instead. A runner-started server lives in an isolated build dir
 #   (.next-e2e via NEXT_DIST_DIR) so it never locks or pollutes your normal
-#   `.next` — and tears it down afterward.
+#   `.next` — and is torn down afterward.
 #
 #   Next dev lazily compiles each route on first hit and can fall over under parallel
 #   load, so the runner warms the heavy routes first and caps workers (E2E_WORKERS=2).
@@ -34,7 +40,10 @@
 #
 # KNOBS:
 #   SKIP_E2E=1         skip entirely for one push       (never runs in CI)
-#   E2E_PORT=3100      port for the dev server (avoid 3000: the Docker app owns it)
+#   E2E_PORT=3100      base port for the dev server (avoid 3000: the Docker app
+#                      owns it). A healthy server here is reused only if it is
+#                      THIS worktree's; otherwise E2E_PORT+1..+9 are scanned for
+#                      a free port
 #   E2E_DATABASE_URL   DB for a runner-started server (default: local Docker
 #                      postgres). Deliberately NOT plain DATABASE_URL — that is
 #                      sourced from .env.local and may be container-perspective.
@@ -54,7 +63,6 @@ if [ "${SKIP_E2E:-}" = "1" ]; then echo "e2e-local: SKIP_E2E=1 — skipping"; ex
 ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT" || exit 1
 
 E2E_PORT="${E2E_PORT:-3100}"
-BASE="http://localhost:${E2E_PORT}"
 
 # --- Local secrets (AUTH_SECRET + AUTH_COGNITO_* from .env.local) -----------------
 if [ -f .env.local ]; then set -a; . ./.env.local; set +a; fi
@@ -62,11 +70,65 @@ if [ -z "${AUTH_SECRET:-}" ]; then
   echo "❌ e2e-local: AUTH_SECRET not set (expected in .env.local). Aborting."; exit 1
 fi
 
-# --- Reuse a running dev server on :$E2E_PORT, or start our own --------------------
+# --- Pick a port whose server (if any) is OURS -------------------------------------
+# Reusing a healthy server is only valid when it serves THIS worktree. Worktrees
+# live inside the main checkout (.claude/worktrees/*), so several checkouts take
+# turns owning :3100 — and a foreign server gates this push against the WRONG
+# code, from a different node_modules (2026-07-26: a foreign server whose module
+# graph had fallen through to the main checkout's stale tree failed
+# code-tab-renders 3/3 on every branch that reused it, via a duplicate
+# @codemirror/state crash no branch contained). Reuse only when the listener's
+# cwd is this worktree; when a foreigner owns the port, scan for a free one.
+ROOT_CANON="$(cd "$ROOT" && pwd -P)"
+
+# cwd of the process listening on TCP <port> ('' when none / undetermined).
+port_owner_cwd() {
+  local pid
+  pid="$(lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null | head -1)"
+  [ -z "$pid" ] && return 0
+  lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | awk '/^n/ { print substr($0, 2); exit }'
+}
+
+REUSE=0
+CHOSEN_PORT=""
+for port in $(seq "$E2E_PORT" $((E2E_PORT + 9))); do
+  if curl -sf "http://localhost:${port}/api/healthz" >/dev/null 2>&1; then
+    owner="$(port_owner_cwd "$port")"
+    if [ -n "$owner" ] && [ "$owner" = "$ROOT_CANON" ]; then
+      REUSE=1; CHOSEN_PORT="$port"; break
+    fi
+    echo "e2e-local: :$port serves ${owner:-an unknown directory}, not this worktree — can't gate this push on it."
+  elif [ -n "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null)" ]; then
+    echo "e2e-local: :$port is occupied by a non-healthy listener — skipping."
+  else
+    CHOSEN_PORT="$port"; break
+  fi
+done
+if [ -z "$CHOSEN_PORT" ]; then
+  echo "❌ e2e-local: no usable port in $E2E_PORT-$((E2E_PORT + 9)) (all owned by other worktrees/processes)."
+  echo "   Stop one of those servers, or rerun with E2E_PORT=<free port>."
+  exit 1
+fi
+E2E_PORT="$CHOSEN_PORT"
+BASE="http://localhost:${E2E_PORT}"
+
+# --- Reuse this worktree's dev server, or start our own ----------------------------
 STARTED_PID=""
-if curl -sf "$BASE/api/healthz" >/dev/null 2>&1; then
-  echo "e2e-local: reusing the dev server already on :$E2E_PORT"
+if [ "$REUSE" = "1" ]; then
+  echo "e2e-local: reusing this worktree's dev server on :$E2E_PORT"
 else
+  # The server must start from a node_modules that matches bun.lock: an
+  # incomplete tree makes Node fall through to the parent checkout's
+  # node_modules (worktrees sit inside it), silently mixing two copies of
+  # packages — the duplicate-@codemirror/state class of crash above.
+  # --frozen-lockfile heals a merely incomplete tree and fails only when
+  # bun.lock itself no longer matches package.json.
+  echo "e2e-local: syncing node_modules (bun install --frozen-lockfile)…"
+  if ! bun install --frozen-lockfile >/dev/null 2>&1; then
+    echo "❌ e2e-local: node_modules cannot be synced — bun.lock does not match package.json."
+    echo "   Run 'bun install' (and commit the lockfile), or bypass once with SKIP_E2E=1."
+    exit 1
+  fi
   echo "e2e-local: starting a dev server on :$E2E_PORT (AUTH_URL pinned to it; isolated .next-e2e)…"
   # Pin the started server to the LOCAL Docker postgres, exactly like the
   # `dev:local` script does. .env.local was sourced above (for AUTH_SECRET) and
