@@ -72,6 +72,13 @@ RUN apt-get update && \
 # Pin versions for supply-chain safety. Update these as needed.
 ARG BUN_VERSION=1.2.12
 ARG UV_VERSION=0.7.9
+# gws tag for the upstream gws-* SKILL.md docs clone further down. The gws
+# BINARY is no longer installed in this image — #1353 moved gws execution to
+# the trusted web broker so the model runtime never holds a Google token — but
+# the per-API SKILL.md guidance is still copied in, and its clone needs a
+# pinned tag. Declared here with the other version pins so the reference at
+# the clone step cannot go out of scope again.
+ARG GWS_VERSION=0.22.5
 
 # bun (JS/TS runtime) and uv (Python package manager) install from their
 # official GitHub release artifacts with SHA256 verification — NOT via
@@ -364,8 +371,11 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
 
 # Upstream gws-* skills (#912) — per-API SKILL.md guidance for Gmail, Drive,
 # Docs, Sheets, Slides, Forms, Tasks, Calendar, Chat, Meet, Contacts, etc.
-# Pinned to the same tag as the gws binary above so skill instructions never
-# drift from the CLI surface actually installed.
+# Pinned via ARG GWS_VERSION (declared with the other version pins near the top
+# of this stage) so the guidance never drifts from the CLI surface the web
+# broker actually executes. NOTE: the gws binary itself is no longer installed
+# here — #1353 moved execution to the trusted web broker — so this clone is the
+# only remaining gws artifact in the image, and it ships documentation only.
 #
 # git is required for the shallow clone. apt-get already added
 # ca-certificates+curl above; git is not in the base image.
