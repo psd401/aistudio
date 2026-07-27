@@ -459,19 +459,18 @@ export async function refreshCognitoTokens(
   }
 }
 
-async function performRefresh(params: RefreshCognitoTokensParams): Promise<RefreshResult> {
-  const { refreshToken, tokenSub, isPollingContext } = params
-  // The retired action wrapped this in `startTimer()` from @/lib/logger, which
-  // is winston-backed and cannot be used here. Emitting `status` + `durationMs`
-  // on every outcome keeps CloudWatch metric filters possible.
-  const startedAt = Date.now()
-  const elapsedMs = () => Date.now() - startedAt
+interface RefreshRequestConfig {
+  clientId: string
+  endpoint: string
+}
 
-  if (isRateLimited(tokenSub, isPollingContext)) {
-    log.warn("Token refresh blocked by rate limit", { tokenSub, isPollingContext: !!isPollingContext })
-    return { ok: false, reason: "rate_limited", message: "Too many refresh attempts" }
-  }
+interface RefreshAttemptContext {
+  elapsedMs: () => number
+  refreshToken: string
+  tokenSub: string
+}
 
+function resolveRefreshRequestConfig(): RefreshRequestConfig | RefreshResult {
   const clientId = process.env.AUTH_COGNITO_CLIENT_ID
   if (!clientId) {
     log.error("AUTH_COGNITO_CLIENT_ID is not set — cannot refresh")
@@ -502,50 +501,50 @@ async function performRefresh(params: RefreshCognitoTokensParams): Promise<Refre
     log.error("Unable to resolve a Cognito IDP endpoint from AUTH_COGNITO_ISSUER/AWS_REGION")
     return { ok: false, reason: "configuration", message: "AWS region configuration required" }
   }
+  return { clientId, endpoint }
+}
 
-  let response: Response
-  try {
-    response = await fetchWithTimeout(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-amz-json-1.1",
-        "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth",
-      },
-      body: JSON.stringify({
-        AuthFlow: "REFRESH_TOKEN_AUTH",
-        ClientId: clientId,
-        AuthParameters: { REFRESH_TOKEN: refreshToken },
-      }),
-      cache: "no-store",
-      // The refresh token travels in the request BODY, so a cross-origin
-      // redirect would not strip it the way it strips an Authorization header.
-      // Following a 307/308 would re-POST the credential to an arbitrary host
-      // and make the endpoint allowlist above meaningless.
-      redirect: "error",
-    })
-  } catch (error) {
-    // Network failure / timeout. `error` is sanitized by the edge logger, which
-    // redacts any long token-shaped substring.
-    log.error("Cognito refresh request failed to complete", {
-      tokenSub,
-      status: "error",
-      durationMs: elapsedMs(),
-      error: error instanceof Error ? error.message : "Unknown error",
-    })
-    return { ok: false, reason: "transient", message: "Cognito request failed" }
-  }
+function requestCognitoRefresh(
+  config: RefreshRequestConfig,
+  refreshToken: string,
+): Promise<Response> {
+  return fetchWithTimeout(config.endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-amz-json-1.1",
+      "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth",
+    },
+    body: JSON.stringify({
+      AuthFlow: "REFRESH_TOKEN_AUTH",
+      ClientId: config.clientId,
+      AuthParameters: { REFRESH_TOKEN: refreshToken },
+    }),
+    cache: "no-store",
+    // The refresh token travels in the request BODY, so a cross-origin
+    // redirect would not strip it the way it strips an Authorization header.
+    // Following a 307/308 would re-POST the credential to an arbitrary host
+    // and make the endpoint allowlist above meaningless.
+    redirect: "error",
+  })
+}
 
-  // Read as text first: Cognito error bodies are JSON, but a proxy/5xx can
-  // return HTML, and an unguarded response.json() would throw past our
-  // fail-closed contract.
-  let body: InitiateAuthResponse | null = null
+async function readInitiateAuthBody(
+  response: Response,
+): Promise<InitiateAuthResponse | null> {
   try {
     const text = await response.text()
-    body = text ? (JSON.parse(text) as InitiateAuthResponse) : null
+    return text ? (JSON.parse(text) as InitiateAuthResponse) : null
   } catch {
-    body = null
+    return null
   }
+}
 
+function interpretCognitoRefresh(
+  response: Response,
+  body: InitiateAuthResponse | null,
+  context: RefreshAttemptContext,
+): RefreshResult {
+  const { elapsedMs, refreshToken, tokenSub } = context
   if (!response.ok) {
     const { reason, errorType } = classifyInitiateAuthError(response.status, body)
     log.warn("Cognito refresh rejected", {
@@ -631,4 +630,46 @@ async function performRefresh(params: RefreshCognitoTokensParams): Promise<Refre
       expiresAt,
     },
   }
+}
+
+async function performRefresh(params: RefreshCognitoTokensParams): Promise<RefreshResult> {
+  const { refreshToken, tokenSub, isPollingContext } = params
+  // The retired action wrapped this in `startTimer()` from @/lib/logger, which
+  // is winston-backed and cannot be used here. Emitting `status` + `durationMs`
+  // on every outcome keeps CloudWatch metric filters possible.
+  const startedAt = Date.now()
+  const elapsedMs = () => Date.now() - startedAt
+
+  if (isRateLimited(tokenSub, isPollingContext)) {
+    log.warn("Token refresh blocked by rate limit", { tokenSub, isPollingContext: !!isPollingContext })
+    return { ok: false, reason: "rate_limited", message: "Too many refresh attempts" }
+  }
+
+  const config = resolveRefreshRequestConfig()
+  if ("ok" in config) return config
+
+  let response: Response
+  try {
+    response = await requestCognitoRefresh(config, refreshToken)
+  } catch (error) {
+    // Network failure / timeout. `error` is sanitized by the edge logger, which
+    // redacts any long token-shaped substring.
+    log.error("Cognito refresh request failed to complete", {
+      tokenSub,
+      status: "error",
+      durationMs: elapsedMs(),
+      error: error instanceof Error ? error.message : "Unknown error",
+    })
+    return { ok: false, reason: "transient", message: "Cognito request failed" }
+  }
+
+  // Read as text first: Cognito error bodies are JSON, but a proxy/5xx can
+  // return HTML, and an unguarded response.json() would throw past our
+  // fail-closed contract.
+  const body = await readInitiateAuthBody(response)
+  return interpretCognitoRefresh(response, body, {
+    elapsedMs,
+    refreshToken,
+    tokenSub,
+  })
 }
