@@ -1,12 +1,25 @@
 import { NextRequest, NextResponse } from "next/server"
 import { verifyAgentInvocationContext } from "@/lib/agent-workspace/invocation-context"
-import { getSecretString } from "@/lib/agent-workspace/secrets-manager"
+import {
+  aistudioOAuthSecretId,
+  deleteAistudioOAuthSecret,
+  getSecretJson,
+  getSecretString,
+  storeAistudioOAuthTokens,
+  type AistudioOAuthTokenData,
+} from "@/lib/agent-workspace/secrets-manager"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
+import { getIssuerUrl } from "@/lib/oauth/issuer-config"
+import { AISTUDIO_OPENCLAW_CLIENT_ID } from "@/lib/oauth/openclaw-client"
 
 const log = createLogger({ module: "agent-aistudio-broker" })
 const ALLOWED_METHODS = new Set(["tools/list", "tools/call"])
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024
 const PERSONAL_KEY_NAME = "aistudio_personal_key"
+
+type AistudioBrokerBody =
+  | { operation: "disconnect" }
+  | { method: "tools/list" | "tools/call"; params: Record<string, unknown> }
 
 function environment(): string {
   return process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
@@ -27,9 +40,12 @@ function mcpUrl(): URL {
 
 function isValidBody(
   value: unknown
-): value is { method: "tools/list" | "tools/call"; params: unknown } {
+): value is AistudioBrokerBody {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false
   const body = value as Record<string, unknown>
+  if (body.operation === "disconnect") {
+    return Object.keys(body).length === 1
+  }
   if (Object.keys(body).some((key) => key !== "method" && key !== "params")) {
     return false
   }
@@ -54,12 +70,88 @@ function isValidBody(
       return false
     }
   }
-  return true
+  return body.params !== null
 }
 
-async function resolveKey(
+async function readJsonObject(response: Response): Promise<Record<string, unknown>> {
+  try {
+    const value: unknown = await response.json()
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+async function refreshOAuthRecord(
+  ownerEmail: string,
+  record: AistudioOAuthTokenData
+): Promise<AistudioOAuthTokenData | null> {
+  const response = await fetch(`${getIssuerUrl()}/api/oauth/token`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: AISTUDIO_OPENCLAW_CLIENT_ID,
+      refresh_token: record.refresh_token,
+    }).toString(),
+    redirect: "error",
+    signal: AbortSignal.timeout(15_000),
+  })
+  const data = await readJsonObject(response)
+  if (
+    !response.ok ||
+    typeof data.access_token !== "string" ||
+    typeof data.refresh_token !== "string"
+  ) {
+    log.warn("Owner-bound AI Studio OAuth refresh was rejected", {
+      status: response.status,
+    })
+    return null
+  }
+  const obtainedAt = new Date()
+  const next: AistudioOAuthTokenData = {
+    access_token: data.access_token,
+    refresh_token: data.refresh_token,
+    token_type: "Bearer",
+    scope: typeof data.scope === "string" ? data.scope : record.scope,
+    obtained_at: obtainedAt.toISOString(),
+    expires_at: new Date(
+      obtainedAt.getTime() +
+        (typeof data.expires_in === "number" ? data.expires_in : 900) * 1000
+    ).toISOString(),
+  }
+  await storeAistudioOAuthTokens(ownerEmail, next)
+  return next
+}
+
+async function resolveOAuthToken(ownerEmail: string): Promise<string | null> {
+  const record = await getSecretJson<AistudioOAuthTokenData>(
+    aistudioOAuthSecretId(ownerEmail)
+  )
+  if (
+    !record ||
+    typeof record.access_token !== "string" ||
+    typeof record.refresh_token !== "string"
+  ) {
+    return null
+  }
+  const expiresAt = Date.parse(record.expires_at)
+  if (Number.isFinite(expiresAt) && expiresAt > Date.now() + 60_000) {
+    return record.access_token
+  }
+  return (await refreshOAuthRecord(ownerEmail, record))?.access_token ?? null
+}
+
+async function resolveCredential(
   ownerEmail: string
-): Promise<{ key: string; source: "personal" | "shared" } | null> {
+): Promise<{ key: string; source: "oauth" | "personal" | "shared" } | null> {
+  const oauth = await resolveOAuthToken(ownerEmail)
+  if (oauth) return { key: oauth, source: "oauth" }
   const personal = await getSecretString(
     `psd-agent-creds/${environment()}/user/${ownerEmail}/${PERSONAL_KEY_NAME}`
   )
@@ -68,6 +160,44 @@ async function resolveKey(
     `psd-agent/${environment()}/aistudio-mcp-api-key`
   )
   return shared ? { key: shared, source: "shared" } : null
+}
+
+async function disconnectOwner(ownerEmail: string): Promise<NextResponse> {
+  const tokens = await getSecretJson<AistudioOAuthTokenData>(
+    aistudioOAuthSecretId(ownerEmail)
+  )
+  if (!tokens?.refresh_token) {
+    return NextResponse.json({ disconnected: true, alreadyDisconnected: true })
+  }
+  const response = await fetch(`${getIssuerUrl()}/api/oauth/revocation`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body: new URLSearchParams({
+      token: tokens.refresh_token,
+      token_type_hint: "refresh_token",
+      client_id: AISTUDIO_OPENCLAW_CLIENT_ID,
+    }).toString(),
+    redirect: "error",
+    signal: AbortSignal.timeout(10_000),
+  })
+  if (!response.ok) {
+    log.warn("Owner-bound AI Studio OAuth revocation failed", {
+      status: response.status,
+    })
+    return NextResponse.json(
+      { error: "AI Studio token revocation failed" },
+      { status: 502 }
+    )
+  }
+  await deleteAistudioOAuthSecret(ownerEmail)
+  log.info(
+    "Owner disconnected AI Studio from OpenClaw",
+    sanitizeForLogging({ ownerEmail })
+  )
+  return NextResponse.json({ disconnected: true })
 }
 
 export async function POST(request: NextRequest) {
@@ -90,7 +220,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Request is too large" }, { status: 413 })
   }
 
-  const credential = await resolveKey(context.ownerEmail)
+  if ("operation" in body) {
+    if (context.mode !== "owner") {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+    }
+    return disconnectOwner(context.ownerEmail)
+  }
+
+  const credential = await resolveCredential(context.ownerEmail)
   if (!credential) {
     return NextResponse.json(
       { error: "AI Studio credential is not configured" },

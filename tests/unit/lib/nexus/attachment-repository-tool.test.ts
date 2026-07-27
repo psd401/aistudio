@@ -23,7 +23,10 @@ jest.mock("ai", () => ({
   tool: (definition: unknown) => definition,
 }));
 
-import { createNexusAttachmentTools } from "@/lib/nexus/attachment-repository-tool";
+import {
+  createNexusAttachmentTools,
+  createNexusRepositorySearchTools,
+} from "@/lib/nexus/attachment-repository-tool";
 import { createTokenMappingSink } from "@/lib/safety/token-mapping-sink";
 import { ContentSafetyBlockedError } from "@/lib/streaming/types";
 
@@ -98,6 +101,29 @@ describe("Nexus attachment repository tool", () => {
       userCognitoSub: "executing-user",
       mode: "hybrid",
       limit: 3,
+    });
+  });
+
+  it("supports server-named project and skill repository tools with the same safety boundary", async () => {
+    const tools = createNexusRepositorySearchTools({
+      repositoryIds: [7],
+      userCognitoSub: "executing-user",
+      tokenMappingSink: createTokenMappingSink(),
+      toolName: "searchProjectRepositories",
+      description: "Search project repositories",
+    });
+    const search = tools.searchProjectRepositories as unknown as SearchTool;
+
+    await expect(search.execute({ query: "attendance" })).resolves.toMatchObject({
+      success: true,
+      results: [{ content: "Budgeted source" }],
+    });
+    expect(mockRetrieveRepositoryContent).toHaveBeenCalledWith({
+      query: "attendance",
+      repositoryIds: [7],
+      userCognitoSub: "executing-user",
+      mode: "hybrid",
+      limit: 5,
     });
   });
 

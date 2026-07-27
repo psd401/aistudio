@@ -62,6 +62,7 @@ export * from "./tables/agentic-cost-reservations";
 export * from "./tables/resource-admission-leases";
 export * from "./tables/workspace-upload-reservations";
 export * from "./tables/nexus-repository-bindings";
+export * from "./tables/nexus-projects";
 
 // ============================================
 // Nexus MCP (Model Context Protocol)
@@ -91,6 +92,10 @@ export * from "./tables/repository-upload-sessions";
 export * from "./tables/repository-processing-jobs";
 export * from "./tables/repository-artifacts";
 export * from "./tables/repository-index-generations";
+export * from "./tables/skill-repository-bindings";
+export * from "./tables/repository-migration-runs";
+export * from "./tables/repository-migration-items";
+export * from "./tables/repository-retrieval-shadow-observations";
 
 // ============================================
 // Prompt Library

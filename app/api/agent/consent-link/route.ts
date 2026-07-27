@@ -28,8 +28,14 @@ const log = createLogger({ module: "agent-consent-link" })
  * `agent_account` is RETIRED (#1232): Workspace operations now execute only
  * through the owner-bound operation broker. This route rejects the old slot.
  */
-type Kind = "user_account" | "cognito_data" | "plaud" | "canva"
-const ALLOWED_KINDS: Kind[] = ["user_account", "cognito_data", "plaud", "canva"]
+type Kind = "user_account" | "cognito_data" | "plaud" | "canva" | "aistudio"
+const ALLOWED_KINDS: Kind[] = [
+  "user_account",
+  "cognito_data",
+  "plaud",
+  "canva",
+  "aistudio",
+]
 
 /**
  * Map a consent kind to its public start page. cognito_data captures a
@@ -44,6 +50,8 @@ function resolveConsentPath(kind: Kind): string {
       return "/agent-connect-plaud"
     case "canva":
       return "/agent-connect-canva"
+    case "aistudio":
+      return "/agent-connect-aistudio"
     default:
       return "/agent-connect"
   }
@@ -142,7 +150,7 @@ export async function POST(request: NextRequest) {
       !(ALLOWED_KINDS as readonly string[]).includes(requestBody.kind))
   ) {
     return NextResponse.json(
-      { error: "kind must be 'user_account', 'cognito_data', 'plaud', or 'canva' if provided" },
+      { error: "kind must be 'user_account', 'cognito_data', 'plaud', 'canva', or 'aistudio' if provided" },
       { status: 400 }
     )
   }
@@ -177,7 +185,9 @@ export async function POST(request: NextRequest) {
   // base64url(32 bytes) = 43 chars, within RFC 7636's 43–128 range. Stored
   // server-side; only the S256 challenge ever leaves in a URL.
   const codeVerifier =
-    kind === "plaud" || kind === "canva" ? randomBytes(32).toString("base64url") : null
+    kind === "plaud" || kind === "canva" || kind === "aistudio"
+      ? randomBytes(32).toString("base64url")
+      : null
 
   await executeQuery(
     (db) =>

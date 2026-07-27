@@ -390,7 +390,22 @@ export class FrontendStackEcs extends cdk.Stack {
       defaultAction: { allow: {} },
       description: `WAF for AIStudio ${environment} environment`,
       rules: [
-        // Rate limiting rule
+        // Per-IP rate limiting for BROWSER traffic.
+        //
+        // scopeDownStatement excludes /api/agent/* — server-to-server calls
+        // from the agent runtime. Those arrive from a handful of NAT egress
+        // IPs, so a per-IP browser budget counts an entire fleet as one
+        // client. #1353 routed every agent LLM call through
+        // /api/agent/model-proxy, and an agentic turn makes many calls per
+        // user message; on 2026-07-27 that produced 4,849 blocked requests in
+        // a single 5-minute window and the dev agent could not answer at all.
+        // The rule itself (added #306, 2025-10-03) is unchanged and still
+        // correct for the browser traffic it was written for.
+        //
+        // Excluding this prefix does not remove authentication: /api/agent/*
+        // is gated by a proxy-signed invocation context
+        // (verifyAgentInvocationContext) and, in the deployed runtime, by the
+        // Cedar egress allowlist. The WAF was never what protected it.
         {
           name: 'RateLimitRule',
           priority: 1,
@@ -398,6 +413,20 @@ export class FrontendStackEcs extends cdk.Stack {
             rateBasedStatement: {
               limit: 2000, // 2000 requests per 5 minutes per IP
               aggregateKeyType: 'IP',
+              scopeDownStatement: {
+                notStatement: {
+                  statement: {
+                    byteMatchStatement: {
+                      fieldToMatch: { uriPath: {} },
+                      positionalConstraint: 'STARTS_WITH',
+                      searchString: '/api/agent/',
+                      textTransformations: [
+                        { priority: 0, type: 'NONE' },
+                      ],
+                    },
+                  },
+                },
+              },
             },
           },
           action: {

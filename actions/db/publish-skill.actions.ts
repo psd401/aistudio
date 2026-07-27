@@ -9,6 +9,8 @@ import { executeTransaction } from "@/lib/db/drizzle-client"
 import { eq, and, sql } from "drizzle-orm"
 import { psdAgentSkills } from "@/lib/db/schema/tables/agent-skills"
 import { psdAgentSkillAudit } from "@/lib/db/schema/tables/agent-skill-audit"
+import { skillRepositoryBindings } from "@/lib/db/schema/tables/skill-repository-bindings"
+import { getAccessibleRepositoryIds } from "@/lib/db/drizzle"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
 import {
   serializeAssistantToSkill,
@@ -117,6 +119,30 @@ export async function publishAssistantArchitectAsSkillAction(
       throw ErrorFactories.authzInsufficientPermissions("publish this assistant")
     }
 
+    const repositoryIds = [
+      ...new Set(
+        (architect.prompts ?? []).flatMap((prompt) =>
+          Array.isArray(prompt.repositoryIds)
+            ? prompt.repositoryIds.filter(
+                (id): id is number =>
+                  typeof id === "number" &&
+                  Number.isSafeInteger(id) &&
+                  id > 0
+              )
+            : []
+        )
+      ),
+    ]
+    const accessibleRepositoryIds = await getAccessibleRepositoryIds(
+      repositoryIds,
+      ownerUserId
+    )
+    if (accessibleRepositoryIds.length !== repositoryIds.length) {
+      throw ErrorFactories.authzInsufficientPermissions(
+        "publish one or more bound repositories"
+      )
+    }
+
     // 2. Serialize to SKILL.md.
     const serializerPrompts = (architect.prompts ?? []).map<SerializerPrompt>((p) => ({
       name: p.name,
@@ -210,6 +236,18 @@ export async function publishAssistantArchitectAsSkillAction(
         )
       }
 
+      await tx
+        .delete(skillRepositoryBindings)
+        .where(eq(skillRepositoryBindings.skillId, resolved.id))
+      if (repositoryIds.length > 0) {
+        await tx.insert(skillRepositoryBindings).values(
+          repositoryIds.map((repositoryId) => ({
+            skillId: resolved.id,
+            repositoryId,
+          }))
+        )
+      }
+
       await tx.insert(psdAgentSkillAudit).values({
         skillId: resolved.id,
         action: "published_from_architect",
@@ -218,6 +256,7 @@ export async function publishAssistantArchitectAsSkillAction(
           assistantId,
           slug: serialized.slug,
           allowedTools: serialized.allowedTools,
+          repositoryIds,
           s3Key: draftPrefix,
           // Record the promotion target so an admin can re-trigger the scan
           // Lambda without reconstructing the path from the draft prefix.

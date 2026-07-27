@@ -112,6 +112,14 @@ cd infra/agent-image
 ENVIRONMENT=prod ./build-and-push.sh 2026-04-16-initial
 ```
 
+`build-and-push.sh` runs a build-time eval gate (#1161) and refuses to push an
+image it could not prove boots and answers a real turn. On a first deploy the
+web tier and router Lambda do not exist yet, so the runtime probe cannot run —
+pass `ALLOW_UNVERIFIED_IMAGE=1` for this bootstrap build only, and let the gate
+run normally on every build after it. See
+[Agent Image Build-Time Eval Gate](./agent-image-build-gate.md) for the checks,
+how the probe's signed broker context is minted, and the bypass flags.
+
 #### 2.4 Deploy AgentCore Runtime
 
 Re-deploy the stack with the image tag to create the AgentCore Runtime:
@@ -261,6 +269,8 @@ To update the agent (new model config, system prompt changes, etc.):
 ```bash
 cd infra/agent-image
 # Edit Dockerfile, openclaw.json, psd-system-prompt.md as needed
+# The eval gate boot-verifies the image before pushing — see
+# docs/operations/agent-image-build-gate.md
 ./build-and-push.sh 2026-04-17-update-models
 
 # Redeploy with new image tag

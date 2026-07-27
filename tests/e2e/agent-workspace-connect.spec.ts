@@ -35,18 +35,22 @@ test.describe('Agent Connect — public pages', () => {
 })
 
 test.describe('Agent Consent Link API — auth gate', () => {
-  test('POST /api/agent/consent-link without Authorization returns 401', async ({ request }) => {
+  // Since the security remediation (53fd0968), this route authenticates via a
+  // router-signed invocation-context header instead of a shared-secret bearer,
+  // and answers 403 when the context is missing or unverifiable. Owner
+  // selectors in the body are rejected too, but auth is checked first.
+  test('POST /api/agent/consent-link without invocation context returns 403', async ({ request }) => {
     const resp = await request.post('/api/agent/consent-link', {
-      data: { ownerEmail: 'hagelk@psd401.net' },
+      data: { kind: 'user_account' },
     })
-    expect(resp.status()).toBe(401)
+    expect(resp.status()).toBe(403)
   })
 
-  test('POST /api/agent/consent-link with wrong bearer returns 401', async ({ request }) => {
+  test('POST /api/agent/consent-link with a stale bearer secret returns 403', async ({ request }) => {
     const resp = await request.post('/api/agent/consent-link', {
       headers: { Authorization: 'Bearer not-the-real-key' },
-      data: { ownerEmail: 'hagelk@psd401.net' },
+      data: { kind: 'user_account' },
     })
-    expect(resp.status()).toBe(401)
+    expect(resp.status()).toBe(403)
   })
 })

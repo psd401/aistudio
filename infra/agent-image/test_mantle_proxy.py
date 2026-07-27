@@ -85,6 +85,17 @@ class TestAgentBrokerRoute(unittest.TestCase):
         self.assertIsNone(_resolve_agent_broker_route("credentials"))
         self.assertIsNone(_resolve_agent_broker_route("api/agent/not-allowed"))
 
+    def test_allows_the_directory_lookup_route(self):
+        # #1239. The directory lookup runs server-side so the model runtime
+        # never holds a Google token; the relay must therefore allow the route
+        # or every lookup 404s at the proxy. Pinned because this allowlist and
+        # the skill-side one in skills/_shared/agent-broker.js have to agree,
+        # and nothing else fails loudly when they drift.
+        self.assertEqual(
+            _resolve_agent_broker_route("api/agent/directory-lookup"),
+            "/api/agent/directory-lookup",
+        )
+
     def test_final_flush_accepts_only_token_bound_private_workspace_writes(self):
         token = "a" * 43
         self.assertTrue(

@@ -61,6 +61,34 @@ function parseArgs(argv) {
 }
 
 /**
+ * Mint the one-click OAuth link through the signed invocation broker. The
+ * legacy callerEmail argument is intentionally ignored: the server derives the
+ * immutable owner from the router-signed context.
+ */
+async function mintConsentUrl(callerEmail) {
+  void callerEmail;
+  const result = await _internals.requestAgentBroker(
+    '/api/agent/consent-link',
+    { kind: 'aistudio' }
+  );
+  if (!result || typeof result.url !== 'string') {
+    throw new Error('Connection-link broker returned an invalid success payload');
+  }
+  return result.url;
+}
+
+/**
+ * Revoke the current invocation owner's delegated grant. No model-selected
+ * owner crosses the broker boundary.
+ */
+async function disconnectOAuth(callerEmail) {
+  void callerEmail;
+  return _internals.requestAgentBroker('/api/agent/aistudio', {
+    operation: 'disconnect',
+  });
+}
+
+/**
  * Low-level MCP call through the owner-bound broker. The model runtime never
  * receives either the owner's personal key or the platform fallback key.
  * Handles terminal transport failures uniformly
@@ -97,14 +125,20 @@ async function callMcpRaw(method, params, callerEmail, timeoutMs = MCP_FETCH_TIM
 
   const httpStatus = Number(brokerResult.httpStatus);
   const keySource =
-    brokerResult.keySource === 'personal' ? 'personal' : 'shared';
+    brokerResult.keySource === 'oauth'
+      ? 'oauth'
+      : brokerResult.keySource === 'personal'
+        ? 'personal'
+        : 'shared';
   const data = brokerResult.payload;
   if (httpStatus === 401) {
     emit({
       status: 'unauthorized',
       message:
         'AI Studio MCP rejected the API key (401). ' +
-        (keySource === 'personal'
+        (keySource === 'oauth'
+          ? 'Your delegated connection expired or was revoked — run connect again.'
+          : keySource === 'personal'
           ? 'Your stored AI Studio key is invalid or revoked — re-store a current ' +
             'key with psd-credentials put --name aistudio_personal_key.'
           : 'The shared key must be a valid sk- key holding at least platform:read.'),
@@ -234,6 +268,8 @@ module.exports = {
   fail,
   emit,
   parseArgs,
+  mintConsentUrl,
+  disconnectOAuth,
   callMcpRaw,
   callMcp,
   callTool,

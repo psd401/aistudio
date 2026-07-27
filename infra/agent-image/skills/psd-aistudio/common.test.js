@@ -79,6 +79,46 @@ test('forwards only the MCP operation to the fixed owner-bound broker', async ()
   expect(serializedCall).not.toContain('Authorization');
 });
 
+test('mints consent without forwarding a model-selected owner', async () => {
+  brokerMock.mockResolvedValue({
+    url: 'https://app.example/agent-connect-aistudio?token=signed',
+  });
+
+  await expect(
+    common.mintConsentUrl('victim@psd401.net')
+  ).resolves.toContain('/agent-connect-aistudio');
+  expect(brokerMock).toHaveBeenCalledWith(
+    '/api/agent/consent-link',
+    { kind: 'aistudio' }
+  );
+  expect(JSON.stringify(brokerMock.mock.calls[0])).not.toContain('victim');
+});
+
+test('disconnects only through the owner-bound broker', async () => {
+  brokerMock.mockResolvedValue({ disconnected: true });
+
+  await expect(
+    common.disconnectOAuth('victim@psd401.net')
+  ).resolves.toEqual({ disconnected: true });
+  expect(brokerMock).toHaveBeenCalledWith('/api/agent/aistudio', {
+    operation: 'disconnect',
+  });
+  expect(JSON.stringify(brokerMock.mock.calls[0])).not.toContain('victim');
+});
+
+test('preserves the OAuth credential source returned by the broker', async () => {
+  brokerMock.mockResolvedValue({
+    httpStatus: 200,
+    keySource: 'oauth',
+    payload: { jsonrpc: '2.0', id: 'test', result: { ok: true } },
+  });
+
+  await expect(
+    common.callMcpRaw('tools/list', {}, 'victim@psd401.net')
+  ).resolves.toEqual({ result: { ok: true }, keySource: 'oauth' });
+  expect(JSON.stringify(brokerMock.mock.calls[0])).not.toContain('victim');
+});
+
 test.each([
   [401, 11, 'unauthorized'],
   [429, 14, 'rate-limited'],

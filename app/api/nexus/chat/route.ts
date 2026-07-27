@@ -19,7 +19,10 @@ import { userCanAccessResource } from '@/lib/db/drizzle/resource-access';
 import { getConnectorTools } from '@/lib/mcp/connector-service';
 import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
 import { createUniversalTools } from '@/lib/tools/provider-native-tools';
-import { createNexusAttachmentTools } from '@/lib/nexus/attachment-repository-tool';
+import {
+  createNexusAttachmentTools,
+  createNexusRepositorySearchTools,
+} from '@/lib/nexus/attachment-repository-tool';
 import { prepareRepositoryAttachmentMessages } from '@/lib/nexus/repository-attachment-messages';
 import {
   resolveNexusAttachmentImageSources,
@@ -89,6 +92,10 @@ import {
   nexusModelFamilySchema,
   type NexusRoutingMetadata,
 } from '@/lib/nexus/model-router/types';
+import {
+  NexusProjectAccessError,
+  resolveNexusProjectChatContext,
+} from '@/lib/nexus/projects/project-service';
 
 // Allow streaming responses up to 30 minutes. Deep Research runs take 5–25
 // minutes; standard chat and image-gen finish well within this window.
@@ -248,6 +255,8 @@ async function executeStreaming(params: {
   workspacePromptFragment?: string;
   /** Owner-validated search over repositories attached to this conversation. */
   attachmentTools?: ToolSet;
+  /** Server-derived project and skill repository instructions. */
+  repositoryPromptFragment?: string;
   reasoningEffort: 'minimal' | 'low' | 'medium' | 'high';
   responseMode: 'standard' | 'flex' | 'priority';
   requestId: string;
@@ -263,32 +272,37 @@ async function executeStreaming(params: {
     conversationIdValue, conversationTitle, enabledTools, enabledConnectors,
     connectorToolResults, failedConnectorIds, skillInstructions, skillName,
     workspaceTools, workspacePromptFragment, attachmentTools,
+    repositoryPromptFragment,
     reasoningEffort, responseMode,
     requestId, dbModelId, log, timer, precomputedInputTokenMappings,
     inputTokenMappingSink, routingMetadata
   } = params;
 
-  const hasAttachmentTools =
+  const hasRepositoryTools =
     !!attachmentTools && Object.keys(attachmentTools).length > 0;
+  const hasAttachmentTools =
+    !!attachmentTools &&
+    Object.hasOwn(attachmentTools, "searchNexusAttachments");
   const systemPrompt = buildNexusSystemPrompt(
     skillInstructions,
     skillName,
     workspacePromptFragment,
-    hasAttachmentTools
+    hasAttachmentTools,
+    repositoryPromptFragment
   );
 
   const hasWorkspaceTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
   const multiStepToolsActive =
     connectorToolResults.length > 0 ||
     hasWorkspaceTools ||
-    hasAttachmentTools;
+    hasRepositoryTools;
 
   // Pre-merge adapter + connector + workspace tools (undefined when none active).
   const mergedTools = await buildMergedChatTools({
     enabledTools,
     connectorToolResults,
     workspaceTools: hasWorkspaceTools ? workspaceTools : undefined,
-    attachmentTools: hasAttachmentTools ? attachmentTools : undefined,
+    attachmentTools: hasRepositoryTools ? attachmentTools : undefined,
   });
 
   const streamRequest: StreamRequest = {
@@ -403,6 +417,7 @@ const ChatRequestSchema = z.object({
   // When the session is bound to a published skill ("use in chat"), the skill's
   // `allowed-tools` pin is enforced server-side over the client tool list (#925 AC#6).
   skillId: z.string().uuid().optional(),
+  projectId: z.string().uuid().optional(),
   // When a workspace document/artifact is open beside the chat (`?workspace=<id|slug>`),
   // the server binds read/edit tools for THAT object (Atrium §1087). Loose validation
   // only — the tool builder canView/canEdit-gates server-side; cap length like other params.
@@ -703,19 +718,16 @@ async function handleDeepResearch(params: {
   // persistence. A denied request must not leave durable chat state, and every
   // failure before the stream takes ownership must release the active lease.
   const reservation = await reserveDeepResearch(userId);
+  // OBSERVE-ONLY (2026-07-27, Hagel): the #1353 thresholds were set without
+  // data on real consumption, so crossing one is telemetry, not a refusal.
+  // A denial carries no leaseId, hence the nullable lease below.
   if (!reservation.allowed) {
-    timer({ status: 'rate_limited', reason: reservation.reason });
-    return new Response(
-      JSON.stringify({
-        error: 'Deep Research capacity or cost budget is currently exhausted. Try again later.',
-        requestId,
-      }),
-      {
-        status: 429,
-        headers: { 'Content-Type': 'application/json', 'Retry-After': '60' },
-      }
-    );
+    log.warn('Deep Research over threshold (observe-only — request allowed)', {
+      requestId,
+      reason: reservation.reason,
+    });
   }
+  const deepResearchLeaseId = reservation.allowed ? reservation.leaseId : null;
 
   // Conversation setup — same shape the standard flow uses, so the
   // conversation list, history, and resume work without special-casing.
@@ -731,7 +743,7 @@ async function handleDeepResearch(params: {
       log,
     });
     if ('error' in convSetup) {
-      await releaseDeepResearch(reservation.leaseId);
+      if (deepResearchLeaseId) await releaseDeepResearch(deepResearchLeaseId);
       return convSetup.error;
     }
     await persistLastUserMessage({
@@ -740,10 +752,10 @@ async function handleDeepResearch(params: {
       dbModelId,
     });
   } catch (error) {
-    await releaseDeepResearch(reservation.leaseId).catch(
+    if (deepResearchLeaseId) await releaseDeepResearch(deepResearchLeaseId).catch(
       (releaseError: unknown) => {
         log.error('Failed to release Deep Research pre-stream lease', {
-          leaseId: reservation.leaseId,
+          leaseId: deepResearchLeaseId,
           error:
             releaseError instanceof Error
               ? releaseError.message
@@ -861,9 +873,9 @@ async function handleDeepResearch(params: {
           }
           timer({ status: 'error', conversationId, errType });
         } finally {
-          await releaseDeepResearch(reservation.leaseId).catch((releaseError: unknown) => {
+          if (deepResearchLeaseId) await releaseDeepResearch(deepResearchLeaseId).catch((releaseError: unknown) => {
             log.error('Failed to release Deep Research concurrency lease', {
-              leaseId: reservation.leaseId,
+              leaseId: deepResearchLeaseId,
               error:
                 releaseError instanceof Error
                   ? releaseError.message
@@ -1136,12 +1148,22 @@ async function setupConversation(params: {
   modelId: string;
   requestId: string;
   log: ReturnType<typeof createLogger>;
+  projectId?: string;
 }): Promise<{
   conversationId: string;
   conversationTitle: string;
   created: boolean;
 } | { error: Response }> {
-  const { conversationIdValue, messages, userId, provider, modelId, requestId, log } = params;
+  const {
+    conversationIdValue,
+    messages,
+    userId,
+    provider,
+    modelId,
+    requestId,
+    log,
+    projectId,
+  } = params;
 
   let conversationId = conversationIdValue || '';
   let conversationTitle = 'New Conversation';
@@ -1149,7 +1171,13 @@ async function setupConversation(params: {
 
   if (!conversationId) {
     conversationTitle = generateConversationTitle(messages as UIMessage[]);
-    const convResult = await createConversation({ userId, provider, modelId, title: conversationTitle });
+    const convResult = await createConversation({
+      userId,
+      provider,
+      modelId,
+      title: conversationTitle,
+      projectId,
+    });
     if ('error' in convResult) return convResult;
     conversationId = convResult.conversationId;
     created = true;
@@ -1158,7 +1186,10 @@ async function setupConversation(params: {
     // Without this check any authenticated user can inject messages into any conversation.
     const owned = await executeQuery(
       (db) => db
-        .select({ id: nexusConversations.id })
+        .select({
+          id: nexusConversations.id,
+          projectId: nexusConversations.projectId,
+        })
         .from(nexusConversations)
         .where(and(
           eq(nexusConversations.id, conversationId),
@@ -1169,6 +1200,19 @@ async function setupConversation(params: {
     );
     if (!owned || owned.length === 0) {
       log.warn('Conversation ownership check failed — access denied', { conversationId, userId });
+      return {
+        error: new Response(
+          JSON.stringify({ error: 'Conversation not found or access denied', requestId }),
+          { status: 404, headers: { 'Content-Type': 'application/json' } }
+        )
+      };
+    }
+    if (owned[0]?.projectId !== (projectId ?? null)) {
+      log.warn('Conversation project binding check failed', {
+        conversationId,
+        userId,
+        requestedProjectId: projectId,
+      });
       return {
         error: new Response(
           JSON.stringify({ error: 'Conversation not found or access denied', requestId }),
@@ -1458,7 +1502,8 @@ function buildNexusSystemPrompt(
   skillInstructions: string | undefined,
   skillName: string | undefined,
   workspacePromptFragment?: string,
-  hasAttachmentTools = false
+  hasAttachmentTools = false,
+  repositoryPromptFragment?: string
 ): string {
   let prompt = NEXUS_BASE_SYSTEM_PROMPT;
   if (skillInstructions) {
@@ -1474,6 +1519,9 @@ function buildNexusSystemPrompt(
       "\n\n---\n\nThe user attached private repository content to this conversation. " +
       "Use searchNexusAttachments before making claims about those attachments. " +
       "Cite the returned source labels and never invent content that was not returned.";
+  }
+  if (repositoryPromptFragment) {
+    prompt += `\n\n---\n\n${repositoryPromptFragment}`;
   }
   return prompt;
 }
@@ -1530,6 +1578,7 @@ async function applySkillSessionBinding(args: {
    * opening a workspace (PR #1136 review, codex P2).
    */
   skillAllowedTools: string[];
+  skillRepositoryIds: number[];
 }> {
   const { connectorToolResults, skillId, log } = args;
   const boundSkill = await loadBoundSkill(skillId, log);
@@ -1540,6 +1589,7 @@ async function applySkillSessionBinding(args: {
       skillInstructions: undefined,
       skillName: undefined,
       skillAllowedTools: [],
+      skillRepositoryIds: [],
     };
   }
   const scopedEnabledTools = intersectSkillAllowedTools(
@@ -1566,6 +1616,7 @@ async function applySkillSessionBinding(args: {
     skillInstructions: boundSkill.instructions ?? undefined,
     skillName: boundSkill.name,
     skillAllowedTools: boundSkill.allowedTools,
+    skillRepositoryIds: boundSkill.repositoryIds,
   };
 }
 
@@ -1624,6 +1675,66 @@ async function bindWorkspaceToolsForChat(args: {
   };
 }
 
+async function resolveChatProjectBinding(input: {
+  requestedProjectId?: string;
+  conversationId?: string;
+  userId: number;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+}): Promise<
+  | {
+      projectId: string;
+      name: string;
+      instructions: string;
+      repositoryIds: number[];
+    }
+  | null
+  | { error: Response }
+> {
+  let projectId = input.requestedProjectId;
+  if (!projectId && input.conversationId) {
+    const conversationId = input.conversationId;
+    const [conversation] = await executeQuery(
+      (db) =>
+        db
+          .select({ projectId: nexusConversations.projectId })
+          .from(nexusConversations)
+          .where(
+            and(
+              eq(nexusConversations.id, conversationId),
+              eq(nexusConversations.userId, input.userId)
+            )
+          )
+          .limit(1),
+      "resolveNexusConversationProject"
+    );
+    projectId = conversation?.projectId ?? undefined;
+  }
+  if (!projectId) return null;
+  try {
+    const context = await resolveNexusProjectChatContext({
+      projectId,
+      userId: input.userId,
+    });
+    return { projectId, ...context };
+  } catch (error) {
+    if (!(error instanceof NexusProjectAccessError)) throw error;
+    input.log.warn("Nexus project binding denied", {
+      userId: input.userId,
+      projectId,
+    });
+    return {
+      error: new Response(
+        JSON.stringify({
+          error: "Project not found or access denied",
+          requestId: input.requestId,
+        }),
+        { status: 404, headers: { "Content-Type": "application/json" } }
+      ),
+    };
+  }
+}
+
 /**
  * Nexus Chat API - Native Streaming with AI SDK v5
  */
@@ -1650,6 +1761,7 @@ export async function POST(req: Request) {
       enabledTools = [],
       enabledConnectors: manuallyEnabledConnectors = [],
       skillId,
+      projectId: requestedProjectId,
       workspaceId,
       nexusMode,
       modelFamily,
@@ -1682,6 +1794,17 @@ export async function POST(req: Request) {
       return canonicalInlineResult.error;
     }
     const messages = canonicalInlineResult.messages;
+
+    const projectBinding = await resolveChatProjectBinding({
+      requestedProjectId,
+      conversationId: conversationIdValue,
+      userId,
+      requestId,
+      log,
+    });
+    if (projectBinding && "error" in projectBinding) {
+      return projectBinding.error;
+    }
 
     // Resolve the current turn's opaque references before routing or creating a
     // conversation. Forged, expired, and foreign markers therefore leave no
@@ -1734,9 +1857,14 @@ export async function POST(req: Request) {
     const requiresAttachmentTools =
       preboundAttachmentRepositoryIds.length > 0 ||
       attachmentPreflight.requiresAttachmentTools;
-    const routingEnabledTools = requiresAttachmentTools
-      ? [...new Set([...enabledTools, 'searchNexusAttachments'])]
-      : enabledTools;
+    const routingEnabledTools = [
+      ...new Set([
+        ...enabledTools,
+        ...(requiresAttachmentTools ? ['searchNexusAttachments'] : []),
+        ...(projectBinding ? ['searchProjectRepositories'] : []),
+        ...(skillId ? ['searchSkillRepositories'] : []),
+      ]),
+    ];
 
     // 4. Classify and resolve the model. In shadow mode this records the proposed
     // route while continuing to execute the client's existing safe fallback.
@@ -1830,13 +1958,24 @@ export async function POST(req: Request) {
     // the only specialist path that explicitly binds inline-shadow references.
     if (
       isDeepResearchModel &&
-      attachmentPreflight.references.length > 0
+      (attachmentPreflight.references.length > 0 || projectBinding)
     ) {
       timer({ status: 'error', reason: 'deep_research_attachment_unsupported' });
       return new Response(
         JSON.stringify({
           error:
-            'Deep Research does not support attached repository content. Choose a chat model for this request.',
+            'Deep Research does not support repository-backed project content. Choose a chat model for this request.',
+          requestId,
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (isImageGenerationModel && projectBinding) {
+      timer({ status: 'error', reason: 'image_project_unsupported' });
+      return new Response(
+        JSON.stringify({
+          error:
+            'Image generation does not use project repository context. Choose a chat model for this request.',
           requestId,
         }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
@@ -1870,9 +2009,9 @@ export async function POST(req: Request) {
       messages:
         messagesWithParts as z.infer<
           typeof ChatRequestSchema
-        >['messages'],
+      >['messages'],
       userId, provider: modelConfig.provider,
-      modelId, requestId, log
+      modelId, requestId, log, projectId: projectBinding?.projectId
     });
     if ('error' in convSetup) return convSetup.error;
     const { conversationId, conversationTitle, created: conversationCreated } =
@@ -1904,17 +2043,29 @@ export async function POST(req: Request) {
         ownerId: userId,
         conversationId,
       });
-    const attachmentTokenMappingSink =
-      attachmentRepositoryIds.length > 0
+    const repositoryTokenMappingSink =
+      attachmentRepositoryIds.length > 0 || projectBinding || skillId
         ? createTokenMappingSink()
         : undefined;
-    const attachmentTools = attachmentTokenMappingSink
+    const attachmentTools = repositoryTokenMappingSink
       ? createNexusAttachmentTools({
           repositoryIds: attachmentRepositoryIds,
           userCognitoSub: session.sub,
-          tokenMappingSink: attachmentTokenMappingSink,
+          tokenMappingSink: repositoryTokenMappingSink,
         })
       : {};
+    const projectTools =
+      repositoryTokenMappingSink && projectBinding
+        ? createNexusRepositorySearchTools({
+            repositoryIds: projectBinding.repositoryIds,
+            userCognitoSub: session.sub,
+            tokenMappingSink: repositoryTokenMappingSink,
+            toolName: "searchProjectRepositories",
+            description:
+              `Search the repositories connected to the Nexus project "${projectBinding.name}". ` +
+              "Use this before making project-specific claims and cite returned sources.",
+          })
+        : {};
     const { lightweightMessages } = await processMessagesWithAttachments(
       conversationId,
       messagesWithParts
@@ -1948,8 +2099,31 @@ export async function POST(req: Request) {
       skillId,
       log,
     });
-    const { scopedEnabledTools, effectiveConnectorToolResults, skillInstructions, skillName, skillAllowedTools } = skillBinding;
+    const {
+      scopedEnabledTools,
+      effectiveConnectorToolResults,
+      skillInstructions,
+      skillName,
+      skillAllowedTools,
+      skillRepositoryIds,
+    } = skillBinding;
     assertAutomaticToolsAvailable(routing.automaticToolNames, scopedEnabledTools);
+    const skillRepositoryTools =
+      repositoryTokenMappingSink && skillRepositoryIds.length > 0
+        ? createNexusRepositorySearchTools({
+            repositoryIds: skillRepositoryIds,
+            userCognitoSub: session.sub,
+            tokenMappingSink: repositoryTokenMappingSink,
+            toolName: "searchSkillRepositories",
+            description:
+              "Search the repositories bound to the loaded skill. Use current results before following repository-dependent skill instructions and cite returned sources.",
+          })
+        : {};
+    const repositoryTools: ToolSet = {
+      ...attachmentTools,
+      ...projectTools,
+      ...skillRepositoryTools,
+    };
 
     // 8c. Bind workspace content tools when a document/artifact is open beside the
     // chat (Atrium §1087). Server-built + canView/canEdit-gated; a bad/unviewable
@@ -1982,7 +2156,17 @@ export async function POST(req: Request) {
       skillName,
       workspaceTools,
       workspacePromptFragment,
-      attachmentTools,
+      attachmentTools: repositoryTools,
+      repositoryPromptFragment: [
+        projectBinding
+          ? `You are working in the Nexus project "${projectBinding.name}". Follow these project instructions for this conversation:\n\n${projectBinding.instructions || "(No additional instructions.)"}\n\nUse searchProjectRepositories for project repository questions.`
+          : null,
+        skillRepositoryIds.length > 0
+          ? "The loaded skill has repository bindings. Use searchSkillRepositories before applying repository-dependent instructions."
+          : null,
+      ]
+        .filter((value): value is string => value !== null)
+        .join("\n\n---\n\n") || undefined,
       reasoningEffort: validation.data.reasoningEffort || 'medium',
       responseMode: validation.data.responseMode || 'standard',
       requestId,
@@ -1990,7 +2174,7 @@ export async function POST(req: Request) {
       log,
       timer,
       precomputedInputTokenMappings,
-      inputTokenMappingSink: attachmentTokenMappingSink,
+      inputTokenMappingSink: repositoryTokenMappingSink,
       routingMetadata: routing.metadata,
     });
     } catch (turnError) {

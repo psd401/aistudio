@@ -533,5 +533,132 @@ class PeriodicPushLifecycleTests(unittest.TestCase):
             self.assertFalse(t1.is_alive(), "thread still alive immediately after stop_periodic_push() returned")
 
 
+class RestoreNeverClobbersTests(unittest.TestCase):
+    """The 2026-07-27 data-loss regression.
+
+    A restore that cannot faithfully reproduce S3 must NOT be followed by a
+    push. The original failure chain was:
+
+      restore raised (MAX_SYNC_FILES=1,000 vs a ~5,000-file workspace)
+        -> container kept the image's default IDENTITY.md / MEMORY.md
+        -> periodic push uploaded those defaults over the real files in S3
+        -> the agent lost its name and all memory
+
+    A failed READ became a destructive WRITE.
+    """
+
+    def test_backstops_sit_above_real_workspaces(self):
+        # Two live prefixes held ~5,000 objects when #1353 capped restore at
+        # 1,000 and push traversal at 4,000. Any backstop below real usage is
+        # a silent-truncation bug, not a safety feature.
+        self.assertGreaterEqual(workspace_sync.MAX_SYNC_FILES, 100_000)
+        self.assertGreaterEqual(workspace_sync.MAX_SYNC_ENTRIES, 100_000)
+
+    def test_incomplete_restore_raises_a_typed_error(self):
+        # The caller distinguishes "incomplete" from other failures so it can
+        # suppress the push specifically.
+        self.assertTrue(
+            issubclass(workspace_sync.WorkspaceRestoreIncomplete, RuntimeError)
+        )
+
+    def test_wrapper_gates_push_on_a_successful_restore(self):
+        # Asserted against the executable source: the push must be guarded by
+        # the hydration flag, not started unconditionally.
+        import re
+        src = open(
+            os.path.join(os.path.dirname(__file__), "agentcore_wrapper.py"),
+            encoding="utf-8",
+        ).read()
+        code = re.sub(r"#[^\n]*", "", src)
+        self.assertIn("_workspace_prefix_hydrated", code)
+        guarded = re.search(
+            r"if\s+workspace_prefix\s+and\s+_workspace_prefix_hydrated\s*:\s*\n"
+            r"\s*workspace_sync\.start_periodic_push",
+            code,
+        )
+        self.assertIsNotNone(
+            guarded,
+            "start_periodic_push must be gated on a successful restore — an "
+            "ungated push overwrites the remote workspace with image defaults",
+        )
+
+
+class RegenerableArtifactSkipTests(unittest.TestCase):
+    """Dependency trees are not memory and must not be synced.
+
+    A real workspace on 2026-07-27 held 4,989 objects, of which 3,886 (77.9%)
+    were a pip virtualenv inside ONE skill. The cold-start restore took 161.7s
+    before the agent could answer, while actual memory/ was 55 files.
+    """
+
+    def test_skips_regenerable_trees_at_any_depth(self):
+        # These appear MID-path, which the prefix list cannot express.
+        for rel in (
+            "skills/hagelk-morning-brief/.tts-venv/lib/python3.11/site-packages/pip/x.py",
+            "skills/foo/node_modules/left-pad/index.js",
+            "skills/foo/.venv/bin/python",
+            "skills/foo/venv/lib/thing.py",
+            "skills/foo/__pycache__/mod.cpython-311.pyc",
+            "workspace/.next/cache/blob",
+        ):
+            self.assertTrue(
+                workspace_sync._should_skip_relative(rel),
+                f"should skip regenerable path: {rel}",
+            )
+
+    def test_never_skips_memory_or_identity(self):
+        # The whole point of the sync. A false positive here is data loss.
+        for rel in (
+            "IDENTITY.md",
+            "MEMORY.md",
+            "USER.md",
+            "memory/2026-04-21.md",
+            "memory/main.sqlite",
+            "memory/.dreams/events.jsonl",
+            "skills/user/my-skill/SKILL.md",
+        ):
+            self.assertFalse(
+                workspace_sync._should_skip_relative(rel),
+                f"must NOT skip user-owned path: {rel}",
+            )
+
+    def test_does_not_skip_lookalike_names(self):
+        # Substring matching would wrongly catch these; segment matching does not.
+        for rel in (
+            "memory/venv-notes.md",
+            "notes/site-packages-comparison.md",
+            "memory/node_modules-explained.md",
+        ):
+            self.assertFalse(
+                workspace_sync._should_skip_relative(rel),
+                f"must NOT skip a file merely NAMED like a build dir: {rel}",
+            )
+
+    def test_visible_venv_suffix_does_not_swallow_authored_skills(self):
+        # skills/user/ is the agent's OWN scratch space. A visible directory
+        # that merely ends in "-venv" is an authored name, not a virtualenv,
+        # and skipping it would drop the skill from both pull and push.
+        for rel in (
+            "skills/user/hagelk-python-venv/SKILL.md",
+            "skills/user/build-a-venv/README.md",
+            "memory/how-to-venv/notes.md",
+        ):
+            self.assertFalse(
+                workspace_sync._should_skip_relative(rel),
+                f"must NOT skip a visible authored dir ending in -venv: {rel}",
+            )
+
+    def test_hidden_venv_suffix_is_still_skipped(self):
+        # The real-world form the skip exists for stays matched.
+        for rel in (
+            "skills/hagelk-morning-brief/.tts-venv/bin/python",
+            "skills/foo/.build-venv/lib/thing.py",
+        ):
+            self.assertTrue(
+                workspace_sync._should_skip_relative(rel),
+                f"should skip hidden virtualenv: {rel}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

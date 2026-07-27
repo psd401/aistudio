@@ -11,6 +11,13 @@
 #   - CDK stacks deployed (ECR repository must exist)
 #
 # The script reads the ECR repository URI from CloudFormation outputs.
+#
+# Build-time eval gate (#1161): the image must prove it boots and answers a real
+# turn before it is pushed. The runtime half needs a signed broker context; this
+# script mints one automatically when your AWS credentials allow it. If it
+# cannot, the build FAILS rather than pushing an unverified image — override
+# with ALLOW_UNVERIFIED_IMAGE=1 only when you accept that.
+# Full reference: docs/operations/agent-image-build-gate.md
 
 set -euo pipefail
 
@@ -135,35 +142,128 @@ docker build \
 # ---------------------------------------------------------------------------
 # Build-time eval gate (issue #1161): runtime boot probe + signed canary turn.
 # The image never receives a provider credential. A canary can run only when
-# the caller supplies the trusted web origin and a short-lived router-signed
-# invocation context. Otherwise the probe is skipped unless REQUIRE_PROBE_GATE
-# makes that a hard failure.
+# the caller supplies the trusted web origin plus a short-lived router-signed
+# invocation context AND its derived request-proof key — the web broker
+# (/api/agent/model-proxy) authorizes on all three, and agentcore_wrapper.py
+# refuses to install authority when either half of the pair is missing.
+#
+# Both halves are minted by scripts/agent-workspace/mint-agent-probe-context.ts
+# (`bun run agent:probe-context`), which signs with the same HMAC key the router
+# Lambda uses. This script auto-mints when the vars are unset and credentials
+# allow it, so the gate runs by default instead of quietly degrading.
+#
+# A skipped runtime probe is a HARD FAILURE unless ALLOW_UNVERIFIED_IMAGE=1 is
+# passed explicitly: "static gates passed" is not "the image boots", and an
+# unverified image reaching ECR is exactly the outcome #1161 exists to prevent.
 if [ "${SKIP_PROBE_GATE:-0}" = "1" ]; then
   echo ""
   echo "WARNING: SKIP_PROBE_GATE=1 — runtime boot/canary probe BYPASSED."
+  echo "         This image is NOT boot-verified. See docs/operations/agent-image-build-gate.md"
 else
   echo ""
   echo "=== Build-time eval gate (1161): runtime boot probe + canary turn ==="
   PROBE_APP_BASE_URL="${AGENT_PROBE_APP_BASE_URL:-}"
   PROBE_INVOCATION_CONTEXT="${AGENT_PROBE_INVOCATION_CONTEXT:-}"
+  PROBE_REQUEST_PROOF_KEY="${AGENT_PROBE_REQUEST_PROOF_KEY:-}"
 
   PROBE_DIR="${PROBE_ARTIFACT_DIR:-${SCRIPT_DIR}/.build-probes}"
   mkdir -p "${PROBE_DIR}"
   PROBE_ARTIFACT="${PROBE_DIR}/${TAG}.json"
 
-  if [ -z "${PROBE_APP_BASE_URL}" ] || [ -z "${PROBE_INVOCATION_CONTEXT}" ]; then
-    MSG="runtime probe SKIPPED — set AGENT_PROBE_APP_BASE_URL and a short-lived AGENT_PROBE_INVOCATION_CONTEXT. Static gates still enforced."
-    echo "WARNING: ${MSG}"
-    printf '{"tag":"%s","skipped":true,"reason":"missing_signed_broker_context"}\n' "${TAG}" > "${PROBE_ARTIFACT}"
+  # Auto-discovery 1: the broker origin. The router Lambda already holds the
+  # exact APP_BASE_URL the deployed agent brokers through, so read it from
+  # there rather than making every developer hardcode the environment's domain.
+  if [ -z "${PROBE_APP_BASE_URL}" ]; then
+    ROUTER_LAMBDA_ARN=$(aws cloudformation describe-stacks \
+      --stack-name "${STACK_NAME}" \
+      --query "Stacks[0].Outputs[?OutputKey=='RouterLambdaArn'].OutputValue" \
+      --output text --region "${REGION}" 2>/dev/null || echo "")
+    if [ -n "${ROUTER_LAMBDA_ARN}" ] && [ "${ROUTER_LAMBDA_ARN}" != "None" ]; then
+      PROBE_APP_BASE_URL=$(aws lambda get-function-configuration \
+        --function-name "${ROUTER_LAMBDA_ARN}" \
+        --query 'Environment.Variables.APP_BASE_URL' \
+        --output text --region "${REGION}" 2>/dev/null || echo "")
+      [ "${PROBE_APP_BASE_URL}" = "None" ] && PROBE_APP_BASE_URL=""
+      [ -n "${PROBE_APP_BASE_URL}" ] && \
+        echo "  Broker origin (from router Lambda): ${PROBE_APP_BASE_URL}"
+    fi
+  fi
+
+  # Auto-discovery 2: the signed context pair. Needs credentials that can read
+  # psd-agent/<env>/invocation-signing-key — a developer has them, the AgentCore
+  # execution role deliberately does not.
+  if [ -z "${PROBE_INVOCATION_CONTEXT}" ] || [ -z "${PROBE_REQUEST_PROOF_KEY}" ]; then
+    REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+    MINT_SCRIPT="${REPO_ROOT}/scripts/agent-workspace/mint-agent-probe-context.ts"
+    if command -v bun >/dev/null 2>&1 && [ -r "${MINT_SCRIPT}" ]; then
+      echo "  Minting a probe invocation context (bun run agent:probe-context)..."
+      MINT_JSON=$(ENVIRONMENT="${ENVIRONMENT}" AWS_REGION="${REGION}" \
+        bun run "${MINT_SCRIPT}" --json 2>&1) && MINT_STATUS=0 || MINT_STATUS=$?
+      if [ "${MINT_STATUS}" -eq 0 ]; then
+        # Parse tolerantly and on ONE line each: a non-JSON stdout (a bun
+        # notice, say) must fall through to the actionable message below, not
+        # abort the build via `set -e` on a failed command substitution.
+        MINT_PAIR=$(printf '%s' "${MINT_JSON}" | "${PYTHON}" -c '
+import json, sys
+try:
+    minted = json.loads(sys.stdin.read())
+    print(minted["invocationContext"])
+    print(minted["requestProofKey"])
+except Exception:
+    print(); print()' || printf '\n\n')
+        PROBE_INVOCATION_CONTEXT=$(printf '%s\n' "${MINT_PAIR}" | sed -n 1p)
+        PROBE_REQUEST_PROOF_KEY=$(printf '%s\n' "${MINT_PAIR}" | sed -n 2p)
+        [ -n "${PROBE_INVOCATION_CONTEXT}" ] && echo "  Minted a fresh probe context."
+      else
+        echo "  Could not mint a probe context automatically:"
+        printf '%s\n' "${MINT_JSON}" | tail -5 | sed 's/^/    /'
+      fi
+    else
+      echo "  Skipping auto-mint (bun or ${MINT_SCRIPT} unavailable)."
+    fi
+  fi
+
+  if [ -z "${PROBE_APP_BASE_URL}" ] || [ -z "${PROBE_INVOCATION_CONTEXT}" ] \
+     || [ -z "${PROBE_REQUEST_PROOF_KEY}" ]; then
+    MSG="runtime probe SKIPPED — no signed broker context, so the image is NOT boot-verified."
+    echo "WARNING: ${MSG}" >&2
+    echo "  To run the gate (see docs/operations/agent-image-build-gate.md):" >&2
+    echo "    eval \"\$(bun run --silent agent:probe-context)\"" >&2
+    echo "    export AGENT_PROBE_APP_BASE_URL=https://dev.<your-domain>" >&2
+    echo "    ./build-and-push.sh ${TAG}" >&2
+    echo "  To push an unverified image anyway, opt in explicitly:" >&2
+    echo "    ALLOW_UNVERIFIED_IMAGE=1 ./build-and-push.sh ${TAG}" >&2
+    printf '{"tag":"%s","skipped":true,"reason":"missing_signed_broker_context","allow_unverified":%s}\n' \
+      "${TAG}" "$([ "${ALLOW_UNVERIFIED_IMAGE:-0}" = "1" ] && echo true || echo false)" \
+      > "${PROBE_ARTIFACT}"
+    # REQUIRE_PROBE_GATE=1 (CI) outranks ALLOW_UNVERIFIED_IMAGE, so an
+    # inherited opt-in in the environment cannot weaken a pipeline.
     if [ "${REQUIRE_PROBE_GATE:-0}" = "1" ]; then
       echo "ERROR: REQUIRE_PROBE_GATE=1 but ${MSG}" >&2
       exit 1
     fi
+    if [ "${ALLOW_UNVERIFIED_IMAGE:-0}" != "1" ]; then
+      echo "ERROR: refusing to push an unverified image. ${MSG}" >&2
+      exit 1
+    fi
+    echo "WARNING: ALLOW_UNVERIFIED_IMAGE=1 — pushing without boot verification." >&2
     PROBE_RAN="false"
   else
     PROBE_RAN="true"
     PROBE_TIMEOUT="${PROBE_BOOT_TIMEOUT:-120}"
     CANARY_MESSAGE="${CANARY_MESSAGE:-Reply with exactly: OK}"
+    # The payload's user_email is identity metadata only — the broker derives
+    # the real owner from the signed claims. Read it back OUT of the token so
+    # the two can never disagree in logs, whoever minted the context.
+    CANARY_OWNER_EMAIL=$(printf '%s' "${PROBE_INVOCATION_CONTEXT}" | "${PYTHON}" -c '
+import base64, json, sys
+fallback = "canary@build-gate.invalid"
+try:
+    segment = sys.stdin.read().strip().split(".")[1]
+    claims = json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
+    print(claims.get("ownerEmail") or fallback)
+except Exception:
+    print(fallback)')
     CID=""
     # Always reap the probe container, even on failure/exit.
     cleanup_probe() { [ -n "${CID}" ] && docker rm -f "${CID}" >/dev/null 2>&1 || true; }
@@ -237,9 +337,14 @@ else
     # false-pass on the echoed "Reply with exactly: OK".
     echo "Canary turn: '${CANARY_MESSAGE}' (via /invocations)..."
     CANARY_TIMEOUT="${PROBE_CANARY_TIMEOUT:-120}"
+    # Both halves of the authority pair are mandatory: agentcore_wrapper.py's
+    # _install_invocation_authority() rejects the turn outright when either the
+    # signed context or its derived request-proof key is missing or malformed,
+    # and the web broker verifies a per-request signature made with that key.
     CANARY_PAYLOAD=$("${PYTHON}" -c \
-      'import json, sys; print(json.dumps({"prompt": sys.argv[1], "user_email": "canary@build-gate", "invocation_context": sys.argv[2]}))' \
-      "${CANARY_MESSAGE}" "${PROBE_INVOCATION_CONTEXT}")
+      'import json, sys; print(json.dumps({"prompt": sys.argv[1], "user_email": sys.argv[2], "invocation_context": sys.argv[3], "invocation_request_proof_key": sys.argv[4]}))' \
+      "${CANARY_MESSAGE}" "${CANARY_OWNER_EMAIL}" \
+      "${PROBE_INVOCATION_CONTEXT}" "${PROBE_REQUEST_PROOF_KEY}")
     CANARY_START=$(date +%s)
     CANARY_OUT=$(docker exec "${CID}" curl -sS -f -m "${CANARY_TIMEOUT}" \
       -X POST "http://127.0.0.1:8080/invocations" \
@@ -287,7 +392,10 @@ print(answer)')
   if [ "${PROBE_RAN}" = "true" ]; then
     echo "=== Eval gate PASSED — image is boot-verified and answers ==="
   else
-    echo "=== Eval gate PASSED (static checks only — runtime probe skipped; image NOT boot-verified) ==="
+    # Deliberately NOT the word "PASSED": the only way to reach this line is an
+    # explicit ALLOW_UNVERIFIED_IMAGE=1, and the banner must read as the waiver
+    # it is rather than as a green build.
+    echo "=== Eval gate WAIVED — static checks only; image NOT boot-verified ==="
   fi
   echo ""
 fi

@@ -235,6 +235,19 @@ export class AgentPlatformStack extends cdk.Stack {
           id: 'cleanup-private-workspace-versions',
           tagFilters: { Scope: 'private' },
           noncurrentVersionExpiration: cdk.Duration.days(30),
+          // NO abortIncompleteMultipartUploadAfter here. S3 rejects the
+          // combination outright — "AbortIncompleteMultipartUpload cannot be
+          // specified with Tags" — because an in-flight multipart upload has
+          // no object tags yet (tags are applied on completion), so a
+          // tag-filtered rule could never match one. CloudFormation surfaces
+          // this as an InvalidRequest that fails the whole stack update.
+        },
+        {
+          // Bucket-wide abort of abandoned multipart uploads, with no prefix
+          // or tag filter so it is a legal home for the action the rule above
+          // cannot carry. Keeps the cleanup intent that the tag-filtered rule
+          // was reaching for.
+          id: 'abort-abandoned-multipart-uploads',
           abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
         },
       ],
@@ -2896,16 +2909,61 @@ export class AgentPlatformStack extends cdk.Stack {
     // push subscription is configured to call). Setting this to the API URL
     // itself is the simplest correct value.
 
-    const gcpPubsubAudience = this.node.tryGetContext('gcpPubsubAudience') as string | undefined;
-    const gcpPubsubServiceAccountEmail = this.node.tryGetContext(
-      'gcpPubsubServiceAccountEmail',
-    ) as string | undefined;
-    const gcpPubsubServiceAccountSubject = this.node.tryGetContext(
-      'gcpPubsubServiceAccountSubject',
-    ) as string | undefined;
-    const gcpPubsubSubscription = this.node.tryGetContext(
-      'gcpPubsubSubscription',
-    ) as string | undefined;
+    // Resolution order: --context flag, then the per-environment defaults in
+    // cdk.json (chatIngress.<env>). The defaults exist because these four
+    // values GATE THE ROUTE'S EXISTENCE — see the guard below — so relying on
+    // an operator to remember four CLI flags means one forgotten flag deletes
+    // live ingress. They are identifiers, not secrets: an endpoint URL, a
+    // service-account email, that account's numeric OIDC subject, and a
+    // subscription path.
+    const chatIngressDefaults =
+      (this.node.tryGetContext('chatIngress') as
+        | Record<string, Record<string, string>>
+        | undefined)?.[environment] ?? {};
+    const fromContext = (key: string): string | undefined =>
+      (this.node.tryGetContext(key) as string | undefined) ?? chatIngressDefaults[key];
+
+    const gcpPubsubAudience = fromContext('gcpPubsubAudience');
+    const gcpPubsubServiceAccountEmail = fromContext('gcpPubsubServiceAccountEmail');
+    const gcpPubsubServiceAccountSubject = fromContext('gcpPubsubServiceAccountSubject');
+    const gcpPubsubSubscription = fromContext('gcpPubsubSubscription');
+
+    // FAIL LOUDLY ON A PARTIAL CONFIG.
+    //
+    // Every one of these four values is required before the /chat route,
+    // its integration, the JWT authorizer, and the Lambda invoke permission
+    // are synthesized. If some are present and others are not, the operator
+    // clearly INTENDS Chat ingress but is missing a value — and silently
+    // skipping the block would make CloudFormation DELETE those four live
+    // resources while reporting a successful deploy.
+    //
+    // That is not hypothetical. On 2026-07-27 a deploy carrying only
+    // `gcpPubsubAudience` (the documented flag at the time) deleted dev's
+    // route, integration, authorizer and Lambda permission. Google Pub/Sub
+    // kept POSTing into a routeless API — ~665 requests, all 5xx, ZERO Lambda
+    // invocations, so nothing appeared in any Lambda log and the agent simply
+    // went silent. Throwing here turns that into a failed deploy that names
+    // the missing values.
+    const chatIngressValues = {
+      gcpPubsubAudience,
+      gcpPubsubServiceAccountEmail,
+      gcpPubsubServiceAccountSubject,
+      gcpPubsubSubscription,
+    };
+    const missingChatIngress = Object.entries(chatIngressValues)
+      .filter(([, v]) => !v)
+      .map(([k]) => k);
+    if (missingChatIngress.length > 0 && missingChatIngress.length < 4) {
+      throw new Error(
+        `Google Chat ingress is partially configured for "${environment}": missing ` +
+          `${missingChatIngress.join(', ')}. Deploying now would DELETE the live ` +
+          `/chat route, its integration, the JWT authorizer and the Lambda invoke ` +
+          `permission, and the agent would stop receiving messages with no error ` +
+          `in any Lambda log. Add the missing --context values, or add them under ` +
+          `chatIngress.${environment} in infra/cdk.json. To intentionally stand up ` +
+          `an environment with NO Chat ingress, omit all four.`,
+      );
+    }
 
     const bridgeLogGroup = new logs.LogGroup(this, 'ChatBridgeLogGroup', {
       logGroupName: `/aws/lambda/psd-agent-chat-bridge-${environment}`,

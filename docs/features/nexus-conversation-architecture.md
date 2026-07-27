@@ -1,6 +1,6 @@
 # Nexus Conversation Architecture
 
-**Last Updated:** January 2025
+**Last Updated:** July 2026
 **Critical:** Read this before modifying conversation handling code
 
 ## Table of Contents
@@ -453,6 +453,29 @@ With cutover flags off, initiation returns `mode: "legacy"` before creating
 repository state and the established attachment processor remains the rollback
 path. See
 [Unified Repository Product Integration](./unified-repository-product-integration.md).
+
+---
+
+## Nexus Projects
+
+Project chats use the same stable runtime and conversation ownership rules.
+`/nexus/projects/{id}` creates the conversation server-side, then navigates to
+`/nexus?conversationId={conversationId}&projectId={projectId}`. The transport
+includes `projectId` in each request body; a resumed conversation may recover
+its persisted project id when the query parameter is absent.
+
+The server never trusts the URL binding. Before attachment preflight, routing,
+or message persistence it verifies both current project membership and that an
+existing conversation is owned by the caller and bound to the same project.
+Every turn reloads project instructions and filters connected repository ids
+through the executing member's current ACL. The private project repository is
+available through the member-specific grant created with membership. Project
+and skill searches use separate bounded tools and pass retrieved content through
+the same content-safety/PII mapping used by attachment retrieval.
+
+Image-generation and Deep Research paths reject project context because those
+special handlers cannot honor the required repository tool contract. See
+[Unified Content: Agents, Skills, and Nexus Projects](./unified-content-agents-and-projects.md).
 
 ---
 

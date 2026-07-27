@@ -84,8 +84,9 @@ export async function createConversation(params: {
   provider: string;
   modelId: string;
   title: string;
+  projectId?: string;
 }): Promise<{ conversationId: string } | { error: Response; requestId?: string }> {
-  const { userId, provider, modelId, title } = params;
+  const { userId, provider, modelId, title, projectId } = params;
 
   const sanitizedTitle = sanitizeTextForDatabase(title);
   const now = new Date();
@@ -94,6 +95,7 @@ export async function createConversation(params: {
     (db) => db.insert(nexusConversations)
       .values({
         userId,
+        projectId,
         provider,
         modelUsed: modelId,
         title: sanitizedTitle,

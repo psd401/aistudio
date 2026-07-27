@@ -16,6 +16,7 @@ import {
 import type { NexusConversationMetadata } from "@/lib/db/types/jsonb";
 import { users } from "./users";
 import { nexusFolders } from "./nexus-folders";
+import { nexusProjects } from "./nexus-projects";
 
 export const nexusConversations = pgTable(
   "nexus_conversations",
@@ -30,6 +31,9 @@ export const nexusConversations = pgTable(
     title: varchar("title", { length: 500 }),
     modelUsed: varchar("model_used", { length: 100 }),
     folderId: uuid("folder_id").references(() => nexusFolders.id),
+    projectId: uuid("project_id").references(() => nexusProjects.id, {
+      onDelete: "set null",
+    }),
     messageCount: integer("message_count").default(0),
     totalTokens: integer("total_tokens").default(0),
     lastMessageAt: timestamp("last_message_at").defaultNow(),

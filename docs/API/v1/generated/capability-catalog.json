@@ -1,9 +1,9 @@
 {
   "summary": {
-    "actions": 24,
+    "actions": 29,
     "features": 9,
-    "scopes": 25,
-    "agentInvocableActions": 17
+    "scopes": 29,
+    "agentInvocableActions": 22
   },
   "actions": [
     {
@@ -493,6 +493,136 @@
       "agentInvocable": true
     },
     {
+      "identifier": "repositories.describe",
+      "name": "repositories_describe",
+      "description": "Describe one durable repository if the authenticated user can currently access it.",
+      "surfaces": [
+        "mcp",
+        "internal",
+        "rest"
+      ],
+      "requiredScopes": [
+        "repositories:list"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "repositories:list"
+        ],
+        "internal": [
+          "repositories:list"
+        ],
+        "rest": [
+          "repositories:list"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "repositories.get_source",
+      "name": "repositories_get_source",
+      "description": "Get exact citation source segments from an authorized repository's active generation and current item version.",
+      "surfaces": [
+        "mcp",
+        "internal",
+        "rest"
+      ],
+      "requiredScopes": [
+        "repositories:read"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "repositories:read"
+        ],
+        "internal": [
+          "repositories:read"
+        ],
+        "rest": [
+          "repositories:read"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "repositories.list",
+      "name": "repositories_list",
+      "description": "List durable repositories the authenticated user can currently access.",
+      "surfaces": [
+        "mcp",
+        "internal",
+        "rest"
+      ],
+      "requiredScopes": [
+        "repositories:list"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "repositories:list"
+        ],
+        "internal": [
+          "repositories:list"
+        ],
+        "rest": [
+          "repositories:list"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "repositories.list_changes",
+      "name": "repositories_list_changes",
+      "description": "List item changes in authorized repositories using a stable opaque cursor.",
+      "surfaces": [
+        "mcp",
+        "internal",
+        "rest"
+      ],
+      "requiredScopes": [
+        "repositories:changes"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "repositories:changes"
+        ],
+        "internal": [
+          "repositories:changes"
+        ],
+        "rest": [
+          "repositories:changes"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "repositories.search",
+      "name": "repositories_search",
+      "description": "Search one or more authorized repositories using the active retrieval generation and live repository and segment ACLs.",
+      "surfaces": [
+        "mcp",
+        "internal",
+        "rest"
+      ],
+      "requiredScopes": [
+        "repositories:search"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "repositories:search"
+        ],
+        "internal": [
+          "repositories:search"
+        ],
+        "rest": [
+          "repositories:search"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": true
+    },
+    {
       "identifier": "web.fetch",
       "name": "web_fetch",
       "description": "Fetch a single public web page over HTTPS and return its readable text content (scripts, styles, and markup stripped). Use to read documentation, articles, or reference pages the user links to. Private/internal hosts are blocked.",
@@ -785,6 +915,38 @@
       "description": "Read the AI Studio capability catalog (actions, features, scopes)",
       "roles": [
         "student",
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "repositories:changes",
+      "description": "Read authorized repository change feeds",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "repositories:list",
+      "description": "List and describe repositories the caller can access",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "repositories:read",
+      "description": "Read authorized repository source segments and citations",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "repositories:search",
+      "description": "Search authorized repositories",
+      "roles": [
         "staff",
         "administrator"
       ]

@@ -190,6 +190,8 @@ try {
       "DATABASE_HOST=database.invalid",
       "-e",
       "DATABASE_SECRET_ARN=arn:aws:secretsmanager:us-east-1:123456789012:secret:artifact-smoke",
+      "-e",
+      "ENVIRONMENT=artifact-smoke",
       "-v",
       `${assetDirectory}:/var/task:ro`,
       "-v",

@@ -47,6 +47,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
+import { MigrationControlPanel } from "./migration-control-panel"
 
 export function RepositoriesAdminClient() {
   const router = useRouter()
@@ -115,6 +116,7 @@ export function RepositoriesAdminClient() {
           View and manage all knowledge repositories across the platform
         </p>
       </div>
+      <MigrationControlPanel />
       <Card>
         <CardContent className="pt-6">
           <div className="rounded-md border">

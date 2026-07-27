@@ -175,6 +175,7 @@ mcp__awslabs_postgres-mcp-server__run_query
 - Use `DATABASE_URL` for local dev (set in .env.local)
 - Use `DB_HOST/DB_USER/DB_PASSWORD` for ECS (auto-injected from Secrets Manager)
 - Connection pool auto-manages connections (max: 20 per container)
+- Bounded DB waits + wedged-pool self-heal: `DB_STATEMENT_TIMEOUT_MS` (60s dev / off prod), `DB_QUERY_DEADLINE_MS` (90s), `DB_TX_DEADLINE_MS` (300s); per-call `deadlineMs` override — see `docs/database/drizzle-patterns.md` (Timeouts section)
 - Graceful shutdown: Handled automatically via `instrumentation.ts`
 - Connection warmup: Pools are pre-initialized on server startup
 

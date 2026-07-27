@@ -84,10 +84,18 @@ RUN apk add --no-cache curl su-exec libc6-compat
 # AgentCore image has no raw binary or OAuth token; requests arrive here through
 # the owner-bound /api/agent/workspace-execute policy broker.
 ARG GWS_VERSION=0.22.5
-ARG GWS_SHA256=94490295d9580e1e88574e715a0a162991747d12d62f8c7b8dcc8268b6c1cea0
+# MUSL build, not gnu. This stage is node:22-alpine, so the glibc artifact
+# installs fine and then dies at first exec with
+# "Error relocating /usr/local/bin/gws: __res_init: symbol not found" —
+# gcompat does not implement glibc's resolver symbols. Because the RUN ends in
+# `gws --version`, that failure surfaces at BUILD time, which is the one good
+# thing about it. When bumping the version, take the digest from the MUSL
+# sidecar:
+#   curl -sL "https://github.com/googleworkspace/cli/releases/download/v<VER>/google-workspace-cli-aarch64-unknown-linux-musl.tar.gz.sha256"
+ARG GWS_SHA256=e700fe63524932b10ec2130b47ece90aa850e66005fe52ccfc4cf8767bf9919a
 RUN set -eux; \
     curl -fsSL -o /tmp/gws.tar.gz \
-      "https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz"; \
+      "https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/google-workspace-cli-aarch64-unknown-linux-musl.tar.gz"; \
     echo "${GWS_SHA256}  /tmp/gws.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/gws.tar.gz -C /tmp ./gws; \
     install -m 0755 /tmp/gws /usr/local/bin/gws; \

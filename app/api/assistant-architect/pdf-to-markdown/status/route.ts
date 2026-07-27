@@ -3,6 +3,7 @@ import { getServerSession } from '@/lib/auth/server-session'
 import { getGenericJobById, getGenericJobByIdForUser } from '@/lib/db/drizzle'
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action'
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
+import { legacyContentRetirementResponse } from "@/lib/repositories/content-platform/legacy-retirement-response"
 
 export async function GET(req: NextRequest) {
   const requestId = generateRequestId();
@@ -29,6 +30,12 @@ export async function GET(req: NextRequest) {
     log.warn("User not found");
     timer({ status: "error", reason: "user_not_found" });
     return new NextResponse(JSON.stringify({ error: 'User not found' }), { status: 401, headers });
+  }
+
+  const retired = await legacyContentRetirementResponse()
+  if (retired) {
+    timer({ status: "success", reason: "legacy_retired" })
+    return retired
   }
 
   const { searchParams } = new URL(req.url);

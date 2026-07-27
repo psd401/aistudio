@@ -28,6 +28,11 @@ jest.mock("@/lib/agent-workspace/secrets-manager", () => ({
   getSecretString: getSecretStringMock,
 }))
 jest.mock("@/lib/resource-admission", () => ({
+  // Real implementation — the capacity-vs-replay split is behaviour under test:
+  // `duplicate` must stay a hard refusal while capacity thresholds are
+  // observe-only.
+  isCapacityDenial: (admission: { allowed: boolean; reason?: string }) =>
+    !admission.allowed && admission.reason !== "duplicate",
   acquireResourceAdmission: (...args: unknown[]) =>
     acquireAdmissionMock(...args),
   finishResourceAdmission: (...args: unknown[]) =>
@@ -214,6 +219,154 @@ describe("Agent model credential broker", () => {
         units: requestBytes + 1_024,
       }),
     )
+  })
+
+  /** The JSON actually dispatched upstream, as a string. */
+  const forwardedBody = (): string => {
+    const call = fetchMock.mock.calls[0]
+    if (!call) throw new Error("fetch was never called")
+    const init = call[1] as { body?: unknown } | undefined
+    if (!init?.body) throw new Error("fetch was called without a body")
+    return Buffer.from(init.body as Buffer).toString("utf8")
+  }
+
+  it("supplies anthropic_version, which Bedrock requires in the BODY", async () => {
+    // Bedrock's Anthropic-compatible endpoint requires `anthropic_version` as
+    // a body field. The native Anthropic API instead uses an
+    // `anthropic-version` HEADER, so an Anthropic-Messages client that is
+    // correct against api.anthropic.com omits the body field and Bedrock
+    // rejects EVERY call with:
+    //   {"type":"invalid_request_error","message":"anthropic_version: Field required"}
+    // That is what took the dev agent down on 2026-07-27 — this proxy path was
+    // one day old and had never completed a single successful turn.
+    await POST(
+      request({
+        model: "us.anthropic.claude-sonnet-5",
+        max_tokens: 1_024,
+        messages: [{ role: "user", content: "hello" }],
+      }) as never,
+      { params: Promise.resolve({ path: ["anthropic", "v1", "messages"] }) },
+    )
+
+    const forwarded = JSON.parse(forwardedBody())
+    expect(forwarded.anthropic_version).toBe("bedrock-2023-05-31")
+    // The rest of the request must survive untouched.
+    expect(forwarded.model).toBe("us.anthropic.claude-sonnet-5")
+    expect(forwarded.max_tokens).toBe(1_024)
+    expect(forwarded.messages).toEqual([{ role: "user", content: "hello" }])
+  })
+
+  it("does not overwrite an anthropic_version the client already set", async () => {
+    await POST(
+      request({
+        model: "us.anthropic.claude-sonnet-5",
+        max_tokens: 1_024,
+        anthropic_version: "bedrock-2099-01-01",
+        messages: [{ role: "user", content: "hello" }],
+      }) as never,
+      { params: Promise.resolve({ path: ["anthropic", "v1", "messages"] }) },
+    )
+
+    const forwarded = JSON.parse(forwardedBody())
+    expect(forwarded.anthropic_version).toBe("bedrock-2099-01-01")
+  })
+
+  it("serves the request when the token/cost budget is over threshold", async () => {
+    // OBSERVE-ONLY. These limits were added in #1353 calibrated as if one
+    // model call per turn; an agentic turn makes many, each re-sending the
+    // whole context, so a single conversation could exhaust the hourly cap and
+    // the user got "I couldn't complete that" with no explanation. Until we
+    // know what normal consumption looks like, over-limit must MEASURE, never
+    // reject.
+    // beforeEach queues mockResolvedValueOnce values that would otherwise
+    // take priority over this override and make the test vacuous.
+    acquireAdmissionMock.mockReset()
+    acquireAdmissionMock.mockImplementation((req: unknown) => {
+      const kind = (req as { kind: string }).kind
+      if (kind === "model-proxy-total-tokens" || kind === "model-proxy-cost-microcents") {
+        return Promise.resolve({ allowed: false, reason: "owner_hourly_units" })
+      }
+      return Promise.resolve({ allowed: true, leaseId: `lease-${kind}`, reservedUnits: 1 })
+    })
+
+    const response = await POST(
+      request({
+        model: "us.anthropic.claude-sonnet-5",
+        max_tokens: 1_024,
+        messages: [{ role: "user", content: "hello" }],
+      }) as never,
+      { params: Promise.resolve({ path: ["anthropic", "v1", "messages"] }) },
+    )
+
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalled()
+    // Only the granted lease may be settled — a denial carries no leaseId.
+    const settled = finishAdmissionMock.mock.calls.map((c) => c[0])
+    expect(settled).not.toContain(undefined)
+  })
+
+  it("serves the request when the call-rate limit is over threshold", async () => {
+    // beforeEach queues mockResolvedValueOnce values that would otherwise
+    // take priority over this override and make the test vacuous.
+    acquireAdmissionMock.mockReset()
+    acquireAdmissionMock.mockImplementation((req: unknown) => {
+      const kind = (req as { kind: string }).kind
+      if (kind === "model-proxy-call") {
+        return Promise.resolve({ allowed: false, reason: "owner_hourly_units" })
+      }
+      return Promise.resolve({ allowed: true, leaseId: `lease-${kind}`, reservedUnits: 1 })
+    })
+
+    const response = await POST(
+      request({
+        model: "us.anthropic.claude-sonnet-5",
+        max_tokens: 1_024,
+        messages: [{ role: "user", content: "hello" }],
+      }) as never,
+      { params: Promise.resolve({ path: ["anthropic", "v1", "messages"] }) },
+    )
+
+    expect(response.status).toBe(200)
+  })
+
+  it("never answers 429 for a budget or capacity threshold", async () => {
+    // The contract in one line: thresholds are telemetry, not a gate.
+    // beforeEach queues mockResolvedValueOnce values that would otherwise
+    // take priority over this override and make the test vacuous.
+    acquireAdmissionMock.mockReset()
+    acquireAdmissionMock.mockResolvedValue({ allowed: false, reason: "owner_hourly_units" })
+
+    const response = await POST(
+      request({
+        model: "us.anthropic.claude-sonnet-5",
+        max_tokens: 1_024,
+        messages: [{ role: "user", content: "hello" }],
+      }) as never,
+      { params: Promise.resolve({ path: ["anthropic", "v1", "messages"] }) },
+    )
+
+    expect(response.status).not.toBe(429)
+    expect(response.status).toBe(200)
+  })
+
+  it("still REFUSES a duplicate — that is a replay guard, not a budget", async () => {
+    // The observe-only change must not disable idempotency. `duplicate` means
+    // the same key was already admitted; serving it would double-apply the
+    // request.
+    acquireAdmissionMock.mockReset()
+    acquireAdmissionMock.mockResolvedValue({ allowed: false, reason: "duplicate" })
+
+    const response = await POST(
+      request({
+        model: "us.anthropic.claude-sonnet-5",
+        max_tokens: 1_024,
+        messages: [{ role: "user", content: "hello" }],
+      }) as never,
+      { params: Promise.resolve({ path: ["anthropic", "v1", "messages"] }) },
+    )
+
+    expect(response.status).toBe(409)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it("retains conservative reservations after an ambiguous dispatch failure", async () => {

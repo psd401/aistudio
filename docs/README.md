@@ -152,6 +152,9 @@ ECS streaming infrastructure operations and monitoring.
 #### [operations/production-migration-checklist.md](./operations/production-migration-checklist.md)
 Comprehensive checklist for deploying to production.
 
+#### [operations/unified-content-migration-retirement.md](./operations/unified-content-migration-retirement.md)
+Inventory, backfill, reconciliation, cutover, rollback, and legacy-content retirement runbook.
+
 #### [operations/tool-management.md](./operations/tool-management.md)
 Managing Assistant Architect tools and permissions.
 
@@ -173,6 +176,8 @@ AI integration patterns using Vercel AI SDK v6, provider factory implementation,
 **[Assistant Architect model routing](./features/assistant-architect-model-routing.md)** — Standard/Advanced authoring, shared capability-aware tier routing, legacy compatibility, execution surfaces, and independent rollout controls.
 
 **[Unified repository product integration](./features/unified-repository-product-integration.md)** — Authoritative Repository Manager source/ACL/version UI, Assistant Architect repository-only knowledge, Nexus private ephemeral attachments, promotion, retention, and rollback boundaries.
+
+**[Unified content agents and Projects](./features/unified-content-agents-and-projects.md)** — Repository catalog MCP/REST scopes, per-user OpenClaw PKCE OAuth, live skill repository bindings, and durable Nexus Project membership/repository/chat boundaries.
 
 **[Google Workspace content synchronization](./features/google-workspace-content-sync.md)** — PKCE OAuth and Picker selection across My Drive and user-accessible Shared Drives, durable cursor/version reconciliation, deployment-owned configuration, deletion grace, and operations.
 

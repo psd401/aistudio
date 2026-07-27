@@ -579,8 +579,9 @@ export async function updateUser(
 
         // Delete+insert lives in the shared helper — this logic was
         // copy-pasted across three call sites and drifted once already
-        // (#1222 review). Managed (source='group-sync') rows stay invisible
-        // to this editor: never deleted, never re-inserted as 'manual'.
+        // (#1222 review). Managed (source='group-sync' or 'oneroster') rows
+        // stay invisible to this editor: never deleted, never re-inserted as
+        // 'manual'.
         const submittedRoleIds = roleList.map((role) => role.id)
         await syncManualUserRoles(tx, userId, submittedRoleIds)
 

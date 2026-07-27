@@ -63,6 +63,10 @@ const PLATFORM_SCOPES = Object.keys(API_SCOPES).filter((s) =>
   s.startsWith("platform:")
 )
 
+const REPOSITORY_SCOPES = Object.keys(API_SCOPES).filter((s) =>
+  s.startsWith("repositories:")
+)
+
 /**
  * Scopes granted for the AI Studio API resource server. Standard OIDC scopes
  * must remain in the OIDC grant portion and must not be duplicated as API
@@ -72,6 +76,7 @@ export const RESOURCE_SERVER_SCOPES = [
   ...MCP_SCOPES,
   ...CONTENT_SCOPES,
   ...PLATFORM_SCOPES,
+  ...REPOSITORY_SCOPES,
 ]
 
 /**

@@ -76,6 +76,8 @@ interface ConversationRuntimeProviderProps {
   routingMode: NexusExperienceMode
   modelFamily: NexusModelFamily
   skillId?: string
+  /** Nexus Project binding; server verifies membership and conversation linkage. */
+  projectId?: string
   /** The open workspace object id/slug (`?workspace=`); binds §1087 content tools server-side. */
   workspaceId?: string
   attachmentAdapter: AttachmentAdapter
@@ -100,6 +102,7 @@ function ConversationRuntimeProvider({
   routingMode,
   modelFamily,
   skillId,
+  projectId,
   workspaceId,
   attachmentAdapter,
   voiceAdapter,
@@ -348,6 +351,7 @@ function ConversationRuntimeProvider({
           enabledConnectors,
           // Bind the session to a skill so the server enforces its allowed-tools pin (#925).
           skillId,
+          projectId,
           // Bind the open workspace object so the server offers §1087 read/edit tools.
           workspaceId: workspaceIdRef.current || undefined,
           conversationId: conversationIdRef.current || undefined,
@@ -386,6 +390,7 @@ interface NexusRuntimeWrapperProps {
   onRoutingModeChange: (mode: NexusExperienceMode) => void
   onModelFamilyChange: (family: NexusModelFamily) => void
   skillId?: string
+  projectId?: string
   /** Open workspace object id/slug (`?workspace=`); passed to the runtime for §1087 tools. */
   workspaceId?: string
   attachmentAdapter: AttachmentAdapter
@@ -410,6 +415,7 @@ function NexusRuntimeWrapper({
   onRoutingModeChange,
   onModelFamilyChange,
   skillId,
+  projectId,
   workspaceId,
   attachmentAdapter,
   voiceAvailable,
@@ -492,6 +498,7 @@ function NexusRuntimeWrapper({
       routingMode={routingMode}
       modelFamily={modelFamily}
       skillId={skillId}
+      projectId={projectId}
       workspaceId={workspaceId}
       attachmentAdapter={attachmentAdapter}
       voiceAdapter={voiceAdapter}
@@ -616,6 +623,11 @@ function NexusPageContent() {
   // session is bound to the skill so the server enforces its allowed-tools pin.
   const urlSkillId = useMemo(() => {
     const raw = searchParams.get('skillId')
+    return raw && uuidSchema.safeParse(raw).success ? raw : undefined
+  }, [searchParams])
+
+  const urlProjectId = useMemo(() => {
+    const raw = searchParams.get('projectId')
     return raw && uuidSchema.safeParse(raw).success ? raw : undefined
   }, [searchParams])
 
@@ -1008,6 +1020,7 @@ function NexusPageContent() {
                           onRoutingModeChange={handleRoutingModeChange}
                           onModelFamilyChange={handleModelFamilyChange}
                           skillId={urlSkillId}
+                          projectId={urlProjectId}
                           workspaceId={urlWorkspaceId ?? undefined}
                           attachmentAdapter={attachmentAdapter}
                           voiceAvailable={voiceAvailability.available}

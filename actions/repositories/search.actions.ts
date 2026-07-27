@@ -20,8 +20,9 @@ import { hasCapabilityAccess } from "@/utils/roles"
 import { assertRepositoryReadAccess } from "@/lib/repositories/repository-access-guard"
 import {
   getContentPlatformConfig,
-  isContentReadV2Active,
+  isCanonicalRepositoryUploadActive,
 } from "@/lib/repositories/content-platform/config"
+import { recordRepositoryRetrievalShadow } from "@/lib/repositories/content-platform/retrieval-shadow"
 
 export interface SearchRepositoryParams {
   query: string
@@ -139,9 +140,9 @@ export async function searchRepository(
       queryPreview: query.substring(0, 50) // First 50 chars of query
     })
 
-    const canonicalOnly = isContentReadV2Active(
-      await getContentPlatformConfig()
-    )
+    const contentConfig = await getContentPlatformConfig()
+    const canonicalOnly =
+      isCanonicalRepositoryUploadActive(contentConfig)
     const retrieval = canonicalOnly
       ? await retrieveRepositoryContent({
           query,
@@ -150,8 +151,10 @@ export async function searchRepository(
           mode: searchType,
           limit: safeLimit,
           denseWeight: safeVectorWeight,
+          includeLegacyCompatibility: false,
         })
       : null
+    const legacyStartedAt = Date.now()
     const results = retrieval
       ? retrieval.results.map(toLegacySearchResult)
       : await dispatchSearch(
@@ -162,6 +165,45 @@ export async function searchRepository(
           safeVectorWeight,
           canonicalOnly
         )
+    const legacyDurationMs = Date.now() - legacyStartedAt
+
+    if (
+      contentConfig.enabled &&
+      contentConfig.readV2Enabled &&
+      contentConfig.retrievalShadowEnabled &&
+      !canonicalOnly
+    ) {
+      const canonicalStartedAt = Date.now()
+      try {
+        const canonicalShadow = await retrieveRepositoryContent({
+          query,
+          repositoryIds: [repositoryId],
+          userCognitoSub: session.sub,
+          mode: searchType,
+          limit: safeLimit,
+          denseWeight: safeVectorWeight,
+          includeLegacyCompatibility: false,
+        })
+        await recordRepositoryRetrievalShadow({
+          repositoryId,
+          product: "repository_manager",
+          searchMode: searchType,
+          legacyItemIds: results.map((result) => result.itemId),
+          canonicalItemIds: canonicalShadow.results.map(
+            (result) => result.itemId
+          ),
+          legacyDurationMs,
+          canonicalDurationMs: Date.now() - canonicalStartedAt,
+        })
+      } catch (shadowError) {
+        log.warn("Canonical retrieval shadow failed without affecting legacy search", {
+          error:
+            shadowError instanceof Error
+              ? shadowError.message
+              : String(shadowError),
+        })
+      }
+    }
 
     log.info("Search completed successfully", {
       repositoryId,

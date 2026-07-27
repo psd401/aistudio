@@ -25,8 +25,12 @@ import { workspaceUploadReservations } from "@/lib/db/schema"
 import {
   acquireResourceAdmission,
   finishResourceAdmission,
+  isCapacityDenial,
   releaseResourceAdmission,
 } from "@/lib/resource-admission"
+import { createLogger } from "@/lib/logger"
+
+const log = createLogger({ module: "workspace-storage-broker" })
 
 const MAX_RELATIVE_PATH_LENGTH = 768
 const MAX_LIST_KEYS = 1_000
@@ -178,7 +182,7 @@ async function reserveUpload(params: {
   contextKey: string
   idempotencyKey: string
   contentLength: number
-}): Promise<readonly [string, string]> {
+}): Promise<readonly [string | null, string | null]> {
   const prefix = params.publicArtifact ? "public" : "private"
   const byteAdmission = await acquireResourceAdmission({
     kind: `workspace-${prefix}-upload-bytes`,
@@ -188,8 +192,23 @@ async function reserveUpload(params: {
     units: params.contentLength,
     limits: params.publicArtifact ? PUBLIC_BYTE_LIMITS : PRIVATE_BYTE_LIMITS,
   })
-  if (!byteAdmission.allowed) {
+  // OBSERVE-ONLY (2026-07-27, Hagel). These thresholds were set in #1353
+  // without data on real usage; crossing one is measured and logged, never a
+  // refusal. NOTE this is a STORAGE bound, not a rate limit — if unbounded
+  // growth becomes a problem the answer is a limit set from these numbers,
+  // not a silent throw at the user.
+  if (!byteAdmission.allowed && !isCapacityDenial(byteAdmission)) {
+    // `duplicate` = replay of an idempotency key. Still a hard failure: a
+    // second reservation for the same upload must not be created.
     throw new WorkspaceStorageAdmissionError(byteAdmission.reason)
+  }
+  if (!byteAdmission.allowed) {
+    log.warn("Workspace upload bytes over threshold (observe-only — upload allowed)", {
+      ownerEmail: params.ownerEmail,
+      contextKey: params.contextKey,
+      contentLength: params.contentLength,
+      reason: byteAdmission.reason,
+    })
   }
   const objectAdmission = await acquireResourceAdmission({
     kind: `workspace-${prefix}-upload-objects`,
@@ -199,11 +218,23 @@ async function reserveUpload(params: {
     units: 1,
     limits: params.publicArtifact ? PUBLIC_OBJECT_LIMITS : PRIVATE_OBJECT_LIMITS,
   })
-  if (!objectAdmission.allowed) {
-    await releaseResourceAdmission(byteAdmission.leaseId)
+  if (!objectAdmission.allowed && !isCapacityDenial(objectAdmission)) {
+    if (byteAdmission.allowed) await releaseResourceAdmission(byteAdmission.leaseId)
     throw new WorkspaceStorageAdmissionError(objectAdmission.reason)
   }
-  return [byteAdmission.leaseId, objectAdmission.leaseId]
+  if (!objectAdmission.allowed) {
+    log.warn("Workspace upload objects over threshold (observe-only — upload allowed)", {
+      ownerEmail: params.ownerEmail,
+      contextKey: params.contextKey,
+      reason: objectAdmission.reason,
+    })
+  }
+  // A denial carries no leaseId. Positions are preserved (byte, then object)
+  // because they are persisted into distinct columns.
+  return [
+    byteAdmission.allowed ? byteAdmission.leaseId : null,
+    objectAdmission.allowed ? objectAdmission.leaseId : null,
+  ]
 }
 
 function expectedChecksum(value: string): string {
@@ -328,6 +359,18 @@ async function reconcileExpiredPublicReservations(
   }
 }
 
+/**
+ * Settle/release helpers that tolerate a NULL lease.
+ *
+ * Since migration 154 an upload may be admitted with no lease (the admission
+ * gates are observe-only), so reconciliation must treat NULL as "nothing to
+ * settle" rather than passing it downstream.
+ */
+const settleLease = (leaseId: string | null, units?: number) =>
+  leaseId ? finishResourceAdmission(leaseId, units) : Promise.resolve()
+const dropLease = (leaseId: string | null) =>
+  leaseId ? releaseResourceAdmission(leaseId) : Promise.resolve()
+
 function publicUrl(bucket: string, key: string): string {
   const region = process.env.AWS_REGION || "us-east-1"
   const encodedKey = key.split("/").map(encodeURIComponent).join("/")
@@ -343,7 +386,7 @@ async function createUploadReservation(params: {
   expectedBytes: number
   checksumSha256: string
   contentType: string
-  leaseIds: readonly [string, string]
+  leaseIds: readonly [string | null, string | null]
 }): Promise<{ id: string; stagingKey: string }> {
   const ownerKey = params.ownerEmail.trim().toLowerCase()
   const id = randomUUID()
@@ -395,8 +438,23 @@ async function createUploadReservation(params: {
           params.expectedBytes,
           params.publicArtifact,
         )
+        // OBSERVE-ONLY (2026-07-27, Hagel). This is the RETAINED-storage
+        // quota — total bytes/objects an owner keeps, not a request rate.
+        // It is the one gate here with a genuine unbounded-growth risk, so
+        // the log line is deliberately loud enough to alarm on: if S3 spend
+        // starts climbing, this is the signal, and the limit should be reset
+        // from these numbers rather than reinstated blind.
         if (quotaReason) {
-          throw new WorkspaceStorageAdmissionError(quotaReason)
+          log.warn(
+            "Workspace retained-storage quota over threshold (observe-only — upload allowed)",
+            {
+              ownerKey,
+              contextKey: params.contextKey,
+              expectedBytes: params.expectedBytes,
+              publicArtifact: params.publicArtifact,
+              reason: quotaReason,
+            },
+          )
         }
         await tx.insert(workspaceUploadReservations).values({
           id,
@@ -418,7 +476,9 @@ async function createUploadReservation(params: {
       "createWorkspaceUploadReservation",
     )
   } catch (error) {
-    await Promise.all(params.leaseIds.map(releaseResourceAdmission))
+    await Promise.all(
+      params.leaseIds.filter((id): id is string => id !== null).map(releaseResourceAdmission),
+    )
     throw error
   }
 }
@@ -812,7 +872,9 @@ export async function createWorkspaceUploadUrl(
           .where(eq(workspaceUploadReservations.id, reservation.id)),
       "rejectWorkspaceUploadSigning",
     )
-    await Promise.all(leaseIds.map(releaseResourceAdmission))
+    await Promise.all(
+      leaseIds.filter((id): id is string => id !== null).map(releaseResourceAdmission),
+    )
     throw error
   }
 }
@@ -898,7 +960,9 @@ export async function createPublicArtifactUpload(
           .where(eq(workspaceUploadReservations.id, reservation.id)),
       "rejectPublicUploadSigning",
     )
-    await Promise.all(leaseIds.map(releaseResourceAdmission))
+    await Promise.all(
+      leaseIds.filter((id): id is string => id !== null).map(releaseResourceAdmission),
+    )
     throw error
   }
 }
@@ -944,11 +1008,8 @@ export async function completeWorkspaceUpload(
     )
     if (existing?.status === "committed") {
       await Promise.allSettled([
-        finishResourceAdmission(
-          existing.byteLeaseId,
-          existing.expectedBytes,
-        ),
-        finishResourceAdmission(existing.objectLeaseId, 1),
+        settleLease(existing.byteLeaseId, existing.expectedBytes),
+        settleLease(existing.objectLeaseId, 1),
       ])
       return {
         key: existing.targetKey,
@@ -1058,8 +1119,8 @@ export async function completeWorkspaceUpload(
     }
     settled = true
     await Promise.allSettled([
-      finishResourceAdmission(claimed.byteLeaseId, claimed.expectedBytes),
-      finishResourceAdmission(claimed.objectLeaseId, 1),
+      settleLease(claimed.byteLeaseId, claimed.expectedBytes),
+      settleLease(claimed.objectLeaseId, 1),
     ])
     for (const prior of priorVersions) {
       if (!prior.objectVersionId) continue
@@ -1143,8 +1204,8 @@ export async function completeWorkspaceUpload(
       "rejectWorkspaceUploadCompletion",
     )
     await Promise.all([
-      releaseResourceAdmission(claimed.byteLeaseId),
-      releaseResourceAdmission(claimed.objectLeaseId),
+      dropLease(claimed.byteLeaseId),
+      dropLease(claimed.objectLeaseId),
     ])
     throw error
   }

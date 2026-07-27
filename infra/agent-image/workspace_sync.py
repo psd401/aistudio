@@ -49,15 +49,43 @@ from typing import Optional
 
 logger = logging.getLogger("workspace_sync")
 
+class WorkspaceRestoreIncomplete(RuntimeError):
+    """Restore did not faithfully reproduce S3.
+
+    The caller MUST NOT start the periodic push after this: the local tree is
+    missing files that still exist remotely, and pushing would delete or
+    overwrite them with image defaults.
+    """
+
+
 WORKSPACE_DIR = Path("/home/node/.openclaw")
-MAX_SYNC_FILE_BYTES = 64 * 1024 * 1024
-MAX_SYNC_TOTAL_BYTES = 256 * 1024 * 1024
-MAX_SYNC_FILES = 1_000
+# All of these are runaway-traversal BACKSTOPS, not product limits. #1353 set
+# them below real-world workspace sizes and the sync path treated hitting one
+# as a fatal error, which on 2026-07-27 destroyed a user's agent memory:
+# restore raised -> container kept image defaults -> periodic push wrote those
+# defaults over the real files in S3.
+#
+# Sizes now sit far above any plausible workspace, and — more importantly —
+# hitting one can no longer fail a restore. See pull_workspace().
+MAX_SYNC_FILE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_SYNC_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
+# Raised from 1,000 (#1353) after that cap silently destroyed a user's agent
+# memory on 2026-07-27. Real workspaces already exceed it: two of the 38 live
+# prefixes hold ~5,000 objects each. The cap is a runaway-traversal backstop,
+# not a product limit, so it sits far above any plausible workspace.
+#
+# CRITICAL: a restore must NEVER fail because of this number. Restoring FEWER
+# files than exist is a silent-corruption bug — the agent boots with image
+# defaults and the periodic push then writes those defaults over the real
+# files in S3. See pull_workspace() and start_periodic_push().
+MAX_SYNC_FILES = 250_000
 # Count every directory entry, including directories, symlinks, sockets, and
 # other unsafe objects.  A model-controlled tree must not turn the privileged
 # final flush into an unbounded traversal even when none of those entries are
 # eligible for upload.
-MAX_SYNC_ENTRIES = 4_000
+# Was 4,000 — below live workspaces (two prefixes hold ~5,000 objects), so the
+# PUSH silently truncated and never uploaded the tail of a user's workspace.
+MAX_SYNC_ENTRIES = 250_000
 MAX_SYNC_DEPTH = 64
 SYNC_WORKERS = 4
 TRANSFER_CHUNK_BYTES = 64 * 1024
@@ -258,6 +286,45 @@ _SKIP_RELATIVE_PREFIXES = (
 # Filename suffixes that are always runtime cruft (socket files, pid files).
 _SKIP_SUFFIXES = (".sock", ".pid")
 
+# Directory names that hold REGENERABLE build artifacts, matched at ANY depth.
+#
+# These are not memory. They are dependency trees a skill can rebuild from its
+# manifest, and round-tripping them through S3 costs real time on every cold
+# start: on 2026-07-27 one workspace held 4,989 objects of which 3,886 (77.9%)
+# were a pip virtualenv inside a single skill, and the restore took 161.7s
+# before the agent could answer its first message. Actual memory/ was 55 files.
+#
+# Matched per path SEGMENT rather than as a prefix, because they appear
+# mid-path — e.g. skills/<name>/.tts-venv/lib/python3.11/site-packages/pip/...
+# — which the prefix list above cannot express.
+_SKIP_SEGMENT_NAMES = frozenset({
+    "node_modules",
+    "site-packages",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".turbo",
+    ".next",
+})
+
+
+def _is_regenerable_segment(segment: str) -> bool:
+    """True for a directory that can be rebuilt and need not be synced."""
+    if segment in _SKIP_SEGMENT_NAMES:
+        return True
+    # Virtualenvs: exact "venv"/".venv", plus HIDDEN skill-local forms like
+    # ".tts-venv". The "-venv" suffix is deliberately not honoured on visible
+    # segments: an authored directory such as
+    # "skills/user/hagelk-python-venv/SKILL.md" would then be skipped by BOTH
+    # the pull and the push, so the agent's own scratch space would be neither
+    # restored nor uploaded. The two failure modes are not symmetric — an
+    # unmatched venv only costs sync time, an over-matched skill loses work —
+    # so keep the match narrow and let a stray visible venv ride along.
+    if segment in ("venv", ".venv"):
+        return True
+    return segment.startswith(".") and segment.endswith("-venv")
+
 
 def _should_skip_relative(relative: str) -> bool:
     """True if this workspace-relative path is gateway-owned, not user memory."""
@@ -265,6 +332,8 @@ def _should_skip_relative(relative: str) -> bool:
     for prefix in _SKIP_RELATIVE_PREFIXES:
         if rel == prefix or rel.startswith(prefix):
             return True
+    if any(_is_regenerable_segment(seg) for seg in rel.split("/")):
+        return True
     return any(rel.endswith(suf) for suf in _SKIP_SUFFIXES)
 
 
@@ -540,6 +609,7 @@ def pull_workspace(prefix: str) -> int:
     # Collect paths first, then obtain short-lived download URLs in each worker.
     to_download: list[tuple[str, Path]] = []
     skipped = 0
+    truncated = False
     continuation = None
     # Resolve the workspace root once so every destination can be checked for
     # containment against it (REV-COR-358 / Zip-Slip). WORKSPACE_DIR was just
@@ -583,8 +653,21 @@ def pull_workspace(prefix: str) -> int:
                 skipped += 1
                 continue
             if len(to_download) >= MAX_SYNC_FILES:
-                raise RuntimeError("workspace restore exceeds the file-count limit")
+                # Do NOT raise. A raised restore leaves the container holding
+                # image defaults, and the periodic push then overwrites the
+                # user's real files in S3 with those defaults — a failed READ
+                # becoming a destructive WRITE. Flag it instead; the caller
+                # refuses to push when the restore was incomplete.
+                logger.error(
+                    "workspace restore hit the file-count backstop (%d) — "
+                    "restore is INCOMPLETE and push will be disabled",
+                    MAX_SYNC_FILES,
+                )
+                truncated = True
+                break
             to_download.append((relative, dest))
+        if truncated:
+            break
         continuation = page.get("continuationToken")
         if not isinstance(continuation, str) or not continuation:
             break
@@ -601,9 +684,16 @@ def pull_workspace(prefix: str) -> int:
             url, content_length, required_headers = _download_spec(relative)
             with total_lock:
                 if total_bytes + content_length > MAX_SYNC_TOTAL_BYTES:
-                    raise RuntimeError(
-                        "workspace restore exceeds the aggregate byte limit"
+                    # Never raise here: an aborted restore leaves image
+                    # defaults in place and the periodic push then overwrites
+                    # the user's real files. Skip this one file, keep going,
+                    # and let pull_workspace mark the restore incomplete so
+                    # the caller suppresses the push.
+                    logger.error(
+                        "workspace restore hit the aggregate byte backstop — "
+                        "restore INCOMPLETE, push will be disabled",
                     )
+                    return f"{relative}: aggregate byte backstop"
                 total_bytes += content_length
             _download_workspace_file(
                 url,
@@ -625,6 +715,13 @@ def pull_workspace(prefix: str) -> int:
             else:
                 logger.warning("workspace pull skip %s", err)
     elapsed = time.monotonic() - started
+
+    if truncated:
+        # Everything reachable was still downloaded, but the restore is NOT a
+        # faithful copy of S3. Signal it so the caller disables the push.
+        raise WorkspaceRestoreIncomplete(
+            f"restore truncated at {MAX_SYNC_FILES} files for prefix {prefix}"
+        )
 
     logger.info(
         "workspace pull: prefix=%s files=%d skipped_config=%d elapsed_s=%.1f",

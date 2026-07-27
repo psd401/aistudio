@@ -308,6 +308,20 @@ async def _finalize_invocation_authority() -> None:
 
 def _serialize_invocations(function):
     """Hold one owner's authority and revoke it before the terminal result."""
+
+    # functools.wraps is LOAD-BEARING, not cosmetic. BedrockAgentCoreApp
+    # decides whether to pass `context` to the entrypoint by inspecting its
+    # signature. Without wraps, inspect.signature() sees this wrapper's
+    # (*args, **kwargs) instead of the real (payload, context), so the SDK
+    # calls it with payload ONLY and every invocation dies with:
+    #
+    #   TypeError: agent_invocation() missing 1 required positional
+    #             argument: 'context'
+    #
+    # The container still boots and reports BOOT_OK — the failure only shows
+    # up when a turn is actually invoked, which is why it reached dev
+    # (2026-07-27) and surfaced to users as "No response from agent."
+    @functools.wraps(function)
     async def serialized(*args, **kwargs):
         finalized = False
         async with _invocation_lock:
@@ -870,9 +884,34 @@ def main():
                 )
                 _workspace_prefix_hydrated = True
             except Exception as exc:  # noqa: BLE001
-                logger.warning("workspace mount failed: %s", exc)
-        if workspace_prefix:
+                logger.error(
+                    "workspace mount FAILED (%s) — periodic push DISABLED for "
+                    "this microVM to protect the remote workspace",
+                    exc,
+                )
+
+        # THE PUSH IS GATED ON A SUCCESSFUL RESTORE. This is a data-loss
+        # guard, not tidiness.
+        #
+        # Previously the push started unconditionally. On 2026-07-27 a restore
+        # failed (the #1353 MAX_SYNC_FILES cap of 1,000 against a ~5,000-file
+        # workspace), the container was left holding the image's DEFAULT
+        # IDENTITY.md/MEMORY.md, and 120s later the periodic push uploaded
+        # those defaults over the user's real files in S3. A failed READ became
+        # a destructive WRITE, and the agent lost its name and memory.
+        #
+        # If we could not faithfully restore, we do not know what the remote
+        # holds — so we must not write to it. The workspace stays readable and
+        # the agent runs with image defaults for this microVM only; nothing
+        # remote is touched. S3 versioning is the last line of defence, not the
+        # first.
+        if workspace_prefix and _workspace_prefix_hydrated:
             workspace_sync.start_periodic_push(workspace_prefix, interval_s=120)
+        elif workspace_prefix:
+            logger.error(
+                "workspace push suppressed: restore incomplete for prefix=%s",
+                workspace_prefix,
+            )
 
         # Per-turn attachment delivery (issue #1138 F1): the router uploaded
         # Chat attachment bytes to S3 AFTER this microVM's one-time workspace

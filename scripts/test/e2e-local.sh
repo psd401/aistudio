@@ -247,6 +247,23 @@ else
   fi
 fi
 
+# --- Apply pending migrations to the LOCAL database --------------------------------
+# A migration merged to dev but never applied locally silently breaks every route
+# that touches the new table — e.g. the durable API rate limiter (migration 146)
+# fails CLOSED, so every /api/v1 request 429s and ~30 authed specs go red with no
+# obvious cause (2026-07-26 incident: gate red on pristine dev because migrations
+# 146-153 were unapplied). The runner is idempotent (skips completed files) and
+# targets ONLY the local DB, so this is a no-op costing ~2s on an up-to-date DB.
+if docker exec -i aistudio-postgres pg_isready -U postgres >/dev/null 2>&1; then
+  echo "e2e-local: applying pending local DB migrations…"
+  if ! DATABASE_URL="${E2E_DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/aistudio}" \
+    DB_SSL="${E2E_DB_SSL:-false}" \
+    bun scripts/db/run-migrations.ts >/dev/null 2>&1; then
+    echo "❌ e2e-local: local DB migration run failed — run 'bun run db:migrate' for details"
+    exit 1
+  fi
+fi
+
 # --- Seed the LOCAL database idempotently -----------------------------------------
 # Allowed: local Docker postgres is fair game (Aurora is off-limits; only
 # data-destroying commands are forbidden). `docker exec … psql` matches `db:seed`.

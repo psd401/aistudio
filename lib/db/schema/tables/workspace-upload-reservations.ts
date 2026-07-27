@@ -23,8 +23,12 @@ export const workspaceUploadReservations = pgTable(
     expectedBytes: bigint("expected_bytes", { mode: "number" }).notNull(),
     checksumSha256: varchar("checksum_sha256", { length: 44 }).notNull(),
     contentType: varchar("content_type", { length: 255 }).notNull(),
-    byteLeaseId: varchar("byte_lease_id", { length: 36 }).notNull(),
-    objectLeaseId: varchar("object_lease_id", { length: 36 }).notNull(),
+    // Nullable since migration 154: the upload admission gates are
+    // observe-only, so an upload may proceed over-threshold with no lease to
+    // record. NULL means "admitted without a lease" — reconciliation treats it
+    // as nothing to release, not as an error.
+    byteLeaseId: varchar("byte_lease_id", { length: 36 }),
+    objectLeaseId: varchar("object_lease_id", { length: 36 }),
     status: varchar("status", { length: 16 }).notNull().default("reserved"),
     objectVersionId: varchar("object_version_id", { length: 1024 }),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),

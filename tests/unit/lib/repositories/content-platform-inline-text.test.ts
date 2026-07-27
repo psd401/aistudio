@@ -2,18 +2,22 @@
 
 import { beforeEach, describe, expect, it, jest } from "@jest/globals";
 
-const mockGetSettings = jest.fn<
-  () => Promise<Record<string, string | null | undefined>>
->();
-const mockUploadRepositoryTextSource = jest.fn<
-  (input: Record<string, unknown>) => Promise<{ key: string; byteSize: number }>
->();
-const mockRegisterCanonicalUpload = jest.fn<
-  (input: Record<string, unknown>) => Promise<unknown>
->();
+const mockGetSettings =
+  jest.fn<() => Promise<Record<string, string | null | undefined>>>();
+const mockUploadRepositoryTextSource =
+  jest.fn<
+    (
+      input: Record<string, unknown>,
+    ) => Promise<{ key: string; byteSize: number }>
+  >();
+const mockDeleteRepositoryObjectVersions =
+  jest.fn<(objectKey: string) => Promise<number>>();
+const mockRegisterCanonicalUpload =
+  jest.fn<(input: Record<string, unknown>) => Promise<unknown>>();
 
 jest.mock("@/lib/settings-manager", () => ({ getSettings: mockGetSettings }));
 jest.mock("@/lib/aws/s3-client", () => ({
+  deleteRepositoryObjectVersions: mockDeleteRepositoryObjectVersions,
   uploadRepositoryTextSource: mockUploadRepositoryTextSource,
 }));
 jest.mock("@/lib/repositories/content-platform/ingestion-service", () => ({
@@ -28,6 +32,7 @@ describe("canonical inline-text ingestion", () => {
       key: "repositories/7/11111111-2222-4333-8444-555555555555/source.txt",
       byteSize: 11,
     });
+    mockDeleteRepositoryObjectVersions.mockResolvedValue(1);
     mockRegisterCanonicalUpload.mockResolvedValue({
       version: { id: "version-1" },
       inspectJob: { id: "job-1" },
@@ -36,9 +41,8 @@ describe("canonical inline-text ingestion", () => {
   });
 
   it("leaves the legacy write untouched while dual-write is disabled", async () => {
-    const { registerCanonicalTextIfEnabled } = await import(
-      "@/lib/repositories/content-platform/inline-text-ingestion"
-    );
+    const { registerCanonicalTextIfEnabled } =
+      await import("@/lib/repositories/content-platform/inline-text-ingestion");
 
     await expect(
       registerCanonicalTextIfEnabled({
@@ -47,7 +51,7 @@ describe("canonical inline-text ingestion", () => {
         userId: 1,
         name: "Quick reference",
         content: "hello world",
-      })
+      }),
     ).resolves.toBeNull();
     expect(mockUploadRepositoryTextSource).not.toHaveBeenCalled();
     expect(mockRegisterCanonicalUpload).not.toHaveBeenCalled();
@@ -58,9 +62,8 @@ describe("canonical inline-text ingestion", () => {
       CONTENT_PLATFORM_ENABLED: "true",
       CONTENT_DUAL_WRITE_ENABLED: "true",
     });
-    const { registerCanonicalTextIfEnabled } = await import(
-      "@/lib/repositories/content-platform/inline-text-ingestion"
-    );
+    const { registerCanonicalTextIfEnabled } =
+      await import("@/lib/repositories/content-platform/inline-text-ingestion");
 
     await expect(
       registerCanonicalTextIfEnabled({
@@ -70,7 +73,7 @@ describe("canonical inline-text ingestion", () => {
         name: "Quick/reference notes",
         content: "hello world",
         traceId: "trace-1",
-      })
+      }),
     ).resolves.toEqual(expect.objectContaining({ created: true }));
 
     expect(mockUploadRepositoryTextSource).toHaveBeenCalledWith({
@@ -101,9 +104,8 @@ describe("canonical inline-text ingestion", () => {
       CONTENT_MAX_FILE_SIZE_GB: "1",
       CONTENT_MAX_OFFICE_SIZE_MB: "1",
     });
-    const { registerCanonicalTextIfEnabled } = await import(
-      "@/lib/repositories/content-platform/inline-text-ingestion"
-    );
+    const { registerCanonicalTextIfEnabled } =
+      await import("@/lib/repositories/content-platform/inline-text-ingestion");
 
     await expect(
       registerCanonicalTextIfEnabled({
@@ -112,9 +114,34 @@ describe("canonical inline-text ingestion", () => {
         userId: 1,
         name: "Oversized notes",
         content: "x".repeat(1024 ** 2 + 1),
-      })
+      }),
     ).rejects.toThrow("Text content must not exceed 1 MiB");
     expect(mockUploadRepositoryTextSource).not.toHaveBeenCalled();
     expect(mockRegisterCanonicalUpload).not.toHaveBeenCalled();
+  });
+
+  it("removes uploaded source versions when canonical registration fails", async () => {
+    mockGetSettings.mockResolvedValue({
+      CONTENT_PLATFORM_ENABLED: "true",
+      CONTENT_DUAL_WRITE_ENABLED: "true",
+    });
+    mockRegisterCanonicalUpload.mockRejectedValueOnce(
+      new Error("database unavailable"),
+    );
+    const { registerCanonicalTextIfEnabled } =
+      await import("@/lib/repositories/content-platform/inline-text-ingestion");
+
+    await expect(
+      registerCanonicalTextIfEnabled({
+        itemId: 3,
+        repositoryId: 7,
+        userId: 1,
+        name: "Quick reference",
+        content: "hello world",
+      }),
+    ).rejects.toThrow("database unavailable");
+    expect(mockDeleteRepositoryObjectVersions).toHaveBeenCalledWith(
+      "repositories/7/11111111-2222-4333-8444-555555555555/source.txt",
+    );
   });
 });

@@ -3,7 +3,8 @@
 const mockGetServerSession = jest.fn();
 const mockGetUserIdFromSession = jest.fn();
 const mockGetContentPlatformConfig = jest.fn();
-const mockIsCanonicalRepositoryUploadActive = jest.fn();
+const mockIsCanonicalNexusAttachmentActive = jest.fn();
+const mockIsCanonicalAssistantArchitectActive = jest.fn();
 const mockIsCanonicalUploadContentType = jest.fn();
 const mockValidateRepositoryUploadFile = jest.fn();
 const mockInitiateRepositoryUpload = jest.fn();
@@ -34,8 +35,10 @@ jest.mock("@/utils/roles", () => ({
 jest.mock("@/lib/repositories/content-platform", () => ({
   getContentPlatformConfig: (...args: unknown[]) =>
     mockGetContentPlatformConfig(...args),
-  isCanonicalRepositoryUploadActive: (...args: unknown[]) =>
-    mockIsCanonicalRepositoryUploadActive(...args),
+  isCanonicalNexusAttachmentActive: (...args: unknown[]) =>
+    mockIsCanonicalNexusAttachmentActive(...args),
+  isCanonicalAssistantArchitectActive: (...args: unknown[]) =>
+    mockIsCanonicalAssistantArchitectActive(...args),
   isCanonicalUploadContentType: (...args: unknown[]) =>
     mockIsCanonicalUploadContentType(...args),
   validateRepositoryUploadFile: (...args: unknown[]) =>
@@ -120,7 +123,8 @@ describe("temporary repository attachment routes", () => {
       mockGetServerSession,
       mockGetUserIdFromSession,
       mockGetContentPlatformConfig,
-      mockIsCanonicalRepositoryUploadActive,
+      mockIsCanonicalNexusAttachmentActive,
+      mockIsCanonicalAssistantArchitectActive,
       mockIsCanonicalUploadContentType,
       mockValidateRepositoryUploadFile,
       mockInitiateRepositoryUpload,
@@ -143,11 +147,14 @@ describe("temporary repository attachment routes", () => {
       enabled: true,
       dualWriteEnabled: true,
       readV2Enabled: true,
+      nexusCutoverEnabled: true,
+      assistantArchitectCutoverEnabled: true,
       nexusAttachmentRetentionDays: 30,
       deletionGraceDays: 7,
       maxFileSizeGb: 10,
     });
-    mockIsCanonicalRepositoryUploadActive.mockReturnValue(true);
+    mockIsCanonicalNexusAttachmentActive.mockReturnValue(true);
+    mockIsCanonicalAssistantArchitectActive.mockReturnValue(true);
     mockIsCanonicalUploadContentType.mockReturnValue(true);
     mockGetOrCreate.mockResolvedValue({
       bindingId,
@@ -210,7 +217,7 @@ describe("temporary repository attachment routes", () => {
   });
 
   it("returns the flag-off legacy mode before creating an ephemeral repository", async () => {
-    mockIsCanonicalRepositoryUploadActive.mockReturnValue(false);
+    mockIsCanonicalNexusAttachmentActive.mockReturnValue(false);
     const response = await POST(uploadRequest());
 
     expect(await response.json()).toMatchObject({ mode: "legacy" });

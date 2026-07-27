@@ -11,11 +11,11 @@
   "dependencies": {
     "@aws-sdk/client-cloudwatch": "^3.0.0",
     "@aws-sdk/client-secrets-manager": "^3.0.0",
-    "postgres": "^3.4.0"
+    "postgres": "3.4.7"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.145",
     "@types/node": "^20.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "5.9.3"
   }
 }
