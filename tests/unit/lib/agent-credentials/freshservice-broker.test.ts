@@ -183,6 +183,48 @@ describe("Freshservice broker behaviour", () => {
     expect(result.data).toBeNull()
   })
 
+  it("fetches a REBUILT path, not the caller's string", async () => {
+    // The allowlist reconstructs the path from literals + Number(), so no
+    // caller-supplied character reaches the URL. A padded id proves it: the
+    // request that goes out is the canonical form, not what was passed in.
+    await call("/tickets/000123")
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://psd401.freshservice.com/api/v2/tickets/123"
+    )
+  })
+
+  it("re-serializes the query from an allowlisted key set", async () => {
+    await call("/tickets?per_page=30&page=2")
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://psd401.freshservice.com/api/v2/tickets?per_page=30&page=2"
+    )
+  })
+
+  it.each([
+    // Unknown keys cannot ride along into the upstream request.
+    "/tickets?evil=1",
+    // A "/" in a value could otherwise smuggle a path segment.
+    "/tickets?include=a/b",
+    // Malformed pairs are rejected rather than silently dropped.
+    "/tickets?noequals",
+  ])("rejects query %s", async (path) => {
+    await expect(call(path)).rejects.toThrow("not allowed")
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("permits @ in a query value, which the agent lookup needs", async () => {
+    // "@" is required by /agents?email=... and is safe here: it appears after
+    // "?", so no URL parser can read it as authority userinfo. The host is
+    // already fixed by the time the query is appended.
+    await call("/agents?email=someone@psd401.net")
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://psd401.freshservice.com/api/v2/agents?email=someone%40psd401.net"
+    )
+  })
+
   it("refuses to follow redirects", async () => {
     // A redirect would replay the owner's Authorization header to whatever
     // host Freshservice pointed at.

@@ -816,48 +816,126 @@ const MAX_FRESHSERVICE_RESPONSE_BYTES = 4 * 1024 * 1024
  * Adding a command means adding its route here — deliberately, so widening the
  * key's reach is a visible diff rather than a side effect.
  */
+/**
+ * Each route REBUILDS its pathname from literals plus the numeric ids it
+ * captured, rather than passing the caller's string through.
+ *
+ * That distinction is the whole point. A predicate that merely *validates* the
+ * input still hands the original attacker-controlled string to fetch(), which
+ * is both a real hazard if a pattern is ever loosened and an SSRF finding no
+ * static analyzer can discharge. Reconstructing means the final URL is
+ * literals + Number(), so no caller-supplied character can reach the host.
+ */
 const FRESHSERVICE_ROUTES: ReadonlyArray<{
   method: "GET" | "POST" | "PUT"
   pattern: RegExp
+  build: (id: number) => string
 }> = [
-  { method: "GET", pattern: /^\/tickets$/ },
-  { method: "POST", pattern: /^\/tickets$/ },
-  { method: "GET", pattern: /^\/tickets\/\d+$/ },
-  { method: "PUT", pattern: /^\/tickets\/\d+$/ },
-  { method: "POST", pattern: /^\/tickets\/\d+\/notes$/ },
-  { method: "GET", pattern: /^\/tickets\/\d+\/requested_items$/ },
-  { method: "GET", pattern: /^\/agents$/ },
-  { method: "GET", pattern: /^\/agents\/\d+$/ },
-  { method: "GET", pattern: /^\/requesters\/\d+$/ },
-  { method: "GET", pattern: /^\/workspaces$/ },
-  { method: "GET", pattern: /^\/workspaces\/\d+$/ },
-  { method: "GET", pattern: /^\/approvals$/ },
+  { method: "GET", pattern: /^\/tickets$/, build: () => "/tickets" },
+  { method: "POST", pattern: /^\/tickets$/, build: () => "/tickets" },
+  { method: "GET", pattern: /^\/tickets\/(\d+)$/, build: (id) => `/tickets/${id}` },
+  { method: "PUT", pattern: /^\/tickets\/(\d+)$/, build: (id) => `/tickets/${id}` },
+  {
+    method: "POST",
+    pattern: /^\/tickets\/(\d+)\/notes$/,
+    build: (id) => `/tickets/${id}/notes`,
+  },
+  {
+    method: "GET",
+    pattern: /^\/tickets\/(\d+)\/requested_items$/,
+    build: (id) => `/tickets/${id}/requested_items`,
+  },
+  { method: "GET", pattern: /^\/agents$/, build: () => "/agents" },
+  { method: "GET", pattern: /^\/agents\/(\d+)$/, build: (id) => `/agents/${id}` },
+  {
+    method: "GET",
+    pattern: /^\/requesters\/(\d+)$/,
+    build: (id) => `/requesters/${id}`,
+  },
+  { method: "GET", pattern: /^\/workspaces$/, build: () => "/workspaces" },
+  {
+    method: "GET",
+    pattern: /^\/workspaces\/(\d+)$/,
+    build: (id) => `/workspaces/${id}`,
+  },
+  { method: "GET", pattern: /^\/approvals$/, build: () => "/approvals" },
 ]
 
-/**
- * Characters a query string may contain. Notably EXCLUDES "/", so a query
- * cannot smuggle extra path segments past the route patterns.
- */
-const FRESHSERVICE_QUERY_CHARS = /^[A-Za-z0-9_=&%.,:+@-]*$/
+/** Query keys the skill actually sends, with the value charset each may use. */
+const FRESHSERVICE_QUERY_KEYS = new Set([
+  "per_page",
+  "page",
+  "include",
+  "email",
+  "approver_id",
+  "status",
+  "parent",
+  "updated_since",
+  "order_type",
+  "workspace_id",
+  "query",
+])
+const FRESHSERVICE_VALUE_CHARS = /^[A-Za-z0-9_.,:+@ -]*$/
 
 /**
- * Split query off BEFORE matching, then match the path against literal
- * patterns.
+ * Canonicalize one request, or return null if it is not allowlisted.
  *
- * Folding an optional query group into each pattern is the obvious approach
- * and the wrong one: it makes every pattern a dynamically built
- * `(\?[...]*)?` — nested quantifiers that a ReDoS linter rejects outright,
- * on a string an attacker controls. Splitting first keeps every pattern a
- * static, anchored literal with no quantifier nesting at all.
+ * Returns a NEWLY BUILT path string: literal segments, numeric ids passed
+ * through Number(), and a query re-serialized from an allowlisted key set with
+ * a value charset that excludes "/", ":"-schemes and "@", so a query can
+ * neither smuggle path segments nor an alternate host.
+ *
+ * Splitting the query off BEFORE matching also keeps every pattern a static
+ * anchored literal. Folding an optional query group into each pattern is the
+ * obvious approach and the wrong one: it produces dynamically-built nested
+ * quantifiers over an attacker-controlled string — a ReDoS hazard, and a lint
+ * error.
  */
-function freshserviceRouteAllowed(method: string, path: string): boolean {
+function canonicalFreshservicePath(method: string, path: string): string | null {
   const queryStart = path.indexOf("?")
   const pathname = queryStart === -1 ? path : path.slice(0, queryStart)
-  const query = queryStart === -1 ? "" : path.slice(queryStart + 1)
-  if (!FRESHSERVICE_QUERY_CHARS.test(query)) return false
-  return FRESHSERVICE_ROUTES.some(
-    (route) => route.method === method && route.pattern.test(pathname)
+  const rawQuery = queryStart === -1 ? "" : path.slice(queryStart + 1)
+
+  const route = FRESHSERVICE_ROUTES.find(
+    (candidate) => candidate.method === method && candidate.pattern.test(pathname)
   )
+  if (!route) return null
+
+  const captured = route.pattern.exec(pathname)?.[1]
+  const id = captured === undefined ? 0 : Number(captured)
+  if (!Number.isSafeInteger(id) || id < 0) return null
+  const canonicalPath = route.build(id)
+
+  if (rawQuery.length === 0) return canonicalPath
+
+  const query = canonicalFreshserviceQuery(rawQuery)
+  if (query === null) return null
+  return query.length > 0 ? `${canonicalPath}?${query}` : canonicalPath
+}
+
+/**
+ * Re-serialize a query from an allowlisted key set, or null if anything in it
+ * is unrecognized. Split out from the path canonicalizer to keep each half
+ * under the complexity ceiling and independently readable.
+ */
+function canonicalFreshserviceQuery(rawQuery: string): string | null {
+  const rebuilt = new URLSearchParams()
+  for (const pair of rawQuery.split("&")) {
+    if (pair.length === 0) continue
+    const eq = pair.indexOf("=")
+    if (eq === -1) return null
+    const key = pair.slice(0, eq)
+    if (!FRESHSERVICE_QUERY_KEYS.has(key)) return null
+    let value: string
+    try {
+      value = decodeURIComponent(pair.slice(eq + 1))
+    } catch {
+      return null
+    }
+    if (!FRESHSERVICE_VALUE_CHARS.test(value)) return null
+    rebuilt.append(key, value)
+  }
+  return rebuilt.toString()
 }
 
 /**
@@ -890,12 +968,15 @@ function validatedFreshserviceRequest(
   ) {
     throw new Error("Invalid Freshservice path")
   }
-  if (!freshserviceRouteAllowed(method, rawPath)) {
+  const canonical = canonicalFreshservicePath(method, rawPath)
+  if (canonical === null) {
     // Named explicitly: an unlisted endpoint is a skill change that needs a
     // route added, not a transient failure the agent should retry.
     throw new Error(`Freshservice route not allowed: ${method} ${rawPath}`)
   }
-  return { path: rawPath, method }
+  // The REBUILT path, never rawPath — this is what keeps caller-supplied
+  // characters out of the URL that gets fetched.
+  return { path: canonical, method }
 }
 
 export async function executeFreshserviceOperation(input: {
