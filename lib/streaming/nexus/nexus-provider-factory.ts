@@ -105,6 +105,303 @@ export interface CacheMetrics {
   costSaved: number;
 }
 
+function includesAny(modelId: string, patterns: readonly string[]): boolean {
+  return patterns.some((pattern) => modelId.includes(pattern));
+}
+
+function baseNexusCapabilities(
+  base: ProviderCapabilities,
+  modelInfo: DatabaseModelInfo | null,
+): NexusModelCapabilities {
+  return {
+    supportsReasoning: base.supportsReasoning,
+    supportsThinking: base.supportsThinking,
+    supportsToolCalls: false,
+    supportsImages: false,
+    supportsAudio: false,
+    maxTimeoutMs: base.maxTimeoutMs,
+    maxTokens: modelInfo?.maxTokens,
+    responsesAPI: false,
+    promptCaching: false,
+    contextCaching: false,
+    artifacts: false,
+    canvas: false,
+    webSearch: false,
+    codeInterpreter: false,
+    grounding: false,
+    codeExecution: false,
+    computerUse: false,
+    workspaceTools: false,
+    mcpSupport: true,
+    supportsBatching: false,
+  };
+}
+
+function applyDatabaseCapabilities(
+  enhanced: NexusModelCapabilities,
+  modelInfo: DatabaseModelInfo,
+  base: ProviderCapabilities,
+): void {
+  const stored = modelInfo.capabilities;
+  if (stored) {
+    enhanced.responsesAPI = hasCapability(stored, "responsesAPI");
+    enhanced.promptCaching = hasCapability(stored, "promptCaching");
+    enhanced.contextCaching = hasCapability(stored, "contextCaching");
+    enhanced.artifacts = hasCapability(stored, "artifacts");
+    enhanced.canvas = hasCapability(stored, "canvas");
+    enhanced.webSearch = hasCapability(stored, "webSearch");
+    enhanced.codeInterpreter = hasCapability(stored, "codeInterpreter");
+    enhanced.grounding = hasCapability(stored, "grounding");
+    enhanced.codeExecution = hasCapability(stored, "codeExecution");
+    enhanced.computerUse = hasCapability(stored, "computerUse");
+    enhanced.workspaceTools = hasCapability(stored, "workspaceTools");
+    enhanced.supportsReasoning =
+      hasCapability(stored, "reasoning") || base.supportsReasoning;
+    enhanced.supportsThinking =
+      hasCapability(stored, "thinking") || base.supportsThinking;
+  }
+  enhanced.averageLatency =
+    modelInfo.averageLatencyMs || enhanced.averageLatency;
+  enhanced.maxConcurrency = modelInfo.maxConcurrency || enhanced.maxConcurrency;
+  enhanced.supportsBatching =
+    modelInfo.supportsBatching || enhanced.supportsBatching;
+  enhanced.costPerToken = modelInfo.inputCostPer1kTokens
+    ? modelInfo.inputCostPer1kTokens / 1000
+    : enhanced.costPerToken;
+}
+
+type ProviderEnhancer = (
+  capabilities: NexusModelCapabilities,
+  modelId: string,
+  hasDatabaseModel: boolean,
+) => void;
+
+const PROVIDER_ENHANCERS: Record<string, ProviderEnhancer> = {
+  openai(capabilities, modelId, hasDatabaseModel) {
+    if (!hasDatabaseModel) {
+      capabilities.responsesAPI = includesAny(modelId, [
+        "gpt-5",
+        "gpt-4.1",
+        "gpt-4o",
+      ]);
+      capabilities.canvas = includesAny(modelId, ["gpt-4o", "gpt-5"]);
+      capabilities.webSearch = true;
+      capabilities.codeInterpreter = true;
+    }
+    capabilities.averageLatency = 800;
+    capabilities.maxConcurrency = 50;
+    capabilities.supportsBatching = false;
+  },
+  "amazon-bedrock"(capabilities, modelId, hasDatabaseModel) {
+    if (!hasDatabaseModel) {
+      capabilities.promptCaching = includesAny(modelId, [
+        "claude-3",
+        "claude-4",
+        "claude-opus",
+        "claude-sonnet",
+      ]);
+      capabilities.artifacts = includesAny(modelId, [
+        "claude-3.5",
+        "claude-4",
+        "claude-opus",
+        "claude-sonnet",
+      ]);
+      capabilities.computerUse = modelId.includes("computer-use");
+    }
+    capabilities.averageLatency = 1200;
+    capabilities.maxConcurrency = 20;
+    capabilities.supportsBatching = true;
+  },
+  google(capabilities, modelId, hasDatabaseModel) {
+    if (!hasDatabaseModel) {
+      capabilities.contextCaching = includesAny(modelId, [
+        "gemini-2",
+        "gemini-1.5",
+      ]);
+      capabilities.grounding = true;
+      capabilities.codeExecution = true;
+      capabilities.workspaceTools = true;
+    }
+    capabilities.averageLatency = 600;
+    capabilities.maxConcurrency = 100;
+    capabilities.supportsBatching = true;
+  },
+  azure(capabilities, _modelId, hasDatabaseModel) {
+    if (!hasDatabaseModel) {
+      capabilities.webSearch = true;
+      capabilities.codeInterpreter = true;
+    }
+    capabilities.averageLatency = 900;
+    capabilities.maxConcurrency = 30;
+    capabilities.supportsBatching = false;
+  },
+};
+
+function applyProviderEnhancements(
+  capabilities: NexusModelCapabilities,
+  provider: string,
+  modelId: string,
+  hasDatabaseModel: boolean,
+): void {
+  PROVIDER_ENHANCERS[provider.toLowerCase()]?.(
+    capabilities,
+    modelId,
+    hasDatabaseModel,
+  );
+}
+
+const FEATURE_MATCHERS: Record<
+  string,
+  (capabilities: NexusModelCapabilities) => boolean
+> = {
+  reasoning: (capabilities) => capabilities.supportsReasoning,
+  thinking: (capabilities) => capabilities.supportsThinking,
+  caching: (capabilities) =>
+    Boolean(capabilities.promptCaching || capabilities.contextCaching),
+  web: (capabilities) =>
+    Boolean(capabilities.webSearch || capabilities.grounding),
+  code: (capabilities) =>
+    Boolean(capabilities.codeInterpreter || capabilities.codeExecution),
+  artifacts: (capabilities) => Boolean(capabilities.artifacts),
+  canvas: (capabilities) => Boolean(capabilities.canvas),
+  computer: (capabilities) => Boolean(capabilities.computerUse),
+};
+
+type ModelEstimate = { patterns: readonly string[]; value: number };
+
+function estimateFromPatterns(
+  modelId: string,
+  estimates: readonly ModelEstimate[],
+  fallback: number,
+): number {
+  return (
+    estimates.find((estimate) => includesAny(modelId, estimate.patterns))
+      ?.value ?? fallback
+  );
+}
+
+const COST_ESTIMATES: Record<
+  string,
+  { models: readonly ModelEstimate[]; fallback: number }
+> = {
+  openai: {
+    models: [
+      { patterns: ["gpt-5"], value: 0.00006 },
+      { patterns: ["gpt-4.1"], value: 0.00005 },
+      { patterns: ["gpt-4o"], value: 0.00003 },
+      { patterns: ["gpt-4"], value: 0.00005 },
+    ],
+    fallback: 0.000002,
+  },
+  "amazon-bedrock": {
+    models: [
+      { patterns: ["claude-opus"], value: 0.000015 },
+      {
+        patterns: ["claude-3.5-sonnet", "claude-sonnet"],
+        value: 0.000003,
+      },
+      {
+        patterns: ["claude-3-haiku", "claude-haiku"],
+        value: 0.00000025,
+      },
+      { patterns: ["deepseek"], value: 0.0000002 },
+    ],
+    fallback: 0.000008,
+  },
+  google: {
+    models: [
+      { patterns: ["gemini-2.5"], value: 0.0000025 },
+      { patterns: ["gemini-2.0-flash"], value: 0.0000015 },
+      { patterns: ["gemini-1.5-pro"], value: 0.00000125 },
+      { patterns: ["gemini-1.5-flash"], value: 0.000000075 },
+    ],
+    fallback: 0.000001,
+  },
+};
+
+function estimatedCostPerToken(provider: string, modelId: string): number {
+  const normalized = provider.toLowerCase();
+  if (normalized === "azure") {
+    return estimatedCostPerToken("openai", modelId) * 1.1;
+  }
+  const estimates = COST_ESTIMATES[normalized];
+  return estimates
+    ? estimateFromPatterns(modelId, estimates.models, estimates.fallback)
+    : 0.000001;
+}
+
+const CONTEXT_ESTIMATES: Record<
+  string,
+  { models: readonly ModelEstimate[]; fallback: number }
+> = {
+  openai: {
+    models: [
+      { patterns: ["gpt-5"], value: 200000 },
+      { patterns: ["gpt-4.1"], value: 1000000 },
+      { patterns: ["gpt-4o"], value: 128000 },
+    ],
+    fallback: 8000,
+  },
+  "amazon-bedrock": {
+    models: [
+      {
+        patterns: ["claude-opus", "claude-sonnet", "claude-3.5", "claude-4"],
+        value: 200000,
+      },
+      { patterns: ["deepseek"], value: 128000 },
+    ],
+    fallback: 100000,
+  },
+  google: {
+    models: [
+      { patterns: ["gemini-2"], value: 2000000 },
+      { patterns: ["gemini-1.5"], value: 1000000 },
+    ],
+    fallback: 32000,
+  },
+};
+
+function estimatedContextWindow(provider: string, modelId: string): number {
+  const normalized =
+    provider.toLowerCase() === "azure" ? "openai" : provider.toLowerCase();
+  const estimates = CONTEXT_ESTIMATES[normalized];
+  return estimates
+    ? estimateFromPatterns(modelId, estimates.models, estimates.fallback)
+    : 8000;
+}
+
+function providerPricing(
+  modelInfo: DatabaseModelInfo | null,
+  capabilities: NexusModelCapabilities,
+  fallbackCachingDiscount: number,
+): NonNullable<NexusLanguageModel["providerMetadata"]["pricing"]> {
+  return {
+    inputCostPerToken: modelInfo?.inputCostPer1kTokens
+      ? modelInfo.inputCostPer1kTokens / 1000
+      : capabilities.costPerToken || 0,
+    outputCostPerToken: modelInfo?.outputCostPer1kTokens
+      ? modelInfo.outputCostPer1kTokens / 1000
+      : (capabilities.costPerToken || 0) * 1.5,
+    cachingDiscount: modelInfo?.cachedInputCostPer1kTokens
+      ? 1 -
+        modelInfo.cachedInputCostPer1kTokens /
+          (modelInfo.inputCostPer1kTokens || 1)
+      : fallbackCachingDiscount,
+  };
+}
+
+function providerLimits(
+  modelInfo: DatabaseModelInfo | null,
+  capabilities: NexusModelCapabilities,
+  estimatedContext: number,
+): NonNullable<NexusLanguageModel["providerMetadata"]["limits"]> {
+  return {
+    maxTokens: modelInfo?.maxTokens || capabilities.maxTokens || 4000,
+    maxRequests: modelInfo?.maxConcurrency || capabilities.maxConcurrency || 10,
+    contextWindow: modelInfo?.maxTokens || estimatedContext,
+  };
+}
+
 /**
  * Enhanced provider factory for Nexus that extends the base provider factory
  * with advanced features like caching, optimization, and provider-specific capabilities
@@ -211,76 +508,11 @@ export class NexusProviderFactory {
     baseCapabilities: ProviderCapabilities,
     options: NexusModelOptions,
   ): Promise<NexusModelCapabilities> {
-    // Get model info from database
     const modelInfo = await this.getModelInfoFromDatabase(provider, modelId);
-
-    const enhanced: NexusModelCapabilities = {
-      // Base capabilities from provider
-      supportsReasoning: baseCapabilities.supportsReasoning,
-      supportsThinking: baseCapabilities.supportsThinking,
-      supportsToolCalls: false, // These would be detected from DB or model patterns
-      supportsImages: false,
-      supportsAudio: false,
-      maxTimeoutMs: baseCapabilities.maxTimeoutMs,
-      maxTokens: modelInfo?.maxTokens,
-      // Initialize Nexus-specific capabilities
-      responsesAPI: false,
-      promptCaching: false,
-      contextCaching: false,
-      artifacts: false,
-      canvas: false,
-      webSearch: false,
-      codeInterpreter: false,
-      grounding: false,
-      codeExecution: false,
-      computerUse: false,
-      workspaceTools: false,
-      mcpSupport: true, // All providers support MCP through our adapter
-      supportsBatching: false,
-    };
-
-    // Use capabilities from database if available
-    if (modelInfo?.capabilities) {
+    const enhanced = baseNexusCapabilities(baseCapabilities, modelInfo);
+    if (modelInfo) {
       try {
-        // Apply all capabilities from database using the unified capabilities field
-        enhanced.responsesAPI = hasCapability(
-          modelInfo.capabilities,
-          "responsesAPI",
-        );
-        enhanced.promptCaching = hasCapability(
-          modelInfo.capabilities,
-          "promptCaching",
-        );
-        enhanced.contextCaching = hasCapability(
-          modelInfo.capabilities,
-          "contextCaching",
-        );
-        enhanced.artifacts = hasCapability(modelInfo.capabilities, "artifacts");
-        enhanced.canvas = hasCapability(modelInfo.capabilities, "canvas");
-        enhanced.webSearch = hasCapability(modelInfo.capabilities, "webSearch");
-        enhanced.codeInterpreter = hasCapability(
-          modelInfo.capabilities,
-          "codeInterpreter",
-        );
-        enhanced.grounding = hasCapability(modelInfo.capabilities, "grounding");
-        enhanced.codeExecution = hasCapability(
-          modelInfo.capabilities,
-          "codeExecution",
-        );
-        enhanced.computerUse = hasCapability(
-          modelInfo.capabilities,
-          "computerUse",
-        );
-        enhanced.workspaceTools = hasCapability(
-          modelInfo.capabilities,
-          "workspaceTools",
-        );
-        enhanced.supportsReasoning =
-          hasCapability(modelInfo.capabilities, "reasoning") ||
-          baseCapabilities.supportsReasoning;
-        enhanced.supportsThinking =
-          hasCapability(modelInfo.capabilities, "thinking") ||
-          baseCapabilities.supportsThinking;
+        applyDatabaseCapabilities(enhanced, modelInfo, baseCapabilities);
       } catch (error) {
         log.warn("Failed to parse capabilities from database", {
           provider,
@@ -290,84 +522,7 @@ export class NexusProviderFactory {
         });
       }
     }
-
-    // Also use performance characteristics from database
-    if (modelInfo) {
-      enhanced.averageLatency =
-        modelInfo.averageLatencyMs || enhanced.averageLatency;
-      enhanced.maxConcurrency =
-        modelInfo.maxConcurrency || enhanced.maxConcurrency;
-      enhanced.supportsBatching =
-        modelInfo.supportsBatching || enhanced.supportsBatching;
-      enhanced.costPerToken = modelInfo.inputCostPer1kTokens
-        ? modelInfo.inputCostPer1kTokens / 1000
-        : enhanced.costPerToken;
-    }
-
-    // Provider-specific enhancements based on model patterns (fallback for models not in DB)
-    // These are inference-based on model naming patterns
-    switch (provider.toLowerCase()) {
-      case "openai":
-        if (!modelInfo) {
-          enhanced.responsesAPI =
-            modelId.includes("gpt-5") ||
-            modelId.includes("gpt-4.1") ||
-            modelId.includes("gpt-4o");
-          enhanced.canvas =
-            modelId.includes("gpt-4o") || modelId.includes("gpt-5");
-          enhanced.webSearch = true;
-          enhanced.codeInterpreter = true;
-        }
-        enhanced.averageLatency = 800; // ms
-        enhanced.maxConcurrency = 50;
-        enhanced.supportsBatching = false;
-        break;
-
-      case "amazon-bedrock": // Claude and other models via Bedrock
-        if (!modelInfo) {
-          enhanced.promptCaching =
-            modelId.includes("claude-3") ||
-            modelId.includes("claude-4") ||
-            modelId.includes("claude-opus") ||
-            modelId.includes("claude-sonnet");
-          enhanced.artifacts =
-            modelId.includes("claude-3.5") ||
-            modelId.includes("claude-4") ||
-            modelId.includes("claude-opus") ||
-            modelId.includes("claude-sonnet");
-          enhanced.computerUse = modelId.includes("computer-use");
-        }
-        enhanced.averageLatency = 1200; // ms
-        enhanced.maxConcurrency = 20;
-        enhanced.supportsBatching = true;
-        break;
-
-      case "google":
-        if (!modelInfo) {
-          enhanced.contextCaching =
-            modelId.includes("gemini-2") || modelId.includes("gemini-1.5");
-          enhanced.grounding = true;
-          enhanced.codeExecution = true;
-          enhanced.workspaceTools = true;
-        }
-        enhanced.averageLatency = 600; // ms
-        enhanced.maxConcurrency = 100;
-        enhanced.supportsBatching = true;
-        break;
-
-      case "azure":
-        if (!modelInfo) {
-          // Azure mirrors OpenAI capabilities
-          enhanced.webSearch = true;
-          enhanced.codeInterpreter = true;
-        }
-        enhanced.averageLatency = 900; // ms
-        enhanced.maxConcurrency = 30;
-        enhanced.supportsBatching = false;
-        break;
-    }
-
-    // Get pricing info from database or use estimates
+    applyProviderEnhancements(enhanced, provider, modelId, Boolean(modelInfo));
     enhanced.costPerToken = await this.getModelCostFromDatabase(
       provider,
       modelId,
@@ -385,6 +540,61 @@ export class NexusProviderFactory {
   /**
    * Wrap the base model with Nexus-specific features
    */
+  private async providerMetadata(
+    provider: string,
+    modelId: string,
+    capabilities: NexusModelCapabilities,
+    modelInfo: DatabaseModelInfo | null,
+  ): Promise<NexusLanguageModel["providerMetadata"]> {
+    const estimatedContext =
+      modelInfo?.maxTokens || (await this.getContextWindow(provider, modelId));
+    return {
+      provider,
+      modelId,
+      pricing: providerPricing(
+        modelInfo,
+        capabilities,
+        this.getCachingDiscount(provider),
+      ),
+      limits: providerLimits(modelInfo, capabilities, estimatedContext),
+    };
+  }
+
+  private attachCacheMethods(
+    model: NexusLanguageModel,
+    config: {
+      provider: string;
+      modelId: string;
+      conversationId?: string;
+    },
+  ): void {
+    model.enableCaching = () => {
+      this.responseCache.enableForModel(
+        config.provider,
+        config.modelId,
+        config.conversationId,
+      );
+    };
+    model.getCacheMetrics = () => this.responseCache.getMetrics();
+  }
+
+  private attachCostEstimator(
+    model: NexusLanguageModel,
+    provider: string,
+    modelId: string,
+  ): void {
+    model.estimateCost = (tokens: number) => {
+      const inputCost = model.providerMetadata.pricing?.inputCostPerToken || 0;
+      const outputCost =
+        model.providerMetadata.pricing?.outputCostPerToken || 0;
+      const baseCost = tokens * (inputCost * 0.6 + outputCost * 0.4);
+      const discount = this.responseCache.isEnabled(provider, modelId)
+        ? model.providerMetadata.pricing?.cachingDiscount || 0
+        : 0;
+      return baseCost * (1 - discount);
+    };
+  }
+
   private async wrapWithNexusFeatures(
     model: LanguageModel,
     config: {
@@ -400,83 +610,26 @@ export class NexusProviderFactory {
     // Get model info from database for pricing and metadata
     const modelInfo = await this.getModelInfoFromDatabase(provider, modelId);
 
-    // Create enhanced model wrapper
+    const providerMetadata = await this.providerMetadata(
+      provider,
+      modelId,
+      capabilities,
+      modelInfo,
+    );
     const nexusModel: NexusLanguageModel = {
       model,
       capabilities,
-      providerMetadata: {
+      providerMetadata,
+    };
+
+    if (capabilities.promptCaching || capabilities.contextCaching) {
+      this.attachCacheMethods(nexusModel, {
         provider,
         modelId,
-        pricing: {
-          inputCostPerToken: 0,
-          outputCostPerToken: 0,
-          cachingDiscount: 0,
-        },
-        limits: {
-          maxTokens: 4000,
-          maxRequests: 10,
-          contextWindow: 4000,
-        },
-      },
-    };
-
-    // Add Nexus metadata
-    nexusModel.capabilities = capabilities;
-    nexusModel.providerMetadata = {
-      provider,
-      modelId,
-      pricing: {
-        inputCostPerToken: modelInfo?.inputCostPer1kTokens
-          ? modelInfo.inputCostPer1kTokens / 1000
-          : capabilities.costPerToken || 0,
-        outputCostPerToken: modelInfo?.outputCostPer1kTokens
-          ? modelInfo.outputCostPer1kTokens / 1000
-          : (capabilities.costPerToken || 0) * 1.5,
-        cachingDiscount: modelInfo?.cachedInputCostPer1kTokens
-          ? 1 -
-            modelInfo.cachedInputCostPer1kTokens /
-              (modelInfo.inputCostPer1kTokens || 1)
-          : this.getCachingDiscount(provider),
-      },
-      limits: {
-        maxTokens: modelInfo?.maxTokens || capabilities.maxTokens || 4000,
-        maxRequests:
-          modelInfo?.maxConcurrency || capabilities.maxConcurrency || 10,
-        contextWindow:
-          modelInfo?.maxTokens ||
-          (await this.getContextWindow(provider, modelId)),
-      },
-    };
-
-    // Add caching methods if supported
-    if (capabilities.promptCaching || capabilities.contextCaching) {
-      nexusModel.enableCaching = () => {
-        this.responseCache.enableForModel(
-          provider,
-          modelId,
-          options.conversationId,
-        );
-      };
-
-      nexusModel.getCacheMetrics = async () => {
-        return await this.responseCache.getMetrics();
-      };
+        conversationId: options.conversationId,
+      });
     }
-
-    // Add cost estimation
-    nexusModel.estimateCost = (tokens: number) => {
-      const inputCost =
-        nexusModel.providerMetadata.pricing?.inputCostPerToken || 0;
-      const outputCost =
-        nexusModel.providerMetadata.pricing?.outputCostPerToken || 0;
-      // Rough estimate: 60% input, 40% output
-      const baseCost = tokens * (inputCost * 0.6 + outputCost * 0.4);
-      const discount = this.responseCache.isEnabled(provider, modelId)
-        ? nexusModel.providerMetadata.pricing?.cachingDiscount || 0
-        : 0;
-      return baseCost * (1 - discount);
-    };
-
+    this.attachCostEstimator(nexusModel, provider, modelId);
     return nexusModel;
   }
 
@@ -656,43 +809,7 @@ export class NexusProviderFactory {
    * Estimate cost per token based on provider and model patterns
    */
   private estimateCostPerToken(provider: string, modelId: string): number {
-    switch (provider.toLowerCase()) {
-      case "openai":
-        if (modelId.includes("gpt-5")) return 0.00006;
-        if (modelId.includes("gpt-4.1")) return 0.00005;
-        if (modelId.includes("gpt-4o")) return 0.00003;
-        if (modelId.includes("gpt-4")) return 0.00005;
-        return 0.000002;
-
-      case "amazon-bedrock":
-        if (modelId.includes("claude-opus")) return 0.000015;
-        if (
-          modelId.includes("claude-3.5-sonnet") ||
-          modelId.includes("claude-sonnet")
-        )
-          return 0.000003;
-        if (
-          modelId.includes("claude-3-haiku") ||
-          modelId.includes("claude-haiku")
-        )
-          return 0.00000025;
-        if (modelId.includes("deepseek")) return 0.0000002;
-        return 0.000008;
-
-      case "google":
-        if (modelId.includes("gemini-2.5")) return 0.0000025;
-        if (modelId.includes("gemini-2.0-flash")) return 0.0000015;
-        if (modelId.includes("gemini-1.5-pro")) return 0.00000125;
-        if (modelId.includes("gemini-1.5-flash")) return 0.000000075;
-        return 0.000001;
-
-      case "azure":
-        // Azure typically costs same as OpenAI with small premium
-        return this.estimateCostPerToken("openai", modelId) * 1.1;
-
-      default:
-        return 0.000001;
-    }
+    return estimatedCostPerToken(provider, modelId);
   }
 
   /**
@@ -738,32 +855,7 @@ export class NexusProviderFactory {
       });
     }
 
-    // Fallback estimates
-    switch (provider.toLowerCase()) {
-      case "openai":
-        if (modelId.includes("gpt-5")) return 200000;
-        if (modelId.includes("gpt-4.1")) return 1000000;
-        if (modelId.includes("gpt-4o")) return 128000;
-        return 8000;
-      case "amazon-bedrock":
-        if (
-          modelId.includes("claude-opus") ||
-          modelId.includes("claude-sonnet")
-        )
-          return 200000;
-        if (modelId.includes("claude-3.5") || modelId.includes("claude-4"))
-          return 200000;
-        if (modelId.includes("deepseek")) return 128000;
-        return 100000;
-      case "google":
-        if (modelId.includes("gemini-2")) return 2000000;
-        if (modelId.includes("gemini-1.5")) return 1000000;
-        return 32000;
-      case "azure":
-        return this.getContextWindow("openai", modelId);
-      default:
-        return 8000;
-    }
+    return estimatedContextWindow(provider, modelId);
   }
 
   /**
@@ -852,40 +944,9 @@ export class NexusProviderFactory {
     capabilities: NexusModelCapabilities,
     requiredFeatures: string[],
   ): number {
-    let count = 0;
-
-    for (const feature of requiredFeatures) {
-      switch (feature) {
-        case "reasoning":
-          if (capabilities.supportsReasoning) count++;
-          break;
-        case "thinking":
-          if (capabilities.supportsThinking) count++;
-          break;
-        case "caching":
-          if (capabilities.promptCaching || capabilities.contextCaching)
-            count++;
-          break;
-        case "web":
-          if (capabilities.webSearch || capabilities.grounding) count++;
-          break;
-        case "code":
-          if (capabilities.codeInterpreter || capabilities.codeExecution)
-            count++;
-          break;
-        case "artifacts":
-          if (capabilities.artifacts) count++;
-          break;
-        case "canvas":
-          if (capabilities.canvas) count++;
-          break;
-        case "computer":
-          if (capabilities.computerUse) count++;
-          break;
-      }
-    }
-
-    return count;
+    return requiredFeatures.filter((feature) =>
+      FEATURE_MATCHERS[feature]?.(capabilities),
+    ).length;
   }
 }
 

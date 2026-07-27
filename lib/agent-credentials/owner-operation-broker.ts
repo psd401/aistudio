@@ -129,27 +129,11 @@ async function ownerCredentialJson(
   return boundedRecord(parsed, `Owner ${name} credential`);
 }
 
-export async function executePsdDataOperation(input: {
-  ownerEmail: string;
-  sessionId: string;
-  method: unknown;
-  params: unknown;
-}): Promise<OperationResult> {
-  if (input.method !== "tools/call" && input.method !== "tools/list") {
-    throw new Error("Unsupported PSD data MCP method");
-  }
-  const params = boundedRecord(input.params ?? {}, "PSD data MCP params");
-  const broker = new AgentCredentialBroker();
-  const record = await ownerCredentialJson(
-    broker,
-    input.ownerEmail,
-    "cognito-refresh",
-    input.sessionId,
-  );
+function psdDataCredential(
+  record: Record<string, unknown> | null,
+): { refreshToken: string; clientId: string; region: string } | null {
   const refreshToken = record?.refresh_token;
-  if (typeof refreshToken !== "string" || !refreshToken) {
-    return { status: "needs-auth", reason: "owner credential is unavailable" };
-  }
+  if (typeof refreshToken !== "string" || !refreshToken) return null;
   const clientId =
     typeof record?.client_id === "string"
       ? record.client_id
@@ -163,8 +147,30 @@ export async function executePsdDataOperation(input: {
   if (!clientId || !/^[a-z0-9-]+$/i.test(region)) {
     throw new Error("Cognito owner credential metadata is incomplete");
   }
-  const refreshResponse = await fetch(
-    `https://cognito-idp.${region}.amazonaws.com/`,
+  return { refreshToken, clientId, region };
+}
+
+async function psdDataOwnerToken(input: {
+  ownerEmail: string;
+  sessionId: string;
+}): Promise<{ token: string } | { result: OperationResult }> {
+  const record = await ownerCredentialJson(
+    new AgentCredentialBroker(),
+    input.ownerEmail,
+    "cognito-refresh",
+    input.sessionId,
+  );
+  const credential = psdDataCredential(record);
+  if (!credential) {
+    return {
+      result: {
+        status: "needs-auth",
+        reason: "owner credential is unavailable",
+      },
+    };
+  }
+  const response = await fetch(
+    `https://cognito-idp.${credential.region}.amazonaws.com/`,
     {
       method: "POST",
       headers: {
@@ -173,31 +179,74 @@ export async function executePsdDataOperation(input: {
       },
       body: JSON.stringify({
         AuthFlow: "REFRESH_TOKEN_AUTH",
-        ClientId: clientId,
-        AuthParameters: { REFRESH_TOKEN: refreshToken },
+        ClientId: credential.clientId,
+        AuthParameters: { REFRESH_TOKEN: credential.refreshToken },
       }),
       redirect: "error",
       signal: AbortSignal.timeout(15_000),
     },
   );
-  const refreshPayload = await readBoundedJson(
-    refreshResponse,
-    MAX_TOKEN_RESPONSE_BYTES,
-    ["application/json", "+json", "application/x-amz-json-1.1"],
-  );
+  const payload = await readBoundedJson(response, MAX_TOKEN_RESPONSE_BYTES, [
+    "application/json",
+    "+json",
+    "application/x-amz-json-1.1",
+  ]);
   const authResult =
-    isRecord(refreshPayload) && isRecord(refreshPayload.AuthenticationResult)
-      ? refreshPayload.AuthenticationResult
+    isRecord(payload) && isRecord(payload.AuthenticationResult)
+      ? payload.AuthenticationResult
       : null;
-  if (!refreshResponse.ok || typeof authResult?.IdToken !== "string") {
-    return { status: "needs-auth", reason: "owner credential was rejected" };
+  if (!response.ok || typeof authResult?.IdToken !== "string") {
+    return {
+      result: {
+        status: "needs-auth",
+        reason: "owner credential was rejected",
+      },
+    };
   }
+  return { token: authResult.IdToken };
+}
+
+async function psdDataOperationResult(
+  response: Response,
+): Promise<OperationResult> {
+  if (response.status === 401) {
+    return { status: "needs-auth", reason: "PSD data rejected owner token" };
+  }
+  if (response.status === 403) {
+    const detail = await readBoundedText(response, 4096, [
+      "application/json",
+      "text/plain",
+    ]);
+    return { status: "forbidden", detail: detail.slice(0, 1024) };
+  }
+  if (response.status === 429) return { status: "rate-limited" };
+  if (!response.ok) throw new Error(`PSD data MCP HTTP ${response.status}`);
+  const payload = await readBoundedJson(response, MAX_MCP_RESPONSE_BYTES);
+  if (!isRecord(payload)) throw new Error("PSD data MCP returned invalid JSON");
+  return {
+    status: "ok",
+    result: payload.error === undefined ? (payload.result ?? null) : payload,
+  };
+}
+
+export async function executePsdDataOperation(input: {
+  ownerEmail: string;
+  sessionId: string;
+  method: unknown;
+  params: unknown;
+}): Promise<OperationResult> {
+  if (input.method !== "tools/call" && input.method !== "tools/list") {
+    throw new Error("Unsupported PSD data MCP method");
+  }
+  const params = boundedRecord(input.params ?? {}, "PSD data MCP params");
+  const ownerToken = await psdDataOwnerToken(input);
+  if ("result" in ownerToken) return ownerToken.result;
 
   const rpcResponse = await fetch(safeHttpsUrl(process.env.PSD_DATA_MCP_URL), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${authResult.IdToken}`,
+      Authorization: `Bearer ${ownerToken.token}`,
       "X-Client-Model": "agentcore-owner-broker",
       "mcp-protocol-version": "2025-11-25",
     },
@@ -210,27 +259,7 @@ export async function executePsdDataOperation(input: {
     redirect: "error",
     signal: AbortSignal.timeout(30_000),
   });
-  if (rpcResponse.status === 401) {
-    return { status: "needs-auth", reason: "PSD data rejected owner token" };
-  }
-  if (rpcResponse.status === 403) {
-    return {
-      status: "forbidden",
-      detail: (
-        await readBoundedText(rpcResponse, 4096, [
-          "application/json",
-          "text/plain",
-        ])
-      ).slice(0, 1024),
-    };
-  }
-  if (rpcResponse.status === 429) return { status: "rate-limited" };
-  if (!rpcResponse.ok)
-    throw new Error(`PSD data MCP HTTP ${rpcResponse.status}`);
-  const payload = await readBoundedJson(rpcResponse, MAX_MCP_RESPONSE_BYTES);
-  if (!isRecord(payload)) throw new Error("PSD data MCP returned invalid JSON");
-  if (payload.error !== undefined) return { status: "ok", result: payload };
-  return { status: "ok", result: payload.result ?? null };
+  return psdDataOperationResult(rpcResponse);
 }
 
 function parseMcpResponse(
@@ -329,31 +358,44 @@ async function plaudMcpRequest(
   };
 }
 
-export async function executePlaudOperation(input: {
-  ownerEmail: string;
-  sessionId: string;
+const PLAUD_ALLOWED_TOOLS = new Set([
+  "get_current_user",
+  "list_files",
+  "get_file",
+  "get_note",
+  "get_transcript",
+]);
+
+function validatedPlaudOperation(input: {
   method: unknown;
   toolName: unknown;
   toolArgs: unknown;
-}): Promise<OperationResult> {
-  const allowedTools = new Set([
-    "get_current_user",
-    "list_files",
-    "get_file",
-    "get_note",
-    "get_transcript",
-  ]);
+}): {
+  method: "tools/call" | "tools/list";
+  toolName: string | undefined;
+  toolArgs: Record<string, unknown>;
+} {
   if (input.method !== "tools/call" && input.method !== "tools/list") {
     throw new Error("Unsupported Plaud MCP method");
   }
   if (
     input.method === "tools/call" &&
-    (typeof input.toolName !== "string" || !allowedTools.has(input.toolName))
+    (typeof input.toolName !== "string" ||
+      !PLAUD_ALLOWED_TOOLS.has(input.toolName))
   ) {
     throw new Error("Unsupported Plaud tool");
   }
-  const toolArgs = boundedRecord(input.toolArgs ?? {}, "Plaud tool arguments");
-  const broker = new AgentCredentialBroker();
+  return {
+    method: input.method,
+    toolName: typeof input.toolName === "string" ? input.toolName : undefined,
+    toolArgs: boundedRecord(input.toolArgs ?? {}, "Plaud tool arguments"),
+  };
+}
+
+async function plaudAccessToken(
+  input: { ownerEmail: string; sessionId: string },
+  broker: AgentCredentialBroker,
+): Promise<{ token: string } | { result: OperationResult }> {
   const record = await ownerCredentialJson(
     broker,
     input.ownerEmail,
@@ -368,9 +410,14 @@ export async function executePlaudOperation(input: {
     typeof clientId !== "string" ||
     !clientId
   ) {
-    return { status: "needs-auth", reason: "owner credential is unavailable" };
+    return {
+      result: {
+        status: "needs-auth",
+        reason: "owner credential is unavailable",
+      },
+    };
   }
-  const tokenResponse = await fetch(
+  const response = await fetch(
     safeHttpsUrl(
       process.env.PLAUD_OAUTH_TOKEN_URL,
       "https://mcp.plaud.ai/token",
@@ -390,20 +437,22 @@ export async function executePlaudOperation(input: {
       signal: AbortSignal.timeout(15_000),
     },
   );
-  const tokenPayload = await readBoundedJson(
-    tokenResponse,
-    MAX_TOKEN_RESPONSE_BYTES,
-  );
+  const payload = await readBoundedJson(response, MAX_TOKEN_RESPONSE_BYTES);
   if (
-    !tokenResponse.ok ||
-    !isRecord(tokenPayload) ||
-    typeof tokenPayload.access_token !== "string"
+    !response.ok ||
+    !isRecord(payload) ||
+    typeof payload.access_token !== "string"
   ) {
-    return { status: "needs-auth", reason: "owner credential was rejected" };
+    return {
+      result: {
+        status: "needs-auth",
+        reason: "owner credential was rejected",
+      },
+    };
   }
   if (
-    typeof tokenPayload.refresh_token === "string" &&
-    tokenPayload.refresh_token !== refreshToken
+    typeof payload.refresh_token === "string" &&
+    payload.refresh_token !== refreshToken
   ) {
     try {
       await broker.put(
@@ -411,7 +460,7 @@ export async function executePlaudOperation(input: {
         "plaud",
         JSON.stringify({
           ...record,
-          refresh_token: tokenPayload.refresh_token,
+          refresh_token: payload.refresh_token,
           obtained_at: new Date().toISOString(),
         }),
       );
@@ -419,18 +468,21 @@ export async function executePlaudOperation(input: {
       log.warn(
         "Plaud refresh-token rotation persistence failed; current access continues",
         sanitizeForLogging({
-          ownerEmail: input.ownerEmail,
-          sessionId: input.sessionId,
+          ...input,
           error: error instanceof Error ? error.message : String(error),
         }),
       );
     }
   }
+  return { token: payload.access_token };
+}
 
-  const initializeId = crypto.randomUUID();
-  const initialized = await plaudMcpRequest(tokenPayload.access_token, {
+async function initializePlaudSession(
+  accessToken: string,
+): Promise<string | undefined | OperationResult> {
+  const initialized = await plaudMcpRequest(accessToken, {
     jsonrpc: "2.0",
-    id: initializeId,
+    id: crypto.randomUUID(),
     method: "initialize",
     params: {
       protocolVersion: MCP_PROTOCOL_VERSION,
@@ -444,15 +496,16 @@ export async function executePlaudOperation(input: {
   if (!initialized.response.ok) {
     throw new Error(`Plaud initialize HTTP ${initialized.response.status}`);
   }
-  const plaudSessionId = initialized.response.headers.get("mcp-session-id");
+  const sessionId =
+    initialized.response.headers.get("mcp-session-id") || undefined;
   const notification = await plaudMcpRequest(
-    tokenPayload.access_token,
+    accessToken,
     {
       jsonrpc: "2.0",
       method: "notifications/initialized",
       params: {},
     },
-    plaudSessionId || undefined,
+    sessionId,
     { allowEmpty: true },
   );
   if (!notification.response.ok) {
@@ -460,19 +513,37 @@ export async function executePlaudOperation(input: {
       `Plaud initialized notification HTTP ${notification.response.status}`,
     );
   }
-  const callId = crypto.randomUUID();
+  return sessionId;
+}
+
+export async function executePlaudOperation(input: {
+  ownerEmail: string;
+  sessionId: string;
+  method: unknown;
+  toolName: unknown;
+  toolArgs: unknown;
+}): Promise<OperationResult> {
+  const operationInput = validatedPlaudOperation(input);
+  const broker = new AgentCredentialBroker();
+  const access = await plaudAccessToken(input, broker);
+  if ("result" in access) return access.result;
+  const initialized = await initializePlaudSession(access.token);
+  if (typeof initialized === "object") return initialized;
   const operation = await plaudMcpRequest(
-    tokenPayload.access_token,
+    access.token,
     {
       jsonrpc: "2.0",
-      id: callId,
-      method: input.method,
+      id: crypto.randomUUID(),
+      method: operationInput.method,
       params:
-        input.method === "tools/call"
-          ? { name: input.toolName, arguments: toolArgs }
+        operationInput.method === "tools/call"
+          ? {
+              name: operationInput.toolName,
+              arguments: operationInput.toolArgs,
+            }
           : {},
     },
-    plaudSessionId || undefined,
+    initialized,
   );
   if (operation.response.status === 401) {
     return { status: "needs-auth", reason: "Plaud rejected owner token" };
@@ -511,7 +582,7 @@ async function sharedCredentialJson(
   return boundedRecord(parsed, "Operation credential");
 }
 
-export async function executeOpenAiImageOperation(input: {
+interface OpenAiImageOperationInput {
   ownerEmail: string;
   sessionId: string;
   prompt: unknown;
@@ -519,10 +590,30 @@ export async function executeOpenAiImageOperation(input: {
   quality: unknown;
   background: unknown;
   referenceDataUrl: unknown;
-}): Promise<{ imageBase64: string }> {
+}
+
+interface ValidatedImageOperation {
+  prompt: string;
+  size: string;
+  quality: string;
+  background: string;
+  reference: string | null;
+}
+
+function validatedImageOperation(
+  input: OpenAiImageOperationInput,
+): ValidatedImageOperation {
   const sizes = new Set(["auto", "1024x1024", "1024x1536", "1536x1024"]);
   const qualities = new Set(["auto", "low", "medium", "high"]);
   const backgrounds = new Set(["auto", "opaque", "transparent"]);
+  const reference =
+    typeof input.referenceDataUrl === "string" ? input.referenceDataUrl : null;
+  const validReference =
+    reference === null ||
+    (reference.length <= 12 * 1024 * 1024 &&
+      /^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(
+        reference,
+      ));
   if (
     typeof input.prompt !== "string" ||
     input.prompt.length === 0 ||
@@ -533,53 +624,33 @@ export async function executeOpenAiImageOperation(input: {
     !qualities.has(input.quality) ||
     typeof input.background !== "string" ||
     !backgrounds.has(input.background) ||
-    (input.referenceDataUrl !== null &&
-      input.referenceDataUrl !== undefined &&
-      (typeof input.referenceDataUrl !== "string" ||
-        input.referenceDataUrl.length > 12 * 1024 * 1024 ||
-        !/^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(
-          input.referenceDataUrl,
-        )))
+    !validReference
   ) {
     throw new Error("Invalid image operation");
   }
-  const broker = new AgentCredentialBroker();
-  const credential = await broker.get(input.ownerEmail, "openai_api_key", {
-    sharedOnly: true,
-    sessionId: input.sessionId,
-  });
-  if (!credential || credential.scope !== "shared") {
-    throw new Error("Image generation credential is not configured");
-  }
-  const reference =
-    typeof input.referenceDataUrl === "string" ? input.referenceDataUrl : null;
-  const body: Record<string, unknown> = {
+  return {
+    prompt: input.prompt,
+    size: input.size,
+    quality: input.quality,
+    background: input.background,
+    reference,
+  };
+}
+
+function openAiImageRequestBody(
+  input: ValidatedImageOperation,
+): Record<string, unknown> {
+  return {
     model: "gpt-image-2",
     prompt: input.prompt,
     ...(input.size !== "auto" ? { size: input.size } : {}),
     ...(input.quality !== "auto" ? { quality: input.quality } : {}),
     ...(input.background !== "auto" ? { background: input.background } : {}),
-    ...(reference ? { images: [{ image_url: reference }] } : {}),
+    ...(input.reference ? { images: [{ image_url: input.reference }] } : {}),
   };
-  const response = await fetch(
-    reference
-      ? "https://api.openai.com/v1/images/edits"
-      : "https://api.openai.com/v1/images/generations",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${credential.value}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-      redirect: "error",
-      signal: AbortSignal.timeout(120_000),
-    },
-  );
-  if (!response.ok) {
-    throw new Error(`Image provider HTTP ${response.status}`);
-  }
-  const payload = await readBoundedJson(response, 32 * 1024 * 1024);
+}
+
+function imageBase64FromPayload(payload: unknown): string {
   const first =
     isRecord(payload) &&
     Array.isArray(payload.data) &&
@@ -593,7 +664,41 @@ export async function executeOpenAiImageOperation(input: {
   ) {
     throw new Error("Image provider returned invalid image data");
   }
-  return { imageBase64: first.b64_json };
+  return first.b64_json;
+}
+
+export async function executeOpenAiImageOperation(
+  input: OpenAiImageOperationInput,
+): Promise<{ imageBase64: string }> {
+  const validated = validatedImageOperation(input);
+  const broker = new AgentCredentialBroker();
+  const credential = await broker.get(input.ownerEmail, "openai_api_key", {
+    sharedOnly: true,
+    sessionId: input.sessionId,
+  });
+  if (!credential || credential.scope !== "shared") {
+    throw new Error("Image generation credential is not configured");
+  }
+  const response = await fetch(
+    validated.reference
+      ? "https://api.openai.com/v1/images/edits"
+      : "https://api.openai.com/v1/images/generations",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${credential.value}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(openAiImageRequestBody(validated)),
+      redirect: "error",
+      signal: AbortSignal.timeout(120_000),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`Image provider HTTP ${response.status}`);
+  }
+  const payload = await readBoundedJson(response, 32 * 1024 * 1024);
+  return { imageBase64: imageBase64FromPayload(payload) };
 }
 
 async function redRoverAuthority(input: {
@@ -726,53 +831,96 @@ function assertRedRoverDateRange(startDate: string, endDate: string): void {
   }
 }
 
-export async function executeRedRoverOperation(input: {
+type RedRoverOperationInput = {
   ownerEmail: string;
   sessionId: string;
   operation: unknown;
   startDate: unknown;
   endDate: unknown;
   filledFilter: unknown;
-}): Promise<unknown> {
+};
+
+type ValidatedRedRoverOperation =
+  | { operation: "organization" }
+  | {
+      operation: "vacancies";
+      startDate: string;
+      endDate: string;
+      filledFilter: "filled" | "unfilled" | null;
+    };
+
+function validatedRedRoverOperation(
+  input: RedRoverOperationInput,
+): ValidatedRedRoverOperation {
   if (input.operation !== "organization" && input.operation !== "vacancies") {
     throw new Error("Invalid Red Rover operation");
   }
+  if (input.operation === "organization") return { operation: "organization" };
+  const validFilter =
+    input.filledFilter === undefined ||
+    input.filledFilter === null ||
+    input.filledFilter === "filled" ||
+    input.filledFilter === "unfilled";
   if (
-    input.operation === "vacancies" &&
-    (typeof input.startDate !== "string" ||
-      typeof input.endDate !== "string" ||
-      (input.filledFilter !== undefined &&
-        input.filledFilter !== null &&
-        input.filledFilter !== "filled" &&
-        input.filledFilter !== "unfilled"))
+    typeof input.startDate !== "string" ||
+    typeof input.endDate !== "string" ||
+    !validFilter
   ) {
     throw new Error("Invalid Red Rover operation");
   }
-  if (input.operation === "vacancies") {
-    assertRedRoverDateRange(input.startDate as string, input.endDate as string);
-  }
+  assertRedRoverDateRange(input.startDate, input.endDate);
+  return {
+    operation: "vacancies",
+    startDate: input.startDate,
+    endDate: input.endDate,
+    filledFilter:
+      input.filledFilter === "filled" || input.filledFilter === "unfilled"
+        ? input.filledFilter
+        : null,
+  };
+}
 
-  const authority = await redRoverAuthority(input);
-  const organization = await redRoverOrganization(authority);
-  if (input.operation === "organization") {
-    return {
-      orgId: organization.orgId,
-      ...(organization.name ? { name: organization.name } : {}),
-    };
+function redRoverFilledQuery(
+  filter: "filled" | "unfilled" | null,
+): Record<string, string> {
+  if (filter === "filled") return { filled: "true" };
+  if (filter === "unfilled") return { filled: "false" };
+  return {};
+}
+
+function appendRedRoverVacancies(
+  allData: unknown[],
+  pageData: unknown[],
+  serializedBytes: number,
+): number {
+  if (allData.length + pageData.length > MAX_RED_ROVER_VACANCY_ITEMS) {
+    throw new Error("Red Rover query exceeded the aggregate item limit");
   }
+  let nextBytes = serializedBytes;
+  for (const item of pageData) {
+    nextBytes += Buffer.byteLength(JSON.stringify(item), "utf8");
+    if (nextBytes > MAX_RED_ROVER_SERIALIZED_BYTES) {
+      throw new Error("Red Rover query exceeded the aggregate byte limit");
+    }
+    allData.push(item);
+  }
+  return nextBytes;
+}
+
+async function redRoverVacancies(
+  operation: Extract<ValidatedRedRoverOperation, { operation: "vacancies" }>,
+  authority: Awaited<ReturnType<typeof redRoverAuthority>>,
+  organization: Awaited<ReturnType<typeof redRoverOrganization>>,
+): Promise<{ data: unknown[]; total: number }> {
   const allData: unknown[] = [];
   let serializedBytes = 0;
   for (let page = 1; page <= 200; page += 1) {
     const query = new URLSearchParams({
-      fromDate: `${input.startDate}T00:00:00Z`,
-      toDate: `${input.endDate}T23:59:59Z`,
+      fromDate: `${operation.startDate}T00:00:00Z`,
+      toDate: `${operation.endDate}T23:59:59Z`,
       pageSize: "100",
       page: String(page),
-      ...(input.filledFilter === "filled"
-        ? { filled: "true" }
-        : input.filledFilter === "unfilled"
-          ? { filled: "false" }
-          : {}),
+      ...redRoverFilledQuery(operation.filledFilter),
     });
     const payload = await redRoverGet(
       `/api/v1/${encodeURIComponent(
@@ -785,22 +933,32 @@ export async function executeRedRoverOperation(input: {
     if (!Array.isArray(payload.data)) {
       throw new TypeError("Red Rover response data is malformed");
     }
-    if (allData.length + payload.data.length > MAX_RED_ROVER_VACANCY_ITEMS) {
-      throw new Error("Red Rover query exceeded the aggregate item limit");
-    }
-    for (const item of payload.data) {
-      const serialized = JSON.stringify(item);
-      serializedBytes += Buffer.byteLength(serialized, "utf8");
-      if (serializedBytes > MAX_RED_ROVER_SERIALIZED_BYTES) {
-        throw new Error("Red Rover query exceeded the aggregate byte limit");
-      }
-      allData.push(item);
-    }
+    serializedBytes = appendRedRoverVacancies(
+      allData,
+      payload.data,
+      serializedBytes,
+    );
     if (payload.hasMoreData !== true) {
       return { data: allData, total: allData.length };
     }
   }
   throw new Error("Red Rover query exceeded the maximum page limit");
+}
+
+export async function executeRedRoverOperation(
+  input: RedRoverOperationInput,
+): Promise<unknown> {
+  const operation = validatedRedRoverOperation(input);
+
+  const authority = await redRoverAuthority(input);
+  const organization = await redRoverOrganization(authority);
+  if (operation.operation === "organization") {
+    return {
+      orgId: organization.orgId,
+      ...(organization.name ? { name: organization.name } : {}),
+    };
+  }
+  return redRoverVacancies(operation, authority, organization);
 }
 
 // ---------------------------------------------------------------------------
