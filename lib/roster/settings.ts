@@ -10,6 +10,8 @@ import { z } from "zod";
 
 export const ONEROSTER_SETTING_KEYS = {
   enabled: "ROSTER_SYNC_ENABLED",
+  /** Opt-in authorization pass; scheduled syncs only, default disabled. */
+  roleSyncEnabled: "ROSTER_ROLE_SYNC_ENABLED",
   baseUrl: "ONEROSTER_BASE_URL",
   authMode: "ONEROSTER_AUTH_MODE",
   credentialsSecretArn: "ONEROSTER_CREDENTIALS_SECRET_ARN",
@@ -26,6 +28,7 @@ export type OneRosterApiVersion = "v1p1" | "v1p2";
 
 export interface OneRosterSettings {
   enabled: boolean;
+  roleSyncEnabled: boolean;
   baseUrl: string | null;
   authMode: OneRosterAuthMode | null;
   credentialsSecretArn: string | null;
@@ -140,9 +143,18 @@ export type ParsedOneRosterSettingsInput = z.output<
 >;
 
 export async function getOneRosterSettings(): Promise<OneRosterSettings> {
-  const [enabled, baseUrl, authMode, secretArn, apiVersion, pageSize] =
+  const [
+    enabled,
+    roleSyncEnabled,
+    baseUrl,
+    authMode,
+    secretArn,
+    apiVersion,
+    pageSize,
+  ] =
     await Promise.all([
       getSetting(ONEROSTER_SETTING_KEYS.enabled),
+      getSetting(ONEROSTER_SETTING_KEYS.roleSyncEnabled),
       getSetting(ONEROSTER_SETTING_KEYS.baseUrl),
       getSetting(ONEROSTER_SETTING_KEYS.authMode),
       getSetting(ONEROSTER_SETTING_KEYS.credentialsSecretArn),
@@ -153,6 +165,8 @@ export async function getOneRosterSettings(): Promise<OneRosterSettings> {
 
   return {
     enabled: enabled?.trim().toLowerCase() === "true",
+    roleSyncEnabled:
+      roleSyncEnabled?.trim().toLowerCase() === "true",
     baseUrl: baseUrl?.trim() || null,
     authMode: parseAuthMode(authMode),
     credentialsSecretArn: secretArn?.trim() || null,

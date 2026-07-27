@@ -22,10 +22,16 @@ import {
   getSql,
   readLastPermRev,
   reconcileCollection,
+  reconcileOneRosterRoles,
   writeLastPermRev,
   writeSyncStatus,
+  type RoleReconcileResult,
 } from "./db";
 import { OneRosterClient } from "./oneroster-client";
+import {
+  roleReconcileMetrics,
+  runPostSyncRoleReconciliation,
+} from "./role-reconciliation";
 import { runOneRosterSync, type OneRosterSyncResult } from "./sync";
 
 const METRIC_NAMESPACE = "AIStudio/RosterSync";
@@ -155,11 +161,26 @@ export async function handler(
     });
     syncResult = result;
 
-    await emitMetrics(result);
-    metricsEmitted = true;
     if (!result.fullySuccessful) {
+      await emitMetrics(result, null);
+      metricsEmitted = true;
       throw new Error(INCOMPLETE_SYNC_ERROR);
     }
+
+    const roleReconcile = await runPostSyncRoleReconciliation(
+      {
+        trigger,
+        enabled: config.roleSyncEnabled,
+        fullySuccessful: result.fullySuccessful,
+      },
+      {
+        reconcile: () => reconcileOneRosterRoles(sql),
+        log,
+      }
+    );
+    await emitMetrics(result, roleReconcile);
+    metricsEmitted = true;
+
     log.info("OneRoster sync completed", {
       unchanged: result.unchanged,
       restartCount: result.restartCount,
@@ -184,7 +205,7 @@ export async function handler(
         : thrownErrorMessage;
     log.error("OneRoster sync failed", { error: errorMessage, runId });
     if (!metricsEmitted) {
-      await emitMetrics(null).catch(() => {});
+      await emitMetrics(null, null).catch(() => {});
     }
     await writeStatusSafely(
       sql,
@@ -257,7 +278,10 @@ async function loadSecret(secretArn: string): Promise<string> {
   return response.SecretString;
 }
 
-async function emitMetrics(result: OneRosterSyncResult | null): Promise<void> {
+async function emitMetrics(
+  result: OneRosterSyncResult | null,
+  roleReconcile: RoleReconcileResult | null
+): Promise<void> {
   const environmentDimension = [{ Name: "Environment", Value: ENVIRONMENT }];
   const metrics: MetricDatum[] = result
     ? [
@@ -327,6 +351,17 @@ async function emitMetrics(result: OneRosterSyncResult | null): Promise<void> {
           Dimensions: dimensions,
         }
       );
+    }
+  }
+
+  if (roleReconcile) {
+    for (const metric of roleReconcileMetrics(roleReconcile)) {
+      metrics.push({
+        MetricName: metric.name,
+        Value: metric.value,
+        Unit: "Count",
+        Dimensions: environmentDimension,
+      });
     }
   }
 
