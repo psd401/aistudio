@@ -5,7 +5,7 @@
 
 import { sanitizeForLogging } from '../logger'
 
-describe('Logger Circular Reference Detection', () => {
+function defineLoggerCircularReferenceDetectionSuite1Part1() {
 
     it('should handle direct circular object reference without stack overflow', () => {
       const obj: Record<string, unknown> = { name: 'test' }
@@ -115,7 +115,9 @@ describe('Logger Circular Reference Detection', () => {
       expect(() => sanitizeForLogging(deepObj)).not.toThrow()
     })
 
-    it('should handle 1000-level deep nesting without crashing', () => {
+    }
+
+function defineLoggerCircularReferenceDetectionSuite1Part2() {it('should handle 1000-level deep nesting without crashing', () => {
       const deepObj = createDeeplyNestedObject(1000)
 
       expect(() => sanitizeForLogging(deepObj)).not.toThrow()
@@ -223,7 +225,9 @@ describe('Logger Circular Reference Detection', () => {
 
 
 
-    it('should complete within reasonable time for complex objects', () => {
+    }
+
+function defineLoggerCircularReferenceDetectionSuite1Part3() {it('should complete within reasonable time for complex objects', () => {
       const complexObj = {
         users: Array.from({ length: 100 }, (_, i) => ({
           id: i,
@@ -282,7 +286,15 @@ describe('Logger Circular Reference Detection', () => {
       expect(typeof result).toBe('string')
     })
 
-})
+}
+
+const defineLoggerCircularReferenceDetectionSuite1 = () => {
+  defineLoggerCircularReferenceDetectionSuite1Part1()
+  defineLoggerCircularReferenceDetectionSuite1Part2()
+  defineLoggerCircularReferenceDetectionSuite1Part3()
+};
+
+describe('Logger Circular Reference Detection', defineLoggerCircularReferenceDetectionSuite1)
 
 // Helper function for creating deeply nested test objects
 function createDeeplyNestedObject(depth: number): Record<string, unknown> {

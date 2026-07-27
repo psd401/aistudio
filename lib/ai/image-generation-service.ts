@@ -639,17 +639,21 @@ async function generateWithGemini(
       for (const refImage of request.referenceImages) {
         if (refImage.base64) {
           // Extract base64 data if it's a data URL
-          let imageData = refImage.base64;
+          const base64 = refImage.base64;
+          let imageData = base64;
           let mimeType = refImage.mimeType || 'image/png';
 
-          if (refImage.base64.startsWith('data:')) {
-            // Parse data URL: data:image/png;base64,XXXX
-            const matches = refImage.base64.match(/^data:([^;]+);base64,(.+)$/);
-            if (matches) {
-              mimeType = matches[1];
-              imageData = matches[2];
+          const handleNestedBranch1 = () => {
+            if (base64.startsWith('data:')) {
+              // Parse data URL: data:image/png;base64,XXXX
+              const matches = base64.match(/^data:([^;]+);base64,(.+)$/);
+              if (matches) {
+                mimeType = matches[1];
+                imageData = matches[2];
+              }
             }
           }
+          handleNestedBranch1()
 
           contentParts.push({
             type: 'image',

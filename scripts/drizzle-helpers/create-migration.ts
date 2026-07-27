@@ -13,13 +13,14 @@
  *   bun run migration:create -- "add-user-preferences"
  */
 
-import * as fs from "node:fs";
+
 import * as path from "node:path";
 import {
   getAbsolutePath,
   getNextMigrationNumber,
   sanitizeForFilename,
 } from "./lib/migration-utils";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 // Constants
 const LAMBDA_SCHEMA_DIR = "./infra/database/schema";
@@ -110,7 +111,7 @@ function main(): void {
 
   // Step 2: Check if file already exists
   const filePath = getAbsolutePath(path.join(LAMBDA_SCHEMA_DIR, filename));
-  if (fs.existsSync(filePath)) {
+  if (validatedFs.existsSync(filePath)) {
     console.error("");
     console.error(`❌ Migration file already exists: ${filePath}`);
     console.error("");
@@ -122,7 +123,7 @@ function main(): void {
   console.log("📝 Step 2: Creating migration file...");
 
   const content = generateMigrationTemplate(nextNumber, description);
-  fs.writeFileSync(filePath, content);
+  validatedFs.writeFileSync(filePath, content);
 
   console.log(`   ✅ Created: ${filePath}`);
 

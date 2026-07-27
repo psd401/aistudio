@@ -11,9 +11,10 @@
  *   bunx ts-node infra/scripts/audit-iam-policies.ts
  */
 
-import * as fs from "node:fs"
+
 import * as path from "node:path"
 import * as glob from "glob"
+import { validatedFs } from "../lib/validated-fs";
 
 interface PolicyViolation {
   file: string
@@ -64,7 +65,7 @@ const ALLOWED_WILDCARDS = [
 
 function auditFile(filePath: string): PolicyViolation[] {
   const violations: PolicyViolation[] = []
-  const content = fs.readFileSync(filePath, "utf-8")
+  const content = validatedFs.readFileSync(filePath, "utf-8")
   const lines = content.split("\n")
 
   for (const [index, line] of lines.entries()) {
@@ -219,7 +220,7 @@ function printReport(report: AuditReport): void {
 }
 
 function saveReport(report: AuditReport, outputPath: string): void {
-  fs.writeFileSync(outputPath, JSON.stringify(report, null, 2))
+  validatedFs.writeFileSync(outputPath, JSON.stringify(report, null, 2))
   console.log(`Full report saved to: ${outputPath}`)
 }
 

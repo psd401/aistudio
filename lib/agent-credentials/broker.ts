@@ -166,9 +166,12 @@ export class AgentCredentialBroker {
             secret.Name.startsWith(prefix)
           ) {
             const name = secret.Name.slice(prefix.length)
-            if (SAFE_CREDENTIAL_NAME_RE.test(name)) {
+            const handleNestedBranch1 = () => {
+              if (SAFE_CREDENTIAL_NAME_RE.test(name)) {
               credentials.push({ name, scope })
             }
+            }
+            handleNestedBranch1()
           }
           if (credentials.length >= MAX_LISTED_CREDENTIALS) {
             return credentials

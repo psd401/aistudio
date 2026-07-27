@@ -33,10 +33,14 @@ const { UnifiedStreamingService } = require('../unified-streaming-service');
 
 const { createTokenMappingSink } = require('../../safety/token-mapping-sink');
 
-describe('UnifiedStreamingService', () => {
-  let streamingService: any;
-  let mockAdapter: any;
-  let mockTelemetryConfig: any;
+let streamingService: any;
+let mockAdapter: any;
+let mockTelemetryConfig: any;
+
+function defineUnifiedStreamingServiceSuite1Part1() {
+
+
+
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -73,7 +77,9 @@ describe('UnifiedStreamingService', () => {
   });
 
 
-    it('detokenizes assistant output with mappings added by a tool after the response wrapper is created', async () => {
+    }
+
+function defineUnifiedStreamingServiceSuite1Part2() {it('detokenizes assistant output with mappings added by a tool after the response wrapper is created', async () => {
       const {
         ReadableStream: NodeReadableStream,
         TransformStream: NodeTransformStream,
@@ -193,7 +199,9 @@ describe('UnifiedStreamingService', () => {
       expect(clientBody).not.toContain(emailPlaceholder);
     });
 
-    it('should successfully stream with OpenAI provider', async () => {
+    }
+
+function defineUnifiedStreamingServiceSuite1Part3() {it('should successfully stream with OpenAI provider', async () => {
       // Arrange
       const request = {
         provider: 'openai',
@@ -307,7 +315,9 @@ describe('UnifiedStreamingService', () => {
       );
     });
 
-    it('should handle Claude thinking models', async () => {
+    }
+
+function defineUnifiedStreamingServiceSuite1Part4() {it('should handle Claude thinking models', async () => {
       // Arrange
       const request = {
         provider: 'amazon-bedrock',
@@ -423,7 +433,9 @@ describe('UnifiedStreamingService', () => {
       expect(failingAdapter.streamWithEnhancements).toHaveBeenCalledTimes(5);
     });
 
-    it('should record telemetry correctly', async () => {
+    }
+
+function defineUnifiedStreamingServiceSuite1Part5() {it('should record telemetry correctly', async () => {
       // Arrange
       const request = {
         provider: 'openai',
@@ -476,4 +488,14 @@ describe('UnifiedStreamingService', () => {
       expect(callArgs.provider).toBe('openai');
     });
   ;
-});
+}
+
+const defineUnifiedStreamingServiceSuite1 = () => {
+  defineUnifiedStreamingServiceSuite1Part1()
+  defineUnifiedStreamingServiceSuite1Part2()
+  defineUnifiedStreamingServiceSuite1Part3()
+  defineUnifiedStreamingServiceSuite1Part4()
+  defineUnifiedStreamingServiceSuite1Part5()
+};
+
+describe('UnifiedStreamingService', defineUnifiedStreamingServiceSuite1);

@@ -41,7 +41,7 @@ function withNodeEnv(value: string, fn: () => void) {
   }
 }
 
-describe("assertSafeFetchUrl", () => {
+const defineAssertSafeFetchUrlSuite1 = () => {
   it("allows a public https URL", () => {
     expect(assertSafeFetchUrl("https://example.com/page").hostname).toBe(
       "example.com"
@@ -96,9 +96,11 @@ describe("assertSafeFetchUrl", () => {
       expect(assertSafeFetchUrl("http://example.com").protocol).toBe("http:");
     });
   });
-});
+};
 
-describe("htmlToText", () => {
+describe("assertSafeFetchUrl", defineAssertSafeFetchUrlSuite1);
+
+const defineHtmlToTextSuite2 = () => {
   it("strips script/style blocks and tags, decodes entities", () => {
     const html =
       "<html><head><style>.x{}</style></head><body>" +
@@ -119,9 +121,11 @@ describe("htmlToText", () => {
     expect(text).not.toMatch(/secret/);
     expect(text).not.toMatch(/leak/);
   });
-});
+};
 
-describe("handleWebFetch", () => {
+describe("htmlToText", defineHtmlToTextSuite2);
+
+const defineHandleWebFetchSuite3 = () => {
   afterEach(() => {
     jest.restoreAllMocks();
   });
@@ -196,9 +200,11 @@ describe("handleWebFetch", () => {
     );
     expect(res.content[0].text).toMatch(/…\[truncated\]/);
   });
-});
+};
 
-describe("handleWebFetch redirect guard (REV-COR-496)", () => {
+describe("handleWebFetch", defineHandleWebFetchSuite3);
+
+const defineHandleWebFetchRedirectGuardREVCOR496Suite4 = () => {
   afterEach(() => {
     jest.restoreAllMocks();
   });
@@ -264,9 +270,11 @@ describe("handleWebFetch redirect guard (REV-COR-496)", () => {
     // MAX_REDIRECTS = 5 → 6 fetches (hops 0..5) then bail.
     expect(fetchMock).toHaveBeenCalledTimes(6);
   });
-});
+};
 
-describe("readResponseText byte cap (REV-COR-500)", () => {
+describe("handleWebFetch redirect guard (REV-COR-496)", defineHandleWebFetchRedirectGuardREVCOR496Suite4);
+
+const defineReadResponseTextByteCapREVCOR500Suite5 = () => {
   it("stops reading at MAX_BYTES and cancels the stream", async () => {
     const CHUNK = 1_000_000;
     let enqueued = 0;
@@ -315,9 +323,11 @@ describe("readResponseText byte cap (REV-COR-500)", () => {
     );
     expect(readerCreated).toBe(false);
   });
-});
+};
 
-describe("htmlToText input bounding (REV-PERF-005)", () => {
+describe("readResponseText byte cap (REV-COR-500)", defineReadResponseTextByteCapREVCOR500Suite5);
+
+const defineHtmlToTextInputBoundingREVPERF005Suite6 = () => {
   afterEach(() => {
     jest.restoreAllMocks();
   });
@@ -345,4 +355,6 @@ describe("htmlToText input bounding (REV-PERF-005)", () => {
     expect(res.content[0].text).toContain("START");
     expect(res.content[0].text).not.toContain("ENDMARKER");
   });
-});
+};
+
+describe("htmlToText input bounding (REV-PERF-005)", defineHtmlToTextInputBoundingREVPERF005Suite6);

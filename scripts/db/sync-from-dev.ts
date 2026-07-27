@@ -21,6 +21,7 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { scriptLogger as log } from "./script-logger";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 const LOCAL_DB_URL =
   process.env.LOCAL_DATABASE_URL ||
@@ -122,8 +123,8 @@ async function main(): Promise<void> {
     }
 
     // Clean up dump file
-    if (fs.existsSync(dumpFile)) {
-      fs.unlinkSync(dumpFile);
+    if (validatedFs.existsSync(dumpFile)) {
+      validatedFs.unlinkSync(dumpFile);
     }
   }
 

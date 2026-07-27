@@ -54,66 +54,16 @@ if (typeof File !== 'undefined' && !File.prototype.arrayBuffer) {
   };
 }
 
-describe('HybridDocumentAdapter', () => {
-  let adapter: HybridDocumentAdapter;
+let adapter: HybridDocumentAdapter;
 
-  beforeEach(() => {
-    jest.clearAllMocks();
-    adapter = new HybridDocumentAdapter();
-  });
-
-
-    it('returns only an opaque marker when canonical ingestion is active', async () => {
-      mockUploadTemporaryAttachment.mockResolvedValue({
-        mode: 'canonical',
-        reference: {
-          bindingId: '123e4567-e89b-42d3-a456-426614174000',
-          itemId: 42,
-          name: 'notes.txt',
-        },
-        repositoryId: 8,
-        itemVersionId: 'version',
-        processingJobId: 'job',
-      });
-      mockWaitForTemporaryAttachment.mockResolvedValue(
-        '[[repository-attachment:v1:123e4567-e89b-42d3-a456-426614174000:42:notes.txt]]'
-      );
-      const repositoryAdapter = new HybridDocumentAdapter(undefined, {
-        repositoryBacked: true,
-        getConversationId: () =>
-          '123e4567-e89b-42d3-a456-426614174111',
-      });
-      const file = new File(['private source text'], 'notes.txt', {
-        type: 'text/plain',
-      });
-
-      const pending = await repositoryAdapter.add({ file });
-      const complete = await repositoryAdapter.send(pending);
-
-      expect(mockUploadTemporaryAttachment).toHaveBeenCalledWith({
-        file,
-        draftKey: 'test-uuid-123',
-        purpose: 'nexus',
-        conversationId: '123e4567-e89b-42d3-a456-426614174111',
-      });
-      expect(JSON.stringify(complete.content)).not.toContain(
-        'private source text'
-      );
-      expect(complete.content).toEqual([
-        {
-          type: 'text',
-          text: '[[repository-attachment:v1:123e4567-e89b-42d3-a456-426614174000:42:notes.txt]]',
-        },
-      ]);
-    });
-  ;
-
-  describe('validateFileType', () => {
-    // Helper to access private method for testing
-    const validateFileType = async (file: File) => {
+const validateFileType = async (file: File) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return await (adapter as any).validateFileType(file);
     };
+
+function defineValidateFileTypeSuite99Part1() {
+    // Helper to access private method for testing
+
 
 
       it('should accept CSV files with text/csv MIME type', async () => {
@@ -246,7 +196,9 @@ describe('HybridDocumentAdapter', () => {
         expect(result).toBe(true);
       });
 
-      it('should reject PDFs whose %PDF header starts beyond the 1024-byte scan window', async () => {
+      }
+
+function defineValidateFileTypeSuite99Part2() {it('should reject PDFs whose %PDF header starts beyond the 1024-byte scan window', async () => {
         // 1025 zero bytes, then %PDF — past the allowed scan region
         const prefix = new Uint8Array(1025);
         const pdfSig = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
@@ -332,7 +284,68 @@ describe('HybridDocumentAdapter', () => {
         expect(result).toBe(false);
       });
     ;
+  }
+
+const defineValidateFileTypeSuite99 = () => {
+  defineValidateFileTypeSuite99Part1()
+  defineValidateFileTypeSuite99Part2()
+};
+
+const defineHybridDocumentAdapterSuite1 = () => {
+
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    adapter = new HybridDocumentAdapter();
   });
+
+
+    it('returns only an opaque marker when canonical ingestion is active', async () => {
+      mockUploadTemporaryAttachment.mockResolvedValue({
+        mode: 'canonical',
+        reference: {
+          bindingId: '123e4567-e89b-42d3-a456-426614174000',
+          itemId: 42,
+          name: 'notes.txt',
+        },
+        repositoryId: 8,
+        itemVersionId: 'version',
+        processingJobId: 'job',
+      });
+      mockWaitForTemporaryAttachment.mockResolvedValue(
+        '[[repository-attachment:v1:123e4567-e89b-42d3-a456-426614174000:42:notes.txt]]'
+      );
+      const repositoryAdapter = new HybridDocumentAdapter(undefined, {
+        repositoryBacked: true,
+        getConversationId: () =>
+          '123e4567-e89b-42d3-a456-426614174111',
+      });
+      const file = new File(['private source text'], 'notes.txt', {
+        type: 'text/plain',
+      });
+
+      const pending = await repositoryAdapter.add({ file });
+      const complete = await repositoryAdapter.send(pending);
+
+      expect(mockUploadTemporaryAttachment).toHaveBeenCalledWith({
+        file,
+        draftKey: 'test-uuid-123',
+        purpose: 'nexus',
+        conversationId: '123e4567-e89b-42d3-a456-426614174111',
+      });
+      expect(JSON.stringify(complete.content)).not.toContain(
+        'private source text'
+      );
+      expect(complete.content).toEqual([
+        {
+          type: 'text',
+          text: '[[repository-attachment:v1:123e4567-e89b-42d3-a456-426614174000:42:notes.txt]]',
+        },
+      ]);
+    });
+  ;
+
+  describe('validateFileType', defineValidateFileTypeSuite99);
 
 
     it('should return code-based message when a known code is provided', () => {
@@ -386,9 +399,11 @@ describe('HybridDocumentAdapter', () => {
       expect(result).toBe('An unexpected error occurred during processing.');
     });
   ;
-});
+};
 
-describe('VisionImageAdapter repository-backed processing', () => {
+describe('HybridDocumentAdapter', defineHybridDocumentAdapterSuite1);
+
+const defineVisionImageAdapterRepositoryBackedProcessingSuite2 = () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
@@ -461,4 +476,6 @@ describe('VisionImageAdapter repository-backed processing', () => {
       },
     ]);
   });
-});
+};
+
+describe('VisionImageAdapter repository-backed processing', defineVisionImageAdapterRepositoryBackedProcessingSuite2);

@@ -98,10 +98,13 @@ test.describe('Assistant Architect Streaming API', () => {
 
             // Should show validation error
             const errorMessages = page.locator('[data-testid="error-message"], .error, .validation-error')
-            if (await errorMessages.count() > 0) {
+            const handleNestedBranch1 = async () => {
+              if (await errorMessages.count() > 0) {
               const errorText = await errorMessages.first().textContent()
               expect(errorText?.toLowerCase()).toMatch(/limit|size|too large|maximum/i)
             }
+            }
+            await handleNestedBranch1()
           }
         } catch {
           // Input may be rejected by browser limits

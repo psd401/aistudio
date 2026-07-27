@@ -1,4 +1,7 @@
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
+
 /**
  * Unit tests for psd-hyperframes/render.js (#1175).
  *
@@ -148,7 +151,7 @@ test('buildPayload rejects a --dry-run given a value', () => {
 test('buildPayload caps the combined html+css+js size', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hf-skill-big-'));
   const cssPath = path.join(dir, 'big.css');
-  fs.writeFileSync(cssPath, 'a'.repeat(5 * 1024 * 1024));
+  validatedFs.writeFileSync(cssPath, 'a'.repeat(5 * 1024 * 1024));
   try {
     expect(() => buildPayload(parseArgs(argv(
       '--user', 'p@psd401.net', '--html', HTML, '--duration', '3', '--css-file', cssPath,
@@ -162,7 +165,7 @@ test('buildPayload caps the combined html+css+js size', () => {
 test('buildPayload reads css/js from files and carries dryRun', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hf-skill-'));
   const cssPath = path.join(dir, 'a.css');
-  fs.writeFileSync(cssPath, 'body{color:red}');
+  validatedFs.writeFileSync(cssPath, 'body{color:red}');
   try {
     const p = buildPayload(parseArgs(argv(
       '--user', 'p@psd401.net', '--html', HTML, '--duration', '3',

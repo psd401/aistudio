@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process"
-import { chmod, mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { validatedFsPromises } from "@/lib/filesystem/validated-fs";
 
 interface CommandPolicy {
   valueFlags: ReadonlySet<string>
@@ -239,7 +240,7 @@ export async function executeGitHubCommand(
 ): Promise<{ stdout: string; stderr: string }> {
   validateGitHubCommand(argv)
   const directory = await mkdtemp(join(tmpdir(), "gh-broker-"))
-  await chmod(directory, 0o700)
+  await validatedFsPromises.chmod(directory, 0o700)
   try {
     return await new Promise((resolve, reject) => {
       execFile(

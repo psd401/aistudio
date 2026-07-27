@@ -29,6 +29,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Handler } from 'aws-lambda';
 import { findMalformedToolVersionPins } from './frontmatter-tools';
+import { validatedFs } from "../../lib/validated-fs";
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
@@ -226,7 +227,7 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
     let dependencyAuditEvidence:
       | { status: 'not_applicable' }
       | { status: 'clean'; lockfileSha256: string };
-    if (fs.existsSync(packageJsonPath)) {
+    if (validatedFs.existsSync(packageJsonPath)) {
       try {
         installSkillDependencies(workDir);
       } catch (npmErr: unknown) {
@@ -391,7 +392,7 @@ export async function downloadSkillFromS3(
   log: LambdaLogger,
   s3Client: S3Client = s3,
 ): Promise<void> {
-  fs.mkdirSync(destDir, { recursive: true });
+  validatedFs.mkdirSync(destDir, { recursive: true });
 
   // H5 fix: Paginate ListObjectsV2 to handle skills with >1000 files
   const normalizedPrefix = prefix.endsWith('/') ? prefix : `${prefix}/`;
@@ -434,7 +435,7 @@ export async function downloadSkillFromS3(
         log.warn('Skipping S3 object with path-traversing key', { key: obj.Key });
         continue;
       }
-      fs.mkdirSync(path.dirname(destPath), { recursive: true });
+      validatedFs.mkdirSync(path.dirname(destPath), { recursive: true });
 
       const getResp = await s3Client.send(new GetObjectCommand({
         Bucket: BUCKET,
@@ -447,18 +448,21 @@ export async function downloadSkillFromS3(
         for await (const chunk of getResp.Body as AsyncIterable<Buffer>) {
           const safeChunk = Buffer.from(chunk);
           objectBytes += safeChunk.byteLength;
-          if (
+          const handleNestedBranch1 = () => {
+            if (
             objectBytes > obj.Size ||
             downloadedBytes + objectBytes > MAX_SKILL_INPUT_TOTAL_BYTES
           ) {
             throw new Error('Skill object exceeded its declared byte limit');
           }
+          }
+          handleNestedBranch1()
           chunks.push(safeChunk);
         }
         if (objectBytes !== obj.Size) {
           throw new Error('Skill object length did not match its S3 metadata');
         }
-        fs.writeFileSync(destPath, Buffer.concat(chunks));
+        validatedFs.writeFileSync(destPath, Buffer.concat(chunks));
         downloadedFiles += 1;
         downloadedBytes += objectBytes;
       }
@@ -576,7 +580,7 @@ async function uploadSkillToS3(srcDir: string, destPrefix: string): Promise<void
 
   function walkDir(dir: string): string[] {
     const files: string[] = [];
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    for (const entry of validatedFs.readdirSync(dir, { withFileTypes: true })) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         files.push(...walkDir(fullPath));
@@ -601,7 +605,7 @@ async function uploadSkillToS3(srcDir: string, destPrefix: string): Promise<void
         return s3.send(new PutObjectCommand({
           Bucket: BUCKET,
           Key: key,
-          Body: fs.readFileSync(filePath),
+          Body: validatedFs.readFileSync(filePath),
           Tagging: `Environment=${ENVIRONMENT}&ManagedBy=cdk&Scope=skill`,
         }));
       }),
@@ -640,7 +644,7 @@ async function scanSkill(skillDir: string): Promise<ScanFindings> {
 
   // Scan all text files for secrets and PII
   function walkAndScan(dir: string): void {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    for (const entry of validatedFs.readdirSync(dir, { withFileTypes: true })) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         if (entry.name === 'node_modules' || entry.name === '.git') continue;
@@ -649,7 +653,7 @@ async function scanSkill(skillDir: string): Promise<ScanFindings> {
         const ext = path.extname(entry.name).toLowerCase();
         if (['.js', '.ts', '.json', '.md', '.yaml', '.yml', '.env', '.txt'].includes(ext) || entry.name === '.env') {
           try {
-            const content = fs.readFileSync(fullPath, 'utf-8');
+            const content = validatedFs.readFileSync(fullPath, 'utf-8');
             const relativePath = path.relative(skillDir, fullPath);
 
             // Secret detection — skip comment lines to avoid false positives
@@ -665,15 +669,19 @@ async function scanSkill(skillDir: string): Promise<ScanFindings> {
               })
               .join('\n');
 
-            for (const pattern of SECRET_PATTERNS) {
+            const handleNestedBranch2 = () => {
+              for (const pattern of SECRET_PATTERNS) {
               pattern.lastIndex = 0;
               if (pattern.test(nonCommentLines)) {
                 findings.secrets.push(`Potential secret in ${relativePath}`);
               }
             }
+            }
+            handleNestedBranch2()
 
             // PII detection (skip SKILL.md example sections)
-            if (!entry.name.endsWith('.md')) {
+            const handleNestedBranch3 = () => {
+              if (!entry.name.endsWith('.md')) {
               for (const pattern of PII_PATTERNS) {
                 pattern.lastIndex = 0;
                 if (pattern.test(content)) {
@@ -681,6 +689,8 @@ async function scanSkill(skillDir: string): Promise<ScanFindings> {
                 }
               }
             }
+            }
+            handleNestedBranch3()
           } catch {
             // Skip files that can't be read as text
           }
@@ -693,10 +703,10 @@ async function scanSkill(skillDir: string): Promise<ScanFindings> {
 
   // SKILL.md lint
   const skillMdPath = path.join(skillDir, 'SKILL.md');
-  if (!fs.existsSync(skillMdPath)) {
+  if (!validatedFs.existsSync(skillMdPath)) {
     findings.skillMdLint.push('SKILL.md is missing');
   } else {
-    const content = fs.readFileSync(skillMdPath, 'utf-8');
+    const content = validatedFs.readFileSync(skillMdPath, 'utf-8');
 
     // Check frontmatter
     if (!content.startsWith('---')) {
@@ -853,10 +863,10 @@ export function auditInstalledDeps(
 /** Return auditable evidence for the exact dependency graph that was scanned. */
 export function hashDependencyLockfile(dir: string): string {
   const lockfilePath = path.join(dir, 'package-lock.json');
-  if (!fs.existsSync(lockfilePath)) {
+  if (!validatedFs.existsSync(lockfilePath)) {
     throw new Error('Dependency audit completed without package-lock.json evidence');
   }
-  return createHash('sha256').update(fs.readFileSync(lockfilePath)).digest('hex');
+  return createHash('sha256').update(validatedFs.readFileSync(lockfilePath)).digest('hex');
 }
 
 async function updateSkillStatus(

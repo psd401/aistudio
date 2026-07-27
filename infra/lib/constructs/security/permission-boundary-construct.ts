@@ -1,9 +1,10 @@
 import * as iam from "aws-cdk-lib/aws-iam"
 import * as cdk from "aws-cdk-lib"
 import { Construct } from "constructs"
-import * as fs from "node:fs"
+
 import * as path from "node:path"
 import { Environment } from "./types"
+import { validatedFs } from "../../validated-fs";
 
 export interface PermissionBoundaryConstructProps {
   environment: Environment
@@ -44,11 +45,11 @@ export class PermissionBoundaryConstruct extends Construct {
       `${boundaryEnv}-boundary.json`
     )
 
-    if (!fs.existsSync(policyPath)) {
+    if (!validatedFs.existsSync(policyPath)) {
       throw new Error(`Permission boundary policy not found: ${policyPath}`)
     }
 
-    return JSON.parse(fs.readFileSync(policyPath, "utf-8"))
+    return JSON.parse(validatedFs.readFileSync(policyPath, "utf-8"))
   }
 
   /**

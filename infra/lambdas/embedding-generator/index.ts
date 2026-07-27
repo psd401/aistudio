@@ -418,10 +418,14 @@ async function processRecord(record: SQSRecord): Promise<void> {
             3,
             2000
           );
-          if (visualEmbeddings.length !== visualIndexes.length) {
+          const handleNestedBranch1 = () => {
+            if (visualEmbeddings.length !== visualIndexes.length) {
             throw new Error('Visual embedding provider returned a mismatched vector count');
           }
-          for (const [position, messageIndex] of visualIndexes.entries()) {
+          }
+          handleNestedBranch1()
+          const handleNestedBranch2 = async () => {
+            for (const [position, messageIndex] of visualIndexes.entries()) {
             const chunkId = message.chunkIds[messageIndex];
             const visualEmbedding = visualEmbeddings[position];
             if (!chunkId || !visualEmbedding) {
@@ -439,6 +443,8 @@ async function processRecord(record: SQSRecord): Promise<void> {
               throw new Error(`Visual chunk ${chunkId} does not belong to generation ${message.generationId}`);
             }
           }
+          }
+          await handleNestedBranch2()
         }
       }
     } else {

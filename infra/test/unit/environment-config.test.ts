@@ -1,7 +1,7 @@
 import * as cdk from "aws-cdk-lib"
 import { EnvironmentConfig } from "../../lib/constructs/config/environment-config"
 
-describe("EnvironmentConfig", () => {
+function defineEnvironmentConfigSuite1Part1() {
 
     test("should return cost-optimized configuration for dev", () => {
       const config = EnvironmentConfig.get("dev")
@@ -113,7 +113,9 @@ describe("EnvironmentConfig", () => {
       expect(config.database.multiAz).toBe(true)
     })
 
-    test("should have moderate compute configuration for staging", () => {
+    }
+
+function defineEnvironmentConfigSuite1Part2() {test("should have moderate compute configuration for staging", () => {
       const config = EnvironmentConfig.get("staging")
 
       expect(config.compute.lambdaMemory).toBe(2048)
@@ -166,7 +168,9 @@ describe("EnvironmentConfig", () => {
     })
 
 
-  describe("Configuration Override", () => {
+  }
+
+function defineEnvironmentConfigSuite1Part3() {describe("Configuration Override", () => {
     // Save original configs to restore after tests
     const originalDevConfig = EnvironmentConfig.get("dev")
 
@@ -272,7 +276,9 @@ describe("EnvironmentConfig", () => {
       expect(config.monitoring).toHaveProperty("tracingEnabled")
     })
 
-    test("should have all required network configuration fields", () => {
+    }
+
+function defineEnvironmentConfigSuite1Part4() {test("should have all required network configuration fields", () => {
       const config = EnvironmentConfig.get("dev")
 
       expect(config.network).toHaveProperty("maxAzs")
@@ -337,4 +343,13 @@ describe("EnvironmentConfig", () => {
       expect(stagingConfig.compute.lambdaMemory).toBeLessThan(prodConfig.compute.lambdaMemory)
     })
 
-})
+}
+
+const defineEnvironmentConfigSuite1 = () => {
+  defineEnvironmentConfigSuite1Part1()
+  defineEnvironmentConfigSuite1Part2()
+  defineEnvironmentConfigSuite1Part3()
+  defineEnvironmentConfigSuite1Part4()
+};
+
+describe("EnvironmentConfig", defineEnvironmentConfigSuite1)

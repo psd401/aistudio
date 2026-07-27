@@ -1,3 +1,4 @@
+
 /**
  * Unit tests for psd-workspace command parsing + payload-file transport
  * (#1138 follow-up: splitCommand has no escape syntax, so arbitrary text
@@ -7,6 +8,8 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
 
 const { describe, expect, test } = require('bun:test');
 const fs = require('node:fs');
@@ -31,7 +34,7 @@ function tmpFile(content, ext = '.json') {
     fs.mkdtempSync(path.join(os.tmpdir(), 'psdws-test-')),
     `payload${ext}`
   );
-  fs.writeFileSync(p, content);
+  validatedFs.writeFileSync(p, content);
   return p;
 }
 

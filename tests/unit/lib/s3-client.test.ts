@@ -39,12 +39,15 @@ function getConstructorName(value: unknown): string | undefined {
     : undefined;
 }
 
-describe('S3 Client', () => {
-  const mockS3Client = {
+const mockS3Client = {
     send: jest.fn(),
   };
+const mockGetSignedUrl = getSignedUrl as jest.Mock;
 
-  const mockGetSignedUrl = getSignedUrl as jest.Mock;
+function defineS3ClientSuite1Part1() {
+
+
+
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -154,7 +157,9 @@ describe('S3 Client', () => {
   ;
 
 
-    it('stores inline text under the canonical repository namespace', async () => {
+    }
+
+function defineS3ClientSuite1Part2() {it('stores inline text under the canonical repository namespace', async () => {
       mockS3Client.send.mockResolvedValue({});
 
       const result = await uploadRepositoryTextSource({
@@ -245,7 +250,9 @@ describe('S3 Client', () => {
   ;
 
 
-    it('paginates and permanently deletes versions and delete markers below an artifact prefix', async () => {
+    }
+
+function defineS3ClientSuite1Part3() {it('paginates and permanently deletes versions and delete markers below an artifact prefix', async () => {
       let listCall = 0;
       mockS3Client.send.mockImplementation((command: unknown) => {
         if (command instanceof ListObjectVersionsCommand) {
@@ -341,7 +348,9 @@ describe('S3 Client', () => {
       );
     });
 
-    it('surfaces partial multi-object deletion failures', async () => {
+    }
+
+function defineS3ClientSuite1Part4() {it('surfaces partial multi-object deletion failures', async () => {
       mockS3Client.send.mockImplementation((command: unknown) => {
         if (command instanceof ListObjectVersionsCommand) {
           return Promise.resolve({
@@ -447,7 +456,9 @@ describe('S3 Client', () => {
   ;
 
 
-    it('should list user documents', async () => {
+    }
+
+function defineS3ClientSuite1Part5() {it('should list user documents', async () => {
       mockS3Client.send.mockResolvedValue({
         Contents: [
           { Key: 'documents/user-123/file1.pdf', Size: 1000, LastModified: new Date() },
@@ -513,4 +524,14 @@ describe('S3 Client', () => {
     });
   ;
 
-});
+}
+
+const defineS3ClientSuite1 = () => {
+  defineS3ClientSuite1Part1()
+  defineS3ClientSuite1Part2()
+  defineS3ClientSuite1Part3()
+  defineS3ClientSuite1Part4()
+  defineS3ClientSuite1Part5()
+};
+
+describe('S3 Client', defineS3ClientSuite1);

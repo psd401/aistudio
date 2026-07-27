@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * psd-brand-guidelines — Node CLI for the PSD brand reference data.
  *
@@ -25,6 +26,8 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -85,7 +88,7 @@ function allLogoPaths(config) {
   for (const [variant, data] of Object.entries(config.logos.variants)) {
     for (const layout of data.files) {
       const p = path.join(ASSETS_DIR, `psd_logo-${variant}-${layout}.png`);
-      if (fs.existsSync(p)) out.push(p);
+      if (validatedFs.existsSync(p)) out.push(p);
     }
   }
   return out;

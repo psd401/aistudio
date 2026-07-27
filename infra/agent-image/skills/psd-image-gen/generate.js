@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * generate.js — psd-image-gen.generate
  * Usage:
@@ -15,9 +16,11 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
 
 const { execFileSync } = require('node:child_process');
-const fs = require('node:fs');
+
 const path = require('node:path');
 
 const { publishArtifact } = require('../_shared/artifact-publisher');
@@ -167,7 +170,7 @@ function enforceCapability() {
 function loadReferenceImage(imagePath) {
   let stat;
   try {
-    stat = fs.statSync(imagePath);
+    stat = validatedFs.statSync(imagePath);
   } catch (err) {
     fail(`--image file not found or unreadable: ${imagePath} (${err.message})`, 'bad_args');
   }
@@ -188,7 +191,7 @@ function loadReferenceImage(imagePath) {
       'bad_args',
     );
   }
-  const base64 = fs.readFileSync(imagePath).toString('base64');
+  const base64 = validatedFs.readFileSync(imagePath).toString('base64');
   return { dataUrl: `data:${mime};base64,${base64}`, mime };
 }
 

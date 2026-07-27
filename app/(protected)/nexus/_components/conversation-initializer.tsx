@@ -86,18 +86,21 @@ export function convertContentToParts(content?: ApiMessageContent): UIMessagePar
 
         if (isError) {
           // Error state
-          let errorText: string
-          if (typeof part.result === 'string') {
-            errorText = part.result
-          } else if (part.result instanceof Error) {
-            errorText = part.result.message
-          } else {
-            try {
-              errorText = JSON.stringify(part.result)
-            } catch {
-              errorText = String(part.result ?? 'Unknown error')
+          let errorText = 'Unknown error'
+          const handleNestedBranch1 = () => {
+            if (typeof part.result === 'string') {
+              errorText = part.result
+            } else if (part.result instanceof Error) {
+              errorText = part.result.message
+            } else {
+              try {
+                errorText = JSON.stringify(part.result)
+              } catch {
+                errorText = String(part.result ?? 'Unknown error')
+              }
             }
           }
+          handleNestedBranch1()
           toolPart = {
             type: `tool-${part.toolName}`,
             toolCallId: part.toolCallId,

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * run.js — psd-learning-page skill entrypoint (Issue #1245).
  *
@@ -36,6 +37,8 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -136,7 +139,7 @@ function loadAuditHtml() {
   ];
   for (const p of candidates) {
     try {
-      if (fs.existsSync(p)) return require(p).auditHtml;
+      if (validatedFs.existsSync(p)) return require(p).auditHtml;
     } catch {
       /* try next */
     }
@@ -237,7 +240,7 @@ async function ingestSource(args, deps) {
   if (typeof args.source_file === 'string') {
     let md;
     try {
-      md = fs.readFileSync(args.source_file, 'utf8');
+      md = validatedFs.readFileSync(args.source_file, 'utf8');
     } catch (err) {
       fail(`--source-file not readable: ${err.message}`, 'bad_args');
     }
@@ -263,7 +266,7 @@ async function ingestSource(args, deps) {
     let md = typeof out.markdown === 'string' ? out.markdown : '';
     if ((!md || out.preview) && out.output_path) {
       try {
-        md = fs.readFileSync(out.output_path, 'utf8');
+        md = validatedFs.readFileSync(out.output_path, 'utf8');
       } catch {
         /* fall back to whatever inline text we have */
       }
@@ -1187,7 +1190,7 @@ async function resolveVideo({
   try {
     sceneDir = makeScratchDir('lp-scene-');
     scenePath = path.join(sceneDir, 'scene.html');
-    fs.writeFileSync(scenePath, composition);
+    validatedFs.writeFileSync(scenePath, composition);
   } catch (err) {
     if (sceneDir) {
       try { fs.rmSync(sceneDir, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -1252,7 +1255,7 @@ function publishToAtrium(html, title, deps) {
   const codeDir = makeScratchDir('lp-artifact-');
   const codePath = path.join(codeDir, 'artifact.html');
   try {
-    fs.writeFileSync(codePath, html);
+    validatedFs.writeFileSync(codePath, html);
   } catch (err) {
     try { fs.rmSync(codeDir, { recursive: true, force: true }); } catch { /* best-effort */ }
     fail(`could not stage the artifact for publish: ${err.message}`, 'publish_failed', 2);
@@ -1359,7 +1362,7 @@ async function main(argv, deps = {}) {
   let overrides = null;
   if (typeof args.content_json === 'string') {
     try {
-      overrides = JSON.parse(fs.readFileSync(args.content_json, 'utf8'));
+      overrides = JSON.parse(validatedFs.readFileSync(args.content_json, 'utf8'));
     } catch (err) {
       fail(`--content-json not readable/parseable: ${err.message}`, 'bad_args');
     }
@@ -1445,7 +1448,7 @@ async function main(argv, deps = {}) {
 
   // 8. Dry-run: write locally. Otherwise publish to Atrium.
   if (args.dry_run) {
-    fs.writeFileSync(args.out, html);
+    validatedFs.writeFileSync(args.out, html);
     emit({
       status: 'ok',
       mode: 'dry-run',

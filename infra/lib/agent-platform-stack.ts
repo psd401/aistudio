@@ -40,6 +40,7 @@ import {
 import { ServiceRoleFactory, usGuardrailProfileArns } from './constructs/security';
 import { AGENT_LAMBDA_RUNTIME } from './constructs/compute/lambda-construct';
 import { HyperframesRenderFunction } from './constructs/compute/hyperframes-render-function';
+import { validatedFs } from "./validated-fs";
 
 export interface AgentPlatformStackProps extends cdk.StackProps {
   environment: 'dev' | 'staging' | 'prod';
@@ -3935,8 +3936,8 @@ export class AgentPlatformStack extends cdk.Stack {
       const out: BundledSkillManifestEntry[] = [];
       for (const entry of fs.readdirSync(bundledSkillsDir)) {
         const skillMdPath = path.join(bundledSkillsDir, entry, 'SKILL.md');
-        if (!fs.existsSync(skillMdPath)) continue;
-        const raw = fs.readFileSync(skillMdPath, 'utf8');
+        if (!validatedFs.existsSync(skillMdPath)) continue;
+        const raw = validatedFs.readFileSync(skillMdPath, 'utf8');
         const fm = raw.match(/^---\n([\s\S]*?)\n---/);
         if (!fm) continue;
         const lines = fm[1].split('\n');

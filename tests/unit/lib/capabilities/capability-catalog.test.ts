@@ -7,7 +7,7 @@ import { buildCapabilityCatalog } from "@/lib/capabilities/capability-catalog"
 import { CAPABILITY_MANIFEST } from "@/lib/capabilities/manifest"
 import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest"
 
-describe("buildCapabilityCatalog", () => {
+function defineBuildCapabilityCatalogSuite1Part1() {
   it("includes a known action and a known feature (DoD)", () => {
     const cat = buildCapabilityCatalog()
     expect(cat.actions?.some((a) => a.identifier === "assistants.execute")).toBe(
@@ -118,7 +118,9 @@ describe("buildCapabilityCatalog", () => {
     expect(buildCapabilityCatalog().actions).toHaveLength(manifestIds.size)
   })
 
-  it("keeps capabilities and scopes as separate namespaces (no cross-mapping)", () => {
+  }
+
+function defineBuildCapabilityCatalogSuite1Part2() {it("keeps capabilities and scopes as separate namespaces (no cross-mapping)", () => {
     const cat = buildCapabilityCatalog()
     for (const f of cat.features ?? []) {
       expect(f).not.toHaveProperty("scope")
@@ -199,4 +201,11 @@ describe("buildCapabilityCatalog", () => {
     const scopeIds = cat.scopes?.map((s) => s.scope) ?? []
     expect(scopeIds).toEqual([...scopeIds].sort((x, y) => x.localeCompare(y)))
   })
-})
+}
+
+const defineBuildCapabilityCatalogSuite1 = () => {
+  defineBuildCapabilityCatalogSuite1Part1()
+  defineBuildCapabilityCatalogSuite1Part2()
+};
+
+describe("buildCapabilityCatalog", defineBuildCapabilityCatalogSuite1)

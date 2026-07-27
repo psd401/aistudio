@@ -1,4 +1,7 @@
 'use strict';
+const { validatedFs } = require("../validated-fs.cjs");
+
+
 /**
  * Unit tests for the hyperframes-render Lambda handler (#1175).
  *
@@ -44,7 +47,7 @@ function validEvent(overrides = {}) {
 /** A fake render that writes a non-empty file to outPath (so statSync works). */
 function fakeRender(bytes = 'MP4DATA') {
   return async (_html, { outPath }) => {
-    fs.writeFileSync(outPath, bytes);
+    validatedFs.writeFileSync(outPath, bytes);
     return outPath;
   };
 }
@@ -216,7 +219,7 @@ test('handler dryRun renders and returns a local path without uploading', async 
   expect(res.status).toBe('ok');
   expect(res.dryRun).toBe(true);
   expect(res.bytes).toBe(3);
-  expect(fs.existsSync(res.localPath)).toBe(true);
+  expect(validatedFs.existsSync(res.localPath)).toBe(true);
   expect(uploaded).toBe(false);
 });
 
@@ -231,7 +234,7 @@ test('handler dryRun without HYPERFRAMES_OUTPUT_DIR leaves no file behind', asyn
   expect(res.status).toBe('ok');
   expect(res.dryRun).toBe(true);
   expect(res.bytes).toBe(3);
-  expect(fs.existsSync(res.localPath)).toBe(false);
+  expect(validatedFs.existsSync(res.localPath)).toBe(false);
 });
 
 test('handler uploads to S3 and returns a public-by-link url', async () => {

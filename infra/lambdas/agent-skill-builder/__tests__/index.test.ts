@@ -27,6 +27,7 @@ import {
   downloadSkillFromS3,
 } from '../index';
 import type { RDSDataClient } from '@aws-sdk/client-rds-data';
+import { validatedFs } from "../../../lib/validated-fs";
 
 type Warn = { message: string; meta?: Record<string, unknown> };
 function collectingLogger(warnings: Warn[]) {
@@ -119,9 +120,9 @@ describe('installSkillDependencies (REV-INFRA-061)', () => {
   test('does NOT execute a malicious postinstall lifecycle script', () => {
     const dir = makeSkillDir();
     try {
-      fs.writeFileSync(path.join(dir, 'package.json'), MALICIOUS_PKG);
+      validatedFs.writeFileSync(path.join(dir, 'package.json'), MALICIOUS_PKG);
       installSkillDependencies(dir);
-      expect(fs.existsSync(path.join(dir, 'PWNED'))).toBe(false);
+      expect(validatedFs.existsSync(path.join(dir, 'PWNED'))).toBe(false);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -130,13 +131,13 @@ describe('installSkillDependencies (REV-INFRA-061)', () => {
   test('control: the same postinstall DOES run without --ignore-scripts (fixture is valid)', () => {
     const dir = makeSkillDir();
     try {
-      fs.writeFileSync(path.join(dir, 'package.json'), MALICIOUS_PKG);
+      validatedFs.writeFileSync(path.join(dir, 'package.json'), MALICIOUS_PKG);
       execSync('npm install --production --no-audit --no-fund', {
         cwd: dir,
         stdio: 'pipe',
         env: { ...process.env, HOME: '/tmp', npm_config_cache: '/tmp/.npm' },
       });
-      expect(fs.existsSync(path.join(dir, 'PWNED'))).toBe(true);
+      expect(validatedFs.existsSync(path.join(dir, 'PWNED'))).toBe(true);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -145,7 +146,7 @@ describe('installSkillDependencies (REV-INFRA-061)', () => {
   test('a benign skill (no scripts, no deps) installs without error', () => {
     const dir = makeSkillDir();
     try {
-      fs.writeFileSync(
+      validatedFs.writeFileSync(
         path.join(dir, 'package.json'),
         JSON.stringify({ name: 'good-skill', version: '1.0.0' }),
       );
@@ -221,11 +222,11 @@ describe('auditInstalledDeps (REV-INFRA-062)', () => {
     const dir = makeSkillDir();
     try {
       const lockfile = '{"lockfileVersion":3,"packages":{"":{"name":"clean"}}}';
-      fs.writeFileSync(path.join(dir, 'package-lock.json'), lockfile);
+      validatedFs.writeFileSync(path.join(dir, 'package-lock.json'), lockfile);
       expect(hashDependencyLockfile(dir)).toBe(
         '0db61f8d84ddaefa04349de1eade84a0493951e50c300610efc24d13c0fa1ecd',
       );
-      fs.writeFileSync(
+      validatedFs.writeFileSync(
         path.join(dir, 'package-lock.json'),
         `${lockfile}\n`,
       );
@@ -293,11 +294,11 @@ describe('downloadSkillFromS3 path-traversal guard (REV-INFRA-063)', () => {
       );
 
       // benign files were written to the correct relative paths
-      expect(fs.existsSync(path.join(destDir, 'src', 'index.js'))).toBe(true);
-      expect(fs.existsSync(path.join(destDir, 'ok.md'))).toBe(true);
+      expect(validatedFs.existsSync(path.join(destDir, 'src', 'index.js'))).toBe(true);
+      expect(validatedFs.existsSync(path.join(destDir, 'ok.md'))).toBe(true);
       // the escaping object was never fetched or written
       expect(getCalls).toEqual([`${prefix}src/index.js`, `${prefix}ok.md`]);
-      expect(fs.existsSync(path.resolve(destDir, '..', '..', 'evil.txt'))).toBe(false);
+      expect(validatedFs.existsSync(path.resolve(destDir, '..', '..', 'evil.txt'))).toBe(false);
       // and it was logged
       expect(
         warnings.some((w) => String(w.meta?.key ?? '').includes('../../evil.txt')),
@@ -320,7 +321,7 @@ describe('downloadSkillFromS3 path-traversal guard (REV-INFRA-063)', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         fakeS3(keys, getCalls) as any,
       );
-      expect(fs.existsSync(path.join(destDir, 'a', 'b', 'c.ts'))).toBe(true);
+      expect(validatedFs.existsSync(path.join(destDir, 'a', 'b', 'c.ts'))).toBe(true);
     } finally {
       fs.rmSync(destDir, { recursive: true, force: true });
     }

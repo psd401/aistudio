@@ -1,4 +1,7 @@
 'use strict';
+const { validatedFs } = require("../validated-fs.cjs");
+
+
 /**
  * hyperframes-render — AWS Lambda handler (container image).
  *
@@ -329,7 +332,7 @@ function buildComposition({ html, css, js }) {
  */
 async function renderToMp4(compositionHtml, { fps, workDir, outPath }) {
   const htmlPath = path.join(workDir, 'index.html');
-  fs.writeFileSync(htmlPath, compositionHtml, 'utf8');
+  validatedFs.writeFileSync(htmlPath, compositionHtml, 'utf8');
 
   const args = [
     'render', workDir,
@@ -360,7 +363,7 @@ async function renderToMp4(compositionHtml, { fps, workDir, outPath }) {
     throw new RenderError('render_failed', `hyperframes render failed: ${detail}`);
   }
 
-  if (!fs.existsSync(outPath) || fs.statSync(outPath).size === 0) {
+  if (!validatedFs.existsSync(outPath) || validatedFs.statSync(outPath).size === 0) {
     throw new RenderError('render_failed', 'hyperframes render produced no output file.');
   }
   return outPath;
@@ -381,7 +384,7 @@ async function uploadMp4(s3, { outPath, userEmail, bucket, uuid }) {
   await s3.send(new PutObjectCommand({
     Bucket: bucket,
     Key: key,
-    Body: fs.readFileSync(outPath),
+    Body: validatedFs.readFileSync(outPath),
     ContentType: 'video/mp4',
     Metadata: { generated_by: 'psd-hyperframes' },
   }));
@@ -426,7 +429,7 @@ async function handler(event, deps = {}) {
         workDir,
         outPath,
       });
-      const bytes = fs.statSync(outPath).size;
+      const bytes = validatedFs.statSync(outPath).size;
 
       const base = {
         status: 'ok',

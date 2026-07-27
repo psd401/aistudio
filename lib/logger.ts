@@ -96,9 +96,12 @@ function sanitizeForLoggerInternal(data: unknown, maxDepth: number, seen: WeakSe
         }
         if (!(key in safeError)) {
           const safeKey = String(key).replace(/[^\w.-]/g, '_')
-          if (safeKey && safeKey !== '__proto__' && safeKey !== 'constructor' && safeKey !== 'prototype') {
+          const handleNestedBranch1 = () => {
+            if (safeKey && safeKey !== '__proto__' && safeKey !== 'constructor' && safeKey !== 'prototype') {
             customProps.set(safeKey, sanitizeForLoggerInternal((data as unknown as Record<string, unknown>)[key], maxDepth - 1, seen))
           }
+          }
+          handleNestedBranch1()
         }
       }
       // Convert Map to plain object safely

@@ -5,9 +5,12 @@ import {
   EnvironmentConfig,
 } from "../../lib/constructs"
 
-describe("SharedVPC Construct", () => {
-  let app: cdk.App
-  let stack: cdk.Stack
+let app: cdk.App
+let stack: cdk.Stack
+
+function defineSharedVPCConstructSuite1Part1() {
+
+
 
   beforeEach(() => {
     app = new cdk.App()
@@ -88,7 +91,9 @@ describe("SharedVPC Construct", () => {
       expect(Object.keys(vpcEndpoints).length).toBe(2)
     })
 
-    test("enables VPC flow logs to S3", () => {
+    }
+
+function defineSharedVPCConstructSuite1Part2() {test("enables VPC flow logs to S3", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
 
@@ -195,7 +200,9 @@ describe("SharedVPC Construct", () => {
       expect(Object.keys(flowLogs).length).toBe(2)
     })
 
-    test("configures proper lifecycle for flow log storage", () => {
+    }
+
+function defineSharedVPCConstructSuite1Part3() {test("configures proper lifecycle for flow log storage", () => {
       // Arrange
       const config = EnvironmentConfig.get("prod")
 
@@ -281,7 +288,9 @@ describe("SharedVPC Construct", () => {
       })
     })
 
-    test("production gets additional interface endpoints when enabled", () => {
+    }
+
+function defineSharedVPCConstructSuite1Part4() {test("production gets additional interface endpoints when enabled", () => {
       // Arrange
       const devConfig = EnvironmentConfig.get("dev")
       const prodConfig = EnvironmentConfig.get("prod")
@@ -391,7 +400,9 @@ describe("SharedVPC Construct", () => {
 
 
 
-    test("can disable flow logs", () => {
+    }
+
+function defineSharedVPCConstructSuite1Part5() {test("can disable flow logs", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
 
@@ -486,4 +497,14 @@ describe("SharedVPC Construct", () => {
       expect(sgCount).toBe(0)
     })
 
-})
+}
+
+const defineSharedVPCConstructSuite1 = () => {
+  defineSharedVPCConstructSuite1Part1()
+  defineSharedVPCConstructSuite1Part2()
+  defineSharedVPCConstructSuite1Part3()
+  defineSharedVPCConstructSuite1Part4()
+  defineSharedVPCConstructSuite1Part5()
+};
+
+describe("SharedVPC Construct", defineSharedVPCConstructSuite1)

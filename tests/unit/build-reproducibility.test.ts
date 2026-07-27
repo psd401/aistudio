@@ -1,5 +1,6 @@
-import { readFileSync, statSync } from "node:fs";
+
 import { join } from "node:path";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 const projectFile = (...segments: string[]) => join(process.cwd(), ...segments);
 
@@ -9,7 +10,7 @@ describe("production build reproducibility", () => {
       ["lib", "fonts.ts"],
       ["lib", "atrium", "meridian-fonts.ts"],
     ]) {
-      const source = readFileSync(projectFile(...modulePath), "utf8");
+      const source = validatedFs.readFileSync(projectFile(...modulePath), "utf8");
       expect(source).toContain("next/font/local");
       expect(source).not.toContain("next/font/google");
     }
@@ -19,12 +20,12 @@ describe("production build reproducibility", () => {
       "SchibstedGrotesk-Variable.woff2",
       "OFL.txt",
     ]) {
-      expect(statSync(projectFile("public", "fonts", asset)).size).toBeGreaterThan(0);
+      expect(validatedFs.statSync(projectFile("public", "fonts", asset)).size).toBeGreaterThan(0);
     }
   });
 
   it("bounds worker concurrency and leaves cache management to Next", () => {
-    const source = readFileSync(projectFile("next.config.mjs"), "utf8");
+    const source = validatedFs.readFileSync(projectFile("next.config.mjs"), "utf8");
 
     expect(source).toMatch(/cpus:\s*2/);
     expect(source).not.toMatch(/config\.cache\s*=/);

@@ -104,8 +104,14 @@ export function ToolSelectionSection({
         .filter(tool => modelSupportsProviderNativeTool(model, tool.name)),
     })))
       .then(candidateToolLists => {
+        const candidateToolNames: string[][] = []
+        for (const candidate of candidateToolLists) {
+          const names: string[] = []
+          for (const tool of candidate.tools) names.push(tool.name)
+          candidateToolNames.push(names)
+        }
         const compatibleNames = compatibleRoutedToolNames(
-          candidateToolLists.map(candidate => candidate.tools.map(tool => tool.name)),
+          candidateToolNames,
           enabledTools
         )
         const byName = new Map<string, ToolConfig>()

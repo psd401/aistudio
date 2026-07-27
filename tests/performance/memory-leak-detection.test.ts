@@ -30,20 +30,18 @@ interface MemorySnapshot {
   requestsCompleted: number;
 }
 
-describe('Memory Leak Detection', () => {
-  let authToken: string | undefined;
-  let baseUrl: string;
+let authToken: string | undefined;
+let baseUrl: string;
 
-  beforeAll(async () => {
+const defineMemoryLeakDetectionSuite1Registration1: NonNullable<Parameters<typeof beforeAll>[0]> = async () => {
     const env = getTestEnvironment();
     baseUrl = env.baseUrl;
     authToken = await getAuthToken();
 
     console.log(`Running memory leak detection tests against: ${baseUrl}`);
     console.log(`⚠️  This test suite may take over 1 hour to complete`);
-  });
-
-  test('1-hour sustained load with heap monitoring', async () => {
+  };
+const defineMemoryLeakDetectionSuite1Registration2: NonNullable<Parameters<typeof test>[1]> = async () => {
     const collector = new MetricsCollector();
     const model = TEST_MODELS[0];
     const testDuration = TEST_CONFIG.memoryLeak.durationMs;
@@ -211,9 +209,8 @@ describe('Memory Leak Detection', () => {
     expect(hourlyGrowth).toBeLessThan(targets.maxMemoryGrowthMB);
     console.log(`\n✅ Memory leak test passed!`);
     console.log(`   Hourly growth: ${hourlyGrowth.toFixed(2)}MB/hour (target: <${targets.maxMemoryGrowthMB}MB/hour)`);
-  });
-
-  test('Burst load followed by idle period (memory cleanup validation)', async () => {
+  };
+const defineMemoryLeakDetectionSuite1Registration3: NonNullable<Parameters<typeof test>[1]> = async () => {
     const collector = new MetricsCollector();
     const model = TEST_MODELS[0];
     const burstCount = 50;
@@ -292,5 +289,17 @@ describe('Memory Leak Detection', () => {
     expect(cleanupEfficiency).toBeGreaterThan(0.5);
 
     console.log(`\n✅ Memory cleanup validation passed!`);
-  });
-});
+  };
+
+const defineMemoryLeakDetectionSuite1 = () => {
+
+
+
+  beforeAll(defineMemoryLeakDetectionSuite1Registration1);
+
+  test('1-hour sustained load with heap monitoring', defineMemoryLeakDetectionSuite1Registration2);
+
+  test('Burst load followed by idle period (memory cleanup validation)', defineMemoryLeakDetectionSuite1Registration3);
+};
+
+describe('Memory Leak Detection', defineMemoryLeakDetectionSuite1);

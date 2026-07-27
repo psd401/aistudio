@@ -20,14 +20,17 @@ class TestStack extends BaseStack {
   }
 }
 
-describe("BaseStack", () => {
-  let app: cdk.App
-
-  // Standard test environment for CDK stacks
-  const testEnv = {
+let app: cdk.App
+const testEnv = {
     account: "123456789012",
     region: "us-east-1",
   }
+
+function defineBaseStackSuite1Part1() {
+
+
+  // Standard test environment for CDK stacks
+
 
   beforeEach(() => {
     app = new cdk.App()
@@ -105,7 +108,9 @@ describe("BaseStack", () => {
     })
   })
 
-  describe("Automatic Tagging", () => {
+  }
+
+function defineBaseStackSuite1Part2() {describe("Automatic Tagging", () => {
     test("should apply all standard tags to resources", () => {
       const stack = new TestStack(app, "TestStack-Dev", {
         deploymentEnvironment: "dev",
@@ -215,7 +220,9 @@ describe("BaseStack", () => {
     })
   })
 
-  describe("Helper Methods", () => {
+  }
+
+function defineBaseStackSuite1Part3() {describe("Helper Methods", () => {
     test("getRemovalPolicy should return RETAIN for prod", () => {
       const stack = new TestStack(app, "TestStack-Prod", {
         deploymentEnvironment: "prod",
@@ -315,7 +322,9 @@ describe("BaseStack", () => {
     })
   })
 
-  describe("Configuration Access", () => {
+  }
+
+function defineBaseStackSuite1Part4() {describe("Configuration Access", () => {
     test("should provide access to environment configuration", () => {
       const stack = new TestStack(app, "TestStack-Dev", {
         deploymentEnvironment: "dev",
@@ -338,4 +347,13 @@ describe("BaseStack", () => {
       expect(stack.deploymentEnvironment).toBe("prod")
     })
   })
-})
+}
+
+const defineBaseStackSuite1 = () => {
+  defineBaseStackSuite1Part1()
+  defineBaseStackSuite1Part2()
+  defineBaseStackSuite1Part3()
+  defineBaseStackSuite1Part4()
+};
+
+describe("BaseStack", defineBaseStackSuite1)

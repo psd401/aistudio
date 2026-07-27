@@ -30,9 +30,12 @@ interface StressTestStep {
   throughput: number;
 }
 
-describe('Stress Testing', () => {
-  let authToken: string | undefined;
-  let baseUrl: string;
+let authToken: string | undefined;
+let baseUrl: string;
+
+function defineStressTestingSuite1Part1() {
+
+
 
   beforeAll(async () => {
     const env = getTestEnvironment();
@@ -42,7 +45,9 @@ describe('Stress Testing', () => {
     console.log(`Running stress tests against: ${baseUrl}`);
   });
 
-  test('Gradual load increase from 1 to 200 users', async () => {
+  }
+
+function defineStressTestingSuite1Part2() {test('Gradual load increase from 1 to 200 users', async () => {
     const model = TEST_MODELS[0];
     const config = TEST_CONFIG.stress;
     const results: StressTestStep[] = [];
@@ -175,7 +180,9 @@ describe('Stress Testing', () => {
     expect(optimalCapacity).toBeGreaterThanOrEqual(100);
   });
 
-  test('Rapid spike load test (0 to 100 users instantly)', async () => {
+  }
+
+function defineStressTestingSuite1Part3() {test('Rapid spike load test (0 to 100 users instantly)', async () => {
     const model = TEST_MODELS[0];
     const spikeUsers = 100;
 
@@ -255,4 +262,12 @@ describe('Stress Testing', () => {
 
     console.log(`\n✅ Rapid spike test passed - system handled sudden load gracefully`);
   });
-});
+}
+
+const defineStressTestingSuite1 = () => {
+  defineStressTestingSuite1Part1()
+  defineStressTestingSuite1Part2()
+  defineStressTestingSuite1Part3()
+};
+
+describe('Stress Testing', defineStressTestingSuite1);

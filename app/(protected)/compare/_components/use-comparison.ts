@@ -26,12 +26,12 @@ export function useComparison() {
     model1: "",
     model2: ""
   })
-  
+
   const [isLoading, setIsLoading] = useState<LoadingState>({
     model1: false,
     model2: false
   })
-  
+
   const abortControllerRef = useRef<{
     model1?: AbortController
     model2?: AbortController
@@ -45,7 +45,7 @@ export function useComparison() {
     // Reset state
     setResponses({ model1: "", model2: "" })
     setIsLoading({ model1: true, model2: true })
-    
+
     // Create new abort controllers
     abortControllerRef.current = {
       model1: new AbortController(),
@@ -88,9 +88,10 @@ export function useComparison() {
 
         for (const line of lines) {
           if (line.startsWith('data: ')) {
-            try {
+            const handleNestedBranch1 = () => {
+              try {
               const data = JSON.parse(line.slice(6))
-              
+
               // Handle model1 data
               if ('model1' in data) {
                 setResponses(prev => ({ ...prev, model1: prev.model1 + data.model1 }))
@@ -100,7 +101,7 @@ export function useComparison() {
               } else if ('model1Finished' in data) {
                 setIsLoading(prev => ({ ...prev, model1: false }))
               }
-              
+
               // Handle model2 data
               if ('model2' in data) {
                 setResponses(prev => ({ ...prev, model2: prev.model2 + data.model2 }))
@@ -110,7 +111,7 @@ export function useComparison() {
               } else if ('model2Finished' in data) {
                 setIsLoading(prev => ({ ...prev, model2: false }))
               }
-              
+
               // Handle overall completion
               if ('done' in data) {
                 setIsLoading({ model1: false, model2: false })
@@ -118,6 +119,8 @@ export function useComparison() {
             } catch {
               // Failed to parse SSE data - silently handle
             }
+            }
+            handleNestedBranch1()
           }
         }
       }

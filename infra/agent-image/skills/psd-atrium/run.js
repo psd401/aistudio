@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * run.js — psd-atrium skill entrypoint (Issue #1055, Atrium agent access Path 2).
  *
@@ -46,8 +47,10 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
 
-const fs = require('node:fs');
+
+
 
 const {
   fail,
@@ -262,7 +265,7 @@ async function main() {
       let code;
       if (codeFile !== undefined) {
         try {
-          code = fs.readFileSync(codeFile, 'utf8');
+          code = validatedFs.readFileSync(codeFile, 'utf8');
         } catch (err) {
           fail(`--code-file not readable: ${err.message}`);
         }

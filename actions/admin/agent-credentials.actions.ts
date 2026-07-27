@@ -475,9 +475,12 @@ export async function provisionCredentialFromRequest(
           smWriteSucceeded = true
           log.info("Secret created", { secretId })
         } catch (createError: unknown) {
-          if (!(createError instanceof Error) || createError.name !== "ResourceExistsException") {
+          const handleNestedBranch1 = () => {
+            if (!(createError instanceof Error) || createError.name !== "ResourceExistsException") {
             throw createError
           }
+          }
+          handleNestedBranch1()
           await client.send(
             new PutSecretValueCommand({ SecretId: secretId, SecretString: secretValue }),
           )

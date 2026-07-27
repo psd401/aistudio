@@ -169,7 +169,8 @@ export function chunkText(text: string, maxChunkSize: number = 1000): string[] {
         if (sentence.length > maxChunkSize) {
           // Split long sentence by words to fit within chunk size
           const words = sentence.split(' ');
-          for (const word of words) {
+          const handleNestedBranch1 = () => {
+            for (const word of words) {
             if (currentChunk.length + word.length + 1 > maxChunkSize) {
               chunks.push(currentChunk.trim());
               currentChunk = word + ' ';
@@ -177,6 +178,8 @@ export function chunkText(text: string, maxChunkSize: number = 1000): string[] {
               currentChunk += word + ' ';
             }
           }
+          }
+          handleNestedBranch1()
         } else {
           currentChunk += sentence + ' ';
         }

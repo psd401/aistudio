@@ -14,6 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 const manifestPath = path.join(process.cwd(), "infra/database/migrations.json");
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
@@ -26,8 +27,7 @@ const listed = [...manifest.initialSetupFiles, ...manifest.migrationFiles];
 
 describe("infra/database/migrations.json manifest", () => {
   it("registers every schema .sql file (rollback scripts are the only exception)", () => {
-    const onDisk = fs
-      .readdirSync(schemaDir)
+    const onDisk = validatedFs.readdirSync(schemaDir)
       // *-rollback.sql are operator-run recovery scripts, deliberately never
       // part of the forward migration sequence.
       .filter((f) => f.endsWith(".sql") && !f.endsWith("-rollback.sql"));
@@ -37,7 +37,7 @@ describe("infra/database/migrations.json manifest", () => {
 
   it("lists no file that is missing from the schema directory", () => {
     const missing = listed.filter(
-      (f) => !fs.existsSync(path.join(schemaDir, f))
+      (f) => !validatedFs.existsSync(path.join(schemaDir, f))
     );
     expect(missing).toEqual([]);
   });

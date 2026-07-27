@@ -304,7 +304,8 @@ export class OfficeProcessor implements DocumentProcessor {
                 const paragraphs = Array.isArray(shape['p:txBody']['a:p']) ?
                   shape['p:txBody']['a:p'] : [shape['p:txBody']['a:p']];
 
-                for (const paragraph of paragraphs) {
+                const handleNestedBranch1 = () => {
+                  for (const paragraph of paragraphs) {
                   if (paragraph && paragraph['a:r']) {
                     const runs = Array.isArray(paragraph['a:r']) ?
                       paragraph['a:r'] : [paragraph['a:r']];
@@ -329,6 +330,8 @@ export class OfficeProcessor implements DocumentProcessor {
                     }
                   }
                 }
+                }
+                handleNestedBranch1()
               }
             }
           }
@@ -433,9 +436,12 @@ export class OfficeProcessor implements DocumentProcessor {
               .map((row: unknown[]) => '| ' + row.map(OfficeProcessor.escapeMdTableCell).join(' | ') + ' |\n')
               .join('');
 
-            if (truncated) {
+            const handleNestedBranch2 = () => {
+              if (truncated) {
               markdown += `\n> ⚠️ **Showing first ${OfficeProcessor.MAX_ROWS_PER_SHEET} of ${allDataRows.length} rows.** Upload a filtered version of this sheet to analyze the full dataset.\n`;
             }
+            }
+            handleNestedBranch2()
           }
         }
 

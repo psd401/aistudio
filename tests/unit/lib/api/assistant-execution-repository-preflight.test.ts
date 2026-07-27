@@ -96,7 +96,7 @@ import {
   executeAssistantForJobCompletion,
 } from "@/lib/api/assistant-execution-service"
 
-describe("assistant execution service repository preflight", () => {
+function defineAssistantExecutionServiceRepositoryPreflightSuite1Part1() {
   beforeEach(() => {
     jest.clearAllMocks()
     mockResolveRuntimeRepositoryInputs.mockResolvedValue({
@@ -182,7 +182,9 @@ describe("assistant execution service repository preflight", () => {
     expect(mockUnifiedStream).not.toHaveBeenCalled()
   })
 
-  it.each([
+  }
+
+function defineAssistantExecutionServiceRepositoryPreflightSuite1Part2() {it.each([
     ["streaming", executeAssistant],
     ["async job", executeAssistantForJobCompletion],
   ] as const)(
@@ -291,7 +293,9 @@ describe("assistant execution service repository preflight", () => {
     }
   )
 
-  it("rejects a foreign runtime reference before execution persistence", async () => {
+  }
+
+function defineAssistantExecutionServiceRepositoryPreflightSuite1Part3() {it("rejects a foreign runtime reference before execution persistence", async () => {
     mockResolveRuntimeRepositoryInputs.mockRejectedValue(
       new Error("Temporary repository input is unavailable")
     )
@@ -313,4 +317,12 @@ describe("assistant execution service repository preflight", () => {
     expect(mockStoreExecutionEvent).not.toHaveBeenCalled()
     expect(mockUnifiedStream).not.toHaveBeenCalled()
   })
-})
+}
+
+const defineAssistantExecutionServiceRepositoryPreflightSuite1 = () => {
+  defineAssistantExecutionServiceRepositoryPreflightSuite1Part1()
+  defineAssistantExecutionServiceRepositoryPreflightSuite1Part2()
+  defineAssistantExecutionServiceRepositoryPreflightSuite1Part3()
+};
+
+describe("assistant execution service repository preflight", defineAssistantExecutionServiceRepositoryPreflightSuite1)

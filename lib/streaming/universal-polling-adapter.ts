@@ -46,12 +46,38 @@ export interface JobPollingResponse {
   requestId: string;
 }
 
+type PollingProgress = {
+  content: string;
+  metadata?: Record<string, unknown>;
+};
+
+function* completedJobUpdates(
+  jobData: JobPollingResponse,
+  lastContent: string,
+  onProgress: ((progress: PollingProgress) => void) | undefined
+): Generator<PollingProgress> {
+  const finalContent = jobData.responseData?.text || jobData.partialContent || '';
+  if (!finalContent || finalContent === lastContent) return;
+
+  const finalData: PollingProgress = {
+    content: finalContent,
+    metadata: {
+      status: 'completed',
+      usage: jobData.responseData?.usage,
+      finishReason: jobData.responseData?.finishReason,
+      completed: true
+    }
+  };
+  onProgress?.(finalData);
+  yield finalData;
+}
+
 /**
  * Universal Polling Adapter
- * 
+ *
  * Provides seamless polling integration for AI streaming requests,
  * overcoming AWS Amplify's 30-second timeout limitation.
- * 
+ *
  * Features:
  * - Progressive content streaming via polling
  * - Intelligent polling intervals based on model characteristics
@@ -61,7 +87,7 @@ export interface JobPollingResponse {
  */
 export class UniversalPollingAdapter {
   private activePollers = new Map<string, AbortController>();
-  
+
   /**
    * Start polling for a job and yield progressive updates
    */
@@ -91,11 +117,11 @@ export class UniversalPollingAdapter {
 
     // Track active poller for cleanup
     this.activePollers.set(jobId, internalController);
-    
+
     let lastContent = '';
     let lastStatus = '';
     let pollingInterval = 1000; // Default 1 second
-    
+
     try {
       while (!combinedSignal.aborted) {
         try {
@@ -108,19 +134,22 @@ export class UniversalPollingAdapter {
             },
             signal: combinedSignal,
           });
-          
+
           if (!response.ok) {
-            if (response.status === 404) {
+            const handleNestedBranch1 = () => {
+              if (response.status === 404) {
               throw new Error('Job not found');
             } else if (response.status === 403) {
               throw new Error('Access denied');
             } else {
               throw new Error(`Polling failed: ${response.status} ${response.statusText}`);
             }
+            }
+            handleNestedBranch1()
           }
-          
+
           const jobData: JobPollingResponse = await response.json();
-          
+
           log.debug('Job poll response', {
             jobId,
             status: jobData.status,
@@ -128,22 +157,22 @@ export class UniversalPollingAdapter {
             contentLength: jobData.partialContent?.length || 0,
             pollingInterval: jobData.pollingInterval
           });
-          
+
           // Update polling interval from server recommendation
           pollingInterval = jobData.pollingInterval;
-          
+
           // Check for status changes
           if (jobData.status !== lastStatus) {
             lastStatus = jobData.status;
             onStatusChange?.(jobData.status);
             log.info('Job status changed', { jobId, status: jobData.status });
           }
-          
+
           // Yield new content if available
           if (jobData.partialContent && jobData.partialContent !== lastContent) {
             const newContent = jobData.partialContent;
             lastContent = newContent;
-            
+
             const progressData = {
               content: newContent,
               metadata: {
@@ -154,86 +183,69 @@ export class UniversalPollingAdapter {
                 currentPhase: jobData.progressInfo.currentPhase
               }
             };
-            
+
             onProgress?.(progressData);
             yield progressData;
           }
-          
+
           // Handle completion states
           if (jobData.status === 'completed') {
             log.info('Job completed successfully', { jobId, finalContentLength: jobData.responseData?.text?.length });
-            
-            // Yield final content if different from partial content
-            const finalContent = jobData.responseData?.text || jobData.partialContent || '';
-            if (finalContent && finalContent !== lastContent) {
-              const finalData = {
-                content: finalContent,
-                metadata: {
-                  status: 'completed',
-                  usage: jobData.responseData?.usage,
-                  finishReason: jobData.responseData?.finishReason,
-                  completed: true
-                }
-              };
-              
-              onProgress?.(finalData);
-              yield finalData;
-            }
-            
+            yield* completedJobUpdates(jobData, lastContent, onProgress);
             break;
           }
-          
+
           if (jobData.status === 'failed') {
             log.error('Job failed', { jobId, errorMessage: jobData.errorMessage });
             throw new Error(jobData.errorMessage || 'AI request failed');
           }
-          
+
           if (jobData.status === 'cancelled') {
             log.info('Job was cancelled', { jobId });
             throw new Error('Request was cancelled');
           }
-          
+
           // Check if we should continue polling
           if (!jobData.shouldContinuePolling) {
             log.warn('Server indicated to stop polling', { jobId, status: jobData.status });
             break;
           }
-          
+
           // Wait before next poll
           await this.sleep(pollingInterval, combinedSignal);
-          
+
         } catch (error) {
           if (combinedSignal.aborted) {
             log.info('Polling cancelled by abort signal', { jobId });
             break;
           }
-          
+
           // Handle network errors with retry logic
           if (error instanceof TypeError && error.message.includes('fetch')) {
             log.warn('Network error during polling, retrying...', { jobId, error: error.message });
             await this.sleep(Math.min(pollingInterval * 2, 5000), combinedSignal); // Exponential backoff, max 5s
             continue;
           }
-          
+
           // Other errors are thrown
           throw error;
         }
       }
-      
+
       // Handle cancellation
       if (combinedSignal.aborted) {
         log.info('Job polling cancelled', { jobId });
-        
+
         // Try to cancel the job on the server
         try {
           await this.cancelJob(jobId);
         } catch (cancelError) {
           log.warn('Failed to cancel job on server', { jobId, error: cancelError });
         }
-        
+
         throw new Error('Request cancelled by user');
       }
-      
+
     } finally {
       // Cleanup
       this.activePollers.delete(jobId);
@@ -248,13 +260,13 @@ export class UniversalPollingAdapter {
       log.debug('Job polling cleanup completed', { jobId });
     }
   }
-  
+
   /**
    * Cancel a job and stop polling
    */
   async cancelJob(jobId: string): Promise<boolean> {
     log.info('Cancelling job', { jobId });
-    
+
     try {
       // Stop local polling
       const poller = this.activePollers.get(jobId);
@@ -262,7 +274,7 @@ export class UniversalPollingAdapter {
         poller.abort();
         this.activePollers.delete(jobId);
       }
-      
+
       // Cancel on server - determine correct endpoint based on context
       const cancelEndpoint = `/api/nexus/chat/jobs/${jobId}`;
       const response = await fetch(cancelEndpoint, {
@@ -271,7 +283,7 @@ export class UniversalPollingAdapter {
           'Content-Type': 'application/json',
         },
       });
-      
+
       if (!response.ok) {
         if (response.status === 404) {
           log.warn('Job not found for cancellation', { jobId });
@@ -283,24 +295,24 @@ export class UniversalPollingAdapter {
           throw new Error(`Cancellation failed: ${response.status} ${response.statusText}`);
         }
       }
-      
+
       const result = await response.json();
       log.info('Job cancelled successfully', { jobId, result });
-      
+
       return result.success || false;
-      
+
     } catch (error) {
       log.error('Failed to cancel job', { jobId, error });
       throw error;
     }
   }
-  
+
   /**
    * Get current job status without polling
    */
   async getJobStatus(jobId: string): Promise<JobPollingResponse> {
     log.debug('Getting job status', { jobId });
-    
+
     try {
       const statusEndpoint = `/api/nexus/chat/jobs/${jobId}`;
       const response = await fetch(statusEndpoint, {
@@ -309,64 +321,64 @@ export class UniversalPollingAdapter {
           'Content-Type': 'application/json',
         },
       });
-      
+
       if (!response.ok) {
         throw new Error(`Status fetch failed: ${response.status} ${response.statusText}`);
       }
-      
+
       const jobData: JobPollingResponse = await response.json();
       log.debug('Job status retrieved', { jobId, status: jobData.status });
-      
+
       return jobData;
-      
+
     } catch (error) {
       log.error('Failed to get job status', { jobId, error });
       throw error;
     }
   }
-  
+
   /**
    * List active jobs for the current user
    */
   async getActiveJobs(): Promise<string[]> {
     return Array.from(this.activePollers.keys());
   }
-  
+
   /**
    * Stop all active polling
    */
   async stopAllPolling(): Promise<void> {
     log.info('Stopping all active polling', { activeCount: this.activePollers.size });
-    
+
     for (const [jobId, controller] of this.activePollers.entries()) {
       controller.abort();
       log.debug('Stopped polling for job', { jobId });
     }
-    
+
     this.activePollers.clear();
   }
-  
+
   /**
    * Combine multiple abort signals
    */
   private combineAbortSignals(signals: (AbortSignal | undefined)[]): AbortSignal {
     const validSignals = signals.filter((signal): signal is AbortSignal => signal !== undefined);
-    
+
     if (validSignals.length === 0) {
       return new AbortController().signal;
     }
-    
+
     if (validSignals.length === 1) {
       return validSignals[0];
     }
-    
+
     // Create combined controller
     const combinedController = new AbortController();
-    
+
     const abortHandler = () => {
       combinedController.abort();
     };
-    
+
     // Listen to all signals
     for (const signal of validSignals) {
       if (signal.aborted) {
@@ -375,17 +387,17 @@ export class UniversalPollingAdapter {
       }
       signal.addEventListener('abort', abortHandler);
     }
-    
+
     // Cleanup listeners when combined signal is aborted
     combinedController.signal.addEventListener('abort', () => {
       for (const signal of validSignals) {
         signal.removeEventListener('abort', abortHandler);
       }
     });
-    
+
     return combinedController.signal;
   }
-  
+
   /**
    * Sleep with abort signal support
    */
@@ -395,16 +407,16 @@ export class UniversalPollingAdapter {
         reject(new Error('Aborted'));
         return;
       }
-      
+
       const timeout = setTimeout(resolve, ms);
-      
+
       const abortHandler = () => {
         clearTimeout(timeout);
         reject(new Error('Aborted'));
       };
-      
+
       abortSignal?.addEventListener('abort', abortHandler);
-      
+
       // Cleanup
       setTimeout(() => {
         abortSignal?.removeEventListener('abort', abortHandler);
@@ -418,7 +430,7 @@ export const universalPollingAdapter = new UniversalPollingAdapter();
 
 /**
  * Assistant UI Chat Model Adapter
- * 
+ *
  * Integrates with @ai-sdk/react's LocalRuntime to provide
  * universal polling for all AI requests.
  */
@@ -437,7 +449,7 @@ export const createUniversalPollingChatModelAdapter = () => {
         provider,
         conversationId
       });
-      
+
       try {
         // 1. Create job via /api/nexus/chat
         const chatResponse = await fetch('/api/nexus/chat', {
@@ -453,26 +465,26 @@ export const createUniversalPollingChatModelAdapter = () => {
           }),
           signal: abortSignal,
         });
-        
+
         if (!chatResponse.ok) {
           throw new Error(`Chat request failed: ${chatResponse.status} ${chatResponse.statusText}`);
         }
-        
+
         const chatData = await chatResponse.json();
         const jobId = chatData.jobId;
-        
+
         if (!jobId) {
           throw new Error('No job ID returned from chat API');
         }
-        
+
         log.info('Job created, starting polling', {
           jobId,
           conversationId: chatData.conversationId
         });
-        
+
         // 2. Poll for results with progressive streaming
         let lastContent = '';
-        
+
         for await (const progress of universalPollingAdapter.pollJob(jobId, {
           abortSignal,
           onProgress: (data) => {
@@ -489,16 +501,16 @@ export const createUniversalPollingChatModelAdapter = () => {
           // Yield progressive updates as Assistant UI messages
           if (progress.content !== lastContent) {
             lastContent = progress.content;
-            
+
             yield {
               content: [{ type: 'text' as const, text: progress.content }],
               metadata: progress.metadata
             };
           }
         }
-        
+
         log.info('Universal polling completed successfully', { jobId });
-        
+
       } catch (error) {
         log.error('Universal polling adapter error', { error });
         throw error;

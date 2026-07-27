@@ -20,7 +20,7 @@ interface ToolSelectorProps {
 const TOOL_ICONS = {
   search: Globe,
   code: Code2,
-  analysis: Search, 
+  analysis: Search,
   creative: Brain
 } as const
 
@@ -47,8 +47,10 @@ export function ToolSelector({
         setAvailableTools(tools)
 
         // Auto-disable tools that are no longer available
+        const availableToolNames = new Set<string>()
+        for (const tool of tools) availableToolNames.add(tool.name)
         const newEnabledTools = enabledTools.filter(toolName =>
-          tools.some(tool => tool.name === toolName)
+          availableToolNames.has(toolName)
         )
         if (newEnabledTools.length !== enabledTools.length) {
           onToolsChange(newEnabledTools)
@@ -133,7 +135,7 @@ export function ToolSelector({
           <div>
             <CardTitle className="text-sm">AI Tools</CardTitle>
             <CardDescription className="text-xs">
-              {enabledTools.length > 0 
+              {enabledTools.length > 0
                 ? `${enabledTools.length} tool${enabledTools.length === 1 ? '' : 's'} enabled`
                 : 'No tools enabled'
               }
@@ -163,14 +165,14 @@ export function ToolSelector({
                 <div className="space-y-3 pl-5">
                   {tools.map(tool => {
                     const isEnabled = enabledTools.includes(tool.name)
-                    
+
                     return (
-                      <div 
+                      <div
                         key={tool.name}
                         className="flex items-start justify-between space-x-3"
                       >
                         <div className="flex-1 space-y-1">
-                          <Label 
+                          <Label
                             htmlFor={`tool-${tool.name}`}
                             className="text-xs font-medium cursor-pointer"
                           >

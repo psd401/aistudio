@@ -1,3 +1,4 @@
+
 /**
  * Regression tests for run.js's CLI subcommand → Canva REST wiring.
  *
@@ -16,6 +17,8 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
 
 process.env.APP_BASE_URL = 'https://app.test';
 process.env.ENVIRONMENT = 'dev';
@@ -236,7 +239,7 @@ test('upload-asset reads the file and POSTs binary to /v1/asset-uploads with met
   // predictable-path-in-shared-tmp pattern CodeQL flags (js/insecure-temporary-file).
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'psd-canva-test-'));
   const tmp = path.join(tmpDir, 'asset.txt');
-  fs.writeFileSync(tmp, 'hello-canva');
+  validatedFs.writeFileSync(tmp, 'hello-canva');
   try {
     await runCli(['--user', EMAIL, 'upload-asset', '--file', tmp, '--name', 'My Asset']);
   } finally {

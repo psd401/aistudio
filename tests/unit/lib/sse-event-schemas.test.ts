@@ -18,7 +18,7 @@ import {
 } from '@/lib/streaming/sse-event-schemas'
 import { VALID_SSE_EVENT_TYPES } from '@/lib/streaming/sse-event-types'
 
-describe('SSE Event Schemas', () => {
+function defineSSEEventSchemasSuite1Part1() {
 
     it('should validate correct text-delta events', () => {
       const validEvent = {
@@ -121,7 +121,9 @@ describe('SSE Event Schemas', () => {
       expect(result.success).toBe(true)
     })
 
-    it('should reject tool-call with missing required fields', () => {
+    }
+
+function defineSSEEventSchemasSuite1Part2() {it('should reject tool-call with missing required fields', () => {
       const invalidEvent = {
         type: 'tool-call',
         toolCallId: 'call-123'
@@ -227,7 +229,9 @@ describe('SSE Event Schemas', () => {
 
 
 
-    it('should extract field names from event', () => {
+    }
+
+function defineSSEEventSchemasSuite1Part3() {it('should extract field names from event', () => {
       const event = {
         type: 'text-delta',
         delta: 'Hello',
@@ -327,7 +331,9 @@ describe('SSE Event Schemas', () => {
       }
     })
 
-    it('should validate correct field name (delta)', () => {
+    }
+
+function defineSSEEventSchemasSuite1Part4() {it('should validate correct field name (delta)', () => {
       // This is the correct format
       const correctEvent = {
         type: 'text-delta',
@@ -438,7 +444,9 @@ describe('SSE Event Schemas', () => {
       expect(result.success).toBe(true)
     })
 
-    it('should reject tool-input-delta missing toolCallId', () => {
+    }
+
+function defineSSEEventSchemasSuite1Part5() {it('should reject tool-input-delta missing toolCallId', () => {
       const event = { type: 'tool-input-delta', delta: '{"key":' }
       const result = validateSSEEvent(event)
       expect(result.success).toBe(false)
@@ -523,4 +531,14 @@ describe('SSE Event Schemas', () => {
       expect(schemaTypes.size).toBe(VALID_SSE_EVENT_TYPES.size)
     })
 
-})
+}
+
+const defineSSEEventSchemasSuite1 = () => {
+  defineSSEEventSchemasSuite1Part1()
+  defineSSEEventSchemasSuite1Part2()
+  defineSSEEventSchemasSuite1Part3()
+  defineSSEEventSchemasSuite1Part4()
+  defineSSEEventSchemasSuite1Part5()
+};
+
+describe('SSE Event Schemas', defineSSEEventSchemasSuite1)

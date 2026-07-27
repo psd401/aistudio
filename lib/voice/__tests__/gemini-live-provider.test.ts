@@ -12,17 +12,19 @@ const mockSession = {
   conn: { close: mockClose },
 }
 
+const mockConnectImplementation = async (params: Record<string, unknown>) => {
+  // Simulate successful connection — call onopen
+  const callbacks = params.callbacks as Record<string, () => void> | undefined
+  if (callbacks?.onopen) {
+    setTimeout(callbacks.onopen, 0)
+  }
+  return mockSession
+}
+
 jest.mock("@google/genai", () => ({
   GoogleGenAI: jest.fn().mockImplementation(() => ({
     live: {
-      connect: mockLiveConnect.mockImplementation(async (params: Record<string, unknown>) => {
-        // Simulate successful connection — call onopen
-        const callbacks = params.callbacks as Record<string, () => void> | undefined
-        if (callbacks?.onopen) {
-          setTimeout(() => callbacks.onopen(), 0)
-        }
-        return mockSession
-      }),
+      connect: mockLiveConnect.mockImplementation(mockConnectImplementation),
     },
   })),
   Modality: { AUDIO: "AUDIO" },
@@ -39,8 +41,15 @@ jest.mock("@/lib/logger", () => ({
   startTimer: () => jest.fn(),
 }))
 
-describe("GeminiLiveProvider", () => {
-  let provider: GeminiLiveProvider
+let provider: GeminiLiveProvider
+const baseConfig: VoiceProviderConfig = {
+    model: "gemini-2.0-flash-live-001",
+    apiKey: "test-api-key",
+    language: "en-US",
+  }
+
+function defineGeminiLiveProviderSuite1Part1() {
+
 
   beforeEach(() => {
     provider = new GeminiLiveProvider()
@@ -55,11 +64,7 @@ describe("GeminiLiveProvider", () => {
     })
   })
 
-  const baseConfig: VoiceProviderConfig = {
-    model: "gemini-2.0-flash-live-001",
-    apiKey: "test-api-key",
-    language: "en-US",
-  }
+
 
 
     it('should be "gemini-live"', () => {
@@ -152,7 +157,9 @@ describe("GeminiLiveProvider", () => {
       expect(connectArgs.config.systemInstruction).toBe("You are a helpful assistant")
     })
 
-    it("should enable context window compression", async () => {
+    }
+
+function defineGeminiLiveProviderSuite1Part2() {it("should enable context window compression", async () => {
       await provider.connect(baseConfig, jest.fn())
 
       const connectArgs = mockLiveConnect.mock.calls[0][0]
@@ -262,7 +269,9 @@ describe("GeminiLiveProvider", () => {
       expect(connectArgs.config.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName).toHaveLength(100)
     })
 
-    it("should truncate long system instructions", async () => {
+    }
+
+function defineGeminiLiveProviderSuite1Part3() {it("should truncate long system instructions", async () => {
       const longInstructionConfig = {
         ...baseConfig,
         systemInstruction: "X".repeat(20_000),
@@ -298,4 +307,12 @@ describe("GeminiLiveProvider", () => {
       expect(args.config.speechConfig?.languageCode).toBeUndefined()
     })
 
-})
+}
+
+const defineGeminiLiveProviderSuite1 = () => {
+  defineGeminiLiveProviderSuite1Part1()
+  defineGeminiLiveProviderSuite1Part2()
+  defineGeminiLiveProviderSuite1Part3()
+};
+
+describe("GeminiLiveProvider", defineGeminiLiveProviderSuite1)

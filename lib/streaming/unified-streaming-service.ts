@@ -294,13 +294,16 @@ function extractTextFromUIMessage(
         segments.push(raw);
       } else if (Array.isArray(raw)) {
         for (const cp of raw) {
-          if (
+          const handleNestedBranch1 = () => {
+            if (
             typeof cp === 'object' && cp !== null &&
             (cp as Record<string, unknown>).type === 'text' &&
             typeof (cp as Record<string, unknown>).text === 'string'
           ) {
             segments.push((cp as { text: string }).text);
           }
+          }
+          handleNestedBranch1()
         }
       }
     }

@@ -55,7 +55,7 @@ async function openPromptsEditor(page: Page): Promise<boolean> {
 
 const SKIP_NO_ARCHITECT = 'No assistant architect owned by the test user (seed assistant-architect-seed.sql)'
 
-test.describe('Assistant Architect - Parallel Execution Persistence', () => {
+const defineAssistantArchitectParallelExecutionPersistenceSuite1 = () => {
   test.describe('Edge Persistence', () => {
     test('should persist edge connections when navigating away and back', async ({ page }) => {
       if (!(await openPromptsEditor(page))) { test.skip(true, SKIP_NO_ARCHITECT); return }
@@ -139,29 +139,44 @@ test.describe('Assistant Architect - Parallel Execution Persistence', () => {
 
       // Let ReactFlow's initial layout/fitView settle before reading transforms —
       // nodes briefly mount at 0,0, which would read as overlapping.
+      const collectNodeXs = (
+        nodes: Array<SVGElement | HTMLElement>
+      ): number[] => {
+        const values: number[] = []
+        for (const node of nodes) {
+          const transform = window.getComputedStyle(node).transform
+          const matrix = transform.match(/matrix.*\((.+)\)/)
+          values.push(matrix ? Number(matrix[1].split(',')[4]) : 0)
+        }
+        return values
+      }
+      const countDistinctNodeXs = async () => {
+        const values = await promptNodes.evaluateAll<number[]>(collectNodeXs)
+        return new Set(values).size
+      }
       await expect
-        .poll(async () => {
-          const xs = await promptNodes.evaluateAll((nodes) =>
-            nodes.map((n) => {
-              const m = window.getComputedStyle(n).transform.match(/matrix.*\((.+)\)/)
-              return m ? Number(m[1].split(',')[4]) : 0
-            })
-          )
-          return new Set(xs).size // distinct X values => layout settled
-        }, { timeout: 10_000 })
+        .poll(countDistinctNodeXs, { timeout: 10_000 })
         .toBeGreaterThan(1)
 
-      const nodePositions = await promptNodes.evaluateAll((nodes) =>
-        nodes.map((node) => {
+      const collectNodePositions = (
+        nodes: Array<SVGElement | HTMLElement>
+      ): Array<{ x: number; y: number }> => {
+        const positions: Array<{ x: number; y: number }> = []
+        for (const node of nodes) {
           const transform = window.getComputedStyle(node).transform
           const match = transform.match(/matrix.*\((.+)\)/)
           if (match) {
             const values = match[1].split(',').map(Number)
-            return { x: values[4] || 0, y: values[5] || 0 }
+            positions.push({ x: values[4] || 0, y: values[5] || 0 })
+          } else {
+            positions.push({ x: 0, y: 0 })
           }
-          return { x: 0, y: 0 }
-        })
-      )
+        }
+        return positions
+      }
+      const nodePositions = await promptNodes.evaluateAll<
+        Array<{ x: number; y: number }>
+      >(collectNodePositions)
 
       expect(nodePositions.length).toBeGreaterThan(0)
 
@@ -189,4 +204,6 @@ test.describe('Assistant Architect - Parallel Execution Persistence', () => {
       }
     })
   })
-})
+};
+
+test.describe('Assistant Architect - Parallel Execution Persistence', defineAssistantArchitectParallelExecutionPersistenceSuite1)

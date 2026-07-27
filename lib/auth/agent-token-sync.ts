@@ -70,6 +70,75 @@ async function getSecretsManagerClient() {
   return _smClient
 }
 
+type SecretsManagerClientInstance = Awaited<
+  ReturnType<typeof getSecretsManagerClient>
+>
+type SecretsManagerSdk = typeof import("@aws-sdk/client-secrets-manager")
+
+interface CreateRefreshSecretContext {
+  client: SecretsManagerClientInstance
+  sdk: Pick<SecretsManagerSdk, "CreateSecretCommand" | "PutSecretValueCommand">
+  secretId: string
+  secretString: string
+  ownerEmail: string
+  environment: string
+}
+
+async function retryRefreshSecretPut(
+  context: CreateRefreshSecretContext,
+): Promise<string | null> {
+  try {
+    const response = await context.client.send(
+      new context.sdk.PutSecretValueCommand({
+        SecretId: context.secretId,
+        SecretString: context.secretString,
+      }),
+    )
+    log.info("Cognito refresh token stored after concurrent secret creation", {
+      secretId: context.secretId,
+    })
+    return response.ARN ?? null
+  } catch (error) {
+    log.warn("Cognito refresh token sync retry failed", {
+      secretId: context.secretId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return null
+  }
+}
+
+async function createRefreshSecret(
+  context: CreateRefreshSecretContext,
+): Promise<string | null> {
+  try {
+    const created = await context.client.send(
+      new context.sdk.CreateSecretCommand({
+        Name: context.secretId,
+        SecretString: context.secretString,
+        Description: `Cognito refresh token for ${context.ownerEmail} — captured for agent data-MCP access`,
+        Tags: [
+          { Key: "Environment", Value: context.environment },
+          { Key: "ManagedBy", Value: "aistudio" },
+          { Key: "OwnerEmail", Value: context.ownerEmail },
+        ],
+      }),
+    )
+    log.info("Cognito refresh token secret created in Secrets Manager", {
+      secretId: context.secretId,
+    })
+    return created.ARN ?? null
+  } catch (error) {
+    if (error instanceof Error && error.name === "ResourceExistsException") {
+      return retryRefreshSecretPut(context)
+    }
+    log.warn("Cognito refresh token CreateSecret failed", {
+      secretId: context.secretId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return null
+  }
+}
+
 /**
  * Persist (or refresh) the user's Cognito refresh token in Secrets Manager.
  *
@@ -163,62 +232,14 @@ export async function syncCognitoRefreshForAgent(
     return resp.ARN ?? null
   } catch (error) {
     if (error instanceof ResourceNotFoundException) {
-      try {
-        const created = await client.send(
-          new CreateSecretCommand({
-            Name: secretId,
-            SecretString: secretString,
-            Description: `Cognito refresh token for ${ownerEmail} — captured for agent data-MCP access`,
-            Tags: [
-              { Key: "Environment", Value: environment },
-              { Key: "ManagedBy", Value: "aistudio" },
-              { Key: "OwnerEmail", Value: ownerEmail },
-            ],
-          }),
-        )
-        log.info("Cognito refresh token secret created in Secrets Manager", {
-          secretId,
-        })
-        return created.ARN ?? null
-      } catch (createError) {
-        // Two concurrent first-writes can race. The loser sees
-        // ResourceExistsException and falls through to PutSecretValue.
-        if (
-          createError instanceof Error &&
-          createError.name === "ResourceExistsException"
-        ) {
-          try {
-            const retry = await client.send(
-              new PutSecretValueCommand({
-                SecretId: secretId,
-                SecretString: secretString,
-              }),
-            )
-            log.info(
-              "Cognito refresh token stored after concurrent secret creation",
-              { secretId },
-            )
-            return retry.ARN ?? null
-          } catch (retryError) {
-            log.warn("Cognito refresh token sync retry failed", {
-              secretId,
-              error:
-                retryError instanceof Error
-                  ? retryError.message
-                  : String(retryError),
-            })
-            return null
-          }
-        }
-        log.warn("Cognito refresh token CreateSecret failed", {
-          secretId,
-          error:
-            createError instanceof Error
-              ? createError.message
-              : String(createError),
-        })
-        return null
-      }
+      return createRefreshSecret({
+        client,
+        sdk: { CreateSecretCommand, PutSecretValueCommand },
+        secretId,
+        secretString,
+        ownerEmail,
+        environment,
+      })
     }
     log.warn("Cognito refresh token PutSecretValue failed", {
       secretId,

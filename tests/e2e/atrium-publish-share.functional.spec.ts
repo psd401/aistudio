@@ -106,7 +106,7 @@ async function openPublishAnd(
   await publishItem.click()
 }
 
-test.describe('Atrium publish + share (authenticated)', () => {
+function defineAtriumPublishShareAuthenticatedSuite1Part1() {
   test.skip(
     process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
     'Requires an authenticated session — set PLAYWRIGHT_AUTH_ENABLED=true and run against the host :3100 dev server (see docs/guides/e2e-authenticated-testing.md)'
@@ -215,7 +215,9 @@ test.describe('Atrium publish + share (authenticated)', () => {
     }
   })
 
-  test('atrium-share-url: publishing to the public web widens to Public, shows /p/{slug}, resolves anonymously, and records an admin notification', async ({
+  }
+
+function defineAtriumPublishShareAuthenticatedSuite1Part2() {test('atrium-share-url: publishing to the public web widens to Public, shows /p/{slug}, resolves anonymously, and records an admin notification', async ({
     browser,
   }) => {
     const context = await browser.newContext({
@@ -299,7 +301,9 @@ test.describe('Atrium publish + share (authenticated)', () => {
     }
   })
 
-  test('atrium-share-grants: the labelled Share control adds a person grant via search, and that user can then read /c/{slug}', async ({
+  }
+
+function defineAtriumPublishShareAuthenticatedSuite1Part3() {test('atrium-share-grants: the labelled Share control adds a person grant via search, and that user can then read /c/{slug}', async ({
     browser,
   }) => {
     const context = await browser.newContext({
@@ -374,4 +378,12 @@ test.describe('Atrium publish + share (authenticated)', () => {
       await context.close()
     }
   })
-})
+}
+
+const defineAtriumPublishShareAuthenticatedSuite1 = () => {
+  defineAtriumPublishShareAuthenticatedSuite1Part1()
+  defineAtriumPublishShareAuthenticatedSuite1Part2()
+  defineAtriumPublishShareAuthenticatedSuite1Part3()
+};
+
+test.describe('Atrium publish + share (authenticated)', defineAtriumPublishShareAuthenticatedSuite1)

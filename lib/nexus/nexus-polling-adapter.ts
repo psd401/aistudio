@@ -41,12 +41,73 @@ export interface NexusPollingAdapterOptions {
   onConversationIdChange?: (conversationId: string) => void
 }
 
+type NexusAdapterContent =
+  | { type: 'text'; text: string }
+  | { type: 'image'; image: string }
+
+function completedJobContent(
+  jobData: NexusJobResponse,
+  jobId: string
+): { content: NexusAdapterContent[] } | null {
+  if (!jobData.responseData) return null
+
+  if (jobData.responseData.type === 'image' && jobData.responseData.s3Key) {
+    const { s3Key, prompt, size, model } = jobData.responseData
+    const imageUrl = `/api/images/${s3Key}`
+    log.info('Image generation job completed', {
+      jobId,
+      prompt: prompt?.substring(0, 50) + (prompt && prompt.length > 50 ? '...' : ''),
+      size,
+      model,
+      s3Key,
+      imageUrl
+    })
+    return { content: [{ type: 'image', image: imageUrl }] }
+  }
+
+  const finalText =
+    jobData.responseData.text ||
+    jobData.partialContent ||
+    'Response completed.'
+  log.info('Text job completed successfully', {
+    jobId,
+    textLength: finalText.length,
+    usage: jobData.responseData.usage
+  })
+  return { content: [{ type: 'text', text: finalText }] }
+}
+
+function* completedJobOutputs(
+  jobData: NexusJobResponse,
+  jobId: string
+): Generator<{ content: NexusAdapterContent[] }> {
+  const content = completedJobContent(jobData, jobId)
+  if (content) yield content
+}
+
+function appendAttachmentPart(
+  parts: Array<Record<string, unknown>>,
+  attachmentPart: { type: string; image?: string; url?: string; mediaType?: string }
+): void {
+  if (attachmentPart.type === 'image' && attachmentPart.image) {
+    parts.push({ type: 'image', image: attachmentPart.image })
+  } else if (attachmentPart.type === 'file' && attachmentPart.url) {
+    parts.push({
+      type: 'file',
+      url: attachmentPart.url,
+      mediaType: attachmentPart.mediaType
+    })
+  } else {
+    parts.push(attachmentPart)
+  }
+}
+
 /**
  * Nexus Polling Adapter for assistant-ui
- * 
+ *
  * Converts the universal polling architecture into a streaming interface
  * that's compatible with assistant-ui's LocalRuntime.
- * 
+ *
  * Flow:
  * 1. Submit chat request → get 202 + jobId
  * 2. Poll job status endpoint → get progressive updates
@@ -54,8 +115,8 @@ export interface NexusPollingAdapterOptions {
  * 4. Handle completion/errors → final response
  */
 export function createNexusPollingAdapter(options: NexusPollingAdapterOptions): ChatModelAdapter {
-  const { 
-    apiUrl, 
+  const {
+    apiUrl,
     bodyFn = () => ({}),
     maxPollAttempts = 300, // 5 minutes with 1s intervals
     pollTimeoutMs = 30000, // 30 seconds per poll
@@ -68,7 +129,7 @@ export function createNexusPollingAdapter(options: NexusPollingAdapterOptions): 
 
   return {
     async *run({ messages, abortSignal }) {
-      log.info('NEXUS POLLING ADAPTER - Starting chat request', { 
+      log.info('NEXUS POLLING ADAPTER - Starting chat request', {
         messageCount: messages.length,
         apiUrl,
         messagesStructure: messages.map(msg => ({
@@ -90,7 +151,7 @@ export function createNexusPollingAdapter(options: NexusPollingAdapterOptions): 
         // Convert ThreadMessages to AI SDK v5 UIMessages format
         const processedMessages = messages.map(message => {
           const parts = []
-          
+
           // Process message content
           if (Array.isArray(message.content)) {
             for (const contentPart of message.content) {
@@ -110,26 +171,19 @@ export function createNexusPollingAdapter(options: NexusPollingAdapterOptions): 
             // Simple string content
             parts.push({ type: 'text', text: message.content })
           }
-          
+
           // CRITICAL: Process attachments and merge their content into parts
           const messageWithAttachments = message as { attachments?: Array<{ content?: Array<{ type: string; image?: string; url?: string; mediaType?: string }> }> }
           if (Array.isArray(messageWithAttachments.attachments)) {
             for (const attachment of messageWithAttachments.attachments) {
               if (Array.isArray(attachment.content)) {
                 for (const attachmentPart of attachment.content) {
-                  if (attachmentPart.type === 'image' && attachmentPart.image) {
-                    parts.push({ type: 'image', image: attachmentPart.image })
-                  } else if (attachmentPart.type === 'file' && attachmentPart.url) {
-                    parts.push({ type: 'file', url: attachmentPart.url, mediaType: attachmentPart.mediaType })
-                  } else {
-                    // Pass through other attachment content
-                    parts.push(attachmentPart)
-                  }
+                  appendAttachmentPart(parts, attachmentPart)
                 }
               }
             }
           }
-          
+
           return {
             id: message.id || generateUUID(),
             role: message.role,
@@ -152,7 +206,7 @@ export function createNexusPollingAdapter(options: NexusPollingAdapterOptions): 
           messages: processedMessages,
           ...bodyFn()
         }
-        
+
         // Include conversationId if we have one for conversation continuity
         if (currentConversationId) {
           requestBody.conversationId = currentConversationId
@@ -191,15 +245,15 @@ export function createNexusPollingAdapter(options: NexusPollingAdapterOptions): 
           if (onConversationIdChange) {
             onConversationIdChange(currentConversationId)
           }
-          log.info('Conversation ID updated', { 
-            previousId: currentConversationId, 
-            newId: responseConversationId 
+          log.info('Conversation ID updated', {
+            previousId: currentConversationId,
+            newId: responseConversationId
           })
         }
 
-        log.info('Job created successfully', { 
-          jobId, 
-          conversationId: currentConversationId 
+        log.info('Job created successfully', {
+          jobId,
+          conversationId: currentConversationId
         })
 
         // 2. Poll for job updates
@@ -244,9 +298,12 @@ export function createNexusPollingAdapter(options: NexusPollingAdapterOptions): 
             clearTimeout(pollTimeout)
 
             if (!pollResponse.ok) {
-              if (pollResponse.status === 404) {
+              const handleNestedBranch2 = () => {
+                if (pollResponse.status === 404) {
                 throw new Error('Job not found - it may have expired')
               }
+              }
+              handleNestedBranch2()
               throw new Error(`Poll request failed: ${pollResponse.status} ${pollResponse.statusText}`)
             }
 
@@ -267,59 +324,16 @@ export function createNexusPollingAdapter(options: NexusPollingAdapterOptions): 
             // Yield progressive updates if we have partial content
             if (jobData.partialContent) {
               yield {
-                content: [{ 
-                  type: 'text' as const, 
-                  text: jobData.partialContent 
+                content: [{
+                  type: 'text' as const,
+                  text: jobData.partialContent
                 }],
               }
             }
 
             // Handle job completion
             if (jobData.status === 'completed') {
-              if (jobData.responseData) {
-                // Handle image generation responses
-                if (jobData.responseData.type === 'image' && jobData.responseData.s3Key) {
-                  const { s3Key, prompt, size, model } = jobData.responseData
-                  
-                  // Convert S3 key to secure API URL
-                  const imageUrl = `/api/images/${s3Key}`
-                  
-                  log.info('Image generation job completed', { 
-                    jobId, 
-                    prompt: prompt?.substring(0, 50) + (prompt && prompt.length > 50 ? '...' : ''),
-                    size,
-                    model,
-                    s3Key,
-                    imageUrl
-                  })
-
-                  yield {
-                    content: [
-                      // Show the image using secure API URL
-                      { 
-                        type: 'image' as const, 
-                        image: imageUrl
-                      }
-                    ],
-                  }
-                } else {
-                  // Handle regular text responses
-                  const finalText = jobData.responseData.text || jobData.partialContent || 'Response completed.'
-                  
-                  log.info('Text job completed successfully', { 
-                    jobId, 
-                    textLength: finalText.length,
-                    usage: jobData.responseData.usage
-                  })
-
-                  yield {
-                    content: [{ 
-                      type: 'text' as const, 
-                      text: finalText 
-                    }],
-                  }
-                }
-              }
+              yield* completedJobOutputs(jobData, jobId)
               return // Job completed successfully
             }
 
@@ -338,9 +352,9 @@ export function createNexusPollingAdapter(options: NexusPollingAdapterOptions): 
 
             // Continue polling if job is still in progress
             if (!jobData.shouldContinuePolling) {
-              log.warn('Server indicated to stop polling but job not completed', { 
-                jobId, 
-                status: jobData.status 
+              log.warn('Server indicated to stop polling but job not completed', {
+                jobId,
+                status: jobData.status
               })
               break
             }
@@ -351,13 +365,13 @@ export function createNexusPollingAdapter(options: NexusPollingAdapterOptions): 
               log.debug('Poll request timed out, will retry', { jobId, attempt: pollAttempts })
               continue // Retry on timeout
             }
-            
-            log.error('Poll request failed', { 
-              jobId, 
-              attempt: pollAttempts, 
+
+            log.error('Poll request failed', {
+              jobId,
+              attempt: pollAttempts,
               error: pollError instanceof Error ? pollError.message : String(pollError)
             })
-            
+
             // For network errors, continue retrying up to max attempts
             if (pollAttempts < maxPollAttempts) {
               continue
@@ -370,7 +384,7 @@ export function createNexusPollingAdapter(options: NexusPollingAdapterOptions): 
         throw new Error(`Job polling timed out after ${pollAttempts} attempts`)
 
       } catch (error) {
-        log.error('Nexus polling adapter error', { 
+        log.error('Nexus polling adapter error', {
           jobId,
           error: error instanceof Error ? {
             message: error.message,

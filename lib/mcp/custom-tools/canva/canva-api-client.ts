@@ -162,7 +162,8 @@ export class CanvaApiClient {
           let waitMs = INITIAL_BACKOFF_MS * Math.pow(2, attempt)
           if (retryAfter) {
             const seconds = parseInt(retryAfter, 10)
-            if (!Number.isNaN(seconds)) {
+            const handleNestedBranch1 = () => {
+              if (!Number.isNaN(seconds)) {
               waitMs = seconds * 1000
             } else {
               const dateMs = Date.parse(retryAfter)
@@ -170,6 +171,8 @@ export class CanvaApiClient {
                 waitMs = Math.max(0, dateMs - Date.now())
               }
             }
+            }
+            handleNestedBranch1()
           }
 
           log.warn("Canva API rate limited", {

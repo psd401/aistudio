@@ -11,11 +11,100 @@ import { validateImportFile, mapModelsForImport, type ExportFormat } from "@/lib
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { decodeMdxEditorEscapes } from "@/lib/utils/text-sanitizer"
 
+type AssistantImport = ExportFormat["assistants"][number]
+
+interface AssistantImportResult {
+  name: string
+  id?: number
+  status: "success" | "error"
+  error?: string
+}
+
+async function importAssistant(
+  assistant: AssistantImport,
+  modelMap: Map<string, number>,
+  userId: number,
+  log: ReturnType<typeof createLogger>
+): Promise<AssistantImportResult> {
+  try {
+    const createdAssistant = await createAssistantArchitect({
+      name: assistant.name,
+      description: assistant.description || "",
+      status: "pending_approval",
+      imagePath: assistant.image_path,
+      isParallel: assistant.is_parallel || false,
+      timeoutSeconds: assistant.timeout_seconds,
+      userId,
+    })
+
+    await importAssistantPrompts(assistant, createdAssistant.id, modelMap, log)
+    await importAssistantFields(assistant, createdAssistant.id)
+    return { name: assistant.name, id: createdAssistant.id, status: "success" }
+  } catch (error) {
+    log.error(`Error importing assistant ${assistant.name}:`, error)
+    return {
+      name: assistant.name,
+      status: "error",
+      error: error instanceof Error ? error.message : "Unknown error",
+    }
+  }
+}
+
+async function importAssistantPrompts(
+  assistant: AssistantImport,
+  assistantId: number,
+  modelMap: Map<string, number>,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  for (const prompt of assistant.prompts) {
+    const modelId = modelMap.get(prompt.model_name)
+    if (!modelId) {
+      log.warn(`No model mapping found for ${prompt.model_name}, skipping prompt`)
+      continue
+    }
+
+    await createChainPrompt({
+      assistantArchitectId: assistantId,
+      name: prompt.name,
+      content: decodeMdxEditorEscapes(prompt.content),
+      systemContext: prompt.system_context
+        ? decodeMdxEditorEscapes(prompt.system_context)
+        : prompt.system_context,
+      modelId,
+      position: prompt.position,
+      parallelGroup: prompt.parallel_group,
+      inputMapping: null,
+      timeoutSeconds: prompt.timeout_seconds,
+    })
+  }
+}
+
+async function importAssistantFields(
+  assistant: AssistantImport,
+  assistantId: number
+): Promise<void> {
+  for (const field of assistant.input_fields) {
+    await createToolInputField({
+      assistantArchitectId: assistantId,
+      name: field.name,
+      label: field.label,
+      fieldType: field.field_type as
+        | "short_text"
+        | "long_text"
+        | "select"
+        | "multi_select"
+        | "file_upload",
+      position: field.position,
+      options: field.options || undefined,
+    })
+  }
+}
+
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId();
   const timer = startTimer("api.admin.assistants.import");
   const log = createLogger({ requestId, route: "api.admin.assistants.import" });
-  
+
   log.info("POST /api/admin/assistants/import - Importing assistants");
 
   try {
@@ -101,83 +190,20 @@ export async function POST(request: NextRequest) {
     // Map models
     const modelMap = await mapModelsForImport(Array.from(modelNames))
 
-    const importResults = []
+    const importResults: AssistantImportResult[] = []
 
     // Import each assistant
     for (const assistant of importData.assistants) {
-      try {
-        // Create assistant and get the generated ID
-        const createdAssistant = await createAssistantArchitect({
-          name: assistant.name,
-          description: assistant.description || '',
-          status: 'pending_approval', // Always import as pending
-          imagePath: assistant.image_path,
-          isParallel: assistant.is_parallel || false,
-          timeoutSeconds: assistant.timeout_seconds,
-          userId,
-        })
-
-        const assistantId = createdAssistant.id
-
-        // Create prompts
-        for (const prompt of assistant.prompts) {
-          const modelId = modelMap.get(prompt.model_name)
-
-          if (!modelId) {
-            log.warn(`No model mapping found for ${prompt.model_name}, skipping prompt`)
-            continue
-          }
-
-          await createChainPrompt({
-            assistantArchitectId: assistantId,
-            name: prompt.name,
-            // Normalize MDXEditor escapes (\$ \{ \} \_ &#x24; &#36;) so imported content
-            // is stored in canonical form identical to what the UI produces.
-            content: decodeMdxEditorEscapes(prompt.content),
-            systemContext: prompt.system_context ? decodeMdxEditorEscapes(prompt.system_context) : prompt.system_context,
-            modelId,
-            position: prompt.position,
-            parallelGroup: prompt.parallel_group,
-            inputMapping: null, // Don't import source-system prompt IDs — they reference IDs that don't exist in this system and would silently resolve to wrong prompts
-            timeoutSeconds: prompt.timeout_seconds,
-          })
-        }
-
-        // Create input fields
-        for (const field of assistant.input_fields) {
-          await createToolInputField({
-            assistantArchitectId: assistantId,
-            name: field.name,
-            label: field.label,
-            fieldType: field.field_type as "short_text" | "long_text" | "select" | "multi_select" | "file_upload",
-            position: field.position,
-            options: field.options || undefined,
-          })
-        }
-
-        importResults.push({
-          name: assistant.name,
-          id: assistantId,
-          status: 'success'
-        })
-
-      } catch (error) {
-        log.error(`Error importing assistant ${assistant.name}:`, error)
-        importResults.push({
-          name: assistant.name,
-          status: 'error',
-          error: error instanceof Error ? error.message : 'Unknown error'
-        })
-      }
+      importResults.push(await importAssistant(assistant, modelMap, userId, log))
     }
 
     // Check if any imports succeeded
     const successCount = importResults.filter(r => r.status === 'success').length
-    
+
     if (successCount === 0) {
       return NextResponse.json(
-        { 
-          isSuccess: false, 
+        {
+          isSuccess: false,
           message: "Failed to import any assistants",
           details: importResults
         },

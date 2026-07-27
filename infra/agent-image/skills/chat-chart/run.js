@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * run.js — chat-chart
  *
@@ -23,6 +24,8 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
 
 const { spawnSync } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
@@ -251,16 +254,16 @@ async function renderLocal(config, userEmail) {
     const stderr = (py.stderr || '').slice(0, 1000);
     fail(`local renderer failed (exit ${py.status}): ${stderr}`, 3);
   }
-  if (!fs.existsSync(outPath)) {
+  if (!validatedFs.existsSync(outPath)) {
     fail(`local renderer claimed success but produced no file at ${outPath}`, 3);
   }
 
-  const bytes = fs.readFileSync(outPath);
+  const bytes = validatedFs.readFileSync(outPath);
   // Best-effort cleanup; the temp dir lives under /tmp which is also wiped
   // on container restart.
   try {
-    fs.unlinkSync(outPath);
-    fs.rmdirSync(tmpDir);
+    validatedFs.unlinkSync(outPath);
+    validatedFs.rmdirSync(tmpDir);
   } catch {
     // The renderer result is already in memory; /tmp cleanup is best-effort.
   }

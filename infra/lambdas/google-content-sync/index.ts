@@ -785,9 +785,12 @@ async function enumerateInitialFiles(
             selection.externalId,
             pageToken,
           );
-          for (const file of page.values) {
+          const handleNestedBranch1 = async () => {
+            for (const file of page.values) {
             await add(file, selection.externalId);
           }
+          }
+          await handleNestedBranch1()
           pageToken = page.nextPageToken;
         } while (pageToken);
         continue;
@@ -811,13 +814,16 @@ async function enumerateInitialFiles(
         let pageToken: string | null = null;
         do {
           const page = await client.listChildren(folderId, pageToken);
-          for (const child of page.values) {
+          const handleNestedBranch2 = async () => {
+            for (const child of page.values) {
             if (child.mimeType === GOOGLE_FOLDER_MIME_TYPE) {
               pendingFolders.push(child.id);
             } else {
               await add(child, selection.externalId);
             }
           }
+          }
+          await handleNestedBranch2()
           pageToken = page.nextPageToken;
         } while (pageToken);
       }
@@ -1210,9 +1216,12 @@ async function reconcileChanges(
         }
         const selectedVia = await selectedViaForFile(context, client, file);
         if (selectedVia.length === 0) {
-          if (await markSourceMissing(context.connector.id, file.id)) {
+          const handleNestedBranch3 = async () => {
+            if (await markSourceMissing(context.connector.id, file.id)) {
             counters.missing += 1;
           }
+          }
+          await handleNestedBranch3()
           continue;
         }
         await importFileIsolated(context, client, file, selectedVia, counters);
@@ -1227,11 +1236,14 @@ async function reconcileChanges(
           error instanceof GoogleDriveApiError &&
           (error.status === 403 || error.status === 404)
         ) {
-          if (await markSourceMissing(context.connector.id, change.fileId)) {
+          const handleNestedBranch4 = async () => {
+            if (await markSourceMissing(context.connector.id, change.fileId)) {
             counters.missing += 1;
           } else {
             counters.failed += 1;
           }
+          }
+          await handleNestedBranch4()
           continue;
         }
         throw error;

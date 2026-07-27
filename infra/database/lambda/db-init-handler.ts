@@ -7,8 +7,9 @@ import {
   ExecuteStatementCommand,
   type ExecuteStatementCommandOutput,
 } from '@aws-sdk/client-rds-data';
-import { promises as fs } from 'node:fs';
+
 import * as path from 'node:path';
+import { validatedFsPromises } from "../../lib/validated-fs";
 // migrations.json is copied to the Lambda package root during bundling
 // Using require for runtime resolution (file doesn't exist in source, only in Lambda package)
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -327,77 +328,85 @@ async function executeFileStatements(
   validateStatements(statements, filename);
 
   for (const statement of statements) {
-    if (statement.trim()) {
-      try {
-        await executeSql(clusterArn, secretArn, database, statement);
-      } catch (error: unknown) {
-        const message = errorMessage(error);
-        // For initial setup files, we might want to continue on "already exists" errors
-        // For migrations, we should fail fast
-        if (INITIAL_SETUP_FILES.includes(filename) &&
-            (message.includes('already exists') ||
-             message.includes('duplicate key'))) {
-          console.log(`⚠️  Skipping (already exists): ${message}`);
-        } else if (MIGRATION_FILES.includes(filename)) {
-          // CREATE TYPE … AS ENUM cannot be written `IF NOT EXISTS` (PostgreSQL
-          // has no such form) and the statement splitter cannot handle the
-          // DO $$ … $$ guard pattern (it closes the block on the inner `);`).
-          // So an enum CREATE TYPE is inherently non-idempotent: on a partial-
-          // failure re-run it raises "type … already exists" (SQLSTATE 42710),
-          // which would otherwise hit the throw below and permanently wedge the
-          // migration. Treat that specific case as already-applied, matching the
-          // idempotency the migration header promises. Scoped to CREATE TYPE so
-          // genuine "already exists" failures in other statements still surface.
-          const isCreateType = statement.trim().toUpperCase().startsWith('CREATE TYPE');
-          if (isCreateType && message.includes('already exists')) {
-            console.log(`⚠️  Skipping (type already exists): ${message}`);
-            continue;
-          }
+    if (!statement.trim()) continue;
 
-          // For migration files, check if it's an ALTER TABLE that actually succeeded
-          // RDS Data API sometimes returns an error-like response for successful ALTER TABLEs
-          const isAlterTable = statement.trim().toUpperCase().startsWith('ALTER TABLE');
-
-          if (isAlterTable) {
-            // Verify if the ALTER actually succeeded by checking the table structure
-            console.log(`⚠️  ALTER TABLE may have succeeded despite error response. Verifying...`);
-
-            // Extract table name and column from ALTER statement
-            const addedColumn = parseAddedColumn(statement);
-
-            if (addedColumn) {
-              const { tableName, columnName } = addedColumn;
-
-              try {
-                // Check if the column exists
-                const checkResult = await executeSql(
-                  clusterArn,
-                  secretArn,
-                  database,
-                  `SELECT column_name FROM information_schema.columns
-                   WHERE table_schema = 'public'
-                   AND table_name = '${tableName}'
-                   AND column_name = '${columnName}'`
-                );
-
-                if (checkResult.records && checkResult.records.length > 0) {
-                  console.log(`✅ Column ${columnName} exists in table ${tableName} - ALTER succeeded`);
-                  // Column exists, so the ALTER worked - continue
-                  continue;
-                }
-              } catch (checkError) {
-                console.log(`Could not verify column existence: ${checkError}`);
-              }
-            }
-          }
-
-          // If we couldn't verify success, throw the original error
-          throw error;
-        } else {
-          throw error;
-        }
-      }
+    try {
+      await executeSql(clusterArn, secretArn, database, statement);
+    } catch (error: unknown) {
+      await handleStatementExecutionError(
+        { clusterArn, secretArn, database, filename, statement },
+        error
+      );
     }
+  }
+}
+
+interface StatementExecutionContext {
+  clusterArn: string;
+  secretArn: string;
+  database: string;
+  filename: string;
+  statement: string;
+}
+
+async function handleStatementExecutionError(
+  context: StatementExecutionContext,
+  error: unknown
+): Promise<void> {
+  const message = errorMessage(error);
+  if (isSkippableInitialSetupError(context.filename, message)) {
+    console.log(`⚠️  Skipping (already exists): ${message}`);
+    return;
+  }
+
+  if (!MIGRATION_FILES.includes(context.filename)) throw error;
+
+  const normalizedStatement = context.statement.trim().toUpperCase();
+  if (normalizedStatement.startsWith('CREATE TYPE') && message.includes('already exists')) {
+    console.log(`⚠️  Skipping (type already exists): ${message}`);
+    return;
+  }
+
+  if (
+    normalizedStatement.startsWith('ALTER TABLE') &&
+    await verifyAlterTableSucceeded(context)
+  ) {
+    return;
+  }
+
+  throw error;
+}
+
+function isSkippableInitialSetupError(filename: string, message: string): boolean {
+  return INITIAL_SETUP_FILES.includes(filename) &&
+    (message.includes('already exists') || message.includes('duplicate key'));
+}
+
+async function verifyAlterTableSucceeded(
+  context: StatementExecutionContext
+): Promise<boolean> {
+  console.log('⚠️  ALTER TABLE may have succeeded despite error response. Verifying...');
+  const addedColumn = parseAddedColumn(context.statement);
+  if (!addedColumn) return false;
+
+  const { tableName, columnName } = addedColumn;
+  try {
+    const checkResult = await executeSql(
+      context.clusterArn,
+      context.secretArn,
+      context.database,
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = 'public'
+       AND table_name = '${tableName}'
+       AND column_name = '${columnName}'`
+    );
+    if (!checkResult.records?.length) return false;
+
+    console.log(`✅ Column ${columnName} exists in table ${tableName} - ALTER succeeded`);
+    return true;
+  } catch (checkError) {
+    console.log(`Could not verify column existence: ${checkError}`);
+    return false;
   }
 }
 
@@ -521,7 +530,7 @@ async function getSqlContent(filename: string): Promise<string> {
   try {
     // Schema files are copied to the Lambda deployment package
     const schemaPath = path.join(__dirname, 'schema', filename);
-    const content = await fs.readFile(schemaPath, 'utf8');
+    const content = await validatedFsPromises.readFile(schemaPath, 'utf8');
     return content;
   } catch (error) {
     console.error(`Failed to read SQL file ${filename}:`, error);

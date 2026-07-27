@@ -8,15 +8,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,22 +16,23 @@ import { PDFDocument, StandardFonts } from "pdf-lib";
 import * as XLSX from "@e965/xlsx";
 import { Document, Packer, Paragraph } from "docx";
 import JSZip from "jszip";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 const repositoryRoot = resolve(
   fileURLToPath(new URL("../..", import.meta.url))
 );
 const cdkOutput = join(repositoryRoot, "infra", "cdk.out");
-const candidates = readdirSync(cdkOutput, { withFileTypes: true })
+const candidates = validatedFs.readdirSync(cdkOutput, { withFileTypes: true })
   .filter((entry) => entry.isDirectory() && entry.name.startsWith("asset."))
   .map((entry) => join(cdkOutput, entry.name))
   .filter((directory) => {
     const entry = join(directory, "index.mjs");
     return (
-      existsSync(entry) &&
-      readFileSync(entry, "utf8").includes("extractPdfTextForRuntimeSmoke")
+      validatedFs.existsSync(entry) &&
+      validatedFs.readFileSync(entry, "utf8").includes("extractPdfTextForRuntimeSmoke")
     );
   })
-  .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+  .sort((left, right) => validatedFs.statSync(right).mtimeMs - validatedFs.statSync(left).mtimeMs);
 
 const assetDirectory = candidates[0];
 if (!assetDirectory) {
@@ -47,7 +40,7 @@ if (!assetDirectory) {
     "No synthesized unified-content Lambda asset was found; synthesize AIStudio-ProcessingStack-Dev first"
   );
 }
-if (!existsSync(join(assetDirectory, "node_modules", "pdf-parse", "package.json"))) {
+if (!validatedFs.existsSync(join(assetDirectory, "node_modules", "pdf-parse", "package.json"))) {
   throw new Error(
     `Synthesized artifact ${assetDirectory} does not contain the external pdf-parse runtime package`
   );
@@ -65,12 +58,12 @@ try {
     { x: 50, y: 740, size: 12, font }
   );
   const fixturePath = join(fixtureDirectory, "runtime.pdf");
-  writeFileSync(fixturePath, await document.save());
+  validatedFs.writeFileSync(fixturePath, await document.save());
   const imagePath = join(fixtureDirectory, "runtime.png");
-  writeFileSync(
+  validatedFs.writeFileSync(
     imagePath,
     Buffer.from(
-      readFileSync(
+      validatedFs.readFileSync(
         join(
           repositoryRoot,
           "tests",
@@ -94,12 +87,12 @@ try {
     "Directory"
   );
   const officePath = join(fixtureDirectory, "runtime.xlsx");
-  writeFileSync(
+  validatedFs.writeFileSync(
     officePath,
     XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }) as Uint8Array
   );
   const docxPath = join(fixtureDirectory, "runtime.docx");
-  writeFileSync(
+  validatedFs.writeFileSync(
     docxPath,
     await Packer.toBuffer(
       new Document({
@@ -123,7 +116,7 @@ try {
     '<p:sld xmlns:p="p" xmlns:a="a"><a:p><a:r><a:t>Artifact PPTX extraction validation</a:t></a:r></a:p></p:sld>'
   );
   const pptxPath = join(fixtureDirectory, "runtime.pptx");
-  writeFileSync(
+  validatedFs.writeFileSync(
     pptxPath,
     await presentation.generateAsync({ type: "uint8array" })
   );

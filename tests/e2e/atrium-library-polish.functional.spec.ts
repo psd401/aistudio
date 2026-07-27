@@ -72,7 +72,7 @@ function searchBox(page: import('@playwright/test').Page) {
   return page.getByRole('textbox', { name: 'Search content by title or tag' })
 }
 
-test.describe('Atrium library polish — search, tags, bulk (authenticated)', () => {
+function defineAtriumLibraryPolishSearchTagsBulkAuthenticatedSuite1Part1() {
   test.skip(
     process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
     'Requires an authenticated session — set PLAYWRIGHT_AUTH_ENABLED=true and run against the host :3100 dev server (see docs/guides/e2e-authenticated-testing.md)'
@@ -174,7 +174,9 @@ test.describe('Atrium library polish — search, tags, bulk (authenticated)', ()
     }
   })
 
-  test('atrium-library-bulk: multi-select archives and restores, and a mixed delete aggregates the partial failure', async ({
+  }
+
+function defineAtriumLibraryPolishSearchTagsBulkAuthenticatedSuite1Part2() {test('atrium-library-bulk: multi-select archives and restores, and a mixed delete aggregates the partial failure', async ({
     browser,
   }) => {
     const context = await browser.newContext({
@@ -291,4 +293,11 @@ test.describe('Atrium library polish — search, tags, bulk (authenticated)', ()
       await context.close()
     }
   })
-})
+}
+
+const defineAtriumLibraryPolishSearchTagsBulkAuthenticatedSuite1 = () => {
+  defineAtriumLibraryPolishSearchTagsBulkAuthenticatedSuite1Part1()
+  defineAtriumLibraryPolishSearchTagsBulkAuthenticatedSuite1Part2()
+};
+
+test.describe('Atrium library polish — search, tags, bulk (authenticated)', defineAtriumLibraryPolishSearchTagsBulkAuthenticatedSuite1)

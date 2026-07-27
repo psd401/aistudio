@@ -18,10 +18,14 @@ interface SynthesizedPolicyStatement {
   Condition?: { StringEquals?: Record<string, string> }
 }
 
-describe("AuroraCostOptimizer", () => {
-  let app: cdk.App
-  let stack: cdk.Stack
-  let mockCluster: rds.IDatabaseCluster
+let app: cdk.App
+let stack: cdk.Stack
+let mockCluster: rds.IDatabaseCluster
+
+function defineAuroraCostOptimizerSuite1Part1() {
+
+
+
 
   beforeEach(() => {
     app = new cdk.App()
@@ -119,7 +123,9 @@ describe("AuroraCostOptimizer", () => {
 
 
 
-    test("enables both auto-pause and scheduled scaling", () => {
+    }
+
+function defineAuroraCostOptimizerSuite1Part2() {test("enables both auto-pause and scheduled scaling", () => {
       new AuroraCostOptimizer(stack, "StagingOptimizer", {
         cluster: mockCluster,
         environment: "staging",
@@ -218,7 +224,9 @@ describe("AuroraCostOptimizer", () => {
       expect(Object.keys(rules).length).toBeGreaterThanOrEqual(2)
     })
 
-    test("creates weekend minimal scaling", () => {
+    }
+
+function defineAuroraCostOptimizerSuite1Part3() {test("creates weekend minimal scaling", () => {
       new AuroraCostOptimizer(stack, "ProdOptimizer", {
         cluster: mockCluster,
         environment: "prod",
@@ -311,7 +319,9 @@ describe("AuroraCostOptimizer", () => {
 
 
 
-    test("accepts custom scaling parameters", () => {
+    }
+
+function defineAuroraCostOptimizerSuite1Part4() {test("accepts custom scaling parameters", () => {
       new AuroraCostOptimizer(stack, "Optimizer", {
         cluster: mockCluster,
         environment: "prod",
@@ -377,4 +387,13 @@ describe("AuroraCostOptimizer", () => {
       })
     })
 
-})
+}
+
+const defineAuroraCostOptimizerSuite1 = () => {
+  defineAuroraCostOptimizerSuite1Part1()
+  defineAuroraCostOptimizerSuite1Part2()
+  defineAuroraCostOptimizerSuite1Part3()
+  defineAuroraCostOptimizerSuite1Part4()
+};
+
+describe("AuroraCostOptimizer", defineAuroraCostOptimizerSuite1)

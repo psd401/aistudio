@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * a11y-audit.js — shared WCAG 2.2 AA accessibility gate for HTML artifacts.
  *
@@ -36,8 +37,10 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
 
-const fs = require('node:fs');
+
+
 
 // Impact levels that BLOCK delivery/publish. axe-core impacts are one of:
 // 'minor' | 'moderate' | 'serious' | 'critical'.
@@ -79,7 +82,7 @@ async function auditHtml(html, opts = {}) {
     );
   }
 
-  const axeSource = fs.readFileSync(axeSourcePath, 'utf8');
+  const axeSource = validatedFs.readFileSync(axeSourcePath, 'utf8');
 
   // `pretendToBeVisual` gives axe a requestAnimationFrame; `outside-only` lets
   // us eval axe's source into the window WITHOUT executing scripts embedded in
@@ -187,7 +190,7 @@ async function cli(argv) {
   let html;
   if (typeof args.file === 'string') {
     try {
-      html = fs.readFileSync(args.file, 'utf8');
+      html = validatedFs.readFileSync(args.file, 'utf8');
     } catch (err) {
       process.stderr.write(
         JSON.stringify({ error: 'bad_args', message: `--file not readable: ${err.message}` }) + '\n'

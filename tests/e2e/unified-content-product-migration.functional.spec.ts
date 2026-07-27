@@ -27,6 +27,118 @@ const MOCK_STREAM = [
   "data: [DONE]\n\n",
 ].join("");
 
+type NexusCanonicalRouteState = {
+  uploadBodies: string[];
+  chatBodies: Array<Record<string, unknown>>;
+  promotionBodies: Array<Record<string, unknown>>;
+  legacyUploadCount: number;
+};
+
+async function configureNexusCanonicalRoutes(
+  page: Page,
+  state: NexusCanonicalRouteState,
+  uploadSessionId: string
+): Promise<void> {
+  await page.route(
+    "**/api/repositories/temporary-attachments",
+    async (route) => {
+      state.uploadBodies.push(
+        route.request().postDataBuffer()?.toString("utf8") ?? ""
+      );
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          mode: "canonical",
+          bindingId: NEXUS_BINDING_ID,
+          repositoryId: 8800,
+          upload: {
+            sessionId: uploadSessionId,
+            uploadMethod: "single",
+            uploadUrl: "/__e2e-storage/nexus-canonical",
+          },
+        }),
+      });
+    }
+  );
+  await page.route("**/__e2e-storage/nexus-canonical", async (route) => {
+    expect(route.request().method()).toBe("PUT");
+    await route.fulfill({ status: 200 });
+  });
+  await page.route(
+    `**/api/repositories/temporary-attachments/${NEXUS_BINDING_ID}/complete`,
+    async (route) => {
+      expect(route.request().postDataJSON()).toMatchObject({
+        sessionId: uploadSessionId,
+        name: "nexus-canonical.pdf",
+      });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          mode: "canonical",
+          reference: {
+            bindingId: NEXUS_BINDING_ID,
+            itemId: 8801,
+            name: "nexus-canonical.pdf",
+          },
+          repositoryId: 8800,
+          itemVersionId: "88888888-9999-4aaa-8bbb-cccccccccccc",
+          processingJobId: "99999999-aaaa-4bbb-8ccc-dddddddddddd",
+        }),
+      });
+    }
+  );
+  await page.route(
+    `**/api/repositories/temporary-attachments/${NEXUS_BINDING_ID}/8801`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ status: "embedded", error: null }),
+      });
+    }
+  );
+  await page.route("**/api/documents/v2/upload", async (route) => {
+    state.legacyUploadCount += 1;
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "Legacy upload must not run" }),
+    });
+  });
+  await page.route("**/api/nexus/chat", async (route) => {
+    state.chatBodies.push(
+      route.request().postDataJSON() as Record<string, unknown>
+    );
+    await route.fulfill({
+      status: 200,
+      headers: {
+        "Content-Type": "text/event-stream",
+        "x-vercel-ai-ui-message-stream": "v1",
+        "X-Conversation-Id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      },
+      body: MOCK_STREAM,
+    });
+  });
+  await page.route(
+    `**/api/repositories/temporary-attachments/${NEXUS_BINDING_ID}/8801/promote`,
+    async (route) => {
+      state.promotionBodies.push(
+        route.request().postDataJSON() as Record<string, unknown>
+      );
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          repositoryId: 8800,
+          name: "nexus-canonical",
+        }),
+      });
+    }
+  );
+}
+
 async function openRepository(
   page: Page,
   repositoryName = SHARED_REPOSITORY,
@@ -50,7 +162,7 @@ async function addNexusAttachment(
   await chooser.setFiles(file);
 }
 
-test.describe("Unified content platform guards", () => {
+const defineUnifiedContentPlatformGuardsSuite1 = () => {
   test("temporary attachment and promotion APIs reject unauthenticated callers", async ({
     request,
   }) => {
@@ -97,15 +209,11 @@ test.describe("Unified content platform guards", () => {
       error: "Invalid notification",
     });
   });
-});
+};
 
-test.describe("Unified content product migration (authenticated)", () => {
-  test.skip(
-    process.env.PLAYWRIGHT_AUTH_ENABLED !== "true",
-    "Requires the authenticated local E2E server and unified-content fixtures",
-  );
+test.describe("Unified content platform guards", defineUnifiedContentPlatformGuardsSuite1);
 
-  test("Repository Manager projects exact read-only access and hides owner-only content", async ({
+const defineUnifiedContentProductMigrationAuthenticatedSuite2Registration1: NonNullable<Parameters<typeof test>[2]> = async ({
     page,
   }) => {
     await authenticateContext(page.context(), READER_EMAIL, READER_SUB);
@@ -152,9 +260,8 @@ test.describe("Unified content product migration (authenticated)", () => {
     ).toBeVisible();
     await expect(details.getByText("Current", { exact: true })).toBeVisible();
     await expect(details.getByRole("tab", { name: "Citations" })).toBeVisible();
-  });
-
-  test("Repository Manager exposes the universal source workflow and management metadata", async ({
+  };
+const defineUnifiedContentProductMigrationAuthenticatedSuite2Registration2: NonNullable<Parameters<typeof test>[2]> = async ({
     page,
   }) => {
     await authenticateContext(page.context(), ADMIN_EMAIL, ADMIN_SUB);
@@ -203,9 +310,8 @@ test.describe("Unified content product migration (authenticated)", () => {
     await expect(sourceDialog.getByText(/unified-content-sync@/)).toHaveCount(
       0,
     );
-  });
-
-  test("staff can manage repositories and bind an explicitly shared repository in Assistant Architect", async ({
+  };
+const defineUnifiedContentProductMigrationAuthenticatedSuite2Registration3: NonNullable<Parameters<typeof test>[2]> = async ({
     page,
   }) => {
     await authenticateContext(page.context(), STAFF_EMAIL, STAFF_SUB);
@@ -236,9 +342,8 @@ test.describe("Unified content product migration (authenticated)", () => {
     await expect(sharedRepository).toBeVisible();
     await sharedRepository.click();
     await expect(sharedRepository).toHaveAttribute("aria-pressed", "true");
-  });
-
-  test("authenticated users without Repository Manager capability cannot promote Nexus attachments", async ({
+  };
+const defineUnifiedContentProductMigrationAuthenticatedSuite2Registration4: NonNullable<Parameters<typeof test>[2]> = async ({
     page,
   }) => {
     await authenticateContext(page.context(), STUDENT_EMAIL, STUDENT_SUB);
@@ -247,9 +352,8 @@ test.describe("Unified content product migration (authenticated)", () => {
       { data: { name: "Forbidden promotion" } },
     );
     expect(response.status()).toBe(403);
-  });
-
-  test("Assistant Architect uses the shared repository picker and has no direct knowledge upload", async ({
+  };
+const defineUnifiedContentProductMigrationAuthenticatedSuite2Registration5: NonNullable<Parameters<typeof test>[2]> = async ({
     page,
   }) => {
     await authenticateContext(page.context(), ADMIN_EMAIL, ADMIN_SUB);
@@ -305,9 +409,8 @@ test.describe("Unified content product migration (authenticated)", () => {
     await expect(sourceDialog).toBeVisible();
     await expect(sourceDialog.getByRole("tab", { name: "File" })).toBeVisible();
     await expect(sourceDialog.getByRole("tab", { name: "Text" })).toBeVisible();
-  });
-
-  test("Assistant Architect runtime sends an opaque temporary repository reference without invoking legacy upload", async ({
+  };
+const defineUnifiedContentProductMigrationAuthenticatedSuite2Registration6: NonNullable<Parameters<typeof test>[2]> = async ({
     page,
   }) => {
     await authenticateContext(page.context(), ADMIN_EMAIL, ADMIN_SUB);
@@ -442,123 +545,20 @@ test.describe("Unified content product migration (authenticated)", () => {
     expect(documentInput).not.toContain(
       "AA-SOURCE-BYTES-MUST-NOT-REACH-THE-MODEL",
     );
-  });
-
-  test("Nexus uploads canonically, sends only an opaque reference, and promotes from the message", async ({
+  };
+const defineUnifiedContentProductMigrationAuthenticatedSuite2Registration7: NonNullable<Parameters<typeof test>[2]> = async ({
     page,
   }) => {
     await authenticateContext(page.context(), ADMIN_EMAIL, ADMIN_SUB);
 
-    const uploadBodies: string[] = [];
-    const chatBodies: Array<Record<string, unknown>> = [];
-    const promotionBodies: Array<Record<string, unknown>> = [];
-    let legacyUploadCount = 0;
+    const routeState: NexusCanonicalRouteState = {
+      uploadBodies: [],
+      chatBodies: [],
+      promotionBodies: [],
+      legacyUploadCount: 0,
+    };
     const uploadSessionId = "22222222-3333-4444-8555-666666666666";
-
-    await page.route(
-      "**/api/repositories/temporary-attachments",
-      async (route) => {
-        uploadBodies.push(
-          route.request().postDataBuffer()?.toString("utf8") ?? "",
-        );
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            mode: "canonical",
-            bindingId: NEXUS_BINDING_ID,
-            repositoryId: 8800,
-            upload: {
-              sessionId: uploadSessionId,
-              uploadMethod: "single",
-              uploadUrl: "/__e2e-storage/nexus-canonical",
-            },
-          }),
-        });
-      },
-    );
-    await page.route("**/__e2e-storage/nexus-canonical", async (route) => {
-      expect(route.request().method()).toBe("PUT");
-      await route.fulfill({ status: 200 });
-    });
-    await page.route(
-      new RegExp(
-        `/api/repositories/temporary-attachments/${NEXUS_BINDING_ID}/complete$`,
-      ),
-      async (route) => {
-        expect(route.request().postDataJSON()).toMatchObject({
-          sessionId: uploadSessionId,
-          name: "nexus-canonical.pdf",
-        });
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            mode: "canonical",
-            reference: {
-              bindingId: NEXUS_BINDING_ID,
-              itemId: 8801,
-              name: "nexus-canonical.pdf",
-            },
-            repositoryId: 8800,
-            itemVersionId: "88888888-9999-4aaa-8bbb-cccccccccccc",
-            processingJobId: "99999999-aaaa-4bbb-8ccc-dddddddddddd",
-          }),
-        });
-      },
-    );
-    await page.route(
-      new RegExp(
-        `/api/repositories/temporary-attachments/${NEXUS_BINDING_ID}/8801$`,
-      ),
-      async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({ status: "embedded", error: null }),
-        });
-      },
-    );
-    await page.route("**/api/documents/v2/upload", async (route) => {
-      legacyUploadCount += 1;
-      await route.fulfill({
-        status: 500,
-        contentType: "application/json",
-        body: JSON.stringify({ error: "Legacy upload must not run" }),
-      });
-    });
-    await page.route("**/api/nexus/chat", async (route) => {
-      chatBodies.push(
-        route.request().postDataJSON() as Record<string, unknown>,
-      );
-      await route.fulfill({
-        status: 200,
-        headers: {
-          "Content-Type": "text/event-stream",
-          "x-vercel-ai-ui-message-stream": "v1",
-          "X-Conversation-Id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-        },
-        body: MOCK_STREAM,
-      });
-    });
-    await page.route(
-      new RegExp(
-        `/api/repositories/temporary-attachments/${NEXUS_BINDING_ID}/8801/promote$`,
-      ),
-      async (route) => {
-        promotionBodies.push(
-          route.request().postDataJSON() as Record<string, unknown>,
-        );
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            repositoryId: 8800,
-            name: "nexus-canonical",
-          }),
-        });
-      },
-    );
+    await configureNexusCanonicalRoutes(page, routeState, uploadSessionId);
 
     await gotoNexus(page);
     await addNexusAttachment(page, {
@@ -577,20 +577,22 @@ test.describe("Unified content product migration (authenticated)", () => {
 
     await page.getByLabel("Message input").fill("Use the attached policy.");
     await page.getByRole("button", { name: "Send message" }).click();
-    await expect.poll(() => chatBodies.length, { timeout: 30_000 }).toBe(1);
+    await expect
+      .poll(() => routeState.chatBodies.length, { timeout: 30_000 })
+      .toBe(1);
 
-    expect(uploadBodies).toHaveLength(1);
-    expect(JSON.parse(uploadBodies[0])).toMatchObject({
+    expect(routeState.uploadBodies).toHaveLength(1);
+    expect(JSON.parse(routeState.uploadBodies[0])).toMatchObject({
       purpose: "nexus",
       fileName: "nexus-canonical.pdf",
       contentType: "application/pdf",
     });
-    expect(uploadBodies[0]).not.toContain(
+    expect(routeState.uploadBodies[0]).not.toContain(
       "NEXUS-SOURCE-BYTES-MUST-NOT-REACH-THE-MODEL",
     );
-    expect(legacyUploadCount).toBe(0);
+    expect(routeState.legacyUploadCount).toBe(0);
 
-    const serializedChat = JSON.stringify(chatBodies[0]);
+    const serializedChat = JSON.stringify(routeState.chatBodies[0]);
     const opaqueMarker =
       `[[repository-attachment:v1:${NEXUS_BINDING_ID}:8801:` +
       "nexus-canonical.pdf]]";
@@ -608,14 +610,15 @@ test.describe("Unified content product migration (authenticated)", () => {
     });
     await expect(keepButton).toBeVisible();
     await keepButton.click();
-    await expect.poll(() => promotionBodies.length).toBe(1);
-    expect(promotionBodies[0]).toEqual({ name: "nexus-canonical" });
+    await expect.poll(() => routeState.promotionBodies.length).toBe(1);
+    expect(routeState.promotionBodies[0]).toEqual({
+      name: "nexus-canonical",
+    });
     await expect(
       page.getByRole("button", { name: "Saved as a repository" }),
     ).toBeVisible();
-  });
-
-  test("Nexus canonicalizes image inputs while retaining inline pixels for vision and image editing", async ({
+  };
+const defineUnifiedContentProductMigrationAuthenticatedSuite2Registration8: NonNullable<Parameters<typeof test>[2]> = async ({
     page,
   }) => {
     await authenticateContext(page.context(), ADMIN_EMAIL, ADMIN_SUB);
@@ -732,9 +735,8 @@ test.describe("Unified content product migration (authenticated)", () => {
     await expect(
       page.getByText("Temporary repository attachment", { exact: true }),
     ).toBeVisible();
-  });
-
-  test("Nexus rejects forged attachment references before creating a conversation", async ({
+  };
+const defineUnifiedContentProductMigrationAuthenticatedSuite2Registration9: NonNullable<Parameters<typeof test>[2]> = async ({
     page,
   }) => {
     await authenticateContext(page.context(), ADMIN_EMAIL, ADMIN_SUB);
@@ -772,9 +774,8 @@ test.describe("Unified content product migration (authenticated)", () => {
         conversation.title?.includes(uniquePrompt),
       ),
     ).toBe(false);
-  });
-
-  test("Nexus uses legacy processing only when the canonical endpoint explicitly selects rollback mode", async ({
+  };
+const defineUnifiedContentProductMigrationAuthenticatedSuite2Registration10: NonNullable<Parameters<typeof test>[2]> = async ({
     page,
   }) => {
     await authenticateContext(page.context(), ADMIN_EMAIL, ADMIN_SUB);
@@ -833,5 +834,33 @@ test.describe("Unified content product migration (authenticated)", () => {
     expect(canonicalNegotiationCount).toBe(1);
     expect(legacyUploadCount).toBe(1);
     expect(legacyStatusCount).toBe(1);
-  });
-});
+  };
+
+const defineUnifiedContentProductMigrationAuthenticatedSuite2 = () => {
+  test.skip(
+    process.env.PLAYWRIGHT_AUTH_ENABLED !== "true",
+    "Requires the authenticated local E2E server and unified-content fixtures",
+  );
+
+  test("Repository Manager projects exact read-only access and hides owner-only content", defineUnifiedContentProductMigrationAuthenticatedSuite2Registration1);
+
+  test("Repository Manager exposes the universal source workflow and management metadata", defineUnifiedContentProductMigrationAuthenticatedSuite2Registration2);
+
+  test("staff can manage repositories and bind an explicitly shared repository in Assistant Architect", defineUnifiedContentProductMigrationAuthenticatedSuite2Registration3);
+
+  test("authenticated users without Repository Manager capability cannot promote Nexus attachments", defineUnifiedContentProductMigrationAuthenticatedSuite2Registration4);
+
+  test("Assistant Architect uses the shared repository picker and has no direct knowledge upload", defineUnifiedContentProductMigrationAuthenticatedSuite2Registration5);
+
+  test("Assistant Architect runtime sends an opaque temporary repository reference without invoking legacy upload", defineUnifiedContentProductMigrationAuthenticatedSuite2Registration6);
+
+  test("Nexus uploads canonically, sends only an opaque reference, and promotes from the message", defineUnifiedContentProductMigrationAuthenticatedSuite2Registration7);
+
+  test("Nexus canonicalizes image inputs while retaining inline pixels for vision and image editing", defineUnifiedContentProductMigrationAuthenticatedSuite2Registration8);
+
+  test("Nexus rejects forged attachment references before creating a conversation", defineUnifiedContentProductMigrationAuthenticatedSuite2Registration9);
+
+  test("Nexus uses legacy processing only when the canonical endpoint explicitly selects rollback mode", defineUnifiedContentProductMigrationAuthenticatedSuite2Registration10);
+};
+
+test.describe("Unified content product migration (authenticated)", defineUnifiedContentProductMigrationAuthenticatedSuite2);

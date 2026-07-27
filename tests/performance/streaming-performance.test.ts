@@ -25,9 +25,12 @@ jest.setTimeout(10 * 60 * 1000); // 10 minutes
 // This prevents CI from hanging on tests that need running server + auth
 const describeOrSkip = shouldSkipPerformanceTests() ? describe.skip : describe;
 
-describeOrSkip('Streaming Performance - TTFT Validation', () => {
-  let authToken: string | undefined;
-  let baseUrl: string;
+let authToken: string | undefined;
+let baseUrl: string;
+
+function defineStreamingPerformanceTTFTValidationSuite1Part1() {
+
+
 
   // Validate test setup before running
   beforeAll(createSetupValidator());
@@ -112,7 +115,9 @@ describeOrSkip('Streaming Performance - TTFT Validation', () => {
     expect(aggregated.ttft.p95).toBeLessThanOrEqual(targets.ttftP95);
   });
 
-  test('TTFT: Medium prompts performance validation', async () => {
+  }
+
+function defineStreamingPerformanceTTFTValidationSuite1Part2() {test('TTFT: Medium prompts performance validation', async () => {
     const collector = new MetricsCollector();
     const targets = getPerformanceTargets();
     const iterations = 30;
@@ -242,7 +247,9 @@ describeOrSkip('Streaming Performance - TTFT Validation', () => {
     }
   });
 
-  test('TTFT: Response time should be consistent across sequential requests', async () => {
+  }
+
+function defineStreamingPerformanceTTFTValidationSuite1Part3() {test('TTFT: Response time should be consistent across sequential requests', async () => {
     const collector = new MetricsCollector();
     const iterations = 30;
 
@@ -296,4 +303,12 @@ describeOrSkip('Streaming Performance - TTFT Validation', () => {
     // TTFT should be reasonably consistent (CV < 50% indicates acceptable consistency)
     expect(coefficientOfVariation).toBeLessThan(50);
   });
-});
+}
+
+const defineStreamingPerformanceTTFTValidationSuite1 = () => {
+  defineStreamingPerformanceTTFTValidationSuite1Part1()
+  defineStreamingPerformanceTTFTValidationSuite1Part2()
+  defineStreamingPerformanceTTFTValidationSuite1Part3()
+};
+
+describeOrSkip('Streaming Performance - TTFT Validation', defineStreamingPerformanceTTFTValidationSuite1);

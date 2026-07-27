@@ -17,7 +17,7 @@ import {
 } from '@/lib/streaming/graceful-degradation'
 import { createSSEMonitor } from '@/lib/streaming/sse-monitoring'
 
-describe('SSE Graceful Degradation', () => {
+function defineSSEGracefulDegradationSuite1Part1() {
   describe('extractTextFromUnknownEvent', () => {
     it('should extract text from standard delta field', () => {
       const event = { type: 'unknown-type', delta: 'Hello world' }
@@ -141,7 +141,9 @@ describe('SSE Graceful Degradation', () => {
     })
   })
 
-  describe('handleUnknownEvent', () => {
+  }
+
+function defineSSEGracefulDegradationSuite1Part2() {describe('handleUnknownEvent', () => {
     let monitor: ReturnType<typeof createSSEMonitor>
 
     beforeEach(() => {
@@ -235,7 +237,9 @@ describe('SSE Graceful Degradation', () => {
     })
   })
 
-  describe('generateUnknownEventMessage', () => {
+  }
+
+function defineSSEGracefulDegradationSuite1Part3() {describe('generateUnknownEventMessage', () => {
     it('should generate message for successful extraction', () => {
       const event = { type: 'new-type', delta: 'Hello world' }
       const extraction = {
@@ -336,4 +340,12 @@ describe('SSE Graceful Degradation', () => {
       expect(result.text).toBe(specialText)
     })
   })
-})
+}
+
+const defineSSEGracefulDegradationSuite1 = () => {
+  defineSSEGracefulDegradationSuite1Part1()
+  defineSSEGracefulDegradationSuite1Part2()
+  defineSSEGracefulDegradationSuite1Part3()
+};
+
+describe('SSE Graceful Degradation', defineSSEGracefulDegradationSuite1)

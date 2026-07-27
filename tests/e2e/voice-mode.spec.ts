@@ -22,7 +22,7 @@ test.beforeEach(async ({ page }) => {
   await authenticateContext(page.context())
 })
 
-test.describe('Voice Mode', () => {
+const defineVoiceModeSuite1 = () => {
   test.describe('Voice button visibility', () => {
     test('voice button is hidden when voice mode is disabled by administrator', async ({ page }) => {
       // Mock the availability endpoint — hook now calls /api/nexus/voice/availability
@@ -90,4 +90,6 @@ test.describe('Voice Mode', () => {
       await expect(voiceButton).toBeVisible()
     })
   })
-})
+};
+
+test.describe('Voice Mode', defineVoiceModeSuite1)

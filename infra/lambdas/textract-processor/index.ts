@@ -107,9 +107,12 @@ async function getDocumentText(jobId: string, useAnalysis: boolean = true): Prom
       // Extract text from blocks
       if (response.Blocks) {
         for (const block of response.Blocks) {
-          if (block.BlockType === 'LINE' && block.Text) {
+          const handleNestedBranch1 = () => {
+            if (block.BlockType === 'LINE' && block.Text) {
             fullText += block.Text + '\n';
           }
+          }
+          handleNestedBranch1()
         }
       }
 

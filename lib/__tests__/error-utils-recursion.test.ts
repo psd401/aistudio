@@ -5,7 +5,7 @@
 
 import { handleError } from '../error-utils'
 
-describe('Error Handler Recursion Prevention', () => {
+function defineErrorHandlerRecursionPreventionSuite1Part1() {
 
     it('should prevent infinite recursion in error handling', () => {
       // Create an error that would trigger error handling recursively
@@ -109,7 +109,9 @@ describe('Error Handler Recursion Prevention', () => {
       expect(() => handleError(undefined, 'Undefined error')).not.toThrow()
     })
 
-    it('should handle errors during high load (100 concurrent calls)', async () => {
+    }
+
+function defineErrorHandlerRecursionPreventionSuite1Part2() {it('should handle errors during high load (100 concurrent calls)', async () => {
       const errors = Array.from({ length: 100 }, (_, i) =>
         new Error(`Error ${i}`)
       )
@@ -216,7 +218,9 @@ describe('Error Handler Recursion Prevention', () => {
       })
     })
 
-    it('should handle rapid successive error calls', () => {
+    }
+
+function defineErrorHandlerRecursionPreventionSuite1Part3() {it('should handle rapid successive error calls', () => {
       const results = []
       for (let i = 0; i < 1000; i++) {
         results.push(handleError(new Error(`Error ${i}`), 'Rapid test'))
@@ -228,4 +232,12 @@ describe('Error Handler Recursion Prevention', () => {
       )).toBe(true)
     })
 
-})
+}
+
+const defineErrorHandlerRecursionPreventionSuite1 = () => {
+  defineErrorHandlerRecursionPreventionSuite1Part1()
+  defineErrorHandlerRecursionPreventionSuite1Part2()
+  defineErrorHandlerRecursionPreventionSuite1Part3()
+};
+
+describe('Error Handler Recursion Prevention', defineErrorHandlerRecursionPreventionSuite1)

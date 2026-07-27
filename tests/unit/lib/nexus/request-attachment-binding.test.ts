@@ -28,7 +28,7 @@ const INPUT = {
   ],
 };
 
-describe("bindNexusRequestAttachmentReferences", () => {
+const defineBindNexusRequestAttachmentReferencesSuite1 = () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
@@ -51,18 +51,20 @@ describe("bindNexusRequestAttachmentReferences", () => {
       new Error("expired")
     );
     const order: string[] = [];
+    const recordUnbind = async () => {
+      order.push("unbind");
+    };
+    const recordDelete = async () => {
+      order.push("delete");
+    };
     const tx = {
       update: jest.fn(() => ({
         set: jest.fn(() => ({
-          where: jest.fn(async () => {
-            order.push("unbind");
-          }),
+          where: jest.fn(recordUnbind),
         })),
       })),
       delete: jest.fn(() => ({
-        where: jest.fn(async () => {
-          order.push("delete");
-        }),
+        where: jest.fn(recordDelete),
       })),
     };
     mockExecuteTransaction.mockImplementation(
@@ -110,9 +112,11 @@ describe("bindNexusRequestAttachmentReferences", () => {
       })
     ).rejects.toBeInstanceOf(NexusAttachmentBindingCleanupError);
   });
-});
+};
 
-describe("rollbackNewNexusAttachmentConversation", () => {
+describe("bindNexusRequestAttachmentReferences", defineBindNexusRequestAttachmentReferencesSuite1);
+
+const defineRollbackNewNexusAttachmentConversationSuite2 = () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
@@ -157,4 +161,6 @@ describe("rollbackNewNexusAttachmentConversation", () => {
       })
     ).rejects.toBeInstanceOf(NexusAttachmentBindingCleanupError);
   });
-});
+};
+
+describe("rollbackNewNexusAttachmentConversation", defineRollbackNewNexusAttachmentConversationSuite2);

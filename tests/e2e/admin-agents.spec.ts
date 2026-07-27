@@ -17,7 +17,7 @@ import { test, expect } from './fixtures'
 
 test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
 
-test.describe('Agent Dashboard — Public Access', () => {
+const defineAgentDashboardPublicAccessSuite1 = () => {
   test.use({ storageState: { cookies: [], origins: [] } })
 
   test('non-admin user is redirected away from /admin/agents', async ({ page }) => {
@@ -36,9 +36,11 @@ test.describe('Agent Dashboard — Public Access', () => {
         url.includes('/dashboard')
     ).toBe(true)
   })
-})
+};
 
-test.describe('Agent Dashboard — Admin', () => {
+test.describe('Agent Dashboard — Public Access', defineAgentDashboardPublicAccessSuite1)
+
+function defineAgentDashboardAdminSuite2Part1() {
   test.beforeEach(async ({ page }) => {
     await page.goto('/admin/agents')
 
@@ -138,7 +140,9 @@ test.describe('Agent Dashboard — Admin', () => {
     await expect(safetyContent).toBeVisible({ timeout: 10000 })
   })
 
-  test('date range selector is present and interactive', async ({ page }) => {
+  }
+
+function defineAgentDashboardAdminSuite2Part2() {test('date range selector is present and interactive', async ({ page }) => {
     // Find the date range selector
     const selector = page.locator('button[role="combobox"]').first()
     await expect(selector).toBeVisible({ timeout: 10000 })
@@ -223,7 +227,9 @@ test.describe('Agent Dashboard — Admin', () => {
   // Loop-2 measurement metrics — avg/p95 model-calls-per-turn, empty-turn rate,
   // and nudge-fire rate. These render regardless of whether there is turn data
   // in the window (they show 0 / 0.0% on an empty range).
-  test('iteration telemetry cards render (model calls, empty-turn, nudge rate)', async ({
+  }
+
+function defineAgentDashboardAdminSuite2Part3() {test('iteration telemetry cards render (model calls, empty-turn, nudge rate)', async ({
     page,
   }, testInfo) => {
     // The stats cards live above the tabs and load with the page.
@@ -270,4 +276,12 @@ test.describe('Agent Dashboard — Admin', () => {
       fullPage: true,
     })
   })
-})
+}
+
+const defineAgentDashboardAdminSuite2 = () => {
+  defineAgentDashboardAdminSuite2Part1()
+  defineAgentDashboardAdminSuite2Part2()
+  defineAgentDashboardAdminSuite2Part3()
+};
+
+test.describe('Agent Dashboard — Admin', defineAgentDashboardAdminSuite2)

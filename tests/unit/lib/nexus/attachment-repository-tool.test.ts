@@ -34,7 +34,7 @@ interface SearchTool {
   execute(input: { query: string; limit?: number }): Promise<unknown>;
 }
 
-describe("Nexus attachment repository tool", () => {
+function defineNexusAttachmentRepositoryToolSuite1Part1() {
   beforeEach(() => {
     jest.clearAllMocks();
     mockProcessInput.mockImplementation(async (content: unknown) => ({
@@ -127,7 +127,9 @@ describe("Nexus attachment repository tool", () => {
     });
   });
 
-  it("tokenizes retrieved PII before returning a provider-visible tool result", async () => {
+  }
+
+function defineNexusAttachmentRepositoryToolSuite1Part2() {it("tokenizes retrieved PII before returning a provider-visible tool result", async () => {
     const nameToken = {
       token: "11111111-1111-4111-8111-111111111111",
       original: "Avery Student",
@@ -230,7 +232,9 @@ describe("Nexus attachment repository tool", () => {
     );
   });
 
-  it("creates no tool without a valid server binding", () => {
+  }
+
+function defineNexusAttachmentRepositoryToolSuite1Part3() {it("creates no tool without a valid server binding", () => {
     expect(
       createNexusAttachmentTools({
         repositoryIds: [],
@@ -239,4 +243,12 @@ describe("Nexus attachment repository tool", () => {
       })
     ).toEqual({});
   });
-});
+}
+
+const defineNexusAttachmentRepositoryToolSuite1 = () => {
+  defineNexusAttachmentRepositoryToolSuite1Part1()
+  defineNexusAttachmentRepositoryToolSuite1Part2()
+  defineNexusAttachmentRepositoryToolSuite1Part3()
+};
+
+describe("Nexus attachment repository tool", defineNexusAttachmentRepositoryToolSuite1);

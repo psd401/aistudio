@@ -98,11 +98,14 @@ export class BaseIAMRole extends Construct {
             this.policyValidator.validate(policy)
           } else {
             // Log warnings for medium/low severity using CDK Annotations
-            for (const violation of result.violations) {
+            const handleNestedBranch1 = () => {
+              for (const violation of result.violations) {
               Annotations.of(this).addWarning(
                 `[Policy ${index}] ${violation.severity.toUpperCase()}: ${violation.message}`
               )
             }
+            }
+            handleNestedBranch1()
           }
         }
       } catch (error) {

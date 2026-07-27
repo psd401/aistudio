@@ -20,9 +20,12 @@ import { getAuthToken } from './lib/auth-helper';
 // Very extended timeout for long-running tests
 jest.setTimeout(45 * 60 * 1000); // 45 minutes
 
-describe('Long-Running Streams', () => {
-  let authToken: string | undefined;
-  let baseUrl: string;
+let authToken: string | undefined;
+let baseUrl: string;
+
+function defineLongRunningStreamsSuite1Part1() {
+
+
 
   beforeAll(async () => {
     const env = getTestEnvironment();
@@ -111,7 +114,9 @@ describe('Long-Running Streams', () => {
     }
   });
 
-  test('Multiple long streams handle correctly with memory monitoring', async () => {
+  }
+
+function defineLongRunningStreamsSuite1Part2() {test('Multiple long streams handle correctly with memory monitoring', async () => {
     const collector = new MetricsCollector();
     const model = TEST_MODELS[0];
     const iterations = 3; // Run 3 long streams sequentially
@@ -210,7 +215,9 @@ describe('Long-Running Streams', () => {
     expect(totalGrowth).toBeLessThan(500);
   });
 
-  test.skip('30-minute extreme duration test', async () => {
+  }
+
+function defineLongRunningStreamsSuite1Part3() {test.skip('30-minute extreme duration test', async () => {
     // This test is skipped by default due to its extreme duration
     // Run manually with: npm run test:perf -- --testNamePattern="30-minute"
 
@@ -259,4 +266,12 @@ describe('Long-Running Streams', () => {
       clearInterval(monitorInterval);
     }
   });
-});
+}
+
+const defineLongRunningStreamsSuite1 = () => {
+  defineLongRunningStreamsSuite1Part1()
+  defineLongRunningStreamsSuite1Part2()
+  defineLongRunningStreamsSuite1Part3()
+};
+
+describe('Long-Running Streams', defineLongRunningStreamsSuite1);

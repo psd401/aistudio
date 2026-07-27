@@ -9,7 +9,6 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
-import * as fs from 'node:fs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
@@ -21,6 +20,7 @@ import {
   EnvironmentConfig,
   ServiceRoleFactory,
 } from './constructs';
+import { validatedFs } from "./validated-fs";
 
 export interface DatabaseStackProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
@@ -37,7 +37,7 @@ export interface DatabaseStackProps extends cdk.StackProps {
  */
 function collectLambdaSourceFiles(dir: string, prefix = ''): { rel: string; abs: string }[] {
   const out: { rel: string; abs: string }[] = [];
-  const entries = fs.readdirSync(dir, { withFileTypes: true })
+  const entries = validatedFs.readdirSync(dir, { withFileTypes: true })
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const entry of entries) {
     const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
@@ -77,16 +77,16 @@ export function computeDbInitAssetHash(databaseDir: string): string {
   const hash = crypto.createHash('sha256');
   for (const f of collectLambdaSourceFiles(path.join(databaseDir, 'lambda'))) {
     hash.update(`${f.rel}\0`);
-    hash.update(fs.readFileSync(f.abs, 'utf8'));
+    hash.update(validatedFs.readFileSync(f.abs, 'utf8'));
   }
-  hash.update(fs.readFileSync(path.join(databaseDir, 'migrations.json'), 'utf8'));
+  hash.update(validatedFs.readFileSync(path.join(databaseDir, 'migrations.json'), 'utf8'));
   const schemaDir = path.join(databaseDir, 'schema');
-  const schemaEntries = fs.readdirSync(schemaDir, { withFileTypes: true })
+  const schemaEntries = validatedFs.readdirSync(schemaDir, { withFileTypes: true })
     .filter(e => e.isFile())
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const e of schemaEntries) {
     hash.update(`${e.name}\0`);
-    hash.update(fs.readFileSync(path.join(schemaDir, e.name), 'utf8'));
+    hash.update(validatedFs.readFileSync(path.join(schemaDir, e.name), 'utf8'));
   }
   return hash.digest('hex').substring(0, 16);
 }

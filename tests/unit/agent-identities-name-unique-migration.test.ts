@@ -19,6 +19,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 const schemaDir = path.join(process.cwd(), "infra/database/schema");
 const migrationFile = "140-agent-identities-name-unique.sql";
@@ -44,7 +45,7 @@ function collectAgentForeignKeys(): { references: Set<string>; dropped: Set<stri
   const dropped = new Set<string>();
 
   for (const file of schemaFiles) {
-    const sql = fs.readFileSync(path.join(schemaDir, file), "utf8");
+    const sql = validatedFs.readFileSync(path.join(schemaDir, file), "utf8");
     // Strip line comments so commented-out DDL never counts as a declaration.
     const code = sql.replace(/--[^\n]*/g, "");
 

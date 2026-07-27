@@ -32,195 +32,147 @@ import {
   resetCircuitBreaker,
 } from '@/lib/db/rds-error-handler'
 
-describe('RDS Error Handler', () => {
-  beforeEach(() => {
+const defineRDSErrorHandlerSuite1Registration1: NonNullable<Parameters<typeof beforeEach>[0]> = () => {
     // Reset circuit breaker state before each test
     resetCircuitBreaker()
     jest.clearAllMocks()
-  })
-
-
-
-      it('should identify InternalServerErrorException as retryable', () => {
+  };
+const defineRDSErrorHandlerSuite1Registration2: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { name: 'InternalServerErrorException' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify ServiceUnavailableException as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration3: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { name: 'ServiceUnavailableException' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify ThrottlingException as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration4: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { name: 'ThrottlingException' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify TooManyRequestsException as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration5: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { name: 'TooManyRequestsException' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify RequestTimeoutException as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration6: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { name: 'RequestTimeoutException' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify UnknownError as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration7: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { name: 'UnknownError' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should NOT identify ValidationError as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration8: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { name: 'ValidationError' }
         expect(isRetryableError(error)).toBe(false)
-      })
-
-      it('should NOT identify AccessDeniedException as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration9: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { name: 'AccessDeniedException' }
         expect(isRetryableError(error)).toBe(false)
-      })
-
-
-
-      it('should identify ECONNRESET as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration10: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { code: 'ECONNRESET' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify ETIMEDOUT as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration11: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { code: 'ETIMEDOUT' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify ECONNREFUSED as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration12: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { code: 'ECONNREFUSED' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify EPIPE as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration13: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { code: 'EPIPE' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify ENOTFOUND as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration14: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { code: 'ENOTFOUND' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should NOT identify ENOENT as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration15: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { code: 'ENOENT' }
         expect(isRetryableError(error)).toBe(false)
-      })
-
-
-
-      it('should identify 500 status as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration16: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { $metadata: { httpStatusCode: 500 } }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify 502 status as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration17: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { $metadata: { httpStatusCode: 502 } }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify 503 status as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration18: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { $metadata: { httpStatusCode: 503 } }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify 504 status as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration19: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { $metadata: { httpStatusCode: 504 } }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify 429 status as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration20: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { $metadata: { httpStatusCode: 429 } }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should NOT identify 400 status as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration21: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { $metadata: { httpStatusCode: 400 } }
         expect(isRetryableError(error)).toBe(false)
-      })
-
-      it('should NOT identify 401 status as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration22: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { $metadata: { httpStatusCode: 401 } }
         expect(isRetryableError(error)).toBe(false)
-      })
-
-      it('should NOT identify 403 status as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration23: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { $metadata: { httpStatusCode: 403 } }
         expect(isRetryableError(error)).toBe(false)
-      })
-
-      it('should NOT identify 404 status as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration24: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { $metadata: { httpStatusCode: 404 } }
         expect(isRetryableError(error)).toBe(false)
-      })
-
-
-
-      it('should identify "network" in message as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration25: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { message: 'Network error occurred' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify "timeout" in message as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration26: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { message: 'Request timeout exceeded' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify "connection" in message as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration27: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { message: 'Connection refused by server' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify "econnreset" in message as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration28: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { message: 'Error: ECONNRESET' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should identify "socket hang up" in message as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration29: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { message: 'socket hang up' }
         expect(isRetryableError(error)).toBe(true)
-      })
-
-      it('should NOT identify generic message as retryable', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration30: NonNullable<Parameters<typeof it>[1]> = () => {
         const error = { message: 'Invalid parameter value' }
         expect(isRetryableError(error)).toBe(false)
-      })
-
-
-
-      it('should return false for null error', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration31: NonNullable<Parameters<typeof it>[1]> = () => {
         // Function now has null guard and returns false
         expect(isRetryableError(null)).toBe(false)
-      })
-
-      it('should return false for undefined error', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration32: NonNullable<Parameters<typeof it>[1]> = () => {
         // Function now has null guard and returns false
         expect(isRetryableError(undefined)).toBe(false)
-      })
-
-      it('should handle empty object', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration33: NonNullable<Parameters<typeof it>[1]> = () => {
         expect(isRetryableError({})).toBe(false)
-      })
-
-      it('should handle string error (truthy but no properties)', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration34: NonNullable<Parameters<typeof it>[1]> = () => {
         // String has no 'name' property matching retryable errors
         expect(isRetryableError('some error')).toBe(false)
-      })
-
-      it('should handle number error (truthy but no properties)', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration35: NonNullable<Parameters<typeof it>[1]> = () => {
         // Number has no matching properties
         expect(isRetryableError(500)).toBe(false)
-      })
-
-
-
-  describe('calculateDelay', () => {
+      };
+const defineRDSErrorHandlerSuite1Registration36: NonNullable<Parameters<typeof describe>[1]> = () => {
     const defaultOptions = {
       maxRetries: 3,
       initialDelay: 100,
@@ -289,9 +241,8 @@ describe('RDS Error Handler', () => {
 
       mockRandom.mockRestore()
     })
-  })
-
-  describe('Circuit Breaker', () => {
+  };
+const defineRDSErrorHandlerSuite1Registration37: NonNullable<Parameters<typeof describe>[1]> = () => {
     let originalDateNow: () => number
 
     beforeEach(() => {
@@ -474,9 +425,8 @@ describe('RDS Error Handler', () => {
         expect(state.successCount).toBe(0)
       })
 
-  })
-
-  describe('executeWithRetry', () => {
+  };
+const defineRDSErrorHandlerSuite1Registration38: NonNullable<Parameters<typeof describe>[1]> = () => {
     beforeEach(() => {
       resetCircuitBreaker()
       jest.useFakeTimers()
@@ -656,5 +606,96 @@ describe('RDS Error Handler', () => {
       expect(result).toBe('finally success')
       expect(mockFn).toHaveBeenCalledTimes(3)
     })
-  })
-})
+  };
+
+const defineRDSErrorHandlerSuite1 = () => {
+  beforeEach(defineRDSErrorHandlerSuite1Registration1)
+
+
+
+      it('should identify InternalServerErrorException as retryable', defineRDSErrorHandlerSuite1Registration2)
+
+      it('should identify ServiceUnavailableException as retryable', defineRDSErrorHandlerSuite1Registration3)
+
+      it('should identify ThrottlingException as retryable', defineRDSErrorHandlerSuite1Registration4)
+
+      it('should identify TooManyRequestsException as retryable', defineRDSErrorHandlerSuite1Registration5)
+
+      it('should identify RequestTimeoutException as retryable', defineRDSErrorHandlerSuite1Registration6)
+
+      it('should identify UnknownError as retryable', defineRDSErrorHandlerSuite1Registration7)
+
+      it('should NOT identify ValidationError as retryable', defineRDSErrorHandlerSuite1Registration8)
+
+      it('should NOT identify AccessDeniedException as retryable', defineRDSErrorHandlerSuite1Registration9)
+
+
+
+      it('should identify ECONNRESET as retryable', defineRDSErrorHandlerSuite1Registration10)
+
+      it('should identify ETIMEDOUT as retryable', defineRDSErrorHandlerSuite1Registration11)
+
+      it('should identify ECONNREFUSED as retryable', defineRDSErrorHandlerSuite1Registration12)
+
+      it('should identify EPIPE as retryable', defineRDSErrorHandlerSuite1Registration13)
+
+      it('should identify ENOTFOUND as retryable', defineRDSErrorHandlerSuite1Registration14)
+
+      it('should NOT identify ENOENT as retryable', defineRDSErrorHandlerSuite1Registration15)
+
+
+
+      it('should identify 500 status as retryable', defineRDSErrorHandlerSuite1Registration16)
+
+      it('should identify 502 status as retryable', defineRDSErrorHandlerSuite1Registration17)
+
+      it('should identify 503 status as retryable', defineRDSErrorHandlerSuite1Registration18)
+
+      it('should identify 504 status as retryable', defineRDSErrorHandlerSuite1Registration19)
+
+      it('should identify 429 status as retryable', defineRDSErrorHandlerSuite1Registration20)
+
+      it('should NOT identify 400 status as retryable', defineRDSErrorHandlerSuite1Registration21)
+
+      it('should NOT identify 401 status as retryable', defineRDSErrorHandlerSuite1Registration22)
+
+      it('should NOT identify 403 status as retryable', defineRDSErrorHandlerSuite1Registration23)
+
+      it('should NOT identify 404 status as retryable', defineRDSErrorHandlerSuite1Registration24)
+
+
+
+      it('should identify "network" in message as retryable', defineRDSErrorHandlerSuite1Registration25)
+
+      it('should identify "timeout" in message as retryable', defineRDSErrorHandlerSuite1Registration26)
+
+      it('should identify "connection" in message as retryable', defineRDSErrorHandlerSuite1Registration27)
+
+      it('should identify "econnreset" in message as retryable', defineRDSErrorHandlerSuite1Registration28)
+
+      it('should identify "socket hang up" in message as retryable', defineRDSErrorHandlerSuite1Registration29)
+
+      it('should NOT identify generic message as retryable', defineRDSErrorHandlerSuite1Registration30)
+
+
+
+      it('should return false for null error', defineRDSErrorHandlerSuite1Registration31)
+
+      it('should return false for undefined error', defineRDSErrorHandlerSuite1Registration32)
+
+      it('should handle empty object', defineRDSErrorHandlerSuite1Registration33)
+
+      it('should handle string error (truthy but no properties)', defineRDSErrorHandlerSuite1Registration34)
+
+      it('should handle number error (truthy but no properties)', defineRDSErrorHandlerSuite1Registration35)
+
+
+
+  describe('calculateDelay', defineRDSErrorHandlerSuite1Registration36)
+
+  describe('Circuit Breaker', defineRDSErrorHandlerSuite1Registration37)
+
+  describe('executeWithRetry', defineRDSErrorHandlerSuite1Registration38)
+};
+
+describe('RDS Error Handler', defineRDSErrorHandlerSuite1)

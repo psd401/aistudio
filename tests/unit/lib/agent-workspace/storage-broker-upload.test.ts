@@ -131,7 +131,7 @@ beforeEach(() => {
   releaseMock.mockResolvedValue(undefined)
 })
 
-describe("verified workspace upload reservations", () => {
+function defineVerifiedWorkspaceUploadReservationsSuite1Part1() {
   it("signs exact length/checksum and never exposes a public URL before verification", async () => {
     const prepared = await createPublicArtifactUpload({
                              ownerEmail: OWNER,
@@ -236,7 +236,9 @@ describe("verified workspace upload reservations", () => {
     expect(executeQueryMock).toHaveBeenCalledTimes(3)
   })
 
-  it("keeps an old public commit charged on ambiguous S3 failure", async () => {
+  }
+
+function defineVerifiedWorkspaceUploadReservationsSuite1Part2() {it("keeps an old public commit charged on ambiguous S3 failure", async () => {
     executeQueryMock
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([
@@ -336,7 +338,9 @@ describe("verified workspace upload reservations", () => {
     expect(acquireMock).toHaveBeenCalledTimes(2)
   })
 
-  it("does not revive an expired reservation for resigning or completion", async () => {
+  }
+
+function defineVerifiedWorkspaceUploadReservationsSuite1Part3() {it("does not revive an expired reservation for resigning or completion", async () => {
     executeQueryMock.mockResolvedValueOnce([
       claimed({
         status: "reserved",
@@ -446,7 +450,9 @@ describe("verified workspace upload reservations", () => {
     expect(executeQueryMock).toHaveBeenCalledTimes(1)
   })
 
-  it("rolls back the exact promoted version when durable settlement fails", async () => {
+  }
+
+function defineVerifiedWorkspaceUploadReservationsSuite1Part4() {it("rolls back the exact promoted version when durable settlement fails", async () => {
     executeQueryMock
       .mockResolvedValueOnce([claimed()])
       .mockResolvedValueOnce([])
@@ -541,7 +547,9 @@ describe("verified workspace upload reservations", () => {
     )
   })
 
-  it("rejects duplicate reservation admission and owner-mismatched completion", async () => {
+  }
+
+function defineVerifiedWorkspaceUploadReservationsSuite1Part5() {it("rejects duplicate reservation admission and owner-mismatched completion", async () => {
     executeQueryMock.mockResolvedValueOnce([])
     acquireMock.mockReset().mockResolvedValueOnce({
       allowed: false,
@@ -566,4 +574,14 @@ describe("verified workspace upload reservations", () => {
     ).rejects.toThrow("unavailable")
     expect(s3SendMock).not.toHaveBeenCalled()
   })
-})
+}
+
+const defineVerifiedWorkspaceUploadReservationsSuite1 = () => {
+  defineVerifiedWorkspaceUploadReservationsSuite1Part1()
+  defineVerifiedWorkspaceUploadReservationsSuite1Part2()
+  defineVerifiedWorkspaceUploadReservationsSuite1Part3()
+  defineVerifiedWorkspaceUploadReservationsSuite1Part4()
+  defineVerifiedWorkspaceUploadReservationsSuite1Part5()
+};
+
+describe("verified workspace upload reservations", defineVerifiedWorkspaceUploadReservationsSuite1)

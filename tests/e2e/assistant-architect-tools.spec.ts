@@ -1,5 +1,6 @@
 import { test, expect } from './fixtures'
 import { authenticateContext } from './helpers/session-auth'
+import type { Locator, Page } from '@playwright/test'
 
 // Authenticated functional spec: skip when no minted session, and inject the
 // session cookie before every test (was missing — the suite ran unauthenticated
@@ -12,7 +13,7 @@ test.beforeEach(async ({ page }) => {
   await authenticateContext(page.context())
 })
 
-test.describe('Assistant Architect Tool Execution', () => {
+function defineAssistantArchitectToolExecutionSuite1Part1() {
   test.beforeEach(async ({ page }) => {
     // Go to assistant architect page
     await page.goto('/utilities/assistant-architect')
@@ -62,7 +63,9 @@ test.describe('Assistant Architect Tool Execution', () => {
     }
   })
 
-  test('should execute assistant architect with tools and show results', async ({ page }) => {
+  }
+
+function defineAssistantArchitectToolExecutionSuite1Part2() {test('should execute assistant architect with tools and show results', async ({ page }) => {
     // Find and click an assistant architect
     const architectCards = page.locator('[data-testid="assistant-architect-card"], .assistant-architect-card, [class*="card"]')
 
@@ -155,7 +158,9 @@ test.describe('Assistant Architect Tool Execution', () => {
     }
   })
 
-  test('should create assistant with web search enabled', async ({ page }) => {
+  }
+
+function defineAssistantArchitectToolExecutionSuite1Part3() {test('should create assistant with web search enabled', async ({ page }) => {
     // Navigate to create assistant architect
     const createButton = page.locator('[data-testid="create-assistant-architect"], button:has-text("Create"), button:has-text("New"), a[href*="create"]')
 
@@ -224,7 +229,9 @@ test.describe('Assistant Architect Tool Execution', () => {
     }
   })
 
-  test('should handle multiple models with different tool capabilities', async ({ page }) => {
+  }
+
+function defineAssistantArchitectToolExecutionSuite1Part4() {test('should handle multiple models with different tool capabilities', async ({ page }) => {
     const createButton = page.locator('[data-testid="create-assistant-architect"], button:has-text("Create"), button:has-text("New"), a[href*="create"]')
 
     if (await createButton.count() > 0) {
@@ -305,7 +312,9 @@ test.describe('Assistant Architect Tool Execution', () => {
     }
   })
 
-  test('should display tool execution progress during streaming', async ({ page }) => {
+  }
+
+function defineAssistantArchitectToolExecutionSuite1Part5() {test('should display tool execution progress during streaming', async ({ page }) => {
     const architectCards = page.locator('[data-testid="assistant-architect-card"]')
 
     if (await architectCards.count() > 0) {
@@ -396,7 +405,9 @@ test.describe('Assistant Architect Tool Execution', () => {
     }
   })
 
-  test('should handle network failures during tool execution gracefully', async ({ page }) => {
+  }
+
+function defineAssistantArchitectToolExecutionSuite1Part6() {test('should handle network failures during tool execution gracefully', async ({ page }) => {
     // Simulate network issues
     await page.route('**/api/**', route => {
       if (Math.random() > 0.7) { // 30% chance of failure
@@ -439,9 +450,20 @@ test.describe('Assistant Architect Tool Execution', () => {
       test.skip(true, 'No assistant architects available for network failure testing')
     }
   })
-})
+}
 
-test.describe('Assistant Architect Tool Performance', () => {
+const defineAssistantArchitectToolExecutionSuite1 = () => {
+  defineAssistantArchitectToolExecutionSuite1Part1()
+  defineAssistantArchitectToolExecutionSuite1Part2()
+  defineAssistantArchitectToolExecutionSuite1Part3()
+  defineAssistantArchitectToolExecutionSuite1Part4()
+  defineAssistantArchitectToolExecutionSuite1Part5()
+  defineAssistantArchitectToolExecutionSuite1Part6()
+};
+
+test.describe('Assistant Architect Tool Execution', defineAssistantArchitectToolExecutionSuite1)
+
+function defineAssistantArchitectToolPerformanceSuite2Part1() {
   test('should execute web search within performance limits', async ({ page }) => {
     await page.goto('/utilities/assistant-architect')
     await page.waitForTimeout(2000)
@@ -516,7 +538,8 @@ test.describe('Assistant Architect Tool Performance', () => {
             const errorElements = page.locator('.error, .failed, [class*="error"]')
             const hasErrors = await errorElements.count() > 0
 
-            if (!hasErrors) {
+            const handleNestedBranch1 = async () => {
+              if (!hasErrors) {
               // Check for actual web search results
               const resultsSection = page.locator('[data-testid="execution-results"], .results, .output')
               await expect(resultsSection.first()).toBeVisible()
@@ -524,6 +547,8 @@ test.describe('Assistant Architect Tool Performance', () => {
               const resultsText = await resultsSection.first().textContent() || ''
               expect(resultsText.length).toBeGreaterThan(50) // Should have substantial content
             }
+            }
+            await handleNestedBranch1()
           } catch {
             // Log timeout for performance monitoring
             console.error('Execution timed out after 30 seconds')
@@ -538,7 +563,9 @@ test.describe('Assistant Architect Tool Performance', () => {
     }
   })
 
-  test('should handle multiple tool execution efficiently', async ({ page }) => {
+  }
+
+function defineAssistantArchitectToolPerformanceSuite2Part2() {test('should handle multiple tool execution efficiently', async ({ page }) => {
     await page.goto('/utilities/assistant-architect')
     await page.waitForTimeout(2000)
 
@@ -591,9 +618,12 @@ test.describe('Assistant Architect Tool Performance', () => {
             const toolResults = page.locator('[data-testid="tool-result"], .tool-result, .tool-output')
             const resultCount = await toolResults.count()
 
-            if (resultCount > 1) {
+            const handleNestedBranch2 = () => {
+              if (resultCount > 1) {
               console.log(`Found ${resultCount} tool results - multi-tool execution successful`)
             }
+            }
+            handleNestedBranch2()
           } catch {
             console.log('Multi-tool execution may have timed out or failed')
           }
@@ -605,9 +635,16 @@ test.describe('Assistant Architect Tool Performance', () => {
       test.skip(true, 'No assistant architects available for multi-tool testing')
     }
   })
-})
+}
 
-test.describe('Assistant Architect Tool Accessibility', () => {
+const defineAssistantArchitectToolPerformanceSuite2 = () => {
+  defineAssistantArchitectToolPerformanceSuite2Part1()
+  defineAssistantArchitectToolPerformanceSuite2Part2()
+};
+
+test.describe('Assistant Architect Tool Performance', defineAssistantArchitectToolPerformanceSuite2)
+
+function defineAssistantArchitectToolAccessibilitySuite3Part1() {
   test('should support keyboard navigation for tool selection', async ({ page }) => {
     await page.goto('/utilities/assistant-architect')
     await page.waitForTimeout(2000)
@@ -711,7 +748,9 @@ test.describe('Assistant Architect Tool Accessibility', () => {
     }
   })
 
-  test('should maintain proper focus management in dialogs', async ({ page }) => {
+  }
+
+function defineAssistantArchitectToolAccessibilitySuite3Part2() {test('should maintain proper focus management in dialogs', async ({ page }) => {
     await page.goto('/utilities/assistant-architect')
     await page.waitForTimeout(2000)
 
@@ -767,9 +806,16 @@ test.describe('Assistant Architect Tool Accessibility', () => {
       test.skip(true, 'No dialogs or modals found for focus management testing')
     }
   })
-})
+}
 
-test.describe('Assistant Architect Tool Security', () => {
+const defineAssistantArchitectToolAccessibilitySuite3 = () => {
+  defineAssistantArchitectToolAccessibilitySuite3Part1()
+  defineAssistantArchitectToolAccessibilitySuite3Part2()
+};
+
+test.describe('Assistant Architect Tool Accessibility', defineAssistantArchitectToolAccessibilitySuite3)
+
+function defineAssistantArchitectToolSecuritySuite4Part1() {
   test('should prevent execution with invalid tool configurations', async ({ page }) => {
     // This would test security aspects of tool validation
     // For now, we ensure that the UI properly validates tool inputs
@@ -849,7 +895,8 @@ test.describe('Assistant Architect Tool Security', () => {
             const errorMessages = page.locator('[data-testid="error-message"], .error, .validation-error')
             const hasError = await errorMessages.count() > 0
 
-            if (hasError) {
+            const handleNestedBranch3 = async () => {
+              if (hasError) {
               const errorText = await errorMessages.first().textContent()
               expect(errorText?.toLowerCase()).toMatch(/limit|size|too large|maximum/i)
               console.log('Large input properly rejected with validation error')
@@ -862,6 +909,8 @@ test.describe('Assistant Architect Tool Security', () => {
                 console.log('Large input appears to have been truncated')
               }
             }
+            }
+            await handleNestedBranch3()
 
             // UI should remain functional
             await expect(page.locator('[data-testid="assistant-architect-execution"]')).toBeVisible()
@@ -875,7 +924,9 @@ test.describe('Assistant Architect Tool Security', () => {
     }
   })
 
-  test('should validate and sanitize special Unicode characters', async ({ page }) => {
+  }
+
+function defineAssistantArchitectToolSecuritySuite4Part2() {test('should validate and sanitize special Unicode characters', async ({ page }) => {
     await page.goto('/utilities/assistant-architect')
     await page.waitForSelector('[data-testid="assistant-architect-page"]')
 
@@ -909,7 +960,8 @@ test.describe('Assistant Architect Tool Security', () => {
             await inputFields.first().fill(dangerousInput)
 
             const executeButton = page.locator('[data-testid="execute-button"]')
-            if (await executeButton.count() > 0) {
+            const handleNestedBranch4 = async () => {
+              if (await executeButton.count() > 0) {
               await executeButton.click()
               await page.waitForTimeout(2000)
 
@@ -927,6 +979,8 @@ test.describe('Assistant Architect Tool Security', () => {
               // UI should remain stable
               await expect(page.locator('[data-testid="assistant-architect-execution"]')).toBeVisible()
             }
+            }
+            await handleNestedBranch4()
           } catch {
             console.log(`Unicode test for input "${dangerousInput.substring(0, 20)}..." handled gracefully`)
           }
@@ -937,7 +991,49 @@ test.describe('Assistant Architect Tool Security', () => {
     }
   })
 
-  test('should enforce rate limiting for excessive tool execution requests', async ({ page }) => {
+  }
+
+async function attemptRateLimitedExecution(
+  page: Page,
+  executeButton: Locator,
+  attempt: number
+): Promise<{ clicked: boolean; detected: boolean }> {
+  try {
+    if (!await executeButton.isEnabled()) {
+      console.log('Rate limiting detected - button not enabled')
+      return { clicked: false, detected: true }
+    }
+
+    await executeButton.click()
+    await page.waitForTimeout(100)
+    const rateLimitMessages = page.locator(
+      '[data-testid="rate-limit-message"], .rate-limit, .throttle'
+    )
+    if (await rateLimitMessages.count() > 0) {
+      console.log(`Rate limiting detected after ${attempt} attempts`)
+      return { clicked: true, detected: true }
+    }
+
+    const errorMessages = page.locator('[data-testid="error-message"], .error')
+    const errorText = await errorMessages.count() > 0
+      ? await errorMessages.first().textContent() || ''
+      : ''
+    if (/rate|limit|throttle|too many/i.test(errorText)) {
+      console.log(`Rate limiting detected in error message: "${errorText}"`)
+      return { clicked: true, detected: true }
+    }
+    if (!await executeButton.isEnabled()) {
+      console.log('Rate limiting detected - button disabled')
+      return { clicked: true, detected: true }
+    }
+    return { clicked: true, detected: false }
+  } catch {
+    console.log(`Rate limit test attempt ${attempt} failed gracefully`)
+    return { clicked: false, detected: false }
+  }
+}
+
+function defineAssistantArchitectToolSecuritySuite4Part3() {test('should enforce rate limiting for excessive tool execution requests', async ({ page }) => {
     await page.goto('/utilities/assistant-architect')
     await page.waitForSelector('[data-testid="assistant-architect-page"]')
 
@@ -960,51 +1056,15 @@ test.describe('Assistant Architect Tool Security', () => {
 
       if (await executeButton.count() > 0) {
         for (let i = 0; i < 10; i++) { // Try 10 rapid executions
-          try {
-            if (await executeButton.isEnabled()) {
-              await executeButton.click()
-              executionAttempts++
-
-              // Very short wait between attempts to trigger rate limiting
-              await page.waitForTimeout(100)
-
-              // Check for rate limiting indicators
-              const rateLimitMessages = page.locator('[data-testid="rate-limit-message"], .rate-limit, .throttle')
-              const errorMessages = page.locator('[data-testid="error-message"], .error')
-
-              if (await rateLimitMessages.count() > 0) {
-                rateLimitDetected = true
-                console.log(`Rate limiting detected after ${executionAttempts} attempts`)
-                break
-              }
-
-              // Check error messages for rate limiting keywords
-              if (await errorMessages.count() > 0) {
-                const errorText = await errorMessages.first().textContent() || ''
-                if (errorText.toLowerCase().includes('rate') ||
-                    errorText.toLowerCase().includes('limit') ||
-                    errorText.toLowerCase().includes('throttle') ||
-                    errorText.toLowerCase().includes('too many')) {
-                  rateLimitDetected = true
-                  console.log(`Rate limiting detected in error message: "${errorText}"`)
-                  break
-                }
-              }
-
-              // Check if button becomes disabled (another rate limiting mechanism)
-              if (!await executeButton.isEnabled()) {
-                rateLimitDetected = true
-                console.log('Rate limiting detected - button disabled')
-                break
-              }
-            } else {
-              rateLimitDetected = true
-              console.log('Rate limiting detected - button not enabled')
-              break
-            }
-          } catch {
-            console.log(`Rate limit test attempt ${i + 1} failed gracefully`)
-          }
+          const result = await attemptRateLimitedExecution(
+            page,
+            executeButton,
+            executionAttempts + 1
+          )
+          if (result.clicked) executionAttempts++
+          if (!result.detected) continue
+          rateLimitDetected = true
+          break
         }
 
         // Rate limiting should be implemented for security
@@ -1022,7 +1082,9 @@ test.describe('Assistant Architect Tool Security', () => {
     }
   })
 
-  test('should prevent unauthorized tool access based on user permissions', async ({ page }) => {
+  }
+
+function defineAssistantArchitectToolSecuritySuite4Part4() {test('should prevent unauthorized tool access based on user permissions', async ({ page }) => {
     // This test would ideally require multiple user accounts with different permissions
     // For now, we test that permission validation is enforced in the UI
 
@@ -1093,7 +1155,9 @@ test.describe('Assistant Architect Tool Security', () => {
     await expect(page.locator('body')).toBeVisible()
   })
 
-  test('should validate SQL injection attempts in tool inputs', async ({ page }) => {
+  }
+
+function defineAssistantArchitectToolSecuritySuite4Part5() {test('should validate SQL injection attempts in tool inputs', async ({ page }) => {
     await page.goto('/utilities/assistant-architect')
     await page.waitForSelector('[data-testid="assistant-architect-page"]')
 
@@ -1120,7 +1184,8 @@ test.describe('Assistant Architect Tool Security', () => {
             await inputFields.first().fill(injectionAttempt)
 
             const executeButton = page.locator('[data-testid="execute-button"]')
-            if (await executeButton.count() > 0) {
+            const handleNestedBranch5 = async () => {
+              if (await executeButton.count() > 0) {
               await executeButton.click()
               await page.waitForTimeout(3000)
 
@@ -1150,6 +1215,8 @@ test.describe('Assistant Architect Tool Security', () => {
               // Application should remain stable
               await expect(page.locator('[data-testid="assistant-architect-execution"]')).toBeVisible()
             }
+            }
+            await handleNestedBranch5()
           } catch {
             console.log(`SQL injection test for "${injectionAttempt.substring(0, 20)}..." handled gracefully`)
           }
@@ -1159,4 +1226,14 @@ test.describe('Assistant Architect Tool Security', () => {
       test.skip(true, 'No assistant architects available for SQL injection testing')
     }
   })
-})
+}
+
+const defineAssistantArchitectToolSecuritySuite4 = () => {
+  defineAssistantArchitectToolSecuritySuite4Part1()
+  defineAssistantArchitectToolSecuritySuite4Part2()
+  defineAssistantArchitectToolSecuritySuite4Part3()
+  defineAssistantArchitectToolSecuritySuite4Part4()
+  defineAssistantArchitectToolSecuritySuite4Part5()
+};
+
+test.describe('Assistant Architect Tool Security', defineAssistantArchitectToolSecuritySuite4)

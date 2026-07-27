@@ -1,6 +1,14 @@
 "use client"
 
-import { useState, useCallback, useRef, useEffect, useMemo } from "react"
+import {
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  useMemo,
+  type Dispatch,
+  type SetStateAction,
+} from "react"
 import { CompareInput } from "./compare-input"
 import { DualResponse } from "./dual-response"
 import { toast } from "sonner"
@@ -22,6 +30,82 @@ function isImageModel(model: { capabilities?: string | string[] | null } | null)
     return Array.isArray(caps) && caps.includes('image_generation')
   } catch {
     return false
+  }
+}
+
+interface ModelEventActions {
+  appendResponse: Dispatch<SetStateAction<string>>
+  setImageUrl: Dispatch<SetStateAction<string | undefined>>
+  setComplete: Dispatch<SetStateAction<boolean>>
+  setError: Dispatch<SetStateAction<string | undefined>>
+}
+
+function handleModelEvent(
+  event: DualStreamEvent,
+  modelLabel: string,
+  actions: ModelEventActions
+): void {
+  if (event.type === "content" && event.chunk) {
+    actions.appendResponse((previous) => previous + event.chunk)
+  } else if (event.type === "image" && event.imageUrl) {
+    if (isSafeImageUrl(event.imageUrl)) {
+      actions.setImageUrl(event.imageUrl)
+    } else {
+      log.warn(`Received unsafe imageUrl for ${event.modelId}, ignoring`)
+      actions.setError("Image generation failed. Please try again.")
+    }
+  } else if (event.type === "finish") {
+    actions.setComplete(true)
+  } else if (event.type === "warning") {
+    actions.setComplete(true)
+    toast.warning(`${modelLabel} unavailable`, {
+      description:
+        event.warning ??
+        "Comparison unavailable — model response could not be generated",
+    })
+  } else if (event.type === "error") {
+    actions.setComplete(true)
+    actions.setError(event.error)
+  }
+}
+
+function processDualStreamLine(
+  line: string,
+  model1Label: string,
+  model2Label: string,
+  model1Actions: ModelEventActions,
+  model2Actions: ModelEventActions
+): void {
+  if (!line.startsWith("data: ")) return
+
+  try {
+    const event = JSON.parse(line.slice(6)) as DualStreamEvent
+    if (event.modelId === "model1") {
+      handleModelEvent(event, model1Label, model1Actions)
+    } else if (event.modelId === "model2") {
+      handleModelEvent(event, model2Label, model2Actions)
+    }
+  } catch (error) {
+    log.warn("Failed to parse SSE event", {
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
+async function consumeDualStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  onLine: (line: string) => void
+): Promise<void> {
+  const decoder = new TextDecoder()
+  let buffer = ""
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) return
+
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split("\n")
+    buffer = lines.pop() || ""
+    for (const line of lines) onLine(line)
   }
 }
 
@@ -125,8 +209,6 @@ export function ModelCompare() {
 
       // Read the stream
       const reader = response.body?.getReader()
-      const decoder = new TextDecoder()
-
       if (!reader) {
         throw new Error('Failed to get stream reader')
       }
@@ -137,86 +219,27 @@ export function ModelCompare() {
       setIsLoading(false)
 
       try {
-        // Process the stream
-        let buffer = ''
-        while (true) {
-          const { done, value } = await reader.read()
-
-          if (done) {
-            break
-          }
-
-          // Decode the chunk and add to buffer
-          buffer += decoder.decode(value, { stream: true })
-
-          // Process complete SSE messages
-          const lines = buffer.split('\n')
-          buffer = lines.pop() || '' // Keep incomplete line in buffer
-
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const data = JSON.parse(line.slice(6)) as DualStreamEvent
-
-                // Handle events based on model ID
-                if (data.modelId === 'model1') {
-                  if (data.type === 'content' && data.chunk) {
-                    setModel1Response(prev => prev + data.chunk)
-                  } else if (data.type === 'image' && data.imageUrl) {
-                    if (isSafeImageUrl(data.imageUrl)) {
-                      setModel1ImageUrl(data.imageUrl)
-                    } else {
-                      log.warn('Received unsafe imageUrl for model1, ignoring')
-                      setModel1Error('Image generation failed. Please try again.')
-                    }
-                  } else if (data.type === 'finish') {
-                    setModel1Complete(true)
-                  } else if (data.type === 'warning') {
-                    // Mark complete before the finish event arrives — the generator
-                    // always emits finish after warning, but we don't rely on that
-                    // sequence in case the finish event is dropped mid-stream.
-                    setModel1Complete(true)
-                    toast.warning(`${model1State.selectedModel?.name ?? 'First model'} unavailable`, {
-                      description: data.warning ?? "Comparison unavailable — model response could not be generated",
-                    })
-                  } else if (data.type === 'error') {
-                    setModel1Complete(true)
-                    // Render error inline in the panel — toast was redundant and dismissed too quickly
-                    setModel1Error(data.error)
-                  }
-                } else if (data.modelId === 'model2') {
-                  if (data.type === 'content' && data.chunk) {
-                    setModel2Response(prev => prev + data.chunk)
-                  } else if (data.type === 'image' && data.imageUrl) {
-                    if (isSafeImageUrl(data.imageUrl)) {
-                      setModel2ImageUrl(data.imageUrl)
-                    } else {
-                      log.warn('Received unsafe imageUrl for model2, ignoring')
-                      setModel2Error('Image generation failed. Please try again.')
-                    }
-                  } else if (data.type === 'finish') {
-                    setModel2Complete(true)
-                  } else if (data.type === 'warning') {
-                    // Mark complete before the finish event arrives — same defensive
-                    // guard as the model1 warning handler above.
-                    setModel2Complete(true)
-                    toast.warning(`${model2State.selectedModel?.name ?? 'Second model'} unavailable`, {
-                      description: data.warning ?? "Comparison unavailable — model response could not be generated",
-                    })
-                  } else if (data.type === 'error') {
-                    setModel2Complete(true)
-                    // Render error inline in the panel — toast was redundant and dismissed too quickly
-                    setModel2Error(data.error)
-                  }
-                }
-              } catch (parseError) {
-                log.warn('Failed to parse SSE event', {
-                  error: parseError instanceof Error ? parseError.message : String(parseError)
-                })
-              }
-            }
-          }
+        const model1Actions: ModelEventActions = {
+          appendResponse: setModel1Response,
+          setImageUrl: setModel1ImageUrl,
+          setComplete: setModel1Complete,
+          setError: setModel1Error,
         }
+        const model2Actions: ModelEventActions = {
+          appendResponse: setModel2Response,
+          setImageUrl: setModel2ImageUrl,
+          setComplete: setModel2Complete,
+          setError: setModel2Error,
+        }
+        await consumeDualStream(reader, (line) =>
+          processDualStreamLine(
+            line,
+            model1State.selectedModel?.name ?? "First model",
+            model2State.selectedModel?.name ?? "Second model",
+            model1Actions,
+            model2Actions
+          )
+        )
 
         // Stream complete — force completion flags to true as a defensive
         // guard against any missed finish/warning/error events.

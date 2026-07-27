@@ -116,7 +116,7 @@ function uploadRequest(options: { includeConversation?: boolean } = {}): Request
   });
 }
 
-describe("temporary repository attachment routes", () => {
+function defineTemporaryRepositoryAttachmentRoutesSuite1Part1() {
   beforeEach(() => {
     jest.clearAllMocks();
     for (const mock of [
@@ -224,7 +224,9 @@ describe("temporary repository attachment routes", () => {
     expect(mockGetOrCreate).not.toHaveBeenCalled();
   });
 
-  it("creates, optionally binds, and initiates direct canonical storage upload", async () => {
+  }
+
+function defineTemporaryRepositoryAttachmentRoutesSuite1Part2() {it("creates, optionally binds, and initiates direct canonical storage upload", async () => {
     const response = await POST(uploadRequest({ includeConversation: true }));
 
     expect(response.status).toBe(200);
@@ -330,7 +332,9 @@ describe("temporary repository attachment routes", () => {
     });
   });
 
-  it("returns 429 and compensates when the owner storage quota is full", async () => {
+  }
+
+function defineTemporaryRepositoryAttachmentRoutesSuite1Part3() {it("returns 429 and compensates when the owner storage quota is full", async () => {
     mockInitiateRepositoryUpload.mockRejectedValue(
       new RepositoryUploadQuotaExceededError("ephemeral-storage-bytes")
     );
@@ -431,7 +435,9 @@ describe("temporary repository attachment routes", () => {
     expect(await response.json()).toMatchObject({ error: "Attachment not found" });
   });
 
-  it("returns only bounded processing state for an owned reference", async () => {
+  }
+
+function defineTemporaryRepositoryAttachmentRoutesSuite1Part4() {it("returns only bounded processing state for an owned reference", async () => {
     const response = await GET(new Request("http://localhost"), {
       params: Promise.resolve({ bindingId, itemId: "31" }),
     });
@@ -525,4 +531,13 @@ describe("temporary repository attachment routes", () => {
     expect(mockResolveForPromotion).not.toHaveBeenCalled();
     expect(mockPromoteRepository).not.toHaveBeenCalled();
   });
-});
+}
+
+const defineTemporaryRepositoryAttachmentRoutesSuite1 = () => {
+  defineTemporaryRepositoryAttachmentRoutesSuite1Part1()
+  defineTemporaryRepositoryAttachmentRoutesSuite1Part2()
+  defineTemporaryRepositoryAttachmentRoutesSuite1Part3()
+  defineTemporaryRepositoryAttachmentRoutesSuite1Part4()
+};
+
+describe("temporary repository attachment routes", defineTemporaryRepositoryAttachmentRoutesSuite1);

@@ -99,7 +99,7 @@ function harness() {
   return { service, dynamoSend, schedulerSend }
 }
 
-describe("AgentScheduleService authority boundary", () => {
+function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
   it("creates a target containing only owner, schedule id, and version", async () => {
     const { service, dynamoSend, schedulerSend } = harness()
     dynamoSend
@@ -194,7 +194,9 @@ describe("AgentScheduleService authority boundary", () => {
     })
   })
 
-  it("rolls back EventBridge when authoritative persistence fails", async () => {
+  }
+
+function defineAgentScheduleServiceAuthorityBoundarySuite1Part2() {it("rolls back EventBridge when authoritative persistence fails", async () => {
     const { service, dynamoSend, schedulerSend } = harness()
     dynamoSend
       .mockResolvedValueOnce({ Items: [] })
@@ -286,7 +288,9 @@ describe("AgentScheduleService authority boundary", () => {
     ).toMatchObject({ activeCount: 50, reconciled: true })
   })
 
-  it("repairs a reconciled but drifted quota on a subsequent mutation", async () => {
+  }
+
+function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a reconciled but drifted quota on a subsequent mutation", async () => {
     const { service, dynamoSend, schedulerSend } = harness()
     const quota = {
       userId: OWNER,
@@ -388,9 +392,17 @@ describe("AgentScheduleService authority boundary", () => {
     ).rejects.toThrow("owner or integrity")
     expect(dynamoSend.mock.calls[0][0]).toBeInstanceOf(QueryCommand)
   })
-})
+}
 
-describe("schedule expression resource guards", () => {
+const defineAgentScheduleServiceAuthorityBoundarySuite1 = () => {
+  defineAgentScheduleServiceAuthorityBoundarySuite1Part1()
+  defineAgentScheduleServiceAuthorityBoundarySuite1Part2()
+  defineAgentScheduleServiceAuthorityBoundarySuite1Part3()
+};
+
+describe("AgentScheduleService authority boundary", defineAgentScheduleServiceAuthorityBoundarySuite1)
+
+const defineScheduleExpressionResourceGuardsSuite2 = () => {
   it.each(["* * * * *", "*/1 * * * *", "rate(4 minutes)"])(
     "rejects excessive frequency: %s",
     (expression) => {
@@ -405,4 +417,6 @@ describe("schedule expression resource guards", () => {
       "cron(0 9 ? * MON-FRI *)"
     )
   })
-})
+};
+
+describe("schedule expression resource guards", defineScheduleExpressionResourceGuardsSuite2)

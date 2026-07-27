@@ -220,9 +220,12 @@ export async function processMessagesWithAttachments(
           )
         ) {
           const canonicalText = canonicalInlineAttachmentText(partData);
-          if (canonicalText === null) {
+          const handleNestedBranch1 = () => {
+            if (canonicalText === null) {
             throw new Error('Inline attachment data is required for storage');
           }
+          }
+          handleNestedBranch1()
           const canonicalPart = { ...partData, data: canonicalText };
           delete canonicalPart.content;
           // Store document in S3
@@ -254,7 +257,8 @@ export async function processMessagesWithAttachments(
           // Extract the correct media type from the data URL prefix so providers receive the
           // right MIME type (e.g. image/jpeg for phone photos rather than image/png).
           const actualMediaType = extractDataUrlMediaType(partData.url);
-          if (actualMediaType && actualMediaType !== partData.mediaType) {
+          const handleNestedBranch2 = () => {
+            if (actualMediaType && actualMediaType !== partData.mediaType) {
             log.debug('Correcting mediaType for file part from data URL', {
               detected: actualMediaType,
               declared: partData.mediaType,
@@ -266,6 +270,8 @@ export async function processMessagesWithAttachments(
           } else {
             lightweightParts.push(part);
           }
+          }
+          handleNestedBranch2()
         } else {
           // Keep text and other parts as-is
           lightweightParts.push(part);
@@ -305,12 +311,15 @@ export async function reconstructMessagesWithAttachments(
             part.text && part.text.includes(ref.originalName)
           );
 
-          if (matchingAttachment) {
+          const handleNestedBranch3 = async () => {
+            if (matchingAttachment) {
             const attachmentData = await getAttachmentFromS3(matchingAttachment.s3Key);
             fullParts.push(attachmentData);
           } else {
             fullParts.push(part); // Keep as-is if not found
           }
+          }
+          await handleNestedBranch3()
         } else {
           fullParts.push(part);
         }

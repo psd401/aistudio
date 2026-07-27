@@ -9,7 +9,7 @@ const AUTH_A = 'tests/e2e/.auth/user-a.json'
 
 // ── Conversations API — Auth-independent ─────────────────────────────────────
 
-test.describe('Nexus Conversations API — Unauthenticated', () => {
+const defineNexusConversationsAPIUnauthenticatedSuite1 = () => {
   test('GET /api/nexus/conversations returns 401', async ({ request }) => {
     const res = await request.get('/api/nexus/conversations')
     expect(res.status()).toBe(401)
@@ -40,11 +40,13 @@ test.describe('Nexus Conversations API — Unauthenticated', () => {
     })
     expect(res.status()).toBe(401)
   })
-})
+};
+
+test.describe('Nexus Conversations API — Unauthenticated', defineNexusConversationsAPIUnauthenticatedSuite1)
 
 // ── Conversations API — Authenticated ────────────────────────────────────────
 
-test.describe('Nexus Conversations API — Authenticated', () => {
+function defineNexusConversationsAPIAuthenticatedSuite2Part1() {
   test.use({ storageState: AUTH_A })
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
@@ -129,7 +131,9 @@ test.describe('Nexus Conversations API — Authenticated', () => {
     expect(updateResult.body.title).toBe('Updated Title')
   })
 
-  test('PATCH /api/nexus/conversations/<id> archives a conversation', async ({ page }) => {
+  }
+
+function defineNexusConversationsAPIAuthenticatedSuite2Part2() {test('PATCH /api/nexus/conversations/<id> archives a conversation', async ({ page }) => {
     await page.goto('/nexus')
     await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 10_000 })
 
@@ -221,7 +225,9 @@ test.describe('Nexus Conversations API — Authenticated', () => {
     expect(messagesResult.body.messages.length).toBe(0)
   })
 
-  test('archived conversations are excluded from default listing', async ({ page }) => {
+  }
+
+function defineNexusConversationsAPIAuthenticatedSuite2Part3() {test('archived conversations are excluded from default listing', async ({ page }) => {
     await page.goto('/nexus')
     await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 10_000 })
 
@@ -288,11 +294,19 @@ test.describe('Nexus Conversations API — Authenticated', () => {
       expect(result.pagination.hasMore).toBe(false)
     }
   })
-})
+}
+
+const defineNexusConversationsAPIAuthenticatedSuite2 = () => {
+  defineNexusConversationsAPIAuthenticatedSuite2Part1()
+  defineNexusConversationsAPIAuthenticatedSuite2Part2()
+  defineNexusConversationsAPIAuthenticatedSuite2Part3()
+};
+
+test.describe('Nexus Conversations API — Authenticated', defineNexusConversationsAPIAuthenticatedSuite2)
 
 // ── Sidebar UI — Authenticated ────────────────────────────────────────────────
 
-test.describe('Nexus Sidebar — Authenticated', () => {
+const defineNexusSidebarAuthenticatedSuite3 = () => {
   test.use({ storageState: AUTH_A })
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
@@ -372,11 +386,13 @@ test.describe('Nexus Sidebar — Authenticated', () => {
     await expect(userBubbles).toHaveCount(2)
     await expect(assistantBubbles).toHaveCount(2)
   })
-})
+};
+
+test.describe('Nexus Sidebar — Authenticated', defineNexusSidebarAuthenticatedSuite3)
 
 // ── Input Validation ──────────────────────────────────────────────────────────
 
-test.describe('Nexus Conversations API — Input Validation', () => {
+const defineNexusConversationsAPIInputValidationSuite4 = () => {
   test.use({ storageState: AUTH_A })
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
@@ -426,4 +442,6 @@ test.describe('Nexus Conversations API — Input Validation', () => {
     expect(result.status).toBe(200)
     expect(result.body.pagination.offset).toBe(0)
   })
-})
+};
+
+test.describe('Nexus Conversations API — Input Validation', defineNexusConversationsAPIInputValidationSuite4)

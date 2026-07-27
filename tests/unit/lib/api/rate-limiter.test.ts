@@ -137,21 +137,27 @@ function createSessionAuth(overrides: Partial<ApiAuthContext> = {}): ApiAuthCont
 // Tests
 // ============================================
 
-describe("Rate Limiter", () => {
+function createTransaction() {
+    return {
+      execute: jest.fn(async () => []),
+      delete: jest.fn(() => ({ where: jest.fn(async () => []) })),
+      select: jest.fn(() => ({
+        from: jest.fn(() => ({
+          where: jest.fn(async () => [{ value: mockReservationCount }]),
+        })),
+      })),
+      insert: jest.fn(() => ({ values: jest.fn(async () => []) })),
+    }
+  }
+
+function defineRateLimiterSuite1Part1() {
+
+
   beforeEach(() => {
     jest.clearAllMocks()
     mockReservationCount = 0
     mockExecuteTransaction.mockImplementation(async (callback: unknown) => {
-      const tx = {
-        execute: jest.fn(async () => []),
-        delete: jest.fn(() => ({ where: jest.fn(async () => []) })),
-        select: jest.fn(() => ({
-          from: jest.fn(() => ({
-            where: jest.fn(async () => [{ value: mockReservationCount }]),
-          })),
-        })),
-        insert: jest.fn(() => ({ values: jest.fn(async () => []) })),
-      }
+      const tx = createTransaction()
       return (callback as (value: typeof tx) => Promise<unknown>)(tx)
     })
   })
@@ -250,7 +256,9 @@ describe("Rate Limiter", () => {
       expect(mockExecuteTransaction).toHaveBeenCalledTimes(1)
     })
 
-    it("should fail closed when database errors", async () => {
+    }
+
+function defineRateLimiterSuite1Part2() {it("should fail closed when database errors", async () => {
       mockExecuteQuery.mockRejectedValueOnce(new Error("DB connection failed"))
 
       const result = await checkRateLimit(createApiKeyAuth())
@@ -349,7 +357,9 @@ describe("Rate Limiter", () => {
   // recordUsage
   // ------------------------------------------
 
-    it("should record usage for API key auth", () => {
+    }
+
+function defineRateLimiterSuite1Part3() {it("should record usage for API key auth", () => {
       mockExecuteQuery.mockResolvedValue([])
 
       const request = new Request("http://localhost:3000/api/v1/chat", {
@@ -397,4 +407,12 @@ describe("Rate Limiter", () => {
       }).not.toThrow()
     })
 
-})
+}
+
+const defineRateLimiterSuite1 = () => {
+  defineRateLimiterSuite1Part1()
+  defineRateLimiterSuite1Part2()
+  defineRateLimiterSuite1Part3()
+};
+
+describe("Rate Limiter", defineRateLimiterSuite1)

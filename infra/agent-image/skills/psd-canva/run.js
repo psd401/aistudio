@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * psd-canva — act on the caller's OWN Canva account via Canva's Connect REST
  * API, authenticated per-user with an OAuth refresh token.
@@ -28,6 +29,8 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
 
 const {
   fail, validateUserEmail, parseArgs, authorizeUser,
@@ -164,10 +167,9 @@ async function main() {
     case 'upload-asset': {
       const file = flagValue(args, 'file');
       if (!file) fail('upload-asset requires --file <local-path>');
-      const fs = require('node:fs');
       const path = require('node:path');
       let bytes;
-      try { bytes = fs.readFileSync(file); }
+      try { bytes = validatedFs.readFileSync(file); }
       catch (err) { fail(`cannot read --file "${file}": ${err.message}`); }
       const name = flagValue(args, 'name') || path.basename(String(file));
       // Canva asset upload: RAW BINARY body + Asset-Upload-Metadata header

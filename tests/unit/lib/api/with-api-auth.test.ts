@@ -104,7 +104,7 @@ function createMockRequest(
 // Tests
 // ============================================
 
-describe("withApiAuth", () => {
+function defineWithApiAuthSuite1Part1() {
   beforeEach(() => {
     jest.clearAllMocks()
 
@@ -209,7 +209,9 @@ describe("withApiAuth", () => {
   // Auth failure short-circuit
   // ------------------------------------------
 
-    it("should return error response without calling handler", async () => {
+    }
+
+function defineWithApiAuthSuite1Part2() {it("should return error response without calling handler", async () => {
       // authenticateRequest returns an error response (not an ApiAuthContext)
       const authError = { status: 401, headers: new Map(), json: async () => ({ error: { code: "UNAUTHORIZED" } }) }
       mockAuthenticateRequest.mockResolvedValue(authError)
@@ -323,7 +325,9 @@ describe("withApiAuth", () => {
   // Execution order
   // ------------------------------------------
 
-    it("should execute auth → rate limit → handler → record usage", async () => {
+    }
+
+function defineWithApiAuthSuite1Part3() {it("should execute auth → rate limit → handler → record usage", async () => {
       const callOrder: string[] = []
 
       mockAuthenticateRequest.mockImplementation(async () => {
@@ -351,4 +355,12 @@ describe("withApiAuth", () => {
       expect(callOrder).toEqual(["auth", "rateLimit", "handler", "recordUsage"])
     })
 
-})
+}
+
+const defineWithApiAuthSuite1 = () => {
+  defineWithApiAuthSuite1Part1()
+  defineWithApiAuthSuite1Part2()
+  defineWithApiAuthSuite1Part3()
+};
+
+describe("withApiAuth", defineWithApiAuthSuite1)

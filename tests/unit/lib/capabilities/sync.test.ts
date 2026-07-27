@@ -251,7 +251,7 @@ function runSync(manifest: CapabilityManifestEntry[]) {
   return syncCapabilityManifest(manifest)
 }
 
-describe("syncCapabilityManifest", () => {
+function defineSyncCapabilityManifestSuite1Part1() {
   beforeEach(() => {
     resetState()
   })
@@ -350,7 +350,9 @@ describe("syncCapabilityManifest", () => {
     expect(result.updated).toEqual([])
   })
 
-  it("deactivates code-source capabilities no longer in the manifest", async () => {
+  }
+
+function defineSyncCapabilityManifestSuite1Part2() {it("deactivates code-source capabilities no longer in the manifest", async () => {
     // An orphaned code capability not present in the new manifest.
     fakeCapabilities.push({
       id: 7,
@@ -455,7 +457,9 @@ describe("syncCapabilityManifest", () => {
     ).toBe(true)
   })
 
-  it("acquires the advisory lock inside the transaction", async () => {
+  }
+
+function defineSyncCapabilityManifestSuite1Part3() {it("acquires the advisory lock inside the transaction", async () => {
     const txSpy = jest.fn(() => Promise.resolve([]))
     // Re-mock executeTransaction for this test to capture the execute call.
     const drizzleClient = jest.requireMock("@/lib/db/drizzle-client") as {
@@ -541,4 +545,12 @@ describe("syncCapabilityManifest", () => {
       ])
     ).rejects.toThrow(/duplicate identifiers: dup/)
   })
-})
+}
+
+const defineSyncCapabilityManifestSuite1 = () => {
+  defineSyncCapabilityManifestSuite1Part1()
+  defineSyncCapabilityManifestSuite1Part2()
+  defineSyncCapabilityManifestSuite1Part3()
+};
+
+describe("syncCapabilityManifest", defineSyncCapabilityManifestSuite1)

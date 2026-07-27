@@ -39,7 +39,7 @@ const ARTIFACT_ID =
 const SHOT_DIR = "docs/verification/atrium-meridian";
 const EMOJI = "🎯";
 
-test.describe("Atrium Meridian rich content (authenticated)", () => {
+function defineAtriumMeridianRichContentAuthenticatedSuite1Part1() {
   test.skip(
     process.env.PLAYWRIGHT_AUTH_ENABLED !== "true",
     "Requires the authed host dev server (collab WS) + seeded doc — see tests/e2e/fixtures/atrium-editor-seed.sql"
@@ -169,7 +169,9 @@ test.describe("Atrium Meridian rich content (authenticated)", () => {
     }
   });
 
-  test("artifact library cards render the live-thumbnail scaffold (gradient fallback; scaled frame when the sandbox origin is configured)", async ({
+  }
+
+function defineAtriumMeridianRichContentAuthenticatedSuite1Part2() {test("artifact library cards render the live-thumbnail scaffold (gradient fallback; scaled frame when the sandbox origin is configured)", async ({
     browser,
   }) => {
     const context = await browser.newContext({
@@ -239,4 +241,11 @@ test.describe("Atrium Meridian rich content (authenticated)", () => {
       await context.close();
     }
   });
-});
+}
+
+const defineAtriumMeridianRichContentAuthenticatedSuite1 = () => {
+  defineAtriumMeridianRichContentAuthenticatedSuite1Part1()
+  defineAtriumMeridianRichContentAuthenticatedSuite1Part2()
+};
+
+test.describe("Atrium Meridian rich content (authenticated)", defineAtriumMeridianRichContentAuthenticatedSuite1);

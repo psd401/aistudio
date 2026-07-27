@@ -1,12 +1,13 @@
 /** @jest-environment node */
 
-import { existsSync } from "node:fs"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os"
 import { basename, isAbsolute, join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "@jest/globals"
 
 import { executeWorkspaceCommand } from "@/lib/agent-workspace/command-executor"
+import { validatedFs, validatedFsPromises } from "@/lib/filesystem/validated-fs";
 
 let fixtureDirectory = ""
 let executable = ""
@@ -29,7 +30,7 @@ afterEach(async () => {
 
 describe("trusted Workspace command runtime", () => {
   it("contains implicit binary downloads in a private disposable directory", async () => {
-    await writeFile(
+    await validatedFsPromises.writeFile(
       executable,
       [
         "#!/usr/bin/env node",
@@ -65,11 +66,11 @@ describe("trusted Workspace command runtime", () => {
     expect(basename(execution.cwd)).toMatch(/^aistudio-workspace-cli-/)
     expect(isAbsolute(execution.home)).toBe(true)
     expect(basename(execution.home)).toBe(basename(execution.cwd))
-    expect(existsSync(execution.cwd)).toBe(false)
+    expect(validatedFs.existsSync(execution.cwd)).toBe(false)
   })
 
   it("removes the disposable directory after a CLI failure", async () => {
-    await writeFile(
+    await validatedFsPromises.writeFile(
       executable,
       [
         "#!/usr/bin/env node",
@@ -98,6 +99,6 @@ describe("trusted Workspace command runtime", () => {
     const executionDirectory = message.slice(message.indexOf("denied:") + 7)
     expect(isAbsolute(executionDirectory)).toBe(true)
     expect(basename(executionDirectory)).toMatch(/^aistudio-workspace-cli-/)
-    expect(existsSync(executionDirectory)).toBe(false)
+    expect(validatedFs.existsSync(executionDirectory)).toBe(false)
   })
 })

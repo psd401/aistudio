@@ -77,15 +77,7 @@ export async function resolveDmSpace(googleIdentity: string): Promise<string | n
       scanned += spaces.length;
       for (const space of spaces) {
         if (!space.name || !space.singleUserBotDm) continue;
-        const membersResp = await client.spaces.members.list({
-          parent: space.name,
-          pageSize: 10,
-        });
-        for (const m of membersResp.data.memberships || []) {
-          if (m.member?.type === "HUMAN" && m.member?.name === googleIdentity) {
-            return space.name;
-          }
-        }
+        if (await spaceContainsIdentity(client, space.name, googleIdentity)) return space.name;
       }
       pageToken = resp.data.nextPageToken || undefined;
     } while (pageToken);
@@ -103,6 +95,22 @@ export async function resolveDmSpace(googleIdentity: string): Promise<string | n
     }));
   }
   return null;
+}
+
+async function spaceContainsIdentity(
+  client: Awaited<ReturnType<typeof getChatClient>>,
+  spaceName: string,
+  googleIdentity: string,
+): Promise<boolean> {
+  const response = await client.spaces.members.list({
+    parent: spaceName,
+    pageSize: 10,
+  });
+  return (response.data.memberships || []).some(
+    (membership) =>
+      membership.member?.type === "HUMAN" &&
+      membership.member?.name === googleIdentity,
+  );
 }
 
 export interface EscalationParams {

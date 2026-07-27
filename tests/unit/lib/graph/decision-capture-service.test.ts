@@ -176,7 +176,7 @@ function setupMocks(options: {
 // Schema Validation Tests
 // ============================================
 
-describe("createDecisionSchema", () => {
+function defineCreateDecisionSchemaSuite1Part1() {
 
     it("should accept valid minimal payload (decision + decidedBy)", () => {
       const result = createDecisionSchema.safeParse({
@@ -281,7 +281,9 @@ describe("createDecisionSchema", () => {
 
 
 
-    it("should accept all optional array fields", () => {
+    }
+
+function defineCreateDecisionSchemaSuite1Part2() {it("should accept all optional array fields", () => {
       const result = createDecisionSchema.safeParse({
         decision: "Use PostgreSQL",
         decidedBy: "Team",
@@ -390,7 +392,9 @@ describe("createDecisionSchema", () => {
 
 
 
-    it("should accept a complete payload with all fields", () => {
+    }
+
+function defineCreateDecisionSchemaSuite1Part3() {it("should accept a complete payload with all fields", () => {
       const result = createDecisionSchema.safeParse({
         decision: "Use PostgreSQL for the data layer",
         decidedBy: "Engineering Team",
@@ -406,13 +410,21 @@ describe("createDecisionSchema", () => {
       expect(result.success).toBe(true)
     })
 
-})
+}
+
+const defineCreateDecisionSchemaSuite1 = () => {
+  defineCreateDecisionSchemaSuite1Part1()
+  defineCreateDecisionSchemaSuite1Part2()
+  defineCreateDecisionSchemaSuite1Part3()
+};
+
+describe("createDecisionSchema", defineCreateDecisionSchemaSuite1)
 
 // ============================================
 // captureStructuredDecision Tests
 // ============================================
 
-describe("captureStructuredDecision", () => {
+function defineCaptureStructuredDecisionSuite2Part1() {
   beforeEach(() => {
     jest.clearAllMocks()
   })
@@ -519,7 +531,9 @@ describe("captureStructuredDecision", () => {
 
 
 
-    it("should batch node inserts into a single statement (plus one edge batch)", async () => {
+    }
+
+function defineCaptureStructuredDecisionSuite2Part2() {it("should batch node inserts into a single statement (plus one edge batch)", async () => {
       const translated = createTranslatedGraph(3, 2)
       mockTranslatePayloadToGraph.mockReturnValue(translated)
 
@@ -616,7 +630,9 @@ describe("captureStructuredDecision", () => {
       })
     })
 
-    it("should strip caller-supplied metadata.dedup (ER audit key is never caller-writable)", async () => {
+    }
+
+function defineCaptureStructuredDecisionSuite2Part3() {it("should strip caller-supplied metadata.dedup (ER audit key is never caller-writable)", async () => {
       const translated = createTranslatedGraph()
       mockTranslatePayloadToGraph.mockReturnValue(translated)
 
@@ -677,7 +693,9 @@ describe("captureStructuredDecision", () => {
       ).rejects.toThrow(missingId)
     })
 
-    it("should create CONTEXT edges for valid relatedTo nodes", async () => {
+    }
+
+function defineCaptureStructuredDecisionSuite2Part4() {it("should create CONTEXT edges for valid relatedTo nodes", async () => {
       const relatedId = "550e8400-e29b-41d4-a716-446655440000"
       const translated = createTranslatedGraph()
       mockTranslatePayloadToGraph.mockReturnValue(translated)
@@ -692,10 +710,16 @@ describe("captureStructuredDecision", () => {
         insert: jest.fn().mockImplementation(() => ({
           values: jest.fn().mockImplementation((vals: unknown) => {
             if (Array.isArray(vals)) insertedEdgeValues.push(...vals)
+            const returnedEdges: Array<{ id: string }> = []
+            if (Array.isArray(vals)) {
+              for (const [index] of vals.entries()) {
+                returnedEdges.push({ id: `edge-${index}` })
+              }
+            }
             return {
               returning: jest.fn().mockResolvedValue(
                 Array.isArray(vals)
-                  ? vals.map((_, i) => ({ id: `edge-${i}` }))
+                  ? returnedEdges
                   : [{ id: `node-${insertedEdgeValues.length}` }]
               ),
             }
@@ -781,7 +805,9 @@ describe("captureStructuredDecision", () => {
       ).rejects.toThrow("Connection lost")
     })
 
-    it("should propagate errors from computeLlmScore", async () => {
+    }
+
+function defineCaptureStructuredDecisionSuite2Part5() {it("should propagate errors from computeLlmScore", async () => {
       setupMocks()
       mockComputeLlmScore.mockRejectedValue(new Error("LLM service unavailable") as never)
 
@@ -891,13 +917,23 @@ describe("captureStructuredDecision", () => {
       expect(mockExecuteTransaction).not.toHaveBeenCalled()
     })
   })
-})
+}
+
+const defineCaptureStructuredDecisionSuite2 = () => {
+  defineCaptureStructuredDecisionSuite2Part1()
+  defineCaptureStructuredDecisionSuite2Part2()
+  defineCaptureStructuredDecisionSuite2Part3()
+  defineCaptureStructuredDecisionSuite2Part4()
+  defineCaptureStructuredDecisionSuite2Part5()
+};
+
+describe("captureStructuredDecision", defineCaptureStructuredDecisionSuite2)
 
 // ============================================
 // createDecisionSchema — relatedTo dedup (Issue #1251)
 // ============================================
 
-describe("createDecisionSchema relatedTo dedup", () => {
+const defineCreateDecisionSchemaRelatedToDedupSuite3 = () => {
   it("deduplicates identical relatedTo UUIDs", () => {
     const uuid = "550e8400-e29b-41d4-a716-446655440000"
     const result = createDecisionSchema.safeParse({
@@ -938,13 +974,15 @@ describe("createDecisionSchema relatedTo dedup", () => {
       expect(result.data.relatedTo).toEqual([a, b])
     }
   })
-})
+};
+
+describe("createDecisionSchema relatedTo dedup", defineCreateDecisionSchemaRelatedToDedupSuite3)
 
 // ============================================
 // commitDecisionSubgraph — conversational commit path (Issue #1251)
 // ============================================
 
-describe("commitDecisionSubgraph", () => {
+const defineCommitDecisionSubgraphSuite4 = () => {
   beforeEach(() => {
     jest.clearAllMocks()
   })
@@ -1052,7 +1090,9 @@ describe("commitDecisionSubgraph", () => {
       )
     ).rejects.toThrow(/Unknown node type/)
   })
-})
+};
+
+describe("commitDecisionSubgraph", defineCommitDecisionSubgraphSuite4)
 
 // ============================================
 // Issue #1252 — lifecycle status, supersession, provenance, ER warnings
@@ -1060,7 +1100,7 @@ describe("commitDecisionSubgraph", () => {
 
 const OLD_DECISION_ID = "99999999-9999-9999-9999-999999999999"
 
-describe("decision lifecycle + supersession + provenance (Issue #1252)", () => {
+const defineDecisionLifecycleSupersessionProvenanceIssue1252Suite5 = () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockGenerateEmbedding.mockResolvedValue(
@@ -1195,4 +1235,6 @@ describe("decision lifecycle + supersession + provenance (Issue #1252)", () => {
     expect(result.decisionNodeId).toBeDefined()
     expect(result.warnings.some((w) => /Entity resolution unavailable/.test(w))).toBe(true)
   })
-})
+};
+
+describe("decision lifecycle + supersession + provenance (Issue #1252)", defineDecisionLifecycleSupersessionProvenanceIssue1252Suite5)

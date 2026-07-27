@@ -78,7 +78,7 @@ function serverRow(overrides: Record<string, unknown>): Record<string, unknown> 
   }
 }
 
-describe("getAvailableConnectors — per-row isolation (REV-COR-620)", () => {
+const defineGetAvailableConnectorsPerRowIsolationREVCOR620Suite1 = () => {
   beforeEach(() => {
     jest.clearAllMocks()
   })
@@ -126,9 +126,11 @@ describe("getAvailableConnectors — per-row isolation (REV-COR-620)", () => {
 
     expect(result.map((c) => c.id)).toEqual(["a", "b", "c"])
   })
-})
+};
 
-describe("rejectUnsafeMcpUrl — encoded-IP SSRF (REV-COR-623)", () => {
+describe("getAvailableConnectors — per-row isolation (REV-COR-620)", defineGetAvailableConnectorsPerRowIsolationREVCOR620Suite1)
+
+const defineRejectUnsafeMcpUrlEncodedIPSSRFREVCOR623Suite2 = () => {
   const originalEnv = process.env.ENVIRONMENT
 
   beforeEach(() => {
@@ -192,9 +194,11 @@ describe("rejectUnsafeMcpUrl — encoded-IP SSRF (REV-COR-623)", () => {
   it("rejects an invalid URL string", () => {
     expect(() => rejectUnsafeMcpUrl("not a url")).toThrow(/Invalid MCP server URL/)
   })
-})
+};
 
-describe("MCP runtime transport hardening", () => {
+describe("rejectUnsafeMcpUrl — encoded-IP SSRF (REV-COR-623)", defineRejectUnsafeMcpUrlEncodedIPSSRFREVCOR623Suite2)
+
+const defineMCPRuntimeTransportHardeningSuite3 = () => {
   it("pins every HTTP request and disables redirect following", () => {
     const hardened = hardenMcpTransportConfig({
       type: "http",
@@ -220,4 +224,6 @@ describe("MCP runtime transport hardening", () => {
       })
     ).toThrow(/Only HTTP/)
   })
-})
+};
+
+describe("MCP runtime transport hardening", defineMCPRuntimeTransportHardeningSuite3)

@@ -11,9 +11,12 @@ interface TaggedResource {
   Properties: { Tags: SynthesizedTag[] }
 }
 
-describe("TaggingAspect", () => {
-  let app: cdk.App
-  let stack: cdk.Stack
+let app: cdk.App
+let stack: cdk.Stack
+
+function defineTaggingAspectSuite1Part1() {
+
+
 
   beforeEach(() => {
     app = new cdk.App()
@@ -107,7 +110,9 @@ describe("TaggingAspect", () => {
 
 
 
-    test("should set cost center to PROD-001 for production", () => {
+    }
+
+function defineTaggingAspectSuite1Part2() {test("should set cost center to PROD-001 for production", () => {
       const config: TaggingConfig = {
         environment: "prod",
         projectName: "AIStudio",
@@ -197,7 +202,9 @@ describe("TaggingAspect", () => {
       })
     })
 
-    test("should set compliance to None for non-production", () => {
+    }
+
+function defineTaggingAspectSuite1Part3() {test("should set compliance to None for non-production", () => {
       const config: TaggingConfig = {
         environment: "dev",
         projectName: "AIStudio",
@@ -294,7 +301,9 @@ describe("TaggingAspect", () => {
       })
     })
 
-    test("should classify S3 buckets as Public by default", () => {
+    }
+
+function defineTaggingAspectSuite1Part4() {test("should classify S3 buckets as Public by default", () => {
       const config: TaggingConfig = {
         environment: "prod",
         projectName: "AIStudio",
@@ -393,7 +402,9 @@ describe("TaggingAspect", () => {
 
 
 
-    test("should always set ManagedBy to CDK", () => {
+    }
+
+function defineTaggingAspectSuite1Part5() {test("should always set ManagedBy to CDK", () => {
       const config: TaggingConfig = {
         environment: "dev",
         projectName: "AIStudio",
@@ -441,4 +452,14 @@ describe("TaggingAspect", () => {
       expect(deployedAtTag?.Value).toMatch(/^\d{4}-\d{2}-\d{2}T/)
     })
 
-})
+}
+
+const defineTaggingAspectSuite1 = () => {
+  defineTaggingAspectSuite1Part1()
+  defineTaggingAspectSuite1Part2()
+  defineTaggingAspectSuite1Part3()
+  defineTaggingAspectSuite1Part4()
+  defineTaggingAspectSuite1Part5()
+};
+
+describe("TaggingAspect", defineTaggingAspectSuite1)

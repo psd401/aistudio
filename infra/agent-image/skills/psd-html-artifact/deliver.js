@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * deliver.js — psd-html-artifact.deliver
  * Usage:
@@ -25,8 +26,10 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
 
-const fs = require('node:fs');
+
+
 const path = require('node:path');
 
 const { publishArtifact } = require('../_shared/artifact-publisher');
@@ -129,7 +132,7 @@ function readHtmlFile(args) {
   }
   let stat;
   try {
-    stat = fs.statSync(file);
+    stat = validatedFs.statSync(file);
   } catch (err) {
     fail(`--file not found or unreadable: ${file} (${err.message})`, 'bad_args');
   }
@@ -149,7 +152,7 @@ function readHtmlFile(args) {
   // with U+FFFD and re-encoding would upload DIFFERENT bytes than the file held
   // (and the reported size would be stale). The audit gets a utf8 view; the
   // upload uses the exact original bytes.
-  const buffer = fs.readFileSync(file);
+  const buffer = validatedFs.readFileSync(file);
   return { file, size: buffer.length, buffer };
 }
 

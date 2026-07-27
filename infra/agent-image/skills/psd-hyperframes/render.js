@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * render.js — psd-hyperframes.render
  *
@@ -19,8 +20,10 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
 
-const fs = require('node:fs');
+
+
 
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 
@@ -95,7 +98,7 @@ function validateEmail(email) {
 
 function readFileOrFail(filePath, flag) {
   try {
-    return fs.readFileSync(filePath, 'utf8');
+    return validatedFs.readFileSync(filePath, 'utf8');
   } catch (err) {
     fail(`${flag} file not found or unreadable: ${filePath} (${err.message})`, 'bad_args');
     return ''; // unreachable — fail() exits

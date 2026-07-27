@@ -1,3 +1,4 @@
+
 /**
  * Shared helpers for the psd-workspace OpenClaw skill (#912).
  *
@@ -7,8 +8,10 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
 
-const fs = require('node:fs');
+
+
 const APP_BASE_URL = process.env.APP_BASE_URL || '';
 
 // Strict email regex — must stay in sync with lib/agent-workspace/validation.ts.
@@ -188,7 +191,7 @@ function resolvePayloadFiles(commandString, options = {}) {
     }
     let content;
     try {
-      content = fs.readFileSync(filePath, 'utf8');
+      content = validatedFs.readFileSync(filePath, 'utf8');
     } catch (err) {
       reject(`${fileFlag}: cannot read ${filePath}: ${err.message}`);
     }

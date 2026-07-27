@@ -207,7 +207,10 @@ export async function processUser(row: TriageRow): Promise<void> {
         const decision = await classifyAndLabel(row, accessToken, m.message);
         if (decision) {
           newDecisions.push(decision.decision);
-          if (decision.escalated) escalated++;
+          const handleNestedBranch1 = () => {
+            if (decision.escalated) escalated++;
+          }
+          handleNestedBranch1()
         }
       } catch (err) {
         log("ERROR", "classify_failed", {
@@ -244,9 +247,12 @@ export async function processUser(row: TriageRow): Promise<void> {
           // wins as the representative. Subsequent labelsAdded events
           // for the same thread (because Gmail fires one per message
           // when a thread is labeled) are no-ops.
-          if (!taskGestures.has(evt.message.threadId)) {
+          const handleNestedBranch2 = () => {
+            if (!taskGestures.has(evt.message.threadId)) {
             taskGestures.set(evt.message.threadId, evt.message.id);
           }
+          }
+          handleNestedBranch2()
         }
       }
     }

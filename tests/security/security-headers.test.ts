@@ -71,8 +71,7 @@ jest.mock('@/auth', () => ({
   })
 }))
 
-describe('Security Headers Tests', () => {
-  const securityHeaders = [
+const securityHeaders = [
     { name: 'Cache-Control', value: 'no-store, no-cache, must-revalidate, private' },
     { name: 'Pragma', value: 'no-cache' },
     { name: 'Expires', value: '0' },
@@ -80,14 +79,18 @@ describe('Security Headers Tests', () => {
     { name: 'X-Frame-Options', value: 'DENY' },
     { name: 'X-XSS-Protection', value: '1; mode=block' }
   ]
+const directResponseHeaders = [
+    { name: 'Strict-Transport-Security', value: 'max-age=31536000; includeSubDomains' },
+    { name: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+  ]
+
+function defineSecurityHeadersTestsSuite1Part1() {
+
 
   // Headers only set on direct responses (redirects, 401s) — passthrough
   // responses receive these from next.config.mjs headers() instead to avoid
   // duplicate headers violating RFC 6797.
-  const directResponseHeaders = [
-    { name: 'Strict-Transport-Security', value: 'max-age=31536000; includeSubDomains' },
-    { name: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
-  ]
+
 
   describe('Protected Routes', () => {
     it.each([
@@ -184,7 +187,9 @@ describe('Security Headers Tests', () => {
     })
   })
 
-  describe('Static Assets', () => {
+  }
+
+function defineSecurityHeadersTestsSuite1Part2() {describe('Static Assets', () => {
     it.each([
       '/_next/static/chunk.js',
       '/_next/image/test.png',
@@ -289,7 +294,9 @@ describe('Security Headers Tests', () => {
     })
   })
 
-  describe('Header Consistency', () => {
+  }
+
+function defineSecurityHeadersTestsSuite1Part3() {describe('Header Consistency', () => {
     it('should apply identical headers regardless of authentication status', async () => {
       const path = '/dashboard'
 
@@ -376,4 +383,12 @@ describe('Security Headers Tests', () => {
       }
     })
   })
-})
+}
+
+const defineSecurityHeadersTestsSuite1 = () => {
+  defineSecurityHeadersTestsSuite1Part1()
+  defineSecurityHeadersTestsSuite1Part2()
+  defineSecurityHeadersTestsSuite1Part3()
+};
+
+describe('Security Headers Tests', defineSecurityHeadersTestsSuite1)

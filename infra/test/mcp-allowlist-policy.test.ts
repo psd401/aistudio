@@ -63,7 +63,9 @@ describe('mcp-allowlist blockedPatterns (REV-COR-487)', () => {
 
   it('regression: the old *synergysis* pattern missed real Synergy hosts', () => {
     // Proves why the fix was needed — the previous pattern never matched.
-    expect(globToRegExp('*synergysis*').test('https://synergy.example.net')).toBe(false);
+    expect(
+      matchesAllowlistGlob('https://synergy.example.net', '*synergysis*')
+    ).toBe(false);
     // The corrected pattern must be present.
     expect(allowlist.blockedPatterns).toContain('*synergy*');
     expect(allowlist.blockedPatterns).not.toContain('*synergysis*');

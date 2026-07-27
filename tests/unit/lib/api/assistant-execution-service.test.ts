@@ -9,7 +9,7 @@ import { decodeMdxEditorEscapes } from '@/lib/utils/text-sanitizer'
 
 // Mock the substituteVariables function since it's not exported
 // These tests verify the expected behavior based on the implementation
-describe('Variable Substitution Logic (substituteVariables)', () => {
+function defineVariableSubstitutionLogicSubstituteVariablesSuite1Part1() {
 
     it('should resolve slugified prompt names with hyphens', () => {
       // Given a prompt named "Facilitator Opening" → slugified to "facilitator-opening"
@@ -109,7 +109,9 @@ describe('Variable Substitution Logic (substituteVariables)', () => {
       }
     })
 
-    it('should handle position mapping with gaps in execution', () => {
+    }
+
+function defineVariableSubstitutionLogicSubstituteVariablesSuite1Part2() {it('should handle position mapping with gaps in execution', () => {
       // Critical test for the bug fixed in review feedback
       // When prompt at position 0 has no output, position 1 should still map correctly
       interface Prompt {
@@ -220,7 +222,9 @@ describe('Variable Substitution Logic (substituteVariables)', () => {
       expect(matches).toHaveLength(0)
     })
 
-    it('should handle malformed variable syntax', () => {
+    }
+
+function defineVariableSubstitutionLogicSubstituteVariablesSuite1Part3() {it('should handle malformed variable syntax', () => {
       const content = "${incomplete ${{double}} {missing}"
       const regex = /\${([\w-]+)}|{{([\w-]+)}}/g
       const matches = Array.from(content.matchAll(regex))
@@ -239,9 +243,17 @@ describe('Variable Substitution Logic (substituteVariables)', () => {
       expect(matches[1][1]).toBe("end")
     })
 
-})
+}
 
-describe('decodeMdxEditorEscapes', () => {
+const defineVariableSubstitutionLogicSubstituteVariablesSuite1 = () => {
+  defineVariableSubstitutionLogicSubstituteVariablesSuite1Part1()
+  defineVariableSubstitutionLogicSubstituteVariablesSuite1Part2()
+  defineVariableSubstitutionLogicSubstituteVariablesSuite1Part3()
+};
+
+describe('Variable Substitution Logic (substituteVariables)', defineVariableSubstitutionLogicSubstituteVariablesSuite1)
+
+const defineDecodeMdxEditorEscapesSuite2 = () => {
   it('decodes backslash-escaped dollar sign', () => {
     expect(decodeMdxEditorEscapes('\\${student_name}')).toBe('${student_name}')
   })
@@ -309,9 +321,11 @@ describe('decodeMdxEditorEscapes', () => {
     const regex = /\${([\w-]+)}|{{([\w-]+)}}/g
     expect(Array.from(decoded.matchAll(regex))).toHaveLength(2)
   })
-})
+};
 
-describe('decode + substitute integration', () => {
+describe('decodeMdxEditorEscapes', defineDecodeMdxEditorEscapesSuite2)
+
+const defineDecodeSubstituteIntegrationSuite3 = () => {
   const substitute = (content: string, vars: Record<string, string>): string => {
     const decoded = decodeMdxEditorEscapes(content)
     return decoded.replace(/\${([\w-]+)}|{{([\w-]+)}}/g, (match, dollarVar, braceVar) => {
@@ -335,9 +349,11 @@ describe('decode + substitute integration', () => {
   it('leaves unmatched variables unchanged', () => {
     expect(substitute('${name}', {})).toBe('${name}')
   })
-})
+};
 
-describe('Import stale inputMapping safety', () => {
+describe('decode + substitute integration', defineDecodeSubstituteIntegrationSuite3)
+
+const defineImportStaleInputMappingSafetySuite4 = () => {
   it('documents that Path 1 inputMapping can resolve to wrong prompt in destination system', () => {
     // When an assistant is imported from system A to system B:
     // - Source: prompt with ID 5 = "Intro Prompt" (inputMapping references prompt_5.output)
@@ -369,4 +385,6 @@ describe('Import stale inputMapping safety', () => {
     const inputs = { student_name: 'Alice' }
     expect(inputs[varName as keyof typeof inputs]).toBe('Alice')
   })
-})
+};
+
+describe('Import stale inputMapping safety', defineImportStaleInputMappingSafetySuite4)
