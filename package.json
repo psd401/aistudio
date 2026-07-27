@@ -35,6 +35,7 @@
     "test:smoke:nexus-ephemeral": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run tests/smoke/nexus-ephemeral-repositories.smoke.ts",
     "test:smoke:repository-upload-quota": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run tests/smoke/repository-upload-quota.smoke.ts",
     "test:smoke:google-content": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run tests/smoke/google-content-connectors.smoke.ts",
+    "test:smoke:roster-email-match": "bun run tests/smoke/roster-email-match-report.smoke.ts",
     "test:smoke:agents-projects": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun --preload ./tests/smoke/server-only-preload.js tests/smoke/unified-content-agents-projects.smoke.ts",
     "test:smoke:unified-content-lambda-artifact": "bun run scripts/test/unified-content-lambda-artifact.smoke.ts",
     "test:smoke:embedding-lambda-artifact": "bun run scripts/test/embedding-lambda-artifact.smoke.ts",
