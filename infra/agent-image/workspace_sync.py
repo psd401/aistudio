@@ -326,6 +326,55 @@ def _is_regenerable_segment(segment: str) -> bool:
     return segment.startswith(".") and segment.endswith("-venv")
 
 
+# Session transcripts: restore only the most recent N.
+#
+# These are the single biggest cost in a cold start. On 2026-07-27 one dev
+# workspace held 812 of them totalling 202 MB — 93% of the bytes the restore
+# pulled — and the pull took 70.8s, during which the agent could not answer at
+# all. Boot itself was 10s and the model turn 15s; the transcripts WERE the
+# latency.
+#
+# Old transcripts are archive, not memory:
+#   • Interactive session keys embed the image digest, so every deploy makes
+#     every previous transcript permanently unresumable.
+#   • Scheduled session keys embed the date, so yesterday's never resumes.
+# The agent's actual continuity lives in memory/, which is 55 files and is
+# always restored in full.
+#
+# SAFE BY CONSTRUCTION: this skips a DOWNLOAD, never an upload or a delete.
+# push_workspace only walks local files and uploads them; nothing in the sync
+# path enumerates S3 to remove objects. Unrestored transcripts stay in S3 and
+# remain readable there. That asymmetry is what makes trimming the pull safe,
+# and it is why the cap is applied HERE rather than by deleting anything.
+SESSION_DIR_PREFIX = "agents/main/sessions/"
+MAX_RESTORED_SESSIONS = 20
+
+
+def _select_session_transcripts(
+    entries: list, keep: int = MAX_RESTORED_SESSIONS
+) -> set:
+    """Return the relative paths of the `keep` most recently modified transcripts.
+
+    `entries` are broker list records: {"path", "size", "lastModified"}. Ranking
+    needs mtime, which the broker only started returning alongside paths — so
+    when it is absent (older web tier during a rollout) the caller keeps ALL
+    transcripts rather than picking an arbitrary subset. Slower, never wrong.
+    """
+    sessions = [e for e in entries if str(e.get("path", "")).startswith(SESSION_DIR_PREFIX)]
+    if not sessions:
+        return set()
+    # A tie at 0 means the broker sent no usable timestamps; ranking would be
+    # arbitrary, so decline to trim.
+    if all(int(e.get("lastModified") or 0) == 0 for e in sessions):
+        return {str(e["path"]) for e in sessions}
+    ranked = sorted(
+        sessions,
+        key=lambda e: (int(e.get("lastModified") or 0), str(e.get("path", ""))),
+        reverse=True,
+    )
+    return {str(e["path"]) for e in ranked[:keep]}
+
+
 def _should_skip_relative(relative: str) -> bool:
     """True if this workspace-relative path is gateway-owned, not user memory."""
     rel = relative.lstrip("/")
@@ -623,7 +672,29 @@ def pull_workspace(prefix: str) -> int:
         paths = page.get("paths", [])
         if not isinstance(paths, list):
             raise RuntimeError("workspace broker returned invalid path list")
+        # Rank session transcripts by recency WITHIN this page. The broker
+        # paginates, so this keeps up to MAX_RESTORED_SESSIONS per page rather
+        # than globally — deliberately: holding every page in memory to rank
+        # globally would reintroduce the unbounded traversal these caps exist
+        # to prevent, and per-page is already a ~40x reduction. Falls back to
+        # keeping all transcripts when the broker sends no timestamps.
+        page_entries = page.get("entries")
+        keep_sessions = (
+            _select_session_transcripts(page_entries)
+            if isinstance(page_entries, list)
+            else None
+        )
         for relative in paths:
+            if (
+                keep_sessions is not None
+                and isinstance(relative, str)
+                and relative.startswith(SESSION_DIR_PREFIX)
+                and relative not in keep_sessions
+            ):
+                # Archived transcript: still in S3, just not worth 70s of the
+                # user's time on every cold start.
+                skipped += 1
+                continue
             if not isinstance(relative, str):
                 continue
             if not relative:

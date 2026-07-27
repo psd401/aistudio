@@ -663,6 +663,7 @@ export async function listWorkspaceObjects(
   continuationToken?: string
 ): Promise<{
   paths: string[]
+  entries: Array<{ path: string; size: number; lastModified: number }>
   continuationToken?: string
 }> {
   const prefix = `${validateTrustedPrefix(signedWorkspacePrefix)}/`
@@ -674,12 +675,34 @@ export async function listWorkspaceObjects(
       ContinuationToken: continuationToken,
     })
   )
+
+  const entries = (response.Contents ?? [])
+    .filter((entry): entry is typeof entry & { Key: string } =>
+      Boolean(entry.Key?.startsWith(prefix))
+    )
+    .map((entry) => ({
+      path: entry.Key.slice(prefix.length),
+      size: entry.Size ?? 0,
+      // Epoch SECONDS. The restore only ever compares these to each other to
+      // rank recency, so second resolution is ample and avoids shipping a
+      // date-string the client would have to parse.
+      lastModified: entry.LastModified
+        ? Math.floor(entry.LastModified.getTime() / 1000)
+        : 0,
+    }))
+    .filter((entry) => entry.path.length > 0)
+
   return {
-    paths: (response.Contents ?? [])
-      .map((entry) => entry.Key)
-      .filter((key): key is string => Boolean(key?.startsWith(prefix)))
-      .map((key) => key.slice(prefix.length))
-      .filter(Boolean),
+    // `paths` is RETAINED for compatibility. Containers deploy independently of
+    // this route, so an older image is always in flight during a rollout and
+    // still reads this field. Removing it would break every running agent's
+    // restore the moment the web tier deployed.
+    paths: entries.map((entry) => entry.path),
+    // Size + mtime come back on the SAME ListObjectsV2 response that already
+    // produced the paths — the metadata was being discarded, so exposing it
+    // costs no extra S3 call. The restore needs it to rank session transcripts
+    // by recency instead of pulling all of them (see workspace_sync.py).
+    entries,
     ...(response.NextContinuationToken
       ? { continuationToken: response.NextContinuationToken }
       : {}),
