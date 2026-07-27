@@ -3,8 +3,7 @@
 const mockGetServerSession = jest.fn();
 const mockGetUserIdFromSession = jest.fn();
 const mockGetContentPlatformConfig = jest.fn();
-const mockIsCanonicalNexusAttachmentActive = jest.fn();
-const mockIsCanonicalAssistantArchitectActive = jest.fn();
+const mockIsCanonicalRepositoryUploadActive = jest.fn();
 const mockIsCanonicalUploadContentType = jest.fn();
 const mockValidateRepositoryUploadFile = jest.fn();
 const mockInitiateRepositoryUpload = jest.fn();
@@ -35,10 +34,8 @@ jest.mock("@/utils/roles", () => ({
 jest.mock("@/lib/repositories/content-platform", () => ({
   getContentPlatformConfig: (...args: unknown[]) =>
     mockGetContentPlatformConfig(...args),
-  isCanonicalNexusAttachmentActive: (...args: unknown[]) =>
-    mockIsCanonicalNexusAttachmentActive(...args),
-  isCanonicalAssistantArchitectActive: (...args: unknown[]) =>
-    mockIsCanonicalAssistantArchitectActive(...args),
+  isCanonicalRepositoryUploadActive: (...args: unknown[]) =>
+    mockIsCanonicalRepositoryUploadActive(...args),
   isCanonicalUploadContentType: (...args: unknown[]) =>
     mockIsCanonicalUploadContentType(...args),
   validateRepositoryUploadFile: (...args: unknown[]) =>
@@ -123,8 +120,7 @@ function defineTemporaryRepositoryAttachmentRoutesSuite1Part1() {
       mockGetServerSession,
       mockGetUserIdFromSession,
       mockGetContentPlatformConfig,
-      mockIsCanonicalNexusAttachmentActive,
-      mockIsCanonicalAssistantArchitectActive,
+      mockIsCanonicalRepositoryUploadActive,
       mockIsCanonicalUploadContentType,
       mockValidateRepositoryUploadFile,
       mockInitiateRepositoryUpload,
@@ -153,8 +149,7 @@ function defineTemporaryRepositoryAttachmentRoutesSuite1Part1() {
       deletionGraceDays: 7,
       maxFileSizeGb: 10,
     });
-    mockIsCanonicalNexusAttachmentActive.mockReturnValue(true);
-    mockIsCanonicalAssistantArchitectActive.mockReturnValue(true);
+    mockIsCanonicalRepositoryUploadActive.mockReturnValue(true);
     mockIsCanonicalUploadContentType.mockReturnValue(true);
     mockGetOrCreate.mockResolvedValue({
       bindingId,
@@ -217,7 +212,7 @@ function defineTemporaryRepositoryAttachmentRoutesSuite1Part1() {
   });
 
   it("returns the flag-off legacy mode before creating an ephemeral repository", async () => {
-    mockIsCanonicalNexusAttachmentActive.mockReturnValue(false);
+    mockIsCanonicalRepositoryUploadActive.mockReturnValue(false);
     const response = await POST(uploadRequest());
 
     expect(await response.json()).toMatchObject({ mode: "legacy" });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@jest/globals"
-import { getModelSelectorButtonText } from "@/components/features/model-selector/model-selector"
+import { getModelSelectorButtonText } from "@/components/features/model-selector/model-selector-label"
 
 describe("model selector button label", () => {
   it("shows the selected model name", () => {

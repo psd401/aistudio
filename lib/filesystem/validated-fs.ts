@@ -57,13 +57,23 @@ function isWithin(candidate: string, root: string): boolean {
   return child === "" || (!child.startsWith("..") && !isAbsolute(child));
 }
 
+function allowedRoots(access: AccessKind): string[] {
+  const tempRoot = resolve(tmpdir());
+  const roots = [resolve(process.cwd()), tempRoot];
+  // macOS reports /var and /tmp through both their public names and the
+  // canonical /private aliases. Child processes can return the opposite form.
+  if (tempRoot === "/tmp" || tempRoot.startsWith("/var/")) {
+    roots.push(`/private${tempRoot}`);
+  }
+  if (access === "read") roots.push("/opt");
+  return roots;
+}
+
 function validatePath(candidate: unknown, access: AccessKind): void {
   const normalized = normalizePath(candidate);
   if (normalized === null) return;
 
-  const roots = [resolve(process.cwd()), resolve(tmpdir())];
-  if (access === "read") roots.push("/opt");
-  if (!roots.some((root) => isWithin(normalized, root))) {
+  if (!allowedRoots(access).some((root) => isWithin(normalized, root))) {
     throw new Error(
       `Refusing ${access} outside the working directory and temporary roots`
     );

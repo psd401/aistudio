@@ -15,6 +15,7 @@ import { IconRobot, IconChevronDown } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
 import { useFilteredModels } from "./use-filtered-models"
 import { ModelSelectorItem } from "./model-selector-item"
+import { getModelSelectorButtonText } from "./model-selector-label"
 import type {
   FilteredModel,
   ModelSelectorProps,
@@ -130,17 +131,6 @@ function ModelListContent(props: ModelListProps) {
       ))}
     </CommandGroup>
   )
-}
-
-export function getModelSelectorButtonText(
-  value: Pick<SelectAiModel, "name"> | null | undefined,
-  accessibleCount: number,
-  totalCount: number,
-  placeholder: string
-): string {
-  if (value) return value.name
-  if (accessibleCount === 0 && totalCount > 0) return "No accessible models"
-  return placeholder
 }
 
 type ResolvedModelSelectorProps = ModelSelectorProps & {

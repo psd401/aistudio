@@ -134,6 +134,11 @@ export async function GET(req: NextRequest) {
         jobId,
         status: loaded.job.status,
       });
+      timer({ status: "success", jobStatus: loaded.job.status });
+      return new NextResponse(
+        JSON.stringify({ jobId: jobIdNum, status: loaded.job.status }),
+        { status: 200, headers },
+      );
     }
 
     let result: JobResult;

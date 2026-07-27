@@ -1,10 +1,10 @@
 /** @jest-environment node */
 
-import { beforeEach, describe, expect, it, jest } from "@jest/globals"
+import { beforeEach, describe, expect, it } from "@jest/globals"
 
 const mockCookieGet = jest.fn()
 const mockCookieDelete = jest.fn()
-const mockDecryptToken = jest.fn<(value: string) => Promise<string>>()
+const mockDecryptToken = jest.fn<Promise<string>, [string]>()
 const mockExecuteQuery = jest.fn()
 
 jest.mock("next/headers", () => ({

@@ -4,17 +4,13 @@ import {
   describe,
   expect,
   it,
-  jest,
 } from "@jest/globals"
-import type { Mock } from "jest-mock"
 
-const getFreshserviceMock: Mock<
-  (...args: unknown[]) => Promise<unknown>
-> = jest.fn()
-const getServerSessionMock: Mock<
-  (...args: unknown[]) => Promise<unknown>
-> = jest.fn()
-const fetchMock: Mock<typeof fetch> = jest.fn()
+const getFreshserviceMock =
+  jest.fn<Promise<unknown>, unknown[]>()
+const getServerSessionMock =
+  jest.fn<Promise<unknown>, unknown[]>()
+const fetchMock = jest.fn() as jest.MockedFunction<typeof fetch>
 
 jest.mock("@/lib/settings-manager", () => ({
   Settings: {
