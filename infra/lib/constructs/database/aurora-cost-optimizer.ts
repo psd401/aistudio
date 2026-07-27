@@ -108,60 +108,96 @@ export class AuroraCostOptimizer extends Construct {
     super(scope, id)
 
     const enableAutoPause =
-      props.enableAutoPause ?? (props.environment !== "prod")
+      props.enableAutoPause ?? props.environment !== "prod"
     const enableScheduledScaling =
-      props.enableScheduledScaling ?? (props.environment !== "dev")
+      props.enableScheduledScaling ?? props.environment !== "dev"
 
-    // Create Lambda function for pause/resume operations
-    const pauseResumeFunctionRole = new iam.Role(this, "PauseResumeFunctionRole", {
+    this.pauseResumeFunction = this.createPauseResumeFunction(props)
+    if (enableAutoPause) {
+      this.configureAutoPause(props)
+    }
+    if (enableScheduledScaling) {
+      this.scalingFunction = this.createScalingFunction(props)
+      this.configureScalingSchedules(props, this.scalingFunction)
+    }
+    this.createConfigurationOutputs(
+      props.environment,
+      enableAutoPause,
+      enableScheduledScaling
+    )
+  }
+
+  private createFunctionRole(
+    id: string,
+    policyId: string,
+    clusterArn: string,
+    includeCloudWatch: boolean
+  ): iam.Role {
+    const role = new iam.Role(this, id, {
       assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
       managedPolicies: [
         iam.ManagedPolicy.fromManagedPolicyArn(
           this,
-          "PauseResumeLambdaBasicExecPolicy",
+          policyId,
           "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
         ),
       ],
     })
-
-    // Scope RDS actions to specific cluster for least privilege
-    pauseResumeFunctionRole.addToPolicy(
+    role.addToPolicy(
       new iam.PolicyStatement({
-        actions: [
-          "rds:ModifyDBCluster",
-          "rds:DescribeDBClusters",
-        ],
-        resources: [props.cluster.clusterArn],
+        actions: ["rds:ModifyDBCluster", "rds:DescribeDBClusters"],
+        resources: [clusterArn],
       })
     )
+    if (includeCloudWatch) {
+      role.addToPolicy(
+        new iam.PolicyStatement({
+          actions: ["cloudwatch:GetMetricStatistics"],
+          resources: ["*"],
+          conditions: {
+            StringEquals: { "cloudwatch:namespace": "AWS/RDS" },
+          },
+        })
+      )
+    }
+    return role
+  }
 
-    // CloudWatch metrics require wildcard but we scope to RDS namespace
-    pauseResumeFunctionRole.addToPolicy(
-      new iam.PolicyStatement({
-        actions: ["cloudwatch:GetMetricStatistics"],
-        resources: ["*"], // Required for CloudWatch metrics API
-        conditions: {
-          StringEquals: {
-            "cloudwatch:namespace": "AWS/RDS"
-          }
-        }
-      })
-    )
-
-    // Create log group for pause/resume function
-    const pauseResumeLogGroup = new logs.LogGroup(this, "PauseResumeFunctionLogGroup", {
-      logGroupName: `/aws/lambda/aistudio-${props.environment}-aurora-pause-resume`,
+  private createFunctionLogGroup(
+    id: string,
+    name: string,
+    environment: AuroraCostOptimizerProps["environment"]
+  ): logs.LogGroup {
+    const logGroup = new logs.LogGroup(this, id, {
+      logGroupName: `/aws/lambda/aistudio-${environment}-${name}`,
       retention: logs.RetentionDays.ONE_WEEK,
-      removalPolicy: props.environment === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+      removalPolicy:
+        environment === "prod"
+          ? cdk.RemovalPolicy.RETAIN
+          : cdk.RemovalPolicy.DESTROY,
     })
+    cdk.Tags.of(logGroup).add("Environment", environment)
+    cdk.Tags.of(logGroup).add("CostCenter", "Database")
+    cdk.Tags.of(logGroup).add("Component", "AuroraCostOptimizer")
+    cdk.Tags.of(logGroup).add("ManagedBy", "CDK")
+    return logGroup
+  }
 
-    // Add tags for cost tracking and resource management
-    cdk.Tags.of(pauseResumeLogGroup).add("Environment", props.environment)
-    cdk.Tags.of(pauseResumeLogGroup).add("CostCenter", "Database")
-    cdk.Tags.of(pauseResumeLogGroup).add("Component", "AuroraCostOptimizer")
-    cdk.Tags.of(pauseResumeLogGroup).add("ManagedBy", "CDK")
-
-    this.pauseResumeFunction = new lambda.Function(this, "PauseResumeFunction", {
+  private createPauseResumeFunction(
+    props: AuroraCostOptimizerProps
+  ): lambda.Function {
+    const role = this.createFunctionRole(
+      "PauseResumeFunctionRole",
+      "PauseResumeLambdaBasicExecPolicy",
+      props.cluster.clusterArn,
+      true
+    )
+    const logGroup = this.createFunctionLogGroup(
+      "PauseResumeFunctionLogGroup",
+      "aurora-pause-resume",
+      props.environment
+    )
+    return new lambda.Function(this, "PauseResumeFunction", {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "pause_resume.handler",
       code: lambda.Code.fromAsset(
@@ -169,8 +205,8 @@ export class AuroraCostOptimizer extends Construct {
       ),
       timeout: cdk.Duration.minutes(2),
       memorySize: 256,
-      role: pauseResumeFunctionRole,
-      reservedConcurrentExecutions: 1, // Prevent concurrent executions and race conditions
+      role,
+      reservedConcurrentExecutions: 1,
       environment: {
         CLUSTER_IDENTIFIER: props.cluster.clusterIdentifier,
         ENVIRONMENT: props.environment,
@@ -178,167 +214,152 @@ export class AuroraCostOptimizer extends Construct {
           props.idleMinutesBeforePause ?? 30
         ).toString(),
       },
-      logGroup: pauseResumeLogGroup,
+      logGroup,
       description: `Aurora cost optimizer for ${props.environment} environment`,
     })
+  }
 
-    // Set up auto-pause checks if enabled
-    if (enableAutoPause) {
-      // Check every 15 minutes for idle status
-      const autoPauseRule = new events.Rule(this, "AutoPauseCheckSchedule", {
-        schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
-        description: `Check for idle Aurora cluster to auto-pause (${props.environment})`,
+  private configureAutoPause(props: AuroraCostOptimizerProps): void {
+    const autoPauseRule = new events.Rule(this, "AutoPauseCheckSchedule", {
+      schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
+      description: `Check for idle Aurora cluster to auto-pause (${props.environment})`,
+    })
+    autoPauseRule.addTarget(
+      new targets.LambdaFunction(this.pauseResumeFunction, {
+        event: events.RuleTargetInput.fromObject({
+          action: "auto",
+          reason: "Scheduled idle check",
+        }),
       })
-
-      autoPauseRule.addTarget(
-        new targets.LambdaFunction(this.pauseResumeFunction, {
-          event: events.RuleTargetInput.fromObject({
-            action: "auto",
-            reason: "Scheduled idle check",
-          }),
-        })
-      )
-
-      // Add CloudWatch alarm for unexpected pause failures
-      const pauseErrorMetric = this.pauseResumeFunction.metricErrors({
-        period: cdk.Duration.hours(1),
-      })
-
-      pauseErrorMetric.createAlarm(this, "PauseResumeErrorAlarm", {
+    )
+    this.pauseResumeFunction
+      .metricErrors({ period: cdk.Duration.hours(1) })
+      .createAlarm(this, "PauseResumeErrorAlarm", {
         threshold: 3,
         evaluationPeriods: 1,
         alarmDescription: `Aurora pause/resume function errors in ${props.environment}`,
         treatMissingData: cdk.aws_cloudwatch.TreatMissingData.NOT_BREACHING,
       })
+  }
+
+  private createScalingFunction(
+    props: AuroraCostOptimizerProps
+  ): lambda.Function {
+    const role = this.createFunctionRole(
+      "ScalingFunctionRole",
+      "ScalingLambdaBasicExecPolicy",
+      props.cluster.clusterArn,
+      false
+    )
+    const logGroup = this.createFunctionLogGroup(
+      "ScalingFunctionLogGroup",
+      "aurora-scaling",
+      props.environment
+    )
+    return new lambda.Function(this, "ScalingFunction", {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "predictive_scaling.handler",
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, "../../../lambdas/aurora-cost-optimizer")
+      ),
+      timeout: cdk.Duration.minutes(2),
+      memorySize: 256,
+      role,
+      reservedConcurrentExecutions: 1,
+      environment: {
+        CLUSTER_IDENTIFIER: props.cluster.clusterIdentifier,
+        ENVIRONMENT: props.environment,
+      },
+      logGroup,
+      description: `Aurora predictive scaling for ${props.environment} environment`,
+    })
+  }
+
+  private configureScalingSchedules(
+    props: AuroraCostOptimizerProps,
+    scalingFunction: lambda.Function
+  ): void {
+    const businessHours = props.businessHours ?? {}
+    const scaling = props.scaling ?? {}
+    this.createScalingRule({
+      id: "BusinessHoursScaleUp",
+      hour: businessHours.scaleUpHour ?? 7,
+      minute: "30",
+      weekDay: businessHours.daysOfWeek ?? "MON-FRI",
+      description: `Scale up Aurora for business hours (${props.environment})`,
+      scalingFunction,
+      minCapacity: scaling.businessHoursMin,
+      maxCapacity: scaling.businessHoursMax,
+      reason: "Business hours scale-up",
+    })
+    this.createScalingRule({
+      id: "AfterHoursScaleDown",
+      hour: businessHours.scaleDownHour ?? 20,
+      minute: "0",
+      weekDay: businessHours.daysOfWeek ?? "MON-FRI",
+      description: `Scale down Aurora after business hours (${props.environment})`,
+      scalingFunction,
+      minCapacity: scaling.offHoursMin ?? 0.5,
+      maxCapacity: scaling.offHoursMax,
+      reason: "After hours scale-down",
+    })
+    if (props.environment !== "dev") {
+      this.createScalingRule({
+        id: "WeekendMinimalScale",
+        hour: 0,
+        minute: "0",
+        weekDay: "SAT",
+        description: `Minimal weekend scaling for Aurora (${props.environment})`,
+        scalingFunction,
+        minCapacity: 0.5,
+        maxCapacity: scaling.offHoursMax ?? 1,
+        reason: "Weekend minimal capacity",
+      })
     }
+  }
 
-    // Set up scheduled scaling if enabled
-    if (enableScheduledScaling) {
-      const scalingFunctionRole = new iam.Role(this, "ScalingFunctionRole", {
-        assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
-        managedPolicies: [
-          iam.ManagedPolicy.fromManagedPolicyArn(
-            this,
-            "ScalingLambdaBasicExecPolicy",
-            "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-          ),
-        ],
-      })
-
-      // Scope RDS actions to specific cluster for least privilege
-      scalingFunctionRole.addToPolicy(
-        new iam.PolicyStatement({
-          actions: ["rds:ModifyDBCluster", "rds:DescribeDBClusters"],
-          resources: [props.cluster.clusterArn],
-        })
-      )
-
-      // Create log group for scaling function
-      const scalingLogGroup = new logs.LogGroup(this, "ScalingFunctionLogGroup", {
-        logGroupName: `/aws/lambda/aistudio-${props.environment}-aurora-scaling`,
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: props.environment === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
-      })
-
-      // Add tags for cost tracking and resource management
-      cdk.Tags.of(scalingLogGroup).add("Environment", props.environment)
-      cdk.Tags.of(scalingLogGroup).add("CostCenter", "Database")
-      cdk.Tags.of(scalingLogGroup).add("Component", "AuroraCostOptimizer")
-      cdk.Tags.of(scalingLogGroup).add("ManagedBy", "CDK")
-
-      this.scalingFunction = new lambda.Function(this, "ScalingFunction", {
-        runtime: lambda.Runtime.PYTHON_3_12,
-        handler: "predictive_scaling.handler",
-        code: lambda.Code.fromAsset(
-          path.join(__dirname, "../../../lambdas/aurora-cost-optimizer")
-        ),
-        timeout: cdk.Duration.minutes(2),
-        memorySize: 256,
-        role: scalingFunctionRole,
-        reservedConcurrentExecutions: 1, // Prevent concurrent executions and race conditions
-        environment: {
-          CLUSTER_IDENTIFIER: props.cluster.clusterIdentifier,
-          ENVIRONMENT: props.environment,
-        },
-        logGroup: scalingLogGroup,
-        description: `Aurora predictive scaling for ${props.environment} environment`,
-      })
-
-      const businessHours = props.businessHours ?? {}
-      const scaling = props.scaling ?? {}
-
-      // Scale up for business hours
-      const scaleUpRule = new events.Rule(this, "BusinessHoursScaleUp", {
-        schedule: events.Schedule.cron({
-          hour: (businessHours.scaleUpHour ?? 7).toString(),
-          minute: "30",
-          weekDay: businessHours.daysOfWeek ?? "MON-FRI",
+  private createScalingRule(params: {
+    id: string
+    hour: number
+    minute: string
+    weekDay: string
+    description: string
+    scalingFunction: lambda.Function
+    minCapacity?: number
+    maxCapacity?: number
+    reason: string
+  }): void {
+    const rule = new events.Rule(this, params.id, {
+      schedule: events.Schedule.cron({
+        hour: params.hour.toString(),
+        minute: params.minute,
+        weekDay: params.weekDay,
+      }),
+      description: params.description,
+    })
+    rule.addTarget(
+      new targets.LambdaFunction(params.scalingFunction, {
+        event: events.RuleTargetInput.fromObject({
+          minCapacity: params.minCapacity,
+          maxCapacity: params.maxCapacity,
+          reason: params.reason,
         }),
-        description: `Scale up Aurora for business hours (${props.environment})`,
       })
+    )
+  }
 
-      scaleUpRule.addTarget(
-        new targets.LambdaFunction(this.scalingFunction, {
-          event: events.RuleTargetInput.fromObject({
-            minCapacity: scaling.businessHoursMin,
-            maxCapacity: scaling.businessHoursMax,
-            reason: "Business hours scale-up",
-          }),
-        })
-      )
-
-      // Scale down after business hours
-      const scaleDownRule = new events.Rule(this, "AfterHoursScaleDown", {
-        schedule: events.Schedule.cron({
-          hour: (businessHours.scaleDownHour ?? 20).toString(),
-          minute: "0",
-          weekDay: businessHours.daysOfWeek ?? "MON-FRI",
-        }),
-        description: `Scale down Aurora after business hours (${props.environment})`,
-      })
-
-      scaleDownRule.addTarget(
-        new targets.LambdaFunction(this.scalingFunction, {
-          event: events.RuleTargetInput.fromObject({
-            minCapacity: scaling.offHoursMin ?? 0.5,
-            maxCapacity: scaling.offHoursMax,
-            reason: "After hours scale-down",
-          }),
-        })
-      )
-
-      // Weekend minimal scaling
-      if (props.environment !== "dev") {
-        const weekendScaleRule = new events.Rule(this, "WeekendMinimalScale", {
-          schedule: events.Schedule.cron({
-            hour: "0",
-            minute: "0",
-            weekDay: "SAT",
-          }),
-          description: `Minimal weekend scaling for Aurora (${props.environment})`,
-        })
-
-        weekendScaleRule.addTarget(
-          new targets.LambdaFunction(this.scalingFunction, {
-            event: events.RuleTargetInput.fromObject({
-              minCapacity: 0.5,
-              maxCapacity: scaling.offHoursMax ?? 1,
-              reason: "Weekend minimal capacity",
-            }),
-          })
-        )
-      }
-    }
-
-    // Output configuration summary
+  private createConfigurationOutputs(
+    environment: AuroraCostOptimizerProps["environment"],
+    enableAutoPause: boolean,
+    enableScheduledScaling: boolean
+  ): void {
     new cdk.CfnOutput(this, "AutoPauseEnabled", {
       value: enableAutoPause.toString(),
-      description: `Auto-pause enabled for ${props.environment}`,
+      description: `Auto-pause enabled for ${environment}`,
     })
-
     new cdk.CfnOutput(this, "ScheduledScalingEnabled", {
       value: enableScheduledScaling.toString(),
-      description: `Scheduled scaling enabled for ${props.environment}`,
+      description: `Scheduled scaling enabled for ${environment}`,
     })
   }
 }
