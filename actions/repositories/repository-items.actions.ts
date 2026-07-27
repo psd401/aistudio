@@ -304,6 +304,47 @@ function validatePresignedUrlInput(input: AddDocumentWithPresignedUrlInput): str
   return null
 }
 
+type DocumentObjectMetadata = Awaited<
+  ReturnType<typeof getDocumentObjectMetadata>
+>
+
+type PresignedObjectValidation =
+  | { isValid: true; metadata: DocumentObjectMetadata }
+  | { isValid: false; message: string }
+
+async function validatePresignedObject(
+  input: AddDocumentWithPresignedUrlInput,
+  log: ReturnType<typeof createLogger>
+): Promise<PresignedObjectValidation> {
+  const metadata = await getDocumentObjectMetadata(input.s3Key)
+  if (metadata.contentLength !== input.metadata.size) {
+    log.warn("Presigned upload size mismatch", {
+      repositoryId: input.repository_id,
+      expectedSize: input.metadata.size,
+      actualSize: metadata.contentLength,
+    })
+    return {
+      isValid: false,
+      message: "Uploaded file size did not match the request",
+    }
+  }
+  if (
+    metadata.contentType &&
+    metadata.contentType !== input.metadata.contentType
+  ) {
+    log.warn("Presigned upload content type mismatch", {
+      repositoryId: input.repository_id,
+      expectedContentType: input.metadata.contentType,
+      actualContentType: metadata.contentType,
+    })
+    return {
+      isValid: false,
+      message: "Uploaded file type did not match the request",
+    }
+  }
+  return { isValid: true, metadata }
+}
+
 // Validate addDocumentItem input; returns a user-facing error message or null when valid
 function validateAddDocumentInput(input: AddDocumentInput): string | null {
   if (!input.name || input.name.trim().length === 0) {
@@ -596,26 +637,11 @@ export async function addDocumentWithPresignedUrl(
     // actually landed in S3 before persisting or queueing it. This closes the
     // gap where a caller could request a small allowed upload, PUT different
     // bytes, then register misleading metadata.
-    const objectMetadata = await getDocumentObjectMetadata(input.s3Key)
-    if (objectMetadata.contentLength !== input.metadata.size) {
-      log.warn("Presigned upload size mismatch", {
-        repositoryId: input.repository_id,
-        expectedSize: input.metadata.size,
-        actualSize: objectMetadata.contentLength,
-      })
-      return { isSuccess: false, message: "Uploaded file size did not match the request" }
+    const objectValidation = await validatePresignedObject(input, log)
+    if (!objectValidation.isValid) {
+      return { isSuccess: false, message: objectValidation.message }
     }
-    if (
-      objectMetadata.contentType &&
-      objectMetadata.contentType !== input.metadata.contentType
-    ) {
-      log.warn("Presigned upload content type mismatch", {
-        repositoryId: input.repository_id,
-        expectedContentType: input.metadata.contentType,
-        actualContentType: objectMetadata.contentType,
-      })
-      return { isSuccess: false, message: "Uploaded file type did not match the request" }
-    }
+    const objectMetadata = objectValidation.metadata
 
     // Create repository item with S3 key reference via Drizzle
     log.info("Creating repository item in database", {

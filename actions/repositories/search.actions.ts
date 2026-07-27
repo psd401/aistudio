@@ -21,6 +21,7 @@ import { assertRepositoryReadAccess } from "@/lib/repositories/repository-access
 import {
   getContentPlatformConfig,
   isCanonicalRepositoryUploadActive,
+  type ContentPlatformConfig,
 } from "@/lib/repositories/content-platform/config"
 import { recordRepositoryRetrievalShadow } from "@/lib/repositories/content-platform/retrieval-shadow"
 
@@ -32,16 +33,35 @@ export interface SearchRepositoryParams {
   vectorWeight?: number
 }
 
+interface SearchDispatchOptions {
+  searchType: 'vector' | 'keyword' | 'hybrid'
+  query: string
+  repositoryId: number
+  limit: number
+  vectorWeight: number
+  canonicalOnly: boolean
+}
+
+type RetrievalDiagnostics = Awaited<
+  ReturnType<typeof retrieveRepositoryContent>
+>["diagnostics"]
+
+interface ExecuteSearchOptions extends SearchDispatchOptions {
+  userCognitoSub: string
+  contentConfig: ContentPlatformConfig
+  log: ReturnType<typeof createLogger>
+}
+
 // Dispatch to the requested search mode with pre-clamped bounds (not exported:
 // a "use server" file may only export async server actions).
-async function dispatchSearch(
-  searchType: 'vector' | 'keyword' | 'hybrid',
-  query: string,
-  repositoryId: number,
-  limit: number,
-  vectorWeight: number,
-  canonicalOnly: boolean
-): Promise<SearchResult[]> {
+async function dispatchSearch({
+  searchType,
+  query,
+  repositoryId,
+  limit,
+  vectorWeight,
+  canonicalOnly,
+}: SearchDispatchOptions): Promise<SearchResult[]> {
   const commonOptions = { repositoryId, limit, canonicalOnly }
   switch (searchType) {
     case 'vector':
@@ -51,6 +71,85 @@ async function dispatchSearch(
     case 'hybrid':
     default:
       return hybridSearch(query, { ...commonOptions, vectorWeight })
+  }
+}
+
+async function executeSearch(
+  options: ExecuteSearchOptions
+): Promise<{
+  results: SearchResult[]
+  diagnostics?: RetrievalDiagnostics
+}> {
+  if (options.canonicalOnly) {
+    const retrieval = await retrieveRepositoryContent({
+      query: options.query,
+      repositoryIds: [options.repositoryId],
+      userCognitoSub: options.userCognitoSub,
+      mode: options.searchType,
+      limit: options.limit,
+      denseWeight: options.vectorWeight,
+      includeLegacyCompatibility: false,
+    })
+    return {
+      results: retrieval.results.map(toLegacySearchResult),
+      diagnostics: retrieval.diagnostics,
+    }
+  }
+
+  const legacyStartedAt = Date.now()
+  const results = await dispatchSearch(options)
+  await recordRetrievalShadowIfEnabled(
+    options,
+    results,
+    Date.now() - legacyStartedAt
+  )
+  return { results }
+}
+
+async function recordRetrievalShadowIfEnabled(
+  options: ExecuteSearchOptions,
+  legacyResults: SearchResult[],
+  legacyDurationMs: number
+): Promise<void> {
+  const { contentConfig } = options
+  if (
+    !contentConfig.enabled ||
+    !contentConfig.readV2Enabled ||
+    !contentConfig.retrievalShadowEnabled
+  ) {
+    return
+  }
+
+  const canonicalStartedAt = Date.now()
+  try {
+    const canonicalShadow = await retrieveRepositoryContent({
+      query: options.query,
+      repositoryIds: [options.repositoryId],
+      userCognitoSub: options.userCognitoSub,
+      mode: options.searchType,
+      limit: options.limit,
+      denseWeight: options.vectorWeight,
+      includeLegacyCompatibility: false,
+    })
+    await recordRepositoryRetrievalShadow({
+      repositoryId: options.repositoryId,
+      product: "repository_manager",
+      searchMode: options.searchType,
+      legacyItemIds: legacyResults.map((result) => result.itemId),
+      canonicalItemIds: canonicalShadow.results.map((result) => result.itemId),
+      legacyDurationMs,
+      canonicalDurationMs: Date.now() - canonicalStartedAt,
+    })
+  } catch (shadowError) {
+    options.log.warn(
+      "Canonical retrieval shadow failed without affecting legacy search",
+      {
+        error:
+          shadowError instanceof Error
+            ? shadowError.message
+            : String(shadowError),
+      }
+    )
   }
 }
 
@@ -143,67 +242,18 @@ export async function searchRepository(
     const contentConfig = await getContentPlatformConfig()
     const canonicalOnly =
       isCanonicalRepositoryUploadActive(contentConfig)
-    const retrieval = canonicalOnly
-      ? await retrieveRepositoryContent({
-          query,
-          repositoryIds: [repositoryId],
-          userCognitoSub: session.sub,
-          mode: searchType,
-          limit: safeLimit,
-          denseWeight: safeVectorWeight,
-          includeLegacyCompatibility: false,
-        })
-      : null
-    const legacyStartedAt = Date.now()
-    const results = retrieval
-      ? retrieval.results.map(toLegacySearchResult)
-      : await dispatchSearch(
-          searchType,
-          query,
-          repositoryId,
-          safeLimit,
-          safeVectorWeight,
-          canonicalOnly
-        )
-    const legacyDurationMs = Date.now() - legacyStartedAt
-
-    if (
-      contentConfig.enabled &&
-      contentConfig.readV2Enabled &&
-      contentConfig.retrievalShadowEnabled &&
-      !canonicalOnly
-    ) {
-      const canonicalStartedAt = Date.now()
-      try {
-        const canonicalShadow = await retrieveRepositoryContent({
-          query,
-          repositoryIds: [repositoryId],
-          userCognitoSub: session.sub,
-          mode: searchType,
-          limit: safeLimit,
-          denseWeight: safeVectorWeight,
-          includeLegacyCompatibility: false,
-        })
-        await recordRepositoryRetrievalShadow({
-          repositoryId,
-          product: "repository_manager",
-          searchMode: searchType,
-          legacyItemIds: results.map((result) => result.itemId),
-          canonicalItemIds: canonicalShadow.results.map(
-            (result) => result.itemId
-          ),
-          legacyDurationMs,
-          canonicalDurationMs: Date.now() - canonicalStartedAt,
-        })
-      } catch (shadowError) {
-        log.warn("Canonical retrieval shadow failed without affecting legacy search", {
-          error:
-            shadowError instanceof Error
-              ? shadowError.message
-              : String(shadowError),
-        })
-      }
-    }
+    const search = await executeSearch({
+      searchType,
+      query,
+      repositoryId,
+      limit: safeLimit,
+      vectorWeight: safeVectorWeight,
+      canonicalOnly,
+      userCognitoSub: session.sub,
+      contentConfig,
+      log,
+    })
+    const results = search.results
 
     log.info("Search completed successfully", {
       repositoryId,
@@ -211,7 +261,7 @@ export async function searchRepository(
       resultCount: results.length,
       limit,
       canonicalOnly,
-      retrievalDiagnostics: retrieval?.diagnostics,
+      retrievalDiagnostics: search.diagnostics,
     })
     
     timer({ 
