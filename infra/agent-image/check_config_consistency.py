@@ -113,6 +113,23 @@ def _match_candidates(model_id: str) -> Tuple[str, ...]:
     return (lowered, re.sub(r"[\s_.:]+", "-", lowered))
 
 
+def _is_claude_candidate(candidates: Tuple[str, ...]) -> bool:
+    """Mirror supportsBedrockPromptCaching()'s FIRST gate.
+
+    Before any version token is considered, the plugin requires a candidate to
+    contain "claude"; a non-Claude model returns false outright. Omitting this
+    made the mirror fail OPEN — `amazon.nova-4-pro` matches the `-4-` token, so
+    the gate would have waved through a model the plugin never caches, shipping
+    full-rate input billing exactly like the bug this gate exists to prevent
+    (Codex P2 on PR #1388).
+
+    The plugin's `AWS_BEDROCK_FORCE_CACHE=1` escape hatch is deliberately NOT
+    honored here: it lives inside the non-Claude branch and we do not set it in
+    this image, so treating it as an override would re-open the same hole.
+    """
+    return any("claude" in candidate for candidate in candidates)
+
+
 def _version_key(version: str) -> tuple:
     """Sort key for the plugin's YYYY.M.P[-beta.N] versions.
 
@@ -175,6 +192,131 @@ def parse_pinned_plugin_version(dockerfile_path: str) -> Tuple[Optional[str], Li
     return version, violations
 
 
+def resolve_ghcr_digest(tag: str) -> Tuple[Optional[str], Optional[str]]:
+    """Ask ghcr what digest a tag actually resolves to. Returns (digest, error)."""
+    import urllib.error
+    import urllib.request
+
+    repo = "openclaw/openclaw"
+    try:
+        token_url = (
+            f"https://ghcr.io/token?scope=repository:{repo}:pull&service=ghcr.io"
+        )
+        with urllib.request.urlopen(token_url, timeout=15) as resp:
+            token = json.loads(resp.read().decode("utf-8")).get("token")
+        if not token:
+            return None, "ghcr returned no pull token"
+        request = urllib.request.Request(
+            f"https://ghcr.io/v2/{repo}/manifests/{tag}", method="HEAD",
+        )
+        request.add_header("Authorization", f"Bearer {token}")
+        request.add_header(
+            "Accept",
+            "application/vnd.oci.image.index.v1+json,"
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+        )
+        with urllib.request.urlopen(request, timeout=15) as resp:
+            digest = resp.headers.get("Docker-Content-Digest")
+        if not digest:
+            return None, f"ghcr returned no digest for tag {tag}"
+        return digest, None
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return None, f"ghcr lookup for {tag} failed: {str(exc)[:200]}"
+
+
+def resolve_plugin_peer_requirement(version: str) -> Tuple[Optional[str], Optional[str]]:
+    """Read the plugin's PUBLISHED peerDependencies.openclaw. Returns (spec, error).
+
+    Uses the npm registry HTTP API directly so the gate needs no npm binary.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = (
+        "https://registry.npmjs.org/"
+        f"@openclaw%2Famazon-bedrock-provider/{version}"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return None, f"npm lookup for plugin {version} failed: {str(exc)[:200]}"
+    spec = (payload.get("peerDependencies") or {}).get("openclaw")
+    if not isinstance(spec, str) or not spec:
+        return None, f"plugin {version} declares no peerDependencies.openclaw"
+    return spec, None
+
+
+def check_upstream_pins(dockerfile_path: str) -> List[str]:
+    """Network-backed half of the pin gate — the half local files cannot prove.
+
+    Two things the offline checks structurally CANNOT establish (both Codex P2s
+    on PR #1388):
+
+      1. That the recorded tag resolves to the pinned digest. Offline we only
+         compare two hand-maintained copies of the same digest, so a bump that
+         updates both copies but leaves the tag stale still passes — and the
+         host-version comparison then runs against a version that is not being
+         built. Only the registry knows the real tag -> digest mapping.
+
+      2. That `host >= plugin` is the actual contract. That rule was INFERRED
+         from this plugin's peer requirement tracking its own version across
+         five releases. A pattern is not a contract: if a later release's
+         `peerDependencies.openclaw` diverges, the inferred rule could admit an
+         incompatible pair or block a compatible rollback. The published
+         peerDependencies is the authority.
+
+    Opt-in (`--verify-upstream`) because the offline gate must stay runnable
+    without network. build-and-push.sh passes it — that is where it matters,
+    since it is the step that actually produces the image.
+    """
+    violations: List[str] = []
+    try:
+        with open(dockerfile_path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+    except OSError as exc:
+        return [f"cannot read Dockerfile {dockerfile_path}: {exc}"]
+
+    tag_match = _HOST_TAG_RE.search(source)
+    from_match = _HOST_FROM_RE.search(source)
+    plugin_version, _ = parse_pinned_plugin_version(dockerfile_path)
+    if not tag_match or not from_match:
+        return ["cannot verify upstream pins — Dockerfile tag/FROM lines unreadable"]
+
+    host_tag, from_digest = tag_match.group(1), from_match.group(1)
+
+    actual_digest, error = resolve_ghcr_digest(host_tag)
+    if error:
+        violations.append(error)
+    elif actual_digest != from_digest:
+        violations.append(
+            f"tag {host_tag} resolves to {actual_digest[:19]}… but the Dockerfile "
+            f"pins {from_digest[:19]}… — the recorded tag is NOT the image being "
+            f"built, so the host/plugin version check is comparing the wrong "
+            f"version"
+        )
+
+    if plugin_version:
+        spec, error = resolve_plugin_peer_requirement(plugin_version)
+        if error:
+            violations.append(error)
+        else:
+            minimum = re.match(r"^>=\s*([0-9A-Za-z.\-]+)$", spec.strip())
+            if not minimum:
+                violations.append(
+                    f"plugin {plugin_version} declares peerDependencies.openclaw="
+                    f"{spec!r}, which this gate cannot interpret — check it by hand "
+                    f"against host {host_tag}"
+                )
+            elif _version_key(host_tag) < _version_key(minimum.group(1)):
+                violations.append(
+                    f"OpenClaw host {host_tag} does not satisfy the PUBLISHED "
+                    f"requirement of plugin {plugin_version} "
+                    f"(peerDependencies.openclaw={spec!r})"
+                )
+    return violations
+
+
 def check_host_plugin_compatibility(dockerfile_path: str) -> List[str]:
     """Assert the OpenClaw base image satisfies the plugin's host requirement.
 
@@ -190,6 +332,12 @@ def check_host_plugin_compatibility(dockerfile_path: str) -> List[str]:
     2026.7.1 -> >=2026.7.1), so `host >= plugin` is the invariant enforced. The
     prerelease-below-release rule in _version_key is what makes the beta case
     fail rather than silently pass.
+
+    That rule is an INFERRED pattern, not the published contract — if a future
+    release's peerDependencies stops tracking its own version, this could admit
+    an incompatible pair or block a compatible rollback. check_upstream_pins
+    (--verify-upstream) reads the real peerDependencies and is what the build
+    actually gates on; this offline check is the fast local approximation.
     """
     violations: List[str] = []
     try:
@@ -217,9 +365,11 @@ def check_host_plugin_compatibility(dockerfile_path: str) -> List[str]:
 
     host_tag, recorded_digest = tag_match.group(1), tag_match.group(2)
     if from_match.group(1) != recorded_digest:
-        # Without this the tag comment is decoration: someone could bump the
-        # FROM digest and leave a stale tag, and the version check below would
-        # then be comparing against a version that is not actually deployed.
+        # NOTE the limit of this check: it compares two hand-maintained copies
+        # of the same digest, so it catches "updated one, forgot the other" but
+        # CANNOT prove the tag really resolves to that digest. A bump that
+        # updates both copies and leaves the tag stale passes here. Only
+        # check_upstream_pins (--verify-upstream) establishes the real mapping.
         violations.append(
             f"Dockerfile FROM digest {from_match.group(1)[:19]}… does not match "
             f"the digest recorded for tag {host_tag} "
@@ -260,6 +410,15 @@ def check_prompt_caching_reachable(
             if not isinstance(model_id, str) or not model_id:
                 continue
             candidates = _match_candidates(model_id)
+            if not _is_claude_candidate(candidates):
+                violations.append(
+                    f"{provider_name}/{model_id}: cacheRetention={retention!r} is "
+                    f"requested but supportsBedrockPromptCaching() rejects every "
+                    f"non-Claude model outright, so this would run UNCACHED at "
+                    f"full input rate. Drop cacheRetention or use a model the "
+                    f"plugin caches"
+                )
+                continue
             # Lowest minimum among ALL matching tokens: the plugin caches as
             # soon as any one of its rules fires, so requiring the strictest
             # match would over-report.
@@ -362,7 +521,10 @@ def check_apikey_hydration(config: dict, wrapper_path: str) -> List[str]:
 
 
 def run_checks(
-    config_path: str, wrapper_path: str, dockerfile_path: str,
+    config_path: str,
+    wrapper_path: str,
+    dockerfile_path: str,
+    verify_upstream: bool = False,
 ) -> Tuple[List[str], dict]:
     config = _load(config_path)
     violations = (
@@ -371,6 +533,8 @@ def run_checks(
         + check_prompt_caching_reachable(config, dockerfile_path)
         + check_host_plugin_compatibility(dockerfile_path)
     )
+    if verify_upstream:
+        violations += check_upstream_pins(dockerfile_path)
     # parse_pinned_plugin_version runs in both Dockerfile checks, so the same
     # pin complaint can arrive twice. De-duplicate, order-preserving.
     return list(dict.fromkeys(violations)), config
@@ -382,10 +546,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--config", default=os.path.join(here, "openclaw.json"))
     parser.add_argument("--wrapper", default=os.path.join(here, "agentcore_wrapper.py"))
     parser.add_argument("--dockerfile", default=os.path.join(here, "Dockerfile"))
+    parser.add_argument(
+        "--verify-upstream",
+        action="store_true",
+        help=(
+            "Additionally verify the pins against ghcr and the npm registry: "
+            "that the recorded tag really resolves to the pinned digest, and "
+            "that the host satisfies the plugin's PUBLISHED "
+            "peerDependencies.openclaw. Requires network; the offline checks "
+            "cannot establish either fact."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
-        violations, _ = run_checks(args.config, args.wrapper, args.dockerfile)
+        violations, _ = run_checks(
+            args.config, args.wrapper, args.dockerfile, args.verify_upstream,
+        )
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

@@ -95,10 +95,17 @@ else
   fi
   echo ""
 
-  echo "2. Config self-consistency (contextWindow + apiKey hydration)..."
+  # --verify-upstream resolves the base-image tag against ghcr and reads the
+  # plugin's published peerDependencies.openclaw from the npm registry. The
+  # offline checks compare hand-maintained copies of those facts and cannot
+  # prove either one; this is the build, it has network, so it gates on the
+  # real values. A host/plugin mismatch is invisible otherwise — `npm pack`
+  # never enforces peerDependencies.
+  echo "2. Config self-consistency (contextWindow + apiKey hydration + pins)..."
   if ! "${PYTHON}" "${SCRIPT_DIR}/check_config_consistency.py" \
         --config "${SCRIPT_DIR}/openclaw.json" \
-        --wrapper "${SCRIPT_DIR}/agentcore_wrapper.py"; then
+        --wrapper "${SCRIPT_DIR}/agentcore_wrapper.py" \
+        --verify-upstream; then
     echo "ERROR: config self-consistency gate FAILED (see above)." >&2
     exit 1
   fi

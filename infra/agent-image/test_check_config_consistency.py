@@ -185,6 +185,29 @@ class PromptCachingReachabilityTests(unittest.TestCase):
             ("us.anthropic.claude-sonnet-4-5", "us-anthropic-claude-sonnet-4-5"),
         )
 
+    def test_non_claude_model_with_a_matching_token_is_still_flagged(self):
+        # Codex P2 on PR #1388: supportsBedrockPromptCaching() rejects every
+        # non-Claude candidate BEFORE any version token is considered. Without
+        # mirroring that first gate, `amazon.nova-4-pro` matches `-4-` and the
+        # gate waves through a model the plugin never caches — failing OPEN,
+        # the exact class of bug this check exists to prevent.
+        for model_id in ("amazon.nova-4-pro", "meta.llama-4-70b"):
+            cfg = {
+                "agents": {"defaults": {"params": {"cacheRetention": "long"}}},
+                "models": {"providers": {"amazon-bedrock": {
+                    "models": [{"id": model_id}]}}},
+            }
+            v = ccc.check_prompt_caching_reachable(
+                cfg, self._dockerfile("2026.7.1"))
+            self.assertEqual(len(v), 1, f"{model_id} must be flagged")
+            self.assertIn("non-Claude", v[0])
+
+    def test_claude_gate_mirrors_the_plugin(self):
+        self.assertTrue(
+            ccc._is_claude_candidate(ccc._match_candidates("us.anthropic.claude-sonnet-5")))
+        self.assertFalse(
+            ccc._is_claude_candidate(ccc._match_candidates("amazon.nova-4-pro")))
+
     def test_unknown_model_is_flagged_not_silently_passed(self):
         # A new model nobody checked against the allowlist must fail loudly —
         # silently assuming caching works is the whole bug.
