@@ -34,6 +34,9 @@ const DEFAULT_TIMEZONE = "America/Los_Angeles";
 const DEFAULT_MAX_SCHEDULES_PER_OWNER = 50;
 const GOOGLE_IDENTITY_RE = /^users\/\d+$/;
 const DM_SPACE_RE = /^spaces\/[\w-]{1,256}$/;
+type ScheduleTransactItems = NonNullable<
+  ConstructorParameters<typeof TransactWriteCommand>[0]["TransactItems"]
+>;
 
 export interface AgentScheduleRecord {
   userId: string;
@@ -248,36 +251,125 @@ function parseRecord(
 ): AgentScheduleRecord {
   if (!isObject(value)) throw new AgentScheduleNotFoundError();
   const normalizedOwner = normalizeOwnerEmail(ownerEmail);
+  if (!hasValidScheduleOwner(value, normalizedOwner, scheduleId)) {
+    throw new AgentScheduleConflictError(
+      "Schedule record failed owner or integrity validation",
+    );
+  }
+  if (!hasValidScheduleDefinition(value) || !hasValidScheduleMetadata(value)) {
+    throw new AgentScheduleConflictError(
+      "Schedule record failed owner or integrity validation",
+    );
+  }
+  return value as unknown as AgentScheduleRecord;
+}
+
+function hasValidScheduleOwner(
+  value: Record<string, unknown>,
+  normalizedOwner: string,
+  scheduleId?: string,
+): boolean {
   const recordOwner =
     typeof value.ownerEmail === "string"
       ? normalizeOwnerEmail(value.ownerEmail)
       : typeof value.userId === "string"
         ? normalizeOwnerEmail(value.userId)
         : "";
-  if (
-    recordOwner !== normalizedOwner ||
-    value.userId !== normalizedOwner ||
-    typeof value.scheduleId !== "string" ||
-    (scheduleId && value.scheduleId !== scheduleId) ||
-    !Number.isInteger(value.version) ||
-    (value.version as number) < 1 ||
-    typeof value.name !== "string" ||
-    typeof value.prompt !== "string" ||
-    typeof value.cronExpression !== "string" ||
-    typeof value.schedulerExpression !== "string" ||
-    typeof value.timezone !== "string" ||
-    typeof value.enabled !== "boolean" ||
-    typeof value.dmSpaceName !== "string" ||
-    !DM_SPACE_RE.test(value.dmSpaceName) ||
-    typeof value.workspacePrefix !== "string" ||
-    typeof value.createdAt !== "string" ||
-    typeof value.updatedAt !== "string"
-  ) {
-    throw new AgentScheduleConflictError(
-      "Schedule record failed owner or integrity validation",
-    );
+  return (
+    recordOwner === normalizedOwner &&
+    value.userId === normalizedOwner &&
+    typeof value.scheduleId === "string" &&
+    (!scheduleId || value.scheduleId === scheduleId)
+  );
+}
+
+function hasValidScheduleDefinition(value: Record<string, unknown>): boolean {
+  return (
+    Number.isInteger(value.version) &&
+    Number(value.version) >= 1 &&
+    typeof value.name === "string" &&
+    typeof value.prompt === "string" &&
+    typeof value.cronExpression === "string" &&
+    typeof value.schedulerExpression === "string" &&
+    typeof value.timezone === "string" &&
+    typeof value.enabled === "boolean"
+  );
+}
+
+function hasValidScheduleMetadata(value: Record<string, unknown>): boolean {
+  return (
+    typeof value.dmSpaceName === "string" &&
+    DM_SPACE_RE.test(value.dmSpaceName) &&
+    typeof value.workspacePrefix === "string" &&
+    typeof value.createdAt === "string" &&
+    typeof value.updatedAt === "string"
+  );
+}
+
+function ownerMetadataSnapshot(
+  items: Record<string, unknown>[],
+  ownerEmail: string,
+): {
+  records: AgentScheduleRecord[];
+  quota?: Record<string, unknown>;
+  guards: Map<string, Record<string, unknown>>;
+} {
+  const records = items
+    .filter(
+      (item) =>
+        typeof item.scheduleId === "string" &&
+        !item.scheduleId.startsWith("__"),
+    )
+    .map((item) => parseRecord(item, ownerEmail));
+  const quota = items.find((item) => item.scheduleId === "__quota__");
+  const guards = new Map(
+    items
+      .filter(
+        (item) =>
+          typeof item.scheduleId === "string" &&
+          item.scheduleId.startsWith("__name__"),
+      )
+      .map((item) => [item.scheduleId as string, item]),
+  );
+  return { records, quota, guards };
+}
+
+function quotaConditionExpression(
+  alreadyReconciled: boolean,
+  previousCount: number | null,
+): string {
+  if (!alreadyReconciled) {
+    return "attribute_not_exists(reconciled) OR reconciled <> :true";
   }
-  return value as unknown as AgentScheduleRecord;
+  return previousCount === null
+    ? "reconciled = :true AND attribute_not_exists(activeCount)"
+    : "reconciled = :true AND activeCount = :previous";
+}
+
+function planStaleGuardDeletes(
+  schedulesTable: string,
+  ownerEmail: string,
+  guards: Map<string, Record<string, unknown>>,
+  plannedGuards: Map<string, string>,
+): ScheduleTransactItems {
+  const items: ScheduleTransactItems = [];
+  for (const [guardId, guard] of guards) {
+    if (plannedGuards.has(guardId)) continue;
+    const previousTarget = guard.targetScheduleId;
+    items.push({
+      Delete: {
+        TableName: schedulesTable,
+        Key: { userId: ownerEmail, scheduleId: guardId },
+        ...(typeof previousTarget === "string"
+          ? {
+              ConditionExpression: "targetScheduleId = :previous",
+              ExpressionAttributeValues: { ":previous": previousTarget },
+            }
+          : {}),
+      },
+    });
+  }
+  return items;
 }
 
 function parseDisabled(value: unknown): boolean {
@@ -427,111 +519,11 @@ export class AgentScheduleService {
   private async ensureOwnerMetadata(ownerEmail: string): Promise<void> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const items = await this.ownerItems(ownerEmail);
-      const records = items
-        .filter(
-          (item) =>
-            typeof item.scheduleId === "string" &&
-            !item.scheduleId.startsWith("__"),
-        )
-        .map((item) => parseRecord(item, ownerEmail));
-      const quota = items.find((item) => item.scheduleId === "__quota__");
-      const guards = new Map(
-        items
-          .filter(
-            (item) =>
-              typeof item.scheduleId === "string" &&
-              item.scheduleId.startsWith("__name__"),
-          )
-          .map((item) => [item.scheduleId as string, item]),
-      );
-      const transactItems: NonNullable<
-        ConstructorParameters<typeof TransactWriteCommand>[0]["TransactItems"]
-      > = [];
-      const quotaActiveCount =
-        typeof quota?.activeCount === "number" &&
-        Number.isSafeInteger(quota.activeCount)
-          ? quota.activeCount
-          : null;
-      if (quota?.reconciled !== true || quotaActiveCount !== records.length) {
-        const alreadyReconciled = quota?.reconciled === true;
-        transactItems.push({
-          Put: {
-            TableName: this.config.schedulesTable,
-            Item: {
-              ...this.ownerQuotaKey(ownerEmail),
-              activeCount: records.length,
-              reconciled: true,
-            },
-            ConditionExpression: alreadyReconciled
-              ? quotaActiveCount === null
-                ? "reconciled = :true AND attribute_not_exists(activeCount)"
-                : "reconciled = :true AND activeCount = :previous"
-              : "attribute_not_exists(reconciled) OR reconciled <> :true",
-            ExpressionAttributeValues:
-              alreadyReconciled && quotaActiveCount !== null
-                ? { ":true": true, ":previous": quotaActiveCount }
-                : { ":true": true },
-          },
-        });
-      }
-      const plannedGuards = new Map<string, string>();
-      for (const record of records) {
-        const key = this.ownerNameKey(ownerEmail, record.name);
-        const existingTarget = plannedGuards.get(key.scheduleId);
-        if (existingTarget && existingTarget !== record.scheduleId) {
-          throw new AgentScheduleConflictError(
-            "Legacy schedules contain duplicate names",
-          );
-        }
-        plannedGuards.set(key.scheduleId, record.scheduleId);
-        const existingGuard = guards.get(key.scheduleId);
-        if (!existingGuard) {
-          transactItems.push({
-            Put: {
-              TableName: this.config.schedulesTable,
-              Item: { ...key, targetScheduleId: record.scheduleId },
-              ConditionExpression:
-                "attribute_not_exists(userId) AND attribute_not_exists(scheduleId)",
-            },
-          });
-        } else if (existingGuard.targetScheduleId !== record.scheduleId) {
-          const previousTarget = existingGuard.targetScheduleId;
-          transactItems.push({
-            Put: {
-              TableName: this.config.schedulesTable,
-              Item: { ...key, targetScheduleId: record.scheduleId },
-              ConditionExpression:
-                typeof previousTarget === "string"
-                  ? "targetScheduleId = :previous"
-                  : "attribute_not_exists(targetScheduleId)",
-              ...(typeof previousTarget === "string"
-                ? {
-                    ExpressionAttributeValues: {
-                      ":previous": previousTarget,
-                    },
-                  }
-                : {}),
-            },
-          });
-        }
-      }
-      for (const [guardId, guard] of guards) {
-        if (plannedGuards.has(guardId)) continue;
-        transactItems.push({
-          Delete: {
-            TableName: this.config.schedulesTable,
-            Key: { userId: ownerEmail, scheduleId: guardId },
-            ...(typeof guard.targetScheduleId === "string"
-              ? {
-                  ConditionExpression: "targetScheduleId = :previous",
-                  ExpressionAttributeValues: {
-                    ":previous": guard.targetScheduleId,
-                  },
-                }
-              : {}),
-          },
-        });
-      }
+      const { records, quota, guards } = ownerMetadataSnapshot(items, ownerEmail);
+      const transactItems = [
+        ...this.planQuotaReconciliation(ownerEmail, records.length, quota),
+        ...this.planNameGuardReconciliation(ownerEmail, records, guards),
+      ];
       if (transactItems.length === 0) return;
       try {
         await this.dynamo.send(
@@ -556,6 +548,95 @@ export class AgentScheduleService {
         throw error;
       }
     }
+  }
+
+  private planQuotaReconciliation(
+    ownerEmail: string,
+    activeCount: number,
+    quota?: Record<string, unknown>,
+  ): ScheduleTransactItems {
+    const previousCount =
+      typeof quota?.activeCount === "number" &&
+      Number.isSafeInteger(quota.activeCount)
+        ? quota.activeCount
+        : null;
+    if (quota?.reconciled === true && previousCount === activeCount) return [];
+    const alreadyReconciled = quota?.reconciled === true;
+    return [{
+      Put: {
+        TableName: this.config.schedulesTable,
+        Item: {
+          ...this.ownerQuotaKey(ownerEmail),
+          activeCount,
+          reconciled: true,
+        },
+        ConditionExpression: quotaConditionExpression(alreadyReconciled, previousCount),
+        ExpressionAttributeValues:
+          alreadyReconciled && previousCount !== null
+            ? { ":true": true, ":previous": previousCount }
+            : { ":true": true },
+      },
+    }];
+  }
+
+  private planNameGuardReconciliation(
+    ownerEmail: string,
+    records: AgentScheduleRecord[],
+    guards: Map<string, Record<string, unknown>>,
+  ): ScheduleTransactItems {
+    const transactItems: ScheduleTransactItems = [];
+    const plannedGuards = new Map<string, string>();
+    for (const record of records) {
+      const key = this.ownerNameKey(ownerEmail, record.name);
+      const existingTarget = plannedGuards.get(key.scheduleId);
+      if (existingTarget && existingTarget !== record.scheduleId) {
+        throw new AgentScheduleConflictError("Legacy schedules contain duplicate names");
+      }
+      plannedGuards.set(key.scheduleId, record.scheduleId);
+      const item = this.planNameGuardPut(key, record, guards.get(key.scheduleId));
+      if (item) transactItems.push(item);
+    }
+    transactItems.push(
+      ...planStaleGuardDeletes(
+        this.config.schedulesTable,
+        ownerEmail,
+        guards,
+        plannedGuards,
+      ),
+    );
+    return transactItems;
+  }
+
+  private planNameGuardPut(
+    key: { userId: string; scheduleId: string },
+    record: AgentScheduleRecord,
+    existingGuard?: Record<string, unknown>,
+  ): ScheduleTransactItems[number] | null {
+    if (!existingGuard) {
+      return {
+        Put: {
+          TableName: this.config.schedulesTable,
+          Item: { ...key, targetScheduleId: record.scheduleId },
+          ConditionExpression:
+            "attribute_not_exists(userId) AND attribute_not_exists(scheduleId)",
+        },
+      };
+    }
+    if (existingGuard.targetScheduleId === record.scheduleId) return null;
+    const previousTarget = existingGuard.targetScheduleId;
+    return {
+      Put: {
+        TableName: this.config.schedulesTable,
+        Item: { ...key, targetScheduleId: record.scheduleId },
+        ConditionExpression:
+          typeof previousTarget === "string"
+            ? "targetScheduleId = :previous"
+            : "attribute_not_exists(targetScheduleId)",
+        ...(typeof previousTarget === "string"
+          ? { ExpressionAttributeValues: { ":previous": previousTarget } }
+          : {}),
+      },
+    };
   }
 
   async list(owner: string): Promise<PublicAgentSchedule[]> {
