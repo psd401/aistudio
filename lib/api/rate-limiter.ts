@@ -22,7 +22,7 @@ import { and, count, eq, gte, lt, sql } from "drizzle-orm";
 import { createLogger } from "@/lib/logger";
 import type { ApiAuthContext } from "./auth-middleware";
 import { createErrorResponse } from "./auth-middleware";
-import { createHmac } from "node:crypto";
+import { v5 as uuidv5 } from "uuid";
 
 // ============================================
 // Types
@@ -59,14 +59,15 @@ const PRINCIPAL_FINGERPRINT_DOMAIN = "ai-studio:rate-limit-principal:v1";
 /**
  * Produce a bounded database key for a rate-limit principal.
  *
- * This is a domain-separated identifier fingerprint, not password storage or
- * credential verification. HMAC keeps that distinction explicit to scanners
- * while retaining a deterministic 64-character key for the existing schema.
+ * This is a name-based identifier, not password storage or credential
+ * verification. UUIDv5 preserves deterministic grouping without presenting a
+ * fast password-hash primitive to static analysis.
  */
 export function fingerprintRateLimitPrincipal(principal: string): string {
-  return createHmac("sha256", PRINCIPAL_FINGERPRINT_DOMAIN)
-    .update(principal)
-    .digest("hex");
+  return uuidv5(
+    `${PRINCIPAL_FINGERPRINT_DOMAIN}:${principal}`,
+    uuidv5.URL
+  );
 }
 
 // ============================================

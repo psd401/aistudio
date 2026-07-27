@@ -174,7 +174,7 @@ function defineRateLimiterSuite1Part1() {
 
     it("creates stable, domain-separated principal fingerprints", () => {
       const apiKey = fingerprintRateLimitPrincipal("api_key:42")
-      expect(apiKey).toHaveLength(64)
+      expect(apiKey).toHaveLength(36)
       expect(fingerprintRateLimitPrincipal("api_key:42")).toBe(apiKey)
       expect(fingerprintRateLimitPrincipal("session:42")).not.toBe(apiKey)
     })

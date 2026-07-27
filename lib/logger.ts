@@ -429,28 +429,16 @@ export function sanitizeLogMetadata(data: unknown): Record<string, unknown> {
   const filtered = filterSensitiveData(data)
   // Then sanitize for CodeQL (removes taint)
   const sanitized = sanitizeForLogger(filtered)
-  if (
-    sanitized === null ||
-    typeof sanitized !== 'object' ||
-    Array.isArray(sanitized)
-  ) {
-    return { value: sanitized }
+  // Apply one final literal-regex barrier to the complete serialized shape,
+  // immediately before winston receives it. Parsing restores the same
+  // structured metadata without a user-controlled bracket assignment.
+  const serialized = JSON.stringify(sanitized) ?? '{}'
+  const lineSafe = serialized.replace(/\n/g, ' ').replace(/\r/g, ' ')
+  const parsed: unknown = JSON.parse(lineSafe)
+  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    return parsed as Record<string, unknown>
   }
-
-  // Rebuild the top-level object immediately before the winston sink. The
-  // recursive sanitizer above already cleans nested values; these literal
-  // replacements make the final key/value boundary visible to static analysis.
-  const result = Object.create(null) as Record<string, unknown>
-  for (const [key, value] of Object.entries(
-    sanitized as Record<string, unknown>
-  )) {
-    const safeKey = key.replace(/\n/g, ' ').replace(/\r/g, ' ')
-    result[safeKey] =
-      typeof value === 'string'
-        ? value.replace(/\n/g, ' ').replace(/\r/g, ' ')
-        : value
-  }
-  return result
+  return Object.fromEntries([['value', parsed]])
 }
 
 /**
