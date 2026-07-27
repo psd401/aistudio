@@ -9,6 +9,7 @@ import {
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 import {
   acquireResourceAdmission,
+  isCapacityDenial,
   finishResourceAdmission,
   releaseResourceAdmission,
 } from "@/lib/resource-admission"
@@ -140,6 +141,10 @@ export async function POST(
   // We do not yet know what normal consumption looks like for this workload.
   // Until we do, over-limit is a LOG LINE, not a 429 — the numbers are here
   // to be read, and limits can be set from evidence later.
+  if (!callAdmission.allowed && !isCapacityDenial(callAdmission)) {
+    // `duplicate` = replayed idempotency key, not a budget. Still refused.
+    return NextResponse.json({ error: "Duplicate model request" }, { status: 409 })
+  }
   if (!callAdmission.allowed) {
     log.warn(
       "Model call rate over threshold (observe-only — request allowed)",
@@ -233,6 +238,14 @@ export async function POST(
     units: reservedCostMicrocents,
     limits: MODEL_PROXY_COST_LIMITS,
   })
+  if (
+    (!tokenAdmission.allowed && !isCapacityDenial(tokenAdmission)) ||
+    (!costAdmission.allowed && !isCapacityDenial(costAdmission))
+  ) {
+    if (callAdmission.allowed) await releaseResourceAdmission(callAdmission.leaseId)
+    if (tokenAdmission.allowed) await releaseResourceAdmission(tokenAdmission.leaseId)
+    return NextResponse.json({ error: "Duplicate model request" }, { status: 409 })
+  }
   if (!tokenAdmission.allowed || !costAdmission.allowed) {
     // OBSERVE-ONLY — see the note above. Log the numbers; serve the request.
     log.warn(

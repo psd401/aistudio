@@ -66,6 +66,25 @@ export type ResourceAdmission =
         | "duplicate"
     }
 
+/**
+ * Is this denial a CAPACITY threshold rather than a correctness guard?
+ *
+ * The capacity reasons (concurrency and hourly budgets) are advisory: their
+ * limits were set in #1353 without data on real usage, and per Hagel
+ * (2026-07-27) they must never block a user — callers measure and log them
+ * instead.
+ *
+ * `duplicate` is NOT one of them. It means the same idempotency key was
+ * already admitted, i.e. a REPLAY. Letting that through would double-apply
+ * whatever the caller does next — a second upload reservation, a second
+ * charge — so it stays a hard failure everywhere.
+ */
+export function isCapacityDenial(
+  admission: ResourceAdmission,
+): boolean {
+  return !admission.allowed && admission.reason !== "duplicate"
+}
+
 function positiveSafeInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(`${label} must be a positive safe integer`)

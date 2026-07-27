@@ -28,6 +28,11 @@ jest.mock("@/lib/agent-workspace/secrets-manager", () => ({
   getSecretString: getSecretStringMock,
 }))
 jest.mock("@/lib/resource-admission", () => ({
+  // Real implementation — the capacity-vs-replay split is behaviour under test:
+  // `duplicate` must stay a hard refusal while capacity thresholds are
+  // observe-only.
+  isCapacityDenial: (admission: { allowed: boolean; reason?: string }) =>
+    !admission.allowed && admission.reason !== "duplicate",
   acquireResourceAdmission: (...args: unknown[]) =>
     acquireAdmissionMock(...args),
   finishResourceAdmission: (...args: unknown[]) =>
@@ -342,6 +347,26 @@ describe("Agent model credential broker", () => {
 
     expect(response.status).not.toBe(429)
     expect(response.status).toBe(200)
+  })
+
+  it("still REFUSES a duplicate — that is a replay guard, not a budget", async () => {
+    // The observe-only change must not disable idempotency. `duplicate` means
+    // the same key was already admitted; serving it would double-apply the
+    // request.
+    acquireAdmissionMock.mockReset()
+    acquireAdmissionMock.mockResolvedValue({ allowed: false, reason: "duplicate" })
+
+    const response = await POST(
+      request({
+        model: "us.anthropic.claude-sonnet-5",
+        max_tokens: 1_024,
+        messages: [{ role: "user", content: "hello" }],
+      }) as never,
+      { params: Promise.resolve({ path: ["anthropic", "v1", "messages"] }) },
+    )
+
+    expect(response.status).toBe(409)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it("retains conservative reservations after an ambiguous dispatch failure", async () => {

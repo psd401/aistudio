@@ -46,6 +46,11 @@ jest.mock("@/lib/resource-admission", () => ({
   acquireResourceAdmission: (...args: unknown[]) => acquireMock(...args),
   finishResourceAdmission: (...args: unknown[]) => finishMock(...args),
   releaseResourceAdmission: (...args: unknown[]) => releaseMock(...args),
+  // Real implementation, not a stub: the capacity-vs-replay distinction is the
+  // behaviour under test here. `duplicate` must stay a hard failure while
+  // capacity thresholds are observe-only.
+  isCapacityDenial: (admission: { allowed: boolean; reason?: string }) =>
+    !admission.allowed && admission.reason !== "duplicate",
 }))
 
 let completeWorkspaceUpload:
