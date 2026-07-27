@@ -14,8 +14,15 @@ import {
   truncateToRepositoryTokens,
 } from "@/lib/repositories/content-platform/token-segmentation";
 import { parseRepositoryEmbeddingDescriptor } from "@/lib/repositories/embedding-configuration";
-import { applyRerankScores, diversifyBySource, reciprocalRankFusion } from "./ranking";
-import { BedrockRepositoryReranker, type RepositoryReranker } from "./bedrock-reranker";
+import {
+  applyRerankScores,
+  diversifyBySource,
+  reciprocalRankFusion,
+} from "./ranking";
+import {
+  BedrockRepositoryReranker,
+  type RepositoryReranker,
+} from "./bedrock-reranker";
 import { resolveRetrievalCitation } from "./citations";
 import { generateVisualQueryEmbedding } from "./visual-embedding";
 import type {
@@ -65,9 +72,30 @@ function parseRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function candidateSegmentLevel(
+  value: unknown,
+): RetrievalCandidate["segmentLevel"] {
+  return value === "document" || value === "section" ? value : "chunk";
+}
+
+function candidateModality(value: unknown): RetrievalModality {
+  return ALL_MODALITIES.includes(value as RetrievalModality)
+    ? (value as RetrievalModality)
+    : "text";
+}
+
+function candidateSignalScore(
+  signal: CandidateSignal,
+  score: number,
+): Pick<RetrievalCandidate, "denseScore" | "lexicalScore" | "visualScore"> {
+  if (signal === "dense") return { denseScore: score };
+  if (signal === "lexical") return { lexicalScore: score };
+  return { visualScore: score };
+}
+
 function mapCandidate(
   row: Record<string, unknown>,
-  signal: CandidateSignal
+  signal: CandidateSignal,
 ): RetrievalCandidate {
   const rawScore = Number(row.score) || 0;
   return {
@@ -86,20 +114,16 @@ function mapCandidate(
     chunkIndex: Number(row.chunk_index),
     parentChunkIndex:
       row.parent_chunk_index == null ? null : Number(row.parent_chunk_index),
-    segmentLevel:
-      row.segment_level === "document" || row.segment_level === "section"
-        ? row.segment_level
-        : "chunk",
-    modality: ALL_MODALITIES.includes(row.modality as RetrievalModality)
-      ? (row.modality as RetrievalModality)
-      : "text",
+    segmentLevel: candidateSegmentLevel(row.segment_level),
+    modality: candidateModality(row.modality),
     sourceLocator: parseRecord(row.source_locator) as RepositorySourceLocator,
-    tokens: Math.max(1, Number(row.tokens) || countRepositoryTokens(String(row.content ?? ""))),
+    tokens: Math.max(
+      1,
+      Number(row.tokens) || countRepositoryTokens(String(row.content ?? "")),
+    ),
     metadata: parseRecord(row.metadata),
     fusedScore: 0,
-    ...(signal === "dense" ? { denseScore: rawScore } : {}),
-    ...(signal === "lexical" ? { lexicalScore: rawScore } : {}),
-    ...(signal === "visual" ? { visualScore: rawScore } : {}),
+    ...candidateSignalScore(signal, rawScore),
   };
 }
 
@@ -109,15 +133,19 @@ function positiveInteger(value: unknown): number | undefined {
 }
 
 function legacySourceLocator(
-  row: Record<string, unknown>
+  row: Record<string, unknown>,
 ): RepositorySourceLocator {
-  const sourceLocator = parseRecord(row.source_locator) as RepositorySourceLocator;
+  const sourceLocator = parseRecord(
+    row.source_locator,
+  ) as RepositorySourceLocator;
   if (Object.keys(sourceLocator).length > 0) return sourceLocator;
 
   const metadata = parseRecord(row.metadata);
   const page = positiveInteger(metadata.page ?? metadata.pageNumber);
   if (page) return { page };
-  const paragraph = positiveInteger(metadata.paragraph ?? metadata.paragraphNumber);
+  const paragraph = positiveInteger(
+    metadata.paragraph ?? metadata.paragraphNumber,
+  );
   if (paragraph) return { paragraph };
   const slide = positiveInteger(metadata.slide ?? metadata.slideNumber);
   if (slide) return { slide };
@@ -150,7 +178,7 @@ function mapLegacyCandidate(row: Record<string, unknown>): RetrievalCandidate {
     sourceLocator: legacySourceLocator(row),
     tokens: Math.max(
       1,
-      Number(row.tokens) || countRepositoryTokens(String(row.content ?? ""))
+      Number(row.tokens) || countRepositoryTokens(String(row.content ?? "")),
     ),
     metadata: {
       ...parseRecord(row.metadata),
@@ -161,7 +189,9 @@ function mapLegacyCandidate(row: Record<string, unknown>): RetrievalCandidate {
   };
 }
 
-async function resolvePrincipal(cognitoSub: string): Promise<RetrievalPrincipal | null> {
+async function resolvePrincipal(
+  cognitoSub: string,
+): Promise<RetrievalPrincipal | null> {
   const user = await getUserByCognitoSub(cognitoSub);
   if (!user) return null;
   const roles = await executeQuery(
@@ -169,8 +199,13 @@ async function resolvePrincipal(cognitoSub: string): Promise<RetrievalPrincipal 
       db
         .select({ roleId: userRoles.roleId })
         .from(userRoles)
-        .where(and(eq(userRoles.userId, user.id), sql`${userRoles.roleId} IS NOT NULL`)),
-    "retrievalV2.principalRoles"
+        .where(
+          and(
+            eq(userRoles.userId, user.id),
+            sql`${userRoles.roleId} IS NOT NULL`,
+          ),
+        ),
+    "retrievalV2.principalRoles",
   );
   return {
     userId: user.id,
@@ -179,7 +214,7 @@ async function resolvePrincipal(cognitoSub: string): Promise<RetrievalPrincipal 
 }
 
 async function resolveSnapshots(
-  repositoryIds: number[]
+  repositoryIds: number[],
 ): Promise<RetrievalGenerationSnapshot[]> {
   if (repositoryIds.length === 0) return [];
   const rows = await executeQuery(
@@ -198,7 +233,7 @@ async function resolveSnapshots(
           ON generation.id = repository.active_index_generation_id
         WHERE repository.id IN (${sql.join(
           repositoryIds.map((repositoryId) => sql`${repositoryId}`),
-          sql`, `
+          sql`, `,
         )})
           AND repository.lifecycle_status = 'active'
           AND (
@@ -208,12 +243,12 @@ async function resolveSnapshots(
           AND (repository.metadata->>'systemManaged') IS DISTINCT FROM 'true'
           AND generation.status = 'active'
       `),
-    "retrievalV2.resolveGenerationSnapshots"
+    "retrievalV2.resolveGenerationSnapshots",
   );
   return (rows as unknown as Array<Record<string, unknown>>).map((row) => {
     const embedding = parseRepositoryEmbeddingDescriptor(
       typeof row.embedding_model === "string" ? row.embedding_model : null,
-      Number(row.embedding_dimensions)
+      Number(row.embedding_dimensions),
     );
     const visual = parseRepositoryEmbeddingDescriptor(
       typeof row.visual_embedding_model === "string"
@@ -221,7 +256,7 @@ async function resolveSnapshots(
         : null,
       row.visual_embedding_dimensions == null
         ? null
-        : Number(row.visual_embedding_dimensions)
+        : Number(row.visual_embedding_dimensions),
     );
     return {
       repositoryId: Number(row.repository_id),
@@ -239,10 +274,8 @@ function accessFilter(principal: RetrievalPrincipal) {
   const rolePredicate =
     principal.roleIds.length > 0
       ? sql`role_value IN (${sql.join(
-          principal.roleIds.map(
-            (roleId) => sql`to_jsonb(${roleId}::integer)`
-          ),
-          sql`, `
+          principal.roleIds.map((roleId) => sql`to_jsonb(${roleId}::integer)`),
+          sql`, `,
         )})`
       : sql`false`;
   return sql`
@@ -357,16 +390,14 @@ function candidateColumns() {
   `;
 }
 
-async function denseCandidates(
-  options: {
-    snapshot: RetrievalGenerationSnapshot;
-    principal: RetrievalPrincipal;
-    embedding: number[];
-    modalities: RetrievalModality[];
-    limit: number;
-    threshold: number;
-  }
-): Promise<RetrievalCandidate[]> {
+async function denseCandidates(options: {
+  snapshot: RetrievalGenerationSnapshot;
+  principal: RetrievalPrincipal;
+  embedding: number[];
+  modalities: RetrievalModality[];
+  limit: number;
+  threshold: number;
+}): Promise<RetrievalCandidate[]> {
   const { snapshot, principal, embedding, modalities, limit, threshold } =
     options;
   const vector = `[${embedding.join(",")}]`;
@@ -389,7 +420,7 @@ async function denseCandidates(
           AND chunk.embedding IS NOT NULL
           AND chunk.modality IN (${sql.join(
             modalities.map((modality) => sql`${modality}`),
-            sql`, `
+            sql`, `,
           )})
           AND item.lifecycle_status = 'active'
           AND version.storage_status = 'available'
@@ -401,10 +432,10 @@ async function denseCandidates(
         ORDER BY score DESC, chunk.id
         LIMIT ${limit}
       `),
-    "retrievalV2.denseCandidates"
+    "retrievalV2.denseCandidates",
   );
   return (rows as unknown as Array<Record<string, unknown>>).map((row) =>
-    mapCandidate(row, "dense")
+    mapCandidate(row, "dense"),
   );
 }
 
@@ -413,7 +444,7 @@ async function lexicalCandidates(
   principal: RetrievalPrincipal,
   query: string,
   modalities: RetrievalModality[],
-  limit: number
+  limit: number,
 ): Promise<RetrievalCandidate[]> {
   const rows = await executeQuery(
     (db) =>
@@ -437,7 +468,7 @@ async function lexicalCandidates(
           )
           AND chunk.modality IN (${sql.join(
             modalities.map((modality) => sql`${modality}`),
-            sql`, `
+            sql`, `,
           )})
           AND item.lifecycle_status = 'active'
           AND version.storage_status = 'available'
@@ -449,10 +480,10 @@ async function lexicalCandidates(
         ORDER BY score DESC, chunk.id
         LIMIT ${limit}
       `),
-    "retrievalV2.lexicalCandidates"
+    "retrievalV2.lexicalCandidates",
   );
   return (rows as unknown as Array<Record<string, unknown>>).map((row) =>
-    mapCandidate(row, "lexical")
+    mapCandidate(row, "lexical"),
   );
 }
 
@@ -467,7 +498,7 @@ async function legacyCompatibilityCandidates(
   principal: RetrievalPrincipal,
   query: string,
   modalities: RetrievalModality[],
-  limit: number
+  limit: number,
 ): Promise<RetrievalCandidate[]> {
   if (repositoryIds.length === 0) return [];
   const rows = await executeQuery(
@@ -496,13 +527,13 @@ async function legacyCompatibilityCandidates(
         JOIN knowledge_repositories repository ON repository.id = item.repository_id
         WHERE repository.id IN (${sql.join(
           repositoryIds.map((repositoryId) => sql`${repositoryId}`),
-          sql`, `
+          sql`, `,
         )})
           AND chunk.item_version_id IS NULL
           AND chunk.index_generation_id IS NULL
           AND chunk.modality IN (${sql.join(
             modalities.map((modality) => sql`${modality}`),
-            sql`, `
+            sql`, `,
           )})
           AND item.lifecycle_status = 'active'
           AND item.processing_status = 'completed'
@@ -525,10 +556,10 @@ async function legacyCompatibilityCandidates(
         ORDER BY score DESC, chunk.id
         LIMIT ${limit}
       `),
-    "retrievalV2.legacyCompatibilityCandidates"
+    "retrievalV2.legacyCompatibilityCandidates",
   );
   return (rows as unknown as Array<Record<string, unknown>>).map(
-    mapLegacyCandidate
+    mapLegacyCandidate,
   );
 }
 
@@ -537,7 +568,7 @@ async function visualCandidates(
   principal: RetrievalPrincipal,
   embedding: number[],
   limit: number,
-  threshold: number
+  threshold: number,
 ): Promise<RetrievalCandidate[]> {
   const vector = `[${embedding.join(",")}]`;
   const rows = await executeQuery(
@@ -568,10 +599,10 @@ async function visualCandidates(
         ORDER BY score DESC, chunk.id
         LIMIT ${limit}
       `),
-    "retrievalV2.visualCandidates"
+    "retrievalV2.visualCandidates",
   );
   return (rows as unknown as Array<Record<string, unknown>>).map((row) =>
-    mapCandidate(row, "visual")
+    mapCandidate(row, "visual"),
   );
 }
 
@@ -584,11 +615,11 @@ async function visualCandidates(
  */
 async function revalidateCandidatesForRerank(
   candidates: RetrievalCandidate[],
-  principal: RetrievalPrincipal
+  principal: RetrievalPrincipal,
 ): Promise<RetrievalCandidate[]> {
   if (candidates.length === 0) return [];
   const chunkIds = uniquePositiveIds(
-    candidates.map((candidate) => candidate.chunkId)
+    candidates.map((candidate) => candidate.chunkId),
   );
   if (chunkIds.length === 0) return [];
 
@@ -604,7 +635,7 @@ async function revalidateCandidatesForRerank(
           ON version.id = chunk.item_version_id
         WHERE chunk.id IN (${sql.join(
           chunkIds.map((chunkId) => sql`${chunkId}`),
-          sql`, `
+          sql`, `,
         )})
           AND item.lifecycle_status = 'active'
           AND repository.lifecycle_status = 'active'
@@ -639,23 +670,23 @@ async function revalidateCandidatesForRerank(
             )
           )
       `),
-    "retrievalV2.revalidateCandidatesForRerank"
+    "retrievalV2.revalidateCandidatesForRerank",
   );
   const allowedChunkIds = new Set(
     (rows as unknown as Array<Record<string, unknown>>).flatMap((row) => {
       const chunkId = positiveInteger(row.chunk_id);
       return chunkId == null ? [] : [chunkId];
-    })
+    }),
   );
   return candidates.filter((candidate) =>
-    allowedChunkIds.has(candidate.chunkId)
+    allowedChunkIds.has(candidate.chunkId),
   );
 }
 
 async function expandCandidate(
   candidate: RetrievalCandidate,
   principal: RetrievalPrincipal,
-  neighborCount: number
+  neighborCount: number,
 ): Promise<RetrievalContextSegment[]> {
   if (candidate.versionNumber === 0) {
     const rows = await executeQuery(
@@ -702,26 +733,28 @@ async function expandCandidate(
             )
           LIMIT 1
         `),
-      "retrievalV2.expandLegacyContext"
+      "retrievalV2.expandLegacyContext",
     );
-    return (rows as unknown as Array<Record<string, unknown>>).flatMap((row) => {
-      const rechecked = mapLegacyCandidate(row);
-      try {
-        return [
-          {
-            chunkId: rechecked.chunkId,
-            chunkIndex: rechecked.chunkIndex,
-            content: rechecked.content,
-            contextPrefix: rechecked.contextPrefix,
-            modality: rechecked.modality,
-            tokens: rechecked.tokens,
-            citation: resolveRetrievalCitation(rechecked),
-          },
-        ];
-      } catch {
-        return [];
-      }
-    });
+    return (rows as unknown as Array<Record<string, unknown>>).flatMap(
+      (row) => {
+        const rechecked = mapLegacyCandidate(row);
+        try {
+          return [
+            {
+              chunkId: rechecked.chunkId,
+              chunkIndex: rechecked.chunkIndex,
+              content: rechecked.content,
+              contextPrefix: rechecked.contextPrefix,
+              modality: rechecked.modality,
+              tokens: rechecked.tokens,
+              citation: resolveRetrievalCitation(rechecked),
+            },
+          ];
+        } catch {
+          return [];
+        }
+      },
+    );
   }
   const lower = Math.max(0, candidate.chunkIndex - neighborCount);
   const upper = candidate.chunkIndex + neighborCount;
@@ -754,33 +787,35 @@ async function expandCandidate(
           AND ${currentSegmentAccessFilter(principal)}
         ORDER BY chunk.chunk_index
       `),
-    "retrievalV2.expandContext"
+    "retrievalV2.expandContext",
   );
-  const expanded = (rows as unknown as Array<Record<string, unknown>>).flatMap((row) => {
-    const contextCandidate = mapCandidate(row, "lexical");
-    try {
-      return [
-        {
-          chunkId: contextCandidate.chunkId,
-          chunkIndex: contextCandidate.chunkIndex,
-          content: contextCandidate.content,
-          contextPrefix: contextCandidate.contextPrefix,
-          modality: contextCandidate.modality,
-          tokens: contextCandidate.tokens,
-          citation: resolveRetrievalCitation(contextCandidate),
-        },
-      ];
-    } catch {
-      return [];
-    }
-  });
+  const expanded = (rows as unknown as Array<Record<string, unknown>>).flatMap(
+    (row) => {
+      const contextCandidate = mapCandidate(row, "lexical");
+      try {
+        return [
+          {
+            chunkId: contextCandidate.chunkId,
+            chunkIndex: contextCandidate.chunkIndex,
+            content: contextCandidate.content,
+            contextPrefix: contextCandidate.contextPrefix,
+            modality: contextCandidate.modality,
+            tokens: contextCandidate.tokens,
+            citation: resolveRetrievalCitation(contextCandidate),
+          },
+        ];
+      } catch {
+        return [];
+      }
+    },
+  );
 
   // Only a row returned by the final ACL/lifecycle query may become model
   // context. Reconstructing the primary from the pre-check candidate would
   // disclose stale content when access is revoked or the repository expires
   // between candidate discovery and context expansion.
   const primary = expanded.find(
-    (segment) => segment.chunkId === candidate.chunkId
+    (segment) => segment.chunkId === candidate.chunkId,
   );
   if (!primary) return [];
 
@@ -802,7 +837,7 @@ async function expandCandidate(
 function fitContextBudget(
   candidates: RetrievalCandidate[],
   contexts: RetrievalContextSegment[][],
-  tokenBudget: number
+  tokenBudget: number,
 ): RetrievalResult[] {
   const results: RetrievalResult[] = [];
   let remaining = tokenBudget;
@@ -812,7 +847,7 @@ function fitContextBudget(
     const fitted: RetrievalContextSegment[] = [];
     for (const segment of recheckedContext) {
       const segmentTokens = countRepositoryTokens(
-        `${segment.contextPrefix}\n${segment.content}`
+        `${segment.contextPrefix}\n${segment.content}`,
       );
       if (segmentTokens <= remaining) {
         fitted.push({ ...segment, tokens: segmentTokens });
@@ -824,7 +859,7 @@ function fitContextBudget(
         const markerTokens = countRepositoryTokens(`\n${marker}`);
         const content = truncateToRepositoryTokens(
           `${segment.contextPrefix}\n${segment.content}`,
-          Math.max(1, remaining - markerTokens)
+          Math.max(1, remaining - markerTokens),
         );
         const boundedContent = `${content}\n${marker}`;
         fitted.push({
@@ -860,13 +895,13 @@ function fitContextBudget(
 
 function uniquePositiveIds(values: number[]): number[] {
   return [...new Set(values)].filter(
-    (value) => Number.isSafeInteger(value) && value > 0
+    (value) => Number.isSafeInteger(value) && value > 0,
   );
 }
 
 export async function retrieveRepositoryContent(
   request: RepositoryRetrievalRequest,
-  dependencies: RetrievalDependencies = {}
+  dependencies: RetrievalDependencies = {},
 ): Promise<RetrievalResponse> {
   const startedAt = Date.now();
   const log = createLogger({ module: "repository-retrieval-v2" });
@@ -879,7 +914,7 @@ export async function retrieveRepositoryContent(
   const denseWeight = Math.min(Math.max(0, request.denseWeight ?? 0.6), 1);
   const modalities = request.modalities?.length
     ? [...new Set(request.modalities)].filter((value) =>
-        ALL_MODALITIES.includes(value)
+        ALL_MODALITIES.includes(value),
       )
     : ALL_MODALITIES;
   if (modalities.length === 0) {
@@ -888,7 +923,7 @@ export async function retrieveRepositoryContent(
   const config = await getContentPlatformConfig();
   const authorized = await getAccessibleRepositoriesByCognitoSub(
     repositoryIds,
-    request.userCognitoSub
+    request.userCognitoSub,
   );
   const authorizedIds = authorized
     .filter((repository) => repository.isAccessible)
@@ -924,14 +959,15 @@ export async function retrieveRepositoryContent(
   if (mode !== "keyword") {
     const groups = Map.groupBy(
       snapshots.filter((snapshot) => snapshot.embeddingModel),
-      (snapshot) => `${snapshot.embeddingModel}:${snapshot.embeddingDimensions}`
+      (snapshot) =>
+        `${snapshot.embeddingModel}:${snapshot.embeddingDimensions}`,
     );
     for (const group of groups.values()) {
       const first = group[0];
       if (!first) continue;
       const descriptor = parseRepositoryEmbeddingDescriptor(
         first.embeddingModel,
-        first.embeddingDimensions
+        first.embeddingDimensions,
       );
       if (!descriptor) continue;
       try {
@@ -941,18 +977,20 @@ export async function retrieveRepositoryContent(
           dimensions: descriptor.dimensions,
         });
         dense.push(
-          ...(await Promise.all(
-            group.map((snapshot) =>
-              denseCandidates({
-                snapshot,
-                principal,
-                embedding: vector,
-                modalities,
-                limit: candidateLimit,
-                threshold,
-              })
+          ...(
+            await Promise.all(
+              group.map((snapshot) =>
+                denseCandidates({
+                  snapshot,
+                  principal,
+                  embedding: vector,
+                  modalities,
+                  limit: candidateLimit,
+                  threshold,
+                }),
+              ),
             )
-          )).flat()
+          ).flat(),
         );
       } catch (error) {
         log.warn("Dense retrieval unavailable for an embedding generation", {
@@ -974,9 +1012,9 @@ export async function retrieveRepositoryContent(
                 principal,
                 query,
                 modalities,
-                candidateLimit
-              )
-            )
+                candidateLimit,
+              ),
+            ),
           )
         ).flat();
   const legacyCompatibility =
@@ -987,7 +1025,7 @@ export async function retrieveRepositoryContent(
           principal,
           query,
           modalities,
-          candidateLimit
+          candidateLimit,
         );
   lexical.push(...legacyCompatibility);
 
@@ -996,14 +1034,14 @@ export async function retrieveRepositoryContent(
     const groups = Map.groupBy(
       snapshots.filter((snapshot) => snapshot.visualEmbeddingModel),
       (snapshot) =>
-        `${snapshot.visualEmbeddingModel}:${snapshot.visualEmbeddingDimensions}`
+        `${snapshot.visualEmbeddingModel}:${snapshot.visualEmbeddingDimensions}`,
     );
     for (const group of groups.values()) {
       const first = group[0];
       const descriptor = first
         ? parseRepositoryEmbeddingDescriptor(
             first.visualEmbeddingModel,
-            first.visualEmbeddingDimensions
+            first.visualEmbeddingDimensions,
           )
         : null;
       if (!first || !descriptor) continue;
@@ -1011,20 +1049,22 @@ export async function retrieveRepositoryContent(
         const vector = await visualEmbedding(
           query,
           descriptor.modelId,
-          descriptor.dimensions
+          descriptor.dimensions,
         );
         visual.push(
-          ...(await Promise.all(
-            group.map((snapshot) =>
-              visualCandidates(
-                snapshot,
-                principal,
-                vector,
-                candidateLimit,
-                threshold
-              )
+          ...(
+            await Promise.all(
+              group.map((snapshot) =>
+                visualCandidates(
+                  snapshot,
+                  principal,
+                  vector,
+                  candidateLimit,
+                  threshold,
+                ),
+              ),
             )
-          )).flat()
+          ).flat(),
         );
       } catch (error) {
         log.warn("Visual retrieval unavailable; continuing without it", {
@@ -1052,7 +1092,7 @@ export async function retrieveRepositoryContent(
         weight: mode === "hybrid" ? denseWeight * 0.8 : 0.8,
       },
     ],
-    config.retrievalRrfK
+    config.retrievalRrfK,
   );
   const rerankEnabled =
     (request.rerank ?? config.retrievalRerankEnabled) && fused.length > 1;
@@ -1066,7 +1106,7 @@ export async function retrieveRepositoryContent(
       const rerankRemainder = fused.slice(candidateLimit);
       const disclosureSafeWindow = await revalidateCandidatesForRerank(
         rerankWindow,
-        principal
+        principal,
       );
       fused = [...disclosureSafeWindow, ...rerankRemainder];
       if (disclosureSafeWindow.length > 1) {
@@ -1077,7 +1117,7 @@ export async function retrieveRepositoryContent(
               .filter(Boolean)
               .join("\n"),
           })),
-          disclosureSafeWindow.length
+          disclosureSafeWindow.length,
         );
         if (scores.length > 0) {
           fused = [
@@ -1096,22 +1136,22 @@ export async function retrieveRepositoryContent(
   const selected = diversifyBySource(
     fused,
     limit,
-    config.retrievalMaxPerSource
+    config.retrievalMaxPerSource,
   );
   const contexts = await Promise.all(
     selected.map((candidate) =>
-      expandCandidate(candidate, principal, config.retrievalNeighborCount)
-    )
+      expandCandidate(candidate, principal, config.retrievalNeighborCount),
+    ),
   );
   const tokenBudget = Math.min(
     Math.max(100, request.tokenBudget ?? config.retrievalContextTokens),
-    32_000
+    32_000,
   );
   const results = fitContextBudget(selected, contexts, tokenBudget);
   const returnedTokens = results.reduce(
     (total, result) =>
       total + result.context.reduce((sum, segment) => sum + segment.tokens, 0),
-    0
+    0,
   );
   return {
     results,

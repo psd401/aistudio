@@ -6,10 +6,10 @@
  * broker, which derives owner and destination from signed server-side context.
  */
 
-'use strict';
+"use strict";
 
-const { requestAgentBroker } = require('../_shared/agent-broker');
-const DEFAULT_TIMEZONE = 'America/Los_Angeles';
+const { requestAgentBroker } = require("../_shared/agent-broker");
+const DEFAULT_TIMEZONE = "America/Los_Angeles";
 
 function fail(message, code = 1) {
   process.stderr.write(`psd-schedules: ${message}\n`);
@@ -22,11 +22,11 @@ function validateEnv() {
 
 function rejectLegacyAuthorityArgs(args) {
   const forbidden = [
-    'user',
-    'owner-email',
-    'google-identity',
-    'dm-space-name',
-    'workspace-prefix',
+    "user",
+    "owner-email",
+    "google-identity",
+    "dm-space-name",
+    "workspace-prefix",
   ];
   const supplied = forbidden.find((field) =>
     Object.prototype.hasOwnProperty.call(args, field),
@@ -34,7 +34,7 @@ function rejectLegacyAuthorityArgs(args) {
   if (supplied) {
     fail(
       `--${supplied} is not accepted. Schedule identity is derived ` +
-        'from the signed invocation context.',
+        "from the signed invocation context.",
     );
   }
 }
@@ -45,47 +45,53 @@ function validateTimezone(timezone) {
   } catch {
     fail(
       `Invalid timezone "${timezone}". Must be a valid IANA timezone ` +
-        '(e.g. America/Los_Angeles, Asia/Tokyo, UTC).',
+        "(e.g. America/Los_Angeles, Asia/Tokyo, UTC).",
     );
   }
 }
 
-function toSchedulerExpression(raw) {
-  const expr = String(raw || '').trim();
-  if (!expr) fail('--cron is required');
-
-  if (expr.startsWith('cron(') || expr.startsWith('rate(') || expr.startsWith('at(')) {
-    return validateWrappedExpression(expr);
-  }
-
+function normalizeUnwrappedCron(expr) {
   const parts = expr.split(/\s+/);
   if (parts.length !== 5 && parts.length !== 6) {
     fail(
       `Invalid cron "${expr}". Expected 5 or 6 fields (got ${parts.length}).`,
     );
   }
-  const expanded = parts.length === 6 ? [...parts] : [...parts, '*'];
+  const expanded = parts.length === 6 ? [...parts] : [...parts, "*"];
   const minute = expanded[0];
-  if (minute === '*' || minute === '*/1') {
-    fail('Every-minute cron is not allowed. Minimum interval is 5 minutes.');
+  if (minute === "*" || minute === "*/1") {
+    fail("Every-minute cron is not allowed. Minimum interval is 5 minutes.");
   }
-  const domSpecified = expanded[2] !== '*' && expanded[2] !== '?';
-  const dowSpecified = expanded[4] !== '*' && expanded[4] !== '?';
+  const domSpecified = expanded[2] !== "*" && expanded[2] !== "?";
+  const dowSpecified = expanded[4] !== "*" && expanded[4] !== "?";
   if (domSpecified && dowSpecified) {
-    fail('Cannot specify both day-of-month and day-of-week.');
+    fail("Cannot specify both day-of-month and day-of-week.");
   }
-  if (dowSpecified) expanded[2] = '?';
-  else expanded[4] = '?';
-  return `cron(${expanded.join(' ')})`;
+  if (dowSpecified) expanded[2] = "?";
+  else expanded[4] = "?";
+  return `cron(${expanded.join(" ")})`;
+}
+
+function toSchedulerExpression(raw) {
+  const expr = String(raw || "").trim();
+  if (!expr) fail("--cron is required");
+  if (
+    expr.startsWith("cron(") ||
+    expr.startsWith("rate(") ||
+    expr.startsWith("at(")
+  ) {
+    return validateWrappedExpression(expr);
+  }
+  return normalizeUnwrappedCron(expr);
 }
 
 function validateWrappedExpression(expr) {
   const cronMatch = expr.match(/^cron\((.+)\)$/);
   if (cronMatch) {
     const fields = cronMatch[1].trim().split(/\s+/);
-    if (fields.length !== 6) fail('cron() must have exactly 6 fields');
-    if (fields[0] === '*' || fields[0] === '*/1') {
-      fail('Every-minute cron is not allowed. Minimum interval is 5 minutes.');
+    if (fields.length !== 6) fail("cron() must have exactly 6 fields");
+    if (fields[0] === "*" || fields[0] === "*/1") {
+      fail("Every-minute cron is not allowed. Minimum interval is 5 minutes.");
     }
     return expr;
   }
@@ -95,10 +101,10 @@ function validateWrappedExpression(expr) {
   if (rateMatch) {
     const count = Number.parseInt(rateMatch[1], 10);
     if (
-      (rateMatch[2] === 'minute' || rateMatch[2] === 'minutes') &&
+      (rateMatch[2] === "minute" || rateMatch[2] === "minutes") &&
       count < 5
     ) {
-      fail('Minimum rate interval is 5 minutes.');
+      fail("Minimum rate interval is 5 minutes.");
     }
     return expr;
   }
@@ -112,14 +118,14 @@ function parseArgs(argv) {
   const args = {};
   for (let index = 2; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === '--help' || arg === '-h') {
+    if (arg === "--help" || arg === "-h") {
       args.help = true;
       continue;
     }
-    if (!arg.startsWith('--')) fail(`Unexpected positional argument: ${arg}`);
+    if (!arg.startsWith("--")) fail(`Unexpected positional argument: ${arg}`);
     const key = arg.slice(2);
     const next = argv[index + 1];
-    if (!next || next.startsWith('--')) {
+    if (!next || next.startsWith("--")) {
       args[key] = true;
     } else {
       args[key] = next;
@@ -135,7 +141,7 @@ function emit(value) {
 
 async function requestScheduleOperation(payload) {
   validateEnv();
-  return requestAgentBroker('/api/agent/schedules', payload);
+  return requestAgentBroker("/api/agent/schedules", payload);
 }
 
 module.exports = {

@@ -19,24 +19,60 @@
 import {
   ComprehendClient,
   DetectPiiEntitiesCommand,
-} from '@aws-sdk/client-comprehend';
-import type { PiiEntity as ComprehendPiiEntity } from '@aws-sdk/client-comprehend';
+} from "@aws-sdk/client-comprehend";
+import type { PiiEntity as ComprehendPiiEntity } from "@aws-sdk/client-comprehend";
 import {
   DynamoDBClient,
   PutItemCommand,
   GetItemCommand,
   BatchGetItemCommand,
-} from '@aws-sdk/client-dynamodb';
-import { v4 as uuidv4 } from 'uuid';
-import { createLogger, generateRequestId } from '@/lib/logger';
+} from "@aws-sdk/client-dynamodb";
+import type { AttributeValue } from "@aws-sdk/client-dynamodb";
+import { v4 as uuidv4 } from "uuid";
+import { createLogger, generateRequestId } from "@/lib/logger";
 import type {
   PIIEntity,
   TokenMapping,
   TokenizationResult,
   PIITokenDynamoDBItem,
   GuardrailsConfig,
-} from './types';
-import { K12_PII_TYPES, CUSTOM_PII_PATTERNS, PII_MIN_CONFIDENCE_SCORE, CONFIDENCE_GATED_PII_TYPES, PII_TYPE_CONFIDENCE_OVERRIDES, type ComprehendPIIType } from './types';
+} from "./types";
+import {
+  K12_PII_TYPES,
+  CUSTOM_PII_PATTERNS,
+  PII_MIN_CONFIDENCE_SCORE,
+  CONFIDENCE_GATED_PII_TYPES,
+  PII_TYPE_CONFIDENCE_OVERRIDES,
+  type ComprehendPIIType,
+} from "./types";
+
+function tokenizationConfig(
+  config: Partial<GuardrailsConfig> | undefined,
+  region: string,
+): GuardrailsConfig {
+  return {
+    region,
+    guardrailId: config?.guardrailId || "",
+    guardrailVersion: config?.guardrailVersion || "DRAFT",
+    piiTokenTableName:
+      config?.piiTokenTableName || process.env.PII_TOKEN_TABLE_NAME,
+    tokenTtlSeconds: config?.tokenTtlSeconds ?? 3600,
+    enablePiiTokenization: config?.enablePiiTokenization ?? true,
+  };
+}
+
+type StoredTokenMapping = { token: string; original: string; type: string };
+
+function storedTokenMapping(
+  item: Record<string, AttributeValue> | undefined,
+): StoredTokenMapping | null {
+  if (!item?.token?.S || !item.original?.S) return null;
+  return {
+    token: item.token.S,
+    original: item.original.S,
+    type: item.type?.S || "",
+  };
+}
 
 /**
  * PIITokenizationService - Reversible PII protection for student data
@@ -49,7 +85,7 @@ export class PIITokenizationService {
   private comprehendClient: ComprehendClient;
   private dynamoDBClient: DynamoDBClient;
   private config: GuardrailsConfig;
-  private log = createLogger({ module: 'PIITokenizationService' });
+  private log = createLogger({ module: "PIITokenizationService" });
 
   constructor(config?: Partial<GuardrailsConfig>) {
     const region = config?.region || process.env.AWS_REGION;
@@ -57,14 +93,16 @@ export class PIITokenizationService {
     // Graceful degradation for local development - disable if no region
     // In production (ECS/Lambda), AWS_REGION is always set
     if (!region) {
-      this.log.warn('AWS_REGION not configured - PIITokenizationService disabled (local development mode)');
+      this.log.warn(
+        "AWS_REGION not configured - PIITokenizationService disabled (local development mode)",
+      );
       // Initialize with dummy region for client instantiation (won't be used)
-      this.comprehendClient = new ComprehendClient({ region: 'us-east-1' });
-      this.dynamoDBClient = new DynamoDBClient({ region: 'us-east-1' });
+      this.comprehendClient = new ComprehendClient({ region: "us-east-1" });
+      this.dynamoDBClient = new DynamoDBClient({ region: "us-east-1" });
       this.config = {
-        region: '',
-        guardrailId: '',
-        guardrailVersion: 'DRAFT',
+        region: "",
+        guardrailId: "",
+        guardrailVersion: "DRAFT",
         piiTokenTableName: undefined,
         tokenTtlSeconds: 3600,
         enablePiiTokenization: false, // Disabled when no region
@@ -74,18 +112,10 @@ export class PIITokenizationService {
 
     this.comprehendClient = new ComprehendClient({ region });
     this.dynamoDBClient = new DynamoDBClient({ region });
-
-    this.config = {
-      region,
-      guardrailId: config?.guardrailId || '',
-      guardrailVersion: config?.guardrailVersion || 'DRAFT',
-      piiTokenTableName: config?.piiTokenTableName || process.env.PII_TOKEN_TABLE_NAME,
-      tokenTtlSeconds: config?.tokenTtlSeconds ?? 3600, // 1 hour default
-      enablePiiTokenization: config?.enablePiiTokenization ?? true,
-    };
+    this.config = tokenizationConfig(config, region);
 
     if (!this.config.piiTokenTableName && this.config.enablePiiTokenization) {
-      this.log.warn('PII token table not configured - tokenization disabled');
+      this.log.warn("PII token table not configured - tokenization disabled");
       this.config.enablePiiTokenization = false;
     }
   }
@@ -94,7 +124,10 @@ export class PIITokenizationService {
    * Check if PII tokenization is enabled
    */
   isEnabled(): boolean {
-    return this.config.enablePiiTokenization === true && !!this.config.piiTokenTableName;
+    return (
+      this.config.enablePiiTokenization === true &&
+      !!this.config.piiTokenTableName
+    );
   }
 
   /**
@@ -109,17 +142,18 @@ export class PIITokenizationService {
     try {
       const command = new DetectPiiEntitiesCommand({
         Text: text,
-        LanguageCode: 'en',
+        LanguageCode: "en",
       });
 
       const response = await this.comprehendClient.send(command);
 
       const entities: PIIEntity[] = (response.Entities || [])
-        .filter((entity: ComprehendPiiEntity): boolean =>
-          entity.Type !== undefined &&
-          entity.BeginOffset !== undefined &&
-          entity.EndOffset !== undefined &&
-          entity.Score !== undefined
+        .filter(
+          (entity: ComprehendPiiEntity): boolean =>
+            entity.Type !== undefined &&
+            entity.BeginOffset !== undefined &&
+            entity.EndOffset !== undefined &&
+            entity.Score !== undefined,
         )
         .map((entity: ComprehendPiiEntity) => ({
           type: entity.Type as string,
@@ -128,7 +162,7 @@ export class PIITokenizationService {
           score: entity.Score as number,
         }));
 
-      this.log.debug('PII detection complete', {
+      this.log.debug("PII detection complete", {
         requestId,
         textLength: text.length,
         entitiesFound: entities.length,
@@ -137,7 +171,7 @@ export class PIITokenizationService {
 
       return entities;
     } catch (error) {
-      this.log.error('PII detection failed', {
+      this.log.error("PII detection failed", {
         requestId,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -175,7 +209,7 @@ export class PIITokenizationService {
     }
 
     if (entities.length > 0) {
-      this.log.debug('Custom PII patterns detected', {
+      this.log.debug("Custom PII patterns detected", {
         entitiesFound: entities.length,
         entityTypes: entities.map((e) => e.type),
       });
@@ -201,7 +235,7 @@ export class PIITokenizationService {
     }
 
     const requestId = generateRequestId();
-    this.log.info('Starting PII tokenization', {
+    this.log.info("Starting PII tokenization", {
       requestId,
       textLength: text.length,
       sessionId,
@@ -222,7 +256,8 @@ export class PIITokenizationService {
         const type = entity.type as ComprehendPIIType;
         if (!K12_PII_TYPES.includes(type)) return false;
         if (!CONFIDENCE_GATED_PII_TYPES.has(type)) return true;
-        const floor = PII_TYPE_CONFIDENCE_OVERRIDES[type] ?? PII_MIN_CONFIDENCE_SCORE;
+        const floor =
+          PII_TYPE_CONFIDENCE_OVERRIDES[type] ?? PII_MIN_CONFIDENCE_SCORE;
         return entity.score >= floor;
       });
 
@@ -231,10 +266,13 @@ export class PIITokenizationService {
 
       // Merge entities, removing duplicates based on position overlap
       // Custom patterns take precedence if they overlap with Comprehend results
-      const allEntities = this.mergeEntities(relevantComprehendEntities, customEntities);
+      const allEntities = this.mergeEntities(
+        relevantComprehendEntities,
+        customEntities,
+      );
 
       if (allEntities.length === 0) {
-        this.log.debug('No PII found (Comprehend or custom)', { requestId });
+        this.log.debug("No PII found (Comprehend or custom)", { requestId });
         return {
           tokenizedText: text,
           tokens: [],
@@ -245,7 +283,7 @@ export class PIITokenizationService {
       // Sort by position (reverse) to replace from end to start
       // This preserves positions during replacement
       const sortedEntities = [...allEntities].sort(
-        (a, b) => b.beginOffset - a.beginOffset
+        (a, b) => b.beginOffset - a.beginOffset,
       );
 
       let tokenizedText = text;
@@ -273,7 +311,7 @@ export class PIITokenizationService {
         });
       }
 
-      this.log.info('PII tokenization complete', {
+      this.log.info("PII tokenization complete", {
         requestId,
         tokensCreated: tokens.length,
         piiTypes: tokens.map((t) => t.type),
@@ -285,7 +323,7 @@ export class PIITokenizationService {
         hasPII: true,
       };
     } catch (error) {
-      this.log.error('PII tokenization failed', {
+      this.log.error("PII tokenization failed", {
         requestId,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -314,14 +352,15 @@ export class PIITokenizationService {
     const requestId = generateRequestId();
 
     // Find all token placeholders in the text (full UUID format)
-    const tokenPattern = /\[PII:([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\]/g;
+    const tokenPattern =
+      /\[PII:([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\]/g;
     const matches = [...text.matchAll(tokenPattern)];
 
     if (matches.length === 0) {
       return text;
     }
 
-    this.log.info('Starting PII detokenization', {
+    this.log.info("Starting PII detokenization", {
       requestId,
       tokensFound: matches.length,
       sessionId,
@@ -332,7 +371,10 @@ export class PIITokenizationService {
 
       // Batch fetch tokens for efficiency
       const tokenIds = matches.map((m) => m[1]);
-      const tokenMappings = await this.batchGetTokenMappings(tokenIds, sessionId);
+      const tokenMappings = await this.batchGetTokenMappings(
+        tokenIds,
+        sessionId,
+      );
 
       let replacementsApplied = 0;
       // NOTE: matchAll returns every occurrence of a token placeholder as a separate entry.
@@ -347,7 +389,10 @@ export class PIITokenizationService {
 
         if (tokenMapping) {
           const before = detokenizedText;
-          detokenizedText = detokenizedText.replace(placeholder, tokenMapping.original);
+          detokenizedText = detokenizedText.replace(
+            placeholder,
+            tokenMapping.original,
+          );
           // Only increment when the substitution actually changed the string.
           // In the pathological case where original itself contains a [PII:UUID] pattern,
           // a prior iteration may have already consumed this placeholder.
@@ -355,7 +400,7 @@ export class PIITokenizationService {
             replacementsApplied++;
           }
         } else {
-          this.log.warn('Token mapping not found', {
+          this.log.warn("Token mapping not found", {
             requestId,
             token,
             sessionId,
@@ -364,7 +409,7 @@ export class PIITokenizationService {
         }
       }
 
-      this.log.info('PII detokenization complete', {
+      this.log.info("PII detokenization complete", {
         requestId,
         uniqueTokensResolved: tokenMappings.length,
         textReplacementsApplied: replacementsApplied,
@@ -372,7 +417,7 @@ export class PIITokenizationService {
 
       return detokenizedText;
     } catch (error) {
-      this.log.error('PII detokenization failed', {
+      this.log.error("PII detokenization failed", {
         requestId,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -394,7 +439,7 @@ export class PIITokenizationService {
    */
   private mergeEntities(
     comprehendEntities: PIIEntity[],
-    customEntities: PIIEntity[]
+    customEntities: PIIEntity[],
   ): PIIEntity[] {
     // Start with all custom entities (they take precedence)
     const merged: PIIEntity[] = [...customEntities];
@@ -405,7 +450,7 @@ export class PIITokenizationService {
         (custom) =>
           // Check if ranges overlap
           comprehend.beginOffset < custom.endOffset &&
-          comprehend.endOffset > custom.beginOffset
+          comprehend.endOffset > custom.beginOffset,
       );
 
       if (!overlaps) {
@@ -423,7 +468,7 @@ export class PIITokenizationService {
     token: string,
     original: string,
     type: string,
-    sessionId: string
+    sessionId: string,
   ): Promise<void> {
     const now = Date.now();
     const ttl = Math.floor(now / 1000) + (this.config.tokenTtlSeconds || 3600);
@@ -457,7 +502,7 @@ export class PIITokenizationService {
    */
   private async getTokenMapping(
     token: string,
-    sessionId: string
+    sessionId: string,
   ): Promise<{ token: string; original: string; type: string } | null> {
     const command = new GetItemCommand({
       TableName: this.config.piiTokenTableName,
@@ -474,9 +519,9 @@ export class PIITokenizationService {
     }
 
     return {
-      token: response.Item.token?.S || '',
-      original: response.Item.original?.S || '',
-      type: response.Item.type?.S || '',
+      token: response.Item.token?.S || "",
+      original: response.Item.original?.S || "",
+      type: response.Item.type?.S || "",
     };
   }
 
@@ -488,7 +533,7 @@ export class PIITokenizationService {
    */
   private async batchGetTokenMappings(
     tokens: string[],
-    sessionId: string
+    sessionId: string,
   ): Promise<Array<{ token: string; original: string; type: string }>> {
     if (tokens.length === 0) {
       return [];
@@ -517,110 +562,87 @@ export class PIITokenizationService {
     // Process batches concurrently with resilience - use allSettled to avoid losing
     // results from successful batches if one batch fails unexpectedly
     const batchSettled = await Promise.allSettled(
-      batches.map(async (batch) => {
-        const batchItems: Array<{ token: string; original: string; type: string }> = [];
-
-        try {
-          const command = new BatchGetItemCommand({
-            RequestItems: {
-              [tableName]: {
-                Keys: batch.map((token) => ({
-                  token: { S: token },
-                  sessionId: { S: sessionId },
-                })),
-              },
-            },
-          });
-
-          const response = await this.dynamoDBClient.send(command);
-          const items = response.Responses?.[tableName] || [];
-
-          for (const item of items) {
-            if (item.token?.S && item.original?.S) {
-              batchItems.push({
-                token: item.token.S,
-                original: item.original.S,
-                type: item.type?.S || '',
-              });
-            }
-          }
-
-          // Handle unprocessed keys (throttling) with retry
-          if (response.UnprocessedKeys?.[tableName]?.Keys?.length) {
-            this.log.warn('BatchGetItem had unprocessed keys, falling back to individual GetItem', {
-              unprocessedCount: response.UnprocessedKeys[tableName].Keys.length,
-            });
-
-            // Fallback to individual GetItem for unprocessed keys
-            const unprocessedResults = await Promise.all(
-              response.UnprocessedKeys[tableName].Keys.map(async (key) => {
-                try {
-                  const retryCommand = new GetItemCommand({
-                    TableName: tableName,
-                    Key: key,
-                  });
-                  const retryResponse = await this.dynamoDBClient.send(retryCommand);
-                  if (retryResponse.Item?.token?.S && retryResponse.Item?.original?.S) {
-                    return {
-                      token: retryResponse.Item.token.S,
-                      original: retryResponse.Item.original.S,
-                      type: retryResponse.Item.type?.S || '',
-                    };
-                  }
-                } catch {
-                  // Token not found or expired
-                }
-                return null;
-              })
-            );
-            batchItems.push(...unprocessedResults.filter((r): r is NonNullable<typeof r> => r !== null));
-          }
-        } catch (error) {
-          this.log.error('BatchGetItem failed, falling back to individual GetItem', {
-            error: error instanceof Error ? error.message : String(error),
-            batchSize: batch.length,
-          });
-
-          // Fallback to individual GetItem on batch failure
-          const fallbackResults = await Promise.all(
-            batch.map(async (token) => {
-              try {
-                const command = new GetItemCommand({
-                  TableName: tableName,
-                  Key: {
-                    token: { S: token },
-                    sessionId: { S: sessionId },
-                  },
-                });
-                const response = await this.dynamoDBClient.send(command);
-                if (response.Item?.token?.S && response.Item?.original?.S) {
-                  return {
-                    token: response.Item.token.S,
-                    original: response.Item.original.S,
-                    type: response.Item.type?.S || '',
-                  };
-                }
-              } catch {
-                // Token not found or expired
-              }
-              return null;
-            })
-          );
-          batchItems.push(...fallbackResults.filter((r): r is NonNullable<typeof r> => r !== null));
-        }
-
-        return batchItems;
-      })
+      batches.map((batch) => this.loadTokenBatch(batch, sessionId, tableName)),
     );
 
     // Extract successful batch results and flatten
     const successfulBatches = batchSettled
-      .filter((result): result is PromiseFulfilledResult<Array<{ token: string; original: string; type: string }>> =>
-        result.status === 'fulfilled'
+      .filter(
+        (
+          result,
+        ): result is PromiseFulfilledResult<
+          Array<{ token: string; original: string; type: string }>
+        > => result.status === "fulfilled",
       )
-      .map(result => result.value);
+      .map((result) => result.value);
 
     return successfulBatches.flat();
+  }
+
+  private async loadTokenMapping(
+    tableName: string,
+    key: Record<string, AttributeValue>,
+  ): Promise<StoredTokenMapping | null> {
+    try {
+      const response = await this.dynamoDBClient.send(
+        new GetItemCommand({ TableName: tableName, Key: key }),
+      );
+      return storedTokenMapping(response.Item);
+    } catch {
+      return null;
+    }
+  }
+
+  private async loadTokenMappings(
+    tableName: string,
+    keys: Array<Record<string, AttributeValue>>,
+  ): Promise<StoredTokenMapping[]> {
+    const results = await Promise.all(
+      keys.map((key) => this.loadTokenMapping(tableName, key)),
+    );
+    return results.filter(
+      (result): result is StoredTokenMapping => result !== null,
+    );
+  }
+
+  private async loadTokenBatch(
+    batch: string[],
+    sessionId: string,
+    tableName: string,
+  ): Promise<StoredTokenMapping[]> {
+    const keys = batch.map((token) => ({
+      token: { S: token },
+      sessionId: { S: sessionId },
+    }));
+    try {
+      const response = await this.dynamoDBClient.send(
+        new BatchGetItemCommand({
+          RequestItems: { [tableName]: { Keys: keys } },
+        }),
+      );
+      const mappings = (response.Responses?.[tableName] || [])
+        .map(storedTokenMapping)
+        .filter((item): item is StoredTokenMapping => item !== null);
+      const unprocessed = response.UnprocessedKeys?.[tableName]?.Keys || [];
+      if (unprocessed.length === 0) return mappings;
+      this.log.warn(
+        "BatchGetItem had unprocessed keys, falling back to individual GetItem",
+        { unprocessedCount: unprocessed.length },
+      );
+      return [
+        ...mappings,
+        ...(await this.loadTokenMappings(tableName, unprocessed)),
+      ];
+    } catch (error) {
+      this.log.error(
+        "BatchGetItem failed, falling back to individual GetItem",
+        {
+          error: error instanceof Error ? error.message : String(error),
+          batchSize: batch.length,
+        },
+      );
+      return this.loadTokenMappings(tableName, keys);
+    }
   }
 
   /**
@@ -628,7 +650,7 @@ export class PIITokenizationService {
    */
   getConfig(): Pick<
     GuardrailsConfig,
-    'region' | 'piiTokenTableName' | 'tokenTtlSeconds' | 'enablePiiTokenization'
+    "region" | "piiTokenTableName" | "tokenTtlSeconds" | "enablePiiTokenization"
   > {
     return {
       region: this.config.region,
@@ -646,7 +668,7 @@ let piiTokenizationServiceInstance: PIITokenizationService | null = null;
  * Get or create the PIITokenizationService singleton
  */
 export function getPIITokenizationService(
-  config?: Partial<GuardrailsConfig>
+  config?: Partial<GuardrailsConfig>,
 ): PIITokenizationService {
   if (!piiTokenizationServiceInstance) {
     piiTokenizationServiceInstance = new PIITokenizationService(config);

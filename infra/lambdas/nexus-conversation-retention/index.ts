@@ -31,6 +31,7 @@ import {
   S3Client,
   ListObjectVersionsCommand,
   DeleteObjectsCommand,
+  type ListObjectVersionsCommandOutput,
   type ObjectIdentifier,
 } from "@aws-sdk/client-s3";
 import postgres from "postgres";
@@ -53,7 +54,10 @@ const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || "";
 const DATABASE_NAME = process.env.DATABASE_NAME || "aistudio";
 const DATABASE_PORT = Number.parseInt(process.env.DATABASE_PORT || "5432", 10);
 const DOCUMENTS_BUCKET_NAME = process.env.DOCUMENTS_BUCKET_NAME || "";
-const SWEEP_BATCH_LIMIT = Number.parseInt(process.env.SWEEP_BATCH_LIMIT || "200", 10);
+const SWEEP_BATCH_LIMIT = Number.parseInt(
+  process.env.SWEEP_BATCH_LIMIT || "200",
+  10,
+);
 
 const RETENTION_SETTING_KEY = "NEXUS_CONVERSATION_RETENTION_DAYS";
 const LOGGER_NAME = "nexus-conversation-retention";
@@ -67,8 +71,11 @@ const log: SweepLogger = {
   error: (evt, fields) => emit("ERROR", evt, fields),
 };
 
-function emit(level: string, evt: string, fields?: Record<string, unknown>): void {
-
+function emit(
+  level: string,
+  evt: string,
+  fields?: Record<string, unknown>,
+): void {
   console.log(JSON.stringify({ level, logger: LOGGER_NAME, evt, ...fields }));
 }
 
@@ -76,9 +83,10 @@ let sqlClient: postgres.Sql | null = null;
 async function getSql(): Promise<postgres.Sql> {
   if (sqlClient) return sqlClient;
   const res = await secrets.send(
-    new GetSecretValueCommand({ SecretId: DATABASE_SECRET_ARN })
+    new GetSecretValueCommand({ SecretId: DATABASE_SECRET_ARN }),
   );
-  if (!res.SecretString) throw new Error("Database secret missing SecretString");
+  if (!res.SecretString)
+    throw new Error("Database secret missing SecretString");
   const creds = JSON.parse(res.SecretString) as {
     username: string;
     password: string;
@@ -108,7 +116,7 @@ async function getSql(): Promise<postgres.Sql> {
  */
 async function deleteVersionsUnderPrefix(
   prefix: string,
-  matchExactKey?: string
+  matchExactKey?: string,
 ): Promise<number> {
   if (!DOCUMENTS_BUCKET_NAME) {
     throw new Error("DOCUMENTS_BUCKET_NAME is not configured");
@@ -125,32 +133,14 @@ async function deleteVersionsUnderPrefix(
         Prefix: prefix,
         KeyMarker: keyMarker,
         VersionIdMarker: versionIdMarker,
-      })
+      }),
     );
 
-    const identifiers: ObjectIdentifier[] = [];
-    for (const entry of [...(page.Versions ?? []), ...(page.DeleteMarkers ?? [])]) {
-      if (!entry.Key || !entry.VersionId) continue;
-      if (matchExactKey !== undefined && entry.Key !== matchExactKey) continue;
-      identifiers.push({ Key: entry.Key, VersionId: entry.VersionId });
-    }
+    const identifiers = objectVersionIdentifiers(page, matchExactKey);
 
     // DeleteObjects caps at 1000 keys per call; a version listing page is also
     // capped at 1000, so one chunk per page is sufficient.
-    if (identifiers.length > 0) {
-      const res = await s3.send(
-        new DeleteObjectsCommand({
-          Bucket: DOCUMENTS_BUCKET_NAME,
-          Delete: { Objects: identifiers, Quiet: true },
-        })
-      );
-      if (res.Errors && res.Errors.length > 0) {
-        throw new Error(
-          `S3 delete reported ${res.Errors.length} error(s), first: ${res.Errors[0]?.Code ?? "unknown"}`
-        );
-      }
-      deleted += identifiers.length;
-    }
+    deleted += await deleteObjectVersions(identifiers);
 
     // Fail loudly rather than silently stopping half-way. A truncated page with
     // no cursor would otherwise exit the loop reporting success, and the caller
@@ -160,7 +150,7 @@ async function deleteVersionsUnderPrefix(
     // Mirrors S3_PREFIX_LIST_CURSOR_ERROR in lib/aws/s3-client.ts.
     if (page.IsTruncated && !page.NextKeyMarker) {
       throw new Error(
-        `S3 returned a truncated version listing without a cursor for prefix ${prefix}`
+        `S3 returned a truncated version listing without a cursor for prefix ${prefix}`,
       );
     }
 
@@ -169,6 +159,40 @@ async function deleteVersionsUnderPrefix(
   } while (keyMarker || versionIdMarker);
 
   return deleted;
+}
+
+function objectVersionIdentifiers(
+  page: ListObjectVersionsCommandOutput,
+  matchExactKey: string | undefined,
+): ObjectIdentifier[] {
+  const identifiers: ObjectIdentifier[] = [];
+  for (const entry of [
+    ...(page.Versions ?? []),
+    ...(page.DeleteMarkers ?? []),
+  ]) {
+    if (!entry.Key || !entry.VersionId) continue;
+    if (matchExactKey !== undefined && entry.Key !== matchExactKey) continue;
+    identifiers.push({ Key: entry.Key, VersionId: entry.VersionId });
+  }
+  return identifiers;
+}
+
+async function deleteObjectVersions(
+  identifiers: ObjectIdentifier[],
+): Promise<number> {
+  if (identifiers.length === 0) return 0;
+  const response = await s3.send(
+    new DeleteObjectsCommand({
+      Bucket: DOCUMENTS_BUCKET_NAME,
+      Delete: { Objects: identifiers, Quiet: true },
+    }),
+  );
+  if (response.Errors?.length) {
+    throw new Error(
+      `S3 delete reported ${response.Errors.length} error(s), first: ${response.Errors[0]?.Code ?? "unknown"}`,
+    );
+  }
+  return identifiers.length;
 }
 
 /**
@@ -201,7 +225,7 @@ export function toObjectKey(value: string | null | undefined): string | null {
  */
 export function documentUrlToObjectKey(
   value: string | null | undefined,
-  bucket: string = DOCUMENTS_BUCKET_NAME
+  bucket: string = DOCUMENTS_BUCKET_NAME,
 ): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -221,27 +245,42 @@ export function documentUrlToObjectKey(
     return null;
   }
 
-  const host = parsed.hostname.toLowerCase();
-  // Only genuine S3 hosts for THIS bucket. A Supabase or CloudFront URL yields
-  // null rather than a guess.
-  const isVirtualHosted =
-    host.startsWith(`${bucket.toLowerCase()}.s3.`) && host.endsWith(".amazonaws.com");
-  const isPathStyle = /^s3[.-][a-z0-9-]*\.?amazonaws\.com$/.test(host) || host === "s3.amazonaws.com";
-  if (!isVirtualHosted && !isPathStyle) return null;
-
-  let path: string;
-  try {
-    path = decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
-  } catch {
-    return null;
-  }
+  const hostStyle = ownedS3HostStyle(parsed.hostname, bucket);
+  if (!hostStyle) return null;
+  const path = decodedObjectPath(parsed.pathname);
+  if (path === null) return null;
   if (path === "") return null;
 
-  if (isVirtualHosted) return toObjectKey(path);
+  if (hostStyle === "virtual") return toObjectKey(path);
 
   const bucketPrefix = `${bucket}/`;
   if (!path.startsWith(bucketPrefix)) return null;
   return toObjectKey(path.slice(bucketPrefix.length));
+}
+
+function ownedS3HostStyle(
+  hostname: string,
+  bucket: string,
+): "virtual" | "path" | null {
+  const host = hostname.toLowerCase();
+  if (
+    host.startsWith(`${bucket.toLowerCase()}.s3.`) &&
+    host.endsWith(".amazonaws.com")
+  ) {
+    return "virtual";
+  }
+  return /^s3[.-][a-z0-9-]*\.?amazonaws\.com$/.test(host) ||
+    host === "s3.amazonaws.com"
+    ? "path"
+    : null;
+}
+
+function decodedObjectPath(pathname: string): string | null {
+  try {
+    return decodeURIComponent(pathname).replace(/^\/+/, "");
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -267,7 +306,10 @@ export const BOUND_EPHEMERAL_REPOSITORIES_SQL = `
  * against exactly these two.
  */
 function conversationStoragePrefixes(conversationId: string): string[] {
-  return [`conversations/${conversationId}/`, `v2/generated-images/${conversationId}/`];
+  return [
+    `conversations/${conversationId}/`,
+    `v2/generated-images/${conversationId}/`,
+  ];
 }
 
 interface MessagePartRow {
@@ -287,7 +329,7 @@ interface MessagePartRow {
 export function extractOutOfPrefixKeys(
   rows: MessagePartRow[],
   conversationId: string,
-  ownerUserId: number
+  ownerUserId: number,
 ): string[] {
   const prefixes = conversationStoragePrefixes(conversationId);
   // Ownership, not just syntax. A legacy row can carry an s3Key that was
@@ -305,7 +347,9 @@ export function extractOutOfPrefixKeys(
     if (!Array.isArray(row.parts)) continue;
     for (const part of row.parts) {
       if (!part || typeof part !== "object") continue;
-      const key = toObjectKey((part as { s3Key?: unknown }).s3Key as string | undefined);
+      const key = toObjectKey(
+        (part as { s3Key?: unknown }).s3Key as string | undefined,
+      );
       if (key === null) continue;
       if (prefixes.some((prefix) => key.startsWith(prefix))) continue;
       if (!key.startsWith(ownerLegacyPrefix)) continue;
@@ -357,7 +401,7 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
            AND ${NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL}
          ORDER BY last_message_at ASC
          LIMIT $2`,
-        [retentionDays, limit]
+        [retentionDays, limit],
       );
       return rows.map<CandidateConversation>((row) => ({
         id: row.id,
@@ -381,7 +425,7 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
            AND ${NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL}
            AND id = $2::uuid
          LIMIT 1`,
-        [retentionDays, conversationId]
+        [retentionDays, conversationId],
       );
       return rows.length > 0;
     },
@@ -396,7 +440,7 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
       // survive.
       const rows = await sql.unsafe<{ repository_id: number }[]>(
         BOUND_EPHEMERAL_REPOSITORIES_SQL,
-        [conversationId]
+        [conversationId],
       );
       return rows.map((row) => row.repository_id);
     },
@@ -435,7 +479,10 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
         if (objectKey === null && row.url) {
           // Observable rather than silent: an operator can tell the difference
           // between "no objects to clean" and "we could not resolve this one".
-          log.warn("document_url_unresolvable", { conversationId, documentId: row.id });
+          log.warn("document_url_unresolvable", {
+            conversationId,
+            documentId: row.id,
+          });
         }
         return { id: row.id, objectKey };
       });
@@ -463,7 +510,9 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
       // Defence in depth: a non-integer would build a prefix that could match
       // far more than one repository's namespace.
       if (!Number.isInteger(repositoryId) || repositoryId <= 0) {
-        throw new Error(`Refusing to sweep storage for invalid repository id: ${repositoryId}`);
+        throw new Error(
+          `Refusing to sweep storage for invalid repository id: ${repositoryId}`,
+        );
       }
       return deleteVersionsUnderPrefix(`repositories/${repositoryId}/`);
     },
@@ -559,7 +608,7 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
                AND ${NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL}
                AND id = $2::uuid
              RETURNING id`,
-            [retentionDays, conversationId]
+            [retentionDays, conversationId],
           );
 
           if (convRows.length === 0) throw new ClaimLostError();
@@ -567,7 +616,10 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
           return docRows.map<LegacyDocument>((row) => {
             const objectKey = documentUrlToObjectKey(row.url);
             if (objectKey === null && row.url) {
-              log.warn("document_url_unresolvable", { conversationId, documentId: row.id });
+              log.warn("document_url_unresolvable", {
+                conversationId,
+                documentId: row.id,
+              });
             }
             return { id: row.id, objectKey };
           });
@@ -575,7 +627,8 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
 
         return { claimed: true, documents };
       } catch (error) {
-        if (error instanceof ClaimLostError) return { claimed: false, documents: [] };
+        if (error instanceof ClaimLostError)
+          return { claimed: false, documents: [] };
         throw error;
       }
     },
@@ -598,9 +651,10 @@ export const handler = async (event: unknown): Promise<SweepResult> => {
   try {
     return await runRetentionSweep(ports, log, {
       dryRun,
-      batchLimit: Number.isSafeInteger(SWEEP_BATCH_LIMIT) && SWEEP_BATCH_LIMIT > 0
-        ? SWEEP_BATCH_LIMIT
-        : 200,
+      batchLimit:
+        Number.isSafeInteger(SWEEP_BATCH_LIMIT) && SWEEP_BATCH_LIMIT > 0
+          ? SWEEP_BATCH_LIMIT
+          : 200,
     });
   } catch (error) {
     log.error("sweep_failed", {

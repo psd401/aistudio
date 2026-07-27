@@ -39,7 +39,6 @@ const ENVIRONMENT = process.env.ENVIRONMENT ?? "dev";
 const secrets = new SecretsManagerClient({});
 const cloudwatch = new CloudWatchClient({});
 
-
 const log = {
   info: (message: string, metadata?: Record<string, unknown>) =>
     console.log(JSON.stringify({ level: "info", message, ...metadata })),
@@ -48,7 +47,6 @@ const log = {
   error: (message: string, metadata?: Record<string, unknown>) =>
     console.error(JSON.stringify({ level: "error", message, ...metadata })),
 };
-
 
 interface OneRosterSyncEvent {
   trigger?: string;
@@ -84,8 +82,42 @@ interface PersistedSyncStatus {
 const INCOMPLETE_SYNC_ERROR =
   "OneRoster sync was incomplete; failed collections retain last-known-good rows";
 
+type OneRosterConfig = Awaited<ReturnType<typeof resolveConfig>>;
+
+function syncSkip(
+  config: OneRosterConfig,
+  manual: boolean,
+): { reason: "not-configured" | "disabled"; error: string } | null {
+  if (!config.baseUrl || !config.authMode || !config.credentialsSecretArn) {
+    return {
+      reason: "not-configured",
+      error: "OneRoster settings are incomplete.",
+    };
+  }
+  if (!manual && !config.enabled) {
+    return {
+      reason: "disabled",
+      error: "Scheduled OneRoster synchronization is disabled.",
+    };
+  }
+  return null;
+}
+
+function syncFailureMessage(
+  error: unknown,
+  result: OneRosterSyncResult | null,
+): string {
+  const thrown = safeErrorMessage(error);
+  const collectionError = result?.collections.find(
+    (collection) => collection.failed > 0,
+  )?.error;
+  return thrown === INCOMPLETE_SYNC_ERROR && collectionError
+    ? collectionError
+    : thrown;
+}
+
 export async function handler(
-  event: OneRosterSyncEvent = {}
+  event: OneRosterSyncEvent = {},
 ): Promise<HandlerResult> {
   const manual = event.trigger === "manual";
   const trigger = manual ? "manual" : "schedule";
@@ -112,8 +144,9 @@ export async function handler(
       error: null,
     });
     const config = await resolveConfig(sql);
-    if (!config.baseUrl || !config.authMode || !config.credentialsSecretArn) {
-      log.warn("OneRoster sync is not fully configured; skipping");
+    const skip = syncSkip(config, manual);
+    if (skip) {
+      log.info("OneRoster sync skipped", { reason: skip.reason });
       await writeStatusSafely(sql, {
         runId,
         trigger,
@@ -122,28 +155,14 @@ export async function handler(
         completedAt: new Date().toISOString(),
         unchanged: false,
         collections: [],
-        error: "OneRoster settings are incomplete.",
+        error: skip.error,
       });
-      return { status: "skipped", reason: "not-configured" };
-    }
-    if (!manual && !config.enabled) {
-      log.info("Nightly OneRoster sync is disabled; skipping");
-      await writeStatusSafely(sql, {
-        runId,
-        trigger,
-        state: "skipped",
-        startedAt,
-        completedAt: new Date().toISOString(),
-        unchanged: false,
-        collections: [],
-        error: "Scheduled OneRoster synchronization is disabled.",
-      });
-      return { status: "skipped", reason: "disabled" };
+      return { status: "skipped", reason: skip.reason };
     }
 
     const credentials = parseCredentials(
       await loadSecret(config.credentialsSecretArn),
-      config.authMode
+      config.authMode,
     );
     const client = new OneRosterClient({
       baseUrl: config.baseUrl,
@@ -154,8 +173,7 @@ export async function handler(
     const result = await runOneRosterSync({
       readLastPermRev: () => readLastPermRev(sql),
       pullRoster: (previousPermRev) => client.pullAll(previousPermRev),
-      reconcileCollection: (collection) =>
-        reconcileCollection(sql, collection),
+      reconcileCollection: (collection) => reconcileCollection(sql, collection),
       writeLastPermRev: (permRev) => writeLastPermRev(sql, permRev),
       log,
     });
@@ -186,7 +204,7 @@ export async function handler(
       restartCount: result.restartCount,
       recordsSynced: result.collections.reduce(
         (total, collection) => total + collection.synced,
-        0
+        0,
       ),
     });
     await writeStatusSafely(
@@ -198,18 +216,11 @@ export async function handler(
         state: "succeeded",
         result,
         error: null,
-      })
+      }),
     );
     return { status: "ok", result };
   } catch (error) {
-    const thrownErrorMessage = safeErrorMessage(error);
-    const collectionError = syncResult?.collections.find(
-      (collection) => collection.failed > 0
-    )?.error;
-    const errorMessage =
-      thrownErrorMessage === INCOMPLETE_SYNC_ERROR && collectionError
-        ? collectionError
-        : thrownErrorMessage;
+    const errorMessage = syncFailureMessage(error, syncResult);
     log.error("OneRoster sync failed", { error: errorMessage, runId });
     if (!metricsEmitted) {
       await emitMetrics(null, null).catch(() => {});
@@ -223,7 +234,7 @@ export async function handler(
         state: "failed",
         result: syncResult,
         error: errorMessage,
-      })
+      }),
     );
     throw error;
   } finally {
@@ -231,16 +242,14 @@ export async function handler(
   }
 }
 
-function statusFromResult(
-  options: {
-    runId: string;
-    trigger: "manual" | "schedule";
-    startedAt: string;
-    state: "succeeded" | "failed";
-    result: OneRosterSyncResult | null;
-    error: string | null;
-  }
-): PersistedSyncStatus {
+function statusFromResult(options: {
+  runId: string;
+  trigger: "manual" | "schedule";
+  startedAt: string;
+  state: "succeeded" | "failed";
+  result: OneRosterSyncResult | null;
+  error: string | null;
+}): PersistedSyncStatus {
   const { runId, trigger, startedAt, state, result, error } = options;
   return {
     runId,
@@ -263,7 +272,7 @@ function statusFromResult(
 
 async function writeStatusSafely(
   sql: Awaited<ReturnType<typeof getSql>>,
-  status: PersistedSyncStatus
+  status: PersistedSyncStatus,
 ): Promise<void> {
   try {
     await writeSyncStatus(sql, status);
@@ -280,7 +289,7 @@ async function writeStatusSafely(
 
 async function loadSecret(secretArn: string): Promise<string> {
   const response = await secrets.send(
-    new GetSecretValueCommand({ SecretId: secretArn })
+    new GetSecretValueCommand({ SecretId: secretArn }),
   );
   if (!response.SecretString) {
     throw new Error("OneRoster credentials secret has no SecretString");
@@ -359,7 +368,7 @@ async function emitMetrics(
           Value: collection.recordsTotal,
           Unit: "Count",
           Dimensions: dimensions,
-        }
+        },
       );
     }
   }
@@ -380,7 +389,7 @@ async function emitMetrics(
       new PutMetricDataCommand({
         Namespace: METRIC_NAMESPACE,
         MetricData: metrics,
-      })
+      }),
     );
   } catch (error) {
     log.warn("Failed to publish OneRoster metrics", {

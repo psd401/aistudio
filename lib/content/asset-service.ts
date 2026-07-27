@@ -4,10 +4,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, inArray, lt } from "drizzle-orm";
-import {
-  executeQuery,
-  executeTransaction,
-} from "@/lib/db/drizzle-client";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import {
   contentAssets,
   contentObjects,
@@ -32,11 +29,7 @@ import {
   type ContentAssetContentType,
 } from "./asset-image";
 import { contentService } from "./content-service";
-import {
-  actorKindOf,
-  agentIdOf,
-  authorUserIdOf,
-} from "./helpers";
+import { actorKindOf, agentIdOf, authorUserIdOf } from "./helpers";
 import {
   ConflictError,
   IdempotencyKeyReusedError,
@@ -109,8 +102,42 @@ function checksumBase64(base64url: string): string {
   return Buffer.from(base64url, "base64url").toString("base64");
 }
 
-function validateInitiate(input: InitiateContentAssetInput): asserts input is
-  InitiateContentAssetInput & { contentType: ContentAssetContentType } {
+function storedAssetContentType(value: string): ContentAssetContentType {
+  if (!isContentAssetContentType(value)) {
+    throw new StorageError("Stored asset content type is invalid");
+  }
+  return value;
+}
+
+function validateAssetFilename(filename: string): void {
+  if (
+    filename.trim().length === 0 ||
+    filename.length > 255 ||
+    /[\0\r\n/\\]/.test(filename)
+  ) {
+    throw new ValidationError("Asset filename is invalid");
+  }
+}
+
+function validateAssetDimension(
+  name: "width" | "height",
+  value: number | undefined,
+): void {
+  if (
+    value !== undefined &&
+    (!Number.isInteger(value) ||
+      value < 1 ||
+      value > CONTENT_ASSET_MAX_DIMENSION)
+  ) {
+    throw new ValidationError(`Asset ${name} is outside the allowed range`);
+  }
+}
+
+function validateInitiate(
+  input: InitiateContentAssetInput,
+): asserts input is InitiateContentAssetInput & {
+  contentType: ContentAssetContentType;
+} {
   if (!isContentAssetContentType(input.contentType)) {
     throw new ValidationError("Only PNG, JPEG, and WebP assets are supported");
   }
@@ -122,28 +149,13 @@ function validateInitiate(input: InitiateContentAssetInput): asserts input is
     throw new ValidationError("Asset byteLength is outside the allowed range");
   }
   if (!/^[A-Za-z0-9_-]{43}$/.test(input.sha256)) {
-    throw new ValidationError("Asset sha256 must be a base64url SHA-256 digest");
+    throw new ValidationError(
+      "Asset sha256 must be a base64url SHA-256 digest",
+    );
   }
-  if (
-    input.filename.trim().length === 0 ||
-    input.filename.length > 255 ||
-    /[\0\r\n/\\]/.test(input.filename)
-  ) {
-    throw new ValidationError("Asset filename is invalid");
-  }
-  for (const [name, value] of [
-    ["width", input.width],
-    ["height", input.height],
-  ] as const) {
-    if (
-      value !== undefined &&
-      (!Number.isInteger(value) ||
-        value < 1 ||
-        value > CONTENT_ASSET_MAX_DIMENSION)
-    ) {
-      throw new ValidationError(`Asset ${name} is outside the allowed range`);
-    }
-  }
+  validateAssetFilename(input.filename);
+  validateAssetDimension("width", input.width);
+  validateAssetDimension("height", input.height);
   if (
     input.width !== undefined &&
     input.height !== undefined &&
@@ -178,7 +190,7 @@ function dto(row: ContentAssetRow): ContentAssetDTO {
 
 async function loadAsset(
   objectId: string,
-  assetId: string
+  assetId: string,
 ): Promise<ContentAssetRow | null> {
   const rows = await executeQuery(
     (db) =>
@@ -188,18 +200,18 @@ async function loadAsset(
         .where(
           and(
             eq(contentAssets.id, assetId),
-            eq(contentAssets.objectId, objectId)
-          )
+            eq(contentAssets.objectId, objectId),
+          ),
         )
         .limit(1),
-    "content.assets.get"
+    "content.assets.get",
   );
   return rows[0] ?? null;
 }
 
 async function markRejected(
   assetId: string,
-  rejectionCode: string
+  rejectionCode: string,
 ): Promise<void> {
   await executeQuery(
     (db) =>
@@ -213,10 +225,10 @@ async function markRejected(
         .where(
           and(
             eq(contentAssets.id, assetId),
-            inArray(contentAssets.state, ["pending", "quarantined"])
-          )
+            inArray(contentAssets.state, ["pending", "quarantined"]),
+          ),
         ),
-    "content.assets.reject"
+    "content.assets.reject",
   );
 }
 
@@ -232,7 +244,7 @@ function rejectionCode(error: unknown): string {
 
 async function loadInitiationReservation(
   objectId: string,
-  keyHash: string
+  keyHash: string,
 ): Promise<ContentAssetRow | null> {
   const rows = await executeQuery(
     (db) =>
@@ -242,11 +254,11 @@ async function loadInitiationReservation(
         .where(
           and(
             eq(contentAssets.objectId, objectId),
-            eq(contentAssets.initiationKeyHash, keyHash)
-          )
+            eq(contentAssets.initiationKeyHash, keyHash),
+          ),
         )
         .limit(1),
-    "content.assets.initiate.loadReservation"
+    "content.assets.initiate.loadReservation",
   );
   return rows[0] ?? null;
 }
@@ -259,12 +271,12 @@ async function loadInitiationReservation(
 async function recoverInitiationReservation(
   objectId: string,
   idempotency: ContentAssetInitiationIdempotency,
-  expiresAt: Date
+  expiresAt: Date,
 ): Promise<ContentAssetRow> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const existing = await loadInitiationReservation(
       objectId,
-      idempotency.keyHash
+      idempotency.keyHash,
     );
     if (!existing) {
       throw new StorageError("Failed to recover the asset upload reservation");
@@ -283,11 +295,11 @@ async function recoverInitiationReservation(
               and(
                 eq(contentAssets.id, existing.id),
                 eq(contentAssets.initiationKeyHash, idempotency.keyHash),
-                inArray(contentAssets.state, ["pending", "quarantined"])
-              )
+                inArray(contentAssets.state, ["pending", "quarantined"]),
+              ),
             )
             .returning(),
-        "content.assets.initiate.renewReservation"
+        "content.assets.initiate.renewReservation",
       );
       if (renewed[0]) return renewed[0];
       continue;
@@ -297,7 +309,7 @@ async function recoverInitiationReservation(
       const replacementUploadKey = s3Store.assetUploadKey(
         objectId,
         existing.id,
-        randomUUID()
+        randomUUID(),
       );
       const recovered = await executeQuery(
         (db) =>
@@ -314,11 +326,11 @@ async function recoverInitiationReservation(
               and(
                 eq(contentAssets.id, existing.id),
                 eq(contentAssets.initiationKeyHash, idempotency.keyHash),
-                eq(contentAssets.state, "deleted")
-              )
+                eq(contentAssets.state, "deleted"),
+              ),
             )
             .returning(),
-        "content.assets.initiate.recoverDeletedReservation"
+        "content.assets.initiate.recoverDeletedReservation",
       );
       if (recovered[0]) return recovered[0];
       continue;
@@ -326,10 +338,191 @@ async function recoverInitiationReservation(
 
     throw new ConflictError(
       "Content asset initiation cannot be replayed from this state",
-      { state: existing.state }
+      { state: existing.state },
     );
   }
-  throw new ConflictError("Content asset initiation lost a reservation state race");
+  throw new ConflictError(
+    "Content asset initiation lost a reservation state race",
+  );
+}
+
+type ContentAssetInsert = typeof contentAssets.$inferInsert;
+
+function initiationValues(
+  req: Requester,
+  objectId: string,
+  input: InitiateContentAssetInput & { contentType: ContentAssetContentType },
+  idempotency: ContentAssetInitiationIdempotency | undefined,
+  expiresAt: Date,
+): ContentAssetInsert {
+  const id = randomUUID();
+  return {
+    id,
+    objectId,
+    uploaderActor: actorKindOf(req),
+    uploaderUserId: authorUserIdOf(req),
+    uploaderAgentId: agentIdOf(req),
+    filename: input.filename.trim(),
+    objectKey: s3Store.assetKey(objectId, id),
+    uploadKey: s3Store.assetUploadKey(objectId, id),
+    contentType: input.contentType,
+    byteLength: input.byteLength,
+    sha256: input.sha256,
+    width: input.width ?? null,
+    height: input.height ?? null,
+    purpose: input.purpose,
+    initiationKeyHash: idempotency?.keyHash ?? null,
+    initiationRequestHash: idempotency?.requestHash ?? null,
+    uploadExpiresAt: expiresAt,
+  };
+}
+
+async function signAssetUpload(
+  key: string,
+  contentType: ContentAssetContentType,
+  contentLength: number,
+  checksumSha256: string,
+): Promise<string> {
+  try {
+    return await s3Store.signedAssetUploadUrl({
+      key,
+      contentType,
+      contentLength,
+      checksumSha256,
+      ttlSeconds: UPLOAD_TTL_SECONDS,
+    });
+  } catch {
+    throw new StorageError("Asset upload storage is temporarily unavailable");
+  }
+}
+
+async function reserveIdempotentAsset(
+  values: ContentAssetInsert,
+  objectId: string,
+  idempotency: ContentAssetInitiationIdempotency,
+  expiresAt: Date,
+): Promise<{ row: ContentAssetRow; replayed: boolean }> {
+  const inserted = await executeQuery(
+    (db) =>
+      db.insert(contentAssets).values(values).onConflictDoNothing().returning(),
+    "content.assets.initiate.reserve",
+  );
+  if (inserted[0]) return { row: inserted[0], replayed: false };
+  const row = await recoverInitiationReservation(
+    objectId,
+    idempotency,
+    expiresAt,
+  );
+  return { row, replayed: true };
+}
+
+async function reserveUnkeyedAsset(
+  values: ContentAssetInsert,
+  checksum: string,
+): Promise<{ row: ContentAssetRow; uploadUrl: string }> {
+  const uploadUrl = await signAssetUpload(
+    values.uploadKey,
+    values.contentType as ContentAssetContentType,
+    values.byteLength,
+    checksum,
+  );
+  const inserted = await executeQuery(
+    (db) => db.insert(contentAssets).values(values).returning(),
+    "content.assets.initiate",
+  );
+  if (!inserted[0]) {
+    throw new StorageError("Failed to reserve the asset upload");
+  }
+  return { row: inserted[0], uploadUrl };
+}
+
+function initiatedAssetResult(
+  row: ContentAssetRow,
+  uploadUrl: string,
+  checksum: string,
+  replayed: boolean,
+): InitiatedContentAssetResult {
+  return {
+    asset: {
+      ...dto(row),
+      upload: {
+        method: "PUT",
+        url: uploadUrl,
+        headers: {
+          "content-type": row.contentType,
+          "x-amz-checksum-sha256": checksum,
+        },
+        expiresAt: row.uploadExpiresAt.toISOString(),
+      },
+    },
+    replayed,
+  };
+}
+
+function assertCompletableAsset(
+  asset: ContentAssetRow,
+  expectedSha256: string,
+): ContentAssetContentType {
+  if (expectedSha256 !== asset.sha256) {
+    throw new ConflictError("Completion checksum does not match initiation");
+  }
+  if (asset.state !== "pending" && asset.state !== "quarantined") {
+    throw new ConflictError(
+      "Content asset cannot be completed from this state",
+      {
+        state: asset.state,
+      },
+    );
+  }
+  if (asset.uploadExpiresAt.getTime() < Date.now()) {
+    throw new ConflictError("Content asset upload has expired");
+  }
+  return storedAssetContentType(asset.contentType);
+}
+
+async function loadAndVerifyAssetSource(
+  asset: ContentAssetRow,
+): Promise<Uint8Array> {
+  let source: Uint8Array;
+  try {
+    source = await s3Store.getBytesBounded(
+      asset.uploadKey,
+      CONTENT_ASSET_MAX_BYTES + 1,
+    );
+  } catch {
+    throw new StorageError("Uploaded asset bytes are unavailable");
+  }
+  if (source.byteLength !== asset.byteLength) {
+    await markRejected(asset.id, "BYTE_LENGTH_MISMATCH");
+    throw new ValidationError("Uploaded asset byte length does not match");
+  }
+  const actualSha256 = createHash("sha256").update(source).digest("base64url");
+  if (actualSha256 !== asset.sha256) {
+    await markRejected(asset.id, "CHECKSUM_MISMATCH");
+    throw new ValidationError("Uploaded asset checksum does not match", {
+      rejectionCode: "CHECKSUM_MISMATCH",
+    });
+  }
+  return source;
+}
+
+async function normalizeUploadedAsset(
+  asset: ContentAssetRow,
+  source: Uint8Array,
+  contentType: ContentAssetContentType,
+): Promise<Awaited<ReturnType<typeof normalizeContentAsset>>> {
+  try {
+    return await normalizeContentAsset({
+      source,
+      declaredContentType: contentType,
+      declaredWidth: asset.width ?? undefined,
+      declaredHeight: asset.height ?? undefined,
+    });
+  } catch (error) {
+    await markRejected(asset.id, rejectionCode(error));
+    void s3Store.deleteKey(asset.uploadKey).catch(() => undefined);
+    throw error;
+  }
 }
 
 export const contentAssetService = {
@@ -337,7 +530,7 @@ export const contentAssetService = {
     req: Requester,
     objectId: string,
     input: InitiateContentAssetInput,
-    idempotency?: ContentAssetInitiationIdempotency
+    idempotency?: ContentAssetInitiationIdempotency,
   ): Promise<InitiatedContentAssetResult> {
     validateInitiate(input);
     if (
@@ -348,185 +541,70 @@ export const contentAssetService = {
       throw new ValidationError("Invalid asset initiation idempotency digest");
     }
     const object = await contentService.loadForEdit(req, objectId);
-    const id = randomUUID();
-    const objectKey = s3Store.assetKey(object.id, id);
-    const uploadKey = s3Store.assetUploadKey(object.id, id);
     const expiresAt = new Date(Date.now() + UPLOAD_TTL_SECONDS * 1000);
     const checksum = checksumBase64(input.sha256);
-    const values = {
-      id,
-      objectId: object.id,
-      uploaderActor: actorKindOf(req),
-      uploaderUserId: authorUserIdOf(req),
-      uploaderAgentId: agentIdOf(req),
-      filename: input.filename.trim(),
-      objectKey,
-      uploadKey,
-      contentType: input.contentType,
-      byteLength: input.byteLength,
-      sha256: input.sha256,
-      width: input.width ?? null,
-      height: input.height ?? null,
-      purpose: input.purpose,
-      initiationKeyHash: idempotency?.keyHash ?? null,
-      initiationRequestHash: idempotency?.requestHash ?? null,
-      uploadExpiresAt: expiresAt,
-    };
-
-    let row: ContentAssetRow;
-    let replayed = false;
-    let uploadUrl: string | undefined;
+    const values = initiationValues(
+      req,
+      object.id,
+      input,
+      idempotency,
+      expiresAt,
+    );
 
     if (idempotency) {
-      const inserted = await executeQuery(
-        (db) =>
-          db
-            .insert(contentAssets)
-            .values(values)
-            .onConflictDoNothing()
-            .returning(),
-        "content.assets.initiate.reserve"
+      const { row, replayed } = await reserveIdempotentAsset(
+        values,
+        object.id,
+        idempotency,
+        expiresAt,
       );
-      if (inserted[0]) {
-        row = inserted[0];
-      } else {
-        row = await recoverInitiationReservation(
-          object.id,
-          idempotency,
-          expiresAt
-        );
-        replayed = true;
-      }
-    } else {
-      // Preserve the unkeyed path's no-orphan behavior on a signing outage.
-      try {
-        uploadUrl = await s3Store.signedAssetUploadUrl({
-          key: uploadKey,
-          contentType: input.contentType,
-          contentLength: input.byteLength,
-          checksumSha256: checksum,
-          ttlSeconds: UPLOAD_TTL_SECONDS,
-        });
-      } catch {
-        throw new StorageError("Asset upload storage is temporarily unavailable");
-      }
-      const inserted = await executeQuery(
-        (db) => db.insert(contentAssets).values(values).returning(),
-        "content.assets.initiate"
+      const uploadUrl = await signAssetUpload(
+        row.uploadKey,
+        storedAssetContentType(row.contentType),
+        row.byteLength,
+        checksum,
       );
-      const insertedRow = inserted[0];
-      if (!insertedRow) {
-        throw new StorageError("Failed to reserve the asset upload");
-      }
-      row = insertedRow;
+      return initiatedAssetResult(row, uploadUrl, checksum, replayed);
     }
 
-    if (!uploadUrl) {
-      try {
-        uploadUrl = await s3Store.signedAssetUploadUrl({
-          key: row.uploadKey,
-          contentType: row.contentType,
-          contentLength: row.byteLength,
-          checksumSha256: checksum,
-          ttlSeconds: UPLOAD_TTL_SECONDS,
-        });
-      } catch {
-        // The durable reservation intentionally remains retryable. The same
-        // client key will find it and ask storage for a replacement request.
-        throw new StorageError("Asset upload storage is temporarily unavailable");
-      }
-    }
-
-    return {
-      asset: {
-        ...dto(row),
-        upload: {
-          method: "PUT",
-          url: uploadUrl,
-          headers: {
-            "content-type": input.contentType,
-            "x-amz-checksum-sha256": checksum,
-          },
-          expiresAt: row.uploadExpiresAt.toISOString(),
-        },
-      },
-      replayed,
-    };
+    // Preserve the unkeyed path's no-orphan behavior on a signing outage.
+    const { row, uploadUrl } = await reserveUnkeyedAsset(values, checksum);
+    return initiatedAssetResult(row, uploadUrl, checksum, false);
   },
 
   async complete(
     req: Requester,
     objectId: string,
     assetId: string,
-    input: { sha256: string }
+    input: { sha256: string },
   ): Promise<ContentAssetDTO> {
     await contentService.loadForEdit(req, objectId);
     const asset = await loadAsset(objectId, assetId);
     if (!asset) throw new NotFoundError("Content asset not found");
-    if (input.sha256 !== asset.sha256) {
-      throw new ConflictError("Completion checksum does not match initiation");
-    }
     if (asset.state === "ready") return dto(asset);
-    if (asset.state !== "pending" && asset.state !== "quarantined") {
-      throw new ConflictError("Content asset cannot be completed from this state", {
-        state: asset.state,
-      });
-    }
-    if (asset.uploadExpiresAt.getTime() < Date.now()) {
-      throw new ConflictError("Content asset upload has expired");
-    }
-    if (!isContentAssetContentType(asset.contentType)) {
+    let contentType: ContentAssetContentType;
+    try {
+      contentType = assertCompletableAsset(asset, input.sha256);
+    } catch (error) {
+      if (!(error instanceof StorageError)) throw error;
       await markRejected(asset.id, "UNSUPPORTED_DECLARED_MIME");
       throw new ValidationError("Stored asset MIME type is unsupported", {
         rejectionCode: "UNSUPPORTED_DECLARED_MIME",
       });
     }
-
-    let source: Uint8Array;
-    try {
-      source = await s3Store.getBytesBounded(
-        asset.uploadKey,
-        CONTENT_ASSET_MAX_BYTES + 1
-      );
-    } catch {
-      throw new StorageError("Uploaded asset bytes are unavailable");
-    }
-    if (source.byteLength !== asset.byteLength) {
-      await markRejected(asset.id, "BYTE_LENGTH_MISMATCH");
-      throw new ValidationError("Uploaded asset byte length does not match");
-    }
-    const actualSha256 = createHash("sha256")
-      .update(source)
-      .digest("base64url");
-    if (actualSha256 !== asset.sha256) {
-      await markRejected(asset.id, "CHECKSUM_MISMATCH");
-      throw new ValidationError("Uploaded asset checksum does not match", {
-        rejectionCode: "CHECKSUM_MISMATCH",
-      });
-    }
-
-    let normalized: Awaited<ReturnType<typeof normalizeContentAsset>>;
-    try {
-      normalized = await normalizeContentAsset({
-        source,
-        declaredContentType: asset.contentType,
-        declaredWidth: asset.width ?? undefined,
-        declaredHeight: asset.height ?? undefined,
-      });
-    } catch (error) {
-      await markRejected(asset.id, rejectionCode(error));
-      void s3Store.deleteKey(asset.uploadKey).catch(() => undefined);
-      throw error;
-    }
+    const source = await loadAndVerifyAssetSource(asset);
+    const normalized = await normalizeUploadedAsset(asset, source, contentType);
 
     try {
       await s3Store.putBytes(
         asset.objectKey,
         normalized.bytes,
-        normalized.contentType
+        normalized.contentType,
       );
     } catch {
-      throw new StorageError("Normalized asset storage is temporarily unavailable");
+      throw new StorageError(
+        "Normalized asset storage is temporarily unavailable",
+      );
     }
     const inspection: ContentAssetInspection = {
       processorVersion: CONTENT_ASSET_PROCESSOR_VERSION,
@@ -551,11 +629,11 @@ export const contentAssetService = {
           .where(
             and(
               eq(contentAssets.id, asset.id),
-              inArray(contentAssets.state, ["pending", "quarantined"])
-            )
+              inArray(contentAssets.state, ["pending", "quarantined"]),
+            ),
           )
           .returning(),
-      "content.assets.complete"
+      "content.assets.complete",
     );
     const ready = rows[0] ?? (await loadAsset(objectId, assetId));
     if (!ready || ready.state !== "ready") {
@@ -579,7 +657,7 @@ export const contentAssetService = {
           .from(contentAssets)
           .where(eq(contentAssets.objectId, object.id))
           .orderBy(contentAssets.createdAt),
-      "content.assets.list"
+      "content.assets.list",
     );
     return rows.map(dto);
   },
@@ -587,7 +665,7 @@ export const contentAssetService = {
   async get(
     req: Requester,
     objectId: string,
-    assetId: string
+    assetId: string,
   ): Promise<ContentAssetDTO> {
     const object = await contentService.get(req, objectId);
     const asset = await loadAsset(object.id, assetId);
@@ -597,7 +675,7 @@ export const contentAssetService = {
 
   async readBytes(
     req: Requester,
-    assetId: string
+    assetId: string,
   ): Promise<{ bytes: Uint8Array; contentType: string; etag: string }> {
     const rows = await executeQuery(
       (db) =>
@@ -606,7 +684,7 @@ export const contentAssetService = {
           .from(contentAssets)
           .where(eq(contentAssets.id, assetId))
           .limit(1),
-      "content.assets.read.resolve"
+      "content.assets.read.resolve",
     );
     const asset = rows[0];
     if (!asset || asset.state !== "ready") {
@@ -623,12 +701,12 @@ export const contentAssetService = {
               contentPublications,
               eq(
                 contentPublications.publishedVersionId,
-                contentVersionAssets.versionId
-              )
+                contentVersionAssets.versionId,
+              ),
             )
             .innerJoin(
               contentObjects,
-              eq(contentObjects.id, contentPublications.objectId)
+              eq(contentObjects.id, contentPublications.objectId),
             )
             .where(
               and(
@@ -636,11 +714,11 @@ export const contentAssetService = {
                 eq(contentPublications.objectId, object.id),
                 eq(contentPublications.destination, "public_web"),
                 eq(contentPublications.status, "live"),
-                eq(contentObjects.visibilityLevel, "public")
-              )
+                eq(contentObjects.visibilityLevel, "public"),
+              ),
             )
             .limit(1),
-        "content.assets.read.publicGate"
+        "content.assets.read.publicGate",
       );
       if (!publication[0]) throw new NotFoundError("Content asset not found");
     }
@@ -651,7 +729,7 @@ export const contentAssetService = {
     try {
       const bytes = await s3Store.getBytesBounded(
         asset.objectKey,
-        normalizedByteLength
+        normalizedByteLength,
       );
       if (bytes.byteLength !== normalizedByteLength) {
         throw new Error("normalized length mismatch");
@@ -669,7 +747,7 @@ export const contentAssetService = {
 
 /** Bounded cleanup job for expired, uncompleted upload reservations. */
 export async function cleanupExpiredContentAssets(
-  limit = CLEANUP_BATCH_SIZE
+  limit = CLEANUP_BATCH_SIZE,
 ): Promise<number> {
   const bounded = Math.max(1, Math.min(limit, CLEANUP_BATCH_SIZE));
   const expired = await executeQuery(
@@ -680,11 +758,11 @@ export async function cleanupExpiredContentAssets(
         .where(
           and(
             eq(contentAssets.state, "pending"),
-            lt(contentAssets.uploadExpiresAt, new Date())
-          )
+            lt(contentAssets.uploadExpiresAt, new Date()),
+          ),
         )
         .limit(bounded),
-    "content.assets.cleanup.select"
+    "content.assets.cleanup.select",
   );
   if (expired.length === 0) return 0;
   // Retire in PostgreSQL before deleting storage. A concurrent recovery either
@@ -697,19 +775,22 @@ export async function cleanupExpiredContentAssets(
         .set({ state: "deleted" })
         .where(
           and(
-            inArray(contentAssets.id, expired.map((asset) => asset.id)),
+            inArray(
+              contentAssets.id,
+              expired.map((asset) => asset.id),
+            ),
             eq(contentAssets.state, "pending"),
-            lt(contentAssets.uploadExpiresAt, new Date())
-          )
+            lt(contentAssets.uploadExpiresAt, new Date()),
+          ),
         )
         .returning({
           id: contentAssets.id,
           uploadKey: contentAssets.uploadKey,
         }),
-    "content.assets.cleanup.mark"
+    "content.assets.cleanup.mark",
   );
   await Promise.allSettled(
-    deleted.map((asset) => s3Store.deleteKey(asset.uploadKey))
+    deleted.map((asset) => s3Store.deleteKey(asset.uploadKey)),
   );
   return deleted.length;
 }
