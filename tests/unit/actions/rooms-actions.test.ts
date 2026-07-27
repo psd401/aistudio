@@ -202,6 +202,37 @@ describe("room actions — server authorization", () => {
     expect(mockUpdateManagedRoom).toHaveBeenCalled();
   });
 
+  it("rejects every entry point when the rooms-manage capability is denied", async () => {
+    mockHasCapabilityAccess.mockResolvedValue(false);
+
+    const created = await createRoomAction({
+      name: "Biology",
+      classSourcedIds: ["owned-section"],
+      memberEmails: [],
+      assistantIds: [],
+    });
+    const loaded = await getRoomsManageDataAction();
+
+    expect(created.isSuccess).toBe(false);
+    expect(loaded.isSuccess).toBe(false);
+    expect(mockHasCapabilityAccess).toHaveBeenCalledWith(
+      "rooms-manage",
+      "teacher-sub"
+    );
+    // The gate must short-circuit before any room data is read or written.
+    expect(mockGetRoomActor).not.toHaveBeenCalled();
+    expect(mockListRoomsForManagement).not.toHaveBeenCalled();
+    expect(mockCreateManagedRoom).not.toHaveBeenCalled();
+  });
+
+  it("scopes the room list to the actor for a non-administrator", async () => {
+    const result = await getRoomsManageDataAction();
+
+    expect(result.isSuccess).toBe(true);
+    expect(mockListRoomsForManagement).toHaveBeenCalledWith(7, false);
+    expect(result.data?.isAdministrator).toBe(false);
+  });
+
   it("loads every active room for administrators", async () => {
     mockGetRoomActor.mockResolvedValue({
       email: "admin@example.com",

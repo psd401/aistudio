@@ -12,6 +12,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 interface RoomsListProps {
   rooms: ManagedRoom[];
+  /**
+   * Administrators are served every owner's rooms, so the list is labelled
+   * "All rooms" and each card names its owner — without it, same-named rooms
+   * from different teachers are indistinguishable. Display only: the server
+   * re-derives management rights on every mutation.
+   */
   isAdministrator: boolean;
   sectionById: ReadonlyMap<string, TeacherSectionOption>;
   assistantById: ReadonlyMap<number, AccessibleAssistantOption>;
@@ -61,6 +67,14 @@ export function RoomsList({
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <CardTitle className="text-base">{room.name}</CardTitle>
+                  {isAdministrator ? (
+                    <p
+                      className="mt-1 text-xs text-muted-foreground"
+                      data-testid={`room-owner-${room.id}`}
+                    >
+                      Owner: {room.createdByEmail ?? "unassigned"}
+                    </p>
+                  ) : null}
                   <p className="mt-1 text-xs text-muted-foreground">
                     {room.classSourcedIds.length} section
                     {room.classSourcedIds.length === 1 ? "" : "s"} ·{" "}

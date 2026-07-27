@@ -14,6 +14,7 @@ import {
   roomMembers,
   roomResources,
   rooms,
+  users,
 } from "@/lib/db/schema";
 import { filterAccessibleResourceIds } from "@/lib/db/drizzle/resource-access";
 import { normalizeEmail } from "@/lib/groups/normalize";
@@ -42,12 +43,25 @@ export interface ManagedRoom {
   id: string;
   name: string;
   createdBy: number | null;
+  /**
+   * Owner email, or null for an orphaned room (creator deleted — `rooms.created_by`
+   * is ON DELETE SET NULL). Only meaningful to administrators, the only actors
+   * served rooms they did not create.
+   */
+  createdByEmail: string | null;
   createdAt: Date;
   updatedAt: Date;
   classSourcedIds: string[];
   memberEmails: string[];
   assistantIds: number[];
 }
+
+/**
+ * Upper bound on rows returned by `listRoomsForManagement`. Only reachable by
+ * administrators, whose list spans every owner in the district; a teacher's own
+ * rooms are far below it.
+ */
+export const MANAGED_ROOM_LIST_LIMIT = 500;
 
 export interface RoomAuthorizationSnapshot {
   createdBy: number | null;
@@ -278,6 +292,19 @@ export async function accessibleApprovedAssistantIds(
   );
 }
 
+/**
+ * Rooms the actor may manage: their own, or — for an administrator — every
+ * active room, so the administrator override in `canManageRoom` is reachable
+ * from the UI instead of only by knowing a room's UUID.
+ *
+ * The administrator result set is district-wide, so it is capped at
+ * `MANAGED_ROOM_LIST_LIMIT` (most recently updated first). The cap is load-
+ * bearing, not cosmetic: every returned id is spread into three `IN (...)`
+ * child-row queries below, so an uncapped list would grow the bind-parameter
+ * count and the payload serialized into the client component linearly with the
+ * number of rooms in the district. A searchable/paged administrator view is
+ * follow-up work.
+ */
 export async function listRoomsForManagement(
   userId: number,
   isAdministrator: boolean
@@ -289,16 +316,19 @@ export async function listRoomsForManagement(
           id: rooms.id,
           name: rooms.name,
           createdBy: rooms.createdBy,
+          createdByEmail: users.email,
           createdAt: rooms.createdAt,
           updatedAt: rooms.updatedAt,
         })
         .from(rooms)
+        .leftJoin(users, eq(users.id, rooms.createdBy))
         .where(
           isAdministrator
             ? eq(rooms.isActive, true)
             : and(eq(rooms.createdBy, userId), eq(rooms.isActive, true))
         )
-        .orderBy(desc(rooms.updatedAt)),
+        .orderBy(desc(rooms.updatedAt))
+        .limit(MANAGED_ROOM_LIST_LIMIT),
     "listRoomsForManagement.rooms"
   );
   if (roomRows.length === 0) return [];
@@ -347,6 +377,8 @@ export async function listRoomsForManagement(
 
   return roomRows.map((room) => ({
     ...room,
+    // Left join: null whenever the creator row is gone (created_by SET NULL).
+    createdByEmail: room.createdByEmail ?? null,
     classSourcedIds: classRows
       .filter((row) => row.roomId === room.id)
       .map((row) => row.classSourcedId),
