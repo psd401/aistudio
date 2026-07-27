@@ -313,8 +313,17 @@ def _is_regenerable_segment(segment: str) -> bool:
     """True for a directory that can be rebuilt and need not be synced."""
     if segment in _SKIP_SEGMENT_NAMES:
         return True
-    # Virtualenvs: ".venv", "venv", and skill-specific forms like ".tts-venv".
-    return segment == "venv" or segment.endswith("-venv") or segment == ".venv"
+    # Virtualenvs: exact "venv"/".venv", plus HIDDEN skill-local forms like
+    # ".tts-venv". The "-venv" suffix is deliberately not honoured on visible
+    # segments: an authored directory such as
+    # "skills/user/hagelk-python-venv/SKILL.md" would then be skipped by BOTH
+    # the pull and the push, so the agent's own scratch space would be neither
+    # restored nor uploaded. The two failure modes are not symmetric — an
+    # unmatched venv only costs sync time, an over-matched skill loses work —
+    # so keep the match narrow and let a stray visible venv ride along.
+    if segment in ("venv", ".venv"):
+        return True
+    return segment.startswith(".") and segment.endswith("-venv")
 
 
 def _should_skip_relative(relative: str) -> bool:

@@ -634,6 +634,31 @@ class RegenerableArtifactSkipTests(unittest.TestCase):
                 f"must NOT skip a file merely NAMED like a build dir: {rel}",
             )
 
+    def test_visible_venv_suffix_does_not_swallow_authored_skills(self):
+        # skills/user/ is the agent's OWN scratch space. A visible directory
+        # that merely ends in "-venv" is an authored name, not a virtualenv,
+        # and skipping it would drop the skill from both pull and push.
+        for rel in (
+            "skills/user/hagelk-python-venv/SKILL.md",
+            "skills/user/build-a-venv/README.md",
+            "memory/how-to-venv/notes.md",
+        ):
+            self.assertFalse(
+                workspace_sync._should_skip_relative(rel),
+                f"must NOT skip a visible authored dir ending in -venv: {rel}",
+            )
+
+    def test_hidden_venv_suffix_is_still_skipped(self):
+        # The real-world form the skip exists for stays matched.
+        for rel in (
+            "skills/hagelk-morning-brief/.tts-venv/bin/python",
+            "skills/foo/.build-venv/lib/thing.py",
+        ):
+            self.assertTrue(
+                workspace_sync._should_skip_relative(rel),
+                f"should skip hidden virtualenv: {rel}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
