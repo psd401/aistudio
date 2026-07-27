@@ -31,11 +31,10 @@ import {
   type ExecSyncOptionsWithStringEncoding,
 } from "node:child_process";
 import { createHash } from "node:crypto";
-import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Handler } from "aws-lambda";
 import { findMalformedToolVersionPins } from "./frontmatter-tools";
-import { validatedFs } from "../../lib/validated-fs";
+import { validatedFs } from "./validated-fs";
 
 const REGION = process.env.AWS_REGION || "us-east-1";
 const ENVIRONMENT = process.env.ENVIRONMENT || "dev";
@@ -398,7 +397,7 @@ async function finishSkillBuild(
     });
   }
   try {
-    fs.rmSync(workDir, { recursive: true, force: true });
+    validatedFs.rmSync(workDir, { recursive: true, force: true });
   } catch {
     // Best-effort cleanup.
   }

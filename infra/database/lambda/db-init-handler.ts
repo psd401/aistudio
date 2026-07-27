@@ -9,7 +9,7 @@ import {
 } from '@aws-sdk/client-rds-data';
 
 import * as path from 'node:path';
-import { validatedFsPromises } from "../../lib/validated-fs";
+import { readBundledSchemaFile } from './schema-file-reader';
 // migrations.json is copied to the Lambda package root during bundling
 // Using require for runtime resolution (file doesn't exist in source, only in Lambda package)
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -529,8 +529,8 @@ function parseAddedColumn(
 async function getSqlContent(filename: string): Promise<string> {
   try {
     // Schema files are copied to the Lambda deployment package
-    const schemaPath = path.join(__dirname, 'schema', filename);
-    const content = await validatedFsPromises.readFile(schemaPath, 'utf8');
+    const schemaDirectory = path.join(__dirname, 'schema');
+    const content = await readBundledSchemaFile(schemaDirectory, filename);
     return content;
   } catch (error) {
     console.error(`Failed to read SQL file ${filename}:`, error);

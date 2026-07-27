@@ -28,7 +28,7 @@ import {
 } from "../index";
 import type { RDSDataClient } from "@aws-sdk/client-rds-data";
 import type { S3Client } from "@aws-sdk/client-s3";
-import { validatedFs } from "../../../lib/validated-fs";
+import { validatedFs } from "../validated-fs";
 
 type Warn = { message: string; meta?: Record<string, unknown> };
 function collectingLogger(warnings: Warn[]) {

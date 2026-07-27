@@ -79,7 +79,7 @@ export function newSweepState(now = new Date().toISOString()): SweepState {
 interface ProcessSweepMessagesOptions {
   row: TriageRow;
   accessToken: string;
-  messages: { id: string; threadId?: string }[];
+  messages: { id: string; threadId: string }[];
   processed: number;
   labeled: number;
   deps: SweepDeps;
