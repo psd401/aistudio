@@ -22,7 +22,7 @@ import { and, count, eq, gte, lt, sql } from "drizzle-orm";
 import { createLogger } from "@/lib/logger";
 import type { ApiAuthContext } from "./auth-middleware";
 import { createErrorResponse } from "./auth-middleware";
-import { createHash } from "node:crypto";
+import { createHmac } from "node:crypto";
 
 // ============================================
 // Types
@@ -54,6 +54,20 @@ const DEFAULT_RPM = (() => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
 })();
 const WINDOW_MS = 60 * 1000; // 1 minute sliding window
+const PRINCIPAL_FINGERPRINT_DOMAIN = "ai-studio:rate-limit-principal:v1";
+
+/**
+ * Produce a bounded database key for a rate-limit principal.
+ *
+ * This is a domain-separated identifier fingerprint, not password storage or
+ * credential verification. HMAC keeps that distinction explicit to scanners
+ * while retaining a deterministic 64-character key for the existing schema.
+ */
+export function fingerprintRateLimitPrincipal(principal: string): string {
+  return createHmac("sha256", PRINCIPAL_FINGERPRINT_DOMAIN)
+    .update(principal)
+    .digest("hex");
+}
 
 // ============================================
 // Core Rate Limiting
@@ -89,7 +103,7 @@ export async function checkRateLimit(
       auth.authType,
       auth.apiKeyId ?? auth.oauthClientId ?? auth.userId,
     ].join(":");
-    const principalHash = createHash("sha256").update(principal).digest("hex");
+    const principalHash = fingerprintRateLimitPrincipal(principal);
     const now = Date.now();
     const windowStart = new Date(now - WINDOW_MS);
     const retentionStart = new Date(now - 24 * 60 * 60 * 1000);

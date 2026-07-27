@@ -113,6 +113,74 @@ function coerceInt(value, flag) {
   return n;
 }
 
+function isAsciiLetter(character) {
+  const code = character?.charCodeAt(0) ?? 0;
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isHtmlWhitespace(character) {
+  return (
+    character === ' ' ||
+    character === '\t' ||
+    character === '\n' ||
+    character === '\r' ||
+    character === '\f'
+  );
+}
+
+function isCompositionIdAttributeAt(html, index) {
+  if (html[index] !== 'd') return false;
+  const target = 'data-composition-id';
+  if (!html.startsWith(target, index)) return false;
+  if (!isHtmlWhitespace(html[index - 1])) return false;
+  const after = html[index + target.length];
+  return (
+    after === '=' ||
+    after === '>' ||
+    after === '/' ||
+    isHtmlWhitespace(after)
+  );
+}
+
+/**
+ * Locate the end of the first opening tag with data-composition-id in one
+ * bounded pass. Tracking quotes avoids treating attribute text or `>` inside
+ * a quoted value as markup and avoids a backtracking regex on supplied HTML.
+ */
+function findCompositionRootOpenTagEnd(html) {
+  let inOpeningTag = false;
+  let quote = '';
+  let hasCompositionId = false;
+
+  for (let index = 0; index < html.length; index += 1) {
+    const character = html[index];
+    if (!inOpeningTag) {
+      if (character === '<' && isAsciiLetter(html[index + 1])) {
+        inOpeningTag = true;
+        hasCompositionId = false;
+      }
+      continue;
+    }
+
+    if (quote) {
+      if (character === quote) quote = '';
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === '>') {
+      if (hasCompositionId) return index + 1;
+      inOpeningTag = false;
+      continue;
+    }
+
+    if (isCompositionIdAttributeAt(html, index)) hasCompositionId = true;
+  }
+  return -1;
+}
+
 /**
  * Insert an <audio> track as the first child of the composition root (the
  * element carrying data-composition-id) so hyperframes treats it as a timeline
@@ -124,9 +192,9 @@ function injectAudioElement(html, url, durationSeconds) {
   const audio =
     `<audio src="${url}" data-start="0" data-duration="${durationSeconds}" ` +
     `data-track-index="0" data-volume="1"></audio>`;
-  const rootOpen = html.match(/<[a-zA-Z][^>]*\bdata-composition-id\b[^>]*>/);
-  if (rootOpen) {
-    const at = rootOpen.index + rootOpen[0].length;
+  const rootOpenEnd = findCompositionRootOpenTagEnd(html);
+  if (rootOpenEnd !== -1) {
+    const at = rootOpenEnd;
     return `${html.slice(0, at)}\n${audio}${html.slice(at)}`;
   }
   const bodyAt = html.toLowerCase().lastIndexOf('</body>');
@@ -368,6 +436,7 @@ module.exports = {
   main,
   parseArgs,
   buildPayload,
+  findCompositionRootOpenTagEnd,
   injectAudioElement,
   invokeRender,
   validateEmail,

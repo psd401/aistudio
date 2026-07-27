@@ -251,8 +251,8 @@ function defineVercelAISDKV5ContractTestsSuite1Part2() {describe('streamText SSE
                 // @ts-expect-error - ensuring textDelta doesn't exist
                 expect(event.textDelta).toBeUndefined();
               }
-              }
-              handleNestedBranch1()
+              };
+              handleNestedBranch1();
             } catch {
               // Ignore non-JSON lines or parse errors for this test
               // We're only checking text-delta events
@@ -325,8 +325,8 @@ function defineVercelAISDKV5ContractTestsSuite1Part2() {describe('streamText SSE
                   expect(typeof event.usage).toBe('object');
                 }
               }
-              }
-              handleNestedBranch2()
+              };
+              handleNestedBranch2();
             } catch {
               // Ignore parse errors for non-standard events
             }

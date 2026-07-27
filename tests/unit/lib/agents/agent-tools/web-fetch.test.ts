@@ -15,7 +15,12 @@ import {
 import type { McpToolContext } from "@/lib/mcp/types";
 import { setSafeFetchTransportForTests } from "@/lib/security/safe-fetch";
 
-setSafeFetchTransportForTests((input, init) => global.fetch(input, init));
+let transportMock = jest.fn();
+setSafeFetchTransportForTests((input, init) => transportMock(input, init));
+
+beforeEach(() => {
+  transportMock = jest.fn();
+});
 
 afterAll(() => {
   setSafeFetchTransportForTests(undefined);
@@ -143,7 +148,7 @@ const defineHandleWebFetchSuite3 = () => {
   });
 
   it("fetches and returns readable text for an html page", async () => {
-    global.fetch = jest.fn().mockResolvedValue({
+    transportMock = jest.fn().mockResolvedValue({
       ok: true,
       status: 200,
       statusText: "OK",
@@ -158,7 +163,7 @@ const defineHandleWebFetchSuite3 = () => {
   });
 
   it("returns an error for a non-OK HTTP status", async () => {
-    global.fetch = jest.fn().mockResolvedValue({
+    transportMock = jest.fn().mockResolvedValue({
       ok: false,
       status: 404,
       statusText: "Not Found",
@@ -172,7 +177,7 @@ const defineHandleWebFetchSuite3 = () => {
   });
 
   it("refuses non-text content types", async () => {
-    global.fetch = jest.fn().mockResolvedValue({
+    transportMock = jest.fn().mockResolvedValue({
       ok: true,
       status: 200,
       statusText: "OK",
@@ -186,7 +191,7 @@ const defineHandleWebFetchSuite3 = () => {
   });
 
   it("truncates output to maxChars", async () => {
-    global.fetch = jest.fn().mockResolvedValue({
+    transportMock = jest.fn().mockResolvedValue({
       ok: true,
       status: 200,
       statusText: "OK",
@@ -240,7 +245,7 @@ const defineHandleWebFetchRedirectGuardREVCOR496Suite4 = () => {
         .fn()
         .mockResolvedValueOnce(redirectTo(target))
         .mockResolvedValueOnce(ok200Html("SECRET_INTERNAL_BODY_9c3f"));
-      global.fetch = fetchMock;
+      transportMock = fetchMock;
       const res = await handleWebFetch({ url: "https://example.com/start" }, ctx);
       expect(res.isError).toBe(true);
       expect(res.content[0].text).not.toContain("SECRET_INTERNAL_BODY_9c3f");
@@ -250,7 +255,7 @@ const defineHandleWebFetchRedirectGuardREVCOR496Suite4 = () => {
   );
 
   it("follows a legitimate http→https redirect on a public host and returns text", async () => {
-    global.fetch = jest
+    transportMock = jest
       .fn()
       .mockResolvedValueOnce(redirectTo("https://example.com/final", 301))
       .mockResolvedValueOnce(ok200Html("<p>Final page</p>"));
@@ -263,7 +268,7 @@ const defineHandleWebFetchRedirectGuardREVCOR496Suite4 = () => {
     const fetchMock = jest
       .fn()
       .mockResolvedValue(redirectTo("https://example.com/loop"));
-    global.fetch = fetchMock;
+    transportMock = fetchMock;
     const res = await handleWebFetch({ url: "https://example.com/loop" }, ctx);
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/too many redirects/i);
@@ -340,7 +345,7 @@ const defineHtmlToTextInputBoundingREVPERF005Suite6 = () => {
     // boundary, proving normalization ran on the bounded slice, not the full 5 MB.
     const filler = "<!-- x -->".repeat(900); // 9000 chars
     const html = `<p>START</p>${filler}<p>ENDMARKER</p>`;
-    global.fetch = jest.fn().mockResolvedValue({
+    transportMock = jest.fn().mockResolvedValue({
       ok: true,
       status: 200,
       statusText: "OK",

@@ -186,7 +186,7 @@ function validateImportedAssistant(assistant: Record<string, unknown>): string |
  * content that would be rejected at execution time is also rejected at import.
  */
 export function validateImportFile(data: unknown): { valid: boolean; error?: string } {
-  if (!data || typeof data !== 'object' || data === null) {
+  if (!data || typeof data !== 'object') {
     return { valid: false, error: "Invalid file format" }
   }
 

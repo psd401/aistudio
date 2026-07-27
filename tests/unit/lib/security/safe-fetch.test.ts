@@ -1,7 +1,7 @@
 /** @jest-environment node */
 
 import {
-  createPinnedLookup,
+  createPinnedRequestOptions,
   isPublicAddress,
   resolvePublicAddresses,
   safeFetchAdapter,
@@ -49,21 +49,30 @@ describe("safe outbound fetch DNS boundary", () => {
     ).rejects.toThrow(/private\/internal/);
   });
 
-  it("pins socket lookup to the already-approved answer", async () => {
+  it("connects to the approved IP while preserving origin routing and TLS identity", async () => {
     const approved = await resolvePublicAddresses(
       "attacker.example",
       async () => [{ address: "93.184.216.34", family: 4 }]
     );
-    const pinned = createPinnedLookup(approved);
+    const options = createPinnedRequestOptions(
+      new URL("https://attacker.example:8443/path?q=1"),
+      approved
+    );
 
-    await expect(
-      new Promise<{ address: string; family: number }>((resolve, reject) => {
-        pinned("attacker.example", { family: 0, hints: 0 }, (error, address, family) => {
-          if (error) reject(error);
-          else resolve({ address: address as string, family: family as number });
-        });
+    expect(options).toEqual(
+      expect.objectContaining({
+        hostname: "93.184.216.34",
+        family: 4,
+        port: 8443,
+        path: "/path?q=1",
+        servername: "attacker.example",
       })
-    ).resolves.toEqual({ address: "93.184.216.34", family: 4 });
+    );
+    expect(
+      new Headers(options.headers as unknown as HeadersInit).get("host")
+    ).toBe(
+      "attacker.example:8443"
+    );
   });
 
   it("forces library callers through manual redirect handling", async () => {

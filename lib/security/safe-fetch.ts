@@ -10,10 +10,10 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import type { RequestOptions as HttpsRequestOptions } from "node:https";
 import {
   BlockList,
   isIP,
-  type LookupFunction,
 } from "node:net";
 import { Readable } from "node:stream";
 
@@ -124,29 +124,57 @@ export async function resolvePublicAddresses(
   return addresses;
 }
 
-/** Build the socket lookup callback that can return only pre-approved addresses. */
-export function createPinnedLookup(
-  approved: readonly ResolvedAddress[]
-): LookupFunction {
-  return (_hostname, options, callback) => {
-    const requestedFamily =
-      typeof options === "number" ? options : options.family;
-    const match =
-      approved.find(
-        ({ family }) => requestedFamily === 0 || family === requestedFamily
-      ) ?? approved[0];
-    callback(null, match.address, match.family);
+/**
+ * Build an origin-form request that connects to the already-approved address.
+ *
+ * The untrusted hostname is retained only for the HTTP Host header and TLS
+ * certificate/SNI checks. The socket destination itself is the validated IP,
+ * so neither a second DNS lookup nor DNS rebinding can redirect the connection.
+ */
+export function createPinnedRequestOptions(
+  url: URL,
+  approved: readonly ResolvedAddress[],
+  init: SafeFetchInit = {}
+): HttpsRequestOptions {
+  const destination = approved[0];
+  if (!destination) {
+    throw new Error("Outbound target did not resolve");
+  }
+
+  const headers = new Headers(init.headers);
+  headers.set("host", url.host);
+  const hasCredentials = url.username.length > 0 || url.password.length > 0;
+
+  return {
+    protocol: url.protocol,
+    hostname: destination.address,
+    family: destination.family,
+    port: url.port ? Number.parseInt(url.port, 10) : undefined,
+    path: `${url.pathname}${url.search}`,
+    method: init.method ?? "GET",
+    headers: Object.fromEntries(headers.entries()),
+    signal: init.signal,
+    // Preserve the original hostname for TLS SNI/certificate verification.
+    servername: url.hostname.replace(/^\[|\]$/g, ""),
+    auth: hasCredentials
+      ? `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`
+      : undefined,
   };
 }
 
-let testTransport: typeof fetch | undefined;
+type SafeFetchTestTransport = (
+  input: URL,
+  init: RequestInit
+) => Promise<Response>;
+
+let testTransport: SafeFetchTestTransport | undefined;
 
 /**
  * Inject a transport only in tests. Production callers always use the pinned
  * Node socket path below.
  */
 export function setSafeFetchTransportForTests(
-  transport: typeof fetch | undefined
+  transport: SafeFetchTestTransport | undefined
 ): void {
   if (process.env.NODE_ENV !== "test") {
     throw new Error("Safe-fetch test transport can only be changed in tests");
@@ -177,20 +205,12 @@ export async function safeFetch(
   }
 
   const approved = await resolvePublicAddresses(url.hostname);
-  const headers = Object.fromEntries(new Headers(init.headers).entries());
   const request = url.protocol === "https:" ? httpsRequest : httpRequest;
+  const requestOptions = createPinnedRequestOptions(url, approved, init);
 
   return new Promise<Response>((resolve, reject) => {
     const req = request(
-      url,
-      {
-        method: init.method ?? "GET",
-        headers,
-        signal: init.signal,
-        lookup: createPinnedLookup(approved),
-        // Preserve the original hostname for TLS SNI/certificate verification.
-        servername: url.hostname.replace(/^\[|\]$/g, ""),
-      },
+      requestOptions,
       (res) => {
         const responseHeaders = new Headers();
         for (const [name, value] of Object.entries(res.headers)) {

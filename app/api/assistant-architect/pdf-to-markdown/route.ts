@@ -251,7 +251,7 @@ async function processPdfInBackground(jobId: number, jobInput: JobInput) {
     const pdfBuffer = Buffer.from(jobInput.fileData, 'base64');
 
     // System prompt for the LLM
-    const systemPrompt = `You are an expert document parser. Given a PDF file, extract ALL text and describe every image or graphic in context. Return a single, well-structured markdown document that preserves the logical order and hierarchy of the original. For images/graphics, insert a markdown image block with a description, e.g. ![Description of image]. Do not skip any content. Output only markdown.`
+    const systemPrompt = `You are an expert document parser. Given a PDF file, extract ALL text and describe every image or graphic in context. Return a single, well-structured markdown document that preserves the logical order and hierarchy of the original. For images/graphics, insert a markdown image block with a description, e.g. ![Description of image]. Do not skip any content. Output only markdown.`;
 
     // Prepare messages for the LLM
     const messages = [

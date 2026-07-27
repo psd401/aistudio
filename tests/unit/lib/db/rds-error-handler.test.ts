@@ -19,7 +19,7 @@ jest.mock('@/lib/logger', () => ({
   }),
   generateRequestId: () => 'test-request-id',
   startTimer: () => () => 100, // Returns a function that returns a number
-}))
+}));
 
 import {
   isRetryableError,
@@ -698,4 +698,4 @@ const defineRDSErrorHandlerSuite1 = () => {
   describe('executeWithRetry', defineRDSErrorHandlerSuite1Registration38)
 };
 
-describe('RDS Error Handler', defineRDSErrorHandlerSuite1)
+describe('RDS Error Handler', defineRDSErrorHandlerSuite1);

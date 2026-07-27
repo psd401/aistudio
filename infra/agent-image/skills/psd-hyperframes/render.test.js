@@ -19,6 +19,8 @@ const path = require('node:path');
 const {
   parseArgs,
   buildPayload,
+  findCompositionRootOpenTagEnd,
+  injectAudioElement,
   invokeRender,
   validateEmail,
   main,
@@ -188,6 +190,24 @@ test('buildPayload injects an <audio> track from --audio-url into the compositio
   expect(p.html).toContain('data-track-index="0"');
   // Injected as the first child of the data-composition-id root element.
   expect(p.html).toMatch(/data-composition-id="demo"[^>]*>\s*<audio /);
+});
+
+test('composition-root lookup is linear and ignores attribute-like quoted text', () => {
+  const html =
+    `<div title="data-composition-id > ${'<A'.repeat(50_000)}">decoy</div>` +
+    '<main title="1 > 0" data-composition-id="real">content</main>';
+  const end = findCompositionRootOpenTagEnd(html);
+
+  expect(end).toBe(html.indexOf('>content') + 1);
+  const injected = injectAudioElement(
+    html,
+    'https://example.com/audio.mp3',
+    3,
+  );
+  expect(injected.indexOf('<audio')).toBeGreaterThan(
+    injected.indexOf('data-composition-id="real"'),
+  );
+  expect(injected.indexOf('<audio')).toBeLessThan(injected.indexOf('content'));
 });
 
 test('buildPayload rejects an unsafe / non-https --audio-url', () => {

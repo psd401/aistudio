@@ -25,6 +25,7 @@ import {
   auditInstalledDeps,
   hashDependencyLockfile,
   downloadSkillFromS3,
+  isValidOwnerKey,
 } from "../index";
 import type { RDSDataClient } from "@aws-sdk/client-rds-data";
 import type { S3Client } from "@aws-sdk/client-s3";
@@ -60,6 +61,13 @@ const VALID_SCAN_EVENT = {
 };
 
 describe("skill scan event binding", () => {
+  test("validates owner keys in bounded linear time", () => {
+    expect(isValidOwnerKey("owner@example.com")).toBe(true);
+    expect(isValidOwnerKey("owner/name@example.com")).toBe(false);
+    expect(isValidOwnerKey("owner @example.com")).toBe(false);
+    expect(isValidOwnerKey(`${"!.".repeat(200)}@example.com`)).toBe(false);
+  });
+
   test("requires the exact deterministic draft-to-approved mapping", () => {
     expect(() => assertSkillScanPrefixes(VALID_SCAN_EVENT)).not.toThrow();
     expect(() =>

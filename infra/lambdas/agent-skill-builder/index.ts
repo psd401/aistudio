@@ -178,6 +178,21 @@ interface SkillBuildState {
   promotionCommitted: boolean;
 }
 
+export function isValidOwnerKey(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 320) {
+    return false;
+  }
+  const at = value.indexOf("@");
+  if (at <= 0 || at !== value.lastIndexOf("@")) return false;
+  const domain = value.slice(at + 1);
+  const dot = domain.lastIndexOf(".");
+  if (dot <= 0 || dot === domain.length - 1) return false;
+  for (const character of value) {
+    if (character === "/" || character.trim().length === 0) return false;
+  }
+  return true;
+}
+
 function validateSkillBuildEvent(
   event: SkillBuildEvent,
   log: LambdaLogger,
@@ -186,8 +201,7 @@ function validateSkillBuildEvent(
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
       event.skillId,
     ) &&
-    typeof event.ownerKey === "string" &&
-    /^[^\s@/]+@[^\s@/]+\.[^\s@/]+$/.test(event.ownerKey) &&
+    isValidOwnerKey(event.ownerKey) &&
     isValidScope(event.scope) &&
     Number.isSafeInteger(event.version) &&
     event.version >= 1 &&

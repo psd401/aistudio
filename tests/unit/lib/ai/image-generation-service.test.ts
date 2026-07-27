@@ -7,18 +7,16 @@
 import { fetchReferenceImageSafely } from "@/lib/ai/image-generation-service";
 import { setSafeFetchTransportForTests } from "@/lib/security/safe-fetch";
 
-setSafeFetchTransportForTests((input, init) => global.fetch(input, init));
+let fetchMock: jest.Mock = jest.fn();
+setSafeFetchTransportForTests((input, init) => fetchMock(input, init));
 
 afterAll(() => {
   setSafeFetchTransportForTests(undefined);
 });
 
 describe("fetchReferenceImageSafely — SSRF guard (REV-COR-497)", () => {
-  let fetchMock: jest.Mock;
-
   beforeEach(() => {
     fetchMock = jest.fn();
-    global.fetch = fetchMock as unknown as typeof fetch;
   });
 
   it("rejects the cloud-metadata IP before issuing any request", async () => {

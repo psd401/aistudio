@@ -81,7 +81,13 @@ jest.mock("@/lib/api/auth-middleware", () => ({
 // Import after mocks — use require() to ensure mocks are registered first
 // (next/jest SWC transform may not properly hoist jest.mock before static imports)
 
-const { checkRateLimit, createRateLimitResponse, addRateLimitHeaders, recordUsage } = require("@/lib/api/rate-limiter")
+const {
+  checkRateLimit,
+  createRateLimitResponse,
+  addRateLimitHeaders,
+  recordUsage,
+  fingerprintRateLimitPrincipal,
+} = require("@/lib/api/rate-limiter")
 import type { ApiAuthContext } from "@/lib/api/auth-middleware"
 
 const { NextResponse } = require("next/server")
@@ -165,6 +171,13 @@ function defineRateLimiterSuite1Part1() {
   // ------------------------------------------
   // checkRateLimit
   // ------------------------------------------
+
+    it("creates stable, domain-separated principal fingerprints", () => {
+      const apiKey = fingerprintRateLimitPrincipal("api_key:42")
+      expect(apiKey).toHaveLength(64)
+      expect(fingerprintRateLimitPrincipal("api_key:42")).toBe(apiKey)
+      expect(fingerprintRateLimitPrincipal("session:42")).not.toBe(apiKey)
+    })
 
     it("should allow requests within limit", async () => {
       // First call: get rate limit config

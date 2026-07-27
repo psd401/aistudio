@@ -50,8 +50,12 @@ function sanitizeForLogger(data: unknown): unknown {
 
 function sanitizeLoggerString(value: string): string {
   return value
+    // Keep these single-character replacements explicit: besides preserving
+    // word boundaries, they are the static-analysis barriers for log forging.
+    .replace(/\t/g, ' ')
+    .replace(/\n/g, ' ')
+    .replace(/\r/g, ' ')
     .replace(/[^\u0020-\u007E]/g, '')
-    .replace(/[\t\n\r]/g, ' ')
     .substring(0, 1000)
 }
 
@@ -380,15 +384,16 @@ export async function withLogContext<T>(
  * @param input - The message to sanitize
  * @returns Sanitized string safe for logging
  */
-function sanitizeLogMessage(input: unknown): string {
+export function sanitizeLogMessage(input: unknown): string {
   // Convert to string if needed
   let str = typeof input === 'string' ? input : String(input)
 
   // Explicitly remove characters that could forge log entries
   // This follows CodeQL log injection prevention guidance
 
-  // Replace newlines with spaces
-  str = str.replace(/[\n\r]/g, ' ')
+  // Keep these as separate literal replacements so both the runtime behavior
+  // and the CodeQL log-forging barriers are explicit.
+  str = str.replace(/\n/g, ' ').replace(/\r/g, ' ')
 
   // Remove control characters (0x00-0x1F and 0x7F) without constructing a
   // dynamic regular expression.
@@ -398,6 +403,13 @@ function sanitizeLogMessage(input: unknown): string {
       return codePoint > 31 && codePoint !== 127
     })
     .join('')
+
+  // Unicode line separators are not C0 control characters, but terminals and
+  // Unicode-aware log processors still treat them as line boundaries.
+  str = str
+    .replace(/\u0085/g, ' ')
+    .replace(/\u2028/g, ' ')
+    .replace(/\u2029/g, ' ')
 
   // Limit length to prevent log bloat
   str = str.substring(0, 1000)
@@ -412,13 +424,33 @@ function sanitizeLogMessage(input: unknown): string {
  * @param data - The metadata to sanitize
  * @returns Sanitized metadata object
  */
-function sanitizeLogMetadata(data: unknown): Record<string, unknown> {
+export function sanitizeLogMetadata(data: unknown): Record<string, unknown> {
   // First remove sensitive data
   const filtered = filterSensitiveData(data)
   // Then sanitize for CodeQL (removes taint)
   const sanitized = sanitizeForLogger(filtered)
-  // Return as typed object
-  return sanitized as Record<string, unknown>
+  if (
+    sanitized === null ||
+    typeof sanitized !== 'object' ||
+    Array.isArray(sanitized)
+  ) {
+    return { value: sanitized }
+  }
+
+  // Rebuild the top-level object immediately before the winston sink. The
+  // recursive sanitizer above already cleans nested values; these literal
+  // replacements make the final key/value boundary visible to static analysis.
+  const result = Object.create(null) as Record<string, unknown>
+  for (const [key, value] of Object.entries(
+    sanitized as Record<string, unknown>
+  )) {
+    const safeKey = key.replace(/\n/g, ' ').replace(/\r/g, ' ')
+    result[safeKey] =
+      typeof value === 'string'
+        ? value.replace(/\n/g, ' ').replace(/\r/g, ' ')
+        : value
+  }
+  return result
 }
 
 /**

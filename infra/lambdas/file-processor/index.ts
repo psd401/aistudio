@@ -16,6 +16,7 @@ import { parse as csvParse } from 'csv-parse/sync';
 import { marked } from 'marked';
 import { TextractUsageTracker } from './textract-usage';
 import { validateRepositoryProcessingKey } from './storage-key';
+import { stripHtmlMarkup } from './html-to-text';
 
 const s3Client = new S3Client({});
 const rdsClient = new RDSDataClient({});
@@ -304,8 +305,7 @@ async function extractTextFromMarkdown(buffer: Buffer): Promise<string> {
   const markdown = buffer.toString();
   // Convert to plain text by removing markdown syntax
   const html = await marked.parse(markdown);
-  // Simple HTML to text conversion
-  return html.replace(/<[^>]*>/g, '').trim();
+  return stripHtmlMarkup(html).trim();
 }
 
 // Result type for text extraction

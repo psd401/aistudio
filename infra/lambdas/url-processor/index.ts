@@ -284,7 +284,7 @@ async function normalizeFetchedContent(
     return normalized;
   }
   const htmlContent = await marked.parse(normalized);
-  return htmlContent.replace(/<[^>]*>/g, '').trim();
+  return cheerio.load(htmlContent).root().text().trim();
 }
 
 function prependPageMetadata(content: string, $: LoadedHtml): string {
