@@ -439,7 +439,7 @@ if (baseDomain) {
   devFrontendStack.addDependency(devAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
   devFrontendStack.addDependency(devAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
   devFrontendStack.addDependency(devProcessingStack); // Need processing queue and Lambda exports
-  if (!retireLegacyContent) {
+  if (devDocumentProcessingStack) {
     devFrontendStack.addDependency(devDocumentProcessingStack);
   }
   cdk.Tags.of(devFrontendStack).add('Environment', 'Dev');
@@ -465,7 +465,7 @@ if (baseDomain) {
   prodFrontendStack.addDependency(prodAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
   prodFrontendStack.addDependency(prodAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
   prodFrontendStack.addDependency(prodProcessingStack); // Need processing queue and Lambda exports
-  if (!retireLegacyContent) {
+  if (prodDocumentProcessingStack) {
     prodFrontendStack.addDependency(prodDocumentProcessingStack);
   }
   cdk.Tags.of(prodFrontendStack).add('Environment', 'Prod');
