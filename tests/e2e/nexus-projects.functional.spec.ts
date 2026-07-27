@@ -73,9 +73,10 @@ function defineNexusProjectsAuthenticatedSuite1Part1() {
     );
 
     await page.getByRole("button", { name: "New project chat" }).click();
-    await expect(page).toHaveURL(/\/nexus\?conversationId=[0-9a-f-]+&projectId=\d+$/, {
-      timeout: 30_000,
-    });
+    await expect(page).toHaveURL(
+      /\/nexus\?conversationId=[0-9a-f-]+&projectId=[0-9a-f-]+$/,
+      { timeout: 30_000 }
+    );
     expect(new URL(page.url()).searchParams.get("projectId")).toBe(String(projectId));
 
     await authenticateContext(
