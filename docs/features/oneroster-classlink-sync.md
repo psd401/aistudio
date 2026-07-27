@@ -3,8 +3,10 @@
 Status: v1 ingestion foundation and administrator control surface implemented by Epic
 [#1308](https://github.com/psd401/aistudio/issues/1308), Issue
 [#1310](https://github.com/psd401/aistudio/issues/1310), and Issue
-[#1311](https://github.com/psd401/aistudio/issues/1311). Role mapping, room
-provisioning, and reporting are separate workstreams.
+[#1311](https://github.com/psd401/aistudio/issues/1311). Optional roster role
+reconciliation is implemented by Issue
+[#1312](https://github.com/psd401/aistudio/issues/1312). Room provisioning and
+reporting are separate workstreams.
 
 ## Scope and data boundary
 
@@ -19,11 +21,14 @@ terms and OneRoster user roles into their relationship tables.
 - Demographics, metadata, resources, and other unnecessary student data are
   neither requested nor persisted.
 - Roster email is normalized to lowercase for the later cross-system user join.
-- This Lambda never writes application users, application role grants,
-  capabilities, API-key scopes, rooms, or assistants. In particular, ingestion
-  cannot grant or revoke the administrator role.
-- The Lambda modifies only the dedicated OneRoster tables and its internal
-  `ONEROSTER_LAST_PERM_REV` setting.
+- Collection ingestion never writes application users, role grants,
+  capabilities, API-key scopes, rooms, or assistants. A separate, default-off
+  post-sync pass may write source-owned `student` and `staff` role grants as
+  described below; it cannot grant or revoke the administrator role.
+- Collection reconciliation modifies only the dedicated OneRoster tables and
+  internal sync settings. The optional role pass additionally modifies
+  `user_roles.source='oneroster'` rows and bumps `users.role_version` for users
+  whose grants changed.
 
 The implementation follows ClassLink's guidance to pull the bulk collections
 with a 10,000-record page size and verify `x-count` and `x-total-count`.
@@ -124,6 +129,7 @@ All values are database-first. The Next.js accessors in
 | Key | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `ROSTER_SYNC_ENABLED` | yes for scheduled runs | `false` | Exact value `true` enables the nightly rule's work. Manual invocation can run while disabled. |
+| `ROSTER_ROLE_SYNC_ENABLED` | no | `false` | Exact value `true` enables the best-effort application-role pass after a fully successful scheduled sync. Manual sync never changes roles. |
 | `ONEROSTER_BASE_URL` | yes | none | HTTPS direct-server origin or application-specific proxy prefix. |
 | `ONEROSTER_AUTH_MODE` | yes | none | `oauth1` or `proxy`. |
 | `ONEROSTER_CREDENTIALS_SECRET_ARN` | yes | none | Full ARN of the scoped secret described above. |
@@ -134,6 +140,34 @@ All values are database-first. The Next.js accessors in
 
 Set the URL, auth mode, secret ARN, version, and page size before enabling the
 schedule. A missing or incomplete configuration safely skips the invocation.
+
+## Optional roster-driven application roles
+
+`ROSTER_ROLE_SYNC_ENABLED` is deliberately default-off. When its exact value is
+`true`, a fully successful **scheduled** roster sync runs one additional
+transaction:
+
+- Active OneRoster `student` roles map to AI Studio `student`.
+- Active OneRoster `teacher`, `aide`, `proctor`, and `administrator` roles map
+  to AI Studio `staff`. Recognized vendor staff/administrator spellings also
+  map to `staff`; family roles and unknown values fail closed and grant nothing.
+- Roster email joins application users with
+  `lower(users.email) = lower(oneroster_users.email)`. Roster people who have
+  never signed in are skipped without error.
+- New grants use `user_roles.source='oneroster'`. The transaction removes only
+  stale `oneroster` rows; `manual` and `group-sync` rows are invisible to it.
+- A mapped role already held from another source is left under that source.
+  `users.role_version` increments once for each user whose rows actually
+  changed, and does not churn on a no-op.
+- The application `administrator` role is not a possible mapping and is
+  structurally excluded from deletion. This path therefore cannot invoke the
+  last-administrator case. Any future change that could remove administrator
+  must use the shared `LAST_ADMIN_GUARD_LOCK_KEY` advisory-lock discipline.
+
+The pass runs only after all six roster collections are confirmed successful,
+including a successful unchanged-revision night. It does not run for manual
+syncs. Its own failure is logged and rolled back but does not fail or undo the
+good roster snapshot. Disable the flag to stop future role changes immediately.
 
 ## Administrator control surface
 
@@ -216,6 +250,9 @@ CloudWatch namespace: `AIStudio/RosterSync`
 - Collection metrics: `RecordsSynced`, `CollectionsFailed`,
   `RecordsDeactivated`, `RecordsTotal` (`Environment` and `Collection`
   dimensions).
+- Role metrics, emitted only when the optional pass succeeds:
+  `RolesGranted`, `RolesRevoked`, `RoleUsersChanged` (`Environment`
+  dimension).
 - `psd-oneroster-sync-failure-{environment}` alarms on any errored invocation
   during a day.
 - `psd-oneroster-sync-staleness-{environment}` alarms after approximately 48
@@ -278,9 +315,12 @@ Roll out disabled:
 2. Create the scoped credential secret and populate the non-secret settings.
 3. Run a manual sync. Compare per-collection totals with ClassLink and inspect a
    sample of lowercased emails and sourced-ID relationships.
-4. Confirm no `users`, application role, room, assistant, or demographics data
+4. Confirm no application roles, rooms, assistants, or demographics data
    changed.
 5. Set `ROSTER_SYNC_ENABLED=true`.
+6. Review the roster-to-user email match and role distribution before setting
+   `ROSTER_ROLE_SYNC_ENABLED=true`. Keep the role flag disabled if either needs
+   investigation.
 
 To stop ingestion, set `ROSTER_SYNC_ENABLED=false` in `/admin/rosters`.
 Existing roster rows remain
@@ -289,6 +329,28 @@ Processing stack version; migration 141 and the `oneroster_*` tables are
 additive and may remain in place. Do not clear rows or the revision checkpoint
 as part of routine rollback. If a credential may be exposed, rotate it in
 ClassLink and Secrets Manager before re-enabling the integration.
+
+To stop authorization reconciliation without stopping collection ingestion,
+set `ROSTER_ROLE_SYNC_ENABLED=false`. Existing `oneroster` grants remain as the
+last successfully reconciled state. If rollback requires removing them, first
+disable the flag, then run:
+
+```sql
+WITH deleted AS (
+  DELETE FROM user_roles
+   WHERE source = 'oneroster'
+  RETURNING user_id
+)
+UPDATE users
+   SET role_version = coalesce(role_version, 0) + 1,
+       updated_at = now()
+ WHERE id IN (SELECT DISTINCT user_id FROM deleted);
+```
+
+That statement is intentionally source-scoped and leaves manual, group-sync,
+and administrator grants unchanged. The version bump invalidates cached role
+state for every affected user. It changes authorization immediately; use the
+normal production change and audit process.
 
 To remove only the administrator UI, remove its `ADMIN_SECTIONS` registry entry
 and route. The settings and last-known-good roster snapshot can remain. Older

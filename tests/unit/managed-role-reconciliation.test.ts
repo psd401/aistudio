@@ -16,6 +16,10 @@ import {
 
 const manual = (roleId: number): ExistingUserRole => ({ roleId, source: "manual" });
 const managed = (roleId: number): ExistingUserRole => ({ roleId, source: "group-sync" });
+const rosterManaged = (roleId: number): ExistingUserRole => ({
+  roleId,
+  source: "oneroster",
+});
 
 describe("computeManagedRoleDiff", () => {
   it("grants a mapped role the user does not yet hold (add path)", () => {
@@ -59,6 +63,14 @@ describe("computeManagedRoleDiff", () => {
     // Manual role 2 persists; group-sync role 5 (no longer computed) is removed.
     const diff = computeManagedRoleDiff([], [manual(2), managed(5)]);
     expect(diff).toEqual({ toAdd: [], toRemove: [5], changed: true });
+  });
+
+  it("leaves OneRoster-owned rows untouched while reconciling group-sync rows", () => {
+    const diff = computeManagedRoleDiff([], [
+      rosterManaged(5),
+      managed(7),
+    ]);
+    expect(diff).toEqual({ toAdd: [], toRemove: [7], changed: true });
   });
 
   it("does not re-add a mapped role already held manually, but still revokes a stale managed role", () => {

@@ -49,10 +49,10 @@ export interface ManualRoleSyncResult {
  * Shared delete+insert body for the three source-aware "replace a user's
  * MANUAL roles" writers (this file's `updateUserRoles`, the legacy
  * `lib/db/user-roles.ts#updateUserRoles`, and the admin `updateUser` action).
- * Managed (source='group-sync') rows are invisible: never deleted
- * (reconciliation would silently re-add them next pass) and never
- * re-inserted as manual (would exempt them from auto-revocation forever).
- * This editor owns manual rows only. Callers keep their own role_version
+ * Managed (`source='group-sync'` or `source='oneroster'`) rows are invisible:
+ * never deleted (their reconciler would silently re-add them next pass) and
+ * never re-inserted as manual (which would exempt them from auto-revocation
+ * forever). This editor owns manual rows only. Callers keep their role_version
  * bump / last-admin-removal checks — this only performs the write (#1222
  * review: the logic was copy-pasted three times, drifting once already).
  */
@@ -426,8 +426,8 @@ export interface ManagedRoleDiff {
  *
  * A role the user already holds (in ANY source) is never re-added, so a manual
  * grant that also happens to be mapped stays manual and survives mapping removal.
- * Only group-sync rows are eligible for removal; manual rows are invisible to the
- * remove set by construction.
+ * Only group-sync rows are eligible for removal; manual and OneRoster rows are
+ * invisible to the remove set by construction.
  */
 export function computeManagedRoleDiff(
   computedRoleIds: Iterable<number>,

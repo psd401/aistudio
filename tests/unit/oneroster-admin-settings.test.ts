@@ -96,6 +96,9 @@ describe("OneRoster administrator settings", () => {
 
   it("includes the durable status key in the shared settings contract", () => {
     expect(ONEROSTER_SETTING_KEYS.syncStatus).toBe("ONEROSTER_SYNC_STATUS");
+    expect(ONEROSTER_SETTING_KEYS.roleSyncEnabled).toBe(
+      "ROSTER_ROLE_SYNC_ENABLED"
+    );
   });
 });
 

@@ -11,11 +11,13 @@ import { roles } from "./roles";
 /**
  * How a user_roles row was granted (Epic #1202, Phase 1 / #1204).
  * 'manual'     — an admin assigned the role by hand (also the value for every
- *                pre-group-sync row). Reconciliation NEVER touches these.
+ *                pre-managed-sync row). Reconciliation NEVER touches these.
  * 'group-sync' — reconciliation granted it from a group→role mapping; it is the
- *                only source reconciliation ever adds or removes.
+ *                only source Google group reconciliation adds or removes.
+ * 'oneroster'  — nightly roster reconciliation granted it from an active
+ *                OneRoster role; only that reconciler adds or removes it.
  */
-export type UserRoleSource = "manual" | "group-sync";
+export type UserRoleSource = "manual" | "group-sync" | "oneroster";
 
 export const userRoles = pgTable("user_roles", {
   id: serial("id").primaryKey(),
@@ -31,5 +33,8 @@ export const userRoles = pgTable("user_roles", {
   userRoleUnique: unique().on(table.userId, table.roleId),
   // Mirrors the inline CHECK in migration 109 so the Drizzle schema stays the
   // faithful source of truth (same convention as capabilities_source_check).
-  sourceCheck: check("user_roles_source_check", sql`${table.source} IN ('manual', 'group-sync')`),
+  sourceCheck: check(
+    "user_roles_source_check",
+    sql`${table.source} IN ('manual', 'group-sync', 'oneroster')`
+  ),
 }));

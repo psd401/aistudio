@@ -8,7 +8,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import postgres from "postgres";
-import { reconcileCollection, writeSyncStatus } from "./db";
+import {
+  reconcileCollection,
+  reconcileOneRosterRoles,
+  writeSyncStatus,
+} from "./db";
 import type { CollectionPullSuccess } from "./oneroster-client";
 
 const databaseUrl = process.env.ONEROSTER_DB_TEST_URL;
@@ -33,6 +37,29 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
     if (!sql) return;
     await sql.unsafe(`
       CREATE EXTENSION IF NOT EXISTS pgcrypto;
+      CREATE TABLE IF NOT EXISTS users (
+        id serial PRIMARY KEY,
+        email varchar(255),
+        role_version integer DEFAULT 1,
+        updated_at timestamp DEFAULT now() NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS roles (
+        id serial PRIMARY KEY,
+        name varchar(100) NOT NULL,
+        description text,
+        is_system boolean DEFAULT false,
+        created_at timestamp DEFAULT now(),
+        updated_at timestamp DEFAULT now()
+      );
+      CREATE TABLE IF NOT EXISTS user_roles (
+        id serial PRIMARY KEY,
+        user_id integer,
+        role_id integer,
+        source varchar(20) NOT NULL DEFAULT 'manual',
+        created_at timestamp DEFAULT now(),
+        updated_at timestamptz DEFAULT now(),
+        UNIQUE (user_id, role_id)
+      );
       CREATE TABLE IF NOT EXISTS settings (
         id serial PRIMARY KEY,
         key varchar(255) NOT NULL UNIQUE,
@@ -56,6 +83,11 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
       import.meta.url
     );
     await sql.unsafe(readFileSync(migrationUrl, "utf8"));
+    const roleSourceMigrationUrl = new URL(
+      "../../database/schema/156-oneroster-user-role-source.sql",
+      import.meta.url
+    );
+    await sql.unsafe(readFileSync(roleSourceMigrationUrl, "utf8"));
   });
 
   beforeEach(async () => {
@@ -74,6 +106,27 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
     await sql`
       DELETE FROM settings WHERE key = 'ONEROSTER_SYNC_STATUS'
     `;
+    await sql`
+      DELETE FROM user_roles
+       WHERE user_id IN (
+         SELECT id
+           FROM users
+          WHERE lower(email) LIKE ${"%@oneroster-role.test"}
+       )
+    `;
+    await sql`
+      DELETE FROM users
+       WHERE lower(email) LIKE ${"%@oneroster-role.test"}
+    `;
+    for (const roleName of ["student", "staff", "administrator"]) {
+      await sql`
+        INSERT INTO roles (name, description, is_system)
+        SELECT ${roleName}, ${`Integration ${roleName}`}, true
+         WHERE NOT EXISTS (
+           SELECT 1 FROM roles WHERE lower(name) = lower(${roleName})
+         )
+      `;
+    }
   });
 
   afterAll(async () => {
@@ -209,5 +262,147 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
     expect(JSON.parse(row.value)).toEqual(status);
     expect(row.category).toBe("integrations");
     expect(row.is_secret).toBe(false);
+  });
+
+  it("reconciles lowercased roster roles while preserving other sources and administrator", async () => {
+    if (!sql) throw new Error("database connection was not initialized");
+    const roleRows = await sql<Array<{ id: number; name: string }>>`
+      SELECT id, lower(name) AS name
+        FROM roles
+       WHERE lower(name) = ANY(${["student", "staff", "administrator"]}::text[])
+    `;
+    const roleIds = new Map(roleRows.map((role) => [role.name, role.id]));
+    const studentRoleId = roleIds.get("student");
+    const staffRoleId = roleIds.get("staff");
+    const administratorRoleId = roleIds.get("administrator");
+    if (!studentRoleId || !staffRoleId || !administratorRoleId) {
+      throw new Error("required integration roles were not initialized");
+    }
+
+    const [mixedCaseUser] = await sql<Array<{ id: number }>>`
+      INSERT INTO users (email, role_version)
+      VALUES ('Mixed.Case@ONEROSTER-ROLE.TEST', 10)
+      RETURNING id
+    `;
+    const [staffUser] = await sql<Array<{ id: number }>>`
+      INSERT INTO users (email, role_version)
+      VALUES ('staff@oneroster-role.test', 20)
+      RETURNING id
+    `;
+    const [removedUser] = await sql<Array<{ id: number }>>`
+      INSERT INTO users (email, role_version)
+      VALUES ('removed@oneroster-role.test', 30)
+      RETURNING id
+    `;
+    const [unchangedUser] = await sql<Array<{ id: number }>>`
+      INSERT INTO users (email, role_version)
+      VALUES ('unchanged@oneroster-role.test', 40)
+      RETURNING id
+    `;
+    const [protectedAdminUser] = await sql<Array<{ id: number }>>`
+      INSERT INTO users (email, role_version)
+      VALUES ('protected-admin@oneroster-role.test', 50)
+      RETURNING id
+    `;
+
+    await sql`
+      INSERT INTO user_roles (user_id, role_id, source)
+      VALUES
+        (${mixedCaseUser.id}, ${administratorRoleId}, 'manual'),
+        (${mixedCaseUser.id}, ${staffRoleId}, 'group-sync'),
+        (${staffUser.id}, ${studentRoleId}, 'oneroster'),
+        (${removedUser.id}, ${staffRoleId}, 'oneroster'),
+        (${unchangedUser.id}, ${studentRoleId}, 'oneroster'),
+        (${protectedAdminUser.id}, ${administratorRoleId}, 'oneroster')
+    `;
+    await sql`
+      INSERT INTO oneroster_users (
+        sourced_id,
+        email,
+        enabled_user,
+        status,
+        is_active
+      )
+      VALUES
+        ('roster-mixed', 'mixed.case@oneroster-role.test', true, 'active', true),
+        ('roster-staff', 'staff@oneroster-role.test', true, 'active', true),
+        ('roster-unchanged', 'unchanged@oneroster-role.test', true, 'active', true),
+        ('roster-unmatched', 'not-signed-in@oneroster-role.test', true, 'active', true)
+    `;
+    await sql`
+      INSERT INTO oneroster_user_roles (
+        user_sourced_id,
+        role,
+        role_type,
+        status,
+        is_active
+      )
+      VALUES
+        ('roster-mixed', 'student', 'primary', 'active', true),
+        ('roster-staff', 'administrator', 'primary', 'active', true),
+        ('roster-unchanged', 'student', 'primary', 'active', true),
+        ('roster-unmatched', 'teacher', 'primary', 'active', true)
+    `;
+
+    const result = await reconcileOneRosterRoles(sql);
+    const grants = await sql<
+      Array<{ email: string; role: string; source: string }>
+    >`
+      SELECT lower(application_user.email) AS email,
+             lower(application_role.name) AS role,
+             managed.source
+        FROM user_roles managed
+        JOIN users application_user ON application_user.id = managed.user_id
+        JOIN roles application_role ON application_role.id = managed.role_id
+       WHERE lower(application_user.email) LIKE ${"%@oneroster-role.test"}
+       ORDER BY email, role
+    `;
+    const versions = await sql<Array<{ email: string; role_version: number }>>`
+      SELECT lower(email) AS email, role_version
+        FROM users
+       WHERE lower(email) LIKE ${"%@oneroster-role.test"}
+       ORDER BY email
+    `;
+
+    expect(result).toEqual({ granted: 2, revoked: 2, usersChanged: 3 });
+    expect(grants).toEqual([
+      {
+        email: "mixed.case@oneroster-role.test",
+        role: "administrator",
+        source: "manual",
+      },
+      {
+        email: "mixed.case@oneroster-role.test",
+        role: "staff",
+        source: "group-sync",
+      },
+      {
+        email: "mixed.case@oneroster-role.test",
+        role: "student",
+        source: "oneroster",
+      },
+      {
+        email: "protected-admin@oneroster-role.test",
+        role: "administrator",
+        source: "oneroster",
+      },
+      {
+        email: "staff@oneroster-role.test",
+        role: "staff",
+        source: "oneroster",
+      },
+      {
+        email: "unchanged@oneroster-role.test",
+        role: "student",
+        source: "oneroster",
+      },
+    ]);
+    expect(versions).toEqual([
+      { email: "mixed.case@oneroster-role.test", role_version: 11 },
+      { email: "protected-admin@oneroster-role.test", role_version: 50 },
+      { email: "removed@oneroster-role.test", role_version: 31 },
+      { email: "staff@oneroster-role.test", role_version: 21 },
+      { email: "unchanged@oneroster-role.test", role_version: 40 },
+    ]);
   });
 });

@@ -33,6 +33,28 @@ const LAST_PERM_REV_SETTING_KEY = "ONEROSTER_LAST_PERM_REV";
 // Keep synchronized with lib/roster/settings.ts and config.ts.
 const SYNC_STATUS_SETTING_KEY = "ONEROSTER_SYNC_STATUS";
 
+/**
+ * OneRoster roles that represent district staff in the fixed v1 mapping.
+ *
+ * The first four values are the OneRoster-defined staff-shaped roles called
+ * out by #1312. The remaining normalized values accommodate common
+ * vendor-specific staff/administrator spellings without treating family roles
+ * (parent, guardian, relative) or unknown input as staff authorization.
+ */
+const STAFF_ONEROSTER_ROLE_NAMES = [
+  "teacher",
+  "aide",
+  "proctor",
+  "administrator",
+  "staff",
+  "districtadministrator",
+  "siteadministrator",
+  "systemadministrator",
+] as const;
+const STAFF_ONEROSTER_ROLES = new Set<string>(
+  STAFF_ONEROSTER_ROLE_NAMES
+);
+
 let sqlSingleton: postgres.Sql | null = null;
 let initPromise: Promise<postgres.Sql> | null = null;
 
@@ -151,6 +173,161 @@ export async function writeSyncStatus(
           is_secret = false,
           updated_at = now()
   `;
+}
+
+export type MappedApplicationRole = "student" | "staff";
+
+/**
+ * Fixed, fail-closed OneRoster → AI Studio role mapping (#1312).
+ *
+ * Application administrator is deliberately not a possible return value.
+ */
+export function mapOneRosterRoleToApplicationRole(
+  role: string | null
+): MappedApplicationRole | null {
+  const normalized = role
+    ?.trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+  if (!normalized) return null;
+  if (normalized === "student") return "student";
+  return STAFF_ONEROSTER_ROLES.has(normalized) ? "staff" : null;
+}
+
+export interface RoleReconcileResult {
+  /** OneRoster-owned user_roles rows inserted. */
+  granted: number;
+  /** OneRoster-owned user_roles rows removed. */
+  revoked: number;
+  /** Distinct users whose role_version was bumped. */
+  usersChanged: number;
+}
+
+/**
+ * Reconcile active roster roles into application roles in one transaction.
+ *
+ * Source ownership is the safety boundary:
+ *   - computed student/staff roles are inserted as source='oneroster' only
+ *     when the user does not already hold that role from any source;
+ *   - only stale source='oneroster' rows are removable;
+ *   - application administrator is excluded from both the mapping and delete.
+ *
+ * The administrator exclusion is structural, so this path cannot revoke admin
+ * access and does not need LAST_ADMIN_GUARD_LOCK_KEY. Any future expansion that
+ * can remove administrator must use the shared advisory-lock discipline.
+ */
+export async function reconcileOneRosterRoles(
+  sql: postgres.Sql
+): Promise<RoleReconcileResult> {
+  return sql.begin(async (tx) => {
+    const requiredRoles = await tx<{ name: string }[]>`
+      SELECT lower(name) AS name
+        FROM roles
+       WHERE lower(name) = ANY(${["student", "staff"]}::text[])
+    `;
+    const availableRoles = new Set(requiredRoles.map((role) => role.name));
+    const missingRoles = ["student", "staff"].filter(
+      (role) => !availableRoles.has(role)
+    );
+    if (missingRoles.length > 0) {
+      throw new Error(
+        `Required application roles are missing: ${missingRoles.join(", ")}`
+      );
+    }
+
+    await tx`
+      CREATE TEMP TABLE _computed_oneroster_roles ON COMMIT DROP AS
+      WITH mapped_roster_roles AS (
+        SELECT DISTINCT
+               application_user.id AS user_id,
+               CASE
+                 WHEN regexp_replace(
+                   lower(trim(roster_role.role)),
+                   '[^a-z0-9]+',
+                   '',
+                   'g'
+                 ) = 'student'
+                   THEN 'student'
+                 WHEN regexp_replace(
+                   lower(trim(roster_role.role)),
+                   '[^a-z0-9]+',
+                   '',
+                   'g'
+                 ) = ANY(${[...STAFF_ONEROSTER_ROLE_NAMES]}::text[])
+                   THEN 'staff'
+                 ELSE NULL
+               END AS application_role_name
+          FROM oneroster_users roster_user
+          JOIN oneroster_user_roles roster_role
+            ON roster_role.user_sourced_id = roster_user.sourced_id
+           AND roster_role.is_active = true
+          JOIN users application_user
+            ON lower(application_user.email) = lower(roster_user.email)
+         WHERE roster_user.is_active = true
+           AND coalesce(roster_user.enabled_user, true) = true
+           AND roster_user.email IS NOT NULL
+      )
+      SELECT mapped.user_id, application_role.id AS role_id
+        FROM mapped_roster_roles mapped
+        JOIN roles application_role
+          ON lower(application_role.name) = mapped.application_role_name
+       WHERE mapped.application_role_name IS NOT NULL
+    `;
+    await tx`ANALYZE _computed_oneroster_roles`;
+
+    const granted = await tx<{ user_id: number }[]>`
+      INSERT INTO user_roles (user_id, role_id, source)
+      SELECT computed.user_id, computed.role_id, 'oneroster'
+        FROM _computed_oneroster_roles computed
+       WHERE NOT EXISTS (
+         SELECT 1
+           FROM user_roles existing
+          WHERE existing.user_id = computed.user_id
+            AND existing.role_id = computed.role_id
+       )
+      ON CONFLICT (user_id, role_id) DO NOTHING
+      RETURNING user_id
+    `;
+
+    const revoked = await tx<{ user_id: number }[]>`
+      DELETE FROM user_roles managed
+       WHERE managed.source = 'oneroster'
+         AND NOT EXISTS (
+           SELECT 1
+             FROM _computed_oneroster_roles computed
+            WHERE computed.user_id = managed.user_id
+              AND computed.role_id = managed.role_id
+         )
+         AND NOT EXISTS (
+           SELECT 1
+             FROM roles protected_role
+            WHERE protected_role.id = managed.role_id
+              AND lower(protected_role.name) = 'administrator'
+         )
+      RETURNING managed.user_id
+    `;
+
+    const changedUserIds = [
+      ...new Set([
+        ...granted.map((row) => row.user_id),
+        ...revoked.map((row) => row.user_id),
+      ]),
+    ];
+    if (changedUserIds.length > 0) {
+      await tx`
+        UPDATE users
+           SET role_version = coalesce(role_version, 0) + 1,
+               updated_at = now()
+         WHERE id = ANY(${changedUserIds}::int[])
+      `;
+    }
+
+    return {
+      granted: granted.length,
+      revoked: revoked.length,
+      usersChanged: changedUserIds.length,
+    };
+  });
 }
 
 export async function reconcileCollection(

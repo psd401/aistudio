@@ -22,6 +22,7 @@ describe("OneRoster sync cross-bundle contracts", () => {
   it("keeps all shared database-first setting keys synchronized", () => {
     for (const key of [
       "ROSTER_SYNC_ENABLED",
+      "ROSTER_ROLE_SYNC_ENABLED",
       "ONEROSTER_BASE_URL",
       "ONEROSTER_AUTH_MODE",
       "ONEROSTER_CREDENTIALS_SECRET_ARN",
@@ -43,10 +44,21 @@ describe("OneRoster sync cross-bundle contracts", () => {
     );
   });
 
-  it("chunks writes below 5,000 rows and limits mutation SQL to roster tables", () => {
+  it("chunks collection writes below 5,000 rows", () => {
     expect(db).toContain("const UPSERT_CHUNK_SIZE = 4_000");
-    expect(db).not.toMatch(/\b(?:INSERT INTO|UPDATE|DELETE FROM)\s+users\b/i);
-    expect(db).not.toMatch(/\b(?:INSERT INTO|UPDATE|DELETE FROM)\s+user_roles\b/i);
+  });
+
+  it("source-scopes role writes and structurally excludes administrator", () => {
+    expect(db).toContain(
+      "SELECT computed.user_id, computed.role_id, 'oneroster'"
+    );
+    expect(db).toContain("WHERE managed.source = 'oneroster'");
+    expect(db).toContain(
+      "lower(protected_role.name) = 'administrator'"
+    );
+    expect(db).not.toContain(
+      "SELECT computed.user_id, computed.role_id, 'administrator'"
+    );
   });
 
   it("applies absence deactivation only inside collection transactions", () => {
