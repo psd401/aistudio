@@ -47,9 +47,17 @@ const customJestConfig = {
   // CDK synthesis copies the application (including manual mocks) into many
   // asset folders. Exclude those generated modules from Jest's haste map so a
   // prior synth cannot create hundreds of false duplicate-mock warnings.
+  //
+  // .claude/worktrees/ holds full repo checkouts. A fresh CI checkout has none,
+  // so these entries are a no-op there, but `bun run test:ci` from a developer's
+  // repo root would otherwise crawl them all. These MUST stay anchored to
+  // <rootDir>: an unanchored '/.claude/worktrees/' also matches when rootDir
+  // *is* a worktree, so jest silently discovers zero tests and exits
+  // "No tests found" instead of failing a check.
   modulePathIgnorePatterns: [
     '<rootDir>/infra/cdk.out/',
     '<rootDir>/.next/',
+    '<rootDir>/.claude/worktrees/',
   ],
   testPathIgnorePatterns: [
     '/node_modules/',
@@ -57,6 +65,7 @@ const customJestConfig = {
     '/.next/',
     '/infra/',  // Infra has its own Jest config and CDK dependencies
     '/tests/performance/',  // EXCLUDE performance tests in CI
+    '<rootDir>/.claude/worktrees/',  // Nested worktrees only - see note above
     'mock-sse-factory.ts',  // Utility file, not a test file
   ]
 };
