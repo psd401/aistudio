@@ -8,7 +8,7 @@
  * actual impact behind the alert.
  */
 
-import { sanitizeForLogging } from '../logger'
+import { sanitizeForLogging, sanitizeLogMessage } from '../logger'
 
 const NUL = String.fromCharCode(0)
 const BEL = String.fromCharCode(7)
@@ -99,6 +99,56 @@ describe('Logger log-injection sanitization', () => {
     it('caps very long strings so a single value cannot flood the log', () => {
       const result = sanitizeForLogging('x'.repeat(5000)) as string
       expect(result.length).toBeLessThanOrEqual(1000)
+    })
+  })
+
+  describe('sanitizeLogMessage - the message path', () => {
+    // The message path and the metadata path sanitize differently: metadata gets
+    // a printable-ASCII allowlist, messages only get line terminators and
+    // control characters removed so international text survives. That asymmetry
+    // is where U+2028 slipped through, so it gets its own coverage.
+
+    it('strips CR and LF', () => {
+      const result = sanitizeLogMessage(FORGERY)
+      expect(result).not.toContain('\n')
+      expect(result).not.toContain('\r')
+      expect(result).toContain('user promoted to administrator')
+    })
+
+    it('strips the Unicode line terminators U+2028 / U+2029 / U+0085', () => {
+      // These are NOT in the C0/DEL range, and JSON.stringify does not escape
+      // U+2028/U+2029 in string values — so before this they reached the log
+      // line as raw bytes and could forge a line break in a terminal or in a
+      // Unicode-aware log splitter.
+      const result = sanitizeLogMessage('a b cd')
+      expect(result).not.toContain(' ')
+      expect(result).not.toContain(' ')
+      expect(result).not.toContain('')
+      expect(result).toBe('a b c d')
+    })
+
+    it('strips control characters', () => {
+      expect(sanitizeLogMessage(`a${NUL}b${BEL}c${DEL}d`)).toBe('abcd')
+    })
+
+    it('preserves non-ASCII text that is not a line terminator', () => {
+      // Deliberately NOT the metadata path's ASCII allowlist — mangling every
+      // accented or non-Latin character in a log message is a real cost, and
+      // none of these can forge a line.
+      const result = sanitizeLogMessage('café — naïve 日本語')
+      expect(result).toContain('café')
+      expect(result).toContain('naïve')
+      expect(result).toContain('日本語')
+    })
+
+    it('coerces non-string input instead of throwing', () => {
+      expect(sanitizeLogMessage(42)).toBe('42')
+      expect(sanitizeLogMessage(null)).toBe('null')
+      expect(sanitizeLogMessage(undefined)).toBe('undefined')
+    })
+
+    it('caps message length', () => {
+      expect(sanitizeLogMessage('x'.repeat(5000)).length).toBeLessThanOrEqual(1000)
     })
   })
 })

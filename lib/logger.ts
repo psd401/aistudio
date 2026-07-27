@@ -37,6 +37,29 @@ function sanitizeForLogger(data: unknown): unknown {
   return sanitizeForLoggerInternal(data, 10, new WeakSet<object>())
 }
 
+// Neutralises every line-terminator a log line could be forged with, plus
+// control characters. Shared by the string branch below and the unknown-type
+// fallback so the two cannot drift apart.
+//
+// Order matters twice over:
+//
+// 1. Behaviour. The printable-ASCII allowlist deletes CR/LF/TAB outright, so
+//    running it first fused tokens across the removed break: a CRLF in
+//    "ok<CRLF>WARN" left "okWARN". Substituting a space first keeps them apart.
+// 2. CodeQL. Its log-injection sanitizer only recognises a
+//    String.prototype.replace whose regex root is a constant it can enumerate.
+//    A negated class (/[^\u0020-\u007E]/) and a positive one (/[\t\n\r]/) both
+//    parse to a RegExpCharacterClass, so neither cleared the taint and every
+//    logger call downstream stayed flagged. Single-character literal regexes
+//    are the form it models.
+function sanitizeLogString(value: string): string {
+  return value
+    .replace(/\t/g, ' ')            // Tabs to spaces
+    .replace(/\n/g, ' ')            // Newlines to spaces (CodeQL barrier)
+    .replace(/\r/g, ' ')            // Carriage returns to spaces (CodeQL barrier)
+    .replace(/[^\u0020-\u007E]/g, '') // Then allow only printable ASCII
+}
+
 // Private recursive implementation - WeakSet shared across all recursive calls
 function sanitizeForLoggerInternal(data: unknown, maxDepth: number, seen: WeakSet<object>): unknown {
   if (data === null || data === undefined) {
@@ -44,28 +67,9 @@ function sanitizeForLoggerInternal(data: unknown, maxDepth: number, seen: WeakSe
   }
 
   if (typeof data === "string") {
-    // CodeQL-compliant sanitization: line breaks and tabs are turned into spaces
-    // FIRST, then everything outside printable ASCII is dropped.
-    //
-    // Order matters twice over:
-    //
-    // 1. Behaviour. The allowlist deletes CR/LF/TAB outright, so running it
-    //    first fused tokens across the removed break: a CRLF in "ok<CRLF>WARN"
-    //    left "okWARN". Substituting a space first preserves the separation and
-    //    matches what sanitizeLogMessage() has always done to the message.
-    // 2. CodeQL. Its log-injection sanitizer only recognises a
-    //    String.prototype.replace whose regex root is a constant it can
-    //    enumerate. A negated class (/[^\u0020-\u007E]/) and a positive one
-    //    (/[\t\n\r]/) both parse to a RegExpCharacterClass, so neither cleared
-    //    the taint and every logger call downstream stayed flagged. Single
-    //    character literal regexes are the form it models.
-    const safe = data
-      .replace(/\t/g, ' ')            // Tabs to spaces
-      .replace(/\n/g, ' ')            // Newlines to spaces (CodeQL barrier)
-      .replace(/\r/g, ' ')            // Carriage returns to spaces (CodeQL barrier)
-      .replace(/[^\u0020-\u007E]/g, '') // Then allow only printable ASCII (space to tilde)
-      .substring(0, 1000)           // Explicit length limit to prevent log bloat
-    return safe
+    // See sanitizeLogString() above for why the order and the single-character
+    // literal regexes matter.
+    return sanitizeLogString(data).substring(0, 1000)
   }
 
   if (typeof data === "number" || typeof data === "boolean") {
@@ -145,8 +149,11 @@ function sanitizeForLoggerInternal(data: unknown, maxDepth: number, seen: WeakSe
     }
   }
 
-  // Fallback for unknown types - create new safe string
-  return String(data).slice(0, 100)
+  // Fallback for unknown types (functions, symbols, bigint). Route through
+  // the same string sanitization as the string branch — String(fn) can carry
+  // newlines straight out of the function source, and nested values never see
+  // the final barrier pass in sanitizeLogMetadata().
+  return sanitizeLogString(String(data)).slice(0, 100)
 }
 
 const isProd = process.env.NODE_ENV === "production"
@@ -374,7 +381,11 @@ export async function withLogContext<T>(
  * @param input - The message to sanitize
  * @returns Sanitized string safe for logging
  */
-function sanitizeLogMessage(input: unknown): string {
+// Exported for tests only. The message path and the metadata path sanitize
+// differently (see the U+2028 note below), and that divergence is exactly where
+// a bug hid — observing it through createLogger() would need a winston mock, so
+// the pure function is exposed instead.
+export function sanitizeLogMessage(input: unknown): string {
   // Convert to string if needed
   let str = typeof input === 'string' ? input : String(input)
 
@@ -396,6 +407,19 @@ function sanitizeLogMessage(input: unknown): string {
   // lib/utils/text-sanitizer.ts.
   // eslint-disable-next-line no-control-regex
   str = str.replace(/[\u0000-\u001F\u007F]/g, '')
+
+  // Non-ASCII line terminators: NEL (U+0085), LINE SEPARATOR (U+2028) and
+  // PARAGRAPH SEPARATOR (U+2029). None are in the C0/DEL range above, and
+  // JSON.stringify does NOT escape U+2028/U+2029 in string values, so before
+  // this they reached the log line as raw bytes — the dev formatter
+  // interpolates the message into plain text (terminals render U+2028 as a
+  // hard break) and Unicode-aware log splitters mis-split the prod JSON.
+  //
+  // Targeted removal rather than the metadata path's full printable-ASCII
+  // allowlist: the goal is to stop line forging, and messages legitimately
+  // carry accented and non-Latin text that the allowlist would silently
+  // mangle. Metadata keeps the stricter allowlist.
+  str = str.replace(/\u0085/g, ' ').replace(/\u2028/g, ' ').replace(/\u2029/g, ' ')
 
   // Limit length to prevent log bloat
   str = str.substring(0, 1000)
@@ -430,13 +454,18 @@ function sanitizeLogMetadata(data: unknown): Record<string, unknown> {
   // here is O(keys) on an already-sanitised, small object, and puts the barrier
   // one step from the sink where it is visible.
   if (sanitized === null || typeof sanitized !== 'object' || Array.isArray(sanitized)) {
-    // Every caller passes an object literal; anything else has no key/value
-    // shape to walk, and Object.entries() on a string would explode it into
-    // per-character entries.
-    return {}
+    // Every current caller passes an object literal, so this is defensive.
+    // Wrap rather than return {} — Object.entries() on a string would explode
+    // it into per-character entries, but silently dropping the payload would
+    // lose exactly the forensic detail someone is reading the log for.
+    return { value: sanitized }
   }
 
-  const result: Record<string, unknown> = {}
+  // Object.create(null), not {}: this assigns model/user-influenced keys with
+  // bracket [[Set]] semantics, and a null-prototype accumulator is the
+  // codebase rule for exactly that (see CLAUDE.md). Upstream already strips
+  // __proto__/constructor/prototype, so this is depth, not the only guard.
+  const result: Record<string, unknown> = Object.create(null)
   for (const [key, value] of Object.entries(sanitized as Record<string, unknown>)) {
     const safeKey = key.replace(/\n/g, ' ').replace(/\r/g, ' ')
     result[safeKey] =
