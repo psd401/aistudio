@@ -17,6 +17,14 @@ export const runtime = "nodejs"
 
 const log = createLogger({ module: "agent-model-proxy" })
 const UPSTREAM = "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic/v1/messages"
+// Bedrock's Anthropic-compatible endpoint requires `anthropic_version` as a
+// BODY field. The native Anthropic API instead takes an `anthropic-version`
+// HEADER, which is what an Anthropic-Messages client sends — so a client that
+// is correct against api.anthropic.com is rejected here with
+// `{"type":"invalid_request_error","message":"anthropic_version: Field required"}`
+// on EVERY call. The proxy forwards the body verbatim, so it has to supply the
+// field itself.
+const BEDROCK_ANTHROPIC_VERSION = "bedrock-2023-05-31"
 const ALLOWED_MODELS = new Set(["us.anthropic.claude-sonnet-5"])
 const MAX_INPUT_TOKEN_UPPER_BOUND = 200_000
 const MAX_OUTPUT_TOKENS = 32_768
@@ -51,6 +59,7 @@ const SONNET_INPUT_COST_MICROCENTS_PER_TOKEN = 300
 const SONNET_OUTPUT_COST_MICROCENTS_PER_TOKEN = 1_500
 
 type ModelRequest = {
+  anthropic_version?: unknown
   model?: unknown
   max_tokens?: unknown
 }
@@ -167,6 +176,23 @@ export async function POST(
       { status: 413 },
     )
   }
+  // Forward the RE-SERIALIZED, validated object rather than the raw bytes,
+  // with `anthropic_version` supplied when the client omitted it. An explicit
+  // client value is preserved rather than overwritten.
+  //
+  // Re-serializing also closes a validate-vs-forward gap: the checks above run
+  // on `parsed`, so forwarding the original bytes would let any parser
+  // disagreement (duplicate keys, for instance, where JSON.parse keeps the
+  // last and another parser may keep the first) send upstream something other
+  // than what was actually validated.
+  const forwardBody = new TextEncoder().encode(
+    JSON.stringify(
+      parsed.anthropic_version === undefined
+        ? { ...parsed, anthropic_version: BEDROCK_ANTHROPIC_VERSION }
+        : parsed,
+    ),
+  )
+
   const bodyDigest = createHash("sha256").update(body).digest("hex")
   const reservedTokens = inputTokenUpperBound + parsed.max_tokens
   const reservedCostMicrocents =
@@ -225,7 +251,7 @@ export async function POST(
         Accept: request.headers.get("accept") || "application/json",
         "x-api-key": apiKey,
       },
-      body: Buffer.from(body),
+      body: Buffer.from(forwardBody),
       redirect: "error",
       signal: request.signal,
     })
