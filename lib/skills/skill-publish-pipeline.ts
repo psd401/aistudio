@@ -26,6 +26,7 @@ import { createLogger } from "@/lib/logger"
 import { getSetting } from "@/lib/settings-manager"
 import {
   acquireResourceAdmission,
+  isCapacityDenial,
   releaseResourceAdmission,
 } from "@/lib/resource-admission"
 
@@ -209,6 +210,14 @@ export async function invokeSkillScan(
   })
   // OBSERVE-ONLY (2026-07-27, Hagel): a scan-rate threshold must not silently
   // refuse to publish a skill. Measure it, log it, carry on.
+  if (!admission.allowed && !isCapacityDenial(admission)) {
+    // Replayed idempotency key — the scan was already dispatched.
+    log.warn("Skill scan already dispatched (duplicate)", {
+      skillId: params.skillId,
+      reason: admission.reason,
+    })
+    return false
+  }
   if (!admission.allowed) {
     log.warn("Skill scan over threshold (observe-only — scan proceeding)", {
       skillId: params.skillId,

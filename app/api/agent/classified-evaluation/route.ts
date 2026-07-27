@@ -10,6 +10,7 @@ import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 import {
   acquireResourceAdmission,
+  isCapacityDenial,
   finishResourceAdmission,
 } from "@/lib/resource-admission"
 
@@ -176,6 +177,9 @@ export async function POST(request: NextRequest) {
   // reject a user's request. The #1353 limits were set without data on
   // what this workload actually consumes; over-threshold is telemetry
   // until real numbers say otherwise.
+  if (!admission.allowed && !isCapacityDenial(admission)) {
+    return NextResponse.json({ error: "Duplicate request" }, { status: 409 })
+  }
   if (!admission.allowed) {
     log.warn("Classified gateway over threshold (observe-only — request allowed)", {
       requestId,
