@@ -218,6 +218,37 @@ export async function safeFetch(
   });
 }
 
+function bodyFromDirectInit(
+  candidate: RequestInit["body"],
+): string | Uint8Array | undefined {
+  if (typeof candidate === "string") return candidate;
+  if (candidate instanceof URLSearchParams) return candidate.toString();
+  if (candidate instanceof Uint8Array) return candidate;
+  if (candidate instanceof ArrayBuffer) return new Uint8Array(candidate);
+  if (candidate === undefined || candidate === null) return undefined;
+  throw new Error("Safe MCP transport accepts only bounded byte request bodies");
+}
+
+async function getSafeRequestBody(options: {
+  method: string;
+  directUrl: URL | undefined;
+  request: Request | undefined;
+  body: RequestInit["body"];
+}): Promise<string | Uint8Array | undefined> {
+  const { method, directUrl, request, body } = options;
+  if (method === "GET" || method === "HEAD") return undefined;
+  if (directUrl) return bodyFromDirectInit(body);
+  if (!request) return undefined;
+  return new Uint8Array(await request.arrayBuffer());
+}
+
+function directInputUrl(input: RequestInfo | URL): URL | undefined {
+  if (typeof input === "string" || input instanceof URL) {
+    return new URL(input.toString());
+  }
+  return undefined;
+}
+
 /**
  * Fetch-compatible adapter for libraries such as @ai-sdk/mcp.
  *
@@ -230,30 +261,15 @@ export async function safeFetchAdapter(
   input: RequestInfo | URL,
   init?: RequestInit
 ): Promise<Response> {
-  const directUrl =
-    typeof input === "string" || input instanceof URL
-      ? new URL(input.toString())
-      : undefined
+  const directUrl = directInputUrl(input)
   const request = directUrl ? undefined : new Request(input, init)
   const method = (init?.method ?? request?.method ?? "GET").toUpperCase()
-  const hasBody = method !== "GET" && method !== "HEAD"
-  let body: string | Uint8Array | undefined
-  if (hasBody && directUrl) {
-    const candidate = init?.body
-    if (typeof candidate === "string") {
-      body = candidate
-    } else if (candidate instanceof URLSearchParams) {
-      body = candidate.toString()
-    } else if (candidate instanceof Uint8Array) {
-      body = candidate
-    } else if (candidate instanceof ArrayBuffer) {
-      body = new Uint8Array(candidate)
-    } else if (candidate !== undefined && candidate !== null) {
-      throw new Error("Safe MCP transport accepts only bounded byte request bodies")
-    }
-  } else if (hasBody && request) {
-    body = new Uint8Array(await request.arrayBuffer())
-  }
+  const body = await getSafeRequestBody({
+    method,
+    directUrl,
+    request,
+    body: init?.body,
+  })
   return safeFetch(directUrl ?? request!.url, {
     method,
     headers: init?.headers ?? request?.headers,
