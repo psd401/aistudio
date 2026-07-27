@@ -30,22 +30,20 @@ interface LinksGroupProps {
   isExpanded: boolean;
 }
 
-export function LinksGroup({ icon: Icon, label, type = 'link', links, link, isExpanded }: LinksGroupProps) {
-  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
-  
-  const hasLinks = Array.isArray(links) && links.length > 0;
-  const isDirectLink = !!link && !hasLinks;
-  const isPage = type === 'page';
-
-  // Create the list of child links
-  const items = (hasLinks ? links : []).map((link) => {
-    const LinkIcon = link.icon ? iconMap[link.icon] : null;
-    
+function NavigationItems({
+  links,
+  isPage,
+}: {
+  links: NavigationLink[];
+  isPage: boolean;
+}) {
+  return links.map((navigationLink) => {
+    const LinkIcon = navigationLink.icon ? iconMap[navigationLink.icon] : null;
     if (isPage) {
       return (
         <Link
-          href={link.link}
-          key={link.label}
+          href={navigationLink.link}
+          key={navigationLink.label}
           className="block p-4 rounded-lg border bg-card text-card-foreground hover:bg-accent transition-colors"
         >
           <div className="flex items-center gap-2 mb-2">
@@ -54,70 +52,48 @@ export function LinksGroup({ icon: Icon, label, type = 'link', links, link, isEx
                 <LinkIcon className="h-4 w-4" />
               </div>
             )}
-            <span className="font-medium">{link.label}</span>
+            <span className="font-medium">{navigationLink.label}</span>
           </div>
-          {link.description && (
-            <p className="text-sm text-muted-foreground">{link.description}</p>
+          {navigationLink.description && (
+            <p className="text-sm text-muted-foreground">
+              {navigationLink.description}
+            </p>
           )}
         </Link>
       );
     }
-
     return (
       <Link
-        href={link.link}
-        key={link.label}
+        href={navigationLink.link}
+        key={navigationLink.label}
         className={cn(
           "block py-1.5 text-sm text-muted-foreground transition-colors rounded-sm",
           "hover:bg-accent/50 hover:text-foreground",
           "px-3"
         )}
       >
-        {link.label}
+        {navigationLink.label}
       </Link>
     );
   });
+}
 
-  // Inline icon display element (not a component, avoids "Cannot create components during render")
-  const iconDisplay = (
-    <div className={cn(
-      "flex h-7 w-7 items-center justify-center rounded-lg border bg-background flex-shrink-0",
-      "mr-3"
-    )}>
-      <Icon className="h-4 w-4" />
-    </div>
-  );
-
-  // Inline button content for direct links
-  const directLinkButtonContent = (
-    <div className={cn(
-      "flex items-center w-full",
-      "justify-start"
-    )}>
-      {iconDisplay}
-      <AnimatePresence>
-        {isExpanded && (
-          <motion.span
-            variants={labelVariants}
-            initial="collapsed"
-            animate="expanded"
-            exit="collapsed"
-            className="text-sm font-medium overflow-hidden whitespace-nowrap"
-          >
-            {label}
-          </motion.span>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-
-  // Inline button content for dropdowns
-  const dropdownButtonContent = (
-    <div className={cn(
-      "flex items-center w-full",
-      "justify-start"
-    )}>
-      {iconDisplay}
+function NavigationButtonContent({
+  Icon,
+  label,
+  isExpanded,
+  isDropdownOpen,
+}: {
+  Icon: LinksGroupProps["icon"];
+  label: string;
+  isExpanded: boolean;
+  isDropdownOpen?: boolean;
+}) {
+  return (
+    <div className="flex items-center w-full justify-start">
+      <div className="flex h-7 w-7 items-center justify-center rounded-lg border bg-background flex-shrink-0 mr-3">
+        <Icon className="h-4 w-4" />
+      </div>
       <AnimatePresence>
         {isExpanded && (
           <>
@@ -130,17 +106,29 @@ export function LinksGroup({ icon: Icon, label, type = 'link', links, link, isEx
             >
               {label}
             </motion.span>
-            <ChevronRight
-              className={cn(
-                "h-4 w-4 transition-transform ml-auto",
-                isDropdownOpen && "rotate-90"
-              )}
-            />
+            {isDropdownOpen !== undefined && (
+              <ChevronRight
+                className={cn(
+                  "h-4 w-4 transition-transform ml-auto",
+                  isDropdownOpen && "rotate-90"
+                )}
+              />
+            )}
           </>
         )}
       </AnimatePresence>
     </div>
   );
+}
+
+export function LinksGroup({ icon: Icon, label, type = 'link', links, link, isExpanded }: LinksGroupProps) {
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+
+  const hasLinks = Array.isArray(links) && links.length > 0;
+  const isDirectLink = !!link && !hasLinks;
+  const isPage = type === 'page';
+
+  const items = <NavigationItems links={hasLinks ? links : []} isPage={isPage} />;
 
   // If it's a direct link (no dropdown)
   if (isDirectLink) {
@@ -154,7 +142,11 @@ export function LinksGroup({ icon: Icon, label, type = 'link', links, link, isEx
             "px-3 justify-start"
           )}
         >
-          {directLinkButtonContent}
+          <NavigationButtonContent
+            Icon={Icon}
+            label={label}
+            isExpanded={isExpanded}
+          />
         </Button>
       </Link>
     );
@@ -176,7 +168,12 @@ export function LinksGroup({ icon: Icon, label, type = 'link', links, link, isEx
             "px-3 justify-start"
           )}
         >
-          {dropdownButtonContent}
+          <NavigationButtonContent
+            Icon={Icon}
+            label={label}
+            isExpanded={isExpanded}
+            isDropdownOpen={isDropdownOpen}
+          />
         </Button>
       </CollapsibleTrigger>
       
@@ -196,4 +193,4 @@ export function LinksGroup({ icon: Icon, label, type = 'link', links, link, isEx
       </CollapsibleContent>
     </Collapsible>
   );
-} 
+}
