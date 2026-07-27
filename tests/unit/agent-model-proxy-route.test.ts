@@ -216,6 +216,56 @@ describe("Agent model credential broker", () => {
     )
   })
 
+  /** The JSON actually dispatched upstream, as a string. */
+  const forwardedBody = (): string => {
+    const call = fetchMock.mock.calls[0]
+    if (!call) throw new Error("fetch was never called")
+    const init = call[1] as { body?: unknown } | undefined
+    if (!init?.body) throw new Error("fetch was called without a body")
+    return Buffer.from(init.body as Buffer).toString("utf8")
+  }
+
+  it("supplies anthropic_version, which Bedrock requires in the BODY", async () => {
+    // Bedrock's Anthropic-compatible endpoint requires `anthropic_version` as
+    // a body field. The native Anthropic API instead uses an
+    // `anthropic-version` HEADER, so an Anthropic-Messages client that is
+    // correct against api.anthropic.com omits the body field and Bedrock
+    // rejects EVERY call with:
+    //   {"type":"invalid_request_error","message":"anthropic_version: Field required"}
+    // That is what took the dev agent down on 2026-07-27 — this proxy path was
+    // one day old and had never completed a single successful turn.
+    await POST(
+      request({
+        model: "us.anthropic.claude-sonnet-5",
+        max_tokens: 1_024,
+        messages: [{ role: "user", content: "hello" }],
+      }) as never,
+      { params: Promise.resolve({ path: ["anthropic", "v1", "messages"] }) },
+    )
+
+    const forwarded = JSON.parse(forwardedBody())
+    expect(forwarded.anthropic_version).toBe("bedrock-2023-05-31")
+    // The rest of the request must survive untouched.
+    expect(forwarded.model).toBe("us.anthropic.claude-sonnet-5")
+    expect(forwarded.max_tokens).toBe(1_024)
+    expect(forwarded.messages).toEqual([{ role: "user", content: "hello" }])
+  })
+
+  it("does not overwrite an anthropic_version the client already set", async () => {
+    await POST(
+      request({
+        model: "us.anthropic.claude-sonnet-5",
+        max_tokens: 1_024,
+        anthropic_version: "bedrock-2099-01-01",
+        messages: [{ role: "user", content: "hello" }],
+      }) as never,
+      { params: Promise.resolve({ path: ["anthropic", "v1", "messages"] }) },
+    )
+
+    const forwarded = JSON.parse(forwardedBody())
+    expect(forwarded.anthropic_version).toBe("bedrock-2099-01-01")
+  })
+
   it("retains conservative reservations after an ambiguous dispatch failure", async () => {
     fetchMock.mockRejectedValueOnce(new Error("client aborted after dispatch"))
     const response = await POST(
