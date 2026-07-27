@@ -154,6 +154,131 @@ function asPositiveInt(value, fallback) {
   return Math.trunc(n);
 }
 
+function validateCompositionFields(event) {
+  const html = event.html;
+  if (typeof html !== 'string' || html.trim().length === 0) {
+    throw new RenderError(
+      'bad_request',
+      '`html` is required and must be a non-empty composition string.'
+    );
+  }
+  const css = event.css;
+  if (css !== undefined && typeof css !== 'string') {
+    throw new RenderError(
+      'bad_request',
+      '`css` must be a string when provided.'
+    );
+  }
+  const js = event.js;
+  if (js !== undefined && typeof js !== 'string') {
+    throw new RenderError(
+      'bad_request',
+      '`js` must be a string when provided.'
+    );
+  }
+  const bytes =
+    Buffer.byteLength(html, 'utf8') +
+    (typeof css === 'string' ? Buffer.byteLength(css, 'utf8') : 0) +
+    (typeof js === 'string' ? Buffer.byteLength(js, 'utf8') : 0);
+  if (bytes > MAX_HTML_BYTES) {
+    throw new RenderError(
+      'bad_request',
+      `Composition (html+css+js) is ${bytes} bytes; maximum is ${MAX_HTML_BYTES}.`
+    );
+  }
+  return { html, css, js };
+}
+
+function validateDurationSeconds(value) {
+  const duration = Number(value);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    throw new RenderError(
+      'bad_request',
+      '`durationSeconds` is required and must be a positive number.'
+    );
+  }
+  if (duration > MAX_DURATION_SECONDS) {
+    throw new RenderError(
+      'bad_request',
+      `\`durationSeconds\` is ${duration}; v1 caps output at ${MAX_DURATION_SECONDS}s. Split longer scenes.`
+    );
+  }
+  return duration;
+}
+
+function validateRenderGeometry(event) {
+  const fps = asPositiveInt(event.fps, DEFAULT_FPS);
+  if (!Number.isFinite(fps) || fps < MIN_FPS || fps > MAX_FPS) {
+    throw new RenderError(
+      'bad_request',
+      `\`fps\` must be an integer between ${MIN_FPS} and ${MAX_FPS}.`
+    );
+  }
+  const width = asPositiveInt(event.width, DEFAULT_WIDTH);
+  const height = asPositiveInt(event.height, DEFAULT_HEIGHT);
+  for (const [name, dimension] of [
+    ['width', width],
+    ['height', height],
+  ]) {
+    if (
+      !Number.isFinite(dimension) ||
+      dimension < MIN_DIMENSION ||
+      dimension > MAX_DIMENSION
+    ) {
+      throw new RenderError(
+        'bad_request',
+        `\`${name}\` must be an integer between ${MIN_DIMENSION} and ${MAX_DIMENSION}.`
+      );
+    }
+  }
+  return { fps, width, height };
+}
+
+function maximumDeclaredDuration(html) {
+  const durationRegex =
+    /data-duration\s{0,20}=\s{0,20}["']?\s{0,20}([\d.]{1,15})/gi;
+  let match;
+  let maximum = 0;
+  while ((match = durationRegex.exec(html)) !== null) {
+    const value = Number(match[1]);
+    if (!Number.isFinite(value)) continue;
+    if (value > MAX_DURATION_SECONDS + 0.5) {
+      throw new RenderError(
+        'bad_request',
+        `Composition declares data-duration=${value}s, above the ${MAX_DURATION_SECONDS}s v1 cap.`
+      );
+    }
+    if (value > maximum) maximum = value;
+  }
+  return maximum;
+}
+
+function validateFrameBudget(durationSeconds, declaredDuration, fps) {
+  const renderSeconds = Math.max(durationSeconds, declaredDuration);
+  const totalFrames = Math.ceil(fps * renderSeconds);
+  if (totalFrames <= MAX_FRAMES) return;
+  throw new RenderError(
+    'bad_request',
+    `fps × duration = ${totalFrames} frames (${fps}fps × ${renderSeconds}s) exceeds the ${MAX_FRAMES}-frame ` +
+      `render budget. Lower fps (≤ ${Math.max(MIN_FPS, Math.floor(MAX_FRAMES / renderSeconds))} at ${renderSeconds}s) or shorten the scene.`
+  );
+}
+
+function validateDeclaredDimensions(html) {
+  const dimensionRegex =
+    /data-(width|height)\s{0,20}=\s{0,20}["']?\s{0,20}([\d.]{1,15})/gi;
+  let match;
+  while ((match = dimensionRegex.exec(html)) !== null) {
+    const value = Number(match[2]);
+    if (Number.isFinite(value) && value > MAX_DIMENSION) {
+      throw new RenderError(
+        'bad_request',
+        `Composition declares data-${match[1].toLowerCase()}=${value}px, above the ${MAX_DIMENSION}px cap.`
+      );
+    }
+  }
+}
+
 /**
  * Validate + normalize the invoke event. Throws RenderError('bad_request', …)
  * on any invalid field so the caller gets a specific, actionable message.
@@ -162,130 +287,15 @@ function validateRequest(event) {
   if (!event || typeof event !== 'object') {
     throw new RenderError('bad_request', 'Event must be a JSON object.');
   }
-
-  const html = event.html;
-  if (typeof html !== 'string' || html.trim().length === 0) {
-    throw new RenderError('bad_request', '`html` is required and must be a non-empty composition string.');
-  }
-
-  const css = event.css;
-  if (css !== undefined && typeof css !== 'string') {
-    throw new RenderError('bad_request', '`css` must be a string when provided.');
-  }
-  const js = event.js;
-  if (js !== undefined && typeof js !== 'string') {
-    throw new RenderError('bad_request', '`js` must be a string when provided.');
-  }
-
-  // Size cap covers the whole composition (html + inline css + js), not html
-  // alone: the doc contract is a combined 4 MB budget, and the summed payload
-  // must also fit the Lambda 6 MB synchronous-invoke ceiling. Measuring only
-  // html let a tiny html + multi-MB css/js slip past validation and fail
-  // opaquely at the AWS invoke layer instead of returning a clean bad_request.
-  const compositionBytes =
-    Buffer.byteLength(html, 'utf8') +
-    (typeof css === 'string' ? Buffer.byteLength(css, 'utf8') : 0) +
-    (typeof js === 'string' ? Buffer.byteLength(js, 'utf8') : 0);
-  if (compositionBytes > MAX_HTML_BYTES) {
-    throw new RenderError(
-      'bad_request',
-      `Composition (html+css+js) is ${compositionBytes} bytes; maximum is ${MAX_HTML_BYTES}.`,
-    );
-  }
-
-  const durationSeconds = Number(event.durationSeconds);
-  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
-    throw new RenderError('bad_request', '`durationSeconds` is required and must be a positive number.');
-  }
-  if (durationSeconds > MAX_DURATION_SECONDS) {
-    throw new RenderError(
-      'bad_request',
-      `\`durationSeconds\` is ${durationSeconds}; v1 caps output at ${MAX_DURATION_SECONDS}s. Split longer scenes.`,
-    );
-  }
-
-  const fps = asPositiveInt(event.fps, DEFAULT_FPS);
-  if (!Number.isFinite(fps) || fps < MIN_FPS || fps > MAX_FPS) {
-    throw new RenderError('bad_request', `\`fps\` must be an integer between ${MIN_FPS} and ${MAX_FPS}.`);
-  }
-  // NB: the frame-budget guard (fps × duration ≤ MAX_FRAMES) is enforced BELOW,
-  // after the composition's data-duration is scanned. hyperframes renders for the
-  // HTML's own data-duration, NOT the durationSeconds request field, so a caller
-  // could otherwise understate durationSeconds and smuggle a long timeline past a
-  // request-field-only check. The budget is checked against the actual render
-  // length = max(durationSeconds, largest declared data-duration).
-
-  const width = asPositiveInt(event.width, DEFAULT_WIDTH);
-  const height = asPositiveInt(event.height, DEFAULT_HEIGHT);
-  for (const [name, dim] of [['width', width], ['height', height]]) {
-    if (!Number.isFinite(dim) || dim < MIN_DIMENSION || dim > MAX_DIMENSION) {
-      throw new RenderError(
-        'bad_request',
-        `\`${name}\` must be an integer between ${MIN_DIMENSION} and ${MAX_DIMENSION}.`,
-      );
-    }
-  }
-
+  const { html, css, js } = validateCompositionFields(event);
+  const durationSeconds = validateDurationSeconds(event.durationSeconds);
+  const { fps, width, height } = validateRenderGeometry(event);
   const userEmail = event.userEmail;
   if (!validateEmail(userEmail)) {
     throw new RenderError('bad_request', '`userEmail` is required and must be a valid email address.');
   }
-
-  // Defense-in-depth cap: reject if the composition declares any
-  // data-duration beyond the ceiling. Stops a caller smuggling a long
-  // timeline past the `durationSeconds` field (which we can't cross-check
-  // against the HTML without a full parse). The root composition's total and
-  // every clip's data-duration must each be <= the cap.
-  // Bounded quantifiers keep this linear (CodeQL js/polynomial-redos): real
-  // attribute whitespace + numeric values are short, so caps of 20/15 are ample.
-  const durationRegex = /data-duration\s{0,20}=\s{0,20}["']?\s{0,20}([\d.]{1,15})/gi;
-  let match;
-  let maxDataDuration = 0;
-  while ((match = durationRegex.exec(html)) !== null) {
-    const value = Number(match[1]);
-    if (Number.isFinite(value)) {
-      if (value > MAX_DURATION_SECONDS + 0.5) {
-        throw new RenderError(
-          'bad_request',
-          `Composition declares data-duration=${value}s, above the ${MAX_DURATION_SECONDS}s v1 cap.`,
-        );
-      }
-      if (value > maxDataDuration) maxDataDuration = value;
-    }
-  }
-
-  // Frame-budget guard — the real bound on render time (frames = fps × duration).
-  // Checked against the ACTUAL render length: hyperframes renders the HTML's own
-  // data-duration (the largest declared one = the root total), not the request
-  // field, so use max(durationSeconds, maxDataDuration) to catch an understated
-  // durationSeconds that hides a long timeline in the composition.
-  const renderSeconds = Math.max(durationSeconds, maxDataDuration);
-  const totalFrames = Math.ceil(fps * renderSeconds);
-  if (totalFrames > MAX_FRAMES) {
-    throw new RenderError(
-      'bad_request',
-      `fps × duration = ${totalFrames} frames (${fps}fps × ${renderSeconds}s) exceeds the ${MAX_FRAMES}-frame ` +
-        `render budget. Lower fps (≤ ${Math.max(MIN_FPS, Math.floor(MAX_FRAMES / renderSeconds))} at ${renderSeconds}s) or shorten the scene.`,
-    );
-  }
-
-  // Same defense-in-depth for the root canvas size. hyperframes sizes the
-  // canvas from the composition's own data-width/data-height, NOT the request's
-  // width/height fields, so the numeric cap above does not bound the actual
-  // render — an oversized composition (e.g. data-width="10000") would sail past
-  // the 3840 cap and can exhaust /tmp or memory. Reject any declared dimension
-  // over the cap before spending the render. Bounded quantifiers keep it linear.
-  const dimensionRegex = /data-(width|height)\s{0,20}=\s{0,20}["']?\s{0,20}([\d.]{1,15})/gi;
-  let dimMatch;
-  while ((dimMatch = dimensionRegex.exec(html)) !== null) {
-    const dimValue = Number(dimMatch[2]);
-    if (Number.isFinite(dimValue) && dimValue > MAX_DIMENSION) {
-      throw new RenderError(
-        'bad_request',
-        `Composition declares data-${dimMatch[1].toLowerCase()}=${dimValue}px, above the ${MAX_DIMENSION}px cap.`,
-      );
-    }
-  }
+  validateFrameBudget(durationSeconds, maximumDeclaredDuration(html), fps);
+  validateDeclaredDimensions(html);
 
   return {
     html,
