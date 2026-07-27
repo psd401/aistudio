@@ -104,6 +104,37 @@ def _format_for_chat(text: str) -> str:
         return text
 
 
+CONTEXT_OVERFLOW_ERROR_CLASS = "ContextOverflow"
+
+
+def _classify_chat_error(error_message: str) -> str:
+    """Name the chat-error class from OpenClaw's message.
+
+    Every chat-channel error arrives as the same generic OpenClawChatError, with
+    the only distinguishing detail buried in free text. That conflates two very
+    different situations:
+
+      • Context overflow — the transcript outgrew the model's window. The work
+        itself is fine; the SESSION is the problem, and continuing it is
+        guaranteed to fail again. Recoverable, but only by starting fresh.
+      • Everything else — a genuine fault. Retrying is not obviously safe.
+
+    Downstream (agent-cron promotion, agent_failures, alarms) has to tell these
+    apart, and the classification belongs HERE, where the message is produced,
+    rather than as a regex duplicated into TypeScript. On 2026-07-27 the prod
+    Morning Dispatch hit overflow twice, burned ~7 minutes retrying, and its
+    failure was indistinguishable from a crash.
+
+    Matches on the stable part of OpenClaw's wording ("context overflow" /
+    "prompt too large"); an unrecognized message keeps the generic class, so a
+    wording change degrades to today's behaviour rather than misclassifying.
+    """
+    lowered = (error_message or "").lower()
+    if "context overflow" in lowered or "prompt too large" in lowered:
+        return CONTEXT_OVERFLOW_ERROR_CLASS
+    return "OpenClawChatError"
+
+
 def _frame_failed_partial(partial: str) -> str:
     """Wrap a failed/degraded turn so it is never presented as a clean answer.
 
@@ -982,10 +1013,14 @@ class OpenClawAdapter(HarnessAdapter):
                             # initialization conflicted" surfaces, so recording
                             # it is what makes the session-conflict class of
                             # failure visible in agent_failures / the alarm.
+                            # Context overflow gets its own class so the caller
+                            # can recover it (fresh session) instead of
+                            # treating it as a crash. See _classify_chat_error.
+                            err_class = _classify_chat_error(str(err_msg))
                             record_failure(
                                 source="harness",
                                 severity="error",
-                                error_class="OpenClawChatError",
+                                error_class=err_class,
                                 error_message=str(err_msg),
                                 session_id=session_id,
                                 model=observed_model or model_override,
@@ -1025,7 +1060,7 @@ class OpenClawAdapter(HarnessAdapter):
                                 messages=messages_log,
                                 tool_calls=tool_calls,
                                 failed=True,
-                                error_class="OpenClawChatError",
+                                error_class=err_class,
                             )
 
                         elif state == "aborted":

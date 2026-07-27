@@ -26,6 +26,71 @@ export interface DatabaseStackProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
 }
 
+/**
+ * Recursively collect the db-init Lambda's build inputs: TypeScript sources
+ * (excluding declaration files) plus package.json/tsconfig.json manifests,
+ * at any depth — the Lambda's tsconfig has no restrictive `include`, so a
+ * nested source like lambda/lib/helper.ts is a compilation input too.
+ * Generated and installed state (node_modules/, dist/) is skipped.
+ * Returns paths relative to the starting directory, sorted for
+ * deterministic hashing.
+ */
+function collectLambdaSourceFiles(dir: string, prefix = ''): { rel: string; abs: string }[] {
+  const out: { rel: string; abs: string }[] = [];
+  const entries = fs.readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const entry of entries) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const abs = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+      out.push(...collectLambdaSourceFiles(abs, rel));
+    } else if (entry.isFile()
+      && ((entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts'))
+        || entry.name === 'package.json' || entry.name === 'tsconfig.json')) {
+      out.push({ rel, abs });
+    }
+  }
+  return out;
+}
+
+/**
+ * Compute the custom asset hash for the db-init Lambda.
+ *
+ * With assetHashType CUSTOM, CDK's default source hash is fully replaced, so
+ * any input left out of this hash can change without the asset ever being
+ * rebuilt or redeployed. It must therefore cover everything that shapes the
+ * bundled Lambda:
+ *  - Lambda sources (*.ts, recursively), package.json, tsconfig.json — the
+ *    bundler compiles these at synth time; omitting them meant a handler-only
+ *    fix kept the old asset hash and silently never reached deployed
+ *    environments
+ *  - migrations.json + schema files, which the bundler copies in from the
+ *    parent directory (outside the asset source path)
+ * Generated artifacts (*.js, *.d.ts, bun.lock, node_modules/, dist/) are
+ * intentionally excluded: they are not bundling inputs. Every file is hashed
+ * with its relative path, so renames change the hash too.
+ *
+ * @param databaseDir Absolute path to infra/database
+ */
+export function computeDbInitAssetHash(databaseDir: string): string {
+  const hash = crypto.createHash('sha256');
+  for (const f of collectLambdaSourceFiles(path.join(databaseDir, 'lambda'))) {
+    hash.update(`${f.rel}\0`);
+    hash.update(fs.readFileSync(f.abs, 'utf8'));
+  }
+  hash.update(fs.readFileSync(path.join(databaseDir, 'migrations.json'), 'utf8'));
+  const schemaDir = path.join(databaseDir, 'schema');
+  const schemaEntries = fs.readdirSync(schemaDir, { withFileTypes: true })
+    .filter(e => e.isFile())
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const e of schemaEntries) {
+    hash.update(`${e.name}\0`);
+    hash.update(fs.readFileSync(path.join(schemaDir, e.name), 'utf8'));
+  }
+  return hash.digest('hex').substring(0, 16);
+}
+
 export class DatabaseStack extends cdk.Stack {
   public readonly databaseResourceArn: string;
   public readonly databaseSecretArn: string;
@@ -257,22 +322,11 @@ export class DatabaseStack extends cdk.Stack {
         ],
       });
 
-      // Compute asset hash that includes migrations.json and schema files
-      // CDK's default hash only covers infra/database/lambda/, but the bundler
-      // copies in schema/ and migrations.json from the parent directory.
-      // Without this, CDK reuses stale Lambda assets when only migrations change.
-      const migrationsPath = path.join(__dirname, '../database/migrations.json');
-      const schemaDir = path.join(__dirname, '../database/schema');
-      const externalHash = crypto.createHash('sha256');
-      externalHash.update(fs.readFileSync(migrationsPath, 'utf8'));
-      const schemaFiles = fs.readdirSync(schemaDir).sort();
-      for (const f of schemaFiles) {
-        const filePath = path.join(schemaDir, f);
-        if (fs.statSync(filePath).isFile()) {
-          externalHash.update(fs.readFileSync(filePath, 'utf8'));
-        }
-      }
-      const migrationAssetHash = externalHash.digest('hex').substring(0, 16);
+      // Custom asset hash covering everything that shapes the bundled Lambda:
+      // sources + package.json/tsconfig (compiled at synth time) and the
+      // migrations.json/schema files the bundler copies in from the parent
+      // directory. See computeDbInitAssetHash for why nothing may be omitted.
+      const migrationAssetHash = computeDbInitAssetHash(path.join(__dirname, '../database'));
 
       // Database initialization Lambda
       // Note: Lambda doesn't need to be in VPC since it uses RDS Data API

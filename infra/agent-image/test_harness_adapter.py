@@ -486,5 +486,76 @@ class TurnResultCacheFieldTests(unittest.TestCase):
         self.assertEqual(result.cache_write, 0)
 
 
+class ChatErrorClassificationTests(unittest.TestCase):
+    """Context overflow must be distinguishable from a genuine crash.
+
+    Every chat-channel error used to arrive as the same OpenClawChatError, with
+    the distinguishing detail buried in free text. That conflation is why the
+    prod Morning Dispatch could not be recovered on 2026-07-27: an overflow —
+    which is fixable by starting a fresh session — looked exactly like a fault
+    that must not be auto-retried.
+
+    Downstream, agent-cron promotes ContextOverflow into a background RESTART
+    and leaves OpenClawChatError alone. Misclassifying in either direction is
+    costly: a missed overflow fails the task silently every morning, and an
+    over-eager match hands real crashes a two-hour retry budget.
+    """
+
+    def test_recognizes_the_message_prod_actually_emitted(self):
+        # Verbatim from the 2026-07-27 prod failure.
+        message = (
+            "Context overflow: prompt too large for the model. Try /reset "
+            "(or /new) to start a fresh session, or use a larger-context model."
+        )
+        self.assertEqual(
+            harness_adapter._classify_chat_error(message),
+            harness_adapter.CONTEXT_OVERFLOW_ERROR_CLASS,
+        )
+
+    def test_matches_either_stable_phrase_case_insensitively(self):
+        for message in (
+            "Context overflow",
+            "context overflow (mid-turn precheck)",
+            "prompt too large for the model",
+            "PROMPT TOO LARGE",
+        ):
+            self.assertEqual(
+                harness_adapter._classify_chat_error(message),
+                harness_adapter.CONTEXT_OVERFLOW_ERROR_CLASS,
+                f"should classify as overflow: {message!r}",
+            )
+
+    def test_leaves_every_other_failure_generic(self):
+        # These MUST NOT become promotable — each is a real fault where an
+        # automatic two-hour retry is the wrong answer.
+        for message in (
+            "reply session initialization conflicted",
+            "websocket closed unexpectedly",
+            "tool_search_code timed out",
+            "AccessDeniedException calling InvokeModel",
+            "",
+        ):
+            self.assertEqual(
+                harness_adapter._classify_chat_error(message),
+                "OpenClawChatError",
+                f"should stay generic: {message!r}",
+            )
+
+    def test_degrades_to_generic_rather_than_raising(self):
+        # A None/odd message must not take down error handling itself — this
+        # runs on the failure path, where raising would mask the real error.
+        self.assertEqual(
+            harness_adapter._classify_chat_error(None),
+            "OpenClawChatError",
+        )
+
+    def test_class_name_matches_the_typescript_consumer(self):
+        # agent-cron/job-promotion.ts keys promotion off this exact literal.
+        # A rename here silently stops every scheduled restart.
+        self.assertEqual(
+            harness_adapter.CONTEXT_OVERFLOW_ERROR_CLASS, "ContextOverflow"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

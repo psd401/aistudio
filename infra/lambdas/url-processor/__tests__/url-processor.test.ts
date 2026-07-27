@@ -267,18 +267,23 @@ describe('handler invocation contracts (REV-COR-435)', () => {
   });
 });
 
-describe('compiled index.js artifact (REV-INFRA-121 / REV-INFRA-122 Done-when)', () => {
-  const js = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+describe('deployed artifact source (REV-INFRA-121 / REV-INFRA-122 Done-when)', () => {
+  // The deployed Lambda is compiled from index.ts at CDK synth time
+  // (bundledLambdaAsset in infra/lib/processing-stack.ts), so asserting on
+  // the source asserts on the deployed artifact — there is no longer a
+  // committed compiled twin that can drift from it.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'index.ts'), 'utf8');
 
-  it('no longer require()s ESM-only node-fetch', () => {
-    expect(js).not.toMatch(/require\(["']node-fetch["']\)/);
+  it('no longer imports ESM-only node-fetch', () => {
+    expect(src).not.toMatch(/require\(["']node-fetch["']\)/);
+    expect(src).not.toMatch(/from ["']node-fetch["']/);
   });
 
   it('contains no legacy chunk-table reference', () => {
-    expect(js).not.toMatch(new RegExp(LEGACY_CHUNK_TABLE));
+    expect(src).not.toMatch(new RegExp(LEGACY_CHUNK_TABLE));
   });
 
   it('targets repository_item_chunks', () => {
-    expect(js).toMatch(/repository_item_chunks/);
+    expect(src).toMatch(/repository_item_chunks/);
   });
 });
