@@ -3,6 +3,8 @@
     "providers": {
       "amazon-bedrock": {
         "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "api": "bedrock-converse-stream",
+        "auth": "aws-sdk",
         "timeoutSeconds": 300,
         "models": [
           {

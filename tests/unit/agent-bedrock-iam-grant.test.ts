@@ -119,6 +119,7 @@ const openclaw = JSON.parse(
       {
         apiKey?: string
         auth?: string
+        api?: string
         models?: Array<{ id?: string }>
       }
     >
@@ -210,15 +211,25 @@ describe("agent Bedrock access via execution-role SigV4", () => {
     expect(declared).toContain(modelId)
   })
 
-  it("carries no credential on the chat provider", () => {
-    // An apiKey or auth mode on this provider defeats the whole change: the
-    // plugin skips the AWS default credential chain whenever a bearer is
-    // present (aws-credential-refresh.js), so a stray key silently reverts us
-    // to credential-in-container while still appearing to work.
+  it("selects SigV4 auth and carries no credential", () => {
+    // auth "aws-sdk" is a MODE SELECTOR, not a credential — it is what tells
+    // OpenClaw to sign with the AWS chain instead of looking for a key. Both
+    // it and the matching api are required, and omitting them does not fall
+    // back gracefully: the turn dies before reaching Bedrock with
+    //   ProviderAuthError: No API key found for provider "amazon-bedrock"
+    // which reads like a missing secret rather than a missing config key.
+    // These two values are the shape the plugin itself emits for an implicit
+    // Bedrock provider (discovery.js resolveImplicitBedrockProvider).
     const provider = openclaw.models.providers["amazon-bedrock"]
     expect(provider).toBeDefined()
+    expect(provider.auth).toBe("aws-sdk")
+    expect(provider.api).toBe("bedrock-converse-stream")
+
+    // An apiKey WOULD be a credential, and would defeat the change: the plugin
+    // skips the AWS default chain whenever a bearer is present
+    // (aws-credential-refresh.js), silently reverting to
+    // credential-in-container while still appearing to work.
     expect(provider.apiKey).toBeUndefined()
-    expect(provider.auth).toBeUndefined()
   })
 
   it("no longer routes chat through the loopback credential proxy", () => {
