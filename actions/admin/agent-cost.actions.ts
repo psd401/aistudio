@@ -75,17 +75,19 @@ async function queryCost(params: CostQueryParams) {
  * #1083). It surfaces AgentCore / infrastructure spend tagged
  * `costCenter=ai-agents` on the execution role.
  *
- * It does NOT capture the harness model spend: the agent model (Claude Sonnet
- * 5 as of #1089; formerly GLM-5) runs through Bedrock Mantle
- * (`bedrock-mantle.us-east-1.api.aws`) authenticated by a SEPARATE IAM user's
- * bearer token (`AWS_BEARER_TOKEN_BEDROCK`, IAM user `psd-agent-bedrock-<env>`),
- * not the tagged AgentCore execution role — so that model spend never carries
- * the `costCenter` tag and won't appear here. Model cost is computed from
- * tokens × ai_models pricing in agent-cost-projection.actions.ts.
+ * Historically it did NOT capture harness model spend: the agent model
+ * authenticated with a SEPARATE IAM user's bearer token (IAM user
+ * `psd-agent-bedrock-<env>`) rather than the tagged AgentCore execution role,
+ * so that spend never carried the `costCenter` tag.
  *
- * Follow-ups to investigate: (a) activate the `costCenter` cost-allocation tag
- * in Billing; (b) determine whether Bedrock Marketplace/Mantle usage is
- * taggable at all. Until then, the token×pricing path is authoritative.
+ * The chat model now calls Bedrock with SigV4 from the tagged execution role,
+ * so its spend CAN carry the tag. Do not assume it does: the `costCenter`
+ * cost-allocation tag still has to be activated in Billing before Cost
+ * Explorer will group by it, and tag activation is not retroactive.
+ *
+ * Model cost therefore remains computed from tokens × ai_models pricing in
+ * agent-cost-projection.actions.ts, which stays authoritative. Treat any model
+ * spend appearing here as reconciliation, not as a second source of truth.
  */
 export async function getAgentCostSummary(
   range: CostDateRange = "30d"

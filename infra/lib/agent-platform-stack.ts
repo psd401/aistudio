@@ -1256,10 +1256,25 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: [agentInvocationSigningSecret.secretArn],
     }));
 
-    // The main generative model is reached only through the owner-bound web
-    // broker, which holds the provider credential and enforces a model/output
-    // allowlist. The model-facing role retains only the single embedding model
-    // required by OpenClaw's local memory index.
+    // Bedrock access for the model-facing runtime, via this role's standard
+    // SigV4 credential chain. NO bearer credential is present in the container.
+    //
+    // Two models, granted separately because they are reached by different
+    // code paths and should fail independently:
+    //   • Titan embeddings — OpenClaw's local memory index (memorySearch).
+    //   • Claude Sonnet 5  — the main generative model.
+    //
+    // The chat model previously required a Bedrock bearer key, which had to be
+    // hydrated from Secrets Manager and INLINED into openclaw.json inside a
+    // container that also runs 33 model-authored skills. Routing it through a
+    // web broker avoided the on-disk key but put an authenticated ALB hop in
+    // front of every model call. SigV4 from this role removes both: no
+    // credential to steal, no hop to pay for. The embedding path has used
+    // exactly this mechanism in production since #1184, which is the proof it
+    // works from inside an AgentCore microVM.
+    //
+    // Scoped to the ONE model the agent may call. A wildcard here would let
+    // model-authored code reach any Bedrock model in the account.
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'BedrockMemoryEmbeddingOnly',
       effect: iam.Effect.ALLOW,
@@ -1268,6 +1283,34 @@ export class AgentPlatformStack extends cdk.Stack {
       ],
       resources: [
         `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v2:0`,
+      ],
+    }));
+
+    // us.anthropic.claude-sonnet-5 is a CROSS-REGION inference profile. Bedrock
+    // authorizes such a call against the profile ARN *and* against the
+    // foundation-model ARN in whichever region it routes the request to, so a
+    // grant naming only the profile fails 100% of the time with AccessDenied —
+    // and it fails intermittently if the member regions are incomplete, because
+    // routing is per-request. Both halves are required.
+    //
+    // The member list is pinned rather than wildcarded so that a profile
+    // silently gaining a region does not silently widen this grant; if AWS adds
+    // one, calls routed there fail loudly and this list gets updated.
+    // Source: `aws bedrock get-inference-profile --inference-profile-identifier
+    // us.anthropic.claude-sonnet-5` (verified 2026-07-27).
+    const sonnetProfileRegions = ['us-east-1', 'us-east-2', 'us-west-2'];
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'BedrockChatModelInvoke',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream',
+      ],
+      resources: [
+        `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.anthropic.claude-sonnet-5`,
+        ...sonnetProfileRegions.map(
+          (r) => `arn:aws:bedrock:${r}::foundation-model/anthropic.claude-sonnet-5`,
+        ),
       ],
     }));
 
