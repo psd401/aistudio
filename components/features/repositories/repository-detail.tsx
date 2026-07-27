@@ -26,6 +26,166 @@ interface RepositoryDetailProps {
   repository: Repository
 }
 
+function RepositoryHeader({
+  repository,
+  onBack,
+  onEdit,
+}: {
+  repository: Repository
+  onBack: () => void
+  onEdit: () => void
+}) {
+  return (
+    <div className="flex items-center justify-between">
+      <div className="flex items-center gap-4">
+        <Button variant="ghost" size="icon" onClick={onBack}>
+          <ArrowLeft className="h-4 w-4" />
+        </Button>
+        <div>
+          <h1 className="text-3xl font-bold">{repository.name}</h1>
+          {repository.description && (
+            <p className="mt-1 text-muted-foreground">
+              {repository.description}
+            </p>
+          )}
+        </div>
+      </div>
+      {repository.canManage ? (
+        <Button variant="outline" onClick={onEdit}>
+          <Edit className="mr-2 h-4 w-4" />
+          Edit
+        </Button>
+      ) : (
+        <Badge variant="outline" className="gap-1">
+          <Shield className="h-3 w-3" />
+          Shared read only
+        </Badge>
+      )}
+    </div>
+  )
+}
+
+function RepositoryInformation({ repository }: RepositoryDetailProps) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Repository Information</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div>
+            <dt className="text-sm font-medium text-muted-foreground">Owner</dt>
+            <dd className="mt-1 text-sm">{repository.ownerName || "-"}</dd>
+          </div>
+          <div>
+            <dt className="text-sm font-medium text-muted-foreground">
+              Visibility
+            </dt>
+            <dd className="mt-1">
+              <Badge variant="outline" className="gap-1">
+                {repository.isPublic ? (
+                  <Globe className="h-3 w-3" />
+                ) : (
+                  <Lock className="h-3 w-3" />
+                )}
+                {repository.isPublic ? "Public" : "Private"}
+              </Badge>
+            </dd>
+          </div>
+          <div>
+            <dt className="text-sm font-medium text-muted-foreground">
+              Created
+            </dt>
+            <dd className="mt-1 text-sm">
+              {repository.createdAt
+                ? format(new Date(repository.createdAt), "PPP")
+                : "-"}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-sm font-medium text-muted-foreground">
+              Last Updated
+            </dt>
+            <dd className="mt-1 text-sm">
+              {repository.updatedAt
+                ? format(new Date(repository.updatedAt), "PPP")
+                : "-"}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-sm font-medium text-muted-foreground">
+              Lifecycle
+            </dt>
+            <dd className="mt-1 flex flex-wrap gap-2">
+              <Badge variant="secondary" className="capitalize">
+                {repository.repositoryKind}
+              </Badge>
+              <Badge
+                variant={
+                  repository.lifecycleStatus === "active"
+                    ? "default"
+                    : "outline"
+                }
+                className="capitalize"
+              >
+                {repository.lifecycleStatus}
+              </Badge>
+            </dd>
+          </div>
+          <div>
+            <dt className="text-sm font-medium text-muted-foreground">
+              Retention
+            </dt>
+            <dd className="mt-1 text-sm">
+              {repository.retentionDays === null
+                ? "Persistent"
+                : `${repository.retentionDays} days`}
+              {repository.expiresAt
+                ? ` · expires ${format(new Date(repository.expiresAt), "PPP")}`
+                : ""}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-sm font-medium text-muted-foreground">
+              Active index generation
+            </dt>
+            <dd className="mt-1 break-all font-mono text-xs">
+              {repository.activeIndexGenerationId || "Not published yet"}
+            </dd>
+          </div>
+        </dl>
+      </CardContent>
+    </Card>
+  )
+}
+
+function RepositoryAccess({ repository }: RepositoryDetailProps) {
+  if (repository.canManage) {
+    return (
+      <RepositoryAccessEditor
+        repositoryId={repository.id}
+        isPublic={repository.isPublic}
+      />
+    )
+  }
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Shared repository access</CardTitle>
+        <CardDescription>
+          Access grants are visible only to repository managers.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm text-muted-foreground">
+          You can read and search this repository, but only its owner or an
+          administrator can change content, settings, or access.
+        </p>
+      </CardContent>
+    </Card>
+  )
+}
+
 export function RepositoryDetail({ repository }: RepositoryDetailProps) {
   const router = useRouter()
   const [uploadModalOpen, setUploadModalOpen] = useState(false)
@@ -34,130 +194,12 @@ export function RepositoryDetail({ repository }: RepositoryDetailProps) {
   return (
     <>
       <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => router.push("/repositories")}
-            >
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
-            <div>
-              <h1 className="text-3xl font-bold">{repository.name}</h1>
-              {repository.description && (
-                <p className="text-muted-foreground mt-1">
-                  {repository.description}
-                </p>
-              )}
-            </div>
-          </div>
-          {repository.canManage ? (
-            <Button
-              variant="outline"
-              onClick={() => router.push(`/repositories/${repository.id}/edit`)}
-            >
-              <Edit className="mr-2 h-4 w-4" />
-              Edit
-            </Button>
-          ) : (
-            <Badge variant="outline" className="gap-1">
-              <Shield className="h-3 w-3" />
-              Shared read only
-            </Badge>
-          )}
-        </div>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Repository Information</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
-                  Owner
-                </dt>
-                <dd className="mt-1 text-sm">{repository.ownerName || "-"}</dd>
-              </div>
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
-                  Visibility
-                </dt>
-                <dd className="mt-1">
-                  {repository.isPublic ? (
-                    <Badge variant="outline" className="gap-1">
-                      <Globe className="h-3 w-3" />
-                      Public
-                    </Badge>
-                  ) : (
-                    <Badge variant="outline" className="gap-1">
-                      <Lock className="h-3 w-3" />
-                      Private
-                    </Badge>
-                  )}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
-                  Created
-                </dt>
-                <dd className="mt-1 text-sm">
-                  {repository.createdAt ? format(new Date(repository.createdAt), "PPP") : "-"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
-                  Last Updated
-                </dt>
-                <dd className="mt-1 text-sm">
-                  {repository.updatedAt ? format(new Date(repository.updatedAt), "PPP") : "-"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
-                  Lifecycle
-                </dt>
-                <dd className="mt-1 flex flex-wrap gap-2">
-                  <Badge variant="secondary" className="capitalize">
-                    {repository.repositoryKind}
-                  </Badge>
-                  <Badge
-                    variant={
-                      repository.lifecycleStatus === "active"
-                        ? "default"
-                        : "outline"
-                    }
-                    className="capitalize"
-                  >
-                    {repository.lifecycleStatus}
-                  </Badge>
-                </dd>
-              </div>
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
-                  Retention
-                </dt>
-                <dd className="mt-1 text-sm">
-                  {repository.retentionDays === null
-                    ? "Persistent"
-                    : `${repository.retentionDays} days`}
-                  {repository.expiresAt
-                    ? ` · expires ${format(new Date(repository.expiresAt), "PPP")}`
-                    : ""}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
-                  Active index generation
-                </dt>
-                <dd className="mt-1 break-all font-mono text-xs">
-                  {repository.activeIndexGenerationId || "Not published yet"}
-                </dd>
-              </div>
-            </dl>
-          </CardContent>
-        </Card>
+        <RepositoryHeader
+          repository={repository}
+          onBack={() => router.push("/repositories")}
+          onEdit={() => router.push(`/repositories/${repository.id}/edit`)}
+        />
+        <RepositoryInformation repository={repository} />
 
         <Tabs defaultValue="items" className="space-y-4">
           <TabsList>
@@ -186,27 +228,7 @@ export function RepositoryDetail({ repository }: RepositoryDetailProps) {
           </TabsContent>
 
           <TabsContent value="access">
-            {repository.canManage ? (
-              <RepositoryAccessEditor
-                repositoryId={repository.id}
-                isPublic={repository.isPublic}
-              />
-            ) : (
-              <Card>
-                <CardHeader>
-                  <CardTitle>Shared repository access</CardTitle>
-                  <CardDescription>
-                    Access grants are visible only to repository managers.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <p className="text-sm text-muted-foreground">
-                    You can read and search this repository, but only its owner
-                    or an administrator can change content, settings, or access.
-                  </p>
-                </CardContent>
-              </Card>
-            )}
+            <RepositoryAccess repository={repository} />
           </TabsContent>
         </Tabs>
       </div>
