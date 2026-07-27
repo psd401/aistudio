@@ -126,7 +126,7 @@ function main(): void {
   try {
     fs.writeFileSync(filePath, content, { flag: "wx" });
   } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException)?.code === "EEXIST") {
+    if ((error as { code?: string } | null)?.code === "EEXIST") {
       console.error("");
       console.error(`❌ Migration file already exists: ${filePath}`);
       console.error("");
