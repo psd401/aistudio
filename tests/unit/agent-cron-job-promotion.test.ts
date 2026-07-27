@@ -27,6 +27,7 @@ import {
   buildJobPayload as buildFromRouter,
   buildOverflowRestartPrompt,
   parseJobPayload,
+  resolveJobInvocation,
   restartSessionId,
   shouldPromoteToJob as shouldPromoteFromRouter,
 } from "../../infra/lambdas/agent-router/job-promotion"
@@ -314,6 +315,33 @@ const baseInput = {
       expect(buildOverflowRestartPrompt("Assemble the morning dispatch.")).toContain(
         "Assemble the morning dispatch.",
       )
+    })
+  })
+
+  describe("runner invocation selection", () => {
+    it("restarts context overflow with a derived session and restart prompt", () => {
+      const invocation = resolveJobInvocation({
+        ...baseInput,
+        reason: "context-overflow",
+        promptExcerpt: baseInput.originalPrompt,
+      })
+
+      expect(invocation.restart).toBe(true)
+      expect(invocation.invokeSessionId).not.toBe(baseInput.sessionId)
+      expect(invocation.prompt).toContain("[job-restart]")
+      expect(invocation.prompt).toContain(baseInput.originalPrompt)
+    })
+
+    it("resumes deadline work in the original session", () => {
+      const invocation = resolveJobInvocation({
+        ...baseInput,
+        reason: "deadline",
+        promptExcerpt: baseInput.originalPrompt,
+      })
+
+      expect(invocation.restart).toBe(false)
+      expect(invocation.invokeSessionId).toBe(baseInput.sessionId)
+      expect(invocation.prompt).toContain("[job-continuation]")
     })
   })
 

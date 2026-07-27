@@ -31,12 +31,12 @@ describe("job runner restart handling", () => {
   })
 
   it("branches on the promotion reason", () => {
-    expect(source).toContain("job.reason === 'context-overflow'")
+    expect(source).toContain("resolveJobInvocation(job)")
   })
 
   it("invokes with the RESTART session id, never the original, on overflow", () => {
-    // The load-bearing line. Passing job.sessionId here is the whole bug.
-    expect(source).toContain("restartSessionId(job.sessionId, job.lockToken)")
+    // The pure selector is behaviour-tested separately. This source assertion
+    // pins the runner to its result rather than the original session id.
     expect(source).toContain("invokeSessionId")
 
     // The invoke must use the derived id.
@@ -49,10 +49,8 @@ describe("job runner restart handling", () => {
   })
 
   it("sends the restart prompt, not the continuation prompt, on overflow", () => {
-    // "Continue from where you stopped" is meaningless in a fresh session and
-    // invites the model to hunt for work it cannot see.
-    expect(source).toContain("buildOverflowRestartPrompt(job.promptExcerpt)")
-    expect(source).toContain("buildContinuationPrompt(job.promptExcerpt)")
+    expect(source).toContain("prompt,")
+    expect(source).toContain("resolveJobInvocation(job)")
   })
 
   it("keeps the lock on the ORIGINAL session id", () => {
