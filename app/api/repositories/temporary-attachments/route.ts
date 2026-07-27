@@ -5,8 +5,7 @@ import { getUserIdFromSession } from "@/actions/repositories/repository-permissi
 import {
   getContentPlatformConfig,
   initiateRepositoryUpload,
-  isCanonicalAssistantArchitectActive,
-  isCanonicalNexusAttachmentActive,
+  isCanonicalRepositoryUploadActive,
   isCanonicalUploadContentType,
   RepositoryUploadQuotaExceededError,
   validateRepositoryUploadFile,
@@ -32,17 +31,6 @@ const initiateSchema = z.object({
   contentType: z.string().trim().min(1).max(255),
   byteSize: z.number().int().positive(),
 });
-
-type InitiateTemporaryAttachment = z.infer<typeof initiateSchema>;
-
-function canonicalTemporaryAttachmentActive(
-  input: InitiateTemporaryAttachment,
-  config: Awaited<ReturnType<typeof getContentPlatformConfig>>,
-): boolean {
-  return input.purpose === "nexus"
-    ? isCanonicalNexusAttachmentActive(config)
-    : isCanonicalAssistantArchitectActive(config);
-}
 
 async function ownsTemporaryAttachmentConversation(
   ownerId: number,
@@ -83,7 +71,7 @@ async function initiateTemporaryAttachment(
 
     const config = await getContentPlatformConfig();
     if (
-      !canonicalTemporaryAttachmentActive(parsed.data, config) ||
+      !isCanonicalRepositoryUploadActive(config) ||
       !isCanonicalUploadContentType(parsed.data.contentType)
     ) {
       timer({
