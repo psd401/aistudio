@@ -8,6 +8,12 @@ const contentListMock = jest.fn()
 const contentCreateMock = jest.fn()
 const publishMock = jest.fn()
 const auditMock = jest.fn()
+const sourceReadMock = jest.fn()
+const assetListMock = jest.fn()
+const assetGetMock = jest.fn()
+const assetReadBytesMock = jest.fn()
+const assetInitiateMock = jest.fn()
+const assetCompleteMock = jest.fn()
 
 jest.mock("@/lib/db/drizzle/users", () => ({
   getUserByEmail: (...args: unknown[]) => getUserByEmailMock(...args),
@@ -49,9 +55,15 @@ jest.mock("@/lib/content", () => {
       super(message, "CONTENT_FORBIDDEN", 403)
     }
   }
+  class MockValidationError extends MockContentError {
+    constructor(message = "Invalid", details?: Record<string, unknown>) {
+      super(message, "VALIDATION_ERROR", 400, details)
+    }
+  }
   return {
     ApprovalRequiredError: MockApprovalRequiredError,
     ForbiddenError: MockForbiddenError,
+    ValidationError: MockValidationError,
     isContentError: (error: unknown) => error instanceof MockContentError,
     contentService: {
       list: (...args: unknown[]) => contentListMock(...args),
@@ -61,6 +73,16 @@ jest.mock("@/lib/content", () => {
       createVersion: jest.fn(),
       loadForEdit: jest.fn(),
       delete: jest.fn(),
+    },
+    contentSourceService: {
+      read: (...args: unknown[]) => sourceReadMock(...args),
+    },
+    contentAssetService: {
+      list: (...args: unknown[]) => assetListMock(...args),
+      get: (...args: unknown[]) => assetGetMock(...args),
+      readBytes: (...args: unknown[]) => assetReadBytesMock(...args),
+      initiate: (...args: unknown[]) => assetInitiateMock(...args),
+      complete: (...args: unknown[]) => assetCompleteMock(...args),
     },
     visibilityService: { setLevel: jest.fn() },
     publishService: {
@@ -210,6 +232,194 @@ describe("signed-owner Atrium operations", () => {
     expect(auditMock).toHaveBeenCalledWith(
       expect.objectContaining({ outcome: "approval_required" })
     )
+  })
+
+  it("reads a document body through the source alias without authoring capability", async () => {
+    sourceReadMock.mockResolvedValue({
+      versionId: "version-1",
+      bodyFormat: "markdown",
+      body: "## Title\nA procedure",
+    })
+    await expect(
+      executeOwnerAtriumOperation({
+        ownerEmail: "owner@psd401.net",
+        requestId: "request-source",
+        method: "GET",
+        path: "/content-1/source",
+      })
+    ).resolves.toEqual({
+      httpStatus: 200,
+      payload: {
+        data: {
+          versionId: "version-1",
+          bodyFormat: "markdown",
+          body: "## Title\nA procedure",
+        },
+        meta: { requestId: "request-source" },
+      },
+    })
+    expect(sourceReadMock).toHaveBeenCalledWith(requester, "content-1")
+    // Reading is not authoring: the capability gate must not run for a read.
+    expect(assertContentAuthoringCapabilityMock).not.toHaveBeenCalled()
+  })
+
+  it("lists assets as a read and reserves an upload as a write", async () => {
+    assetListMock.mockResolvedValue([{ id: "asset-1", state: "ready" }])
+    await expect(
+      executeOwnerAtriumOperation({
+        ownerEmail: "owner@psd401.net",
+        requestId: "request-list",
+        method: "GET",
+        path: "/content-1/assets",
+      })
+    ).resolves.toEqual({
+      httpStatus: 200,
+      payload: {
+        data: [{ id: "asset-1", state: "ready" }],
+        meta: { requestId: "request-list" },
+      },
+    })
+    expect(assertContentAuthoringCapabilityMock).not.toHaveBeenCalled()
+
+    assetInitiateMock.mockResolvedValue({
+      asset: { id: "asset-2", upload: { method: "PUT", url: "https://s3" } },
+      replayed: false,
+    })
+    const initiateBody = {
+      filename: "screenshot.png",
+      contentType: "image/png",
+      byteLength: 1024,
+      sha256: "A".repeat(43),
+      purpose: "document_image",
+    }
+    await expect(
+      executeOwnerAtriumOperation({
+        ownerEmail: "owner@psd401.net",
+        requestId: "request-initiate",
+        method: "POST",
+        path: "/content-1/assets",
+        body: initiateBody,
+      })
+    ).resolves.toEqual({
+      httpStatus: 201,
+      payload: {
+        data: { id: "asset-2", upload: { method: "PUT", url: "https://s3" } },
+        meta: { requestId: "request-initiate" },
+      },
+    })
+    expect(assertContentAuthoringCapabilityMock).toHaveBeenCalledWith({
+      authType: "session",
+      cognitoSub: "cognito-owner",
+    })
+    expect(assetInitiateMock).toHaveBeenCalledWith(
+      requester,
+      "content-1",
+      initiateBody
+    )
+    expect(auditMock).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "initiate_asset", outcome: "ok" })
+    )
+  })
+
+  it("completes an asset upload and audits it", async () => {
+    assetCompleteMock.mockResolvedValue({ id: "asset-2", state: "ready" })
+    await expect(
+      executeOwnerAtriumOperation({
+        ownerEmail: "owner@psd401.net",
+        requestId: "request-complete",
+        method: "POST",
+        path: "/content-1/assets/asset-2/complete",
+        body: { sha256: "B".repeat(43) },
+      })
+    ).resolves.toEqual({
+      httpStatus: 200,
+      payload: {
+        data: { id: "asset-2", state: "ready" },
+        meta: { requestId: "request-complete" },
+      },
+    })
+    expect(assetCompleteMock).toHaveBeenCalledWith(
+      requester,
+      "content-1",
+      "asset-2",
+      { sha256: "B".repeat(43) }
+    )
+    expect(auditMock).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "complete_asset", outcome: "ok" })
+    )
+  })
+
+  it("rejects an initiate body the v1 asset contract would refuse", async () => {
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "request-bad",
+      method: "POST",
+      path: "/content-1/assets",
+      body: {
+        filename: "evil.svg",
+        contentType: "image/svg+xml",
+        byteLength: 1024,
+        sha256: "A".repeat(43),
+        purpose: "document_image",
+      },
+    })
+    expect(result.httpStatus).toBe(400)
+    expect(assetInitiateMock).not.toHaveBeenCalled()
+  })
+
+  it("serves asset bytes base64-encoded and refuses an oversized read", async () => {
+    assetGetMock.mockResolvedValue({
+      id: "asset-3",
+      objectId: "content-1",
+      filename: "diagram.png",
+      byteLength: 3,
+    })
+    assetReadBytesMock.mockResolvedValue({
+      bytes: new Uint8Array([1, 2, 3]),
+      contentType: "image/png",
+      etag: '"abc"',
+    })
+    await expect(
+      executeOwnerAtriumOperation({
+        ownerEmail: "owner@psd401.net",
+        requestId: "request-bytes",
+        method: "GET",
+        path: "/content-1/assets/asset-3/bytes",
+      })
+    ).resolves.toEqual({
+      httpStatus: 200,
+      payload: {
+        data: {
+          id: "asset-3",
+          objectId: "content-1",
+          filename: "diagram.png",
+          contentType: "image/png",
+          byteLength: 3,
+          encoding: "base64",
+          data: Buffer.from([1, 2, 3]).toString("base64"),
+        },
+        meta: { requestId: "request-bytes" },
+      },
+    })
+    // The asset is resolved through the OBJECT first, so an asset id belonging
+    // to another object cannot be served under this object's path.
+    expect(assetGetMock).toHaveBeenCalledWith(requester, "content-1", "asset-3")
+
+    assetGetMock.mockResolvedValue({
+      id: "asset-4",
+      objectId: "content-1",
+      filename: "huge.png",
+      byteLength: 8 * 1024 * 1024,
+    })
+    assetReadBytesMock.mockClear()
+    const oversized = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "request-huge",
+      method: "GET",
+      path: "/content-1/assets/asset-4/bytes",
+    })
+    expect(oversized.httpStatus).toBe(400)
+    expect(assetReadBytesMock).not.toHaveBeenCalled()
   })
 
   it("fails closed when the signed owner cannot become a requester", async () => {

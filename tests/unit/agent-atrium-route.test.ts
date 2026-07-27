@@ -101,10 +101,33 @@ describe("POST /api/agent/atrium", () => {
   })
 
   it.each([
+    ["GET", "/content-1/source"],
+    ["GET", "/content-1/assets"],
+    ["GET", "/content-1/assets/asset-1/bytes"],
+    ["POST", "/content-1/assets"],
+    ["POST", "/content-1/assets/asset-1/complete"],
+  ])("admits the asset + source surface %s %s", async (method, path) => {
+    const response = await POST(request({ method, path }))
+    expect(response.status).toBe(200)
+    expect(executeOwnerAtriumOperationMock).toHaveBeenCalledWith(
+      expect.objectContaining({ method, path })
+    )
+  })
+
+  it.each([
     ["POST", "/content-1/publish/public_web"],
     ["GET", "/content-1/../../admin"],
     ["PUT", "/content-1"],
     ["DELETE", "/content-1/publish/attacker"],
+    // Asset paths are exact: no deeper nesting, no unknown leaf, and no
+    // DELETE/PATCH verbs (asset removal is not an agent-reachable operation).
+    ["GET", "/content-1/assets/asset-1"],
+    ["GET", "/content-1/assets/asset-1/bytes/extra"],
+    ["POST", "/content-1/assets/asset-1"],
+    ["POST", "/content-1/assets/asset-1/complete/extra"],
+    ["POST", "/content-1/source"],
+    ["DELETE", "/content-1/assets/asset-1"],
+    ["PATCH", "/content-1/assets"],
   ])("rejects operation %s %s outside the fixed API surface", async (method, path) => {
     const response = await POST(request({ method, path }))
     expect(response.status).toBe(400)
