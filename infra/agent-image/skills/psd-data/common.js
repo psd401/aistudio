@@ -49,81 +49,91 @@ function blankStringLiterals(sql) {
   while (i < sql.length) {
     const ch = sql[i];
     const next = sql[i + 1];
-
     if (ch === '-' && next === '-') {
-      out += '  ';
-      i += 2;
-      while (i < sql.length && sql[i] !== '\n') {
-        out += ' ';
-        i++;
-      }
+      const blanked = blankLineComment(sql, i);
+      out += blanked.text;
+      i = blanked.nextIndex;
       continue;
     }
-
     if (ch === '/' && next === '*') {
-      // Postgres block comments nest, so track depth rather than stopping
-      // at the first `*/` — otherwise a nested `/* ... */` would end the
-      // blanked region early and expose the remaining "still-outer-comment"
-      // text as live SQL to scan.
-      let depth = 1;
-      out += '  ';
-      i += 2;
-      while (i < sql.length && depth > 0) {
-        if (sql[i] === '/' && sql[i + 1] === '*') {
-          depth++;
-          out += '  ';
-          i += 2;
-        } else if (sql[i] === '*' && sql[i + 1] === '/') {
-          depth--;
-          out += '  ';
-          i += 2;
-        } else {
-          out += sql[i] === '\n' ? '\n' : ' ';
-          i++;
-        }
-      }
+      const blanked = blankBlockComment(sql, i);
+      out += blanked.text;
+      i = blanked.nextIndex;
       continue;
     }
-
     if (ch === "'") {
-      // Postgres only applies backslash-escaping inside E'...' literals
-      // (standard_conforming_strings = on, the default, makes backslash a
-      // plain character in a bare '...' literal — only '' doubling escapes
-      // a quote). Detect the E prefix so a plain '...' literal containing a
-      // stray backslash-quote sequence terminates where Postgres would
-      // actually terminate it, rather than swallowing the rest of the SQL.
-      const prevChar = sql[i - 1];
-      const prevPrevChar = sql[i - 2];
-      const isEscapeString =
-        prevChar !== undefined &&
-        /[eE]/.test(prevChar) &&
-        (prevPrevChar === undefined || !/[A-Za-z0-9_]/.test(prevPrevChar));
-      out += ' ';
-      i++;
-      while (i < sql.length) {
-        const curr = sql[i];
-        if (isEscapeString && curr === '\\') {
-          out += '  ';
-          i += 2;
-        } else if (curr === "'" && sql[i + 1] === "'") {
-          out += '  ';
-          i += 2;
-        } else if (curr === "'") {
-          out += ' ';
-          i++;
-          break;
-        } else {
-          out += curr === '\n' ? '\n' : ' ';
-          i++;
-        }
-      }
+      const blanked = blankQuotedString(sql, i);
+      out += blanked.text;
+      i = blanked.nextIndex;
       continue;
     }
-
     out += ch;
     i++;
   }
   return out;
+}
+
+function blankLineComment(sql, startIndex) {
+  let text = '  ';
+  let index = startIndex + 2;
+  while (index < sql.length && sql[index] !== '\n') {
+    text += ' ';
+    index++;
+  }
+  return { text, nextIndex: index };
+}
+
+function blankBlockComment(sql, startIndex) {
+  let text = '  ';
+  let index = startIndex + 2;
+  let depth = 1;
+  while (index < sql.length && depth > 0) {
+    if (sql[index] === '/' && sql[index + 1] === '*') {
+      depth++;
+      text += '  ';
+      index += 2;
+    } else if (sql[index] === '*' && sql[index + 1] === '/') {
+      depth--;
+      text += '  ';
+      index += 2;
+    } else {
+      text += sql[index] === '\n' ? '\n' : ' ';
+      index++;
+    }
+  }
+  return { text, nextIndex: index };
+}
+
+function blankQuotedString(sql, startIndex) {
+  const isEscapeString = hasEscapeStringPrefix(sql, startIndex);
+  let text = ' ';
+  let index = startIndex + 1;
+  while (index < sql.length) {
+    const current = sql[index];
+    if (isEscapeString && current === '\\') {
+      text += '  ';
+      index += 2;
+    } else if (current === "'" && sql[index + 1] === "'") {
+      text += '  ';
+      index += 2;
+    } else if (current === "'") {
+      return { text: text + ' ', nextIndex: index + 1 };
+    } else {
+      text += current === '\n' ? '\n' : ' ';
+      index++;
+    }
+  }
+  return { text, nextIndex: index };
+}
+
+function hasEscapeStringPrefix(sql, quoteIndex) {
+  const prefix = sql[quoteIndex - 1];
+  const beforePrefix = sql[quoteIndex - 2];
+  return (
+    prefix !== undefined &&
+    /[eE]/.test(prefix) &&
+    (beforePrefix === undefined || !/[A-Za-z0-9_]/.test(beforePrefix))
+  );
 }
 
 // Find the index of the ')' that closes the '(' at openIndex, accounting for
