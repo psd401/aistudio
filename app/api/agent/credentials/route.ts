@@ -123,14 +123,22 @@ export async function POST(request: NextRequest) {
         )
       }
       case "freshservice": {
-        const granted = await broker.canAccessSkill(
-          invocation.ownerEmail,
-          "skill.freshservice",
-          undefined
-        )
-        if (!granted) {
-          return NextResponse.json({ error: "Forbidden" }, { status: 403 })
-        }
+        // NO capability gate — deliberately, and do not add one back.
+        //
+        // An earlier version of this case checked `skill.freshservice`, copied
+        // from the redrover case below. That identifier exists nowhere else in
+        // the codebase, so no role could ever hold it: every Freshservice call
+        // returned 403 forever, and the message ("access is not granted for
+        // this account") sent debugging toward account provisioning instead of
+        // toward the gate that had just been invented.
+        //
+        // The redrover gate is not a precedent to copy. Red Rover authenticates
+        // with a SHARED district credential (sharedCredentialJson), so who may
+        // borrow the district's account is a real question. Freshservice uses
+        // the caller's OWN per-user key (getUserOnly, scoped to
+        // invocation.ownerEmail) — the credential IS the authorization, and it
+        // grants exactly the access that person already has in Freshservice.
+        // A capability check adds no security here, only a way to be locked out.
         return NextResponse.json(
           await executeFreshserviceOperation({
             ownerEmail: invocation.ownerEmail,
