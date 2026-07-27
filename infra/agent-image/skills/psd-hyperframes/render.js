@@ -110,6 +110,76 @@ function coerceInt(value, flag) {
   return n;
 }
 
+const COMPOSITION_ID_ATTR = 'data-composition-id';
+
+// `\w` for the purposes of a regex word boundary: [A-Za-z0-9_].
+function isWordChar(ch) {
+  if (ch === undefined || ch === '') return false;
+  return (
+    (ch >= 'a' && ch <= 'z') ||
+    (ch >= 'A' && ch <= 'Z') ||
+    (ch >= '0' && ch <= '9') ||
+    ch === '_'
+  );
+}
+
+function isAsciiLetter(ch) {
+  return ch !== undefined && ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'));
+}
+
+// Reproduces the `\bdata-composition-id\b` word-boundary match without a regex,
+// so `data-composition-ids` / `xdata-composition-id` still do not count as hits.
+function hasCompositionIdAttr(tag) {
+  for (
+    let k = tag.indexOf(COMPOSITION_ID_ATTR);
+    k !== -1;
+    k = tag.indexOf(COMPOSITION_ID_ATTR, k + 1)
+  ) {
+    const before = k === 0 ? '' : tag[k - 1];
+    const after = tag[k + COMPOSITION_ID_ATTR.length];
+    if (!isWordChar(before) && !isWordChar(after)) return true;
+  }
+  return false;
+}
+
+/**
+ * Index just past the end of the first opening tag carrying data-composition-id,
+ * or -1 if there is none.
+ *
+ * Linear, non-backtracking scan. The regex this replaces —
+ * /<[a-zA-Z][^>]*\bdata-composition-id\b[^>]*>/ — has two unbounded `[^>]*`
+ * runs around the literal, so on HTML full of `<` with no `>` the engine
+ * re-scans to end-of-input from every candidate start: quadratic in the input
+ * size and CodeQL's js/polynomial-redos. `html` is attacker-controllable
+ * (--html / --file), so that is a real denial-of-service lever, not a
+ * theoretical one. Here each character is visited at most twice: the inner
+ * loop stops at the tag terminator `>` OR at a stray `<` (which cannot appear
+ * inside a tag), and the outer loop resumes from wherever the inner one
+ * stopped, so no region is ever rescanned.
+ */
+function findCompositionRootTagEnd(html) {
+  const n = html.length;
+  let i = 0;
+  while (i < n) {
+    if (html[i] !== '<') {
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    while (j < n && html[j] !== '>' && html[j] !== '<') j++;
+    if (j >= n) return -1; // unterminated tag — nothing further can match
+    if (html[j] === '<') {
+      i = j; // malformed: restart at the nested '<' without rescanning
+      continue;
+    }
+    if (isAsciiLetter(html[i + 1]) && hasCompositionIdAttr(html.slice(i, j + 1))) {
+      return j + 1;
+    }
+    i = j + 1;
+  }
+  return -1;
+}
+
 /**
  * Insert an <audio> track as the first child of the composition root (the
  * element carrying data-composition-id) so hyperframes treats it as a timeline
@@ -121,9 +191,8 @@ function injectAudioElement(html, url, durationSeconds) {
   const audio =
     `<audio src="${url}" data-start="0" data-duration="${durationSeconds}" ` +
     `data-track-index="0" data-volume="1"></audio>`;
-  const rootOpen = html.match(/<[a-zA-Z][^>]*\bdata-composition-id\b[^>]*>/);
-  if (rootOpen) {
-    const at = rootOpen.index + rootOpen[0].length;
+  const at = findCompositionRootTagEnd(html);
+  if (at !== -1) {
     return `${html.slice(0, at)}\n${audio}${html.slice(at)}`;
   }
   const bodyAt = html.toLowerCase().lastIndexOf('</body>');
