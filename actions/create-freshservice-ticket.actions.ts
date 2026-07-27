@@ -8,18 +8,16 @@ import {
   sanitizeForLogging,
   startTimer,
 } from "@/lib/logger"
+import {
+  parseFreshserviceTicketId,
+  type FreshserviceTicketData,
+} from "@/lib/freshservice/ticket-response"
 import { Settings } from "@/lib/settings-manager"
 import type { ActionState } from "@/types"
 
 interface FreshserviceTicketResponse {
   ticket_url: string
   ticket_id: number
-}
-
-interface FreshserviceTicketData {
-  id: number | string
-  display_id?: string | number
-  [key: string]: unknown
 }
 
 interface FreshserviceApiResponse {
@@ -278,18 +276,6 @@ async function requireSuccessfulResponse(
     "Freshservice",
     new Error(upstreamErrorMessage(response.status, errorData))
   )
-}
-
-export function parseFreshserviceTicketId(
-  ticket: FreshserviceTicketData
-): number | null {
-  const ticketId =
-    typeof ticket.id === "string"
-      ? Number.parseInt(ticket.id, 10)
-      : ticket.id
-  return !ticketId || Number.isNaN(ticketId) || ticketId <= 0
-    ? null
-    : ticketId
 }
 
 export async function createFreshserviceTicketAction(

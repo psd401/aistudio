@@ -54,10 +54,8 @@ jest.mock("@/lib/error-utils", () => ({
   }),
 }))
 
-import {
-  createFreshserviceTicketAction,
-  parseFreshserviceTicketId,
-} from "@/actions/create-freshservice-ticket.actions"
+import { createFreshserviceTicketAction } from "@/actions/create-freshservice-ticket.actions"
+import { parseFreshserviceTicketId } from "@/lib/freshservice/ticket-response"
 
 const originalFetch = globalThis.fetch
 
