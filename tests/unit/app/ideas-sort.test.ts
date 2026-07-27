@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it } from '@jest/globals';
 import { sortIdeas } from '@/app/(protected)/ideas/_components/use-ideas';
 import type { Idea } from '@/app/(protected)/ideas/_components/ideas-types';
 
