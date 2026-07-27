@@ -47,10 +47,10 @@ function synthesizeProcessingStack(): Template {
   return Template.fromStack(stack);
 }
 
-describe('ProcessingStack embedding visual-artifact access', () => {
-  const template = synthesizeProcessingStack();
-  const statements = policyStatements(template.toJSON());
+const template = synthesizeProcessingStack();
+const statements = policyStatements(template.toJSON());
 
+describe('ProcessingStack embedding visual-artifact access', () => {
   it('grants read-only access to repository artifacts without the broken generic S3 condition', () => {
     const statement = statements.find(
       (candidate) => candidate.Sid === 'RepositoryVisualArtifactRead',
@@ -121,7 +121,9 @@ describe('ProcessingStack embedding visual-artifact access', () => {
       ScalingConfig: { MaximumConcurrency: 5 },
     });
   });
+});
 
+describe('ProcessingStack scheduled roster synchronization', () => {
   it('routes group-sync alarms through the shared monitoring topic', () => {
     const alarms = Object.values(
       template.findResources('AWS::CloudWatch::Alarm'),
