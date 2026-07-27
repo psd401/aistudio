@@ -836,7 +836,6 @@ async function migrateCandidate(
           );
         }
         sourceObjectBytesAvailable = false;
-        comparisonSegments = candidate.legacySegments;
         declaredContentType = "text/plain";
         stored = await storage.putObject({
           targetKey,
