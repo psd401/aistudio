@@ -235,6 +235,19 @@ export class AgentPlatformStack extends cdk.Stack {
           id: 'cleanup-private-workspace-versions',
           tagFilters: { Scope: 'private' },
           noncurrentVersionExpiration: cdk.Duration.days(30),
+          // NO abortIncompleteMultipartUploadAfter here. S3 rejects the
+          // combination outright — "AbortIncompleteMultipartUpload cannot be
+          // specified with Tags" — because an in-flight multipart upload has
+          // no object tags yet (tags are applied on completion), so a
+          // tag-filtered rule could never match one. CloudFormation surfaces
+          // this as an InvalidRequest that fails the whole stack update.
+        },
+        {
+          // Bucket-wide abort of abandoned multipart uploads, with no prefix
+          // or tag filter so it is a legal home for the action the rule above
+          // cannot carry. Keeps the cleanup intent that the tag-filtered rule
+          // was reaching for.
+          id: 'abort-abandoned-multipart-uploads',
           abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
         },
       ],
