@@ -286,6 +286,45 @@ _SKIP_RELATIVE_PREFIXES = (
 # Filename suffixes that are always runtime cruft (socket files, pid files).
 _SKIP_SUFFIXES = (".sock", ".pid")
 
+# Directory names that hold REGENERABLE build artifacts, matched at ANY depth.
+#
+# These are not memory. They are dependency trees a skill can rebuild from its
+# manifest, and round-tripping them through S3 costs real time on every cold
+# start: on 2026-07-27 one workspace held 4,989 objects of which 3,886 (77.9%)
+# were a pip virtualenv inside a single skill, and the restore took 161.7s
+# before the agent could answer its first message. Actual memory/ was 55 files.
+#
+# Matched per path SEGMENT rather than as a prefix, because they appear
+# mid-path — e.g. skills/<name>/.tts-venv/lib/python3.11/site-packages/pip/...
+# — which the prefix list above cannot express.
+_SKIP_SEGMENT_NAMES = frozenset({
+    "node_modules",
+    "site-packages",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".turbo",
+    ".next",
+})
+
+
+def _is_regenerable_segment(segment: str) -> bool:
+    """True for a directory that can be rebuilt and need not be synced."""
+    if segment in _SKIP_SEGMENT_NAMES:
+        return True
+    # Virtualenvs: exact "venv"/".venv", plus HIDDEN skill-local forms like
+    # ".tts-venv". The "-venv" suffix is deliberately not honoured on visible
+    # segments: an authored directory such as
+    # "skills/user/hagelk-python-venv/SKILL.md" would then be skipped by BOTH
+    # the pull and the push, so the agent's own scratch space would be neither
+    # restored nor uploaded. The two failure modes are not symmetric — an
+    # unmatched venv only costs sync time, an over-matched skill loses work —
+    # so keep the match narrow and let a stray visible venv ride along.
+    if segment in ("venv", ".venv"):
+        return True
+    return segment.startswith(".") and segment.endswith("-venv")
+
 
 def _should_skip_relative(relative: str) -> bool:
     """True if this workspace-relative path is gateway-owned, not user memory."""
@@ -293,6 +332,8 @@ def _should_skip_relative(relative: str) -> bool:
     for prefix in _SKIP_RELATIVE_PREFIXES:
         if rel == prefix or rel.startswith(prefix):
             return True
+    if any(_is_regenerable_segment(seg) for seg in rel.split("/")):
+        return True
     return any(rel.endswith(suf) for suf in _SKIP_SUFFIXES)
 
 
