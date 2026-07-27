@@ -184,6 +184,240 @@ async function ensureTrustedLabels(
   return mapping
 }
 
+type AgentInvocation = NonNullable<
+  Awaited<ReturnType<typeof verifyAgentInvocationContext>>
+>
+
+type OperationDispatch<T> =
+  | { handled: true; value: T }
+  | { handled: false }
+
+type GmailOperationValue =
+  | { kind: "response"; value: NextResponse }
+  | { kind: "result"; value: unknown }
+
+function handledGmailResponse(response: NextResponse): OperationDispatch<GmailOperationValue> {
+  return { handled: true, value: { kind: "response", value: response } }
+}
+
+function handledGmailResult(result: unknown): OperationDispatch<GmailOperationValue> {
+  return { handled: true, value: { kind: "result", value: result } }
+}
+
+async function executeStateOperation(
+  body: Record<string, unknown>,
+  context: AgentInvocation
+): Promise<OperationDispatch<NextResponse>> {
+  if (body.operation === "get-state") {
+    const result = await ddb.send(
+      new GetCommand({
+        TableName: tableName(),
+        Key: { userEmail: context.ownerEmail },
+      })
+    )
+    return {
+      handled: true,
+      value: NextResponse.json({ state: result.Item ?? null }),
+    }
+  }
+  if (body.operation === "update-state") {
+    if (context.mode !== "owner") {
+      return {
+        handled: true,
+        value: NextResponse.json({ error: "Forbidden" }, { status: 403 }),
+      }
+    }
+    const attrs = objectBody(body.attrs)
+    if (
+      !attrs ||
+      Object.keys(attrs).length === 0 ||
+      Object.keys(attrs).some((field) => !SAFE_STATE_FIELDS.has(field))
+    ) {
+      return {
+        handled: true,
+        value: NextResponse.json(
+          { error: "Invalid triage state update" },
+          { status: 400 }
+        ),
+      }
+    }
+    const names: Record<string, string> = {}
+    const values: Record<string, unknown> = {}
+    const sets: string[] = []
+    for (const [index, [field, value]] of Object.entries(attrs).entries()) {
+      names[`#field${index}`] = field
+      values[`:value${index}`] = value
+      sets.push(`#field${index} = :value${index}`)
+    }
+    await ddb.send(
+      new UpdateCommand({
+        TableName: tableName(),
+        Key: { userEmail: context.ownerEmail },
+        UpdateExpression: `SET ${sets.join(", ")}`,
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+      })
+    )
+    return { handled: true, value: NextResponse.json({ ok: true }) }
+  }
+  if (body.operation === "delete-state") {
+    if (context.mode !== "owner") {
+      return {
+        handled: true,
+        value: NextResponse.json({ error: "Forbidden" }, { status: 403 }),
+      }
+    }
+    await ddb.send(
+      new DeleteCommand({
+        TableName: tableName(),
+        Key: { userEmail: context.ownerEmail },
+      })
+    )
+    return { handled: true, value: NextResponse.json({ ok: true }) }
+  }
+  return { handled: false }
+}
+
+async function createGmailLabel(
+  token: string,
+  name: string
+): Promise<OperationDispatch<GmailOperationValue>> {
+  if (name.length === 0 || name.length > 225) {
+    return handledGmailResponse(
+      NextResponse.json(
+        { error: "Invalid label name" },
+        { status: 400 }
+      )
+    )
+  }
+  return handledGmailResult(
+    await gmailJson(
+      await gmail(token, "/labels", {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          labelListVisibility: "labelShow",
+          messageListVisibility: "show",
+        }),
+      })
+    )
+  )
+}
+
+async function modifyGmailMessage(
+  token: string,
+  body: Record<string, unknown>
+): Promise<OperationDispatch<GmailOperationValue>> {
+  if (
+    typeof body.messageId !== "string" ||
+    !SAFE_ID.test(body.messageId) ||
+    !Array.isArray(body.addLabelIds) ||
+    !Array.isArray(body.removeLabelIds)
+  ) {
+    return { handled: false }
+  }
+  const labels = [...body.addLabelIds, ...body.removeLabelIds]
+  if (
+    labels.some((label) => typeof label !== "string" || !SAFE_ID.test(label)) ||
+    body.addLabelIds.some((label) => label === "TRASH" || label === "SPAM")
+  ) {
+    return handledGmailResponse(
+      NextResponse.json(
+        { error: "Invalid message labels" },
+        { status: 400 }
+      )
+    )
+  }
+  return handledGmailResult(
+    await gmailJson(
+      await gmail(token, `/messages/${body.messageId}/modify`, {
+        method: "POST",
+        body: JSON.stringify({
+          addLabelIds: body.addLabelIds,
+          removeLabelIds: body.removeLabelIds,
+        }),
+      })
+    )
+  )
+}
+
+async function renameGmailLabel(
+  token: string,
+  body: Record<string, unknown>
+): Promise<OperationDispatch<GmailOperationValue>> {
+  if (
+    typeof body.labelId !== "string" ||
+    !SAFE_ID.test(body.labelId) ||
+    typeof body.name !== "string" ||
+    body.name.length > 225
+  ) {
+    return { handled: false }
+  }
+  return handledGmailResult(
+    await gmailJson(
+      await gmail(token, `/labels/${body.labelId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name: body.name }),
+      })
+    )
+  )
+}
+
+async function deleteGmailLabel(
+  token: string,
+  body: Record<string, unknown>
+): Promise<OperationDispatch<GmailOperationValue>> {
+  if (typeof body.labelId !== "string" || !SAFE_ID.test(body.labelId)) {
+    return { handled: false }
+  }
+  return handledGmailResult(
+    await gmailJson(
+      await gmail(token, `/labels/${body.labelId}`, { method: "DELETE" })
+    )
+  )
+}
+
+async function executeGmailOperation(
+  body: Record<string, unknown>,
+  context: AgentInvocation,
+  token: string
+): Promise<OperationDispatch<GmailOperationValue>> {
+  switch (body.operation) {
+    case "gmail-profile":
+      return handledGmailResult(
+        await gmailJson(await gmail(token, "/profile"))
+      )
+    case "ensure-labels":
+      if (context.mode !== "owner" || Object.keys(body).length !== 1) {
+        return handledGmailResponse(
+          NextResponse.json(
+            { error: "Invalid label resolution request" },
+            { status: 400 }
+          )
+        )
+      }
+      return handledGmailResult(
+        await ensureTrustedLabels(token, context.ownerEmail)
+      )
+    case "list-labels":
+      return handledGmailResult(
+        await gmailJson(await gmail(token, "/labels"))
+      )
+    case "create-label":
+      return typeof body.name === "string"
+        ? createGmailLabel(token, body.name)
+        : { handled: false }
+    case "rename-label":
+      return renameGmailLabel(token, body)
+    case "delete-label":
+      return deleteGmailLabel(token, body)
+    case "modify-message":
+      return modifyGmailMessage(token, body)
+    default:
+      return { handled: false }
+  }
+}
+
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId()
   const context = await verifyAgentInvocationContext(request, {
@@ -203,62 +437,15 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid triage request" }, { status: 400 })
   }
   if (["ownerEmail", "userEmail", "userId"].some((key) => key in body)) {
-    return NextResponse.json({ error: "Owner selectors are not accepted" }, { status: 400 })
+    return NextResponse.json(
+      { error: "Owner selectors are not accepted" },
+      { status: 400 }
+    )
   }
 
   try {
-    if (body.operation === "get-state") {
-      const result = await ddb.send(
-        new GetCommand({
-          TableName: tableName(),
-          Key: { userEmail: context.ownerEmail },
-        })
-      )
-      return NextResponse.json({ state: result.Item ?? null })
-    }
-    if (body.operation === "update-state") {
-      if (context.mode !== "owner") {
-        return NextResponse.json({ error: "Forbidden" }, { status: 403 })
-      }
-      const attrs = objectBody(body.attrs)
-      if (
-        !attrs ||
-        Object.keys(attrs).length === 0 ||
-        Object.keys(attrs).some((field) => !SAFE_STATE_FIELDS.has(field))
-      ) {
-        return NextResponse.json({ error: "Invalid triage state update" }, { status: 400 })
-      }
-      const names: Record<string, string> = {}
-      const values: Record<string, unknown> = {}
-      const sets: string[] = []
-      for (const [index, [field, value]] of Object.entries(attrs).entries()) {
-        names[`#field${index}`] = field
-        values[`:value${index}`] = value
-        sets.push(`#field${index} = :value${index}`)
-      }
-      await ddb.send(
-        new UpdateCommand({
-          TableName: tableName(),
-          Key: { userEmail: context.ownerEmail },
-          UpdateExpression: `SET ${sets.join(", ")}`,
-          ExpressionAttributeNames: names,
-          ExpressionAttributeValues: values,
-        })
-      )
-      return NextResponse.json({ ok: true })
-    }
-    if (body.operation === "delete-state") {
-      if (context.mode !== "owner") {
-        return NextResponse.json({ error: "Forbidden" }, { status: 403 })
-      }
-      await ddb.send(
-        new DeleteCommand({
-          TableName: tableName(),
-          Key: { userEmail: context.ownerEmail },
-        })
-      )
-      return NextResponse.json({ ok: true })
-    }
+    const stateResult = await executeStateOperation(body, context)
+    if (stateResult.handled) return stateResult.value
 
     const token = await accessToken(context.ownerEmail)
     if (!token) {
@@ -267,83 +454,24 @@ export async function POST(request: NextRequest) {
         { status: 409 }
       )
     }
-    let result: unknown
-    if (body.operation === "gmail-profile") {
-      result = await gmailJson(await gmail(token, "/profile"))
-    } else if (body.operation === "ensure-labels") {
-      if (context.mode !== "owner" || Object.keys(body).length !== 1) {
-        return NextResponse.json({ error: "Invalid label resolution request" }, { status: 400 })
-      }
-      const mapping = await ensureTrustedLabels(token, context.ownerEmail)
-      result = {
-        labels: mapping.labels,
-        labelIdsByKey: mapping.labelIdsByKey,
-      }
-    } else if (body.operation === "list-labels") {
-      result = await gmailJson(await gmail(token, "/labels"))
-    } else if (body.operation === "create-label" && typeof body.name === "string") {
-      if (body.name.length === 0 || body.name.length > 225) {
-        return NextResponse.json({ error: "Invalid label name" }, { status: 400 })
-      }
-      result = await gmailJson(
-        await gmail(token, "/labels", {
-          method: "POST",
-          body: JSON.stringify({
-            name: body.name,
-            labelListVisibility: "labelShow",
-            messageListVisibility: "show",
-          }),
-        })
+    const gmailResult = await executeGmailOperation(body, context, token)
+    if (!gmailResult.handled) {
+      return NextResponse.json(
+        { error: "Unsupported triage operation" },
+        { status: 400 }
       )
-    } else if (
-      body.operation === "rename-label" &&
-      typeof body.labelId === "string" &&
-      SAFE_ID.test(body.labelId) &&
-      typeof body.name === "string" &&
-      body.name.length <= 225
-    ) {
-      result = await gmailJson(
-        await gmail(token, `/labels/${body.labelId}`, {
-          method: "PATCH",
-          body: JSON.stringify({ name: body.name }),
-        })
-      )
-    } else if (
-      body.operation === "delete-label" &&
-      typeof body.labelId === "string" &&
-      SAFE_ID.test(body.labelId)
-    ) {
-      result = await gmailJson(
-        await gmail(token, `/labels/${body.labelId}`, { method: "DELETE" })
-      )
-    } else if (
-      body.operation === "modify-message" &&
-      typeof body.messageId === "string" &&
-      SAFE_ID.test(body.messageId) &&
-      Array.isArray(body.addLabelIds) &&
-      Array.isArray(body.removeLabelIds)
-    ) {
-      const labels = [...body.addLabelIds, ...body.removeLabelIds]
-      if (
-        labels.some((label) => typeof label !== "string" || !SAFE_ID.test(label)) ||
-        body.addLabelIds.some(
-          (label) => label === "TRASH" || label === "SPAM"
-        )
-      ) {
-        return NextResponse.json({ error: "Invalid message labels" }, { status: 400 })
-      }
-      result = await gmailJson(
-        await gmail(token, `/messages/${body.messageId}/modify`, {
-          method: "POST",
-          body: JSON.stringify({
-            addLabelIds: body.addLabelIds,
-            removeLabelIds: body.removeLabelIds,
-          }),
-        })
-      )
-    } else {
-      return NextResponse.json({ error: "Unsupported triage operation" }, { status: 400 })
     }
+    if (gmailResult.value.kind === "response") {
+      return gmailResult.value.value
+    }
+    const gmailBody = objectBody(gmailResult.value.value)
+    const result =
+      body.operation === "ensure-labels" && gmailBody
+        ? {
+            labels: gmailBody.labels,
+            labelIdsByKey: gmailBody.labelIdsByKey,
+          }
+        : gmailResult.value.value
     log.info(
       "Owner-bound triage operation completed",
       sanitizeForLogging({
