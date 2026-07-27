@@ -256,7 +256,6 @@ function defineAssistantExecutionServiceRepositoryPreflightSuite1Part2() {it.eac
         expect.stringContaining("Attached source: authoritative-name.pdf"),
         [42, 77],
         "executor-sub",
-        undefined,
         expect.any(Object),
         expect.any(String)
       )
@@ -264,7 +263,6 @@ function defineAssistantExecutionServiceRepositoryPreflightSuite1Part2() {it.eac
         expect.stringContaining("Attached source: authoritative-name.pdf"),
         [43, 77],
         "executor-sub",
-        undefined,
         expect.any(Object),
         expect.any(String)
       )
