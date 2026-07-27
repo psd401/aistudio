@@ -113,10 +113,16 @@ function main(): void {
   // The existence check and the write are a single atomic operation via the
   // "wx" flag (O_CREAT | O_EXCL) instead of an fs.existsSync() guard followed
   // by fs.writeFileSync(). The two-step form is a TOCTOU race
-  // (CodeQL js/file-system-race): between the check and the write another
-  // process — or a second copy of this script, which is realistic when two
-  // people generate a migration at the same time — can create the same path,
-  // and the unguarded write then silently clobbers their migration.
+  // (CodeQL js/file-system-race): between the check and the write, another
+  // process can create the same path, and the unguarded write then silently
+  // clobbers it.
+  //
+  // Scope of the guarantee: this makes writing THIS path atomic and
+  // non-clobbering. It is not a fix for two people running the script at once —
+  // getNextMigrationNumber() scans the directory, so two concurrent runs with
+  // different descriptions both compute N and write NNN-a.sql / NNN-b.sql,
+  // different paths, so O_EXCL never fires and you get a duplicated number.
+  // Catching that needs the numbering itself to be serialized; out of scope here.
   const filePath = getAbsolutePath(path.join(LAMBDA_SCHEMA_DIR, filename));
 
   console.log("");

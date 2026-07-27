@@ -78,13 +78,19 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const awsDbUrl = `postgresql://${awsUser}:${encodeURIComponent(awsPassword)}@${awsHost}:5432/${awsDatabase}?sslmode=require`;
+  // The password is deliberately NOT in this URL. libpq picks it up from
+  // PGPASSWORD (set on the child's env below), which keeps it out of the argv
+  // — and therefore out of `ps` output and out of the "Command failed: pg_dump
+  // <argv>" message that execFileSync puts on the thrown error, which we log.
+  const awsDbUrl = `postgresql://${awsUser}@${awsHost}:5432/${awsDatabase}?sslmode=require`;
+  const childEnv = { ...process.env, PGPASSWORD: awsPassword };
 
-  // Create temp directory for dump files
+  // Create temp directory for dump files.
+  // mkdirSync({ recursive: true }) is already a no-op on an existing directory,
+  // so the existsSync() guard was both redundant and a check-then-use race
+  // (CodeQL js/file-system-race).
   const tmpDir = path.join(process.cwd(), "tmp", "db-sync");
-  if (!fs.existsSync(tmpDir)) {
-    fs.mkdirSync(tmpDir, { recursive: true });
-  }
+  fs.mkdirSync(tmpDir, { recursive: true });
 
   log.info("Syncing the following tables:");
   for (const t of TABLES_TO_SYNC) log.info(`  - ${t}`);
@@ -119,7 +125,7 @@ async function main(): Promise<void> {
             "--column-inserts",
             "--on-conflict-do-nothing",
           ],
-          { stdio: ["ignore", dumpFd, "pipe"] }
+          { stdio: ["ignore", dumpFd, "pipe"], env: childEnv }
         );
       } finally {
         fs.closeSync(dumpFd);
@@ -140,13 +146,22 @@ async function main(): Promise<void> {
       log.success(`${table} (${countResult.trim()} rows)`);
     } catch (error: unknown) {
       const err = error as Error;
-      log.warn(`Failed to sync ${table}: ${err.message}`);
+      // execFileSync puts the whole argv in the message ("Command failed:
+      // pg_dump <argv>"). The password is no longer in there (PGPASSWORD), but
+      // the host/user/database still are — scrub the connection strings rather
+      // than print an operator's infrastructure into the log.
+      const safeMessage = (err.message ?? "")
+        .split(awsDbUrl)
+        .join("<aws-connection>")
+        .split(LOCAL_DB_URL)
+        .join("<local-connection>");
+      log.warn(`Failed to sync ${table}: ${safeMessage}`);
     }
 
-    // Clean up dump file
-    if (fs.existsSync(dumpFile)) {
-      fs.unlinkSync(dumpFile);
-    }
+    // Clean up dump file.
+    // rmSync({ force: true }) ignores a missing path, so no existsSync() guard
+    // is needed — that guard was another check-then-use race.
+    fs.rmSync(dumpFile, { force: true });
   }
 
   // Clean up temp directory

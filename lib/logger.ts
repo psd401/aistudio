@@ -96,6 +96,16 @@ function sanitizeForLoggerInternal(data: unknown, maxDepth: number, seen: WeakSe
     }
     seen.add(data)
 
+    // Dates have no own enumerable properties, so the generic object branch
+    // below turns them into `{}` — the timestamp just vanishes from the log.
+    // Emit the ISO string instead. This matters now that logPerformance()
+    // routes its metadata through here: startTimer(...)({ completedAt: date })
+    // used to reach winston as a real Date and would otherwise start logging
+    // as an empty object.
+    if (data instanceof Date) {
+      return Number.isNaN(data.getTime()) ? '[Invalid Date]' : data.toISOString()
+    }
+
     if (data instanceof Error) {
       // Make a new plain object with sanitized message/name/stack
       // DON'T recurse into Error.cause to prevent infinite error chains
