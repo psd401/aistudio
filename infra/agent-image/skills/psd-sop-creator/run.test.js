@@ -201,6 +201,41 @@ test('HTML inside a fenced code block is fine — it is an example, not markup',
   expect(validateBody(body)).toEqual([]);
 });
 
+test('a CRLF body validates the same as an LF body', () => {
+  const result = run(['validate', '--body', VALID_BODY.replace(/\n/g, '\r\n')]);
+  expect(result.code).toBe(0);
+  expect(result.out.valid).toBe(true);
+  expect(result.out.sections).toEqual(_internals.REQUIRED_SECTIONS);
+});
+
+test('a ``` line inside a ```` fence does not close it (CommonMark fence lengths)', () => {
+  const body = withBody((b) =>
+    b.replace(
+      'All schools and administrative buildings',
+      [
+        'All schools and administrative buildings',
+        '',
+        '````',
+        '```',
+        '## Not A Real Section',
+        '````',
+      ].join('\n')
+    )
+  );
+  expect(validateBody(body)).toEqual([]);
+});
+
+test('a reference-style image is rejected — it would bypass upload entirely', () => {
+  const body = withBody((b) =>
+    b.replace(
+      'All schools and administrative buildings',
+      'All schools\n\n![Diagram][fig1]\n\n[fig1]: ./diagram.png'
+    )
+  );
+  const violations = validateBody(body);
+  expect(violations.map((v) => v.code)).toContain('reference_image');
+});
+
 test('a heading inside a fenced code block is not counted as a section', () => {
   const body = withBody((b) =>
     b.replace(
@@ -313,6 +348,27 @@ test('collectImages classifies external, local, and atrium-asset references', ()
   expect(images.map((i) => i.kind)).toEqual(['external', 'local', 'asset']);
   expect(images[1].resolved).toBe(path.resolve('/base', 'imgs/b.png'));
   expect(images[2]).toMatchObject({ assetId: 'asset-1', alt: 'Diagram' });
+});
+
+test('collectImages handles a path with spaces — validate accepts it, so create must too', () => {
+  const images = collectImages('![Panel](my panel.png)', '/base');
+  expect(images).toHaveLength(1);
+  expect(images[0]).toMatchObject({ kind: 'local', src: 'my panel.png' });
+  expect(images[0].resolved).toBe(path.resolve('/base', 'my panel.png'));
+});
+
+test('a pipe in the owner value cannot corrupt the metadata table', () => {
+  const doc = buildDocument({
+    body: '## Title\n\nX',
+    owner: 'Help Desk | IT Operations',
+    department: 'Technology',
+    effectiveDate: '2026-08-01',
+    logoUrl: 'https://aistudio.test/branding/psd-logo.png',
+  });
+  expect(doc).toContain('| **Owner** | Help Desk \\| IT Operations |');
+  // Still a two-column row after escaping: unescaped pipes would add columns.
+  const row = doc.split('\n').find((l) => l.includes('**Owner**'));
+  expect(row.split(/(?<!\\)\|/).length).toBe(4);
 });
 
 test('applyReplacements swaps only the referenced lines', () => {
@@ -721,4 +777,38 @@ test('a failed upload discards the document it already created', () => {
     'delete',
   ]);
   expect(calls[2].args[calls[2].args.indexOf('--id') + 1]).toBe('obj-1');
+  // The payload must also SAY what happened, or the caller cannot reason
+  // about whether a retry is safe.
+  expect(result.out.documentId).toBe('obj-1');
+  expect(result.out.cleanup).toBe('discarded');
+});
+
+test('a failed cleanup is reported so the caller can delete the orphan by id', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sop-fail2-'));
+  fs.writeFileSync(path.join(dir, 'panel.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  const body = VALID_BODY.replace(
+    'All schools and administrative buildings',
+    'All schools\n\n![Panel](panel.png)'
+  );
+  const { runSkill } = atriumStub({
+    'upload-asset': () => ({
+      code: 12,
+      stdout: JSON.stringify({ status: 'error', message: 'storage unavailable' }),
+      stderr: '',
+    }),
+    delete: () => ({
+      code: 12,
+      stdout: JSON.stringify({ status: 'error', message: 'delete also failed' }),
+      stderr: '',
+    }),
+  });
+
+  const result = run(['create', '--body', body, ...CREATE_META, '--image-base', dir], {
+    runSkill,
+  });
+
+  expect(result.code).toBe(12);
+  expect(result.out.message).toContain('storage unavailable');
+  expect(result.out.documentId).toBe('obj-1');
+  expect(result.out.cleanup).toBe('delete_failed');
 });

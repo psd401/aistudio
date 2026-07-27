@@ -625,6 +625,50 @@ test('upload-asset reserves, PUTs the bytes, completes, and returns an alt-beari
   );
 });
 
+test('upload-asset sanitizes quotes and braces out of --alt so the directive stays parseable', async () => {
+  const file = tmpFile('shot.png', PNG_BYTES);
+  const originalPut = common._internals.putPresignedBytes;
+  common._internals.putPresignedBytes = async () => {};
+
+  restResponder = (call) => {
+    if (call.path === '/obj-1/assets') {
+      return {
+        approvalRequired: false,
+        status: 201,
+        payload: {
+          id: 'asset-9',
+          embedRef: '::atrium-asset{id="asset-9" alt="shot.png"}',
+          upload: {
+            method: 'PUT',
+            url: 'https://s3.example/upload',
+            headers: { 'content-type': 'image/png', 'x-amz-checksum-sha256': 'CHK' },
+          },
+        },
+      };
+    }
+    return {
+      approvalRequired: false,
+      status: 200,
+      payload: {
+        id: 'asset-9',
+        state: 'ready',
+        embedRef: '::atrium-asset{id="asset-9" alt="shot.png"}',
+      },
+    };
+  };
+
+  try {
+    // A "}" would end the {...} directive early; a quote would end alt="…".
+    await run('upload-asset', '--id', 'obj-1', '--file', file, '--alt', 'Step 1} "done"');
+  } finally {
+    common._internals.putPresignedBytes = originalPut;
+  }
+
+  expect(emitted[0].directive).toBe('::atrium-asset{id="asset-9" alt="Step 1  \'done\'"}');
+  // The whole directive still parses as a single {...} attribute block.
+  expect(emitted[0].directive).toMatch(/^::atrium-asset\{[^{}]*\}$/);
+});
+
 test('upload-asset refuses a non-image regardless of its .png filename (exit 1)', async () => {
   const file = tmpFile('not-really.png', Buffer.from('%PDF-1.7 this is a pdf'));
   let code;

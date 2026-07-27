@@ -102,10 +102,24 @@ const DEPARTMENTS = [
 
 // ── output contract ──────────────────────────────────────────────────────────
 
-function fail(message, code = 'bad_args', exit = 1) {
-  process.stderr.write(`psd-sop-creator: ${message}\n`);
-  process.stdout.write(JSON.stringify({ status: 'error', error: code, message }) + '\n');
-  process.exit(exit);
+/**
+ * Failures THROW instead of calling process.exit() directly: process.exit()
+ * terminates without unwinding the stack, so a fail() deep inside the create
+ * sequence would skip the catch that discards a half-built document and the
+ * finally that removes the scratch directory. main() is the single place that
+ * turns a SkillFailure into the JSON-on-stdout + exit-code contract.
+ */
+class SkillFailure extends Error {
+  constructor(message, code, exit, extra) {
+    super(message);
+    this.code = code;
+    this.exit = exit;
+    this.extra = extra;
+  }
+}
+
+function fail(message, code = 'bad_args', exit = 1, extra = undefined) {
+  throw new SkillFailure(message, code, exit, extra);
 }
 
 function emit(obj) {
@@ -204,12 +218,15 @@ function scanLines(markdown) {
     const fenceMatch = /^\s*(`{3,}|~{3,})/.exec(text);
     if (fenceMatch) {
       const marker = fenceMatch[1][0];
+      const length = fenceMatch[1].length;
       if (fence === null) {
-        fence = marker;
+        fence = { marker, length };
         out.push({ index, text, inCode: true });
         continue;
       }
-      if (fence === marker) {
+      // CommonMark: a fence closes only on the same character in a run at
+      // least as long as the opener — a ``` line inside a ```` block is content.
+      if (fence.marker === marker && length >= fence.length) {
         fence = null;
         out.push({ index, text, inCode: true });
         continue;
@@ -304,6 +321,22 @@ function validateBody(markdown) {
         'data_uri',
         `Line ${line.index + 1} embeds an image as a data: URI. Those are stripped.`,
         'Save the image to a file and reference its path, or use an https URL.',
+        { line: line.index + 1 }
+      );
+      break;
+    }
+  }
+
+  // Reference-style images (![alt][ref]) would pass every other check but the
+  // collector only understands the inline form — the reference would never be
+  // uploaded and would ship as a dead link in a "validated" document.
+  for (const line of lines) {
+    if (line.inCode) continue;
+    if (/!\[[^\]]*\]\[[^\]]*\]/.test(line.text)) {
+      add(
+        'reference_image',
+        `Line ${line.index + 1} uses a reference-style image (![alt][ref]). Those bypass image upload and render as dead links.`,
+        'Use the inline form on its own line instead: ![alt](path-or-https-url).',
         { line: line.index + 1 }
       );
       break;
@@ -419,6 +452,9 @@ function titleFromBody(markdown) {
  * collab schema (TableKit is in the shared extension set).
  */
 function buildDocument({ body, owner, department, effectiveDate, logoUrl }) {
+  // Metadata values land in pipe-table cells; an unescaped "|" in free text
+  // (owner is unrestricted) would add a column and corrupt the masthead table.
+  const cell = (value) => String(value).replace(/\|/g, '\\|');
   return [
     `![${LOGO_ALT}](${logoUrl})`,
     '',
@@ -426,9 +462,9 @@ function buildDocument({ body, owner, department, effectiveDate, logoUrl }) {
     '',
     '| Field | Value |',
     '| --- | --- |',
-    `| **Owner** | ${owner} |`,
-    `| **Department** | ${department} |`,
-    `| **Effective date** | ${effectiveDate} |`,
+    `| **Owner** | ${cell(owner)} |`,
+    `| **Department** | ${cell(department)} |`,
+    `| **Effective date** | ${cell(effectiveDate)} |`,
     `| **Status** | Draft |`,
     '',
     String(body).trim(),
@@ -514,7 +550,7 @@ function atrium(run, args, context) {
 
 const ATRIUM_ASSET_RE = /^\s*::atrium-asset\{([^}]*)\}\s*$/;
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-const OWN_LINE_IMAGE_RE = /^\s*!\[([^\]]*)\]\(([^)\s]+)\)\s*$/;
+const OWN_LINE_IMAGE_RE = /^\s*!\[([^\]]*)\]\(\s*([^)]+?)\s*\)\s*$/;
 
 /**
  * Every image reference in the body, in document order. Three kinds:
@@ -605,9 +641,11 @@ function preflightLocalImages(images) {
  */
 function discardPartialDocument(run, objectId) {
   try {
-    run({ skill: 'atrium', args: ['delete', '--id', objectId] });
+    const res = run({ skill: 'atrium', args: ['delete', '--id', objectId] });
+    return !res || res.code === 0;
   } catch {
     /* best effort — the original failure is what the caller reports */
+    return false;
   }
 }
 
@@ -701,12 +739,15 @@ function readBody(args) {
     if (args.body !== undefined) fail('pass either --body or --body-file, not both');
     const file = requireStr(args, 'body_file', 'body-file');
     try {
-      return fs.readFileSync(file, 'utf8');
+      // CRLF normalization: the heading/structure regexes anchor on $, which
+      // does not match \r — a Windows-authored file would report every
+      // required section as missing.
+      return fs.readFileSync(file, 'utf8').replace(/\r\n?/g, '\n');
     } catch (err) {
       fail(`--body-file not readable: ${err.message}`);
     }
   }
-  return requireStr(args, 'body', 'body');
+  return requireStr(args, 'body', 'body').replace(/\r\n?/g, '\n');
 }
 
 function cmdValidate(args) {
@@ -842,7 +883,16 @@ function cmdCreate(args, deps = {}) {
           'writing the SOP body'
         );
       } catch (err) {
-        discardPartialDocument(run, created.id);
+        const discarded = discardPartialDocument(run, created.id);
+        // The error payload must say what already happened: without the id, a
+        // retry after a failed cleanup multiplies half-built drafts invisibly.
+        if (err instanceof SkillFailure) {
+          err.extra = {
+            ...(err.extra || {}),
+            documentId: created.id,
+            cleanup: discarded ? 'discarded' : 'delete_failed',
+          };
+        }
         throw err;
       }
     }
@@ -912,13 +962,31 @@ function main(argv = process.argv, deps = {}) {
     process.exit(0);
   }
 
-  switch (subcommand) {
-    case 'validate':
-      return cmdValidate(args);
-    case 'create':
-      return cmdCreate(args, deps);
-    default:
-      return fail(`Unknown subcommand: ${subcommand}. Run with --help to see options.`);
+  try {
+    switch (subcommand) {
+      case 'validate':
+        return cmdValidate(args);
+      case 'create':
+        return cmdCreate(args, deps);
+      default:
+        return fail(`Unknown subcommand: ${subcommand}. Run with --help to see options.`);
+    }
+  } catch (err) {
+    // The single place a SkillFailure becomes the JSON + exit-code contract —
+    // AFTER every cleanup catch/finally on the way up has run.
+    if (err instanceof SkillFailure) {
+      process.stderr.write(`psd-sop-creator: ${err.message}\n`);
+      process.stdout.write(
+        JSON.stringify({
+          status: 'error',
+          error: err.code,
+          message: err.message,
+          ...(err.extra || {}),
+        }) + '\n'
+      );
+      process.exit(err.exit);
+    }
+    throw err;
   }
 }
 
@@ -926,7 +994,12 @@ if (require.main === module) {
   try {
     main();
   } catch (err) {
-    fail(err instanceof Error ? err.message : String(err), 'internal', 2);
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`psd-sop-creator: ${message}\n`);
+    process.stdout.write(
+      JSON.stringify({ status: 'error', error: 'internal', message }) + '\n'
+    );
+    process.exit(2);
   }
 }
 

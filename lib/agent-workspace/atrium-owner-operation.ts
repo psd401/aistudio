@@ -463,6 +463,7 @@ async function executeMetadataWrite(
     const deleted = await contentService.delete(req, segments[0], {
       surface: "rest",
     })
+    recordAudit(req, audit, input.requestId, "ok")
     return success(deleted, input.requestId)
   }
 

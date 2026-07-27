@@ -144,7 +144,7 @@ Give every image real alt text describing what it shows.
 | 1 | Bad arguments / a referenced image file is missing | Fix the invocation |
 | 2 | Internal error | Report it; do not retry blindly |
 | 3 | **Template violations** | Read `violations[]`, apply each `fix`, run again |
-| 12 | Upstream failure (Atrium, storage) | Surface the error verbatim |
+| 12 | Upstream failure (Atrium, storage) | Surface the error verbatim. If the payload carries `documentId`, a partly-built draft existed: `cleanup: "discarded"` means it was already deleted (safe to retry); `cleanup: "delete_failed"` means it is still in Atrium — delete it with `psd-atrium delete --id <documentId>` before retrying, or the retries multiply drafts |
 
 ## Rules
 

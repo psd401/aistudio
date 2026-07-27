@@ -6,6 +6,7 @@ const assertContentAuthoringCapabilityMock = jest.fn()
 const resolveCollectionIdMock = jest.fn()
 const contentListMock = jest.fn()
 const contentCreateMock = jest.fn()
+const contentDeleteMock = jest.fn()
 const publishMock = jest.fn()
 const auditMock = jest.fn()
 const sourceReadMock = jest.fn()
@@ -72,7 +73,7 @@ jest.mock("@/lib/content", () => {
       update: jest.fn(),
       createVersion: jest.fn(),
       loadForEdit: jest.fn(),
-      delete: jest.fn(),
+      delete: (...args: unknown[]) => contentDeleteMock(...args),
     },
     contentSourceService: {
       read: (...args: unknown[]) => sourceReadMock(...args),
@@ -195,6 +196,36 @@ describe("signed-owner Atrium operations", () => {
       expect.objectContaining({
         req: requester,
         action: "create",
+        objectId: "content-1",
+        outcome: "ok",
+      })
+    )
+  })
+
+  it("deletes an object and audits the success", async () => {
+    contentDeleteMock.mockResolvedValue({ id: "content-1", deleted: true })
+    await expect(
+      executeOwnerAtriumOperation({
+        ownerEmail: "owner@psd401.net",
+        requestId: "request-del",
+        method: "DELETE",
+        path: "/content-1",
+      })
+    ).resolves.toEqual({
+      httpStatus: 200,
+      payload: {
+        data: { id: "content-1", deleted: true },
+        meta: { requestId: "request-del" },
+      },
+    })
+    expect(contentDeleteMock).toHaveBeenCalledWith(requester, "content-1", {
+      surface: "rest",
+    })
+    // A successful agent-initiated delete must leave an audit row, exactly
+    // like every other mutation — not only the deletes that throw.
+    expect(auditMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "delete",
         objectId: "content-1",
         outcome: "ok",
       })

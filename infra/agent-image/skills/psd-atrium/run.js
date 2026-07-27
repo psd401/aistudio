@@ -367,8 +367,10 @@ async function main() {
       // `embedRef` from the server carries the FILENAME as alt text. Rebuild the
       // directive with the caller's alt when one was given, so a screenshot
       // lands in the document with real alternative text instead of "diagram.png".
+      // Quotes would break out of the alt="…" attribute; braces would end the
+      // {...} directive early and truncate round-trip parsing downstream.
       const directive = alt
-        ? `::atrium-asset{id="${completed.id}" alt="${alt.replace(/"/g, "'")}"}`
+        ? `::atrium-asset{id="${completed.id}" alt="${alt.replace(/"/g, "'").replace(/[{}]/g, ' ').trim()}"}`
         : completed.embedRef;
       emit({
         ...completed,

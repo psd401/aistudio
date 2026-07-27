@@ -197,10 +197,17 @@ def parse_pages(spec: str):
             continue
         if "-" in part:
             lo, hi = part.split("-", 1)
+            if int(lo) > int(hi):
+                # A reversed range yields an empty set, and an empty page list is
+                # falsy downstream — the whole document would convert silently.
+                _fail(f"--pages range '{part}' is reversed (start > end)", "bad_args")
             pages.update(range(int(lo), int(hi) + 1))
         else:
             pages.add(int(part))
-    return sorted(p for p in pages if p >= 0)
+    result = sorted(p for p in pages if p >= 0)
+    if not result:
+        _fail(f"--pages '{spec}' selects no pages", "bad_args")
+    return result
 
 
 @contextlib.contextmanager
@@ -287,9 +294,15 @@ def collect_extracted_images(image_dir: Path):
     disk and reported as dropped, so the caller can say "3 images were not carried
     over" instead of silently losing them.
     """
+    # Digit-aware sort: pymupdf4llm names files with un-padded page/index
+    # numbers, and a plain name sort puts "input-10.png" before "input-2.png",
+    # so the MAX cutoff could drop an early page while keeping a later one.
     files = sorted(
         (p for p in image_dir.iterdir() if p.is_file()),
-        key=lambda p: p.name,
+        key=lambda p: [
+            (0, int(part)) if part.isdigit() else (1, part)
+            for part in re.split(r"(\d+)", p.name)
+        ],
     )
     kept = files[:MAX_EXTRACTED_IMAGES]
     dropped = files[MAX_EXTRACTED_IMAGES:]
