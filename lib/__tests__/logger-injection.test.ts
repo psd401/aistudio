@@ -19,7 +19,7 @@
 // it explicitly. `@jest-environment node` above is required with it — the real
 // module pulls in winston, which needs Node globals the jsdom environment does
 // not provide.
-const { sanitizeForLogging, sanitizeLogMessage } =
+const { sanitizeForLogging, sanitizeLogMessage, sanitizeLogMetadata } =
   jest.requireActual<typeof import('../logger')>('../logger')
 
 const NUL = String.fromCharCode(0)
@@ -161,6 +161,56 @@ describe('Logger log-injection sanitization', () => {
 
     it('caps message length', () => {
       expect(sanitizeLogMessage('x'.repeat(5000)).length).toBeLessThanOrEqual(1000)
+    })
+  })
+
+  describe('sanitizeLogMetadata - Dates survive the metadata path', () => {
+    // This path runs filterSensitiveData() BEFORE sanitizeForLogger(), the
+    // opposite of sanitizeForLogging(). A Date has no own enumerable
+    // properties, so the filter pass's generic object traversal flattened it to
+    // {} before the ISO branch could ever see it — startTimer(...)({
+    // completedAt: date }) logged an empty object and the timestamp was gone.
+    const ISO = '2026-07-27T12:34:56.000Z'
+
+    it('emits an ISO string rather than {}', () => {
+      const result = sanitizeLogMetadata({ operation: 'act', completedAt: new Date(ISO) })
+      expect(result.completedAt).toBe(ISO)
+      expect(result.operation).toBe('act')
+    })
+
+    it('converts nested and array Dates too', () => {
+      const result = sanitizeLogMetadata({ a: { when: new Date(ISO) }, list: [new Date(ISO)] })
+      expect((result.a as Record<string, unknown>).when).toBe(ISO)
+      expect((result.list as unknown[])[0]).toBe(ISO)
+    })
+
+    it('renders the same Date instance twice, not [Circular]', () => {
+      // A Date is a leaf and cannot form a cycle, but it used to be recorded in
+      // the shared `seen` set before the ISO branch ran, so the second
+      // reference to one instance came out as '[Circular]'.
+      const d = new Date(ISO)
+      const result = sanitizeLogMetadata({ startedAt: d, endedAt: d })
+      expect(result.startedAt).toBe(ISO)
+      expect(result.endedAt).toBe(ISO)
+    })
+
+    it('guards an invalid Date instead of throwing', () => {
+      expect(sanitizeLogMetadata({ bad: new Date('nope') }).bad).toBe('[Invalid Date]')
+    })
+
+    it('still strips line breaks from metadata values', () => {
+      expect(sanitizeLogMetadata({ note: FORGERY }).note).not.toContain('\n')
+      expect(sanitizeLogMetadata({ note: FORGERY }).note).not.toContain('\r')
+    })
+
+    it('drops prototype-manipulating keys and pollutes nothing', () => {
+      // JSON.parse so the __proto__ key is a real own property rather than a
+      // literal that would invoke the setter at construction time.
+      const poison = JSON.parse('{"__proto__":{"polluted":true},"constructor":1,"keep":"yes"}')
+      const result = sanitizeLogMetadata(poison)
+      expect(Object.keys(result)).toEqual(['keep'])
+      expect(Object.getPrototypeOf(result)).toBeNull()
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined()
     })
   })
 })
