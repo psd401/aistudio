@@ -91,8 +91,16 @@ export function shouldRefreshToken(
 }
 
 /**
- * Refreshes AWS Cognito tokens by calling the server action
- * This avoids Edge Runtime compatibility issues with AWS SDK
+ * Refreshes AWS Cognito tokens by calling `refreshCognitoTokens` directly.
+ *
+ * This runs in the caller's runtime — including Edge, since `middleware.ts`
+ * pulls `auth.ts` and its callbacks into the Edge bundle. It is NOT an RPC hop:
+ * the retired `"use server"` action was only ever a boundary when imported by a
+ * *client* component, which is why it was inlined into `middleware.js` along
+ * with winston and the AWS SDK (#1297). `refreshCognitoTokens` uses `fetch` and
+ * `@/lib/auth/edge-logger` so it is safe in either runtime.
+ *
+ * See `docs/guides/edge-runtime-boundaries.md`.
  *
  * @param token - Current JWT token containing refresh token
  * @returns Promise<RefreshedTokens | null> - New tokens or null if refresh failed
