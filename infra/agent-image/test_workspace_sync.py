@@ -12,6 +12,7 @@ network or real filesystem outside the temp dir is touched.
 
 import os
 import io
+import pathlib
 import pwd
 import shutil
 import subprocess
@@ -657,6 +658,92 @@ class RegenerableArtifactSkipTests(unittest.TestCase):
             self.assertTrue(
                 workspace_sync._should_skip_relative(rel),
                 f"should skip hidden virtualenv: {rel}",
+            )
+
+
+class SessionTranscriptRestoreTests(unittest.TestCase):
+    """Cold-start restore must not pull every archived session transcript.
+
+    On 2026-07-27 a dev workspace held 812 transcripts totalling 202 MB — 93%
+    of the bytes the restore pulled — and the pull took 70.8s during which the
+    agent could not answer. Boot was 10s and the model turn 15s: the
+    transcripts WERE the cold-start latency.
+    """
+
+    def _sessions(self, count, base_mtime=1_700_000_000):
+        return [
+            {
+                "path": f"{workspace_sync.SESSION_DIR_PREFIX}s{i:04d}.jsonl",
+                "size": 250_000,
+                "lastModified": base_mtime + i,
+            }
+            for i in range(count)
+        ]
+
+    def test_keeps_only_the_most_recent_transcripts(self):
+        keep = workspace_sync._select_session_transcripts(self._sessions(812))
+        self.assertEqual(len(keep), workspace_sync.MAX_RESTORED_SESSIONS)
+
+    def test_keeps_the_newest_and_drops_the_oldest(self):
+        # Ranking must be by mtime, not by path order: the CURRENT session's
+        # transcript is the most recently written one, and dropping it would
+        # make the agent resume with no conversation history.
+        keep = workspace_sync._select_session_transcripts(self._sessions(100))
+        self.assertIn(f"{workspace_sync.SESSION_DIR_PREFIX}s0099.jsonl", keep)
+        self.assertNotIn(f"{workspace_sync.SESSION_DIR_PREFIX}s0000.jsonl", keep)
+
+    def test_never_selects_non_session_files(self):
+        # memory/ is the agent's actual continuity and must always restore in
+        # full — it must never be subject to this cap.
+        entries = self._sessions(30) + [
+            {"path": "memory/MEMORY.md", "size": 13_683, "lastModified": 1},
+            {"path": "IDENTITY.md", "size": 770, "lastModified": 1},
+        ]
+        keep = workspace_sync._select_session_transcripts(entries)
+        self.assertNotIn("memory/MEMORY.md", keep)
+        self.assertNotIn("IDENTITY.md", keep)
+        self.assertTrue(
+            all(p.startswith(workspace_sync.SESSION_DIR_PREFIX) for p in keep)
+        )
+
+    def test_keeps_everything_when_the_broker_sends_no_timestamps(self):
+        # Containers deploy independently of the web tier, so a new image can
+        # run against an older broker that returns no mtimes. Ranking would
+        # then be arbitrary and could discard the live session, so the restore
+        # declines to trim: slower, never wrong.
+        no_ts = [dict(e, lastModified=0) for e in self._sessions(50)]
+        self.assertEqual(len(workspace_sync._select_session_transcripts(no_ts)), 50)
+
+        missing = [{"path": e["path"]} for e in self._sessions(50)]
+        self.assertEqual(len(workspace_sync._select_session_transcripts(missing)), 50)
+
+    def test_no_sessions_selects_nothing(self):
+        self.assertEqual(
+            workspace_sync._select_session_transcripts(
+                [{"path": "memory/a.md", "size": 1, "lastModified": 9}]
+            ),
+            set(),
+        )
+
+    def test_trimming_the_pull_cannot_delete_remote_objects(self):
+        # THE SAFETY INVARIANT. Skipping a download is only safe because the
+        # push is additive: it walks LOCAL files and uploads them, and nothing
+        # in the sync path enumerates S3 to remove keys. If a delete ever
+        # appeared, an unrestored transcript would become a deleted one — the
+        # same failed-READ-becomes-destructive-WRITE shape that destroyed a
+        # user's agent memory on 2026-07-27.
+        source = pathlib.Path(__file__).with_name("workspace_sync.py").read_text()
+        for forbidden in (
+            "DeleteObject",
+            "delete_object",
+            "DeleteObjects",
+            '"operation": "delete"',
+            "'operation': 'delete'",
+        ):
+            self.assertNotIn(
+                forbidden,
+                source,
+                f"workspace_sync must never delete remote objects (found {forbidden})",
             )
 
 

@@ -10,6 +10,7 @@ import {
   executeOpenAiImageOperation,
   executePlaudOperation,
   executePsdDataOperation,
+  executeFreshserviceOperation,
   executeRedRoverOperation,
 } from "@/lib/agent-credentials/owner-operation-broker"
 
@@ -118,6 +119,25 @@ export async function POST(request: NextRequest) {
             startDate: body.startDate,
             endDate: body.endDate,
             filledFilter: body.filledFilter,
+          })
+        )
+      }
+      case "freshservice": {
+        const granted = await broker.canAccessSkill(
+          invocation.ownerEmail,
+          "skill.freshservice",
+          undefined
+        )
+        if (!granted) {
+          return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+        }
+        return NextResponse.json(
+          await executeFreshserviceOperation({
+            ownerEmail: invocation.ownerEmail,
+            sessionId: invocation.sessionId,
+            path: body.path,
+            method: body.method,
+            body: body.body,
           })
         )
       }

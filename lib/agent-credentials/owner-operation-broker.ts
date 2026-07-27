@@ -783,3 +783,258 @@ export async function executeRedRoverOperation(input: {
   }
   throw new Error("Red Rover query exceeded the maximum page limit")
 }
+
+// ---------------------------------------------------------------------------
+// Freshservice
+// ---------------------------------------------------------------------------
+//
+// psd-freshservice used to read the owner's API key in plaintext via
+// psd-credentials/get.js and call Freshservice from inside the model runtime.
+// #1353 removed plaintext credential access — correctly — but the skill was
+// never migrated, so it kept exec'ing a script that no longer exists. EVERY
+// freshservice command has been dead since: the process fails before it even
+// checks whether a key is provisioned, and the resulting error blames the
+// user's credentials rather than the skill.
+//
+// The key now stays server-side, exactly like Red Rover above.
+
+const FRESHSERVICE_DOMAIN = "psd401.freshservice.com"
+const FRESHSERVICE_BASE_URL = `https://${FRESHSERVICE_DOMAIN}/api/v2`
+const MAX_FRESHSERVICE_RESPONSE_BYTES = 4 * 1024 * 1024
+
+/**
+ * Exactly the Freshservice endpoints psd-freshservice uses, as
+ * (method, path) pairs.
+ *
+ * This is the security boundary. The model composes the path, so without an
+ * allowlist the "fetch a ticket" broker would be a general-purpose proxy that
+ * signs arbitrary requests with the owner's API key — including admin
+ * endpoints the skill never uses. Anchored patterns, numeric ids only, and a
+ * restricted query charset (no "/", so a query string cannot smuggle extra
+ * path segments).
+ *
+ * Adding a command means adding its route here — deliberately, so widening the
+ * key's reach is a visible diff rather than a side effect.
+ */
+/**
+ * Each route REBUILDS its pathname from literals plus the numeric ids it
+ * captured, rather than passing the caller's string through.
+ *
+ * That distinction is the whole point. A predicate that merely *validates* the
+ * input still hands the original attacker-controlled string to fetch(), which
+ * is both a real hazard if a pattern is ever loosened and an SSRF finding no
+ * static analyzer can discharge. Reconstructing means the final URL is
+ * literals + Number(), so no caller-supplied character can reach the host.
+ */
+const FRESHSERVICE_ROUTES: ReadonlyArray<{
+  method: "GET" | "POST" | "PUT"
+  pattern: RegExp
+  build: (id: number) => string
+}> = [
+  { method: "GET", pattern: /^\/tickets$/, build: () => "/tickets" },
+  { method: "POST", pattern: /^\/tickets$/, build: () => "/tickets" },
+  { method: "GET", pattern: /^\/tickets\/(\d+)$/, build: (id) => `/tickets/${id}` },
+  { method: "PUT", pattern: /^\/tickets\/(\d+)$/, build: (id) => `/tickets/${id}` },
+  {
+    method: "POST",
+    pattern: /^\/tickets\/(\d+)\/notes$/,
+    build: (id) => `/tickets/${id}/notes`,
+  },
+  {
+    method: "GET",
+    pattern: /^\/tickets\/(\d+)\/requested_items$/,
+    build: (id) => `/tickets/${id}/requested_items`,
+  },
+  { method: "GET", pattern: /^\/agents$/, build: () => "/agents" },
+  { method: "GET", pattern: /^\/agents\/(\d+)$/, build: (id) => `/agents/${id}` },
+  {
+    method: "GET",
+    pattern: /^\/requesters\/(\d+)$/,
+    build: (id) => `/requesters/${id}`,
+  },
+  { method: "GET", pattern: /^\/workspaces$/, build: () => "/workspaces" },
+  {
+    method: "GET",
+    pattern: /^\/workspaces\/(\d+)$/,
+    build: (id) => `/workspaces/${id}`,
+  },
+  { method: "GET", pattern: /^\/approvals$/, build: () => "/approvals" },
+]
+
+/** Query keys the skill actually sends, with the value charset each may use. */
+const FRESHSERVICE_QUERY_KEYS = new Set([
+  "per_page",
+  "page",
+  "include",
+  "email",
+  "approver_id",
+  "status",
+  "parent",
+  "updated_since",
+  "order_type",
+  "workspace_id",
+  "query",
+])
+const FRESHSERVICE_VALUE_CHARS = /^[A-Za-z0-9_.,:+@ -]*$/
+
+/**
+ * Canonicalize one request, or return null if it is not allowlisted.
+ *
+ * Returns a NEWLY BUILT path string: literal segments, numeric ids passed
+ * through Number(), and a query re-serialized from an allowlisted key set with
+ * a value charset that excludes "/", ":"-schemes and "@", so a query can
+ * neither smuggle path segments nor an alternate host.
+ *
+ * Splitting the query off BEFORE matching also keeps every pattern a static
+ * anchored literal. Folding an optional query group into each pattern is the
+ * obvious approach and the wrong one: it produces dynamically-built nested
+ * quantifiers over an attacker-controlled string — a ReDoS hazard, and a lint
+ * error.
+ */
+function canonicalFreshservicePath(method: string, path: string): string | null {
+  const queryStart = path.indexOf("?")
+  const pathname = queryStart === -1 ? path : path.slice(0, queryStart)
+  const rawQuery = queryStart === -1 ? "" : path.slice(queryStart + 1)
+
+  const route = FRESHSERVICE_ROUTES.find(
+    (candidate) => candidate.method === method && candidate.pattern.test(pathname)
+  )
+  if (!route) return null
+
+  const captured = route.pattern.exec(pathname)?.[1]
+  const id = captured === undefined ? 0 : Number(captured)
+  if (!Number.isSafeInteger(id) || id < 0) return null
+  const canonicalPath = route.build(id)
+
+  if (rawQuery.length === 0) return canonicalPath
+
+  const query = canonicalFreshserviceQuery(rawQuery)
+  if (query === null) return null
+  return query.length > 0 ? `${canonicalPath}?${query}` : canonicalPath
+}
+
+/**
+ * Re-serialize a query from an allowlisted key set, or null if anything in it
+ * is unrecognized. Split out from the path canonicalizer to keep each half
+ * under the complexity ceiling and independently readable.
+ */
+function canonicalFreshserviceQuery(rawQuery: string): string | null {
+  const rebuilt = new URLSearchParams()
+  for (const pair of rawQuery.split("&")) {
+    if (pair.length === 0) continue
+    const eq = pair.indexOf("=")
+    if (eq === -1) return null
+    const key = pair.slice(0, eq)
+    if (!FRESHSERVICE_QUERY_KEYS.has(key)) return null
+    let value: string
+    try {
+      value = decodeURIComponent(pair.slice(eq + 1))
+    } catch {
+      return null
+    }
+    if (!FRESHSERVICE_VALUE_CHARS.test(value)) return null
+    rebuilt.append(key, value)
+  }
+  return rebuilt.toString()
+}
+
+/**
+ * Proxy one allowlisted Freshservice call using the owner's stored API key.
+ *
+ * Returns the upstream status alongside the body instead of throwing on
+ * non-2xx: the skill maps 429 to a "wait, don't retry" message and 404 to "no
+ * such ticket", and collapsing those into a generic error was what made the
+ * old client's failures unreadable.
+ */
+/**
+ * Validate one Freshservice request, or throw.
+ *
+ * Split out from the executor so the request-shaping rules read as a single
+ * unit — and so neither half trips the complexity ceiling.
+ */
+function validatedFreshserviceRequest(
+  rawPath: unknown,
+  rawMethod: unknown
+): { path: string; method: "GET" | "POST" | "PUT" } {
+  const method = rawMethod === undefined ? "GET" : rawMethod
+  if (method !== "GET" && method !== "POST" && method !== "PUT") {
+    throw new Error("Invalid Freshservice method")
+  }
+  if (
+    typeof rawPath !== "string" ||
+    !rawPath.startsWith("/") ||
+    rawPath.length > 512 ||
+    hasAsciiControl(rawPath)
+  ) {
+    throw new Error("Invalid Freshservice path")
+  }
+  const canonical = canonicalFreshservicePath(method, rawPath)
+  if (canonical === null) {
+    // Named explicitly: an unlisted endpoint is a skill change that needs a
+    // route added, not a transient failure the agent should retry.
+    throw new Error(`Freshservice route not allowed: ${method} ${rawPath}`)
+  }
+  // The REBUILT path, never rawPath — this is what keeps caller-supplied
+  // characters out of the URL that gets fetched.
+  return { path: canonical, method }
+}
+
+export async function executeFreshserviceOperation(input: {
+  ownerEmail: string
+  sessionId: string
+  path: unknown
+  method: unknown
+  body: unknown
+}): Promise<unknown> {
+  const { path, method } = validatedFreshserviceRequest(input.path, input.method)
+
+  const credential = await new AgentCredentialBroker().getUserOnly(
+    input.ownerEmail,
+    "freshservice_api_key",
+    { sessionId: input.sessionId }
+  )
+  if (!credential) {
+    // Distinct, machine-readable outcome — the skill turns this into the
+    // "paste your key" prompt. It is NOT an error: a user who has never
+    // registered a key is in a normal state.
+    return { status: 0, ok: false, code: "credential_missing" }
+  }
+
+  const response = await fetch(`${FRESHSERVICE_BASE_URL}${path}`, {
+    method,
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${credential.value}:X`).toString(
+        "base64"
+      )}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    ...(method === "GET"
+      ? {}
+      : { body: JSON.stringify(boundedRecord(input.body ?? {}, "Freshservice body")) }),
+    redirect: "error",
+    signal: AbortSignal.timeout(30_000),
+  })
+
+  if (response.status === 429) {
+    return {
+      status: 429,
+      ok: false,
+      code: "rate_limited",
+      retryAfter: response.headers.get("retry-after") ?? "unknown",
+    }
+  }
+
+  // A body that is absent or unparseable is normal for some Freshservice
+  // responses (204 on update). Keep the status — it is the useful half.
+  const data = await readBoundedJson(
+    response,
+    MAX_FRESHSERVICE_RESPONSE_BYTES
+  ).catch(() => null)
+  // Derive success from the status rather than reading `response.ok`. The
+  // status is the value the skill branches on anyway, and deriving it keeps
+  // this correct against any fetch implementation that omits the convenience
+  // property.
+  const status = response.status
+  return { status, ok: status >= 200 && status < 300, data }
+}

@@ -1256,10 +1256,25 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: [agentInvocationSigningSecret.secretArn],
     }));
 
-    // The main generative model is reached only through the owner-bound web
-    // broker, which holds the provider credential and enforces a model/output
-    // allowlist. The model-facing role retains only the single embedding model
-    // required by OpenClaw's local memory index.
+    // Bedrock access for the model-facing runtime, via this role's standard
+    // SigV4 credential chain. NO bearer credential is present in the container.
+    //
+    // Two models, granted separately because they are reached by different
+    // code paths and should fail independently:
+    //   • Titan embeddings — OpenClaw's local memory index (memorySearch).
+    //   • Claude Sonnet 5  — the main generative model.
+    //
+    // The chat model previously required a Bedrock bearer key, which had to be
+    // hydrated from Secrets Manager and INLINED into openclaw.json inside a
+    // container that also runs 33 model-authored skills. Routing it through a
+    // web broker avoided the on-disk key but put an authenticated ALB hop in
+    // front of every model call. SigV4 from this role removes both: no
+    // credential to steal, no hop to pay for. The embedding path has used
+    // exactly this mechanism in production since #1184, which is the proof it
+    // works from inside an AgentCore microVM.
+    //
+    // Scoped to the ONE model the agent may call. A wildcard here would let
+    // model-authored code reach any Bedrock model in the account.
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'BedrockMemoryEmbeddingOnly',
       effect: iam.Effect.ALLOW,
@@ -1268,6 +1283,34 @@ export class AgentPlatformStack extends cdk.Stack {
       ],
       resources: [
         `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v2:0`,
+      ],
+    }));
+
+    // us.anthropic.claude-sonnet-5 is a CROSS-REGION inference profile. Bedrock
+    // authorizes such a call against the profile ARN *and* against the
+    // foundation-model ARN in whichever region it routes the request to, so a
+    // grant naming only the profile fails 100% of the time with AccessDenied —
+    // and it fails intermittently if the member regions are incomplete, because
+    // routing is per-request. Both halves are required.
+    //
+    // The member list is pinned rather than wildcarded so that a profile
+    // silently gaining a region does not silently widen this grant; if AWS adds
+    // one, calls routed there fail loudly and this list gets updated.
+    // Source: `aws bedrock get-inference-profile --inference-profile-identifier
+    // us.anthropic.claude-sonnet-5` (verified 2026-07-27).
+    const sonnetProfileRegions = ['us-east-1', 'us-east-2', 'us-west-2'];
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'BedrockChatModelInvoke',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream',
+      ],
+      resources: [
+        `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.anthropic.claude-sonnet-5`,
+        ...sonnetProfileRegions.map(
+          (r) => `arn:aws:bedrock:${r}::foundation-model/anthropic.claude-sonnet-5`,
+        ),
       ],
     }));
 
@@ -1894,10 +1937,17 @@ export class AgentPlatformStack extends cdk.Stack {
       // 15 min is Lambda's hard ceiling. The morning brief on May 1, 2026
       // hit our 13-min client-side abort while the agent was still
       // streaming heartbeats every 30s — it just hadn't finished yet.
-      // Stack: harness deadline 840s (14:00) < AbortSignal 870s (14:30) <
-      // Lambda 900s (15:00). Each layer has ~30s headroom over the next
-      // so failure modes degrade in order: harness returns partial → abort
-      // fires with whatever streamed → Lambda kills as last resort.
+      //
+      // The ordering harness-deadline < abort < Lambda-timeout still holds,
+      // but the first two are NO LONGER CONSTANTS: they are derived from the
+      // Lambda's real remaining time (lambdas/agent-cron/turn-deadline.ts).
+      // The old fixed 840s/870s pair silently assumed the turn starts when the
+      // request is sent; it starts once AgentCore has cold-started the microVM,
+      // and on 2026-07-27 that ~47s gap made the abort fire 5.6s BEFORE the
+      // agent finished, discarding a completed 13.7-minute dispatch.
+      //
+      // A turn that genuinely needs longer than this Lambda is now promoted to
+      // the background job-runner rather than truncated (JOB_* env below).
       timeout: cdk.Duration.minutes(15),
       architecture: lambda.Architecture.ARM_64,
       role: this.cronLambdaRole,
@@ -2870,6 +2920,53 @@ export class AgentPlatformStack extends cdk.Stack {
     );
     this.routerLambda.addEnvironment('JOB_SECURITY_GROUP', jobRunnerSg.securityGroupId);
     this.routerLambda.addEnvironment('JOB_CONTAINER_NAME', 'job-runner');
+
+    // The cron Lambda promotes long SCHEDULED turns into the SAME job-runner.
+    // Lambda's 15-minute ceiling is an AWS hard limit, so without this a
+    // scheduled task that legitimately needs longer can never finish — it gets
+    // truncated every single run, with no configuration that helps.
+    //
+    // Same task definition, same payload contract, same delivery path as the
+    // router's interactive promotion; only the trigger differs. The runner does
+    // not need to know which Lambda launched it.
+    const jobSubnetIds = vpc
+      .selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS })
+      .subnetIds.join(',');
+    cronLambda.addEnvironment('JOB_CLUSTER_ARN', jobCluster.clusterArn);
+    cronLambda.addEnvironment('JOB_TASK_DEF_ARN', jobTaskDef.taskDefinitionArn);
+    cronLambda.addEnvironment('JOB_SUBNETS', jobSubnetIds);
+    cronLambda.addEnvironment('JOB_SECURITY_GROUP', jobRunnerSg.securityGroupId);
+    cronLambda.addEnvironment('JOB_CONTAINER_NAME', 'job-runner');
+    // Cron pre-acquires the kind='job' session lock so nothing else touches the
+    // session during the ~60s of Fargate cold start before the runner's first
+    // renewal. Without the table the cron code declines to promote rather than
+    // launching an unlockable job.
+    cronLambda.addEnvironment(
+      'SESSION_LOCKS_TABLE',
+      this.sessionLocksTable.tableName,
+    );
+    this.sessionLocksTable.grantReadWriteData(this.cronLambdaRole);
+
+    this.cronLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'JobRunnerLaunch',
+      effect: iam.Effect.ALLOW,
+      actions: ['ecs:RunTask'],
+      resources: [jobTaskDef.taskDefinitionArn],
+    }));
+    // RunTask needs PassRole on BOTH roles the task assumes; granting only the
+    // task role fails at launch with an opaque AccessDenied.
+    this.cronLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'JobRunnerPassRole',
+      effect: iam.Effect.ALLOW,
+      actions: ['iam:PassRole'],
+      resources: [
+        jobTaskDef.taskRole.roleArn,
+        jobTaskDef.obtainExecutionRole().roleArn,
+      ],
+      conditions: {
+        StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' },
+      },
+    }));
 
     cdk.Tags.of(jobCluster).add('Environment', environment);
     cdk.Tags.of(jobCluster).add('ManagedBy', 'cdk');
