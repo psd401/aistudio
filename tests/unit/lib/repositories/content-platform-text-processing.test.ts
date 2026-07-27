@@ -77,7 +77,7 @@ describe("canonical text processing", () => {
       "utf8",
     );
     expect(workerSource).toContain(
-      "detectedContentType = extracted.detectedContentType;",
+      "detectedContentType: extracted.detectedContentType,",
     );
   });
 });
