@@ -51,6 +51,8 @@ beforeEach(() => {
       nextUserOffset: 50,
     },
   })
+  mockGrantRepositoryAccess.mockResolvedValue({ isSuccess: true })
+  mockRevokeRepositoryAccess.mockResolvedValue({ isSuccess: true })
 })
 
 describe("RepositoryAccessEditor", () => {
@@ -108,5 +110,52 @@ describe("RepositoryAccessEditor", () => {
         screen.queryByRole("button", { name: "Load more users" })
       ).not.toBeInTheDocument()
     )
+  })
+
+  it("grants the selected user and refreshes the access list", async () => {
+    render(<RepositoryAccessEditor repositoryId={7} isPublic={false} />)
+
+    fireEvent.click(
+      await screen.findByText("First User (first@example.com)")
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Grant access" }))
+
+    await waitFor(() =>
+      expect(mockGrantRepositoryAccess).toHaveBeenCalledWith(7, 1, null)
+    )
+    expect(mockGetRepositoryAccess).toHaveBeenCalledTimes(2)
+  })
+
+  it("revokes an existing signed access entry", async () => {
+    mockGetRepositoryAccess.mockResolvedValue({
+      isSuccess: true,
+      data: [
+        {
+          id: 10,
+          repositoryId: 7,
+          userId: 1,
+          roleId: null,
+          userName: "First User",
+          userEmail: "first@example.com",
+          roleName: null,
+        },
+      ],
+    })
+
+    render(<RepositoryAccessEditor repositoryId={7} isPublic={false} />)
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Revoke access for First User",
+      })
+    )
+
+    await waitFor(() =>
+      expect(mockRevokeRepositoryAccess).toHaveBeenCalledWith(10)
+    )
+    expect(
+      screen.queryByRole("button", {
+        name: "Revoke access for First User",
+      })
+    ).not.toBeInTheDocument()
   })
 })
