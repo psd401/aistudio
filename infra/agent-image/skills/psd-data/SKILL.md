@@ -24,12 +24,24 @@ reachable through this skill, where the caller's own Cognito identity and
 row-level security decide what they may see.
 
 If a user asks about absences, vacancies, unfilled jobs, substitutes, or
-Red Rover generally, answer it from here — start with `tables --detailed` to
-locate the current Red Rover tables, `schema --table <name>` to inspect their
-columns, and `lesson-check` for what previous sessions learned about them. Do
-not report `psd-redrover` as missing and do not attempt to call the Red Rover
-API directly; the shared credential and its broker operation have been
-removed.
+Red Rover generally, answer it from here. Use the normal flow below — there is
+nothing Red-Rover-specific about it:
+
+```bash
+# 1. Find the current Red Rover tables (names are not hardcoded here on purpose).
+node /opt/psd-skills/psd-data/run.js tables --detailed
+
+# 2. Check what previous sessions learned. Both flags are REQUIRED.
+node /opt/psd-skills/psd-data/run.js lesson-check \
+  --task "unfilled substitute vacancies last week" \
+  --tables '["<table from step 1>"]'
+
+# 3. Inspect columns, then query.
+node /opt/psd-skills/psd-data/run.js schema --table '["<table from step 1>"]'
+```
+
+Do not report `psd-redrover` as missing and do not attempt to call the Red Rover
+API directly; the shared credential and its broker operation have been removed.
 
 ## Authentication
 
