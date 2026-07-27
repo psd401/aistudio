@@ -47,6 +47,7 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
+import type { Dispatch, SetStateAction } from "react"
 import { useToast } from "@/components/ui/use-toast"
 import {
   AlertDialog,
@@ -92,23 +93,22 @@ interface UsersPageClientProps {
   initialRoles?: Array<{ id: string; name: string }>
 }
 
-export function UsersPageClient({
-  initialStats,
-  initialUsers,
-  initialRoles,
-}: UsersPageClientProps) {
-  const { toast } = useToast()
+type Toast = ReturnType<typeof useToast>["toast"]
+type RoleOption = { id: string; name: string }
 
-  // State
+function useUsersData(
+  {
+    initialRoles,
+    initialStats,
+    initialUsers,
+  }: UsersPageClientProps,
+  toast: Toast
+) {
   const [stats, setStats] = useState<UserStats | null>(initialStats || null)
   const [users, setUsers] = useState<UserListItem[]>(initialUsers || [])
-  const [roles, setRoles] = useState<Array<{ id: string; name: string }>>(
-    initialRoles || []
-  )
+  const [roles, setRoles] = useState<RoleOption[]>(initialRoles || [])
   const [loading, setLoading] = useState(!initialStats || !initialUsers)
   const [loadingStats, setLoadingStats] = useState(!initialStats)
-
-  // Filters
   const [activeTab, setActiveTab] = useState<RoleTab>("all")
   const [filters, setFilters] = useState<UserFiltersState>({
     search: "",
@@ -116,73 +116,49 @@ export function UsersPageClient({
     role: "all",
   })
 
-  // Selected user for detail view
-  const [selectedUser, setSelectedUser] = useState<UserDetail | null>(null)
-  const [detailOpen, setDetailOpen] = useState(false)
-  const [loadingActivity, setLoadingActivity] = useState(false)
-
-  // Delete confirmation
-  const [deleteDialog, setDeleteDialog] = useState(false)
-  const [userToDelete, setUserToDelete] = useState<UserTableRow | null>(null)
-
-  // Load initial data
   const loadData = useCallback(async () => {
     setLoading(true)
-
     try {
       const [statsResult, usersResult, rolesResult] = await Promise.all([
         getUserStats(),
         getUsers(),
         getRoles(),
       ])
-
       if (statsResult.isSuccess && statsResult.data) {
         setStats(statsResult.data)
       }
-
       if (usersResult.isSuccess && usersResult.data) {
         setUsers(usersResult.data)
       }
-
       if (rolesResult.isSuccess && rolesResult.data) {
         setRoles(rolesResult.data)
       }
     } catch (error) {
       toast({
         title: "Error",
-        description: error instanceof Error ? error.message : "Failed to load user data",
+        description:
+          error instanceof Error ? error.message : "Failed to load user data",
         variant: "destructive",
       })
     } finally {
       setLoading(false)
       setLoadingStats(false)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [toast])
 
   useEffect(() => {
-    if (!initialStats || !initialUsers) {
-      loadData()
-    }
-  }, [loadData, initialStats, initialUsers])
+    if (!initialStats || !initialUsers) void loadData()
+  }, [initialStats, initialUsers, loadData])
 
-  // Handle filter changes
-  const handleFiltersChange = useCallback(
-    async (newFilters: UserFiltersState) => {
-      // Prevent concurrent filter requests
-      if (loading) return
-
-      setFilters(newFilters)
+  const loadFilteredUsers = useCallback(
+    async (nextFilters: UserFiltersState, roleTab: RoleTab) => {
       setLoading(true)
-
       try {
-        // Reload users with new filters
         const result = await getUsers({
-          search: newFilters.search,
-          status: newFilters.status,
-          role: activeTab !== "all" ? activeTab : newFilters.role,
+          search: nextFilters.search,
+          status: nextFilters.status,
+          role: roleTab !== "all" ? roleTab : nextFilters.role,
         })
-
         if (result.isSuccess && result.data) {
           setUsers(result.data)
         } else if (!result.isSuccess) {
@@ -192,56 +168,186 @@ export function UsersPageClient({
             variant: "destructive",
           })
         }
-      } catch {
-        // Error already shown via toast in else block above
       } finally {
         setLoading(false)
       }
     },
-    // toast is stable from useToast() and doesn't need to be in dependencies
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activeTab, loading]
+    [toast]
   )
 
-  // Handle tab change
-  const handleTabChange = useCallback(
-    async (value: string) => {
-      // Prevent concurrent tab change requests
+  const handleFiltersChange = useCallback(
+    (nextFilters: UserFiltersState) => {
       if (loading) return
-
+      setFilters(nextFilters)
+      void loadFilteredUsers(nextFilters, activeTab)
+    },
+    [activeTab, loadFilteredUsers, loading]
+  )
+  const handleTabChange = useCallback(
+    (value: string) => {
+      if (loading) return
       const tab = value as RoleTab
       setActiveTab(tab)
-      setLoading(true)
+      void loadFilteredUsers(filters, tab)
+    },
+    [filters, loadFilteredUsers, loading]
+  )
+  return {
+    activeTab,
+    filters,
+    handleFiltersChange,
+    handleTabChange,
+    loadData,
+    loading,
+    loadingStats,
+    roles,
+    setStats,
+    setUsers,
+    stats,
+    users,
+  }
+}
 
+function toUserDetail(user: UserTableRow): UserDetail {
+  return {
+    id: user.id,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    email: user.email,
+    roles: user.roles,
+    status: user.status,
+    lastSignInAt: user.lastSignInAt,
+    createdAt: user.createdAt,
+  }
+}
+
+function useSelectedUser() {
+  const [selectedUser, setSelectedUser] = useState<UserDetail | null>(null)
+  const [detailOpen, setDetailOpen] = useState(false)
+  const [loadingActivity, setLoadingActivity] = useState(false)
+
+  const openUser = useCallback(async (user: UserTableRow) => {
+    setLoadingActivity(true)
+    setSelectedUser(toUserDetail(user))
+    setDetailOpen(true)
+    const result = await getUserActivity(user.id)
+    if (result.isSuccess && result.data) {
+      setSelectedUser(previous =>
+        previous
+          ? {
+              ...previous,
+              activitySummary: {
+                nexusConversations: result.data!.nexusConversations,
+                promptsUsed: result.data!.promptsUsed,
+                lastActivity: result.data!.lastActivity || undefined,
+              },
+            }
+          : null
+      )
+    }
+    setLoadingActivity(false)
+  }, [])
+  return {
+    detailOpen,
+    loadingActivity,
+    openUser,
+    selectedUser,
+    setDetailOpen,
+  }
+}
+
+function useUserMutations({
+  setStats,
+  setUsers,
+  toast,
+}: {
+  setStats: Dispatch<SetStateAction<UserStats | null>>
+  setUsers: Dispatch<SetStateAction<UserListItem[]>>
+  toast: Toast
+}) {
+  const [deleteDialog, setDeleteDialog] = useState(false)
+  const [userToDelete, setUserToDelete] = useState<UserTableRow | null>(null)
+  const requestDelete = useCallback((user: UserTableRow) => {
+    setUserToDelete(user)
+    setDeleteDialog(true)
+  }, [])
+  const confirmDelete = useCallback(async () => {
+    if (!userToDelete) return
+    try {
+      const result = await deleteUser(userToDelete.id)
+      if (!result.isSuccess) {
+        throw new Error(result.message || "Failed to delete user")
+      }
+      setUsers(previous =>
+        previous.filter(user => user.id !== userToDelete.id)
+      )
+      toast({ title: "Success", description: "User deleted successfully" })
+      const statsResult = await getUserStats()
+      if (statsResult.isSuccess && statsResult.data) {
+        setStats(statsResult.data)
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description:
+          error instanceof Error ? error.message : "Failed to delete user",
+        variant: "destructive",
+      })
+    } finally {
+      setDeleteDialog(false)
+      setUserToDelete(null)
+    }
+  }, [setStats, setUsers, toast, userToDelete])
+
+  const saveUser = useCallback(
+    async (user: UserDetail) => {
       try {
-        const result = await getUsers({
-          search: filters.search,
-          status: filters.status,
-          role: tab !== "all" ? tab : filters.role,
+        const result = await updateUser(user.id, {
+          firstName: user.firstName,
+          lastName: user.lastName,
+          roles: user.roles,
         })
-
-        if (result.isSuccess && result.data) {
-          setUsers(result.data)
-        } else if (!result.isSuccess) {
-          toast({
-            title: "Error",
-            description: result.message || "Failed to load users",
-            variant: "destructive",
-          })
+        if (!result.isSuccess) {
+          throw new Error(result.message || "Failed to update user")
         }
-      } catch {
-        // Error already shown via toast in else block above
-      } finally {
-        setLoading(false)
+        const persistedRoles = result.data?.roles ?? user.roles
+        setUsers(previous =>
+          previous.map(current =>
+            current.id === user.id
+              ? {
+                  ...current,
+                  firstName: user.firstName,
+                  lastName: user.lastName,
+                  roles: persistedRoles,
+                }
+              : current
+          )
+        )
+        toast({ title: "Success", description: "User updated successfully" })
+      } catch (error) {
+        toast({
+          title: "Error",
+          description:
+            error instanceof Error ? error.message : "Failed to update user",
+          variant: "destructive",
+        })
+        throw new Error("Failed to save user", { cause: error })
       }
     },
-    // toast is stable from useToast() and doesn't need to be in dependencies
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filters, loading]
+    [setUsers, toast]
   )
+  return {
+    confirmDelete,
+    deleteDialog,
+    requestDelete,
+    saveUser,
+    setDeleteDialog,
+    userToDelete,
+  }
+}
 
-  // Transform users for table
-  const tableUsers: UserTableRow[] = users.map((user) => ({
+function toTableUsers(users: UserListItem[]): UserTableRow[] {
+  return users.map(user => ({
     id: user.id,
     firstName: user.firstName,
     lastName: user.lastName,
@@ -251,174 +357,25 @@ export function UsersPageClient({
     lastSignInAt: user.lastSignInAt,
     createdAt: user.createdAt,
   }))
+}
 
-  // View user detail
-  const handleViewUser = useCallback(
-    async (user: UserTableRow) => {
-      setLoadingActivity(true)
-      setSelectedUser({
-        id: user.id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        email: user.email,
-        roles: user.roles,
-        status: user.status,
-        lastSignInAt: user.lastSignInAt,
-        createdAt: user.createdAt,
-      })
-      setDetailOpen(true)
-
-      // Load activity data on-demand (N+1 pattern)
-      // NOTE: This fetches activity data individually when opening user details.
-      // For Phase 1 MVP this is acceptable as it only triggers on user interaction.
-      // Future optimization: Prefetch activity data for visible users or implement
-      // pagination with activity data included in initial query.
-      const activityResult = await getUserActivity(user.id)
-      if (activityResult.isSuccess && activityResult.data) {
-        setSelectedUser((prev) =>
-          prev
-            ? {
-                ...prev,
-                activitySummary: {
-                  nexusConversations: activityResult.data!.nexusConversations,
-                  promptsUsed: activityResult.data!.promptsUsed,
-                  lastActivity: activityResult.data!.lastActivity || undefined,
-                },
-              }
-            : null
-        )
-      }
-      setLoadingActivity(false)
-    },
-    []
+export function UsersPageClient({
+  initialStats,
+  initialUsers,
+  initialRoles,
+}: UsersPageClientProps) {
+  const { toast } = useToast()
+  const userData = useUsersData(
+    { initialRoles, initialStats, initialUsers },
+    toast
   )
-
-  // Edit user
-  const handleEditUser = useCallback(async (user: UserTableRow) => {
-    // Open detail sheet in edit mode
-    // Use same logic as handleViewUser to fetch activity data
-    setLoadingActivity(true)
-    setSelectedUser({
-      id: user.id,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      email: user.email,
-      roles: user.roles,
-      status: user.status,
-      lastSignInAt: user.lastSignInAt,
-      createdAt: user.createdAt,
-    })
-    setDetailOpen(true)
-
-    // Load activity data (same as handleViewUser)
-    const activityResult = await getUserActivity(user.id)
-    if (activityResult.isSuccess && activityResult.data) {
-      setSelectedUser((prev) =>
-        prev
-          ? {
-              ...prev,
-              activitySummary: {
-                nexusConversations: activityResult.data!.nexusConversations,
-                promptsUsed: activityResult.data!.promptsUsed,
-                lastActivity: activityResult.data!.lastActivity || undefined,
-              },
-            }
-          : null
-      )
-    }
-    setLoadingActivity(false)
-  }, [])
-
-  // Delete user
-  const handleDeleteUser = useCallback((user: UserTableRow) => {
-    setUserToDelete(user)
-    setDeleteDialog(true)
-  }, [])
-
-  const confirmDelete = useCallback(async () => {
-    if (!userToDelete) return
-
-    try {
-      const result = await deleteUser(userToDelete.id)
-
-      if (!result.isSuccess) {
-        throw new Error(result.message || "Failed to delete user")
-      }
-
-      setUsers((prev) => prev.filter((u) => u.id !== userToDelete.id))
-      toast({
-        title: "Success",
-        description: "User deleted successfully",
-      })
-
-      // Refresh stats
-      const statsResult = await getUserStats()
-      if (statsResult.isSuccess && statsResult.data) {
-        setStats(statsResult.data)
-      }
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: error instanceof Error ? error.message : "Failed to delete user",
-        variant: "destructive",
-      })
-    } finally {
-      setDeleteDialog(false)
-      setUserToDelete(null)
-    }
-    // toast is stable from useToast() and doesn't need to be in dependencies
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userToDelete])
-
-  // Save user changes
-  const handleSaveUser = useCallback(
-    async (user: UserDetail) => {
-      try {
-        const result = await updateUser(user.id, {
-          firstName: user.firstName,
-          lastName: user.lastName,
-          roles: user.roles,
-        })
-
-        if (!result.isSuccess) {
-          throw new Error(result.message || "Failed to update user")
-        }
-
-        // Update local state from the ACTUAL post-write role set, not the
-        // submission — "unchecking" a group-managed role is a correct server
-        // no-op (the reconciler owns those rows), and trusting the submitted
-        // list would show a revocation that never happened (#1222 round 3).
-        const persistedRoles = result.data?.roles ?? user.roles
-        setUsers((prev) =>
-          prev.map((u) =>
-            u.id === user.id
-              ? {
-                  ...u,
-                  firstName: user.firstName,
-                  lastName: user.lastName,
-                  roles: persistedRoles,
-                }
-              : u
-          )
-        )
-
-        toast({
-          title: "Success",
-          description: "User updated successfully",
-        })
-      } catch (error) {
-        toast({
-          title: "Error",
-          description: error instanceof Error ? error.message : "Failed to update user",
-          variant: "destructive",
-        })
-        throw new Error("Failed to save user", { cause: error })
-      }
-    },
-    // toast is stable from useToast() and doesn't need to be in dependencies
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []
-  )
+  const selected = useSelectedUser()
+  const mutations = useUserMutations({
+    setStats: userData.setStats,
+    setUsers: userData.setUsers,
+    toast,
+  })
+  const tableUsers = toTableUsers(userData.users)
 
   return (
     <div className="p-6 space-y-6" data-testid="user-management-page">
@@ -433,7 +390,11 @@ export function UsersPageClient({
             </p>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={loadData}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void userData.loadData()}
+            >
               <IconRefresh className="h-4 w-4 mr-2" />
               Refresh
             </Button>
@@ -442,14 +403,17 @@ export function UsersPageClient({
       </div>
 
       {/* Stats Cards */}
-      {loadingStats ? (
+      {userData.loadingStats ? (
         <StatsCardsSkeleton />
-      ) : stats ? (
-        <StatsCards stats={stats} />
+      ) : userData.stats ? (
+        <StatsCards stats={userData.stats} />
       ) : null}
 
       {/* Role Tabs */}
-      <Tabs value={activeTab} onValueChange={handleTabChange}>
+      <Tabs
+        value={userData.activeTab}
+        onValueChange={userData.handleTabChange}
+      >
         <TabsList>
           <TabsTrigger value="all">All Users</TabsTrigger>
           <TabsTrigger value="administrator">Admins</TabsTrigger>
@@ -460,44 +424,52 @@ export function UsersPageClient({
 
       {/* Filters */}
       <UserFilters
-        roles={roles}
-        onFiltersChange={handleFiltersChange}
-        initialFilters={filters}
-        hideRoleFilter={activeTab !== "all"}
+        roles={userData.roles}
+        onFiltersChange={userData.handleFiltersChange}
+        initialFilters={userData.filters}
+        hideRoleFilter={userData.activeTab !== "all"}
       />
 
       {/* Data Table */}
       <UsersDataTable
         users={tableUsers}
-        onViewUser={handleViewUser}
-        onEditUser={handleEditUser}
-        onDeleteUser={handleDeleteUser}
-        loading={loading}
+        onViewUser={selected.openUser}
+        onEditUser={selected.openUser}
+        onDeleteUser={mutations.requestDelete}
+        loading={userData.loading}
       />
 
       {/* User Detail Sheet */}
       <UserDetailSheet
-        user={selectedUser}
-        open={detailOpen}
-        onOpenChange={setDetailOpen}
-        onSave={handleSaveUser}
-        roles={roles}
-        loadingActivity={loadingActivity}
+        user={selected.selectedUser}
+        open={selected.detailOpen}
+        onOpenChange={selected.setDetailOpen}
+        onSave={mutations.saveUser}
+        roles={userData.roles}
+        loadingActivity={selected.loadingActivity}
       />
 
       {/* Delete Confirmation Dialog */}
-      <AlertDialog open={deleteDialog} onOpenChange={setDeleteDialog}>
+      <AlertDialog
+        open={mutations.deleteDialog}
+        onOpenChange={mutations.setDeleteDialog}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete User</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete {userToDelete?.firstName}{" "}
-              {userToDelete?.lastName}? This action cannot be undone.
+              Are you sure you want to delete{" "}
+              {mutations.userToDelete?.firstName}{" "}
+              {mutations.userToDelete?.lastName}? This action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={confirmDelete}>Delete</AlertDialogAction>
+            <AlertDialogAction
+              onClick={() => void mutations.confirmDelete()}
+            >
+              Delete
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
