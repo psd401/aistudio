@@ -6,9 +6,21 @@
  * that reach winston. A forged newline in a logged value lets an attacker
  * append a whole fake log line (e.g. a fabricated audit entry), which is the
  * actual impact behind the alert.
+ *
+ * @jest-environment node
  */
 
-import { sanitizeForLogging, sanitizeLogMessage } from '../logger'
+// jest.setup.js installs a global `jest.mock('@/lib/logger', ...)`. That stub
+// exposes `sanitizeForLogging` as an identity function and does not export
+// `sanitizeLogMessage` at all, so under the default module registry this suite
+// tests nothing: the message-path cases throw "not a function" and the
+// metadata-path cases pass or fail on the stub rather than on the sanitizer.
+// These tests only mean something against the real implementation, so bind to
+// it explicitly. `@jest-environment node` above is required with it — the real
+// module pulls in winston, which needs Node globals the jsdom environment does
+// not provide.
+const { sanitizeForLogging, sanitizeLogMessage } =
+  jest.requireActual<typeof import('../logger')>('../logger')
 
 const NUL = String.fromCharCode(0)
 const BEL = String.fromCharCode(7)
