@@ -17,13 +17,24 @@ type AsyncLocalStorageType<T> = {
 
 let asyncLocalStorageModule: AsyncLocalStorageType<LogContext> | null = null
 
+type AsyncHooksModule = {
+  AsyncLocalStorage: new <T>() => AsyncLocalStorageType<T>
+}
+
+type ProcessWithBuiltinModules = NodeJS.Process & {
+  getBuiltinModule?: (specifier: string) => unknown
+}
+
 // Only import in Node.js runtime (not Edge)
 // EdgeRuntime is defined in Edge Runtime environments
 if (typeof (globalThis as { EdgeRuntime?: unknown }).EdgeRuntime === 'undefined') {
   try {
-    // Dynamic require to avoid bundling in Edge Runtime
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { AsyncLocalStorage } = require('node:async_hooks')
+    // Resolve dynamically so Edge bundles do not include node:async_hooks.
+    const getBuiltinModule =
+      (process as ProcessWithBuiltinModules).getBuiltinModule
+    const { AsyncLocalStorage } = getBuiltinModule?.(
+      'node:async_hooks'
+    ) as AsyncHooksModule
     asyncLocalStorageModule = new AsyncLocalStorage() as AsyncLocalStorageType<LogContext>
   } catch {
     // Silently fail - Edge Runtime or environment without async_hooks
@@ -37,92 +48,108 @@ function sanitizeForLogger(data: unknown): unknown {
   return sanitizeForLoggerInternal(data, 10, new WeakSet<object>())
 }
 
+function sanitizeLoggerString(value: string): string {
+  return value
+    .replace(/[^\u0020-\u007E]/g, '')
+    .replace(/[\t\n\r]/g, ' ')
+    .substring(0, 1000)
+}
+
+const UNSAFE_PROPERTY_NAMES = new Set([
+  '__proto__',
+  'constructor',
+  'prototype',
+])
+
+function cleanPropertyName(value: string): string | null {
+  const clean = String(value).replace(/[^\w.-]/g, '_')
+  if (!clean || UNSAFE_PROPERTY_NAMES.has(clean)) return null
+  return clean
+}
+
+function markSeen(value: object, seen: WeakSet<object>): boolean {
+  if (seen.has(value)) return false
+  seen.add(value)
+  return true
+}
+
+function sanitizeLoggerError(
+  error: Error,
+  maxDepth: number,
+  seen: WeakSet<object>
+): Record<string, unknown> {
+  const safeError: Record<string, unknown> = {
+    name: sanitizeForLoggerInternal(error.name, maxDepth - 1, seen),
+    message: sanitizeForLoggerInternal(error.message, maxDepth - 1, seen),
+    stack:
+      typeof error.stack === "string"
+        ? sanitizeForLoggerInternal(error.stack, maxDepth - 1, seen)
+        : "",
+  }
+  const customProps = new Map<string, unknown>()
+  for (const key of Object.keys(error)) {
+    if (key === 'cause' || key in safeError) continue
+    const safeKey = cleanPropertyName(key)
+    if (!safeKey) continue
+    const value = (error as unknown as Record<string, unknown>)[key]
+    customProps.set(
+      safeKey,
+      sanitizeForLoggerInternal(value, maxDepth - 1, seen)
+    )
+  }
+  if (customProps.size > 0) {
+    safeError.customProperties = Object.fromEntries(customProps)
+  }
+  return safeError
+}
+
+function sanitizeLoggerObject(
+  data: object,
+  maxDepth: number,
+  seen: WeakSet<object>
+): unknown {
+  if (!markSeen(data, seen)) return '[Circular]'
+  if (data instanceof Error) {
+    return sanitizeLoggerError(data, maxDepth, seen)
+  }
+  const propMap = new Map<string, unknown>()
+  for (const [key, value] of Object.entries(data)) {
+    const cleanKey = cleanPropertyName(key)
+    if (!cleanKey) continue
+    propMap.set(
+      cleanKey,
+      sanitizeForLoggerInternal(value, maxDepth - 1, seen)
+    )
+  }
+  return Object.fromEntries(propMap)
+}
+
+function sanitizeLoggerArray(
+  data: unknown[],
+  maxDepth: number,
+  seen: WeakSet<object>
+): unknown {
+  if (!markSeen(data, seen)) return '[Circular]'
+  return data.map(
+    (item) => sanitizeForLoggerInternal(item, maxDepth - 1, seen)
+  )
+}
+
 // Private recursive implementation - WeakSet shared across all recursive calls
 function sanitizeForLoggerInternal(data: unknown, maxDepth: number, seen: WeakSet<object>): unknown {
-  if (data === null || data === undefined) {
-    return data
-  }
-
-  if (typeof data === "string") {
-    // CodeQL-compliant sanitization: explicit character allowlisting
-    const safe = data
-      .replace(/[^\u0020-\u007E]/g, '') // Only allow printable ASCII characters (space to tilde)
-      .replace(/[\t\n\r]/g, ' ')    // Replace line breaks with spaces
-      .substring(0, 1000)           // Explicit length limit to prevent log bloat
-    return safe
-  }
-
+  if (data === null || data === undefined) return data
+  if (typeof data === "string") return sanitizeLoggerString(data)
   if (typeof data === "number" || typeof data === "boolean") {
     // Create new primitives to break taint flow
     return typeof data === "number" ? Number(data) : Boolean(data)
   }
-
-  // CRITICAL: Check depth limit BEFORE recursion to prevent stack overflow
-  if (maxDepth <= 0) {
-    return '[Max Depth Reached]'
-  }
-
+  if (maxDepth <= 0) return '[Max Depth Reached]'
   if (Array.isArray(data)) {
-    // CRITICAL: Circular reference detection for arrays
-    if (seen.has(data)) {
-      return '[Circular]'
-    }
-    seen.add(data)
-    // Create a new array with sanitized elements
-    return data.map(item => sanitizeForLoggerInternal(item, maxDepth - 1, seen))
+    return sanitizeLoggerArray(data, maxDepth, seen)
   }
-
-  // Enhanced: Sanitize Error objects so message, name, and stack are safe
   if (typeof data === "object") {
-    // CRITICAL: Circular reference detection for objects
-    if (seen.has(data)) {
-      return '[Circular]'
-    }
-    seen.add(data)
-
-    if (data instanceof Error) {
-      // Make a new plain object with sanitized message/name/stack
-      // DON'T recurse into Error.cause to prevent infinite error chains
-      const safeError: Record<string, unknown> = {}
-      safeError.name = sanitizeForLoggerInternal(data.name, maxDepth - 1, seen)
-      safeError.message = sanitizeForLoggerInternal(data.message, maxDepth - 1, seen)
-      safeError.stack = typeof data.stack === "string" ? sanitizeForLoggerInternal(data.stack, maxDepth - 1, seen) : ""
-      // Use Map to avoid any prototype pollution risks
-      const customProps = new Map<string, unknown>()
-      for (const key of Object.keys(data)) {
-        // Skip 'cause' property to prevent infinite error chains
-        if (key === 'cause') {
-          continue
-        }
-        if (!(key in safeError)) {
-          const safeKey = String(key).replace(/[^\w.-]/g, '_')
-          const handleNestedBranch1 = () => {
-            if (safeKey && safeKey !== '__proto__' && safeKey !== 'constructor' && safeKey !== 'prototype') {
-            customProps.set(safeKey, sanitizeForLoggerInternal((data as unknown as Record<string, unknown>)[key], maxDepth - 1, seen))
-          }
-          }
-          handleNestedBranch1()
-        }
-      }
-      // Convert Map to plain object safely
-      if (customProps.size > 0) {
-        safeError.customProperties = Object.fromEntries(customProps)
-      }
-      return safeError
-    } else {
-      // Use Map to avoid prototype pollution completely
-      const propMap = new Map<string, unknown>()
-      for (const [key, value] of Object.entries(data)) {
-        const cleanKey = String(key).replace(/[^\w.-]/g, '_')
-        if (cleanKey && cleanKey !== '__proto__' && cleanKey !== 'constructor' && cleanKey !== 'prototype') {
-          propMap.set(cleanKey, sanitizeForLoggerInternal(value, maxDepth - 1, seen))
-        }
-      }
-      return Object.fromEntries(propMap)
-    }
+    return sanitizeLoggerObject(data, maxDepth, seen)
   }
-
-  // Fallback for unknown types - create new safe string
   return String(data).slice(0, 100)
 }
 
@@ -169,69 +196,71 @@ function filterSensitiveData(data: unknown): unknown {
   return filterSensitiveDataInternal(data, 10, new WeakSet<object>())
 }
 
+function filterSensitiveString(value: string): string {
+  let filtered = value
+  for (const pattern of SENSITIVE_PATTERNS) {
+    filtered = filtered.replace(pattern, "[REDACTED]")
+  }
+  return filtered.replace(EMAIL_PATTERN, "***@$1")
+}
+
+const SENSITIVE_KEY_FRAGMENTS = [
+  "password",
+  "token",
+  "secret",
+  "apikey",
+  "api_key",
+]
+
+function filterSensitiveValue(
+  key: string,
+  value: unknown,
+  maxDepth: number,
+  seen: WeakSet<object>
+): unknown {
+  const lowerKey = key.toLowerCase()
+  if (SENSITIVE_KEY_FRAGMENTS.some((fragment) => lowerKey.includes(fragment))) {
+    return "[REDACTED]"
+  }
+  if (lowerKey.includes("email")) {
+    return typeof value === "string"
+      ? value.replace(EMAIL_PATTERN, "***@$1")
+      : value
+  }
+  return filterSensitiveDataInternal(value, maxDepth - 1, seen)
+}
+
+function filterSensitiveObject(
+  data: object,
+  maxDepth: number,
+  seen: WeakSet<object>
+): unknown {
+  if (!markSeen(data, seen)) return '[Circular]'
+  const propMap = new Map<string, unknown>()
+  for (const [key, value] of Object.entries(data)) {
+    const cleanKey = cleanPropertyName(key)
+    if (!cleanKey) continue
+    propMap.set(
+      cleanKey,
+      filterSensitiveValue(cleanKey, value, maxDepth, seen)
+    )
+  }
+  return Object.fromEntries(propMap)
+}
+
 // Private recursive implementation - WeakSet shared across all recursive calls
 function filterSensitiveDataInternal(data: unknown, maxDepth: number, seen: WeakSet<object>): unknown {
-  if (typeof data === "string") {
-    let filtered = data
-    // Filter out sensitive patterns
-    for (const pattern of SENSITIVE_PATTERNS) {
-      filtered = filtered.replace(pattern, "[REDACTED]")
-    }
-    // Mask email addresses (keep domain for debugging)
-    filtered = filtered.replace(EMAIL_PATTERN, "***@$1")
-    return filtered
-  }
-
-  // CRITICAL: Check depth limit to prevent stack overflow
-  if (maxDepth <= 0) {
-    return '[Max Depth Reached]'
-  }
-
+  if (typeof data === "string") return filterSensitiveString(data)
+  if (maxDepth <= 0) return '[Max Depth Reached]'
   if (Array.isArray(data)) {
-    // CRITICAL: Circular reference detection
-    if (seen.has(data)) {
-      return '[Circular]'
-    }
-    seen.add(data)
-    return data.map(item => filterSensitiveDataInternal(item, maxDepth - 1, seen))
+    if (!markSeen(data, seen)) return '[Circular]'
+    return data.map(
+      (item) => filterSensitiveDataInternal(item, maxDepth - 1, seen)
+    )
   }
-
   if (data && typeof data === "object") {
-    // CRITICAL: Circular reference detection
-    if (seen.has(data)) {
-      return '[Circular]'
-    }
-    seen.add(data)
-
-    const propMap = new Map<string, unknown>()
-    for (const [key, value] of Object.entries(data)) {
-      const cleanKey = String(key).replace(/[^\w.-]/g, '_')
-      if (!cleanKey || cleanKey === '__proto__' || cleanKey === 'constructor' || cleanKey === 'prototype') {
-        continue
-      }
-
-      const lowerKey = cleanKey.toLowerCase()
-      let filteredValue: unknown
-
-      if (lowerKey.includes("password") ||
-          lowerKey.includes("token") ||
-          lowerKey.includes("secret") ||
-          lowerKey.includes("apikey") ||
-          lowerKey.includes("api_key")) {
-        filteredValue = "[REDACTED]"
-      } else if (lowerKey.includes("email")) {
-        filteredValue = typeof value === "string"
-          ? value.replace(EMAIL_PATTERN, "***@$1")
-          : value
-      } else {
-        filteredValue = filterSensitiveDataInternal(value, maxDepth - 1, seen)
-      }
-
-      propMap.set(cleanKey, filteredValue)
-    }
-    return Object.fromEntries(propMap)
+    return filterSensitiveObject(data, maxDepth, seen)
   }
-
   return data
 }
 
