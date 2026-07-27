@@ -6,19 +6,51 @@
  * that reach winston. A forged newline in a logged value lets an attacker
  * append a whole fake log line (e.g. a fabricated audit entry), which is the
  * actual impact behind the alert.
- *
- * @jest-environment node
  */
 
-// jest.setup.js installs a global `jest.mock('@/lib/logger', ...)`. That stub
-// exposes `sanitizeForLogging` as an identity function and does not export
-// `sanitizeLogMessage` at all, so under the default module registry this suite
-// tests nothing: the message-path cases throw "not a function" and the
-// metadata-path cases pass or fail on the stub rather than on the sanitizer.
-// These tests only mean something against the real implementation, so bind to
-// it explicitly. `@jest-environment node` above is required with it — the real
-// module pulls in winston, which needs Node globals the jsdom environment does
-// not provide.
+// The subjects here are pure functions, but reaching them means loading the
+// real lib/logger.ts, which takes two steps.
+//
+// 1. jest.setup.js installs a repo-wide `jest.mock('@/lib/logger', ...)`. That
+//    stub exposes `sanitizeForLogging` as an identity function and does not
+//    export `sanitizeLogMessage` or `sanitizeLogMetadata` at all, so under the
+//    default registry this suite tests nothing — the message-path cases throw
+//    "not a function" and the metadata-path cases assert against a passthrough.
+//    jest.requireActual bypasses the registry for this module only.
+//
+// 2. requireActual still resolves the module's own imports normally, and
+//    logger.ts pulls in winston and nanoid purely to build the singleton
+//    logger — none of which any assertion below touches. Stubbing them keeps
+//    this suite on the default jsdom environment: switching to
+//    `@jest-environment node` makes nanoid resolve to its ESM entry, which
+//    next/jest does not transform inside node_modules ("Cannot use import
+//    statement outside a module"), and the winston load would then depend on
+//    Node globals jsdom omits. Only the module-load surface is stubbed.
+jest.mock('nanoid', () => ({ nanoid: () => 'test-request-id' }))
+
+jest.mock('winston', () => {
+  const noopFormat = () => ({})
+  const format = {
+    printf: noopFormat,
+    combine: noopFormat,
+    timestamp: noopFormat,
+    errors: noopFormat,
+    colorize: noopFormat,
+    json: noopFormat,
+  }
+  const winstonStub = {
+    createLogger: () => ({
+      debug: jest.fn(),
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+    }),
+    format,
+    transports: { Console: class Console {} },
+  }
+  return { __esModule: true, default: winstonStub, ...winstonStub }
+})
+
 const { sanitizeForLogging, sanitizeLogMessage, sanitizeLogMetadata } =
   jest.requireActual<typeof import('../logger')>('../logger')
 
