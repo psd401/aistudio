@@ -40,7 +40,19 @@ export interface RateLimitResult {
 // Constants
 // ============================================
 
-const DEFAULT_RPM = 60;
+// Default requests-per-minute for principals without a per-key configuration
+// (session auth, OAuth clients, api keys with no rateLimitRpm row). Overridable
+// via API_RATE_LIMIT_DEFAULT_RPM for environments whose traffic shape is not
+// production-like: the local E2E harness (scripts/test/e2e-local.sh) drives one
+// shared test user far harder than any human, and a warm dev server runs the
+// suite fast enough to trip the production budget. Unset/invalid → 60.
+const DEFAULT_RPM = (() => {
+  const parsed = Number.parseInt(
+    process.env.API_RATE_LIMIT_DEFAULT_RPM ?? "",
+    10
+  );
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
+})();
 const WINDOW_MS = 60 * 1000; // 1 minute sliding window
 
 // ============================================

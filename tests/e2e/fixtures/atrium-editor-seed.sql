@@ -24,6 +24,17 @@
 
 -- 1. The editor document -----------------------------------------------------
 
+-- Reset the editor doc's accumulated collaborative state so every run starts
+-- from the pristine baseline. The specs that drive this doc (editor-rail,
+-- comments/track-changes) APPEND lines and comment/suggestion marks on every
+-- run — and the collab server persists them — so without this reset the Y.Doc
+-- accumulates stale marks across runs until the comments spec wedges (the
+-- comment composer's selection-driven enablement flaps and Fill times out).
+-- The collab server re-initializes doc state on first connect, which is the
+-- baseline these specs were written against.
+DELETE FROM atrium_doc_comments WHERE object_id = 'a7100000-0000-4000-8000-000000006060';
+DELETE FROM atrium_doc_state    WHERE object_id = 'a7100000-0000-4000-8000-000000006060';
+
 INSERT INTO content_objects (
   id, kind, title, slug, owner_user_id, created_by_actor, visibility_level, status
 )
