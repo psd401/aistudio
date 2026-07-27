@@ -10,7 +10,9 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "moduleResolution": "node"
+    "moduleResolution": "node",
+    "inlineSourceMap": true,
+    "inlineSources": true
   },
   "include": ["index.ts"],
   "exclude": ["node_modules"]
