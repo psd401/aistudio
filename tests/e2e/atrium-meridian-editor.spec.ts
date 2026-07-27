@@ -21,12 +21,10 @@ import { mkdirSync } from "node:fs";
  * PREREQUISITES (why this is gated) — same as atrium-editor-rail.spec.ts:
  *  - Host dev server via `bun run server.ts` on :3100 (the collab WS lives in the
  *    custom server) with PLAYWRIGHT_AUTH_ENABLED=true.
- *  - Seed the document: tests/e2e/fixtures/atrium-editor-seed.sql (owned by the
- *    admin e2e-test-user, so the minted session gets canEdit=true).
+ *  - Seeded admin user: this spec creates an isolated document through the
+ *    authenticated content API and deletes it after the presence check.
  */
 
-const OBJ_ID =
-  process.env.ATRIUM_EDITOR_E2E_ID ?? "a7100000-0000-4000-8000-000000006060";
 const SHOT_DIR = "docs/verification/atrium-meridian";
 
 test.describe("Atrium Meridian editor (authenticated)", () => {
@@ -46,9 +44,26 @@ test.describe("Atrium Meridian editor (authenticated)", () => {
       viewport: { width: 1440, height: 960 },
     });
     await authenticateContext(context); // default admin = the seeded doc's owner
+    let objectId: string | undefined;
     try {
       const page = await context.newPage();
-      await page.goto(`/atrium/${OBJ_ID}/edit`);
+      const runToken = Date.now();
+      const created = await page.request.post("/api/v1/content", {
+        data: {
+          kind: "document",
+          title: `Meridian editor probe ${runToken}`,
+          body: `# Meridian editor probe\n\nSeed ${runToken}`,
+          bodyFormat: "markdown",
+        },
+      });
+      expect(created.status()).toBe(201);
+      objectId = ((await created.json()) as { data?: { id?: string } }).data?.id;
+      expect(objectId).toBeTruthy();
+      if (!objectId) {
+        throw new Error("Authenticated content creation returned no object id");
+      }
+
+      await page.goto(`/atrium/${objectId}/edit`);
 
       // The Meridian sheet + desk + topbar rendered.
       await expect(page.locator(".mer-editor-desk")).toBeVisible({ timeout: 60000 });
@@ -84,9 +99,9 @@ test.describe("Atrium Meridian editor (authenticated)", () => {
       await page.keyboard.press("End");
       await page.keyboard.press("Enter");
       await page.keyboard.type(marker);
-      for (let i = 0; i < marker.length; i++) {
-        await page.keyboard.press("Shift+ArrowLeft");
-      }
+      const markerText = pm.getByText(marker, { exact: true });
+      await expect(markerText).toBeVisible({ timeout: 15000 });
+      await markerText.selectText();
 
       // The floating dark formatting toolbar appears over the selection.
       const bubble = page.locator('[data-testid="editor-bubble-menu"]');
@@ -105,14 +120,18 @@ test.describe("Atrium Meridian editor (authenticated)", () => {
       await expect(boldBtn).toHaveAttribute("aria-pressed", "true", {
         timeout: 15000,
       });
-      await expect(pm.locator("strong")).not.toHaveCount(0, { timeout: 15000 });
+      await expect(pm.locator("strong", { hasText: marker })).toHaveCount(1, {
+        timeout: 15000,
+      });
 
       const underlineBtn = bubble.locator('button[aria-label="Underline"]');
       await underlineBtn.click();
       await expect(underlineBtn).toHaveAttribute("aria-pressed", "true", {
         timeout: 15000,
       });
-      await expect(pm.locator("u")).not.toHaveCount(0, { timeout: 15000 });
+      await expect(pm.locator("u", { hasText: marker })).toHaveCount(1, {
+        timeout: 15000,
+      });
 
       await page.screenshot({
         path: `${SHOT_DIR}/02-editor-sheet.png`,
@@ -126,7 +145,7 @@ test.describe("Atrium Meridian editor (authenticated)", () => {
       });
       await authenticateContext(context2);
       const page2 = await context2.newPage();
-      await page2.goto(`/atrium/${OBJ_ID}/edit`);
+      await page2.goto(`/atrium/${objectId}/edit`);
       await expect(page2.locator(".ProseMirror")).toHaveAttribute(
         "contenteditable",
         "true",
@@ -149,6 +168,13 @@ test.describe("Atrium Meridian editor (authenticated)", () => {
         await context2.close();
       }
     } finally {
+      if (objectId) {
+        try {
+          await context.request.delete(`/api/v1/content/${objectId}`);
+        } catch {
+          // Best-effort cleanup must not mask a formatting or presence failure.
+        }
+      }
       await context.close();
     }
   });
