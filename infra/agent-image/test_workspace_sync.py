@@ -533,5 +533,55 @@ class PeriodicPushLifecycleTests(unittest.TestCase):
             self.assertFalse(t1.is_alive(), "thread still alive immediately after stop_periodic_push() returned")
 
 
+class RestoreNeverClobbersTests(unittest.TestCase):
+    """The 2026-07-27 data-loss regression.
+
+    A restore that cannot faithfully reproduce S3 must NOT be followed by a
+    push. The original failure chain was:
+
+      restore raised (MAX_SYNC_FILES=1,000 vs a ~5,000-file workspace)
+        -> container kept the image's default IDENTITY.md / MEMORY.md
+        -> periodic push uploaded those defaults over the real files in S3
+        -> the agent lost its name and all memory
+
+    A failed READ became a destructive WRITE.
+    """
+
+    def test_backstops_sit_above_real_workspaces(self):
+        # Two live prefixes held ~5,000 objects when #1353 capped restore at
+        # 1,000 and push traversal at 4,000. Any backstop below real usage is
+        # a silent-truncation bug, not a safety feature.
+        self.assertGreaterEqual(workspace_sync.MAX_SYNC_FILES, 100_000)
+        self.assertGreaterEqual(workspace_sync.MAX_SYNC_ENTRIES, 100_000)
+
+    def test_incomplete_restore_raises_a_typed_error(self):
+        # The caller distinguishes "incomplete" from other failures so it can
+        # suppress the push specifically.
+        self.assertTrue(
+            issubclass(workspace_sync.WorkspaceRestoreIncomplete, RuntimeError)
+        )
+
+    def test_wrapper_gates_push_on_a_successful_restore(self):
+        # Asserted against the executable source: the push must be guarded by
+        # the hydration flag, not started unconditionally.
+        import re
+        src = open(
+            os.path.join(os.path.dirname(__file__), "agentcore_wrapper.py"),
+            encoding="utf-8",
+        ).read()
+        code = re.sub(r"#[^\n]*", "", src)
+        self.assertIn("_workspace_prefix_hydrated", code)
+        guarded = re.search(
+            r"if\s+workspace_prefix\s+and\s+_workspace_prefix_hydrated\s*:\s*\n"
+            r"\s*workspace_sync\.start_periodic_push",
+            code,
+        )
+        self.assertIsNotNone(
+            guarded,
+            "start_periodic_push must be gated on a successful restore — an "
+            "ungated push overwrites the remote workspace with image defaults",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
