@@ -181,6 +181,15 @@ describe("unified content migration reconciliation", () => {
         ...readyInput,
         migrationMetrics: {
           ...readyInput.migrationMetrics,
+          excluded: 3,
+        },
+      }),
+    ).toEqual({ ready: true, blockers: [] });
+    expect(
+      assessContentRetirementReadiness({
+        ...readyInput,
+        migrationMetrics: {
+          ...readyInput.migrationMetrics,
           mismatched: 1,
           verified: 2,
         },

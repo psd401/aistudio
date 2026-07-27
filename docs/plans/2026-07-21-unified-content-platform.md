@@ -1345,6 +1345,28 @@ missing-object recovery, explicit eligibility, complete artifact hashing,
 per-run reconciliation bookkeeping, and Google text normalization address
 those defects with unit, PostgreSQL smoke, and CDK assertions.
 
+A requested full Claude review of the review-ready diff then found three
+additional recovery defects before merge: migration 159 omitted generations
+that had written every vector but failed during atomic activation; replaying a
+preexisting object-backed canonical artifact did not backfill its missing
+SHA-256; and full rollback counted explicitly excluded sources as unfinished
+while never selecting them. The corrected implementation fences and releases
+activation-only failures, conditionally backfills only null artifact hashes,
+and completes rollback with excluded-source metrics. The real PostgreSQL smoke
+now applies migrations 159 and 160 twice, exercises the activation-only handoff,
+replays a legacy object-backed artifact, and completes an excluded-only rollback
+without invoking object storage.
+
+The follow-up security pass found that the first SHA repair bound a digest only
+to an artifact row, not its immutable payload coordinates, and that the route
+gate/finalizer still counted explicitly excluded connectors in their
+verification denominator. Publication replay now rejects item, processor,
+object-key, inline-text, or existing-hash drift; object-backed writes carry an
+S3 SHA-256 checksum; and both retirement entry points share the dashboard's
+fail-closed exclusion rules. PostgreSQL smoke covers mismatched object-key
+rejection before hash repair, while unit guards keep both retirement queries
+aligned.
+
 Live dev evidence now records 45 eligible sources, 44 migrated and verified,
 zero failed or unapproved mismatches, three explicitly excluded unsupported
 connector rows, and one genuinely missing Nexus source. A reversible rollback

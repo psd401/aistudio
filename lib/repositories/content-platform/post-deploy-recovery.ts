@@ -163,11 +163,11 @@ export async function releasePostDeployRecoveryJobs(
 
 /**
  * Rearm exhausted embedding generations only after the previous unbounded
- * embedding worker has drained. Migration 157 fences known connection-storm
+ * embedding worker has drained. Migration 159 fences known connection-storm
  * failures with the maximum attempt count and a timestamp; old workers cannot
  * claim them. The replacement scheduler clears that fence after the same
  * 20-minute handoff used by processing jobs, then the normal bounded recovery
- * path redispatches only missing vectors.
+ * path redispatches missing vectors or an activation-only generation.
  */
 export async function releasePostDeployEmbeddingGenerations(
   options: ReleasePostDeployRecoveryOptions = {}
@@ -193,14 +193,6 @@ export async function releasePostDeployEmbeddingGenerations(
               SELECT 1
               FROM repository_item_chunks chunk
               WHERE chunk.index_generation_id = generation.id
-                AND (
-                  chunk.embedding IS NULL
-                  OR (
-                    generation.visual_embedding_model IS NOT NULL
-                    AND chunk.modality IN ('image', 'video')
-                    AND chunk.visual_embedding IS NULL
-                  )
-                )
             )
             AND NOT EXISTS (
               SELECT 1

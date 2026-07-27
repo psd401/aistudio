@@ -1548,32 +1548,40 @@ async function processRollbackBatch(
           SELECT COUNT(*)::integer AS count
           FROM repository_migration_items
           WHERE origin_run_id = ${parentRunId}::uuid
-            AND status <> 'rolled_back'
+            AND status NOT IN ('rolled_back', 'excluded')
         `),
         "contentMigration.rollbackRemaining",
       ),
     )[0]?.count ?? 0;
   if (remaining === 0) {
-    const total =
-      toPgRows<{ count: number }>(
+    const totals =
+      toPgRows<{ rolled_back: number; excluded: number }>(
         await executeQuery(
           (db) =>
             db.execute(sql`
-            SELECT COUNT(*)::integer AS count
+            SELECT
+              COUNT(*) FILTER (
+                WHERE status = 'rolled_back'
+              )::integer AS rolled_back,
+              COUNT(*) FILTER (
+                WHERE status = 'excluded'
+              )::integer AS excluded
             FROM repository_migration_items
             WHERE origin_run_id = ${parentRunId}::uuid
-              AND status = 'rolled_back'
           `),
           "contentMigration.rollbackTotal",
         ),
-      )[0]?.count ?? rolledBack;
+      )[0];
     await executeQuery(
       (db) =>
         db
           .update(repositoryMigrationRuns)
           .set({
             status: "rolled_back",
-            metrics: { rolledBack: total },
+            metrics: {
+              rolledBack: totals?.rolled_back ?? rolledBack,
+              excluded: totals?.excluded ?? 0,
+            },
             finishedAt: new Date(),
             updatedAt: new Date(),
           })

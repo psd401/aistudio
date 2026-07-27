@@ -168,13 +168,16 @@ describe("unified-content embedding concurrency recovery migration", () => {
     expect(migration).toContain("version.object_key ~ (");
   });
 
-  it("fences only the latest incomplete failed generation until the bounded worker drains", () => {
+  it("fences the latest failed generation even when only activation remains", () => {
     expect(migration).toContain("embedding_recovery_queued_at = now()");
     expect(migration).toContain("embedding_recovery_attempts = 3");
     expect(migration).toContain(
       "'embedding-concurrency-v1: '"
     );
-    expect(migration).toContain("chunk.embedding IS NULL");
+    expect(migration).toContain(
+      "WHERE chunk.index_generation_id = generation.id"
+    );
+    expect(migration).not.toContain("chunk.embedding IS NULL");
     expect(migration).toContain("newer_generation.status IN ('building', 'active', 'failed')");
   });
 });

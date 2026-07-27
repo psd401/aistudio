@@ -30,6 +30,7 @@ import {
   repositoryItemChunks,
   repositoryItems,
   repositoryItemVersions,
+  repositoryMigrationItems,
   repositoryMigrationRuns,
   repositoryProcessingJobs,
   repositoryUploadSessions,
@@ -60,6 +61,7 @@ import {
   publishDocumentVersion,
   publishPdfVersion,
   POST_DEPLOY_RECOVERY_MARKER,
+  processNextRepositoryMigrationBatch,
   recordRepositoryProcessingFailure,
   recordRepositorySecurityBlock,
   reconcileRepositoryProcessingDlqMessage,
@@ -72,7 +74,9 @@ import {
   retryCanonicalRepositoryItem,
   segmentPdfPages,
   sourceRevisionForObjectKey,
+  startRepositoryRollbackRun,
   updateRepositoryMigrationRunCursor,
+  type RepositoryMigrationStorage,
   type RepositoryUploadStorage,
 } from "@/lib/repositories/content-platform";
 import { keywordSearch } from "@/lib/repositories/search-service";
@@ -119,6 +123,17 @@ const embeddingConcurrencyRecoveryStatements =
     .split(/;\s*(?:\r?\n|$)/)
     .map((statement) => statement.trim())
     .filter((statement) => statement.length > 0);
+const migrationSourceEligibilitySql = readFileSync(
+  resolve(
+    process.cwd(),
+    "infra/database/schema/160-unified-content-migration-source-eligibility.sql"
+  ),
+  "utf8"
+);
+const migrationSourceEligibilityStatements = migrationSourceEligibilitySql
+  .split(/;\s*(?:\r?\n|$)/)
+  .map((statement) => statement.trim())
+  .filter((statement) => statement.length > 0);
 
 async function applyPostDeployHandoff(context: string): Promise<void> {
   for (const [index, statement] of postDeployHandoffStatements.entries()) {
@@ -152,12 +167,30 @@ async function applyEmbeddingConcurrencyRecovery(
   }
 }
 
+async function applyMigrationSourceEligibility(context: string): Promise<void> {
+  for (const [
+    index,
+    statement,
+  ] of migrationSourceEligibilityStatements.entries()) {
+    await executeQuery(
+      (db) => db.execute(sql.raw(statement)),
+      `${context}.${index + 1}`
+    );
+  }
+}
+
 // The deployment always migrates the database before the application or worker
 // loads the expanded Drizzle schema. Reproduce that order in the standalone
 // smoke, whose local database may predate this branch.
 await applyPostDeployHandoff("smoke.unifiedContent.ensurePostDeploySchema");
 await applyArtifactStateRecovery(
   "smoke.unifiedContent.ensureArtifactRecoverySchema"
+);
+await applyMigrationSourceEligibility(
+  "smoke.unifiedContent.ensureMigrationSourceEligibility"
+);
+await applyMigrationSourceEligibility(
+  "smoke.unifiedContent.reapplyMigrationSourceEligibility"
 );
 const font = await pdf.embedFont(StandardFonts.Helvetica);
 for (const text of [
@@ -271,6 +304,103 @@ try {
           .delete(repositoryMigrationRuns)
           .where(eq(repositoryMigrationRuns.id, cursorRun.id)),
       "smoke.unifiedContent.cleanupCursorRun"
+    );
+  }
+
+  const [excludedRollbackParent] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryMigrationRuns)
+        .values({
+          mode: "backfill",
+          status: "completed_with_errors",
+          requestedBy: owner.id,
+          sourceKinds: ["assistant_pdf_job"],
+          snapshot: {
+            counts: { assistant_pdf_job: 1 },
+            maximumIds: { assistant_pdf_job: 1 },
+          },
+          metrics: { discovered: 1, excluded: 1 },
+          recoveryWindowEndsAt: new Date(Date.now() + 60_000),
+          startedAt: new Date(),
+          finishedAt: new Date(),
+        })
+        .returning({ id: repositoryMigrationRuns.id }),
+    "smoke.unifiedContent.createExcludedRollbackParent"
+  );
+  assert.ok(excludedRollbackParent);
+  let excludedRollbackRunId: string | null = null;
+  try {
+    await executeQuery(
+      (db) =>
+        db.insert(repositoryMigrationItems).values({
+          runId: excludedRollbackParent.id,
+          originRunId: excludedRollbackParent.id,
+          sourceKind: "assistant_pdf_job",
+          sourceId: Date.now(),
+          ownerId: owner.id,
+          status: "excluded",
+          lastErrorCode: "MIGRATION_SOURCE_EXCLUDED",
+          metadata: {
+            exclusionReason: "unsupported_connector_source",
+            excludedAt: new Date().toISOString(),
+          },
+        }),
+      "smoke.unifiedContent.createExcludedRollbackItem"
+    );
+    const excludedRollbackRun = await startRepositoryRollbackRun({
+      parentRunId: excludedRollbackParent.id,
+      requestedBy: owner.id,
+    });
+    excludedRollbackRunId = excludedRollbackRun.id;
+    const rollbackStorage: RepositoryMigrationStorage = {
+      inspectAndCopyObject: async () => {
+        throw new Error("Excluded rollback must not inspect source objects");
+      },
+      putObject: async () => {
+        throw new Error("Excluded rollback must not create source objects");
+      },
+      deleteObject: async () => {
+        throw new Error("Excluded rollback must not delete source objects");
+      },
+    };
+    assert.deepEqual(
+      await processNextRepositoryMigrationBatch(rollbackStorage),
+      { runId: excludedRollbackRun.id, mode: "rollback" }
+    );
+    const [completedExcludedRollback] = await executeQuery(
+      (db) =>
+        db
+          .select({
+            status: repositoryMigrationRuns.status,
+            metrics: repositoryMigrationRuns.metrics,
+          })
+          .from(repositoryMigrationRuns)
+          .where(eq(repositoryMigrationRuns.id, excludedRollbackRun.id))
+          .limit(1),
+      "smoke.unifiedContent.readExcludedRollback"
+    );
+    assert.deepEqual(completedExcludedRollback, {
+      status: "rolled_back",
+      metrics: { rolledBack: 0, excluded: 1 },
+    });
+  } finally {
+    const rollbackRunId = excludedRollbackRunId;
+    if (rollbackRunId) {
+      await executeQuery(
+        (db) =>
+          db
+            .delete(repositoryMigrationRuns)
+            .where(eq(repositoryMigrationRuns.id, rollbackRunId)),
+        "smoke.unifiedContent.cleanupExcludedRollbackRun"
+      );
+    }
+    await executeQuery(
+      (db) =>
+        db
+          .delete(repositoryMigrationRuns)
+          .where(eq(repositoryMigrationRuns.id, excludedRollbackParent.id)),
+      "smoke.unifiedContent.cleanupExcludedRollbackParent"
     );
   }
 
@@ -1938,6 +2068,79 @@ try {
     canonicalTextArtifact?.sha256,
     createHash("sha256").update(textExtraction.canonicalText).digest("hex")
   );
+  const canonicalTextSha256 = createHash("sha256")
+    .update(textExtraction.canonicalText)
+    .digest("hex");
+  const canonicalTextObjectKey =
+    `repositories/${repository.id}/artifacts/${textRegistration.version.id}/canonical-text.md`;
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryArtifacts)
+        .set({
+          objectKey: canonicalTextObjectKey,
+          textInline: null,
+          sha256: null,
+        })
+        .where(eq(repositoryArtifacts.id, textPublication.artifactId)),
+    "smoke.unifiedContent.createLegacyObjectBackedArtifact"
+  );
+  await assert.rejects(
+    publishDocumentVersion({
+      itemVersionId: textRegistration.version.id,
+      processorVersion: textExtraction.processorVersion,
+      processorName: "aistudio-text",
+      detectedContentType: textExtraction.detectedContentType,
+      inspectionStatus: "clean",
+      malwareScanRequired: true,
+      canonicalTextObjectKey: `${canonicalTextObjectKey}.mismatched`,
+      canonicalTextSha256,
+      segments: textExtraction.segments,
+      artifactMetadata: textExtraction.metadata,
+    }),
+    /object key does not match the replay/
+  );
+  const [rejectedReplayArtifact] = await executeQuery(
+    (db) =>
+      db
+        .select({ sha256: repositoryArtifacts.sha256 })
+        .from(repositoryArtifacts)
+        .where(eq(repositoryArtifacts.id, textPublication.artifactId))
+        .limit(1),
+    "smoke.unifiedContent.readRejectedLegacyArtifactReplay"
+  );
+  assert.equal(rejectedReplayArtifact?.sha256, null);
+  const legacyArtifactReplay = await publishDocumentVersion({
+    itemVersionId: textRegistration.version.id,
+    processorVersion: textExtraction.processorVersion,
+    processorName: "aistudio-text",
+    detectedContentType: textExtraction.detectedContentType,
+    inspectionStatus: "clean",
+    malwareScanRequired: true,
+    canonicalTextObjectKey,
+    canonicalTextSha256,
+    segments: textExtraction.segments,
+    artifactMetadata: textExtraction.metadata,
+  });
+  assert.equal(legacyArtifactReplay.replayed, true);
+  const [backfilledLegacyArtifact] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          objectKey: repositoryArtifacts.objectKey,
+          textInline: repositoryArtifacts.textInline,
+          sha256: repositoryArtifacts.sha256,
+        })
+        .from(repositoryArtifacts)
+        .where(eq(repositoryArtifacts.id, textPublication.artifactId))
+        .limit(1),
+    "smoke.unifiedContent.readBackfilledLegacyArtifact"
+  );
+  assert.deepEqual(backfilledLegacyArtifact, {
+    objectKey: canonicalTextObjectKey,
+    textInline: null,
+    sha256: canonicalTextSha256,
+  });
   const canonicalTextResults = await retrieveRepositoryContent({
     query: "MOONLIT-HARBOR-SMOKE",
     repositoryIds: [repository.id],
@@ -2270,8 +2473,20 @@ try {
       }),
     "smoke.unifiedContent.createConnectionStormChunk"
   );
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        UPDATE repository_item_chunks
+        SET embedding = ${smokeVector}::vector
+        WHERE index_generation_id = ${connectionStormGeneration.id}::uuid
+      `),
+    "smoke.unifiedContent.completeConnectionStormEmbeddings"
+  );
   await applyEmbeddingConcurrencyRecovery(
     "smoke.unifiedContent.applyEmbeddingConcurrencyRecovery"
+  );
+  await applyEmbeddingConcurrencyRecovery(
+    "smoke.unifiedContent.reapplyEmbeddingConcurrencyRecovery"
   );
   const [fencedConnectionStormGeneration] = await executeQuery(
     (db) =>
@@ -2328,6 +2543,7 @@ try {
   assert.ok(rearmedConnectionStormGeneration);
   assert.equal(rearmedConnectionStormGeneration.recoveryAttempt, 1);
   assert.equal(rearmedConnectionStormGeneration.previousStatus, "failed");
+  assert.equal(rearmedConnectionStormGeneration.activationOnly, true);
 
   const [activeLegacyItem] = await executeQuery(
     (db) =>

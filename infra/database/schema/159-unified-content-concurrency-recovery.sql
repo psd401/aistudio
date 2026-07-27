@@ -54,18 +54,13 @@ WHERE generation.status = 'failed'
   AND generation.embedding_recovery_attempts >= 3
   AND generation.error_message ILIKE
     'Failed query:%FROM repository_index_generations%'
+  -- A connection timeout can exhaust the retry budget after every vector was
+  -- written but before atomic activation. Fence any owned generation with the
+  -- known failure signature, not only generations with missing vectors.
   AND EXISTS (
     SELECT 1
     FROM repository_item_chunks chunk
     WHERE chunk.index_generation_id = generation.id
-      AND (
-        chunk.embedding IS NULL
-        OR (
-          generation.visual_embedding_model IS NOT NULL
-          AND chunk.modality IN ('image', 'video')
-          AND chunk.visual_embedding IS NULL
-        )
-      )
   )
   AND NOT EXISTS (
     SELECT 1

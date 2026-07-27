@@ -4,6 +4,7 @@ import {
   desc,
   eq,
   inArray,
+  isNull,
   ne,
   sql,
   type SQLWrapper,
@@ -115,6 +116,60 @@ export type PublishPdfVersionResult = PublishDocumentVersionResult;
 export const MAX_INLINE_ARTIFACT_CHARACTERS = 1_000_000;
 export const REPOSITORY_PUBLICATION_STATEMENT_TIMEOUT_MS = 240_000;
 export const REPOSITORY_PUBLICATION_TRANSACTION_DEADLINE_MS = 270_000;
+
+interface ExistingCanonicalArtifact {
+  id: string;
+  itemVersionId: string;
+  kind: RepositoryArtifactKind;
+  objectKey: string | null;
+  textInline: string | null;
+  processorName: string;
+  processorVersion: string;
+  sha256: string | null;
+}
+
+function assertCanonicalArtifactReplayBinding(
+  input: PublishDocumentVersionInput,
+  artifact: ExistingCanonicalArtifact,
+  canonicalTextSha256: string,
+): void {
+  if (
+    artifact.itemVersionId !== input.itemVersionId ||
+    artifact.kind !== "canonical_text" ||
+    artifact.processorName !== input.processorName ||
+    artifact.processorVersion !== input.processorVersion
+  ) {
+    throw new Error(
+      "Existing canonical artifact coordinates do not match the replay",
+    );
+  }
+  if (artifact.objectKey !== (input.canonicalTextObjectKey ?? null)) {
+    throw new Error(
+      "Existing canonical artifact object key does not match the replay",
+    );
+  }
+  if (
+    artifact.textInline !== null &&
+    artifact.textInline !== (input.canonicalText ?? null)
+  ) {
+    throw new Error(
+      "Existing canonical artifact inline text does not match the replay",
+    );
+  }
+  if (artifact.objectKey === null && artifact.textInline === null) {
+    throw new Error("Existing canonical artifact has no bound payload");
+  }
+  const storedSha256 =
+    artifact.sha256 ??
+    (artifact.textInline
+      ? createHash("sha256").update(artifact.textInline).digest("hex")
+      : null);
+  if (storedSha256 && storedSha256 !== canonicalTextSha256) {
+    throw new Error(
+      "Existing canonical artifact SHA-256 does not match the replay",
+    );
+  }
+}
 
 /**
  * Repository publication copies the previous immutable generation before
@@ -240,6 +295,14 @@ export async function publishDocumentVersion(
 ): Promise<PublishDocumentVersionResult> {
   validatePublicationInput(input);
   const key = artifactKey(input);
+  const canonicalTextSha256 =
+    input.canonicalTextSha256 ??
+    (input.canonicalText
+      ? createHash("sha256").update(input.canonicalText).digest("hex")
+      : undefined);
+  if (!canonicalTextSha256) {
+    throw new Error("Canonical text SHA-256 is required");
+  }
 
   return executeTransaction(
     async (tx) => {
@@ -334,10 +397,41 @@ export async function publishDocumentVersion(
         buildingGeneration?.id ?? context.activeGenerationId;
 
       const [existingArtifact] = await tx
-        .select({ id: repositoryArtifacts.id })
+        .select({
+          id: repositoryArtifacts.id,
+          itemVersionId: repositoryArtifacts.itemVersionId,
+          kind: repositoryArtifacts.kind,
+          objectKey: repositoryArtifacts.objectKey,
+          textInline: repositoryArtifacts.textInline,
+          processorName: repositoryArtifacts.processorName,
+          processorVersion: repositoryArtifacts.processorVersion,
+          sha256: repositoryArtifacts.sha256,
+        })
         .from(repositoryArtifacts)
         .where(eq(repositoryArtifacts.artifactKey, key))
         .limit(1);
+      if (existingArtifact) {
+        assertCanonicalArtifactReplayBinding(
+          input,
+          existingArtifact,
+          canonicalTextSha256,
+        );
+      }
+      if (
+        existingArtifact &&
+        existingArtifact.sha256 === null &&
+        canonicalTextSha256
+      ) {
+        await tx
+          .update(repositoryArtifacts)
+          .set({ sha256: canonicalTextSha256 })
+          .where(
+            and(
+              eq(repositoryArtifacts.id, existingArtifact.id),
+              isNull(repositoryArtifacts.sha256)
+            )
+          );
+      }
 
       if (
         existingArtifact &&
@@ -388,13 +482,7 @@ export async function publishDocumentVersion(
               kind: "canonical_text",
               mediaType: "text/markdown",
               objectKey: input.canonicalTextObjectKey,
-              sha256:
-                input.canonicalTextSha256 ??
-                (input.canonicalText
-                  ? createHash("sha256")
-                      .update(input.canonicalText)
-                      .digest("hex")
-                  : undefined),
+              sha256: canonicalTextSha256,
               textInline:
                 input.canonicalText &&
                 input.canonicalText.length <= MAX_INLINE_ARTIFACT_CHARACTERS

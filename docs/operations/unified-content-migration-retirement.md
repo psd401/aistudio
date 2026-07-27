@@ -102,10 +102,12 @@ Migration publication sets a four-minute PostgreSQL statement timeout inside a
 270-second application transaction deadline for large repositories.
 
 If a pre-cap deployment exhausted Aurora connections, migration 159 fences only
-the exact incomplete generation and failed inspect rows carrying the known
-connection-establishment errors. The scheduled worker releases that marker
-after the old Lambda runtime has drained. It never re-arms arbitrary processing
-failures.
+the exact exhausted generation and failed inspect rows carrying the known
+connection-establishment errors. This includes a generation whose vectors were
+fully written but whose final activation transaction failed. The scheduled
+worker releases that marker after the old Lambda runtime has drained, and the
+bounded recovery path either fills missing vectors or performs activation only.
+It never re-arms arbitrary processing failures.
 
 Repository connector sources explicitly classified `unsupported`, and
 canonical targets created by the migration itself, are excluded from migration
@@ -115,10 +117,19 @@ deterministic text source and records `recoveredFromLegacySegments`. Access
 denials, network errors, and a source with neither bytes nor segments remain
 fail-closed.
 
+The route gate and irreversible finalizer use the same inventory and metric
+denominators as the operator dashboard: excluded connector sources are reported
+separately, not counted as discovered work requiring verification, and never
+make a destructive retirement gate easier to satisfy for a supported source.
+
 Repository items that already had a canonical version are shadow-audited
 without replacing that version. Newly created migration repositories, items,
 versions, jobs, and S3 objects are recorded separately so rollback never
-deletes preexisting canonical data.
+deletes preexisting canonical data. Replaying a pre-hash canonical publication
+first verifies the immutable item, processor, payload locator, and any existing
+inline bytes. Object-backed producers send the expected SHA-256 checksum to S3,
+then the transaction conditionally backfills a missing canonical-text hash
+before returning the existing generation.
 
 ## 3. Shadow retrieval and product cutover
 
@@ -153,7 +164,9 @@ backfill. The drill verifies the deletion plan and records
 `snapshot.rollbackDrill=true`; it does not delete canonical data. A full
 rollback, if needed, fences processing jobs, deletes only migration-created
 canonical objects/rows, preserves preexisting canonical versions, and marks
-the mappings rolled back.
+the mappings rolled back. Explicitly excluded sources are retained as audit
+evidence, skipped because they created no canonical data, and reported in the
+completed rollback metrics instead of preventing the run from finishing.
 
 After a successful drill:
 

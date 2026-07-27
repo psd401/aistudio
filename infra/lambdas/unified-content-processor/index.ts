@@ -1005,6 +1005,9 @@ async function storeCanonicalText(
       Key: objectKey,
       Body: canonicalText,
       ContentType: "text/markdown; charset=utf-8",
+      ChecksumSHA256: Buffer.from(canonicalTextSha256, "hex").toString(
+        "base64",
+      ),
     }),
   );
   return { canonicalTextObjectKey: objectKey, canonicalTextSha256 };
