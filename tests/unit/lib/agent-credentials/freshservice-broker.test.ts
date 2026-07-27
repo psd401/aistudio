@@ -13,6 +13,10 @@
  * endpoints the skill never uses. These tests pin exactly what is reachable.
  */
 
+import fs from "node:fs"
+import path from "node:path"
+import { stripComments } from "../../../helpers/strip-ts-comments"
+
 const getUserOnly = jest.fn()
 const fetchMock = jest.fn()
 
@@ -223,6 +227,39 @@ describe("Freshservice broker behaviour", () => {
     expect(fetchMock.mock.calls[0][0]).toBe(
       "https://psd401.freshservice.com/api/v2/agents?email=someone%40psd401.net"
     )
+  })
+
+  it("is not gated behind a capability that cannot be granted", async () => {
+    // REGRESSION PIN. The route case briefly checked `skill.freshservice`,
+    // copied from the redrover case. That identifier existed nowhere else, so
+    // no role could hold it and every call 403'd forever — and the message
+    // ("access is not granted for this account") pointed debugging at account
+    // provisioning rather than at the gate that had just been invented.
+    //
+    // Red Rover is not a precedent: it uses a SHARED district credential, so
+    // gating who may borrow it is meaningful. Freshservice uses the caller's
+    // OWN per-user key, so the credential is already the authorization.
+    // Comment-stripped: the prose above the case explains WHY the gate was
+    // removed and names the identifier, so a raw substring check would fail on
+    // correct source.
+    const routeSource = stripComments(
+      fs.readFileSync(
+        path.join(process.cwd(), "app/api/agent/credentials/route.ts"),
+        "utf8",
+      ),
+    )
+    const freshserviceCase = routeSource.slice(
+      routeSource.indexOf('case "freshservice"'),
+      routeSource.indexOf('case "put"'),
+    )
+
+    // Guard the slice, so the assertions below cannot pass on an empty string.
+    expect(freshserviceCase).toContain("executeFreshserviceOperation")
+    expect(freshserviceCase).not.toContain("canAccessSkill")
+    expect(routeSource).not.toContain("skill.freshservice")
+
+    // The redrover case KEEPS its gate — it uses a shared district credential.
+    expect(routeSource).toContain("skill.redrover")
   })
 
   it("refuses to follow redirects", async () => {
