@@ -308,6 +308,20 @@ async def _finalize_invocation_authority() -> None:
 
 def _serialize_invocations(function):
     """Hold one owner's authority and revoke it before the terminal result."""
+
+    # functools.wraps is LOAD-BEARING, not cosmetic. BedrockAgentCoreApp
+    # decides whether to pass `context` to the entrypoint by inspecting its
+    # signature. Without wraps, inspect.signature() sees this wrapper's
+    # (*args, **kwargs) instead of the real (payload, context), so the SDK
+    # calls it with payload ONLY and every invocation dies with:
+    #
+    #   TypeError: agent_invocation() missing 1 required positional
+    #             argument: 'context'
+    #
+    # The container still boots and reports BOOT_OK — the failure only shows
+    # up when a turn is actually invoked, which is why it reached dev
+    # (2026-07-27) and surfaced to users as "No response from agent."
+    @functools.wraps(function)
     async def serialized(*args, **kwargs):
         finalized = False
         async with _invocation_lock:

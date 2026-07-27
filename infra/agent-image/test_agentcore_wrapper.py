@@ -9,6 +9,8 @@ The Docker-only deps (harness_adapter, workspace_sync, the AgentCore SDK) are
 stubbed in sys.modules so the pure helper can be imported and tested.
 """
 
+import asyncio
+import inspect
 import sys
 import unittest
 from unittest import mock
@@ -168,6 +170,55 @@ class TestInvocationContextInstaller(unittest.TestCase):
                 preexec_fn=drop_to_node,
             )
             self.assertEqual(probe.returncode, 0)
+
+
+class TestSerializedInvocationSignature(unittest.TestCase):
+    """The decorator must not hide the entrypoint's real signature.
+
+    BedrockAgentCoreApp inspects the entrypoint to decide whether to pass
+    `context`. If _serialize_invocations returns a bare (*args, **kwargs)
+    wrapper, the SDK sees no `context` parameter, calls the handler with
+    `payload` only, and EVERY invocation dies with
+
+        TypeError: agent_invocation() missing 1 required positional
+                  argument: 'context'
+
+    The container still boots and logs BOOT_OK, so nothing catches this until
+    a real turn is invoked — it reached dev on 2026-07-27 and surfaced to
+    users as "No response from agent." (incident: the build-time canary turn,
+    which would have caught it, had been skipped).
+    """
+
+    def test_preserves_payload_and_context_parameters(self):
+        async def entrypoint(payload, context):
+            yield {"result": payload}
+
+        wrapped = agentcore_wrapper._serialize_invocations(entrypoint)
+        params = list(inspect.signature(wrapped).parameters)
+        self.assertEqual(
+            params,
+            ["payload", "context"],
+            "the SDK introspects this signature to decide whether to pass "
+            "`context`; (*args, **kwargs) here means context is never passed",
+        )
+
+    def test_wrapper_still_forwards_both_arguments(self):
+        seen = {}
+
+        async def entrypoint(payload, context):
+            seen["payload"] = payload
+            seen["context"] = context
+            yield {"result": "ok"}
+
+        wrapped = agentcore_wrapper._serialize_invocations(entrypoint)
+
+        async def drive():
+            return [e async for e in wrapped({"p": 1}, "ctx")]
+
+        events = asyncio.run(drive())
+        self.assertEqual(seen["payload"], {"p": 1})
+        self.assertEqual(seen["context"], "ctx")
+        self.assertEqual(events, [{"result": "ok"}])
 
 
 class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
