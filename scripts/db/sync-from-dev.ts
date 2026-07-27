@@ -17,7 +17,7 @@
  * For most development work, the seed data (npm run db:seed) is sufficient.
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { scriptLogger as log } from "./script-logger";
@@ -97,22 +97,44 @@ async function main(): Promise<void> {
     log.info(`Syncing ${table}...`);
 
     try {
-      // Export from AWS
+      // Export from AWS.
+      // execFileSync (argv array, no shell) rather than execSync (one shell
+      // string): the connection URLs are assembled from AWS_DEV_DB_* /
+      // LOCAL_DATABASE_URL environment variables, so interpolating them into a
+      // shell command lets a hostile env value break out of the quotes and run
+      // arbitrary commands (CodeQL js/indirect-command-line-injection). With
+      // execFileSync each value is passed as a single argv entry and is never
+      // parsed by a shell. Losing the shell also loses `>` redirection, so the
+      // dump is written by handing pg_dump an fd for its stdout — which keeps
+      // the streaming behaviour instead of buffering whole tables in memory.
       log.debug(`  Exporting from AWS...`);
-      execSync(
-        `pg_dump "${awsDbUrl}" --table=${table} --data-only --column-inserts --on-conflict-do-nothing > "${dumpFile}"`,
-        { stdio: "pipe" }
-      );
+      const dumpFd = fs.openSync(dumpFile, "w");
+      try {
+        execFileSync(
+          "pg_dump",
+          [
+            awsDbUrl,
+            `--table=${table}`,
+            "--data-only",
+            "--column-inserts",
+            "--on-conflict-do-nothing",
+          ],
+          { stdio: ["ignore", dumpFd, "pipe"] }
+        );
+      } finally {
+        fs.closeSync(dumpFd);
+      }
 
       // Import to local
       log.debug(`  Importing to local...`);
-      execSync(`psql "${LOCAL_DB_URL}" -f "${dumpFile}"`, {
+      execFileSync("psql", [LOCAL_DB_URL, "-f", dumpFile], {
         stdio: "pipe",
       });
 
       // Get row count
-      const countResult = execSync(
-        `psql "${LOCAL_DB_URL}" -t -c "SELECT COUNT(*) FROM ${table};"`,
+      const countResult = execFileSync(
+        "psql",
+        [LOCAL_DB_URL, "-t", "-c", `SELECT COUNT(*) FROM ${table};`],
         { encoding: "utf8" }
       );
       log.success(`${table} (${countResult.trim()} rows)`);
