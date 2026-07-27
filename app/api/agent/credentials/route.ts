@@ -25,6 +25,136 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value)
 }
 
+type AgentInvocation = NonNullable<
+  Awaited<ReturnType<typeof verifyAgentInvocationContext>>
+>
+
+async function executeCredentialOperation(
+  body: Record<string, unknown>,
+  invocation: AgentInvocation
+): Promise<NextResponse> {
+  const broker = new AgentCredentialBroker()
+  switch (body.operation) {
+    case "get":
+    case "list":
+      return NextResponse.json(
+        { error: "Plaintext credential access is not supported" },
+        { status: 403 }
+      )
+    case "psd-data-mcp":
+      return NextResponse.json(
+        await executePsdDataOperation({
+          ownerEmail: invocation.ownerEmail,
+          sessionId: invocation.sessionId,
+          method: body.method,
+          params: body.params,
+        })
+      )
+    case "plaud-mcp":
+      return NextResponse.json(
+        await executePlaudOperation({
+          ownerEmail: invocation.ownerEmail,
+          sessionId: invocation.sessionId,
+          method: body.method,
+          toolName: body.toolName,
+          toolArgs: body.toolArgs,
+        })
+      )
+    case "openai-image": {
+      const granted = await broker.canAccessSkill(
+        invocation.ownerEmail,
+        "skill.image-gen",
+        undefined
+      )
+      if (!granted) {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+      }
+      return NextResponse.json(
+        await executeOpenAiImageOperation({
+          ownerEmail: invocation.ownerEmail,
+          sessionId: invocation.sessionId,
+          prompt: body.prompt,
+          size: body.size,
+          quality: body.quality,
+          background: body.background,
+          referenceDataUrl: body.referenceDataUrl,
+        })
+      )
+    }
+    case "redrover": {
+      const granted = await broker.canAccessSkill(
+        invocation.ownerEmail,
+        "skill.redrover",
+        undefined
+      )
+      if (!granted) {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+      }
+      return NextResponse.json(
+        await executeRedRoverOperation({
+          ownerEmail: invocation.ownerEmail,
+          sessionId: invocation.sessionId,
+          operation: body.action,
+          startDate: body.startDate,
+          endDate: body.endDate,
+          filledFilter: body.filledFilter,
+        })
+      )
+    }
+    case "freshservice": {
+      // Freshservice uses the caller's own owner-scoped key, so that
+      // credential is the authorization. Unlike Red Rover's shared district
+      // credential, this operation must not gain an ungrantable capability
+      // gate between the signed owner context and the broker.
+      return NextResponse.json(
+        await executeFreshserviceOperation({
+          ownerEmail: invocation.ownerEmail,
+          sessionId: invocation.sessionId,
+          path: body.path,
+          method: body.method,
+          body: body.body,
+        })
+      )
+    }
+    case "put":
+      if (invocation.mode !== "owner") {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+      }
+      return NextResponse.json({
+        credential: await broker.put(
+          invocation.ownerEmail,
+          body.name,
+          body.value
+        ),
+      })
+    case "request":
+      if (invocation.mode !== "owner") {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+      }
+      return NextResponse.json({
+        requestId: await broker.request(
+          invocation.ownerEmail,
+          body.name,
+          body.reason,
+          body.skillContext
+        ),
+      })
+    case "check-skill-access":
+      return NextResponse.json({
+        granted: await broker.canAccessSkill(
+          invocation.ownerEmail,
+          body.capability,
+          body.skillId
+        ),
+      })
+    default:
+      return NextResponse.json(
+        { error: "Unsupported operation" },
+        { status: 400 }
+      )
+  }
+}
+
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId()
   const invocation = await verifyAgentInvocationContext(request, {
@@ -54,140 +184,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const broker = new AgentCredentialBroker()
-    switch (body.operation) {
-      case "get":
-      case "list":
-        return NextResponse.json(
-          { error: "Plaintext credential access is not supported" },
-          { status: 403 }
-        )
-      case "psd-data-mcp":
-        return NextResponse.json(
-          await executePsdDataOperation({
-            ownerEmail: invocation.ownerEmail,
-            sessionId: invocation.sessionId,
-            method: body.method,
-            params: body.params,
-          })
-        )
-      case "plaud-mcp":
-        return NextResponse.json(
-          await executePlaudOperation({
-            ownerEmail: invocation.ownerEmail,
-            sessionId: invocation.sessionId,
-            method: body.method,
-            toolName: body.toolName,
-            toolArgs: body.toolArgs,
-          })
-        )
-      case "openai-image": {
-        const granted = await broker.canAccessSkill(
-          invocation.ownerEmail,
-          "skill.image-gen",
-          undefined
-        )
-        if (!granted) {
-          return NextResponse.json({ error: "Forbidden" }, { status: 403 })
-        }
-        return NextResponse.json(
-          await executeOpenAiImageOperation({
-            ownerEmail: invocation.ownerEmail,
-            sessionId: invocation.sessionId,
-            prompt: body.prompt,
-            size: body.size,
-            quality: body.quality,
-            background: body.background,
-            referenceDataUrl: body.referenceDataUrl,
-          })
-        )
-      }
-      case "redrover": {
-        const granted = await broker.canAccessSkill(
-          invocation.ownerEmail,
-          "skill.redrover",
-          undefined
-        )
-        if (!granted) {
-          return NextResponse.json({ error: "Forbidden" }, { status: 403 })
-        }
-        return NextResponse.json(
-          await executeRedRoverOperation({
-            ownerEmail: invocation.ownerEmail,
-            sessionId: invocation.sessionId,
-            operation: body.action,
-            startDate: body.startDate,
-            endDate: body.endDate,
-            filledFilter: body.filledFilter,
-          })
-        )
-      }
-      case "freshservice": {
-        // NO capability gate — deliberately, and do not add one back.
-        //
-        // An earlier version of this case checked `skill.freshservice`, copied
-        // from the redrover case below. That identifier exists nowhere else in
-        // the codebase, so no role could ever hold it: every Freshservice call
-        // returned 403 forever, and the message ("access is not granted for
-        // this account") sent debugging toward account provisioning instead of
-        // toward the gate that had just been invented.
-        //
-        // The redrover gate is not a precedent to copy. Red Rover authenticates
-        // with a SHARED district credential (sharedCredentialJson), so who may
-        // borrow the district's account is a real question. Freshservice uses
-        // the caller's OWN per-user key (getUserOnly, scoped to
-        // invocation.ownerEmail) — the credential IS the authorization, and it
-        // grants exactly the access that person already has in Freshservice.
-        // A capability check adds no security here, only a way to be locked out.
-        return NextResponse.json(
-          await executeFreshserviceOperation({
-            ownerEmail: invocation.ownerEmail,
-            sessionId: invocation.sessionId,
-            path: body.path,
-            method: body.method,
-            body: body.body,
-          })
-        )
-      }
-      case "put": {
-        if (invocation.mode !== "owner") {
-          return NextResponse.json({ error: "Forbidden" }, { status: 403 })
-        }
-        return NextResponse.json({
-          credential: await broker.put(
-            invocation.ownerEmail,
-            body.name,
-            body.value
-          ),
-        })
-      }
-      case "request": {
-        if (invocation.mode !== "owner") {
-          return NextResponse.json({ error: "Forbidden" }, { status: 403 })
-        }
-        return NextResponse.json({
-          requestId: await broker.request(
-            invocation.ownerEmail,
-            body.name,
-            body.reason,
-            body.skillContext
-          ),
-        })
-      }
-      case "check-skill-access":
-        return NextResponse.json({
-          granted: await broker.canAccessSkill(
-            invocation.ownerEmail,
-            body.capability,
-            body.skillId
-          ),
-        })
-      default:
-        return NextResponse.json(
-          { error: "Unsupported operation" },
-          { status: 400 }
-        )
-    }
+    return await executeCredentialOperation(body, invocation)
   } catch (error) {
     if (error instanceof AgentCredentialInputError) {
       return NextResponse.json({ error: error.message }, { status: 400 })
