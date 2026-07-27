@@ -34,6 +34,19 @@ function requireEnv(name: string): string {
  */
 const LAST_ADMIN_GUARD_LOCK_KEY = 925_001;
 
+// Keep synchronized with the fixed v1 mapping in oneroster-sync/db.ts. The
+// Lambdas are packaged independently, so this small allowlist is duplicated.
+const STAFF_ONEROSTER_ROLE_NAMES = [
+  "teacher",
+  "aide",
+  "proctor",
+  "administrator",
+  "staff",
+  "districtadministrator",
+  "siteadministrator",
+  "systemadministrator",
+] as const;
+
 let _sql: postgres.Sql | null = null;
 let _initPromise: Promise<postgres.Sql> | null = null;
 
@@ -214,7 +227,9 @@ export interface RoleReconcileResult {
  *   - computed = (user, role) for every ACTIVE group→role mapping the user is a
  *     transitive member of (matched by lowercased email);
  *   - add computed roles the user lacks in ANY source, tagged 'group-sync';
- *   - remove only 'group-sync' rows no longer computed — 'manual' rows are never
+ *   - when a stale group-owned row is still computed by OneRoster, transfer
+ *     ownership to 'oneroster' atomically instead of dropping effective access;
+ *   - remove only remaining stale 'group-sync' rows — 'manual' rows are never
  *     eligible, so a hand-assigned role always survives;
  *   - bump role_version once per changed user (no churn on a no-op).
  *
@@ -312,8 +327,63 @@ export async function reconcileManagedRoles(
       RETURNING user_id
     `;
 
+    // user_roles is unique on (user_id, role_id), so overlapping providers
+    // cannot persist two provenance rows. Before removing a stale group-owned
+    // row, atomically hand it to OneRoster when the active roster still
+    // computes the same effective role. This closes the gap where one
+    // reconciler could delete the only row before the other runs.
+    await tx`
+      UPDATE user_roles managed
+         SET source = 'oneroster',
+             updated_at = now()
+        FROM users application_user,
+             roles application_role
+       WHERE managed.source = 'group-sync'
+         AND managed.user_id = application_user.id
+         AND managed.role_id = application_role.id
+         AND lower(application_role.name) IN ('student', 'staff')
+         AND NOT EXISTS (
+           SELECT 1
+             FROM _computed_roles computed
+            WHERE computed.user_id = managed.user_id
+              AND computed.role_id = managed.role_id
+         )
+         AND EXISTS (
+           SELECT 1
+             FROM oneroster_users roster_user
+             JOIN oneroster_user_roles roster_role
+               ON roster_role.user_sourced_id = roster_user.sourced_id
+              AND roster_role.is_active = true
+            WHERE roster_user.is_active = true
+              AND coalesce(roster_user.enabled_user, true) = true
+              AND lower(roster_user.email) = lower(application_user.email)
+              AND (
+                (
+                  lower(application_role.name) = 'student'
+                  AND regexp_replace(
+                    lower(trim(roster_role.role)),
+                    '[^a-z0-9]+',
+                    '',
+                    'g'
+                  ) = 'student'
+                )
+                OR
+                (
+                  lower(application_role.name) = 'staff'
+                  AND regexp_replace(
+                    lower(trim(roster_role.role)),
+                    '[^a-z0-9]+',
+                    '',
+                    'g'
+                  ) = ANY(${[...STAFF_ONEROSTER_ROLE_NAMES]}::text[])
+                )
+              )
+         )
+    `;
+
     // Remove group-sync rows no longer computed. Manual rows are never matched;
-    // the administrator role is excluded entirely when the guard tripped.
+    // rows transferred to OneRoster above are no longer matched; the
+    // administrator role is excluded entirely when the guard tripped.
     const removed = await tx<{ user_id: number }[]>`
       DELETE FROM user_roles ur
        WHERE ur.source = 'group-sync'

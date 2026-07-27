@@ -11,6 +11,7 @@
 import {
   computeManagedRoleDiff,
   applyLastAdminGuard,
+  partitionManagedRoleRemovals,
   type ExistingUserRole,
 } from "@/lib/db/drizzle/user-roles";
 
@@ -95,6 +96,15 @@ describe("computeManagedRoleDiff", () => {
   it("treats an empty computed set with no managed rows as a no-op", () => {
     const diff = computeManagedRoleDiff([], []);
     expect(diff).toEqual({ toAdd: [], toRemove: [], changed: false });
+  });
+});
+
+describe("partitionManagedRoleRemovals", () => {
+  it("transfers overlapping roster grants and removes only unowned roles", () => {
+    expect(partitionManagedRoleRemovals([2, 5, 7], [5, 9])).toEqual({
+      toTransfer: [5],
+      toRemove: [2, 7],
+    });
   });
 });
 

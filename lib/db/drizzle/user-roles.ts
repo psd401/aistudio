@@ -10,7 +10,16 @@
  * @see https://orm.drizzle.team/docs/transactions
  */
 
-import { eq, ne, inArray, notInArray, and, sql } from "drizzle-orm";
+import {
+  eq,
+  ne,
+  inArray,
+  notInArray,
+  and,
+  or,
+  isNull,
+  sql,
+} from "drizzle-orm";
 import { executeQuery, type DbTransaction } from "@/lib/db/drizzle-client";
 import {
   users,
@@ -19,6 +28,8 @@ import {
   groups,
   groupMembers,
   groupRoleMappings,
+  onerosterUsers,
+  onerosterUserRoles,
   type UserRoleSource,
 } from "@/lib/db/schema";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
@@ -38,6 +49,20 @@ import { ErrorFactories } from "@/lib/error-utils";
  * last-admin count against both reconcilers too (#1222 round 4).
  */
 export const LAST_ADMIN_GUARD_LOCK_KEY = 925_001;
+
+// Keep synchronized with the fixed v1 mapping in
+// infra/lambdas/oneroster-sync/db.ts. The app and Lambda bundles cannot share
+// runtime imports across their packaging boundary.
+const STAFF_ONEROSTER_ROLE_NAMES = [
+  "teacher",
+  "aide",
+  "proctor",
+  "administrator",
+  "staff",
+  "districtadministrator",
+  "siteadministrator",
+  "systemadministrator",
+] as const;
 
 export interface ManualRoleSyncResult {
   deletedRoleIds: number[];
@@ -419,6 +444,31 @@ export interface ManagedRoleDiff {
   changed: boolean;
 }
 
+export interface ManagedRoleRemovalPartition {
+  /** Stale group-owned roles whose effective grant remains roster-computed. */
+  toTransfer: number[];
+  /** Stale group-owned roles no longer computed by either provider. */
+  toRemove: number[];
+}
+
+export function partitionManagedRoleRemovals(
+  groupOwnedRoleIds: Iterable<number>,
+  rosterComputedRoleIds: Iterable<number>
+): ManagedRoleRemovalPartition {
+  const rosterComputed = new Set(rosterComputedRoleIds);
+  const toTransfer: number[] = [];
+  const toRemove: number[] = [];
+
+  for (const roleId of groupOwnedRoleIds) {
+    if (rosterComputed.has(roleId)) {
+      toTransfer.push(roleId);
+    } else {
+      toRemove.push(roleId);
+    }
+  }
+  return { toTransfer, toRemove };
+}
+
 /**
  * Pure reconciliation core — no I/O, exhaustively unit-testable. Given the roles
  * a user SHOULD hold from group mappings (`computedRoleIds`) and their current
@@ -471,6 +521,76 @@ export function applyLastAdminGuard(
     toRemove: toRemove.filter((id) => id !== adminRoleId),
     adminProtected: true,
   };
+}
+
+async function transferOverlappingGroupRolesToOneRoster(
+  tx: DbTransaction,
+  userId: number,
+  normalizedEmail: string,
+  groupOwnedRoleIds: number[]
+): Promise<number[]> {
+  if (groupOwnedRoleIds.length === 0) return [];
+
+  const normalizedRosterRole = sql<string>`regexp_replace(
+    lower(trim(${onerosterUserRoles.role})),
+    '[^a-z0-9]+',
+    '',
+    'g'
+  )`;
+  const rosterComputedRows = await tx
+    .selectDistinct({ roleId: roles.id })
+    .from(onerosterUsers)
+    .innerJoin(
+      onerosterUserRoles,
+      and(
+        eq(onerosterUserRoles.userSourcedId, onerosterUsers.sourcedId),
+        eq(onerosterUserRoles.isActive, true)
+      )
+    )
+    .innerJoin(
+      roles,
+      or(
+        and(
+          eq(sql`lower(${roles.name})`, "student"),
+          eq(normalizedRosterRole, "student")
+        ),
+        and(
+          eq(sql`lower(${roles.name})`, "staff"),
+          inArray(normalizedRosterRole, [...STAFF_ONEROSTER_ROLE_NAMES])
+        )
+      )
+    )
+    .where(
+      and(
+        eq(sql`lower(${onerosterUsers.email})`, normalizedEmail),
+        eq(onerosterUsers.isActive, true),
+        or(
+          eq(onerosterUsers.enabledUser, true),
+          isNull(onerosterUsers.enabledUser)
+        )
+      )
+    );
+  const partition = partitionManagedRoleRemovals(
+    groupOwnedRoleIds,
+    rosterComputedRows.map((row) => row.roleId)
+  );
+
+  if (partition.toTransfer.length > 0) {
+    await tx
+      .update(userRoles)
+      .set({
+        source: "oneroster",
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(userRoles.userId, userId),
+          eq(userRoles.source, "group-sync"),
+          inArray(userRoles.roleId, partition.toTransfer)
+        )
+      );
+  }
+  return partition.toRemove;
 }
 
 /**
@@ -556,11 +676,17 @@ export async function reconcileUserManagedRoles(
 
           if (!diff.changed) return diff;
 
+          let toRemove = await transferOverlappingGroupRolesToOneRoster(
+            tx,
+            userId,
+            normalizedEmail,
+            diff.toRemove
+          );
+
           // Last-administrator lockout guard: an automated revocation must never
           // zero out the system's administrators (there would be no in-app
           // recovery — every admin surface, including the mapping UI itself, is
           // admin-gated). Mirrors actions/admin/user-management.actions.ts.
-          let toRemove = diff.toRemove;
           if (toRemove.length > 0) {
             const [adminRole] = await tx
               .select({ id: roles.id })

@@ -21,6 +21,20 @@ const sql = databaseUrl
   ? postgres(databaseUrl, { max: 1 })
   : null;
 
+async function reconcileGoogleGroupRoles(
+  database: postgres.Sql
+): Promise<{
+  added: number;
+  removed: number;
+  usersChanged: number;
+  adminRoleProtected: boolean;
+}> {
+  process.env.DATABASE_HOST ??= "integration.invalid";
+  process.env.DATABASE_SECRET_ARN ??= "integration-secret";
+  const { reconcileManagedRoles } = await import("../group-sync/db");
+  return reconcileManagedRoles(database);
+}
+
 function orgs(
   records: Array<Record<string, unknown>>
 ): CollectionPullSuccess {
@@ -70,6 +84,30 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
         created_at timestamp DEFAULT now(),
         updated_at timestamp DEFAULT now()
       );
+      CREATE TABLE IF NOT EXISTS groups (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        group_email text NOT NULL,
+        name text,
+        source text NOT NULL DEFAULT 'manual',
+        is_active boolean NOT NULL DEFAULT true,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_groups_group_email
+        ON groups (lower(group_email));
+      CREATE TABLE IF NOT EXISTS group_members (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        group_id uuid NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+        member_email text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE TABLE IF NOT EXISTS group_role_mappings (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        group_email text NOT NULL,
+        role_id integer NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
       CREATE OR REPLACE FUNCTION update_updated_at_column()
       RETURNS TRIGGER AS $$
       BEGIN
@@ -92,6 +130,14 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
 
   beforeEach(async () => {
     if (!sql) return;
+    await sql`
+      DELETE FROM group_role_mappings
+       WHERE lower(group_email) LIKE ${"%@oneroster-role.test"}
+    `;
+    await sql`
+      DELETE FROM groups
+       WHERE lower(group_email) LIKE ${"%@oneroster-role.test"}
+    `;
     await sql.unsafe(`
       TRUNCATE TABLE
         oneroster_enrollments,
@@ -264,7 +310,7 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
     expect(row.is_secret).toBe(false);
   });
 
-  it("reconciles lowercased roster roles while preserving other sources and administrator", async () => {
+  it("reconciles lowercased roles and transfers overlapping provider ownership atomically", async () => {
     if (!sql) throw new Error("database connection was not initialized");
     const roleRows = await sql<Array<{ id: number; name: string }>>`
       SELECT id, lower(name) AS name
@@ -339,12 +385,37 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
       )
       VALUES
         ('roster-mixed', 'student', 'primary', 'active', true),
+        ('roster-mixed', 'teacher', 'secondary', 'active', true),
         ('roster-staff', 'administrator', 'primary', 'active', true),
         ('roster-unchanged', 'student', 'primary', 'active', true),
         ('roster-unmatched', 'teacher', 'primary', 'active', true)
     `;
+    const [studentGroup] = await sql<Array<{ id: string }>>`
+      INSERT INTO groups (
+        group_email,
+        name,
+        source,
+        is_active
+      )
+      VALUES (
+        'roster-student@oneroster-role.test',
+        'Roster overlap student group',
+        'manual',
+        true
+      )
+      RETURNING id
+    `;
+    await sql`
+      INSERT INTO group_members (group_id, member_email)
+      VALUES (${studentGroup.id}, 'staff@oneroster-role.test')
+    `;
+    await sql`
+      INSERT INTO group_role_mappings (group_email, role_id)
+      VALUES ('roster-student@oneroster-role.test', ${studentRoleId})
+    `;
 
     const result = await reconcileOneRosterRoles(sql);
+    const groupResult = await reconcileGoogleGroupRoles(sql);
     const grants = await sql<
       Array<{ email: string; role: string; source: string }>
     >`
@@ -364,7 +435,13 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
        ORDER BY email
     `;
 
-    expect(result).toEqual({ granted: 2, revoked: 2, usersChanged: 3 });
+    expect(result).toEqual({ granted: 2, revoked: 1, usersChanged: 3 });
+    expect(groupResult).toEqual({
+      added: 0,
+      removed: 0,
+      usersChanged: 0,
+      adminRoleProtected: false,
+    });
     expect(grants).toEqual([
       {
         email: "mixed.case@oneroster-role.test",
@@ -374,7 +451,7 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
       {
         email: "mixed.case@oneroster-role.test",
         role: "staff",
-        source: "group-sync",
+        source: "oneroster",
       },
       {
         email: "mixed.case@oneroster-role.test",
@@ -390,6 +467,11 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
         email: "staff@oneroster-role.test",
         role: "staff",
         source: "oneroster",
+      },
+      {
+        email: "staff@oneroster-role.test",
+        role: "student",
+        source: "group-sync",
       },
       {
         email: "unchanged@oneroster-role.test",

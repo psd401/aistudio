@@ -13,9 +13,11 @@ import { roles } from "./roles";
  * 'manual'     — an admin assigned the role by hand (also the value for every
  *                pre-managed-sync row). Reconciliation NEVER touches these.
  * 'group-sync' — reconciliation granted it from a group→role mapping; it is the
- *                only source Google group reconciliation adds or removes.
+ *                source Google group reconciliation owns while eligible.
  * 'oneroster'  — nightly roster reconciliation granted it from an active
- *                OneRoster role; only that reconciler adds or removes it.
+ *                OneRoster role; that reconciler owns it while eligible.
+ * When both providers compute the same unique (user, role), the current owner
+ * transfers its own row to the surviving provider before revocation.
  */
 export type UserRoleSource = "manual" | "group-sync" | "oneroster";
 

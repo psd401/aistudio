@@ -18,6 +18,8 @@ describe("OneRoster sync cross-bundle contracts", () => {
     "infra/lambdas/oneroster-sync/config.ts"
   );
   const db = source("infra/lambdas/oneroster-sync/db.ts");
+  const groupDb = source("infra/lambdas/group-sync/db.ts");
+  const appGroupReconciler = source("lib/db/drizzle/user-roles.ts");
 
   it("keeps all shared database-first setting keys synchronized", () => {
     for (const key of [
@@ -59,6 +61,26 @@ describe("OneRoster sync cross-bundle contracts", () => {
     expect(db).not.toContain(
       "SELECT computed.user_id, computed.role_id, 'administrator'"
     );
+  });
+
+  it("hands overlapping unique rows to the surviving managed provider", () => {
+    expect(db).toContain("SET source = 'group-sync'");
+    expect(groupDb).toContain("SET source = 'oneroster'");
+    expect(appGroupReconciler).toContain('source: "oneroster"');
+
+    for (const roleName of [
+      "teacher",
+      "aide",
+      "proctor",
+      "administrator",
+      "districtadministrator",
+      "siteadministrator",
+      "systemadministrator",
+    ]) {
+      expect(db).toContain(roleName);
+      expect(groupDb).toContain(roleName);
+      expect(appGroupReconciler).toContain(roleName);
+    }
   });
 
   it("applies absence deactivation only inside collection transactions", () => {

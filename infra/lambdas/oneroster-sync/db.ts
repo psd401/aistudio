@@ -209,7 +209,9 @@ export interface RoleReconcileResult {
  * Source ownership is the safety boundary:
  *   - computed student/staff roles are inserted as source='oneroster' only
  *     when the user does not already hold that role from any source;
- *   - only stale source='oneroster' rows are removable;
+ *   - stale OneRoster-owned rows still granted by Google groups are handed to
+ *     source='group-sync' atomically before any remaining stale rows are removed;
+ *   - only remaining stale source='oneroster' rows are removable;
  *   - application administrator is excluded from both the mapping and delete.
  *
  * The administrator exclusion is structural, so this path cannot revoke admin
@@ -287,6 +289,42 @@ export async function reconcileOneRosterRoles(
        )
       ON CONFLICT (user_id, role_id) DO NOTHING
       RETURNING user_id
+    `;
+
+    // user_roles is unique on (user_id, role_id), so an overlapping group grant
+    // may be represented by this OneRoster-owned row. Hand off provenance
+    // before deletion when the active group graph still computes the role.
+    await tx`
+      UPDATE user_roles managed
+         SET source = 'group-sync',
+             updated_at = now()
+        FROM users application_user
+       WHERE managed.source = 'oneroster'
+         AND managed.user_id = application_user.id
+         AND NOT EXISTS (
+           SELECT 1
+             FROM _computed_oneroster_roles computed
+            WHERE computed.user_id = managed.user_id
+              AND computed.role_id = managed.role_id
+         )
+         AND EXISTS (
+           SELECT 1
+             FROM group_role_mappings mapping
+             JOIN groups synced_group
+               ON lower(synced_group.group_email) = lower(mapping.group_email)
+              AND synced_group.is_active = true
+             JOIN group_members membership
+               ON membership.group_id = synced_group.id
+            WHERE mapping.role_id = managed.role_id
+              AND lower(membership.member_email) =
+                  lower(application_user.email)
+         )
+         AND NOT EXISTS (
+           SELECT 1
+             FROM roles protected_role
+            WHERE protected_role.id = managed.role_id
+              AND lower(protected_role.name) = 'administrator'
+         )
     `;
 
     const revoked = await tx<{ user_id: number }[]>`

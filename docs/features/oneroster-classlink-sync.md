@@ -157,8 +157,11 @@ transaction:
 - New grants use `user_roles.source='oneroster'`. The transaction removes only
   stale `oneroster` rows; `manual` and `group-sync` rows are invisible to it.
 - A mapped role already held from another source is left under that source.
-  `users.role_version` increments once for each user whose rows actually
-  changed, and does not churn on a no-op.
+  Because `(user_id, role_id)` is unique, if that owner's eligibility later
+  disappears while the other provider still computes the role, the current
+  owner atomically transfers its own row to the surviving provider instead of
+  dropping access. Provenance-only transfers do not bump `role_version`;
+  effective grant/revoke changes increment it once per affected user.
 - The application `administrator` role is not a possible mapping and is
   structurally excluded from deletion. This path therefore cannot invoke the
   last-administrator case. Any future change that could remove administrator
