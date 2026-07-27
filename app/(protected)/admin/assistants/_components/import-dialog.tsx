@@ -30,6 +30,244 @@ interface ImportResult {
   error?: string
 }
 
+function ImportDropZone({
+  dragActive,
+  onDrag,
+  onDrop,
+  onFileInput,
+}: {
+  dragActive: boolean
+  onDrag: (event: React.DragEvent) => void
+  onDrop: (event: React.DragEvent) => void
+  onFileInput: (event: React.ChangeEvent<HTMLInputElement>) => void
+}) {
+  const openFilePicker = () => document.getElementById("file-upload")?.click()
+  return (
+    <div
+      className={`cursor-pointer rounded-lg border-2 border-dashed p-8 text-center transition-colors duration-200 ${
+        dragActive
+          ? "border-primary bg-primary/5"
+          : "border-border hover:border-primary/50"
+      }`}
+      onDragEnter={onDrag}
+      onDragLeave={onDrag}
+      onDragOver={onDrag}
+      onDrop={onDrop}
+      onClick={openFilePicker}
+      onKeyDown={(event) => event.key === "Enter" && openFilePicker()}
+      role="button"
+      tabIndex={0}
+    >
+      <Upload className="mx-auto mb-4 h-12 w-12 text-muted-foreground" />
+      <p className="mb-1 text-sm font-medium">
+        Drop your JSON file here or click to browse
+      </p>
+      <p className="text-xs text-muted-foreground">
+        Maximum file size: 10MB
+      </p>
+      <input
+        id="file-upload"
+        type="file"
+        accept=".json"
+        onChange={onFileInput}
+        className="hidden"
+      />
+    </div>
+  )
+}
+
+function ImportPreview({
+  file,
+  data,
+}: {
+  file: File
+  data: ExportFormat
+}) {
+  return (
+    <>
+      <Alert>
+        <FileText className="h-4 w-4" />
+        <AlertDescription>
+          <strong>{file.name}</strong> ({(file.size / 1024).toFixed(2)} KB)
+          <br />
+          Version: {data.version} | Exported:{" "}
+          {new Date(data.exported_at).toLocaleDateString()}
+          {data.export_source && ` | Source: ${data.export_source}`}
+        </AlertDescription>
+      </Alert>
+      <div>
+        <h4 className="mb-2 text-sm font-medium">
+          Assistants to import ({data.assistants.length}):
+        </h4>
+        <ScrollArea className="h-[200px] w-full rounded border">
+          <div className="space-y-2 p-2">
+            {data.assistants.map((assistant, index) => (
+              <div
+                key={index}
+                className="flex items-start gap-2 rounded p-2 hover:bg-muted/50"
+              >
+                <div className="flex-1">
+                  <div className="font-medium">{assistant.name}</div>
+                  {assistant.description && (
+                    <div className="line-clamp-1 text-sm text-muted-foreground">
+                      {assistant.description}
+                    </div>
+                  )}
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {assistant.prompts.length} prompts,{" "}
+                    {assistant.input_fields.length} fields
+                  </div>
+                </div>
+                <Badge variant="outline" className="text-xs">
+                  {assistant.status}
+                </Badge>
+              </div>
+            ))}
+          </div>
+        </ScrollArea>
+      </div>
+      <Alert>
+        <AlertCircle className="h-4 w-4" />
+        <AlertDescription>
+          All imported assistants will be set to{" "}
+          <strong>pending approval</strong> status and assigned to your account.
+          Models will be mapped to available options.
+        </AlertDescription>
+      </Alert>
+    </>
+  )
+}
+
+function ImportResults({ results }: { results: ImportResult[] }) {
+  return (
+    <div>
+      <h4 className="mb-2 text-sm font-medium">Import Results:</h4>
+      <ScrollArea className="h-[200px] w-full rounded border">
+        <div className="space-y-2 p-2">
+          {results.map((result, index) => (
+            <div key={index} className="flex items-center gap-2 rounded p-2">
+              {result.status === "success" ? (
+                <CheckCircle className="h-4 w-4 text-green-500" />
+              ) : (
+                <AlertCircle className="h-4 w-4 text-destructive" />
+              )}
+              <div className="flex-1">
+                <div className="font-medium">{result.name}</div>
+                {result.error && (
+                  <div className="text-xs text-destructive">{result.error}</div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </ScrollArea>
+    </div>
+  )
+}
+
+function ImportFooter({
+  file,
+  results,
+  isImporting,
+  onSecondary,
+  onImport,
+}: {
+  file: File | null
+  results: ImportResult[] | null
+  isImporting: boolean
+  onSecondary: () => void
+  onImport: () => void
+}) {
+  return (
+    <DialogFooter>
+      <Button
+        variant="outline"
+        onClick={onSecondary}
+        disabled={isImporting}
+      >
+        {results ? "Import Another" : file ? "Change File" : "Cancel"}
+      </Button>
+      {file && !results && (
+        <Button onClick={onImport} disabled={isImporting}>
+          {isImporting ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              Importing...
+            </>
+          ) : (
+            <>
+              <Upload className="mr-2 h-4 w-4" />
+              Import
+            </>
+          )}
+        </Button>
+      )}
+    </DialogFooter>
+  )
+}
+
+function ImportDialogView({
+  open,
+  file,
+  previewData,
+  importResults,
+  dragActive,
+  isImporting,
+  onOpenChange,
+  onDrag,
+  onDrop,
+  onFileInput,
+  onSecondary,
+  onImport,
+}: {
+  open: boolean
+  file: File | null
+  previewData: ExportFormat | null
+  importResults: ImportResult[] | null
+  dragActive: boolean
+  isImporting: boolean
+  onOpenChange: (open: boolean) => void
+  onDrag: (event: React.DragEvent) => void
+  onDrop: (event: React.DragEvent) => void
+  onFileInput: (event: React.ChangeEvent<HTMLInputElement>) => void
+  onSecondary: () => void
+  onImport: () => void
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Import Assistants</DialogTitle>
+          <DialogDescription>
+            Import assistants from a previously exported JSON file.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4 py-4">
+          {!file && !importResults && (
+            <ImportDropZone
+              dragActive={dragActive}
+              onDrag={onDrag}
+              onDrop={onDrop}
+              onFileInput={onFileInput}
+            />
+          )}
+          {file && previewData && !importResults && (
+            <ImportPreview file={file} data={previewData} />
+          )}
+          {importResults && <ImportResults results={importResults} />}
+        </div>
+        <ImportFooter
+          file={file}
+          results={importResults}
+          isImporting={isImporting}
+          onSecondary={onSecondary}
+          onImport={onImport}
+        />
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 export function ImportDialog({
   open,
   onOpenChange,
@@ -177,179 +415,31 @@ export function ImportDialog({
   }, [])
 
   return (
-    <Dialog 
-      open={open} 
+    <ImportDialogView
+      open={open}
+      file={file}
+      previewData={previewData}
+      importResults={importResults}
+      dragActive={dragActive}
+      isImporting={isImporting}
       onOpenChange={(newOpen) => {
         onOpenChange(newOpen)
-        if (!newOpen) {
+        if (!newOpen) resetDialog()
+      }}
+      onDrag={handleDrag}
+      onDrop={handleDrop}
+      onFileInput={handleFileInput}
+      onSecondary={() => {
+        if (importResults) {
           resetDialog()
+        } else if (file) {
+          setFile(null)
+          setPreviewData(null)
+        } else {
+          onOpenChange(false)
         }
       }}
-    >
-      <DialogContent className="max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>Import Assistants</DialogTitle>
-          <DialogDescription>
-            Import assistants from a previously exported JSON file.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-4 py-4">
-          {!file && !importResults && (
-            <div
-              className={`
-                border-2 border-dashed rounded-lg p-8 text-center cursor-pointer
-                transition-colors duration-200
-                ${dragActive ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50'}
-              `}
-              onDragEnter={handleDrag}
-              onDragLeave={handleDrag}
-              onDragOver={handleDrag}
-              onDrop={handleDrop}
-              onClick={() => document.getElementById('file-upload')?.click()}
-              onKeyDown={(e) => e.key === 'Enter' && document.getElementById('file-upload')?.click()}
-              role="button"
-              tabIndex={0}
-            >
-              <Upload className="mx-auto h-12 w-12 text-muted-foreground mb-4" />
-              <p className="text-sm font-medium mb-1">
-                Drop your JSON file here or click to browse
-              </p>
-              <p className="text-xs text-muted-foreground">
-                Maximum file size: 10MB
-              </p>
-              <input
-                id="file-upload"
-                type="file"
-                accept=".json"
-                onChange={handleFileInput}
-                className="hidden"
-              />
-            </div>
-          )}
-
-          {file && previewData && !importResults && (
-            <>
-              <Alert>
-                <FileText className="h-4 w-4" />
-                <AlertDescription>
-                  <strong>{file.name}</strong> ({(file.size / 1024).toFixed(2)} KB)
-                  <br />
-                  Version: {previewData.version} | 
-                  Exported: {new Date(previewData.exported_at).toLocaleDateString()}
-                  {previewData.export_source && ` | Source: ${previewData.export_source}`}
-                </AlertDescription>
-              </Alert>
-
-              <div>
-                <h4 className="text-sm font-medium mb-2">
-                  Assistants to import ({previewData.assistants.length}):
-                </h4>
-                <ScrollArea className="h-[200px] w-full rounded border">
-                  <div className="p-2 space-y-2">
-                    {previewData.assistants.map((assistant, index) => (
-                      <div
-                        key={index}
-                        className="flex items-start gap-2 p-2 rounded hover:bg-muted/50"
-                      >
-                        <div className="flex-1">
-                          <div className="font-medium">{assistant.name}</div>
-                          {assistant.description && (
-                            <div className="text-sm text-muted-foreground line-clamp-1">
-                              {assistant.description}
-                            </div>
-                          )}
-                          <div className="text-xs text-muted-foreground mt-1">
-                            {assistant.prompts.length} prompts, {assistant.input_fields.length} fields
-                          </div>
-                        </div>
-                        <Badge variant="outline" className="text-xs">
-                          {assistant.status}
-                        </Badge>
-                      </div>
-                    ))}
-                  </div>
-                </ScrollArea>
-              </div>
-
-              <Alert>
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription>
-                  All imported assistants will be set to <strong>pending approval</strong> status
-                  and assigned to your account. Models will be mapped to available options.
-                </AlertDescription>
-              </Alert>
-            </>
-          )}
-
-          {importResults && (
-            <div>
-              <h4 className="text-sm font-medium mb-2">Import Results:</h4>
-              <ScrollArea className="h-[200px] w-full rounded border">
-                <div className="p-2 space-y-2">
-                  {importResults.map((result, index) => (
-                    <div
-                      key={index}
-                      className="flex items-center gap-2 p-2 rounded"
-                    >
-                      {result.status === 'success' ? (
-                        <CheckCircle className="h-4 w-4 text-green-500" />
-                      ) : (
-                        <AlertCircle className="h-4 w-4 text-destructive" />
-                      )}
-                      <div className="flex-1">
-                        <div className="font-medium">{result.name}</div>
-                        {result.error && (
-                          <div className="text-xs text-destructive">
-                            {result.error}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </ScrollArea>
-            </div>
-          )}
-        </div>
-
-        <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => {
-              if (importResults) {
-                // If we have import results, reset to allow new import
-                resetDialog()
-              } else if (file) {
-                // If we have a file selected, clear it
-                setFile(null)
-                setPreviewData(null)
-              } else {
-                // Otherwise close the dialog
-                onOpenChange(false)
-              }
-            }}
-            disabled={isImporting}
-          >
-            {importResults ? "Import Another" : file ? "Change File" : "Cancel"}
-          </Button>
-          {file && !importResults && (
-            <Button onClick={handleImport} disabled={isImporting}>
-              {isImporting ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Importing...
-                </>
-              ) : (
-                <>
-                  <Upload className="mr-2 h-4 w-4" />
-                  Import
-                </>
-              )}
-            </Button>
-          )}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      onImport={handleImport}
+    />
   )
 }
