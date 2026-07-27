@@ -12,6 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 interface RoomsListProps {
   rooms: ManagedRoom[];
+  isAdministrator: boolean;
   sectionById: ReadonlyMap<string, TeacherSectionOption>;
   assistantById: ReadonlyMap<number, AccessibleAssistantOption>;
   deletingRoomId: string | null;
@@ -22,6 +23,7 @@ interface RoomsListProps {
 
 export function RoomsList({
   rooms,
+  isAdministrator,
   sectionById,
   assistantById,
   deletingRoomId,
@@ -34,7 +36,7 @@ export function RoomsList({
       <div className="flex items-center justify-between gap-3">
         <div>
           <h2 id="my-rooms-heading" className="text-lg font-semibold">
-            My rooms
+            {isAdministrator ? "All rooms" : "My rooms"}
           </h2>
           <p className="text-sm text-muted-foreground">
             {rooms.length} active room{rooms.length === 1 ? "" : "s"}

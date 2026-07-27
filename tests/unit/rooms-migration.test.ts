@@ -75,6 +75,15 @@ describe("migration 157 — teacher-managed rooms", () => {
     );
   });
 
+  it("seeds capability-gated room navigation for fresh databases", () => {
+    expect(migration).toContain("'rooms-manage'");
+    expect(migration).toContain("JOIN roles ON roles.name IN ('administrator', 'staff')");
+    expect(migration).toContain("'Rooms'");
+    expect(migration).toContain("'IconUsersGroup'");
+    expect(migration).toContain("'/rooms/manage'");
+    expect(migration).toContain("capabilities.id");
+  });
+
   it("remains splitter-compatible, excludes demographics, and documents rollback", () => {
     expect(migration).not.toMatch(/\bDO\s+\$\$/i);
     expect(migration).not.toMatch(/^\s*(BEGIN|COMMIT|ROLLBACK)\s*;/im);

@@ -279,7 +279,8 @@ export async function accessibleApprovedAssistantIds(
 }
 
 export async function listRoomsForManagement(
-  userId: number
+  userId: number,
+  isAdministrator: boolean
 ): Promise<ManagedRoom[]> {
   const roomRows = await executeQuery(
     (db) =>
@@ -292,7 +293,11 @@ export async function listRoomsForManagement(
           updatedAt: rooms.updatedAt,
         })
         .from(rooms)
-        .where(and(eq(rooms.createdBy, userId), eq(rooms.isActive, true)))
+        .where(
+          isAdministrator
+            ? eq(rooms.isActive, true)
+            : and(eq(rooms.createdBy, userId), eq(rooms.isActive, true))
+        )
         .orderBy(desc(rooms.updatedAt)),
     "listRoomsForManagement.rooms"
   );

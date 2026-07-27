@@ -152,7 +152,15 @@ test.describe("Teacher room management (#1313)", () => {
         SEEDED_STAFF_EMAIL,
         SEEDED_STAFF_SUB
       );
-      await page.goto("/rooms/manage");
+      await page.goto("/dashboard");
+      const navigation = page.getByRole("navigation");
+      await navigation.hover();
+      await navigation
+        .getByRole("button", { name: "Instructional" })
+        .click();
+      const roomsLink = navigation.locator('a[href="/rooms/manage"]');
+      await expect(roomsLink).toBeVisible({ timeout: 15_000 });
+      await roomsLink.click();
       await expect(page.getByTestId("rooms-manage")).toBeVisible({
         timeout: 15_000,
       });
@@ -216,6 +224,13 @@ test.describe("Teacher room management (#1313)", () => {
               AND resource_id = ${String(assistant.id)}) AS resources
       `;
       expect(counts).toEqual({ classes: 1, members: 1, resources: 1 });
+
+      await authenticateContext(page.context());
+      await page.goto("/rooms/manage");
+      await expect(page.getByText("All rooms", { exact: true })).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(page.getByText(roomName, { exact: true })).toBeVisible();
 
       await mkdir(".verification", { recursive: true });
       await page.screenshot({

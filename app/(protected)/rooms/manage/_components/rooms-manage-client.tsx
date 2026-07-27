@@ -142,6 +142,7 @@ export function RoomsManageClient({
     >
       <RoomsList
         rooms={initialData.rooms}
+        isAdministrator={initialData.isAdministrator}
         sectionById={sectionById}
         assistantById={assistantById}
         deletingRoomId={deletingRoomId}

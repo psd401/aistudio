@@ -83,6 +83,7 @@ export interface RoomsManageData {
   rooms: ManagedRoom[];
   sections: TeacherSectionOption[];
   assistants: AccessibleAssistantOption[];
+  isAdministrator: boolean;
 }
 
 interface RoomsActor extends RoomMutationActor {
@@ -213,13 +214,13 @@ export async function getRoomsManageDataAction(): Promise<
   try {
     const actor = await requireRoomsActor(requestId, log);
     const [rooms, sections, assistants] = await Promise.all([
-      listRoomsForManagement(actor.userId),
+      listRoomsForManagement(actor.userId, actor.isAdministrator),
       listTeacherSections(actor.email),
       listAccessibleApprovedAssistants(actor.userId),
     ]);
     timer({ status: "success" });
     return createSuccess(
-      { rooms, sections, assistants },
+      { rooms, sections, assistants, isAdministrator: actor.isAdministrator },
       "Room management data loaded"
     );
   } catch (error) {

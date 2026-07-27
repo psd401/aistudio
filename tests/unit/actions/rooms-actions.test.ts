@@ -6,6 +6,7 @@ const mockListTeacherSections = jest.fn();
 const mockAccessibleApprovedAssistantIds = jest.fn();
 const mockAccessibleActiveRosterStudentEmails = jest.fn();
 const mockGetRoomAuthorizationSnapshot = jest.fn();
+const mockListRoomsForManagement = jest.fn();
 const mockCreateManagedRoom = jest.fn();
 const mockUpdateManagedRoom = jest.fn();
 const mockDeactivateManagedRoom = jest.fn();
@@ -32,7 +33,8 @@ jest.mock("@/lib/rooms/queries", () => ({
   getRoomAuthorizationSnapshot: (...args: unknown[]) =>
     mockGetRoomAuthorizationSnapshot(...args),
   listAccessibleApprovedAssistants: jest.fn().mockResolvedValue([]),
-  listRoomsForManagement: jest.fn().mockResolvedValue([]),
+  listRoomsForManagement: (...args: unknown[]) =>
+    mockListRoomsForManagement(...args),
   searchActiveRosterStudents: jest.fn().mockResolvedValue([]),
 }));
 jest.mock("@/lib/rooms/mutations", () => ({
@@ -44,6 +46,7 @@ jest.mock("@/lib/rooms/mutations", () => ({
 
 import {
   createRoomAction,
+  getRoomsManageDataAction,
   updateRoomAction,
 } from "@/actions/db/rooms-actions";
 
@@ -75,6 +78,7 @@ describe("room actions — server authorization", () => {
     mockAccessibleActiveRosterStudentEmails.mockResolvedValue(
       new Set(["student@example.com"])
     );
+    mockListRoomsForManagement.mockResolvedValue([]);
     mockCreateManagedRoom.mockResolvedValue(roomId);
     mockUpdateManagedRoom.mockResolvedValue(undefined);
   });
@@ -196,5 +200,18 @@ describe("room actions — server authorization", () => {
 
     expect(result.isSuccess).toBe(true);
     expect(mockUpdateManagedRoom).toHaveBeenCalled();
+  });
+
+  it("loads every active room for administrators", async () => {
+    mockGetRoomActor.mockResolvedValue({
+      email: "admin@example.com",
+      isAdministrator: true,
+    });
+
+    const result = await getRoomsManageDataAction();
+
+    expect(result.isSuccess).toBe(true);
+    expect(mockListRoomsForManagement).toHaveBeenCalledWith(7, true);
+    expect(result.data?.isAdministrator).toBe(true);
   });
 });

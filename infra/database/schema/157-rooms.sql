@@ -88,9 +88,77 @@ CREATE INDEX IF NOT EXISTS idx_room_resources_room_id
 CREATE INDEX IF NOT EXISTS idx_room_resources_resource
   ON room_resources (resource_type, resource_id);
 
+-- The manifest sync normally creates this capability at application boot. On a
+-- fresh database migrations run first, so create and grant it here only when it
+-- does not already exist. Existing districts keep their current role grants.
+WITH inserted_capability AS (
+  INSERT INTO capabilities (
+    identifier,
+    name,
+    description,
+    is_active,
+    source
+  )
+  SELECT
+    'rooms-manage',
+    'Room Management',
+    'Compose class rooms from roster sections and assign approved assistants.',
+    true,
+    'code'
+  WHERE NOT EXISTS (
+    SELECT 1 FROM capabilities WHERE identifier = 'rooms-manage'
+  )
+  RETURNING id
+)
+INSERT INTO role_capabilities (role_id, capability_id)
+SELECT roles.id, inserted_capability.id
+FROM inserted_capability
+JOIN roles ON roles.name IN ('administrator', 'staff')
+ON CONFLICT (role_id, capability_id) DO NOTHING;
+
+-- Keep room management discoverable under Instructional and gate the link with
+-- the same capability enforced by the route. Parent lookup avoids fixed IDs in
+-- deployed databases; a missing Instructional section safely yields a top-level
+-- link instead.
+INSERT INTO navigation_items (
+  label,
+  icon,
+  link,
+  parent_id,
+  capability_id,
+  requires_role,
+  position,
+  is_active,
+  type,
+  description
+)
+SELECT
+  'Rooms',
+  'IconUsersGroup',
+  '/rooms/manage',
+  (
+    SELECT id
+    FROM navigation_items
+    WHERE label = 'Instructional' AND type = 'section'
+    ORDER BY id
+    LIMIT 1
+  ),
+  capabilities.id,
+  NULL,
+  10,
+  true,
+  'link',
+  'Compose roster sections, individual students, and approved assistants'
+FROM capabilities
+WHERE capabilities.identifier = 'rooms-manage'
+  AND NOT EXISTS (
+    SELECT 1 FROM navigation_items WHERE link = '/rooms/manage'
+  );
+
 -- ============================================
 -- ROLLBACK SQL (for manual rollback if needed)
 -- ============================================
+-- DELETE FROM navigation_items WHERE link = '/rooms/manage';
 -- DROP TABLE IF EXISTS room_resources;
 -- DROP TABLE IF EXISTS room_members;
 -- DROP TABLE IF EXISTS room_classes;
