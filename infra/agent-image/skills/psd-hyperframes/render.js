@@ -134,85 +134,94 @@ function injectAudioElement(html, url, durationSeconds) {
   return `${html}\n${audio}`;
 }
 
-/**
- * Validate the CLI args and assemble the render Lambda invoke payload.
- * Every invalid input fails fast with an actionable message.
- */
-function buildPayload(args) {
-  if (!validateEmail(args.user)) {
-    fail('--user is required and must be a valid email', 'bad_args');
-  }
-
+function resolveCompositionHtml(args) {
   let html;
   if (args.file && args.file !== true) {
     html = readFileOrFail(String(args.file), '--file');
   } else if (args.html && args.html !== true) {
     html = String(args.html);
   } else {
-    fail('Provide the composition via --file <path> or --html "<inline html>"', 'bad_args');
+    fail(
+      'Provide the composition via --file <path> or --html "<inline html>"',
+      'bad_args'
+    );
   }
   if (!html || html.trim().length === 0) {
     fail('Composition HTML is empty', 'bad_args');
   }
+  return html;
+}
 
-  // A value-bearing flag given with no value (last token, or immediately
-  // followed by another --flag) parses to boolean `true`. Fail loudly instead
-  // of silently dropping the intended CSS/JS (the --file path already does).
-  let css;
-  if (args.css_file === true) fail('--css-file requires a file path', 'bad_args');
-  else if (args.css_file) css = readFileOrFail(String(args.css_file), '--css-file');
-  else if (args.css === true) fail('--css requires a value', 'bad_args');
-  else if (args.css) css = String(args.css);
-
-  let js;
-  if (args.js_file === true) fail('--js-file requires a file path', 'bad_args');
-  else if (args.js_file) js = readFileOrFail(String(args.js_file), '--js-file');
-  else if (args.js === true) fail('--js requires a value', 'bad_args');
-  else if (args.js) js = String(args.js);
-
-  // Optional audio track (narration / music). hyperframes has no separate audio
-  // input — it muxes audio from an <audio> element in the composition. --audio-url
-  // points at a hosted clip (e.g. a psd-tts MP3 URL); we inject the <audio> below.
-  // Restricted to https:// / data:audio so the value is safe to interpolate into
-  // the src attribute (no quotes/spaces/angle brackets).
-  let audioUrl;
-  if (args.audio_url === true) fail('--audio-url requires a URL', 'bad_args');
-  else if (args.audio_url) {
-    audioUrl = String(args.audio_url);
-    if (!/^https:\/\/[^\s"'<>]+$/.test(audioUrl) && !/^data:audio\/[^\s"'<>]+$/i.test(audioUrl)) {
-      fail('--audio-url must be an https:// URL or a data:audio/ URI (no spaces or quotes)', 'bad_args');
-    }
+function resolveOptionalSource(args, inlineName, fileName) {
+  if (args[fileName] === true) {
+    fail(`--${fileName.replace(/_/g, '-')} requires a file path`, 'bad_args');
   }
+  if (args[fileName]) {
+    return readFileOrFail(
+      String(args[fileName]),
+      `--${fileName.replace(/_/g, '-')}`
+    );
+  }
+  if (args[inlineName] === true) {
+    fail(`--${inlineName} requires a value`, 'bad_args');
+  }
+  return args[inlineName] ? String(args[inlineName]) : undefined;
+}
 
-  const compositionBytes =
+function resolveAudioUrl(args) {
+  if (args.audio_url === true) {
+    fail('--audio-url requires a URL', 'bad_args');
+  }
+  if (!args.audio_url) return undefined;
+  const url = String(args.audio_url);
+  if (
+    !/^https:\/\/[^\s"'<>]+$/.test(url) &&
+    !/^data:audio\/[^\s"'<>]+$/i.test(url)
+  ) {
+    fail(
+      '--audio-url must be an https:// URL or a data:audio/ URI (no spaces or quotes)',
+      'bad_args'
+    );
+  }
+  return url;
+}
+
+function validateCompositionSize(html, css, js) {
+  const bytes =
     Buffer.byteLength(html, 'utf8') +
     (css ? Buffer.byteLength(css, 'utf8') : 0) +
     (js ? Buffer.byteLength(js, 'utf8') : 0);
-  if (compositionBytes > MAX_COMPOSITION_BYTES) {
+  if (bytes > MAX_COMPOSITION_BYTES) {
     fail(
-      `Composition (html+css+js) is ${compositionBytes} bytes; the ${MAX_COMPOSITION_BYTES}-byte cap keeps the invoke under the Lambda payload limit. Trim the scene.`,
-      'bad_args',
+      `Composition (html+css+js) is ${bytes} bytes; the ${MAX_COMPOSITION_BYTES}-byte cap keeps the invoke under the Lambda payload limit. Trim the scene.`,
+      'bad_args'
     );
   }
+}
 
+function resolveDuration(args) {
   if (args.duration === undefined || args.duration === true) {
     fail('--duration <seconds> is required', 'bad_args');
   }
-  const durationSeconds = Number(args.duration);
-  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+  const duration = Number(args.duration);
+  if (!Number.isFinite(duration) || duration <= 0) {
     fail('--duration must be a positive number of seconds', 'bad_args');
   }
-  if (durationSeconds > MAX_DURATION_SECONDS) {
-    fail(`--duration must be ${MAX_DURATION_SECONDS}s (3 min) or fewer. Split longer scenes.`, 'bad_args');
+  if (duration > MAX_DURATION_SECONDS) {
+    fail(
+      `--duration must be ${MAX_DURATION_SECONDS}s (3 min) or fewer. Split longer scenes.`,
+      'bad_args'
+    );
   }
+  return duration;
+}
 
+function resolveFps(args, durationSeconds) {
   if (args.fps === true) fail('--fps requires a value', 'bad_args');
   const fps = args.fps ? coerceInt(args.fps, '--fps') : DEFAULT_FPS;
   if (fps < MIN_FPS || fps > MAX_FPS) {
     fail(`--fps must be between ${MIN_FPS} and ${MAX_FPS}`, 'bad_args');
   }
-  // Render time scales with total frames (fps × duration), not seconds — a longer
-  // scene must lower its fps to fit the budget. Fail fast; the Lambda re-checks.
   const totalFrames = Math.ceil(fps * durationSeconds);
   if (totalFrames > MAX_FRAMES) {
     fail(
@@ -221,27 +230,49 @@ function buildPayload(args) {
       'bad_args'
     );
   }
+  return fps;
+}
 
+function resolveDimensions(args) {
   if (args.width === true) fail('--width requires a value', 'bad_args');
   if (args.height === true) fail('--height requires a value', 'bad_args');
   const width = args.width ? coerceInt(args.width, '--width') : DEFAULT_WIDTH;
-  const height = args.height ? coerceInt(args.height, '--height') : DEFAULT_HEIGHT;
-  for (const [name, dim] of [['--width', width], ['--height', height]]) {
-    if (dim < MIN_DIMENSION || dim > MAX_DIMENSION) {
-      fail(`${name} must be between ${MIN_DIMENSION} and ${MAX_DIMENSION}`, 'bad_args');
+  const height = args.height
+    ? coerceInt(args.height, '--height')
+    : DEFAULT_HEIGHT;
+  for (const [name, dimension] of [
+    ['--width', width],
+    ['--height', height],
+  ]) {
+    if (dimension < MIN_DIMENSION || dimension > MAX_DIMENSION) {
+      fail(
+        `${name} must be between ${MIN_DIMENSION} and ${MAX_DIMENSION}`,
+        'bad_args'
+      );
     }
   }
+  return { width, height };
+}
 
-  // --dry-run is a bare flag; a value after it is a mistake (e.g. `--dry-run
-  // true` would otherwise silently disable it). Reject rather than mis-parse.
+/**
+ * Validate the CLI args and assemble the render Lambda invoke payload.
+ * Every invalid input fails fast with an actionable message.
+ */
+function buildPayload(args) {
+  if (!validateEmail(args.user)) {
+    fail('--user is required and must be a valid email', 'bad_args');
+  }
+  let html = resolveCompositionHtml(args);
+  const css = resolveOptionalSource(args, 'css', 'css_file');
+  const js = resolveOptionalSource(args, 'js', 'js_file');
+  const audioUrl = resolveAudioUrl(args);
+  validateCompositionSize(html, css, js);
+  const durationSeconds = resolveDuration(args);
+  const fps = resolveFps(args, durationSeconds);
+  const { width, height } = resolveDimensions(args);
   if (args.dry_run !== undefined && args.dry_run !== true) {
     fail('--dry-run is a flag and takes no value', 'bad_args');
   }
-
-  // Bake the audio track into the composition root now that the duration is
-  // known: data-duration spans the whole video so hyperframes pads/trims the
-  // source clip to fit. Done here (not in the Lambda) so the render service
-  // needs no change — it just renders whatever composition it receives.
   if (audioUrl) html = injectAudioElement(html, audioUrl, durationSeconds);
 
   const payload = { html, durationSeconds, fps, width, height, userEmail: args.user };
