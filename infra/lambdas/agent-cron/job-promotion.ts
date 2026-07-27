@@ -41,9 +41,46 @@ const DEADLINE_ERROR_CLASSES = new Set([
   'ChatDeadlineExpiredPartial',
 ]);
 
+/**
+ * Context overflow — the transcript outgrew the model's window.
+ *
+ * Classified in the container (harness_adapter._classify_chat_error) rather
+ * than by matching text here, because the wording lives with the code that
+ * produces it.
+ */
+const CONTEXT_OVERFLOW_ERROR_CLASS = 'ContextOverflow';
+
+/**
+ * Why a turn is being promoted. The two reasons need OPPOSITE handling in the
+ * runner, which is why this is carried rather than re-derived:
+ *
+ *   deadline         — the turn ran out of clock with a healthy transcript.
+ *                      RESUME the same session; the work in progress is the
+ *                      whole point.
+ *   context-overflow — the transcript itself is the problem. Resuming it is
+ *                      guaranteed to overflow again, so the runner must start
+ *                      a FRESH session from the original request.
+ */
+export type PromotionReason = 'deadline' | 'context-overflow';
+
+/**
+ * Why this failed turn should be promoted, or null to leave it alone.
+ *
+ * Deliberately NOT keyed on the generic OpenClawChatError: promoting that
+ * would hand genuine crashes a two-hour retry budget.
+ */
+export function promotionReason(
+  errorClass: string | undefined
+): PromotionReason | null {
+  if (!errorClass) return null;
+  if (DEADLINE_ERROR_CLASSES.has(errorClass)) return 'deadline';
+  if (errorClass === CONTEXT_OVERFLOW_ERROR_CLASS) return 'context-overflow';
+  return null;
+}
+
 /** True when a failed scheduled turn should be promoted to a background job. */
 export function shouldPromoteToJob(errorClass: string | undefined): boolean {
-  return !!errorClass && DEADLINE_ERROR_CLASSES.has(errorClass);
+  return promotionReason(errorClass) !== null;
 }
 
 /**
@@ -56,6 +93,12 @@ export function shouldPromoteToJob(errorClass: string | undefined): boolean {
  */
 export interface JobPayload {
   sessionId: string;
+  /**
+   * Why the turn was promoted. Optional so a payload written by an older cron
+   * build still parses; the runner defaults it to 'deadline', which is the
+   * behaviour that existed before this field.
+   */
+  reason?: PromotionReason;
   lockToken: string;
   runtimeId: string;
   userEmail: string;
@@ -71,6 +114,7 @@ const PROMPT_EXCERPT_MAX = 2000;
 
 export function buildJobPayload(input: {
   sessionId: string;
+  reason?: PromotionReason;
   lockToken: string;
   runtimeId: string;
   userEmail: string;
@@ -83,6 +127,7 @@ export function buildJobPayload(input: {
 }): string {
   const payload: JobPayload = {
     sessionId: input.sessionId,
+    ...(input.reason ? { reason: input.reason } : {}),
     lockToken: input.lockToken,
     runtimeId: input.runtimeId,
     userEmail: input.userEmail,

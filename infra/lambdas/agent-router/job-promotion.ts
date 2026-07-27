@@ -37,9 +37,25 @@ export function shouldPromoteToJob(errorClass: string | undefined): boolean {
  * its OpenClaw history; the excerpt is context garnish for the continuation
  * message, not the source of truth).
  */
+/**
+ * Why a turn was promoted. Drives OPPOSITE handling in the runner:
+ *
+ *   deadline         — ran out of clock with a healthy transcript. RESUME the
+ *                      same session; the work in progress is the whole point.
+ *   context-overflow — the transcript itself outgrew the model window.
+ *                      Resuming it re-overflows on the first model call, so the
+ *                      runner starts a FRESH session from the original request.
+ *
+ * Absent on payloads written before this existed; treated as 'deadline', which
+ * is exactly the behaviour that predated it.
+ */
+export type PromotionReason = 'deadline' | 'context-overflow';
+
 export interface JobPayload {
   /** AgentCore session to resume (sticky-routes to the same microVM). */
   sessionId: string;
+  /** See PromotionReason. Defaults to 'deadline' when absent. */
+  reason?: PromotionReason;
   /** Session-lock token the router pre-acquired with kind='job'. */
   lockToken: string;
   /** Resolved AgentCore runtime id/ARN (runner skips the SSM lookup). */
@@ -59,6 +75,7 @@ const PROMPT_EXCERPT_MAX = 2000;
 
 export function buildJobPayload(input: {
   sessionId: string;
+  reason?: PromotionReason;
   lockToken: string;
   runtimeId: string;
   userEmail: string;
@@ -71,6 +88,7 @@ export function buildJobPayload(input: {
 }): string {
   const payload: JobPayload = {
     sessionId: input.sessionId,
+    ...(input.reason ? { reason: input.reason } : {}),
     lockToken: input.lockToken,
     runtimeId: input.runtimeId,
     userEmail: input.userEmail,
@@ -108,6 +126,11 @@ export function parseJobPayload(raw: string | undefined): JobPayload {
   };
   return {
     sessionId: requireString('sessionId'),
+    // Unknown/absent -> 'deadline'. A payload from an older cron build must
+    // keep resuming the session, not silently switch to a fresh one.
+    ...(obj.reason === 'context-overflow' || obj.reason === 'deadline'
+      ? { reason: obj.reason }
+      : {}),
     lockToken: requireString('lockToken'),
     runtimeId: requireString('runtimeId'),
     userEmail: requireString('userEmail'),
@@ -142,4 +165,54 @@ export function buildContinuationPrompt(promptExcerpt: string): string {
     'When everything is done, reply with the complete final answer for the ' +
     `user.${excerpt}`
   );
+}
+
+/**
+ * The message sent when restarting after a CONTEXT OVERFLOW.
+ *
+ * Deliberately NOT the continuation prompt. Continuation says "carry on from
+ * where you stopped", which is meaningless in a fresh session that has no
+ * history to carry on from — and worse, it invites the model to hunt for
+ * earlier work it cannot see.
+ *
+ * The tradeoff this makes explicit: the previous leg's tool calls are NOT in
+ * this session, so the model cannot verify what already ran. Side effects are
+ * therefore the real hazard on a restart, and the instruction leads with
+ * checking current state before re-doing anything that writes.
+ */
+export function buildOverflowRestartPrompt(promptExcerpt: string): string {
+  const request = promptExcerpt
+    ? `\n\nThe original request was:\n${promptExcerpt}`
+    : '';
+  return (
+    '[job-restart] Your previous attempt at this task grew too large for the ' +
+    'model context window and could not continue, so you are starting over ' +
+    'in a fresh session with a much longer time budget. You do NOT have the ' +
+    'earlier transcript.\n\n' +
+    'Two things matter:\n' +
+    '1. SIDE EFFECTS MAY ALREADY HAVE RUN. Before creating, sending, ' +
+    'sharing, or posting anything, check whether it already exists and skip ' +
+    'it if so.\n' +
+    '2. STAY SMALLER THIS TIME. Prefer fewer, more targeted tool calls, and ' +
+    'avoid re-reading large outputs you have already summarized — running ' +
+    'out of context is what ended the last attempt.\n\n' +
+    `When everything is done, reply with the complete final answer.${request}`
+  );
+}
+
+/**
+ * Session id for a restart leg.
+ *
+ * A fresh id is what actually discards the overflowing transcript — AgentCore
+ * sticky-routes by session, so reusing the id would hand the runner the very
+ * history that blew the window. Derived from the original (rather than random)
+ * so the restart stays traceable to the run that spawned it, and suffixed
+ * once: a restart of a restart keeps a single suffix rather than growing the
+ * id without bound, since AgentCore enforces a session-id length limit.
+ */
+export function restartSessionId(sessionId: string): string {
+  const base = sessionId.replace(/-r\d+$/, '');
+  const previous = /-r(\d+)$/.exec(sessionId);
+  const attempt = previous ? Number(previous[1]) + 1 : 2;
+  return `${base}-r${attempt}`;
 }
