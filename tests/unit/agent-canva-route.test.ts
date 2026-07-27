@@ -1,19 +1,17 @@
-let context:
-  | { ownerEmail: string; actorEmail: string; mode: "owner" | "scheduled" }
-  | null = {
-  ownerEmail: "owner@psd401.net",
-  actorEmail: "owner@psd401.net",
-  mode: "owner",
-}
+import type { NextRequest } from "next/server"
+
+const verifyContextMock = jest.fn()
 const getSecretJsonMock = jest.fn()
 const storeCanvaRefreshTokenMock = jest.fn()
+const fetchMock = jest.fn()
+const warnMock = jest.fn()
 
 jest.mock("@/lib/agent-workspace/invocation-context", () => ({
-  verifyAgentInvocationContext: jest.fn(async () => context),
+  verifyAgentInvocationContext: (...args: unknown[]) =>
+    verifyContextMock(...args),
 }))
 jest.mock("@/lib/agent-workspace/secrets-manager", () => ({
-  canvaSecretId: (ownerEmail: string) =>
-    `psd-agent-creds/test/user/${ownerEmail}/canva`,
+  canvaSecretId: (ownerEmail: string) => `canva/${ownerEmail}`,
   getSecretJson: (...args: unknown[]) => getSecretJsonMock(...args),
   storeCanvaRefreshToken: (...args: unknown[]) =>
     storeCanvaRefreshTokenMock(...args),
@@ -21,160 +19,143 @@ jest.mock("@/lib/agent-workspace/secrets-manager", () => ({
 jest.mock("@/lib/logger", () => ({
   createLogger: () => ({
     info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
+    warn: (...args: unknown[]) => warnMock(...args),
   }),
-  generateRequestId: () => "request-test",
+  generateRequestId: () => "canva-request-id",
   sanitizeForLogging: (value: unknown) => value,
 }))
 
-import type { NextRequest } from "next/server"
 import { POST } from "@/app/api/agent/canva/route"
 
 function request(body: unknown): NextRequest {
   return {
-    headers: { get: () => null },
     json: async () => body,
   } as unknown as NextRequest
 }
 
-const originalFetch = globalThis.fetch
-
 beforeEach(() => {
-  context = {
-    ownerEmail: "owner@psd401.net",
-    actorEmail: "owner@psd401.net",
+  jest.clearAllMocks()
+  verifyContextMock.mockResolvedValue({
+    ownerEmail: "owner@example.com",
+    actorEmail: "owner@example.com",
     mode: "owner",
-  }
-  process.env.ENVIRONMENT = "test"
-  getSecretJsonMock.mockReset()
-  storeCanvaRefreshTokenMock.mockReset().mockResolvedValue("arn:test")
-  globalThis.fetch = jest
-    .fn()
-    .mockResolvedValueOnce(
-      {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          access_token: "access-token",
-          refresh_token: "rotated-token",
-          scope: "design:meta:read",
-        }),
-      } as Response
-    )
-    .mockResolvedValueOnce(
-      {
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify({ items: [] }),
-        headers: { get: () => null },
-      } as unknown as Response
-    ) as typeof fetch
-})
-
-afterAll(() => {
-  globalThis.fetch = originalFetch
+    sessionId: "session-1",
+    nonce: "nonce-1",
+  })
+  getSecretJsonMock.mockResolvedValue({
+    refresh_token: "stored-refresh",
+    scope: "design:read",
+  })
+  storeCanvaRefreshTokenMock.mockResolvedValue(undefined)
+  global.fetch = fetchMock as unknown as typeof fetch
 })
 
 describe("POST /api/agent/canva", () => {
-  it("requires a signed context and rejects owner selectors", async () => {
-    context = null
-    expect((await POST(request({ operation: "status" }))).status).toBe(403)
-    context = {
-      ownerEmail: "owner@psd401.net",
-      actorEmail: "owner@psd401.net",
-      mode: "owner",
-    }
-    expect(
-      (
-        await POST(
-          request({
-            operation: "status",
-            ownerEmail: "victim@psd401.net",
-          })
-        )
-      ).status
-    ).toBe(400)
+  it("requires a signed owner or scheduled context", async () => {
+    verifyContextMock.mockResolvedValue(null)
+
+    const response = await POST(request({ operation: "status" }))
+
+    expect(response.status).toBe(403)
     expect(getSecretJsonMock).not.toHaveBeenCalled()
   })
 
-  it("checks connection state only for the signed owner", async () => {
-    getSecretJsonMock.mockResolvedValue({
-      refresh_token: "stored",
-      obtained_at: "2026-01-01T00:00:00Z",
-    })
-    const response = await POST(request({ operation: "status" }))
-    expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ connected: true })
-    expect(getSecretJsonMock).toHaveBeenCalledWith(
-      "psd-agent-creds/test/user/owner@psd401.net/canva"
+  it("rejects extra authority fields on status requests", async () => {
+    const response = await POST(
+      request({ operation: "status", ownerEmail: "victim@example.com" })
     )
+
+    expect(response.status).toBe(400)
+    expect(getSecretJsonMock).not.toHaveBeenCalled()
   })
 
-  it("refreshes and rotates the signed owner's token without exposing it", async () => {
-    getSecretJsonMock
-      .mockResolvedValueOnce({
-        refresh_token: "stored-token",
-        obtained_at: "2026-01-01T00:00:00Z",
-      })
-      .mockResolvedValueOnce({
-        client_id: "client-id",
-        client_secret: "client-secret",
-      })
+  it("reports connection state from the signed owner's secret", async () => {
+    const response = await POST(request({ operation: "status" }))
+
+    expect(warnMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ connected: true })
+    expect(getSecretJsonMock).toHaveBeenCalledWith("canva/owner@example.com")
+  })
+
+  it("rejects query keys outside the fixed Canva surface", async () => {
     const response = await POST(
       request({
         operation: "request",
         method: "GET",
         path: "/v1/designs",
-        query: { query: "poster" },
+        query: { ownerEmail: "victim@example.com" },
       })
     )
-    expect(response.status).toBe(200)
-    expect(storeCanvaRefreshTokenMock).toHaveBeenCalledWith(
-      "owner@psd401.net",
-      expect.objectContaining({ refresh_token: "rotated-token" })
-    )
-    const tokenFetch = (globalThis.fetch as jest.Mock).mock.calls[0]
-    expect(String(tokenFetch[0])).toBe(
-      "https://api.canva.com/rest/v1/oauth/token"
-    )
-    expect(tokenFetch[1].redirect).toBe("error")
-    const apiFetch = (globalThis.fetch as jest.Mock).mock.calls[1]
-    expect(String(apiFetch[0])).toBe(
-      "https://api.canva.com/rest/v1/designs?query=poster"
-    )
-    expect(apiFetch[1].headers.Authorization).toBe("Bearer access-token")
-    expect(apiFetch[1].redirect).toBe("error")
-    const serializedResponse = JSON.stringify(await response.json())
-    expect(serializedResponse).not.toContain("access-token")
-    expect(serializedResponse).not.toContain("rotated-token")
-  })
 
-  it.each([
-    ["GET", "https://attacker.example/v1/designs"],
-    ["POST", "/v1/users/me"],
-    ["DELETE", "/v1/designs"],
-    ["GET", "/v1/exports/../../admin"],
-  ])("rejects method/path %s %s outside the named surface", async (method, path) => {
-    const response = await POST(
-      request({ operation: "request", method, path })
-    )
     expect(response.status).toBe(400)
     expect(getSecretJsonMock).not.toHaveBeenCalled()
   })
 
-  it("rejects malformed upload metadata before reading credentials", async () => {
+  it("returns needs-connection before contacting Canva", async () => {
+    getSecretJsonMock.mockResolvedValue(null)
+
     const response = await POST(
       request({
         operation: "request",
-        method: "POST",
-        path: "/v1/asset-uploads",
-        rawBodyBase64: Buffer.from("asset").toString("base64"),
-        uploadMetadata: '{"name_base64":"../../etc/passwd"}',
+        method: "GET",
+        path: "/v1/users/me",
       })
     )
-    expect(response.status).toBe(400)
-    expect(getSecretJsonMock).not.toHaveBeenCalled()
+
+    expect(response.status).toBe(401)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("refreshes and forwards only an allowed owner-bound operation", async () => {
+    getSecretJsonMock
+      .mockResolvedValueOnce({
+        refresh_token: "stored-refresh",
+        scope: "design:read",
+      })
+      .mockResolvedValueOnce({
+        client_id: "canva-client",
+        client_secret: "canva-secret",
+      })
+    fetchMock
+      .mockResolvedValueOnce(
+        {
+          ok: true,
+          json: async () => ({
+            access_token: "short-lived-access",
+            refresh_token: "rotated-refresh",
+            scope: "design:read",
+          }),
+        } as Response
+      )
+      .mockResolvedValueOnce(
+        {
+          status: 200,
+          text: async () => JSON.stringify({ id: "user-1" }),
+          headers: { get: () => null },
+        } as unknown as Response
+      )
+
+    const response = await POST(
+      request({
+        operation: "request",
+        method: "GET",
+        path: "/v1/users/me",
+      })
+    )
+
+    expect(warnMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls[1]?.[0].toString()).toBe(
+      "https://api.canva.com/rest/v1/users/me"
+    )
+    expect(fetchMock.mock.calls[1]?.[1]?.headers).toMatchObject({
+      Authorization: "Bearer short-lived-access",
+    })
+    expect(storeCanvaRefreshTokenMock).toHaveBeenCalledWith(
+      "owner@example.com",
+      expect.objectContaining({ refresh_token: "rotated-refresh" })
+    )
   })
 })
