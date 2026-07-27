@@ -42,69 +42,126 @@ const EMBEDDING_MODALITIES = new Set<EmbeddingModality>([
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+function requireEmbeddingMessageObject(
+  value: unknown
+): Record<string, unknown> {
+  if (!value || typeof value !== 'object') {
+    throw new Error('Embedding message must be an object');
+  }
+  return value as Record<string, unknown>;
+}
+
+function validateEmbeddingIdentity(message: Record<string, unknown>): void {
+  if (!Number.isSafeInteger(message.itemId) || Number(message.itemId) <= 0) {
+    throw new Error('Embedding message requires a positive item id');
+  }
+  const generationId = message.generationId;
+  if (
+    generationId != null
+    && (
+      typeof generationId !== 'string'
+      || !UUID_PATTERN.test(generationId)
+    )
+  ) {
+    throw new Error('Embedding message generation id must be a UUID');
+  }
+}
+
+function requireEmbeddingWorkArrays(
+  message: Record<string, unknown>
+): { chunkIds: unknown[]; texts: unknown[] } {
+  if (!Array.isArray(message.chunkIds) || !Array.isArray(message.texts)) {
+    throw new TypeError('Embedding message requires chunk and text arrays');
+  }
+  return { chunkIds: message.chunkIds, texts: message.texts };
+}
+
+function validateActivationMessage(
+  message: Record<string, unknown>,
+  chunkIds: unknown[],
+  texts: unknown[]
+): void {
+  if (!message.generationId) {
+    throw new Error('Embedding activation message requires a generation id');
+  }
+  if (chunkIds.length > 0 || texts.length > 0) {
+    throw new Error('Embedding activation message must not contain chunk work');
+  }
+  const modalities = message.modalities;
+  const visualSources = message.visualSources;
+  const hasModalities =
+    modalities != null
+    && (!Array.isArray(modalities) || modalities.length > 0);
+  const hasVisualSources =
+    visualSources != null
+    && (!Array.isArray(visualSources) || visualSources.length > 0);
+  if (hasModalities || hasVisualSources) {
+    throw new Error(
+      'Embedding activation message must not contain vector inputs'
+    );
+  }
+}
+
+function hasInvalidModalities(
+  modalities: unknown,
+  expectedLength: number
+): boolean {
+  if (modalities == null) return false;
+  if (!Array.isArray(modalities)) return true;
+  if (modalities.length !== expectedLength) return true;
+  return !modalities.every(
+    (modality) =>
+      typeof modality === 'string'
+      && EMBEDDING_MODALITIES.has(modality as EmbeddingModality)
+  );
+}
+
+function hasInvalidVisualSources(
+  visualSources: unknown,
+  expectedLength: number
+): boolean {
+  if (visualSources == null) return false;
+  return (
+    !Array.isArray(visualSources)
+    || visualSources.length !== expectedLength
+  );
+}
+
+function validateEmbeddingWork(
+  message: Record<string, unknown>,
+  chunkIds: unknown[],
+  texts: unknown[]
+): void {
+  const invalidChunks =
+    chunkIds.length === 0
+    || chunkIds.length !== texts.length
+    || !chunkIds.every(
+      (chunkId) => Number.isSafeInteger(chunkId) && Number(chunkId) > 0
+    );
+  const invalidTexts = !texts.every((text) => typeof text === 'string');
+  if (
+    invalidChunks
+    || invalidTexts
+    || hasInvalidModalities(message.modalities, chunkIds.length)
+    || hasInvalidVisualSources(message.visualSources, chunkIds.length)
+  ) {
+    throw new Error('Embedding message has invalid or mismatched chunk data');
+  }
+}
+
 /** Validate malformed SQS input before model or database work begins. */
 export function assertValidEmbeddingMessage(
   value: unknown
 ): asserts value is EmbeddingMessage {
-  if (!value || typeof value !== 'object') {
-    throw new Error('Embedding message must be an object');
-  }
-  const message = value as Record<string, unknown>;
-  const itemId = message.itemId;
-  const generationId = message.generationId;
-  const chunkIds = message.chunkIds;
-  const texts = message.texts;
-  const modalities = message.modalities;
-  const visualSources = message.visualSources;
+  const message = requireEmbeddingMessageObject(value);
+  validateEmbeddingIdentity(message);
+  const { chunkIds, texts } = requireEmbeddingWorkArrays(message);
   const activationOnly = message.activationOnly === true;
-  if (!Number.isSafeInteger(itemId) || Number(itemId) <= 0) {
-    throw new Error('Embedding message requires a positive item id');
-  }
-  if (
-    generationId != null &&
-    (typeof generationId !== 'string' || !UUID_PATTERN.test(generationId))
-  ) {
-    throw new Error('Embedding message generation id must be a UUID');
-  }
-  if (!Array.isArray(chunkIds) || !Array.isArray(texts)) {
-    throw new TypeError('Embedding message requires chunk and text arrays');
-  }
   if (activationOnly) {
-    if (!generationId) {
-      throw new Error('Embedding activation message requires a generation id');
-    }
-    if (chunkIds.length > 0 || texts.length > 0) {
-      throw new Error('Embedding activation message must not contain chunk work');
-    }
-    if (
-      (modalities != null && (!Array.isArray(modalities) || modalities.length > 0)) ||
-      (visualSources != null &&
-        (!Array.isArray(visualSources) || visualSources.length > 0))
-    ) {
-      throw new Error('Embedding activation message must not contain vector inputs');
-    }
+    validateActivationMessage(message, chunkIds, texts);
     return;
   }
-  if (
-    chunkIds.length === 0 ||
-    chunkIds.length !== texts.length ||
-    !chunkIds.every(
-      (chunkId) => Number.isSafeInteger(chunkId) && Number(chunkId) > 0
-    ) ||
-    !texts.every((text) => typeof text === 'string') ||
-    (modalities != null &&
-      (!Array.isArray(modalities) ||
-        modalities.length !== chunkIds.length ||
-        !modalities.every(
-          (modality) =>
-            typeof modality === 'string' &&
-            EMBEDDING_MODALITIES.has(modality as EmbeddingModality)
-        ))) ||
-    (visualSources != null &&
-      (!Array.isArray(visualSources) || visualSources.length !== chunkIds.length))
-  ) {
-    throw new Error('Embedding message has invalid or mismatched chunk data');
-  }
+  validateEmbeddingWork(message, chunkIds, texts);
 }
 
 /** Stale generations must acknowledge queued batches without doing model work. */

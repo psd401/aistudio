@@ -69,137 +69,186 @@ function publicJwk(jwk: JWK): JWK {
   return publicFields
 }
 
-export function parseOidcSigningKeySet(
-  input: unknown,
-  now = new Date()
-): OidcSigningKeySet {
+function requireStoredKeySet(input: unknown): StoredOidcSigningKeySet {
   if (typeof input !== "object" || input === null) {
     throw new TypeError("OIDC signing secret must contain a JSON object")
   }
-
   const candidate = input as Partial<StoredOidcSigningKeySet>
   if (candidate.version !== 1) {
-    throw new TypeError("OIDC signing secret has unsupported version; expected 1")
+    throw new TypeError(
+      "OIDC signing secret has unsupported version; expected 1"
+    )
   }
   if (
-    typeof candidate.activeKid !== "string" ||
-    candidate.activeKid.length === 0
+    typeof candidate.activeKid !== "string"
+    || candidate.activeKid.length === 0
   ) {
     throw new TypeError("OIDC signing secret is missing activeKid")
   }
   if (!Array.isArray(candidate.keys) || candidate.keys.length === 0) {
     throw new TypeError("OIDC signing secret must contain at least one key")
   }
+  return candidate as StoredOidcSigningKeySet
+}
 
-  const seenKids = new Set<string>()
-  const usable: StoredOidcSigningKey[] = []
-  let activeCount = 0
-  let standbyCount = 0
-  let storedActive: StoredOidcSigningKey | undefined
-  let dueStandby: StoredOidcSigningKey | undefined
+function isValidDateString(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value))
+}
 
-  for (const [index, entry] of candidate.keys.entries()) {
-    if (typeof entry !== "object" || entry === null) {
-      throw new TypeError(`OIDC signing secret key ${index} must be an object`)
-    }
-    if (
-      entry.status !== "active" &&
-      entry.status !== "standby" &&
-      entry.status !== "retiring"
-    ) {
-      throw new TypeError(
-        `OIDC signing secret key ${index} has invalid status`
-      )
-    }
-    if (typeof entry.createdAt !== "string" || !Number.isFinite(Date.parse(entry.createdAt))) {
-      throw new TypeError(
-        `OIDC signing secret key ${index} has invalid createdAt`
-      )
-    }
-    if (typeof entry.jwk !== "object" || entry.jwk === null) {
-      throw new TypeError(`OIDC signing secret key ${index} is missing jwk`)
-    }
+const OIDC_KEY_STATUSES = new Set([
+  "active",
+  "standby",
+  "retiring",
+])
 
-    const jwk = entry.jwk
-    const kid = requiredString(jwk.kid, "kid", index)
-    requiredString(jwk.n, "n", index)
-    requiredString(jwk.e, "e", index)
-    for (const field of PRIVATE_RSA_FIELDS) {
-      requiredString(jwk[field], field, index)
-    }
-    if (jwk.kty !== "RSA" || jwk.alg !== "RS256" || jwk.use !== "sig") {
-      throw new TypeError(
-        `OIDC signing secret key ${index} must be an RSA/RS256 signing JWK`
-      )
-    }
-    if (seenKids.has(kid)) {
-      throw new TypeError(`OIDC signing secret contains duplicate kid ${kid}`)
-    }
-    seenKids.add(kid)
-
-    if (entry.status === "active") {
-      activeCount += 1
-      if (kid !== candidate.activeKid) {
-        throw new TypeError(
-          `OIDC signing secret active key ${kid} does not match activeKid`
-        )
-      }
-      storedActive = entry
-      usable.push(entry)
-      continue
-    }
-
-    if (entry.status === "standby") {
-      standbyCount += 1
-      if (
-        typeof entry.activateAfter !== "string" ||
-        !Number.isFinite(Date.parse(entry.activateAfter))
-      ) {
-        throw new TypeError(
-          `OIDC signing secret standby key ${kid} needs a valid activateAfter`
-        )
-      }
-      if (Date.parse(entry.activateAfter) <= now.getTime()) {
-        dueStandby = entry
-      }
-      usable.push(entry)
-      continue
-    }
-
-    if (
-      typeof entry.retireAfter !== "string" ||
-      !Number.isFinite(Date.parse(entry.retireAfter))
-    ) {
-      throw new TypeError(
-        `OIDC signing secret retiring key ${kid} needs a valid retireAfter`
-      )
-    }
-    if (Date.parse(entry.retireAfter) > now.getTime()) {
-      usable.push(entry)
-    }
+function validateStoredKey(
+  entry: unknown,
+  index: number
+): { key: StoredOidcSigningKey; kid: string } {
+  if (typeof entry !== "object" || entry === null) {
+    throw new TypeError(`OIDC signing secret key ${index} must be an object`)
+  }
+  const key = entry as StoredOidcSigningKey
+  if (!OIDC_KEY_STATUSES.has(key.status)) {
+    throw new TypeError(
+      `OIDC signing secret key ${index} has invalid status`
+    )
+  }
+  if (!isValidDateString(key.createdAt)) {
+    throw new TypeError(
+      `OIDC signing secret key ${index} has invalid createdAt`
+    )
+  }
+  if (typeof key.jwk !== "object" || key.jwk === null) {
+    throw new TypeError(`OIDC signing secret key ${index} is missing jwk`)
   }
 
-  if (activeCount !== 1) {
+  const kid = requiredString(key.jwk.kid, "kid", index)
+  requiredString(key.jwk.n, "n", index)
+  requiredString(key.jwk.e, "e", index)
+  for (const field of PRIVATE_RSA_FIELDS) {
+    requiredString(key.jwk[field], field, index)
+  }
+  if (
+    key.jwk.kty !== "RSA"
+    || key.jwk.alg !== "RS256"
+    || key.jwk.use !== "sig"
+  ) {
+    throw new TypeError(
+      `OIDC signing secret key ${index} must be an RSA/RS256 signing JWK`
+    )
+  }
+  return { key, kid }
+}
+
+interface SigningKeyAccumulator {
+  usable: StoredOidcSigningKey[]
+  activeCount: number
+  standbyCount: number
+  storedActive?: StoredOidcSigningKey
+  dueStandby?: StoredOidcSigningKey
+}
+
+function addStoredKey(options: {
+  key: StoredOidcSigningKey
+  kid: string
+  activeKid: string
+  now: Date
+  accumulator: SigningKeyAccumulator
+}): void {
+  const { key, kid, activeKid, now, accumulator } = options
+  if (key.status === "active") {
+    accumulator.activeCount += 1
+    if (kid !== activeKid) {
+      throw new TypeError(
+        `OIDC signing secret active key ${kid} does not match activeKid`
+      )
+    }
+    accumulator.storedActive = key
+    accumulator.usable.push(key)
+    return
+  }
+
+  if (key.status === "standby") {
+    accumulator.standbyCount += 1
+    if (!isValidDateString(key.activateAfter)) {
+      throw new TypeError(
+        `OIDC signing secret standby key ${kid} needs a valid activateAfter`
+      )
+    }
+    if (Date.parse(key.activateAfter) <= now.getTime()) {
+      accumulator.dueStandby = key
+    }
+    accumulator.usable.push(key)
+    return
+  }
+
+  if (!isValidDateString(key.retireAfter)) {
+    throw new TypeError(
+      `OIDC signing secret retiring key ${kid} needs a valid retireAfter`
+    )
+  }
+  if (Date.parse(key.retireAfter) > now.getTime()) {
+    accumulator.usable.push(key)
+  }
+}
+
+function getEffectiveActiveKey(
+  accumulator: SigningKeyAccumulator
+): StoredOidcSigningKey {
+  if (accumulator.activeCount !== 1) {
     throw new TypeError(
       "OIDC signing secret must contain exactly one active key"
     )
   }
-  if (standbyCount > 1) {
+  if (accumulator.standbyCount > 1) {
     throw new TypeError(
       "OIDC signing secret may contain at most one standby key"
     )
   }
-  const effectiveActive = dueStandby ?? storedActive
+  const effectiveActive =
+    accumulator.dueStandby ?? accumulator.storedActive
   if (!effectiveActive) {
     throw new TypeError("OIDC signing secret has no effective active key")
   }
+  return effectiveActive
+}
+
+export function parseOidcSigningKeySet(
+  input: unknown,
+  now = new Date()
+): OidcSigningKeySet {
+  const candidate = requireStoredKeySet(input)
+  const seenKids = new Set<string>()
+  const accumulator: SigningKeyAccumulator = {
+    usable: [],
+    activeCount: 0,
+    standbyCount: 0,
+  }
+
+  for (const [index, entry] of candidate.keys.entries()) {
+    const { key, kid } = validateStoredKey(entry, index)
+    if (seenKids.has(kid)) {
+      throw new TypeError(`OIDC signing secret contains duplicate kid ${kid}`)
+    }
+    seenKids.add(kid)
+    addStoredKey({
+      key,
+      kid,
+      activeKid: candidate.activeKid,
+      now,
+      accumulator,
+    })
+  }
+
+  const effectiveActive = getEffectiveActiveKey(accumulator)
   const effectiveKid = requiredString(effectiveActive.jwk.kid, "kid", 0)
 
   // oidc-provider chooses the first equally suitable signing key. A staged key
   // is advertised to every task before activateAfter, then becomes first
   // without a second secret write. The activation delay is longer than the
   // process cache, eliminating a mixed-task unknown-kid window.
-  usable.sort((left, right) => {
+  accumulator.usable.sort((left, right) => {
     if (left.jwk.kid === effectiveKid) return -1
     if (right.jwk.kid === effectiveKid) return 1
     if (left.status === "retiring" && right.status !== "retiring") return 1
@@ -209,8 +258,8 @@ export function parseOidcSigningKeySet(
 
   return {
     activeKid: effectiveKid,
-    signingKeys: usable.map((entry) => ({ ...entry.jwk })),
-    publicKeys: usable.map((entry) => publicJwk(entry.jwk)),
+    signingKeys: accumulator.usable.map((entry) => ({ ...entry.jwk })),
+    publicKeys: accumulator.usable.map((entry) => publicJwk(entry.jwk)),
     source: "secrets-manager",
   }
 }

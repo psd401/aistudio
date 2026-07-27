@@ -45,6 +45,80 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+function isValidScheduleReference(
+  event: ScheduleReferenceEvent,
+  schedulesTable: string,
+): event is {
+  ownerEmail: string;
+  scheduleId: string;
+  version: number;
+} {
+  const ownerEmail = event.ownerEmail;
+  const validOwner =
+    typeof ownerEmail === 'string'
+    && ownerEmail === ownerEmail.toLowerCase()
+    && SAFE_EMAIL_RE.test(ownerEmail);
+  const validScheduleId =
+    typeof event.scheduleId === 'string'
+    && SCHEDULE_ID_RE.test(event.scheduleId);
+  const validVersion =
+    Number.isInteger(event.version) && Number(event.version) >= 1;
+  return validOwner && validScheduleId && validVersion && !!schedulesTable;
+}
+
+function hasMatchingScheduleOwner(
+  item: Record<string, unknown>,
+  event: { ownerEmail: string; scheduleId: string },
+): boolean {
+  return (
+    item.userId === event.ownerEmail
+    && item.ownerEmail === event.ownerEmail
+    && item.scheduleId === event.scheduleId
+  );
+}
+
+function hasValidOptionalIdentityFields(
+  item: Record<string, unknown>,
+): boolean {
+  const validDisplayName =
+    item.displayName === undefined
+    || (
+      typeof item.displayName === 'string'
+      && item.displayName.length <= 200
+    );
+  const validGoogleIdentity =
+    item.googleIdentity === undefined
+    || (
+      typeof item.googleIdentity === 'string'
+      && /^users\/\d+$/.test(item.googleIdentity)
+    );
+  return validDisplayName && validGoogleIdentity;
+}
+
+function isBoundedString(
+  value: unknown,
+  maxLength: number,
+): value is string {
+  return (
+    typeof value === 'string'
+    && value.length > 0
+    && value.length <= maxLength
+  );
+}
+
+function hasValidScheduleContent(
+  item: Record<string, unknown>,
+): boolean {
+  return (
+    isBoundedString(item.name, 120)
+    && isBoundedString(item.prompt, 20_000)
+    && typeof item.dmSpaceName === 'string'
+    && DM_SPACE_RE.test(item.dmSpaceName)
+    && isBoundedString(item.workspacePrefix, 128)
+    && hasValidOptionalIdentityFields(item)
+  );
+}
+
 /**
  * Load and validate the one authoritative schedule record before any user
  * lookup, AgentCore invocation, or Chat delivery. EventBridge payload fields
@@ -55,16 +129,7 @@ export async function loadAuthorizedSchedule(
   dynamo: DynamoDBDocumentClient,
   schedulesTable: string,
 ): Promise<ScheduleLoadResult> {
-  if (
-    typeof event?.ownerEmail !== 'string' ||
-    event.ownerEmail !== event.ownerEmail.toLowerCase() ||
-    !SAFE_EMAIL_RE.test(event.ownerEmail) ||
-    typeof event.scheduleId !== 'string' ||
-    !SCHEDULE_ID_RE.test(event.scheduleId) ||
-    !Number.isInteger(event.version) ||
-    (event.version as number) < 1 ||
-    !schedulesTable
-  ) {
+  if (!isValidScheduleReference(event, schedulesTable)) {
     return { authorized: false, reason: 'invalid-reference' };
   }
 
@@ -85,11 +150,7 @@ export async function loadAuthorizedSchedule(
   if (!isObject(item)) {
     return { authorized: false, reason: 'invalid-record' };
   }
-  if (
-    item.userId !== event.ownerEmail ||
-    item.ownerEmail !== event.ownerEmail ||
-    item.scheduleId !== event.scheduleId
-  ) {
+  if (!hasMatchingScheduleOwner(item, event)) {
     return { authorized: false, reason: 'owner-mismatch' };
   }
   if (item.version !== event.version) {
@@ -98,25 +159,7 @@ export async function loadAuthorizedSchedule(
   if (item.enabled !== true) {
     return { authorized: false, reason: 'disabled' };
   }
-  if (
-    typeof item.name !== 'string' ||
-    item.name.length === 0 ||
-    item.name.length > 120 ||
-    typeof item.prompt !== 'string' ||
-    item.prompt.length === 0 ||
-    item.prompt.length > 20_000 ||
-    typeof item.dmSpaceName !== 'string' ||
-    !DM_SPACE_RE.test(item.dmSpaceName) ||
-    typeof item.workspacePrefix !== 'string' ||
-    item.workspacePrefix.length === 0 ||
-    item.workspacePrefix.length > 128 ||
-    (item.displayName !== undefined &&
-      (typeof item.displayName !== 'string' ||
-        item.displayName.length > 200)) ||
-    (item.googleIdentity !== undefined &&
-      (typeof item.googleIdentity !== 'string' ||
-        !/^users\/\d+$/.test(item.googleIdentity)))
-  ) {
+  if (!hasValidScheduleContent(item)) {
     return { authorized: false, reason: 'invalid-record' };
   }
   return {
