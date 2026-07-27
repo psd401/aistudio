@@ -1386,7 +1386,8 @@ upload window, rejects inconsistent or ambiguous twins, and persists the
 duplicate source ID in both S3 and migration evidence.
 Unit coverage exercises valid, corrupt, empty, and ambiguous evidence; the real
 PostgreSQL lifecycle smoke proves the missing-object retry, reconstructed bytes,
-provenance, metrics, and cleanup.
+provenance, metrics, and cleanup while stale, cross-owner, and
+cross-conversation verified poison controls prove those SQL fences fail closed.
 
 The epic is not ready for retirement. The verified-duplicate recovery must be
 deployed and the live row retried/reconciled; retrieval shadowing and the three

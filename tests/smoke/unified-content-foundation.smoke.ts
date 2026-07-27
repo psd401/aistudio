@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { and, eq, sql, type SQL } from "drizzle-orm";
+import { and, eq, ne, sql, type SQL } from "drizzle-orm";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import * as XLSX from "@e965/xlsx";
 import {
@@ -27,6 +27,7 @@ import {
   documentChunks,
   documents,
   knowledgeRepositories,
+  nexusConversations,
   repositoryArtifacts,
   repositoryIndexGenerations,
   repositoryItemChunks,
@@ -222,6 +223,16 @@ const [owner] = await executeQuery(
   "smoke.unifiedContent.owner"
 );
 assert.ok(owner, "standard local seed is missing e2e-test-user");
+const [otherOwner] = await executeQuery(
+  (db) =>
+    db
+      .select({ id: users.id })
+      .from(users)
+      .where(ne(users.id, owner.id))
+      .limit(1),
+  "smoke.unifiedContent.otherOwner"
+);
+assert.ok(otherOwner, "standard local seed is missing a second user");
 
 const [repository] = await executeQuery(
   (db) =>
@@ -640,6 +651,131 @@ try {
       }),
     "smoke.unifiedContent.createStaleDuplicateMigration"
   );
+  const crossOwnerSegments = [
+    "This same-window document belongs to a different user.",
+  ];
+  const crossOwnerEvidence = buildMigrationContentEvidence(crossOwnerSegments);
+  const [crossOwnerDuplicateDocument] = await executeQuery(
+    (db) =>
+      db
+        .insert(documents)
+        .values({
+          userId: otherOwner.id,
+          conversationId: null,
+          name: "verified-duplicate-recovery.pdf",
+          type: "pdf",
+          size: 79_052,
+          url: `legacy/${Date.now()}-cross-owner-duplicate.pdf`,
+          metadata: duplicateMetadata,
+        })
+        .returning({ id: documents.id }),
+    "smoke.unifiedContent.createCrossOwnerDuplicateDocument"
+  );
+  assert.ok(crossOwnerDuplicateDocument);
+  await executeQuery(
+    (db) =>
+      db.insert(documentChunks).values(
+        crossOwnerSegments.map((content, chunkIndex) => ({
+          documentId: crossOwnerDuplicateDocument.id,
+          content,
+          chunkIndex,
+          metadata: {},
+        }))
+      ),
+    "smoke.unifiedContent.createCrossOwnerDuplicateChunks"
+  );
+  await executeQuery(
+    (db) =>
+      db.insert(repositoryMigrationItems).values({
+        runId: verifiedDuplicateRun.id,
+        originRunId: verifiedDuplicateRun.id,
+        sourceKind: "nexus_document",
+        sourceId: crossOwnerDuplicateDocument.id,
+        ownerId: otherOwner.id,
+        canonicalRepositoryId: repository.id,
+        canonicalItemId: item.id,
+        canonicalVersionId: first.version.id,
+        sourceRecordCount: crossOwnerEvidence.recordCount,
+        canonicalRecordCount: crossOwnerEvidence.recordCount,
+        sourceContentSha256: crossOwnerEvidence.sha256,
+        canonicalContentSha256: crossOwnerEvidence.sha256,
+        status: "verified",
+        metadata: {},
+        migratedAt: new Date(),
+        verifiedAt: new Date(),
+      }),
+    "smoke.unifiedContent.createCrossOwnerDuplicateMigration"
+  );
+  const [otherConversation] = await executeQuery(
+    (db) =>
+      db
+        .insert(nexusConversations)
+        .values({
+          userId: owner.id,
+          provider: "smoke",
+          title: "Verified duplicate conversation fence",
+        })
+        .returning({ id: nexusConversations.id }),
+    "smoke.unifiedContent.createDuplicateFenceConversation"
+  );
+  assert.ok(otherConversation);
+  const crossConversationSegments = [
+    "This same-window document belongs to a different conversation.",
+  ];
+  const crossConversationEvidence = buildMigrationContentEvidence(
+    crossConversationSegments
+  );
+  const [crossConversationDuplicateDocument] = await executeQuery(
+    (db) =>
+      db
+        .insert(documents)
+        .values({
+          userId: owner.id,
+          conversationId: otherConversation.id,
+          name: "verified-duplicate-recovery.pdf",
+          type: "pdf",
+          size: 79_052,
+          url: `legacy/${Date.now()}-cross-conversation-duplicate.pdf`,
+          metadata: duplicateMetadata,
+        })
+        .returning({ id: documents.id }),
+    "smoke.unifiedContent.createCrossConversationDuplicateDocument"
+  );
+  assert.ok(crossConversationDuplicateDocument);
+  await executeQuery(
+    (db) =>
+      db.insert(documentChunks).values(
+        crossConversationSegments.map((content, chunkIndex) => ({
+          documentId: crossConversationDuplicateDocument.id,
+          content,
+          chunkIndex,
+          metadata: {},
+        }))
+      ),
+    "smoke.unifiedContent.createCrossConversationDuplicateChunks"
+  );
+  await executeQuery(
+    (db) =>
+      db.insert(repositoryMigrationItems).values({
+        runId: verifiedDuplicateRun.id,
+        originRunId: verifiedDuplicateRun.id,
+        sourceKind: "nexus_document",
+        sourceId: crossConversationDuplicateDocument.id,
+        ownerId: owner.id,
+        canonicalRepositoryId: repository.id,
+        canonicalItemId: item.id,
+        canonicalVersionId: first.version.id,
+        sourceRecordCount: crossConversationEvidence.recordCount,
+        canonicalRecordCount: crossConversationEvidence.recordCount,
+        sourceContentSha256: crossConversationEvidence.sha256,
+        canonicalContentSha256: crossConversationEvidence.sha256,
+        status: "verified",
+        metadata: {},
+        migratedAt: new Date(),
+        verifiedAt: new Date(),
+      }),
+    "smoke.unifiedContent.createCrossConversationDuplicateMigration"
+  );
   const [missingDuplicateDocument] = await executeQuery(
     (db) =>
       db
@@ -870,6 +1006,27 @@ try {
           .delete(documents)
           .where(eq(documents.id, staleDuplicateDocument.id)),
       "smoke.unifiedContent.cleanupStaleDuplicateDocument"
+    );
+    await executeQuery(
+      (db) =>
+        db
+          .delete(documents)
+          .where(eq(documents.id, crossOwnerDuplicateDocument.id)),
+      "smoke.unifiedContent.cleanupCrossOwnerDuplicateDocument"
+    );
+    await executeQuery(
+      (db) =>
+        db
+          .delete(documents)
+          .where(eq(documents.id, crossConversationDuplicateDocument.id)),
+      "smoke.unifiedContent.cleanupCrossConversationDuplicateDocument"
+    );
+    await executeQuery(
+      (db) =>
+        db
+          .delete(nexusConversations)
+          .where(eq(nexusConversations.id, otherConversation.id)),
+      "smoke.unifiedContent.cleanupDuplicateFenceConversation"
     );
   }
 
