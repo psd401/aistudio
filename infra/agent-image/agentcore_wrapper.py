@@ -392,6 +392,21 @@ def resolve_model_call_count(proxy_model_calls: int, tool_call_count: int) -> in
     return tool_call_count + 1
 
 
+def proxy_delta_is_authoritative(
+    proxy_reads_ok: bool, proxy_in: int, proxy_out: int,
+) -> bool:
+    """Whether the Mantle proxy's usage delta should outrank the harness.
+
+    Only when the proxy actually MEASURED something. Successful /usage reads
+    are not sufficient on their own: after #1159/#1384 moved chat serving to
+    the native amazon-bedrock provider, the proxy stays healthy but sees zero
+    model traffic, so its delta is a truthful 0 that must not overwrite the
+    harness's transcript-derived counts. That precedence bug is exactly why
+    every invocation reported tokens_in=0 tokens_out=0 on dev and prod.
+    """
+    return bool(proxy_reads_ok) and (proxy_in > 0 or proxy_out > 0)
+
+
 def read_proxy_usage() -> dict:
     """Read cumulative token usage from the Mantle proxy's /usage endpoint
     (issue #1083). Returns a dict with input_tokens / output_tokens / model and
@@ -1032,20 +1047,26 @@ def main():
                 yield {"type": "heartbeat", "elapsed_s": elapsed}
 
         # Take the post-turn usage delta from the Mantle proxy (issue #1083).
-        # This is the authoritative token source: the proxy reads every
-        # OpenAI-compatible response's `usage` object, whereas the harness
-        # adapter's WS-event extraction frequently yields 0. The proxy also
-        # carries the real model id (e.g. "zai.glm-5") so we never record the
+        # The proxy reads every OpenAI-compatible response's `usage` object and
+        # carries the real model id (e.g. "zai.glm-5"), so we never record the
         # literal "default".
         #
-        # The delta is only trustworthy when BOTH reads succeeded — if the
+        # NO LONGER THE PRIMARY SOURCE. #1159 and #1384 moved chat serving off
+        # this proxy (native amazon-bedrock provider, SigV4 via the execution
+        # role), so on the current image the proxy sees no model traffic and
+        # every delta below is a real, correct 0 — it now only relays the
+        # /agent-broker routes. The harness reads the true per-turn usage out of
+        # the OpenClaw session transcript instead (harness_adapter.
+        # _read_turn_usage). Keep this block: it is still correct and wins if
+        # the proxy is ever put back in the serving path.
+        #
+        # The delta is only meaningful when BOTH reads succeeded — if the
         # BASELINE read failed (ok=False), `final − 0` would over-count every
-        # prior turn in this microVM, so we discard the proxy delta and fall
-        # back to the harness numbers. The model id is still usable from a
-        # successful final read regardless.
+        # prior turn in this microVM, so we discard the proxy delta. The model
+        # id is still usable from a successful final read regardless.
         usage_final = await loop.run_in_executor(None, read_proxy_usage)
-        usage_trustworthy = usage_baseline.get("ok") and usage_final.get("ok")
-        if usage_trustworthy:
+        proxy_reads_ok = usage_baseline.get("ok") and usage_final.get("ok")
+        if proxy_reads_ok:
             proxy_in = max(0, usage_final["input_tokens"] - usage_baseline["input_tokens"])
             proxy_out = max(0, usage_final["output_tokens"] - usage_baseline["output_tokens"])
             # Bedrock prompt-caching split (issue #1089) — same before/after
@@ -1074,6 +1095,12 @@ def main():
                 "(baseline_ok=%s final_ok=%s session=%s)",
                 usage_baseline.get("ok"), usage_final.get("ok"), session_id,
             )
+        # The proxy delta is only ADOPTED when it actually measured something.
+        # A genuinely 0-token turn loses nothing — the harness reports 0 for it
+        # too. See proxy_delta_is_authoritative for the full rationale.
+        proxy_measured = proxy_delta_is_authoritative(
+            proxy_reads_ok, proxy_in, proxy_out,
+        )
         proxy_model = usage_final.get("model") if usage_final.get("ok") else None
 
         # Adapter contract: TurnResult preferred; legacy str still
@@ -1100,12 +1127,13 @@ def main():
             }
         else:
             reply_text = result.text or ""
-            # Proxy delta wins; harness value is the fallback only when the
-            # proxy read was itself untrustworthy (not merely when it measured
-            # a real 0 — `or` would discard a trustworthy 0 and substitute the
-            # harness's possibly-wrong count, contradicting this comment).
-            input_tokens = proxy_in if usage_trustworthy else result.tokens_in
-            output_tokens = proxy_out if usage_trustworthy else result.tokens_out
+            # Proxy delta wins only when the proxy was actually on the serving
+            # path this turn (it measured tokens); otherwise the harness's
+            # transcript-derived numbers are the source of truth. See the
+            # `proxy_measured` comment above for why "reads succeeded" is not
+            # sufficient on its own.
+            input_tokens = proxy_in if proxy_measured else result.tokens_in
+            output_tokens = proxy_out if proxy_measured else result.tokens_out
             metadata = {
                 "session_id": session_id,
                 "user_id": user_email,
@@ -1115,10 +1143,15 @@ def main():
                 "model": proxy_model or result.model or model_override or DEFAULT_AGENT_MODEL_ID,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
-                # Bedrock prompt-caching split (issue #1089). Proxy-only; 0 when
-                # the proxy delta was untrusted or the model doesn't cache.
-                "cache_read_input_tokens": proxy_cache_read if usage_trustworthy else 0,
-                "cache_write_input_tokens": proxy_cache_write if usage_trustworthy else 0,
+                # Bedrock prompt-caching split (issue #1089). Same precedence as
+                # input/output: proxy when it served this turn, else the
+                # harness's transcript read. 0 when the model doesn't cache.
+                "cache_read_input_tokens": (
+                    proxy_cache_read if proxy_measured else result.cache_read
+                ),
+                "cache_write_input_tokens": (
+                    proxy_cache_write if proxy_measured else result.cache_write
+                ),
                 # Iteration telemetry (issue #1161).
                 # model_call_count: the proxy's usage_events delta is authoritative
                 #   WHEN the proxy is in the serving path — but #1159 ("direct-

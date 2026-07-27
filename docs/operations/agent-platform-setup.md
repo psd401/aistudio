@@ -290,7 +290,8 @@ the Dockerfile (the enforcement gate that keeps these from regressing).
 
 | Artifact | Pin | Verification |
 |----------|-----|--------------|
-| OpenClaw base | `ghcr.io/openclaw/openclaw@sha256:3814fb…` (2026.6.11) | Immutable digest in `FROM` |
+| OpenClaw base | `ghcr.io/openclaw/openclaw@sha256:6a31d4…` (2026.7.1) | Immutable digest in `FROM` |
+| amazon-bedrock provider plugin | `2026.7.1` | `npm pack` pin; must stay ≥ the minimum in `check_config_consistency.py` or prompt caching silently turns off |
 | bun | `1.2.12` | `bun-linux-aarch64.zip` SHA256 vs `BUN_SHA256` ARG |
 | uv | `0.7.9` | `uv-aarch64-unknown-linux-gnu.tar.gz` SHA256 vs `UV_SHA256` ARG |
 | Google Workspace CLI (`gws`) | `0.22.5` | `.tar.gz` SHA256 vs `GWS_SHA256` ARG |
@@ -331,7 +332,7 @@ release (Morning Brief "chat deadline expired"; nested
 workspace double-nesting fix is present — no Docker required, just `curl`/`jq`/`gh`:
 
 ```bash
-REPO=openclaw/openclaw; TAG=2026.6.11        # target the latest stable release
+REPO=openclaw/openclaw; TAG=2026.7.1         # target the latest stable release
 TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:$REPO:pull&service=ghcr.io" | jq -r .token)
 
 # Multi-arch index digest (this is what goes in FROM):
