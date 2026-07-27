@@ -18,15 +18,12 @@ function defineBuildCapabilityCatalogSuite1Part1() {
     )
   })
 
-  it("registers Red Rover as a staff/administrator capability", () => {
-    const capability = CAPABILITY_MANIFEST.find(
-      (entry) => entry.identifier === "skill.redrover"
-    )
-    expect(capability).toBeDefined()
-    expect(capability?.defaultRoles).toEqual([
-      "administrator",
-      "staff",
-    ])
+  it("no longer registers the retired Red Rover capability", () => {
+    expect(
+      CAPABILITY_MANIFEST.some(
+        (entry) => entry.identifier === "skill.redrover"
+      )
+    ).toBe(false)
   })
 
   it("projects describe_capabilities as an MCP-invocable action gated by platform:read", () => {

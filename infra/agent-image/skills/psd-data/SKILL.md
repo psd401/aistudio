@@ -1,7 +1,7 @@
 ---
 name: psd-data
-summary: Query the PSD data warehouse via the psd-data-mcp server. Authenticates as the calling user, enforces row-level security, exposes 8 tools (tables, schema, permissions, query, lessons).
-description: Read-only access to PSD's Redshift data warehouse, authenticated with the caller's Cognito identity. Lists tables, inspects schemas, runs RLS-rewritten SELECT queries, and manages cross-session "lessons" learned about the data. The MCP server enforces all access control — the skill simply forwards JSON-RPC calls with the right bearer token.
+summary: Query the PSD data warehouse via the psd-data-mcp server. Authenticates as the calling user, enforces row-level security, exposes 8 tools (tables, schema, permissions, query, lessons). Also the source for Red Rover employee absence and vacancy data — the retired psd-redrover skill.
+description: Read-only access to PSD's Redshift data warehouse, authenticated with the caller's Cognito identity. Lists tables, inspects schemas, runs RLS-rewritten SELECT queries, and manages cross-session "lessons" learned about the data. This is also where Red Rover absence, vacancy, and substitute-fill data now lives — the standalone psd-redrover skill was retired. The MCP server enforces all access control — the skill simply forwards JSON-RPC calls with the right bearer token.
 allowed-tools: Bash(node:*)
 ---
 
@@ -13,6 +13,22 @@ Caller identity comes from the signed invocation context. Never pass `--user`
 or another identity selector; the CLI rejects model-supplied authority. The
 trusted broker uses the signed owner to resolve the caller's stored Cognito
 refresh token, mint a fresh id_token, and authenticate to the MCP server.
+
+## Red Rover data lives here now
+
+The former `psd-redrover` skill was **retired**. It read the Red Rover API with
+a single shared district credential, which gave every holder the same
+district-wide view regardless of who they were. Red Rover employee absence,
+vacancy, and substitute-fill data is now ingested into the warehouse and is
+reachable through this skill, where the caller's own Cognito identity and
+row-level security decide what they may see.
+
+If a user asks about absences, vacancies, unfilled jobs, substitutes, or
+Red Rover generally, answer it from here — start with `list-tables` /
+`describe` to locate the current Red Rover tables, and check `lessons` for
+what previous sessions learned about them. Do not report `psd-redrover` as
+missing and do not attempt to call the Red Rover API directly; the shared
+credential and its broker operation have been removed.
 
 ## Authentication
 

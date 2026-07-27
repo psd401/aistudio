@@ -1,16 +1,12 @@
 /** @jest-environment node */
 
 const getUserOnlyMock = jest.fn()
-const getMock = jest.fn()
 const putMock = jest.fn()
 
 jest.mock("@/lib/agent-credentials/broker", () => ({
   AgentCredentialBroker: class {
     getUserOnly(...args: unknown[]) {
       return getUserOnlyMock(...args)
-    }
-    get(...args: unknown[]) {
-      return getMock(...args)
     }
     put(...args: unknown[]) {
       return putMock(...args)
@@ -21,7 +17,6 @@ jest.mock("@/lib/agent-credentials/broker", () => ({
 import {
   executePlaudOperation,
   executePsdDataOperation,
-  executeRedRoverOperation,
 } from "@/lib/agent-credentials/owner-operation-broker"
 
 const originalFetch = globalThis.fetch
@@ -91,14 +86,6 @@ beforeEach(() => {
     scope: "user",
   })
   putMock.mockResolvedValue({ name: "plaud", action: "rotated" })
-  getMock.mockResolvedValue({
-    name: "redrover_credentials",
-    value: JSON.stringify({
-      username: "service-user",
-      password: "service-password",
-    }),
-    scope: "shared",
-  })
 })
 
 afterAll(() => {
@@ -378,122 +365,10 @@ function defineOwnerOnlyOperationCredentialBrokerSuite1Part3() {it("does not acc
 
   }
 
-function defineOwnerOnlyOperationCredentialBrokerSuite1Part4() {it("returns only allowlisted Red Rover organization fields", async () => {
-    globalThis.fetch = jest.fn().mockResolvedValueOnce(
-      jsonResponse([
-        {
-          orgId: "district-1",
-          name: "Example District",
-          apiKey: "provider-secret",
-          password: "leaked-password",
-          metadata: { private: true },
-        },
-      ])
-    ) as typeof fetch
-    await expect(
-      executeRedRoverOperation({
-        ownerEmail: "owner@psd401.net",
-        sessionId: "session-1",
-        operation: "organization",
-        startDate: undefined,
-        endDate: undefined,
-        filledFilter: undefined,
-      })
-    ).resolves.toEqual({
-      orgId: "district-1",
-      name: "Example District",
-    })
-  })
-
-  it("rejects an excessive Red Rover date range before resolving credentials", async () => {
-    const fetchMock = jest.fn()
-    globalThis.fetch = fetchMock as typeof fetch
-    await expect(
-      executeRedRoverOperation({
-        ownerEmail: "owner@psd401.net",
-        sessionId: "session-1",
-        operation: "vacancies",
-        startDate: "2026-01-01",
-        endDate: "2026-02-01",
-        filledFilter: undefined,
-      })
-    ).rejects.toThrow("at most 31 inclusive days")
-    expect(getMock).not.toHaveBeenCalled()
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
-
-  it("caps aggregate Red Rover vacancy items across pages", async () => {
-    const fetchMock = jest
-      .fn()
-      .mockResolvedValueOnce(
-        jsonResponse([
-          {
-            orgId: "district-1",
-            name: "Example District",
-            apiKey: "provider-secret",
-          },
-        ])
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({
-          data: Array.from({ length: 5001 }, (_, index) => ({ index })),
-          hasMoreData: false,
-        })
-      )
-    globalThis.fetch = fetchMock as typeof fetch
-    await expect(
-      executeRedRoverOperation({
-        ownerEmail: "owner@psd401.net",
-        sessionId: "session-1",
-        operation: "vacancies",
-        startDate: "2026-01-01",
-        endDate: "2026-01-31",
-        filledFilter: "unfilled",
-      })
-    ).rejects.toThrow("aggregate item limit")
-  })
-
-  it("caps aggregate serialized Red Rover vacancy bytes across pages", async () => {
-    const largeItem = { description: "x".repeat(3 * 1024 * 1024) }
-    const fetchMock = jest
-      .fn()
-      .mockResolvedValueOnce(
-        jsonResponse([
-          {
-            orgId: "district-1",
-            name: "Example District",
-            apiKey: "provider-secret",
-          },
-        ])
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({ data: [largeItem], hasMoreData: true })
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({ data: [largeItem], hasMoreData: true })
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({ data: [largeItem], hasMoreData: false })
-      )
-    globalThis.fetch = fetchMock as typeof fetch
-    await expect(
-      executeRedRoverOperation({
-        ownerEmail: "owner@psd401.net",
-        sessionId: "session-1",
-        operation: "vacancies",
-        startDate: "2026-01-01",
-        endDate: "2026-01-31",
-        filledFilter: undefined,
-      })
-    ).rejects.toThrow("aggregate byte limit")
-  })
-}
-
 const defineOwnerOnlyOperationCredentialBrokerSuite1 = () => {
   defineOwnerOnlyOperationCredentialBrokerSuite1Part1()
   defineOwnerOnlyOperationCredentialBrokerSuite1Part2()
   defineOwnerOnlyOperationCredentialBrokerSuite1Part3()
-  defineOwnerOnlyOperationCredentialBrokerSuite1Part4()
 };
 
 describe("owner-only operation credential broker", defineOwnerOnlyOperationCredentialBrokerSuite1)
