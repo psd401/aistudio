@@ -110,15 +110,14 @@ async function emitNeedsAuthAndExit(ownerEmail, reason) {
   process.exit(10);
 }
 
-async function canvaFetch(accessToken, method, path, opts = {}) {
-  void accessToken;
+function canvaRequestPayload(method, path, opts) {
   const query = {};
   for (const [key, value] of Object.entries(opts.query || {})) {
     if (value !== undefined && value !== null && value !== '') {
       query[key] = String(value);
     }
   }
-  const payload = {
+  return {
     operation: 'request',
     method,
     path,
@@ -132,7 +131,69 @@ async function canvaFetch(accessToken, method, path, opts = {}) {
         }
       : {}),
   };
+}
 
+function unauthorizedError(message) {
+  return Object.assign(new Error(message), {
+    code: 'unauthorized',
+    status: 401,
+  });
+}
+
+function rateLimitError() {
+  return Object.assign(new Error('Canva API rate limited (HTTP 429)'), {
+    code: 'rate_limited',
+    status: 429,
+  });
+}
+
+function canvaHttpError(result, status) {
+  const upstream =
+    result.payload && typeof result.payload === 'object'
+      ? result.payload
+      : {};
+  return Object.assign(
+    new Error(
+      upstream.message || `Canva API error: HTTP ${status || 'unknown'}`
+    ),
+    {
+      code: upstream.code || `http_${status || 'unknown'}`,
+      status,
+    }
+  );
+}
+
+function canvaRetryDelay(result, attempt) {
+  const seconds = Number(result.retryAfter);
+  return Number.isFinite(seconds) && seconds >= 0
+    ? seconds * 1000
+    : 1000 * Math.pow(2, attempt);
+}
+
+async function parseCanvaResponse(result, attempt, maxRetries) {
+  const status = Number(result.httpStatus);
+  if (status === 429) {
+    const error = rateLimitError();
+    if (attempt < maxRetries - 1) {
+      await sleep(canvaRetryDelay(result, attempt));
+    }
+    return { retry: true, error };
+  }
+  if (status === 401) {
+    throw unauthorizedError('Canva rejected the owner-bound authorization');
+  }
+  if (status < 200 || status >= 300) {
+    throw canvaHttpError(result, status);
+  }
+  return {
+    retry: false,
+    payload: status === 204 ? null : (result.payload ?? null),
+  };
+}
+
+async function canvaFetch(accessToken, method, path, opts = {}) {
+  void accessToken;
+  const payload = canvaRequestPayload(method, path, opts);
   const maxRetries = 3;
   let lastError = null;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -145,55 +206,15 @@ async function canvaFetch(accessToken, method, path, opts = {}) {
       );
     } catch (err) {
       if (err && err.status === 401) {
-        throw Object.assign(
-          new Error('Canva authorization is missing or expired'),
-          { code: 'unauthorized', status: 401 }
-        );
+        throw unauthorizedError('Canva authorization is missing or expired');
       }
       lastError = err instanceof Error ? err : new Error(String(err));
       if (attempt === maxRetries - 1) throw lastError;
       continue;
     }
-
-    const status = Number(result.httpStatus);
-    if (status === 429) {
-      lastError = Object.assign(
-        new Error('Canva API rate limited (HTTP 429)'),
-        { code: 'rate_limited', status: 429 }
-      );
-      if (attempt < maxRetries - 1) {
-        const seconds = Number(result.retryAfter);
-        const waitMs = Number.isFinite(seconds) && seconds >= 0
-          ? seconds * 1000
-          : 1000 * Math.pow(2, attempt);
-        await sleep(waitMs);
-      }
-      continue;
-    }
-    if (status === 401) {
-      throw Object.assign(
-        new Error('Canva rejected the owner-bound authorization'),
-        { code: 'unauthorized', status: 401 }
-      );
-    }
-    if (status < 200 || status >= 300) {
-      const upstream =
-        result.payload && typeof result.payload === 'object'
-          ? result.payload
-          : {};
-      throw Object.assign(
-        new Error(
-          upstream.message ||
-            `Canva API error: HTTP ${status || 'unknown'}`
-        ),
-        {
-          code: upstream.code || `http_${status || 'unknown'}`,
-          status,
-        }
-      );
-    }
-    if (status === 204) return null;
-    return result.payload ?? null;
+    const parsed = await parseCanvaResponse(result, attempt, maxRetries);
+    if (!parsed.retry) return parsed.payload;
+    lastError = parsed.error;
   }
   throw lastError || new Error('Canva API request failed after retries');
 }
