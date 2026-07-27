@@ -106,38 +106,48 @@ const promptData = {
 
 let mod: typeof import('@/actions/db/assistant-architect-actions')
 
-function defineAssistantArchitectMutationAuthorizationSuite1Part1() {
+async function loadAssistantArchitectActions(): Promise<void> {
+  mod = await import('@/actions/db/assistant-architect-actions')
+}
 
-  beforeAll(async () => { mod = await import('@/actions/db/assistant-architect-actions') })
-  beforeEach(() => {
-    jest.clearAllMocks()
-    mockGetServerSession.mockResolvedValue({ sub: 'user-1' })
-    mockHasRole.mockResolvedValue(false)
-    mockGetCurrentUserAction.mockResolvedValue({ isSuccess: true, data: { user: { id: 1 } } })
-    mockGetAccessibleRepositoryIds.mockImplementation((repositoryIds) =>
-      Promise.resolve(repositoryIds)
-    )
-    mockGetToolInputFields.mockResolvedValue([])
-    mockUserCanAccessResource.mockResolvedValue(true)
-    mockGetRepositoryById.mockImplementation((repositoryId) =>
-      Promise.resolve({
-        id: repositoryId,
-        repositoryKind: "durable",
-        lifecycleStatus: "active",
-      })
-    )
-    mockValidateAssistantRepositoryAudience.mockResolvedValue({
-      isCompatible: true,
-      mismatches: [],
-    })
-    mockValidateAssistantRepositoryAudienceForRepositoryIds.mockResolvedValue({
-      isCompatible: true,
-      mismatches: [],
-    })
-    mockExecuteQuery.mockImplementation((_fn: unknown, label?: string) =>
-      Promise.resolve(label === 'getExecutionOwnerForResultUpdate' ? [{ userId: 999 }] : [])
-    )
+function resetAssistantArchitectAuthorizationMocks(): void {
+  jest.clearAllMocks()
+  mockGetServerSession.mockResolvedValue({ sub: 'user-1' })
+  mockHasRole.mockResolvedValue(false)
+  mockGetCurrentUserAction.mockResolvedValue({
+    isSuccess: true,
+    data: { user: { id: 1 } },
   })
+  mockGetAccessibleRepositoryIds.mockImplementation((repositoryIds) =>
+    Promise.resolve(repositoryIds)
+  )
+  mockGetToolInputFields.mockResolvedValue([])
+  mockUserCanAccessResource.mockResolvedValue(true)
+  mockGetRepositoryById.mockImplementation((repositoryId) =>
+    Promise.resolve({
+      id: repositoryId,
+      repositoryKind: "durable",
+      lifecycleStatus: "active",
+    })
+  )
+  mockValidateAssistantRepositoryAudience.mockResolvedValue({
+    isCompatible: true,
+    mismatches: [],
+  })
+  mockValidateAssistantRepositoryAudienceForRepositoryIds.mockResolvedValue({
+    isCompatible: true,
+    mismatches: [],
+  })
+  mockExecuteQuery.mockImplementation((_fn: unknown, label?: string) =>
+    Promise.resolve(
+      label === 'getExecutionOwnerForResultUpdate' ? [{ userId: 999 }] : []
+    )
+  )
+}
+
+function defineAssistantArchitectMutationAuthorizationSuite1Part1() {
+  beforeAll(loadAssistantArchitectActions)
+  beforeEach(resetAssistantArchitectAuthorizationMocks)
 
   it('getAssistantArchitectAction rejects a direct unauthenticated RPC before loading contents', async () => {
     mockGetServerSession.mockResolvedValue(null)

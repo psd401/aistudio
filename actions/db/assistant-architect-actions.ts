@@ -79,6 +79,80 @@ type ArchitectWithRelations = SelectAssistantArchitect & {
   prompts?: SelectChainPrompt[];
 }
 
+type ArchitectLookupCaller =
+  | { isInternalLookup: true }
+  | {
+      isInternalLookup: false
+      callerId: number
+      callerIsAdmin: boolean
+    }
+
+const MASKED_ARCHITECT_NOT_FOUND = {
+  isSuccess: false,
+  message: "Assistant architect not found",
+} as const
+
+async function resolveArchitectLookupCaller(
+  internalAccess?: symbol
+): Promise<ArchitectLookupCaller | null> {
+  if (internalAccess === INTERNAL_ASSISTANT_LOOKUP) {
+    return { isInternalLookup: true }
+  }
+  const session = await getServerSession()
+  if (!session?.sub) return null
+
+  const currentUser = await getCurrentUserAction()
+  const callerId = currentUser.isSuccess
+    ? currentUser.data?.user?.id
+    : undefined
+  if (!callerId) return null
+
+  return {
+    isInternalLookup: false,
+    callerId,
+    callerIsAdmin: await hasRole("administrator"),
+  }
+}
+
+function createArchitectNotFoundError(id: string) {
+  return createError("Assistant architect not found", {
+    code: "NOT_FOUND",
+    level: ErrorLevel.WARN,
+    details: { id },
+  })
+}
+
+async function verifyArchitectLookupVisibility(
+  architect: SelectAssistantArchitect,
+  id: string,
+  caller: ArchitectLookupCaller
+): Promise<void> {
+  if (architect.status === "approved") return
+
+  const isAdmin = caller.isInternalLookup
+    ? await hasRole("administrator")
+    : caller.callerIsAdmin
+  const visibleCallerId = caller.isInternalLookup
+    ? (await getCurrentUserAction()).data?.user?.id
+    : caller.callerId
+  if (!isAdmin && architect.userId !== visibleCallerId) {
+    throw createArchitectNotFoundError(id)
+  }
+}
+
+async function canCallerAccessArchitect(
+  architect: SelectAssistantArchitect,
+  caller: ArchitectLookupCaller
+): Promise<boolean> {
+  if (caller.isInternalLookup) return true
+  return userCanAccessResource(
+    caller.callerId,
+    "assistant",
+    architect.id,
+    { ownerUserId: architect.userId }
+  )
+}
+
 // Helper function to safely parse integers with validation
 function safeParseInt(value: string, fieldName: string): number {
   const parsed = Number.parseInt(value, 10);
@@ -704,23 +778,8 @@ export async function getAssistantArchitectByIdAction(
     // a concrete application user before prompt contents are loaded. Trusted
     // REST/MCP execution paths pass an unforgeable, server-only Symbol and apply
     // their own API-key scope + shared resource authorization.
-    const isInternalLookup = internalAccess === INTERNAL_ASSISTANT_LOOKUP
-    let callerId: number | undefined
-    let callerIsAdmin = false
-    if (!isInternalLookup) {
-      const session = await getServerSession()
-      if (!session?.sub) {
-        return { isSuccess: false, message: "Assistant architect not found" }
-      }
-      const currentUser = await getCurrentUserAction()
-      callerId = currentUser.isSuccess
-        ? currentUser.data?.user?.id
-        : undefined
-      if (!callerId) {
-        return { isSuccess: false, message: "Assistant architect not found" }
-      }
-      callerIsAdmin = await hasRole("administrator")
-    }
+    const caller = await resolveArchitectLookupCaller(internalAccess)
+    if (!caller) return MASKED_ARCHITECT_NOT_FOUND
 
     // Parse string ID to integer
     const idInt = Number.parseInt(id, 10);
@@ -737,11 +796,7 @@ export async function getAssistantArchitectByIdAction(
     const architect = await drizzleGetAssistantArchitectById(idInt);
 
     if (!architect) {
-      throw createError("Assistant architect not found", {
-        code: "NOT_FOUND",
-        level: ErrorLevel.WARN,
-        details: { id }
-      });
+      throw createArchitectNotFoundError(id)
     }
 
     // Visibility (REV-COR-034): a non-approved architect and its prompt contents
@@ -750,38 +805,16 @@ export async function getAssistantArchitectByIdAction(
     // (browser session OR API key at the route layer) so execution and the v1 API
     // are unaffected — this gates draft/pending enumeration without a hard session
     // requirement that would break API-key callers.
-    if (architect.status !== "approved") {
-      const isAdmin = isInternalLookup
-        ? await hasRole("administrator")
-        : callerIsAdmin
-      const visibleCallerId = isInternalLookup
-        ? (await getCurrentUserAction()).data?.user?.id
-        : callerId
-      if (!isAdmin && architect.userId !== visibleCallerId) {
-        throw createError("Assistant architect not found", {
-          code: "NOT_FOUND",
-          level: ErrorLevel.WARN,
-          details: { id }
-        });
-      }
-    }
+    await verifyArchitectLookupVisibility(architect, id, caller)
 
-    if (!isInternalLookup) {
-      const canAccess = await userCanAccessResource(
-        callerId ?? -1,
-        "assistant",
-        architect.id,
-        { ownerUserId: architect.userId }
-      )
-      if (!canAccess) {
-        // Visibility-before-permission: do not reveal whether an assistant exists
-        // through either exported server-action name when resource access hides it.
-        log.warn("Assistant architect lookup masked by resource access", {
-          architectId: id,
-          userId: callerId,
-        })
-        return { isSuccess: false, message: "Assistant architect not found" }
-      }
+    if (!(await canCallerAccessArchitect(architect, caller))) {
+      // Visibility-before-permission: do not reveal whether an assistant exists
+      // through either exported server-action name when resource access hides it.
+      log.warn("Assistant architect lookup masked by resource access", {
+        architectId: id,
+        userId: caller.isInternalLookup ? undefined : caller.callerId,
+      })
+      return MASKED_ARCHITECT_NOT_FOUND
     }
 
     // Get input fields and prompts in parallel via Drizzle

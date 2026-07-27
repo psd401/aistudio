@@ -67,6 +67,10 @@ export interface AssistantListResult {
   nextCursor: string | null
 }
 
+function parseAssistantListCursor(cursor: string | undefined): number | undefined {
+  return cursor === undefined ? undefined : Number.parseInt(cursor, 10)
+}
+
 // ============================================
 // Access Validation
 // ============================================
@@ -128,9 +132,7 @@ export async function listAccessibleAssistants(
       )
     : undefined
 
-  let scanCursor = options.cursor
-    ? Number.parseInt(options.cursor, 10)
-    : undefined
+  let scanCursor = parseAssistantListCursor(options.cursor)
   const accessibleRows: Array<{
     id: number
     name: string
