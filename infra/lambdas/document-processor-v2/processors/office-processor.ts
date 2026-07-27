@@ -31,6 +31,21 @@ interface OfficeExtractedContent {
   slides?: unknown[];
 }
 
+interface PptxSlide {
+  id: unknown;
+  text?: unknown;
+}
+
+interface PptxContent {
+  slides?: PptxSlide[];
+  text?: string;
+  metadata?: {
+    slideCount?: unknown;
+    slidesWithContent?: unknown;
+    extractionMethod?: unknown;
+  };
+}
+
 export class OfficeProcessor implements DocumentProcessor {
   constructor(
     private documentType: "docx" | "xlsx" | "pptx",
@@ -547,58 +562,58 @@ export class OfficeProcessor implements DocumentProcessor {
     return markdown;
   }
 
-  private convertPptxToMarkdown(content: unknown): string {
-    let markdown = "# PowerPoint Presentation\n\n";
-
-    // Use structured slide data from node-pptx-parser if available
-    if (content.slides && Array.isArray(content.slides)) {
-      for (const slide of content.slides) {
-        if (slide.text && slide.text.length > 0) {
-          // Use the slide's actual archive-derived id (REV-COR-413), not its position in
-          // the array — when slide numbering has a gap (slide1, slide2, slide4), `index`
-          // would mislabel slide 4 as "Slide 3" here even though `combinedText` and
-          // `slides[].id` both correctly show 4.
-          markdown += `## Slide ${slide.id}\n\n`;
-
-          // Join slide text with proper formatting
-          const slideContent = slide.text.join("\n").trim();
-          if (slideContent) {
-            markdown += `${slideContent}\n\n`;
-          }
-        }
-      }
-    } else {
-      // Fallback to text-based parsing if structured data not available
-      const text = content.text;
-      const sections = text
-        .split(/## Slide \d+/)
-        .filter((section: string) => section.trim().length > 0);
-
-      for (const [index, section] of sections.entries()) {
-        const trimmedSection = section.trim();
-        if (trimmedSection) {
-          if (index === 0 && !text.includes("## Slide")) {
-            markdown += `## Slide 1\n\n${trimmedSection}\n\n`;
-          } else if (index > 0) {
-            markdown += `## Slide ${index + 1}\n\n${trimmedSection}\n\n`;
-          } else {
-            markdown += `${trimmedSection}\n\n`;
-          }
-        }
-      }
+  private structuredSlidesMarkdown(slides: PptxSlide[]): string {
+    let markdown = "";
+    for (const slide of slides) {
+      if (!Array.isArray(slide.text) || slide.text.length === 0) continue;
+      const slideContent = slide.text.join("\n").trim();
+      if (!slideContent) continue;
+      markdown += `## Slide ${slide.id}\n\n${slideContent}\n\n`;
     }
-
-    // Add metadata
-    markdown += "\n---\n";
-    if (content.metadata?.slideCount) {
-      markdown += `**Total Slides:** ${content.metadata.slideCount}\n`;
-    }
-    if (content.metadata?.slidesWithContent) {
-      markdown += `**Slides with Content:** ${content.metadata.slidesWithContent}\n`;
-    }
-    markdown += `**Extraction Method:** ${content.metadata?.extractionMethod || "custom-jszip-pptx"}\n`;
-
     return markdown;
+  }
+
+  private fallbackSlidesMarkdown(text: string): string {
+    let markdown = "";
+    const sections = text
+      .split(/## Slide \d+/)
+      .filter((section) => section.trim().length > 0);
+    for (const [index, section] of sections.entries()) {
+      const trimmedSection = section.trim();
+      if (!trimmedSection) continue;
+      if (index === 0 && !text.includes("## Slide")) {
+        markdown += `## Slide 1\n\n${trimmedSection}\n\n`;
+      } else if (index > 0) {
+        markdown += `## Slide ${index + 1}\n\n${trimmedSection}\n\n`;
+      } else {
+        markdown += `${trimmedSection}\n\n`;
+      }
+    }
+    return markdown;
+  }
+
+  private pptxMetadataMarkdown(metadata: PptxContent["metadata"]): string {
+    let markdown = "\n---\n";
+    if (metadata?.slideCount) {
+      markdown += `**Total Slides:** ${metadata.slideCount}\n`;
+    }
+    if (metadata?.slidesWithContent) {
+      markdown += `**Slides with Content:** ${metadata.slidesWithContent}\n`;
+    }
+    markdown += `**Extraction Method:** ${metadata?.extractionMethod || "custom-jszip-pptx"}\n`;
+    return markdown;
+  }
+
+  private convertPptxToMarkdown(content: unknown): string {
+    const pptx = content as PptxContent;
+    const slidesMarkdown = Array.isArray(pptx.slides)
+      ? this.structuredSlidesMarkdown(pptx.slides)
+      : this.fallbackSlidesMarkdown(pptx.text ?? "");
+    return (
+      "# PowerPoint Presentation\n\n" +
+      slidesMarkdown +
+      this.pptxMetadataMarkdown(pptx.metadata)
+    );
   }
 
   private convertTextToMarkdown(text: string): string {

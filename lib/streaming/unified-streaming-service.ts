@@ -798,6 +798,44 @@ function buildStreamResponse(options: BuildStreamResponseOptions): StreamRespons
   return { result, requestId, capabilities, telemetryConfig };
 }
 
+async function prepareStreamInput(options: {
+  request: StreamRequest;
+  contentSafetyService: ReturnType<typeof getContentSafetyService>;
+  log: ReturnType<typeof createLogger>;
+  requestId: string;
+}) {
+  const { request, contentSafetyService, log, requestId } = options;
+  let messages = validateAndCopyMessages(request, log);
+  let inputSafetyResult: ContentSafetyResult | undefined;
+  if (shouldCheckInputSafety(request, contentSafetyService)) {
+    const safetyCheck = await checkInputContentSafety({
+      messages,
+      request,
+      contentSafetyService,
+      log,
+      requestId,
+    });
+    inputSafetyResult = safetyCheck.safetyResult;
+    messages = safetyCheck.updatedMessages;
+  }
+  return { messages, inputSafetyResult };
+}
+
+function logStreamStart(
+  request: StreamRequest,
+  log: ReturnType<typeof createLogger>
+): void {
+  log.info('Starting unified stream', {
+    provider: request.provider,
+    modelId: request.modelId,
+    source: request.source,
+    userId: request.userId,
+    messageCount: request.messages?.length || 0,
+    hasMessages: !!request.messages,
+    messagesType: typeof request.messages
+  });
+}
+
 /**
  * Unified streaming service that handles all AI streaming operations
  * across chat, compare, and assistant execution tools.
@@ -820,15 +858,7 @@ export class UnifiedStreamingService {
     const timer = startTimer('unified-streaming-service.stream');
     const log = createLogger({ requestId, module: 'unified-streaming-service' });
 
-    log.info('Starting unified stream', {
-      provider: request.provider,
-      modelId: request.modelId,
-      source: request.source,
-      userId: request.userId,
-      messageCount: request.messages?.length || 0,
-      hasMessages: !!request.messages,
-      messagesType: typeof request.messages
-    });
+    logStreamStart(request, log);
 
     try {
       // 1. Get provider adapter and capabilities
@@ -853,19 +883,14 @@ export class UnifiedStreamingService {
       checkCircuitBreaker(circuitBreaker, request.provider, log);
 
       // 4. Validate and copy messages
-      let messages = validateAndCopyMessages(request, log);
-
-      // 5. K-12 Content Safety: Check user input before sending to AI
       const contentSafetyService = getContentSafetyService();
-      let inputSafetyResult: ContentSafetyResult | undefined;
-
-      if (shouldCheckInputSafety(request, contentSafetyService)) {
-        const safetyCheck = await checkInputContentSafety({
-          messages, request, contentSafetyService, log, requestId
-        });
-        inputSafetyResult = safetyCheck.safetyResult;
-        messages = safetyCheck.updatedMessages;
-      }
+      const preparedInput = await prepareStreamInput({
+        request,
+        contentSafetyService,
+        log,
+        requestId,
+      });
+      const { messages, inputSafetyResult } = preparedInput;
 
       // 6. Convert messages and build config
       const convertedMessages = await convertMessages(messages, log);

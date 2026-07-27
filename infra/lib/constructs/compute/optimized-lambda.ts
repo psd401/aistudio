@@ -140,24 +140,8 @@ export class OptimizedLambda extends Construct {
     // Determine optimal configuration based on profile and PowerTuning
     const config = this.getOptimalConfiguration(props)
 
-    // Create optimized log group with appropriate retention
-    this.logGroup = new logs.LogGroup(this, "LogGroup", {
-      logGroupName: `/aws/lambda/${props.functionName}`,
-      retention:
-        props.logRetention ||
-        this.getLogRetention(props.performanceProfile || "standard"),
-      removalPolicy:
-        props.performanceProfile === "critical"
-          ? cdk.RemovalPolicy.RETAIN
-          : cdk.RemovalPolicy.DESTROY,
-    })
-
-    // Determine runtime and architecture
-    const runtime = props.runtime || lambda.Runtime.NODEJS_20_X
-    const architecture =
-      props.enableGraviton !== false
-        ? lambda.Architecture.ARM_64
-        : lambda.Architecture.X86_64
+    this.logGroup = this.createLogGroup(props)
+    const { runtime, architecture } = this.resolveExecutionPlatform(props)
 
     // Create Lambda function with optimizations
     this.function = new lambda.Function(this, "Function", {
@@ -263,6 +247,32 @@ export class OptimizedLambda extends Construct {
 
     // Add cost allocation tags for tracking
     this.addCostTags(props, config)
+  }
+
+  private createLogGroup(props: OptimizedLambdaProps): logs.LogGroup {
+    const performanceProfile = props.performanceProfile || "standard"
+    return new logs.LogGroup(this, "LogGroup", {
+      logGroupName: `/aws/lambda/${props.functionName}`,
+      retention:
+        props.logRetention || this.getLogRetention(performanceProfile),
+      removalPolicy:
+        performanceProfile === "critical"
+          ? cdk.RemovalPolicy.RETAIN
+          : cdk.RemovalPolicy.DESTROY,
+    })
+  }
+
+  private resolveExecutionPlatform(props: OptimizedLambdaProps): {
+    runtime: lambda.Runtime
+    architecture: lambda.Architecture
+  } {
+    return {
+      runtime: props.runtime || lambda.Runtime.NODEJS_20_X,
+      architecture:
+        props.enableGraviton !== false
+          ? lambda.Architecture.ARM_64
+          : lambda.Architecture.X86_64,
+    }
   }
 
   /**
