@@ -175,6 +175,41 @@ jobs:
       env:
         CI: true
 
+  # Production-build regression for #1297. Source-level import tests cannot
+  # prove how Next/Webpack packages middleware, so exercise the compiled bundle
+  # with Next's real Edge sandbox and a signed expired session on every PR/push.
+  auth-edge-production:
+    name: Auth Edge Production Artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      AUTH_SECRET: artifact-test-secret-at-least-32-characters
+      AUTH_URL: https://artifact.test
+      AUTH_COGNITO_CLIENT_ID: artifact-client
+      AUTH_COGNITO_ISSUER: https://cognito-idp.us-east-1.amazonaws.com/us-east-1_artifact
+      NEXT_PUBLIC_COGNITO_CLIENT_ID: artifact-client
+      NEXT_PUBLIC_COGNITO_DOMAIN: artifact.auth.us-east-1.amazoncognito.com
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v7
+
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+      with:
+        bun-version: "1.2.x"
+
+    - name: Install dependencies
+      run: bun install --frozen-lockfile
+
+    - name: Build production standalone application
+      run: bun run build
+
+    - name: Exercise compiled auth middleware in the Edge sandbox
+      run: bun run test:smoke:auth-edge-production
+
   # CDK validation job - checks infrastructure code
   cdk-validate:
     name: Validate CDK Infrastructure

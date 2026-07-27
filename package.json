@@ -38,6 +38,7 @@
     "test:smoke:agents-projects": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun --preload ./tests/smoke/server-only-preload.js tests/smoke/unified-content-agents-projects.smoke.ts",
     "test:smoke:unified-content-lambda-artifact": "bun run scripts/test/unified-content-lambda-artifact.smoke.ts",
     "test:smoke:embedding-lambda-artifact": "bun run scripts/test/embedding-lambda-artifact.smoke.ts",
+    "test:smoke:auth-edge-production": "node scripts/test/auth-edge-production.smoke.cjs",
     "agent:probe-context": "bun run scripts/agent-workspace/mint-agent-probe-context.ts",
     "test:skill:workspace": "cd infra/agent-image/skills/psd-workspace && bun test common.test.js",
     "test:skill:directory": "cd infra/agent-image/skills/psd-directory && bun test run.test.js",
