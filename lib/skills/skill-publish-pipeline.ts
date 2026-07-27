@@ -207,13 +207,16 @@ export async function invokeSkillScan(
     units: 1,
     limits: SKILL_SCAN_LIMITS,
   })
+  // OBSERVE-ONLY (2026-07-27, Hagel): a scan-rate threshold must not silently
+  // refuse to publish a skill. Measure it, log it, carry on.
   if (!admission.allowed) {
-    log.warn("Skill scan admission rejected", {
+    log.warn("Skill scan over threshold (observe-only — scan proceeding)", {
       skillId: params.skillId,
       reason: admission.reason,
     })
-    return false
   }
+  // No leaseId on a denial; the scan still runs, it just is not lease-bound.
+  const scanLeaseId = admission.allowed ? admission.leaseId : null
 
   try {
     const client = getLambda()
@@ -226,7 +229,7 @@ export async function invokeSkillScan(
             skillId: params.skillId,
             ownerKey: params.ownerKey.toLowerCase(),
             version: params.version,
-            scanLeaseId: admission.leaseId,
+            scanLeaseId,
             idempotencyKey: params.idempotencyKey,
             s3Key: params.draftPrefix,
             destinationPrefix: params.destinationPrefix,
@@ -239,7 +242,7 @@ export async function invokeSkillScan(
     log.info("Dispatched skill-builder scan", { skillId: params.skillId })
     return true
   } catch (error) {
-    await releaseResourceAdmission(admission.leaseId)
+    if (scanLeaseId) await releaseResourceAdmission(scanLeaseId)
     log.error("Skill-builder invoke failed (non-fatal)", {
       skillId: params.skillId,
       error: error instanceof Error ? error.message : String(error),
