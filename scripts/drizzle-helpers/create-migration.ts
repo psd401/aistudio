@@ -108,21 +108,32 @@ function main(): void {
   console.log(`   Next number: ${formattedNumber}`);
   console.log(`   Filename: ${filename}`);
 
-  // Step 2: Check if file already exists
+  // Step 2 + 3: Create the migration file, failing if it already exists.
+  //
+  // The existence check and the write are a single atomic operation via the
+  // "wx" flag (O_CREAT | O_EXCL) instead of an fs.existsSync() guard followed
+  // by fs.writeFileSync(). The two-step form is a TOCTOU race
+  // (CodeQL js/file-system-race): between the check and the write another
+  // process — or a second copy of this script, which is realistic when two
+  // people generate a migration at the same time — can create the same path,
+  // and the unguarded write then silently clobbers their migration.
   const filePath = getAbsolutePath(path.join(LAMBDA_SCHEMA_DIR, filename));
-  if (fs.existsSync(filePath)) {
-    console.error("");
-    console.error(`❌ Migration file already exists: ${filePath}`);
-    console.error("");
-    process.exit(1);
-  }
 
-  // Step 3: Create the migration file
   console.log("");
   console.log("📝 Step 2: Creating migration file...");
 
   const content = generateMigrationTemplate(nextNumber, description);
-  fs.writeFileSync(filePath, content);
+  try {
+    fs.writeFileSync(filePath, content, { flag: "wx" });
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException)?.code === "EEXIST") {
+      console.error("");
+      console.error(`❌ Migration file already exists: ${filePath}`);
+      console.error("");
+      process.exit(1);
+    }
+    throw error;
+  }
 
   console.log(`   ✅ Created: ${filePath}`);
 

@@ -265,11 +265,18 @@ export class DatabaseStack extends cdk.Stack {
       const schemaDir = path.join(__dirname, '../database/schema');
       const externalHash = crypto.createHash('sha256');
       externalHash.update(fs.readFileSync(migrationsPath, 'utf8'));
-      const schemaFiles = fs.readdirSync(schemaDir).sort();
-      for (const f of schemaFiles) {
-        const filePath = path.join(schemaDir, f);
-        if (fs.statSync(filePath).isFile()) {
-          externalHash.update(fs.readFileSync(filePath, 'utf8'));
+      // readdirSync({ withFileTypes: true }) carries the file/directory kind on
+      // the entry itself, so the regular-file test no longer needs a separate
+      // fs.statSync() on the path we are about to read. Stat-then-read is a
+      // TOCTOU race (CodeQL js/file-system-race) — the path can change kind
+      // between the two syscalls — and dropping the extra stat also halves the
+      // syscalls per schema file during synth.
+      const schemaEntries = fs
+        .readdirSync(schemaDir, { withFileTypes: true })
+        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      for (const entry of schemaEntries) {
+        if (entry.isFile()) {
+          externalHash.update(fs.readFileSync(path.join(schemaDir, entry.name), 'utf8'));
         }
       }
       const migrationAssetHash = externalHash.digest('hex').substring(0, 16);
