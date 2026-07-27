@@ -583,5 +583,57 @@ class RestoreNeverClobbersTests(unittest.TestCase):
         )
 
 
+class RegenerableArtifactSkipTests(unittest.TestCase):
+    """Dependency trees are not memory and must not be synced.
+
+    A real workspace on 2026-07-27 held 4,989 objects, of which 3,886 (77.9%)
+    were a pip virtualenv inside ONE skill. The cold-start restore took 161.7s
+    before the agent could answer, while actual memory/ was 55 files.
+    """
+
+    def test_skips_regenerable_trees_at_any_depth(self):
+        # These appear MID-path, which the prefix list cannot express.
+        for rel in (
+            "skills/hagelk-morning-brief/.tts-venv/lib/python3.11/site-packages/pip/x.py",
+            "skills/foo/node_modules/left-pad/index.js",
+            "skills/foo/.venv/bin/python",
+            "skills/foo/venv/lib/thing.py",
+            "skills/foo/__pycache__/mod.cpython-311.pyc",
+            "workspace/.next/cache/blob",
+        ):
+            self.assertTrue(
+                workspace_sync._should_skip_relative(rel),
+                f"should skip regenerable path: {rel}",
+            )
+
+    def test_never_skips_memory_or_identity(self):
+        # The whole point of the sync. A false positive here is data loss.
+        for rel in (
+            "IDENTITY.md",
+            "MEMORY.md",
+            "USER.md",
+            "memory/2026-04-21.md",
+            "memory/main.sqlite",
+            "memory/.dreams/events.jsonl",
+            "skills/user/my-skill/SKILL.md",
+        ):
+            self.assertFalse(
+                workspace_sync._should_skip_relative(rel),
+                f"must NOT skip user-owned path: {rel}",
+            )
+
+    def test_does_not_skip_lookalike_names(self):
+        # Substring matching would wrongly catch these; segment matching does not.
+        for rel in (
+            "memory/venv-notes.md",
+            "notes/site-packages-comparison.md",
+            "memory/node_modules-explained.md",
+        ):
+            self.assertFalse(
+                workspace_sync._should_skip_relative(rel),
+                f"must NOT skip a file merely NAMED like a build dir: {rel}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
