@@ -28,6 +28,13 @@ interface JobMetadata {
   fileName: string;
 }
 
+interface ChunkData {
+  content: string;
+  metadata: Record<string, unknown>;
+  chunkIndex: number;
+  tokens?: number;
+}
+
 // Helper function to create SQL parameters
 function createSqlParameter(name: string, value: string | number | boolean | null): SqlParameter {
   if (value === null) {
@@ -127,18 +134,8 @@ async function getDocumentText(jobId: string, useAnalysis: boolean = true): Prom
 }
 
 // Chunk text (same as file-processor)
-function chunkText(text: string, maxChunkSize: number = 2000): Array<{
-  content: string;
-  metadata: Record<string, unknown>;
-  chunkIndex: number;
-  tokens?: number;
-}> {
-  const chunks: Array<{
-    content: string;
-    metadata: Record<string, unknown>;
-    chunkIndex: number;
-    tokens?: number;
-  }> = [];
+function chunkText(text: string, maxChunkSize: number = 2000): ChunkData[] {
+  const chunks: ChunkData[] = [];
 
   const lines = text.split('\n');
   let currentChunk = '';
@@ -175,7 +172,10 @@ function chunkText(text: string, maxChunkSize: number = 2000): Array<{
 }
 
 // Store chunks and queue for embeddings (similar to file-processor)
-async function storeAndQueueChunks(itemId: number, chunks: unknown[]): Promise<void> {
+async function storeAndQueueChunks(
+  itemId: number,
+  chunks: readonly ChunkData[],
+): Promise<void> {
   if (chunks.length === 0) return;
 
   // First, delete existing chunks

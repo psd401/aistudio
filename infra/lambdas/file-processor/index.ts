@@ -3,7 +3,11 @@ import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import { RDSDataClient, ExecuteStatementCommand, BatchExecuteStatementCommand, SqlParameter } from '@aws-sdk/client-rds-data';
 import { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
-import { TextractClient, StartDocumentTextDetectionCommand } from '@aws-sdk/client-textract';
+import {
+  TextractClient,
+  StartDocumentTextDetectionCommand,
+  type StartDocumentTextDetectionCommandInput,
+} from '@aws-sdk/client-textract';
 import { Readable } from 'node:stream';
 import pdfParse from 'pdf-parse';
 import * as mammoth from 'mammoth';
@@ -111,22 +115,22 @@ async function startTextractJob(
       throw new Error(`Cannot process ${pageCount} pages. Only ${remaining} pages remaining in free tier this month.`);
     }
 
-    const params = {
+    const params: StartDocumentTextDetectionCommandInput = {
       DocumentLocation: {
         S3Object: {
           Bucket: bucketName,
           Name: fileKey
         }
-      }
+      },
+      ...(TEXTRACT_SNS_TOPIC_ARN && TEXTRACT_ROLE_ARN
+        ? {
+            NotificationChannel: {
+              RoleArn: TEXTRACT_ROLE_ARN,
+              SNSTopicArn: TEXTRACT_SNS_TOPIC_ARN,
+            },
+          }
+        : {}),
     };
-
-    // Add notification if SNS topic is configured
-    if (TEXTRACT_SNS_TOPIC_ARN && TEXTRACT_ROLE_ARN) {
-      (params as unknown).NotificationChannel = {
-        RoleArn: TEXTRACT_ROLE_ARN,
-        SNSTopicArn: TEXTRACT_SNS_TOPIC_ARN
-      };
-    }
 
     // Use StartDocumentTextDetection instead of StartDocumentAnalysis to save costs
     // Text detection is cheaper and sufficient for most PDFs

@@ -331,7 +331,7 @@ async function fetchAndExtractContent(url: string): Promise<string> {
       return prependPageMetadata(content, $);
     } catch (fetchError: unknown) {
       clearTimeout(timeout);
-      if (fetchError.name === 'AbortError') {
+      if (fetchError instanceof Error && fetchError.name === 'AbortError') {
         throw new Error('Request timeout after 30 seconds', { cause: fetchError });
       }
       throw fetchError;
