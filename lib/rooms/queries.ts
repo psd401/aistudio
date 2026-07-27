@@ -110,6 +110,25 @@ export async function listTeacherSections(
   return toPgRows<TeacherSectionOption>(result);
 }
 
+/**
+ * Escape LIKE metacharacters (`\`, `%`, `_`) in user-supplied search text so a
+ * query like "first_last" matches literally instead of treating `_` as a
+ * single-character wildcard. Postgres's default LIKE escape character is already
+ * backslash, so this needs NO explicit `ESCAPE` clause — matching the precedent
+ * in lib/content/visibility-service.ts.
+ *
+ * Do NOT add an explicit escape clause here with a single-backslash string.
+ * Inside a template literal the backslash is consumed escaping the closing
+ * quote, so what reaches Postgres is an escape clause with an EMPTY string,
+ * which per the Postgres docs selects no escape character at all. The
+ * backslashes inserted below then become literal characters the pattern has to
+ * match, and a search for `first_last` silently returns no rows. Verified
+ * against PostgreSQL 16. If an explicit clause is ever needed, the string must
+ * contain a doubled backslash in source.
+ *
+ * The pattern is a bound parameter regardless — this is pattern semantics, not
+ * injection protection.
+ */
 function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, "\\$&");
 }
@@ -160,10 +179,10 @@ export async function searchActiveRosterStudents(
                )
           )
           AND (
-            lower(u.email) LIKE ${pattern} ESCAPE '\'
+            lower(u.email) LIKE ${pattern}
             OR lower(
               trim(concat_ws(' ', u.given_name, u.family_name))
-            ) LIKE ${pattern} ESCAPE '\'
+            ) LIKE ${pattern}
           )
         ORDER BY email
         LIMIT ${boundedLimit}
