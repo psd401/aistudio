@@ -35,26 +35,36 @@
 #     smoke test (docs/operations/agent-platform-setup.md) before trusting it.
 #
 # Multi-arch index digest (Docker picks arm64 at build time via --platform):
-#   ghcr.io/openclaw/openclaw:2026.7.1-beta.2
-#   index: sha256:0e5680d7d58d3b6c08afa0fc992f4ad319b5586f60923e1985b7c6f838c535d5
+#   ghcr.io/openclaw/openclaw:2026.7.1
+#   index: sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c
 #
-# Why a PRERELEASE pin (2026-07-08, #1138): 2026.6.11 (last stable) ships the
-# P1 packaging bug openclaw#99677 — "reconcile is not a function" after every
-# auto-compaction — which aborted a live production run (the 7/6 Plaud task).
-# The fix (openclaw PR #99678) landed in 2026.7.1-beta.2, alongside fixes for
-# empty-reply surfacing (#100456) and compaction prechecks/mid-stream
-# recovery, all of which match failure classes we observed. Move this pin to
-# 2026.7.1 STABLE as soon as it publishes.
+# Moved from the 2026.7.1-beta.2 PRERELEASE pin to 2026.7.1 STABLE (2026-07-27),
+# which is what the prerelease note below asked for. Two reasons:
+#   1. It is the release of the same line — it carries openclaw PR #99678
+#      ("reconcile is not a function" after auto-compaction, the P1 that
+#      aborted the 7/6 Plaud production run) plus the empty-reply and
+#      compaction-precheck fixes that motivated the prerelease pin.
+#   2. It is REQUIRED by the amazon-bedrock provider bump below. Plugin
+#      2026.7.1 is the first release whose prompt-caching allowlist knows
+#      `claude-sonnet-5`, and it declares `peerDependencies.openclaw >=2026.7.1`
+#      / `compat.pluginApi >=2026.7.1`. A prerelease sorts BELOW its release in
+#      semver (2026.7.1-beta.2 < 2026.7.1), so pairing plugin 2026.7.1 with the
+#      beta.2 host would violate the plugin's own host contract. Host and
+#      plugin move together or not at all.
 #
 # Rollback targets (previous pins):
-#   2026.6.11  index sha256:3814fb1f62f9cfc5944de088c5817c68c88b5d721feebe36420b666a90a61ce7
-#   2026.4.20  index sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
+#   2026.7.1-beta.2  index sha256:0e5680d7d58d3b6c08afa0fc992f4ad319b5586f60923e1985b7c6f838c535d5
+#   2026.6.11        index sha256:3814fb1f62f9cfc5944de088c5817c68c88b5d721feebe36420b666a90a61ce7
+#   2026.4.20        index sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
+# Rolling back the host REQUIRES rolling the plugin back to 2026.6.11 in the
+# same commit (see the host-contract note above) — at the cost of prompt
+# caching, which that plugin cannot do for this model.
 #
 # DO NOT revert to `:latest` or bump without (a) confirming the workspace
 # double-nesting fix by commit ancestry and (b) a clean end-to-end test that
 # includes the Morning Brief payload — a trivial "respond OK" prompt masks
 # session-completion regressions.
-FROM ghcr.io/openclaw/openclaw@sha256:0e5680d7d58d3b6c08afa0fc992f4ad319b5586f60923e1985b7c6f838c535d5
+FROM ghcr.io/openclaw/openclaw@sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c
 
 # Switch to root for installations
 USER root
@@ -309,9 +319,25 @@ COPY skills /opt/psd-skills
 # /opt (image-owned): ~/.openclaw is runtime-persistent storage that shadows
 # anything written there at build time. Loaded via openclaw.json
 # plugins.load.paths. Version-pinned to the same OpenClaw release this image
-# pins (2026.6.11); npm verifies the registry integrity hash on pack. The
+# pins (2026.7.1); npm verifies the registry integrity hash on pack. The
 # tarball is self-contained (bundleDependencies: @aws-sdk clients ship inside
 # it, with an npm-shrinkwrap.json), so no npm install runs after extraction.
+#
+# 2026.6.11 -> 2026.7.1 (2026-07-27) RESTORES PROMPT CACHING, which had been
+# silently off for every turn since #1384 moved chat to this provider. The
+# plugin only emits Bedrock Converse `cachePoint` blocks when
+# supportsBedrockPromptCaching() recognizes the model, and 2026.6.11's
+# allowlist predates Sonnet 5 — it matches only `-4-`, `claude-fable-5`,
+# `claude-3-7-sonnet` and `claude-3-5-haiku`, so `us.anthropic.claude-sonnet-5`
+# fell through to `return false`. Its fallback injector (onPayload ->
+# injectBedrockCachePoints) could not cover for that either: every path to it
+# is gated behind isBedrockAppInferenceProfile(), and ours is a SYSTEM-defined
+# profile, not an application-inference-profile ARN. So neither the shared
+# runtime nor the plugin ever added a cache point, and `cacheRetention: "long"`
+# in openclaw.json had nothing to act on. 2026.7.1 adds `claude-sonnet-5` to
+# that allowlist. Do not downgrade this plugin without also removing the
+# caching expectation — see check_config_consistency.py, which fails the build
+# if the two drift apart again.
 RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund && \
@@ -322,11 +348,12 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
     cd /opt/psd-skills/psd-email-triage && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-hyperframes && npm install --omit=dev --no-audit --no-fund && \
     mkdir -p /opt/openclaw-plugins && cd /opt/openclaw-plugins && \
-    npm pack @openclaw/amazon-bedrock-provider@2026.6.11 && \
-    tar -xzf openclaw-amazon-bedrock-provider-2026.6.11.tgz && \
+    npm pack @openclaw/amazon-bedrock-provider@2026.7.1 && \
+    tar -xzf openclaw-amazon-bedrock-provider-2026.7.1.tgz && \
     mv package amazon-bedrock && \
-    rm openclaw-amazon-bedrock-provider-2026.6.11.tgz && \
-    test -f /opt/openclaw-plugins/amazon-bedrock/openclaw.plugin.json
+    rm openclaw-amazon-bedrock-provider-2026.7.1.tgz && \
+    test -f /opt/openclaw-plugins/amazon-bedrock/openclaw.plugin.json && \
+    grep -q "claude-sonnet-5" /opt/openclaw-plugins/amazon-bedrock/dist/bedrock-options.js
 # chat-card has zero npm deps. chat-chart's npm install is paired with the
 # matplotlib install above — both stay disabled until we figure out the
 # AgentCore overlay-mount failure. With both off the image boots cleanly

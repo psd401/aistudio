@@ -2,7 +2,7 @@
 """
 Config self-consistency gate for the agent image (issue #1161).
 
-Two static asserts over openclaw.json, run on the host before build (no Docker):
+Three static asserts over openclaw.json, run on the host before build (no Docker):
 
   1. contextWindow sanity — every declared model's contextWindow must be a
      positive int inside a sane range, and if the model id is in the known-models
@@ -14,6 +14,16 @@ Two static asserts over openclaw.json, run on the host before build (no Docker):
      provider that points at an env var nothing sets boots with no credential
      and every model call 401s (the r11-class "missing provider" failure).
 
+  3. prompt-caching reachability — if openclaw.json asks for prompt caching
+     (`params.cacheRetention` other than "none"), the @openclaw/amazon-bedrock-
+     provider version pinned in the Dockerfile must actually be able to deliver
+     it for the declared model. The plugin only emits Bedrock Converse
+     `cachePoint` blocks when its internal supportsBedrockPromptCaching()
+     allowlist recognizes the model id; an unrecognized model silently gets NO
+     caching and every turn pays full input rate. That is not a config error,
+     not a runtime error, and not visible anywhere except the token bill —
+     which is exactly how it went unnoticed from #1384 until 2026-07-27.
+
 Exit 0 when consistent, 1 on any violation.
 """
 
@@ -22,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from typing import Dict, List, Optional, Tuple
 
@@ -38,6 +49,143 @@ KNOWN_CONTEXT_WINDOWS: Dict[str, int] = {
 # magnitude typos without hardcoding every model).
 _MIN_CONTEXT_WINDOW = 8000
 _MAX_CONTEXT_WINDOW = 2_000_000
+
+# Providers that serve through @openclaw/amazon-bedrock-provider. Only these are
+# subject to the prompt-caching reachability check; the Mantle path reaches
+# Bedrock over the Anthropic Messages API, where caching is negotiated
+# differently and this plugin is not in the loop.
+_BEDROCK_NATIVE_PROVIDERS = frozenset({"amazon-bedrock"})
+
+# First @openclaw/amazon-bedrock-provider release whose
+# supportsBedrockPromptCaching() allowlist recognizes a model. Keys are matched
+# as substrings of the declared model id, mirroring how the plugin builds its
+# match candidates. Verified by reading dist/bedrock-options.js per version:
+# 2026.6.11 matched only `-4-`, `claude-fable-5`, `claude-3-7-sonnet` and
+# `claude-3-5-haiku`; 2026.7.1 added `claude-sonnet-5` and `claude-mythos-5`.
+_CACHE_CAPABLE_PLUGIN_MIN: Dict[str, str] = {
+    "claude-sonnet-5": "2026.7.1",
+    "claude-mythos-5": "2026.7.1",
+    "claude-fable-5": "2026.6.11",
+    "claude-3-7-sonnet": "2026.6.11",
+    "claude-3-5-haiku": "2026.6.11",
+}
+
+_PLUGIN_PACK_RE = re.compile(
+    r"npm pack @openclaw/amazon-bedrock-provider@([0-9A-Za-z.\-]+)"
+)
+
+
+def _version_key(version: str) -> tuple:
+    """Sort key for the plugin's YYYY.M.P[-beta.N] versions.
+
+    A prerelease sorts BELOW its release (2026.7.1-beta.2 < 2026.7.1), matching
+    semver. That specific rule is load-bearing here: plugin 2026.7.1 declares
+    `peerDependencies.openclaw >=2026.7.1`, so pinning the beta of the same
+    number would NOT satisfy it — the trap this check exists to keep flagging.
+    """
+    release, _, prerelease = version.partition("-")
+    numbers = tuple(
+        int(part) if part.isdigit() else 0 for part in release.split(".")
+    )
+    if not prerelease:
+        # 1 outranks 0, so a release beats any prerelease of the same numbers.
+        return (numbers, 1, ())
+    # Each tag becomes (kind, value) so a mixed numeric/alpha prerelease never
+    # raises on compare AND numeric tags order numerically — plain str() would
+    # sort beta.10 below beta.2. Numeric identifiers rank below alphanumeric,
+    # per semver.
+    tags = tuple(
+        (0, int(part), "") if part.isdigit() else (1, 0, part)
+        for part in re.split(r"[.\-]", prerelease)
+        if part
+    )
+    return (numbers, 0, tags)
+
+
+def parse_pinned_plugin_version(dockerfile_path: str) -> Tuple[Optional[str], List[str]]:
+    """Read the @openclaw/amazon-bedrock-provider version pinned in the Dockerfile."""
+    try:
+        with open(dockerfile_path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+    except OSError as exc:
+        return None, [f"cannot read Dockerfile {dockerfile_path}: {exc}"]
+
+    matches = _PLUGIN_PACK_RE.findall(source)
+    if not matches:
+        return None, [
+            "Dockerfile has no `npm pack @openclaw/amazon-bedrock-provider@<version>` "
+            "line — the prompt-caching gate cannot verify the pin"
+        ]
+    if len(set(matches)) > 1:
+        return None, [
+            "Dockerfile pins conflicting amazon-bedrock-provider versions: "
+            + ", ".join(sorted(set(matches)))
+        ]
+    version = matches[0]
+    violations: List[str] = []
+    # The same version appears in the tar/rm filenames right after npm pack; a
+    # copy-paste slip there fails the build deep in the RUN with a confusing
+    # "No such file" instead of a clear version mismatch.
+    for filename in (
+        f"openclaw-amazon-bedrock-provider-{version}.tgz",
+    ):
+        if source.count(filename) < 2:
+            violations.append(
+                f"Dockerfile pins plugin {version} but its tar/rm filenames do "
+                f"not both reference {filename}"
+            )
+    return version, violations
+
+
+def check_prompt_caching_reachable(
+    config: dict, dockerfile_path: str,
+) -> List[str]:
+    """Assert a requested cacheRetention can actually be honored by the pinned plugin."""
+    defaults = (config.get("agents") or {}).get("defaults") or {}
+    retention = (defaults.get("params") or {}).get("cacheRetention")
+    if not isinstance(retention, str) or retention == "none":
+        return []  # caching not requested — nothing to guarantee
+
+    pinned, violations = parse_pinned_plugin_version(dockerfile_path)
+    if pinned is None:
+        return violations
+
+    providers = (config.get("models") or {}).get("providers") or {}
+    for provider_name, provider in providers.items():
+        if provider_name not in _BEDROCK_NATIVE_PROVIDERS or not isinstance(provider, dict):
+            continue
+        for model in provider.get("models") or []:
+            if not isinstance(model, dict):
+                continue
+            model_id = model.get("id")
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            lowered = model_id.lower()
+            required = next(
+                (
+                    minimum
+                    for token, minimum in _CACHE_CAPABLE_PLUGIN_MIN.items()
+                    if token in lowered
+                ),
+                None,
+            )
+            if required is None:
+                violations.append(
+                    f"{provider_name}/{model_id}: cacheRetention={retention!r} is "
+                    f"requested but this model is not in the caching-support table "
+                    f"— confirm the pinned plugin's supportsBedrockPromptCaching() "
+                    f"allowlist matches it, then add it to "
+                    f"_CACHE_CAPABLE_PLUGIN_MIN"
+                )
+                continue
+            if _version_key(pinned) < _version_key(required):
+                violations.append(
+                    f"{provider_name}/{model_id}: cacheRetention={retention!r} needs "
+                    f"amazon-bedrock-provider >= {required}, but the Dockerfile pins "
+                    f"{pinned} — caching would be SILENTLY off and every turn would "
+                    f"pay full input rate"
+                )
+    return violations
 
 
 def _load(config_path: str) -> dict:
@@ -113,10 +261,14 @@ def check_apikey_hydration(config: dict, wrapper_path: str) -> List[str]:
     return violations
 
 
-def run_checks(config_path: str, wrapper_path: str) -> Tuple[List[str], dict]:
+def run_checks(
+    config_path: str, wrapper_path: str, dockerfile_path: str,
+) -> Tuple[List[str], dict]:
     config = _load(config_path)
-    violations = check_context_windows(config) + check_apikey_hydration(
-        config, wrapper_path
+    violations = (
+        check_context_windows(config)
+        + check_apikey_hydration(config, wrapper_path)
+        + check_prompt_caching_reachable(config, dockerfile_path)
     )
     return violations, config
 
@@ -126,10 +278,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=os.path.join(here, "openclaw.json"))
     parser.add_argument("--wrapper", default=os.path.join(here, "agentcore_wrapper.py"))
+    parser.add_argument("--dockerfile", default=os.path.join(here, "Dockerfile"))
     args = parser.parse_args(argv)
 
     try:
-        violations, _ = run_checks(args.config, args.wrapper)
+        violations, _ = run_checks(args.config, args.wrapper, args.dockerfile)
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -140,7 +293,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"  - {v}", file=sys.stderr)
         return 1
 
-    print("OK — openclaw.json context windows + apiKey hydration paths consistent.")
+    print(
+        "OK — openclaw.json context windows + apiKey hydration paths + "
+        "prompt-caching reachability consistent."
+    )
     return 0
 
 
