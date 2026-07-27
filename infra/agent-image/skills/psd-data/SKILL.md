@@ -24,11 +24,12 @@ reachable through this skill, where the caller's own Cognito identity and
 row-level security decide what they may see.
 
 If a user asks about absences, vacancies, unfilled jobs, substitutes, or
-Red Rover generally, answer it from here — start with `list-tables` /
-`describe` to locate the current Red Rover tables, and check `lessons` for
-what previous sessions learned about them. Do not report `psd-redrover` as
-missing and do not attempt to call the Red Rover API directly; the shared
-credential and its broker operation have been removed.
+Red Rover generally, answer it from here — start with `tables --detailed` to
+locate the current Red Rover tables, `schema --table <name>` to inspect their
+columns, and `lesson-check` for what previous sessions learned about them. Do
+not report `psd-redrover` as missing and do not attempt to call the Red Rover
+API directly; the shared credential and its broker operation have been
+removed.
 
 ## Authentication
 
