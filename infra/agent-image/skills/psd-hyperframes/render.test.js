@@ -17,6 +17,7 @@ const {
   parseArgs,
   buildPayload,
   injectAudioElement,
+  findCompositionRootTagEnd,
   invokeRender,
   validateEmail,
   main,
@@ -350,4 +351,69 @@ test('injectAudioElement is linear on the quadratic witness (many unclosed tags)
   const out = injectAudioElement(witness, AUDIO_URL, 1);
   expect(Date.now() - started).toBeLessThan(1000);
   expect(out.endsWith('</audio>')).toBe(true);
+});
+
+// ── findCompositionRootTagEnd: parity with the regex it replaced (#1298) ─────
+//
+// The scanner must agree with /<[a-zA-Z][^>]*\bdata-composition-id\b[^>]*>/ on
+// everything except the one case where that regex was itself wrong (a quoted
+// '>' inside an attribute value, which its [^>]* could not cross).
+
+function oldRegexFind(html) {
+  const m = html.match(/<[a-zA-Z][^>]*\bdata-composition-id\b[^>]*>/);
+  return m ? m.index + m[0].length : -1;
+}
+
+const PARITY_CASES = [
+  ['plain root', '<div data-composition-id="demo">hi</div>'],
+  ['root not first', '<html><body><section data-composition-id="d">x</section></body></html>'],
+  // '<' inside a quoted attribute value: [^>]* crossed it happily, so a scanner
+  // that treats every '<' as a restart would lose the root and silently drop
+  // the narration track.
+  ['quoted <', '<div title="a < b" data-composition-id="root"><p>s</p></div>'],
+  ['attr suffix', '<div data-composition-ids="d">x</div>'],
+  ['attr prefix', '<div xdata-composition-id="d">x</div>'],
+  // No whitespace before the attribute — \b accepts '"' as the boundary.
+  ['quote, no space', '<div class="x"data-composition-id>y</div>'],
+  ['nested <', '<<a data-composition-id>'],
+  ['comment first', '<!-- data-composition-id --><div data-composition-id>x</div>'],
+  // <data-composition-id> is a legal custom-element name. The old regex could
+  // never match it (its mandatory [a-zA-Z] ate the name's first character), so
+  // an element *named* this must not be mistaken for one *carrying* the attr.
+  ['element named attr', '<data-composition-id>hi</data-composition-id>'],
+  ['unterminated', '<div data-composition-id="d"'],
+  ['empty', ''],
+  ['bare <', '<'],
+  ['no attr', '<a>'],
+];
+
+for (const [name, html] of PARITY_CASES) {
+  test(`findCompositionRootTagEnd matches the old regex: ${name}`, () => {
+    expect(findCompositionRootTagEnd(html)).toBe(oldRegexFind(html));
+  });
+}
+
+test('findCompositionRootTagEnd crosses a quoted > that the old regex could not', () => {
+  // The one intentional divergence: [^>]* stopped at the quoted '>', so the old
+  // regex found no root and the audio was appended outside the composition.
+  const html = '<div title="a>b" data-composition-id="z">x</div>';
+  expect(oldRegexFind(html)).toBe(-1);
+  expect(findCompositionRootTagEnd(html)).toBe(40 + 1);
+  expect(injectAudioElement(html, AUDIO_URL, 1)).toContain('">\n<audio');
+});
+
+test('findCompositionRootTagEnd stays linear on quote-heavy witnesses', () => {
+  // Quote tracking must not reintroduce rescanning. Each shape is 400k chars;
+  // measured 2-10 ms each, against a 1 s bound.
+  const shapes = [
+    '<a'.repeat(200000), // unclosed tags
+    '<"'.repeat(200000), // quote open/close churn
+    '<a x="' + 'a'.repeat(400000), // one never-closed quote
+    '<a ' + 'data-composition-idz '.repeat(19047) + '>', // many near-misses in one tag
+  ];
+  for (const html of shapes) {
+    const started = Date.now();
+    findCompositionRootTagEnd(html);
+    expect(Date.now() - started).toBeLessThan(1000);
+  }
 });

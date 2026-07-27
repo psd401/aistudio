@@ -275,7 +275,12 @@ export class DatabaseStack extends cdk.Stack {
         .readdirSync(schemaDir, { withFileTypes: true })
         .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
       for (const entry of schemaEntries) {
-        if (entry.isFile()) {
+        // isSymbolicLink() as well as isFile(): a Dirent reports the directory
+        // entry's own kind and does not follow links, whereas the statSync()
+        // this replaced did. Without the second test a symlinked schema file
+        // would drop silently out of the hash, and CDK would reuse a stale
+        // migration Lambda asset when only that file changed.
+        if (entry.isFile() || entry.isSymbolicLink()) {
           externalHash.update(fs.readFileSync(path.join(schemaDir, entry.name), 'utf8'));
         }
       }

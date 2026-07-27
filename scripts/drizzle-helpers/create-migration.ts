@@ -35,7 +35,13 @@ function generateMigrationTemplate(
   const now = new Date().toISOString();
   const formattedNumber = String(migrationNumber).padStart(3, "0");
 
-  return `-- Migration ${formattedNumber}: ${description}
+  // Collapse newlines before interpolating into the `--` comment. A raw newline
+  // in the description ends the comment, so the rest of the argument lands as
+  // live SQL in a file the migration Lambda executes against the database.
+  // Dev-only input (process.argv[2]), but it is a one-line guard.
+  const commentSafeDescription = description.replace(/[\r\n]+/g, " ");
+
+  return `-- Migration ${formattedNumber}: ${commentSafeDescription}
 -- Created: ${now.split("T")[0]}
 -- Part of Epic #526 - RDS Data API to Drizzle ORM Migration
 --

@@ -129,13 +129,21 @@ function isAsciiLetter(ch) {
 
 // Reproduces the `\bdata-composition-id\b` word-boundary match without a regex,
 // so `data-composition-ids` / `xdata-composition-id` still do not count as hits.
+//
+// `tag` always starts at its '<'. Matches at index < 2 are rejected because the
+// old regex's mandatory `<[a-zA-Z]` consumed the first character of the element
+// name, so the literal could only ever align at '<' + 2 or later. Without this,
+// an element *named* data-composition-id (`<data-composition-id>` is a legal
+// custom-element name) would be mistaken for an element *carrying* the
+// attribute, and attacker-supplied HTML could steer the insertion point.
 function hasCompositionIdAttr(tag) {
   for (
     let k = tag.indexOf(COMPOSITION_ID_ATTR);
     k !== -1;
     k = tag.indexOf(COMPOSITION_ID_ATTR, k + 1)
   ) {
-    const before = k === 0 ? '' : tag[k - 1];
+    if (k < 2) continue; // the element name, not an attribute
+    const before = tag[k - 1];
     const after = tag[k + COMPOSITION_ID_ATTR.length];
     if (!isWordChar(before) && !isWordChar(after)) return true;
   }
@@ -153,9 +161,18 @@ function hasCompositionIdAttr(tag) {
  * size and CodeQL's js/polynomial-redos. `html` is attacker-controllable
  * (--html / --file), so that is a real denial-of-service lever, not a
  * theoretical one. Here each character is visited at most twice: the inner
- * loop stops at the tag terminator `>` OR at a stray `<` (which cannot appear
- * inside a tag), and the outer loop resumes from wherever the inner one
- * stopped, so no region is ever rescanned.
+ * loop stops at the tag terminator `>` OR at a stray `<` outside an attribute
+ * value, and the outer loop resumes from wherever the inner one stopped, so no
+ * region is ever rescanned.
+ *
+ * The scan tracks quoting, because `<` and `>` are both legal inside a quoted
+ * attribute value. Ignoring that broke real compositions: in
+ * `<div title="a < b" data-composition-id="root">` a naive scan abandons the
+ * tag at the quoted `<`, finds no root, and the narration `<audio>` gets
+ * appended outside the composition — where hyperframes does not mux it, so the
+ * audio silently vanishes from the MP4. Being quote-aware about `>` as well
+ * also fixes the same bug in the original regex, whose `[^>]*` stopped dead at
+ * a quoted `>` (`title="a>b"`).
  */
 function findCompositionRootTagEnd(html) {
   const n = html.length;
@@ -166,7 +183,18 @@ function findCompositionRootTagEnd(html) {
       continue;
     }
     let j = i + 1;
-    while (j < n && html[j] !== '>' && html[j] !== '<') j++;
+    let quote = ''; // the open quote character while inside an attribute value
+    while (j < n) {
+      const ch = html[j];
+      if (quote) {
+        if (ch === quote) quote = '';
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === '>' || ch === '<') {
+        break;
+      }
+      j++;
+    }
     if (j >= n) return -1; // unterminated tag — nothing further can match
     if (html[j] === '<') {
       i = j; // malformed: restart at the nested '<' without rescanning
@@ -404,6 +432,7 @@ module.exports = {
   parseArgs,
   buildPayload,
   injectAudioElement,
+  findCompositionRootTagEnd,
   invokeRender,
   validateEmail,
   MAX_DURATION_SECONDS,
