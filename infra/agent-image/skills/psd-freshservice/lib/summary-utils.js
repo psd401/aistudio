@@ -17,22 +17,28 @@
 
 const { fsFetch } = require('./api');
 
+const TICKET_CATEGORIES = [
+  ['Password Reset', ['password reset']],
+  ['Security Alert', ['security alert', 'compromised', 'breach']],
+  ['Schoology', ['schoology']],
+  ['PowerSchool', ['powerschool']],
+  ['Promethean Board', ['promethean']],
+  ['Chromebook', ['chromebook']],
+  ['Phone/Voicemail', ['phone', 'voicemail', 'ext.']],
+  ['Badge Request', ['badge']],
+  ['New Student', ['new student', 'enrollee']],
+  ['Intercom', ['intercom']],
+  ['Raptor', ['raptor']],
+  ['GoGuardian', ['goguardian', 'go guardian']],
+  ['Access/Login', ['login', 'access', 'mfa']],
+];
+
 function categorizeTicket(subject) {
   const lower = (subject || '').toLowerCase();
-  if (lower.includes('password reset')) return 'Password Reset';
-  if (lower.includes('security alert') || lower.includes('compromised') || lower.includes('breach')) return 'Security Alert';
-  if (lower.includes('schoology')) return 'Schoology';
-  if (lower.includes('powerschool')) return 'PowerSchool';
-  if (lower.includes('promethean')) return 'Promethean Board';
-  if (lower.includes('chromebook')) return 'Chromebook';
-  if (lower.includes('phone') || lower.includes('voicemail') || lower.includes('ext.')) return 'Phone/Voicemail';
-  if (lower.includes('badge')) return 'Badge Request';
-  if (lower.includes('new student') || lower.includes('enrollee')) return 'New Student';
-  if (lower.includes('intercom')) return 'Intercom';
-  if (lower.includes('raptor')) return 'Raptor';
-  if (lower.includes('goguardian') || lower.includes('go guardian')) return 'GoGuardian';
-  if (lower.includes('login') || lower.includes('access') || lower.includes('mfa')) return 'Access/Login';
-  return 'Other';
+  const match = TICKET_CATEGORIES.find(([, terms]) =>
+    terms.some((term) => lower.includes(term))
+  );
+  return match?.[0] || 'Other';
 }
 
 /**

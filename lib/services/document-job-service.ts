@@ -66,6 +66,45 @@ export interface CreateJobParams {
   processingOptions: ProcessingOptions;
 }
 
+interface AwsErrorDetails {
+  Code?: string;
+  $metadata?: {
+    httpStatusCode?: number;
+    requestId?: string;
+    totalRetryDelay?: number;
+  };
+}
+
+function abbreviatedFileName(fileName: string): string {
+  return fileName.substring(0, 50) + (fileName.length > 50 ? '...' : '');
+}
+
+function documentJobErrorDetails(error: unknown) {
+  const awsError =
+    error !== null && typeof error === 'object'
+      ? (error as AwsErrorDetails)
+      : {};
+  return {
+    name: error instanceof Error ? error.name : 'Unknown',
+    message:
+      error instanceof Error ? error.message : String(error || 'No message'),
+    code: awsError.Code,
+    httpStatusCode: awsError.$metadata?.httpStatusCode,
+    requestId: awsError.$metadata?.requestId,
+    stack: error instanceof Error ? error.stack : undefined,
+    totalRetryDelay: awsError.$metadata?.totalRetryDelay
+  };
+}
+
+function isNamedAwsError(error: unknown): error is object & { name: unknown } {
+  return (
+    error !== null &&
+    typeof error === 'object' &&
+    'name' in error &&
+    Boolean(error.name)
+  );
+}
+
 export async function createDocumentJob(params: CreateJobParams): Promise<DocumentJob> {
   const requestId = generateRequestId();
   const jobLog = createLogger({ action: 'createDocumentJob', requestId });
@@ -82,7 +121,7 @@ export async function createDocumentJob(params: CreateJobParams): Promise<Docume
       fileType: params.fileType,
       purpose: params.purpose,
       userId: params.userId.substring(0, 8) + '...', // Log only first 8 chars of user ID
-      fileName: params.fileName ? params.fileName.substring(0, 50) + (params.fileName.length > 50 ? '...' : '') : undefined,
+      fileName: abbreviatedFileName(params.fileName),
       hasProcessingOptions: !!params.processingOptions
     });
 
@@ -139,27 +178,16 @@ export async function createDocumentJob(params: CreateJobParams): Promise<Docume
     jobLog.info('Document job created successfully', { jobId, fileName: params.fileName, userId: params.userId });
     return job;
   } catch (error) {
-    // CRITICAL: Log the actual error details
-    const errorDetails = {
-      name: error instanceof Error ? error.name : 'Unknown',
-      message: error instanceof Error ? error.message : String(error || 'No message'),
-      code: 'Code' in (error as object) ? (error as { Code?: string }).Code : undefined,
-      httpStatusCode: '$metadata' in (error as object) ? (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode : undefined,
-      requestId: '$metadata' in (error as object) ? (error as { $metadata?: { requestId?: string } }).$metadata?.requestId : undefined,
-      stack: error instanceof Error ? error.stack : undefined,
-      totalRetryDelay: '$metadata' in (error as object) ? (error as { $metadata?: { totalRetryDelay?: number } }).$metadata?.totalRetryDelay : undefined
-    };
-
     jobLog.error('Failed to create document job', {
-      error: errorDetails,
+      error: documentJobErrorDetails(error),
       fileSize: params.fileSize,
       fileType: params.fileType,
       purpose: params.purpose,
-      fileName: params.fileName ? params.fileName.substring(0, 50) + (params.fileName.length > 50 ? '...' : '') : undefined,
+      fileName: abbreviatedFileName(params.fileName),
       requestId
     });
     // Preserve AWS error context for better debugging
-    if (error && typeof error === 'object' && 'name' in error && error.name) {
+    if (isNamedAwsError(error)) {
       // Re-throw AWS SDK errors to preserve their structure
       throw error;
     }
