@@ -1,7 +1,13 @@
 "use client"
 
 import { zodResolver } from "@hookform/resolvers/zod"
-import { useForm } from "react-hook-form"
+import {
+  useForm,
+  type FieldValues,
+  type Path,
+  type SubmitHandler,
+  type UseFormReturn
+} from "react-hook-form"
 import * as z from "zod"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -515,242 +521,240 @@ function* processArchitectSseLines(
   }
 }
 
-// Factory function to create a stable ChatModelAdapter
-function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptions) {
-  const {
-    toolId,
-    inputsRef,
-    hasCompletedExecutionRef,
-    executionIdRef,
-    conversationIdRef,
-    executionModelRef,
-    onExecutionIdChangeRef,
-    onPromptCountChangeRef,
-    onToolEventRef,
-    approveDestructiveRef
-  } = options
+function prepareAdapterMessages(
+  messages: ChatModelRunOptions['messages']
+) {
+  return Array.from(messages).map(message => {
+    const parts = []
+    if (Array.isArray(message.content)) {
+      for (const contentPart of message.content) {
+        parts.push(
+          contentPart.type === 'text'
+            ? { type: 'text', text: contentPart.text }
+            : contentPart
+        )
+      }
+    } else if (typeof message.content === 'string') {
+      parts.push({ type: 'text', text: message.content })
+    }
+    return {
+      id: message.id || `msg-${Date.now()}`,
+      role: message.role,
+      parts: parts.length > 0 ? parts : [{ type: 'text', text: '' }]
+    }
+  })
+}
 
+function buildAdapterRequest(
+  options: AssistantArchitectAdapterOptions,
+  messages: ChatModelRunOptions['messages']
+): { endpoint: string; mode: string; body: unknown } {
+  if (!options.hasCompletedExecutionRef.current) {
+    return {
+      endpoint: '/api/assistant-architect/execute',
+      mode: 'EXECUTION',
+      body: {
+        toolId: options.toolId,
+        inputs: options.inputsRef.current,
+        approveDestructiveTools:
+          options.approveDestructiveRef.current === true
+      }
+    }
+  }
+  const modelConfig = options.executionModelRef.current || {
+    modelId: '3',
+    provider: 'openai'
+  }
   return {
-    async *run(options: ChatModelRunOptions): AsyncGenerator<ChatModelRunResult> {
-      const { messages, abortSignal } = options
+    endpoint: '/api/nexus/chat',
+    mode: 'CONVERSATION',
+    body: {
+      messages: prepareAdapterMessages(messages),
+      modelId: modelConfig.modelId,
+      provider: modelConfig.provider,
+      conversationId: options.conversationIdRef.current || undefined,
+      enabledTools: []
+    }
+  }
+}
 
-      log.info('🚀 LocalRuntime run() CALLED', {
-        messageCount: messages.length,
-        hasAbortSignal: !!abortSignal
+function captureAdapterResponseMetadata(
+  response: Response,
+  options: AssistantArchitectAdapterOptions,
+  mode: string
+): boolean {
+  const executionId = response.headers.get('X-Execution-Id')
+  const promptCount = response.headers.get('X-Prompt-Count')
+  const conversationId = response.headers.get('X-Conversation-Id')
+  if (executionId) {
+    options.executionIdRef.current = Number(executionId)
+    options.onExecutionIdChangeRef.current(Number(executionId))
+    log.info('Execution started', { executionId, promptCount })
+  }
+  if (promptCount) {
+    options.onPromptCountChangeRef.current(Number(promptCount))
+  }
+  if (!conversationId || conversationId === options.conversationIdRef.current) {
+    return true
+  }
+  const validation = z.string().uuid().safeParse(conversationId)
+  if (!validation.success) {
+    log.error('Invalid conversation ID format from server', {
+      conversationId,
+      mode,
+      error: validation.error.message
+    })
+    return false
+  }
+  log.info('Conversation ID captured', {
+    conversationId,
+    mode,
+    wasNull: options.conversationIdRef.current === null
+  })
+  options.conversationIdRef.current = conversationId
+  return true
+}
+
+async function* consumeAdapterStream(
+  response: Response,
+  options: AssistantArchitectAdapterOptions,
+  mode: string
+): AsyncGenerator<ChatModelRunResult> {
+  if (!response.body) throw new Error('Response body is null')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  const context: ArchitectStreamContext = {
+    accumulatedText: '',
+    sources: [],
+    monitor: createSSEMonitor({
+      executionId: options.executionIdRef.current || undefined,
+      toolId: options.toolId
+    }),
+    onToolEvent: options.onToolEventRef.current
+  }
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      yield* processArchitectSseLines(lines, context)
+    }
+    if (context.accumulatedText || context.sources.length > 0) {
+      yield {
+        content: [
+          ...(context.accumulatedText
+            ? [{ type: 'text' as const, text: context.accumulatedText }]
+            : []),
+          ...context.sources.map(source => ({
+            type: 'source' as const,
+            sourceType: 'url' as const,
+            id: source.id,
+            url: source.url,
+            title: source.title
+          }))
+        ]
+      }
+    }
+    const metrics = context.monitor.complete()
+    log.info('Streaming completed successfully', {
+      totalLength: context.accumulatedText.length,
+      mode,
+      metrics: {
+        totalEvents: metrics.totalEvents,
+        unknownTypes: metrics.unknownTypes.length,
+        parseErrors: metrics.parseErrors,
+        fieldMismatches: metrics.fieldMismatches.length
+      }
+    })
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch (error) {
+      log.warn('Failed to release reader lock', {
+        error: error instanceof Error ? error.message : String(error)
       })
+    }
+  }
+}
 
+// Factory function to create a stable ChatModelAdapter
+function createAssistantArchitectAdapter(
+  adapterOptions: AssistantArchitectAdapterOptions
+) {
+  return {
+    async *run(
+      runOptions: ChatModelRunOptions
+    ): AsyncGenerator<ChatModelRunResult> {
+      log.info('🚀 LocalRuntime run() CALLED', {
+        messageCount: runOptions.messages.length,
+        hasAbortSignal: !!runOptions.abortSignal
+      })
       try {
-        // DYNAMIC ENDPOINT ROUTING based on execution state
-        const endpoint = hasCompletedExecutionRef.current
-          ? '/api/nexus/chat'
-          : '/api/assistant-architect/execute'
-
-        const mode = hasCompletedExecutionRef.current ? 'CONVERSATION' : 'EXECUTION'
-
+        const request = buildAdapterRequest(
+          adapterOptions,
+          runOptions.messages
+        )
         log.info('Assistant Architect stream request', {
-          mode,
-          messageCount: messages.length
+          mode: request.mode,
+          messageCount: runOptions.messages.length
         })
-
-        // Convert messages to proper format
-        const processedMessages = Array.from(messages).map(message => {
-          const parts = []
-
-          if (Array.isArray(message.content)) {
-            for (const contentPart of message.content) {
-              if (contentPart.type === 'text') {
-                parts.push({ type: 'text', text: contentPart.text })
-              } else {
-                parts.push(contentPart)
-              }
-            }
-          } else if (typeof message.content === 'string') {
-            parts.push({ type: 'text', text: message.content })
-          }
-
-          return {
-            id: message.id || `msg-${Date.now()}`,
-            role: message.role,
-            parts: parts.length > 0 ? parts : [{ type: 'text', text: '' }]
-          }
-        })
-
-        // Build request body based on mode
-        let body: unknown
-        if (hasCompletedExecutionRef.current) {
-          // CONVERSATION MODE: After execution completes
-          const modelConfig = executionModelRef.current || {
-            modelId: '3',
-            provider: 'openai'
-          }
-
-          body = {
-            messages: processedMessages,
-            modelId: modelConfig.modelId,
-            provider: modelConfig.provider,
-            conversationId: conversationIdRef.current || undefined,
-            enabledTools: []
-          }
-        } else {
-          // EXECUTION MODE: Initial assistant execution
-          body = {
-            toolId,
-            inputs: inputsRef.current,
-            // Per-run approval for destructive agent tools (#926); ignored in
-            // prompt-chain mode by the route.
-            approveDestructiveTools: approveDestructiveRef.current === true
-          }
-        }
-
-        // Make the fetch request
-        const response = await fetch(endpoint, {
+        const response = await fetch(request.endpoint, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(body),
-          signal: abortSignal
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(request.body),
+          signal: runOptions.abortSignal
         })
-
         if (!response.ok) {
-          log.error('Stream request failed', { status: response.status, mode })
+          log.error('Stream request failed', {
+            status: response.status,
+            mode: request.mode
+          })
           throw new Error(`Stream request failed: ${response.status}`)
         }
-
-        // Extract execution metadata from headers
-        const executionId = response.headers.get('X-Execution-Id')
-        const promptCount = response.headers.get('X-Prompt-Count')
-        const newConversationId = response.headers.get('X-Conversation-Id')
-
-        if (executionId) {
-          executionIdRef.current = Number(executionId)
-          onExecutionIdChangeRef.current(Number(executionId))
-          log.info('Execution started', { executionId, promptCount })
+        if (
+          !captureAdapterResponseMetadata(
+            response,
+            adapterOptions,
+            request.mode
+          )
+        ) {
+          return
         }
-
-        if (promptCount) {
-          onPromptCountChangeRef.current(Number(promptCount))
-        }
-
-        if (newConversationId && newConversationId !== conversationIdRef.current) {
-          // Validate UUID format before storing (defense-in-depth)
-          const validation = z.string().uuid().safeParse(newConversationId)
-          if (!validation.success) {
-            log.error('Invalid conversation ID format from server', {
-              conversationId: newConversationId,
-              mode,
-              error: validation.error.message
-            })
-            return
-          }
-
-          log.info('Conversation ID captured', {
-            conversationId: newConversationId,
-            mode,
-            wasNull: conversationIdRef.current === null
-          })
-          conversationIdRef.current = newConversationId
-        }
-
-        // Process and yield the response stream
-        if (!response.body) {
-          throw new Error('Response body is null')
-        }
-
-        const reader = response.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-        const streamContext: ArchitectStreamContext = {
-          accumulatedText: '',
-          sources: [],
-          monitor: createSSEMonitor({
-            executionId: executionIdRef.current || undefined,
-            toolId
-          }),
-          onToolEvent: onToolEventRef.current
-        }
-
-        try {
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) break
-
-            buffer += decoder.decode(value, { stream: true })
-            const lines = buffer.split('\n')
-            buffer = lines.pop() || ''
-
-            yield* processArchitectSseLines(lines, streamContext)
-          }
-
-          // Final yield with complete accumulated text and any collected sources
-          if (streamContext.accumulatedText || streamContext.sources.length > 0) {
-            yield {
-              content: [
-                ...(streamContext.accumulatedText
-                  ? [{ type: 'text' as const, text: streamContext.accumulatedText }]
-                  : []),
-                ...streamContext.sources.map(source => ({
-                  type: 'source' as const,
-                  sourceType: 'url' as const,
-                  id: source.id,
-                  url: source.url,
-                  title: source.title
-                }))
-              ]
-            }
-          }
-
-          // Complete monitoring and log metrics locally
-          const metrics = streamContext.monitor.complete()
-
-          log.info('Streaming completed successfully', {
-            totalLength: streamContext.accumulatedText.length,
-            mode,
-            metrics: {
-              totalEvents: metrics.totalEvents,
-              unknownTypes: metrics.unknownTypes.length,
-              parseErrors: metrics.parseErrors,
-              fieldMismatches: metrics.fieldMismatches.length
-            }
-          })
-
-        } finally {
-          try {
-            reader.releaseLock()
-          } catch (releaseError) {
-            log.warn('Failed to release reader lock', {
-              error: releaseError instanceof Error ? releaseError.message : String(releaseError)
-            })
-          }
-        }
-
+        yield* consumeAdapterStream(
+          response,
+          adapterOptions,
+          request.mode
+        )
       } catch (error) {
-        // Handle AbortError gracefully - this occurs during React StrictMode unmount/remount
-        // or when the user navigates away. We should silently exit without showing an error.
+        const mode = adapterOptions.hasCompletedExecutionRef.current
+          ? 'CONVERSATION'
+          : 'EXECUTION'
         if (error instanceof Error && error.name === 'AbortError') {
           log.debug('Stream aborted (likely StrictMode or navigation)', {
-            mode: hasCompletedExecutionRef.current ? 'CONVERSATION' : 'EXECUTION'
+            mode
           })
-          return // Silently exit - the runtime will restart if needed
+          return
         }
-
-        const errorMode = hasCompletedExecutionRef.current ? 'CONVERSATION' : 'EXECUTION'
         log.error('Streaming adapter error', {
-          error: error instanceof Error ? {
-            message: error.message,
-            name: error.name
-          } : String(error),
-          mode: errorMode
+          error:
+            error instanceof Error
+              ? { message: error.message, name: error.name }
+              : String(error),
+          mode
         })
-
-        // Yield error message to user
         yield {
           content: [{
             type: 'text' as const,
-            text: `Error: ${error instanceof Error ? error.message : 'An unknown error occurred'}`
+            text: `Error: ${
+              error instanceof Error
+                ? error.message
+                : 'An unknown error occurred'
+            }`
           }]
         }
-
         throw error
       }
     }
@@ -1090,6 +1094,206 @@ const DestructiveApprovalToggle = memo(function DestructiveApprovalToggle({
 })
 DestructiveApprovalToggle.displayName = "DestructiveApprovalToggle"
 
+function AssistantInputForm<TValues extends FieldValues>(props: {
+  tool: AssistantArchitectWithRelations
+  form: UseFormReturn<TValues>
+  onSubmit: SubmitHandler<TValues>
+  isExecuting: boolean
+  isAgentic: boolean
+  approveDestructive: boolean
+  onApproveDestructiveChange: (approved: boolean) => void
+}) {
+  const { toast } = useToast()
+  return (
+    <Form {...props.form}>
+      <form
+        onSubmit={props.form.handleSubmit(props.onSubmit)}
+        className="space-y-4"
+      >
+        {props.tool.inputFields.map((field: SelectToolInputField) => (
+          <FormField
+            key={field.id}
+            control={props.form.control}
+            name={field.name as Path<TValues>}
+            render={({ field: formField }) => (
+              <FormItem>
+                <FormLabel>{field.label || field.name}</FormLabel>
+                <FormControl>
+                  {field.fieldType === "long_text" ? (
+                    <Textarea
+                      placeholder="Enter your answer..."
+                      {...formField}
+                      value={
+                        typeof formField.value === 'string'
+                          ? formField.value
+                          : ''
+                      }
+                      className="bg-muted"
+                      disabled={props.isExecuting}
+                    />
+                  ) : field.fieldType === "select" ||
+                    field.fieldType === "multi_select" ? (
+                    <Select
+                      onValueChange={formField.onChange}
+                      defaultValue={
+                        typeof formField.value === 'string'
+                          ? formField.value
+                          : undefined
+                      }
+                      disabled={props.isExecuting}
+                    >
+                      <SelectTrigger className="bg-muted">
+                        <SelectValue
+                          placeholder={`Select ${
+                            field.label || field.name
+                          }...`}
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {renderSelectOptions(field.options)}
+                      </SelectContent>
+                    </Select>
+                  ) : field.fieldType === "file_upload" ? (
+                    <DocumentUploadButton
+                      label="Add Document for Knowledge"
+                      onContent={document => formField.onChange(document)}
+                      repositoryBacked
+                      disabled={props.isExecuting}
+                      className="w-full"
+                      onError={error => {
+                        toast({
+                          title:
+                            error?.status === 413
+                              ? "File Too Large"
+                              : "Upload Failed",
+                          description:
+                            error?.status === 413
+                              ? "Please upload a file smaller than 50MB."
+                              : error?.message || "Unknown error",
+                          variant: "destructive"
+                        })
+                      }}
+                    />
+                  ) : (
+                    <Input
+                      placeholder="Enter your answer..."
+                      {...formField}
+                      value={
+                        typeof formField.value === 'string'
+                          ? formField.value
+                          : ''
+                      }
+                      className="bg-muted"
+                      disabled={props.isExecuting}
+                    />
+                  )}
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        ))}
+        <DestructiveApprovalToggle
+          tool={props.tool}
+          isAgentic={props.isAgentic}
+          checked={props.approveDestructive}
+          onChange={props.onApproveDestructiveChange}
+          disabled={props.isExecuting}
+        />
+        <Button type="submit" disabled={props.isExecuting}>
+          {props.isExecuting ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Running...
+            </>
+          ) : (
+            <>
+              <Sparkles className="mr-2 h-4 w-4" /> Generate
+            </>
+          )}
+        </Button>
+      </form>
+    </Form>
+  )
+}
+
+function AvailableTools({ enabledTools }: { enabledTools: string[] }) {
+  if (enabledTools.length === 0) return null
+  return (
+    <div className="tool-execution-status space-y-2">
+      <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+        <Settings className="h-4 w-4" />
+        <span>Tools Available ({enabledTools.length})</span>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {enabledTools.map(toolName => (
+          <Badge key={toolName} variant="outline" className="text-xs">
+            {getToolDisplayName(toolName)}
+          </Badge>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function AssistantExecutionPane(props: {
+  tool: AssistantArchitectWithRelations
+  inputs: Record<string, unknown>
+  promptCount: number
+  isExecuting: boolean
+  hasResults: boolean
+  isAgentic: boolean
+  toolTimeline: ToolTimelineEvent[]
+  approveDestructive: boolean
+  onExecutionIdChange: (id: number) => void
+  onPromptCountChange: (count: number) => void
+  onExecutionComplete: () => void
+  onExecutionError: (error: string) => void
+  onToolEvent: (event: ToolTimelineEvent) => void
+}) {
+  if (!props.isExecuting && !props.hasResults) return null
+  return (
+    <ErrorBoundary>
+      <AssistantArchitectRuntimeProvider
+        tool={props.tool}
+        inputs={props.inputs}
+        onExecutionIdChange={props.onExecutionIdChange}
+        onPromptCountChange={props.onPromptCountChange}
+        onExecutionComplete={props.onExecutionComplete}
+        onExecutionError={props.onExecutionError}
+        hasCompletedExecution={props.hasResults}
+        onToolEvent={props.onToolEvent}
+        approveDestructive={props.approveDestructive}
+      >
+        <div className="space-y-6">
+          {props.promptCount > 1 && props.isExecuting && (
+            <ExecutionProgress
+              totalPrompts={props.promptCount}
+              prompts={props.tool.prompts || []}
+            />
+          )}
+          {props.isAgentic && (
+            <ToolCallTimeline events={props.toolTimeline} />
+          )}
+          {props.isExecuting && !props.hasResults && (
+            <div
+              role="status"
+              className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 rounded-md px-3 py-2"
+            >
+              <Loader2 className="h-4 w-4 animate-spin" />
+              <span>
+                Execution in progress — follow-up available when complete
+              </span>
+            </div>
+          )}
+          <div className="border rounded-lg p-4 space-y-4 max-w-full">
+            <Thread />
+          </div>
+        </div>
+      </AssistantArchitectRuntimeProvider>
+    </ErrorBoundary>
+  )
+}
+
 export const AssistantArchitectStreaming = memo(function AssistantArchitectStreaming({
   tool
 }: AssistantArchitectStreamingProps) {
@@ -1243,163 +1447,32 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
   return (
     <div className="space-y-6">
       <ToolHeader tool={tool} />
-
-      {error && (
-        <ErrorAlert errorMessage={error} />
-      )}
-
-      <div className="space-y-4">
-        <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-            {tool.inputFields.map((field: SelectToolInputField) => (
-              <FormField
-                key={field.id}
-                control={form.control}
-                name={field.name}
-                render={({ field: formField }) => (
-                  <FormItem>
-                    <FormLabel>{field.label || field.name}</FormLabel>
-                    <FormControl>
-                      {field.fieldType === "long_text" ? (
-                        <Textarea
-                          placeholder="Enter your answer..."
-                          {...formField}
-                          value={typeof formField.value === 'string' ? formField.value : ''}
-                          className="bg-muted"
-                          disabled={isExecuting}
-                        />
-                      ) : field.fieldType === "select" || field.fieldType === "multi_select" ? (
-                        <Select
-                          onValueChange={formField.onChange}
-                          defaultValue={typeof formField.value === 'string' ? formField.value : undefined}
-                          disabled={isExecuting}
-                        >
-                          <SelectTrigger className="bg-muted">
-                            <SelectValue placeholder={`Select ${field.label || field.name}...`} />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {renderSelectOptions(field.options)}
-                          </SelectContent>
-                        </Select>
-                      ) : field.fieldType === "file_upload" ? (
-                        <DocumentUploadButton
-                          label="Add Document for Knowledge"
-                          onContent={doc => formField.onChange(doc)}
-                          repositoryBacked
-                          disabled={isExecuting}
-                          className="w-full"
-                          onError={err => {
-                            if (err?.status === 413) {
-                              toast({
-                                title: "File Too Large",
-                                description: "Please upload a file smaller than 50MB.",
-                                variant: "destructive"
-                              })
-                            } else {
-                              toast({
-                                title: "Upload Failed",
-                                description: err?.message || "Unknown error",
-                                variant: "destructive"
-                              })
-                            }
-                          }}
-                        />
-                      ) : (
-                        <Input
-                          placeholder="Enter your answer..."
-                          {...formField}
-                          value={typeof formField.value === 'string' ? formField.value : ''}
-                          className="bg-muted"
-                          disabled={isExecuting}
-                        />
-                      )}
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            ))}
-            <DestructiveApprovalToggle
-              tool={tool}
-              isAgentic={isAgentic}
-              checked={approveDestructive}
-              onChange={setApproveDestructive}
-              disabled={isExecuting}
-            />
-            <div className="flex gap-2">
-              <Button type="submit" disabled={isExecuting}>
-                {isExecuting ? (
-                  <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Running...</>
-                ) : (
-                  <><Sparkles className="mr-2 h-4 w-4" /> Generate</>
-                )}
-              </Button>
-            </div>
-          </form>
-        </Form>
-      </div>
-
-      {/* Tool Usage Indicators */}
-      {enabledTools.length > 0 && (
-        <div className="tool-execution-status space-y-2">
-          <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-            <Settings className="h-4 w-4" />
-            <span>Tools Available ({enabledTools.length})</span>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {enabledTools.map(toolName => (
-              <Badge key={toolName} variant="outline" className="text-xs">
-                {getToolDisplayName(toolName)}
-              </Badge>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Streaming execution section - Thread remains visible after completion */}
-      {(isExecuting || hasResults) && (
-        <ErrorBoundary>
-          <AssistantArchitectRuntimeProvider
-            tool={tool}
-            inputs={inputs}
-            onExecutionIdChange={handleExecutionIdChange}
-            onPromptCountChange={handlePromptCountChange}
-            onExecutionComplete={handleExecutionComplete}
-            onExecutionError={handleExecutionError}
-            hasCompletedExecution={hasResults}
-            onToolEvent={handleToolEvent}
-            approveDestructive={approveDestructive}
-          >
-            <div className="space-y-6">
-              {/* Progress indicator for multi-prompt execution */}
-              {promptCount > 1 && isExecuting && (
-                <ExecutionProgress
-                  totalPrompts={promptCount}
-                  prompts={tool.prompts || []}
-                />
-              )}
-
-              {/* Agentic tool-call timeline (Issue #926) */}
-              {isAgentic && (
-                <ToolCallTimeline events={toolTimeline} />
-              )}
-
-              {/* Execution in-progress status banner */}
-              {isExecuting && !hasResults && (
-                <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 rounded-md px-3 py-2">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  <span>Execution in progress — follow-up available when complete</span>
-                </div>
-              )}
-
-              {/* Thread component for streaming output and follow-up conversations */}
-              <div className="border rounded-lg p-4 space-y-4 max-w-full">
-                <Thread />
-              </div>
-            </div>
-          </AssistantArchitectRuntimeProvider>
-        </ErrorBoundary>
-      )}
+      {error && <ErrorAlert errorMessage={error} />}
+      <AssistantInputForm
+        tool={tool}
+        form={form}
+        onSubmit={onSubmit}
+        isExecuting={isExecuting}
+        isAgentic={isAgentic}
+        approveDestructive={approveDestructive}
+        onApproveDestructiveChange={setApproveDestructive}
+      />
+      <AvailableTools enabledTools={enabledTools} />
+      <AssistantExecutionPane
+        tool={tool}
+        inputs={inputs}
+        promptCount={promptCount}
+        isExecuting={isExecuting}
+        hasResults={hasResults}
+        isAgentic={isAgentic}
+        toolTimeline={toolTimeline}
+        approveDestructive={approveDestructive}
+        onExecutionIdChange={handleExecutionIdChange}
+        onPromptCountChange={handlePromptCountChange}
+        onExecutionComplete={handleExecutionComplete}
+        onExecutionError={handleExecutionError}
+        onToolEvent={handleToolEvent}
+      />
     </div>
   )
 })
