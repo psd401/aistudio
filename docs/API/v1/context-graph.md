@@ -833,6 +833,23 @@ executing principal's current ACL. The model receives tokenizer-bounded hybrid
 retrieval context and repository tools; durable history retains only the
 caller's original message text, not injected source content.
 
+Assistant room access is evaluated in the shared resource gate before any
+provider call:
+
+- current membership in an active room grants an assistant assigned to that
+  room, even if its role/group resource grants would deny the caller;
+- a caller whose only AI Studio role is `student` and who has at least one
+  active room can list, inspect, and execute only room-assigned assistants;
+- administrators, callers with any non-student role, and students with no
+  active rooms keep the ordinary owner/resource-grant behavior; and
+- room assignment never grants a model or repository.
+
+`GET /api/v1/assistants` and MCP `list_assistants` use the same batch filter.
+`GET /api/v1/assistants/{id}` masks an assistant excluded by the room rule as
+`404`. Execution, conversation start, and follow-up message routes first apply
+the existing assistant existence/status visibility check, then return `403` if
+the current shared assistant/model/resource decision denies the run.
+
 **Authentication and scopes:** Bearer API key or authenticated session.
 Requires `assistants:execute`, `assistants:*`,
 `assistant:{id}:execute`, or `*`, plus per-resource access to the assistant and
@@ -878,7 +895,8 @@ and async job are not created.
 **Response `401`** — Missing or invalid authentication.
 
 **Response `403`** — Missing assistant execution scope or current
-assistant/model/repository access.
+assistant/model/repository access, including an assistant no longer assigned to
+the caller's active room.
 
 **Response `404`** — Assistant not found, assistant execution is disabled, or a
 conversation does not belong to the assistant ID in the path.

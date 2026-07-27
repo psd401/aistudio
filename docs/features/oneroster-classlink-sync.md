@@ -7,8 +7,10 @@ Status: v1 ingestion foundation and administrator control surface implemented by
 reconciliation is implemented by Issue
 [#1312](https://github.com/psd401/aistudio/issues/1312). Teacher-managed room
 provisioning is implemented by Issue
-[#1313](https://github.com/psd401/aistudio/issues/1313). Student room access
-enforcement and reporting remain separate workstreams.
+[#1313](https://github.com/psd401/aistudio/issues/1313). Student room access and
+assistant enforcement are implemented by Issue
+[#1314](https://github.com/psd401/aistudio/issues/1314). Reporting remains a
+separate workstream.
 
 ## Scope and data boundary
 
@@ -215,7 +217,49 @@ sets in one `executeTransaction` call. Ownership is rechecked while the room
 row is locked, and child rows cascade if a room is manually hard-deleted.
 Neither room management nor membership resolution writes users, roster rows,
 roles, capabilities, API scopes, resource grants, or administrator access.
-Student-facing assistant grant/restriction behavior remains owned by #1314.
+
+## Student room access and assistant enforcement
+
+Migration 158 adds a student-role navigation entry for `/rooms`. The page calls
+the reverse membership accessors in `lib/rooms/membership.ts`, which resolve the
+signed-in application user's current email against both active linked-section
+enrollments and explicit room members. `/rooms/[id]` uses the same boundary and
+returns not found for nonexistent and nonmember room IDs. Only approved
+room-assigned assistants are rendered, and their launch links use the normal
+`/tools/assistant-architect/{id}` execution experience.
+
+Assistant room authorization is part of the existing shared resource access
+layer, not a new capability or API-key scope:
+
+- Membership in any active room grants access to an assistant assigned to that
+  room, even when `resource_access_grants` would otherwise deny it.
+- A user whose complete AI Studio role set is exactly `student` and who belongs
+  to at least one active room may see and execute only assistants assigned to
+  their active rooms. Ownership, an unrestricted resource, and a direct
+  role/group resource grant do not bypass this restriction.
+- Administrators and users with any non-student role are never room-restricted.
+  Students with no active rooms keep the pre-room ownership and resource-grant
+  behavior.
+- Model and repository authorization remains independent. Room assignment
+  grants the assistant only; every model/repository used by a run must still
+  pass its existing access checks.
+
+`userCanAccessResource` is the single-assistant execution/detail gate and
+`filterAccessibleResourceIds` is the batch list gate. The web catalog and
+gallery, v1 REST list/detail/execution routes, and MCP list/execution handlers
+all flow through those helpers. Direct-ID surfaces perform base assistant
+existence/status visibility first; an assistant hidden by the room policy is
+reported as `404`, while an execution that passed visibility but fails a
+current assistant/model permission returns `403`.
+
+Membership and assignments take effect dynamically. Deactivating a room,
+removing a member/section, or unassigning an assistant changes the next
+authorization decision without copying or deleting application users. To stop
+the student UI while preserving data, deactivate the `/rooms` navigation item
+or apply migration 158's rollback statement. To disable room enforcement
+entirely, roll back the #1314 application deployment before removing migration
+157 data; dropping room tables while room-aware code is deployed fails closed
+with database errors rather than silently widening access.
 
 ## Administrator control surface
 

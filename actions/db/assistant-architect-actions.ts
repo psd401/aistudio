@@ -594,24 +594,26 @@ export async function getAssistantArchitectsAction(): Promise<
     if (isAdmin) {
       architects = allArchitects;
     } else {
-      // Per-resource grant filter (#1206): an approved assistant NOT owned by the
-      // caller is additionally gated by resource_access_grants — a restricted
-      // assistant only appears in the gallery for a user who matches a role/group
-      // grant (zero grants = unrestricted). The caller always sees their own (any
-      // status). Batch lookup to avoid an N+1 over the gallery.
-      const approvedNotOwnedIds = allArchitects
-        .filter((a) => a.status === "approved" && a.userId !== callerId)
-        .map((a) => a.id);
+      // Shared assistant resource filtering applies grants, room assignment,
+      // and the student-room restriction in one batch. Ownership remains an
+      // access path except for a student-only caller with an active room, whose
+      // gallery is limited to room-assigned assistants.
+      const visibleCandidates = allArchitects.filter(
+        (architect) =>
+          architect.userId === callerId || architect.status === "approved"
+      );
       const accessibleIds = await filterAccessibleResourceIds(
         callerId ?? -1,
         "assistant",
-        approvedNotOwnedIds
+        visibleCandidates.map((architect) => architect.id),
+        {
+          ownedResourceIds: visibleCandidates
+            .filter((architect) => architect.userId === callerId)
+            .map((architect) => architect.id),
+        }
       );
-      architects = allArchitects.filter(
-        (architect) =>
-          architect.userId === callerId ||
-          (architect.status === "approved" &&
-            accessibleIds.has(String(architect.id)))
+      architects = visibleCandidates.filter(
+        (architect) => accessibleIds.has(String(architect.id))
       );
     }
 

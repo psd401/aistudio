@@ -414,30 +414,33 @@ async function authorizeAndLoadArchitect(
   }
 
   // SECURITY (#1206): per-resource grant filter, BENEATH the capability +
-  // owner/admin/approved gate above. An assistant may be restricted to specific
-  // roles/groups (resource_access_grants). The owner always reaches their own
-  // assistant; everyone else (admins pass inside userCanAccessResource) must
-  // match a grant. Zero grants = unrestricted (preserves today's behavior).
-  if (!isOwner) {
-    const canAccessAssistant = await userCanAccessResource(userId, 'assistant', architect.id);
-    if (!canAccessAssistant) {
-      log.warn('User lacks per-resource grant for assistant architect', {
-        userId,
-        toolId,
-        architectId: architect.id,
-      });
-      return {
-        ok: false,
-        response: new Response(
-          JSON.stringify({
-            error: 'Access denied',
-            message: 'You do not have access to this assistant',
-            requestId,
-          }),
-          { status: 403, headers: { 'Content-Type': 'application/json' } }
-        ),
-      };
-    }
+  // owner/admin/approved gate above. The shared helper adds room assignment as
+  // an access path and restricts student-only users with active rooms to their
+  // room-assigned assistants. Ownership remains a bypass for everyone outside
+  // that narrow restriction. Zero grants = unrestricted.
+  const canAccessAssistant = await userCanAccessResource(
+    userId,
+    'assistant',
+    architect.id,
+    { ownerUserId: architect.userId }
+  );
+  if (!canAccessAssistant) {
+    log.warn('User lacks shared resource access for assistant architect', {
+      userId,
+      toolId,
+      architectId: architect.id,
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Access denied',
+          message: 'You do not have access to this assistant',
+          requestId,
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      ),
+    };
   }
 
   // Log successful authorization for audit trail

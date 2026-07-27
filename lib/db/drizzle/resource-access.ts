@@ -10,6 +10,8 @@
  *   - ZERO grant rows for a resource  = UNRESTRICTED (everyone may access).
  *   - ANY matching grant row          = allowed.
  *   - ADMINISTRATORS always pass.
+ *   - Active room assignment is an additional assistant grant.
+ *   - Student-only active room members are limited to room-assigned assistants.
  *
  * This is the resource-scoped authorization axis — NOT a Capability (role-gated
  * UI feature) and NOT a Scope (API-key permission). See
@@ -29,12 +31,28 @@ import {
   type ResourceGrantKind,
 } from "@/lib/db/schema";
 import { normalizeEmail } from "@/lib/groups/normalize";
+import { getRoomAssistantAccessContext } from "@/lib/rooms/membership";
 
 /** A single grant on a resource, reduced to what the editor reads/writes. */
 export interface ResourceGrant {
   grantKind: ResourceGrantKind;
   /** Role name (kind='role') or lowercased group email (kind='group'). */
   grantValue: string;
+}
+
+export interface ResourceAccessOptions {
+  /**
+   * Assistant ownership is an existing access path. It is supplied explicitly
+   * because ownership lives on assistant_architects rather than the grants
+   * table. A room-restricted student does not receive this bypass for an
+   * unassigned assistant.
+   */
+  ownerUserId?: number | null;
+}
+
+export interface ResourceBatchAccessOptions {
+  /** Assistant ids owned by the caller among `resourceIds`. */
+  ownedResourceIds?: Array<number | string>;
 }
 
 /**
@@ -50,7 +68,8 @@ function resourceIdText(resourceId: number | string): string {
  * Whether a user may access a single resource. The canonical per-resource gate
  * for execution paths (model resolution, assistant execute, skill invocation).
  *
- * One round-trip: a boolean-OR of four EXISTS predicates —
+ * For assistants, room assignment/restriction and explicit ownership are
+ * evaluated first. The ordinary grant query is a boolean-OR of four predicates —
  *   1. the resource has NO grants (unrestricted), OR
  *   2. the user is an administrator, OR
  *   3. a `role` grant matches one of the user's roles (by name, case-insensitive), OR
@@ -62,10 +81,21 @@ function resourceIdText(resourceId: number | string): string {
 export async function userCanAccessResource(
   userId: number,
   resourceType: ResourceGrantType,
-  resourceId: number | string
+  resourceId: number | string,
+  options: ResourceAccessOptions = {}
 ): Promise<boolean> {
   const idText = resourceIdText(resourceId);
   const validUser = Number.isInteger(userId) && userId > 0;
+
+  if (resourceType === "assistant") {
+    const roomAccess = await getRoomAssistantAccessContext(userId, [idText]);
+    if (roomAccess.isAdministrator) return true;
+    if (roomAccess.assignedAssistantIds.has(idText)) return true;
+    if (roomAccess.isStudentOnly && roomAccess.hasActiveRoomMembership) {
+      return false;
+    }
+    if (validUser && options.ownerUserId === userId) return true;
+  }
 
   const result = await executeQuery(
     (db) =>
@@ -121,20 +151,43 @@ export async function userCanAccessResource(
  * batch gate for list surfaces (e.g. GET /api/models), avoiding the N+1 of
  * calling `userCanAccessResource` per row.
  *
- * A candidate is accessible when it has NO grants (unrestricted) OR the user is
- * an administrator OR at least one of its grants matches the user. Returns the
- * accessible ids as TEXT (the storage form); compare with `resourceIdText(id)`.
+ * A candidate is accessible when it has NO grants (unrestricted), the user is
+ * an administrator, at least one grant matches, or an assistant-specific room
+ * assignment/ownership path matches. Student-only active room members receive
+ * only assigned assistant ids. Returns accessible ids as TEXT (the storage
+ * form); compare with `resourceIdText(id)`.
  */
 export async function filterAccessibleResourceIds(
   userId: number,
   resourceType: ResourceGrantType,
-  resourceIds: Array<number | string>
+  resourceIds: Array<number | string>,
+  options: ResourceBatchAccessOptions = {}
 ): Promise<Set<string>> {
   const idTexts = resourceIds.map(resourceIdText);
   const accessible = new Set<string>();
   if (idTexts.length === 0) return accessible;
 
   const validUser = Number.isInteger(userId) && userId > 0;
+  if (resourceType === "assistant") {
+    const roomAccess = await getRoomAssistantAccessContext(userId, idTexts);
+    if (roomAccess.isAdministrator) {
+      return new Set(idTexts);
+    }
+    if (roomAccess.isStudentOnly && roomAccess.hasActiveRoomMembership) {
+      return new Set(
+        idTexts.filter((id) => roomAccess.assignedAssistantIds.has(id))
+      );
+    }
+    for (const id of idTexts) {
+      if (roomAccess.assignedAssistantIds.has(id)) accessible.add(id);
+    }
+    const candidateIds = new Set(idTexts);
+    for (const ownedId of options.ownedResourceIds ?? []) {
+      const id = resourceIdText(ownedId);
+      if (validUser && candidateIds.has(id)) accessible.add(id);
+    }
+  }
+
   // Parameterized IN-list (drizzle does NOT expand a raw array into an IN list).
   const idList = sql.join(
     idTexts.map((t) => sql`${t}`),
@@ -142,7 +195,8 @@ export async function filterAccessibleResourceIds(
   );
 
   // Administrators see everything — short-circuit before any grant lookup.
-  if (validUser) {
+  // Assistant administrator status was already loaded with room context above.
+  if (validUser && resourceType !== "assistant") {
     const adminResult = await executeQuery(
       (db) =>
         db.execute(sql`

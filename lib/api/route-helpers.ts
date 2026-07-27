@@ -110,9 +110,10 @@ export async function verifyAssistantAccess(
 /**
  * Per-resource access enforcement (#1206), BENEATH the scope + verifyAssistantAccess
  * gates. Rejects a caller who lacks a role/group grant on the assistant OR any
- * model it uses. The owner always passes the assistant check; admins pass inside
- * the grant lookups; zero grants = unrestricted. Returns a 403 Response on
- * denial, else null.
+ * model it uses. Assistant ownership remains an access path except for a
+ * student-only user with an active room, who may execute only room-assigned
+ * assistants. Admins pass inside the shared lookup; zero grants =
+ * unrestricted. Returns a 403 Response on denial, else null.
  *
  * Shared by every v1 assistant entry point (execute, start-conversation,
  * send-message) so a caller can't bypass a resource grant by picking a
@@ -128,9 +129,9 @@ export async function verifyAssistantAccess(
  * (via {@link verifyAssistantResourceGrants}) and the MCP `execute_assistant`
  * handler — every execution surface must enforce the SAME assistant/model
  * grants or a scope-holding key could run a restricted assistant through the
- * surface that forgot to check. Admin bypass and zero-grants-unrestricted
- * semantics live inside the SQL primitives. The assistant check is skipped for
- * the owner; model grants are checked for everyone (execution runs ALL prompts).
+ * surface that forgot to check. Admin bypass, room assignment/restriction, owner
+ * access, and zero-grants-unrestricted semantics live inside the shared
+ * primitive. Model grants are checked for everyone (execution runs ALL prompts).
  */
 export async function checkAssistantResourceGrants(args: {
   userId: number
@@ -142,11 +143,14 @@ export async function checkAssistantResourceGrants(args: {
 > {
   const { userId, architectUserId, architectId, modelDbIds } = args
 
-  if (architectUserId !== userId) {
-    const canAccessAssistant = await userCanAccessResource(userId, "assistant", architectId)
-    if (!canAccessAssistant) {
-      return { granted: false, reason: "assistant" }
-    }
+  const canAccessAssistant = await userCanAccessResource(
+    userId,
+    "assistant",
+    architectId,
+    { ownerUserId: architectUserId }
+  )
+  if (!canAccessAssistant) {
+    return { granted: false, reason: "assistant" }
   }
 
   const distinctModelIds = [...new Set(modelDbIds)]
