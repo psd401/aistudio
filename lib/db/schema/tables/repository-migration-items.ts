@@ -37,6 +37,8 @@ export interface RepositoryMigrationItemMetadata {
   legacyConversationId?: string;
   createdRepository?: boolean;
   preexistingCanonicalVersion?: boolean;
+  recoveredFromLegacySegments?: boolean;
+  recoveredFromVerifiedDuplicateSourceId?: number;
   rollbackDrill?: boolean;
   approvedMismatchAt?: string;
   approvedMismatchBy?: number;

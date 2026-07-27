@@ -1369,13 +1369,27 @@ aligned.
 
 Live dev evidence now records 45 eligible sources, 44 migrated and verified,
 zero failed or unapproved mismatches, three explicitly excluded unsupported
-connector rows, and one genuinely missing Nexus source. A reversible rollback
-drill passed and restored the exact current version transactionally. The Google
-infrastructure and connector are deployed and incremental sync succeeds; the
-external mutation matrix remains outstanding.
+connector rows, and one Nexus row whose own object and chunks are missing. A
+reversible rollback drill passed and restored the exact current version
+transactionally. The Google infrastructure and connector are deployed and
+incremental sync succeeds; the external mutation matrix remains outstanding.
 
-The epic is not ready for retirement. The missing Nexus source needs restore or
-an explicit product-data disposition; retrieval shadowing and the three
+The post-merge read-only recovery audit proved that the remaining Nexus row is
+an exact metadata twin of a verified source owned by the same user: filename,
+declared 79,052-byte size, PDF metadata, and page count match, and the uploads
+are three minutes apart. The verified twin's three legacy chunks already
+reconcile to its canonical version. The focused follow-up therefore recovers a
+missing Nexus source only from an already verified exact twin with matching
+owner, conversation, filename, type, size, and JSON metadata. It recomputes the
+segments against the recorded verified hash, limits matches to a ten-minute
+upload window, rejects inconsistent or ambiguous twins, and persists the
+duplicate source ID in both S3 and migration evidence.
+Unit coverage exercises valid, corrupt, empty, and ambiguous evidence; the real
+PostgreSQL lifecycle smoke proves the missing-object retry, reconstructed bytes,
+provenance, metrics, and cleanup.
+
+The epic is not ready for retirement. The verified-duplicate recovery must be
+deployed and the live row retried/reconciled; retrieval shadowing and the three
 independent product cutovers still require authenticated observation; the full
 quiet/recovery window must then elapse; and Cohere Embed v4/Rerank 3.5 remain
 blocked on an AWS Marketplace subscription that the current principal is not

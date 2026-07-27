@@ -114,8 +114,15 @@ canonical targets created by the migration itself, are excluded from migration
 inventory without deleting their audit rows. A missing legacy S3 object is
 recoverable only when ordered legacy segments are present; the worker writes a
 deterministic text source and records `recoveredFromLegacySegments`. Access
-denials, network errors, and a source with neither bytes nor segments remain
-fail-closed.
+denials and network errors remain fail-closed. When a Nexus row has neither
+bytes nor its own segments, the worker may use a previously verified exact
+duplicate only when owner, conversation, filename, type, declared byte size,
+JSON metadata, and upload time within ten minutes all match; the duplicate has
+a canonical version; its source and canonical content hashes match; its
+segments recompute to that recorded hash; and every eligible duplicate agrees
+on the same hash. The reconstructed object and migration mapping record
+`recoveredFromVerifiedDuplicateSourceId`. Missing, inconsistent, or ambiguous
+duplicate evidence remains unrecoverable.
 
 The route gate and irreversible finalizer use the same inventory and metric
 denominators as the operator dashboard: excluded connector sources are reported
@@ -285,9 +292,14 @@ Repository item, proved the legacy read source existed, restored the exact
 canonical version in the same transaction, and recorded
 `snapshot.rollbackDrill=true`.
 
-Retirement is not approved. One Nexus document is genuinely unrecoverable
-because both its legacy object and chunks are absent. Retrieval shadowing and
-all three product cutovers remain disabled, so the required observation and
-seven-day quiet windows have not started. Restore or formally disposition the
-missing source, complete the live shadow/cutover matrix, and let the full
-recovery window elapse before enabling retirement or running the finalizer.
+Retirement is not approved. One Nexus row initially appeared unrecoverable
+because both its legacy object and chunks are absent. A post-merge read-only
+audit found a verified exact twin from the same owner, uploaded three minutes
+later with the same filename, declared 79,052-byte size, PDF metadata, and page
+count. Its three legacy chunks already reconcile to a verified canonical
+version. The verified-duplicate recovery must be deployed, retried, processed,
+and reconciled before this live blocker is closed. Retrieval shadowing and all
+three product cutovers remain disabled, so the required observation and
+seven-day quiet windows have not started. Complete the live shadow/cutover
+matrix and let the full recovery window elapse before enabling retirement or
+running the finalizer.

@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { eq, sql, type SQL } from "drizzle-orm";
+import { and, eq, sql, type SQL } from "drizzle-orm";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import * as XLSX from "@e965/xlsx";
 import {
@@ -24,6 +24,8 @@ import {
   executeTransaction,
 } from "@/lib/db/drizzle-client";
 import {
+  documentChunks,
+  documents,
   knowledgeRepositories,
   repositoryArtifacts,
   repositoryIndexGenerations,
@@ -41,6 +43,7 @@ import {
   extractOfficeDocument,
   extractCanonicalTextDocument,
   buildImageSearchDocument,
+  buildMigrationContentEvidence,
   buildRepositorySourceObjectKey,
   canAcknowledgeCanonicalEmbeddingDlqMessage,
   canAcknowledgeRepositoryProcessingDlqMessage,
@@ -490,6 +493,386 @@ try {
   assert.equal(replay.created, false);
   assert.equal(replay.version.id, first.version.id);
   assert.equal(replay.inspectJob.id, first.inspectJob.id);
+
+  const duplicateSegments = [
+    "The verified duplicate contains the complete first section.",
+    "The verified duplicate contains the complete second section.",
+  ];
+  const duplicateEvidence = buildMigrationContentEvidence(duplicateSegments);
+  const duplicateMetadata = {
+    info: {
+      Title: "Verified exact duplicate recovery smoke",
+      Producer: "Unified content PostgreSQL smoke",
+    },
+    pageCount: 1,
+  };
+  const [verifiedDuplicateDocument] = await executeQuery(
+    (db) =>
+      db
+        .insert(documents)
+        .values({
+          userId: owner.id,
+          conversationId: null,
+          name: "verified-duplicate-recovery.pdf",
+          type: "pdf",
+          size: 79_052,
+          url: `legacy/${Date.now()}-verified-duplicate.pdf`,
+          metadata: duplicateMetadata,
+        })
+        .returning({ id: documents.id }),
+    "smoke.unifiedContent.createVerifiedDuplicateDocument"
+  );
+  assert.ok(verifiedDuplicateDocument);
+  await executeQuery(
+    (db) =>
+      db.insert(documentChunks).values(
+        duplicateSegments.map((content, chunkIndex) => ({
+          documentId: verifiedDuplicateDocument.id,
+          content,
+          chunkIndex,
+          metadata: {},
+        }))
+      ),
+    "smoke.unifiedContent.createVerifiedDuplicateChunks"
+  );
+  const [verifiedDuplicateRun] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryMigrationRuns)
+        .values({
+          mode: "backfill",
+          status: "completed",
+          requestedBy: owner.id,
+          sourceKinds: ["nexus_document"],
+          cursor: { nexus_document: verifiedDuplicateDocument.id },
+          snapshot: {
+            counts: { nexus_document: 1 },
+            maximumIds: {
+              nexus_document: verifiedDuplicateDocument.id,
+            },
+          },
+          metrics: { discovered: 1, migrated: 1, verified: 1 },
+          recoveryWindowEndsAt: new Date(Date.now() + 60_000),
+          startedAt: new Date(),
+          finishedAt: new Date(),
+        })
+        .returning({ id: repositoryMigrationRuns.id }),
+    "smoke.unifiedContent.createVerifiedDuplicateRun"
+  );
+  assert.ok(verifiedDuplicateRun);
+  await executeQuery(
+    (db) =>
+      db.insert(repositoryMigrationItems).values({
+        runId: verifiedDuplicateRun.id,
+        originRunId: verifiedDuplicateRun.id,
+        sourceKind: "nexus_document",
+        sourceId: verifiedDuplicateDocument.id,
+        ownerId: owner.id,
+        canonicalRepositoryId: repository.id,
+        canonicalItemId: item.id,
+        canonicalVersionId: first.version.id,
+        sourceRecordCount: duplicateEvidence.recordCount,
+        canonicalRecordCount: duplicateEvidence.recordCount,
+        sourceContentSha256: duplicateEvidence.sha256,
+        canonicalContentSha256: duplicateEvidence.sha256,
+        status: "verified",
+        metadata: {},
+        migratedAt: new Date(),
+        verifiedAt: new Date(),
+      }),
+    "smoke.unifiedContent.createVerifiedDuplicateMigration"
+  );
+  const staleDuplicateSegments = [
+    "This older document deliberately has different content.",
+  ];
+  const staleDuplicateEvidence = buildMigrationContentEvidence(
+    staleDuplicateSegments
+  );
+  const [staleDuplicateDocument] = await executeQuery(
+    (db) =>
+      db
+        .insert(documents)
+        .values({
+          userId: owner.id,
+          conversationId: null,
+          name: "verified-duplicate-recovery.pdf",
+          type: "pdf",
+          size: 79_052,
+          url: `legacy/${Date.now()}-stale-duplicate.pdf`,
+          metadata: duplicateMetadata,
+          createdAt: new Date(Date.now() - 60 * 60 * 1_000),
+        })
+        .returning({ id: documents.id }),
+    "smoke.unifiedContent.createStaleDuplicateDocument"
+  );
+  assert.ok(staleDuplicateDocument);
+  await executeQuery(
+    (db) =>
+      db.insert(documentChunks).values(
+        staleDuplicateSegments.map((content, chunkIndex) => ({
+          documentId: staleDuplicateDocument.id,
+          content,
+          chunkIndex,
+          metadata: {},
+        }))
+      ),
+    "smoke.unifiedContent.createStaleDuplicateChunks"
+  );
+  await executeQuery(
+    (db) =>
+      db.insert(repositoryMigrationItems).values({
+        runId: verifiedDuplicateRun.id,
+        originRunId: verifiedDuplicateRun.id,
+        sourceKind: "nexus_document",
+        sourceId: staleDuplicateDocument.id,
+        ownerId: owner.id,
+        canonicalRepositoryId: repository.id,
+        canonicalItemId: item.id,
+        canonicalVersionId: first.version.id,
+        sourceRecordCount: staleDuplicateEvidence.recordCount,
+        canonicalRecordCount: staleDuplicateEvidence.recordCount,
+        sourceContentSha256: staleDuplicateEvidence.sha256,
+        canonicalContentSha256: staleDuplicateEvidence.sha256,
+        status: "verified",
+        metadata: {},
+        migratedAt: new Date(),
+        verifiedAt: new Date(),
+      }),
+    "smoke.unifiedContent.createStaleDuplicateMigration"
+  );
+  const [missingDuplicateDocument] = await executeQuery(
+    (db) =>
+      db
+        .insert(documents)
+        .values({
+          userId: owner.id,
+          conversationId: null,
+          name: "verified-duplicate-recovery.pdf",
+          type: "pdf",
+          size: 79_052,
+          url: `legacy/${Date.now()}-missing-duplicate.pdf`,
+          metadata: duplicateMetadata,
+        })
+        .returning({ id: documents.id }),
+    "smoke.unifiedContent.createMissingDuplicateDocument"
+  );
+  assert.ok(missingDuplicateDocument);
+  const [duplicateRecoveryRun] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryMigrationRuns)
+        .values({
+          mode: "backfill",
+          status: "queued",
+          requestedBy: owner.id,
+          sourceKinds: ["nexus_document"],
+          cursor: { nexus_document: missingDuplicateDocument.id - 1 },
+          snapshot: {
+            counts: { nexus_document: 1 },
+            maximumIds: { nexus_document: missingDuplicateDocument.id },
+          },
+          metrics: { discovered: 1 },
+        })
+        .returning({ id: repositoryMigrationRuns.id }),
+    "smoke.unifiedContent.createDuplicateRecoveryRun"
+  );
+  assert.ok(duplicateRecoveryRun);
+  const recoveredDuplicateWrite: {
+    body?: Buffer;
+    metadata?: Record<string, string>;
+  } = {};
+  let recoveredDuplicateTarget:
+    | {
+        repositoryId: number | null;
+        itemId: number | null;
+        createdRepository: boolean;
+      }
+    | undefined;
+  try {
+    const duplicateRecoveryStorage: RepositoryMigrationStorage = {
+      inspectAndCopyObject: async () => {
+        const error = new Error("missing duplicate source");
+        error.name = "NoSuchKey";
+        throw error;
+      },
+      putObject: async (stored) => {
+        recoveredDuplicateWrite.body = Buffer.from(stored.body);
+        recoveredDuplicateWrite.metadata = stored.metadata;
+        return {
+          byteSize: stored.body.byteLength,
+          contentType: stored.contentType,
+          sha256: createHash("sha256").update(stored.body).digest("hex"),
+        };
+      },
+      deleteObject: async () => {
+        throw new Error("Duplicate recovery must not delete objects");
+      },
+    };
+    assert.deepEqual(
+      await processNextRepositoryMigrationBatch(duplicateRecoveryStorage),
+      { runId: duplicateRecoveryRun.id, mode: "backfill" }
+    );
+    assert.equal(
+      recoveredDuplicateWrite.body?.toString("utf8"),
+      duplicateSegments.join("\n")
+    );
+    assert.equal(
+      recoveredDuplicateWrite.metadata
+        ?.recoveredFromVerifiedDuplicateSourceId,
+      verifiedDuplicateDocument.id.toString()
+    );
+    const [recoveredDuplicate] = await executeQuery(
+      (db) =>
+        db
+          .select({
+            status: repositoryMigrationItems.status,
+            sourceRecordCount: repositoryMigrationItems.sourceRecordCount,
+            sourceContentSha256:
+              repositoryMigrationItems.sourceContentSha256,
+            sourceObjectSha256: repositoryMigrationItems.sourceObjectSha256,
+            metadata: repositoryMigrationItems.metadata,
+            repositoryId: repositoryMigrationItems.canonicalRepositoryId,
+            itemId: repositoryMigrationItems.canonicalItemId,
+          })
+          .from(repositoryMigrationItems)
+          .where(
+            and(
+              eq(repositoryMigrationItems.sourceKind, "nexus_document"),
+              eq(
+                repositoryMigrationItems.sourceId,
+                missingDuplicateDocument.id
+              )
+            )
+          )
+          .limit(1),
+      "smoke.unifiedContent.readRecoveredDuplicateMigration"
+    );
+    assert.ok(recoveredDuplicate);
+    recoveredDuplicateTarget = {
+      repositoryId: recoveredDuplicate.repositoryId,
+      itemId: recoveredDuplicate.itemId,
+      createdRepository:
+        recoveredDuplicate.metadata.createdRepository === true,
+    };
+    assert.equal(recoveredDuplicate.status, "migrated");
+    assert.equal(
+      recoveredDuplicate.sourceRecordCount,
+      duplicateEvidence.recordCount
+    );
+    assert.equal(
+      recoveredDuplicate.sourceContentSha256,
+      duplicateEvidence.sha256
+    );
+    assert.equal(recoveredDuplicate.sourceObjectSha256, null);
+    assert.equal(
+      recoveredDuplicate.metadata.recoveredFromVerifiedDuplicateSourceId,
+      verifiedDuplicateDocument.id
+    );
+    const [completedDuplicateRecoveryRun] = await executeQuery(
+      (db) =>
+        db
+          .select({
+            status: repositoryMigrationRuns.status,
+            metrics: repositoryMigrationRuns.metrics,
+          })
+          .from(repositoryMigrationRuns)
+          .where(eq(repositoryMigrationRuns.id, duplicateRecoveryRun.id))
+          .limit(1),
+      "smoke.unifiedContent.readCompletedDuplicateRecoveryRun"
+    );
+    assert.equal(completedDuplicateRecoveryRun?.status, "completed");
+    assert.equal(completedDuplicateRecoveryRun?.metrics.migrated, 1);
+    assert.equal(completedDuplicateRecoveryRun?.metrics.unrecoverable, 0);
+  } finally {
+    if (!recoveredDuplicateTarget) {
+      const [target] = await executeQuery(
+        (db) =>
+          db
+            .select({
+              repositoryId: repositoryMigrationItems.canonicalRepositoryId,
+              itemId: repositoryMigrationItems.canonicalItemId,
+              metadata: repositoryMigrationItems.metadata,
+            })
+            .from(repositoryMigrationItems)
+            .where(
+              and(
+                eq(repositoryMigrationItems.sourceKind, "nexus_document"),
+                eq(
+                  repositoryMigrationItems.sourceId,
+                  missingDuplicateDocument.id
+                )
+              )
+            )
+            .limit(1),
+        "smoke.unifiedContent.findDuplicateRecoveryTargetForCleanup"
+      );
+      if (target) {
+        recoveredDuplicateTarget = {
+          repositoryId: target.repositoryId,
+          itemId: target.itemId,
+          createdRepository: target.metadata.createdRepository === true,
+        };
+      }
+    }
+    if (
+      recoveredDuplicateTarget?.createdRepository &&
+      recoveredDuplicateTarget.repositoryId
+    ) {
+      const repositoryId = recoveredDuplicateTarget.repositoryId;
+      await executeQuery(
+        (db) =>
+          db
+            .delete(knowledgeRepositories)
+            .where(eq(knowledgeRepositories.id, repositoryId)),
+        "smoke.unifiedContent.cleanupDuplicateRecoveryRepository"
+      );
+    } else if (recoveredDuplicateTarget?.itemId) {
+      const itemId = recoveredDuplicateTarget.itemId;
+      await executeQuery(
+        (db) =>
+          db
+            .delete(repositoryItems)
+            .where(eq(repositoryItems.id, itemId)),
+        "smoke.unifiedContent.cleanupDuplicateRecoveryItem"
+      );
+    }
+    await executeQuery(
+      (db) =>
+        db
+          .delete(repositoryMigrationRuns)
+          .where(eq(repositoryMigrationRuns.id, duplicateRecoveryRun.id)),
+      "smoke.unifiedContent.cleanupDuplicateRecoveryRun"
+    );
+    await executeQuery(
+      (db) =>
+        db
+          .delete(repositoryMigrationRuns)
+          .where(eq(repositoryMigrationRuns.id, verifiedDuplicateRun.id)),
+      "smoke.unifiedContent.cleanupVerifiedDuplicateRun"
+    );
+    await executeQuery(
+      (db) =>
+        db
+          .delete(documents)
+          .where(eq(documents.id, missingDuplicateDocument.id)),
+      "smoke.unifiedContent.cleanupMissingDuplicateDocument"
+    );
+    await executeQuery(
+      (db) =>
+        db
+          .delete(documents)
+          .where(eq(documents.id, verifiedDuplicateDocument.id)),
+      "smoke.unifiedContent.cleanupVerifiedDuplicateDocument"
+    );
+    await executeQuery(
+      (db) =>
+        db
+          .delete(documents)
+          .where(eq(documents.id, staleDuplicateDocument.id)),
+      "smoke.unifiedContent.cleanupStaleDuplicateDocument"
+    );
+  }
+
   assert.equal(
     await canAcknowledgeRepositoryProcessingDlqMessage({
       jobId: first.inspectJob.id,

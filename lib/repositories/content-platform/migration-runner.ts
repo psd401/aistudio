@@ -85,6 +85,7 @@ interface NexusDocumentCandidate {
   sourceId: number;
   ownerId: number;
   conversationId: string | null;
+  createdAt: Date;
   name: string;
   source: string;
   byteSize: number;
@@ -112,6 +113,17 @@ interface ReservedMigration {
   repositoryId: number;
   itemId: number;
   createdRepository: boolean;
+}
+
+export interface VerifiedDuplicateNexusRecovery {
+  sourceId: number;
+  legacySegments: string[];
+}
+
+export interface VerifiedDuplicateNexusRecoveryCandidate
+  extends VerifiedDuplicateNexusRecovery {
+  sourceRecordCount: number;
+  sourceContentSha256: string;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -336,6 +348,7 @@ async function loadNextCandidate(
       id: number;
       user_id: number;
       conversation_id: string | null;
+      created_at: Date;
       name: string;
       url: string;
       size: number;
@@ -350,6 +363,7 @@ async function loadNextCandidate(
               document.id,
               document.user_id,
               document.conversation_id,
+              document.created_at,
               document.name,
               document.url,
               document.size,
@@ -376,6 +390,7 @@ async function loadNextCandidate(
           sourceId: row.id,
           ownerId: row.user_id,
           conversationId: row.conversation_id,
+          createdAt: row.created_at,
           name: row.name,
           source: row.url,
           byteSize: row.size,
@@ -682,6 +697,95 @@ export function buildLegacyMigrationFallbackBody(
   return content ? Buffer.from(content, "utf8") : null;
 }
 
+export function resolveVerifiedDuplicateNexusRecovery(
+  candidates: VerifiedDuplicateNexusRecoveryCandidate[]
+): VerifiedDuplicateNexusRecovery | null {
+  if (candidates.length === 0) return null;
+  const verified: Array<
+    VerifiedDuplicateNexusRecoveryCandidate & { sha256: string }
+  > = [];
+  for (const candidate of candidates) {
+    const evidence = buildMigrationContentEvidence(candidate.legacySegments);
+    if (
+      !evidence.sha256 ||
+      evidence.recordCount !== candidate.sourceRecordCount ||
+      evidence.sha256 !== candidate.sourceContentSha256.trim()
+    ) {
+      return null;
+    }
+    verified.push({ ...candidate, sha256: evidence.sha256 });
+  }
+  if (new Set(verified.map((entry) => entry.sha256)).size !== 1) {
+    return null;
+  }
+  return {
+    sourceId: verified[0]!.sourceId,
+    legacySegments: verified[0]!.legacySegments,
+  };
+}
+
+async function loadVerifiedDuplicateNexusRecovery(
+  candidate: NexusDocumentCandidate
+): Promise<VerifiedDuplicateNexusRecovery | null> {
+  const rows = toPgRows<{
+    source_id: number;
+    source_record_count: number;
+    source_content_sha256: string;
+    legacy_segments: string[];
+  }>(
+    await executeQuery(
+      (db) =>
+        db.execute(sql`
+          SELECT
+            document.id AS source_id,
+            migration.source_record_count,
+            migration.source_content_sha256,
+            ARRAY(
+              SELECT chunk.content
+              FROM document_chunks chunk
+              WHERE chunk.document_id = document.id
+              ORDER BY chunk.chunk_index, chunk.id
+            ) AS legacy_segments
+          FROM documents document
+          JOIN repository_migration_items migration
+            ON migration.source_kind = 'nexus_document'
+           AND migration.source_id = document.id
+           AND migration.owner_id = document.user_id
+          JOIN repository_item_versions version
+            ON version.id = migration.canonical_version_id
+           AND version.item_id = migration.canonical_item_id
+          WHERE document.id <> ${candidate.sourceId}
+            AND document.user_id = ${candidate.ownerId}
+            AND document.conversation_id IS NOT DISTINCT FROM
+                ${candidate.conversationId}::uuid
+            AND document.created_at BETWEEN
+                ${candidate.createdAt}::timestamptz - INTERVAL '10 minutes'
+                AND ${candidate.createdAt}::timestamptz + INTERVAL '10 minutes'
+            AND document.name = ${candidate.name}
+            AND document.type = ${candidate.contentType}
+            AND document.size = ${candidate.byteSize}
+            AND COALESCE(document.metadata, '{}'::jsonb) =
+                ${JSON.stringify(candidate.metadata)}::jsonb
+            AND migration.status = 'verified'
+            AND migration.source_record_count IS NOT NULL
+            AND migration.source_content_sha256 IS NOT NULL
+            AND migration.source_content_sha256 =
+                migration.canonical_content_sha256
+          ORDER BY document.id
+        `),
+      "contentMigration.verifiedDuplicateNexusRecovery"
+    )
+  );
+  return resolveVerifiedDuplicateNexusRecovery(
+    rows.map((row) => ({
+      sourceId: row.source_id,
+      sourceRecordCount: row.source_record_count,
+      sourceContentSha256: row.source_content_sha256,
+      legacySegments: row.legacy_segments ?? [],
+    }))
+  );
+}
+
 async function migrateCandidate(
   run: RepositoryMigrationRunRow,
   candidate: MigrationCandidate,
@@ -769,6 +873,7 @@ async function migrateCandidate(
     let declaredContentType: string;
     let sourceObjectBytesAvailable = true;
     let comparisonSegments = candidate.legacySegments;
+    let verifiedDuplicateSourceId: number | null = null;
     let textBody =
       candidate.sourceKind === "repository_item"
         ? textCandidateBody(candidate)
@@ -782,7 +887,6 @@ async function migrateCandidate(
       comparisonSegments = [snapshot];
       textBody = Buffer.from(snapshot, "utf8");
     }
-    const sourceContent = buildMigrationContentEvidence(comparisonSegments);
     if (textBody) {
       declaredContentType = "text/plain";
       stored = await storage.putObject({
@@ -827,9 +931,21 @@ async function migrateCandidate(
         declaredContentType = stored.contentType ?? declaredContentType;
       } catch (error) {
         if (!isMissingMigrationSourceObject(error)) throw error;
-        const fallbackBody = buildLegacyMigrationFallbackBody(
-          candidate.legacySegments
-        );
+        let fallbackSegments = candidate.legacySegments;
+        if (
+          candidate.sourceKind === "nexus_document" &&
+          fallbackSegments.length === 0
+        ) {
+          const duplicate =
+            await loadVerifiedDuplicateNexusRecovery(candidate);
+          if (duplicate) {
+            fallbackSegments = duplicate.legacySegments;
+            comparisonSegments = duplicate.legacySegments;
+            verifiedDuplicateSourceId = duplicate.sourceId;
+          }
+        }
+        const fallbackBody =
+          buildLegacyMigrationFallbackBody(fallbackSegments);
         if (!fallbackBody) {
           throw new UnrecoverableMigrationSourceError(
             "Legacy source object and extracted content are unavailable"
@@ -845,11 +961,18 @@ async function migrateCandidate(
             migrationSourceKind: candidate.sourceKind,
             migrationSourceId: candidate.sourceId.toString(),
             recoveredFromLegacySegments: "true",
+            ...(verifiedDuplicateSourceId === null
+              ? {}
+              : {
+                  recoveredFromVerifiedDuplicateSourceId:
+                    verifiedDuplicateSourceId.toString(),
+                }),
           },
         });
       }
     }
 
+    const sourceContent = buildMigrationContentEvidence(comparisonSegments);
     const registration = await registerCanonicalUpload({
       itemId: reserved.itemId,
       userId: candidate.ownerId,
@@ -892,7 +1015,15 @@ async function migrateCandidate(
             ...reserved.migration.metadata,
             ...(sourceObjectBytesAvailable
               ? {}
-              : { recoveredFromLegacySegments: true }),
+              : {
+                  recoveredFromLegacySegments: true,
+                  ...(verifiedDuplicateSourceId === null
+                    ? {}
+                    : {
+                        recoveredFromVerifiedDuplicateSourceId:
+                          verifiedDuplicateSourceId,
+                      }),
+                }),
           },
           lastErrorCode: null,
           lastErrorMessage: null,

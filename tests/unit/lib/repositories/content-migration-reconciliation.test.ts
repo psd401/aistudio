@@ -13,6 +13,7 @@ import {
   buildLegacyMigrationFallbackBody,
   deterministicMigrationSourceId,
   isMissingMigrationSourceObject,
+  resolveVerifiedDuplicateNexusRecovery,
 } from "@/lib/repositories/content-platform/migration-runner";
 
 describe("unified content migration reconciliation", () => {
@@ -42,6 +43,85 @@ describe("unified content migration reconciliation", () => {
       ),
     ).toBe("first\nsecond");
     expect(buildLegacyMigrationFallbackBody([" ", "\n"])).toBeNull();
+  });
+
+  it("accepts only hash-consistent verified duplicate recovery evidence", () => {
+    const segments = ["first section", "second section"];
+    const hash = buildMigrationContentEvidence(segments).sha256;
+    const differentHash =
+      buildMigrationContentEvidence(["different"]).sha256;
+    if (!hash || !differentHash) {
+      throw new Error("Non-empty migration evidence must include a SHA-256");
+    }
+    expect(
+      resolveVerifiedDuplicateNexusRecovery([
+        {
+          sourceId: 3,
+          sourceRecordCount: 2,
+          sourceContentSha256: hash,
+          legacySegments: segments,
+        },
+        {
+          sourceId: 4,
+          sourceRecordCount: 2,
+          sourceContentSha256: hash,
+          legacySegments: segments,
+        },
+      ])
+    ).toEqual({ sourceId: 3, legacySegments: segments });
+    expect(
+      resolveVerifiedDuplicateNexusRecovery([
+        {
+          sourceId: 3,
+          sourceRecordCount: 2,
+          sourceContentSha256: "0".repeat(64),
+          legacySegments: segments,
+        },
+      ])
+    ).toBeNull();
+    expect(
+      resolveVerifiedDuplicateNexusRecovery([
+        {
+          sourceId: 3,
+          sourceRecordCount: 2,
+          sourceContentSha256: hash,
+          legacySegments: segments,
+        },
+        {
+          sourceId: 4,
+          sourceRecordCount: 2,
+          sourceContentSha256: "0".repeat(64),
+          legacySegments: segments,
+        },
+      ])
+    ).toBeNull();
+    expect(
+      resolveVerifiedDuplicateNexusRecovery([
+        {
+          sourceId: 3,
+          sourceRecordCount: 2,
+          sourceContentSha256: hash,
+          legacySegments: segments,
+        },
+        {
+          sourceId: 4,
+          sourceRecordCount: 1,
+          sourceContentSha256: differentHash,
+          legacySegments: ["different"],
+        },
+      ])
+    ).toBeNull();
+    expect(
+      resolveVerifiedDuplicateNexusRecovery([
+        {
+          sourceId: 3,
+          sourceRecordCount: 1,
+          sourceContentSha256: hash,
+          legacySegments: segments,
+        },
+      ])
+    ).toBeNull();
+    expect(resolveVerifiedDuplicateNexusRecovery([])).toBeNull();
   });
 
   it("builds stable normalized evidence and deterministic source ids", () => {
