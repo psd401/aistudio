@@ -43,6 +43,110 @@ const TOOL_ICONS = {
   media: Brain
 } as const
 
+function groupToolsByCategory(
+  tools: ToolConfig[]
+): Record<string, ToolConfig[]> {
+  return tools.reduce<Record<string, ToolConfig[]>>((grouped, tool) => {
+    grouped[tool.category] ??= []
+    grouped[tool.category].push(tool)
+    return grouped
+  }, {})
+}
+
+function ToolCategories({
+  toolsByCategory,
+  enabledTools,
+  disabled,
+  isLoading,
+  onToggle,
+}: {
+  toolsByCategory: Record<string, ToolConfig[]>
+  enabledTools: string[]
+  disabled: boolean
+  isLoading: boolean
+  onToggle: (toolName: string, enabled: boolean) => void
+}) {
+  return (
+    <div className="space-y-4 rounded-lg border bg-muted/20 p-4">
+      {Object.entries(toolsByCategory).map(
+        ([category, tools], categoryIndex) => {
+          const IconComponent =
+            TOOL_ICONS[category as keyof typeof TOOL_ICONS] || Brain
+          return (
+            <div key={category}>
+              {categoryIndex > 0 && <Separator className="my-3" />}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <IconComponent className="h-3 w-3 text-muted-foreground" />
+                  <span className="text-xs font-medium capitalize text-muted-foreground">
+                    {category}
+                  </span>
+                </div>
+                <div className="space-y-3 pl-5">
+                  {tools.map((tool) => (
+                    <div
+                      key={tool.name}
+                      className="flex items-start justify-between space-x-3"
+                    >
+                      <div className="flex-1 space-y-1">
+                        <Label
+                          htmlFor={`tool-${tool.name}`}
+                          className="cursor-pointer text-sm font-medium"
+                        >
+                          {tool.displayName}
+                        </Label>
+                        <p className="text-xs leading-relaxed text-muted-foreground">
+                          {tool.description}
+                        </p>
+                      </div>
+                      <Switch
+                        id={`tool-${tool.name}`}
+                        checked={enabledTools.includes(tool.name)}
+                        disabled={disabled || isLoading}
+                        onCheckedChange={(checked) =>
+                          onToggle(tool.name, checked)
+                        }
+                        aria-label={`Enable ${tool.displayName}: ${tool.description}`}
+                        className="mt-0.5"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )
+        }
+      )}
+    </div>
+  )
+}
+
+function ToolSelectionHeader({ enabledCount }: { enabledCount: number }) {
+  return (
+    <div className="flex items-center gap-2">
+      <Label className="text-sm font-medium">Available Tools</Label>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Info className="h-4 w-4 cursor-help text-muted-foreground" />
+          </TooltipTrigger>
+          <TooltipContent>
+            <p className="max-w-xs text-sm">
+              Enable AI tools for this prompt based on the eligible model
+              capabilities. Tools will be available during prompt execution.
+            </p>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+      {enabledCount > 0 && (
+        <Badge variant="secondary" className="text-xs">
+          {enabledCount} enabled
+        </Badge>
+      )}
+    </div>
+  )
+}
+
 export function ToolSelectionSection({
   selectedModelId,
   enabledTools,
@@ -161,37 +265,11 @@ export function ToolSelectionSection({
   }
 
   // Group tools by category
-  const toolsByCategory = availableTools.reduce((acc, tool) => {
-    if (!acc[tool.category]) {
-      acc[tool.category] = []
-    }
-    acc[tool.category].push(tool)
-    return acc
-  }, {} as Record<string, ToolConfig[]>)
+  const toolsByCategory = groupToolsByCategory(availableTools)
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <Label className="text-sm font-medium">Available Tools</Label>
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Info className="h-4 w-4 text-muted-foreground cursor-help" />
-            </TooltipTrigger>
-            <TooltipContent>
-              <p className="max-w-xs text-sm">
-                Enable AI tools for this prompt based on the eligible model capabilities.
-                Tools will be available during prompt execution.
-              </p>
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-        {enabledTools.length > 0 && (
-          <Badge variant="secondary" className="text-xs">
-            {enabledTools.length} enabled
-          </Badge>
-        )}
-      </div>
+      <ToolSelectionHeader enabledCount={enabledTools.length} />
 
       {error ? (
         <div className="p-4 border rounded-lg bg-destructive/10 border-destructive/20">
@@ -212,57 +290,13 @@ export function ToolSelectionSection({
           </p>
         </div>
       ) : (
-        <div className="space-y-4 border rounded-lg p-4 bg-muted/20">
-          {Object.entries(toolsByCategory).map(([category, tools], categoryIndex) => {
-            const IconComponent = TOOL_ICONS[category as keyof typeof TOOL_ICONS] || Brain
-
-            return (
-              <div key={category}>
-                {categoryIndex > 0 && <Separator className="my-3" />}
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <IconComponent className="h-3 w-3 text-muted-foreground" />
-                    <span className="text-xs font-medium capitalize text-muted-foreground">
-                      {category}
-                    </span>
-                  </div>
-                  <div className="space-y-3 pl-5">
-                    {tools.map(tool => {
-                      const isEnabled = enabledTools.includes(tool.name)
-
-                      return (
-                        <div
-                          key={tool.name}
-                          className="flex items-start justify-between space-x-3"
-                        >
-                          <div className="flex-1 space-y-1">
-                            <Label
-                              htmlFor={`tool-${tool.name}`}
-                              className="text-sm font-medium cursor-pointer"
-                            >
-                              {tool.displayName}
-                            </Label>
-                            <p className="text-xs text-muted-foreground leading-relaxed">
-                              {tool.description}
-                            </p>
-                          </div>
-                          <Switch
-                            id={`tool-${tool.name}`}
-                            checked={isEnabled}
-                            disabled={disabled || isLoading}
-                            onCheckedChange={(checked) => handleToolToggle(tool.name, checked)}
-                            aria-label={`Enable ${tool.displayName}: ${tool.description}`}
-                            className="mt-0.5"
-                          />
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              </div>
-            )
-          })}
-        </div>
+        <ToolCategories
+          toolsByCategory={toolsByCategory}
+          enabledTools={enabledTools}
+          disabled={disabled}
+          isLoading={isLoading}
+          onToggle={handleToolToggle}
+        />
       )}
     </div>
   )
