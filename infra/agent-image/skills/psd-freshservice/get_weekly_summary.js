@@ -65,6 +65,112 @@ function getDayName(date) {
   return date.toLocaleDateString('en-US', { weekday: 'short' });
 }
 
+function createDayBuckets() {
+  const byDay = Object.create(null);
+  for (const day of DAY_LABELS) {
+    byDay[day] = { count: 0, categories: {}, agents: {} };
+  }
+  return byDay;
+}
+
+function recordTicketByDay(byDay, dayName, category, responderId) {
+  if (!byDay[dayName]) return;
+  byDay[dayName].count += 1;
+  byDay[dayName].categories[category] =
+    (byDay[dayName].categories[category] || 0) + 1;
+  if (responderId) {
+    byDay[dayName].agents[responderId] =
+      (byDay[dayName].agents[responderId] || 0) + 1;
+  }
+}
+
+function recordTicketByAgent(byAgent, ticket, agentMap, category, dayName) {
+  if (!ticket.responder_id) return;
+  const id = ticket.responder_id;
+  if (!byAgent[id]) {
+    byAgent[id] = {
+      agent: agentMap[id] || { name: `Agent ${id}`, first_name: 'Unknown' },
+      count: 0,
+      categories: Object.create(null),
+      byDay: Object.create(null),
+    };
+  }
+  byAgent[id].count += 1;
+  byAgent[id].categories[category] =
+    (byAgent[id].categories[category] || 0) + 1;
+  byAgent[id].byDay[dayName] = (byAgent[id].byDay[dayName] || 0) + 1;
+}
+
+function aggregateTickets(tickets, agentMap) {
+  const byDay = createDayBuckets();
+  const byAgent = Object.create(null);
+  const byCategory = Object.create(null);
+  const byCategoryByDay = Object.create(null);
+  for (const ticket of tickets) {
+    const dayName = getDayName(new Date(ticket.updated_at));
+    const category = categorizeTicket(ticket.subject);
+    recordTicketByDay(
+      byDay,
+      dayName,
+      category,
+      ticket.responder_id
+    );
+    byCategory[category] = (byCategory[category] || 0) + 1;
+    byCategoryByDay[category] ||= Object.create(null);
+    byCategoryByDay[category][dayName] =
+      (byCategoryByDay[category][dayName] || 0) + 1;
+    recordTicketByAgent(byAgent, ticket, agentMap, category, dayName);
+  }
+  return { byDay, byAgent, byCategory, byCategoryByDay };
+}
+
+function rankAgents(byAgent, elapsedWeekdays) {
+  return Object.entries(byAgent)
+    .map(([id, data]) => ({
+      id,
+      name: data.agent.name,
+      first_name: data.agent.first_name,
+      job_title: data.agent.job_title,
+      count: data.count,
+      categories: data.categories,
+      byDay: data.byDay,
+      avg_per_day: (data.count / elapsedWeekdays).toFixed(1),
+    }))
+    .sort((left, right) => right.count - left.count);
+}
+
+function trendDays(tickets, byDay) {
+  if (tickets.length === 0) return { peakDay: null, slowDay: null };
+  const weekdays = DAY_LABELS.slice(0, 5);
+  return {
+    peakDay: weekdays.reduce(
+      (peak, day) => (byDay[day].count > byDay[peak].count ? day : peak),
+      'Mon'
+    ),
+    slowDay: weekdays.reduce(
+      (slow, day) => (byDay[day].count < byDay[slow].count ? day : slow),
+      'Mon'
+    ),
+  };
+}
+
+function categorySummary(byCategory, ticketCount) {
+  return Object.fromEntries(
+    Object.entries(byCategory)
+      .sort((left, right) => right[1] - left[1])
+      .map(([category, total]) => [
+        category,
+        {
+          total,
+          pct:
+            ticketCount > 0
+              ? `${((total / ticketCount) * 100).toFixed(1)}%`
+              : '0.0%',
+        },
+      ])
+  );
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
@@ -89,76 +195,13 @@ async function main() {
   const agentMap = await fetchAgentMap(apiKey, responderIds);
 
   const tickets = ticketRes.tickets || [];
-  const byDay = Object.create(null);
-  for (const d of DAY_LABELS) byDay[d] = { count: 0, categories: {}, agents: {} };
-
-  const byAgent = Object.create(null);
-  const byCategory = Object.create(null);
-  const byCategoryByDay = Object.create(null);
-
-  for (const ticket of tickets) {
-    const updatedAt = new Date(ticket.updated_at);
-    // Dockerfile sets TZ=America/Los_Angeles — Date methods already use
-    // Pacific time. No manual offset conversion needed.
-    const dayName = getDayName(updatedAt);
-    const category = categorizeTicket(ticket.subject);
-
-    if (byDay[dayName]) {
-      byDay[dayName].count += 1;
-      byDay[dayName].categories[category] = (byDay[dayName].categories[category] || 0) + 1;
-      if (ticket.responder_id) {
-        byDay[dayName].agents[ticket.responder_id] = (byDay[dayName].agents[ticket.responder_id] || 0) + 1;
-      }
-    }
-    byCategory[category] = (byCategory[category] || 0) + 1;
-    if (!byCategoryByDay[category]) byCategoryByDay[category] = Object.create(null);
-    byCategoryByDay[category][dayName] = (byCategoryByDay[category][dayName] || 0) + 1;
-
-    if (ticket.responder_id) {
-      const id = ticket.responder_id;
-      if (!byAgent[id]) {
-        byAgent[id] = {
-          agent: agentMap[id] || { name: `Agent ${id}`, first_name: 'Unknown' },
-          count: 0,
-          categories: Object.create(null),
-          byDay: Object.create(null),
-        };
-      }
-      byAgent[id].count += 1;
-      byAgent[id].categories[category] = (byAgent[id].categories[category] || 0) + 1;
-      byAgent[id].byDay[dayName] = (byAgent[id].byDay[dayName] || 0) + 1;
-    }
-  }
-
+  const { byDay, byAgent, byCategory, byCategoryByDay } =
+    aggregateTickets(tickets, agentMap);
   const elapsedWeekdays = countElapsedWeekdays(range.start, range.end);
-
-  const sortedAgents = Object.entries(byAgent)
-    .map(([id, data]) => ({
-      id,
-      name: data.agent.name,
-      first_name: data.agent.first_name,
-      job_title: data.agent.job_title,
-      count: data.count,
-      categories: data.categories,
-      byDay: data.byDay,
-      avg_per_day: (data.count / elapsedWeekdays).toFixed(1),
-    }))
-    .sort((a, b) => b.count - a.count);
-
+  const sortedAgents = rankAgents(byAgent, elapsedWeekdays);
   const weekdayCounts = DAY_LABELS.slice(0, 5).map((d) => byDay[d].count);
   const avgDaily = weekdayCounts.reduce((a, b) => a + b, 0) / elapsedWeekdays;
-
-  // When no tickets exist, peak/slow day are meaningless — return null to
-  // avoid misleading the agent into reporting "Monday was the slowest day"
-  // when every day had 0 tickets.
-  const hasTickets = tickets.length > 0;
-  const peakDay = hasTickets
-    ? DAY_LABELS.slice(0, 5).reduce((max, d) => byDay[d].count > byDay[max].count ? d : max, 'Mon')
-    : null;
-  const slowDay = hasTickets
-    ? DAY_LABELS.slice(0, 5).reduce((min, d) => byDay[d].count < byDay[min].count ? d : min, 'Mon')
-    : null;
-
+  const { peakDay, slowDay } = trendDays(tickets, byDay);
   const output = {
     week: range.label,
     date_range: { start: range.start.toISOString(), end: range.end.toISOString() },
@@ -170,11 +213,7 @@ async function main() {
       slow_day: slowDay ? { day: slowDay, count: byDay[slowDay].count } : null,
       daily_counts: byDay,
     },
-    by_category: Object.fromEntries(
-      Object.entries(byCategory)
-        .sort((a, b) => b[1] - a[1])
-        .map(([k, v]) => [k, { total: v, pct: tickets.length > 0 ? `${((v / tickets.length) * 100).toFixed(1)}%` : '0.0%' }]),
-    ),
+    by_category: categorySummary(byCategory, tickets.length),
     category_trends: byCategoryByDay,
     top_agents: sortedAgents.slice(0, 10),
     all_agents: sortedAgents,
