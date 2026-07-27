@@ -899,19 +899,46 @@ function uniquePositiveIds(values: number[]): number[] {
   );
 }
 
-export async function retrieveRepositoryContent(
+type RetrievalConfig = Awaited<ReturnType<typeof getContentPlatformConfig>>;
+type RetrievalMode = NonNullable<RepositoryRetrievalRequest["mode"]>;
+
+interface NormalizedRetrievalRequest {
+  query: string;
+  repositoryIds: number[];
+  mode: RetrievalMode;
+  limit: number;
+  threshold: number;
+  denseWeight: number;
+  modalities: RetrievalModality[];
+}
+
+interface CandidateCollectionOptions {
+  snapshots: RetrievalGenerationSnapshot[];
+  principal: RetrievalPrincipal;
+  query: string;
+  modalities: RetrievalModality[];
+  candidateLimit: number;
+  threshold: number;
+  mode: RetrievalMode;
+  log: ReturnType<typeof createLogger>;
+}
+
+interface RerankOptions {
+  candidates: RetrievalCandidate[];
+  request: RepositoryRetrievalRequest;
+  query: string;
+  principal: RetrievalPrincipal;
+  candidateLimit: number;
+  config: RetrievalConfig;
+  dependencies: RetrievalDependencies;
+  log: ReturnType<typeof createLogger>;
+}
+
+function normalizeRetrievalRequest(
   request: RepositoryRetrievalRequest,
-  dependencies: RetrievalDependencies = {},
-): Promise<RetrievalResponse> {
-  const startedAt = Date.now();
-  const log = createLogger({ module: "repository-retrieval-v2" });
+): NormalizedRetrievalRequest {
   const query = request.query.trim();
   if (!query) throw new Error("Retrieval query cannot be empty");
-  const repositoryIds = uniquePositiveIds(request.repositoryIds).slice(0, 50);
-  const mode = request.mode ?? "hybrid";
-  const limit = Math.min(Math.max(1, Math.floor(request.limit ?? 10)), 50);
-  const threshold = Math.min(Math.max(0, request.threshold ?? 0.2), 1);
-  const denseWeight = Math.min(Math.max(0, request.denseWeight ?? 0.6), 1);
   const modalities = request.modalities?.length
     ? [...new Set(request.modalities)].filter((value) =>
         ALL_MODALITIES.includes(value),
@@ -920,88 +947,113 @@ export async function retrieveRepositoryContent(
   if (modalities.length === 0) {
     throw new Error("Retrieval requires at least one supported modality");
   }
-  const config = await getContentPlatformConfig();
-  const authorized = await getAccessibleRepositoriesByCognitoSub(
-    repositoryIds,
-    request.userCognitoSub,
-  );
-  const authorizedIds = authorized
-    .filter((repository) => repository.isAccessible)
-    .map((repository) => repository.id);
-  const principal =
-    authorizedIds.length > 0
-      ? await resolvePrincipal(request.userCognitoSub)
-      : null;
-  if (!principal || authorizedIds.length === 0) {
-    return {
-      results: [],
-      diagnostics: {
-        durationMs: Date.now() - startedAt,
-        repositoriesRequested: repositoryIds.length,
-        repositoriesAuthorized: 0,
-        denseCandidates: 0,
-        lexicalCandidates: 0,
-        visualCandidates: 0,
-        fusedCandidates: 0,
-        reranked: false,
-        returnedResults: 0,
-        returnedTokens: 0,
-      },
-    };
-  }
-  const snapshots = await resolveSnapshots(authorizedIds);
-  const candidateLimit = Math.max(limit, config.retrievalCandidateLimit);
-  const textEmbedding = dependencies.generateTextEmbedding ?? generateEmbedding;
-  const visualEmbedding =
-    dependencies.generateVisualEmbedding ?? generateVisualQueryEmbedding;
+  return {
+    query,
+    repositoryIds: uniquePositiveIds(request.repositoryIds).slice(0, 50),
+    mode: request.mode ?? "hybrid",
+    limit: Math.min(Math.max(1, Math.floor(request.limit ?? 10)), 50),
+    threshold: Math.min(Math.max(0, request.threshold ?? 0.2), 1),
+    denseWeight: Math.min(Math.max(0, request.denseWeight ?? 0.6), 1),
+    modalities,
+  };
+}
 
-  const dense: RetrievalCandidate[] = [];
-  if (mode !== "keyword") {
-    const groups = Map.groupBy(
-      snapshots.filter((snapshot) => snapshot.embeddingModel),
-      (snapshot) =>
-        `${snapshot.embeddingModel}:${snapshot.embeddingDimensions}`,
+function emptyRetrievalResponse(
+  startedAt: number,
+  repositoriesRequested: number,
+): RetrievalResponse {
+  return {
+    results: [],
+    diagnostics: {
+      durationMs: Date.now() - startedAt,
+      repositoriesRequested,
+      repositoriesAuthorized: 0,
+      denseCandidates: 0,
+      lexicalCandidates: 0,
+      visualCandidates: 0,
+      fusedCandidates: 0,
+      reranked: false,
+      returnedResults: 0,
+      returnedTokens: 0,
+    },
+  };
+}
+
+async function collectDenseCandidates(
+  options: CandidateCollectionOptions,
+  textEmbedding: typeof generateEmbedding,
+): Promise<RetrievalCandidate[]> {
+  const {
+    snapshots,
+    principal,
+    query,
+    modalities,
+    candidateLimit,
+    threshold,
+    mode,
+    log,
+  } = options;
+  if (mode === "keyword") return [];
+  const candidates: RetrievalCandidate[] = [];
+  const groups = Map.groupBy(
+    snapshots.filter((snapshot) => snapshot.embeddingModel),
+    (snapshot) =>
+      `${snapshot.embeddingModel}:${snapshot.embeddingDimensions}`,
+  );
+  for (const group of groups.values()) {
+    const first = group[0];
+    if (!first) continue;
+    const descriptor = parseRepositoryEmbeddingDescriptor(
+      first.embeddingModel,
+      first.embeddingDimensions,
     );
-    for (const group of groups.values()) {
-      const first = group[0];
-      if (!first) continue;
-      const descriptor = parseRepositoryEmbeddingDescriptor(
-        first.embeddingModel,
-        first.embeddingDimensions,
+    if (!descriptor) continue;
+    try {
+      const vector = await textEmbedding(query, {
+        provider: descriptor.provider,
+        modelId: descriptor.modelId,
+        dimensions: descriptor.dimensions,
+      });
+      candidates.push(
+        ...(
+          await Promise.all(
+            group.map((snapshot) =>
+              denseCandidates({
+                snapshot,
+                principal,
+                embedding: vector,
+                modalities,
+                limit: candidateLimit,
+                threshold,
+              }),
+            ),
+          )
+        ).flat(),
       );
-      if (!descriptor) continue;
-      try {
-        const vector = await textEmbedding(query, {
-          provider: descriptor.provider,
-          modelId: descriptor.modelId,
-          dimensions: descriptor.dimensions,
-        });
-        dense.push(
-          ...(
-            await Promise.all(
-              group.map((snapshot) =>
-                denseCandidates({
-                  snapshot,
-                  principal,
-                  embedding: vector,
-                  modalities,
-                  limit: candidateLimit,
-                  threshold,
-                }),
-              ),
-            )
-          ).flat(),
-        );
-      } catch (error) {
-        log.warn("Dense retrieval unavailable for an embedding generation", {
-          descriptor: first.embeddingModel,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+    } catch (error) {
+      log.warn("Dense retrieval unavailable for an embedding generation", {
+        descriptor: first.embeddingModel,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
+  return candidates;
+}
 
-  const lexical =
+async function collectLexicalCandidates(
+  options: CandidateCollectionOptions,
+  authorizedIds: number[],
+  includeLegacyCompatibility: boolean,
+): Promise<RetrievalCandidate[]> {
+  const {
+    snapshots,
+    principal,
+    query,
+    modalities,
+    candidateLimit,
+    mode,
+  } = options;
+  const candidates =
     mode === "vector"
       ? []
       : (
@@ -1017,64 +1069,201 @@ export async function retrieveRepositoryContent(
             ),
           )
         ).flat();
-  const legacyCompatibility =
-    request.includeLegacyCompatibility === false
-      ? []
-      : await legacyCompatibilityCandidates(
-          authorizedIds,
-          principal,
-          query,
-          modalities,
-          candidateLimit,
-        );
-  lexical.push(...legacyCompatibility);
-
-  const visual: RetrievalCandidate[] = [];
-  if (config.visualIndexEnabled && mode !== "keyword") {
-    const groups = Map.groupBy(
-      snapshots.filter((snapshot) => snapshot.visualEmbeddingModel),
-      (snapshot) =>
-        `${snapshot.visualEmbeddingModel}:${snapshot.visualEmbeddingDimensions}`,
+  if (includeLegacyCompatibility) {
+    candidates.push(
+      ...(await legacyCompatibilityCandidates(
+        authorizedIds,
+        principal,
+        query,
+        modalities,
+        candidateLimit,
+      )),
     );
-    for (const group of groups.values()) {
-      const first = group[0];
-      const descriptor = first
-        ? parseRepositoryEmbeddingDescriptor(
-            first.visualEmbeddingModel,
-            first.visualEmbeddingDimensions,
-          )
-        : null;
-      if (!first || !descriptor) continue;
-      try {
-        const vector = await visualEmbedding(
-          query,
-          descriptor.modelId,
-          descriptor.dimensions,
-        );
-        visual.push(
-          ...(
-            await Promise.all(
-              group.map((snapshot) =>
-                visualCandidates(
-                  snapshot,
-                  principal,
-                  vector,
-                  candidateLimit,
-                  threshold,
-                ),
+  }
+  return candidates;
+}
+
+async function collectVisualCandidates(
+  options: CandidateCollectionOptions,
+  visualEmbedding: typeof generateVisualQueryEmbedding,
+  visualIndexEnabled: boolean,
+): Promise<RetrievalCandidate[]> {
+  const {
+    snapshots,
+    principal,
+    query,
+    candidateLimit,
+    threshold,
+    mode,
+    log,
+  } = options;
+  if (!visualIndexEnabled || mode === "keyword") return [];
+  const candidates: RetrievalCandidate[] = [];
+  const groups = Map.groupBy(
+    snapshots.filter((snapshot) => snapshot.visualEmbeddingModel),
+    (snapshot) =>
+      `${snapshot.visualEmbeddingModel}:${snapshot.visualEmbeddingDimensions}`,
+  );
+  for (const group of groups.values()) {
+    const first = group[0];
+    const descriptor = first
+      ? parseRepositoryEmbeddingDescriptor(
+          first.visualEmbeddingModel,
+          first.visualEmbeddingDimensions,
+        )
+      : null;
+    if (!first || !descriptor) continue;
+    try {
+      const vector = await visualEmbedding(
+        query,
+        descriptor.modelId,
+        descriptor.dimensions,
+      );
+      candidates.push(
+        ...(
+          await Promise.all(
+            group.map((snapshot) =>
+              visualCandidates(
+                snapshot,
+                principal,
+                vector,
+                candidateLimit,
+                threshold,
               ),
-            )
-          ).flat(),
-        );
-      } catch (error) {
-        log.warn("Visual retrieval unavailable; continuing without it", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+            ),
+          )
+        ).flat(),
+      );
+    } catch (error) {
+      log.warn("Visual retrieval unavailable; continuing without it", {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
+  return candidates;
+}
 
-  let fused = reciprocalRankFusion(
+async function rerankCandidates({
+  candidates,
+  request,
+  query,
+  principal,
+  candidateLimit,
+  config,
+  dependencies,
+  log,
+}: RerankOptions): Promise<{
+  candidates: RetrievalCandidate[];
+  reranked: boolean;
+}> {
+  const enabled =
+    (request.rerank ?? config.retrievalRerankEnabled) &&
+    candidates.length > 1;
+  if (!enabled) return { candidates, reranked: false };
+  try {
+    const reranker =
+      dependencies.reranker ??
+      new BedrockRepositoryReranker(config.retrievalRerankModelId);
+    const window = candidates.slice(0, candidateLimit);
+    const remainder = candidates.slice(candidateLimit);
+    const disclosureSafeWindow = await revalidateCandidatesForRerank(
+      window,
+      principal,
+    );
+    const revalidated = [...disclosureSafeWindow, ...remainder];
+    if (disclosureSafeWindow.length <= 1) {
+      return { candidates: revalidated, reranked: false };
+    }
+    const scores = await reranker.rerank(
+      query,
+      disclosureSafeWindow.map((candidate) => ({
+        text: [candidate.contextPrefix, candidate.content]
+          .filter(Boolean)
+          .join("\n"),
+      })),
+      disclosureSafeWindow.length,
+    );
+    if (scores.length === 0) {
+      return { candidates: revalidated, reranked: false };
+    }
+    return {
+      candidates: [
+        ...applyRerankScores(disclosureSafeWindow, scores),
+        ...remainder,
+      ],
+      reranked: true,
+    };
+  } catch (error) {
+    log.warn("Bedrock reranking unavailable; using reciprocal-rank fusion", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { candidates, reranked: false };
+  }
+}
+
+export async function retrieveRepositoryContent(
+  request: RepositoryRetrievalRequest,
+  dependencies: RetrievalDependencies = {},
+): Promise<RetrievalResponse> {
+  const startedAt = Date.now();
+  const log = createLogger({ module: "repository-retrieval-v2" });
+  const normalized = normalizeRetrievalRequest(request);
+  const {
+    query,
+    repositoryIds,
+    mode,
+    limit,
+    threshold,
+    denseWeight,
+    modalities,
+  } = normalized;
+  const config = await getContentPlatformConfig();
+  const authorized = await getAccessibleRepositoriesByCognitoSub(
+    repositoryIds,
+    request.userCognitoSub,
+  );
+  const authorizedIds = authorized
+    .filter((repository) => repository.isAccessible)
+    .map((repository) => repository.id);
+  const principal =
+    authorizedIds.length > 0
+      ? await resolvePrincipal(request.userCognitoSub)
+      : null;
+  if (!principal || authorizedIds.length === 0) {
+    return emptyRetrievalResponse(startedAt, repositoryIds.length);
+  }
+  const snapshots = await resolveSnapshots(authorizedIds);
+  const candidateLimit = Math.max(limit, config.retrievalCandidateLimit);
+  const textEmbedding = dependencies.generateTextEmbedding ?? generateEmbedding;
+  const visualEmbedding =
+    dependencies.generateVisualEmbedding ?? generateVisualQueryEmbedding;
+
+  const collectionOptions: CandidateCollectionOptions = {
+    snapshots,
+    principal,
+    query,
+    modalities,
+    candidateLimit,
+    threshold,
+    mode,
+    log,
+  };
+  const dense = await collectDenseCandidates(
+    collectionOptions,
+    textEmbedding,
+  );
+  const lexical = await collectLexicalCandidates(
+    collectionOptions,
+    authorizedIds,
+    request.includeLegacyCompatibility !== false,
+  );
+  const visual = await collectVisualCandidates(
+    collectionOptions,
+    visualEmbedding,
+    config.visualIndexEnabled,
+  );
+
+  const fused = reciprocalRankFusion(
     [
       {
         signal: "dense",
@@ -1094,47 +1283,19 @@ export async function retrieveRepositoryContent(
     ],
     config.retrievalRrfK,
   );
-  const rerankEnabled =
-    (request.rerank ?? config.retrievalRerankEnabled) && fused.length > 1;
-  let reranked = false;
-  if (rerankEnabled) {
-    try {
-      const reranker =
-        dependencies.reranker ??
-        new BedrockRepositoryReranker(config.retrievalRerankModelId);
-      const rerankWindow = fused.slice(0, candidateLimit);
-      const rerankRemainder = fused.slice(candidateLimit);
-      const disclosureSafeWindow = await revalidateCandidatesForRerank(
-        rerankWindow,
-        principal,
-      );
-      fused = [...disclosureSafeWindow, ...rerankRemainder];
-      if (disclosureSafeWindow.length > 1) {
-        const scores = await reranker.rerank(
-          query,
-          disclosureSafeWindow.map((candidate) => ({
-            text: [candidate.contextPrefix, candidate.content]
-              .filter(Boolean)
-              .join("\n"),
-          })),
-          disclosureSafeWindow.length,
-        );
-        if (scores.length > 0) {
-          fused = [
-            ...applyRerankScores(disclosureSafeWindow, scores),
-            ...rerankRemainder,
-          ];
-          reranked = true;
-        }
-      }
-    } catch (error) {
-      log.warn("Bedrock reranking unavailable; using reciprocal-rank fusion", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
+  const rerankResult = await rerankCandidates({
+    candidates: fused,
+    request,
+    query,
+    principal,
+    candidateLimit,
+    config,
+    dependencies,
+    log,
+  });
+  const reranked = rerankResult.reranked;
   const selected = diversifyBySource(
-    fused,
+    rerankResult.candidates,
     limit,
     config.retrievalMaxPerSource,
   );
@@ -1162,7 +1323,7 @@ export async function retrieveRepositoryContent(
       denseCandidates: dense.length,
       lexicalCandidates: lexical.length,
       visualCandidates: visual.length,
-      fusedCandidates: fused.length,
+      fusedCandidates: rerankResult.candidates.length,
       reranked,
       ...(reranked ? { rerankModelId: config.retrievalRerankModelId } : {}),
       returnedResults: results.length,
