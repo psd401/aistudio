@@ -339,93 +339,77 @@ function validateStringLength(
 // Row Transformation Helpers
 // ============================================
 
+function parseJobData<T>(
+  value: unknown,
+  fieldName: "requestData" | "responseData",
+  jobId: string
+): T {
+  if (typeof value !== "string") return value as T;
+
+  try {
+    return JSON.parse(value) as T;
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : String(error);
+    throw ErrorFactories.invalidFormat(fieldName, value, "Valid JSON", {
+      details: { jobId, parseError: errorMessage },
+      technicalMessage: `Failed to parse ${fieldName} JSON for job ${jobId}: ${errorMessage}`,
+    });
+  }
+}
+
+function validateRequestData(
+  requestData: JobRequestData,
+  jobId: string
+): void {
+  if (!Array.isArray(requestData.messages)) {
+    throw ErrorFactories.invalidInput(
+      "requestData.messages",
+      requestData.messages,
+      "must be an array",
+      {
+        details: { jobId },
+        technicalMessage: `Invalid requestData for job ${jobId}: messages must be an array`,
+      }
+    );
+  }
+  if (typeof requestData.provider !== "string") {
+    throw ErrorFactories.invalidInput(
+      "requestData.provider",
+      requestData.provider,
+      "must be a string",
+      {
+        details: { jobId },
+        technicalMessage: `Invalid requestData for job ${jobId}: provider must be a string`,
+      }
+    );
+  }
+  if (typeof requestData.modelId !== "string" || !requestData.modelId) {
+    throw ErrorFactories.invalidInput(
+      "requestData.modelId",
+      requestData.modelId,
+      "must be a non-empty string",
+      {
+        details: { jobId },
+        technicalMessage: `Invalid requestData for job ${jobId}: modelId must be a non-empty string`,
+      }
+    );
+  }
+}
+
 /**
  * Transform a database row to StreamingJob format
  */
 function transformToStreamingJob(row: SelectAiStreamingJob): StreamingJob {
-  // Handle requestData parsing - must be valid JSON with proper structure
-  let parsedRequestData: JobRequestData;
-  if (typeof row.requestData === "string") {
-    try {
-      parsedRequestData = JSON.parse(row.requestData);
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      throw ErrorFactories.invalidFormat(
-        "requestData",
-        row.requestData,
-        "Valid JSON",
-        {
-          details: { jobId: row.id, parseError: errorMessage },
-          technicalMessage: `Failed to parse requestData JSON for job ${row.id}: ${errorMessage}`,
-        }
-      );
-    }
-  } else {
-    parsedRequestData = row.requestData as unknown as JobRequestData;
-  }
-
-  // Validate requestData structure and types
-  if (!Array.isArray(parsedRequestData.messages)) {
-    throw ErrorFactories.invalidInput(
-      "requestData.messages",
-      parsedRequestData.messages,
-      "must be an array",
-      {
-        details: { jobId: row.id },
-        technicalMessage: `Invalid requestData for job ${row.id}: messages must be an array`,
-      }
-    );
-  }
-  if (typeof parsedRequestData.provider !== "string") {
-    throw ErrorFactories.invalidInput(
-      "requestData.provider",
-      parsedRequestData.provider,
-      "must be a string",
-      {
-        details: { jobId: row.id },
-        technicalMessage: `Invalid requestData for job ${row.id}: provider must be a string`,
-      }
-    );
-  }
-  if (
-    typeof parsedRequestData.modelId !== "string" ||
-    !parsedRequestData.modelId
-  ) {
-    throw ErrorFactories.invalidInput(
-      "requestData.modelId",
-      parsedRequestData.modelId,
-      "must be a non-empty string",
-      {
-        details: { jobId: row.id },
-        technicalMessage: `Invalid requestData for job ${row.id}: modelId must be a non-empty string`,
-      }
-    );
-  }
-
-  // Handle responseData parsing - optional field
-  let parsedResponseData: JobResponseData | undefined;
-  if (row.responseData) {
-    if (typeof row.responseData === "string") {
-      try {
-        parsedResponseData = JSON.parse(row.responseData);
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        throw ErrorFactories.invalidFormat(
-          "responseData",
-          row.responseData,
-          "Valid JSON",
-          {
-            details: { jobId: row.id, parseError: errorMessage },
-            technicalMessage: `Failed to parse responseData for job ${row.id}: ${errorMessage}`,
-          }
-        );
-      }
-    } else {
-      parsedResponseData = row.responseData as unknown as JobResponseData;
-    }
-  }
+  const parsedRequestData = parseJobData<JobRequestData>(
+    row.requestData,
+    "requestData",
+    row.id
+  );
+  validateRequestData(parsedRequestData, row.id);
+  const parsedResponseData = row.responseData
+    ? parseJobData<JobResponseData>(row.responseData, "responseData", row.id)
+    : undefined;
 
   // Determine nexusConversationId - UUID-formatted conversation IDs are Nexus conversations
   const conversationId = row.conversationId;

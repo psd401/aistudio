@@ -238,6 +238,45 @@ export interface EscalationDecisionParams {
   confidenceThreshold?: number;
 }
 
+function explicitEscalationReason(
+  features: EmailFeatures,
+  escalation: EscalationConfig,
+): string | undefined {
+  if (escalation.senders.includes(features.fromEmail)) {
+    return `sender:${features.fromEmail}`;
+  }
+  const keyword = escalation.keywords.find((candidate) => {
+    const normalized = candidate.toLowerCase();
+    return (
+      features.subjectLower.includes(normalized) ||
+      features.snippetLower.includes(normalized)
+    );
+  });
+  return keyword ? `keyword:${keyword}` : undefined;
+}
+
+function modeEscalationReason(
+  params: EscalationDecisionParams,
+  mode: Exclude<EscalationMode, "none">,
+  threshold: number,
+): string | undefined {
+  const { label, source, confidence, escalation } = params;
+  if (mode === "all") {
+    const hasExplicitRules =
+      escalation.senders.length > 0 || escalation.keywords.length > 0;
+    return hasExplicitRules ? undefined : `label:${label}`;
+  }
+  if (source === "rule") return `rule:${label}`;
+  if (
+    mode === "high-confidence" &&
+    source === "llm" &&
+    confidence >= threshold
+  ) {
+    return `high-confidence:${confidence.toFixed(2)}`;
+  }
+  return undefined;
+}
+
 /**
  * Enforce the per-user escalation policy. Explicit escalation rules
  * (sender / keyword lists) always ping in every mode except `none` — the
@@ -247,7 +286,7 @@ export interface EscalationDecisionParams {
 export function shouldEscalate(
   params: EscalationDecisionParams,
 ): { escalate: true; reason: string } | { escalate: false } {
-  const { label, source, confidence, features, escalation } = params;
+  const { label, features, escalation } = params;
   const mode = params.mode ?? DEFAULT_ESCALATION_MODE;
   const threshold =
     typeof params.confidenceThreshold === "number"
@@ -259,50 +298,11 @@ export function shouldEscalate(
     return { escalate: false };
   }
 
-  // Explicit escalation rules always ping ("I always want to hear from X"),
-  // regardless of source/confidence — in every mode except `none`.
-  if (escalation.senders.includes(features.fromEmail)) {
-    return { escalate: true, reason: `sender:${features.fromEmail}` };
-  }
-  for (const kw of escalation.keywords) {
-    const kwLower = kw.toLowerCase();
-    if (
-      features.subjectLower.includes(kwLower) ||
-      features.snippetLower.includes(kwLower)
-    ) {
-      return { escalate: true, reason: `keyword:${kw}` };
-    }
-  }
+  const explicitReason = explicitEscalationReason(features, escalation);
+  if (explicitReason) return { escalate: true, reason: explicitReason };
 
-  // No explicit escalation-rule match — the MODE decides.
-  const hasExplicitRules =
-    escalation.senders.length > 0 || escalation.keywords.length > 0;
-
-  switch (mode) {
-    case "all":
-      // Legacy behaviour: the LABEL alone is the trigger, but only when the
-      // user hasn't narrowed escalation to specific senders/keywords.
-      if (!hasExplicitRules) {
-        return { escalate: true, reason: `label:${label}` };
-      }
-      return { escalate: false };
-    case "high-confidence":
-      if (source === "rule") {
-        return { escalate: true, reason: `rule:${label}` };
-      }
-      if (source === "llm" && confidence >= threshold) {
-        return {
-          escalate: true,
-          reason: `high-confidence:${confidence.toFixed(2)}`,
-        };
-      }
-      return { escalate: false };
-    case "rules-only":
-      if (source === "rule") {
-        return { escalate: true, reason: `rule:${label}` };
-      }
-      return { escalate: false };
-    default:
-      return { escalate: false };
-  }
+  const modeReason = modeEscalationReason(params, mode, threshold);
+  return modeReason
+    ? { escalate: true, reason: modeReason }
+    : { escalate: false };
 }

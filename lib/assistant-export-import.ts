@@ -142,6 +142,44 @@ const IMPORT_MAX_ASSISTANT_NAME_LENGTH = 255
 const IMPORT_MAX_PROMPT_CONTENT_LENGTH = 10_000_000
 const IMPORT_MAX_PROMPTS_PER_ASSISTANT = 20
 
+function validateImportedPrompt(
+  assistantName: string,
+  prompt: Record<string, unknown>
+): string | undefined {
+  const oversizedFields = ["content", "system_context"].filter(field => {
+    const value = prompt[field]
+    return typeof value === "string" && value.length > IMPORT_MAX_PROMPT_CONTENT_LENGTH
+  })
+
+  if (oversizedFields.length === 0) return undefined
+  return `Assistant ${assistantName}: prompt ${oversizedFields[0]} too large (max ${IMPORT_MAX_PROMPT_CONTENT_LENGTH} characters)`
+}
+
+function validateImportedAssistant(assistant: Record<string, unknown>): string | undefined {
+  if (!assistant.name || typeof assistant.name !== "string") {
+    return "Invalid assistant: missing name"
+  }
+  if (assistant.name.length > IMPORT_MAX_ASSISTANT_NAME_LENGTH) {
+    return `Assistant name too long (max ${IMPORT_MAX_ASSISTANT_NAME_LENGTH} characters)`
+  }
+  if (!Array.isArray(assistant.prompts)) {
+    return `Invalid assistant ${assistant.name}: missing prompts array`
+  }
+  if (assistant.prompts.length > IMPORT_MAX_PROMPTS_PER_ASSISTANT) {
+    return `Assistant ${assistant.name}: too many prompts (max ${IMPORT_MAX_PROMPTS_PER_ASSISTANT})`
+  }
+
+  for (const prompt of assistant.prompts as Record<string, unknown>[]) {
+    const promptError = validateImportedPrompt(assistant.name, prompt)
+    if (promptError) return promptError
+  }
+
+  if (!Array.isArray(assistant.input_fields)) {
+    return `Invalid assistant ${assistant.name}: missing input_fields array`
+  }
+  return undefined
+}
+
 /**
  * Validates import file structure, version, and per-field size limits.
  * Size limits mirror the runtime guards in assistant-execution-service.ts so
@@ -167,36 +205,9 @@ export function validateImportFile(data: unknown): { valid: boolean; error?: str
     return { valid: false, error: "Missing or invalid assistants array" }
   }
 
-  // Validate each assistant structure
   for (const assistant of importData.assistants as Record<string, unknown>[]) {
-    if (!assistant.name || typeof assistant.name !== 'string') {
-      return { valid: false, error: "Invalid assistant: missing name" }
-    }
-
-    if (assistant.name.length > IMPORT_MAX_ASSISTANT_NAME_LENGTH) {
-      return { valid: false, error: `Assistant name too long (max ${IMPORT_MAX_ASSISTANT_NAME_LENGTH} characters)` }
-    }
-
-    if (!Array.isArray(assistant.prompts)) {
-      return { valid: false, error: `Invalid assistant ${assistant.name}: missing prompts array` }
-    }
-
-    if ((assistant.prompts as unknown[]).length > IMPORT_MAX_PROMPTS_PER_ASSISTANT) {
-      return { valid: false, error: `Assistant ${assistant.name}: too many prompts (max ${IMPORT_MAX_PROMPTS_PER_ASSISTANT})` }
-    }
-
-    for (const prompt of assistant.prompts as Record<string, unknown>[]) {
-      if (typeof prompt.content === 'string' && prompt.content.length > IMPORT_MAX_PROMPT_CONTENT_LENGTH) {
-        return { valid: false, error: `Assistant ${assistant.name}: prompt content too large (max ${IMPORT_MAX_PROMPT_CONTENT_LENGTH} characters)` }
-      }
-      if (typeof prompt.system_context === 'string' && prompt.system_context.length > IMPORT_MAX_PROMPT_CONTENT_LENGTH) {
-        return { valid: false, error: `Assistant ${assistant.name}: prompt system_context too large (max ${IMPORT_MAX_PROMPT_CONTENT_LENGTH} characters)` }
-      }
-    }
-
-    if (!Array.isArray(assistant.input_fields)) {
-      return { valid: false, error: `Invalid assistant ${assistant.name}: missing input_fields array` }
-    }
+    const assistantError = validateImportedAssistant(assistant)
+    if (assistantError) return { valid: false, error: assistantError }
   }
 
   return { valid: true }

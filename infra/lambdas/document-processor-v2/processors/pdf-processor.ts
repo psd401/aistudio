@@ -15,6 +15,47 @@ const SCANNED_PDF_SENTINEL = 'Scanned PDF detected - no text content extractable
 export class PDFProcessor implements DocumentProcessor {
   constructor(private config: ProcessorConfig) {}
 
+  private async buildResult(
+    params: ProcessingParams,
+    extractionResult: { text: string | null; pageCount: number },
+    startTime: number,
+    logger: ReturnType<typeof createLambdaLogger>
+  ): Promise<ProcessingResult> {
+    const { buffer, onProgress } = params;
+    if (!extractionResult.text || extractionResult.text.trim().length === 0) {
+      throw new Error(SCANNED_PDF_SENTINEL);
+    }
+
+    await onProgress?.('post_processing', 70);
+    const result: ProcessingResult = {
+      text: extractionResult.text,
+      metadata: {
+        extractionMethod: 'pdf-parse',
+        processingTime: Date.now() - startTime,
+        pageCount: extractionResult.pageCount || 1,
+        originalSize: buffer.length,
+      }
+    };
+
+    if (this.config.convertToMarkdown) {
+      await onProgress?.('converting_markdown', 80);
+      result.markdown = this.convertToMarkdown(extractionResult.text);
+    }
+    if (this.config.generateEmbeddings) {
+      await onProgress?.('chunking_text', 90);
+      result.chunks = this.chunkText(extractionResult.text);
+    }
+
+    result.metadata.processingTime = Date.now() - startTime;
+    logger.info('PDF processing completed successfully', {
+      processingTime: result.metadata.processingTime,
+      textLength: result.text?.length || 0,
+      hasMarkdown: !!result.markdown,
+      chunkCount: result.chunks?.length || 0
+    });
+    return result;
+  }
+
   async process(params: ProcessingParams): Promise<ProcessingResult> {
     const startTime = Date.now();
     const { buffer, fileName, onProgress } = params;
@@ -39,46 +80,7 @@ export class PDFProcessor implements DocumentProcessor {
     }
 
     try {
-      if (!extractionResult.text || extractionResult.text.trim().length === 0) {
-        // Emit a distinct message so client-side SAFE_ERROR_MAP can surface
-        // a user-friendly explanation rather than a generic "Server processing failed".
-        throw new Error(SCANNED_PDF_SENTINEL);
-      }
-
-      await onProgress?.('post_processing', 70);
-
-      // Build result
-      const result: ProcessingResult = {
-        text: extractionResult.text,
-        metadata: {
-          extractionMethod: 'pdf-parse',
-          processingTime: Date.now() - startTime,
-          pageCount: extractionResult.pageCount || 1,
-          originalSize: buffer.length,
-        }
-      };
-
-      // Convert to Markdown if requested
-      if (this.config.convertToMarkdown) {
-        await onProgress?.('converting_markdown', 80);
-        result.markdown = this.convertToMarkdown(extractionResult.text);
-      }
-
-      // Generate chunks if requested
-      if (this.config.generateEmbeddings) {
-        await onProgress?.('chunking_text', 90);
-        result.chunks = this.chunkText(extractionResult.text);
-      }
-
-      result.metadata.processingTime = Date.now() - startTime;
-
-      logger.info('PDF processing completed successfully', {
-        processingTime: result.metadata.processingTime,
-        textLength: result.text?.length || 0,
-        hasMarkdown: !!result.markdown,
-        chunkCount: result.chunks?.length || 0
-      });
-      return result;
+      return await this.buildResult(params, extractionResult, startTime, logger);
 
     } catch (error) {
       // Rethrow the scanned-PDF sentinel so the caller can store it verbatim
