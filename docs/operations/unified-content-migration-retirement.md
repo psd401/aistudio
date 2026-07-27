@@ -123,6 +123,10 @@ segments recompute to that recorded hash; and every eligible duplicate agrees
 on the same hash. The reconstructed object and migration mapping record
 `recoveredFromVerifiedDuplicateSourceId`. Missing, inconsistent, or ambiguous
 duplicate evidence remains unrecoverable.
+Recovered text is normalized through the same contract as the canonical
+`text/plain` processor before it is stored or hashed for migration evidence.
+This keeps a verified legacy segment snapshot from becoming a reconciliation
+mismatch solely because the text processor bounds consecutive blank lines.
 
 The route gate and irreversible finalizer use the same inventory and metric
 denominators as the operator dashboard: excluded connector sources are reported

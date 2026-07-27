@@ -38,10 +38,13 @@ describe("unified content migration reconciliation", () => {
   it("reconstructs a deterministic text source only from non-empty legacy segments", () => {
     expect(
       new TextDecoder().decode(
-        buildLegacyMigrationFallbackBody([" first ", "", "second\n"]) ??
-          undefined,
+        buildLegacyMigrationFallbackBody([
+          " first\n\n\n\n\ncontinued ",
+          "",
+          "second\n",
+        ]) ?? undefined,
       ),
-    ).toBe("first\nsecond");
+    ).toBe("first\n\n\ncontinued\nsecond");
     expect(buildLegacyMigrationFallbackBody([" ", "\n"])).toBeNull();
   });
 

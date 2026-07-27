@@ -1388,6 +1388,9 @@ Unit coverage exercises valid, corrupt, empty, and ambiguous evidence; the real
 PostgreSQL lifecycle smoke proves the missing-object retry, reconstructed bytes,
 provenance, metrics, and cleanup while stale, cross-owner, and
 cross-conversation verified poison controls prove those SQL fences fail closed.
+Recovered text and its persisted evidence share the canonical text processor's
+normalization contract, including bounded consecutive-newline normalization, so
+successful recovery cannot manufacture a later reconciliation mismatch.
 
 The epic is not ready for retirement. The verified-duplicate recovery must be
 deployed and the live row retried/reconciled; retrieval shadowing and the three

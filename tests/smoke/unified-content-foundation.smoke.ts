@@ -506,10 +506,23 @@ try {
   assert.equal(replay.inspectJob.id, first.inspectJob.id);
 
   const duplicateSegments = [
-    "The verified duplicate contains the complete first section.",
+    [
+      "The verified duplicate contains the complete first section.",
+      "",
+      "",
+      "",
+      "The first section resumes after excessive legacy whitespace.",
+    ].join("\n"),
     "The verified duplicate contains the complete second section.",
   ];
   const duplicateEvidence = buildMigrationContentEvidence(duplicateSegments);
+  const recoveredDuplicateText = extractCanonicalTextDocument(
+    Buffer.from(duplicateSegments.join("\n"), "utf8"),
+    "text/plain"
+  ).canonicalText;
+  const recoveredDuplicateEvidence = buildMigrationContentEvidence([
+    recoveredDuplicateText,
+  ]);
   const duplicateMetadata = {
     info: {
       Title: "Verified exact duplicate recovery smoke",
@@ -850,7 +863,7 @@ try {
     );
     assert.equal(
       recoveredDuplicateWrite.body?.toString("utf8"),
-      duplicateSegments.join("\n")
+      recoveredDuplicateText
     );
     assert.equal(
       recoveredDuplicateWrite.metadata
@@ -893,11 +906,11 @@ try {
     assert.equal(recoveredDuplicate.status, "migrated");
     assert.equal(
       recoveredDuplicate.sourceRecordCount,
-      duplicateEvidence.recordCount
+      recoveredDuplicateEvidence.recordCount
     );
     assert.equal(
       recoveredDuplicate.sourceContentSha256,
-      duplicateEvidence.sha256
+      recoveredDuplicateEvidence.sha256
     );
     assert.equal(recoveredDuplicate.sourceObjectSha256, null);
     assert.equal(

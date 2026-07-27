@@ -31,6 +31,7 @@ import {
 } from "./migration-reconciliation";
 import { buildRepositorySourceObjectKey } from "./object-key";
 import { reconcileMigrationEvidence } from "./migration-reconciliation";
+import { normalizeCanonicalTextSource } from "./text-processing";
 import { fetchRepositoryUrlText } from "./url-snapshot";
 
 const MIGRATION_BATCH_SIZE = 3;
@@ -694,7 +695,12 @@ export function buildLegacyMigrationFallbackBody(
     .map((segment) => segment.trim())
     .filter((segment) => segment.length > 0)
     .join("\n");
-  return content ? Buffer.from(content, "utf8") : null;
+  return content
+    ? Buffer.from(
+        normalizeCanonicalTextSource(Buffer.from(content, "utf8")),
+        "utf8"
+      )
+    : null;
 }
 
 export function resolveVerifiedDuplicateNexusRecovery(
@@ -940,7 +946,6 @@ async function migrateCandidate(
             await loadVerifiedDuplicateNexusRecovery(candidate);
           if (duplicate) {
             fallbackSegments = duplicate.legacySegments;
-            comparisonSegments = duplicate.legacySegments;
             verifiedDuplicateSourceId = duplicate.sourceId;
           }
         }
@@ -951,6 +956,7 @@ async function migrateCandidate(
             "Legacy source object and extracted content are unavailable"
           );
         }
+        comparisonSegments = [Buffer.from(fallbackBody).toString("utf8")];
         sourceObjectBytesAvailable = false;
         declaredContentType = "text/plain";
         stored = await storage.putObject({
