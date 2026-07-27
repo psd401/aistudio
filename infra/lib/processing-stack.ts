@@ -33,30 +33,36 @@ import { GoogleContentSync } from "./constructs/processing/google-content-sync";
  * The bundle vendors production node_modules so each Lambda runs against its
  * own pinned dependency versions (file-processor needs pdf-parse 1.x — the
  * shared processing layer's build script installs pdf-parse unpinned, which
- * resolves to the incompatible 2.x API).
+ * resolves to the incompatible 2.x API). Versions are pinned by each Lambda's
+ * committed bun.lock, installed with --frozen-lockfile; the lockfile is part
+ * of the SOURCE asset hash, so dependency updates deploy via lockfile changes
+ * rather than drifting silently under a range-only manifest.
  *
  * Same local-bun/Docker-npm split and SOURCE asset hash as the agent-router
- * asset in agent-platform-stack: hashing the bundle output lets CDK skip
- * Lambda code updates when only TypeScript source changes.
+ * asset in agent-platform-stack — SOURCE because output-derived hashes have
+ * let CDK skip Lambda code updates when only TypeScript source changed.
  */
 function bundledLambdaAsset(dirName: string): lambda.AssetCode {
   const sourceDir = path.join(__dirname, "../lambdas", dirName);
   return lambda.Code.fromAsset(sourceDir, {
     assetHashType: cdk.AssetHashType.SOURCE,
     // Local install/build state and tests are not bundling inputs; excluding
-    // them keeps the source hash identical across machines.
-    exclude: ["node_modules", "dist", "__tests__", "*.js", "*.d.ts", "bun.lock"],
+    // them keeps the source hash identical across machines. bun.lock is NOT
+    // excluded: it pins the vendored dependencies, so it must invalidate the
+    // hash when it changes.
+    exclude: ["node_modules", "dist", "__tests__", "*.js", "*.d.ts"],
     bundling: {
       image: lambda.Runtime.NODEJS_20_X.bundlingImage,
       local: {
         tryBundle(outputDir: string): boolean {
           try {
-            // Build with all deps (including devDependencies for tsc)
-            execSync("bun install && bunx tsc", { cwd: sourceDir, stdio: "inherit" });
+            // Build with all deps (including devDependencies for tsc),
+            // pinned exactly by the committed lockfile
+            execSync("bun install --frozen-lockfile && bunx tsc", { cwd: sourceDir, stdio: "inherit" });
             execSync(`cp -r dist/* ${outputDir}/`, { cwd: sourceDir, stdio: "inherit" });
-            // Vendor production-only deps into the bundle
-            execSync(`cp package.json ${outputDir}/`, { cwd: sourceDir, stdio: "inherit" });
-            execSync("bun install --production", { cwd: outputDir, stdio: "inherit" });
+            // Vendor production-only deps into the bundle at locked versions
+            execSync(`cp package.json bun.lock ${outputDir}/`, { cwd: sourceDir, stdio: "inherit" });
+            execSync("bun install --production --frozen-lockfile", { cwd: outputDir, stdio: "inherit" });
             return true;
           } catch (e) {
             // Log the error so build failures aren't silently swallowed.
@@ -69,7 +75,9 @@ function bundledLambdaAsset(dirName: string): lambda.AssetCode {
       command: [
         "bash", "-c",
         [
-          // Docker fallback: use npm since it's available in the bundling image
+          // Docker fallback: npm is what the bundling image ships (no bun, so
+          // the bun.lock pin cannot be honored here — same accepted divergence
+          // as the agent-router asset; the local bun path is primary)
           "npm install",
           "npm run build",
           "cp -r dist/* /asset-output/",

@@ -66,13 +66,14 @@ export class SecretCacheLayer extends Construct {
     this.layer = new lambda.LayerVersion(this, "Layer", {
       code: lambda.Code.fromAsset(layerPath, {
         assetHashType: cdk.AssetHashType.SOURCE,
-        exclude: ["node_modules", "dist", "*.js", "*.d.ts", "bun.lock"],
+        // bun.lock is a hash input: it pins the build toolchain versions
+        exclude: ["node_modules", "dist", "*.js", "*.d.ts"],
         bundling: {
           image: lambda.Runtime.NODEJS_20_X.bundlingImage,
           local: {
             tryBundle(outputDir: string): boolean {
               try {
-                execSync("bun install && bunx tsc", { cwd: layerPath, stdio: "inherit" })
+                execSync("bun install --frozen-lockfile && bunx tsc", { cwd: layerPath, stdio: "inherit" })
                 execSync(`cp -r dist/* ${outputDir}/`, { cwd: layerPath, stdio: "inherit" })
                 execSync(`cp package.json ${outputDir}/`, { cwd: layerPath, stdio: "inherit" })
                 return true

@@ -29,3 +29,12 @@ cdk.out
 # Package lock files in lambdas (can be regenerated)
 lambdas/**/package-lock.json
 lambdas/**/bun.lock
+
+# ...except the synth-time-bundled Lambdas, whose committed lockfiles pin the
+# vendored dependencies and are hashed into the asset ID — dependency updates
+# deploy via lockfile changes instead of drifting silently under a range-only
+# manifest
+!lambdas/file-processor/bun.lock
+!lambdas/url-processor/bun.lock
+!lambdas/textract-processor/bun.lock
+!lambdas/layers/secret-cache/nodejs/bun.lock
