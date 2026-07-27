@@ -1,5 +1,5 @@
 {
-  "app": "bunx ts-node --prefer-ts-exts bin/infra.ts",
+  "app": "bunx tsx bin/infra.ts",
   "watch": {
     "include": [
       "**"
