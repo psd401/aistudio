@@ -984,6 +984,22 @@ force-closing the old client after 5s — which also rejects every zombie query
 still queued on it. Rebuilds are rate-limited to one per 60s. A real database
 error resets the detector, since it proves the pool is alive.
 
+**Caveats:**
+
+- A deadline error does **not** cancel the underlying work — the query or
+  transaction keeps running until `statement_timeout` cancels it or a pool
+  rebuild destroys its connection. In production (where `statement_timeout`
+  defaults to off) a transaction can therefore still **commit after** the
+  caller received `DbPoolDeadlineError`. Do not build user-facing "retry on
+  failure" flows on `executeTransaction` without idempotency keys.
+- With `statement_timeout` off (prod default), a legitimately slow >90s query
+  is indistinguishable from a starved pool at this layer. A misfired rebuild
+  is deliberately survivable: in-flight statements fail with retryable
+  connection errors (auto-retried by `executeWithRetry`), open transactions
+  roll back atomically, and rebuilds are capped at one per 60s. If prod runs
+  known >90s operations, pass a per-call `deadlineMs` override or set
+  `DB_STATEMENT_TIMEOUT_MS` so the invariant holds there too.
+
 Connections also carry `application_name` (default `aistudio`, override via
 `DB_APPLICATION_NAME`) so the app's connections are attributable in
 `pg_stat_activity` during incident diagnosis.

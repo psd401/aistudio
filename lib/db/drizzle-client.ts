@@ -159,8 +159,11 @@ let lastPoolRebuildAt = 0;
  * client restores it. `end({ timeout: 5 })` force-closes the old pool's
  * sockets after 5s, which also rejects every zombie query still queued on it
  * so their abandoned handlers finally settle.
+ *
+ * Exported for unit tests and manual operational intervention only — normal
+ * code must never call this directly; the pool guard owns the trigger.
  */
-function rebuildWedgedPool(consecutiveFailures: number): void {
+export function rebuildWedgedPool(consecutiveFailures: number): void {
   const log = createLogger({ context: "drizzle-client", operation: "rebuildWedgedPool" });
   const now = Date.now();
   if (now - lastPoolRebuildAt < POOL_REBUILD_MIN_INTERVAL_MS) {
