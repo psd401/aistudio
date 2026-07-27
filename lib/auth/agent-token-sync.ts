@@ -139,6 +139,106 @@ async function createRefreshSecret(
   }
 }
 
+function shouldSkipRefreshSync(
+  ownerEmail: string,
+  refreshToken: string
+): boolean {
+  if (!refreshToken || typeof refreshToken !== "string") {
+    log.debug("Skipping cognito-refresh sync — no refresh token in payload", {
+      ownerEmail: ownerEmail || "unknown",
+    })
+    return true
+  }
+  if (!SAFE_EMAIL_RE.test(ownerEmail)) {
+    log.warn("Skipping cognito-refresh sync — invalid ownerEmail", {
+      ownerEmail: ownerEmail || "unknown",
+    })
+    return true
+  }
+  if (
+    process.env.NODE_ENV === "development" &&
+    !process.env.FORCE_AGENT_TOKEN_SYNC
+  ) {
+    log.info("Local dev — skipping Secrets Manager write for cognito-refresh", {
+      ownerEmail,
+    })
+    return true
+  }
+  return false
+}
+
+function cognitoRefreshConfiguration(ownerEmail: string): {
+  clientId: string
+  userPoolId: string
+  region: string
+} | null {
+  const clientId =
+    process.env.AUTH_COGNITO_CLIENT_ID ?? process.env.COGNITO_CLIENT_ID ?? null
+  if (!clientId) {
+    log.warn(
+      "Skipping cognito-refresh sync — AUTH_COGNITO_CLIENT_ID not set",
+      sanitizeForLogging({ ownerEmail }),
+    )
+    return null
+  }
+  const issuer = process.env.AUTH_COGNITO_ISSUER ?? ""
+  const issuerMatch = issuer.match(
+    /^https:\/\/cognito-idp\.([a-z0-9-]+)\.amazonaws\.com\/([a-z0-9-_]+)$/i,
+  )
+  return {
+    clientId,
+    userPoolId:
+      process.env.AUTH_COGNITO_USER_POOL_ID ??
+      process.env.COGNITO_USER_POOL_ID ??
+      issuerMatch?.[2] ??
+      "unknown",
+    region:
+      process.env.AUTH_COGNITO_REGION ??
+      issuerMatch?.[1] ??
+      process.env.AWS_REGION ??
+      "us-east-1",
+  }
+}
+
+async function persistCognitoRefreshSecret(options: {
+  secretId: string
+  secretString: string
+  ownerEmail: string
+  environment: string
+}): Promise<string | null> {
+  const {
+    PutSecretValueCommand,
+    CreateSecretCommand,
+    ResourceNotFoundException,
+  } = await import("@aws-sdk/client-secrets-manager")
+  const client = await getSecretsManagerClient()
+  try {
+    const response = await client.send(
+      new PutSecretValueCommand({
+        SecretId: options.secretId,
+        SecretString: options.secretString,
+      }),
+    )
+    log.info("Cognito refresh token rotated in Secrets Manager", {
+      secretId: options.secretId,
+    })
+    return response.ARN ?? null
+  } catch (error) {
+    if (error instanceof ResourceNotFoundException) {
+      return createRefreshSecret({
+        client,
+        sdk: { CreateSecretCommand, PutSecretValueCommand },
+        ...options,
+      })
+    }
+    log.warn("Cognito refresh token PutSecretValue failed", {
+      secretId: options.secretId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return null
+  }
+}
+
 /**
  * Persist (or refresh) the user's Cognito refresh token in Secrets Manager.
  *
@@ -153,98 +253,25 @@ export async function syncCognitoRefreshForAgent(
   ownerEmail: string,
   refreshToken: string,
 ): Promise<string | null> {
-  if (!refreshToken || typeof refreshToken !== "string") {
-    log.debug("Skipping cognito-refresh sync — no refresh token in payload", {
-      ownerEmail: ownerEmail || "unknown",
-    })
-    return null
-  }
-  if (!SAFE_EMAIL_RE.test(ownerEmail)) {
-    log.warn("Skipping cognito-refresh sync — invalid ownerEmail", {
-      ownerEmail: ownerEmail || "unknown",
-    })
-    return null
-  }
-
-  // Local dev: nothing to sync to. The agent stack is not deployed locally.
-  if (process.env.NODE_ENV === "development" && !process.env.FORCE_AGENT_TOKEN_SYNC) {
-    log.info("Local dev — skipping Secrets Manager write for cognito-refresh", {
-      ownerEmail,
-    })
-    return null
-  }
-
-  // The agent uses client_id + region to refresh the token. user_pool_id is
-  // stored alongside for traceability but is not required for the refresh
-  // flow — derive it from AUTH_COGNITO_ISSUER when AUTH_COGNITO_USER_POOL_ID
-  // is absent (the web ECS task only sets the issuer).
-  const clientId =
-    process.env.AUTH_COGNITO_CLIENT_ID ?? process.env.COGNITO_CLIENT_ID ?? null
-  if (!clientId) {
-    log.warn(
-      "Skipping cognito-refresh sync — AUTH_COGNITO_CLIENT_ID not set",
-      sanitizeForLogging({ ownerEmail }),
-    )
-    return null
-  }
-  // Issuer format: https://cognito-idp.<region>.amazonaws.com/<pool-id>
-  const issuer = process.env.AUTH_COGNITO_ISSUER ?? ""
-  const issuerMatch = issuer.match(
-    /^https:\/\/cognito-idp\.([a-z0-9-]+)\.amazonaws\.com\/([a-z0-9-_]+)$/i,
-  )
-  const userPoolId =
-    process.env.AUTH_COGNITO_USER_POOL_ID ??
-    process.env.COGNITO_USER_POOL_ID ??
-    (issuerMatch ? issuerMatch[2] : "unknown")
-  const region =
-    process.env.AUTH_COGNITO_REGION ??
-    (issuerMatch ? issuerMatch[1] : undefined) ??
-    process.env.AWS_REGION ??
-    "us-east-1"
+  if (shouldSkipRefreshSync(ownerEmail, refreshToken)) return null
+  const configuration = cognitoRefreshConfiguration(ownerEmail)
+  if (!configuration) return null
 
   const secretId = cognitoRefreshSecretId(ownerEmail)
   const payload: CognitoRefreshTokenRecord = {
     refresh_token: refreshToken,
     obtained_at: new Date().toISOString(),
-    user_pool_id: userPoolId,
-    client_id: clientId,
-    region,
+    user_pool_id: configuration.userPoolId,
+    client_id: configuration.clientId,
+    region: configuration.region,
   }
   const secretString = JSON.stringify(payload)
-
-  const {
-    PutSecretValueCommand,
-    CreateSecretCommand,
-    ResourceNotFoundException,
-  } = await import("@aws-sdk/client-secrets-manager")
-  const client = await getSecretsManagerClient()
   const environment =
     process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
-
-  try {
-    const resp = await client.send(
-      new PutSecretValueCommand({
-        SecretId: secretId,
-        SecretString: secretString,
-      }),
-    )
-    log.info("Cognito refresh token rotated in Secrets Manager", { secretId })
-    return resp.ARN ?? null
-  } catch (error) {
-    if (error instanceof ResourceNotFoundException) {
-      return createRefreshSecret({
-        client,
-        sdk: { CreateSecretCommand, PutSecretValueCommand },
-        secretId,
-        secretString,
-        ownerEmail,
-        environment,
-      })
-    }
-    log.warn("Cognito refresh token PutSecretValue failed", {
-      secretId,
-      error: error instanceof Error ? error.message : String(error),
-    })
-    return null
-  }
+  return persistCognitoRefreshSecret({
+    secretId,
+    secretString,
+    ownerEmail,
+    environment,
+  })
 }
