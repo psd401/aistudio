@@ -329,14 +329,36 @@ interface GoogleChatEvent {
  * need MESSAGE and ADDED_TO_SPACE; other event types degrade to
  * `TYPE_UNSPECIFIED` and are ignored downstream.
  */
-function normalizeChatEvent(raw: Record<string, unknown>): GoogleChatEvent {
-  // Already legacy shape
-  if (typeof (raw as { type?: unknown }).type === 'string') {
-    return raw as unknown as GoogleChatEvent;
+function normalizeAddedToSpaceEvent(
+  chat: Record<string, unknown>,
+  eventTime: string,
+  payload: {
+    space: GoogleChatEvent['space'];
+    user?: NonNullable<GoogleChatEvent['message']>['sender'];
   }
+): GoogleChatEvent {
+  const user =
+    (chat.user as NonNullable<GoogleChatEvent['message']>['sender'] | undefined) ??
+    payload.user;
+  return {
+    type: 'ADDED_TO_SPACE',
+    eventTime,
+    space: payload.space,
+    message: user
+      ? {
+          name: '',
+          text: '',
+          sender: user,
+          createTime: eventTime,
+        }
+      : undefined,
+  };
+}
 
-  const chat = (raw.chat ?? {}) as Record<string, unknown>;
-  const eventTime = (chat.eventTime as string | undefined) ?? '';
+function normalizeCommonChatEvent(
+  chat: Record<string, unknown>,
+  eventTime: string
+): GoogleChatEvent {
   const messagePayload = chat.messagePayload as
     | { space?: GoogleChatEvent['space']; message?: GoogleChatEvent['message'] }
     | undefined;
@@ -357,23 +379,10 @@ function normalizeChatEvent(raw: Record<string, unknown>): GoogleChatEvent {
   }
 
   if (addedPayload?.space) {
-    // Synthesize a minimal message envelope so the existing welcome path can
-    // read `chatEvent.message.sender.email` for domain validation.
-    const user = (chat.user as NonNullable<GoogleChatEvent['message']>['sender'] | undefined)
-      ?? addedPayload.user;
-    return {
-      type: 'ADDED_TO_SPACE',
-      eventTime,
+    return normalizeAddedToSpaceEvent(chat, eventTime, {
       space: addedPayload.space,
-      message: user
-        ? ({
-            name: '',
-            text: '',
-            sender: user,
-            createTime: eventTime,
-          } as GoogleChatEvent['message'])
-        : undefined,
-    };
+      user: addedPayload.user,
+    });
   }
 
   if (removedPayload?.space) {
@@ -413,6 +422,16 @@ function normalizeChatEvent(raw: Record<string, unknown>): GoogleChatEvent {
     eventTime,
     space: { name: '', type: 'TYPE_UNSPECIFIED' },
   };
+}
+
+function normalizeChatEvent(raw: Record<string, unknown>): GoogleChatEvent {
+  if (typeof raw.type === 'string') {
+    return raw as unknown as GoogleChatEvent;
+  }
+
+  const chat = (raw.chat ?? {}) as Record<string, unknown>;
+  const eventTime = (chat.eventTime as string | undefined) ?? '';
+  return normalizeCommonChatEvent(chat, eventTime);
 }
 
 // Rich-output envelope helper extracted to its own module so the Cron
@@ -895,44 +914,56 @@ async function maybeProvisionAgentAccount(
   senderEmail: string,
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
-  // Not configured (endpoint/key/table) — no-op until the stack wires them.
-  if (!USERS_TABLE || !APP_BASE_URL) return;
-  if (!AGENT_INTERNAL_API_KEY_SECRET_ID && !process.env.AGENT_INTERNAL_API_KEY) return;
-
-  // Already provisioned or permanently excluded — nothing to do.
-  if (user.agentAccountStatus === 'active' || user.agentAccountStatus === 'excluded') return;
-
+  if (!shouldCheckAgentAccount(user)) return;
   const localPart = (senderEmail.split('@')[0] || '').toLowerCase();
-
-  // Students (numeric-prefix usernames) are never provisioned. Mark once so we
-  // don't re-check them on every message. The conditional avoids a redundant
-  // write when already excluded.
   if (/^\d/.test(localPart)) {
-    try {
-      await dynamoClient.send(
-        new UpdateCommand({
-          TableName: USERS_TABLE,
-          Key: { googleIdentity: user.googleIdentity },
-          UpdateExpression: 'SET agentAccountStatus = :excluded, agentAccountCheckedAt = :now',
-          ConditionExpression:
-            'attribute_exists(googleIdentity) AND (attribute_not_exists(agentAccountStatus) OR agentAccountStatus <> :excluded)',
-          ExpressionAttributeValues: { ':excluded': 'excluded', ':now': new Date().toISOString() },
-        })
-      );
-    } catch (err) {
-      if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') {
-        log.error('Failed to mark student username provisioning-excluded', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
+    await markAgentAccountExcluded(user, log);
     return;
   }
 
-  // Throttle + dedupe gate: claim the check with a conditional update. Only one
-  // caller wins per hour; concurrent Lambdas for the same user get
-  // ConditionalCheckFailedException and skip. Stamping BEFORE the network call
-  // prevents a thundering herd; a failure simply retries after the window.
+  if (!(await claimAgentAccountCheck(user, log))) return;
+  const status = await requestAgentAccountStatus(user, senderEmail, log);
+  if (status) await persistAgentAccountStatus(user, status, log);
+}
+
+function shouldCheckAgentAccount(user: AgentUser): boolean {
+  const keyConfigured =
+    Boolean(AGENT_INTERNAL_API_KEY_SECRET_ID) ||
+    Boolean(process.env.AGENT_INTERNAL_API_KEY);
+  const terminalStatus =
+    user.agentAccountStatus === 'active' ||
+    user.agentAccountStatus === 'excluded';
+  return Boolean(USERS_TABLE && APP_BASE_URL && keyConfigured && !terminalStatus);
+}
+
+async function markAgentAccountExcluded(
+  user: AgentUser,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  try {
+    await dynamoClient.send(
+      new UpdateCommand({
+        TableName: USERS_TABLE,
+        Key: { googleIdentity: user.googleIdentity },
+        UpdateExpression: 'SET agentAccountStatus = :excluded, agentAccountCheckedAt = :now',
+        ConditionExpression:
+          'attribute_exists(googleIdentity) AND (attribute_not_exists(agentAccountStatus) OR agentAccountStatus <> :excluded)',
+        ExpressionAttributeValues: { ':excluded': 'excluded', ':now': new Date().toISOString() },
+      })
+    );
+  } catch (error) {
+    if ((error as { name?: string }).name !== 'ConditionalCheckFailedException') {
+      log.error('Failed to mark student username provisioning-excluded', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
+async function claimAgentAccountCheck(
+  user: AgentUser,
+  log: ReturnType<typeof createLogger>
+): Promise<boolean> {
   const cutoff = new Date(Date.now() - AGENT_ACCOUNT_RECHECK_MS).toISOString();
   try {
     await dynamoClient.send(
@@ -945,20 +976,24 @@ async function maybeProvisionAgentAccount(
         ExpressionAttributeValues: { ':now': new Date().toISOString(), ':cutoff': cutoff },
       })
     );
-  } catch (err) {
-    // Recently checked, or another invocation is handling it — skip silently.
-    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') return;
+    return true;
+  } catch (error) {
+    if ((error as { name?: string }).name === 'ConditionalCheckFailedException') return false;
     log.error('Failed to claim agent-account provisioning check', {
-      error: err instanceof Error ? err.message : String(err),
+      error: error instanceof Error ? error.message : String(error),
     });
-    return;
+    return false;
   }
+}
 
-  // Call the app's account-request endpoint with a short timeout.
-  let status: string | undefined;
+async function requestAgentAccountStatus(
+  user: AgentUser,
+  senderEmail: string,
+  log: ReturnType<typeof createLogger>
+): Promise<'active' | 'requested' | null> {
   try {
     const apiKey = await getInternalApiKey();
-    if (!apiKey) return;
+    if (!apiKey) return null;
     const invocationAuthority = await issueInvocationContext({
       actorEmail: senderEmail,
       ownerEmail: senderEmail,
@@ -984,35 +1019,39 @@ async function maybeProvisionAgentAccount(
     });
     if (!resp.ok) {
       log.warn('account-request returned non-OK', { httpStatus: resp.status });
-      return;
+      return null;
     }
     const respBody = (await resp.json().catch(() => ({}))) as { status?: string };
-    status = respBody.status;
-  } catch (err) {
-    // Sheet/API outage degrades silently for the user — retries on a later message.
+    return respBody.status === 'active' || respBody.status === 'requested'
+      ? respBody.status
+      : null;
+  } catch (error) {
     log.warn('account-request call failed (will retry on a later message)', {
-      error: err instanceof Error ? err.message : String(err),
+      error: error instanceof Error ? error.message : String(error),
     });
-    return;
+    return null;
   }
+}
 
-  // Advance the stored status to the endpoint's verdict ('active' | 'requested').
-  if (status === 'active' || status === 'requested') {
-    try {
-      await dynamoClient.send(
-        new UpdateCommand({
-          TableName: USERS_TABLE,
-          Key: { googleIdentity: user.googleIdentity },
-          UpdateExpression: 'SET agentAccountStatus = :s',
-          ConditionExpression: 'attribute_exists(googleIdentity)',
-          ExpressionAttributeValues: { ':s': status },
-        })
-      );
-    } catch (err) {
-      log.error('Failed to persist agent-account status', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+async function persistAgentAccountStatus(
+  user: AgentUser,
+  status: 'active' | 'requested',
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  try {
+    await dynamoClient.send(
+      new UpdateCommand({
+        TableName: USERS_TABLE,
+        Key: { googleIdentity: user.googleIdentity },
+        UpdateExpression: 'SET agentAccountStatus = :s',
+        ConditionExpression: 'attribute_exists(googleIdentity)',
+        ExpressionAttributeValues: { ':s': status },
+      })
+    );
+  } catch (error) {
+    log.error('Failed to persist agent-account status', {
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -1461,53 +1500,28 @@ async function consumeAgentCoreStream(
   return lastResultEvent;
 }
 
-async function invokeAgentCore(
-  message: string,
-  userId: string,
-  sessionId: string,
-  log: ReturnType<typeof createLogger>,
-  userContext?: {
-    displayName?: string;
-    workspacePrefix?: string;
-    /** Present when someone other than the agent owner invokes the agent */
-    invokedBy?: { email: string; displayName: string };
-    /** Ephemeral thread context for cross-user invocations */
-    threadContext?: string;
-    /** Files the user attached in Chat (issue #1138 F1). Rendered into the
-     * prompt header by the container so the agent knows a file arrived. */
-    attachments?: AgentAttachment[];
-    /**
-     * Turn-deadline override in seconds (async job-runner only, #1138).
-     * The wrapper passes it to the harness, which clamps to [60, 7200].
-     * Interactive turns omit it (container default: 840s).
-     */
-    deadlineS?: number;
-    /** Pre-resolved runtime id — skips the env/SSM lookup (job-runner). */
-    runtimeIdOverride?: string;
-  }
-): Promise<{
+interface AgentInvocationContext {
+  displayName?: string;
+  workspacePrefix?: string;
+  invokedBy?: { email: string; displayName: string };
+  threadContext?: string;
+  attachments?: AgentAttachment[];
+  deadlineS?: number;
+  runtimeIdOverride?: string;
+}
+
+interface AgentCoreResult {
   response: string;
   inputTokens: number;
   outputTokens: number;
-  /** Bedrock prompt-caching token split (issue #1089). 0 on non-caching models. */
   cacheReadInputTokens: number;
   cacheWriteInputTokens: number;
   model: string | null;
-  /** Wall-clock ms reported by the harness from chat.send to final. */
   latencyMs: number;
-  /**
-   * Iteration telemetry (issue #1161).
-   * modelCallCount — upstream Mantle model round-trips this turn (proxy delta).
-   * durationMs — full turn wall-clock from the wrapper (invocation_start ->
-   *   final yield); distinct from latencyMs (harness chat.send -> final).
-   * nudged — the harness fired its one empty-turn nudge this turn.
-   */
   modelCallCount: number;
   durationMs: number;
   nudged: boolean;
-  /** Per-turn message log (role + content_text). Empty when harness doesn't surface it. */
   messages: Array<{ role: string; content: string }>;
-  /** Per-turn tool calls. Empty when harness doesn't surface them. */
   toolCalls: Array<{
     name: string;
     args: unknown;
@@ -1518,312 +1532,297 @@ async function invokeAgentCore(
     started_at: string;
     finished_at: string;
   }>;
-  /**
-   * True when this turn is an error/degraded return rather than a real answer
-   * (harness-reported via metadata.failed, or a router-side invocation error).
-   * The caller flags these instead of logging a clean "Message processed".
-   */
   failed?: boolean;
-  /** Short class for the failure (e.g. OpenClawChatError, AgentCoreHttpError). */
   errorClass?: string;
-  /**
-   * Which layer detected the failure. 'harness' failures are already recorded
-   * in agent_failures by the container, so the router only logs them; 'router'
-   * failures are recorded by the caller (nothing else saw them).
-   */
   errorSource?: 'harness' | 'router';
-}> {
-  // Resolve the AgentCore Runtime ID — explicit override (job-runner passes
-  // the id the router already resolved), then env var, then module-level
-  // cache, then SSM. Cached at module scope with TTL to avoid redundant SSM
-  // API calls on every invocation (~5–20ms + cost per call).
-  let runtimeId =
-    userContext?.runtimeIdOverride || process.env.AGENTCORE_RUNTIME_ID || '';
-  if (!runtimeId) {
-    if (
-      cachedRuntimeId &&
-      runtimeIdCachedAt &&
-      Date.now() - runtimeIdCachedAt < RUNTIME_ID_TTL_MS
-    ) {
-      runtimeId = cachedRuntimeId;
-    } else {
-      try {
-        const param = await ssmClient.send(
-          new GetParameterCommand({
-            Name: `/aistudio/${ENVIRONMENT}/agentcore-runtime-id`,
-          })
-        );
-        runtimeId = param.Parameter?.Value || '';
-        if (runtimeId) {
-          cachedRuntimeId = runtimeId;
-          runtimeIdCachedAt = Date.now();
-        }
-      } catch {
-        log.error('Failed to resolve AgentCore Runtime ID from SSM');
-      }
-    }
-  }
+}
 
-  if (!runtimeId) {
-    return {
-      response:
-        'Your agent is not yet deployed. An administrator needs to push the agent image and deploy the AgentCore Runtime.',
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadInputTokens: 0,
-      cacheWriteInputTokens: 0,
-      model: null,
-      latencyMs: 0,
-      modelCallCount: 0,
-      durationMs: 0,
-      nudged: false,
-      messages: [],
-      toolCalls: [],
-      failed: true,
-      errorClass: 'AgentNotDeployed',
-      errorSource: 'router',
-    };
-  }
+function failedAgentCoreResult(
+  response: string,
+  errorClass: string
+): AgentCoreResult {
+  return {
+    response,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    model: null,
+    latencyMs: 0,
+    modelCallCount: 0,
+    durationMs: 0,
+    nudged: false,
+    messages: [],
+    toolCalls: [],
+    failed: true,
+    errorClass,
+    errorSource: 'router',
+  };
+}
 
-  // Invoke AgentCore Runtime via SigV4-signed HTTP request.
-  // The bedrock-agentcore TypeScript SDK is not yet GA, so we use generic HTTP
-  // signing. The API expects:
-  //   POST /runtimes/{runtimeArn}/invocations
-  //   X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: {sessionId}
-  //   X-Amzn-Bedrock-AgentCore-Runtime-User-Id: {userId}
-  //
-  // TODO: Replace with @aws-sdk/client-bedrock-agentcore when GA SDK is released.
+function cachedAgentCoreRuntimeId(): string {
+  const cacheFresh =
+    Boolean(cachedRuntimeId) &&
+    Boolean(runtimeIdCachedAt) &&
+    Date.now() - (runtimeIdCachedAt ?? 0) < RUNTIME_ID_TTL_MS;
+  return cacheFresh ? cachedRuntimeId ?? '' : '';
+}
+
+async function resolveAgentCoreRuntimeId(
+  userContext: AgentInvocationContext | undefined,
+  log: ReturnType<typeof createLogger>
+): Promise<string> {
+  const configuredRuntimeId =
+    userContext?.runtimeIdOverride ||
+    process.env.AGENTCORE_RUNTIME_ID ||
+    cachedAgentCoreRuntimeId();
+  if (configuredRuntimeId) return configuredRuntimeId;
+
   try {
-    const region = process.env.AWS_REGION || 'us-east-1';
-    const account = process.env.AWS_ACCOUNT_ID || '';
-    // Construct the full Runtime ARN — the API requires the ARN, not the runtime ID
-    const runtimeArn = runtimeId.startsWith('arn:')
-      ? runtimeId
-      : `arn:aws:bedrock-agentcore:${region}:${account}:runtime/${runtimeId}`;
-    const ownerEmail = userId.trim().toLowerCase();
-    const actorEmail = (userContext?.invokedBy?.email ?? userId).trim().toLowerCase();
-    const invocationAuthority = await issueInvocationContext({
-      actorEmail,
-      ownerEmail,
-      mode: userContext?.invokedBy ? 'consultation' : 'owner',
-      sessionId,
-      workspacePrefix: userContext?.workspacePrefix ?? '',
-    }, {
-      // Interactive turns retain the 15-minute default. The background job
-      // runner passes its bounded two-hour deadline so owner-bound broker
-      // authority remains valid for the entire resumed turn.
-      ...(userContext?.deadlineS === undefined
-        ? {}
-        : { ttlSeconds: userContext.deadlineS }),
-    });
-    const body = JSON.stringify({
-      prompt: message,
-      user_email: userId,
-      user_display_name: userContext?.displayName ?? '',
-      workspace_prefix: userContext?.workspacePrefix ?? '',
-      invocation_context: invocationAuthority.token,
-      invocation_request_proof_key: invocationAuthority.requestProofKey,
-      // Cross-user invocation fields
-      ...(userContext?.invokedBy && {
-        invoked_by_email: userContext.invokedBy.email,
-        invoked_by_display_name: userContext.invokedBy.displayName,
-      }),
-      ...(userContext?.threadContext && {
-        thread_context: userContext.threadContext,
-      }),
-      // Structured attachment metadata (issue #1138 F1). The container renders
-      // an [attachments: ...] prompt header from this so the agent sees what
-      // arrived instead of reporting "I don't see any attachment."
-      ...(userContext?.attachments?.length
-        ? { attachments: userContext.attachments }
-        : {}),
-      // Turn-deadline override (async job-runner only, #1138): harness
-      // clamps to [60, 7200]. Interactive turns omit it (default 840s).
-      ...(userContext?.deadlineS ? { deadline_s: userContext.deadlineS } : {}),
-    });
+    const param = await ssmClient.send(
+      new GetParameterCommand({
+        Name: `/aistudio/${ENVIRONMENT}/agentcore-runtime-id`,
+      })
+    );
+    const runtimeId = param.Parameter?.Value || '';
+    if (runtimeId) {
+      cachedRuntimeId = runtimeId;
+      runtimeIdCachedAt = Date.now();
+    }
+    return runtimeId;
+  } catch {
+    log.error('Failed to resolve AgentCore Runtime ID from SSM');
+    return '';
+  }
+}
 
-    const request = new HttpRequest({
+function invocationTtlOptions(
+  deadlineS: number | undefined
+): { ttlSeconds?: number } {
+  return deadlineS === undefined ? {} : { ttlSeconds: deadlineS };
+}
+
+function addOptionalAgentContext(
+  payload: Record<string, unknown>,
+  context: AgentInvocationContext
+): void {
+  if (context.invokedBy) {
+    payload.invoked_by_email = context.invokedBy.email;
+    payload.invoked_by_display_name = context.invokedBy.displayName;
+  }
+  if (context.threadContext) payload.thread_context = context.threadContext;
+  if (context.attachments?.length) payload.attachments = context.attachments;
+  if (context.deadlineS) payload.deadline_s = context.deadlineS;
+}
+
+async function createAgentCoreRequestBody(
+  message: string,
+  userId: string,
+  sessionId: string,
+  userContext?: AgentInvocationContext
+): Promise<string> {
+  const context = userContext ?? {};
+  const invokedBy = context.invokedBy;
+  const invocationAuthority = await issueInvocationContext(
+    {
+      actorEmail: (invokedBy?.email ?? userId).trim().toLowerCase(),
+      ownerEmail: userId.trim().toLowerCase(),
+      mode: invokedBy ? 'consultation' : 'owner',
+      sessionId,
+      workspacePrefix: context.workspacePrefix ?? '',
+    },
+    invocationTtlOptions(context.deadlineS)
+  );
+  const payload: Record<string, unknown> = {
+    prompt: message,
+    user_email: userId,
+    user_display_name: context.displayName ?? '',
+    workspace_prefix: context.workspacePrefix ?? '',
+    invocation_context: invocationAuthority.token,
+    invocation_request_proof_key: invocationAuthority.requestProofKey,
+  };
+  addOptionalAgentContext(payload, context);
+  return JSON.stringify(payload);
+}
+
+async function fetchAgentCoreResponse(
+  runtimeId: string,
+  message: string,
+  userId: string,
+  sessionId: string,
+  userContext?: AgentInvocationContext
+): Promise<Awaited<ReturnType<typeof undiciFetch>>> {
+  const region = process.env.AWS_REGION || 'us-east-1';
+  const account = process.env.AWS_ACCOUNT_ID || '';
+  const runtimeArn = runtimeId.startsWith('arn:')
+    ? runtimeId
+    : `arn:aws:bedrock-agentcore:${region}:${account}:runtime/${runtimeId}`;
+  const hostname = `bedrock-agentcore.${region}.amazonaws.com`;
+  const body = await createAgentCoreRequestBody(
+    message,
+    userId,
+    sessionId,
+    userContext
+  );
+  const signed = await agentCoreSigner.sign(
+    new HttpRequest({
       method: 'POST',
       protocol: 'https:',
-      hostname: `bedrock-agentcore.${region}.amazonaws.com`,
+      hostname,
       path: `/runtimes/${encodeURIComponent(runtimeArn)}/invocations`,
       headers: {
         'Content-Type': 'application/json',
-        host: `bedrock-agentcore.${region}.amazonaws.com`,
+        host: hostname,
         'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': sessionId,
         'X-Amzn-Bedrock-AgentCore-Runtime-User-Id': userId,
       },
       body,
-    });
+    })
+  );
+  return undiciFetch(`https://${signed.hostname}${signed.path}`, {
+    method: signed.method,
+    headers: signed.headers as Record<string, string>,
+    body: signed.body as string,
+    dispatcher: agentCoreDispatcher,
+  });
+}
 
-    const signed = await agentCoreSigner.sign(request);
+async function agentCoreHttpFailure(
+  response: Awaited<ReturnType<typeof undiciFetch>>,
+  log: ReturnType<typeof createLogger>
+): Promise<AgentCoreResult> {
+  const errorBody = await response.text();
+  log.error('AgentCore invocation failed', {
+    status: response.status,
+    body: errorBody.substring(0, 500),
+  });
+  const throttled = response.status === 503 || response.status === 429;
+  return failedAgentCoreResult(
+    throttled
+      ? "I'm temporarily busy. Please try again in a moment."
+      : 'I encountered an error processing your message. Please try again.',
+    throttled
+      ? `AgentCoreThrottled_${response.status}`
+      : `AgentCoreHttpError_${response.status}`
+  );
+}
 
-    // Use undici fetch with a custom dispatcher so the 14-min timeout takes
-    // effect. The global `fetch()` ignores per-call dispatcher options in
-    // some Node versions and has defaulted headers/bodyTimeout = 5 min,
-    // which caused deploy-time 5-min `fetch failed` observed in prod logs
-    // even though the Lambda timeout is 15 min.
-    const response = await undiciFetch(
-      `https://${signed.hostname}${signed.path}`,
-      {
-        method: signed.method,
-        headers: signed.headers as Record<string, string>,
-        body: signed.body as string,
-        dispatcher: agentCoreDispatcher,
-      }
+async function readAgentCoreResponseBody(
+  response: Awaited<ReturnType<typeof undiciFetch>>,
+  log: ReturnType<typeof createLogger>
+): Promise<Record<string, unknown>> {
+  const contentType = response.headers.get('content-type') ?? '';
+  if (contentType.includes('text/event-stream')) {
+    return (await consumeAgentCoreStream(response, log)) ?? {};
+  }
+  return (await response.json()) as Record<string, unknown>;
+}
+
+function parseAgentMessages(
+  value: unknown
+): Array<{ role: string; content: string }> {
+  if (!Array.isArray(value)) return [];
+  return (value as Array<Record<string, unknown>>)
+    .map(message => ({
+      role: typeof message.role === 'string' ? message.role : 'assistant',
+      content: typeof message.content === 'string' ? message.content : '',
+    }))
+    .filter(message => message.content.length > 0);
+}
+
+function parseToolCallStatus(
+  value: unknown
+): 'success' | 'error' | 'timeout' {
+  return value === 'error' || value === 'timeout' ? value : 'success';
+}
+
+function parseAgentToolCalls(value: unknown): AgentCoreResult['toolCalls'] {
+  if (!Array.isArray(value)) return [];
+  return (value as Array<Record<string, unknown>>).map(toolCall => ({
+    name: typeof toolCall.name === 'string' ? toolCall.name : 'unknown',
+    args: toolCall.args ?? null,
+    result: toolCall.result ?? null,
+    status: parseToolCallStatus(toolCall.status),
+    error_text:
+      typeof toolCall.error_text === 'string' ? toolCall.error_text : null,
+    duration_ms:
+      typeof toolCall.duration_ms === 'number' ? toolCall.duration_ms : 0,
+    started_at:
+      typeof toolCall.started_at === 'string'
+        ? toolCall.started_at
+        : new Date().toISOString(),
+    finished_at:
+      typeof toolCall.finished_at === 'string'
+        ? toolCall.finished_at
+        : new Date().toISOString(),
+  }));
+}
+
+function parseAgentCoreResult(
+  responseBody: Record<string, unknown>
+): AgentCoreResult {
+  const metadata =
+    (responseBody.metadata as Record<string, unknown> | undefined) ?? {};
+  const failed = metadata.failed === true;
+  return {
+    response: (responseBody.result as string) || 'No response from agent.',
+    inputTokens: (metadata.input_tokens as number) || 0,
+    outputTokens: (metadata.output_tokens as number) || 0,
+    cacheReadInputTokens: (metadata.cache_read_input_tokens as number) || 0,
+    cacheWriteInputTokens: (metadata.cache_write_input_tokens as number) || 0,
+    model: (metadata.model as string) || 'unknown',
+    latencyMs: (metadata.latency_ms as number) || 0,
+    modelCallCount: (metadata.model_call_count as number) || 0,
+    durationMs: (metadata.duration_ms as number) || 0,
+    nudged: metadata.nudged === true,
+    messages: parseAgentMessages(metadata.messages),
+    toolCalls: parseAgentToolCalls(metadata.tool_calls),
+    failed,
+    errorClass:
+      typeof metadata.error_class === 'string'
+        ? metadata.error_class
+        : undefined,
+    errorSource: failed ? 'harness' : undefined,
+  };
+}
+
+async function invokeAgentCore(
+  message: string,
+  userId: string,
+  sessionId: string,
+  log: ReturnType<typeof createLogger>,
+  userContext?: AgentInvocationContext
+): Promise<AgentCoreResult> {
+  const runtimeId = await resolveAgentCoreRuntimeId(userContext, log);
+  if (!runtimeId) {
+    return failedAgentCoreResult(
+      'Your agent is not yet deployed. An administrator needs to push the agent image and deploy the AgentCore Runtime.',
+      'AgentNotDeployed'
     );
+  }
 
-    if (!response.ok) {
-      const errorBody = await response.text();
-      log.error('AgentCore invocation failed', {
-        status: response.status,
-        body: errorBody.substring(0, 500),
-      });
-
-      if (response.status === 503 || response.status === 429) {
-        return {
-          response: "I'm temporarily busy. Please try again in a moment.",
-          inputTokens: 0,
-          outputTokens: 0,
-          cacheReadInputTokens: 0,
-          cacheWriteInputTokens: 0,
-          model: null,
-          latencyMs: 0,
-          modelCallCount: 0,
-          durationMs: 0,
-          nudged: false,
-          messages: [],
-          toolCalls: [],
-          failed: true,
-          errorClass: `AgentCoreThrottled_${response.status}`,
-          errorSource: 'router',
-        };
-      }
-
-      return {
-        response: 'I encountered an error processing your message. Please try again.',
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadInputTokens: 0,
-        cacheWriteInputTokens: 0,
-        model: null,
-        latencyMs: 0,
-        modelCallCount: 0,
-        durationMs: 0,
-        nudged: false,
-        messages: [],
-        toolCalls: [],
-        failed: true,
-        errorClass: `AgentCoreHttpError_${response.status}`,
-        errorSource: 'router',
-      };
-    }
-
-    // The AgentCore container uses an async-generator entrypoint, so the
-    // response Content-Type is text/event-stream. We discard heartbeat events
-    // and pick the last event carrying a `result` field. If the container
-    // ever falls back to a buffered JSON response, we still parse that.
-    const contentType = response.headers.get('content-type') ?? '';
-    let responseBody: Record<string, unknown>;
-    if (contentType.includes('text/event-stream')) {
-      responseBody = (await consumeAgentCoreStream(response, log)) ?? {};
-    } else {
-      responseBody = (await response.json()) as Record<string, unknown>;
-    }
-    const result = (responseBody.result as string) || 'No response from agent.';
-    const metadata = (responseBody.metadata as Record<string, unknown>) || {};
-
-    // Best-effort coercion — the harness MAY surface these fields, but
-    // each defaults safely when missing so older harness versions don't
-    // break the writer.
-    const rawMessages = (metadata.messages as unknown) ?? [];
-    const messages = Array.isArray(rawMessages)
-      ? (rawMessages as Array<Record<string, unknown>>)
-          .map((m) => ({
-            role: typeof m.role === 'string' ? m.role : 'assistant',
-            content: typeof m.content === 'string' ? m.content : '',
-          }))
-          .filter((m) => m.content.length > 0)
-      : [];
-    const rawToolCalls = (metadata.tool_calls as unknown) ?? [];
-    type RawToolCall = Record<string, unknown>;
-    const toolCalls = Array.isArray(rawToolCalls)
-      ? (rawToolCalls as RawToolCall[]).map((t) => ({
-          name: typeof t.name === 'string' ? t.name : 'unknown',
-          args: t.args ?? null,
-          result: t.result ?? null,
-          status:
-            t.status === 'success' || t.status === 'error' || t.status === 'timeout'
-              ? (t.status as 'success' | 'error' | 'timeout')
-              : 'success',
-          error_text: typeof t.error_text === 'string' ? t.error_text : null,
-          duration_ms: typeof t.duration_ms === 'number' ? t.duration_ms : 0,
-          started_at:
-            typeof t.started_at === 'string'
-              ? t.started_at
-              : new Date().toISOString(),
-          finished_at:
-            typeof t.finished_at === 'string'
-              ? t.finished_at
-              : new Date().toISOString(),
-        }))
-      : [];
-
-    return {
-      response: result,
-      inputTokens: (metadata.input_tokens as number) || 0,
-      outputTokens: (metadata.output_tokens as number) || 0,
-      // Bedrock prompt-caching split (issue #1089); the wrapper sends 0 on
-      // GLM-5 and on any turn with no cache activity.
-      cacheReadInputTokens: (metadata.cache_read_input_tokens as number) || 0,
-      cacheWriteInputTokens: (metadata.cache_write_input_tokens as number) || 0,
-      // The wrapper (issue #1083) now always sends the real model id
-      // ("zai.glm-5") on success and null on error paths. The stale
-      // 'kimi-k2.5' fallback was dead code — the wrapper used to send the
-      // literal "default", which is truthy, so this branch never fired and
-      // every row was mislabeled. Fall back to 'unknown' only if the metadata
-      // is somehow missing the field.
-      model: (metadata.model as string) || 'unknown',
-      latencyMs: (metadata.latency_ms as number) || 0,
-      // Iteration telemetry (issue #1161). The wrapper sends model_call_count
-      // (proxy round-trip delta), duration_ms (turn wall-clock), and nudged
-      // (empty-turn nudge fired). Older wrapper images omit these — default 0/false.
-      modelCallCount: (metadata.model_call_count as number) || 0,
-      durationMs: (metadata.duration_ms as number) || 0,
-      nudged: metadata.nudged === true,
-      messages,
-      toolCalls,
-      // Harness-reported error turn (e.g. OpenClaw session-init conflict). The
-      // container already wrote the agent_failures row; the caller only logs
-      // this so it isn't recorded as a clean success.
-      failed: metadata.failed === true,
-      errorClass:
-        typeof metadata.error_class === 'string' ? metadata.error_class : undefined,
-      errorSource: metadata.failed === true ? 'harness' : undefined,
-    };
+  try {
+    const response = await fetchAgentCoreResponse(
+      runtimeId,
+      message,
+      userId,
+      sessionId,
+      userContext
+    );
+    if (!response.ok) return agentCoreHttpFailure(response, log);
+    return parseAgentCoreResult(await readAgentCoreResponseBody(response, log));
   } catch (error) {
     log.error('AgentCore invocation error', {
       error: error instanceof Error ? error.message : String(error),
     });
-    return {
-      response:
-        "I'm temporarily unable to help. Please try again shortly.",
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadInputTokens: 0,
-      cacheWriteInputTokens: 0,
-      model: null,
-      latencyMs: 0,
-      modelCallCount: 0,
-      durationMs: 0,
-      nudged: false,
-      messages: [],
-      toolCalls: [],
-      failed: true,
-      errorClass:
-        error instanceof Error ? error.name || 'AgentCoreInvocationError' : 'AgentCoreInvocationError',
-      errorSource: 'router',
-    };
+    const errorClass =
+      error instanceof Error
+        ? error.name || 'AgentCoreInvocationError'
+        : 'AgentCoreInvocationError';
+    return failedAgentCoreResult(
+      "I'm temporarily unable to help. Please try again shortly.",
+      errorClass
+    );
   }
 }
 
@@ -1963,31 +1962,95 @@ async function fetchChatUploads(
  * behavior (post the failure frame). Promotion must never make things
  * worse than the status quo.
  */
+interface JobPromotionInput {
+  sessionId: string;
+  userEmail: string;
+  displayName: string;
+  workspacePrefix: string;
+  spaceName: string;
+  threadName?: string;
+  isDM: boolean;
+  originalPrompt: string;
+}
+
+interface JobPromotionConfig {
+  clusterArn: string;
+  taskDefArn: string;
+  subnets: string[];
+  securityGroup: string;
+  containerName: string;
+}
+
+function getJobPromotionConfig(): JobPromotionConfig | null {
+  const config: JobPromotionConfig = {
+    clusterArn: process.env.JOB_CLUSTER_ARN || '',
+    taskDefArn: process.env.JOB_TASK_DEF_ARN || '',
+    subnets: (process.env.JOB_SUBNETS || '').split(',').filter(Boolean),
+    securityGroup: process.env.JOB_SECURITY_GROUP || '',
+    containerName: process.env.JOB_CONTAINER_NAME || 'job-runner',
+  };
+  const requiredValues = [
+    config.clusterArn,
+    config.taskDefArn,
+    config.securityGroup,
+  ];
+  return requiredValues.some(value => value.length === 0) ||
+    config.subnets.length === 0
+    ? null
+    : config;
+}
+
+async function runPromotedJob(
+  config: JobPromotionConfig,
+  payload: string
+): Promise<string | undefined> {
+  const result = await ecsClient.send(
+    new RunTaskCommand({
+      cluster: config.clusterArn,
+      taskDefinition: config.taskDefArn,
+      launchType: 'FARGATE',
+      count: 1,
+      startedBy: 'agent-router-promotion',
+      networkConfiguration: {
+        awsvpcConfiguration: {
+          subnets: config.subnets,
+          securityGroups: [config.securityGroup],
+          assignPublicIp: 'DISABLED',
+        },
+      },
+      overrides: {
+        containerOverrides: [
+          {
+            name: config.containerName,
+            environment: [{ name: 'JOB_PAYLOAD', value: payload }],
+          },
+        ],
+      },
+    })
+  );
+  if (result.failures?.length) {
+    const failureSummary = result.failures
+      .map(failure =>
+        `${failure.reason ?? 'unknown'}${
+          failure.detail ? ` (${failure.detail})` : ''
+        }`
+      )
+      .join('; ');
+    throw new Error(`RunTask failures: ${failureSummary}`);
+  }
+  return result.tasks?.[0]?.taskArn;
+}
+
 async function promoteToJob(
-  input: {
-    sessionId: string;
-    userEmail: string;
-    displayName: string;
-    workspacePrefix: string;
-    spaceName: string;
-    threadName?: string;
-    isDM: boolean;
-    originalPrompt: string;
-  },
+  input: JobPromotionInput,
   log: ReturnType<typeof createLogger>
 ): Promise<boolean> {
-  const clusterArn = process.env.JOB_CLUSTER_ARN || '';
-  const taskDefArn = process.env.JOB_TASK_DEF_ARN || '';
-  const subnets = (process.env.JOB_SUBNETS || '').split(',').filter(Boolean);
-  const securityGroup = process.env.JOB_SECURITY_GROUP || '';
-  const containerName = process.env.JOB_CONTAINER_NAME || 'job-runner';
-  if (!clusterArn || !taskDefArn || subnets.length === 0 || !securityGroup) {
+  const config = getJobPromotionConfig();
+  if (!config) {
     log.warn('Job promotion not configured — falling back to failure frame');
     return false;
   }
 
-  // The turn that just expired resolved the runtime id moments ago — reuse
-  // the env value or the warm module cache; no fresh SSM call.
   const runtimeId = process.env.AGENTCORE_RUNTIME_ID || cachedRuntimeId || '';
   if (!runtimeId) {
     log.warn('Job promotion aborted — no resolved AgentCore runtime id');
@@ -2017,37 +2080,7 @@ async function promoteToJob(
       originalPrompt: input.originalPrompt,
     });
 
-    const result = await ecsClient.send(
-      new RunTaskCommand({
-        cluster: clusterArn,
-        taskDefinition: taskDefArn,
-        launchType: 'FARGATE',
-        count: 1,
-        startedBy: 'agent-router-promotion',
-        networkConfiguration: {
-          awsvpcConfiguration: {
-            subnets,
-            securityGroups: [securityGroup],
-            assignPublicIp: 'DISABLED',
-          },
-        },
-        overrides: {
-          containerOverrides: [
-            {
-              name: containerName,
-              environment: [{ name: 'JOB_PAYLOAD', value: payload }],
-            },
-          ],
-        },
-      })
-    );
-    if (result.failures && result.failures.length > 0) {
-      throw new Error(
-        `RunTask failures: ${result.failures
-          .map((f) => `${f.reason ?? 'unknown'}${f.detail ? ` (${f.detail})` : ''}`)
-          .join('; ')}`
-      );
-    }
+    const taskArn = await runPromotedJob(config, payload);
 
     await sendGoogleChatResponse(
       input.spaceName,
@@ -2063,7 +2096,7 @@ async function promoteToJob(
       // an input to Loop-2 instruction tuning, so it's a metric without an alarm.
       marker: 'BACKGROUND_PROMOTION',
       sessionId: input.sessionId,
-      taskArn: result.tasks?.[0]?.taskArn ?? 'unknown',
+      taskArn: taskArn ?? 'unknown',
     });
     return true;
   } catch (error) {
@@ -2164,43 +2197,180 @@ function truncateJsonValue(value: unknown): string | null {
   });
 }
 
+interface TelemetryToolCall {
+  name: string;
+  args: unknown;
+  result: unknown;
+  status: 'success' | 'error' | 'timeout';
+  error_text: string | null;
+  duration_ms: number;
+  started_at: string;
+  finished_at: string;
+}
+
+interface TelemetryParams {
+  userId: string;
+  sessionId: string;
+  model: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens?: number;
+  cacheWriteInputTokens?: number;
+  latencyMs: number;
+  modelCallCount?: number;
+  durationMs?: number;
+  nudged?: boolean;
+  guardrailBlocked: boolean;
+  spaceName: string;
+  invokedBy?: string;
+  agentOwnerId?: string;
+  topic?: Topic | null;
+  messages?: Array<{ role: string; content: string }>;
+  toolCalls?: TelemetryToolCall[];
+}
+
+interface TelemetryDefaults {
+  invokedBy: string | null;
+  agentOwnerId: string | null;
+  topic: Topic | null;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  modelCallCount: number;
+  durationMs: number;
+  nudged: boolean;
+  totalTokens: number;
+}
+
+const MAX_MESSAGES_PER_TURN = 200;
+const MAX_TOOLS_PER_TURN = 200;
+
+function normalizeTelemetryParams(params: TelemetryParams): TelemetryDefaults {
+  const cacheReadTokens = params.cacheReadInputTokens ?? 0;
+  const cacheWriteTokens = params.cacheWriteInputTokens ?? 0;
+  return {
+    invokedBy: params.invokedBy ?? null,
+    agentOwnerId: params.agentOwnerId ?? null,
+    topic: params.topic ?? null,
+    cacheReadTokens,
+    cacheWriteTokens,
+    modelCallCount: params.modelCallCount ?? 0,
+    durationMs: params.durationMs ?? 0,
+    nudged: params.nudged ?? false,
+    totalTokens:
+      params.inputTokens +
+      params.outputTokens +
+      cacheReadTokens +
+      cacheWriteTokens,
+  };
+}
+
+async function insertTelemetrySummary(
+  sql: postgres.Sql,
+  params: TelemetryParams,
+  defaults: TelemetryDefaults
+): Promise<number | undefined> {
+  const [messageRow] = await Promise.all([
+    sql<{ id: number }[]>`INSERT INTO agent_messages
+        (user_id, session_id, model, input_tokens, output_tokens,
+         cache_read_input_tokens, cache_write_input_tokens,
+         latency_ms, model_call_count, duration_ms, nudged,
+         guardrail_blocked, space_name, invoked_by, agent_owner_id, topic, created_at)
+        VALUES (${params.userId}, ${params.sessionId}, ${params.model},
+                ${params.inputTokens}, ${params.outputTokens},
+                ${defaults.cacheReadTokens}, ${defaults.cacheWriteTokens},
+                ${params.latencyMs}, ${defaults.modelCallCount}, ${defaults.durationMs}, ${defaults.nudged},
+                ${params.guardrailBlocked},
+                ${params.spaceName}, ${defaults.invokedBy}, ${defaults.agentOwnerId}, ${defaults.topic}, NOW())
+        RETURNING id`,
+    sql`INSERT INTO agent_sessions
+        (user_id, session_id, session_start, total_messages, total_tokens, created_at, updated_at)
+        VALUES (${params.userId}, ${params.sessionId}, NOW(), 1, ${defaults.totalTokens}, NOW(), NOW())
+        ON CONFLICT (session_id) DO UPDATE SET
+          total_messages = agent_sessions.total_messages + 1,
+          total_tokens = agent_sessions.total_tokens + EXCLUDED.total_tokens,
+          session_end = NOW()`,
+  ]);
+  return messageRow[0]?.id;
+}
+
+function buildMessageTelemetryWrites(
+  sql: postgres.Sql,
+  messageId: number,
+  params: TelemetryParams,
+  log: ReturnType<typeof createLogger>
+): Promise<unknown>[] {
+  const messages = params.messages ?? [];
+  const cappedMessages = messages.slice(0, MAX_MESSAGES_PER_TURN);
+  if (messages.length > MAX_MESSAGES_PER_TURN) {
+    log.warn('Deep telemetry message cap hit — truncating', {
+      actual: messages.length,
+      cap: MAX_MESSAGES_PER_TURN,
+      sessionId: params.sessionId,
+    });
+  }
+  return cappedMessages.map(message => {
+    const { value, truncated } = truncateContent(message.content);
+    return sql`INSERT INTO agent_message_content
+        (message_id, session_id, user_email, role, content_text, content_truncated, created_at)
+        VALUES (${messageId}, ${params.sessionId}, ${params.userId},
+                ${message.role}, ${value}, ${truncated}, NOW())`;
+  });
+}
+
+function buildToolTelemetryWrites(
+  sql: postgres.Sql,
+  messageId: number,
+  params: TelemetryParams,
+  log: ReturnType<typeof createLogger>
+): Promise<unknown>[] {
+  const toolCalls = params.toolCalls ?? [];
+  const cappedToolCalls = toolCalls.slice(0, MAX_TOOLS_PER_TURN);
+  if (toolCalls.length > MAX_TOOLS_PER_TURN) {
+    log.warn('Deep telemetry tool-call cap hit — truncating', {
+      actual: toolCalls.length,
+      cap: MAX_TOOLS_PER_TURN,
+      sessionId: params.sessionId,
+    });
+  }
+  return cappedToolCalls.map(toolCall =>
+    sql`INSERT INTO agent_tool_invocations
+        (message_id, session_id, user_email, tool_name, tool_args,
+         tool_result, status, error_text, duration_ms, started_at, finished_at, created_at)
+        VALUES (${messageId}, ${params.sessionId}, ${params.userId},
+                ${toolCall.name},
+                ${truncateJsonValue(toolCall.args)}::jsonb,
+                ${truncateJsonValue(toolCall.result)}::jsonb,
+                ${toolCall.status}, ${toolCall.error_text}, ${toolCall.duration_ms},
+                ${toolCall.started_at}, ${toolCall.finished_at}, NOW())`
+  );
+}
+
+async function writeDeepTelemetry(
+  sql: postgres.Sql,
+  messageId: number,
+  params: TelemetryParams,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const writes = [
+    ...buildMessageTelemetryWrites(sql, messageId, params, log),
+    ...buildToolTelemetryWrites(sql, messageId, params, log),
+  ];
+  if (writes.length === 0) return;
+
+  try {
+    await Promise.all(writes);
+  } catch (error) {
+    log.error('Failed to write deep telemetry rows', {
+      error: error instanceof Error ? error.message : String(error),
+      messageId,
+      contentCount: params.messages?.length ?? 0,
+      toolCount: params.toolCalls?.length ?? 0,
+    });
+  }
+}
+
 async function logTelemetry(
-  params: {
-    userId: string;
-    sessionId: string;
-    model: string | null;
-    inputTokens: number;
-    outputTokens: number;
-    /** Bedrock prompt-caching split (issue #1089). Default 0 for callers that don't set it. */
-    cacheReadInputTokens?: number;
-    cacheWriteInputTokens?: number;
-    latencyMs: number;
-    /** Iteration telemetry (issue #1161). Optional; default 0/false for callers that don't set them. */
-    modelCallCount?: number;
-    durationMs?: number;
-    nudged?: boolean;
-    guardrailBlocked: boolean;
-    spaceName: string;
-    /** Cross-user invocation: email of the person who invoked the agent */
-    invokedBy?: string;
-    /** Cross-user invocation: email of the agent owner whose agent was consulted */
-    agentOwnerId?: string;
-    /** Fixed-taxonomy topic label from the classifier; null when [private], unclassified, or classifier disabled */
-    topic?: Topic | null;
-    /** Per-turn message log for the deep-telemetry Conversations tab. */
-    messages?: Array<{ role: string; content: string }>;
-    /** Per-turn tool invocations for the Conversations timeline. */
-    toolCalls?: Array<{
-      name: string;
-      args: unknown;
-      result: unknown;
-      status: 'success' | 'error' | 'timeout';
-      error_text: string | null;
-      duration_ms: number;
-      started_at: string;
-      finished_at: string;
-    }>;
-  },
+  params: TelemetryParams,
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
   if (!DATABASE_HOST || !DATABASE_SECRET_ARN) {
@@ -2210,117 +2380,9 @@ async function logTelemetry(
 
   try {
     const sql = await getDbClient();
-    const invokedBy = params.invokedBy ?? null;
-    const agentOwnerId = params.agentOwnerId ?? null;
-    const topic = params.topic ?? null;
-    // Bedrock prompt-caching split (issue #1089). Optional on the params, so
-    // default to 0 — GLM-5 rows and older callers record no cache activity.
-    const cacheReadTokens = params.cacheReadInputTokens ?? 0;
-    const cacheWriteTokens = params.cacheWriteInputTokens ?? 0;
-    // Iteration telemetry (issue #1161). Optional on the params so older/other
-    // callers default cleanly — 0 model calls, 0ms duration, no nudge.
-    const modelCallCount = params.modelCallCount ?? 0;
-    const durationMs = params.durationMs ?? 0;
-    const nudged = params.nudged ?? false;
-    // Session total is true VOLUME processed, so it must include the cached
-    // prefix (#1089/#1092): input_tokens is now the DE-CACHED billable input,
-    // so add cache read/write back or agent_sessions.total_tokens under-reports
-    // on cache-hit turns. cache tokens are 0 on GLM-5 / non-caching turns.
-    const totalTokens =
-      params.inputTokens + params.outputTokens + cacheReadTokens + cacheWriteTokens;
-
-    // Insert agent_messages first to get the id, then fan out to the
-    // deep-telemetry tables. The session upsert is independent and can
-    // run in parallel with the message insert.
-    const [messageRow] = await Promise.all([
-      sql<{ id: number }[]>`INSERT INTO agent_messages
-          (user_id, session_id, model, input_tokens, output_tokens,
-           cache_read_input_tokens, cache_write_input_tokens,
-           latency_ms, model_call_count, duration_ms, nudged,
-           guardrail_blocked, space_name, invoked_by, agent_owner_id, topic, created_at)
-          VALUES (${params.userId}, ${params.sessionId}, ${params.model},
-                  ${params.inputTokens}, ${params.outputTokens},
-                  ${cacheReadTokens}, ${cacheWriteTokens},
-                  ${params.latencyMs}, ${modelCallCount}, ${durationMs}, ${nudged},
-                  ${params.guardrailBlocked},
-                  ${params.spaceName}, ${invokedBy}, ${agentOwnerId}, ${topic}, NOW())
-          RETURNING id`,
-      sql`INSERT INTO agent_sessions
-          (user_id, session_id, session_start, total_messages, total_tokens, created_at, updated_at)
-          VALUES (${params.userId}, ${params.sessionId}, NOW(), 1, ${totalTokens}, NOW(), NOW())
-          ON CONFLICT (session_id) DO UPDATE SET
-            total_messages = agent_sessions.total_messages + 1,
-            total_tokens = agent_sessions.total_tokens + EXCLUDED.total_tokens,
-            session_end = NOW()`,
-    ]);
-    const messageId = messageRow[0]?.id;
-
-    // Deep telemetry — content + tool invocations. Both are
-    // best-effort: failure here logs but doesn't surface to the user.
-    // Empty arrays are normal for sessions whose harness doesn't surface
-    // the data yet.
-    //
-    // Hard cap on rows per turn to prevent a misbehaving harness from
-    // firing thousands of parallel INSERTs and exhausting the Aurora
-    // connection pool. 200 messages + 200 tool calls is already generous;
-    // normal turns have <10 of each.
-    const MAX_MESSAGES_PER_TURN = 200;
-    const MAX_TOOLS_PER_TURN = 200;
-    const writes: Promise<unknown>[] = [];
-    if (messageId && params.messages && params.messages.length > 0) {
-      const cappedMessages = params.messages.slice(0, MAX_MESSAGES_PER_TURN);
-      if (params.messages.length > MAX_MESSAGES_PER_TURN) {
-        log.warn('Deep telemetry message cap hit — truncating', {
-          actual: params.messages.length,
-          cap: MAX_MESSAGES_PER_TURN,
-          sessionId: params.sessionId,
-        });
-      }
-      for (const m of cappedMessages) {
-        const { value, truncated } = truncateContent(m.content);
-        writes.push(
-          sql`INSERT INTO agent_message_content
-              (message_id, session_id, user_email, role, content_text, content_truncated, created_at)
-              VALUES (${messageId}, ${params.sessionId}, ${params.userId},
-                      ${m.role}, ${value}, ${truncated}, NOW())`,
-        );
-      }
-    }
-    if (messageId && params.toolCalls && params.toolCalls.length > 0) {
-      const cappedToolCalls = params.toolCalls.slice(0, MAX_TOOLS_PER_TURN);
-      if (params.toolCalls.length > MAX_TOOLS_PER_TURN) {
-        log.warn('Deep telemetry tool-call cap hit — truncating', {
-          actual: params.toolCalls.length,
-          cap: MAX_TOOLS_PER_TURN,
-          sessionId: params.sessionId,
-        });
-      }
-      for (const t of cappedToolCalls) {
-        writes.push(
-          sql`INSERT INTO agent_tool_invocations
-              (message_id, session_id, user_email, tool_name, tool_args,
-               tool_result, status, error_text, duration_ms, started_at, finished_at, created_at)
-              VALUES (${messageId}, ${params.sessionId}, ${params.userId},
-                      ${t.name},
-                      ${truncateJsonValue(t.args)}::jsonb,
-                      ${truncateJsonValue(t.result)}::jsonb,
-                      ${t.status}, ${t.error_text}, ${t.duration_ms},
-                      ${t.started_at}, ${t.finished_at}, NOW())`,
-        );
-      }
-    }
-    if (writes.length > 0) {
-      try {
-        await Promise.all(writes);
-      } catch (deepErr) {
-        log.error('Failed to write deep telemetry rows', {
-          error: deepErr instanceof Error ? deepErr.message : String(deepErr),
-          messageId,
-          contentCount: params.messages?.length ?? 0,
-          toolCount: params.toolCalls?.length ?? 0,
-        });
-      }
-    }
+    const defaults = normalizeTelemetryParams(params);
+    const messageId = await insertTelemetrySummary(sql, params, defaults);
+    if (messageId) await writeDeepTelemetry(sql, messageId, params, log);
   } catch (error) {
     // Telemetry failure should not affect user experience
     log.error('Failed to write telemetry', {
@@ -2737,831 +2799,924 @@ export async function handler(
   return { batchItemFailures };
 }
 
-async function processRecord(
+async function parseChatEventRecord(
   record: SQSRecord,
   log: ReturnType<typeof createLogger>
-): Promise<void> {
-  const startTime = Date.now();
-
-  // Parse the Pub/Sub message from SQS
-  // Google Chat Pub/Sub → GCP Pub/Sub → (bridge) → SQS → Lambda
-  //
-  // Chat publishes events in the **Workspace common-event format**, not the
-  // legacy webhook format. The two shapes are very different:
-  //   Common:  { commonEventObject, chat: { user, eventTime, messagePayload: { space, message } } }
-  //   Legacy:  { type, eventTime, space, message: { sender, text, ... } }
-  // Older Google docs (and older snippets in this codebase) describe legacy.
-  // We normalize both to the legacy shape so the rest of this Lambda is
-  // unchanged.
-  let chatEvent: GoogleChatEvent;
+): Promise<GoogleChatEvent> {
   try {
-    // The SQS message body contains the Pub/Sub message data
-    const sqsBody = JSON.parse(record.body);
-    // Pub/Sub wraps data in base64 under .message.data
-    const pubsubData = sqsBody.message?.data || sqsBody.Message || sqsBody;
+    const sqsBody = JSON.parse(record.body) as {
+      message?: { data?: unknown };
+      Message?: unknown;
+    };
+    const pubsubData =
+      sqsBody.message?.data || sqsBody.Message || sqsBody;
     const decoded =
       typeof pubsubData === 'string'
         ? Buffer.from(pubsubData, 'base64').toString('utf-8')
         : JSON.stringify(pubsubData);
-    const raw = JSON.parse(decoded) as Record<string, unknown>;
-    chatEvent = normalizeChatEvent(raw);
+    return normalizeChatEvent(
+      JSON.parse(decoded) as Record<string, unknown>
+    );
   } catch (error) {
     log.error('Failed to parse chat event', {
       error: error instanceof Error ? error.message : String(error),
       body: record.body.substring(0, 500),
     });
-    // Rethrow so SQS marks as failed and retries/DLQs the message
     throw error;
   }
+}
 
-  // CARD_CLICKED events: a user clicked a button on a card the agent posted.
-  // Convert the action.parameters[] into a synthesised user message and fall
-  // through to the normal MESSAGE handling so the agent decides the follow-up
-  // (same auth checks, same allowlist, same session continuity via thread).
-  // This is the load-bearing piece of Phase 1 interactivity — without it,
-  // every button click would dead-end at "ignored event".
-  if (chatEvent.type === 'CARD_CLICKED') {
-    const action = chatEvent.action ?? {};
-    const params = action.parameters ?? [];
-    const intentParam = params.find((p) => p.key === 'intent');
-    const intent = intentParam?.value ?? action.actionMethodName ?? 'unspecified';
-    const otherParams = params
-      .filter((p) => p.key !== 'intent')
-      .map((p) => `${p.key}=${p.value}`)
-      .join(' ');
-    const synthesisedText = otherParams
-      ? `[button] intent=${intent} ${otherParams}`
-      : `[button] intent=${intent}`;
-    log.info('CARD_CLICKED — synthesising user message', {
-      intent,
-      paramCount: params.length,
-      space: chatEvent.space?.name,
-    });
-    // Mutate the event in place so downstream code (which only knows about
-    // MESSAGE) sees a normal message it can process. The synthesised payload
-    // is intentionally terse — the agent should already have context about
-    // what the button means from its own prior turn that emitted the card.
-    chatEvent = {
-      ...chatEvent,
-      type: 'MESSAGE',
-      message: {
-        name: chatEvent.message?.name ?? '',
-        text: synthesisedText,
-        argumentText: synthesisedText,
-        sender:
-          chatEvent.user ??
-          chatEvent.message?.sender ??
-          ({
-            name: '',
-            displayName: '',
-            email: '',
-            type: 'HUMAN',
-          } as NonNullable<GoogleChatEvent['message']>['sender']),
-        thread: chatEvent.message?.thread,
-        createTime: chatEvent.eventTime,
-      },
-    };
-  }
+function cardClickMessageText(
+  action: NonNullable<GoogleChatEvent['action']>
+): { intent: string; text: string; paramCount: number } {
+  const parameters = action.parameters ?? [];
+  const intent =
+    parameters.find(parameter => parameter.key === 'intent')?.value ??
+    action.actionMethodName ??
+    'unspecified';
+  const otherParameters = parameters
+    .filter(parameter => parameter.key !== 'intent')
+    .map(parameter => `${parameter.key}=${parameter.value}`)
+    .join(' ');
+  return {
+    intent,
+    text: otherParameters
+      ? `[button] intent=${intent} ${otherParameters}`
+      : `[button] intent=${intent}`,
+    paramCount: parameters.length,
+  };
+}
 
-  // Only process MESSAGE events
-  if (chatEvent.type !== 'MESSAGE') {
-    log.info('Ignoring non-message event', { type: chatEvent.type });
-    if (chatEvent.type === 'ADDED_TO_SPACE') {
-      // Validate that ADDED_TO_SPACE events come from an allowed domain before
-      // responding. An injected event with no sender or an outside-domain sender
-      // should not receive a welcome message (confirms the agent is active).
-      const addedByEmail = chatEvent.message?.sender?.email;
-      const addedByDomain = addedByEmail?.split('@')[1]?.toLowerCase();
-      if (addedByDomain && ALLOWED_DOMAINS.includes(addedByDomain)) {
-        await sendGoogleChatResponse(
-          chatEvent.space.name,
-          undefined,
-          "Hello! I'm your PSD AI Agent. Send me a message to get started.",
-          log
-        );
-      } else {
-        log.warn('ADDED_TO_SPACE from unverified domain, skipping welcome message', {
-          space: chatEvent.space.name,
-          domain: addedByDomain || 'unknown',
-        });
-      }
-    }
-    return;
-  }
+function convertCardClickToMessage(
+  chatEvent: GoogleChatEvent,
+  log: ReturnType<typeof createLogger>
+): GoogleChatEvent {
+  if (chatEvent.type !== 'CARD_CLICKED') return chatEvent;
 
-  const message = chatEvent.message;
-  // Google Chat provides two text fields on a message:
-  //   * message.text — full raw text including bot @mention chips rendered
-  //     as "@<Bot Name>" literal. In a ROOM/space that leading bot mention
-  //     is part of the string, which broke the cross-user parser
-  //     (/^@agent:/) because the text started with "@PSD AI Agent " instead.
-  //   * message.argumentText — same text with bot @mention chips stripped.
-  //     Google's documented field for bot consumers. In a DM it matches
-  //     message.text exactly (no bot mention to strip).
-  // Prefer argumentText; fall back to text when absent (older API versions,
-  // edge cases where only one field is populated).
-  const rawText = (message?.argumentText ?? message?.text ?? '').trim();
-  // Files the user attached in Chat (uploaded content + Drive chips). A
-  // message may carry ONLY an attachment (no caption), so this also decides
-  // whether an otherwise-empty message is worth processing (issue #1138 F1).
-  const attachments = message ? extractAttachments(message) : [];
-  // Slash commands with no arguments (e.g., bare "/ask") have empty argumentText
-  // but are still valid — the handler will show usage help. Only bail on truly
-  // empty messages when there's no recognized slash command present.
-  //
-  // Unrecognized slash commands (commandId not in CROSS_USER_SLASH_COMMAND_IDS)
-  // are rejected early to prevent them from falling through to the normal
-  // AgentCore path with an empty prompt.
-  const slashCommandId = message?.slashCommand?.commandId;
-  const hasRecognizedSlashCommand = !!slashCommandId && CROSS_USER_SLASH_COMMAND_IDS.has(slashCommandId);
-  if (slashCommandId && !hasRecognizedSlashCommand) {
-    log.warn('Ignoring unrecognized slash command', { commandId: slashCommandId });
-    return;
-  }
-  if (
-    !message ||
-    (!rawText && !hasRecognizedSlashCommand && attachments.length === 0) ||
-    !message.sender
-  ) {
-    log.warn('Message event missing required fields');
-    return;
-  }
-
-  // Inter-agent communication: detect bot-to-bot messages in shared spaces.
-  // In DM spaces, bot messages are always ignored (no inter-agent routing).
-  // In shared spaces (ROOM), bot messages are handled by the dedicated
-  // inter-agent branch below, which applies rate limiting and anti-loop
-  // protection before returning; they do not continue through the normal
-  // human-message / AgentCore processing path.
-  const isBotSender = message.sender.type === 'BOT';
-  const isSharedSpace = chatEvent.space.type === 'ROOM';
-
-  if (isBotSender && !isSharedSpace) {
-    // Bot messages in DMs are self-responses — ignore
-    return;
-  }
-
-  if (isBotSender && isSharedSpace) {
-    // Inter-agent message in shared space
-    const senderBotId = message.sender.name;
-    const spaceName = chatEvent.space.name;
-    // Thread correlation: real threadName when present, otherwise bucket all
-    // unthreaded messages in this space under a space-stable key so anti-loop
-    // counts still correlate. Using a per-message UUID here (previous fix)
-    // scattered each top-level message into its own thread and defeated the
-    // anti-loop check entirely.
-    const threadName = message.thread?.name || `unthreaded-${spaceName}`;
-    const interAgentStartTime = Date.now();
-
-    log.info('Inter-agent message detected', {
-      senderBot: senderBotId,
-      senderDisplayName: message.sender.displayName,
-      space: spaceName,
-      thread: threadName,
-    });
-
-    // Record FIRST, then check counts. Write-before-read prevents the race
-    // condition where concurrent writers both pass the check before either
-    // writes — both would see stale counts and allow 2× the intended limit.
-    // By recording first, the count query always reflects the current message.
-    await recordInterAgentMessage(
-      senderBotId,
-      'broadcast',
-      spaceName,
-      threadName,
-      log
-    );
-
-    // Rate limit check (queries count AFTER this message was recorded)
-    const rateLimited = await isInterAgentRateLimited(senderBotId, log);
-    if (rateLimited) {
-      log.warn('Inter-agent message rate-limited', { senderBot: senderBotId });
-      await sendGoogleChatResponse(
-        spaceName,
-        threadName,
-        `⚠️ Rate limit reached: ${message.sender.displayName} has sent too many inter-agent messages this hour. Please wait before continuing this conversation.`,
-        log
-      );
-      return;
-    }
-
-    // Anti-loop detection: check if this bot has already sent 3+ messages
-    // in this thread within the last hour (including the one just recorded).
-    // Blocks further exchanges to prevent infinite agent-to-agent loops.
-    const antiLoopTriggered = await isAntiLoopTriggered(
-      senderBotId,
-      threadName,
-      log
-    );
-
-    if (antiLoopTriggered) {
-      await sendGoogleChatResponse(
-        spaceName,
-        threadName,
-        `🔄 Anti-loop protection: This agent conversation in this thread has been paused ` +
-        `(too many bot messages detected). A human can continue by replying in this thread — ` +
-        `the counter resets after 1 hour.`,
-        log
-      );
-      return;
-    }
-
-    // Log inter-agent telemetry separately.
-    // Note: latency measured from inter-agent branch entry, not processRecord
-    // start, so it excludes upstream deduplication/parsing overhead.
-    await logTelemetry(
-      {
-        userId: `bot:${senderBotId}`,
-        sessionId: `interagent-${spaceName}-${threadName || 'none'}`,
-        model: null,
-        inputTokens: 0,
-        outputTokens: 0,
-        latencyMs: Date.now() - interAgentStartTime,
-        guardrailBlocked: false,
-        spaceName,
-      },
-      log
-    );
-
-    // Inter-agent messages are logged but not routed through AgentCore —
-    // they flow through the shared Google Chat space where humans can observe.
-    // The agents' own Google Chat → AgentCore → response pipeline handles
-    // generating replies. This Lambda just tracks and governs the traffic.
-    log.info('Inter-agent message logged', {
-      senderBot: senderBotId,
-      space: spaceName,
-    });
-    return;
-  }
-
-  const senderName = message.sender.name;
-  const senderEmail = message.sender.email;
-  const senderDisplayName = message.sender.displayName;
-  // Attachment-only messages (a file with no caption) have empty text. Give
-  // the agent a minimal prompt so the container doesn't short-circuit on an
-  // empty message — the [attachments: ...] header still carries the details.
-  let messageText =
-    rawText ||
-    (attachments.length > 0
-      ? '(The user attached a file with no accompanying message.)'
-      : rawText);
-  const spaceName = chatEvent.space.name;
-  const threadName = message.thread?.name;
-
-  // Idempotency guard — Google Chat retries Pub/Sub deliveries when the bot
-  // is slow to ack, and SQS may also redeliver under partial-batch-failure.
-  // Without this, two invocations land on the same OpenClaw session in
-  // parallel and the second is rejected in ~135ms with an empty fallback
-  // string, which the user sees as "I processed your message but had no
-  // response." The Chat message resource name is immutable per send, so
-  // it's the right idempotency key.
-  const messageNameKey = message.name;
-  if (messageNameKey && await isDuplicateMessage(messageNameKey, log)) {
-    log.info('Duplicate Chat message — skipping', { messageName: messageNameKey });
-    return;
-  }
-
-  // Validate sender belongs to an allowed domain — prevents abuse if
-  // an actor injects messages into the SQS queue with arbitrary emails.
-  const emailDomain = senderEmail.split('@')[1]?.toLowerCase();
-  if (!emailDomain || !ALLOWED_DOMAINS.includes(emailDomain)) {
-    log.warn('Sender email not in allowed domains', {
-      sender: senderName,
-      domain: emailDomain,
-      allowedDomains: ALLOWED_DOMAINS,
-    });
-    return;
-  }
-
-  log.info('Processing message', {
-    sender: senderName,
-    space: spaceName,
-    textLength: messageText.length,
-    attachmentCount: attachments.length,
-    attachmentSources: attachments.map((a) => a.source),
+  const { intent, text, paramCount } = cardClickMessageText(
+    chatEvent.action ?? {}
+  );
+  log.info('CARD_CLICKED — synthesising user message', {
+    intent,
+    paramCount,
+    space: chatEvent.space?.name,
   });
+  const sender =
+    chatEvent.user ??
+    chatEvent.message?.sender ?? {
+      name: '',
+      displayName: '',
+      email: '',
+      type: 'HUMAN' as const,
+    };
+  return {
+    ...chatEvent,
+    type: 'MESSAGE',
+    message: {
+      name: chatEvent.message?.name ?? '',
+      text,
+      argumentText: text,
+      sender,
+      thread: chatEvent.message?.thread,
+      createTime: chatEvent.eventTime,
+    },
+  };
+}
 
-  // Guard: reject messages that exceed the configured length limit before
-  // hitting Guardrails or AgentCore — prevents timeouts and unexpected costs.
-  if (messageText.length > MAX_MESSAGE_LENGTH) {
-    log.warn('Message exceeds maximum length', {
-      length: messageText.length,
-      limit: MAX_MESSAGE_LENGTH,
-    });
+async function handleNonMessageEvent(
+  chatEvent: GoogleChatEvent,
+  log: ReturnType<typeof createLogger>
+): Promise<boolean> {
+  if (chatEvent.type === 'MESSAGE') return false;
+
+  log.info('Ignoring non-message event', { type: chatEvent.type });
+  if (chatEvent.type !== 'ADDED_TO_SPACE') return true;
+
+  const addedByEmail = chatEvent.message?.sender?.email;
+  const addedByDomain = addedByEmail?.split('@')[1]?.toLowerCase();
+  if (addedByDomain && ALLOWED_DOMAINS.includes(addedByDomain)) {
     await sendGoogleChatResponse(
-      spaceName,
-      threadName,
-      `Your message is too long (${messageText.length.toLocaleString()} characters). ` +
-        `Please keep messages under ${MAX_MESSAGE_LENGTH.toLocaleString()} characters.`,
+      chatEvent.space.name,
+      undefined,
+      "Hello! I'm your PSD AI Agent. Send me a message to get started.",
       log
     );
-    return;
+  } else {
+    log.warn('ADDED_TO_SPACE from unverified domain, skipping welcome message', {
+      space: chatEvent.space.name,
+      domain: addedByDomain || 'unknown',
+    });
+  }
+  return true;
+}
+
+interface IncomingMessage {
+  chatEvent: GoogleChatEvent;
+  message: NonNullable<GoogleChatEvent['message']>;
+  rawText: string;
+  attachments: AgentAttachment[];
+  isSharedSpace: boolean;
+}
+
+function extractIncomingMessage(
+  chatEvent: GoogleChatEvent,
+  log: ReturnType<typeof createLogger>
+): IncomingMessage | null {
+  const message = chatEvent.message;
+  if (!message?.sender) {
+    log.warn('Message event missing required fields');
+    return null;
   }
 
-  // Step 1: Resolve user
-  const user = await getOrCreateUser(
-    senderName,
-    senderEmail,
-    senderDisplayName,
+  const rawText = (message.argumentText ?? message.text ?? '').trim();
+  const attachments = extractAttachments(message);
+  const slashCommandId = message.slashCommand?.commandId;
+  const hasRecognizedSlashCommand =
+    slashCommandId === undefined
+      ? false
+      : CROSS_USER_SLASH_COMMAND_IDS.has(slashCommandId);
+  if (slashCommandId && !hasRecognizedSlashCommand) {
+    log.warn('Ignoring unrecognized slash command', {
+      commandId: slashCommandId,
+    });
+    return null;
+  }
+  const hasProcessableContent =
+    Boolean(rawText) ||
+    hasRecognizedSlashCommand ||
+    attachments.length > 0;
+  if (!hasProcessableContent) {
+    log.warn('Message event missing required fields');
+    return null;
+  }
+  return {
+    chatEvent,
+    message,
+    rawText,
+    attachments,
+    isSharedSpace: chatEvent.space.type === 'ROOM',
+  };
+}
+
+async function handleBotMessage(
+  incoming: IncomingMessage,
+  log: ReturnType<typeof createLogger>
+): Promise<boolean> {
+  const { message, chatEvent, isSharedSpace } = incoming;
+  if (message.sender.type !== 'BOT') return false;
+  if (!isSharedSpace) return true;
+
+  const senderBotId = message.sender.name;
+  const spaceName = chatEvent.space.name;
+  const threadName = message.thread?.name || `unthreaded-${spaceName}`;
+  const startTime = Date.now();
+  log.info('Inter-agent message detected', {
+    senderBot: senderBotId,
+    senderDisplayName: message.sender.displayName,
+    space: spaceName,
+    thread: threadName,
+  });
+  await recordInterAgentMessage(
+    senderBotId,
+    'broadcast',
+    spaceName,
+    threadName,
     log
   );
 
-  // Step 1b: Ensure the user's agnt_ Workspace account is provisioned (#1233).
-  // Deterministic framework trigger (no AI in the loop). Fire-and-forget so it
-  // NEVER adds latency to the reply; it self-throttles (hourly, deduped) and
-  // swallows all errors — a failure just retries on a later message.
-  void maybeProvisionAgentAccount(user, senderEmail, log);
-
-  // Step 2: Guardrails — telemetry only. Never refuse a user message.
-  // `wouldHaveBlocked` is recorded in agent_messages for later analysis
-  // but the conversation continues regardless of guardrail verdict.
-  const guardrailResult = await applyGuardrails(messageText, log);
-
-  // Step 2b: Topic classification for the Organizational Nervous System.
-  // Runs AFTER guardrails so blocked-content analysis is not polluted, and
-  // BEFORE cross-user parsing so we classify the user's intent, not the
-  // routing prefix. The `[private]` opt-out bypasses the classifier entirely
-  // — no topic label is produced and no signal is written.
-  //
-  // Privacy: the classifier is a pure function of text. The recordSignal
-  // call below stores ONLY {building, weekTopic, topic, count}; no user
-  // identifier, no message content. See topic-classifier.ts and issue #890
-  // for the full privacy contract.
-  const classifierSkipped = isPrivateMessage(messageText);
-  const topic: Topic | null = classifierSkipped
-    ? null
-    : classifyTopic(messageText);
-  if (topic) {
-    // Fire-and-forget — signal write must not block message delivery.
-    // Using `department` as the aggregation unit; see recordSignal docblock.
-    void recordSignal({ building: user.department, topic }, log);
-  }
-
-  // Step 3: Check for cross-user agent invocation.
-  // Supports two invocation methods:
-  //   1. /ask slash command (preferred) — `/ask reese what's on the calendar?`
-  //   2. @agent:username text prefix (deprecated) — `@agent:reese what's on the calendar?`
-  //
-  // Slash commands are checked first because Google Chat sets message.slashCommand
-  // on the event, making them unambiguous. The @agent: text parser is kept for
-  // backward compatibility during the sunset window (issue #907).
-  //
-  // In DMs, slash commands are still recognized (the /ask command routes to
-  // another agent even from a private DM), but @agent: text prefix is only
-  // recognized in shared spaces (historical behavior preserved).
-  const slashInvocation = message ? parseSlashCommandInvocation(message) : null;
-  const textInvocation = isSharedSpace ? parseCrossUserInvocation(messageText) : null;
-  // Slash command takes priority; fall back to @agent: text prefix
-  const crossUserInvocation = slashInvocation ?? textInvocation;
-
-  if (crossUserInvocation) {
-    // The command name used in the invocation ("/ask", "/consult", or "@agent:").
-    // Used to generate context-appropriate usage help text.
-    const cmdLabel = crossUserInvocation.commandName ?? '/ask';
-
-    // Handle empty invocation — user typed just "/ask" with no arguments.
-    // Respond with usage help. A future Phase 2 enhancement could open a
-    // dialog card with a dropdown of agent owners (issue #907 open question).
-    if (!crossUserInvocation.targetUsername) {
-      const usageHelp = crossUserInvocation.source === 'slash-command'
-        ? `Usage: \`${cmdLabel} <username> <question>\`\n\nExample: \`${cmdLabel} reese what's on the calendar for today?\``
-        : 'Usage: `@agent:<username> <question>`\n\nExample: `@agent:reese what\'s on the calendar for today?`';
-      await sendGoogleChatResponse(spaceName, threadName, usageHelp, log);
-      return;
-    }
-
-    // Log after the empty-username fast path but with a validated username
-    // (isValidUsername already ran inside the parser; only validated usernames
-    // reach here). Avoids logging arbitrary raw input at INFO level.
-    log.info('Cross-user invocation detected', {
-      sender: senderEmail,
-      targetUsername: crossUserInvocation.targetUsername,
-      source: crossUserInvocation.source,
-      space: spaceName,
-    });
-
-    // Resolve the target user
-    const targetUser = await resolveUserByEmailPrefix(
-      crossUserInvocation.targetUsername,
+  if (await isInterAgentRateLimited(senderBotId, log)) {
+    log.warn('Inter-agent message rate-limited', { senderBot: senderBotId });
+    await sendGoogleChatResponse(
+      spaceName,
+      threadName,
+      `⚠️ Rate limit reached: ${message.sender.displayName} has sent too many inter-agent messages this hour. Please wait before continuing this conversation.`,
       log
     );
-
-    if (!targetUser) {
-      // H2 fix: Generic error to prevent user enumeration — don't echo the
-      // username or confirm/deny whether it exists in the system.
-      await sendGoogleChatResponse(
-        spaceName,
-        threadName,
-        'Agent not found. If you believe this is an error, contact your workspace admin.',
-        log
-      );
-      return;
-    }
-
-    // There is no durable delegation-grant store yet. Same-domain membership,
-    // a slash command, and model instructions are not authorization to mount
-    // another owner's workspace or hydrate their credentials. Fail closed
-    // before attachment delivery, session selection, or AgentCore invocation.
-    if (!canInvokeOwnerAgent(senderEmail, targetUser.email)) {
-      log.warn('Cross-owner invocation denied: no explicit delegation', {
-        actorEmail: senderEmail,
-        ownerEmail: targetUser.email,
-        source: crossUserInvocation.source,
-      });
-      await sendGoogleChatResponse(
-        spaceName,
-        threadName,
-        'Cross-user agent consultation is unavailable until the owner grants explicit access.',
-        log,
-      );
-      return;
-    }
-
-    // Don't allow invoking your own agent — use normal messaging.
-    // H3 fix: Use the stripped message (without invocation prefix) for normal processing.
-    if (targetUser.email.toLowerCase() === senderEmail.toLowerCase()) {
-      log.info('Self-invocation detected, treating as normal message', {
-        sender: senderEmail,
-      });
-      // Fall through to normal processing with the stripped message.
-      // If the stripped message is empty, return a prompt rather than
-      // sending an empty string to AgentCore.
-      if (!crossUserInvocation.strippedMessage) {
-        const selfHelp = crossUserInvocation.source === 'slash-command'
-          ? `You can talk to your own agent by sending a message directly -- no need for \`${cmdLabel}\`.`
-          : 'Please include a message. You can talk to your agent normally without the @agent: prefix.';
-        await sendGoogleChatResponse(spaceName, threadName, selfHelp, log);
-        return;
-      }
-      messageText = crossUserInvocation.strippedMessage;
-    } else {
-      // Cross-user path: invoke the TARGET user's agent with sender context
-      const actualMessage = crossUserInvocation.strippedMessage;
-      if (!actualMessage) {
-        const emptyHelp = crossUserInvocation.source === 'slash-command'
-          ? `Please include a question. Example: \`${cmdLabel} ${crossUserInvocation.targetUsername} what's the budget status?\``
-          : `Please include a question after @agent:${crossUserInvocation.targetUsername}. ` +
-            `Example: @agent:${crossUserInvocation.targetUsername} what's the budget status?`;
-        await sendGoogleChatResponse(spaceName, threadName, emptyHelp, log);
-        return;
-      }
-
-      // H1 fix: Run guardrails on the stripped message (what AgentCore actually
-      // receives), not the original text with the invocation prefix.
-      // Telemetry-only per policy: record the assessment but never refuse the
-      // message — cross-user invocations pass through just like direct DMs.
-      await applyGuardrails(actualMessage, log);
-
-      // Thread context is empty in Phase 1 (no domain-wide delegation yet)
-      const threadContext = '';
-
-      // Session ID uses the TARGET user's workspace prefix so the invocation
-      // hits the target's AgentCore session and has access to their memory.
-      // Include a hash of the invoker's email to isolate sessions per invoker —
-      // without this, two different users consulting the same agent in the same
-      // space would share conversational context and potentially leak information.
-      // The build tag rotation still applies for deploy freshness.
-      const spaceHash = crypto.createHash('sha256').update(spaceName).digest('hex');
-      const invokerHash = crypto.createHash('sha256').update(senderEmail).digest('hex').slice(0, 8);
-      const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
-      const crossSessionId = `xuser-${targetUser.workspacePrefix}-${spaceHash}-${invokerHash}-${buildTag}`;
-
-      // Deliver Chat uploads to the TARGET user's workspace — that is where
-      // the consulted agent's turn runs, and the invoker deliberately sent
-      // the file to that agent (issue #1138 F1).
-      await fetchChatUploads(attachments, targetUser.workspacePrefix, log);
-
-      // Same per-session serialization as the owner path — cross-user
-      // invocations also collide if two queries land back-to-back.
-      const crossLockToken = await waitForSessionLock(crossSessionId, log);
-      if (!crossLockToken) {
-        const ownerLabel = targetUser.displayName || targetUser.email;
-        await sendGoogleChatResponse(
-          spaceName, threadName,
-          `[${ownerLabel}'s Agent] I'm currently busy processing another request. Please try again in a moment.`,
-          log,
-        );
-        return;
-      }
-      const agentResult = await invokeAgentCore(
-        actualMessage,
-        targetUser.email,
-        crossSessionId,
-        log,
-        {
-          displayName: targetUser.displayName,
-          workspacePrefix: targetUser.workspacePrefix,
-          invokedBy: {
-            email: senderEmail,
-            displayName: senderDisplayName,
-          },
-          threadContext,
-          ...(attachments.length > 0 ? { attachments } : {}),
-        }
-      ).finally(() => releaseSessionLock(crossSessionId, crossLockToken, log));
-
-      // Token alerting — total VOLUME processed incl. the cached prefix
-      // (#1089/#1092): a large cached-context turn is still a heavy turn worth
-      // flagging, and input_tokens is de-cached, so add cache read/write back.
-      const totalTokens =
-        agentResult.inputTokens + agentResult.outputTokens +
-        agentResult.cacheReadInputTokens + agentResult.cacheWriteInputTokens;
-      if (totalTokens > TOKEN_LIMIT) {
-        log.warn('Token usage exceeds alerting threshold (cross-user)', {
-          invoker: senderEmail,
-          agentOwner: targetUser.email,
-          totalTokens,
-          threshold: TOKEN_LIMIT,
-        });
-      }
-
-      // Response — cross-user replies are always prefixed with the target user's
-      // agent label (in both shared spaces and DMs via slash commands).
-      // When invoked via the deprecated @agent: prefix, append a deprecation
-      // notice nudging users toward the /ask slash command (issue #907).
-      const deprecationNotice = crossUserInvocation.source === 'text-prefix'
-        ? `\n\n_Tip: \`/ask ${crossUserInvocation.targetUsername} ...\` works too (and is faster)_`
-        : '';
-      const maxLength = 4096;
-      const truncationSuffix = '\n\n_(Response truncated -- ask me to continue)_';
-      const ownerLabel = targetUser.displayName || targetUser.email;
-      const crossPrefix = `[${ownerLabel}'s Agent] `;
-      const reservedLength = crossPrefix.length + deprecationNotice.length;
-      // Clamp to a minimum of 0 to prevent negative substring lengths when
-      // the prefix + deprecation notice are unusually long (e.g., very long
-      // display name). In that edge case the response body is fully truncated.
-      const availableLength = Math.max(maxLength - reservedLength, 0);
-      if (availableLength === 0) {
-        log.warn('Cross-user response body fully truncated due to long prefix/notice', {
-          reservedLength,
-          maxLength,
-          ownerLabel,
-        });
-      }
-      const truncatedResponse =
-        agentResult.response.length > availableLength
-          ? agentResult.response.substring(0, Math.max(availableLength - truncationSuffix.length, 0)) +
-            truncationSuffix
-          : agentResult.response;
-      const finalResponse = `${crossPrefix}${truncatedResponse}${deprecationNotice}`;
-
-      await sendGoogleChatResponse(spaceName, threadName, finalResponse, log);
-
-      // Telemetry — record both the invoker and the agent owner.
-      // Semantics for cross-user invocations:
-      //   userId      = invoker (who triggered the cross-user call)
-      //   invokedBy   = same as userId for cross-user (confirms it's a cross-user call)
-      //   agentOwnerId = whose agent was consulted (resource consumption attribution)
-      // This means "messages by userId" includes both self-sent and cross-user-initiated.
-      // To query "messages consuming X's agent resources", filter by agentOwnerId.
-      // Prefer the harness-reported latency_ms (covers exactly chat.send →
-      // final) over the router-wall-clock — they only differ by a few ms
-      // but the harness number is what we want in the dashboard.
-      const latencyMs = agentResult.latencyMs > 0
-        ? agentResult.latencyMs
-        : Date.now() - startTime;
-      await logTelemetry(
-        {
-          userId: senderEmail,
-          sessionId: crossSessionId,
-          model: agentResult.model,
-          inputTokens: agentResult.inputTokens,
-          outputTokens: agentResult.outputTokens,
-          cacheReadInputTokens: agentResult.cacheReadInputTokens,
-          cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
-          latencyMs,
-          modelCallCount: agentResult.modelCallCount,
-          durationMs: agentResult.durationMs,
-          nudged: agentResult.nudged,
-          guardrailBlocked: false, // Always false here — blocked messages return early above
-          spaceName,
-          invokedBy: senderEmail,
-          agentOwnerId: targetUser.email,
-          topic,
-          messages: agentResult.messages,
-          toolCalls: agentResult.toolCalls,
-        },
-        log
-      );
-
-      const crossTurnFailed = await flagFailedTurn(
-        agentResult,
-        { userId: senderEmail, sessionId: crossSessionId, latencyMs },
-        log,
-      );
-      if (!crossTurnFailed) {
-        log.info('Cross-user invocation processed', {
-          invoker: senderEmail,
-          agentOwner: targetUser.email,
-          model: agentResult.model,
-          source: crossUserInvocation.source,
-          latencyMs,
-        });
-      }
-      return;
-    }
+    return true;
   }
-
-  // Step 4: Invoke AgentCore (normal path — owner's own agent)
-  // Session ID = workspace prefix + SHA-256 hash of space name + build tag.
-  //
-  // Using a hash (not truncation) prevents two spaces with a long common
-  // prefix from silently merging into one session.
-  //
-  // The trailing build tag is critical: AgentCore sticky-routes by session ID
-  // and existing microVMs survive the idle window. Without rotating the
-  // session ID per deploy, an active user can be pinned to a microVM running
-  // OLD code for hours. Mixing AGENT_BUILD_TAG into the session forces every
-  // deploy to spawn a fresh microVM on the next message — old microVMs
-  // receive no further traffic and time out naturally. Long-term memory
-  // survives because the S3 workspace is keyed only on workspacePrefix.
-  const spaceHash = crypto.createHash('sha256').update(spaceName).digest('hex');
-  const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
-  const sessionId = `${user.workspacePrefix}-${spaceHash}-${buildTag}`;
-
-  // Deliver Chat-uploaded files into the agent's S3 workspace so the agent
-  // can actually read them (issue #1138 F1). Runs BEFORE the session lock so
-  // a slow download doesn't extend the lock hold. Mutates `attachments` in
-  // place (adds workspacePath on success); never throws.
-  await fetchChatUploads(attachments, user.workspacePrefix, log);
-
-  // Background job in flight (#1138)? Reply instantly instead of making the
-  // user wait out the 13-minute lock poll below just to hear "busy".
-  if (await isJobLockActive(sessionId, log)) {
+  if (await isAntiLoopTriggered(senderBotId, threadName, log)) {
     await sendGoogleChatResponse(
-      spaceName, threadName,
-      "I'm still working on your earlier task in the background — I'll post " +
-        'the result here when it\'s done.',
-      log,
+      spaceName,
+      threadName,
+      `🔄 Anti-loop protection: This agent conversation in this thread has been paused ` +
+        `(too many bot messages detected). A human can continue by replying in this thread — ` +
+        `the counter resets after 1 hour.`,
+      log
     );
-    return;
+    return true;
   }
 
-  // Serialize per-session invocations. Two messages back-to-back from the
-  // same user/space share this session ID and would otherwise hit the same
-  // OpenClaw turn loop concurrently — the second turn comes back empty.
-  // Wait up to 13 min for a prior turn to finish, then proceed.
+  await logTelemetry(
+    {
+      userId: `bot:${senderBotId}`,
+      sessionId: `interagent-${spaceName}-${threadName || 'none'}`,
+      model: null,
+      inputTokens: 0,
+      outputTokens: 0,
+      latencyMs: Date.now() - startTime,
+      guardrailBlocked: false,
+      spaceName,
+    },
+    log
+  );
+  log.info('Inter-agent message logged', {
+    senderBot: senderBotId,
+    space: spaceName,
+  });
+  return true;
+}
+
+interface HumanMessage {
+  chatEvent: GoogleChatEvent;
+  message: NonNullable<GoogleChatEvent['message']>;
+  attachments: AgentAttachment[];
+  isSharedSpace: boolean;
+  senderName: string;
+  senderEmail: string;
+  senderDisplayName: string;
+  messageText: string;
+  spaceName: string;
+  threadName?: string;
+}
+
+function createHumanMessage(incoming: IncomingMessage): HumanMessage {
+  const { chatEvent, message, rawText, attachments, isSharedSpace } = incoming;
+  return {
+    chatEvent,
+    message,
+    attachments,
+    isSharedSpace,
+    senderName: message.sender.name,
+    senderEmail: message.sender.email,
+    senderDisplayName: message.sender.displayName,
+    messageText:
+      rawText ||
+      (attachments.length > 0
+        ? '(The user attached a file with no accompanying message.)'
+        : rawText),
+    spaceName: chatEvent.space.name,
+    threadName: message.thread?.name,
+  };
+}
+
+async function admitHumanMessage(
+  human: HumanMessage,
+  log: ReturnType<typeof createLogger>
+): Promise<boolean> {
+  if (
+    human.message.name &&
+    (await isDuplicateMessage(human.message.name, log))
+  ) {
+    log.info('Duplicate Chat message — skipping', {
+      messageName: human.message.name,
+    });
+    return false;
+  }
+
+  const emailDomain = human.senderEmail.split('@')[1]?.toLowerCase();
+  if (!emailDomain || !ALLOWED_DOMAINS.includes(emailDomain)) {
+    log.warn('Sender email not in allowed domains', {
+      sender: human.senderName,
+      domain: emailDomain,
+      allowedDomains: ALLOWED_DOMAINS,
+    });
+    return false;
+  }
+  log.info('Processing message', {
+    sender: human.senderName,
+    space: human.spaceName,
+    textLength: human.messageText.length,
+    attachmentCount: human.attachments.length,
+    attachmentSources: human.attachments.map(attachment => attachment.source),
+  });
+
+  if (human.messageText.length <= MAX_MESSAGE_LENGTH) return true;
+  log.warn('Message exceeds maximum length', {
+    length: human.messageText.length,
+    limit: MAX_MESSAGE_LENGTH,
+  });
+  await sendGoogleChatResponse(
+    human.spaceName,
+    human.threadName,
+    `Your message is too long (${human.messageText.length.toLocaleString()} characters). ` +
+      `Please keep messages under ${MAX_MESSAGE_LENGTH.toLocaleString()} characters.`,
+    log
+  );
+  return false;
+}
+
+interface PreparedHumanTurn {
+  user: AgentUser;
+  guardrailResult: Awaited<ReturnType<typeof applyGuardrails>>;
+  topic: Topic | null;
+}
+
+async function prepareHumanTurn(
+  human: HumanMessage,
+  log: ReturnType<typeof createLogger>
+): Promise<PreparedHumanTurn> {
+  const user = await getOrCreateUser(
+    human.senderName,
+    human.senderEmail,
+    human.senderDisplayName,
+    log
+  );
+  void maybeProvisionAgentAccount(user, human.senderEmail, log);
+  const guardrailResult = await applyGuardrails(human.messageText, log);
+  const topic = isPrivateMessage(human.messageText)
+    ? null
+    : classifyTopic(human.messageText);
+  if (topic) {
+    void recordSignal({ building: user.department, topic }, log);
+  }
+  return { user, guardrailResult, topic };
+}
+
+function agentResultTelemetry(
+  result: AgentCoreResult
+): Pick<
+  TelemetryParams,
+  | 'model'
+  | 'inputTokens'
+  | 'outputTokens'
+  | 'cacheReadInputTokens'
+  | 'cacheWriteInputTokens'
+  | 'modelCallCount'
+  | 'durationMs'
+  | 'nudged'
+  | 'messages'
+  | 'toolCalls'
+> {
+  return {
+    model: result.model,
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    cacheReadInputTokens: result.cacheReadInputTokens,
+    cacheWriteInputTokens: result.cacheWriteInputTokens,
+    modelCallCount: result.modelCallCount,
+    durationMs: result.durationMs,
+    nudged: result.nudged,
+    messages: result.messages,
+    toolCalls: result.toolCalls,
+  };
+}
+
+function totalAgentTokens(result: AgentCoreResult): number {
+  return (
+    result.inputTokens +
+    result.outputTokens +
+    result.cacheReadInputTokens +
+    result.cacheWriteInputTokens
+  );
+}
+
+function findCrossUserInvocation(
+  human: HumanMessage
+): CrossUserInvocation | null {
+  const slashInvocation = parseSlashCommandInvocation(human.message);
+  if (slashInvocation) return slashInvocation;
+  return human.isSharedSpace
+    ? parseCrossUserInvocation(human.messageText)
+    : null;
+}
+
+function crossUserUsageHelp(invocation: CrossUserInvocation): string {
+  const commandLabel = invocation.commandName ?? '/ask';
+  return invocation.source === 'slash-command'
+    ? `Usage: \`${commandLabel} <username> <question>\`\n\nExample: \`${commandLabel} reese what's on the calendar for today?\``
+    : 'Usage: `@agent:<username> <question>`\n\nExample: `@agent:reese what\'s on the calendar for today?`';
+}
+
+function emptyCrossUserQuestionHelp(
+  invocation: CrossUserInvocation
+): string {
+  const commandLabel = invocation.commandName ?? '/ask';
+  return invocation.source === 'slash-command'
+    ? `Please include a question. Example: \`${commandLabel} ${invocation.targetUsername} what's the budget status?\``
+    : `Please include a question after @agent:${invocation.targetUsername}. ` +
+        `Example: @agent:${invocation.targetUsername} what's the budget status?`;
+}
+
+function crossUserSessionId(
+  human: HumanMessage,
+  targetUser: AgentUser
+): string {
+  const spaceHash = crypto
+    .createHash('sha256')
+    .update(human.spaceName)
+    .digest('hex');
+  const invokerHash = crypto
+    .createHash('sha256')
+    .update(human.senderEmail)
+    .digest('hex')
+    .slice(0, 8);
+  const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
+  return `xuser-${targetUser.workspacePrefix}-${spaceHash}-${invokerHash}-${buildTag}`;
+}
+
+async function invokeCrossUserAgent(
+  human: HumanMessage,
+  invocation: CrossUserInvocation,
+  targetUser: AgentUser,
+  log: ReturnType<typeof createLogger>
+): Promise<{ result: AgentCoreResult; sessionId: string } | null> {
+  const sessionId = crossUserSessionId(human, targetUser);
+  await fetchChatUploads(human.attachments, targetUser.workspacePrefix, log);
   const lockToken = await waitForSessionLock(sessionId, log);
   if (!lockToken) {
+    const ownerLabel = targetUser.displayName || targetUser.email;
     await sendGoogleChatResponse(
-      spaceName, threadName,
-      "I'm currently busy processing another request. Please try again in a moment.",
-      log,
+      human.spaceName,
+      human.threadName,
+      `[${ownerLabel}'s Agent] I'm currently busy processing another request. Please try again in a moment.`,
+      log
     );
-    return;
+    return null;
   }
-  const agentResult = await invokeAgentCore(
-    messageText,
-    senderEmail,
+  const result = await invokeAgentCore(
+    invocation.strippedMessage,
+    targetUser.email,
     sessionId,
     log,
     {
-      displayName: senderDisplayName,
-      workspacePrefix: user.workspacePrefix,
-      ...(attachments.length > 0 ? { attachments } : {}),
+      displayName: targetUser.displayName,
+      workspacePrefix: targetUser.workspacePrefix,
+      invokedBy: {
+        email: human.senderEmail,
+        displayName: human.senderDisplayName,
+      },
+      threadContext: '',
+      ...(human.attachments.length > 0
+        ? { attachments: human.attachments }
+        : {}),
     }
   ).finally(() => releaseSessionLock(sessionId, lockToken, log));
+  return { result, sessionId };
+}
 
-  // Step 5: Token usage alerting threshold (warn-only, not enforcement)
-  // The response is still delivered — this is for monitoring/alerting.
-  // Hard enforcement requires pre-invocation token estimation via session
-  // tracking in DynamoDB, which is planned for Phase 2.
-  // Total VOLUME processed incl. the cached prefix (#1089/#1092): input_tokens
-  // is de-cached billable input, so add cache read/write back for an accurate
-  // heavy-turn signal.
-  const totalTokens =
-    agentResult.inputTokens + agentResult.outputTokens +
-    agentResult.cacheReadInputTokens + agentResult.cacheWriteInputTokens;
+function buildCrossUserResponse(
+  invocation: CrossUserInvocation,
+  targetUser: AgentUser,
+  result: AgentCoreResult,
+  log: ReturnType<typeof createLogger>
+): string {
+  const deprecationNotice =
+    invocation.source === 'text-prefix'
+      ? `\n\n_Tip: \`/ask ${invocation.targetUsername} ...\` works too (and is faster)_`
+      : '';
+  const maxLength = 4096;
+  const truncationSuffix =
+    '\n\n_(Response truncated -- ask me to continue)_';
+  const ownerLabel = targetUser.displayName || targetUser.email;
+  const prefix = `[${ownerLabel}'s Agent] `;
+  const reservedLength = prefix.length + deprecationNotice.length;
+  const availableLength = Math.max(maxLength - reservedLength, 0);
+  if (availableLength === 0) {
+    log.warn(
+      'Cross-user response body fully truncated due to long prefix/notice',
+      { reservedLength, maxLength, ownerLabel }
+    );
+  }
+  const response =
+    result.response.length > availableLength
+      ? result.response.substring(
+          0,
+          Math.max(availableLength - truncationSuffix.length, 0)
+        ) + truncationSuffix
+      : result.response;
+  return `${prefix}${response}${deprecationNotice}`;
+}
+
+interface CrossUserTurnContext {
+  human: HumanMessage,
+  invocation: CrossUserInvocation,
+  targetUser: AgentUser,
+  topic: Topic | null,
+  startTime: number;
+}
+
+async function recordCrossUserResult(
+  context: CrossUserTurnContext & {
+    result: AgentCoreResult;
+    sessionId: string;
+  },
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const {
+    human,
+    invocation,
+    targetUser,
+    result,
+    sessionId,
+    topic,
+    startTime,
+  } = context;
+  const latencyMs =
+    result.latencyMs > 0 ? result.latencyMs : Date.now() - startTime;
+  await logTelemetry(
+    {
+      userId: human.senderEmail,
+      sessionId,
+      ...agentResultTelemetry(result),
+      latencyMs,
+      guardrailBlocked: false,
+      spaceName: human.spaceName,
+      invokedBy: human.senderEmail,
+      agentOwnerId: targetUser.email,
+      topic,
+    },
+    log
+  );
+  const failed = await flagFailedTurn(
+    result,
+    { userId: human.senderEmail, sessionId, latencyMs },
+    log
+  );
+  if (!failed) {
+    log.info('Cross-user invocation processed', {
+      invoker: human.senderEmail,
+      agentOwner: targetUser.email,
+      model: result.model,
+      source: invocation.source,
+      latencyMs,
+    });
+  }
+}
+
+async function runCrossUserTurn(
+  context: CrossUserTurnContext,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const { human, invocation, targetUser } = context;
+  if (!invocation.strippedMessage) {
+    await sendGoogleChatResponse(
+      human.spaceName,
+      human.threadName,
+      emptyCrossUserQuestionHelp(invocation),
+      log
+    );
+    return;
+  }
+  await applyGuardrails(invocation.strippedMessage, log);
+  const turn = await invokeCrossUserAgent(human, invocation, targetUser, log);
+  if (!turn) return;
+
+  const totalTokens = totalAgentTokens(turn.result);
   if (totalTokens > TOKEN_LIMIT) {
-    log.warn('Token usage exceeds alerting threshold', {
-      inputTokens: agentResult.inputTokens,
-      outputTokens: agentResult.outputTokens,
+    log.warn('Token usage exceeds alerting threshold (cross-user)', {
+      invoker: human.senderEmail,
+      agentOwner: targetUser.email,
       totalTokens,
       threshold: TOKEN_LIMIT,
     });
   }
-
-  // Step 5b: Async-job promotion (#1138). A turn that ran out of clock —
-  // not one that broke — moves to a background job that resumes the SAME
-  // session with a 2-hour budget. On success: log first-leg telemetry and
-  // stop (the ack was posted inside promoteToJob; the runner posts the
-  // final answer). On ANY promotion failure: fall through and deliver the
-  // failure-framed partial exactly as before.
-  if (shouldPromoteToJob(agentResult.errorClass)) {
-    const promoted = await promoteToJob(
-      {
-        sessionId,
-        userEmail: senderEmail,
-        displayName: senderDisplayName,
-        workspacePrefix: user.workspacePrefix,
-        spaceName,
-        threadName,
-        isDM: chatEvent.space.type === 'DM',
-        originalPrompt: messageText,
-      },
-      log
-    );
-    if (promoted) {
-      const promotedLatencyMs = agentResult.latencyMs > 0
-        ? agentResult.latencyMs
-        : Date.now() - startTime;
-      await logTelemetry(
-        {
-          userId: senderEmail,
-          sessionId,
-          model: agentResult.model,
-          inputTokens: agentResult.inputTokens,
-          outputTokens: agentResult.outputTokens,
-          cacheReadInputTokens: agentResult.cacheReadInputTokens,
-          cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
-          latencyMs: promotedLatencyMs,
-          modelCallCount: agentResult.modelCallCount,
-          durationMs: agentResult.durationMs,
-          nudged: agentResult.nudged,
-          guardrailBlocked: guardrailResult.wouldHaveBlocked,
-          spaceName,
-          topic,
-          messages: agentResult.messages,
-          toolCalls: agentResult.toolCalls,
-        },
-        log
-      );
-      return;
-    }
-  }
-
-  // KNOWN GAP: Output is not run through Bedrock Guardrails.
-  // applyGuardrails() only filters INPUT (source: 'INPUT'). The agent response
-  // is sent directly to Google Chat without content filtering. For K-12
-  // deployments, consider adding an output guardrail check via source: 'OUTPUT'
-  // before sendGoogleChatResponse(). The Bedrock ApplyGuardrail API supports
-  // this in the same call. Deferred to Phase 2 to avoid doubling latency.
-
-  // Step 6: Send response
-  // Prefix with [User's Agent] in shared spaces for clarity.
-  // Truncate the raw response BEFORE adding the prefix so truncation
-  // behavior is consistent between DMs and shared spaces (the prefix
-  // would otherwise consume ~30 chars of the 4096 limit only in shared spaces).
-  const maxLength = 4096;
-  const truncationSuffix = '\n\n_(Response truncated — ask me to continue)_';
-  const isDM = chatEvent.space.type === 'DM';
-  const prefix = isDM ? '' : `[${senderDisplayName}'s Agent] `;
-  const availableLength = maxLength - prefix.length;
-  const truncatedResponse =
-    agentResult.response.length > availableLength
-      ? agentResult.response.substring(0, availableLength - truncationSuffix.length) +
-        truncationSuffix
-      : agentResult.response;
-  const finalResponse = `${prefix}${truncatedResponse}`;
-
-  await sendGoogleChatResponse(spaceName, threadName, finalResponse, log);
-
-  // Step 7: Log telemetry
-  // Prefer the harness-reported latency_ms when available so the dashboard
-  // shows chat.send → final, not the entire router execution.
-  const latencyMs = agentResult.latencyMs > 0
-    ? agentResult.latencyMs
-    : Date.now() - startTime;
-  await logTelemetry(
+  await sendGoogleChatResponse(
+    human.spaceName,
+    human.threadName,
+    buildCrossUserResponse(invocation, targetUser, turn.result, log),
+    log
+  );
+  await recordCrossUserResult(
     {
-      userId: senderEmail,
-      sessionId,
-      model: agentResult.model,
-      inputTokens: agentResult.inputTokens,
-      outputTokens: agentResult.outputTokens,
-      cacheReadInputTokens: agentResult.cacheReadInputTokens,
-      cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
-      latencyMs,
-      modelCallCount: agentResult.modelCallCount,
-      durationMs: agentResult.durationMs,
-      nudged: agentResult.nudged,
-      // Preserve the guardrail signal for telemetry — the message was not
-      // blocked, but we record whether it would have been under the old
-      // fail-closed policy for later analysis / tuning.
-      guardrailBlocked: guardrailResult.wouldHaveBlocked,
-      spaceName,
-      topic,
-      messages: agentResult.messages,
-      toolCalls: agentResult.toolCalls,
+      ...context,
+      result: turn.result,
+      sessionId: turn.sessionId,
     },
     log
   );
+}
 
-  const turnFailed = await flagFailedTurn(
-    agentResult,
-    { userId: senderEmail, sessionId, latencyMs },
-    log,
+interface CrossUserRouteResult {
+  handled: boolean;
+  messageText: string;
+}
+
+async function handleCrossUserInvocation(
+  human: HumanMessage,
+  topic: Topic | null,
+  startTime: number,
+  log: ReturnType<typeof createLogger>
+): Promise<CrossUserRouteResult> {
+  const invocation = findCrossUserInvocation(human);
+  if (!invocation) return { handled: false, messageText: human.messageText };
+  if (!invocation.targetUsername) {
+    await sendGoogleChatResponse(
+      human.spaceName,
+      human.threadName,
+      crossUserUsageHelp(invocation),
+      log
+    );
+    return { handled: true, messageText: human.messageText };
+  }
+
+  log.info('Cross-user invocation detected', {
+    sender: human.senderEmail,
+    targetUsername: invocation.targetUsername,
+    source: invocation.source,
+    space: human.spaceName,
+  });
+  const targetUser = await resolveUserByEmailPrefix(
+    invocation.targetUsername,
+    log
   );
-  if (!turnFailed) {
-    log.info('Message processed', {
-      sender: senderName,
-      model: agentResult.model,
+  if (!targetUser) {
+    await sendGoogleChatResponse(
+      human.spaceName,
+      human.threadName,
+      'Agent not found. If you believe this is an error, contact your workspace admin.',
+      log
+    );
+    return { handled: true, messageText: human.messageText };
+  }
+  if (!canInvokeOwnerAgent(human.senderEmail, targetUser.email)) {
+    log.warn('Cross-owner invocation denied: no explicit delegation', {
+      actorEmail: human.senderEmail,
+      ownerEmail: targetUser.email,
+      source: invocation.source,
+    });
+    await sendGoogleChatResponse(
+      human.spaceName,
+      human.threadName,
+      'Cross-user agent consultation is unavailable until the owner grants explicit access.',
+      log
+    );
+    return { handled: true, messageText: human.messageText };
+  }
+
+  const selfInvocation =
+    targetUser.email.toLowerCase() === human.senderEmail.toLowerCase();
+  if (selfInvocation && !invocation.strippedMessage) {
+    const commandLabel = invocation.commandName ?? '/ask';
+    const help =
+      invocation.source === 'slash-command'
+        ? `You can talk to your own agent by sending a message directly -- no need for \`${commandLabel}\`.`
+        : 'Please include a message. You can talk to your agent normally without the @agent: prefix.';
+    await sendGoogleChatResponse(
+      human.spaceName,
+      human.threadName,
+      help,
+      log
+    );
+    return { handled: true, messageText: human.messageText };
+  }
+  if (selfInvocation) {
+    log.info('Self-invocation detected, treating as normal message', {
+      sender: human.senderEmail,
+    });
+    return { handled: false, messageText: invocation.strippedMessage };
+  }
+
+  await runCrossUserTurn(
+    { human, invocation, targetUser, topic, startTime },
+    log
+  );
+  return { handled: true, messageText: human.messageText };
+}
+
+function ownerSessionId(human: HumanMessage, user: AgentUser): string {
+  const spaceHash = crypto
+    .createHash('sha256')
+    .update(human.spaceName)
+    .digest('hex');
+  const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
+  return `${user.workspacePrefix}-${spaceHash}-${buildTag}`;
+}
+
+async function invokeOwnerAgent(
+  human: HumanMessage,
+  user: AgentUser,
+  messageText: string,
+  log: ReturnType<typeof createLogger>
+): Promise<{ result: AgentCoreResult; sessionId: string } | null> {
+  const sessionId = ownerSessionId(human, user);
+  await fetchChatUploads(human.attachments, user.workspacePrefix, log);
+  if (await isJobLockActive(sessionId, log)) {
+    await sendGoogleChatResponse(
+      human.spaceName,
+      human.threadName,
+      "I'm still working on your earlier task in the background — I'll post " +
+        'the result here when it\'s done.',
+      log
+    );
+    return null;
+  }
+
+  const lockToken = await waitForSessionLock(sessionId, log);
+  if (!lockToken) {
+    await sendGoogleChatResponse(
+      human.spaceName,
+      human.threadName,
+      "I'm currently busy processing another request. Please try again in a moment.",
+      log
+    );
+    return null;
+  }
+  const result = await invokeAgentCore(
+    messageText,
+    human.senderEmail,
+    sessionId,
+    log,
+    {
+      displayName: human.senderDisplayName,
+      workspacePrefix: user.workspacePrefix,
+      ...(human.attachments.length > 0
+        ? { attachments: human.attachments }
+        : {}),
+    }
+  ).finally(() => releaseSessionLock(sessionId, lockToken, log));
+  return { result, sessionId };
+}
+
+interface OwnerTurnContext {
+  human: HumanMessage,
+  prepared: PreparedHumanTurn,
+  messageText: string,
+  turn: { result: AgentCoreResult; sessionId: string },
+  startTime: number;
+}
+
+async function promoteOwnerTurn(
+  context: OwnerTurnContext,
+  log: ReturnType<typeof createLogger>
+): Promise<boolean> {
+  const { human, prepared, messageText, turn, startTime } = context;
+  if (!shouldPromoteToJob(turn.result.errorClass)) return false;
+  const promoted = await promoteToJob(
+    {
+      sessionId: turn.sessionId,
+      userEmail: human.senderEmail,
+      displayName: human.senderDisplayName,
+      workspacePrefix: prepared.user.workspacePrefix,
+      spaceName: human.spaceName,
+      threadName: human.threadName,
+      isDM: human.chatEvent.space.type === 'DM',
+      originalPrompt: messageText,
+    },
+    log
+  );
+  if (!promoted) return false;
+
+  const latencyMs =
+    turn.result.latencyMs > 0
+      ? turn.result.latencyMs
+      : Date.now() - startTime;
+  await logTelemetry(
+    {
+      userId: human.senderEmail,
+      sessionId: turn.sessionId,
+      ...agentResultTelemetry(turn.result),
       latencyMs,
-      inputTokens: agentResult.inputTokens,
-      outputTokens: agentResult.outputTokens,
+      guardrailBlocked: prepared.guardrailResult.wouldHaveBlocked,
+      spaceName: human.spaceName,
+      topic: prepared.topic,
+    },
+    log
+  );
+  return true;
+}
+
+function buildOwnerResponse(
+  human: HumanMessage,
+  result: AgentCoreResult
+): string {
+  const maxLength = 4096;
+  const truncationSuffix =
+    '\n\n_(Response truncated — ask me to continue)_';
+  const prefix =
+    human.chatEvent.space.type === 'DM'
+      ? ''
+      : `[${human.senderDisplayName}'s Agent] `;
+  const availableLength = maxLength - prefix.length;
+  const response =
+    result.response.length > availableLength
+      ? result.response.substring(
+          0,
+          availableLength - truncationSuffix.length
+        ) + truncationSuffix
+      : result.response;
+  return `${prefix}${response}`;
+}
+
+async function recordOwnerResult(
+  human: HumanMessage,
+  prepared: PreparedHumanTurn,
+  turn: { result: AgentCoreResult; sessionId: string },
+  startTime: number,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const latencyMs =
+    turn.result.latencyMs > 0
+      ? turn.result.latencyMs
+      : Date.now() - startTime;
+  await logTelemetry(
+    {
+      userId: human.senderEmail,
+      sessionId: turn.sessionId,
+      ...agentResultTelemetry(turn.result),
+      latencyMs,
+      guardrailBlocked: prepared.guardrailResult.wouldHaveBlocked,
+      spaceName: human.spaceName,
+      topic: prepared.topic,
+    },
+    log
+  );
+  const failed = await flagFailedTurn(
+    turn.result,
+    {
+      userId: human.senderEmail,
+      sessionId: turn.sessionId,
+      latencyMs,
+    },
+    log
+  );
+  if (!failed) {
+    log.info('Message processed', {
+      sender: human.senderName,
+      model: turn.result.model,
+      latencyMs,
+      inputTokens: turn.result.inputTokens,
+      outputTokens: turn.result.outputTokens,
     });
   }
 }
+
+async function handleOwnerTurn(
+  human: HumanMessage,
+  prepared: PreparedHumanTurn,
+  messageText: string,
+  startTime: number,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const turn = await invokeOwnerAgent(
+    human,
+    prepared.user,
+    messageText,
+    log
+  );
+  if (!turn) return;
+
+  const totalTokens = totalAgentTokens(turn.result);
+  if (totalTokens > TOKEN_LIMIT) {
+    log.warn('Token usage exceeds alerting threshold', {
+      inputTokens: turn.result.inputTokens,
+      outputTokens: turn.result.outputTokens,
+      totalTokens,
+      threshold: TOKEN_LIMIT,
+    });
+  }
+  if (
+    await promoteOwnerTurn(
+      { human, prepared, messageText, turn, startTime },
+      log
+    )
+  ) {
+    return;
+  }
+  await sendGoogleChatResponse(
+    human.spaceName,
+    human.threadName,
+    buildOwnerResponse(human, turn.result),
+    log
+  );
+  await recordOwnerResult(human, prepared, turn, startTime, log);
+}
+
+async function processRecord(
+  record: SQSRecord,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const startTime = Date.now();
+  const parsedEvent = await parseChatEventRecord(record, log);
+  const chatEvent = convertCardClickToMessage(parsedEvent, log);
+  if (await handleNonMessageEvent(chatEvent, log)) return;
+  const incoming = extractIncomingMessage(chatEvent, log);
+  if (!incoming) return;
+  if (await handleBotMessage(incoming, log)) return;
+  const human = createHumanMessage(incoming);
+  if (!(await admitHumanMessage(human, log))) return;
+  const prepared = await prepareHumanTurn(human, log);
+  const route = await handleCrossUserInvocation(
+    human,
+    prepared.topic,
+    startTime,
+    log
+  );
+  if (route.handled) return;
+  await handleOwnerTurn(
+    human,
+    prepared,
+    route.messageText,
+    startTime,
+    log
+  );
+}
+
+export const agentRouterTestHelpers = {
+  normalizeChatEvent,
+  cardClickMessageText,
+  parseAgentCoreResult,
+  totalAgentTokens,
+};
 
 // ---------------------------------------------------------------------------
 // Exports for the async job-runner entrypoint (job-main.ts, issue #1138).
