@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react"
 import { useRouter } from "next/navigation"
 import { zodResolver } from "@hookform/resolvers/zod"
-import { useForm } from "react-hook-form"
+import { useForm, type UseFormReturn } from "react-hook-form"
 import * as z from "zod"
 import { Button } from "@/components/ui/button"
 import { Form } from "@/components/ui/form"
@@ -35,6 +35,49 @@ const formSchema = z.object({
 
 type FormValues = z.infer<typeof formSchema>
 
+interface AssistantSetupSectionsProps {
+  form: UseFormReturn<FormValues>
+  images: string[]
+  agentic: AgenticConfigState
+  onAgenticChange: (value: AgenticConfigState) => void
+  routing: ModelRoutingState
+  onRoutingChange: (value: ModelRoutingState) => void
+  lockAgentic: boolean
+  disabled: boolean
+}
+
+function AssistantSetupSections({
+  form,
+  images,
+  agentic,
+  onAgenticChange,
+  routing,
+  onRoutingChange,
+  lockAgentic,
+  disabled,
+}: AssistantSetupSectionsProps) {
+  return (
+    <>
+      <Form {...form}>
+        <form className="space-y-6">
+          <AssistantDetailsForm control={form.control} images={images} />
+        </form>
+      </Form>
+      <AgenticModeSection
+        value={agentic}
+        onChange={onAgenticChange}
+        lockAgentic={lockAgentic}
+        disabled={disabled}
+      />
+      <ModelRoutingSection
+        value={routing}
+        onChange={onRoutingChange}
+        disabled={disabled}
+      />
+    </>
+  )
+}
+
 /**
  * Map the UI agentic config to the server-action payload. Cost cap is whole
  * dollars in the UI; the action/DB store whole cents. Tools are cleared when not
@@ -53,23 +96,15 @@ function toAgenticPayload(agentic: AgenticConfigState) {
   }
 }
 
-export function CreateForm({ initialData, initialInputFields = [] }: CreateFormProps) {
-  const router = useRouter()
-  const { toast } = useToast()
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [images, setImages] = useState<string[]>([])
-  const [assistantId, setAssistantId] = useState<string | null>(
-    initialData?.id ? String(initialData.id) : null
-  )
-  const [inputFields, setInputFields] = useState<SelectToolInputField[]>(initialInputFields)
-  const [routing, setRouting] = useState<ModelRoutingState>(() => ({
+function createInitialRouting(initialData?: SelectAssistantArchitect): ModelRoutingState {
+  return {
     mode: initialData?.modelRoutingMode ?? "standard",
     family: initialData?.modelRoutingFamily ?? null,
-  }))
+  }
+}
 
-  // Agentic mode config (Issue #926). Initialized from the existing assistant
-  // when editing; defaults to prompt-chain for new assistants.
-  const [agentic, setAgentic] = useState<AgenticConfigState>(() => ({
+function createInitialAgenticConfig(initialData?: SelectAssistantArchitect): AgenticConfigState {
+  return {
     mode: (initialData?.mode as AgenticConfigState["mode"]) || "prompt_chain",
     enabledTools: initialData?.agentEnabledTools ?? [],
     enabledConnectors: initialData?.agentEnabledConnectors ?? [],
@@ -83,7 +118,25 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
       typeof initialData?.agentMaxRequestsPerHour === "number"
         ? initialData.agentMaxRequestsPerHour
         : null,
-  }))
+  }
+}
+
+export function CreateForm({ initialData, initialInputFields = [] }: CreateFormProps) {
+  const router = useRouter()
+  const { toast } = useToast()
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [images, setImages] = useState<string[]>([])
+  const [assistantId, setAssistantId] = useState<string | null>(
+    initialData?.id ? String(initialData.id) : null
+  )
+  const [inputFields, setInputFields] = useState<SelectToolInputField[]>(initialInputFields)
+  const [routing, setRouting] = useState<ModelRoutingState>(() => createInitialRouting(initialData))
+
+  // Agentic mode config (Issue #926). Initialized from the existing assistant
+  // when editing; defaults to prompt-chain for new assistants.
+  const [agentic, setAgentic] = useState<AgenticConfigState>(
+    () => createInitialAgenticConfig(initialData)
+  )
   // The mode transition is one-way: an assistant already in agentic mode cannot
   // be reverted, so lock the prompt-chain option when editing such an assistant.
   const lockAgentic = initialData?.mode === "agentic"
@@ -201,22 +254,14 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
 
   return (
     <div className="space-y-8">
-      <Form {...form}>
-        <form className="space-y-6">
-          <AssistantDetailsForm control={form.control} images={images} />
-        </form>
-      </Form>
-
-      <AgenticModeSection
-        value={agentic}
-        onChange={setAgentic}
+      <AssistantSetupSections
+        form={form}
+        images={images}
+        agentic={agentic}
+        onAgenticChange={setAgentic}
+        routing={routing}
+        onRoutingChange={setRouting}
         lockAgentic={lockAgentic}
-        disabled={isSubmitting}
-      />
-
-      <ModelRoutingSection
-        value={routing}
-        onChange={setRouting}
         disabled={isSubmitting}
       />
 

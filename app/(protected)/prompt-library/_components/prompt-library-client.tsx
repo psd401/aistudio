@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useEffectEvent, useRef } from "react"
 import { useRouter } from "next/navigation"
 import { listPrompts } from "@/actions/prompt-library.actions"
 import { useAction } from "@/lib/hooks/use-action"
@@ -30,11 +30,84 @@ import { EmptyState } from "./empty-state"
 import type { PromptListItem as PromptListItemType } from "@/lib/prompt-library/types"
 import { PageBranding } from "@/components/ui/page-branding"
 
+interface PromptFilters {
+  search: string
+  tags: string[]
+  visibility: ReturnType<typeof usePromptLibraryStore.getState>["visibilityFilter"]
+  sort: ReturnType<typeof usePromptLibraryStore.getState>["sortBy"]
+}
+
+function usePromptResults({ search, tags, visibility, sort }: PromptFilters) {
+  const [prompts, setPrompts] = useState<PromptListItemType[]>([])
+  const [loading, setLoading] = useState(true)
+  const { execute } = useAction(listPrompts, {
+    showSuccessToast: false,
+    showErrorToast: false
+  })
+  const executeLatest = useEffectEvent(execute)
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadPrompts() {
+      setLoading(true)
+      const result = await executeLatest({
+        search: search || undefined,
+        tags: tags.length > 0 ? tags : undefined,
+        visibility: visibility === "all" ? undefined : visibility,
+        sort,
+        page: 1,
+        limit: 100
+      })
+      if (!cancelled && result?.isSuccess && result.data) {
+        setPrompts(result.data.prompts)
+      }
+      if (!cancelled) setLoading(false)
+    }
+
+    void loadPrompts()
+    return () => {
+      cancelled = true
+    }
+  }, [search, tags, visibility, sort])
+
+  return { prompts, setPrompts, loading }
+}
+
+function PromptLibraryHeader({
+  onBrowsePublic,
+  onCreatePrompt,
+}: {
+  onBrowsePublic: () => void
+  onCreatePrompt: () => void
+}) {
+  return (
+    <div className="mb-6">
+      <PageBranding />
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900">Prompt Library</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            Manage and organize your saved prompts
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={onBrowsePublic}>
+            <Globe className="mr-2 h-4 w-4" />
+            Browse Public
+          </Button>
+          <Button onClick={onCreatePrompt}>
+            <Plus className="mr-2 h-4 w-4" />
+            New Prompt
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function PromptLibraryClient() {
   const router = useRouter()
   const searchInputRef = useRef<HTMLInputElement>(null)
-  const [prompts, setPrompts] = useState<PromptListItemType[]>([])
-  const [loading, setLoading] = useState(true)
 
   const {
     viewMode,
@@ -48,33 +121,12 @@ export function PromptLibraryClient() {
   } = usePromptLibraryStore()
 
   const [debouncedSearch] = useDebounce(searchQuery, 300)
-
-  const { execute: executeList } = useAction(listPrompts, {
-    showSuccessToast: false,
-    showErrorToast: false
+  const { prompts, setPrompts, loading } = usePromptResults({
+    search: debouncedSearch,
+    tags: selectedTags,
+    visibility: visibilityFilter,
+    sort: sortBy,
   })
-
-  // Load prompts
-  useEffect(() => {
-    async function loadPrompts() {
-      setLoading(true)
-      const result = await executeList({
-        search: debouncedSearch || undefined,
-        tags: selectedTags.length > 0 ? selectedTags : undefined,
-        visibility: visibilityFilter === 'all' ? undefined : visibilityFilter,
-        sort: sortBy,
-        page: 1,
-        limit: 100
-      })
-
-      if (result?.isSuccess && result.data) {
-        setPrompts(result.data.prompts)
-      }
-      setLoading(false)
-    }
-
-    loadPrompts()
-  }, [debouncedSearch, selectedTags, visibilityFilter, sortBy]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectedCount = selectedPrompts.size
 
@@ -104,31 +156,10 @@ export function PromptLibraryClient() {
 
   return (
     <>
-      {/* Page Header */}
-      <div className="mb-6">
-        <PageBranding />
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold text-gray-900">Prompt Library</h1>
-            <p className="text-sm text-muted-foreground mt-1">
-              Manage and organize your saved prompts
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              onClick={() => router.push('/prompt-library/public')}
-            >
-              <Globe className="mr-2 h-4 w-4" />
-              Browse Public
-            </Button>
-            <Button onClick={() => router.push('/prompt-library/new')}>
-              <Plus className="mr-2 h-4 w-4" />
-              New Prompt
-            </Button>
-          </div>
-        </div>
-      </div>
+      <PromptLibraryHeader
+        onBrowsePublic={() => router.push('/prompt-library/public')}
+        onCreatePrompt={() => router.push('/prompt-library/new')}
+      />
 
       <Card>
         <CardHeader>

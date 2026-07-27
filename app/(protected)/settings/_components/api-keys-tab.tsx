@@ -53,6 +53,124 @@ function getKeyStatus(key: ApiKeyInfo) {
   return { label: "Active", variant: "default" as const }
 }
 
+function ApiKeyList({
+  keys,
+  onRevoke,
+}: {
+  keys: ApiKeyInfo[]
+  onRevoke: (key: ApiKeyInfo) => void
+}) {
+  if (keys.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12 text-center">
+        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-muted">
+          <Key className="h-6 w-6 text-muted-foreground" />
+        </div>
+        <h3 className="font-semibold">No API Keys</h3>
+        <p className="mt-1 max-w-sm text-sm text-muted-foreground">
+          Create an API key to integrate AI Studio with your applications. You can have up to 10 active keys.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      {keys.map((key) => <ApiKeyRow key={key.id} apiKey={key} onRevoke={onRevoke} />)}
+    </div>
+  )
+}
+
+function ApiKeyRow({ apiKey, onRevoke }: { apiKey: ApiKeyInfo; onRevoke: (key: ApiKeyInfo) => void }) {
+  const status = getKeyStatus(apiKey)
+  return (
+    <div className="flex items-start justify-between rounded-lg border p-4">
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-2">
+          <span className="font-medium">{apiKey.name}</span>
+          <Badge variant={status.variant}>{status.label}</Badge>
+        </div>
+        <p className="font-mono text-sm text-muted-foreground">
+          sk-{apiKey.keyPrefix}{"••••••••"}
+        </p>
+        {apiKey.scopes.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {apiKey.scopes.map((scope) => (
+              <Badge key={scope} variant="outline" className="text-xs">{scope}</Badge>
+            ))}
+          </div>
+        )}
+        <ApiKeyDates apiKey={apiKey} />
+      </div>
+      {!apiKey.revokedAt && apiKey.isActive && (
+        <Button variant="destructive" size="sm" onClick={() => onRevoke(apiKey)}>
+          Revoke
+        </Button>
+      )}
+    </div>
+  )
+}
+
+function ApiKeyDates({ apiKey }: { apiKey: ApiKeyInfo }) {
+  return (
+    <div className="flex flex-wrap gap-x-4 text-xs text-muted-foreground">
+      <span>Created {formatDistanceToNow(new Date(apiKey.createdAt), { addSuffix: true })}</span>
+      {apiKey.lastUsedAt && (
+        <span>Last used {formatDistanceToNow(new Date(apiKey.lastUsedAt), { addSuffix: true })}</span>
+      )}
+      {apiKey.expiresAt && (
+        <span>Expires {formatDistanceToNow(new Date(apiKey.expiresAt), { addSuffix: true })}</span>
+      )}
+    </div>
+  )
+}
+
+interface RevokeApiKeyDialogProps {
+  target: ApiKeyInfo | null
+  isRevoking: boolean
+  onOpenChange: (open: boolean) => void
+  onConfirm: () => void
+}
+
+function RevokeApiKeyDialog({
+  target,
+  isRevoking,
+  onOpenChange,
+  onConfirm,
+}: RevokeApiKeyDialogProps) {
+  return (
+    <AlertDialog open={target !== null} onOpenChange={onOpenChange}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Revoke API Key?</AlertDialogTitle>
+          <AlertDialogDescription className="space-y-2">
+            <p>
+              This action cannot be undone. All applications using the key{" "}
+              <strong>&ldquo;{target?.name}&rdquo;</strong> will immediately lose access.
+            </p>
+            {target?.lastUsedAt && (
+              <p className="text-xs">
+                Last used: {formatDistanceToNow(new Date(target.lastUsedAt), { addSuffix: true })}
+              </p>
+            )}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={isRevoking}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={onConfirm}
+            disabled={isRevoking}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          >
+            {isRevoking && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            Revoke Key
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  )
+}
+
 export function ApiKeysTab({ initialKeys, userRoles }: ApiKeysTabProps) {
   const [keys, setKeys] = useState<ApiKeyInfo[]>(initialKeys)
   const [showCreateDialog, setShowCreateDialog] = useState(false)
@@ -119,83 +237,7 @@ export function ApiKeysTab({ initialKeys, userRoles }: ApiKeysTabProps) {
           />
         )}
 
-        {/* Key list */}
-        {keys.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-12 text-center">
-            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-              <Key className="h-6 w-6 text-muted-foreground" />
-            </div>
-            <h3 className="font-semibold">No API Keys</h3>
-            <p className="mt-1 max-w-sm text-sm text-muted-foreground">
-              Create an API key to integrate AI Studio with your
-              applications. You can have up to 10 active keys.
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {keys.map((key) => {
-              const status = getKeyStatus(key)
-              return (
-                <div
-                  key={key.id}
-                  className="flex items-start justify-between rounded-lg border p-4"
-                >
-                  <div className="space-y-1.5">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{key.name}</span>
-                      <Badge variant={status.variant}>{status.label}</Badge>
-                    </div>
-                    <p className="font-mono text-sm text-muted-foreground">
-                      sk-{key.keyPrefix}{"••••••••"}
-                    </p>
-                    {key.scopes.length > 0 && (
-                      <div className="flex flex-wrap gap-1">
-                        {key.scopes.map((scope) => (
-                          <Badge key={scope} variant="outline" className="text-xs">
-                            {scope}
-                          </Badge>
-                        ))}
-                      </div>
-                    )}
-                    <div className="flex flex-wrap gap-x-4 text-xs text-muted-foreground">
-                      <span>
-                        Created{" "}
-                        {formatDistanceToNow(new Date(key.createdAt), {
-                          addSuffix: true,
-                        })}
-                      </span>
-                      {key.lastUsedAt && (
-                        <span>
-                          Last used{" "}
-                          {formatDistanceToNow(new Date(key.lastUsedAt), {
-                            addSuffix: true,
-                          })}
-                        </span>
-                      )}
-                      {key.expiresAt && (
-                        <span>
-                          Expires{" "}
-                          {formatDistanceToNow(new Date(key.expiresAt), {
-                            addSuffix: true,
-                          })}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  {!key.revokedAt && key.isActive && (
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => setRevokeTarget(key)}
-                    >
-                      Revoke
-                    </Button>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        )}
+        <ApiKeyList keys={keys} onRevoke={setRevokeTarget} />
       </CardContent>
 
       {/* Create Dialog */}
@@ -206,45 +248,14 @@ export function ApiKeysTab({ initialKeys, userRoles }: ApiKeysTabProps) {
         userRoles={userRoles}
       />
 
-      {/* Revoke Confirmation */}
-      <AlertDialog
-        open={revokeTarget !== null}
+      <RevokeApiKeyDialog
+        target={revokeTarget}
+        isRevoking={isRevoking}
         onOpenChange={(open) => {
           if (!open) setRevokeTarget(null)
         }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Revoke API Key?</AlertDialogTitle>
-            <AlertDialogDescription className="space-y-2">
-              <p>
-                This action cannot be undone. All applications using the key{" "}
-                <strong>&ldquo;{revokeTarget?.name}&rdquo;</strong> will
-                immediately lose access.
-              </p>
-              {revokeTarget?.lastUsedAt && (
-                <p className="text-xs">
-                  Last used:{" "}
-                  {formatDistanceToNow(new Date(revokeTarget.lastUsedAt), {
-                    addSuffix: true,
-                  })}
-                </p>
-              )}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={isRevoking}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleRevoke}
-              disabled={isRevoking}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              {isRevoking && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Revoke Key
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+        onConfirm={handleRevoke}
+      />
     </Card>
   )
 }
