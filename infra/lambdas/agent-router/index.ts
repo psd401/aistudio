@@ -28,7 +28,6 @@
  *   DATABASE_NAME          — Aurora database name
  *   GOOGLE_CREDENTIALS_SECRET_ARN — Secrets Manager ARN for Google service account JSON
  *   TOKEN_LIMIT_PER_INTERACTION — Alerting threshold for token usage (default 100000)
- *   GUARDRAIL_FAIL_OPEN    — 'true' to allow messages when guardrail service fails (default: 'false')
  *   ALLOWED_DOMAINS        — Comma-separated list of allowed email domains (default: 'psd401.net')
  */
 
@@ -59,8 +58,8 @@ import { ECSClient, RunTaskCommand } from '@aws-sdk/client-ecs';
 import { S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { Context as LambdaContext, SQSBatchResponse, SQSEvent, SQSRecord } from 'aws-lambda';
-import * as crypto from 'crypto';
-import type { Readable } from 'stream';
+import * as crypto from 'node:crypto';
+import type { Readable } from 'node:stream';
 import * as chatPkg from '@googleapis/chat';
 import { Agent as UndiciAgent, fetch as undiciFetch } from 'undici';
 import { classifyTopic, isPrivateMessage, isoWeek, type Topic } from './topic-classifier';
@@ -191,7 +190,6 @@ const TOKEN_LIMIT = parseInt(
   10
 );
 // Fail closed by default in K-12 environment — only allow through on explicit opt-in
-const GUARDRAIL_FAIL_OPEN = process.env.GUARDRAIL_FAIL_OPEN === 'true';
 // Domain allowlist for sender identity validation
 const ALLOWED_DOMAINS = (process.env.ALLOWED_DOMAINS || 'psd401.net')
   .split(',')
@@ -687,7 +685,7 @@ async function waitForSessionLock(
   let backoffMs = 1000;
   while (Date.now() - start < maxWaitMs) {
     const token = await tryAcquireSessionLock(sessionId, log);
-    if (token !== null) {
+    if (typeof token === "string") {
       if (attempt > 0) {
         log.info('Session lock acquired after wait', {
           waitedMs: Date.now() - start,
@@ -1125,7 +1123,14 @@ async function getOrCreateUser(
  * to ensure consistent input validation regardless of invocation method.
  */
 function isValidUsername(value: string): boolean {
-  return /^[a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?$/.test(value);
+  if (value.length === 0) return false;
+  const isAlphaNumeric = (character: string) => /^[a-zA-Z0-9]$/.test(character);
+  if (!isAlphaNumeric(value[0]) || !isAlphaNumeric(value.at(-1) ?? '')) {
+    return false;
+  }
+  return [...value].every(
+    (character) => isAlphaNumeric(character) || character === '.' || character === '_' || character === '-'
+  );
 }
 
 /**
@@ -1146,12 +1151,21 @@ function parseCrossUserInvocation(text: string): CrossUserInvocation | null {
   // Match @agent: followed by a username (alphanumeric, dots, hyphens, underscores).
   // Must start and end with alphanumeric; rejects punctuation-only inputs like
   // @agent:. or @agent:--- which are not valid email local parts.
-  const match = text.trim().match(/^@agent:([a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?)\s*([\s\S]*)/);
-  if (!match) return null;
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('@agent:')) return null;
+
+  const invocation = trimmed.slice('@agent:'.length);
+  const whitespaceIndex = invocation.search(/\s/);
+  const username = whitespaceIndex === -1
+    ? invocation
+    : invocation.slice(0, whitespaceIndex);
+  if (!isValidUsername(username)) return null;
 
   return {
-    targetUsername: match[1].toLowerCase(),
-    strippedMessage: match[2].trim(),
+    targetUsername: username.toLowerCase(),
+    strippedMessage: whitespaceIndex === -1
+      ? ''
+      : invocation.slice(whitespaceIndex).trim(),
     source: 'text-prefix',
   };
 }
@@ -3242,7 +3256,7 @@ async function processRecord(
             displayName: senderDisplayName,
           },
           threadContext,
-          ...(attachments.length ? { attachments } : {}),
+          ...(attachments.length > 0 ? { attachments } : {}),
         }
       ).finally(() => releaseSessionLock(crossSessionId, crossLockToken, log));
 
@@ -3404,7 +3418,7 @@ async function processRecord(
     {
       displayName: senderDisplayName,
       workspacePrefix: user.workspacePrefix,
-      ...(attachments.length ? { attachments } : {}),
+      ...(attachments.length > 0 ? { attachments } : {}),
     }
   ).finally(() => releaseSessionLock(sessionId, lockToken, log));
 

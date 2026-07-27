@@ -85,10 +85,10 @@ jest.mock("@/lib/db/schema", () => ({
 
 // Import after mocks — use require() to ensure mocks are registered first
 // (next/jest SWC transform may not properly hoist jest.mock before static imports)
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { authenticateRequest, requireScope, createErrorResponse, createApiResponse } = require("@/lib/api/auth-middleware")
 // Real role→scope mapping (single source of truth) for asserting session scopes.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { getScopesForRoles } = require("@/lib/api-keys/scopes")
 
 // ============================================

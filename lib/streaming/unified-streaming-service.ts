@@ -612,7 +612,7 @@ async function convertMessages(
       messageCount: normalizedMessages.length,
       messageRoles: normalizedMessages.map(m => m.role),
     });
-    throw new Error(`Message conversion failed: ${error.message}`);
+    throw new Error(`Message conversion failed: ${error.message}`, { cause: conversionError });
   }
 }
 
@@ -808,7 +808,7 @@ function buildStreamResponse(options: BuildStreamResponseOptions): StreamRespons
  */
 export class UnifiedStreamingService {
   private circuitBreakers = new Map<string, CircuitBreaker>();
-  
+
   /**
    * Main streaming method that handles all AI operations
    */
@@ -816,7 +816,7 @@ export class UnifiedStreamingService {
     const requestId = generateRequestId();
     const timer = startTimer('unified-streaming-service.stream');
     const log = createLogger({ requestId, module: 'unified-streaming-service' });
-    
+
     log.info('Starting unified stream', {
       provider: request.provider,
       modelId: request.modelId,
@@ -826,12 +826,12 @@ export class UnifiedStreamingService {
       hasMessages: !!request.messages,
       messagesType: typeof request.messages
     });
-    
+
     try {
       // 1. Get provider adapter and capabilities
       const adapter = await getProviderAdapter(request.provider);
       const capabilities = adapter.getCapabilities(request.modelId);
-      
+
       // 2. Configure telemetry
       const telemetryConfig = await getTelemetryConfig({
         functionId: `${request.source}.stream`,
@@ -844,7 +844,7 @@ export class UnifiedStreamingService {
         recordInputs: request.telemetry?.recordInputs,
         recordOutputs: request.telemetry?.recordOutputs
       });
-      
+
       // 3. Check circuit breaker
       const circuitBreaker = this.getCircuitBreaker(request.provider);
       checkCircuitBreaker(circuitBreaker, request.provider, log);
@@ -879,10 +879,10 @@ export class UnifiedStreamingService {
         providerOptions: adapter.getProviderOptions(request.modelId, request.options),
         telemetryConfig
       });
-      
+
       // 5. Start telemetry span
       const span = createStreamingTelemetrySpan(telemetryConfig, request, capabilities, config.timeout || timeout);
-      
+
       try {
         // 6. Execute streaming with provider-specific handling
         const result = await adapter.streamWithEnhancements(config, {
@@ -917,7 +917,7 @@ export class UnifiedStreamingService {
             request.callbacks?.onError?.(error);
           }
         });
-        
+
         // 7. Mark circuit breaker as successful and build response
         circuitBreaker.recordSuccess();
         log.info('Stream completed successfully', {
@@ -942,7 +942,7 @@ export class UnifiedStreamingService {
           hasDynamicTokenMappings: request.inputTokenMappingSink !== undefined,
           log
         });
-        
+
       } catch (error) {
         span?.recordException(error as Error);
         span?.setStatus({ code: 2 }); // ERROR
@@ -951,7 +951,7 @@ export class UnifiedStreamingService {
       } finally {
         span?.end();
       }
-      
+
     } catch (error) {
       timer({ status: 'error' });
       log.error('Stream failed', {
@@ -963,7 +963,7 @@ export class UnifiedStreamingService {
       throw error;
     }
   }
-  
+
   /**
    * Get or create circuit breaker for provider
    */
@@ -977,7 +977,7 @@ export class UnifiedStreamingService {
     }
     return this.circuitBreakers.get(provider)!;
   }
-  
+
   /**
    * Calculate adaptive timeout based on model capabilities and request
    */
@@ -1005,11 +1005,11 @@ export class UnifiedStreamingService {
       // Other reasoning models get 1 minute
       return 60000;
     }
-    
+
     // Standard models use base timeout
     return request.timeout || baseTimeout;
   }
-  
+
   /**
    * Handle streaming progress events using typed SSE events and type guards
    */
@@ -1141,7 +1141,7 @@ export class UnifiedStreamingService {
     }
     return false;
   }
-  
+
   /**
    * Handle reasoning content for advanced models
    */
@@ -1153,7 +1153,7 @@ export class UnifiedStreamingService {
       });
     }
   }
-  
+
   /**
    * Handle thinking content for Claude models
    */
@@ -1165,7 +1165,7 @@ export class UnifiedStreamingService {
       });
     }
   }
-  
+
   /**
    * Handle stream completion
    */
@@ -1196,14 +1196,14 @@ export class UnifiedStreamingService {
       });
       span.setStatus({ code: 1 }); // OK
     }
-    
-    timer({ 
+
+    timer({
       status: 'success',
       tokensUsed: data.usage?.totalTokens || 0,
       finishReason: data.finishReason
     });
   }
-  
+
   /**
    * Handle stream errors
    */

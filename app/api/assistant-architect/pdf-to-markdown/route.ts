@@ -30,33 +30,33 @@ export async function POST(req: NextRequest) {
   const requestId = generateRequestId();
   const timer = startTimer("api.assistant-architect.pdf-to-markdown");
   const log = createLogger({ requestId, route: "api.assistant-architect.pdf-to-markdown" });
-  
+
   log.info('POST /api/assistant-architect/pdf-to-markdown - Processing PDF conversion');
-  
+
   // Set response headers early to ensure proper content type
   const headers = {
     'Content-Type': 'application/json',
     'X-Request-Id': requestId,
   };
-  
+
   // Get user authentication
   const session = await getServerSession();
   if (!session || !session.sub) {
     log.warn("Unauthorized - No session");
     timer({ status: "error", reason: "unauthorized" });
     return new NextResponse(
-      JSON.stringify({ error: 'Unauthorized' }), 
+      JSON.stringify({ error: 'Unauthorized' }),
       { status: 401, headers }
     );
   }
-  
+
   // Get the current user's database ID
   const currentUser = await getCurrentUserAction();
   if (!currentUser.isSuccess || !currentUser.data) {
     log.warn("User not found");
     timer({ status: "error", reason: "user_not_found" });
     return new NextResponse(
-      JSON.stringify({ error: 'User not found' }), 
+      JSON.stringify({ error: 'User not found' }),
       { status: 401, headers }
     );
   }
@@ -122,18 +122,18 @@ async function processAuthenticatedPdfUpload(
       log.warn('No file provided');
       timer({ status: "error", reason: "no_file" });
       return new NextResponse(
-        JSON.stringify({ error: 'No file uploaded.' }), 
+        JSON.stringify({ error: 'No file uploaded.' }),
         { status: 400, headers }
       );
     }
-    
+
     log.debug('File received', { fileName: file.name, size: file.size, type: file.type });
-    
+
     if (file.type !== 'application/pdf') {
       log.warn('Invalid file type', { fileType: file.type });
       timer({ status: "error", reason: "invalid_file_type" });
       return new NextResponse(
-        JSON.stringify({ error: 'Only PDF files are supported.' }), 
+        JSON.stringify({ error: 'Only PDF files are supported.' }),
         { status: 400, headers }
       );
     }
@@ -141,7 +141,7 @@ async function processAuthenticatedPdfUpload(
       log.warn('File too large', { fileSize: file.size });
       timer({ status: "error", reason: "file_too_large" });
       return new NextResponse(
-        JSON.stringify({ error: 'File size exceeds 25MB limit.' }), 
+        JSON.stringify({ error: 'File size exceeds 25MB limit.' }),
         { status: 400, headers }
       );
     }
@@ -150,7 +150,7 @@ async function processAuthenticatedPdfUpload(
     log.debug('Converting file to base64');
     const arrayBuffer = await file.arrayBuffer()
     const base64Data = Buffer.from(arrayBuffer).toString('base64')
-    
+
     // Create a job in the database
     log.debug('Creating job in database');
     const jobInput = {
@@ -169,7 +169,7 @@ async function processAuthenticatedPdfUpload(
     });
 
     log.info('Job created', { jobId: job.id });
-    
+
     // Ensure job is committed and visible before returning
     let committedJob = null;
     for (let i = 0; i < 5; i++) {
@@ -189,19 +189,19 @@ async function processAuthenticatedPdfUpload(
         { status: 500, headers }
       );
     }
-    
+
     // Start processing in the background (non-blocking)
     processPdfInBackground(job.id, jobInput).catch(error => {
       const bgLog = createLogger({ requestId: `job-${job.id}`, route: "api.assistant-architect.pdf-to-markdown" });
       bgLog.error('Background processing error', error);
     });
-    
+
     // Small delay to ensure background process starts
     await new Promise(resolve => setTimeout(resolve, 100));
-    
+
     log.info('PDF processing started', { jobId: job.id });
     timer({ status: "success", jobId: job.id });
-    
+
     // Return immediately with job ID
     return new NextResponse(
       JSON.stringify({
@@ -211,12 +211,12 @@ async function processAuthenticatedPdfUpload(
       }),
       { status: 202, headers }
     );
-    
+
   } catch (error) {
     timer({ status: "error" });
     log.error('Failed to process PDF file', error);
     return new NextResponse(
-      JSON.stringify({ error: 'Failed to process PDF file' }), 
+      JSON.stringify({ error: 'Failed to process PDF file' }),
       { status: 500, headers }
     );
   }
@@ -246,13 +246,13 @@ async function processPdfInBackground(jobId: number, jobInput: JobInput) {
     if (!model) {
       throw ErrorFactories.dbRecordNotFound('ai_models', jobInput.modelId);
     }
-    
+
     // Convert base64 back to buffer
     const pdfBuffer = Buffer.from(jobInput.fileData, 'base64');
-    
+
     // System prompt for the LLM
     const systemPrompt = `You are an expert document parser. Given a PDF file, extract ALL text and describe every image or graphic in context. Return a single, well-structured markdown document that preserves the logical order and hierarchy of the original. For images/graphics, insert a markdown image block with a description, e.g. ![Description of image]. Do not skip any content. Output only markdown.`
-    
+
     // Prepare messages for the LLM
     const messages = [
       {
@@ -263,14 +263,14 @@ async function processPdfInBackground(jobId: number, jobInput: JobInput) {
         ]
       }
     ];
-    
+
     log.info(`[PDF-to-Markdown Background] Prepared messages for job ${jobId}:`, {
       role: messages[0].role,
       contentTypes: messages[0].content.map(c => c.type),
       textLength: (messages[0].content[0] as { type: string; text: string })?.text?.length || 0,
       fileSize: (messages[0].content[1] as { type: string; data: Buffer })?.data?.length || 0
     });
-    
+
     // Call the LLM
     log.info(`[PDF-to-Markdown Background] Calling LLM for job ${jobId}...`);
     const startTime = Date.now();
@@ -278,22 +278,22 @@ async function processPdfInBackground(jobId: number, jobInput: JobInput) {
       { provider: model.provider as string, modelId: model.modelId as string },
       messages
     );
-    
+
     const processingTime = Date.now() - startTime;
     log.info(`[PDF-to-Markdown Background] Job ${jobId} completed in ${processingTime}ms`);
     log.info(`[PDF-to-Markdown Background] Markdown result length: ${markdown?.length || 0}`);
-    
+
     if (!markdown) {
       throw ErrorFactories.externalServiceError('AI Model', new Error('No markdown content generated'));
     }
-    
+
     // Update job with result
-    const outputData = { 
+    const outputData = {
       markdown,
       fileName: jobInput.fileName,
-      processingTime 
+      processingTime
     };
-    
+
     log.info(`[PDF-to-Markdown Background] Saving result for job ${jobId}:`, {
       markdownLength: markdown.length,
       fileName: jobInput.fileName
@@ -302,7 +302,7 @@ async function processPdfInBackground(jobId: number, jobInput: JobInput) {
     await updateGenericJobStatus(jobId, 'completed', JSON.stringify(outputData));
 
     log.info(`[PDF-to-Markdown Background] Job ${jobId} successfully saved to database`);
-      
+
   } catch (error) {
     log.error(`[PDF-to-Markdown Background] Job ${jobId} failed:`, error);
 

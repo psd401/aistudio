@@ -26,8 +26,8 @@
 
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const CONFIG_PATH = path.join(__dirname, 'brand-config.json');
 const ASSETS_DIR = path.join(__dirname, 'assets');
@@ -99,6 +99,10 @@ function validatePrompt(config, prompt) {
   for (const pattern of forbidden.patterns) {
     let re;
     try {
+      // Patterns are immutable, reviewed expressions from the bundled
+      // brand-config.json—not caller input. Keep compilation at this boundary
+      // so administrators can evolve the brand policy without changing code.
+      // eslint-disable-next-line security/detect-non-literal-regexp
       re = new RegExp(pattern, 'i');
     } catch {
       continue;
@@ -131,7 +135,7 @@ function usage() {
 }
 
 function main(argv) {
-  if (argv.length < 1) {
+  if (argv.length === 0) {
     usage();
     process.exit(0);
   }

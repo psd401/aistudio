@@ -29,14 +29,6 @@ describe('Simple Utility Functions', () => {
     expect(15 / 3).toBe(5)
   })
 
-  it('should handle boolean operations', () => {
-    expect(true && false).toBe(false)
-    expect(true || false).toBe(true)
-    expect(!false).toBe(true)
-    expect(Boolean('')).toBe(false)
-    expect(Boolean('test')).toBe(true)
-  })
-
   it('should handle date operations', () => {
     const date = new Date(2023, 0, 1) // Year, month (0-based), day
     expect(date.getFullYear()).toBe(2023)

@@ -6,7 +6,7 @@ import * as targets from "aws-cdk-lib/aws-events-targets"
 import * as iam from "aws-cdk-lib/aws-iam"
 import * as logs from "aws-cdk-lib/aws-logs"
 import { Construct } from "constructs"
-import * as path from "path"
+import * as path from "node:path"
 
 export interface AuroraCostOptimizerProps {
   /**

@@ -4,6 +4,20 @@ import * as rds from "aws-cdk-lib/aws-rds"
 import * as lambda from "aws-cdk-lib/aws-lambda"
 import { AuroraCostOptimizer } from "../../lib/constructs/database/aurora-cost-optimizer"
 
+interface SynthesizedResource {
+  Properties?: {
+    Handler?: string
+    Description?: string
+    PolicyDocument?: { Statement?: SynthesizedPolicyStatement[] }
+  }
+}
+
+interface SynthesizedPolicyStatement {
+  Action?: string[]
+  Resource?: unknown
+  Condition?: { StringEquals?: Record<string, string> }
+}
+
 describe("AuroraCostOptimizer", () => {
   let app: cdk.App
   let stack: cdk.Stack
@@ -23,7 +37,7 @@ describe("AuroraCostOptimizer", () => {
     )
   })
 
-  describe("Development Environment", () => {
+
     test("enables auto-pause by default", () => {
       new AuroraCostOptimizer(stack, "DevOptimizer", {
         cluster: mockCluster,
@@ -62,7 +76,7 @@ describe("AuroraCostOptimizer", () => {
 
       // Should not create scaling Lambda for dev
       const functions = template.findResources("AWS::Lambda::Function")
-      const scalingFunctions = Object.values(functions).filter((fn: any) =>
+      const scalingFunctions = (Object.values(functions) as SynthesizedResource[]).filter((fn) =>
         fn.Properties?.Handler?.includes("predictive_scaling")
       )
 
@@ -102,9 +116,9 @@ describe("AuroraCostOptimizer", () => {
         EvaluationPeriods: 1,
       })
     })
-  })
 
-  describe("Staging Environment", () => {
+
+
     test("enables both auto-pause and scheduled scaling", () => {
       new AuroraCostOptimizer(stack, "StagingOptimizer", {
         cluster: mockCluster,
@@ -161,9 +175,9 @@ describe("AuroraCostOptimizer", () => {
         ScheduleExpression: Match.stringLikeRegexp("cron.*20.*MON-FRI"),
       })
     })
-  })
 
-  describe("Production Environment", () => {
+
+
     test("disables auto-pause by default", () => {
       new AuroraCostOptimizer(stack, "ProdOptimizer", {
         cluster: mockCluster,
@@ -174,7 +188,7 @@ describe("AuroraCostOptimizer", () => {
 
       // Should not have auto-pause schedule (only scaling schedules)
       const rules = template.findResources("AWS::Events::Rule")
-      const autoPauseRules = Object.values(rules).filter((rule: any) =>
+      const autoPauseRules = (Object.values(rules) as SynthesizedResource[]).filter((rule) =>
         rule.Properties?.Description?.toLowerCase().includes("pause")
       )
 
@@ -231,9 +245,9 @@ describe("AuroraCostOptimizer", () => {
         Handler: "pause_resume.handler",
       })
     })
-  })
 
-  describe("IAM Permissions", () => {
+
+
     test("grants RDS modification permissions to pause/resume Lambda with least privilege", () => {
       new AuroraCostOptimizer(stack, "Optimizer", {
         cluster: mockCluster,
@@ -244,12 +258,14 @@ describe("AuroraCostOptimizer", () => {
 
       // Verify RDS actions are granted
       const policies = template.findResources("AWS::IAM::Policy")
-      const policyStatements = Object.values(policies).flatMap((policy: any) =>
-        policy.Properties.PolicyDocument.Statement
+      const policyStatements = (
+        Object.values(policies) as SynthesizedResource[]
+      ).flatMap((policy) =>
+        policy.Properties?.PolicyDocument?.Statement ?? []
       )
 
       // Check for RDS permissions scoped to cluster ARN
-      const rdsStatement = policyStatements.find((stmt: any) =>
+      const rdsStatement = policyStatements.find((stmt) =>
         stmt.Action?.includes("rds:ModifyDBCluster")
       )
       expect(rdsStatement).toBeDefined()
@@ -260,7 +276,7 @@ describe("AuroraCostOptimizer", () => {
       expect(rdsStatement?.Resource).not.toBe("*") // Verify it's not wildcard
 
       // Check for CloudWatch permissions with namespace condition
-      const cloudWatchStatement = policyStatements.find((stmt: any) =>
+      const cloudWatchStatement = policyStatements.find((stmt) =>
         stmt.Action?.includes("cloudwatch:GetMetricStatistics")
       )
       expect(cloudWatchStatement).toBeDefined()
@@ -292,9 +308,9 @@ describe("AuroraCostOptimizer", () => {
         },
       })
     })
-  })
 
-  describe("Custom Configuration", () => {
+
+
     test("accepts custom scaling parameters", () => {
       new AuroraCostOptimizer(stack, "Optimizer", {
         cluster: mockCluster,
@@ -328,9 +344,9 @@ describe("AuroraCostOptimizer", () => {
       const rules = template.findResources("AWS::Events::Rule")
       expect(Object.keys(rules)).toHaveLength(0)
     })
-  })
 
-  describe("Lambda Configuration", () => {
+
+
     test("creates Lambda functions with proper configuration", () => {
       const optimizer = new AuroraCostOptimizer(stack, "Optimizer", {
         cluster: mockCluster,
@@ -360,5 +376,5 @@ describe("AuroraCostOptimizer", () => {
         ReservedConcurrentExecutions: 1,
       })
     })
-  })
+
 })

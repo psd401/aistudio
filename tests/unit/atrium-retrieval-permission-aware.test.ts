@@ -37,7 +37,7 @@ let insertedChunkPayload: Array<Record<string, unknown>> | null = null;
 // assert the repository_items.type mapping (document -> "document", artifact -> "text").
 let insertedRows: Array<Record<string, unknown>> = [];
 
-const shiftTx = () => (txResults.length ? txResults.shift() : []);
+const shiftTx = () => (txResults.length > 0 ? txResults.shift() : []);
 const txChain: Record<string, unknown> = {};
 const txProxy: unknown = new Proxy(txChain, {
   get(_t, prop: string | symbol) {

@@ -163,7 +163,7 @@ describe('cross-library Argon2 interop (the claim validateApiKey depends on)', (
   it("the app's native argon2.verify() accepts a hash-wasm PHC string", async () => {
     // The exact library lib/api-keys/argon2-loader.ts loads at runtime,
     // resolved from the repo root node_modules.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+
     const nativeArgon2 = require('argon2') as {
       verify(hash: string, plain: string): Promise<boolean>;
     };

@@ -34,7 +34,7 @@ import {
   UpdateScheduleCommand,
 } from "@aws-sdk/client-scheduler"
 import {
-  GetCommand,
+
   PutCommand,
   QueryCommand,
   TransactWriteCommand,

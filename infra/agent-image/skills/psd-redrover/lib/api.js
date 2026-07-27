@@ -100,10 +100,7 @@ async function getOrganization(creds) {
  * filtered by filled/unfilled status. Read-only; uses rrGet under the
  * hood. Returns { data: [...] } on success or { error } on API failure.
  */
-async function getVacancyDetails(orgId, apiKey, creds, startDate, endDate, filledFilter) {
-  void orgId;
-  void apiKey;
-  void creds;
+async function getVacancyDetails(startDate, endDate, filledFilter) {
   return requestAgentBroker('/api/agent/credentials', {
     operation: 'redrover',
     action: 'vacancies',
@@ -188,7 +185,7 @@ function parseDate(dateArg) {
   const d = /^\d{4}-\d{2}-\d{2}$/.test(dateArg)
     ? new Date(`${dateArg}T00:00:00`)
     : new Date(dateArg);
-  if (isNaN(d.getTime())) {
+  if (Number.isNaN(d.getTime())) {
     fail(`Could not parse date: ${dateArg}`, 'bad_args');
   }
   return {

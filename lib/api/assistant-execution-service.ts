@@ -515,16 +515,16 @@ async function executePromptChain(
     if (promptsAtPosition.length > 1) {
       // Parallel execution
       const parallelPromises = promptsAtPosition.map((prompt, idx) =>
-        executeSinglePromptWithCompletion(
+        executeSinglePromptWithCompletion({
           prompt,
           inputs,
           context,
           requestId,
           log,
-          prompts.length,
-          isLastPosition && idx === 0,
-          prompts
-        )
+          totalPrompts: prompts.length,
+          isLastPrompt: isLastPosition && idx === 0,
+          prompts,
+        })
       )
 
       const results = await Promise.allSettled(parallelPromises)
@@ -547,16 +547,16 @@ async function executePromptChain(
     } else {
       const prompt = promptsAtPosition[0]
       const isLastPrompt = isLastPosition
-      const streamResponse = await executeSinglePromptWithCompletion(
+      const streamResponse = await executeSinglePromptWithCompletion({
         prompt,
         inputs,
         context,
         requestId,
         log,
-        prompts.length,
+        totalPrompts: prompts.length,
         isLastPrompt,
-        prompts
-      )
+        prompts,
+      })
 
       if (streamResponse) {
         lastStreamResponse = streamResponse
@@ -600,16 +600,16 @@ async function executePromptChainForText(
 
     for (const prompt of promptsAtPosition) {
       const isLast = isLastPosition && prompt === promptsAtPosition[0]
-      const result = await executeSinglePromptCollectText(
+      const result = await executeSinglePromptCollectText({
         prompt,
         inputs,
         context,
         requestId,
         log,
-        prompts.length,
-        isLast,
-        prompts
-      )
+        totalPrompts: prompts.length,
+        isLastPrompt: isLast,
+        prompts,
+      })
 
       if (isLast) {
         lastText = result.text
@@ -676,7 +676,6 @@ async function buildPromptKnowledgeContext(
       getPromptRepositoryQuery(prompt, context),
       repositoryIds,
       context.userCognitoSub,
-      context.assistantOwnerSub,
       {
         maxChunks: 10,
         maxTokens: 4000,
@@ -718,15 +717,27 @@ async function buildPromptKnowledgeContext(
 }
 
 async function executeSinglePromptWithCompletion(
-  prompt: ChainPrompt,
-  inputs: Record<string, unknown>,
-  context: PromptExecutionContext,
-  requestId: string,
-  log: ReturnType<typeof createLogger>,
-  totalPrompts: number,
-  isLastPrompt: boolean,
-  prompts: ChainPrompt[]
+  options: {
+    prompt: ChainPrompt
+    inputs: Record<string, unknown>
+    context: PromptExecutionContext
+    requestId: string
+    log: ReturnType<typeof createLogger>
+    totalPrompts: number
+    isLastPrompt: boolean
+    prompts: ChainPrompt[]
+  }
 ) {
+  const {
+    prompt,
+    inputs,
+    context,
+    requestId,
+    log,
+    totalPrompts,
+    isLastPrompt,
+    prompts,
+  } = options
   const promptStartTime = Date.now()
   const promptTimer = startTimer(`prompt.${prompt.id}.execution`)
 
@@ -758,14 +769,14 @@ async function executeSinglePromptWithCompletion(
 
     // 2. Variable substitution
     const inputMapping = (prompt.inputMapping || {}) as Record<string, string>
-    const processedContent = substituteVariables(
-      prompt.content,
+    const processedContent = substituteVariables({
+      content: prompt.content,
       inputs,
-      context.previousOutputs,
-      inputMapping,
-      prompts,
-      prompt.position
-    )
+      previousOutputs: context.previousOutputs,
+      mapping: inputMapping,
+      allPrompts: prompts,
+      currentPromptPosition: prompt.position,
+    })
 
     // 3. Build messages
     const userMessage: UIMessage = {
@@ -957,15 +968,27 @@ async function executeSinglePromptWithCompletion(
 // ============================================
 
 async function executeSinglePromptCollectText(
-  prompt: ChainPrompt,
-  inputs: Record<string, unknown>,
-  context: PromptExecutionContext,
-  requestId: string,
-  log: ReturnType<typeof createLogger>,
-  totalPrompts: number,
-  isLastPrompt: boolean,
-  prompts: ChainPrompt[]
+  options: {
+    prompt: ChainPrompt
+    inputs: Record<string, unknown>
+    context: PromptExecutionContext
+    requestId: string
+    log: ReturnType<typeof createLogger>
+    totalPrompts: number
+    isLastPrompt: boolean
+    prompts: ChainPrompt[]
+  }
 ): Promise<{ text: string; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } }> {
+  const {
+    prompt,
+    inputs,
+    context,
+    requestId,
+    log,
+    totalPrompts,
+    isLastPrompt,
+    prompts,
+  } = options
   const promptStartTime = Date.now()
   const promptTimer = startTimer(`prompt.${prompt.id}.execution`)
 
@@ -998,14 +1021,14 @@ async function executeSinglePromptCollectText(
 
     // Variable substitution
     const inputMapping = (prompt.inputMapping || {}) as Record<string, string>
-    const processedContent = substituteVariables(
-      prompt.content,
+    const processedContent = substituteVariables({
+      content: prompt.content,
       inputs,
-      context.previousOutputs,
-      inputMapping,
-      prompts,
-      prompt.position
-    )
+      previousOutputs: context.previousOutputs,
+      mapping: inputMapping,
+      allPrompts: prompts,
+      currentPromptPosition: prompt.position,
+    })
 
     // Build messages
     const userMessage: UIMessage = {
@@ -1166,13 +1189,23 @@ function slugify(str: string): string {
 
 // Exported for unit testing (REV-COR-517).
 export function substituteVariables(
-  content: string,
-  inputs: Record<string, unknown>,
-  previousOutputs: Map<number, string>,
-  mapping: Record<string, string>,
-  allPrompts: ChainPrompt[],
-  currentPromptPosition: number
+  options: {
+    content: string
+    inputs: Record<string, unknown>
+    previousOutputs: Map<number, string>
+    mapping: Record<string, string>
+    allPrompts: ChainPrompt[]
+    currentPromptPosition: number
+  }
 ): string {
+  const {
+    content,
+    inputs,
+    previousOutputs,
+    mapping,
+    allPrompts,
+    currentPromptPosition,
+  } = options
   if (content.length > MAX_PROMPT_CONTENT_SIZE) {
     throw ErrorFactories.validationFailed([{
       field: "content",

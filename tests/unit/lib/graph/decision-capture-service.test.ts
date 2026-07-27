@@ -177,7 +177,7 @@ function setupMocks(options: {
 // ============================================
 
 describe("createDecisionSchema", () => {
-  describe("required fields", () => {
+
     it("should accept valid minimal payload (decision + decidedBy)", () => {
       const result = createDecisionSchema.safeParse({
         decision: "Use PostgreSQL",
@@ -234,9 +234,9 @@ describe("createDecisionSchema", () => {
       })
       expect(result.success).toBe(false)
     })
-  })
 
-  describe("string length limits", () => {
+
+
     it("should reject decision exceeding 2000 chars", () => {
       const result = createDecisionSchema.safeParse({
         decision: "x".repeat(2001),
@@ -278,9 +278,9 @@ describe("createDecisionSchema", () => {
       })
       expect(result.success).toBe(false)
     })
-  })
 
-  describe("array fields", () => {
+
+
     it("should accept all optional array fields", () => {
       const result = createDecisionSchema.safeParse({
         decision: "Use PostgreSQL",
@@ -328,9 +328,9 @@ describe("createDecisionSchema", () => {
       })
       expect(result.success).toBe(false)
     })
-  })
 
-  describe("relatedTo field", () => {
+
+
     it("should accept valid UUIDs", () => {
       const result = createDecisionSchema.safeParse({
         decision: "Use PostgreSQL",
@@ -358,9 +358,9 @@ describe("createDecisionSchema", () => {
       })
       expect(result.success).toBe(false)
     })
-  })
 
-  describe("metadata field", () => {
+
+
     it("should accept valid metadata object", () => {
       const result = createDecisionSchema.safeParse({
         decision: "Use PostgreSQL",
@@ -387,9 +387,9 @@ describe("createDecisionSchema", () => {
       })
       expect(result.success).toBe(true)
     })
-  })
 
-  describe("full payload", () => {
+
+
     it("should accept a complete payload with all fields", () => {
       const result = createDecisionSchema.safeParse({
         decision: "Use PostgreSQL for the data layer",
@@ -405,7 +405,7 @@ describe("createDecisionSchema", () => {
       })
       expect(result.success).toBe(true)
     })
-  })
+
 })
 
 // ============================================
@@ -417,7 +417,7 @@ describe("captureStructuredDecision", () => {
     jest.clearAllMocks()
   })
 
-  describe("orchestration flow", () => {
+
     it("should translate payload, persist in transaction, and compute score", async () => {
       const { translated, tx } = setupMocks({ score: 75, warnings: ["Missing conditions"] })
 
@@ -516,9 +516,9 @@ describe("captureStructuredDecision", () => {
       expect(result.completenessScore).toBe(100)
       expect(result.completenessMethod).toBe("llm-enhanced")
     })
-  })
 
-  describe("transaction persistence", () => {
+
+
     it("should batch node inserts into a single statement (plus one edge batch)", async () => {
       const translated = createTranslatedGraph(3, 2)
       mockTranslatePayloadToGraph.mockReturnValue(translated)
@@ -636,9 +636,9 @@ describe("captureStructuredDecision", () => {
       expect(firstMetadata).not.toHaveProperty("dedup")
       expect(firstMetadata).toHaveProperty("project", "ok")
     })
-  })
 
-  describe("relatedTo validation", () => {
+
+
     it("should validate relatedTo nodes exist inside the transaction", async () => {
       const relatedId = "550e8400-e29b-41d4-a716-446655440000"
       const { tx } = setupMocks({ existingRelatedNodeIds: [relatedId] })
@@ -739,9 +739,9 @@ describe("captureStructuredDecision", () => {
       expect(tx.select).not.toHaveBeenCalled()
       expect(result.decisionNodeId).toBeDefined()
     })
-  })
 
-  describe("completeness scoring", () => {
+
+
     it("should forward LLM-enhanced score when available", async () => {
       setupMocks({ score: 85, method: "llm-enhanced" })
 
@@ -769,9 +769,9 @@ describe("captureStructuredDecision", () => {
 
       expect(result.warnings).toEqual([])
     })
-  })
 
-  describe("error handling", () => {
+
+
     it("should propagate transaction errors", async () => {
       mockTranslatePayloadToGraph.mockReturnValue(createTranslatedGraph())
       mockExecuteTransaction.mockRejectedValue(new Error("Connection lost"))
@@ -799,9 +799,9 @@ describe("captureStructuredDecision", () => {
         captureStructuredDecision(createPayload(), 1, "req-123")
       ).rejects.toThrow("Translation failed")
     })
-  })
 
-  describe("result shape", () => {
+
+
     it("should return all required fields in DecisionCaptureResult", async () => {
       setupMocks({
         nodeCount: 4,
@@ -842,7 +842,7 @@ describe("captureStructuredDecision", () => {
       expect(result.nodesCreated).toBe(5)
       expect(result.edgesCreated).toBe(4)
     })
-  })
+
 
   // ============================================
   // Issue #1251 — vocabulary + self-reference enforcement on the REST/MCP path
@@ -1063,7 +1063,9 @@ const OLD_DECISION_ID = "99999999-9999-9999-9999-999999999999"
 describe("decision lifecycle + supersession + provenance (Issue #1252)", () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    mockGenerateEmbedding.mockResolvedValue(new Array(512).fill(0.01))
+    mockGenerateEmbedding.mockResolvedValue(
+      Array.from({ length: 512 }, () => 0.01)
+    )
   })
 
   /** Mock tx that also records tx.update(...).set(...) calls (supersession). */

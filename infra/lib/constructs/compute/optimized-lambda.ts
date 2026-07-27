@@ -258,7 +258,7 @@ export class OptimizedLambda extends Construct {
     }
 
     // Store metrics for consolidated dashboards
-    this.storeMetricsForConsolidation(props.functionName)
+    this.storeMetricsForConsolidation()
     this.dashboard = undefined
 
     // Add cost allocation tags for tracking
@@ -453,7 +453,7 @@ export class OptimizedLambda extends Construct {
    * Metrics are stored in this.metrics Map and can be accessed via metric() method.
    * Dashboard creation removed - metrics now exported to consolidated dashboards.
    */
-  private storeMetricsForConsolidation(functionName: string): void {
+  private storeMetricsForConsolidation(): void {
     // Core Lambda metrics
     const invocations = this.function.metricInvocations({
       statistic: "Sum",

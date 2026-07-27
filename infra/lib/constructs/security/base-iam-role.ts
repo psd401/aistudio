@@ -82,7 +82,7 @@ export class BaseIAMRole extends Construct {
   private validatePolicies(policies?: iam.PolicyDocument[]): void {
     if (!policies) return
 
-    policies.forEach((policy, index) => {
+    for (const [index, policy] of policies.entries()) {
       try {
         // Check policy without throwing for non-critical violations
         const result = this.policyValidator.check(policy)
@@ -98,17 +98,17 @@ export class BaseIAMRole extends Construct {
             this.policyValidator.validate(policy)
           } else {
             // Log warnings for medium/low severity using CDK Annotations
-            result.violations.forEach((violation) => {
+            for (const violation of result.violations) {
               Annotations.of(this).addWarning(
                 `[Policy ${index}] ${violation.severity.toUpperCase()}: ${violation.message}`
               )
-            })
+            }
           }
         }
       } catch (error) {
-        throw new Error(`Policy validation failed for policy ${index}: ${error instanceof Error ? error.message : String(error)}`)
+        throw new Error(`Policy validation failed for policy ${index}: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
       }
-    })
+    }
   }
 
   /**
@@ -154,9 +154,9 @@ export class BaseIAMRole extends Construct {
 
     const securePolicies: { [name: string]: iam.PolicyDocument } = {}
 
-    policies.forEach((policy, index) => {
+    for (const [index, policy] of policies.entries()) {
       securePolicies[`Policy${index}`] = policy
-    })
+    }
 
     return securePolicies
   }
@@ -173,9 +173,9 @@ export class BaseIAMRole extends Construct {
       { key: "ComplianceRequired", value: "true" },
     ]
 
-    tags.forEach((tag) => {
+    for (const tag of tags) {
       cdk.Tags.of(this.role).add(tag.key, tag.value)
-    })
+    }
   }
 
   /**

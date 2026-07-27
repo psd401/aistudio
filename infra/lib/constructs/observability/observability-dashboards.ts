@@ -183,7 +183,7 @@ export class ObservabilityDashboards extends Construct {
 
       // ECS health overview
       if (metrics.ecs) {
-        Object.entries(metrics.ecs).forEach(([name, ecsMetrics]) => {
+        for (const [name, ecsMetrics] of Object.entries(metrics.ecs)) {
           dashboard.addWidgets(
             new cloudwatch.SingleValueWidget({
               title: `${name} - Status`,
@@ -202,7 +202,7 @@ export class ObservabilityDashboards extends Construct {
               height: 4,
             })
           );
-        });
+        };
       }
 
       // Aurora health overview
@@ -269,7 +269,7 @@ export class ObservabilityDashboards extends Construct {
 
       // Storage overview
       if (metrics.storage) {
-        Object.entries(metrics.storage).forEach(([name, storageMetrics]) => {
+        for (const [name, storageMetrics] of Object.entries(metrics.storage)) {
           dashboard.addWidgets(
             new cloudwatch.SingleValueWidget({
               title: `${name} - Size`,
@@ -287,7 +287,7 @@ export class ObservabilityDashboards extends Construct {
               height: 4,
             })
           );
-        });
+        };
       }
     }
 
@@ -395,7 +395,7 @@ export class ObservabilityDashboards extends Construct {
     // Lambda metrics - create comprehensive monitoring section for each function
     // Layout: Use full 24-unit width with side-by-side widgets
     if (metrics.lambda) {
-      Object.entries(metrics.lambda).forEach(([name, lambdaMetrics]) => {
+      for (const [name, lambdaMetrics] of Object.entries(metrics.lambda)) {
         // Section header for each Lambda function (full width)
         dashboard.addWidgets(
           DashboardWidgetFactory.createSectionHeader(`${name} Metrics`, `Detailed performance monitoring for ${name}`)
@@ -468,12 +468,12 @@ export class ObservabilityDashboards extends Construct {
         );
 
         dashboard.addWidgets(...row2Widgets);
-      });
+      };
     }
 
     // ECS metrics - create comprehensive monitoring section with horizontal layout
     if (metrics.ecs) {
-      Object.entries(metrics.ecs).forEach(([name, ecsMetrics]) => {
+      for (const [name, ecsMetrics] of Object.entries(metrics.ecs)) {
         // Section header for ECS service (full width)
         dashboard.addWidgets(
           DashboardWidgetFactory.createSectionHeader(`${name} ECS Service`, `Container performance and health metrics`)
@@ -544,7 +544,7 @@ export class ObservabilityDashboards extends Construct {
         }
 
         dashboard.addWidgets(...statusWidgets);
-      });
+      };
     }
 
     // Aurora metrics - comprehensive database monitoring with horizontal layout
@@ -880,7 +880,7 @@ export class ObservabilityDashboards extends Construct {
       DashboardWidgetFactory.createSectionHeader('Storage Analytics', 'S3 bucket metrics and costs')
     );
 
-    Object.entries(metrics.storage).forEach(([bucketName, storageMetrics]) => {
+    for (const [bucketName, storageMetrics] of Object.entries(metrics.storage)) {
       dashboard.addWidgets(
         DashboardWidgetFactory.createStorageWidget(bucketName, storageMetrics, { width: 12, height: 6 })
       );
@@ -895,7 +895,7 @@ export class ObservabilityDashboards extends Construct {
           )
         );
       }
-    });
+    };
   }
 
   /**

@@ -84,7 +84,7 @@ async function main() {
   }
 
   // Validate file entries
-  const path = require('path');
+  const path = require('node:path');
   const fakeRoot = '/safe-skill-root';
   for (const file of files) {
     if (!file.path || !file.content_base64) {

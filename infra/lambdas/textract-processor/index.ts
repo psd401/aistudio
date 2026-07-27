@@ -49,11 +49,11 @@ function createSqlParameter(name: string, value: string | number | boolean | nul
 async function getJobMetadata(jobId: string): Promise<JobMetadata | null> {
   try {
     const sql = `
-      SELECT item_id, file_name 
-      FROM textract_jobs 
+      SELECT item_id, file_name
+      FROM textract_jobs
       WHERE job_id = :jobId
     `;
-    
+
     const result = await rdsClient.send(
       new ExecuteStatementCommand({
         resourceArn: DATABASE_RESOURCE_ARN,
@@ -63,7 +63,7 @@ async function getJobMetadata(jobId: string): Promise<JobMetadata | null> {
         parameters: [createSqlParameter('jobId', jobId)]
       })
     );
-    
+
     if (result.records && result.records.length > 0) {
       const record = result.records[0];
       return {
@@ -71,7 +71,7 @@ async function getJobMetadata(jobId: string): Promise<JobMetadata | null> {
         fileName: record[1]?.stringValue || ''
       };
     }
-    
+
     return null;
   } catch (error) {
     console.error('Error getting job metadata:', error);
@@ -83,11 +83,11 @@ async function getJobMetadata(jobId: string): Promise<JobMetadata | null> {
 async function getDocumentText(jobId: string, useAnalysis: boolean = true): Promise<string> {
   let nextToken: string | undefined;
   let fullText = '';
-  
+
   do {
     try {
       let response;
-      
+
       if (useAnalysis) {
         response = await textractClient.send(
           new GetDocumentAnalysisCommand({
@@ -103,7 +103,7 @@ async function getDocumentText(jobId: string, useAnalysis: boolean = true): Prom
           })
         );
       }
-      
+
       // Extract text from blocks
       if (response.Blocks) {
         for (const block of response.Blocks) {
@@ -112,31 +112,31 @@ async function getDocumentText(jobId: string, useAnalysis: boolean = true): Prom
           }
         }
       }
-      
+
       nextToken = response.NextToken;
     } catch (error) {
       console.error('Error getting document text:', error);
       break;
     }
   } while (nextToken);
-  
+
   return fullText.trim();
 }
 
 // Chunk text (same as file-processor)
 function chunkText(text: string, maxChunkSize: number = 2000): Array<{
   content: string;
-  metadata: Record<string, any>;
+  metadata: Record<string, unknown>;
   chunkIndex: number;
   tokens?: number;
 }> {
   const chunks: Array<{
     content: string;
-    metadata: Record<string, any>;
+    metadata: Record<string, unknown>;
     chunkIndex: number;
     tokens?: number;
   }> = [];
-  
+
   const lines = text.split('\n');
   let currentChunk = '';
   let lineStart = 0;            // source line where the current chunk begins
@@ -167,14 +167,14 @@ function chunkText(text: string, maxChunkSize: number = 2000): Array<{
       tokens: Math.ceil(currentChunk.length / 4),
     });
   }
-  
+
   return chunks;
 }
 
 // Store chunks and queue for embeddings (similar to file-processor)
-async function storeAndQueueChunks(itemId: number, chunks: any[]): Promise<void> {
+async function storeAndQueueChunks(itemId: number, chunks: unknown[]): Promise<void> {
   if (chunks.length === 0) return;
-  
+
   // First, delete existing chunks
   await rdsClient.send(
     new ExecuteStatementCommand({
@@ -185,10 +185,10 @@ async function storeAndQueueChunks(itemId: number, chunks: any[]): Promise<void>
       parameters: [createSqlParameter('itemId', itemId)],
     })
   );
-  
+
   const chunkIds: number[] = [];
   const texts: string[] = [];
-  
+
   // Batch insert new chunks
   const parameterSets: SqlParameter[][] = chunks.map(chunk => [
     createSqlParameter('itemId', itemId),
@@ -197,32 +197,32 @@ async function storeAndQueueChunks(itemId: number, chunks: any[]): Promise<void>
     createSqlParameter('chunkIndex', chunk.chunkIndex),
     createSqlParameter('tokens', chunk.tokens ?? null),
   ]);
-  
+
   const batchSize = 25;
   for (let i = 0; i < parameterSets.length; i += batchSize) {
     const batch = parameterSets.slice(i, i + batchSize);
-    
+
     await rdsClient.send(
       new BatchExecuteStatementCommand({
         resourceArn: DATABASE_RESOURCE_ARN,
         secretArn: DATABASE_SECRET_ARN,
         database: DATABASE_NAME,
-        sql: `INSERT INTO repository_item_chunks 
+        sql: `INSERT INTO repository_item_chunks
               (item_id, content, metadata, chunk_index, tokens)
               VALUES (:itemId, :content, :metadata::jsonb, :chunkIndex, :tokens)`,
         parameterSets: batch,
       })
     );
-    
+
     // Query for the inserted IDs
     const chunkResult = await rdsClient.send(
       new ExecuteStatementCommand({
         resourceArn: DATABASE_RESOURCE_ARN,
         secretArn: DATABASE_SECRET_ARN,
         database: DATABASE_NAME,
-        sql: `SELECT id, content FROM repository_item_chunks 
-              WHERE item_id = :itemId 
-              AND chunk_index >= :startIndex 
+        sql: `SELECT id, content FROM repository_item_chunks
+              WHERE item_id = :itemId
+              AND chunk_index >= :startIndex
               AND chunk_index < :endIndex
               ORDER BY chunk_index`,
         parameters: [
@@ -232,17 +232,17 @@ async function storeAndQueueChunks(itemId: number, chunks: any[]): Promise<void>
         ]
       })
     );
-    
+
     if (chunkResult.records) {
-      chunkResult.records.forEach(record => {
+      for (const record of chunkResult.records) {
         if (record[0]?.longValue && record[1]?.stringValue) {
           chunkIds.push(record[0].longValue);
           texts.push(record[1].stringValue);
         }
-      });
+      };
     }
   }
-  
+
   // Queue for embeddings if configured
   if (EMBEDDING_QUEUE_URL && chunkIds.length > 0) {
     await sqsClient.send(
@@ -255,14 +255,14 @@ async function storeAndQueueChunks(itemId: number, chunks: any[]): Promise<void>
         })
       })
     );
-    
+
     // Update status
     await rdsClient.send(
       new ExecuteStatementCommand({
         resourceArn: DATABASE_RESOURCE_ARN,
         secretArn: DATABASE_SECRET_ARN,
         database: DATABASE_NAME,
-        sql: `UPDATE repository_items 
+        sql: `UPDATE repository_items
               SET processing_status = 'processing_embeddings',
                   updated_at = CURRENT_TIMESTAMP
               WHERE id = :itemId`,
@@ -276,7 +276,7 @@ async function storeAndQueueChunks(itemId: number, chunks: any[]): Promise<void>
         resourceArn: DATABASE_RESOURCE_ARN,
         secretArn: DATABASE_SECRET_ARN,
         database: DATABASE_NAME,
-        sql: `UPDATE repository_items 
+        sql: `UPDATE repository_items
               SET processing_status = 'completed',
                   updated_at = CURRENT_TIMESTAMP
               WHERE id = :itemId`,
@@ -289,14 +289,14 @@ async function storeAndQueueChunks(itemId: number, chunks: any[]): Promise<void>
 // Lambda handler
 export async function handler(event: SNSEvent) {
   console.log('Textract completion event:', JSON.stringify(event, null, 2));
-  
+
   for (const record of event.Records) {
     try {
       const message: TextractMessage = JSON.parse(record.Sns.Message);
-      const { JobId, Status, DocumentLocation, API } = message;
-      
+      const { JobId, Status, API } = message;
+
       console.log(`Processing Textract job: ${JobId}, Status: ${Status}, API: ${API}`);
-      
+
       if (Status === 'SUCCEEDED') {
         // Get job metadata
         const metadata = await getJobMetadata(JobId);
@@ -304,11 +304,11 @@ export async function handler(event: SNSEvent) {
           console.error(`No metadata found for job ${JobId}`);
           continue;
         }
-        
+
         // Get extracted text
         const useAnalysis = API === 'StartDocumentAnalysis';
         const extractedText = await getDocumentText(JobId, useAnalysis);
-        
+
         if (!extractedText || extractedText.trim().length === 0) {
           console.error('No text extracted from document');
           await rdsClient.send(
@@ -316,7 +316,7 @@ export async function handler(event: SNSEvent) {
               resourceArn: DATABASE_RESOURCE_ARN,
               secretArn: DATABASE_SECRET_ARN,
               database: DATABASE_NAME,
-              sql: `UPDATE repository_items 
+              sql: `UPDATE repository_items
                     SET processing_status = 'failed',
                         processing_error = 'No text extracted from document by Textract',
                         updated_at = CURRENT_TIMESTAMP
@@ -326,16 +326,16 @@ export async function handler(event: SNSEvent) {
           );
           continue;
         }
-        
+
         console.log(`Extracted ${extractedText.length} characters from ${metadata.fileName}`);
-        
+
         // Chunk the text
         const chunks = chunkText(extractedText);
         console.log(`Created ${chunks.length} chunks`);
-        
+
         // Store chunks and queue for embeddings
         await storeAndQueueChunks(metadata.itemId, chunks);
-        
+
         // Clean up the job record
         await rdsClient.send(
           new ExecuteStatementCommand({
@@ -346,10 +346,10 @@ export async function handler(event: SNSEvent) {
             parameters: [createSqlParameter('jobId', JobId)]
           })
         );
-        
+
       } else if (Status === 'FAILED') {
         console.error(`Textract job failed: ${JobId}`);
-        
+
         const metadata = await getJobMetadata(JobId);
         if (metadata) {
           await rdsClient.send(
@@ -357,7 +357,7 @@ export async function handler(event: SNSEvent) {
               resourceArn: DATABASE_RESOURCE_ARN,
               secretArn: DATABASE_SECRET_ARN,
               database: DATABASE_NAME,
-              sql: `UPDATE repository_items 
+              sql: `UPDATE repository_items
                     SET processing_status = 'failed',
                         processing_error = 'Textract processing failed',
                         updated_at = CURRENT_TIMESTAMP
@@ -367,7 +367,7 @@ export async function handler(event: SNSEvent) {
           );
         }
       }
-      
+
     } catch (error) {
       console.error('Error processing Textract completion:', error);
     }

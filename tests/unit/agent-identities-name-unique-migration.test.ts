@@ -25,6 +25,7 @@ const migrationFile = "140-agent-identities-name-unique.sql";
 const migration = fs.readFileSync(path.join(schemaDir, migrationFile), "utf8");
 /** The migration with `--` comment lines removed — i.e. the SQL that runs. */
 const migrationSql = migration.replace(/--[^\n]*/g, "");
+const normalizedMigrationSql = migrationSql.replace(/\s+/g, " ").toLowerCase();
 
 const schemaFiles = fs
   .readdirSync(schemaDir)
@@ -47,18 +48,18 @@ function collectAgentForeignKeys(): { references: Set<string>; dropped: Set<stri
     // Strip line comments so commented-out DDL never counts as a declaration.
     const code = sql.replace(/--[^\n]*/g, "");
 
-    for (const m of code.matchAll(/DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([A-Za-z_][\w]*)/gi)) {
-      dropped.add(m[1].toLowerCase());
-    }
-
     let currentTable: string | null = null;
     for (const line of code.split("\n")) {
-      const create = line.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][\w]*)/i);
-      if (create) currentTable = create[1].toLowerCase();
-      const alter = line.match(/ALTER\s+TABLE\s+(?:ONLY\s+)?([A-Za-z_][\w]*)/i);
-      if (alter) currentTable = alter[1].toLowerCase();
+      const droppedTable = readTableName(line, "DROP");
+      if (droppedTable) dropped.add(droppedTable);
+      const createTable = readTableName(line, "CREATE");
+      if (createTable) currentTable = createTable;
+      const alterTable = readTableName(line, "ALTER");
+      if (alterTable) currentTable = alterTable;
 
-      const inline = line.match(/^\s*([A-Za-z_][\w]*)\s+uuid\b[^,]*REFERENCES\s+agent_identities\s*\(/i);
+      const inline = line.match(
+        /^\s{0,40}([A-Za-z_]\w*)\s{1,20}uuid\b[^,\n]{0,500}REFERENCES\s{1,20}agent_identities\s{0,20}\(/i
+      );
       if (inline && currentTable) {
         references.add(`${currentTable}.${inline[1].toLowerCase()}`);
         continue;
@@ -73,6 +74,26 @@ function collectAgentForeignKeys(): { references: Set<string>; dropped: Set<stri
   }
 
   return { references, dropped };
+}
+
+function isSqlName(value: string | undefined): value is string {
+  if (!value || !/^[A-Za-z_]$/.test(value[0])) return false;
+  return [...value].every((character) => /^[A-Za-z0-9_]$/.test(character));
+}
+
+function readTableName(
+  line: string,
+  operation: "ALTER" | "CREATE" | "DROP"
+): string | null {
+  const tokens = line.trim().replace(/[(),;]/g, " ").split(/\s+/);
+  const upper = tokens.map((token) => token.toUpperCase());
+  if (upper[0] !== operation || upper[1] !== "TABLE") return null;
+
+  let index = 2;
+  if (operation === "CREATE" && upper[2] === "IF") index = 5;
+  if (operation === "DROP" && upper[2] === "IF") index = 4;
+  if (operation === "ALTER" && upper[2] === "ONLY") index = 3;
+  return isSqlName(tokens[index]) ? tokens[index].toLowerCase() : null;
 }
 
 describe("migration 140 — agent_identities name uniqueness (#1303)", () => {
@@ -108,11 +129,12 @@ describe("migration 140 — agent_identities name uniqueness (#1303)", () => {
 
     const uncovered = live.filter((ref) => {
       const [table, column] = ref.split(".");
-      const update = new RegExp(
-        `UPDATE\\s+${table}\\s+\\w+\\s+SET\\s+${column}\\s*=\\s*d\\.keep_id`,
-        "i"
-      );
-      return !update.test(migration);
+      const updatePrefix = `update ${table} `;
+      const updateStart = normalizedMigrationSql.indexOf(updatePrefix);
+      if (updateStart === -1) return true;
+      const updateEnd = normalizedMigrationSql.indexOf(";", updateStart);
+      const statement = normalizedMigrationSql.slice(updateStart, updateEnd);
+      return !statement.includes(`set ${column} = d.keep_id`);
     });
     expect(uncovered).toEqual([]);
   });
@@ -163,13 +185,13 @@ describe("migration 140 — agent_identities name uniqueness (#1303)", () => {
       ["atrium_doc_comments", "author_agent_id"],
       ["content_assets", "uploader_agent_id"],
     ];
+    const indexedColumns = new Set(
+      [...migrationSql.matchAll(
+        /CREATE INDEX IF NOT EXISTS \S+\s+ON\s+([A-Za-z_]\w*)\s*\(\s*([A-Za-z_]\w*)\s*\)/gi
+      )].map((match) => `${match[1].toLowerCase()}.${match[2].toLowerCase()}`)
+    );
     for (const [table, column] of pairs) {
-      expect(migrationSql).toMatch(
-        new RegExp(
-          `CREATE INDEX IF NOT EXISTS \\S+\\s+ON ${table}\\s*\\(${column}\\)`,
-          "i"
-        )
-      );
+      expect(indexedColumns).toContain(`${table}.${column}`);
     }
   });
 

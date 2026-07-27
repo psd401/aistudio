@@ -454,14 +454,14 @@ function deriveContent(markdown, title, overrides) {
     // Coerce authored entries to strings — a bare number/object from LLM-authored
     // JSON must not reach buildNarration (`b.endsWith`) and throw an uncaught
     // TypeError that degrades to a generic exit(2) instead of a clean bad_args.
-    (overrides && Array.isArray(overrides.summary) && overrides.summary.length && overrides.summary.map((s) => String(s))) ||
+    (overrides && Array.isArray(overrides.summary) && overrides.summary.length > 0 && overrides.summary.map((s) => String(s))) ||
     paragraphs.slice(0, 6).map((p) => {
       const first = splitSentences(p)[0] || p;
       return first.length > 220 ? first.slice(0, 217).trimEnd() + '…' : first;
     });
 
   // Guarantee at least one bullet so the page is never empty.
-  if (!summaryBullets.length) {
+  if (summaryBullets.length === 0) {
     summaryBullets.push(`Key points from ${title}.`);
   }
 
@@ -473,7 +473,7 @@ function deriveContent(markdown, title, overrides) {
   const nonTitle = headings.filter((h) => h.text.toLowerCase().trim() !== titleLc).map((h) => h.text);
   const headingTargets = level2.length >= 2 ? level2 : nonTitle;
   const learningTargets =
-    (overrides && Array.isArray(overrides.learningTargets) && overrides.learningTargets.length && overrides.learningTargets.map((t) => String(t))) ||
+    (overrides && Array.isArray(overrides.learningTargets) && overrides.learningTargets.length > 0 && overrides.learningTargets.map((t) => String(t))) ||
     (headingTargets.length >= 2
       ? headingTargets.slice(0, 4).map((h) => `Understand ${h}.`)
       : [`Understand the key points of ${title}.`, `Explain why ${title} matters and when it applies.`]);
@@ -483,11 +483,11 @@ function deriveContent(markdown, title, overrides) {
   // would keep the truthy empty array, shipping a zero-question quiz. Bind it so
   // the deterministic fallback actually runs when nothing survives.
   const authoredQuiz =
-    overrides && Array.isArray(overrides.quiz) && overrides.quiz.length
+    overrides && Array.isArray(overrides.quiz) && overrides.quiz.length > 0
       ? normalizeAuthoredQuiz(overrides.quiz)
       : null;
   const quizItems =
-    (authoredQuiz && authoredQuiz.length && authoredQuiz) ||
+    (authoredQuiz && authoredQuiz.length > 0 && authoredQuiz) ||
     buildDeterministicQuiz(summaryBullets, learningTargets, title);
 
   const narration =
@@ -575,7 +575,7 @@ function buildDeterministicQuiz(summaryBullets, learningTargets, title) {
 function buildNarration(title, learningTargets, summaryBullets) {
   const parts = [];
   parts.push(`Welcome. In this short lesson, we'll walk through ${title}, and why it matters to you.`);
-  if (learningTargets.length) {
+  if (learningTargets.length > 0) {
     parts.push(`By the end, you should be able to: ${learningTargets.join(' ')}`);
   }
   parts.push('Here are the key points.');
@@ -610,13 +610,13 @@ function segmentScript(script) {
 function normalizeAuthoredNarration(narr) {
   const script = String(narr.script || '');
   const segments =
-    Array.isArray(narr.segments) && narr.segments.length ? narr.segments : segmentScript(script);
+    Array.isArray(narr.segments) && narr.segments.length > 0 ? narr.segments : segmentScript(script);
   return { ...narr, script, segments, transcript: narr.transcript || script };
 }
 
 // Unclamped narration length in seconds (may exceed the hyperframes video cap).
 function fullNarrationSeconds(narration) {
-  if (narration.segments && narration.segments.length) {
+  if (narration.segments && narration.segments.length > 0) {
     return narration.segments[narration.segments.length - 1].end;
   }
   const words = String(narration.script || '').split(/\s+/).filter(Boolean).length;
@@ -656,13 +656,13 @@ function vttTime(seconds) {
 
 function buildVtt(segments) {
   const lines = ['WEBVTT', ''];
-  segments.forEach((seg, i) => {
+  for (const [i, seg] of segments.entries()) {
     lines.push(String(i + 1));
     lines.push(`${vttTime(seg.start)} --> ${vttTime(seg.end)}`);
     // VTT is plain text; escape the cue payload's markup-significant chars.
     lines.push(escapeHtml(seg.text));
     lines.push('');
-  });
+  };
   return lines.join('\n');
 }
 
@@ -779,7 +779,7 @@ function renderSourceHtml(markdown) {
     .split(/\n{2,}/)
     .map((b) => b.replace(/\s+$/g, ''))
     .filter((b) => b.trim().length);
-  if (!blocks.length) return '<p>(No source content.)</p>';
+  if (blocks.length === 0) return '<p>(No source content.)</p>';
   return blocks
     .map((b) => `<p>${escapeHtml(b).replace(/\n/g, '<br>')}</p>`)
     .join('\n');
@@ -1101,7 +1101,9 @@ ${sectionsHtml}
 function isSafeMediaUrl(url, kind) {
   if (typeof url !== 'string') return false;
   if (/^https?:\/\//i.test(url)) return true;
-  return new RegExp(`^data:${kind}\\/`, 'i').test(url);
+  if (kind === 'audio') return /^data:audio\//i.test(url);
+  if (kind === 'video') return /^data:video\//i.test(url);
+  return false;
 }
 
 async function resolveAudio(args, narration, deps, dryRunPlaceholders) {
@@ -1156,7 +1158,15 @@ ${clips}
 </body></html>`;
 }
 
-async function resolveVideo(args, audioUrl, title, points, narration, deps, dryRunPlaceholders) {
+async function resolveVideo({
+  args,
+  audioUrl,
+  title,
+  points,
+  narration,
+  deps,
+  dryRunPlaceholders,
+}) {
   const run = deps.runSkill || runSkill;
   if (typeof args.video_url === 'string') {
     if (!isSafeMediaUrl(args.video_url, 'video')) {
@@ -1368,15 +1378,15 @@ async function main(argv, deps = {}) {
   // self-contained placeholders so all five modalities are present offline.
   const dryRunPlaceholders = Boolean(args.dry_run) && !args.generate_media;
   const audioRes = await resolveAudio(args, content.narration, deps, dryRunPlaceholders);
-  const videoRes = await resolveVideo(
+  const videoRes = await resolveVideo({
     args,
-    audioRes.media && audioRes.media.url,
+    audioUrl: audioRes.media && audioRes.media.url,
     title,
-    content.summaryBullets,
-    content.narration,
+    points: content.summaryBullets,
+    narration: content.narration,
     deps,
-    dryRunPlaceholders
-  );
+    dryRunPlaceholders,
+  });
 
   const omissions = {
     audio: audioRes.omission,

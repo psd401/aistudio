@@ -12,8 +12,8 @@
  * mode impossible to reintroduce.
  */
 
-import fs from "fs";
-import path from "path";
+import fs from "node:fs";
+import path from "node:path";
 
 const manifestPath = path.join(process.cwd(), "infra/database/migrations.json");
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {

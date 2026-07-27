@@ -59,7 +59,7 @@ describe("canonical text processing", () => {
     ).toBe("text/plain");
     expect(() =>
       extractCanonicalTextDocument(
-        Uint8Array.from([0xff, 0xfe, 0xfd]),
+        Uint8Array.from([0xFF, 0xFE, 0xFD]),
         "text/plain"
       )
     ).toThrow("not valid UTF-8");

@@ -9,9 +9,9 @@ import {
   getSortedRowModel,
   getFilteredRowModel,
   SortingState,
-  useReactTable,
   ColumnFiltersState,
 } from "@tanstack/react-table"
+import { useUncompiledReactTable } from "@/components/ui/use-uncompiled-react-table"
 import {
   Table,
   TableBody,
@@ -103,6 +103,8 @@ export function UsersDataTable({
   loading = false,
   className,
 }: UsersDataTableProps) {
+  "use no memo"
+
   const { toast } = useToast()
   const [sorting, setSorting] = useState<SortingState>([])
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
@@ -239,7 +241,7 @@ export function UsersDataTable({
     [onViewUser, onEditUser, onDeleteUser, onSendInvite]
   )
 
-  const table = useReactTable({
+  const table = useUncompiledReactTable({
     data: users,
     columns,
     state: {

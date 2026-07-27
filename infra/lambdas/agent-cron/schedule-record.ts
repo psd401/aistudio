@@ -100,15 +100,15 @@ export async function loadAuthorizedSchedule(
   }
   if (
     typeof item.name !== 'string' ||
-    item.name.length < 1 ||
+    item.name.length === 0 ||
     item.name.length > 120 ||
     typeof item.prompt !== 'string' ||
-    item.prompt.length < 1 ||
+    item.prompt.length === 0 ||
     item.prompt.length > 20_000 ||
     typeof item.dmSpaceName !== 'string' ||
     !DM_SPACE_RE.test(item.dmSpaceName) ||
     typeof item.workspacePrefix !== 'string' ||
-    item.workspacePrefix.length < 1 ||
+    item.workspacePrefix.length === 0 ||
     item.workspacePrefix.length > 128 ||
     (item.displayName !== undefined &&
       (typeof item.displayName !== 'string' ||

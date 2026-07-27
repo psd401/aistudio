@@ -9,14 +9,128 @@ export interface LogContext {
   service?: string;
   operation?: string;
   processorType?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface LogMetrics {
   processingTime?: number;
   fileSize?: number;
   status?: string;
-  [key: string]: any;
+  [key: string]: unknown;
+}
+
+const SENSITIVE_ASSIGNMENT_KEYS = [
+  'authorization',
+  'access_token',
+  'access-token',
+  'accesstoken',
+  'auth_token',
+  'auth-token',
+  'authtoken',
+  'password',
+  'passwd',
+  'api_key',
+  'api-key',
+  'apikey',
+  'secret',
+  'token',
+] as const;
+
+interface SensitiveKeyMatch {
+  index: number;
+  key: string;
+}
+
+function isWordCharacter(character: string | undefined): boolean {
+  if (!character) return false;
+  const code = character.codePointAt(0) ?? 0;
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    character === '_'
+  );
+}
+
+function findSensitiveKey(
+  lower: string,
+  fromIndex: number
+): SensitiveKeyMatch | null {
+  let earliest: SensitiveKeyMatch | null = null;
+  for (const key of SENSITIVE_ASSIGNMENT_KEYS) {
+    let index = lower.indexOf(key, fromIndex);
+    while (index !== -1) {
+      const before = lower[index - 1];
+      const after = lower[index + key.length];
+      if (!isWordCharacter(before) && !isWordCharacter(after)) {
+        if (!earliest || index < earliest.index) {
+          earliest = { index, key };
+        }
+        break;
+      }
+      index = lower.indexOf(key, index + key.length);
+    }
+  }
+  return earliest;
+}
+
+function skipWhitespace(input: string, start: number): number {
+  let index = start;
+  while (index < input.length && /\s/.test(input[index])) index += 1;
+  return index;
+}
+
+function findSecretValueSpan(
+  input: string,
+  lower: string,
+  match: SensitiveKeyMatch
+): { start: number; end: number } | null {
+  let index = match.index + match.key.length;
+  const keyQuote = input[match.index - 1];
+  if ((keyQuote === '"' || keyQuote === "'") && input[index] === keyQuote) {
+    index += 1;
+  }
+  index = skipWhitespace(input, index);
+  if (input[index] !== ':' && input[index] !== '=') return null;
+  index = skipWhitespace(input, index + 1);
+  if (input[index] === '"' || input[index] === "'") index += 1;
+
+  if (lower.startsWith('bearer', index) && /\s/.test(input[index + 6] ?? '')) {
+    index = skipWhitespace(input, index + 6);
+  }
+
+  const start = index;
+  const valueDelimiters = new Set(['"', "'", ',', ';', '}', ')', '&']);
+  while (
+    index < input.length &&
+    !/\s/.test(input[index]) &&
+    !valueDelimiters.has(input[index])
+  ) {
+    index += 1;
+  }
+  return index > start ? { start, end: index } : null;
+}
+
+function redactSensitiveAssignments(input: string): string {
+  const lower = input.toLowerCase();
+  let cursor = 0;
+  let searchIndex = 0;
+  let output = '';
+
+  while (searchIndex < input.length) {
+    const match = findSensitiveKey(lower, searchIndex);
+    if (!match) break;
+    const span = findSecretValueSpan(input, lower, match);
+    if (!span) {
+      searchIndex = match.index + match.key.length;
+      continue;
+    }
+    output += `${input.slice(cursor, span.start)}[REDACTED]`;
+    cursor = span.end;
+    searchIndex = span.end;
+  }
+
+  return output + input.slice(cursor);
 }
 
 export class LambdaLogger {
@@ -30,7 +144,7 @@ export class LambdaLogger {
     };
   }
 
-  private formatMessage(level: string, message: string, data?: any): string {
+  private formatMessage(level: string, message: string, data?: unknown): string {
     const logEntry = {
       level: level.toUpperCase(),
       message,
@@ -42,7 +156,7 @@ export class LambdaLogger {
     return JSON.stringify(logEntry);
   }
 
-  private sanitizeData(data: any): any {
+  private sanitizeData(data: unknown): unknown {
     if (data === null || data === undefined) {
       return data;
     }
@@ -58,10 +172,7 @@ export class LambdaLogger {
       // the unquoted-only version missed these entirely. Free-form message strings
       // are otherwise NOT deep-scrubbed — callers must avoid interpolating secrets
       // into messages.
-      return data.replace(
-        /(["']?)\b(password|passwd|secret|token|api[_-]?key|access[_-]?key|authorization|auth[_-]?token)\b\1(\s*[:=]\s*)(["']?)((?:bearer\s+)?)([^\s"',;})&]+)\4/gi,
-        '$1$2$1$3$4$5[REDACTED]$4'
-      );
+      return redactSensitiveAssignments(data);
     }
 
     if (Array.isArray(data)) {
@@ -94,13 +205,13 @@ export class LambdaLogger {
   private static readonly SENSITIVE_KEY_RE =
     /password|passwd|secret|token|credential|api[_-]?key|access[_-]?key|authorization|auth[_-]?token/i;
 
-  info(message: string, data?: any): void {
+  info(message: string, data?: unknown): void {
     // In Lambda, console.log goes to CloudWatch automatically
-    // eslint-disable-next-line no-console
+
     console.log(this.formatMessage('info', message, data));
   }
 
-  error(message: string, error?: Error | any, data?: any): void {
+  error(message: string, error?: Error | unknown, data?: unknown): void {
     const errorData = error instanceof Error ? {
       errorName: error.name,
       errorMessage: error.message,
@@ -108,19 +219,19 @@ export class LambdaLogger {
       ...data
     } : { error, ...data };
 
-    // eslint-disable-next-line no-console
+
     console.error(this.formatMessage('error', message, errorData));
   }
 
-  warn(message: string, data?: any): void {
-    // eslint-disable-next-line no-console
+  warn(message: string, data?: unknown): void {
+
     console.warn(this.formatMessage('warn', message, data));
   }
 
-  debug(message: string, data?: any): void {
+  debug(message: string, data?: unknown): void {
     // Only log debug messages if DEBUG environment variable is set
     if (process.env.DEBUG) {
-      // eslint-disable-next-line no-console
+
       console.debug(this.formatMessage('debug', message, data));
     }
   }

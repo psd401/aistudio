@@ -21,8 +21,8 @@
  * `bun install`/`tsc`; Docker image assets are only fingerprinted at synth, not
  * built. Lives in the `infra` jest project (roots: infra/test).
  */
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { AgentPlatformStack } from '../lib/agent-platform-stack';

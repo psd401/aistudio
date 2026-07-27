@@ -4,6 +4,7 @@ import { executeTransaction } from "@/lib/db/drizzle-client";
 import { repositoryConnectors } from "@/lib/db/schema";
 import { requestGoogleDriveSync } from "@/lib/repositories/google-drive/connector-service";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
+import { ErrorFactories } from "@/lib/error-utils";
 
 function tokenHash(token: string): string {
   return createHash("sha256").update(token).digest("hex");
@@ -55,7 +56,10 @@ export async function POST(request: Request): Promise<Response> {
         !connector.watchTokenHash ||
         !safeHashEqual(connector.watchTokenHash, tokenHash(channelToken))
       ) {
-        throw new Error("Notification channel not found");
+        throw ErrorFactories.authzResourceNotFound(
+          "Google Drive notification channel",
+          channelId
+        );
       }
       if (
         connector.lastNotificationNumber !== null &&

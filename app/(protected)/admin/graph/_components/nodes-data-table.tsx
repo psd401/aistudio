@@ -7,8 +7,8 @@ import {
   getCoreRowModel,
   getSortedRowModel,
   SortingState,
-  useReactTable,
 } from "@tanstack/react-table"
+import { useUncompiledReactTable } from "@/components/ui/use-uncompiled-react-table"
 import {
   Table,
   TableBody,
@@ -91,6 +91,8 @@ export function NodesDataTable({
   loading = false,
   className,
 }: NodesDataTableProps) {
+  "use no memo"
+
   const [sorting, setSorting] = useState<SortingState>([])
 
   const columns = useMemo<ColumnDef<NodeTableRow>[]>(
@@ -181,7 +183,7 @@ export function NodesDataTable({
     [onViewNode, onEditNode, onDeleteNode]
   )
 
-  const table = useReactTable({
+  const table = useUncompiledReactTable({
     data: nodes,
     columns,
     state: { sorting },

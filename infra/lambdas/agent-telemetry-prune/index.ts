@@ -81,10 +81,10 @@ async function pruneTable(
   let deleted = 0
   let batches = 0
   const SAFETY_CAP = 1_000_000
-  // eslint-disable-next-line no-constant-condition
+
   while (true) {
     if (deleted >= SAFETY_CAP) {
-      // eslint-disable-next-line no-console
+
       console.log(JSON.stringify({
         level: "WARN",
         logger: "agent-telemetry-prune",
@@ -118,7 +118,7 @@ async function pruneTable(
 export const handler = async (_event: Parameters<ScheduledHandler>[0]): Promise<PruneResult> => {
   const cutoff = new Date(Date.now() - RETENTION_DAYS * 86400_000)
   const cutoffIso = cutoff.toISOString()
-  // eslint-disable-next-line no-console
+
   console.log(
     JSON.stringify({
       level: "INFO",
@@ -141,7 +141,7 @@ export const handler = async (_event: Parameters<ScheduledHandler>[0]): Promise<
     retentionDays: RETENTION_DAYS,
     batches: content.batches + tools.batches,
   }
-  // eslint-disable-next-line no-console
+
   console.log(
     JSON.stringify({
       level: "INFO",

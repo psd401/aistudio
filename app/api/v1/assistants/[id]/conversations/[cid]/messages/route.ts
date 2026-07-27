@@ -162,7 +162,6 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       userMessageText,
       repositoryAccess.repositoryIds,
       auth.cognitoSub,
-      undefined,
       {
         maxChunks: 10,
         maxTokens: 4000,

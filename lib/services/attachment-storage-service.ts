@@ -85,13 +85,13 @@ export async function storeAttachmentInS3(
   try {
     const attachmentId = attachment.id || generateUUID();
     const sanitizedName = sanitizeFileName(attachment.name || 'attachment');
-    
+
     // Create conversation-scoped S3 key
     const s3Key = `conversations/${conversationId}/attachments/${messageId}-${attachmentIndex}-${sanitizedName}`;
-    
+
     const contentToStore = buildAttachmentStoragePayload(attachment);
     const contentType = 'application/json';
-    
+
     // Store in S3
     await s3Client.send(new PutObjectCommand({
       Bucket: await getDocumentsBucket(),
@@ -106,7 +106,7 @@ export async function storeAttachmentInS3(
         attachmentType: attachment.type,
       },
     }));
-    
+
     log.info('Attachment stored in S3', {
       conversationId,
       messageId,
@@ -114,7 +114,7 @@ export async function storeAttachmentInS3(
       s3Key,
       size: JSON.stringify(contentToStore).length
     });
-    
+
     return {
       s3Key,
       originalName: attachment.name || 'attachment',
@@ -122,14 +122,14 @@ export async function storeAttachmentInS3(
       size: JSON.stringify(contentToStore).length,
       attachmentId
     };
-    
+
   } catch (error) {
     log.error('Failed to store attachment in S3', {
       conversationId,
       messageId,
       error: error instanceof Error ? error.message : String(error)
     });
-    throw new Error(`Failed to store attachment: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to store attachment: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }
 
@@ -142,28 +142,28 @@ export async function getAttachmentFromS3(s3Key: string): Promise<AttachmentCont
       Bucket: await getDocumentsBucket(),
       Key: s3Key,
     }));
-    
+
     if (!response.Body) {
       throw new Error('No content returned from S3');
     }
-    
+
     const bodyText = await response.Body.transformToString();
     const attachmentData = JSON.parse(bodyText) as AttachmentContent;
-    
+
     log.info('Attachment retrieved from S3', {
       s3Key,
       type: attachmentData.type,
       size: bodyText.length
     });
-    
+
     return attachmentData;
-    
+
   } catch (error) {
     log.error('Failed to retrieve attachment from S3', {
       s3Key,
       error: error instanceof Error ? error.message : String(error)
     });
-    throw new Error(`Failed to retrieve attachment: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to retrieve attachment: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }
 
@@ -177,14 +177,14 @@ export async function processMessagesWithAttachments(
 ): Promise<{ lightweightMessages: UIMessage[], attachmentReferences: AttachmentMetadata[] }> {
   const lightweightMessages: UIMessage[] = [];
   const attachmentReferences: AttachmentMetadata[] = [];
-  
+
   for (const message of messages) {
     const messageId = generateUUID();
-    
+
     if (Array.isArray(message.parts)) {
       const lightweightParts: UIMessage['parts'] = [];
       let attachmentIndex = 0;
-      
+
       for (const part of message.parts) {
         const partData = part as unknown as {
           type: string;
@@ -202,9 +202,9 @@ export async function processMessagesWithAttachments(
             partData as AttachmentContent,
             attachmentIndex++
           );
-          
+
           attachmentReferences.push(metadata);
-          
+
           // Replace with lightweight S3 reference for Lambda reconstruction
           lightweightParts.push({
             type: 'image' as const,
@@ -271,7 +271,7 @@ export async function processMessagesWithAttachments(
           lightweightParts.push(part);
         }
       }
-      
+
       lightweightMessages.push({
         ...message,
         parts: lightweightParts
@@ -281,7 +281,7 @@ export async function processMessagesWithAttachments(
       lightweightMessages.push(message);
     }
   }
-  
+
   return { lightweightMessages, attachmentReferences };
 }
 
@@ -293,18 +293,18 @@ export async function reconstructMessagesWithAttachments(
   attachmentReferences: AttachmentMetadata[]
 ): Promise<UIMessage[]> {
   const fullMessages: UIMessage[] = [];
-  
+
   for (const message of lightweightMessages) {
     if (Array.isArray(message.parts)) {
       const fullParts = [];
-      
+
       for (const part of message.parts) {
         if (part.type === 'text' && typeof part.text === 'string' && part.text.startsWith('[Image:') && part.text.includes('conversation context')) {
           // Find and restore image from S3
-          const matchingAttachment = attachmentReferences.find(ref => 
+          const matchingAttachment = attachmentReferences.find(ref =>
             part.text && part.text.includes(ref.originalName)
           );
-          
+
           if (matchingAttachment) {
             const attachmentData = await getAttachmentFromS3(matchingAttachment.s3Key);
             fullParts.push(attachmentData);
@@ -315,7 +315,7 @@ export async function reconstructMessagesWithAttachments(
           fullParts.push(part);
         }
       }
-      
+
       fullMessages.push({
         ...message,
         parts: fullParts as UIMessage['parts']
@@ -324,7 +324,7 @@ export async function reconstructMessagesWithAttachments(
       fullMessages.push(message);
     }
   }
-  
+
   return fullMessages;
 }
 

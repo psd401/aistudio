@@ -9,7 +9,6 @@
 
 import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals'
 import { SSEMonitor, createSSEMonitor } from '@/lib/streaming/sse-monitoring'
-import type { SSEEvent } from '@/lib/streaming/sse-event-types'
 
 describe('SSEMonitor', () => {
   let monitor: SSEMonitor

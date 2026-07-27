@@ -5,7 +5,7 @@ const { requestAgentBroker } = require('./agent-broker');
 
 async function publishArtifact(bytes, extension, contentType) {
   if (!Buffer.isBuffer(bytes) && !(bytes instanceof Uint8Array)) {
-    throw new Error('Artifact body must be bytes');
+    throw new TypeError('Artifact body must be bytes');
   }
   if (!/^\.[a-z0-9]{1,8}$/.test(extension)) {
     throw new Error('Invalid artifact extension');
@@ -49,7 +49,7 @@ async function publishArtifact(bytes, extension, contentType) {
     reservationId: prepared.reservationId,
   });
   if (typeof completed.publicUrl !== 'string' || typeof completed.key !== 'string') {
-    throw new Error('Artifact upload verification failed');
+    throw new TypeError('Artifact upload verification failed');
   }
   return { url: completed.publicUrl, key: completed.key };
 }

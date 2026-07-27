@@ -1,24 +1,21 @@
-import { 
-  uploadDocument, 
+import {
+  uploadDocument,
   uploadRepositoryTextSource,
   copyRepositorySourceToCanonicalNamespace,
-  getDocumentSignedUrl, 
+  getDocumentSignedUrl,
   deleteDocument,
   deleteRepositoryObjectVersions,
   deleteRepositoryObjectVersionsByPrefix,
   documentExists,
-  listUserDocuments,
-  extractKeyFromUrl
+  listUserDocuments
 } from '@/lib/aws/s3-client';
-import { 
-  S3Client, 
-  PutObjectCommand, 
-  GetObjectCommand, 
+import {
+  S3Client,
+  PutObjectCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
   HeadObjectCommand,
   HeadBucketCommand,
-  ListObjectsV2Command,
   ListObjectVersionsCommand,
   CopyObjectCommand,
 } from '@aws-sdk/client-s3';
@@ -36,6 +33,12 @@ jest.mock('@/lib/settings-manager', () => ({
   }
 }));
 
+function getConstructorName(value: unknown): string | undefined {
+  return typeof value === 'object' && value !== null
+    ? value.constructor.name
+    : undefined;
+}
+
 describe('S3 Client', () => {
   const mockS3Client = {
     send: jest.fn(),
@@ -46,23 +49,23 @@ describe('S3 Client', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     (S3Client as jest.Mock).mockImplementation(() => mockS3Client);
-    
+
     // Mock HeadBucketCommand to simulate bucket exists
-    mockS3Client.send.mockImplementation((command: any) => {
-      if (command.constructor.name === 'HeadBucketCommand') {
+    mockS3Client.send.mockImplementation((command: unknown) => {
+      if (getConstructorName(command) === 'HeadBucketCommand') {
         return Promise.resolve({});
       }
-      if (command.constructor.name === 'PutObjectCommand') {
+      if (getConstructorName(command) === 'PutObjectCommand') {
         return Promise.resolve({});
       }
       return Promise.resolve({});
     });
-    
+
     // Mock getSignedUrl to return a test URL
     mockGetSignedUrl.mockResolvedValue('https://test-bucket.s3.amazonaws.com/test-key?signature=test');
   });
 
-  describe('uploadDocument', () => {
+
     it('should upload a document successfully', async () => {
       const params = {
         userId: 'user-123',
@@ -98,11 +101,11 @@ describe('S3 Client', () => {
       };
 
       // Mock bucket check to succeed, but upload to fail
-      mockS3Client.send.mockImplementation((command: any) => {
-        if (command.constructor.name === 'HeadBucketCommand') {
+      mockS3Client.send.mockImplementation((command: unknown) => {
+        if (getConstructorName(command) === 'HeadBucketCommand') {
           return Promise.resolve({});
         }
-        if (command.constructor.name === 'PutObjectCommand') {
+        if (getConstructorName(command) === 'PutObjectCommand') {
           return Promise.reject(new Error('S3 Upload Error'));
         }
         return Promise.resolve({});
@@ -148,9 +151,9 @@ describe('S3 Client', () => {
         /^repositories\/7\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/handbook\.pdf$/i
       );
     });
-  });
+  ;
 
-  describe('uploadRepositoryTextSource', () => {
+
     it('stores inline text under the canonical repository namespace', async () => {
       mockS3Client.send.mockResolvedValue({});
 
@@ -172,9 +175,9 @@ describe('S3 Client', () => {
         expect.any(PutObjectCommand)
       );
     });
-  });
+  ;
 
-  describe('copyRepositorySourceToCanonicalNamespace', () => {
+
     it('copies a legacy source to a canonical key while preserving S3 metadata', async () => {
       mockS3Client.send.mockResolvedValue({});
 
@@ -209,7 +212,7 @@ describe('S3 Client', () => {
         expect.any(CopyObjectCommand)
       );
     });
-  });
+  ;
 
   // TODO: Update these tests once downloadDocument is implemented
   // describe('downloadDocument', () => {
@@ -218,7 +221,7 @@ describe('S3 Client', () => {
   //   });
   // });
 
-  describe('deleteDocument', () => {
+
     it('should delete a document successfully', async () => {
       const key = 'documents/user-123/test.pdf';
 
@@ -239,9 +242,9 @@ describe('S3 Client', () => {
 
       await expect(deleteDocument(key)).rejects.toThrow('Failed to delete document');
     });
-  });
+  ;
 
-  describe('version-aware repository deletion', () => {
+
     it('paginates and permanently deletes versions and delete markers below an artifact prefix', async () => {
       let listCall = 0;
       mockS3Client.send.mockImplementation((command: unknown) => {
@@ -361,21 +364,21 @@ describe('S3 Client', () => {
         )
       ).rejects.toThrow('Failed to delete repository objects from S3');
     });
-  });
+  ;
 
-  describe('getDocumentSignedUrl', () => {
+
     it('should generate a signed URL for download', async () => {
       const mockUrl = 'https://s3.amazonaws.com/bucket/documents/user-123/test.pdf?signature=xyz';
 
       (getSignedUrl as jest.Mock).mockResolvedValue(mockUrl);
 
-      const result = await getDocumentSignedUrl({ 
-        key: 'documents/user-123/test.pdf' 
+      const result = await getDocumentSignedUrl({
+        key: 'documents/user-123/test.pdf'
       });
 
       expect(result).toBe(mockUrl);
       expect(getSignedUrl).toHaveBeenCalledWith(
-        expect.anything(), // S3Client instance 
+        expect.anything(), // S3Client instance
         expect.anything(), // GetObjectCommand
         expect.objectContaining({
           expiresIn: 3600,
@@ -388,7 +391,7 @@ describe('S3 Client', () => {
 
       (getSignedUrl as jest.Mock).mockResolvedValue(mockUrl);
 
-      const result = await getDocumentSignedUrl({ 
+      const result = await getDocumentSignedUrl({
         key: 'documents/user-123/test.pdf',
         expiresIn: 7200
       });
@@ -406,11 +409,11 @@ describe('S3 Client', () => {
     it('should handle signed URL generation errors', async () => {
       (getSignedUrl as jest.Mock).mockRejectedValue(new Error('S3 Error'));
 
-      await expect(getDocumentSignedUrl({ 
-        key: 'documents/user-123/test.pdf' 
+      await expect(getDocumentSignedUrl({
+        key: 'documents/user-123/test.pdf'
       })).rejects.toThrow('Failed to generate signed URL');
     });
-  });
+  ;
 
   // TODO: Update these tests once getDocumentUrl is implemented
   // describe('getDocumentUrl', () => {
@@ -419,7 +422,7 @@ describe('S3 Client', () => {
   //   });
   // });
 
-  describe('documentExists', () => {
+
     it('should return true if document exists', async () => {
       mockS3Client.send.mockResolvedValue({});
 
@@ -441,9 +444,9 @@ describe('S3 Client', () => {
 
       expect(result).toBe(false);
     });
-  });
+  ;
 
-  describe('listUserDocuments', () => {
+
     it('should list user documents', async () => {
       mockS3Client.send.mockResolvedValue({
         Contents: [
@@ -461,9 +464,9 @@ describe('S3 Client', () => {
         lastModified: expect.any(Date)
       });
     });
-  });
+  ;
 
-  describe('Key Generation', () => {
+
     it('should generate unique keys for same filename', async () => {
       const params = {
         userId: 'user-123',
@@ -502,12 +505,12 @@ describe('S3 Client', () => {
         });
 
         if (testCase.expectedExt) {
-          expect(result.key).toMatch(new RegExp(`${testCase.expectedExt}$`));
+          expect(result.key.endsWith(testCase.expectedExt)).toBe(true);
         } else {
           expect(result.key).toMatch(/^user-123\/\d+-no-extension$/);
         }
       }
     });
-  });
+  ;
 
 });

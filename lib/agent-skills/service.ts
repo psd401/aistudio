@@ -50,7 +50,7 @@ function safeName(raw: unknown): string {
 function safeRelativePath(raw: unknown): string {
   if (
     typeof raw !== "string" ||
-    raw.length < 1 ||
+    raw.length === 0 ||
     raw.length > 240 ||
     raw.startsWith("/") ||
     raw.includes("\\") ||
@@ -95,7 +95,7 @@ export class AgentSkillsService {
   async search(ownerEmail: string, rawQuery: unknown) {
     if (
       typeof rawQuery !== "string" ||
-      rawQuery.trim().length < 1 ||
+      rawQuery.trim().length === 0 ||
       rawQuery.length > MAX_QUERY_LENGTH
     ) {
       throw new AgentSkillInputError("Invalid skill search query")
@@ -184,7 +184,7 @@ export class AgentSkillsService {
     }
     if (
       typeof input.summary !== "string" ||
-      input.summary.trim().length < 1 ||
+      input.summary.trim().length === 0 ||
       input.summary.length > MAX_SUMMARY_LENGTH
     ) {
       throw new AgentSkillInputError("Invalid skill summary")

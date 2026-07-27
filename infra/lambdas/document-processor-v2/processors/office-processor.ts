@@ -1,8 +1,8 @@
-import { 
-  ProcessingParams, 
-  ProcessingResult, 
-  DocumentProcessor, 
-  ProcessorConfig 
+import {
+  ProcessingParams,
+  ProcessingResult,
+  DocumentProcessor,
+  ProcessorConfig
 } from './factory';
 import * as mammoth from 'mammoth';
 import * as XLSX from '@e965/xlsx';
@@ -32,23 +32,23 @@ export class OfficeProcessor implements DocumentProcessor {
   async process(params: ProcessingParams): Promise<ProcessingResult> {
     const startTime = Date.now();
     const { buffer, fileName, onProgress } = params;
-    const logger = createLambdaLogger({ 
+    const logger = createLambdaLogger({
       operation: 'OfficeProcessor.process',
       documentType: this.documentType,
       fileName,
       fileSize: buffer.length
     });
-    
-    logger.info('Starting office document processing', { 
-      documentType: this.documentType.toUpperCase(), 
-      fileName, 
-      bufferSize: buffer.length 
+
+    logger.info('Starting office document processing', {
+      documentType: this.documentType.toUpperCase(),
+      fileName,
+      bufferSize: buffer.length
     });
-    
+
     await onProgress?.('parsing_document', 40);
-    
-    let extractedContent: any;
-    
+
+    let extractedContent: unknown;
+
     try {
       switch (this.documentType) {
         case 'docx':
@@ -65,15 +65,15 @@ export class OfficeProcessor implements DocumentProcessor {
       }
     } catch (error) {
       logger.error(`Error processing ${this.documentType}`, error);
-      throw new Error(`Failed to process ${this.documentType}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(`Failed to process ${this.documentType}: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
     }
-    
+
     if (!extractedContent.text) {
       throw new Error(`No text content extracted from ${this.documentType}`);
     }
-    
+
     await onProgress?.('post_processing', 70);
-    
+
     // Build result
     const result: ProcessingResult = {
       text: extractedContent.text,
@@ -84,21 +84,21 @@ export class OfficeProcessor implements DocumentProcessor {
         ...extractedContent.metadata,
       }
     };
-    
+
     // Convert to Markdown if requested
     if (this.config.convertToMarkdown) {
       await onProgress?.('converting_markdown', 80);
       result.markdown = await this.convertToMarkdown(extractedContent, this.documentType);
     }
-    
+
     // Generate chunks if requested
     if (this.config.generateEmbeddings) {
       await onProgress?.('chunking_text', 90);
       result.chunks = await this.chunkText(extractedContent.text);
     }
-    
+
     result.metadata.processingTime = Date.now() - startTime;
-    
+
     logger.info(`${this.documentType.toUpperCase()} processing completed successfully`, {
       processingTime: result.metadata.processingTime,
       textLength: result.text?.length || 0,
@@ -108,7 +108,7 @@ export class OfficeProcessor implements DocumentProcessor {
     return result;
   }
 
-  private async processDocx(buffer: Buffer): Promise<any> {
+  private async processDocx(buffer: Buffer): Promise<unknown> {
     const logger = createLambdaLogger({ operation: 'OfficeProcessor.processDocx' });
     logger.info('Processing DOCX document');
 
@@ -128,7 +128,7 @@ export class OfficeProcessor implements DocumentProcessor {
           wordCount: textResult.value.split(/\s+/).length,
           characterCount: textResult.value.length,
         }
-      };
+      }
     }
 
     const textResult = await mammoth.extractRawText({ buffer });
@@ -146,7 +146,7 @@ export class OfficeProcessor implements DocumentProcessor {
   private static readonly MAX_XLSX_BYTES = 25 * 1024 * 1024; // 25 MB
   private static readonly MAX_XLSX_ROWS_PARSE = 10000; // hard cap at parse time
 
-  private async processXlsx(buffer: Buffer): Promise<any> {
+  private async processXlsx(buffer: Buffer): Promise<unknown> {
     const logger = createLambdaLogger({ operation: 'OfficeProcessor.processXlsx' });
     logger.info('Processing XLSX document');
 
@@ -159,9 +159,9 @@ export class OfficeProcessor implements DocumentProcessor {
       sheetRows: OfficeProcessor.MAX_XLSX_ROWS_PARSE,
     });
     let combinedText = '';
-    const sheetData: any[] = [];
+    const sheetData: unknown[] = [];
 
-    workbook.SheetNames.forEach((sheetName: string, index: number) => {
+    for (const [index, sheetName] of workbook.SheetNames.entries()) {
       const sheet = workbook.Sheets[sheetName];
 
       // Convert to CSV for text extraction
@@ -194,7 +194,7 @@ export class OfficeProcessor implements DocumentProcessor {
           ? Math.min(10000, Math.max(0, ...json.map((row) => Array.isArray(row) ? row.length : 0)))
           : 0,
       });
-    });
+    };
 
     return {
       text: combinedText.trim(),
@@ -209,17 +209,17 @@ export class OfficeProcessor implements DocumentProcessor {
     };
   }
 
-  private async processPptx(buffer: Buffer): Promise<any> {
+  private async processPptx(buffer: Buffer): Promise<unknown> {
     const logger = createLambdaLogger({ operation: 'OfficeProcessor.processPptx' });
     logger.info('Processing PPTX document using custom JSZip parser');
-    
+
     try {
       // Load PPTX as ZIP archive
       const zip = new JSZip();
       const zipData = await zip.loadAsync(buffer);
-      
+
       // Extract text from all slides
-      const slides: any[] = [];
+      const slides: unknown[] = [];
       let combinedText = '';
 
       // Enumerate the slide entries actually present in the archive, sorted by their
@@ -249,17 +249,17 @@ export class OfficeProcessor implements DocumentProcessor {
           combinedText += `\n\n## Slide ${slideNumber}\n\n${slideText.join('\n')}`;
         }
       }
-      
+
       if (slides.length === 0) {
         throw new Error('No slides found in PPTX - file might be corrupted or empty');
       }
-      
+
       const cleanedText = combinedText.trim();
-      
+
       if (!cleanedText) {
         throw new Error('No readable text found in PPTX slides');
       }
-      
+
       return {
         text: cleanedText,
         slides: slides, // Keep structured slide data
@@ -272,7 +272,7 @@ export class OfficeProcessor implements DocumentProcessor {
       };
     } catch (error) {
       logger.error('PPTX processing failed', error);
-      throw new Error(`Failed to process PPTX: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(`Failed to process PPTX: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
     }
   }
 
@@ -281,7 +281,7 @@ export class OfficeProcessor implements DocumentProcessor {
    */
   private async extractTextFromSlideXml(slideXml: string, slideNumber: number): Promise<string[]> {
     return new Promise((resolve) => {
-      parseString(slideXml, { explicitArray: false, ignoreAttrs: true }, (err: any, result: any) => {
+      parseString(slideXml, { explicitArray: false, ignoreAttrs: true }, (err: unknown, result: unknown) => {
         const logger = createLambdaLogger({ operation: 'OfficeProcessor.extractTextFromSlideXml' });
         if (err) {
           logger.warn(`Error parsing slide ${slideNumber} XML`, { error: err });
@@ -290,7 +290,7 @@ export class OfficeProcessor implements DocumentProcessor {
         }
 
         const textBlocks: string[] = [];
-        
+
         try {
           // Navigate through the PPTX XML structure to find text elements
           // Structure: p:sld -> p:cSld -> p:spTree -> p:sp -> p:txBody -> a:p -> a:r -> a:t
@@ -298,29 +298,29 @@ export class OfficeProcessor implements DocumentProcessor {
           if (slide && slide['p:cSld'] && slide['p:cSld']['p:spTree']) {
             const shapes = slide['p:cSld']['p:spTree']['p:sp'];
             const shapesArray = Array.isArray(shapes) ? shapes : [shapes];
-            
+
             for (const shape of shapesArray) {
               if (shape && shape['p:txBody'] && shape['p:txBody']['a:p']) {
-                const paragraphs = Array.isArray(shape['p:txBody']['a:p']) ? 
+                const paragraphs = Array.isArray(shape['p:txBody']['a:p']) ?
                   shape['p:txBody']['a:p'] : [shape['p:txBody']['a:p']];
-                
+
                 for (const paragraph of paragraphs) {
                   if (paragraph && paragraph['a:r']) {
-                    const runs = Array.isArray(paragraph['a:r']) ? 
+                    const runs = Array.isArray(paragraph['a:r']) ?
                       paragraph['a:r'] : [paragraph['a:r']];
-                    
+
                     let paragraphText = '';
                     for (const run of runs) {
                       if (run && run['a:t']) {
                         paragraphText += run['a:t'];
                       }
                     }
-                    
+
                     if (paragraphText.trim()) {
                       textBlocks.push(paragraphText.trim());
                     }
                   }
-                  
+
                   // Handle direct text in paragraphs (without runs)
                   if (paragraph && paragraph['a:t']) {
                     const directText = paragraph['a:t'];
@@ -336,16 +336,16 @@ export class OfficeProcessor implements DocumentProcessor {
           const logger = createLambdaLogger({ operation: 'OfficeProcessor.extractTextFromSlideXml' });
           logger.warn(`Error extracting text from slide ${slideNumber}`, { error: parseError });
         }
-        
+
         resolve(textBlocks);
       });
     });
   }
 
-  private async convertToMarkdown(extractedContent: any, docType: string): Promise<string> {
+  private async convertToMarkdown(extractedContent: unknown, docType: string): Promise<string> {
     const text = extractedContent.text;
     if (!text) return '';
-    
+
     switch (docType) {
       case 'docx':
         return this.convertDocxToMarkdown(extractedContent);
@@ -358,7 +358,7 @@ export class OfficeProcessor implements DocumentProcessor {
     }
   }
 
-  private convertDocxToMarkdown(content: any): string {
+  private convertDocxToMarkdown(content: unknown): string {
     // Use HTML content if available for better structure
     if (content.html) {
       try {
@@ -386,7 +386,7 @@ export class OfficeProcessor implements DocumentProcessor {
         logger.warn('Failed to convert HTML to markdown, falling back to plain text', { error });
       }
     }
-    
+
     // Fallback to plain text conversion
     return this.convertTextToMarkdown(content.text);
   }
@@ -413,7 +413,7 @@ export class OfficeProcessor implements DocumentProcessor {
     let markdown = '# Spreadsheet Data\n\n';
 
     if (content.sheets) {
-      content.sheets.forEach((sheet: XlsxSheetData) => {
+      for (const sheet of content.sheets) {
         const safeSheetName = OfficeProcessor.sanitizeSheetName(String(sheet.name ?? ''));
         markdown += `## ${safeSheetName}\n\n`;
 
@@ -443,38 +443,38 @@ export class OfficeProcessor implements DocumentProcessor {
           ? `${sheet.rowCount}+ rows (parsing capped here — true count unknown)`
           : `${sheet.rowCount} rows`;
         markdown += `\n**Sheet Stats:** ${rowStats}, ${sheet.columnCount} columns\n\n`;
-      });
+      }
     }
 
     return markdown;
   }
 
-  private convertPptxToMarkdown(content: any): string {
+  private convertPptxToMarkdown(content: unknown): string {
     let markdown = '# PowerPoint Presentation\n\n';
-    
+
     // Use structured slide data from node-pptx-parser if available
     if (content.slides && Array.isArray(content.slides)) {
-      content.slides.forEach((slide: any) => {
+      for (const slide of content.slides) {
         if (slide.text && slide.text.length > 0) {
           // Use the slide's actual archive-derived id (REV-COR-413), not its position in
           // the array — when slide numbering has a gap (slide1, slide2, slide4), `index`
           // would mislabel slide 4 as "Slide 3" here even though `combinedText` and
           // `slides[].id` both correctly show 4.
           markdown += `## Slide ${slide.id}\n\n`;
-          
+
           // Join slide text with proper formatting
           const slideContent = slide.text.join('\n').trim();
           if (slideContent) {
             markdown += `${slideContent}\n\n`;
           }
         }
-      });
+      }
     } else {
       // Fallback to text-based parsing if structured data not available
       const text = content.text;
       const sections = text.split(/## Slide \d+/).filter((section: string) => section.trim().length > 0);
-      
-      sections.forEach((section: string, index: number) => {
+
+      for (const [index, section] of sections.entries()) {
         const trimmedSection = section.trim();
         if (trimmedSection) {
           if (index === 0 && !text.includes('## Slide')) {
@@ -485,9 +485,9 @@ export class OfficeProcessor implements DocumentProcessor {
             markdown += `${trimmedSection}\n\n`;
           }
         }
-      });
+      }
     }
-    
+
     // Add metadata
     markdown += '\n---\n';
     if (content.metadata?.slideCount) {
@@ -497,19 +497,19 @@ export class OfficeProcessor implements DocumentProcessor {
       markdown += `**Slides with Content:** ${content.metadata.slidesWithContent}\n`;
     }
     markdown += `**Extraction Method:** ${content.metadata?.extractionMethod || 'custom-jszip-pptx'}\n`;
-    
+
     return markdown;
   }
 
   private convertTextToMarkdown(text: string): string {
     // Simple text to markdown conversion
     const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 0);
-    
+
     let markdown = '';
-    
+
     for (const paragraph of paragraphs) {
       const trimmed = paragraph.trim();
-      
+
       // Detect potential headers
       if (trimmed.length < 100 && !/[.!?]$/.test(trimmed) && /^[A-Z]/.test(trimmed)) {
         const words = trimmed.split(' ');
@@ -518,25 +518,25 @@ export class OfficeProcessor implements DocumentProcessor {
           continue;
         }
       }
-      
+
       // Regular paragraph
       markdown += `${trimmed}\n\n`;
     }
-    
+
     return markdown.trim();
   }
 
-  private async chunkText(text: string): Promise<any[]> {
+  private async chunkText(text: string): Promise<unknown[]> {
     const chunkSize = 2000;
     const overlap = 200;
-    
+
     const chunks = [];
     let startIndex = 0;
     let chunkIndex = 0;
-    
+
     while (startIndex < text.length) {
       let endIndex = Math.min(startIndex + chunkSize, text.length);
-      
+
       // Try to break at a sentence boundary — but only when the break still leaves
       // a chunk larger than the overlap. Otherwise `endIndex - overlap` would move
       // the next window BACKWARD and the loop would never terminate (REV-COR-406).
@@ -574,11 +574,11 @@ export class OfficeProcessor implements DocumentProcessor {
       if (nextStart <= startIndex) break; // defensive; should be unreachable
       startIndex = nextStart;
     }
-    
+
     const logger = createLambdaLogger({ operation: 'OfficeProcessor.chunkText' });
-    logger.info('Text chunking completed', { 
-      chunkCount: chunks.length, 
-      documentType: this.documentType 
+    logger.info('Text chunking completed', {
+      chunkCount: chunks.length,
+      documentType: this.documentType
     });
     return chunks;
   }

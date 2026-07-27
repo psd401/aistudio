@@ -86,7 +86,7 @@ function validateEmail(email) {
   if (typeof email !== 'string' || email.length === 0 || email.length > 320) return false;
   if (email.includes('/') || /\s/.test(email)) return false;
   const at = email.indexOf('@');
-  if (at <= 0 || email.indexOf('@', at + 1) !== -1) return false;
+  if (at <= 0 || email.includes('@', at + 1)) return false;
   const domain = email.slice(at + 1);
   const dot = domain.lastIndexOf('.');
   if (dot <= 0 || dot === domain.length - 1) return false;

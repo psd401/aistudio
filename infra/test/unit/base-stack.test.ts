@@ -1,12 +1,15 @@
 import * as cdk from "aws-cdk-lib"
 import { Template, Match } from "aws-cdk-lib/assertions"
-import { Construct } from "constructs"
 import { BaseStack, BaseStackProps } from "../../lib/constructs/base/base-stack"
 import { EnvironmentConfig } from "../../lib/constructs/config/environment-config"
 
 // Test implementation of BaseStack
 class TestStack extends BaseStack {
-  protected defineResources(props: BaseStackProps): void {
+  public envValueForTest<T>(devValue: T, prodValue: T): T {
+    return this.getEnvValue(devValue, prodValue)
+  }
+
+  protected defineResources(_props: BaseStackProps): void {
     // Create a simple S3 bucket for testing
     new cdk.aws_s3.Bucket(this, "TestBucket", {
       removalPolicy: this.getRemovalPolicy(),
@@ -257,7 +260,7 @@ describe("BaseStack", () => {
       })
 
       // Access the protected method through a type assertion
-      const result = (stack as any).getEnvValue("dev-value", "prod-value")
+      const result = stack.envValueForTest("dev-value", "prod-value")
       expect(result).toBe("dev-value")
     })
 
@@ -268,7 +271,7 @@ describe("BaseStack", () => {
         env: testEnv,
       })
 
-      const result = (stack as any).getEnvValue("dev-value", "prod-value")
+      const result = stack.envValueForTest("dev-value", "prod-value")
       expect(result).toBe("prod-value")
     })
 

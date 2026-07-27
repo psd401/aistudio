@@ -34,7 +34,7 @@ jest.mock('@/lib/auth/request-context', () => ({
 
 // Mock AWS Cognito authentication
 jest.mock('@/lib/auth/server-session', () => ({
-  getServerSession: jest.fn(() => Promise.resolve({ 
+  getServerSession: jest.fn(() => Promise.resolve({
     sub: 'test-cognito-sub',
     email: 'test@example.com'
   }))
@@ -78,7 +78,7 @@ global.ResizeObserver = ResizeObserver;
 
 // Add TextEncoder/TextDecoder for Node environment
 if (typeof global.TextEncoder === 'undefined') {
-  const { TextEncoder, TextDecoder } = require('util');
+  const { TextEncoder, TextDecoder } = require('node:util');
   global.TextEncoder = TextEncoder;
   global.TextDecoder = TextDecoder;
 }
@@ -86,9 +86,9 @@ if (typeof global.TextEncoder === 'undefined') {
 // Add ReadableStream polyfill for SSE testing
 if (typeof global.ReadableStream === 'undefined') {
   try {
-    const { ReadableStream } = require('stream/web');
+    const { ReadableStream } = require('node:stream/web');
     global.ReadableStream = ReadableStream;
-  } catch (e) {
+  } catch {
     // Fallback for older Node versions
     // Create a minimal polyfill for testing purposes
     global.ReadableStream = class ReadableStream {
@@ -138,7 +138,7 @@ if (typeof global.Response === 'undefined' || !global.Response.prototype) {
     const { Response, Headers } = require('undici');
     global.Response = Response;
     global.Headers = Headers;
-  } catch (e) {
+  } catch {
     // Minimal Response polyfill
     global.Headers = class Headers extends Map {
       get(key) {
@@ -190,11 +190,11 @@ jest.mock('next/server', () => ({
         };
       }
     }
-    
+
     json() {
       return Promise.resolve(JSON.parse(this.body));
     }
-    
+
     static json(data, init) {
       return new NextResponse(JSON.stringify(data), {
         ...init,
@@ -210,11 +210,11 @@ jest.mock('next/server', () => ({
     }
 
     static redirect(url, status = 307) {
-      return new NextResponse(null, { 
-        status, 
-        headers: { 
+      return new NextResponse(null, {
+        status,
+        headers: {
           location: typeof url === 'string' ? url : url.toString()
-        } 
+        }
       });
     }
   }
@@ -223,7 +223,7 @@ jest.mock('next/server', () => ({
 // Mock Radix UI primitives
 jest.mock('@radix-ui/react-slot', () => {
   const React = require('react');
-  
+
   const Slot = React.forwardRef(({ children, ...props }, ref) => {
     if (React.Children.count(children) === 1) {
       const child = React.Children.only(children);
@@ -237,18 +237,18 @@ jest.mock('@radix-ui/react-slot', () => {
     }
     return React.createElement('div', { ...props, ref }, children);
   });
-  
+
   const SlotClone = React.forwardRef(({ children, ...props }, ref) => {
     return React.createElement('span', { ...props, ref }, children);
   });
-  
+
   const createSlot = (name) => ({
     __scopedNameSlot: Symbol(name),
     Provider: ({ children }) => children,
     Slot: Slot,
     SlotClone: SlotClone
   });
-  
+
   return {
     Slot,
     SlotClone,
@@ -259,7 +259,7 @@ jest.mock('@radix-ui/react-slot', () => {
 // Mock Radix UI Primitive
 jest.mock('@radix-ui/react-primitive', () => {
   const React = require('react');
-  
+
   const Primitive = {
     div: React.forwardRef((props, ref) => React.createElement('div', { ...props, ref })),
     span: {
@@ -271,7 +271,7 @@ jest.mock('@radix-ui/react-primitive', () => {
     select: React.forwardRef((props, ref) => React.createElement('select', { ...props, ref })),
     option: React.forwardRef((props, ref) => React.createElement('option', { ...props, ref }))
   };
-  
+
   return {
     Primitive
   };
@@ -280,14 +280,14 @@ jest.mock('@radix-ui/react-primitive', () => {
 // Mock Radix UI Collection
 jest.mock('@radix-ui/react-collection', () => {
   const React = require('react');
-  
+
   const createCollection = (name) => ({
     __scopedNameCollection: Symbol(name),
     Provider: ({ children }) => children,
     Slot: React.forwardRef((props, ref) => React.createElement('div', { ...props, ref })),
     ItemSlot: React.forwardRef((props, ref) => React.createElement('div', { ...props, ref }))
   });
-  
+
   return {
     createCollection
   };
@@ -296,20 +296,20 @@ jest.mock('@radix-ui/react-collection', () => {
 // Mock Radix UI Select
 jest.mock('@radix-ui/react-select', () => {
   const React = require('react');
-  
+
   const createMockComponent = (displayName) => {
-    const Component = React.forwardRef((props, ref) => 
+    const Component = React.forwardRef((props, ref) =>
       React.createElement('div', { ...props, ref })
     );
     Component.displayName = displayName;
     return Component;
   };
-  
+
   const Select = ({ children, ...props }) => React.createElement('div', props, children);
   Select.displayName = 'Select';
-  
+
   const SelectTrigger = createMockComponent('SelectTrigger');
-  const SelectValue = createMockComponent('SelectValue');  
+  const SelectValue = createMockComponent('SelectValue');
   const SelectContent = createMockComponent('SelectContent');
   const SelectViewport = createMockComponent('SelectViewport');
   const SelectItem = createMockComponent('SelectItem');
@@ -321,7 +321,7 @@ jest.mock('@radix-ui/react-select', () => {
   const SelectSeparator = createMockComponent('SelectSeparator');
   const SelectGroup = createMockComponent('SelectGroup');
   const SelectIcon = createMockComponent('SelectIcon');
-  
+
   return {
     Root: Select,
     Trigger: SelectTrigger,
@@ -345,15 +345,15 @@ jest.mock('@radix-ui/react-context', () => ({
   createContext: (rootComponentName, defaultContext) => {
     const React = require('react');
     const Context = React.createContext(defaultContext);
-    
+
     const Provider = ({ children, ...props }) => {
       return React.createElement(Context.Provider, { value: props }, children);
     };
-    
-    const useContext = (consumerName) => {
+
+    const useContext = (_consumerName) => {
       return React.useContext(Context);
     };
-    
+
     return [Provider, useContext];
   }
 }));
@@ -361,20 +361,20 @@ jest.mock('@radix-ui/react-context', () => ({
 // Mock UI Components directly
 jest.mock('@/components/ui/select', () => {
   const React = require('react');
-  
+
   const Select = ({ children, defaultValue, onValueChange, disabled, ...props }) => {
     // Create a context to share the selected value
     const [value, setValue] = React.useState(defaultValue);
-    
+
     const handleValueChange = (newValue) => {
       setValue(newValue);
       onValueChange?.(newValue);
     };
-    
-    return React.createElement('div', { 
-      ...props, 
+
+    return React.createElement('div', {
+      ...props,
       'data-testid': props['data-testid'] || 'select',
-      'data-value': value 
+      'data-value': value
     }, React.Children.map(children, child => {
       if (React.isValidElement(child)) {
         return React.cloneElement(child, { onValueChange: handleValueChange, value, disabled });
@@ -382,29 +382,29 @@ jest.mock('@/components/ui/select', () => {
       return child;
     }));
   };
-  
-  const SelectTrigger = React.forwardRef(({ children, onValueChange, value, disabled, ...props }, ref) => 
-    React.createElement('button', { 
-      ...props, 
+
+  const SelectTrigger = React.forwardRef(({ children, onValueChange: _onValueChange, value, disabled, ...props }, ref) =>
+    React.createElement('button', {
+      ...props,
       ref,
       type: 'button',
       value: value,
       disabled: disabled
     }, children)
   );
-  
-  const SelectValue = React.forwardRef(({ children, placeholder, ...props }, ref) => 
-    React.createElement('span', { 
-      ...props, 
+
+  const SelectValue = React.forwardRef(({ children, placeholder, ...props }, ref) =>
+    React.createElement('span', {
+      ...props,
       ref,
-      'data-placeholder': placeholder 
+      'data-placeholder': placeholder
     }, children || placeholder)
   );
-  
-  const SelectContent = React.forwardRef(({ children, onValueChange, ...props }, ref) => 
-    React.createElement('div', { 
-      ...props, 
-      ref 
+
+  const SelectContent = React.forwardRef(({ children, onValueChange, ...props }, ref) =>
+    React.createElement('div', {
+      ...props,
+      ref
     }, React.Children.map(children, child => {
       if (React.isValidElement(child)) {
         return React.cloneElement(child, { onValueChange });
@@ -412,20 +412,20 @@ jest.mock('@/components/ui/select', () => {
       return child;
     }))
   );
-  
-  const SelectItem = React.forwardRef(({ children, value, onValueChange, ...props }, ref) => 
-    React.createElement('div', { 
-      ...props, 
+
+  const SelectItem = React.forwardRef(({ children, value, onValueChange, ...props }, ref) =>
+    React.createElement('div', {
+      ...props,
       ref,
       'data-value': value,
       onClick: () => onValueChange?.(value)
     }, children)
   );
-  
-  const SelectGroup = React.forwardRef(({ children, ...props }, ref) => 
+
+  const SelectGroup = React.forwardRef(({ children, ...props }, ref) =>
     React.createElement('div', { ...props, ref }, children)
   );
-  
+
   return {
     Select,
     SelectTrigger,
@@ -439,15 +439,15 @@ jest.mock('@/components/ui/select', () => {
 // Mock Radix UI Dropdown Menu
 jest.mock('@radix-ui/react-dropdown-menu', () => {
   const React = require('react');
-  
+
   const createMockComponent = (displayName) => {
-    const Component = React.forwardRef((props, ref) => 
+    const Component = React.forwardRef((props, ref) =>
       React.createElement('div', { ...props, ref })
     );
     Component.displayName = displayName;
     return Component;
   };
-  
+
   // Create consistent component references
   const SubTrigger = createMockComponent('DropdownMenuSubTrigger');
   const SubContent = createMockComponent('DropdownMenuSubContent');
@@ -457,7 +457,7 @@ jest.mock('@radix-ui/react-dropdown-menu', () => {
   const RadioItem = createMockComponent('DropdownMenuRadioItem');
   const Label = createMockComponent('DropdownMenuLabel');
   const Separator = createMockComponent('DropdownMenuSeparator');
-  
+
   return {
     Root: createMockComponent('DropdownMenuRoot'),
     Trigger: createMockComponent('DropdownMenuTrigger'),
@@ -481,21 +481,21 @@ jest.mock('@radix-ui/react-dropdown-menu', () => {
 // Mock Radix UI Scroll Area
 jest.mock('@radix-ui/react-scroll-area', () => {
   const React = require('react');
-  
+
   const createMockComponent = (displayName) => {
-    const Component = React.forwardRef((props, ref) => 
+    const Component = React.forwardRef((props, ref) =>
       React.createElement('div', { ...props, ref })
     );
     Component.displayName = displayName;
     return Component;
   };
-  
+
   const mockRoot = createMockComponent('ScrollAreaRoot');
-  const mockViewport = createMockComponent('ScrollAreaViewport'); 
+  const mockViewport = createMockComponent('ScrollAreaViewport');
   const mockScrollbar = createMockComponent('ScrollAreaScrollbar');
   const mockThumb = createMockComponent('ScrollAreaThumb');
   const mockCorner = createMockComponent('ScrollAreaCorner');
-  
+
   return {
     Root: mockRoot,
     Viewport: mockViewport,
@@ -557,6 +557,6 @@ jest.mock('@/lib/graph/graph-embeddings', () => ({
   GRAPH_EMBEDDING_DIMENSIONS: 512,
   DEFAULT_GRAPH_EMBEDDING_MODEL_ID: 'amazon.titan-embed-text-v2:0',
   getGraphEmbeddingModelId: jest.fn(() => Promise.resolve('amazon.titan-embed-text-v2:0')),
-  generateGraphEmbedding: jest.fn(() => Promise.resolve(new Array(512).fill(0.01))),
+  generateGraphEmbedding: jest.fn(() => Promise.resolve(Array.from({length: 512}).fill(0.01))),
   __resetGraphEmbeddingClient: jest.fn(),
 }));

@@ -1,8 +1,8 @@
 import * as cdk from "aws-cdk-lib"
 import * as lambda from "aws-cdk-lib/aws-lambda"
 import { Construct } from "constructs"
-import * as path from "path"
-import { execSync } from "child_process"
+import * as path from "node:path"
+import { execSync } from "node:child_process"
 
 /**
  * Props for SecretCacheLayer construct

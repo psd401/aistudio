@@ -132,7 +132,7 @@ describe('ProcessingStack embedding visual-artifact access', () => {
       'psd-group-sync-staleness-dev',
     ]) {
       const alarm = alarms.find((resource) =>
-        JSON.stringify(resource).includes(`\"AlarmName\":\"${alarmName}\"`),
+        JSON.stringify(resource).includes(`"AlarmName":"${alarmName}"`),
       );
       expect(alarm).toBeDefined();
       expect(JSON.stringify(alarm)).toContain(

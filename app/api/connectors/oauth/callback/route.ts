@@ -31,6 +31,7 @@ import { encryptToken, decryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { getOAuthStateCookieName } from "@/lib/mcp/oauth-state"
 import { safeFetch } from "@/lib/security/safe-fetch"
+import { ErrorFactories } from "@/lib/error-utils"
 
 const log = createLogger({ action: "oauth-callback" })
 
@@ -377,7 +378,11 @@ export async function GET(req: Request): Promise<Response> {
 function parseTokenResponse(json: unknown): OAuthTokenResponse {
   const result = oauthTokenResponseSchema.safeParse(json)
   if (!result.success) {
-    throw new Error(`Invalid OAuth token response: ${result.error.issues[0]?.message ?? "unknown"}`)
+    throw ErrorFactories.invalidFormat(
+      "OAuth token response",
+      json,
+      result.error.issues[0]?.message ?? "valid token response"
+    )
   }
   return result.data
 }

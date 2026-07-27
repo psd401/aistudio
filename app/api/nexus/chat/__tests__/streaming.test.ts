@@ -15,7 +15,7 @@ import { parseSSEEvent, isTextDeltaEvent, isErrorEvent, isToolCallEvent } from '
 import { createMockSSEResponse, createMockAISDKResponse, createFailingSSEStream, SSE_FIXTURES, accumulateText } from '@/lib/streaming/__tests__/mock-sse-factory';
 
 describe('Nexus Chat Streaming', () => {
-  describe('SSE Event Streaming', () => {
+
     it('should stream text-delta events correctly', async () => {
       const mockResponse = createMockSSEResponse([...SSE_FIXTURES.simpleText]);
 
@@ -49,13 +49,13 @@ describe('Nexus Chat Streaming', () => {
       expect(textDeltaEvents.length).toBeGreaterThan(0);
 
       // Verify field name is 'delta', not 'textDelta'
-      textDeltaEvents.forEach(event => {
+      for (const event of textDeltaEvents) {
         expect(event.delta).toBeDefined();
         expect(typeof event.delta).toBe('string');
 
         // Critical: Ensure we're not using the wrong field name
         expect('textDelta' in event).toBe(false);
-      });
+      };
 
       const text = accumulateText(events);
       expect(text).toBe('Hello world');
@@ -140,9 +140,9 @@ describe('Nexus Chat Streaming', () => {
       const text = accumulateText(events);
       expect(text).toContain('search');
     });
-  });
+  ;
 
-  describe('Error Handling', () => {
+
     it('should emit error events on stream failure', async () => {
       const mockResponse = createMockSSEResponse([...SSE_FIXTURES.withError]);
 
@@ -231,9 +231,9 @@ describe('Nexus Chat Streaming', () => {
 
       expect(() => parseSSEEvent(invalidData)).toThrow('SSE event missing required "type" field');
     });
-  });
+  ;
 
-  describe('Streaming Performance', () => {
+
     it('should handle rapid event streams', async () => {
       const mockResponse = createMockSSEResponse(
         SSE_FIXTURES.large,
@@ -325,9 +325,9 @@ describe('Nexus Chat Streaming', () => {
       // Should have taken at least some time (delays between chunks)
       expect(elapsedTime).toBeGreaterThan(20);
     });
-  });
+  ;
 
-  describe('Conversation Continuity', () => {
+
     it('should handle follow-up messages in same conversation', async () => {
       // First message
       const firstResponse = createMockSSEResponse([
@@ -386,9 +386,9 @@ describe('Nexus Chat Streaming', () => {
       const text = accumulateText(events);
       expect(text).toBe('Follow-up response');
     });
-  });
+  ;
 
-  describe('Edge Cases', () => {
+
     it('should handle empty messages', async () => {
       const mockResponse = createMockSSEResponse([...SSE_FIXTURES.empty]);
 
@@ -462,5 +462,5 @@ describe('Nexus Chat Streaming', () => {
       const text = accumulateText(receivedEvents);
       expect(text).toBe('The quick brown fox jumps');
     });
-  });
+  ;
 });

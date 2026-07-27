@@ -10,7 +10,7 @@ import { decodeMdxEditorEscapes } from '@/lib/utils/text-sanitizer'
 // Mock the substituteVariables function since it's not exported
 // These tests verify the expected behavior based on the implementation
 describe('Variable Substitution Logic (substituteVariables)', () => {
-  describe('Slugified Prompt Names', () => {
+
     it('should resolve slugified prompt names with hyphens', () => {
       // Given a prompt named "Facilitator Opening" → slugified to "facilitator-opening"
       // When: ${facilitator-opening} is used
@@ -74,9 +74,9 @@ describe('Variable Substitution Logic (substituteVariables)', () => {
       expect(slugifiedOutputs.get("test")).toBe("Output 2")
       expect(slugifiedOutputs.size).toBeGreaterThanOrEqual(1)
     })
-  })
 
-  describe('Positional Variable Resolution (prompt_N_output)', () => {
+
+
     it('should parse prompt_N_output pattern correctly', () => {
       const varName = "prompt_0_output"
       const positionalMatch = varName.match(/^prompt_(\d+)_output$/)
@@ -131,8 +131,7 @@ describe('Variable Substitution Logic (substituteVariables)', () => {
       const positionToPromptId = new Map<number, number>()
 
       // Bug fix: Always map position → ID, even if no output
-      for (let i = 0; i < sortedPrevPrompts.length; i++) {
-        const prevPrompt = sortedPrevPrompts[i]
+      for (const [i, prevPrompt] of sortedPrevPrompts.entries()) {
         positionToPromptId.set(i, prevPrompt.id)
       }
 
@@ -141,9 +140,9 @@ describe('Variable Substitution Logic (substituteVariables)', () => {
       expect(positionToPromptId.get(1)).toBe(2)  // Position 1 → Prompt B
       expect(positionToPromptId.get(2)).toBe(3)  // Position 2 → Prompt C
     })
-  })
 
-  describe('Regex Pattern Matching', () => {
+
+
     it('should match ${variable} syntax with hyphens', () => {
       const content = "${facilitator-opening} and ${user-input}"
       const regex = /\${([\w-]+)}|{{([\w-]+)}}/g
@@ -192,9 +191,9 @@ describe('Variable Substitution Logic (substituteVariables)', () => {
       expect(matches).toHaveLength(1)  // Fixed: hyphenated name matched
       expect(matches[0][1]).toBe("facilitator-opening")
     })
-  })
 
-  describe('Variable Resolution Priority', () => {
+
+
     it('should document the correct resolution order', () => {
       // This test documents the priority order (no actual function calls)
       const resolutionPaths = [
@@ -210,9 +209,9 @@ describe('Variable Substitution Logic (substituteVariables)', () => {
       expect(resolutionPaths[2]).toContain("Slugified")
       expect(resolutionPaths[3]).toContain("prompt_N_output")
     })
-  })
 
-  describe('Edge Cases', () => {
+
+
     it('should handle content with no variables', () => {
       const content = "This is plain text with no variables"
       const regex = /\${([\w-]+)}|{{([\w-]+)}}/g
@@ -239,7 +238,7 @@ describe('Variable Substitution Logic (substituteVariables)', () => {
       expect(matches[0][1]).toBe("start")
       expect(matches[1][1]).toBe("end")
     })
-  })
+
 })
 
 describe('decodeMdxEditorEscapes', () => {

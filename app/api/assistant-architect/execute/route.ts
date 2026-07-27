@@ -1937,7 +1937,6 @@ async function injectRepositoryKnowledge(
       [prompt.content, context.runtimeRepositoryQuery].filter(Boolean).join('\n'),
       repositoryIds,
       context.userCognitoSub,
-      context.assistantOwnerSub,
       {
         maxChunks: 10,
         maxTokens: 4000,

@@ -436,10 +436,8 @@ test.describe("Unified content product migration (authenticated)", () => {
     const inputs = executions[0]?.inputs as Record<string, unknown> | undefined;
     const documentInput = inputs?.e2e_knowledge_document;
     expect(typeof documentInput).toBe("string");
-    expect(documentInput).toMatch(
-      new RegExp(
-        String.raw`^\[\[repository-attachment:v1:${AA_BINDING_ID}:7701:aa-private-source\.pdf\]\]$`,
-      ),
+    expect(documentInput).toBe(
+      `[[repository-attachment:v1:${AA_BINDING_ID}:7701:aa-private-source.pdf]]`,
     );
     expect(documentInput).not.toContain(
       "AA-SOURCE-BYTES-MUST-NOT-REACH-THE-MODEL",

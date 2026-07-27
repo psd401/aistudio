@@ -379,15 +379,15 @@ test('resolveAudio/resolveVideo use supplied URLs without generating', async () 
     false
   );
   expect(a.media.url).toBe('https://x/a.mp3');
-  const v = await R.resolveVideo(
-    R.parseArgs(argv('--user', 'a@b.net', '--video-url', 'https://x/v.mp4')),
-    'https://x/a.mp3',
-    'T',
-    ['p'],
-    { segments: [{ text: 'x', start: 0, end: 2 }], script: 's' },
-    { runSkill },
-    false
-  );
+  const v = await R.resolveVideo({
+                    args: R.parseArgs(argv('--user', 'a@b.net', '--video-url', 'https://x/v.mp4')),
+                    audioUrl: 'https://x/a.mp3',
+                    title: 'T',
+                    points: ['p'],
+                    narration: { segments: [{ text: 'x', start: 0, end: 2 }], script: 's' },
+                    deps: { runSkill },
+                    dryRunPlaceholders: false,
+                  });
   expect(v.media.url).toBe('https://x/v.mp4');
 });
 
@@ -405,15 +405,15 @@ test('resolveAudio degrades gracefully when psd-tts fails', async () => {
 
 test('resolveVideo degrades gracefully when psd-hyperframes fails', async () => {
   const runSkill = () => ({ code: 1, stdout: JSON.stringify({ error: 'render_failed' }), stderr: '' });
-  const v = await R.resolveVideo(
-    R.parseArgs(argv('--user', 'a@b.net')),
-    'https://x/a.mp3',
-    'T',
-    ['point one'],
-    { segments: [{ text: 'x', start: 0, end: 2 }], script: 's' },
-    { runSkill },
-    false
-  );
+  const v = await R.resolveVideo({
+                    args: R.parseArgs(argv('--user', 'a@b.net')),
+                    audioUrl: 'https://x/a.mp3',
+                    title: 'T',
+                    points: ['point one'],
+                    narration: { segments: [{ text: 'x', start: 0, end: 2 }], script: 's' },
+                    deps: { runSkill },
+                    dryRunPlaceholders: false,
+                  });
   expect(v.media).toBeNull();
   expect(v.omission).toBeTruthy();
 });
@@ -449,30 +449,30 @@ test('resolveVideo notes the 60s cap when the narration is longer than the video
   // trimmed to the 3-minute cap, so the page must say so via the note hook.
   const longNarration = { script: 'x', segments: [{ text: 'a', start: 0, end: 100 }, { text: 'b', start: 100, end: 200 }] };
   const runSkill = () => ({ code: 0, stdout: JSON.stringify({ url: 'https://x/v.mp4' }), stderr: '' });
-  const v = await R.resolveVideo(
-    R.parseArgs(argv('--user', 'a@b.net')),
-    'https://x/a.mp3',
-    'T',
-    ['point'],
-    longNarration,
-    { runSkill },
-    false
-  );
+  const v = await R.resolveVideo({
+                    args: R.parseArgs(argv('--user', 'a@b.net')),
+                    audioUrl: 'https://x/a.mp3',
+                    title: 'T',
+                    points: ['point'],
+                    narration: longNarration,
+                    deps: { runSkill },
+                    dryRunPlaceholders: false,
+                  });
   expect(v.media.url).toBe('https://x/v.mp4');
   expect(v.media.note).toMatch(/minutes|capped/i);
 });
 
 test('a narration within the 3-minute cap is NOT trimmed (no video note)', async () => {
   const runSkill = () => ({ code: 0, stdout: JSON.stringify({ url: 'https://x/v.mp4' }), stderr: '' });
-  const v = await R.resolveVideo(
-    R.parseArgs(argv('--user', 'a@b.net')),
-    'https://x/a.mp3',
-    'T',
-    ['point'],
-    { script: 'x', segments: [{ text: 'a', start: 0, end: 60 }, { text: 'b', start: 60, end: 167 }] }, // 2:47 < 3 min
-    { runSkill },
-    false
-  );
+  const v = await R.resolveVideo({
+                    args: R.parseArgs(argv('--user', 'a@b.net')),
+                    audioUrl: 'https://x/a.mp3',
+                    title: 'T',
+                    points: ['point'],
+                    narration: { script: 'x', segments: [{ text: 'a', start: 0, end: 60 }, { text: 'b', start: 60, end: 167 }] },
+                    deps: { runSkill },
+                    dryRunPlaceholders: false,
+                  });
   expect(v.media.url).toBe('https://x/v.mp4');
   expect(v.media.note).toBeUndefined();
 });
@@ -480,15 +480,15 @@ test('a narration within the 3-minute cap is NOT trimmed (no video note)', async
 test('resolveVideo passes a budget-safe fps so a 3-minute video fits the render budget', async () => {
   const calls = [];
   const runSkill = (spec) => { calls.push(spec); return { code: 0, stdout: JSON.stringify({ url: 'https://x/v.mp4' }), stderr: '' }; };
-  await R.resolveVideo(
-    R.parseArgs(argv('--user', 'a@b.net')),
-    'https://x/a.mp3',
-    'T',
-    ['point'],
-    { script: 'x', segments: [{ text: 'a', start: 0, end: 200 }] }, // clamps to 180
-    { runSkill },
-    false
-  );
+  await R.resolveVideo({
+          args: R.parseArgs(argv('--user', 'a@b.net')),
+          audioUrl: 'https://x/a.mp3',
+          title: 'T',
+          points: ['point'],
+          narration: { script: 'x', segments: [{ text: 'a', start: 0, end: 200 }] },
+          deps: { runSkill },
+          dryRunPlaceholders: false,
+        });
   const a = calls[0].args;
   const dur = Number(a[a.indexOf('--duration') + 1]);
   const fps = Number(a[a.indexOf('--fps') + 1]);

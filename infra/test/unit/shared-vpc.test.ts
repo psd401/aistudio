@@ -16,7 +16,7 @@ describe("SharedVPC Construct", () => {
     })
   })
 
-  describe("Development Environment", () => {
+
     test("creates VPC with correct subnet configuration", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
@@ -130,9 +130,9 @@ describe("SharedVPC Construct", () => {
         MaxAggregationInterval: 600, // 10 minutes
       })
     })
-  })
 
-  describe("Production Environment", () => {
+
+
     test("uses NAT gateways for reliability", () => {
       // Arrange
       const config = EnvironmentConfig.get("prod")
@@ -227,9 +227,9 @@ describe("SharedVPC Construct", () => {
         },
       })
     })
-  })
 
-  describe("VPC Endpoints Configuration", () => {
+
+
     test("disables all endpoints when enableGatewayEndpoints is false", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
@@ -337,9 +337,9 @@ describe("SharedVPC Construct", () => {
       const vpcEndpoints = template.findResources("AWS::EC2::VPCEndpoint")
       expect(Object.keys(vpcEndpoints).length).toBe(0)
     })
-  })
 
-  describe("Subnet Configuration", () => {
+
+
     test("provides helper method for workload-specific subnets", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
@@ -388,9 +388,9 @@ describe("SharedVPC Construct", () => {
         CidrBlock: Match.stringLikeRegexp(".*\\.0/22"),
       })
     })
-  })
 
-  describe("Flow Logs", () => {
+
+
     test("can disable flow logs", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
@@ -412,9 +412,9 @@ describe("SharedVPC Construct", () => {
         0 // No flow log bucket
       )
     })
-  })
 
-  describe("Tags", () => {
+
+
     test("tags subnets appropriately", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
@@ -440,9 +440,9 @@ describe("SharedVPC Construct", () => {
         }),
       })
     })
-  })
 
-  describe("Cost Optimization (Issue #617)", () => {
+
+
     test("interface endpoints disabled by default saves ~$428/month", () => {
       // Arrange
       const devConfig = EnvironmentConfig.get("dev")
@@ -485,5 +485,5 @@ describe("SharedVPC Construct", () => {
       }).length
       expect(sgCount).toBe(0)
     })
-  })
+
 })

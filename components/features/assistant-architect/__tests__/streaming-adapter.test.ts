@@ -12,7 +12,7 @@ import { parseSSEEvent, isTextDeltaEvent, isTextStartEvent, isErrorEvent, isFini
 import { createMockSSEResponse, createFailingSSEStream, SSE_FIXTURES, accumulateText } from '@/lib/streaming/__tests__/mock-sse-factory';
 
 describe('Assistant Architect Streaming Adapter', () => {
-  describe('SSE Event Processing', () => {
+
     it('should parse and handle text-delta events correctly', async () => {
       const mockResponse = createMockSSEResponse([...SSE_FIXTURES.simpleText]);
 
@@ -51,13 +51,13 @@ describe('Assistant Architect Streaming Adapter', () => {
       expect(textDeltaEvents.length).toBe(2);
 
       // Verify delta field exists (not textDelta)
-      textDeltaEvents.forEach(event => {
+      for (const event of textDeltaEvents) {
         expect(event.delta).toBeDefined();
         expect(typeof event.delta).toBe('string');
 
         // Ensure textDelta doesn't exist
         expect('textDelta' in event).toBe(false);
-      });
+      };
 
       // Verify accumulated text
       const text = accumulateText(events);
@@ -185,9 +185,9 @@ describe('Assistant Architect Streaming Adapter', () => {
       expect(text).toContain('Analyzing input');
       expect(text).toContain('Here is the result');
     });
-  });
+  ;
 
-  describe('Error Handling', () => {
+
     it('should handle error events gracefully', async () => {
       const mockResponse = createMockSSEResponse([...SSE_FIXTURES.withError]);
 
@@ -303,9 +303,9 @@ describe('Assistant Architect Streaming Adapter', () => {
         expect(toolErrorEvent.errorText).toBe('API rate limit exceeded');
       }
     });
-  });
+  ;
 
-  describe('Performance', () => {
+
     it('should handle large streaming responses efficiently', async () => {
       const mockResponse = createMockSSEResponse([...SSE_FIXTURES.large]);
 
@@ -345,9 +345,9 @@ describe('Assistant Architect Streaming Adapter', () => {
       // Should complete reasonably quickly (adjust threshold as needed)
       expect(elapsedTime).toBeLessThan(1000);
     });
-  });
+  ;
 
-  describe('Edge Cases', () => {
+
     it('should handle empty responses', async () => {
       const mockResponse = createMockSSEResponse([...SSE_FIXTURES.empty]);
 
@@ -422,5 +422,5 @@ describe('Assistant Architect Streaming Adapter', () => {
       const reasoningEnd = events.find(e => e.type === 'reasoning-end');
       expect(reasoningEnd).toBeDefined();
     });
-  });
+  ;
 });

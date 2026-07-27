@@ -16,8 +16,8 @@
  *     call for these inserts (the Done-when "grep returns zero matches").
  */
 
-import { readFileSync } from "fs"
-import { join } from "path"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import { sql } from "drizzle-orm"
 import { PgDialect } from "drizzle-orm/pg-core"
 

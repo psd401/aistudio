@@ -24,8 +24,10 @@ import { screen, fireEvent, waitFor } from "@testing-library/dom";
 // lucide icons used by the component are not in the global lucide mock; stub them.
 jest.mock("lucide-react", () => {
   const React = require("react");
-  const icon = (name: string) => () =>
-    React.createElement("span", { "data-testid": `icon-${name}` });
+  const icon = (name: string) =>
+    function MockIcon() {
+      return React.createElement("span", { "data-testid": `icon-${name}` });
+    };
   return {
     Globe: icon("globe"),
     Lock: icon("lock"),
@@ -52,8 +54,9 @@ jest.mock("@/components/ui/dialog", () => {
   const Ctx = React.createContext(undefined);
   const pass =
     (tag: string) =>
-    ({ children }: { children?: React.ReactNode }) =>
-      React.createElement(tag, null, children);
+    function MockPassThrough({ children }: { children?: React.ReactNode }) {
+      return React.createElement(tag, null, children);
+    };
   const Dialog = ({
     children,
     onOpenChange,

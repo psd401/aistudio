@@ -117,16 +117,16 @@ export async function POST(request: NextRequest) {
       input.idempotencyKey &&
       input.checksumSha256
     ) {
-      result = await createWorkspaceUploadUrl(
-          context.ownerEmail,
-          context.workspacePrefix,
-          input.path,
-          input.contentLength,
-          `${context.sessionId}:${context.nonce}`,
-          input.idempotencyKey,
-          input.checksumSha256,
-          input.contentType
-        )
+      result = await createWorkspaceUploadUrl({
+                       ownerEmail: context.ownerEmail,
+                       signedWorkspacePrefix: context.workspacePrefix,
+                       relativePath: input.path,
+                       contentLength: input.contentLength,
+                       contextKey: `${context.sessionId}:${context.nonce}`,
+                       idempotencyKey: input.idempotencyKey,
+                       checksumSha256: input.checksumSha256,
+                       contentType: input.contentType,
+                     })
     } else if (
       input.operation === "publish" &&
       input.path &&
@@ -135,15 +135,15 @@ export async function POST(request: NextRequest) {
       input.idempotencyKey &&
       input.checksumSha256
     ) {
-      result = await createPublicArtifactUpload(
-        context.ownerEmail,
-        input.path,
-        input.contentType,
-        input.contentLength,
-        `${context.sessionId}:${context.nonce}`,
-        input.idempotencyKey,
-        input.checksumSha256,
-      )
+      result = await createPublicArtifactUpload({
+                       ownerEmail: context.ownerEmail,
+                       fileName: input.path,
+                       contentType: input.contentType,
+                       contentLength: input.contentLength,
+                       contextKey: `${context.sessionId}:${context.nonce}`,
+                       idempotencyKey: input.idempotencyKey,
+                       checksumSha256: input.checksumSha256,
+                     })
     } else if (input.operation === "download-public" && input.path) {
       result = await createPublicArtifactDownloadUrl(
         context.ownerEmail,

@@ -60,7 +60,7 @@ export async function handleContentBlockedResponse(
     const clonedResponse = response.clone()
     const errorData: ContentBlockedResponse = await clonedResponse.json()
     if (errorData.code === 'CONTENT_BLOCKED') {
-      const categories = Array.isArray(errorData.categories) && errorData.categories.length
+      const categories = Array.isArray(errorData.categories) && errorData.categories.length > 0
         ? ` (${errorData.categories.join(', ')})`
         : ''
       toast.error('Content Blocked', {

@@ -32,7 +32,8 @@
  * trusted web broker regardless of scope.
  * Additionally, file creation (Drive/Docs/Sheets/Slides) is blocked on the
  * USER slot: files created there are owned by the user's account
- * (impersonation). Create with --scope agent and share explicitly.
+ * (impersonation). Create with --scope agent; permission changes require the
+ * server-recorded provenance flow.
  *
  * Flow:
  *   1. Phase 1 gate check on --command (forbidden ops → exit 13)

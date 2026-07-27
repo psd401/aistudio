@@ -53,12 +53,12 @@ export function parseCanonicalEmbeddingDlqMessage(
       !UUID_PATTERN.test(generationId) ||
       !Array.isArray(chunkIds) ||
       (!activationOnly && chunkIds.length === 0) ||
-      (activationOnly && chunkIds.length !== 0) ||
+      (activationOnly && chunkIds.length > 0) ||
       !chunkIds.every(
         (chunkId) => Number.isSafeInteger(chunkId) && Number(chunkId) > 0
       ) ||
       !Array.isArray(texts) ||
-      (activationOnly && texts.length !== 0) ||
+      (activationOnly && texts.length > 0) ||
       texts.length !== chunkIds.length ||
       !texts.every((text) => typeof text === "string")
     ) {

@@ -56,18 +56,18 @@ export function useModels() {
       const response = await fetch("/api/models", {
         cache: 'no-store'
       })
-      
+
       if (!response.ok) {
         throw new Error("Failed to fetch models")
       }
-      
+
       const result = await response.json()
       const modelsData = result.data || result
-      
+
       if (!Array.isArray(modelsData)) {
         throw new TypeError("Invalid models data")
       }
-      
+
       setModels(modelsData)
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load models"
@@ -100,7 +100,7 @@ export function useModels() {
  */
 export function useModelPersistence(storageKey: string) {
   const [selectedModel, setSelectedModelState] = useState<SelectAiModel | null>(null)
-  
+
   // Load persisted model on mount with validation
   useEffect(() => {
     const savedData = localStorage.getItem(`${storageKey}Data`)
@@ -131,7 +131,7 @@ export function useModelPersistence(storageKey: string) {
       }
     }
   }, [storageKey])
-  
+
   // Wrapper to persist model selection
   const setSelectedModel = useCallback((model: SelectAiModel | null) => {
     setSelectedModelState(model)
@@ -143,7 +143,7 @@ export function useModelPersistence(storageKey: string) {
       localStorage.removeItem(`${storageKey}Data`)
     }
   }, [storageKey])
-  
+
   // setTransientModel updates in-memory state without persisting to localStorage.
   // Used for URL-driven or prompt-settings-driven model selections that should not
   // overwrite the user's stored preference.
@@ -232,11 +232,15 @@ export function useModelsWithPersistence(
       }
 
       // Find a model that matches required capabilities
-      let candidateModel: SelectAiModel | null = null
+      const hasCapabilityRequirements =
+        requiredCapabilities && requiredCapabilities.length > 0
+      const candidateModel: SelectAiModel | null = hasCapabilityRequirements
+        ? models.find(model =>
+            meetsRequiredCapabilities(model, requiredCapabilities)
+          ) ?? null
+        : models[0]
 
-      if (requiredCapabilities && requiredCapabilities.length > 0) {
-        candidateModel = models.find(model => meetsRequiredCapabilities(model, requiredCapabilities)) ?? null
-
+      if (hasCapabilityRequirements) {
         // If no model matches required capabilities, don't fall back to models[0]
         // Instead, leave it null to prompt user selection
         if (!candidateModel) {
@@ -245,9 +249,6 @@ export function useModelsWithPersistence(
             availableModelCount: models.length
           })
         }
-      } else {
-        // No capability requirements, default to first model
-        candidateModel = models[0]
       }
 
       if (candidateModel) {

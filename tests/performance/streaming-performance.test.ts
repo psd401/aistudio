@@ -229,17 +229,17 @@ describeOrSkip('Streaming Performance - TTFT Validation', () => {
     console.log(`\n📊 Cross-Provider TTFT Comparison:`);
     console.log(`\n| Provider | Model | TTFT p95 (ms) | TTFT Median (ms) | Error Rate |`);
     console.log(`|----------|-------|---------------|------------------|------------|`);
-    results.forEach(r => {
+    for (const r of results) {
       console.log(
         `| ${r.provider.padEnd(8)} | ${r.modelId.padEnd(30)} | ${r.ttftP95.toFixed(2).padStart(13)} | ${r.ttftMedian.toFixed(2).padStart(16)} | ${r.errorRate.toFixed(2)}% |`
       );
-    });
+    }
 
     // All providers should meet the target
     const targets = getPerformanceTargets();
-    results.forEach(r => {
+    for (const r of results) {
       expect(r.ttftP95).toBeLessThanOrEqual(targets.ttftP95);
-    });
+    }
   });
 
   test('TTFT: Response time should be consistent across sequential requests', async () => {

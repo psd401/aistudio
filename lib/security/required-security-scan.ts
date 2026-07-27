@@ -11,6 +11,6 @@ export async function runRequiredSecurityScan<T>(
     return await scan()
   } catch (error) {
     onFailure(error)
-    throw new Error(publicMessage)
+    throw new Error(publicMessage, { cause: error })
   }
 }

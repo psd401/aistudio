@@ -233,7 +233,7 @@ async function main() {
   if (args.prompt.length > 4000) {
     fail('--prompt must be 4000 characters or fewer', 'bad_args');
   }
-  const size = args.size && args.size !== true ? String(args.size) : 'auto';
+  const size = args.size > 0 && args.size !== true ? String(args.size) : 'auto';
   const quality = args.quality && args.quality !== true ? String(args.quality) : 'auto';
   const background = args.background && args.background !== true ? String(args.background) : 'auto';
 

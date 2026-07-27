@@ -2,7 +2,7 @@ import { SQSEvent, Context, SQSBatchResponse, SQSBatchItemFailure } from 'aws-la
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { DynamoDBClient, PutItemCommand, QueryCommand } from '@aws-sdk/client-dynamodb';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
-import { Readable } from 'stream';
+import { Readable } from 'node:stream';
 import { DocumentProcessorFactory } from './processors/factory';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { createLambdaLogger } from './utils/lambda-logger';
@@ -38,7 +38,7 @@ interface ProcessingContext {
 async function updateJobStatus(
   jobId: string,
   status: string,
-  updates: Record<string, any> = {},
+  updates: Record<string, unknown> = {},
   logger = createLambdaLogger({ operation: 'updateJobStatus' })
 ): Promise<void> {
   const timestamp = Date.now();
@@ -65,7 +65,7 @@ async function updateJobStatus(
 
     // Get the existing job data and preserve all fields
     const existingJob = unmarshall(existingJobResponse.Items[0]);
-    
+
     // Create new status entry with complete job data preserved
     await dynamoClient.send(
       new PutItemCommand({
@@ -87,7 +87,7 @@ async function updateJobStatus(
         }),
       })
     );
-    
+
     logger.info('Job status updated successfully', { jobId, status, updates });
   } catch (error) {
     logger.error('Failed to update job status', error, { jobId, status });
@@ -96,20 +96,20 @@ async function updateJobStatus(
 }
 
 // Store processing results
-async function storeResults(jobId: string, result: Record<string, any>): Promise<void> {
+async function storeResults(jobId: string, result: Record<string, unknown>): Promise<void> {
   const resultSize = JSON.stringify(result).length;
-  
+
   if (resultSize > 400 * 1024) { // 400KB limit for DynamoDB
     // Store large results in S3
     const resultKey = `v2/results/${jobId}/result.json`;
-    
+
     await s3Client.send(new PutObjectCommand({
       Bucket: DOCUMENTS_BUCKET,
       Key: resultKey,
       Body: JSON.stringify(result),
       ContentType: 'application/json',
     }));
-    
+
     await updateJobStatus(jobId, 'completed', {
       resultLocation: 's3',
       resultS3Key: resultKey,
@@ -129,12 +129,12 @@ async function sendToHighMemoryQueue(context: ProcessingContext): Promise<void> 
   if (!HIGH_MEMORY_QUEUE_URL) {
     throw new Error('HIGH_MEMORY_QUEUE_URL not configured');
   }
-  
+
   await sqsClient.send(new SendMessageCommand({
     QueueUrl: HIGH_MEMORY_QUEUE_URL,
     MessageBody: JSON.stringify(context),
   }));
-  
+
   const logger = createLambdaLogger({ operation: 'sendToHighMemoryQueue', jobId: context.jobId });
   logger.info('Job sent to high-memory queue', { jobId: context.jobId, queueUrl: HIGH_MEMORY_QUEUE_URL });
 }
@@ -156,37 +156,37 @@ async function streamToBuffer(stream: Readable): Promise<Buffer> {
 // Process a single document
 async function processDocument(context: ProcessingContext): Promise<void> {
   const { jobId, bucket, key, fileName, fileSize, fileType, processingOptions } = context;
-  const logger = createLambdaLogger({ 
-    operation: 'processDocument', 
-    jobId, 
-    fileName, 
+  const logger = createLambdaLogger({
+    operation: 'processDocument',
+    jobId,
+    fileName,
     fileType,
     processorType: PROCESSOR_TYPE
   });
   const timer = logger.startTimer('document-processing');
-  
-  logger.info('Starting document processing', { 
-    fileName, 
-    fileSize, 
-    fileType, 
-    bucket, 
-    key, 
-    processingOptions 
+
+  logger.info('Starting document processing', {
+    fileName,
+    fileSize,
+    fileType,
+    bucket,
+    key,
+    processingOptions
   });
-  
+
   try {
     // Update status to processing
-    await updateJobStatus(jobId, 'processing', { 
+    await updateJobStatus(jobId, 'processing', {
       processingStage: 'initializing',
       progress: 10,
       startTime: new Date().toISOString(),
     }, logger);
-    
+
     // Check if this should be routed to high-memory processor
     if (PROCESSOR_TYPE === 'STANDARD' && fileSize > 50 * 1024 * 1024) {
-      logger.info('Routing large file to high-memory processor', { 
-        fileSize, 
-        threshold: 50 * 1024 * 1024 
+      logger.info('Routing large file to high-memory processor', {
+        fileSize,
+        threshold: 50 * 1024 * 1024
       });
       await sendToHighMemoryQueue(context);
       await updateJobStatus(jobId, 'processing', {
@@ -195,41 +195,41 @@ async function processDocument(context: ProcessingContext): Promise<void> {
       }, logger);
       return;
     }
-    
+
     // Download file from S3
     await updateJobStatus(jobId, 'processing', {
       processingStage: 'downloading',
       progress: 20,
     }, logger);
-    
+
     const getObjectCommand = new GetObjectCommand({
       Bucket: bucket,
       Key: key,
     });
-    
+
     const response = await s3Client.send(getObjectCommand);
     const stream = response.Body as Readable;
     const buffer = await streamToBuffer(stream);
-    
-    logger.info('File downloaded from S3', { 
-      downloadedBytes: buffer.length, 
-      bucket, 
-      key 
+
+    logger.info('File downloaded from S3', {
+      downloadedBytes: buffer.length,
+      bucket,
+      key
     });
-    
+
     // Select and configure processor
     await updateJobStatus(jobId, 'processing', {
       processingStage: 'selecting_processor',
       progress: 30,
     }, logger);
-    
+
     const processor = DocumentProcessorFactory.create(fileType, {
       enableOCR: processingOptions.ocrEnabled,
       convertToMarkdown: processingOptions.convertToMarkdown,
       extractImages: processingOptions.extractImages,
       generateEmbeddings: processingOptions.generateEmbeddings,
     }, buffer, fileName);
-    
+
     // Process document with progress callbacks
     const result = await processor.process({
       buffer,
@@ -238,34 +238,34 @@ async function processDocument(context: ProcessingContext): Promise<void> {
       jobId,
       options: processingOptions,
       onProgress: async (stage: string, progress: number) => {
-        await updateJobStatus(jobId, 'processing', { 
-          processingStage: stage, 
+        await updateJobStatus(jobId, 'processing', {
+          processingStage: stage,
           progress: Math.max(30, Math.min(95, progress)) // Keep between 30-95%
         }, logger);
       },
     });
-    
+
     // Store results
     await updateJobStatus(jobId, 'processing', {
       processingStage: 'storing_results',
       progress: 95,
     }, logger);
-    
+
     await storeResults(jobId, result);
-    
+
     timer();
-    logger.info('Document processing completed successfully', { 
-      fileName, 
+    logger.info('Document processing completed successfully', {
+      fileName,
       fileType,
-      resultSize: JSON.stringify(result).length 
+      resultSize: JSON.stringify(result).length
     });
-    
+
   } catch (error) {
     timer();
     logger.error('Document processing failed', error, { fileName, fileType });
-    
+
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    
+
     await updateJobStatus(jobId, 'failed', {
       errorMessage,
       failedAt: new Date().toISOString(),
@@ -371,7 +371,7 @@ export async function handler(event: SQSEvent, context: Context): Promise<SQSBat
   // records' itemIdentifiers keeps ONLY those messages on the queue for SQS retry and
   // DLQ redrive (maxReceiveCount reached) — the previous void return made Lambda treat
   // a partial-batch failure as a full success and silently delete the failed messages.
-  results.forEach((result, index) => {
+  for (const [index, result] of results.entries()) {
     if (result.status === 'rejected') {
       batchItemFailures.push({ itemIdentifier: items[index].messageId });
       logger.error('Document processing failed — record left on queue for retry', {
@@ -380,7 +380,7 @@ export async function handler(event: SQSEvent, context: Context): Promise<SQSBat
         reason: result.reason instanceof Error ? result.reason.message : String(result.reason)
       });
     }
-  });
+  };
 
   logger.info('Lambda execution completed', {
     successCount: results.length - (batchItemFailures.length - parseFailureMessageIds.length),

@@ -181,7 +181,7 @@ describe('Memory Leak Detection', () => {
 
     // Generate memory usage chart (text-based)
     console.log(`\n📈 Heap Usage Over Time:`);
-    memorySnapshots.forEach((snapshot, index) => {
+    for (const [index, snapshot] of memorySnapshots.entries()) {
       if (index % 2 === 0) {
         // Log every other snapshot to avoid clutter
         const minutes = Math.floor(snapshot.timestamp / 60000);
@@ -189,7 +189,7 @@ describe('Memory Leak Detection', () => {
         const bar = '█'.repeat(Math.floor(snapshot.heapUsed / 1024 / 1024 / 10));
         console.log(`   ${minutes.toString().padStart(3)}m: ${heapMB.padStart(8)}MB ${bar}`);
       }
-    });
+    }
 
     // Generate aggregated metrics report
     const aggregated = collector.getAggregated();

@@ -6,7 +6,7 @@
 // Read-only.
 
 const {
-  parseArgs, requireUser, getCredentials, getOrganization, getVacancyDetails, getWeekRange, emit, fail,
+  parseArgs, requireUser, getVacancyDetails, getWeekRange, emit, fail,
 } = require('./lib/api.js');
 
 const SCHOOL_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
@@ -102,7 +102,7 @@ function buildWeeklySummary(vacancies, weekRange) {
 
 (async () => {
   const args = parseArgs(process.argv);
-  const user = requireUser(args);
+  requireUser(args);
   const weeksAgoRaw = args.weeks_ago ?? args._positional[0] ?? '0';
   const weeksAgo = Number.parseInt(weeksAgoRaw, 10);
   if (!Number.isFinite(weeksAgo) || weeksAgo < 0 || weeksAgo > 52) {
@@ -111,9 +111,7 @@ function buildWeeklySummary(vacancies, weekRange) {
   const weekRange = getWeekRange(weeksAgo);
 
   try {
-    const creds = getCredentials(user);
-    const org = await getOrganization(creds);
-    const result = await getVacancyDetails(org.orgId, org.apiKey, creds, weekRange.start, weekRange.end);
+    const result = await getVacancyDetails(weekRange.start, weekRange.end);
     if (result.error) fail(result.error, 'redrover_api_error');
     emit(buildWeeklySummary(result.data, weekRange));
   } catch (err) {

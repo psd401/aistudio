@@ -74,7 +74,7 @@ async function main() {
   const userEmail = requireUser(args);
   const weeksAgo = args.weeks_ago ? parseInt(args.weeks_ago, 10) : 0;
   const workspaceId = args.workspace_id ? Number(args.workspace_id) : 2;
-  if (isNaN(workspaceId)) fail('--workspace-id must be a number', 'bad_args');
+  if (Number.isNaN(workspaceId)) fail('--workspace-id must be a number', 'bad_args');
   const range = getWeekRange(weeksAgo);
 
   const apiKey = getApiKey(userEmail);
@@ -173,7 +173,7 @@ async function main() {
     by_category: Object.fromEntries(
       Object.entries(byCategory)
         .sort((a, b) => b[1] - a[1])
-        .map(([k, v]) => [k, { total: v, pct: tickets.length ? `${((v / tickets.length) * 100).toFixed(1)}%` : '0.0%' }]),
+        .map(([k, v]) => [k, { total: v, pct: tickets.length > 0 ? `${((v / tickets.length) * 100).toFixed(1)}%` : '0.0%' }]),
     ),
     category_trends: byCategoryByDay,
     top_agents: sortedAgents.slice(0, 10),

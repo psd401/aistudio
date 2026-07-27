@@ -175,7 +175,7 @@ describe("handleVoiceConnection", () => {
     delete process.env.AUTH_SECRET
   })
 
-  describe("authentication", () => {
+
     it("should close with 4001 when no session cookie present", async () => {
       const ws = createMockWs()
       const req = createMockReq({})
@@ -278,7 +278,7 @@ describe("handleVoiceConnection", () => {
         secret: expect.any(String),
       })
     })
-  })
+
 
   describe("authorization", () => {
     beforeEach(() => {
@@ -365,7 +365,7 @@ describe("handleVoiceConnection", () => {
     })
   })
 
-  describe("error handling", () => {
+
     it("should close with 4001 when AUTH_SECRET is not configured", async () => {
       delete process.env.AUTH_SECRET
       delete process.env.NEXTAUTH_SECRET
@@ -455,7 +455,7 @@ describe("handleVoiceConnection", () => {
       expect(ws.removeAllListeners).toHaveBeenCalledWith("close")
       expect(ws.removeAllListeners).toHaveBeenCalledWith("error")
     })
-  })
+
 
   describe("message handling", () => {
     beforeEach(() => {
@@ -668,7 +668,7 @@ describe("handleVoiceConnection", () => {
     })
   })
 
-  describe("chunked cookie edge cases", () => {
+
     it("should handle cookies with = in value", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
       mockVoiceAccess.mockResolvedValue(true)
@@ -707,5 +707,5 @@ describe("handleVoiceConnection", () => {
         expect.objectContaining({ token: "chunk0" })
       )
     })
-  })
+
 })

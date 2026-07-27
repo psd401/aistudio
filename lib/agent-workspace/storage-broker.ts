@@ -740,18 +740,30 @@ export async function createWorkspaceDownloadUrl(
 }
 
 export async function createWorkspaceUploadUrl(
-  ownerEmail: string,
-  signedWorkspacePrefix: string,
-  relativePath: string,
-  contentLength: number,
-  contextKey: string,
-  idempotencyKey: string,
-  checksumSha256: string,
-  contentType?: string
+  options: {
+    ownerEmail: string
+    signedWorkspacePrefix: string
+    relativePath: string
+    contentLength: number
+    contextKey: string
+    idempotencyKey: string
+    checksumSha256: string
+    contentType?: string
+  }
 ): Promise<UploadPreparation | {
   unchanged: true
   key: string
 }> {
+  const {
+    ownerEmail,
+    signedWorkspacePrefix,
+    relativePath,
+    contentLength,
+    contextKey,
+    idempotencyKey,
+    checksumSha256,
+    contentType,
+  } = options
   const length = expectedLength(contentLength, MAX_PRIVATE_UPLOAD_BYTES)
   const checksum = expectedChecksum(checksumSha256)
   const normalizedContentType = expectedContentType(contentType)
@@ -903,13 +915,15 @@ export async function createWorkspaceUploadUrl(
 }
 
 export async function createPublicArtifactUpload(
-  ownerEmail: string,
-  fileName: string,
-  contentType: string,
-  contentLength: number,
-  contextKey: string,
-  idempotencyKey: string,
-  checksumSha256: string,
+  options: {
+    ownerEmail: string
+    fileName: string
+    contentType: string
+    contentLength: number
+    contextKey: string
+    idempotencyKey: string
+    checksumSha256: string
+  }
 ): Promise<{
   uploadUrl: string
   reservationId: string
@@ -919,6 +933,15 @@ export async function createPublicArtifactUpload(
     "x-amz-checksum-sha256": string
   }
 }> {
+  const {
+    ownerEmail,
+    fileName,
+    contentType,
+    contentLength,
+    contextKey,
+    idempotencyKey,
+    checksumSha256,
+  } = options
   const length = expectedLength(contentLength, MAX_PUBLIC_ARTIFACT_BYTES)
   const checksum = expectedChecksum(checksumSha256)
   const normalizedContentType = expectedContentType(contentType)

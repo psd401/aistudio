@@ -392,7 +392,7 @@ describe("ToolCatalog", () => {
   // Per-surface scope resolution (#924 follow-up): a tool on both mcp + rest
   // carries different scope vocabularies per surface (mcp:execute_assistant vs
   // assistants:execute). Scope filtering must use the surface-specific scope.
-  describe("per-surface scopes", () => {
+
     it("lists assistants.execute on the rest surface for an assistants:execute caller", async () => {
       const catalog = new ToolCatalog()
       const tools = await catalog.list({
@@ -464,7 +464,7 @@ describe("ToolCatalog", () => {
         "assistants:execute",
       ])
     })
-  })
+
 
   // Issue #926: image gen / web fetch / document gen are agent platform tools.
   describe("agent platform tools (#926)", () => {
@@ -719,7 +719,7 @@ describe("ToolCatalog", () => {
   })
 
   // Issue #926: destructive flag drives the human-in-the-loop confirmation gate.
-  describe("destructive flag (#926)", () => {
+
     it("marks decisions.capture (a writing tool) destructive", () => {
       const entry = TOOL_MANIFEST.find((t) => t.identifier === "decisions.capture")
       expect(entry?.destructive).toBe(true)
@@ -740,7 +740,7 @@ describe("ToolCatalog", () => {
       expect(capture?.destructive).toBe(true)
       expect(search?.destructive).toBe(false)
     })
-  })
+
 
   // Issue #925 (epic #922 completion audit): skill-derived catalog rows carry
   // `handlerRef: skill:{id}` and dispatch through the lazily-imported skill
@@ -893,7 +893,7 @@ describe("ToolCatalog", () => {
 
   // Issue #926 defense-in-depth: the internal agent surface must never dispatch
   // a human-only (agentCallable=false) tool, even with valid scopes.
-  describe("internal-surface agentCallable dispatch guard (#926)", () => {
+
     it("rejects an agentCallable=false tool on the internal surface as unknown", async () => {
       dbRows = [
         {
@@ -923,5 +923,5 @@ describe("ToolCatalog", () => {
       // leak to the agent loop.
       expect(result.ok === false && result.reason).toBe("unknown")
     })
-  })
+
 })

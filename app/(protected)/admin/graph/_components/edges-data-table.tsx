@@ -7,8 +7,8 @@ import {
   getCoreRowModel,
   getSortedRowModel,
   SortingState,
-  useReactTable,
 } from "@tanstack/react-table"
+import { useUncompiledReactTable } from "@/components/ui/use-uncompiled-react-table"
 import {
   Table,
   TableBody,
@@ -86,6 +86,8 @@ export function EdgesDataTable({
   loading = false,
   className,
 }: EdgesDataTableProps) {
+  "use no memo"
+
   const [sorting, setSorting] = useState<SortingState>([])
 
   const columns = useMemo<ColumnDef<EdgeTableRow>[]>(
@@ -183,7 +185,7 @@ export function EdgesDataTable({
     [onDeleteEdge]
   )
 
-  const table = useReactTable({
+  const table = useUncompiledReactTable({
     data: edges,
     columns,
     state: { sorting },

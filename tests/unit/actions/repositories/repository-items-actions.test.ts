@@ -124,12 +124,18 @@ jest.mock('@/lib/repositories/content-platform', () => ({
     'text/markdown',
     'text/csv',
   ].includes(contentType),
-  isRepositorySourceObjectKey: (repositoryId: number, objectKey: string) =>
-    new RegExp(
-      `^repositories/${repositoryId}/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/[^/]+$`,
-      'i'
-    ).test(objectKey) &&
-    !objectKey.includes('..'),
+  isRepositorySourceObjectKey: (repositoryId: number, objectKey: string) => {
+    const prefix = `repositories/${repositoryId}/`
+    if (!objectKey.startsWith(prefix) || objectKey.includes('..')) return false
+    const [versionId, fileName, extra] = objectKey.slice(prefix.length).split('/')
+    return (
+      extra === undefined &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        versionId
+      ) &&
+      Boolean(fileName)
+    )
+  },
   registerCanonicalTextIfEnabled: mockRegisterCanonicalTextIfEnabled,
   registerCanonicalText: mockRegisterCanonicalText,
   registerCanonicalUploadIfEnabled: mockRegisterCanonicalUploadIfEnabled,
@@ -649,7 +655,7 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     mockExecuteTransaction.mockImplementation(async (...args: unknown[]) => {
       const operation = args[0]
       if (typeof operation !== 'function') {
-        throw new Error('Expected a transaction callback')
+        throw new TypeError('Expected a transaction callback')
       }
       return (operation as (tx: unknown) => Promise<unknown>)({ insert })
     })

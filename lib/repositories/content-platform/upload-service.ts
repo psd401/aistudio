@@ -357,7 +357,7 @@ export async function createRepositoryUploadStorage(
         } catch (abortError) {
           throw new AggregateError(
             [signingError, abortError],
-            "Failed to sign and abort repository multipart upload"
+            "Failed to sign and abort repository multipart upload", { cause: abortError }
           );
         }
         throw signingError;

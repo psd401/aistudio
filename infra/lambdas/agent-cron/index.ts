@@ -40,7 +40,7 @@ import {
   type PromotionReason,
 } from './job-promotion';
 import * as chatPkg from '@googleapis/chat';
-import * as crypto from 'crypto';
+import * as crypto from 'node:crypto';
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
 import { extractRichEnvelope } from './rich-envelope';
 import {

@@ -66,6 +66,6 @@ export function safeJsonbStringify(value: unknown): string {
     return result;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to stringify JSONB value: ${errorMessage}`);
+    throw new Error(`Failed to stringify JSONB value: ${errorMessage}`, { cause: error });
   }
 }

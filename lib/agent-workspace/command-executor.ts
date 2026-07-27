@@ -332,7 +332,7 @@ export function requiredWorkspaceScopeGap(
         : null
   if (!required) return null
   const missing = required.scopes.filter((scope) => !granted.has(scope))
-  return missing.length
+  return missing.length > 0
     ? { scopes: missing, capability: required.capability }
     : null
 }

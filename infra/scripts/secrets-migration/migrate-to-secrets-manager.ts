@@ -24,8 +24,6 @@ import {
   SecretsManagerClient,
   CreateSecretCommand,
   DescribeSecretCommand,
-  TagResourceCommand,
-  PutResourcePolicyCommand,
 } from "@aws-sdk/client-secrets-manager"
 import {
   SSMClient,
@@ -37,8 +35,8 @@ import {
   GetFunctionConfigurationCommand,
   UpdateFunctionConfigurationCommand,
 } from "@aws-sdk/client-lambda"
-import * as fs from "fs"
-import * as path from "path"
+import * as fs from "node:fs"
+import * as path from "node:path"
 
 interface SecretMapping {
   source: "env-var" | "ssm-param"
@@ -447,7 +445,7 @@ class SecretsMigrator {
 
   private detectSecretType(
     name: string,
-    value: string
+    _value: string
   ): "database" | "api-key" | "oauth" | "custom" {
     if (name.toLowerCase().includes("database") || name.toLowerCase().includes("db")) {
       return "database"
@@ -485,7 +483,7 @@ class SecretsMigrator {
     return value
   }
 
-  private async findParameterUsage(paramName: string): Promise<string[]> {
+  private async findParameterUsage(_paramName: string): Promise<string[]> {
     // This would scan Lambda functions, ECS tasks, etc. for parameter usage
     return ["TBD"]
   }

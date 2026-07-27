@@ -1,7 +1,7 @@
 "use server"
 
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
-import { handleError, createSuccess } from "@/lib/error-utils"
+import { ErrorFactories, handleError, createSuccess } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
@@ -511,7 +511,11 @@ export async function provisionCredentialFromRequest(
           )
           .returning({ id: psdAgentCredentialRequests.id })
         if (result.length === 0) {
-          throw new Error("Request is no longer pending — another admin may have already provisioned it.")
+          throw ErrorFactories.bizInvalidState(
+            "fulfill credential request",
+            "not pending",
+            "pending"
+          )
         }
         await tx.insert(psdAgentCredentialsAudit).values({
           credentialName: request.credentialName,

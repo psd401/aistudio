@@ -8,8 +8,8 @@ import {
   getSortedRowModel,
   getFilteredRowModel,
   SortingState,
-  useReactTable,
 } from "@tanstack/react-table"
+import { useUncompiledReactTable } from "@/components/ui/use-uncompiled-react-table"
 import {
   Table,
   TableBody,
@@ -102,6 +102,8 @@ export function ModelsDataTable({
   loadingToggles,
   className,
 }: ModelsDataTableProps) {
+  "use no memo"
+
   const [sorting, setSorting] = useState<SortingState>([])
 
   // Create columns with actions
@@ -217,7 +219,7 @@ export function ModelsDataTable({
     [onViewModel, onToggleActive, onToggleNexus, onToggleArchitect, onDeleteModel, loadingToggles]
   )
 
-  const table = useReactTable({
+  const table = useUncompiledReactTable({
     data: models,
     columns,
     state: {

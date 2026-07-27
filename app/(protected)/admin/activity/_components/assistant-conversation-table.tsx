@@ -6,9 +6,9 @@ import {
   flexRender,
   getCoreRowModel,
   getSortedRowModel,
-  useReactTable,
   SortingState,
 } from "@tanstack/react-table"
+import { useUncompiledReactTable } from "@/components/ui/use-uncompiled-react-table"
 import {
   Table,
   TableBody,
@@ -82,6 +82,8 @@ export function AssistantConversationTable({
   loading,
   onViewDetail,
 }: AssistantConversationTableProps) {
+  "use no memo"
+
   const [sorting, setSorting] = useState<SortingState>([
     { id: "lastMessageAt", desc: true },
   ])
@@ -189,7 +191,7 @@ export function AssistantConversationTable({
     [onViewDetail]
   )
 
-  const table = useReactTable({
+  const table = useUncompiledReactTable({
     data,
     columns,
     state: { sorting },

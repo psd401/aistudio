@@ -78,7 +78,7 @@ const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
 const DATABASE_PORT = parseInt(process.env.DATABASE_PORT || '5432', 10);
 const MIN_SIGNALS = parseInt(process.env.MIN_SIGNALS || '3', 10);
 const MIN_BUILDINGS = parseInt(process.env.MIN_BUILDINGS || '2', 10);
-const SPIKE_RATIO = parseFloat(process.env.SPIKE_RATIO || '2.0');
+const SPIKE_RATIO = Number.parseFloat(process.env.SPIKE_RATIO || '2.0');
 const ROLLING_WEEKS = parseInt(process.env.ROLLING_WEEKS || '4', 10);
 
 function log(level: 'INFO' | 'WARN' | 'ERROR', message: string, meta: Record<string, unknown> = {}) {

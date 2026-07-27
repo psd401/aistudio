@@ -125,7 +125,7 @@ export async function classifyWithLLM(
     // Hard-fail safe: any Bedrock or parse error → fall through to
     // `later`. We DO log the error so CloudWatch shows real
     // misconfigurations (model not enabled, throttle, etc.).
-    // eslint-disable-next-line no-console
+
     console.error(
       JSON.stringify({
         level: "ERROR",
@@ -147,10 +147,10 @@ function buildSystemPrompt(
   learnedPatterns: LearnedPattern[],
   recentCorrections: CorrectionRecord[],
 ): string {
-  const vip = rules.vipSenders.length
+  const vip = rules.vipSenders.length > 0
     ? rules.vipSenders.join(", ")
     : "(none — anyone is fair game)";
-  const muted = rules.muteSenders.length
+  const muted = rules.muteSenders.length > 0
     ? rules.muteSenders.join(", ")
     : "(none configured)";
   const keywords =

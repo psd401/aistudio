@@ -238,13 +238,13 @@ function filterSensitiveDataInternal(data: unknown, maxDepth: number, seen: Weak
 const devFormat = winston.format.printf(({ timestamp, level, message, ...meta }) => {
   const context = getLogContext()
   const allMeta = { ...context, ...meta }
-  
+
   // Filter sensitive data in dev
   const filteredMeta = filterSensitiveData(allMeta)
-  const metaString = Object.keys(filteredMeta as object).length > 0 
-    ? `\n${JSON.stringify(filteredMeta, null, 2)}` 
+  const metaString = Object.keys(filteredMeta as object).length > 0
+    ? `\n${JSON.stringify(filteredMeta, null, 2)}`
     : ""
-  
+
   const requestId = context?.requestId ? `[${context.requestId}] ` : ""
   return `${timestamp} ${requestId}${level}: ${message}${metaString}`
 })
@@ -269,7 +269,7 @@ const prodFormat = winston.format.combine(
   winston.format.printf((info) => {
     const context = getLogContext()
     const { timestamp, level, message, stack, ...meta } = info
-    
+
     const logEntry: LogEntryWithStack = {
       timestamp: timestamp as string,
       level: level as string,
@@ -280,11 +280,11 @@ const prodFormat = winston.format.combine(
       version: process.env.APP_VERSION || "unknown",
       region: process.env.AWS_REGION || "unknown",
     }
-    
+
     if (stack) {
       logEntry.stack = stack as string
     }
-    
+
     // Filter sensitive data in production
     return JSON.stringify(filterSensitiveData(logEntry))
   })
@@ -358,13 +358,14 @@ function sanitizeLogMessage(input: unknown): string {
   // Replace newlines with spaces
   str = str.replace(/[\n\r]/g, ' ')
 
-  // Remove control characters (0x00-0x1F and 0x7F)
-  // Using String.fromCharCode to avoid eslint no-control-regex warning
-  const controlCharsPattern = new RegExp(
-    `[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]`,
-    'g'
-  )
-  str = str.replace(controlCharsPattern, '')
+  // Remove control characters (0x00-0x1F and 0x7F) without constructing a
+  // dynamic regular expression.
+  str = [...str]
+    .filter((character) => {
+      const codePoint = character.codePointAt(0) ?? 0
+      return codePoint > 31 && codePoint !== 127
+    })
+    .join('')
 
   // Limit length to prevent log bloat
   str = str.substring(0, 1000)
@@ -451,7 +452,7 @@ export function logPerformance(
 ): void {
   const duration = Date.now() - startTime
   const context = getLogContext()
-  
+
   logger.info(`Performance: ${operation}`, {
     ...context,
     operation,
@@ -470,4 +471,4 @@ export function startTimer(operation: string): (metadata?: object) => void {
   }
 }
 
-export default logger 
+export default logger

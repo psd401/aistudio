@@ -247,7 +247,7 @@ export class AgentCredentialBroker {
     const name = credentialName(rawName)
     if (
       typeof rawReason !== "string" ||
-      rawReason.trim().length < 1 ||
+      rawReason.trim().length === 0 ||
       rawReason.length > 2000
     ) {
       throw new AgentCredentialInputError("Invalid request reason")

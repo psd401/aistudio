@@ -250,7 +250,7 @@ export function ConversationInitializer({
     return () => {
       abortController.abort()
     }
-  }, [conversationId, status])
+  }, [conversationId, onModelUsed, status])
 
   if (loading) {
     return (

@@ -1,8 +1,8 @@
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 import { RDSDataClient, ExecuteStatementCommand, BatchExecuteStatementCommand, SqlParameter } from '@aws-sdk/client-rds-data';
 import { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';
-import { lookup } from 'dns/promises';
-import { isIP } from 'net';
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import * as cheerio from 'cheerio';
 import { marked } from 'marked';
 
@@ -45,7 +45,7 @@ interface URLProcessingJob {
 
 interface ChunkData {
   content: string;
-  metadata: Record<string, any>;
+  metadata: Record<string, unknown>;
   chunkIndex: number;
   tokens?: number;
 }
@@ -54,7 +54,7 @@ interface ChunkData {
 async function updateJobStatus(
   jobId: string,
   status: string,
-  details?: any,
+  details?: unknown,
   error?: string
 ) {
   const timestamp = Date.now();
@@ -82,12 +82,12 @@ async function updateItemStatus(
   error?: string
 ) {
   const sql = error
-    ? `UPDATE repository_items 
-       SET processing_status = :status, 
+    ? `UPDATE repository_items
+       SET processing_status = :status,
            processing_error = :error,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = :itemId`
-    : `UPDATE repository_items 
+    : `UPDATE repository_items
        SET processing_status = :status,
            processing_error = NULL,
            updated_at = CURRENT_TIMESTAMP
@@ -151,9 +151,9 @@ function ipv6IsBlocked(ip: string): boolean {
   if (dotted) return ipv4IsBlocked(dotted[1]);
   const hex = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
   if (hex) {
-    const high = parseInt(hex[1], 16);
-    const low = parseInt(hex[2], 16);
-    const asIpv4 = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
+    const high = Number.parseInt(hex[1], 16);
+    const low = Number.parseInt(hex[2], 16);
+    const asIpv4 = `${(high >> 8) & 0xFF}.${high & 0xFF}.${(low >> 8) & 0xFF}.${low & 0xFF}`;
     return ipv4IsBlocked(asIpv4);
   }
   // Deprecated IPv4-compatible form (no "ffff:" marker), e.g. "::127.0.0.1".
@@ -275,7 +275,7 @@ async function fetchAndExtractContent(url: string): Promise<string> {
 
       // Try to find main content areas
       let content = '';
-    
+
       // Common content selectors
       const contentSelectors = [
       'main',
@@ -315,7 +315,7 @@ async function fetchAndExtractContent(url: string): Promise<string> {
 
       // Extract metadata
       const title = $('title').text() || $('h1').first().text() || '';
-      const description = $('meta[name="description"]').attr('content') || 
+      const description = $('meta[name="description"]').attr('content') ||
                          $('meta[property="og:description"]').attr('content') || '';
 
       // Prepend metadata to content
@@ -327,16 +327,16 @@ async function fetchAndExtractContent(url: string): Promise<string> {
       }
 
       return content;
-    } catch (fetchError: any) {
+    } catch (fetchError: unknown) {
       clearTimeout(timeout);
       if (fetchError.name === 'AbortError') {
-        throw new Error('Request timeout after 30 seconds');
+        throw new Error('Request timeout after 30 seconds', { cause: fetchError });
       }
       throw fetchError;
     }
   } catch (error) {
     console.error('Error fetching URL:', error);
-    throw new Error(`Failed to fetch URL: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to fetch URL: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }
 
@@ -396,7 +396,7 @@ export async function storeChunks(itemId: number, chunks: ChunkData[]) {
       parameters: [createSqlParameter('itemId', itemId)],
     })
   );
-  
+
   // Batch insert new chunks
   const parameterSets: SqlParameter[][] = chunks.map(chunk => [
     createSqlParameter('itemId', itemId),
@@ -405,12 +405,12 @@ export async function storeChunks(itemId: number, chunks: ChunkData[]) {
     createSqlParameter('chunkIndex', chunk.chunkIndex),
     createSqlParameter('tokens', chunk.tokens ?? null),
   ]);
-  
+
   // BatchExecuteStatement has a limit of 25 parameter sets
   const batchSize = 25;
   for (let i = 0; i < parameterSets.length; i += batchSize) {
     const batch = parameterSets.slice(i, i + batchSize);
-    
+
     await rdsClient.send(
       new BatchExecuteStatementCommand({
         resourceArn: DATABASE_RESOURCE_ARN,
@@ -428,26 +428,26 @@ export async function storeChunks(itemId: number, chunks: ChunkData[]) {
 // Process a URL
 async function processURL(job: URLProcessingJob) {
   console.log(`Processing URL: ${job.url} for item: ${job.itemName}`);
-  
+
   try {
     // Update status to processing
     await updateItemStatus(job.itemId, 'processing');
     await updateJobStatus(job.jobId, 'processing', { url: job.url });
-    
+
     // Fetch and extract content from URL
     const content = await fetchAndExtractContent(job.url);
-    
+
     if (!content || content.trim().length === 0) {
       throw new Error('No content extracted from URL');
     }
-    
+
     // Chunk text
     const chunks = chunkText(content);
     console.log(`Extracted ${chunks.length} chunks from ${job.url}`);
-    
+
     // Store chunks
     await storeChunks(job.itemId, chunks);
-    
+
     // Update status to completed
     await updateItemStatus(job.itemId, 'completed');
     await updateJobStatus(job.jobId, 'completed', {
@@ -455,14 +455,14 @@ async function processURL(job: URLProcessingJob) {
       chunksCreated: chunks.length,
       totalTokens: chunks.reduce((sum, chunk) => sum + (chunk.tokens || 0), 0),
     });
-    
+
   } catch (error) {
     console.error(`Error processing URL ${job.url}:`, error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    
+
     await updateItemStatus(job.itemId, 'failed', errorMessage);
     await updateJobStatus(job.jobId, 'failed', { url: job.url }, errorMessage);
-    
+
     throw error; // Re-throw to let Lambda handle retry logic
   }
 }

@@ -136,11 +136,51 @@ export type TaskCreationResult =
   | { ok: true; taskRef: string; rawReply: string }
   | { ok: false; reason: string; rawReply: string };
 
-const SUCCESS_PATTERN = /Created\s+([^\s#]+(?:\s+[^\s#]+)*?)\s+(?:issue|task)\s+(#?\w+[\w/-]*)\s*:?\s*(.+)?/i;
-// Looser fallback: "Created <anything>: <title>" with no id. Captures the
-// title as the taskRef so downstream still has something to display.
-const SUCCESS_FALLBACK_PATTERN = /Created\s+(.+?)\s*:\s*(.+)$/i;
-const FAILED_PATTERN = /FAILED:\s*(.+?)\s*$/im;
+function getFailureReason(line: string): string | null {
+  const marker = "FAILED:";
+  const markerIndex = line.toUpperCase().indexOf(marker);
+  if (markerIndex === -1) return null;
+  return line.slice(markerIndex + marker.length).trim().slice(0, 500) || null;
+}
+
+function isTaskReference(value: string): boolean {
+  if (value.length === 0 || value.length > 128) return false;
+  return [...value].every((character, index) => {
+    if (character === "#" && index === 0) return true;
+    return /^[A-Za-z0-9_/-]$/.test(character);
+  });
+}
+
+function getStructuredTaskReference(line: string): string | null {
+  const lower = line.toLowerCase();
+  const createdIndex = lower.indexOf("created ");
+  if (createdIndex === -1) return null;
+
+  const issueIndex = lower.indexOf(" issue ", createdIndex);
+  const taskIndex = lower.indexOf(" task ", createdIndex);
+  const markerIndex = [issueIndex, taskIndex]
+    .filter((index) => index !== -1)
+    .sort((left, right) => left - right)[0];
+  if (markerIndex === undefined) return null;
+
+  const markerLength = markerIndex === issueIndex ? " issue ".length : " task ".length;
+  const remainder = line.slice(markerIndex + markerLength).trimStart();
+  const separatorIndex = remainder.search(/[\s:]/);
+  const taskRef = separatorIndex === -1
+    ? remainder
+    : remainder.slice(0, separatorIndex);
+  return isTaskReference(taskRef) ? taskRef : null;
+}
+
+function getFallbackTaskReference(line: string): string | null {
+  const lower = line.toLowerCase();
+  const createdIndex = lower.indexOf("created ");
+  if (createdIndex === -1) return null;
+  const referenceStart = createdIndex + "created ".length;
+  const colonIndex = line.indexOf(":", referenceStart);
+  if (colonIndex === -1) return null;
+  return line.slice(referenceStart, colonIndex).trim().slice(0, 64) || null;
+}
 
 /**
  * Build the session ID for an AgentCore invocation.
@@ -367,13 +407,12 @@ export function parseAgentReply(raw: string): TaskCreationResult {
   // discovery (which is the order AgentCore emitted them).
   for (const body of bodies) {
     for (const line of body.split(/\r?\n/)) {
-      const failMatch = line.match(FAILED_PATTERN);
-      if (failMatch) {
-        return { ok: false, reason: failMatch[1].trim(), rawReply: raw };
+      const failureReason = getFailureReason(line);
+      if (failureReason) {
+        return { ok: false, reason: failureReason, rawReply: raw };
       }
-      const okMatch = line.match(SUCCESS_PATTERN);
-      if (okMatch) {
-        const taskRef = (okMatch[2] ?? "").trim();
+      const taskRef = getStructuredTaskReference(line);
+      if (taskRef) {
         return { ok: true, taskRef, rawReply: raw };
       }
     }
@@ -381,9 +420,8 @@ export function parseAgentReply(raw: string): TaskCreationResult {
   // Second pass: loose "Created X: title" with no id.
   for (const body of bodies) {
     for (const line of body.split(/\r?\n/)) {
-      const okMatch = line.match(SUCCESS_FALLBACK_PATTERN);
-      if (okMatch) {
-        const taskRef = (okMatch[1] ?? "task").trim().slice(0, 64);
+      const taskRef = getFallbackTaskReference(line);
+      if (taskRef) {
         return { ok: true, taskRef, rawReply: raw };
       }
     }

@@ -158,17 +158,19 @@ export class PIITokenizationService {
     const entities: PIIEntity[] = [];
 
     for (const pattern of CUSTOM_PII_PATTERNS) {
-      // Create a new RegExp with global flag to find all matches
-      const globalPattern = new RegExp(pattern.pattern.source, 'g');
-      let match: RegExpExecArray | null;
-
-      while ((match = globalPattern.exec(text)) !== null) {
+      let offset = 0;
+      while (offset <= text.length) {
+        pattern.pattern.lastIndex = 0;
+        const match = pattern.pattern.exec(text.slice(offset));
+        if (!match) break;
+        const beginOffset = offset + match.index;
         entities.push({
           type: pattern.type,
-          beginOffset: match.index,
-          endOffset: match.index + match[0].length,
+          beginOffset,
+          endOffset: beginOffset + match[0].length,
           score: pattern.confidence ?? 1.0,
         });
+        offset = beginOffset + Math.max(match[0].length, 1);
       }
     }
 

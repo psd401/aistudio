@@ -80,7 +80,7 @@ function normalizeArgs(
     key.startsWith("rating_")
   )
   if (
-    ratingEntries.length < 1 ||
+    ratingEntries.length === 0 ||
     ratingEntries.length > 20 ||
     ratingEntries.some(
       ([, rating]) =>

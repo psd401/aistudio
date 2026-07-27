@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto"
 import { and, eq, isNull, sql } from "drizzle-orm"
 import { createLogger, generateRequestId, sanitizeForLogging, startTimer } from "@/lib/logger"
-import { createSuccess, handleError } from "@/lib/error-utils"
+import { createSuccess, ErrorFactories, handleError } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema"
@@ -287,7 +287,11 @@ export async function handleAistudioCallback(
       "consumeAistudioConsentNonce"
     )
     if (consumed.length !== 1) {
-      throw new Error("AI Studio consent nonce was consumed concurrently")
+      throw ErrorFactories.bizInvalidState(
+        "consume AI Studio consent nonce",
+        "already consumed",
+        "unconsumed"
+      )
     }
     timer({ status: "success" })
     log.info(

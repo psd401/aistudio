@@ -171,7 +171,7 @@ test.describe('Atrium publish + share (authenticated)', () => {
       // The success caption shows the copyable /c/{slug} reader URL.
       const readerLink = page.getByTestId('publish-reader-url')
       await expect(readerLink).toBeVisible({ timeout: 30000 })
-      await expect(readerLink).toHaveText(new RegExp(`/c/${slug}$`))
+      expect((await readerLink.textContent())?.trim().endsWith(`/c/${slug}`)).toBe(true)
 
       // The widen actually took effect: a SECOND seeded user (no grant, no
       // ownership) loads the intranet reader and gets 200 with the body.
@@ -245,7 +245,7 @@ test.describe('Atrium publish + share (authenticated)', () => {
       // caption carries the public URL.
       const readerLink = page.getByTestId('publish-reader-url')
       await expect(readerLink).toBeVisible({ timeout: 30000 })
-      await expect(readerLink).toHaveText(new RegExp(`/p/${slug}$`))
+      expect((await readerLink.textContent())?.trim().endsWith(`/p/${slug}`)).toBe(true)
       await page.screenshot({
         path: `${SHOT_DIR}/atrium-share-url.png`,
         fullPage: false,

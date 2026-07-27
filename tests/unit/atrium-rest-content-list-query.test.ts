@@ -39,7 +39,7 @@ jest.mock("@/lib/content", () => {
 });
 
 jest.mock("@/lib/content/rest", () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+
   const { z } = require("zod") as typeof import("zod");
   return {
     contentErrorToResponse: jest.fn(() => ({ __marker: "content-error" })),

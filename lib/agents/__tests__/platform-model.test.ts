@@ -1,5 +1,5 @@
-import { readFileSync } from "fs"
-import { join, resolve } from "path"
+import { readFileSync } from "node:fs"
+import { join, resolve } from "node:path"
 import { AGENT_MODEL_ID, AGENT_REQUEST_MODEL_ID } from "@/lib/agents/platform-model"
 
 /**

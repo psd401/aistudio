@@ -14,15 +14,12 @@
  * Issue #873
  */
 
-// eslint-disable-next-line no-undef -- AudioWorkletProcessor is a global in the AudioWorklet scope
 class PCMCaptureProcessor extends AudioWorkletProcessor {
   constructor() {
     super()
     // sampleRate is a global in AudioWorkletGlobalScope
-    // eslint-disable-next-line no-undef -- AudioWorklet global
     this._ratio = sampleRate / 16000
     // Pre-allocate buffer for ~200ms of input at native sample rate
-    // eslint-disable-next-line no-undef -- AudioWorklet global
     this._bufferSize = Math.ceil(sampleRate * 0.2)
     this._buffer = new Float32Array(this._bufferSize)
     this._writePos = 0
@@ -91,5 +88,4 @@ class PCMCaptureProcessor extends AudioWorkletProcessor {
   }
 }
 
-// eslint-disable-next-line no-undef -- AudioWorklet global
 registerProcessor('pcm-capture-processor', PCMCaptureProcessor)

@@ -412,7 +412,7 @@ export function UsersPageClient({
           description: error instanceof Error ? error.message : "Failed to update user",
           variant: "destructive",
         })
-        throw new Error("Failed to save user")
+        throw new Error("Failed to save user", { cause: error })
       }
     },
     // toast is stable from useToast() and doesn't need to be in dependencies

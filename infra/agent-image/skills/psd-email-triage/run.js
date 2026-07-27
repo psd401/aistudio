@@ -209,7 +209,11 @@ async function cmd_disable(args) {
     await lib.updateRow(user, { enabled: false, disabledAt: now });
     // Pause digest too — preserves the schedule config for re-enable.
     if (row.digestEnabled && row.digestScheduleArn) {
-      try { await lib.deleteDigestSchedule(user); } catch (_) {}
+      try {
+        await lib.deleteDigestSchedule(user);
+      } catch {
+        // Disabling triage must still succeed if the stale schedule is absent.
+      }
     }
     emit({
       ok: true,
@@ -225,12 +229,21 @@ async function cmd_disable(args) {
     const accessToken = await lib.getUserAccessToken(user);
     const trustedLabelIds = await lib.ensureLabels(accessToken, lib.DEFAULT_LABELS);
     for (const [, labelId] of Object.entries(trustedLabelIds)) {
-      try { await lib.deleteLabel(accessToken, labelId); labelsDeleted++; } catch (_) {}
+      try {
+        await lib.deleteLabel(accessToken, labelId);
+        labelsDeleted++;
+      } catch {
+        // Continue deleting the remaining independently-owned Gmail labels.
+      }
     }
-  } catch (_) {
+  } catch {
     // If OAuth fails, leave labels — better than crashing the forget.
   }
-  try { await lib.deleteDigestSchedule(user); } catch (_) {}
+  try {
+    await lib.deleteDigestSchedule(user);
+  } catch {
+    // Forget remains idempotent when the digest schedule is already absent.
+  }
   await lib.deleteRow(user);
 
   emit({
@@ -640,7 +653,11 @@ async function cmd_digest(args) {
     return;
   }
   if (verb === 'disable') {
-    try { await lib.deleteDigestSchedule(user); } catch (_) {}
+    try {
+      await lib.deleteDigestSchedule(user);
+    } catch {
+      // The persisted disabled state is authoritative if cleanup is already done.
+    }
     await lib.updateRow(user, { digestEnabled: false });
     emit({ ok: true, subcommand: 'digest disable', summary: 'Daily digest disabled.' });
     return;
@@ -778,7 +795,7 @@ async function cmd_suggestions(args) {
     emit({
       ok: true,
       subcommand: 'suggestions list',
-      summary: pending.length
+      summary: pending.length > 0
         ? `${pending.length} pending suggestion(s) from your recent corrections`
         : 'No pending suggestions.',
       data: { suggestions: pending },

@@ -6,7 +6,7 @@
 import { sanitizeForLogging } from '../logger'
 
 describe('Logger Circular Reference Detection', () => {
-  describe('sanitizeForLogging - Circular Objects', () => {
+
     it('should handle direct circular object reference without stack overflow', () => {
       const obj: Record<string, unknown> = { name: 'test' }
       obj.self = obj // Circular reference
@@ -88,9 +88,9 @@ describe('Logger Circular Reference Detection', () => {
       expect(result).toBeDefined()
       // Should handle multiple circular paths without stack overflow
     })
-  })
 
-  describe('sanitizeForLogging - Depth Limiting', () => {
+
+
     it('should handle deeply nested objects within limit (10 levels)', () => {
       const deepObj = createDeeplyNestedObject(10)
 
@@ -120,9 +120,9 @@ describe('Logger Circular Reference Detection', () => {
 
       expect(() => sanitizeForLogging(deepObj)).not.toThrow()
     })
-  })
 
-  describe('sanitizeForLogging - Error Object Handling', () => {
+
+
     it('should skip Error.cause property to prevent infinite error chains', () => {
       const error1 = new Error('Error 1')
       const error2 = new Error('Error 2')
@@ -160,9 +160,9 @@ describe('Logger Circular Reference Detection', () => {
       expect(result).toBeDefined()
       expect(result).toHaveProperty('name', 'CredentialsProviderError')
     })
-  })
 
-  describe('sanitizeForLogging - Edge Cases', () => {
+
+
     it('should handle null and undefined', () => {
       expect(sanitizeForLogging(null)).toBeNull()
       expect(sanitizeForLogging(undefined)).toBeUndefined()
@@ -220,9 +220,9 @@ describe('Logger Circular Reference Detection', () => {
 
       expect(() => sanitizeForLogging(largeArray)).not.toThrow()
     })
-  })
 
-  describe('sanitizeForLogging - Performance', () => {
+
+
     it('should complete within reasonable time for complex objects', () => {
       const complexObj = {
         users: Array.from({ length: 100 }, (_, i) => ({
@@ -249,9 +249,9 @@ describe('Logger Circular Reference Detection', () => {
       // Should complete in less than 1 second
       expect(endTime - startTime).toBeLessThan(1000)
     })
-  })
 
-  describe('sanitizeForLogging - Security', () => {
+
+
     it('should prevent prototype pollution attempts', () => {
       const maliciousObj = JSON.parse('{"__proto__": {"polluted": true}}')
 
@@ -281,7 +281,7 @@ describe('Logger Circular Reference Detection', () => {
       const result = sanitizeForLogging(longString)
       expect(typeof result).toBe('string')
     })
-  })
+
 })
 
 // Helper function for creating deeply nested test objects

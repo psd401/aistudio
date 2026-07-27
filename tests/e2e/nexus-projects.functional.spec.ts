@@ -73,12 +73,10 @@ test.describe("Nexus Projects (authenticated)", () => {
     );
 
     await page.getByRole("button", { name: "New project chat" }).click();
-    await expect(page).toHaveURL(
-      new RegExp(
-        `/nexus\\?conversationId=[0-9a-f-]+&projectId=${projectId}$`
-      ),
-      { timeout: 30_000 }
-    );
+    await expect(page).toHaveURL(/\/nexus\?conversationId=[0-9a-f-]+&projectId=\d+$/, {
+      timeout: 30_000,
+    });
+    expect(new URL(page.url()).searchParams.get("projectId")).toBe(String(projectId));
 
     await authenticateContext(
       page.context(),
@@ -127,7 +125,7 @@ test.describe("Nexus Projects (authenticated)", () => {
         "repositories:changes",
       ]) {
         await createDialog
-          .getByRole("checkbox", { name: new RegExp(`^${scope}`) })
+          .getByRole("checkbox", { name: scope, exact: false })
           .click();
       }
       await createDialog.getByRole("button", { name: "Create Key" }).click();

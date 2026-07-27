@@ -4,7 +4,6 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
 import * as eventsources from 'aws-cdk-lib/aws-lambda-event-sources';
 import { Construct } from 'constructs';
 
@@ -79,7 +78,7 @@ export class DocumentProcessingStack extends cdk.Stack {
 
     // Import existing documents bucket from StorageStack
     this.documentsBucket = s3.Bucket.fromBucketName(
-      this, 
+      this,
       'ExistingDocumentsBucket',
       documentsBucketName
     );

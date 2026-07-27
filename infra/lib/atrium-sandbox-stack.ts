@@ -185,7 +185,7 @@ export class AtriumSandboxStack extends cdk.Stack {
     const templatePath = path.join(__dirname, '..', 'sandbox-host', 'render.html');
     // Path is __dirname + fixed literal segments (the repo's committed host
     // template) — no external input. The lint rule cannot prove that statically.
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
+
     const template = fs.readFileSync(templatePath, 'utf8');
     // replaceAll (not replace): guard against a future edit reintroducing the
     // token elsewhere in the template — replace() would substitute only the first.

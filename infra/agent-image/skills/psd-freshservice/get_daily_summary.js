@@ -81,7 +81,7 @@ function parseDate(arg) {
   // Pacific timezone (UTC-7/8) yields the *previous* calendar day for
   // d.getFullYear()/getMonth()/getDate() — an off-by-one bug.
   const d = new Date(`${arg}T00:00:00`);
-  if (isNaN(d.getTime())) fail(`Could not parse --date: ${arg}`, 'bad_args');
+  if (Number.isNaN(d.getTime())) fail(`Could not parse --date: ${arg}`, 'bad_args');
   return {
     start: new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0),
     end: new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59),
@@ -98,7 +98,7 @@ async function main() {
   const userEmail = requireUser(args);
   const dateArg = args.date && args.date !== true ? String(args.date) : 'today';
   const workspaceId = args.workspace_id ? Number(args.workspace_id) : 2;
-  if (isNaN(workspaceId)) fail('--workspace-id must be a number', 'bad_args');
+  if (Number.isNaN(workspaceId)) fail('--workspace-id must be a number', 'bad_args');
   const range = parseDate(dateArg);
 
   const apiKey = getApiKey(userEmail);

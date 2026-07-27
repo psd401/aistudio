@@ -168,9 +168,18 @@ export function wildcardMatch(pattern: string, value: string): boolean {
   const p = pattern.toLowerCase();
   const v = value.toLowerCase();
   if (!p.includes("*")) return p === v;
-  // Escape regex special chars except `*`, then turn `*` into `.*`.
-  const escaped = p.replace(/[-/\\^$+?.()|[\]{}]/g, "\\$&").replace(/\*/g, ".*");
-  return new RegExp(`^${escaped}$`).test(v);
+  const parts = p.split("*");
+  let position = 0;
+  for (const [index, part] of parts.entries()) {
+    if (part.length === 0) continue;
+    if (index === parts.length - 1 && !p.endsWith("*")) {
+      return v.endsWith(part) && v.length - part.length >= position;
+    }
+    const matchAt = v.indexOf(part, position);
+    if (matchAt < 0 || (index === 0 && matchAt !== 0)) return false;
+    position = matchAt + part.length;
+  }
+  return true;
 }
 
 /**

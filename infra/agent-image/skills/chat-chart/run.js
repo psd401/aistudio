@@ -59,7 +59,10 @@ const ALLOWED_ENGINES = new Set(['auto', 'quickchart', 'local']);
 const PII_PATTERNS = [
   { name: 'email', re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/ },
   { name: 'ssn', re: /\b\d{3}-\d{2}-\d{4}\b/ },
-  { name: 'us-phone', re: /\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/ },
+  { name: 'us-phone', re: /\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/ },
+  { name: 'us-phone', re: /\(\d{3}\)\s\d{3}-\d{4}\b/ },
+  { name: 'us-phone', re: /\b1[-.\s]\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/ },
+  { name: 'us-phone', re: /\b1\d{10}\b/ },
   // PSD student IDs: 7 digits starting with 2. Matches the convention used
   // by lib/safety/types.ts in the Next.js app.
   { name: 'psd-student-id', re: /\b2\d{6}\b/ },
@@ -255,7 +258,12 @@ async function renderLocal(config, userEmail) {
   const bytes = fs.readFileSync(outPath);
   // Best-effort cleanup; the temp dir lives under /tmp which is also wiped
   // on container restart.
-  try { fs.unlinkSync(outPath); fs.rmdirSync(tmpDir); } catch (_) {}
+  try {
+    fs.unlinkSync(outPath);
+    fs.rmdirSync(tmpDir);
+  } catch {
+    // The renderer result is already in memory; /tmp cleanup is best-effort.
+  }
 
   const published = await publishArtifact(bytes, '.png', 'image/png');
   return published.url;

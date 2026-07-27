@@ -304,7 +304,7 @@ export class SSEEventAdapter {
           error: error.message,
           data: data.substring(0, 100), // Log first 100 chars
         });
-        throw new Error(`Failed to parse SSE event JSON: ${error.message}`);
+        throw new Error(`Failed to parse SSE event JSON: ${error.message}`, { cause: error });
       }
       throw error;
     }

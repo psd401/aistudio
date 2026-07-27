@@ -39,7 +39,7 @@ const ENVIRONMENT = process.env.ENVIRONMENT ?? "dev";
 const secrets = new SecretsManagerClient({});
 const cloudwatch = new CloudWatchClient({});
 
-/* eslint-disable no-console */
+
 const log = {
   info: (message: string, metadata?: Record<string, unknown>) =>
     console.log(JSON.stringify({ level: "info", message, ...metadata })),
@@ -48,7 +48,7 @@ const log = {
   error: (message: string, metadata?: Record<string, unknown>) =>
     console.error(JSON.stringify({ level: "error", message, ...metadata })),
 };
-/* eslint-enable no-console */
+
 
 interface OneRosterSyncEvent {
   trigger?: string;
@@ -191,7 +191,14 @@ export async function handler(
     });
     await writeStatusSafely(
       sql,
-      statusFromResult(runId, trigger, startedAt, "succeeded", result, null)
+      statusFromResult({
+        runId,
+        trigger,
+        startedAt,
+        state: "succeeded",
+        result,
+        error: null,
+      })
     );
     return { status: "ok", result };
   } catch (error) {
@@ -209,14 +216,14 @@ export async function handler(
     }
     await writeStatusSafely(
       sql,
-      statusFromResult(
+      statusFromResult({
         runId,
         trigger,
         startedAt,
-        "failed",
-        syncResult,
-        errorMessage
-      )
+        state: "failed",
+        result: syncResult,
+        error: errorMessage,
+      })
     );
     throw error;
   } finally {
@@ -225,13 +232,16 @@ export async function handler(
 }
 
 function statusFromResult(
-  runId: string,
-  trigger: "manual" | "schedule",
-  startedAt: string,
-  state: "succeeded" | "failed",
-  result: OneRosterSyncResult | null,
-  error: string | null
+  options: {
+    runId: string;
+    trigger: "manual" | "schedule";
+    startedAt: string;
+    state: "succeeded" | "failed";
+    result: OneRosterSyncResult | null;
+    error: string | null;
+  }
 ): PersistedSyncStatus {
+  const { runId, trigger, startedAt, state, result, error } = options;
   return {
     runId,
     trigger,

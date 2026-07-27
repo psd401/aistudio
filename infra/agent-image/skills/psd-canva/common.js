@@ -122,7 +122,7 @@ async function canvaFetch(accessToken, method, path, opts = {}) {
     operation: 'request',
     method,
     path,
-    ...(Object.keys(query).length ? { query } : {}),
+    ...(Object.keys(query).length > 0 ? { query } : {}),
     ...(opts.body !== undefined ? { body: opts.body } : {}),
     ...(opts.rawBody !== undefined
       ? {

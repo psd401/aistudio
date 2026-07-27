@@ -78,7 +78,7 @@ test('validateRequest requires a positive durationSeconds', () => {
 
 test('validateRequest enforces the duration cap', () => {
   expect(() => validateRequest(validEvent({ durationSeconds: MAX_DURATION_SECONDS + 1 }))).toThrow(
-    new RegExp(String(MAX_DURATION_SECONDS)),
+    String(MAX_DURATION_SECONDS),
   );
 });
 

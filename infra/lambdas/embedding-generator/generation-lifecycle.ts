@@ -67,19 +67,19 @@ export function assertValidEmbeddingMessage(
     throw new Error('Embedding message generation id must be a UUID');
   }
   if (!Array.isArray(chunkIds) || !Array.isArray(texts)) {
-    throw new Error('Embedding message requires chunk and text arrays');
+    throw new TypeError('Embedding message requires chunk and text arrays');
   }
   if (activationOnly) {
     if (!generationId) {
       throw new Error('Embedding activation message requires a generation id');
     }
-    if (chunkIds.length !== 0 || texts.length !== 0) {
+    if (chunkIds.length > 0 || texts.length > 0) {
       throw new Error('Embedding activation message must not contain chunk work');
     }
     if (
-      (modalities != null && (!Array.isArray(modalities) || modalities.length !== 0)) ||
+      (modalities != null && (!Array.isArray(modalities) || modalities.length > 0)) ||
       (visualSources != null &&
-        (!Array.isArray(visualSources) || visualSources.length !== 0))
+        (!Array.isArray(visualSources) || visualSources.length > 0))
     ) {
       throw new Error('Embedding activation message must not contain vector inputs');
     }

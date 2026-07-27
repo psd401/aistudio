@@ -34,6 +34,7 @@ import { useVoiceAvailability } from './_components/voice-mode/use-voice-availab
 import { useVoiceSession } from './_components/voice-mode/use-voice-session'
 import { getNexusChatPreferences, updateNexusChatPreferences } from '@/actions/settings/user-settings.actions'
 import type { NexusExperienceMode, NexusModelFamily } from '@/lib/nexus/model-router/types'
+import { createSynchronousValueAccessor } from '@/lib/nexus/synchronous-value-accessor'
 
 const log = createLogger({ moduleName: 'nexus-page' })
 const uuidSchema = z.string().uuid()
@@ -88,8 +89,16 @@ interface ConversationRuntimeProviderProps {
   onConnectorToolsReceived?: (mapping: Record<string, { serverId: string; serverName: string }>) => void
 }
 
+interface RuntimeValues {
+  conversationId: string | null
+  modelFamily: NexusModelFamily
+  routingMode: NexusExperienceMode
+  selectedModel: SelectAiModel | null
+  sessionStatus: ReturnType<typeof useSession>['status']
+  workspaceId?: string
+}
+
 /** UUID format for validating X-Connector-Reconnect header values */
-// eslint-disable-next-line unicorn/better-regex -- expanded form avoids security/detect-unsafe-regex on grouped quantifier
 const UUID_RE = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i
 const MAX_RECONNECT_IDS = 10
 
@@ -111,45 +120,38 @@ function ConversationRuntimeProvider({
   onConnectorReconnect,
   onConnectorToolsReceived
 }: ConversationRuntimeProviderProps) {
-  // Use a ref so the adapter instance stays stable when conversationId transitions
-  // from null → UUID during a new conversation. Without this, the runtime re-calls
-  // load() on the recreated adapter and fetches already-displayed messages,
-  // causing duplicate message rendering. (Issue #868)
-  const conversationIdRef = useRef(conversationId)
-  conversationIdRef.current = conversationId
-
-  // Track the open workspace id via ref so the transport body always sends the
-  // CURRENT value: the runtime is created once (stable), but the user can open /
-  // close / switch the workspace panel mid-conversation (§1087). Reading a ref
-  // keeps the sent workspaceId fresh without recreating the transport.
-  const workspaceIdRef = useRef(workspaceId)
-  workspaceIdRef.current = workspaceId
-
-  // Track session status via ref for use inside customFetch without adding to deps.
-  // useSession is safe here — SessionProvider wraps this component tree.
   const { status: sessionStatus } = useSession()
-  const sessionStatusRef = useRef(sessionStatus)
-  sessionStatusRef.current = sessionStatus
-
-  // Track selectedModel via ref so the body() callback always reads the latest
-  // value without causing the transport to be recreated on every model change.
-  // Guards against the transient null state while models are loading from localStorage.
-  const selectedModelRef = useRef(selectedModel)
-  selectedModelRef.current = selectedModel
-
-  const routingModeRef = useRef(routingMode)
-  routingModeRef.current = routingMode
-  const modelFamilyRef = useRef(modelFamily)
-  modelFamilyRef.current = modelFamily
+  // The runtime and its adapters must keep stable identities across conversation,
+  // workspace, routing, and model changes. This closure-backed accessor updates
+  // synchronously during render without exposing React refs to render-time code.
+  const [runtimeValues] = useState(() =>
+    createSynchronousValueAccessor<RuntimeValues>({
+      conversationId,
+      modelFamily,
+      routingMode,
+      selectedModel,
+      sessionStatus,
+      workspaceId,
+    })
+  )
+  runtimeValues.set({
+    conversationId,
+    modelFamily,
+    routingMode,
+    selectedModel,
+    sessionStatus,
+    workspaceId,
+  })
 
   // Prevents the "Model not ready" toast from firing multiple times if body()
   // is called in rapid succession before models finish loading.
-  const modelNotReadyToastShownRef = useRef(false)
+  const [modelNotReadyToastShown] = useState(() =>
+    createSynchronousValueAccessor(false)
+  )
 
   const historyAdapter = useMemo(
-    () => createNexusHistoryAdapter(() => conversationIdRef.current),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally stable; conversationId accessed via ref
-    []
+    () => createNexusHistoryAdapter(() => runtimeValues.get().conversationId),
+    [runtimeValues]
   )
 
   // Custom fetch to intercept X-Conversation-Id header for conversation continuity
@@ -176,7 +178,7 @@ function ConversationRuntimeProvider({
     // poll), block the request immediately rather than letting the 401 come back from
     // the server. This closes the gap between server-side token invalidation and client-
     // side detection without changing the global poll interval (see session-provider.tsx).
-    if (sessionStatusRef.current === 'unauthenticated') {
+    if (runtimeValues.get().sessionStatus === 'unauthenticated') {
       throwSessionExpired('Pre-send check: session unauthenticated, blocking chat request')
     }
 
@@ -318,7 +320,13 @@ function ConversationRuntimeProvider({
     }
 
     return response
-  }, [conversationId, onConversationIdChange, onConnectorReconnect, onConnectorToolsReceived])
+  }, [
+    conversationId,
+    onConversationIdChange,
+    onConnectorReconnect,
+    onConnectorToolsReceived,
+    runtimeValues,
+  ])
 
   // Use official useChatRuntime from @assistant-ui/react-ai-sdk
   // This natively understands AI SDK's streaming format
@@ -329,18 +337,19 @@ function ConversationRuntimeProvider({
       api: '/api/nexus/chat',
       fetch: customFetch as typeof fetch,
       body: () => {
-        const model = selectedModelRef.current
+        const values = runtimeValues.get()
+        const model = values.selectedModel
         if (!model) {
           // selectedModel is null — models haven't finished loading from localStorage.
           // Throwing here prevents the runtime from sending an empty body which the
           // server rejects with a 400 Zod validation error.
-          if (!modelNotReadyToastShownRef.current) {
-            modelNotReadyToastShownRef.current = true
+          if (!modelNotReadyToastShown.get()) {
+            modelNotReadyToastShown.set(true)
             toast.error('Model not ready', {
               description: 'Please wait a moment for models to load, then try again.',
               duration: 5000,
             })
-            setTimeout(() => { modelNotReadyToastShownRef.current = false }, 5000)
+            setTimeout(() => modelNotReadyToastShown.set(false), 5000)
           }
           throw new Error('No model selected — please wait for models to load')
         }
@@ -353,10 +362,10 @@ function ConversationRuntimeProvider({
           skillId,
           projectId,
           // Bind the open workspace object so the server offers §1087 read/edit tools.
-          workspaceId: workspaceIdRef.current || undefined,
-          conversationId: conversationIdRef.current || undefined,
-          nexusMode: routingModeRef.current,
-          modelFamily: routingModeRef.current === 'standard' ? 'auto' : modelFamilyRef.current,
+          workspaceId: values.workspaceId || undefined,
+          conversationId: values.conversationId || undefined,
+          nexusMode: values.routingMode,
+          modelFamily: values.routingMode === 'standard' ? 'auto' : values.modelFamily,
         }
       }
     }),
@@ -585,7 +594,7 @@ function NexusPageContent() {
     useState(false)
   const canPromoteRepositoryAttachments =
     sessionStatus === 'authenticated' && hasRepositoryManagerCapability
-  
+
   // Get conversation ID from URL parameter with validation
   const urlConversationId = searchParams.get('id')
   const validatedConversationId = useMemo(() => {
@@ -782,7 +791,7 @@ function NexusPageContent() {
   useEffect(() => {
     log.debug('Enabled tools changed', { enabledTools })
   }, [enabledTools])
-  
+
   // Wrap setSelectedModel to reload page on model change
   const setSelectedModel = useCallback((model: SelectAiModel | null) => {
     originalSetSelectedModel(model);
@@ -892,7 +901,7 @@ function NexusPageContent() {
 
     log.debug('Conversation ID updated', { newId: newConversationId })
   }, [attachmentConversationId, router])
-  
+
   // Handle invalid conversation ID in URL - redirect to clean state
   useEffect(() => {
     if (urlConversationId && !validatedConversationId) {
@@ -906,7 +915,7 @@ function NexusPageContent() {
   // Authentication verification for defense in depth
   useEffect(() => {
     if (sessionStatus === 'loading') return // Still loading, wait
-    
+
     if (sessionStatus === 'unauthenticated' || !session?.user) {
       // Not authenticated, redirect to sign in
       router.push('/api/auth/signin?callbackUrl=/nexus')
@@ -966,7 +975,7 @@ function NexusPageContent() {
   const voiceAvailability = useVoiceAvailability()
 
 
-  
+
   // Show loading state while checking authentication
   if (sessionStatus === 'loading') {
     return (

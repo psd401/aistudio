@@ -6,9 +6,9 @@ import {
   flexRender,
   getCoreRowModel,
   getSortedRowModel,
-  useReactTable,
   SortingState,
 } from "@tanstack/react-table"
+import { useUncompiledReactTable } from "@/components/ui/use-uncompiled-react-table"
 import {
   Table,
   TableBody,
@@ -67,6 +67,8 @@ export function NexusActivityTable({
   loading,
   onViewDetail,
 }: NexusActivityTableProps) {
+  "use no memo"
+
   const [sorting, setSorting] = useState<SortingState>([
     { id: "lastMessageAt", desc: true },
   ])
@@ -170,7 +172,7 @@ export function NexusActivityTable({
     [onViewDetail]
   )
 
-  const table = useReactTable({
+  const table = useUncompiledReactTable({
     data,
     columns,
     state: { sorting },

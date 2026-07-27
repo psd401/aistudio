@@ -68,7 +68,7 @@ jest.mock("drizzle-orm", () => ({
 const mockCreateErrorResponse = jest.fn<(...args: unknown[]) => unknown>(
   (...args: unknown[]) => {
     const [requestId, status, code, message] = args
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+
     const { NextResponse: NR } = require("next/server")
     return NR.json({ error: { code, message }, requestId }, { status: status as number })
   }
@@ -80,10 +80,10 @@ jest.mock("@/lib/api/auth-middleware", () => ({
 
 // Import after mocks — use require() to ensure mocks are registered first
 // (next/jest SWC transform may not properly hoist jest.mock before static imports)
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { checkRateLimit, createRateLimitResponse, addRateLimitHeaders, recordUsage } = require("@/lib/api/rate-limiter")
 import type { ApiAuthContext } from "@/lib/api/auth-middleware"
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { NextResponse } = require("next/server")
 
 // ============================================
@@ -159,7 +159,7 @@ describe("Rate Limiter", () => {
   // ------------------------------------------
   // checkRateLimit
   // ------------------------------------------
-  describe("checkRateLimit", () => {
+
     it("should allow requests within limit", async () => {
       // First call: get rate limit config
       mockExecuteQuery.mockResolvedValueOnce([{ rateLimitRpm: 60 }])
@@ -172,7 +172,7 @@ describe("Rate Limiter", () => {
       expect(result.remaining).toBe(29) // 60 - 30 - 1 (current)
       // The typed operator applies the timestamp column encoder. A raw SQL
       // interpolation passes Date directly to postgres.js and fails closed.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
+
       const { gte } = require("drizzle-orm") as { gte: jest.Mock }
       expect(gte).toHaveBeenCalledWith(
         "request_at",
@@ -271,12 +271,12 @@ describe("Rate Limiter", () => {
       expect(result.limit).toBe(60)
       expect(result.allowed).toBe(true)
     })
-  })
+
 
   // ------------------------------------------
   // createRateLimitResponse
   // ------------------------------------------
-  describe("createRateLimitResponse", () => {
+
     it("should return 429 with rate limit headers", () => {
       const rateLimitResult = {
         allowed: false,
@@ -307,12 +307,12 @@ describe("Rate Limiter", () => {
 
       expect(response.headers.get("Retry-After")).toBe("60")
     })
-  })
+
 
   // ------------------------------------------
   // addRateLimitHeaders
   // ------------------------------------------
-  describe("addRateLimitHeaders", () => {
+
     it("should add headers to response when limit > 0", () => {
       const response = NextResponse.json({ data: "ok" })
       const rateLimitResult = {
@@ -343,12 +343,12 @@ describe("Rate Limiter", () => {
       // Map.get returns undefined for missing keys (not null like real Headers)
       expect(response.headers.get("X-RateLimit-Limit")).toBeFalsy()
     })
-  })
+
 
   // ------------------------------------------
   // recordUsage
   // ------------------------------------------
-  describe("recordUsage", () => {
+
     it("should record usage for API key auth", () => {
       mockExecuteQuery.mockResolvedValue([])
 
@@ -396,5 +396,5 @@ describe("Rate Limiter", () => {
         recordUsage(createApiKeyAuth(), request as never, 200, 150)
       }).not.toThrow()
     })
-  })
+
 })

@@ -75,7 +75,7 @@ async function auditHtml(html, opts = {}) {
   } catch (err) {
     throw new Error(
       'a11y gate unavailable: jsdom and axe-core must be installed for ' +
-        `psd-html-artifact (${err.message})`
+        `psd-html-artifact (${err.message})`, { cause: err }
     );
   }
 

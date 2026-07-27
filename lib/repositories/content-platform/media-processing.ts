@@ -287,13 +287,23 @@ function locatorFor(item: TimedText): RepositorySourceLocator {
 }
 
 function addSegment(
-  segments: PublishableSegment[],
-  content: string,
-  sourceLocator: RepositorySourceLocator,
-  modality: MediaKind,
-  segmentLevel: "document" | "section" | "chunk" = "chunk",
-  parentChunkIndex?: number,
+  options: {
+    segments: PublishableSegment[];
+    content: string;
+    sourceLocator: RepositorySourceLocator;
+    modality: MediaKind;
+    segmentLevel?: "document" | "section" | "chunk";
+    parentChunkIndex?: number;
+  }
 ): void {
+  const {
+    segments,
+    content,
+    sourceLocator,
+    modality,
+    segmentLevel = "chunk",
+    parentChunkIndex,
+  } = options;
   const normalized = content.trim();
   if (!normalized) return;
   segments.push({
@@ -442,77 +452,77 @@ export function processBdaMediaOutput(
 
   const segments: PublishableSegment[] = [];
   if (summary) {
-    addSegment(
+    addSegment({
       segments,
-      summary,
-      { timeStartMs: 0, timeEndMs: metadata.durationMs },
-      expectedModality,
-      "document",
-    );
+      content: summary,
+      sourceLocator: { timeStartMs: 0, timeEndMs: metadata.durationMs },
+      modality: expectedModality,
+      segmentLevel: "document",
+    });
   }
   for (const topic of topics) {
-    addSegment(
+    addSegment({
       segments,
-      `Topic summary: ${topic.text}`,
-      locatorFor(topic),
-      "audio",
-      "section",
-      segments[0]?.chunkIndex,
-    );
+      content: `Topic summary: ${topic.text}`,
+      sourceLocator: locatorFor(topic),
+      modality: "audio",
+      segmentLevel: "section",
+      parentChunkIndex: segments[0]?.chunkIndex,
+    });
   }
   for (const chapter of chapters) {
-    addSegment(
+    addSegment({
       segments,
-      `Chapter summary: ${chapter.text}`,
-      locatorFor(chapter),
-      "video",
-      "section",
-      segments[0]?.chunkIndex,
-    );
+      content: `Chapter summary: ${chapter.text}`,
+      sourceLocator: locatorFor(chapter),
+      modality: "video",
+      segmentLevel: "section",
+      parentChunkIndex: segments[0]?.chunkIndex,
+    });
   }
   for (const item of groupedTranscript) {
     const label = labelForTimedText(item);
-    addSegment(
+    addSegment({
       segments,
-      `${label ? `${label}: ` : ""}${item.text}`,
-      locatorFor(item),
-      expectedModality,
-      "chunk",
-      parentForTime(segments, item.startMs),
-    );
+      content: `${label ? `${label}: ` : ""}${item.text}`,
+      sourceLocator: locatorFor(item),
+      modality: expectedModality,
+      segmentLevel: "chunk",
+      parentChunkIndex: parentForTime(segments, item.startMs),
+    });
   }
   for (const frame of frames) {
-    addSegment(
+    addSegment({
       segments,
-      `On-screen text: ${frame.text}`,
-      locatorFor(frame),
-      "video",
-      "chunk",
-      parentForTime(segments, frame.startMs),
-    );
+      content: `On-screen text: ${frame.text}`,
+      sourceLocator: locatorFor(frame),
+      modality: "video",
+      segmentLevel: "chunk",
+      parentChunkIndex: parentForTime(segments, frame.startMs),
+    });
   }
   if (segments.length === 0) {
-    addSegment(
+    addSegment({
       segments,
-      `${expectedModality === "audio" ? "Audio" : "Video"} with no detected speech or text`,
-      { timeStartMs: 0, timeEndMs: metadata.durationMs },
-      expectedModality,
-      "document",
-    );
+      content: `${expectedModality === "audio" ? "Audio" : "Video"} with no detected speech or text`,
+      sourceLocator: { timeStartMs: 0, timeEndMs: metadata.durationMs },
+      modality: expectedModality,
+      segmentLevel: "document",
+    });
   }
 
   const transcriptText = transcript.map(transcriptLine).join("\n");
   const sections = [
     `# ${expectedModality === "audio" ? "Audio" : "Video"} analysis`,
     summary ? `## Summary\n\n${summary}` : "",
-    topics.length
+    topics.length > 0
       ? `## Topics\n\n${topics.map((item) => transcriptLine(item)).join("\n\n")}`
       : "",
-    chapters.length
+    chapters.length > 0
       ? `## Chapters\n\n${chapters.map((item) => transcriptLine(item)).join("\n\n")}`
       : "",
     transcriptText ? `## Transcript\n\n${transcriptText}` : "",
-    frames.length
+    frames.length > 0
       ? `## On-screen text\n\n${frames.map((item) => transcriptLine(item)).join("\n")}`
       : "",
   ].filter(Boolean);

@@ -596,9 +596,9 @@ export class MonitoringStack extends cdk.Stack {
 
     // Add alarm actions
     const alarms = [dbUtilizationAlarm, lambdaErrorsAlarm, dlqAlarm];
-    alarms.forEach((alarm) => {
+    for (const alarm of alarms) {
       alarm.addAlarmAction(new cloudwatch_actions.SnsAction(this.alarmTopic));
-    });
+    }
 
     // Add alarm status widget to dashboard
     this.dashboard.addWidgets(

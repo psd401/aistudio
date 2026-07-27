@@ -68,7 +68,7 @@ const log: SweepLogger = {
 };
 
 function emit(level: string, evt: string, fields?: Record<string, unknown>): void {
-  // eslint-disable-next-line no-console
+
   console.log(JSON.stringify({ level, logger: LOGGER_NAME, evt, ...fields }));
 }
 

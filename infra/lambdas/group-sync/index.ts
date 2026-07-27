@@ -34,7 +34,7 @@ const ENVIRONMENT = process.env.ENVIRONMENT ?? "dev";
 const secretsClient = new SecretsManagerClient({});
 const cloudwatch = new CloudWatchClient({});
 
-/* eslint-disable no-console */
+
 const log = {
   info: (msg: string, meta?: Record<string, unknown>) =>
     console.log(JSON.stringify({ level: "info", msg, ...meta })),
@@ -43,7 +43,7 @@ const log = {
   error: (msg: string, meta?: Record<string, unknown>) =>
     console.error(JSON.stringify({ level: "error", msg, ...meta })),
 };
-/* eslint-enable no-console */
+
 
 interface GroupSyncEvent {
   trigger?: string;

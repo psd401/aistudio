@@ -133,15 +133,15 @@ beforeEach(() => {
 
 describe("verified workspace upload reservations", () => {
   it("signs exact length/checksum and never exposes a public URL before verification", async () => {
-    const prepared = await createPublicArtifactUpload(
-      OWNER,
-      "report.pdf",
-      "application/pdf",
-      4,
-      "session:nonce",
-      "idempotency-1",
-      CHECKSUM,
-    )
+    const prepared = await createPublicArtifactUpload({
+                             ownerEmail: OWNER,
+                             fileName: "report.pdf",
+                             contentType: "application/pdf",
+                             contentLength: 4,
+                             contextKey: "session:nonce",
+                             idempotencyKey: "idempotency-1",
+                             checksumSha256: CHECKSUM,
+                           })
     expect(prepared).toEqual({
       uploadUrl: expect.stringContaining("X-Amz-SignedHeaders"),
       reservationId: RESERVATION,
@@ -165,30 +165,30 @@ describe("verified workspace upload reservations", () => {
 
   it("rejects a public extension/MIME mismatch before reserving capacity", async () => {
     await expect(
-      createPublicArtifactUpload(
-        OWNER,
-        "report.png",
-        "text/html",
-        4,
-        "session:nonce",
-        "idempotency-mime",
-        CHECKSUM,
-      ),
+      createPublicArtifactUpload({
+        ownerEmail: OWNER,
+        fileName: "report.png",
+        contentType: "text/html",
+        contentLength: 4,
+        contextKey: "session:nonce",
+        idempotencyKey: "idempotency-mime",
+        checksumSha256: CHECKSUM,
+      }),
     ).rejects.toThrow("content type")
     expect(executeQueryMock).not.toHaveBeenCalled()
     expect(acquireMock).not.toHaveBeenCalled()
   })
 
   it("accepts the UTF-8 HTML MIME used by the artifact publishers", async () => {
-    const prepared = await createPublicArtifactUpload(
-      OWNER,
-      "report.html",
-      "text/html; charset=utf-8",
-      4,
-      "session:nonce",
-      "idempotency-html",
-      CHECKSUM,
-    )
+    const prepared = await createPublicArtifactUpload({
+                             ownerEmail: OWNER,
+                             fileName: "report.html",
+                             contentType: "text/html; charset=utf-8",
+                             contentLength: 4,
+                             contextKey: "session:nonce",
+                             idempotencyKey: "idempotency-html",
+                             checksumSha256: CHECKSUM,
+                           })
     expect(prepared.requiredHeaders["Content-Type"]).toBe(
       "text/html; charset=utf-8",
     )
@@ -216,15 +216,15 @@ describe("verified workspace upload reservations", () => {
       }),
     )
 
-    await createPublicArtifactUpload(
-      OWNER,
-      "report.pdf",
-      "application/pdf",
-      4,
-      "session:nonce",
-      "idempotency-reconciled",
-      CHECKSUM,
-    )
+    await createPublicArtifactUpload({
+            ownerEmail: OWNER,
+            fileName: "report.pdf",
+            contentType: "application/pdf",
+            contentLength: 4,
+            contextKey: "session:nonce",
+            idempotencyKey: "idempotency-reconciled",
+            checksumSha256: CHECKSUM,
+          })
 
     expect(
       (s3SendMock.mock.calls[0]?.[0] as { input: Record<string, unknown> })
@@ -248,15 +248,15 @@ describe("verified workspace upload reservations", () => {
       ])
     s3SendMock.mockRejectedValueOnce(new Error("S3 unavailable"))
 
-    await createPublicArtifactUpload(
-      OWNER,
-      "report.pdf",
-      "application/pdf",
-      4,
-      "session:nonce",
-      "idempotency-retained",
-      CHECKSUM,
-    )
+    await createPublicArtifactUpload({
+            ownerEmail: OWNER,
+            fileName: "report.pdf",
+            contentType: "application/pdf",
+            contentLength: 4,
+            contextKey: "session:nonce",
+            idempotencyKey: "idempotency-retained",
+            checksumSha256: CHECKSUM,
+          })
 
     expect(executeQueryMock).toHaveBeenCalledTimes(2)
   })
@@ -269,15 +269,15 @@ describe("verified workspace upload reservations", () => {
           "public-images/c8cd3c6427301eaf6665bcca/report.pdf",
       }),
     ])
-    const first = await createPublicArtifactUpload(
-      OWNER,
-      "report.pdf",
-      "application/pdf",
-      4,
-      "session:nonce",
-      "idempotency-retry",
-      CHECKSUM,
-    )
+    const first = await createPublicArtifactUpload({
+                          ownerEmail: OWNER,
+                          fileName: "report.pdf",
+                          contentType: "application/pdf",
+                          contentLength: 4,
+                          contextKey: "session:nonce",
+                          idempotencyKey: "idempotency-retry",
+                          checksumSha256: CHECKSUM,
+                        })
     expect(first.reservationId).toBe(RESERVATION)
     expect(acquireMock).not.toHaveBeenCalled()
     expect(executeTransactionMock).not.toHaveBeenCalled()
@@ -294,15 +294,15 @@ describe("verified workspace upload reservations", () => {
         },
       ])
     s3SendMock.mockRejectedValueOnce(new Error("NoSuchVersion"))
-    const prepared = await createWorkspaceUploadUrl(
-      OWNER,
-      "users/owner",
-      "note.txt",
-      4,
-      "session:nonce",
-      "fresh-idempotency",
-      CHECKSUM,
-    )
+    const prepared = await createWorkspaceUploadUrl({
+                             ownerEmail: OWNER,
+                             signedWorkspacePrefix: "users/owner",
+                             relativePath: "note.txt",
+                             contentLength: 4,
+                             contextKey: "session:nonce",
+                             idempotencyKey: "fresh-idempotency",
+                             checksumSha256: CHECKSUM,
+                           })
     expect(prepared).toHaveProperty("uploadUrl")
     expect(acquireMock).toHaveBeenCalledTimes(2)
   })
@@ -323,15 +323,15 @@ describe("verified workspace upload reservations", () => {
       ContentType: "application/octet-stream",
       VersionId: "newer-untracked-version",
     })
-    const prepared = await createWorkspaceUploadUrl(
-      OWNER,
-      "users/owner",
-      "note.txt",
-      4,
-      "session:nonce",
-      "fresh-idempotency",
-      CHECKSUM,
-    )
+    const prepared = await createWorkspaceUploadUrl({
+                             ownerEmail: OWNER,
+                             signedWorkspacePrefix: "users/owner",
+                             relativePath: "note.txt",
+                             contentLength: 4,
+                             contextKey: "session:nonce",
+                             idempotencyKey: "fresh-idempotency",
+                             checksumSha256: CHECKSUM,
+                           })
     expect(prepared).toHaveProperty("uploadUrl")
     expect(acquireMock).toHaveBeenCalledTimes(2)
   })
@@ -346,15 +346,15 @@ describe("verified workspace upload reservations", () => {
       }),
     ])
     await expect(
-      createPublicArtifactUpload(
-        OWNER,
-        "report.pdf",
-        "application/pdf",
-        4,
-        "session:nonce",
-        "expired-idempotency",
-        CHECKSUM,
-      ),
+      createPublicArtifactUpload({
+        ownerEmail: OWNER,
+        fileName: "report.pdf",
+        contentType: "application/pdf",
+        contentLength: 4,
+        contextKey: "session:nonce",
+        idempotencyKey: "expired-idempotency",
+        checksumSha256: CHECKSUM,
+      }),
     ).rejects.toThrow("non-reusable")
     expect(acquireMock).not.toHaveBeenCalled()
 
@@ -548,15 +548,15 @@ describe("verified workspace upload reservations", () => {
       reason: "duplicate",
     })
     await expect(
-      createWorkspaceUploadUrl(
-        OWNER,
-        "users/owner",
-        "note.txt",
-        4,
-        "session:nonce",
-        "idempotency-duplicate",
-        CHECKSUM,
-      ),
+      createWorkspaceUploadUrl({
+        ownerEmail: OWNER,
+        signedWorkspacePrefix: "users/owner",
+        relativePath: "note.txt",
+        contentLength: 4,
+        contextKey: "session:nonce",
+        idempotencyKey: "idempotency-duplicate",
+        checksumSha256: CHECKSUM,
+      }),
     ).rejects.toThrow("duplicate")
 
     executeQueryMock.mockReset()

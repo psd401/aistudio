@@ -358,13 +358,17 @@ function candidateColumns() {
 }
 
 async function denseCandidates(
-  snapshot: RetrievalGenerationSnapshot,
-  principal: RetrievalPrincipal,
-  embedding: number[],
-  modalities: RetrievalModality[],
-  limit: number,
-  threshold: number
+  options: {
+    snapshot: RetrievalGenerationSnapshot;
+    principal: RetrievalPrincipal;
+    embedding: number[];
+    modalities: RetrievalModality[];
+    limit: number;
+    threshold: number;
+  }
 ): Promise<RetrievalCandidate[]> {
+  const { snapshot, principal, embedding, modalities, limit, threshold } =
+    options;
   const vector = `[${embedding.join(",")}]`;
   const rows = await executeQuery(
     (db) =>
@@ -939,14 +943,14 @@ export async function retrieveRepositoryContent(
         dense.push(
           ...(await Promise.all(
             group.map((snapshot) =>
-              denseCandidates(
+              denseCandidates({
                 snapshot,
                 principal,
-                vector,
+                embedding: vector,
                 modalities,
-                candidateLimit,
-                threshold
-              )
+                limit: candidateLimit,
+                threshold,
+              })
             )
           )).flat()
         );

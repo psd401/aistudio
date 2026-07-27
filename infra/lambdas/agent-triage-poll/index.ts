@@ -33,7 +33,6 @@ import {
   modifyMessage,
   modifyThread,
   threadHasUserReply,
-  type HistoryEvent,
 } from "./gmail";
 import {
   classifyWithLLM,
@@ -44,7 +43,6 @@ import {
   applyRules,
   shouldEscalate,
   type EmailFeatures,
-  type Label,
 } from "./rules";
 import { postEscalation, postTaskOutcome, resolveDmSpace } from "./chat";
 import {
@@ -81,7 +79,7 @@ export function log(
   evt: string,
   fields: Record<string, unknown>,
 ) {
-  // eslint-disable-next-line no-console
+
   console.log(
     JSON.stringify({
       level,

@@ -18,7 +18,13 @@ export abstract class BaseStack extends cdk.Stack {
 
   constructor(scope: Construct, id: string, props: BaseStackProps) {
     // Extract our custom properties and pass only StackProps to parent
-    const { deploymentEnvironment, config, projectName, owner, ...stackProps } = props
+    const {
+      deploymentEnvironment,
+      config,
+      projectName,
+      owner: _owner,
+      ...stackProps
+    } = props
 
     super(scope, id, {
       ...stackProps,

@@ -55,7 +55,7 @@ jest.mock("@/lib/api/rate-limiter", () => ({
 
 // Import after mocks — use require() to ensure mocks are registered first
 // (next/jest SWC transform may not properly hoist jest.mock before static imports)
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { withApiAuth } = require("@/lib/api/with-api-auth")
 import type { ApiAuthContext } from "@/lib/api/auth-middleware"
 
@@ -121,7 +121,7 @@ describe("withApiAuth", () => {
   // ------------------------------------------
   // Successful request flow
   // ------------------------------------------
-  describe("successful request flow", () => {
+
     it("should call handler with auth context, requestId, and resolved params", async () => {
       const handler = jest.fn<(...args: unknown[]) => Promise<unknown>>().mockResolvedValue(
         NextResponse.json({ data: "success" })
@@ -203,12 +203,12 @@ describe("withApiAuth", () => {
         expect.any(Number) // responseTimeMs
       )
     })
-  })
+
 
   // ------------------------------------------
   // Auth failure short-circuit
   // ------------------------------------------
-  describe("auth failure", () => {
+
     it("should return error response without calling handler", async () => {
       // authenticateRequest returns an error response (not an ApiAuthContext)
       const authError = { status: 401, headers: new Map(), json: async () => ({ error: { code: "UNAUTHORIZED" } }) }
@@ -232,12 +232,12 @@ describe("withApiAuth", () => {
 
       expect(mockCheckRateLimit).not.toHaveBeenCalled()
     })
-  })
+
 
   // ------------------------------------------
   // Rate limit short-circuit
   // ------------------------------------------
-  describe("rate limit exceeded", () => {
+
     it("should return 429 without calling handler", async () => {
       mockCheckRateLimit.mockResolvedValue({
         allowed: false,
@@ -283,12 +283,12 @@ describe("withApiAuth", () => {
         expect.any(Number)
       )
     })
-  })
+
 
   // ------------------------------------------
   // Handler error handling
   // ------------------------------------------
-  describe("handler errors", () => {
+
     it("should catch unhandled errors and return 500", async () => {
       const handler = jest.fn<(...args: unknown[]) => Promise<unknown>>().mockRejectedValue(new Error("Unexpected crash"))
 
@@ -317,12 +317,12 @@ describe("withApiAuth", () => {
         expect.any(Number)
       )
     })
-  })
+
 
   // ------------------------------------------
   // Execution order
   // ------------------------------------------
-  describe("middleware execution order", () => {
+
     it("should execute auth → rate limit → handler → record usage", async () => {
       const callOrder: string[] = []
 
@@ -350,5 +350,5 @@ describe("withApiAuth", () => {
 
       expect(callOrder).toEqual(["auth", "rateLimit", "handler", "recordUsage"])
     })
-  })
+
 })

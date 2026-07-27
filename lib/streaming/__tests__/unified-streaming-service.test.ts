@@ -28,9 +28,9 @@ jest.doMock('@/lib/logger', () => ({
 }));
 
 // Import after mocking - disable ESLint for this specific case
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { UnifiedStreamingService } = require('../unified-streaming-service');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { createTokenMappingSink } = require('../../safety/token-mapping-sink');
 
 describe('UnifiedStreamingService', () => {
@@ -40,9 +40,9 @@ describe('UnifiedStreamingService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    
+
     streamingService = new UnifiedStreamingService();
-    
+
     mockAdapter = {
       createModel: jest.fn(),
       createTools: (jest.fn() as jest.Mock<any>).mockResolvedValue({}),
@@ -50,7 +50,7 @@ describe('UnifiedStreamingService', () => {
       getProviderOptions: jest.fn(),
       streamWithEnhancements: jest.fn()
     };
-    
+
     mockTelemetryConfig = {
       isEnabled: true,
       functionId: 'test-function',
@@ -67,12 +67,12 @@ describe('UnifiedStreamingService', () => {
         }))
       }
     };
-    
+
     mockGetProviderAdapter.mockResolvedValue(mockAdapter);
     mockGetTelemetryConfig.mockResolvedValue(mockTelemetryConfig);
   });
 
-  describe('stream', () => {
+
     it('detokenizes assistant output with mappings added by a tool after the response wrapper is created', async () => {
       const {
         ReadableStream: NodeReadableStream,
@@ -403,7 +403,7 @@ describe('UnifiedStreamingService', () => {
 
       // Trip the circuit breaker by failing multiple times
       const streamingServiceWithFailures = new UnifiedStreamingService();
-      
+
       // Make 5 failed attempts to open the circuit (failureThreshold is 5)
       for (let i = 0; i < 5; i++) {
         try {
@@ -418,7 +418,7 @@ describe('UnifiedStreamingService', () => {
       await expect(streamingServiceWithFailures.stream(request)).rejects.toThrow(
         'Circuit breaker is open for provider: openai'
       );
-      
+
       // Verify the adapter wasn't called again after circuit opened
       expect(failingAdapter.streamWithEnhancements).toHaveBeenCalledTimes(5);
     });
@@ -475,5 +475,5 @@ describe('UnifiedStreamingService', () => {
       expect(callArgs.modelId).toBe('gpt-4');
       expect(callArgs.provider).toBe('openai');
     });
-  });
+  ;
 });

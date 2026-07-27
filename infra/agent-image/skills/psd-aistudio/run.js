@@ -144,7 +144,7 @@ function parseList(value, label) {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-  return items.length ? items : undefined;
+  return items.length > 0 ? items : undefined;
 }
 
 function parseIntegerList(value, label) {

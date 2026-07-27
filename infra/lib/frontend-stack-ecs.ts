@@ -347,7 +347,7 @@ export class FrontendStackEcs extends cdk.Stack {
       });
 
       // Add HTTPS listener with certificate
-      const httpsListener = this.ecsService.loadBalancer.addListener('HttpsListener', {
+      this.ecsService.loadBalancer.addListener('HttpsListener', {
         port: 443,
         protocol: elbv2.ApplicationProtocol.HTTPS,
         certificates: [certificate],

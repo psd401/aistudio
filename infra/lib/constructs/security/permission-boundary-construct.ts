@@ -1,8 +1,8 @@
 import * as iam from "aws-cdk-lib/aws-iam"
 import * as cdk from "aws-cdk-lib"
 import { Construct } from "constructs"
-import * as fs from "fs"
-import * as path from "path"
+import * as fs from "node:fs"
+import * as path from "node:path"
 import { Environment } from "./types"
 
 export interface PermissionBoundaryConstructProps {
@@ -34,7 +34,7 @@ export class PermissionBoundaryConstruct extends Construct {
     cdk.Tags.of(this.policy).add("ManagedBy", "CDK")
   }
 
-  private loadPolicyDocument(environment: Environment): any {
+  private loadPolicyDocument(environment: Environment): unknown {
     // Map staging to dev boundary for now
     const boundaryEnv = environment === "staging" ? "dev" : environment
 

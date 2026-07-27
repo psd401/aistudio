@@ -136,7 +136,7 @@ function validateEmail(email) {
   if (email.includes('/') || /\s/.test(email)) return false;
   const at = email.indexOf('@');
   // exactly one '@', with a non-empty local part
-  if (at <= 0 || email.indexOf('@', at + 1) !== -1) return false;
+  if (at <= 0 || email.includes('@', at + 1)) return false;
   const domain = email.slice(at + 1);
   const dot = domain.lastIndexOf('.');
   // a dot in the domain that is neither the first nor the last character

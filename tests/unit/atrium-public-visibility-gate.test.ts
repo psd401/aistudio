@@ -23,7 +23,6 @@
 // --- mocks (hoisted above imports by jest) ---
 
 let executeTransactionCalls = 0;
-let executeQueryCalls = 0;
 // A queue of canned executeQuery results (e.g. the collection-default lookup);
 // each call shifts the next, falling back to [] — lets a test drive
 // `collectionDefaultOutsideTx` to a specific default_visibility_level.
@@ -47,7 +46,7 @@ const txProxy: unknown = new Proxy(txChain, {
       return () => txProxy;
     }
     if (prop === "returning" || prop === "limit") {
-      return () => (txResults.length ? txResults.shift() : []);
+      return () => (txResults.length > 0 ? txResults.shift() : []);
     }
     return () => txProxy;
   },
@@ -63,8 +62,7 @@ jest.mock("@/lib/db/drizzle-client", () => ({
     }
   ),
   executeQuery: jest.fn(async () => {
-    executeQueryCalls += 1;
-    return executeQueryResults.length ? executeQueryResults.shift() : [];
+    return executeQueryResults.length > 0 ? executeQueryResults.shift() : [];
   }),
 }));
 
@@ -141,7 +139,6 @@ const delegatedWithGrant: Requester = {
 
 beforeEach(() => {
   executeTransactionCalls = 0;
-  executeQueryCalls = 0;
   txUpdateCalls = 0;
   emitCalls = [];
   txResults = [];

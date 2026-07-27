@@ -2,10 +2,10 @@ import { convertToModelMessages } from 'ai';
 import { createProviderAdapter } from './provider-factory';
 import { createLogger } from './utils/logger';
 import type { SettingsManager } from './utils/settings-manager';
-import type { 
-  StreamRequest, 
-  StreamResponse, 
-  StreamConfig, 
+import type {
+  StreamRequest,
+  StreamResponse,
+  StreamConfig,
   StreamingProgress
 } from './types';
 
@@ -16,17 +16,17 @@ class CircuitBreaker {
   private failures = 0;
   private lastFailureTime = 0;
   private isOpen = false;
-  
+
   constructor(
     private readonly failureThreshold = 5,
     private readonly recoveryTimeoutMs = 60000
   ) {}
-  
+
   execute<T>(fn: () => Promise<T>): Promise<T> {
     if (this.isOpen && Date.now() - this.lastFailureTime < this.recoveryTimeoutMs) {
       throw new Error('Circuit breaker is open');
     }
-    
+
     return fn()
       .then(result => {
         this.onSuccess();
@@ -37,21 +37,21 @@ class CircuitBreaker {
         throw error;
       });
   }
-  
+
   private onSuccess() {
     this.failures = 0;
     this.isOpen = false;
   }
-  
+
   private onFailure() {
     this.failures++;
     this.lastFailureTime = Date.now();
-    
+
     if (this.failures >= this.failureThreshold) {
       this.isOpen = true;
     }
   }
-  
+
   getState() {
     return {
       failures: this.failures,
@@ -64,14 +64,14 @@ class CircuitBreaker {
 /**
  * Unified streaming service that handles all AI streaming operations
  * across chat, compare, and assistant execution tools.
- * 
+ *
  * Supports multiple providers (OpenAI, Claude via Bedrock, Google Gemini, Azure)
  * with circuit breaker pattern, telemetry, and settings management.
  */
 export class UnifiedStreamingService {
   private circuitBreakers = new Map<string, CircuitBreaker>();
   private settingsManager?: SettingsManager;
-  
+
   /**
    * Initialize the unified streaming service
    * @param settingsManager - Optional settings manager for database-backed configuration
@@ -79,7 +79,7 @@ export class UnifiedStreamingService {
   constructor(settingsManager?: SettingsManager) {
     this.settingsManager = settingsManager;
   }
-  
+
   /**
    * Main streaming method that handles all AI operations
    */
@@ -87,7 +87,7 @@ export class UnifiedStreamingService {
     const requestId = this.generateRequestId();
     const startTime = Date.now();
     const log = createLogger({ module: 'UnifiedStreamingService', requestId });
-    
+
     log.info('Starting unified stream', {
       provider: request.provider,
       modelId: request.modelId,
@@ -95,24 +95,24 @@ export class UnifiedStreamingService {
       userId: request.userId,
       messageCount: request.messages?.length || 0
     });
-    
+
     try {
-      // 1. Get provider adapter and capabilities  
+      // 1. Get provider adapter and capabilities
       const adapter = createProviderAdapter(request.provider, this.settingsManager);
       const capabilities = adapter.getCapabilities(request.modelId);
-      
+
       // 2. Check circuit breaker
       const circuitBreaker = this.getCircuitBreaker(request.provider);
-      
+
       // 3. Validate and convert messages
       if (!request.messages || !Array.isArray(request.messages)) {
         throw new Error('Messages array is required for streaming');
       }
-      
+
       // Pass messages directly to AI SDK without preprocessing
       // Let convertToModelMessages handle UIMessage → ModelMessage conversion
       const processedMessages = request.messages;
-      
+
       let convertedMessages;
       try {
         convertedMessages = convertToModelMessages(processedMessages as Parameters<typeof convertToModelMessages>[0]);
@@ -120,18 +120,18 @@ export class UnifiedStreamingService {
         log.error('Message conversion failed', {
           error: (conversionError as Error).message
         });
-        throw new Error(`Message conversion failed: ${(conversionError as Error).message}`);
+        throw new Error(`Message conversion failed: ${(conversionError as Error).message}`, { cause: conversionError });
       }
-      
+
       // 4. Create model
       const model = await adapter.createModel(request.modelId, request.options);
-      
+
       // 5. Configure streaming
       const tools = request.tools;
-      
+
       // For gpt-image-1, we need to pass tools in the options to the Responses API
       // The tools array should be passed to the createModel call instead
-      
+
       const config: StreamConfig = {
         model,
         messages: convertedMessages,
@@ -142,7 +142,7 @@ export class UnifiedStreamingService {
         timeout: this.getAdaptiveTimeout(capabilities, request),
         providerOptions: adapter.getProviderOptions(request.modelId, request.options)
       };
-      
+
       // 6. Execute streaming with circuit breaker
       const result = await circuitBreaker.execute(async () => {
         return await adapter.streamWithEnhancements(config, {
@@ -161,7 +161,7 @@ export class UnifiedStreamingService {
           onFinish: async (data) => {
             const duration = Date.now() - startTime;
             this.handleFinish(data, requestId, duration);
-            
+
             // Call user-provided onFinish callback
             if (request.callbacks?.onFinish) {
               try {
@@ -181,20 +181,20 @@ export class UnifiedStreamingService {
           }
         });
       });
-      
+
       log.info('Stream completed successfully', {
         provider: request.provider,
         modelId: request.modelId,
         duration: Date.now() - startTime
       });
-      
+
       return {
         result,
         requestId,
         capabilities,
         telemetryConfig: { isEnabled: false } // Basic implementation
       };
-      
+
     } catch (error) {
       const duration = Date.now() - startTime;
       log.error('Stream failed', {
@@ -206,7 +206,7 @@ export class UnifiedStreamingService {
       throw error;
     }
   }
-  
+
   /**
    * Generate image using unified provider system
    */
@@ -233,7 +233,7 @@ export class UnifiedStreamingService {
     const requestId = this.generateRequestId();
     const startTime = Date.now();
     const log = createLogger({ module: 'UnifiedStreamingService', requestId });
-    
+
     log.info('Starting image generation', {
       provider: request.provider,
       modelId: request.modelId,
@@ -243,22 +243,22 @@ export class UnifiedStreamingService {
       size: request.size,
       style: request.style
     });
-    
+
     try {
       // 1. Validate request
       if (!request.prompt || typeof request.prompt !== 'string' || request.prompt.trim().length === 0) {
         throw new Error('Image generation prompt is required');
       }
-      
+
       // 2. Get circuit breaker
       const circuitBreaker = this.getCircuitBreaker(request.provider);
-      
+
       // 3. Create provider adapter
       const adapter = createProviderAdapter(request.provider, this.settingsManager);
-      
+
       // 4. Create image model
       const imageModel = await adapter.createImageModel(request.modelId, request.options);
-      
+
       // 5. Configure generation options
       const generateConfig = {
         model: imageModel,
@@ -267,7 +267,7 @@ export class UnifiedStreamingService {
         ...(request.style && { style: request.style }),
         providerOptions: adapter.getProviderOptions(request.modelId, request.options)
       };
-      
+
       // 6. Execute image generation with circuit breaker
       const result = await circuitBreaker.execute(async () => {
         return await adapter.generateImageWithEnhancements(generateConfig, {
@@ -276,9 +276,9 @@ export class UnifiedStreamingService {
           }
         });
       });
-      
+
       const duration = Date.now() - startTime;
-      
+
       log.info('Image generation completed', {
         provider: request.provider,
         modelId: request.modelId,
@@ -286,7 +286,7 @@ export class UnifiedStreamingService {
         hasImage: !!result.image,
         imageType: result.image?.mediaType
       });
-      
+
       return {
         image: result.image,
         metadata: {
@@ -298,7 +298,7 @@ export class UnifiedStreamingService {
           generatedAt: new Date().toISOString()
         }
       };
-      
+
     } catch (error) {
       const duration = Date.now() - startTime;
       log.error('Image generation failed', {
@@ -310,7 +310,7 @@ export class UnifiedStreamingService {
       throw error;
     }
   }
-  
+
   /**
    * Preprocess messages to ensure correct format for AI SDK
    */
@@ -320,7 +320,7 @@ export class UnifiedStreamingService {
       if (msg.parts && Array.isArray(msg.parts)) {
         return msg;
       }
-      
+
       // If message has content property with string, convert to parts
       if ('content' in msg && typeof msg.content === 'string') {
         return {
@@ -328,18 +328,18 @@ export class UnifiedStreamingService {
           parts: [{ type: 'text', text: msg.content }]
         };
       }
-      
+
       // If message has content property with array, keep as ModelMessage format
       // Don't convert back to parts - let convertToModelMessages handle proper conversion
       if ('content' in msg && Array.isArray(msg.content)) {
         return msg;
       }
-      
+
       // Otherwise, return as-is and let convertToModelMessages handle it
       return msg;
     });
   }
-  
+
   /**
    * Get or create circuit breaker for provider
    */
@@ -349,13 +349,13 @@ export class UnifiedStreamingService {
     }
     return this.circuitBreakers.get(provider)!;
   }
-  
+
   /**
    * Calculate adaptive timeout based on model capabilities
    */
   private getAdaptiveTimeout(capabilities: { supportsReasoning?: boolean; supportsThinking?: boolean; maxTimeoutMs?: number }, request: StreamRequest): number {
     const baseTimeout = 30000; // 30 seconds
-    
+
     // Extend timeout for reasoning models
     if (capabilities.supportsReasoning) {
       // Complex reasoning models may need up to 5 minutes
@@ -369,10 +369,10 @@ export class UnifiedStreamingService {
       // Other reasoning models get 1 minute
       return 60000;
     }
-    
+
     return request.timeout || baseTimeout;
   }
-  
+
   /**
    * Handle streaming progress events
    */
@@ -382,7 +382,7 @@ export class UnifiedStreamingService {
       tokens: event.metadata?.tokens
     });
   }
-  
+
   /**
    * Handle reasoning content
    */
@@ -392,7 +392,7 @@ export class UnifiedStreamingService {
       length: reasoning.length
     });
   }
-  
+
   /**
    * Handle thinking content
    */
@@ -402,7 +402,7 @@ export class UnifiedStreamingService {
       length: thinking.length
     });
   }
-  
+
   /**
    * Handle stream completion
    */
@@ -429,7 +429,7 @@ export class UnifiedStreamingService {
       duration
     });
   }
-  
+
   /**
    * Handle stream errors
    */
@@ -440,7 +440,7 @@ export class UnifiedStreamingService {
       stack: error.stack
     });
   }
-  
+
   /**
    * Generate unique request ID
    */

@@ -6,7 +6,7 @@
 // Read-only.
 
 const {
-  parseArgs, requireUser, getCredentials, getOrganization, getVacancyDetails, parseDate, emit, fail,
+  parseArgs, requireUser, getVacancyDetails, parseDate, emit, fail,
 } = require('./lib/api.js');
 
 function buildSummary(vacancies, dateLabel, dateStr) {
@@ -79,13 +79,11 @@ function buildSummary(vacancies, dateLabel, dateStr) {
 
 (async () => {
   const args = parseArgs(process.argv);
-  const user = requireUser(args);
+  requireUser(args);
   const dateInfo = parseDate(args.date || args._positional[0]);
 
   try {
-    const creds = getCredentials(user);
-    const org = await getOrganization(creds);
-    const result = await getVacancyDetails(org.orgId, org.apiKey, creds, dateInfo.date, dateInfo.date);
+    const result = await getVacancyDetails(dateInfo.date, dateInfo.date);
     if (result.error) fail(result.error, 'redrover_api_error');
     emit(buildSummary(result.data, dateInfo.label, dateInfo.date));
   } catch (err) {

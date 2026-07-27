@@ -73,7 +73,7 @@ jest.mock("@/lib/logger", () => {
   }
 })
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+
 const { __mockLogger: mockLogger } = require("@/lib/logger") as { __mockLogger: {
   info: jest.Mock; warn: jest.Mock; error: jest.Mock; debug: jest.Mock
 }}

@@ -11,6 +11,7 @@ import {
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { AISTUDIO_OPENCLAW_CLIENT_ID } from "@/lib/oauth/openclaw-client"
+import { ErrorFactories } from "@/lib/error-utils"
 
 const log = createLogger({ module: "agent-aistudio-broker" })
 const ALLOWED_METHODS = new Set(["tools/list", "tools/call"])
@@ -27,13 +28,19 @@ function environment(): string {
 
 function mcpUrl(): URL {
   const raw = process.env.APP_BASE_URL
-  if (!raw) throw new Error("APP_BASE_URL is not configured")
+  if (!raw) {
+    throw ErrorFactories.sysConfigurationError(
+      "APP_BASE_URL is not configured"
+    )
+  }
   const base = new URL(raw)
   const localHttp =
     base.protocol === "http:" &&
     (base.hostname === "localhost" || base.hostname === "127.0.0.1")
   if (base.protocol !== "https:" && !localHttp) {
-    throw new Error("APP_BASE_URL must use HTTPS")
+    throw ErrorFactories.sysConfigurationError(
+      "APP_BASE_URL must use HTTPS"
+    )
   }
   return new URL("/api/mcp", base)
 }

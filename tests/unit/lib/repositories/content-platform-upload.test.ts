@@ -318,7 +318,7 @@ describe("canonical repository upload initiation", () => {
 
     expect(outcomes.filter((outcome) => outcome.status === "fulfilled"))
       .toHaveLength(1);
-    const [rejected] = outcomes.filter(
+    const rejected = outcomes.find(
       (outcome): outcome is PromiseRejectedResult =>
         outcome.status === "rejected"
     );

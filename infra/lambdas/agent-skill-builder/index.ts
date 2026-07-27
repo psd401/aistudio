@@ -23,10 +23,10 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
-import { execSync, type ExecSyncOptionsWithStringEncoding } from 'child_process';
-import { createHash } from 'crypto';
-import * as fs from 'fs';
-import * as path from 'path';
+import { execSync, type ExecSyncOptionsWithStringEncoding } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { Handler } from 'aws-lambda';
 import { findMalformedToolVersionPins } from './frontmatter-tools';
 
@@ -127,13 +127,11 @@ export function assertSkillScanPrefixes(event: Pick<
   'ownerKey' | 's3Key' | 'destinationPrefix'
 >): void {
   const ownerPrefix = `skills/user/${event.ownerKey.toLowerCase()}/`;
-  const draftMatch = event.s3Key.match(
-    new RegExp(
-      `^${ownerPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` +
-        'drafts/([a-zA-Z0-9_.-]+)/versions/' +
-        '([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$',
-      'i',
-    ),
+  const draftPath = event.s3Key.startsWith(ownerPrefix)
+    ? event.s3Key.slice(ownerPrefix.length)
+    : "";
+  const draftMatch = draftPath.match(
+    /^drafts\/([a-zA-Z0-9_.-]+)\/versions\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i,
   );
   if (!draftMatch) {
     throw new Error('Invalid owner-bound skill scan prefixes');
@@ -168,7 +166,7 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
     event.version < 1 ||
     !/^[0-9a-f-]{36}$/i.test(event.scanLeaseId) ||
     typeof event.idempotencyKey !== 'string' ||
-    event.idempotencyKey.length < 1 ||
+    event.idempotencyKey.length === 0 ||
     event.idempotencyKey.length > 256
   ) {
     log.error('Invalid scope in SkillBuildEvent', { scope: event.scope });
@@ -818,7 +816,7 @@ export function auditInstalledDeps(
       log.warn('npm audit could not run; dependency vulnerabilities were NOT evaluated', {
         error: message.substring(0, 300),
       });
-      throw new Error(`Dependency audit could not run: ${message}`);
+      throw new Error(`Dependency audit could not run: ${message}`, { cause: err });
     }
   }
 

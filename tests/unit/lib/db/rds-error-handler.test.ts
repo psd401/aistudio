@@ -39,8 +39,8 @@ describe('RDS Error Handler', () => {
     jest.clearAllMocks()
   })
 
-  describe('isRetryableError', () => {
-    describe('AWS error names', () => {
+
+
       it('should identify InternalServerErrorException as retryable', () => {
         const error = { name: 'InternalServerErrorException' }
         expect(isRetryableError(error)).toBe(true)
@@ -80,9 +80,9 @@ describe('RDS Error Handler', () => {
         const error = { name: 'AccessDeniedException' }
         expect(isRetryableError(error)).toBe(false)
       })
-    })
 
-    describe('error codes', () => {
+
+
       it('should identify ECONNRESET as retryable', () => {
         const error = { code: 'ECONNRESET' }
         expect(isRetryableError(error)).toBe(true)
@@ -112,9 +112,9 @@ describe('RDS Error Handler', () => {
         const error = { code: 'ENOENT' }
         expect(isRetryableError(error)).toBe(false)
       })
-    })
 
-    describe('HTTP status codes', () => {
+
+
       it('should identify 500 status as retryable', () => {
         const error = { $metadata: { httpStatusCode: 500 } }
         expect(isRetryableError(error)).toBe(true)
@@ -159,9 +159,9 @@ describe('RDS Error Handler', () => {
         const error = { $metadata: { httpStatusCode: 404 } }
         expect(isRetryableError(error)).toBe(false)
       })
-    })
 
-    describe('network error messages', () => {
+
+
       it('should identify "network" in message as retryable', () => {
         const error = { message: 'Network error occurred' }
         expect(isRetryableError(error)).toBe(true)
@@ -191,9 +191,9 @@ describe('RDS Error Handler', () => {
         const error = { message: 'Invalid parameter value' }
         expect(isRetryableError(error)).toBe(false)
       })
-    })
 
-    describe('edge cases', () => {
+
+
       it('should return false for null error', () => {
         // Function now has null guard and returns false
         expect(isRetryableError(null)).toBe(false)
@@ -217,8 +217,8 @@ describe('RDS Error Handler', () => {
         // Number has no matching properties
         expect(isRetryableError(500)).toBe(false)
       })
-    })
-  })
+
+
 
   describe('calculateDelay', () => {
     const defaultOptions = {
@@ -304,7 +304,7 @@ describe('RDS Error Handler', () => {
       Date.now = originalDateNow
     })
 
-    describe('initial state', () => {
+
       it('should start in closed state', () => {
         const state = getCircuitBreakerState()
         expect(state.state).toBe('closed')
@@ -315,9 +315,9 @@ describe('RDS Error Handler', () => {
       it('should allow requests when closed', () => {
         expect(checkCircuitBreaker()).toBe(true)
       })
-    })
 
-    describe('checkCircuitBreaker', () => {
+
+
       it('should allow requests when circuit is closed', () => {
         expect(checkCircuitBreaker()).toBe(true)
       })
@@ -361,9 +361,9 @@ describe('RDS Error Handler', () => {
         expect(getCircuitBreakerState().state).toBe('half-open')
         expect(checkCircuitBreaker()).toBe(true)
       })
-    })
 
-    describe('recordSuccess', () => {
+
+
       it('should reset failure count when closed', () => {
         recordFailure()
         recordFailure()
@@ -408,9 +408,9 @@ describe('RDS Error Handler', () => {
         expect(state.failureCount).toBe(0)
         expect(state.successCount).toBe(0)
       })
-    })
 
-    describe('recordFailure', () => {
+
+
       it('should increment failure count', () => {
         recordFailure()
         expect(getCircuitBreakerState().failureCount).toBe(1)
@@ -455,9 +455,9 @@ describe('RDS Error Handler', () => {
         const state = getCircuitBreakerState()
         expect(state.lastFailureTime).toBeGreaterThanOrEqual(before)
       })
-    })
 
-    describe('resetCircuitBreaker', () => {
+
+
       it('should reset all state to initial values', () => {
         // Create some state
         for (let i = 0; i < 5; i++) {
@@ -473,7 +473,7 @@ describe('RDS Error Handler', () => {
         expect(state.lastFailureTime).toBe(0)
         expect(state.successCount).toBe(0)
       })
-    })
+
   })
 
   describe('executeWithRetry', () => {

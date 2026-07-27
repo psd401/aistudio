@@ -98,7 +98,7 @@ export function parseOidcSigningKeySet(
   let storedActive: StoredOidcSigningKey | undefined
   let dueStandby: StoredOidcSigningKey | undefined
 
-  candidate.keys.forEach((entry, index) => {
+  for (const [index, entry] of candidate.keys.entries()) {
     if (typeof entry !== "object" || entry === null) {
       throw new TypeError(`OIDC signing secret key ${index} must be an object`)
     }
@@ -146,7 +146,7 @@ export function parseOidcSigningKeySet(
       }
       storedActive = entry
       usable.push(entry)
-      return
+      continue
     }
 
     if (entry.status === "standby") {
@@ -163,7 +163,7 @@ export function parseOidcSigningKeySet(
         dueStandby = entry
       }
       usable.push(entry)
-      return
+      continue
     }
 
     if (
@@ -177,7 +177,7 @@ export function parseOidcSigningKeySet(
     if (Date.parse(entry.retireAfter) > now.getTime()) {
       usable.push(entry)
     }
-  })
+  }
 
   if (activeCount !== 1) {
     throw new TypeError(

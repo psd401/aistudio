@@ -63,7 +63,6 @@ describe('Long-Running Streams', () => {
     });
 
     const startTime = Date.now();
-    let lastLogTime = startTime;
 
     // Monitor progress during streaming
     const monitorInterval = setInterval(() => {
@@ -71,7 +70,6 @@ describe('Long-Running Streams', () => {
       const minutes = Math.floor(elapsed / 60000);
       const seconds = Math.floor((elapsed % 60000) / 1000);
       console.log(`  ⏱️  Streaming progress: ${minutes}m ${seconds}s`);
-      lastLogTime = Date.now();
     }, 30000); // Log every 30 seconds
 
     try {
@@ -178,14 +176,14 @@ describe('Long-Running Streams', () => {
     console.log(`\n📊 Memory Growth Analysis:`);
     console.log(`\n| Iteration | Before (MB) | After (MB) | Delta (MB) |`);
     console.log(`|-----------|-------------|------------|------------|`);
-    memorySnapshots.forEach(snapshot => {
+    for (const snapshot of memorySnapshots) {
       const before = snapshot.before.heapUsed / 1024 / 1024;
       const after = snapshot.after.heapUsed / 1024 / 1024;
       const delta = after - before;
       console.log(
         `| ${snapshot.iteration.toString().padStart(9)} | ${before.toFixed(2).padStart(11)} | ${after.toFixed(2).padStart(10)} | ${delta.toFixed(2).padStart(10)} |`
       );
-    });
+    }
 
     // Calculate total memory growth
     const firstMemory = memorySnapshots[0].before.heapUsed;

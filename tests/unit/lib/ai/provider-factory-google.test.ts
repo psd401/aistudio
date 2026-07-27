@@ -8,8 +8,8 @@
  *
  * Uses the global `jest` (not @jest/globals) so jest.mock hoisting works.
  */
-import * as fs from "fs";
-import * as path from "path";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 const googleSearchTool = { __googleSearch: true };
 const createGoogleGenerativeAIMock = jest.fn((_opts: unknown) =>

@@ -151,7 +151,7 @@ async function main() {
         const pages = String(pagesRaw).split(',').map((p) => Number(p.trim())).filter((n) => Number.isInteger(n) && n > 0);
         // A supplied-but-unusable page list must fail loudly — silently
         // dropping it would export ALL pages against the caller's intent.
-        if (!pages.length) fail('export --pages must be a comma-separated list of positive page numbers (e.g. 1,2,3)');
+        if (pages.length === 0) fail('export --pages must be a comma-separated list of positive page numbers (e.g. 1,2,3)');
         // "pages" lives INSIDE the format object, not at the body top level.
         body.format.pages = pages;
       }

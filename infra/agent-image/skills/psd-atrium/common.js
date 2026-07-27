@@ -111,7 +111,7 @@ async function restFetch(method, path, opts = {}) {
       {
         method,
         path,
-        ...(Object.keys(query).length ? { query } : {}),
+        ...(Object.keys(query).length > 0 ? { query } : {}),
         ...(opts.body !== undefined ? { body: opts.body } : {}),
       },
       { timeoutMs: REQUEST_TIMEOUT_MS + 5_000 }
@@ -192,7 +192,7 @@ function parseList(value, label = 'tags') {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-  return items.length ? items : undefined;
+  return items.length > 0 ? items : undefined;
 }
 
 /**
@@ -218,7 +218,7 @@ function parseGrants(value, label = 'grants') {
     if (!val) fail(`--grants entry "${entry}" has an empty value`);
     grants.push({ kind, value: val });
   }
-  return grants.length ? grants : undefined;
+  return grants.length > 0 ? grants : undefined;
 }
 
 module.exports = {

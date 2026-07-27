@@ -18,6 +18,7 @@ import {
   type GmailLabelDescriptor,
 } from "@/lib/agent/email-triage-label-map"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
+import { ErrorFactories } from "@/lib/error-utils"
 
 const log = createLogger({ module: "agent-email-triage" })
 interface EmailTriageDynamoClient {
@@ -95,7 +96,10 @@ async function gmail(
 async function gmailJson(response: Response): Promise<unknown> {
   if (!response.ok) {
     const detail = await response.text()
-    throw new Error(`Gmail request failed: ${response.status} ${detail.slice(0, 300)}`)
+    throw ErrorFactories.externalServiceError(
+      "Gmail",
+      new Error(`HTTP ${response.status}: ${detail.slice(0, 300)}`)
+    )
   }
   if (response.status === 204) return {}
   return response.json()
@@ -120,7 +124,11 @@ async function ensureTrustedLabels(
       (label) => label.name === expectedName && label.type === "user"
     )
     if (matches.length > 1) {
-      throw new Error(`Duplicate Gmail label for ${key}`)
+      throw ErrorFactories.bizInvalidState(
+        `resolve Gmail label ${key}`,
+        "duplicate",
+        "unique"
+      )
     }
     let id = matches[0]?.id
     if (id === undefined) {
@@ -223,11 +231,11 @@ export async function POST(request: NextRequest) {
       const names: Record<string, string> = {}
       const values: Record<string, unknown> = {}
       const sets: string[] = []
-      Object.entries(attrs).forEach(([field, value], index) => {
+      for (const [index, [field, value]] of Object.entries(attrs).entries()) {
         names[`#field${index}`] = field
         values[`:value${index}`] = value
         sets.push(`#field${index} = :value${index}`)
-      })
+      }
       await ddb.send(
         new UpdateCommand({
           TableName: tableName(),
@@ -274,7 +282,7 @@ export async function POST(request: NextRequest) {
     } else if (body.operation === "list-labels") {
       result = await gmailJson(await gmail(token, "/labels"))
     } else if (body.operation === "create-label" && typeof body.name === "string") {
-      if (body.name.length < 1 || body.name.length > 225) {
+      if (body.name.length === 0 || body.name.length > 225) {
         return NextResponse.json({ error: "Invalid label name" }, { status: 400 })
       }
       result = await gmailJson(

@@ -253,7 +253,7 @@ function calculateGraphExecutionOrder(
   nodes: Node[],
   edges: Edge[]
 ): { id: string; position: number; parallelGroup: number | null }[] {
-  const startNode = nodes.find(n => n.type === 'start')
+  const startNode = nodes.some(n => n.type === 'start')
   if (!startNode) return []
 
   const nodeLevels = new Map<string, number>()
@@ -455,15 +455,15 @@ function FlowComponent({
       log.error("Failed to save graph structure", { error })
       toast.error("Failed to save graph structure")
     }
-    finally { setIsSaving(false);} 
+    finally { setIsSaving(false);}
   }, [calculateExecutionOrder, assistantId]);
 
   // Handle edge changes and update positions
   const onEdgesChange = useCallback((changes: EdgeChange[]) => {
     _onEdgesChange(changes)
-    
+
     // Only save when edges are added or removed
-    const hasStructuralChanges = changes.some((change) => 
+    const hasStructuralChanges = changes.some((change) =>
       change.type === 'remove' || change.type === 'add'
     )
     if (hasStructuralChanges && !isInitialRender.current) {

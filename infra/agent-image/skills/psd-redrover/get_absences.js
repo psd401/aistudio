@@ -7,14 +7,14 @@
 // Max date range: 31 days. Read-only.
 
 const {
-  parseArgs, requireUser, getCredentials, getOrganization, getVacancyDetails, emit, fail,
+  parseArgs, requireUser, getVacancyDetails, emit, fail,
 } = require('./lib/api.js');
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 (async () => {
   const args = parseArgs(process.argv);
-  const user = requireUser(args);
+  requireUser(args);
   const startDate = args.start;
   const endDate = args.end;
   const filledFilter = args.filter || 'all';
@@ -38,9 +38,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
   }
 
   try {
-    const creds = getCredentials(user);
-    const org = await getOrganization(creds);
-    const result = await getVacancyDetails(org.orgId, org.apiKey, creds, startDate, endDate, filledFilter);
+    const result = await getVacancyDetails(startDate, endDate, filledFilter);
     if (result.error) fail(result.error, 'redrover_api_error');
     emit({ start: startDate, end: endDate, filter: filledFilter, total: result.total, data: result.data });
   } catch (err) {

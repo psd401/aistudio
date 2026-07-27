@@ -119,7 +119,7 @@ function uploadRequest(options: { includeConversation?: boolean } = {}): Request
 describe("temporary repository attachment routes", () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    [
+    for (const mock of [
       mockGetServerSession,
       mockGetUserIdFromSession,
       mockGetContentPlatformConfig,
@@ -140,7 +140,7 @@ describe("temporary repository attachment routes", () => {
       mockResolveForPromotion,
       mockPromoteRepository,
       mockHasCapabilityAccess,
-    ].forEach((mock) => mock.mockReset());
+    ]) mock.mockReset();
     mockGetServerSession.mockResolvedValue({ sub: "user-sub" });
     mockGetUserIdFromSession.mockResolvedValue(7);
     mockGetContentPlatformConfig.mockResolvedValue({

@@ -61,13 +61,13 @@ describe("GeminiLiveProvider", () => {
     language: "en-US",
   }
 
-  describe("providerId", () => {
+
     it('should be "gemini-live"', () => {
       expect(provider.providerId).toBe("gemini-live")
     })
-  })
 
-  describe("initial state", () => {
+
+
     it("should not be connected initially", () => {
       expect(provider.isConnected()).toBe(false)
     })
@@ -78,9 +78,9 @@ describe("GeminiLiveProvider", () => {
       expect(state.speaking).toBe("none")
       expect(state.transcript).toEqual([])
     })
-  })
 
-  describe("connect", () => {
+
+
     it("should throw if no API key provided", async () => {
       const noKeyConfig = { ...baseConfig, apiKey: undefined }
       await expect(provider.connect(noKeyConfig, jest.fn())).rejects.toThrow(
@@ -167,9 +167,9 @@ describe("GeminiLiveProvider", () => {
       const connectArgs = mockLiveConnect.mock.calls[0][0]
       expect(connectArgs.config.sessionResumption).toEqual({})
     })
-  })
 
-  describe("sendAudio", () => {
+
+
     it("should not throw when not connected", () => {
       expect(() => provider.sendAudio(Buffer.from("test"))).not.toThrow()
     })
@@ -187,9 +187,9 @@ describe("GeminiLiveProvider", () => {
         },
       })
     })
-  })
 
-  describe("disconnect", () => {
+
+
     it("should be safe to call when not connected", async () => {
       await expect(provider.disconnect()).resolves.not.toThrow()
     })
@@ -220,9 +220,9 @@ describe("GeminiLiveProvider", () => {
         expect(endEvent.reason).toBe("cancelled")
       }
     })
-  })
 
-  describe("getSessionState", () => {
+
+
     it("should return a copy of the state", () => {
       const state1 = provider.getSessionState()
       const state2 = provider.getSessionState()
@@ -230,9 +230,9 @@ describe("GeminiLiveProvider", () => {
       expect(state1).not.toBe(state2)
       expect(state1.transcript).not.toBe(state2.transcript)
     })
-  })
 
-  describe("sendAudio size validation", () => {
+
+
     it("should reject buffers larger than MAX_AUDIO_BUFFER_SIZE", async () => {
       await provider.connect(baseConfig, jest.fn())
       // 65KB > 64KB limit
@@ -248,9 +248,9 @@ describe("GeminiLiveProvider", () => {
       provider.sendAudio(validBuffer)
       expect(mockSendRealtimeInput).toHaveBeenCalled()
     })
-  })
 
-  describe("buildLiveConfig validation", () => {
+
+
     it("should truncate long voice names", async () => {
       const longNameConfig = {
         ...baseConfig,
@@ -297,5 +297,5 @@ describe("GeminiLiveProvider", () => {
       const args = mockLiveConnect.mock.calls[0][0]
       expect(args.config.speechConfig?.languageCode).toBeUndefined()
     })
-  })
+
 })

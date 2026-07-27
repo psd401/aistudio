@@ -524,7 +524,7 @@ test.describe('Assistant Architect Tool Performance', () => {
               const resultsText = await resultsSection.first().textContent() || ''
               expect(resultsText.length).toBeGreaterThan(50) // Should have substantial content
             }
-          } catch (timeoutError) {
+          } catch {
             // Log timeout for performance monitoring
             console.error('Execution timed out after 30 seconds')
             throw new Error('Tool execution exceeded 30-second performance requirement')
@@ -866,7 +866,7 @@ test.describe('Assistant Architect Tool Security', () => {
             // UI should remain functional
             await expect(page.locator('[data-testid="assistant-architect-execution"]')).toBeVisible()
           }
-        } catch (error) {
+        } catch {
           console.log('Large input test completed with browser limitation handling')
         }
       }
@@ -892,9 +892,9 @@ test.describe('Assistant Architect Tool Security', () => {
         // Null bytes and control characters
         'test\x00\x01\x02\x03input',
         // Right-to-left override attacks
-        'test\u202emalicious',
+        'test\u202Emalicious',
         // Zero-width characters
-        'test\u200b\u200c\u200d\ufeff',
+        'test\u200B\u200C\u200D\uFEFF',
         // Emoji injection
         '🔥💥⚡️<script>alert("emoji")</script>',
         // Mixed encoding
@@ -927,7 +927,7 @@ test.describe('Assistant Architect Tool Security', () => {
               // UI should remain stable
               await expect(page.locator('[data-testid="assistant-architect-execution"]')).toBeVisible()
             }
-          } catch (error) {
+          } catch {
             console.log(`Unicode test for input "${dangerousInput.substring(0, 20)}..." handled gracefully`)
           }
         }
@@ -1002,7 +1002,7 @@ test.describe('Assistant Architect Tool Security', () => {
               console.log('Rate limiting detected - button not enabled')
               break
             }
-          } catch (error) {
+          } catch {
             console.log(`Rate limit test attempt ${i + 1} failed gracefully`)
           }
         }
@@ -1150,7 +1150,7 @@ test.describe('Assistant Architect Tool Security', () => {
               // Application should remain stable
               await expect(page.locator('[data-testid="assistant-architect-execution"]')).toBeVisible()
             }
-          } catch (error) {
+          } catch {
             console.log(`SQL injection test for "${injectionAttempt.substring(0, 20)}..." handled gracefully`)
           }
         }

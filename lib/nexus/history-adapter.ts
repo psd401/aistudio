@@ -67,7 +67,7 @@ const safeRole = (role: string | undefined): ValidRole =>
 const safeDate = (value: string | Date | undefined): Date | undefined => {
   if (!value) return undefined
   const d = new Date(value)
-  return isFinite(d.getTime()) ? d : undefined
+  return Number.isFinite(d.getTime()) ? d : undefined
 }
 
 // JSON object type for tool arguments (matches assistant-ui's ReadonlyJSONObject)
@@ -104,7 +104,7 @@ const createExportedMessageRepository = (messages: MessageData[]): ExportedMessa
     messages: validMessages.map((msg, index) => {
       // Ensure content is in the correct format for assistant-ui
       // Content can include text parts and static tool parts for UI rendering
-      let content: ContentPartLike[] = []
+      let content: ContentPartLike[]
 
       if (Array.isArray(msg.content)) {
         // Process each part - text becomes text, tool-call converts to static tool, images become markdown
@@ -384,4 +384,3 @@ export function createNexusHistoryAdapter(getConversationId: () => string | null
 
   return adapter;
 }
-

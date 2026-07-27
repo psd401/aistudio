@@ -25,10 +25,10 @@ import * as apigwv2Authorizers from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import * as apigwv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as customResources from 'aws-cdk-lib/custom-resources';
-import * as path from 'path';
-import * as fs from 'fs';
-import * as crypto from 'crypto';
-import { execSync } from 'child_process';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
+import * as crypto from 'node:crypto';
+import { execSync } from 'node:child_process';
 // ALPHA CDK CONSTRUCT: @aws-cdk/aws-bedrock-agentcore-alpha has no API stability
 // guarantee and may introduce breaking changes on any release. Version is pinned
 // (not caret) in infra/package.json. Review changelog before upgrading.
@@ -817,7 +817,7 @@ export class AgentPlatformStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }
@@ -1027,7 +1027,7 @@ export class AgentPlatformStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }
@@ -1174,7 +1174,7 @@ export class AgentPlatformStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }
@@ -1821,7 +1821,7 @@ export class AgentPlatformStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }
@@ -1906,7 +1906,7 @@ export class AgentPlatformStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }
@@ -2185,7 +2185,7 @@ export class AgentPlatformStack extends cdk.Stack {
                 execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                 return true;
               } catch (e) {
-                // eslint-disable-next-line no-console
+
                 console.error('Local bundling failed, falling back to Docker:', e);
                 return false;
               }
@@ -2426,7 +2426,7 @@ export class AgentPlatformStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }
@@ -2556,7 +2556,7 @@ export class AgentPlatformStack extends cdk.Stack {
                   // Log the error so build failures aren't silently swallowed.
                   // Docker fallback may use a different TS version, producing
                   // subtle bundle differences — surface the root cause here.
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }
@@ -2614,7 +2614,6 @@ export class AgentPlatformStack extends cdk.Stack {
         GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,
         TOKEN_LIMIT_PER_INTERACTION: '100000',
         // K-12 safety: fail closed when guardrails are unavailable
-        GUARDRAIL_FAIL_OPEN: 'false',
         // Only allow messages from configured domain emails
         ALLOWED_DOMAINS: props.allowedDomains || 'psd401.net',
         // #1233 agnt_ auto-provisioning: the router calls the Next.js app's
@@ -2758,7 +2757,7 @@ export class AgentPlatformStack extends cdk.Stack {
                   );
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('psd-agent-mint esbuild bundling failed:', e);
                   return false;
                 }
@@ -3090,7 +3089,7 @@ export class AgentPlatformStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }
@@ -3548,7 +3547,7 @@ export class AgentPlatformStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }
@@ -3652,7 +3651,7 @@ export class AgentPlatformStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }
@@ -3755,7 +3754,7 @@ export class AgentPlatformStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }
@@ -3869,7 +3868,7 @@ export class AgentPlatformStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }
@@ -4017,7 +4016,7 @@ export class AgentPlatformStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }

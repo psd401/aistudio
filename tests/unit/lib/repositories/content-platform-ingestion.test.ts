@@ -89,7 +89,7 @@ describe("canonical upload registration rollout", () => {
     mockExecuteTransaction.mockImplementation(async (...args: unknown[]) => {
       const operation = args[0];
       if (typeof operation !== "function") {
-        throw new Error("Expected a transaction callback");
+        throw new TypeError("Expected a transaction callback");
       }
       return (operation as (transaction: unknown) => Promise<unknown>)(tx);
     });

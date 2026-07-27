@@ -7,13 +7,13 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as cr from 'aws-cdk-lib/custom-resources';
-import * as path from 'path';
-import * as crypto from 'crypto';
-import * as fs from 'fs';
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
-import { execSync } from 'child_process';
+import { execSync } from 'node:child_process';
 import {
   AuroraCostOptimizer,
   AuroraCostDashboard,
@@ -349,7 +349,6 @@ export class DatabaseStack extends cdk.Stack {
             local: {
               tryBundle(outputDir: string) {
                 try {
-                  const execSync = require('child_process').execSync;
                   const lambdaDir = path.join(__dirname, '../database/lambda');
 
                   // Run npm install and build
@@ -557,7 +556,7 @@ export class DatabaseStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }

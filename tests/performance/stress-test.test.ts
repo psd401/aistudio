@@ -154,12 +154,12 @@ describe('Stress Testing', () => {
     console.log(`| Users | Requests | Success | Failed | Error Rate | Avg TTFT (ms) | Avg Response (ms) | Throughput (tok/s) |`);
     console.log(`|-------|----------|---------|--------|------------|---------------|-------------------|-------------------|`);
 
-    results.forEach(r => {
+    for (const r of results) {
       const totalRequests = r.successfulRequests + r.failedRequests;
       console.log(
         `| ${r.userCount.toString().padStart(5)} | ${totalRequests.toString().padStart(8)} | ${r.successfulRequests.toString().padStart(7)} | ${r.failedRequests.toString().padStart(6)} | ${r.errorRate.toFixed(2).padStart(10)}% | ${r.avgTtft.toFixed(2).padStart(13)} | ${r.avgResponseTime.toFixed(2).padStart(17)} | ${r.throughput.toFixed(2).padStart(17)} |`
       );
-    });
+    }
 
     // Find optimal capacity
     const acceptableResults = results.filter(r => r.errorRate <= 5); // <5% error rate

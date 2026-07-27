@@ -89,13 +89,13 @@ export async function resolveDmSpace(googleIdentity: string): Promise<string | n
       }
       pageToken = resp.data.nextPageToken || undefined;
     } while (pageToken);
-    // eslint-disable-next-line no-console
+
     console.log(JSON.stringify({
       level: "WARN", logger: "triage-poll", evt: "dm_space_not_found",
       googleIdentity, spacesScanned: scanned,
     }));
   } catch (error) {
-    // eslint-disable-next-line no-console
+
     console.log(JSON.stringify({
       level: "ERROR", logger: "triage-poll", evt: "dm_space_resolve_error",
       googleIdentity,

@@ -285,7 +285,7 @@ export async function decryptToken(ciphertext: string): Promise<string> {
     payload = JSON.parse(json) as EncryptedPayload
   } catch (err) {
     log.warn("Failed to parse encrypted token payload", { error: String(err) })
-    throw new Error("Invalid encrypted token format: failed to parse payload")
+    throw new Error("Invalid encrypted token format: failed to parse payload", { cause: err })
   }
 
   if (payload.iv == null || payload.tag == null || payload.data == null) {

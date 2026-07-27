@@ -128,7 +128,12 @@ export function ToolSelectionSection({
       .finally(() => {
         setIsLoading(false)
       })
-  }, [automaticRouting, candidateModels, filterIncompatibleTools])
+  }, [
+    automaticRouting,
+    candidateModels,
+    enabledTools,
+    filterIncompatibleTools,
+  ])
 
   const handleToolToggle = (toolName: string, enabled: boolean) => {
     log.debug('Tool toggle', { toolName, enabled, currentEnabledTools: enabledTools })

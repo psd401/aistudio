@@ -12,6 +12,7 @@ import {
 } from "@/lib/nexus/ephemeral-repository-service";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import { apiRateLimit } from "@/lib/rate-limit";
+import { ErrorFactories } from "@/lib/error-utils";
 
 const completeSchema = z.object({
   sessionId: z.string().uuid(),
@@ -97,7 +98,10 @@ async function completeTemporaryAttachment(
       itemId: completed.itemId,
     });
     if (!canonicalAttachment) {
-      throw new Error("Completed attachment could not be resolved");
+      throw ErrorFactories.dbRecordNotFound(
+        "repository_items",
+        completed.itemId
+      );
     }
 
     timer({

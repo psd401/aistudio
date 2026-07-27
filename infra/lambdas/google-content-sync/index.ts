@@ -185,7 +185,7 @@ async function ensureDatabaseCredentials(): Promise<void> {
         typeof parsed.username !== "string" ||
         typeof parsed.password !== "string"
       ) {
-        throw new Error("Database secret is missing username or password");
+        throw new TypeError("Database secret is missing username or password");
       }
       process.env.DB_HOST = databaseHost;
       process.env.DB_PORT = process.env.DATABASE_PORT ?? "5432";
