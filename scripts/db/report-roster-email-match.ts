@@ -33,10 +33,7 @@ const includeSensitiveSamples =
 const SAMPLE_LIMIT = 25;
 
 type EmailCohort =
-  | "student_domain"
-  | "staff_domain"
-  | "other_domain"
-  | "missing_email";
+  "student_domain" | "staff_domain" | "other_domain" | "missing_email";
 
 interface MatchCohortRow {
   cohort: EmailCohort;
@@ -77,6 +74,12 @@ interface ReferentialDriftSampleRow {
   inactive_user: boolean;
   missing_class: boolean;
   inactive_class: boolean;
+}
+
+interface EmailMatchSummary {
+  activeRosterUsers: number;
+  unmatchedRosterUsers: number;
+  unexpectedDomainUsers: number;
 }
 
 function ratePercent(matched: number, total: number): number | null {
@@ -121,28 +124,10 @@ function formatIdentifierSample(identifier: string | null): string {
   return includeSensitiveSamples ? identifier : "[redacted]";
 }
 
-async function main(): Promise<void> {
-  log.section("AI Studio - OneRoster Email-Match Report (#1315)");
-  log.info("Database", { url: DATABASE_URL.replace(/:\/\/.*@/, "://*****@") });
-  log.info("Sample limit", { rowsPerSection: SAMPLE_LIMIT });
-  log.info("Sensitive sample identifiers", {
-    included: includeSensitiveSamples,
-  });
-  if (includeSensitiveSamples) {
-    log.warn(
-      "Raw roster identifiers are enabled. Keep this terminal private and do not capture or share its output."
-    );
-  }
-
-  const sql = postgres(DATABASE_URL, {
-    ssl: sslEnabled ? "require" : false,
-    max: 1,
-    idle_timeout: 20,
-    connect_timeout: 10,
-  });
-
-  try {
-    const cohorts = await sql<MatchCohortRow[]>`
+async function reportEmailMatches(
+  sql: postgres.Sql,
+): Promise<EmailMatchSummary> {
+  const cohorts = await sql<MatchCohortRow[]>`
       WITH active_roster_users AS (
         SELECT lower(nullif(btrim(email), '')) AS normalized_email,
                CASE
@@ -170,49 +155,60 @@ async function main(): Promise<void> {
        GROUP BY cohort
     `;
 
-    const cohortByName = new Map<EmailCohort, MatchCohortRow>(
-      cohorts.map((row) => [row.cohort, row])
-    );
-    const orderedCohorts: EmailCohort[] = [
-      "student_domain",
-      "staff_domain",
-      "other_domain",
-      "missing_email",
-    ];
-    const totals = cohorts.reduce(
-      (summary, row) => ({
-        total: summary.total + row.total,
-        matched: summary.matched + row.matched,
-      }),
-      { total: 0, matched: 0 }
-    );
-    const unmatchedCount = totals.total - totals.matched;
-    const unexpectedDomainCount =
-      (cohortByName.get("other_domain")?.total ?? 0) +
-      (cohortByName.get("missing_email")?.total ?? 0);
+  const cohortByName = new Map<EmailCohort, MatchCohortRow>(
+    cohorts.map((row) => [row.cohort, row]),
+  );
+  const orderedCohorts: EmailCohort[] = [
+    "student_domain",
+    "staff_domain",
+    "other_domain",
+    "missing_email",
+  ];
+  const totals = cohorts.reduce(
+    (summary, row) => ({
+      total: summary.total + row.total,
+      matched: summary.matched + row.matched,
+    }),
+    { total: 0, matched: 0 },
+  );
+  const unmatchedCount = totals.total - totals.matched;
+  const unexpectedDomainCount =
+    (cohortByName.get("other_domain")?.total ?? 0) +
+    (cohortByName.get("missing_email")?.total ?? 0);
 
-    log.section("Active roster email match rate");
-    log.info("Overall", {
-      activeRosterUsers: totals.total,
-      matchedApplicationUsers: totals.matched,
-      unmatchedRosterUsers: unmatchedCount,
-      matchRatePercent: ratePercent(totals.matched, totals.total),
+  log.section("Active roster email match rate");
+  log.info("Overall", {
+    activeRosterUsers: totals.total,
+    matchedApplicationUsers: totals.matched,
+    unmatchedRosterUsers: unmatchedCount,
+    matchRatePercent: ratePercent(totals.matched, totals.total),
+  });
+  for (const cohort of orderedCohorts) {
+    const row = cohortByName.get(cohort) ?? {
+      cohort,
+      total: 0,
+      matched: 0,
+    };
+    log.info(cohortLabel(cohort), {
+      activeRosterUsers: row.total,
+      matchedApplicationUsers: row.matched,
+      unmatchedRosterUsers: row.total - row.matched,
+      matchRatePercent: ratePercent(row.matched, row.total),
     });
-    for (const cohort of orderedCohorts) {
-      const row = cohortByName.get(cohort) ?? {
-        cohort,
-        total: 0,
-        matched: 0,
-      };
-      log.info(cohortLabel(cohort), {
-        activeRosterUsers: row.total,
-        matchedApplicationUsers: row.matched,
-        unmatchedRosterUsers: row.total - row.matched,
-        matchRatePercent: ratePercent(row.matched, row.total),
-      });
-    }
+  }
 
-    const unmatchedSamples = await sql<UnmatchedRosterUserRow[]>`
+  return {
+    activeRosterUsers: totals.total,
+    unmatchedRosterUsers: unmatchedCount,
+    unexpectedDomainUsers: unexpectedDomainCount,
+  };
+}
+
+async function reportUnmatchedRosterUsers(
+  sql: postgres.Sql,
+  unmatchedCount: number,
+): Promise<void> {
+  const unmatchedSamples = await sql<UnmatchedRosterUserRow[]>`
       SELECT lower(nullif(btrim(ou.email), '')) AS email,
              coalesce(nullif(btrim(ou.role), ''), 'unknown') AS role
         FROM oneroster_users ou
@@ -229,23 +225,25 @@ async function main(): Promise<void> {
        LIMIT ${SAMPLE_LIMIT}
     `;
 
-    log.section("Unmatched active roster users (bounded sample)");
-    if (unmatchedSamples.length === 0) {
-      log.success("No unmatched active roster users.");
-    } else {
-      log.warn("Sample coverage", {
-        showing: unmatchedSamples.length,
-        totalUnmatched: unmatchedCount,
+  log.section("Unmatched active roster users (bounded sample)");
+  if (unmatchedSamples.length === 0) {
+    log.success("No unmatched active roster users.");
+  } else {
+    log.warn("Sample coverage", {
+      showing: unmatchedSamples.length,
+      totalUnmatched: unmatchedCount,
+    });
+    for (const row of unmatchedSamples) {
+      log.warn("Unmatched roster user", {
+        email: formatEmailSample(row.email),
+        role: row.role,
       });
-      for (const row of unmatchedSamples) {
-        log.warn("Unmatched roster user", {
-          email: formatEmailSample(row.email),
-          role: row.role,
-        });
-      }
     }
+  }
+}
 
-    const [duplicateSummary] = await sql<DuplicateSummaryRow[]>`
+async function reportDuplicateRosterEmails(sql: postgres.Sql): Promise<number> {
+  const [duplicateSummary] = await sql<DuplicateSummaryRow[]>`
       WITH duplicate_emails AS (
         SELECT lower(btrim(email)) AS email,
                count(*)::int AS roster_rows
@@ -259,7 +257,7 @@ async function main(): Promise<void> {
              coalesce(sum(roster_rows), 0)::int AS roster_rows
         FROM duplicate_emails
     `;
-    const duplicateSamples = await sql<DuplicateSampleRow[]>`
+  const duplicateSamples = await sql<DuplicateSampleRow[]>`
       SELECT lower(btrim(email)) AS email,
              count(*)::int AS roster_rows,
              array_agg(
@@ -274,28 +272,31 @@ async function main(): Promise<void> {
        ORDER BY count(*) DESC, lower(btrim(email))
        LIMIT ${SAMPLE_LIMIT}
     `;
-    const duplicateEmailGroups =
-      duplicateSummary?.duplicate_email_groups ?? 0;
+  const duplicateEmailGroups = duplicateSummary?.duplicate_email_groups ?? 0;
 
-    log.section("Duplicate active roster emails");
-    log.info("Summary", {
-      duplicateEmailGroups,
-      affectedRosterRows: duplicateSummary?.roster_rows ?? 0,
-      sampleLimit: SAMPLE_LIMIT,
-    });
-    if (duplicateSamples.length === 0) {
-      log.success("No active roster rows share a case-insensitive email.");
-    } else {
-      for (const row of duplicateSamples) {
-        log.warn("Duplicate roster email", {
-          email: formatEmailSample(row.email),
-          rosterRows: row.roster_rows,
-          roles: row.roles,
-        });
-      }
+  log.section("Duplicate active roster emails");
+  log.info("Summary", {
+    duplicateEmailGroups,
+    affectedRosterRows: duplicateSummary?.roster_rows ?? 0,
+    sampleLimit: SAMPLE_LIMIT,
+  });
+  if (duplicateSamples.length === 0) {
+    log.success("No active roster rows share a case-insensitive email.");
+  } else {
+    for (const row of duplicateSamples) {
+      log.warn("Duplicate roster email", {
+        email: formatEmailSample(row.email),
+        rosterRows: row.roster_rows,
+        roles: row.roles,
+      });
     }
+  }
 
-    const [driftSummary] = await sql<ReferentialDriftSummaryRow[]>`
+  return duplicateEmailGroups;
+}
+
+async function reportReferentialDrift(sql: postgres.Sql): Promise<number> {
+  const [driftSummary] = await sql<ReferentialDriftSummaryRow[]>`
       WITH enrollment_references AS (
         SELECT e.sourced_id,
                (u.sourced_id IS NULL) AS missing_user,
@@ -321,7 +322,7 @@ async function main(): Promise<void> {
              count(*) FILTER (WHERE inactive_class)::int AS inactive_classes
         FROM enrollment_references
     `;
-    const driftSamples = await sql<ReferentialDriftSampleRow[]>`
+  const driftSamples = await sql<ReferentialDriftSampleRow[]>`
       SELECT e.sourced_id AS enrollment_sourced_id,
              e.user_sourced_id,
              e.class_sourced_id,
@@ -347,61 +348,109 @@ async function main(): Promise<void> {
        ORDER BY e.sourced_id
        LIMIT ${SAMPLE_LIMIT}
     `;
-    const affectedEnrollments = driftSummary?.affected_enrollments ?? 0;
+  const affectedEnrollments = driftSummary?.affected_enrollments ?? 0;
 
-    log.section("Active enrollment referential drift");
-    log.info("Summary", {
-      affectedEnrollments,
-      missingUsers: driftSummary?.missing_users ?? 0,
-      inactiveUsers: driftSummary?.inactive_users ?? 0,
-      missingClasses: driftSummary?.missing_classes ?? 0,
-      inactiveClasses: driftSummary?.inactive_classes ?? 0,
-      sampleLimit: SAMPLE_LIMIT,
-    });
-    if (driftSamples.length === 0) {
-      log.success(
-        "All active enrollments reference active roster users and classes."
-      );
-    } else {
-      for (const row of driftSamples) {
-        log.warn("Enrollment referential drift", {
-          enrollmentSourcedId: formatIdentifierSample(
-            row.enrollment_sourced_id
-          ),
-          userSourcedId: formatIdentifierSample(row.user_sourced_id),
-          classSourcedId: formatIdentifierSample(row.class_sourced_id),
-          role: row.role,
-          missingUser: row.missing_user,
-          inactiveUser: row.inactive_user,
-          missingClass: row.missing_class,
-          inactiveClass: row.inactive_class,
-        });
-      }
+  log.section("Active enrollment referential drift");
+  log.info("Summary", {
+    affectedEnrollments,
+    missingUsers: driftSummary?.missing_users ?? 0,
+    inactiveUsers: driftSummary?.inactive_users ?? 0,
+    missingClasses: driftSummary?.missing_classes ?? 0,
+    inactiveClasses: driftSummary?.inactive_classes ?? 0,
+    sampleLimit: SAMPLE_LIMIT,
+  });
+  if (driftSamples.length === 0) {
+    log.success(
+      "All active enrollments reference active roster users and classes.",
+    );
+  } else {
+    for (const row of driftSamples) {
+      log.warn("Enrollment referential drift", {
+        enrollmentSourcedId: formatIdentifierSample(row.enrollment_sourced_id),
+        userSourcedId: formatIdentifierSample(row.user_sourced_id),
+        classSourcedId: formatIdentifierSample(row.class_sourced_id),
+        role: row.role,
+        missingUser: row.missing_user,
+        inactiveUser: row.inactive_user,
+        missingClass: row.missing_class,
+        inactiveClass: row.inactive_class,
+      });
     }
+  }
 
-    const hasFindings =
-      totals.total === 0 ||
-      unmatchedCount > 0 ||
-      unexpectedDomainCount > 0 ||
-      duplicateEmailGroups > 0 ||
-      affectedEnrollments > 0;
+  return affectedEnrollments;
+}
 
-    log.section("Promotion result");
-    if (hasFindings) {
-      log.fail(
-        "Roster data-quality findings require review before enabling production flags."
-      );
-      log.info(
-        "Apply the decision rule in docs/features/oneroster-classlink-sync.md; " +
-          "document expected never-signed-in users without copying raw email samples."
-      );
-      process.exitCode = 1;
-    } else {
-      log.success(
-        "No roster email-match, domain, duplicate, or referential-drift findings."
-      );
-      process.exitCode = 0;
-    }
+function reportPromotionResult(hasFindings: boolean): void {
+  log.section("Promotion result");
+  if (hasFindings) {
+    log.fail(
+      "Roster data-quality findings require review before enabling production flags.",
+    );
+    log.info(
+      "Apply the decision rule in docs/features/oneroster-classlink-sync.md; " +
+        "document expected never-signed-in users without copying raw email samples.",
+    );
+    process.exitCode = 1;
+  } else {
+    log.success(
+      "No roster email-match, domain, duplicate, or referential-drift findings.",
+    );
+    process.exitCode = 0;
+  }
+}
+
+function logReportConfiguration(): void {
+  log.section("AI Studio - OneRoster Email-Match Report (#1315)");
+  log.info("Database", { url: DATABASE_URL.replace(/:\/\/.*@/, "://*****@") });
+  log.info("Sample limit", { rowsPerSection: SAMPLE_LIMIT });
+  log.info("Sensitive sample identifiers", {
+    included: includeSensitiveSamples,
+  });
+  if (includeSensitiveSamples) {
+    log.warn(
+      "Raw roster identifiers are enabled. Keep this terminal private and do not capture or share its output.",
+    );
+  }
+}
+
+function reportHasFindings(input: {
+  activeRosterUsers: number;
+  unmatchedRosterUsers: number;
+  unexpectedDomainUsers: number;
+  duplicateEmailGroups: number;
+  affectedEnrollments: number;
+}): boolean {
+  return [
+    input.activeRosterUsers === 0,
+    input.unmatchedRosterUsers > 0,
+    input.unexpectedDomainUsers > 0,
+    input.duplicateEmailGroups > 0,
+    input.affectedEnrollments > 0,
+  ].some(Boolean);
+}
+
+async function main(): Promise<void> {
+  logReportConfiguration();
+  const sql = postgres(DATABASE_URL, {
+    ssl: sslEnabled ? "require" : false,
+    max: 1,
+    idle_timeout: 20,
+    connect_timeout: 10,
+  });
+
+  try {
+    const emailMatches = await reportEmailMatches(sql);
+    await reportUnmatchedRosterUsers(sql, emailMatches.unmatchedRosterUsers);
+    const duplicateEmailGroups = await reportDuplicateRosterEmails(sql);
+    const affectedEnrollments = await reportReferentialDrift(sql);
+    reportPromotionResult(
+      reportHasFindings({
+        ...emailMatches,
+        duplicateEmailGroups,
+        affectedEnrollments,
+      }),
+    );
   } finally {
     await sql.end();
   }
