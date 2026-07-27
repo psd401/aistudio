@@ -109,6 +109,15 @@ node run.js create-document --title "Sample" --markdown "# Hello" [--collection 
 node run.js create-artifact --title "Chart" --code "<html><style>…</style><script>…</script></html>" --body-format html
 ```
 
+> **Pass a LARGE body through a file, not an argument.** `--markdown-file`
+> (create-document), `--body-file` (edit), and `--code-file` (create-artifact)
+> read the content from disk. This is not just tidiness: one argv value is capped
+> at 128 KiB (`MAX_ARG_STRLEN`), so a long document fails the spawn with `E2BIG`
+> before this skill even starts — far below the 4 MiB the API itself accepts. If
+> you have written the content to a file already, prefer the file flag every
+> time. Passing both the inline and file form of the same body is an error, not
+> a silent preference for one.
+
 > **Artifact code fully supports HTML, CSS, and JavaScript — including
 > `<script>`, `<style>`, and inline `style="…"`.** Pass raw code; the skill
 > base64-encodes every write body automatically so it is opaque to AI Studio's
@@ -135,6 +144,7 @@ relay that the widen is **pending approval**, not that the object is public.
 
 ```bash
 node run.js edit --id <id> --body "new full text"                 # replace (default)
+node run.js edit --id <id> --body-file /tmp/new-body.md           # same, from a file
 node run.js edit --id <id> --body "extra paragraph" --mode append # append to saved body
 ```
 
