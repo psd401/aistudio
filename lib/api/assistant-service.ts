@@ -16,6 +16,7 @@ import {
   chainPrompts,
   toolInputFields,
 } from "@/lib/db/schema"
+import { filterAccessibleResourceIds } from "@/lib/db/drizzle/resource-access"
 import { createLogger } from "@/lib/logger"
 
 // ============================================
@@ -127,47 +128,90 @@ export async function listAccessibleAssistants(
       )
     : undefined
 
-  const cursorCondition = options.cursor
-    ? gt(assistantArchitects.id, Number.parseInt(options.cursor, 10))
+  let scanCursor = options.cursor
+    ? Number.parseInt(options.cursor, 10)
     : undefined
+  const accessibleRows: Array<{
+    id: number
+    name: string
+    description: string | null
+    status: string
+    userId: number | null
+    createdAt: Date
+    updatedAt: Date
+    promptCount: number
+    inputFieldCount: number
+  }> = []
+  const scanSize = Math.max(limit + 1, 100)
 
-  // Combine all conditions
-  const conditions = [accessCondition, statusCondition, searchCondition, cursorCondition].filter(
-    (c): c is NonNullable<typeof c> => c !== undefined
-  )
+  // Room-restricted students can have long runs of hidden assistants between
+  // assigned ones. Scan candidate pages until we have a full accessible page
+  // (plus one lookahead row) so keyset pagination never returns a false empty
+  // page merely because its first database chunk was filtered out.
+  while (accessibleRows.length <= limit) {
+    const cursorCondition =
+      scanCursor !== undefined
+        ? gt(assistantArchitects.id, scanCursor)
+        : undefined
+    const conditions = [
+      accessCondition,
+      statusCondition,
+      searchCondition,
+      cursorCondition,
+    ].filter((condition): condition is NonNullable<typeof condition> =>
+      condition !== undefined
+    )
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined
 
-  const whereClause = conditions.length > 0 ? and(...conditions) : undefined
+    const rows = await executeQuery(
+      (db) =>
+        db
+          .select({
+            id: assistantArchitects.id,
+            name: assistantArchitects.name,
+            description: assistantArchitects.description,
+            status: assistantArchitects.status,
+            userId: assistantArchitects.userId,
+            createdAt: assistantArchitects.createdAt,
+            updatedAt: assistantArchitects.updatedAt,
+            promptCount: sql<number>`(
+              SELECT COUNT(*)::int FROM chain_prompts
+              WHERE chain_prompts.assistant_architect_id = ${assistantArchitects.id}
+            )`,
+            inputFieldCount: sql<number>`(
+              SELECT COUNT(*)::int FROM tool_input_fields
+              WHERE tool_input_fields.assistant_architect_id = ${assistantArchitects.id}
+            )`,
+          })
+          .from(assistantArchitects)
+          .where(whereClause)
+          .orderBy(assistantArchitects.id)
+          .limit(scanSize),
+      "listAccessibleAssistants"
+    )
+    if (rows.length === 0) break
 
-  const rows = await executeQuery(
-    (db) =>
-      db
-        .select({
-          id: assistantArchitects.id,
-          name: assistantArchitects.name,
-          description: assistantArchitects.description,
-          status: assistantArchitects.status,
-          createdAt: assistantArchitects.createdAt,
-          updatedAt: assistantArchitects.updatedAt,
-          // Subquery for prompt count
-          promptCount: sql<number>`(
-            SELECT COUNT(*)::int FROM chain_prompts
-            WHERE chain_prompts.assistant_architect_id = ${assistantArchitects.id}
-          )`,
-          // Subquery for input field count
-          inputFieldCount: sql<number>`(
-            SELECT COUNT(*)::int FROM tool_input_fields
-            WHERE tool_input_fields.assistant_architect_id = ${assistantArchitects.id}
-          )`,
-        })
-        .from(assistantArchitects)
-        .where(whereClause)
-        .orderBy(assistantArchitects.id)
-        .limit(limit + 1), // Fetch one extra to determine if there are more
-    "listAccessibleAssistants"
-  )
+    const accessibleIds = isAdmin
+      ? new Set(rows.map((row) => String(row.id)))
+      : await filterAccessibleResourceIds(
+          userId,
+          "assistant",
+          rows.map((row) => row.id),
+          {
+            ownedResourceIds: rows
+              .filter((row) => row.userId === userId)
+              .map((row) => row.id),
+          }
+        )
+    accessibleRows.push(
+      ...rows.filter((row) => accessibleIds.has(String(row.id)))
+    )
+    scanCursor = rows[rows.length - 1]?.id
+    if (rows.length < scanSize) break
+  }
 
-  const hasMore = rows.length > limit
-  const items = rows.slice(0, limit).map((row) => ({
+  const hasMore = accessibleRows.length > limit
+  const items = accessibleRows.slice(0, limit).map((row) => ({
     id: row.id,
     name: row.name,
     description: row.description,

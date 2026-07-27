@@ -22,6 +22,7 @@ import {
 } from "@/lib/api"
 import { getAssistantById } from "@/lib/api/assistant-service"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
+import { INTERNAL_ASSISTANT_LOOKUP } from "@/lib/assistant-architect/internal-access"
 import {
   executeAssistant,
   validateExecutionInputs,
@@ -95,7 +96,10 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   // blocks the run). Shared with the execute and follow-up-message v1 entry
   // points so a caller can't bypass a resource grant by picking a different
   // entry point into the same assistant.
-  const architectResult = await getAssistantArchitectByIdAction(assistantId.toString())
+  const architectResult = await getAssistantArchitectByIdAction(
+    assistantId.toString(),
+    INTERNAL_ASSISTANT_LOOKUP
+  )
   if (!architectResult.isSuccess || !architectResult.data) {
     return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
   }

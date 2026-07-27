@@ -20,6 +20,8 @@ import { getUserRequester } from '@/actions/db/atrium/requester';
 import type { Requester } from '@/lib/content/types';
 import { hasCapabilityAccess, hasRole } from '@/utils/roles';
 import { ErrorFactories } from '@/lib/error-utils';
+import { getRoomAssistantAccessContext } from '@/lib/rooms/membership';
+import { hasAssistantExecutionFeatureAccess } from '@/lib/rooms/assistant-execution-policy';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
 import { getScopesForRoles } from '@/lib/api-keys/scopes';
 import {
@@ -32,6 +34,7 @@ import {
 import type { ToolInvocationAudit } from '@/lib/agents';
 import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
 import { createAssistantExecutionConversation } from '@/lib/assistant-architect/execution-conversation';
+import { INTERNAL_ASSISTANT_LOOKUP } from '@/lib/assistant-architect/internal-access';
 import type {
   AssistantArchitectMode,
   AssistantModelFamily,
@@ -326,24 +329,9 @@ async function authorizeAndLoadArchitect(
 
   log.debug('User authenticated', sanitizeForLogging({ userId: session.sub }));
 
-  // 3. Check tool access permission
-  const hasAccess = await hasCapabilityAccess('assistant-architect');
-  if (!hasAccess) {
-    log.warn('User does not have assistant-architect tool access', { userId: session.sub });
-    return {
-      ok: false,
-      response: new Response(
-        JSON.stringify({
-          error: 'Access denied',
-          message: 'You do not have permission to use the Assistant Architect tool',
-          requestId
-        }),
-        { status: 403, headers: { 'Content-Type': 'application/json' } }
-      )
-    };
-  }
-
-  // 4. Get current user
+  // 3. Get current user. The feature-capability decision must wait until after
+  // the assistant is loaded because an assignment to this exact assistant is
+  // the narrow room-backed alternative to the general capability.
   const currentUser = await getCurrentUserAction();
   if (!currentUser.isSuccess) {
     log.error('Failed to get current user');
@@ -352,8 +340,12 @@ async function authorizeAndLoadArchitect(
 
   const userId = currentUser.data.user.id;
 
-  // 5. Load assistant architect configuration with prompts
-  const architectResult = await getAssistantArchitectByIdAction(toolId.toString());
+  // 4. Load assistant architect configuration with prompts. Visibility is
+  // resolved before permission so hidden tools cannot be probed via a 403.
+  const architectResult = await getAssistantArchitectByIdAction(
+    toolId.toString(),
+    INTERNAL_ASSISTANT_LOOKUP
+  );
   if (!architectResult.isSuccess || !architectResult.data) {
     log.error('Assistant architect not found', { toolId });
     return {
@@ -413,31 +405,67 @@ async function authorizeAndLoadArchitect(
     };
   }
 
+  // 5. Check the human feature gate. Room assignment is intentionally evaluated
+  // only after authentication + visibility and only for this exact assistant.
+  // This lets students launch what their teacher assigned without granting the
+  // broad assistant-architect capability or conflating capabilities with API
+  // scopes/resource grants.
+  const [hasCapability, roomAccess] = await Promise.all([
+    hasCapabilityAccess('assistant-architect', session.sub),
+    getRoomAssistantAccessContext(userId, [architect.id]),
+  ]);
+  const hasFeatureAccess = hasAssistantExecutionFeatureAccess({
+    hasCapability,
+    assistantId: architect.id,
+    roomAccess,
+  });
+  if (!hasFeatureAccess) {
+    log.warn('User does not have assistant-architect feature access', {
+      userId,
+      toolId,
+      roomAssigned: roomAccess.assignedAssistantIds.has(String(architect.id)),
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Access denied',
+          message: 'You do not have permission to use the Assistant Architect tool',
+          requestId
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      )
+    };
+  }
+
   // SECURITY (#1206): per-resource grant filter, BENEATH the capability +
-  // owner/admin/approved gate above. An assistant may be restricted to specific
-  // roles/groups (resource_access_grants). The owner always reaches their own
-  // assistant; everyone else (admins pass inside userCanAccessResource) must
-  // match a grant. Zero grants = unrestricted (preserves today's behavior).
-  if (!isOwner) {
-    const canAccessAssistant = await userCanAccessResource(userId, 'assistant', architect.id);
-    if (!canAccessAssistant) {
-      log.warn('User lacks per-resource grant for assistant architect', {
-        userId,
-        toolId,
-        architectId: architect.id,
-      });
-      return {
-        ok: false,
-        response: new Response(
-          JSON.stringify({
-            error: 'Access denied',
-            message: 'You do not have access to this assistant',
-            requestId,
-          }),
-          { status: 403, headers: { 'Content-Type': 'application/json' } }
-        ),
-      };
-    }
+  // owner/admin/approved gate above. The shared helper adds room assignment as
+  // an access path and restricts student-only users with active rooms to their
+  // room-assigned assistants. Ownership remains a bypass for everyone outside
+  // that narrow restriction. Zero grants = unrestricted.
+  const canAccessAssistant = await userCanAccessResource(
+    userId,
+    'assistant',
+    architect.id,
+    { ownerUserId: architect.userId }
+  );
+  if (!canAccessAssistant) {
+    log.warn('User lacks shared resource access for assistant architect', {
+      userId,
+      toolId,
+      architectId: architect.id,
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Access denied',
+          message: 'You do not have access to this assistant',
+          requestId,
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      ),
+    };
   }
 
   // Log successful authorization for audit trail
@@ -446,7 +474,8 @@ async function authorizeAndLoadArchitect(
     toolId,
     architectOwnerId: architect.userId,
     status: architect.status,
-    accessReason
+    accessReason,
+    featureAccessReason: hasCapability ? 'capability' : 'room-assignment',
   });
 
   const prompts = (architect.prompts || []).sort((a, b) => a.position - b.position);

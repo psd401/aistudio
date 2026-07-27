@@ -9,8 +9,10 @@ jest.mock("@/lib/db/drizzle-client", () => ({
 }));
 
 import {
+  getRoomAssistantAccessContext,
   mergeRoomMembershipEmails,
   resolveRoomMembershipEmails,
+  roomsForUser,
 } from "@/lib/rooms/membership";
 
 describe("room membership", () => {
@@ -63,5 +65,76 @@ describe("room membership", () => {
       "lower(rm.member_email) = lower(${email})"
     );
     expect(source).toContain("lower(u.email) = lower(${email})");
+  });
+
+  it("groups reverse membership rows into rooms with approved assistants", async () => {
+    mockExecuteQuery.mockResolvedValue([
+      {
+        id: "room-a",
+        name: "Biology",
+        assistantId: 7,
+        assistantName: "Lab Helper",
+        assistantDescription: "Helps with labs",
+        assistantImagePath: null,
+      },
+      {
+        id: "room-a",
+        name: "Biology",
+        assistantId: 8,
+        assistantName: "Study Guide",
+        assistantDescription: null,
+        assistantImagePath: "/guide.png",
+      },
+      {
+        id: "room-b",
+        name: "Chemistry",
+        assistantId: null,
+        assistantName: null,
+        assistantDescription: null,
+        assistantImagePath: null,
+      },
+    ]);
+
+    await expect(roomsForUser(42)).resolves.toEqual([
+      {
+        id: "room-a",
+        name: "Biology",
+        assistants: [
+          {
+            id: 7,
+            name: "Lab Helper",
+            description: "Helps with labs",
+            imagePath: null,
+          },
+          {
+            id: 8,
+            name: "Study Guide",
+            description: null,
+            imagePath: "/guide.png",
+          },
+        ],
+      },
+      { id: "room-b", name: "Chemistry", assistants: [] },
+    ]);
+  });
+
+  it("maps the shared student-room access context", async () => {
+    mockExecuteQuery.mockResolvedValue([
+      {
+        isAdministrator: false,
+        isStudentOnly: true,
+        hasActiveRoomMembership: true,
+        assignedAssistantIds: ["7", "8"],
+      },
+    ]);
+
+    await expect(
+      getRoomAssistantAccessContext(42, [7, 8, 9])
+    ).resolves.toEqual({
+      isAdministrator: false,
+      isStudentOnly: true,
+      hasActiveRoomMembership: true,
+      assignedAssistantIds: new Set(["7", "8"]),
+    });
   });
 });

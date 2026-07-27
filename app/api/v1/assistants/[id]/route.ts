@@ -13,7 +13,11 @@ import {
   extractNumericParam,
   verifyAssistantAccess,
 } from "@/lib/api"
-import { getAssistantById } from "@/lib/api/assistant-service"
+import {
+  getAssistantById,
+  getAssistantForAccessCheck,
+} from "@/lib/api/assistant-service"
+import { userCanAccessResource } from "@/lib/db/drizzle/resource-access"
 import { createLogger } from "@/lib/logger"
 
 // ============================================
@@ -34,6 +38,27 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
   try {
     const accessError = await verifyAssistantAccess(assistantId, auth, requestId)
     if (accessError) return accessError
+
+    // Apply resource/room visibility only after the base existence + status
+    // check. A direct id the caller cannot use is masked as not found rather
+    // than disclosing that an unassigned assistant exists.
+    const accessRow = await getAssistantForAccessCheck(assistantId)
+    const canAccessResource =
+      accessRow !== null &&
+      await userCanAccessResource(
+        auth.userId,
+        "assistant",
+        assistantId,
+        { ownerUserId: accessRow.userId }
+      )
+    if (!canAccessResource) {
+      return createErrorResponse(
+        requestId,
+        404,
+        "NOT_FOUND",
+        `Assistant not found: ${assistantId}`
+      )
+    }
 
     // Load full details
     const assistant = await getAssistantById(assistantId)

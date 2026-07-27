@@ -16,7 +16,7 @@ const manifest = JSON.parse(
 
 describe("migration 157 — teacher-managed rooms", () => {
   it("is registered after the current OneRoster role-source migration", () => {
-    expect(manifest.migrationFiles.slice(-2)).toEqual([
+    expect(manifest.migrationFiles.slice(-3, -1)).toEqual([
       "156-oneroster-user-role-source.sql",
       "157-rooms.sql",
     ]);

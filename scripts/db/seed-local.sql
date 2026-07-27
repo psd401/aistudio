@@ -192,7 +192,8 @@ INSERT INTO navigation_items (id, label, icon, link, parent_id, capability_id, r
 (37, 'Model Compare', 'IconRobot', '/compare', 19, (SELECT id FROM capabilities WHERE identifier = 'model-compare'), NULL, 20, true, 'Compare AI model responses side-by-side', 'link'),
 (36, 'Repositories', 'IconBuildingBank', '/repositories', 19, (SELECT id FROM capabilities WHERE identifier = 'knowledge-repositories'), NULL, 30, true, '', 'link'),
 (47, 'Decision Capture', 'IconGitBranch', '/nexus/decision-capture', 19, (SELECT id FROM capabilities WHERE identifier = 'decision-capture'), NULL, 40, true, 'Extract decisions from meeting transcripts', 'link'),
-(48, 'Rooms', 'IconUsersGroup', '/rooms/manage', 21, (SELECT id FROM capabilities WHERE identifier = 'rooms-manage'), NULL, 10, true, 'Compose roster sections, individual students, and approved assistants', 'link');
+(48, 'Rooms', 'IconUsersGroup', '/rooms/manage', 21, (SELECT id FROM capabilities WHERE identifier = 'rooms-manage'), NULL, 10, true, 'Compose roster sections, individual students, and approved assistants', 'link'),
+(49, 'My Rooms', 'IconUsersGroup', '/rooms', 21, NULL, 'student', 20, true, 'Open classroom rooms and launch assigned assistants', 'link');
 
 -- Update sequence to max id + 1
 SELECT setval('navigation_items_id_seq', (SELECT MAX(id) FROM navigation_items));

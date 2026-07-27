@@ -11,6 +11,7 @@
 import { UIMessage } from "ai"
 import { z } from "zod"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
+import { INTERNAL_ASSISTANT_LOOKUP } from "@/lib/assistant-architect/internal-access"
 import { createLogger, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { getUserById } from "@/lib/db/drizzle"
 import { executeQuery } from "@/lib/db/drizzle-client"
@@ -232,7 +233,10 @@ async function prepareAssistantExecution(
   log.info("Starting assistant execution", { assistantId, userId })
 
   // 1. Load assistant configuration
-  const architectResult = await getAssistantArchitectByIdAction(assistantId.toString())
+  const architectResult = await getAssistantArchitectByIdAction(
+    assistantId.toString(),
+    INTERNAL_ASSISTANT_LOOKUP
+  )
   if (!architectResult.isSuccess || !architectResult.data) {
     throw ErrorFactories.dbRecordNotFound("assistant_architects", assistantId)
   }

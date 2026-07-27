@@ -22,6 +22,7 @@ import {
   isErrorResponse,
 } from "@/lib/api"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
+import { INTERNAL_ASSISTANT_LOOKUP } from "@/lib/assistant-architect/internal-access"
 import { getConversationById } from "@/lib/db/drizzle/nexus-conversations"
 import { getMessagesByConversation, createMessageWithStats } from "@/lib/db/drizzle/nexus-messages"
 import { getAIModelById } from "@/lib/db/drizzle"
@@ -100,7 +101,10 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
 
   try {
     // 5. Load assistant to get model and system prompt.
-    const architectResult = await getAssistantArchitectByIdAction(assistantId.toString())
+    const architectResult = await getAssistantArchitectByIdAction(
+      assistantId.toString(),
+      INTERNAL_ASSISTANT_LOOKUP
+    )
     if (!architectResult.isSuccess || !architectResult.data) {
       return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
     }

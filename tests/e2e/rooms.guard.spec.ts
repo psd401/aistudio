@@ -11,4 +11,15 @@ test.describe("Rooms management — route auth gate (always-run)", () => {
     expect(response.status()).toBe(307);
     expect(response.headers()["location"]).toContain("/api/auth/signin");
   });
+
+  test("GET /rooms unauthenticated redirects to sign-in", async ({
+    request,
+  }) => {
+    const response = await request.get("/rooms", {
+      maxRedirects: 0,
+    });
+
+    expect(response.status()).toBe(307);
+    expect(response.headers()["location"]).toContain("/api/auth/signin");
+  });
 });

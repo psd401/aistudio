@@ -267,6 +267,7 @@ export async function listAccessibleApprovedAssistants(
           id: assistantArchitects.id,
           name: assistantArchitects.name,
           description: assistantArchitects.description,
+          userId: assistantArchitects.userId,
         })
         .from(assistantArchitects)
         .where(eq(assistantArchitects.status, "approved"))
@@ -276,7 +277,12 @@ export async function listAccessibleApprovedAssistants(
   const accessible = await filterAccessibleResourceIds(
     userId,
     "assistant",
-    candidates.map((candidate) => candidate.id)
+    candidates.map((candidate) => candidate.id),
+    {
+      ownedResourceIds: candidates
+        .filter((candidate) => candidate.userId === userId)
+        .map((candidate) => candidate.id),
+    }
   );
   return candidates.filter((candidate) => accessible.has(String(candidate.id)));
 }
@@ -289,7 +295,10 @@ export async function accessibleApprovedAssistantIds(
   const approved = await executeQuery(
     (db) =>
       db
-        .select({ id: assistantArchitects.id })
+        .select({
+          id: assistantArchitects.id,
+          userId: assistantArchitects.userId,
+        })
         .from(assistantArchitects)
         .where(
           and(
@@ -302,7 +311,12 @@ export async function accessibleApprovedAssistantIds(
   const accessible = await filterAccessibleResourceIds(
     userId,
     "assistant",
-    approved.map((candidate) => candidate.id)
+    approved.map((candidate) => candidate.id),
+    {
+      ownedResourceIds: approved
+        .filter((candidate) => candidate.userId === userId)
+        .map((candidate) => candidate.id),
+    }
   );
   return new Set(
     approved

@@ -28,7 +28,10 @@ import {
 import { getServerSession } from "@/lib/auth/server-session";
 import { hasCapabilityAccess, hasRole } from "@/utils/roles";
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action";
-import { filterAccessibleResourceIds } from "@/lib/db/drizzle/resource-access";
+import {
+  filterAccessibleResourceIds,
+  userCanAccessResource,
+} from "@/lib/db/drizzle/resource-access";
 import {
   validateAssistantRepositoryAudience,
   validateAssistantRepositoryAudienceForRepositoryIds,
@@ -68,6 +71,7 @@ import {
   isExecutableTextModel,
   modelSupportsProviderNativeTool,
 } from "@/lib/ai/model-router/core";
+import { INTERNAL_ASSISTANT_LOOKUP } from "@/lib/assistant-architect/internal-access";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -446,7 +450,7 @@ export async function getAssistantArchitectAction(
   const log = createLogger({ requestId, action: "getAssistantArchitect" })
   
   log.info("Action started: Getting assistant architect", { architectId: id })
-  
+
   // This is an alias for getAssistantArchitectByIdAction for backward compatibility
   const result = await getAssistantArchitectByIdAction(id);
   
@@ -594,24 +598,26 @@ export async function getAssistantArchitectsAction(): Promise<
     if (isAdmin) {
       architects = allArchitects;
     } else {
-      // Per-resource grant filter (#1206): an approved assistant NOT owned by the
-      // caller is additionally gated by resource_access_grants — a restricted
-      // assistant only appears in the gallery for a user who matches a role/group
-      // grant (zero grants = unrestricted). The caller always sees their own (any
-      // status). Batch lookup to avoid an N+1 over the gallery.
-      const approvedNotOwnedIds = allArchitects
-        .filter((a) => a.status === "approved" && a.userId !== callerId)
-        .map((a) => a.id);
+      // Shared assistant resource filtering applies grants, room assignment,
+      // and the student-room restriction in one batch. Ownership remains an
+      // access path except for a student-only caller with an active room, whose
+      // gallery is limited to room-assigned assistants.
+      const visibleCandidates = allArchitects.filter(
+        (architect) =>
+          architect.userId === callerId || architect.status === "approved"
+      );
       const accessibleIds = await filterAccessibleResourceIds(
         callerId ?? -1,
         "assistant",
-        approvedNotOwnedIds
+        visibleCandidates.map((architect) => architect.id),
+        {
+          ownedResourceIds: visibleCandidates
+            .filter((architect) => architect.userId === callerId)
+            .map((architect) => architect.id),
+        }
       );
-      architects = allArchitects.filter(
-        (architect) =>
-          architect.userId === callerId ||
-          (architect.status === "approved" &&
-            accessibleIds.has(String(architect.id)))
+      architects = visibleCandidates.filter(
+        (architect) => accessibleIds.has(String(architect.id))
       );
     }
 
@@ -684,13 +690,37 @@ export async function getAssistantArchitectsAction(): Promise<
 }
 
 export async function getAssistantArchitectByIdAction(
-  id: string
+  id: string,
+  internalAccess?: symbol
 ): Promise<ActionState<ArchitectWithRelations | undefined>> {
   const requestId = generateRequestId()
   const log = createLogger({ requestId, action: "getAssistantArchitectById" })
 
   try {
     log.info("Action started: Getting assistant architect by ID via Drizzle", { architectId: id })
+
+    // Every exported function in this "use server" module is directly invocable
+    // through the server-action RPC. Browser calls must authenticate and resolve
+    // a concrete application user before prompt contents are loaded. Trusted
+    // REST/MCP execution paths pass an unforgeable, server-only Symbol and apply
+    // their own API-key scope + shared resource authorization.
+    const isInternalLookup = internalAccess === INTERNAL_ASSISTANT_LOOKUP
+    let callerId: number | undefined
+    let callerIsAdmin = false
+    if (!isInternalLookup) {
+      const session = await getServerSession()
+      if (!session?.sub) {
+        return { isSuccess: false, message: "Assistant architect not found" }
+      }
+      const currentUser = await getCurrentUserAction()
+      callerId = currentUser.isSuccess
+        ? currentUser.data?.user?.id
+        : undefined
+      if (!callerId) {
+        return { isSuccess: false, message: "Assistant architect not found" }
+      }
+      callerIsAdmin = await hasRole("administrator")
+    }
 
     // Parse string ID to integer
     const idInt = Number.parseInt(id, 10);
@@ -721,15 +751,36 @@ export async function getAssistantArchitectByIdAction(
     // are unaffected — this gates draft/pending enumeration without a hard session
     // requirement that would break API-key callers.
     if (architect.status !== "approved") {
-      const isAdmin = await hasRole("administrator");
-      const currentUser = await getCurrentUserAction();
-      const callerId = currentUser.isSuccess ? currentUser.data?.user?.id : undefined;
-      if (!isAdmin && architect.userId !== callerId) {
+      const isAdmin = isInternalLookup
+        ? await hasRole("administrator")
+        : callerIsAdmin
+      const visibleCallerId = isInternalLookup
+        ? (await getCurrentUserAction()).data?.user?.id
+        : callerId
+      if (!isAdmin && architect.userId !== visibleCallerId) {
         throw createError("Assistant architect not found", {
           code: "NOT_FOUND",
           level: ErrorLevel.WARN,
           details: { id }
         });
+      }
+    }
+
+    if (!isInternalLookup) {
+      const canAccess = await userCanAccessResource(
+        callerId ?? -1,
+        "assistant",
+        architect.id,
+        { ownerUserId: architect.userId }
+      )
+      if (!canAccess) {
+        // Visibility-before-permission: do not reveal whether an assistant exists
+        // through either exported server-action name when resource access hides it.
+        log.warn("Assistant architect lookup masked by resource access", {
+          architectId: id,
+          userId: callerId,
+        })
+        return { isSuccess: false, message: "Assistant architect not found" }
       }
     }
 
