@@ -301,6 +301,23 @@ def collect_extracted_images(image_dir: Path):
     return kept, dropped
 
 
+def drop_image_references(markdown: str, dropped) -> str:
+    """Remove the ![](...) references for images that were discarded.
+
+    Matched by BASENAME: the reference in the Markdown has already been
+    absolutized to the resolved directory, and matching on the filename keeps
+    this correct regardless of how the path was spelled.
+    """
+    names = {p.name for p in dropped}
+
+    def rewrite(match):
+        target = match.group(2).strip()
+        return "" if Path(target).name in names else match.group(0)
+
+    cleaned = re.sub(r"!\[([^\]]*)\]\(([^)]*)\)", rewrite, markdown)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Convert a PDF to clean Markdown (tables preserved).")
     src = parser.add_mutually_exclusive_group(required=True)
@@ -379,6 +396,17 @@ def main():
     if not markdown.strip():
         _fail("conversion produced no text (scanned/image-only PDF? OCR is not enabled in v1)", "empty_output")
 
+    kept, dropped = ([], [])
+    if image_dir is not None:
+        # Apply the cap BEFORE the Markdown is written. Deleting the files but
+        # leaving their ![](path) references behind would emit `status: ok`
+        # alongside a document whose image links point at nothing — a broken
+        # result reported as a successful one. Dropping the references keeps the
+        # Markdown truthful about what actually survived.
+        kept, dropped = collect_extracted_images(image_dir)
+        if dropped:
+            markdown = drop_image_references(markdown, dropped)
+
     out_path = Path(args.out).expanduser() if args.out else Path("/tmp") / f"{stem}.md"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(markdown, encoding="utf-8")
@@ -390,15 +418,14 @@ def main():
         "chars": len(markdown),
     }
     if image_dir is not None:
-        kept, dropped = collect_extracted_images(image_dir)
         result["images"] = [str(p) for p in kept]
         result["image_dir"] = str(image_dir)
         if dropped:
             result["images_dropped"] = len(dropped)
             result["image_note"] = (
                 f"{len(dropped)} image(s) beyond the {MAX_EXTRACTED_IMAGES}-image cap were "
-                "discarded; their ![](path) references in the Markdown now point at files "
-                "that do not exist."
+                "discarded, and their references were removed from the Markdown so no link "
+                "points at a missing file."
             )
     if len(markdown) <= INLINE_LIMIT:
         result["markdown"] = markdown

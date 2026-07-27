@@ -329,7 +329,16 @@ test('applyReplacements swaps only the referenced lines', () => {
 function atriumStub(overrides = {}) {
   const calls = [];
   const runSkill = (spec) => {
-    calls.push(spec);
+    // Snapshot any file-transported body AT CALL TIME. The real psd-atrium
+    // reads it during the call too, and the skill deletes its scratch
+    // directory as soon as `create` returns — so reading it afterwards would
+    // race the cleanup that production correctly performs.
+    const capture = { ...spec, files: {} };
+    for (const flag of ['--markdown-file', '--body-file']) {
+      const at = spec.args.indexOf(flag);
+      if (at !== -1) capture.files[flag] = fs.readFileSync(spec.args[at + 1], 'utf8');
+    }
+    calls.push(capture);
     const sub = spec.args[0];
     if (overrides[sub]) return overrides[sub](spec);
     if (sub === 'create-document') {
@@ -393,7 +402,11 @@ test('create with no images posts the whole document in one call', () => {
   // Private + the SOP collection, never inherited from a flag default elsewhere.
   expect(args[args.indexOf('--visibility') + 1]).toBe('private');
   expect(args[args.indexOf('--collection') + 1]).toBe('standard-operating-procedures');
-  const markdown = args[args.indexOf('--markdown') + 1];
+  // The body goes through a FILE, always — a whole SOP can exceed the 128 KiB
+  // per-argument limit and fail the spawn with E2BIG. Passing it inline only
+  // when it happens to be small would leave the large-document path untested.
+  expect(args).not.toContain('--markdown');
+  const markdown = calls[0].files['--markdown-file'];
   expect(markdown).toContain('# Standard Operating Procedure (SOP)');
   expect(markdown).toContain('| **Owner** | Director of Technology |');
 
@@ -429,12 +442,13 @@ test('create with a local image creates the object FIRST, uploads, then writes t
 
   // The bodyless create avoids writing a body that would immediately be replaced.
   expect(calls[0].args).not.toContain('--markdown');
+  expect(calls[0].args).not.toContain('--markdown-file');
   expect(calls[1].args[calls[1].args.indexOf('--alt') + 1]).toBe('Control panel');
   expect(calls[1].args[calls[1].args.indexOf('--file') + 1]).toBe(
     path.join(dir, 'panel.png')
   );
 
-  const finalBody = calls[2].args[calls[2].args.indexOf('--body') + 1];
+  const finalBody = calls[2].files['--body-file'];
   expect(finalBody).toContain(
     '::atrium-asset{id="2f1c9d0e-7a3b-4c5d-9e6f-000000000001" alt="Control panel"}'
   );
@@ -465,7 +479,7 @@ test('create copies an ::atrium-asset image out of --source-id', () => {
   expect(getArgs[getArgs.indexOf('--id') + 1]).toBe('obj-source');
   expect(getArgs[getArgs.indexOf('--asset-id') + 1]).toBe('src-asset-9');
   // Re-uploaded under a NEW id: an asset belongs to exactly one object.
-  const finalBody = calls[3].args[calls[3].args.indexOf('--body') + 1];
+  const finalBody = calls[3].files['--body-file'];
   expect(finalBody).toContain('::atrium-asset{id="2f1c9d0e-7a3b-4c5d-9e6f-000000000001"');
   expect(finalBody).not.toContain('src-asset-9');
 });
@@ -587,7 +601,13 @@ test('an upstream psd-atrium failure surfaces as exit 12', () => {
 });
 
 test('--body-file and --body are mutually exclusive', () => {
-  const file = path.join(os.tmpdir(), `sop-${Date.now()}.md`);
+  // mkdtempSync, not tmpdir()+Date.now(): a predictable path in the shared temp
+  // dir is pre-creatable by a local actor and collides between same-millisecond
+  // runs. Same reason the skill itself uses mkdtempSync for its scratch dir.
+  const file = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'psd-sop-body-')),
+    'sop.md'
+  );
   fs.writeFileSync(file, VALID_BODY);
   expect(run(['validate', '--body-file', file]).code).toBe(0);
   expect(run(['validate', '--body-file', file, '--body', VALID_BODY]).code).toBe(1);
@@ -619,4 +639,86 @@ test('a non-UUID asset id is rejected — the directive would render as literal 
   });
   expect(result.code).toBe(12);
   expect(result.out.message).toMatch(/no UUID/i);
+});
+
+// ── review-driven regressions ────────────────────────────────────────────────
+
+test('image syntax inside a fenced code block is NOT treated as a real image', () => {
+  // A technical SOP legitimately documents markdown. Scanning raw lines would
+  // try to upload the EXAMPLE — failing on a path that never existed, or worse,
+  // uploading something and rewriting the example into a live directive.
+  const body = [
+    '![real](/tmp/real.png)',
+    '',
+    '```markdown',
+    '![example](imgs/not-real.png)',
+    '::atrium-asset{id="11111111-1111-4111-8111-111111111111" alt="sample"}',
+    '```',
+  ].join('\n');
+  const images = collectImages(body, '/base');
+  expect(images).toHaveLength(1);
+  expect(images[0].src).toBe('/tmp/real.png');
+});
+
+test('create validates image files BEFORE creating anything in Atrium', () => {
+  const body = VALID_BODY.replace(
+    'All schools and administrative buildings',
+    'All schools\n\n![Panel](missing.png)'
+  );
+  const { calls, runSkill } = atriumStub();
+  const result = run(
+    ['create', '--body', body, ...CREATE_META, '--image-base', os.tmpdir()],
+    { runSkill }
+  );
+
+  expect(result.code).toBe(1);
+  expect(result.out.error).toBe('image_missing');
+  // The whole point: a typo'd path must not leave an empty private draft that
+  // multiplies on every retry.
+  expect(calls).toHaveLength(0);
+  expect(result.out.message).toContain('Nothing was created in Atrium');
+});
+
+test('create refuses a missing --source-id before creating anything', () => {
+  const body = VALID_BODY.replace(
+    'All schools and administrative buildings',
+    'All schools\n\n::atrium-asset{id="11111111-1111-4111-8111-111111111111" alt="D"}'
+  );
+  const { calls, runSkill } = atriumStub();
+  const result = run(['create', '--body', body, ...CREATE_META], { runSkill });
+
+  expect(result.code).toBe(1);
+  expect(result.out.error).toBe('source_id_required');
+  expect(calls).toHaveLength(0);
+});
+
+test('a failed upload discards the document it already created', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sop-fail-'));
+  fs.writeFileSync(path.join(dir, 'panel.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  const body = VALID_BODY.replace(
+    'All schools and administrative buildings',
+    'All schools\n\n![Panel](panel.png)'
+  );
+  const { calls, runSkill } = atriumStub({
+    'upload-asset': () => ({
+      code: 12,
+      stdout: JSON.stringify({ status: 'error', message: 'storage unavailable' }),
+      stderr: '',
+    }),
+  });
+
+  const result = run(['create', '--body', body, ...CREATE_META, '--image-base', dir], {
+    runSkill,
+  });
+
+  expect(result.code).toBe(12);
+  expect(result.out.message).toContain('storage unavailable');
+  // The object EXISTS by this point, so it has to be cleaned up — otherwise
+  // every retry of a transient storage failure leaves another empty draft.
+  expect(calls.map((c) => c.args[0])).toEqual([
+    'create-document',
+    'upload-asset',
+    'delete',
+  ]);
+  expect(calls[2].args[calls[2].args.indexOf('--id') + 1]).toBe('obj-1');
 });

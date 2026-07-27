@@ -675,3 +675,81 @@ test('get-asset decodes the base64 payload to disk', async () => {
   expect(fs.readFileSync(out).equals(PNG_BYTES)).toBe(true);
   expect(emitted[0].byteLength).toBe(PNG_BYTES.length);
 });
+
+test('get-asset refuses to write bytes that are not a real image', async () => {
+  const out = nodePath.join(
+    fs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-bad-')),
+    'evil.png'
+  );
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: {
+      id: 'asset-9',
+      objectId: 'obj-1',
+      filename: 'evil.png',
+      contentType: 'image/png',
+      encoding: 'base64',
+      // Not an image. Atrium normalizes and re-encodes every asset on
+      // completion, so this cannot be a real stored asset — writing it would
+      // put arbitrary response bytes on disk at a caller-named path.
+      data: Buffer.from('<?php system($_GET[0]); ?>').toString('base64'),
+    },
+  });
+
+  let code;
+  try {
+    await run('get-asset', '--id', 'obj-1', '--asset-id', 'asset-9', '--out', out);
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(12);
+  expect(fs.existsSync(out)).toBe(false);
+});
+
+test('create-document accepts a large body via --markdown-file', async () => {
+  const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-md-'));
+  const file = nodePath.join(dir, 'big.md');
+  // Comfortably past MAX_ARG_STRLEN (128 KiB), which is exactly the case that
+  // fails with E2BIG when passed as a single argv value.
+  const big = `# Big\n\n${'x'.repeat(200_000)}\n`;
+  fs.writeFileSync(file, big);
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 201,
+    payload: { id: 'obj-big', slug: 'big' },
+  });
+
+  await run('create-document', '--title', 'Big', '--markdown-file', file);
+
+  const sent = restCalls[0].opts.body;
+  expect(sent.codeEncoding).toBe('base64');
+  expect(Buffer.from(sent.body, 'base64').toString('utf8')).toBe(big);
+});
+
+test('edit accepts --body-file, and refuses it combined with --body', async () => {
+  const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-edit-'));
+  const file = nodePath.join(dir, 'body.md');
+  fs.writeFileSync(file, '# Replacement');
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 201,
+    payload: { id: 'v2' },
+  });
+
+  await run('edit', '--id', 'obj-1', '--body-file', file);
+  expect(restCalls[0].path).toBe('/obj-1/versions');
+  expect(Buffer.from(restCalls[0].opts.body.body, 'base64').toString('utf8')).toBe(
+    '# Replacement'
+  );
+
+  restCalls = [];
+  let code;
+  try {
+    await run('edit', '--id', 'obj-1', '--body-file', file, '--body', 'inline');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+  expect(restCalls).toHaveLength(0);
+});

@@ -26,16 +26,20 @@ is a human step. Say so when you hand back the link.
 
 ### 1. Get the source
 
-| Source | How |
-|--------|-----|
-| The user describes it in chat | Use what they said; interview for the rest |
-| A PDF | `psd-pdf-to-markdown` with **`--extract-images <dir>`** |
-| A Google Doc | `psd-workspace` (Drive export) |
-| An existing Atrium document | `psd-atrium read-source --id <id>` — **not** `read`, which never returns a document's text |
+Ingest is a **separate skill invocation** you make first — this skill does not
+run the converters itself, so each one applies its own tool permissions. Save
+the result to a file and pass it to `create --body-file`.
 
-For a PDF, always pass `--extract-images`. Without it the screenshots are
-dropped, and a Technology or Finance procedure without its screenshots has lost
-most of its value.
+| Source | Invoke |
+|--------|--------|
+| The user describes it in chat | Nothing — use what they said; interview for the rest |
+| A PDF | the **`psd-pdf-to-markdown`** skill, with **`--extract-images <dir>`** |
+| A Google Doc | the **`psd-workspace`** skill (Drive export) |
+| An existing Atrium document | the **`psd-atrium`** skill: `read-source --id <id>` — **not** `read`, which never returns a document's text |
+
+For a PDF, always pass `--extract-images` and then point `create --image-base`
+at that directory. Without it the screenshots are dropped, and a Technology or
+Finance procedure without its screenshots has lost most of its value.
 
 ### 2. Interview for what is missing
 

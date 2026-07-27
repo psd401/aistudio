@@ -21,13 +21,14 @@
  *   node run.js upload-asset --id <id> --file <path> [--alt <text>]
  *                    [--filename <name>] [--purpose document_image|capture_step]
  *   node run.js get-asset --id <id> --asset-id <assetId> --out <path>
- *   node run.js create-document --title <t> [--markdown <md>] [--collection <slug|id>]
+ *   node run.js create-document --title <t> [--markdown <md> | --markdown-file <path>]
+ *                    [--collection <slug|id>]
  *                    [--tags a,b,c] [--visibility private|group|internal|public]
  *                    [--grants role:staff,building:GHS]
  *   node run.js create-artifact --title <t> (--code <src> | --code-file <path>)
  *                    --body-format html|jsx [--collection <slug|id>] [--tags a,b,c]
  *                    [--visibility <level>] [--grants ...]
- *   node run.js edit --id <id> --body <text> [--mode replace|append]
+ *   node run.js edit --id <id> (--body <text> | --body-file <path>) [--mode replace|append]
  *                    [--body-format markdown|html|jsx] [--summary <s>]
  *   node run.js archive --id <id>
  *   node run.js delete --id <id>
@@ -99,12 +100,13 @@ function usage() {
       '  get-asset --id <id> --asset-id <assetId> --out <path>',
       '',
       'Write (creates a new version; content starts private + draft):',
-      '  create-document --title <t> [--markdown <md>] [--collection <slug|id>]',
-      '                  [--tags a,b,c] [--visibility <level>] [--grants k:v,...]',
+      '  create-document --title <t> [--markdown <md> | --markdown-file <path>]',
+      '                  [--collection <slug|id>] [--tags a,b,c] [--visibility <level>]',
+      '                  [--grants k:v,...]',
       '  create-artifact --title <t> (--code <src> | --code-file <path>)',
       '                  --body-format html|jsx [--collection <slug|id>] [--tags a,b,c]',
       '                  [--visibility <level>] [--grants k:v,...]',
-      '  edit --id <id> --body <text> [--mode replace|append]',
+      '  edit --id <id> (--body <text> | --body-file <path>) [--mode replace|append]',
       '       [--body-format markdown|html|jsx] [--summary <s>]',
       '  archive --id <id>   (soft-remove: status -> archived, stays findable)',
       '  delete  --id <id>   (HARD delete: permanent; owner/admin only; refused',
@@ -114,6 +116,10 @@ function usage() {
       '',
       'Artifact code (HTML/JS/CSS, incl. <script>/<style>) is fully supported and',
       'sent base64-encoded automatically — you pass raw code, nothing to escape.',
+      '',
+      'Use --markdown-file / --body-file / --code-file for a LARGE document: an',
+      'oversized argv fails the spawn with E2BIG (128 KiB), well below the 4 MiB',
+      'the broker itself accepts.',
       '',
       'Publish (§26.4 — a public destination you may not publish directly returns',
       'a queued-for-approval result; relay its message verbatim):',
@@ -151,6 +157,30 @@ function optStr(args, name, label) {
   if (v === undefined) return undefined;
   if (v === true) fail(`--${label} requires a value`);
   return v;
+}
+
+/**
+ * Read a body either inline (`--markdown`/`--body`) or from a file
+ * (`--markdown-file`/`--body-file`), rejecting the ambiguous combination.
+ *
+ * The file form is not a convenience — it is the only way to pass a LARGE
+ * document. A whole SOP (or any long converted PDF) can exceed Linux's
+ * per-argument limit (MAX_ARG_STRLEN, 128 KiB), and an oversized argv fails the
+ * spawn with E2BIG before this process even starts, well below the broker's
+ * 4 MiB request ceiling. `create-artifact` already had `--code-file` for exactly
+ * this reason; documents need the same escape hatch.
+ */
+function readInlineOrFile(args, inlineKey, inlineLabel, fileKey, fileLabel) {
+  const filePath = optStr(args, fileKey, fileLabel);
+  if (filePath !== undefined && args[inlineKey] !== undefined) {
+    fail(`pass either --${inlineLabel} or --${fileLabel}, not both`);
+  }
+  if (filePath === undefined) return optStr(args, inlineKey, inlineLabel);
+  try {
+    return fs.readFileSync(filePath, 'utf8');
+  } catch (err) {
+    fail(`--${fileLabel} not readable: ${err.message}`);
+  }
 }
 
 /** Build the { level, grants? } visibility object from --visibility/--grants. */
@@ -363,6 +393,18 @@ async function main() {
         fail('AI Studio returned no asset bytes', 12);
       }
       const bytes = Buffer.from(payload.data, 'base64');
+      if (bytes.length === 0) fail('AI Studio returned an empty asset', 12);
+      // Verify the decoded bytes really are one of the three image types this
+      // surface can hold before writing anything to disk. Atrium normalizes and
+      // re-encodes every asset on completion, so a mismatch means the response
+      // is not what it claims to be — and refusing here keeps this command from
+      // ever writing arbitrary response bytes to a caller-named path.
+      if (!detectImageContentType(bytes)) {
+        fail(
+          'AI Studio returned bytes that are not a PNG, JPEG, or WebP image; refusing to write them',
+          12
+        );
+      }
       try {
         fs.writeFileSync(out, bytes);
       } catch (err) {
@@ -381,7 +423,13 @@ async function main() {
 
     case 'create-document': {
       const title = requireStr(args, 'title', 'title');
-      const markdown = optStr(args, 'markdown', 'markdown');
+      const markdown = readInlineOrFile(
+        args,
+        'markdown',
+        'markdown',
+        'markdown_file',
+        'markdown-file'
+      );
       const visibility = buildVisibility(args);
       const body = {
         kind: 'document',
@@ -443,7 +491,8 @@ async function main() {
 
     case 'edit': {
       const id = requireStr(args, 'id', 'id');
-      const text = requireStr(args, 'body', 'body');
+      const text = readInlineOrFile(args, 'body', 'body', 'body_file', 'body-file');
+      if (text === undefined || text === '') fail('--body or --body-file is required');
       const mode = optEnum(args, 'mode', 'mode', ['replace', 'append']) || 'replace';
       let bodyFormat = optEnum(args, 'body_format', 'body-format', BODY_FORMATS);
       const summary = optStr(args, 'summary', 'summary');

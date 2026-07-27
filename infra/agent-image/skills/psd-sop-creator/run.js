@@ -7,11 +7,14 @@
  * not a rendered HTML artifact. An SOP is a living document that staff revise;
  * an artifact would be a snapshot nobody can edit.
  *
- * It COMPOSES existing agent-image skills rather than re-implementing them:
- *   Atrium read/write + images → psd-atrium (read-source, upload-asset, get-asset,
- *                                create-document, edit)
- *   PDF ingest                 → psd-pdf-to-markdown (--extract-images)
- *   Google Docs ingest         → psd-workspace
+ * This process shells out to exactly ONE sibling skill: psd-atrium (read-source,
+ * upload-asset, get-asset, create-document, edit), hence `Bash(node:*)`.
+ *
+ * INGEST is not run from here. The agent invokes psd-pdf-to-markdown (with
+ * --extract-images) or psd-workspace itself, under those skills' own
+ * `allowed-tools`, and passes the resulting markdown to `create --body-file`.
+ * Doing it in-process would require granting this skill the Python entrypoint
+ * as well, widening its permissions for no benefit.
  *
  * Subcommands:
  *   validate  — structural gate only, no network. Use it while drafting.
@@ -32,12 +35,12 @@
 'use strict';
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 // Container layout (overridable so the unit tests can point at fakes).
 const SKILLS_DIR = process.env.PSD_SKILLS_DIR || '/opt/psd-skills';
-const VENV_PY = process.env.PSD_VENV_PYTHON || '/opt/agentcore-venv/bin/python3';
 /** Read at CALL time, not module-load time, so a test (or a wrapper that sets it
  *  late) is not fixed to whatever the environment held when this file was first
  *  required. */
@@ -447,13 +450,13 @@ function logoUrlFrom(baseUrl) {
 // ── composed-skill runner (tests inject deps.runSkill) ────────────────────────
 
 function runSkill(spec) {
+  // Only psd-atrium. Ingest (psd-pdf-to-markdown, psd-workspace) is NOT run from
+  // here: the agent invokes those skills itself, under THEIR own `allowed-tools`,
+  // and hands the resulting markdown to `create` via --body-file. Shelling them
+  // from this process would need `Bash(/opt/agentcore-venv/bin/python3:*)` in
+  // this skill's frontmatter — a strictly wider permission grant for no gain.
   const map = {
     atrium: { cmd: 'node', base: [path.join(SKILLS_DIR, 'psd-atrium', 'run.js')] },
-    pdf: {
-      cmd: VENV_PY,
-      base: [path.join(SKILLS_DIR, 'psd-pdf-to-markdown', 'scripts', 'convert.py')],
-    },
-    workspace: { cmd: 'node', base: [path.join(SKILLS_DIR, 'psd-workspace', 'run.js')] },
   };
   const entry = map[spec.skill];
   if (!entry) throw new Error(`unknown skill: ${spec.skill}`);
@@ -520,10 +523,18 @@ const OWN_LINE_IMAGE_RE = /^\s*!\[([^\]]*)\]\(([^)\s]+)\)\s*$/;
  *   asset    — an existing ::atrium-asset directive; the bytes must be COPIED
  *              from the source object, because an asset belongs to exactly one
  *              object and a version referencing a foreign asset is rejected.
+ *
+ * Runs off the SAME fence-aware scan the validator uses. A technical SOP can
+ * legitimately contain a fenced example showing an image line or an
+ * ::atrium-asset directive; scanning raw lines would treat that example as a
+ * real image, then either fail on a path that was never meant to exist or —
+ * worse — upload something and rewrite the example into a live directive,
+ * corrupting the very thing the SOP was documenting.
  */
 function collectImages(markdown, imageBase) {
   const images = [];
-  for (const [index, text] of String(markdown).split('\n').entries()) {
+  for (const { index, text, inCode } of scanLines(markdown)) {
+    if (inCode) continue;
     const directive = ATRIUM_ASSET_RE.exec(text);
     if (directive) {
       const id = /id="([^"]+)"/.exec(directive[1]);
@@ -557,6 +568,50 @@ function collectImages(markdown, imageBase) {
 }
 
 /**
+ * Prove every local image is readable BEFORE anything is created in Atrium.
+ *
+ * The upload step necessarily runs after the document exists (an asset attaches
+ * to an object), so a missing file discovered there would abort having already
+ * persisted a bodyless private draft — and every retry would leave another one.
+ * A typo'd image path is by far the most likely failure in this whole flow, so
+ * it gets checked while failing is still free.
+ */
+function preflightLocalImages(images) {
+  for (const image of images) {
+    if (image.kind !== 'local') continue;
+    try {
+      // accessSync, not existsSync: an unreadable file exists but still cannot
+      // be uploaded, and finding that out later costs an orphan document.
+      fs.accessSync(image.resolved, fs.constants.R_OK);
+    } catch {
+      fail(
+        `image not found or not readable: ${image.src} (resolved to ${image.resolved}). ` +
+          'Pass --image-base if the paths are relative to another directory. ' +
+          'Nothing was created in Atrium.',
+        'image_missing'
+      );
+    }
+  }
+}
+
+/**
+ * Best-effort removal of a document this run created but could not finish.
+ *
+ * An SOP whose body was never written is not a draft anyone wants — it is an
+ * empty private object that clutters the collection and, on retry, multiplies.
+ * Deliberately quiet: the caller is already failing with the REAL error, and a
+ * cleanup problem must not replace it with a more confusing one. The object is
+ * ours and unpublished, which is exactly the case `delete` allows.
+ */
+function discardPartialDocument(run, objectId) {
+  try {
+    run({ skill: 'atrium', args: ['delete', '--id', objectId] });
+  } catch {
+    /* best effort — the original failure is what the caller reports */
+  }
+}
+
+/**
  * Upload every image that needs uploading and return a line-index → replacement
  * map. Ordering is forced by the platform: the object must exist before an asset
  * can attach to it, and the asset must be `ready` before a version may reference
@@ -571,13 +626,8 @@ function materializeImages({ images, objectId, sourceId, run, scratchDir }) {
 
     let filePath;
     if (image.kind === 'local') {
-      if (!fs.existsSync(image.resolved)) {
-        fail(
-          `image not found: ${image.src} (resolved to ${image.resolved}). ` +
-            'Pass --image-base if the paths are relative to another directory.',
-          'image_missing'
-        );
-      }
+      // Already proven readable by preflightLocalImages() before the document
+      // was created; this is the belt-and-braces re-check.
       filePath = image.resolved;
     } else {
       if (!sourceId) {
@@ -705,66 +755,124 @@ function cmdCreate(args, deps = {}) {
   const images = collectImages(body, imageBase);
   const needsUpload = images.some((image) => image.kind !== 'external');
 
-  // Step 1 — create the document. Bodyless on purpose when there are images to
-  // upload: assets attach to an OBJECT, so the object has to exist first, and a
-  // body written now would have to be rewritten anyway once the asset ids exist.
-  const createArgs = [
-    'create-document',
-    '--title',
-    title,
-    '--collection',
-    collection,
-    '--visibility',
-    'private',
-  ];
-  if (tags) createArgs.push('--tags', tags);
-  if (!needsUpload) {
-    createArgs.push('--markdown', buildDocument({ body, owner, department, effectiveDate, logoUrl }));
-  }
-  const created = atrium(run, createArgs, 'creating the Atrium document');
-  if (!created.id) {
-    fail('Atrium returned no document id', 'atrium_failed', 12);
+  // Everything that can be checked without touching Atrium is checked here, so
+  // the common mistakes (bad structure, a typo'd image path, a missing
+  // --source-id) cost nothing and leave nothing behind.
+  preflightLocalImages(images);
+  if (!sourceId && images.some((image) => image.kind === 'asset')) {
+    const orphan = images.find((image) => image.kind === 'asset');
+    fail(
+      `the body references ::atrium-asset{id="${orphan.assetId}"}, an image owned by another ` +
+        'Atrium object. Pass --source-id <that object> so its bytes can be copied — an asset ' +
+        'cannot be referenced across objects. Nothing was created in Atrium.',
+      'source_id_required'
+    );
   }
 
-  // Step 2 — upload the images, then step 3 — write the body that references them.
-  let uploaded = [];
-  if (needsUpload) {
-    const scratchDir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'psd-sop-'));
-    let replacements;
-    try {
-      ({ replacements, uploaded } = materializeImages({
-        images,
-        objectId: created.id,
-        sourceId,
-        run,
-        scratchDir,
-      }));
-    } finally {
-      fs.rmSync(scratchDir, { recursive: true, force: true });
+  // A whole SOP can exceed the 128 KiB per-argument limit, which fails the spawn
+  // with E2BIG before psd-atrium starts. Bodies go through a file, always — not
+  // only when they happen to be large, so the big-document path is the one that
+  // is exercised every run rather than the one nobody tests.
+  const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'psd-sop-'));
+  try {
+    // Step 1 — create the document. Bodyless on purpose when there are images to
+    // upload: assets attach to an OBJECT, so the object has to exist first, and a
+    // body written now would have to be rewritten anyway once the asset ids exist.
+    const createArgs = [
+      'create-document',
+      '--title',
+      title,
+      '--collection',
+      collection,
+      '--visibility',
+      'private',
+    ];
+    if (tags) createArgs.push('--tags', tags);
+    if (!needsUpload) {
+      const bodyPath = path.join(scratchDir, 'sop.md');
+      fs.writeFileSync(
+        bodyPath,
+        buildDocument({ body, owner, department, effectiveDate, logoUrl })
+      );
+      createArgs.push('--markdown-file', bodyPath);
     }
-    const finalBody = buildDocument({
-      body: applyReplacements(body, replacements),
+    const created = atrium(run, createArgs, 'creating the Atrium document');
+    if (!created.id) {
+      fail('Atrium returned no document id', 'atrium_failed', 12);
+    }
+
+    // Step 2 — upload the images, then step 3 — write the body referencing them.
+    // From here on the object EXISTS, so any failure has to clean it up or it
+    // becomes an empty draft that multiplies on every retry.
+    let uploaded = [];
+    if (needsUpload) {
+      try {
+        const { replacements, uploaded: done } = materializeImages({
+          images,
+          objectId: created.id,
+          sourceId,
+          run,
+          scratchDir,
+        });
+        uploaded = done;
+        const finalPath = path.join(scratchDir, 'sop-final.md');
+        fs.writeFileSync(
+          finalPath,
+          buildDocument({
+            body: applyReplacements(body, replacements),
+            owner,
+            department,
+            effectiveDate,
+            logoUrl,
+          })
+        );
+        atrium(
+          run,
+          [
+            'edit',
+            '--id',
+            created.id,
+            '--body-file',
+            finalPath,
+            '--body-format',
+            'markdown',
+            '--summary',
+            'Initial SOP draft',
+          ],
+          'writing the SOP body'
+        );
+      } catch (err) {
+        discardPartialDocument(run, created.id);
+        throw err;
+      }
+    }
+    finishCreate({
+      created,
+      title,
+      collection,
       owner,
       department,
       effectiveDate,
-      logoUrl,
+      images,
+      uploaded,
     });
-    atrium(
-      run,
-      [
-        'edit',
-        '--id',
-        created.id,
-        '--body',
-        finalBody,
-        '--body-format',
-        'markdown',
-        '--summary',
-        'Initial SOP draft',
-      ],
-      'writing the SOP body'
-    );
+  } finally {
+    fs.rmSync(scratchDir, { recursive: true, force: true });
   }
+}
+
+/** Emit the success payload. Split out so `cmdCreate` can stay inside the
+ *  scratch-directory `finally` without the reporting code living there too. */
+function finishCreate({
+  created,
+  title,
+  collection,
+  owner,
+  department,
+  effectiveDate,
+  images,
+  uploaded,
+}) {
 
   const url = created.url ? `${appBaseUrl()}${created.url}` : null;
   emit({
