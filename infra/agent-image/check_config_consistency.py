@@ -2,7 +2,8 @@
 """
 Config self-consistency gate for the agent image (issue #1161).
 
-Three static asserts over openclaw.json, run on the host before build (no Docker):
+Four static asserts over openclaw.json + the Dockerfile, run on the host before
+build (no Docker):
 
   1. contextWindow sanity — every declared model's contextWindow must be a
      positive int inside a sane range, and if the model id is in the known-models
@@ -23,6 +24,12 @@ Three static asserts over openclaw.json, run on the host before build (no Docker
      caching and every turn pays full input rate. That is not a config error,
      not a runtime error, and not visible anywhere except the token bill —
      which is exactly how it went unnoticed from #1384 until 2026-07-27.
+
+  4. host/plugin compatibility — the OpenClaw base image must satisfy the
+     plugin's `peerDependencies.openclaw`. The plugin is vendored with
+     `npm pack`, which downloads a tarball and runs no install, so that peer
+     requirement is enforced NOWHERE else in the build. This check is the only
+     thing standing between a mismatched host/plugin pair and production.
 
 Exit 0 when consistent, 1 on any violation.
 """
@@ -57,12 +64,19 @@ _MAX_CONTEXT_WINDOW = 2_000_000
 _BEDROCK_NATIVE_PROVIDERS = frozenset({"amazon-bedrock"})
 
 # First @openclaw/amazon-bedrock-provider release whose
-# supportsBedrockPromptCaching() allowlist recognizes a model. Keys are matched
-# as substrings of the declared model id, mirroring how the plugin builds its
-# match candidates. Verified by reading dist/bedrock-options.js per version:
-# 2026.6.11 matched only `-4-`, `claude-fable-5`, `claude-3-7-sonnet` and
-# `claude-3-5-haiku`; 2026.7.1 added `claude-sonnet-5` and `claude-mythos-5`.
+# supportsBedrockPromptCaching() allowlist recognizes a model. Keys are the
+# plugin's OWN match tokens, tested against the same candidates it builds.
+# Verified by reading dist/bedrock-options.js per version: 2026.6.11 matched
+# `-4-`, `claude-fable-5`, `claude-3-7-sonnet` and `claude-3-5-haiku`;
+# 2026.7.1 added `claude-sonnet-5` and `claude-mythos-5`.
+#
+# Keep this table a faithful mirror of that function. Omitting one of its
+# tokens does not fail safe — it fails LOUD in the wrong direction: a model the
+# plugin would happily cache gets rejected here and a valid rollout is blocked.
+# `-4-` is in the table for exactly that reason (Codex P2 on PR #1388): every
+# versioned Claude 4 id — us.anthropic.claude-sonnet-4-5-… — matches it.
 _CACHE_CAPABLE_PLUGIN_MIN: Dict[str, str] = {
+    "-4-": "2026.6.11",
     "claude-sonnet-5": "2026.7.1",
     "claude-mythos-5": "2026.7.1",
     "claude-fable-5": "2026.6.11",
@@ -73,6 +87,30 @@ _CACHE_CAPABLE_PLUGIN_MIN: Dict[str, str] = {
 _PLUGIN_PACK_RE = re.compile(
     r"npm pack @openclaw/amazon-bedrock-provider@([0-9A-Za-z.\-]+)"
 )
+
+# The base image is pinned by immutable digest, with the human-readable tag
+# recorded directly above it. Parsing both lets us cross-check them AND compare
+# the host version against the plugin's peer requirement.
+_HOST_TAG_RE = re.compile(
+    r"^#\s*ghcr\.io/openclaw/openclaw:([0-9A-Za-z.\-]+)\s*$\n"
+    r"^#\s*index:\s*(sha256:[0-9a-f]{64})\s*$",
+    re.MULTILINE,
+)
+_HOST_FROM_RE = re.compile(
+    r"^FROM\s+ghcr\.io/openclaw/openclaw@(sha256:[0-9a-f]{64})", re.MULTILINE,
+)
+
+
+def _match_candidates(model_id: str) -> Tuple[str, ...]:
+    """Mirror the plugin's getModelMatchCandidates() for one id.
+
+    It lowercases and ALSO tries a variant with `[\\s_.:]+` collapsed to `-`,
+    which is how a dotted id like `anthropic.claude.sonnet.4` still matches the
+    `-4-` rule. Testing only the raw id would under-match and reject a model the
+    plugin actually caches.
+    """
+    lowered = model_id.lower()
+    return (lowered, re.sub(r"[\s_.:]+", "-", lowered))
 
 
 def _version_key(version: str) -> tuple:
@@ -137,6 +175,67 @@ def parse_pinned_plugin_version(dockerfile_path: str) -> Tuple[Optional[str], Li
     return version, violations
 
 
+def check_host_plugin_compatibility(dockerfile_path: str) -> List[str]:
+    """Assert the OpenClaw base image satisfies the plugin's host requirement.
+
+    `npm pack` only downloads a tarball — it runs no install, so the plugin's
+    `peerDependencies.openclaw` is NEVER enforced anywhere in the build. Nothing
+    but this check stands between a mismatched pair and production. That matters
+    most on the rollback path the Dockerfile documents: reverting the base image
+    to 2026.7.1-beta.2 while leaving plugin 2026.7.1 in place produces exactly
+    such a pair, and every other gate here would pass it (Codex P2 on PR #1388).
+
+    Across every published release this plugin's peer requirement has tracked
+    its own version (2026.6.11 -> >=2026.6.11, 2026.6.33 -> >=2026.6.33,
+    2026.7.1 -> >=2026.7.1), so `host >= plugin` is the invariant enforced. The
+    prerelease-below-release rule in _version_key is what makes the beta case
+    fail rather than silently pass.
+    """
+    violations: List[str] = []
+    try:
+        with open(dockerfile_path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+    except OSError as exc:
+        return [f"cannot read Dockerfile {dockerfile_path}: {exc}"]
+
+    plugin_version, plugin_violations = parse_pinned_plugin_version(dockerfile_path)
+    violations.extend(plugin_violations)
+
+    tag_match = _HOST_TAG_RE.search(source)
+    from_match = _HOST_FROM_RE.search(source)
+    if not tag_match:
+        return violations + [
+            "Dockerfile has no `# ghcr.io/openclaw/openclaw:<tag>` + `# index: "
+            "sha256:…` pair recording the base-image version — host/plugin "
+            "compatibility cannot be verified"
+        ]
+    if not from_match:
+        return violations + [
+            "Dockerfile has no digest-pinned "
+            "`FROM ghcr.io/openclaw/openclaw@sha256:…` line"
+        ]
+
+    host_tag, recorded_digest = tag_match.group(1), tag_match.group(2)
+    if from_match.group(1) != recorded_digest:
+        # Without this the tag comment is decoration: someone could bump the
+        # FROM digest and leave a stale tag, and the version check below would
+        # then be comparing against a version that is not actually deployed.
+        violations.append(
+            f"Dockerfile FROM digest {from_match.group(1)[:19]}… does not match "
+            f"the digest recorded for tag {host_tag} "
+            f"({recorded_digest[:19]}…) — update the comment and the FROM "
+            f"together, or the version below is not the one being built"
+        )
+    if plugin_version and _version_key(host_tag) < _version_key(plugin_version):
+        violations.append(
+            f"OpenClaw base image {host_tag} is older than amazon-bedrock-provider "
+            f"{plugin_version}, which requires openclaw >= {plugin_version}. "
+            f"`npm pack` does not enforce peerDependencies, so this mismatch "
+            f"would ship. Move the host and plugin together."
+        )
+    return violations
+
+
 def check_prompt_caching_reachable(
     config: dict, dockerfile_path: str,
 ) -> List[str]:
@@ -160,15 +259,16 @@ def check_prompt_caching_reachable(
             model_id = model.get("id")
             if not isinstance(model_id, str) or not model_id:
                 continue
-            lowered = model_id.lower()
-            required = next(
-                (
-                    minimum
-                    for token, minimum in _CACHE_CAPABLE_PLUGIN_MIN.items()
-                    if token in lowered
-                ),
-                None,
-            )
+            candidates = _match_candidates(model_id)
+            # Lowest minimum among ALL matching tokens: the plugin caches as
+            # soon as any one of its rules fires, so requiring the strictest
+            # match would over-report.
+            matched = [
+                minimum
+                for token, minimum in _CACHE_CAPABLE_PLUGIN_MIN.items()
+                if any(token in candidate for candidate in candidates)
+            ]
+            required = min(matched, key=_version_key) if matched else None
             if required is None:
                 violations.append(
                     f"{provider_name}/{model_id}: cacheRetention={retention!r} is "
@@ -269,8 +369,11 @@ def run_checks(
         check_context_windows(config)
         + check_apikey_hydration(config, wrapper_path)
         + check_prompt_caching_reachable(config, dockerfile_path)
+        + check_host_plugin_compatibility(dockerfile_path)
     )
-    return violations, config
+    # parse_pinned_plugin_version runs in both Dockerfile checks, so the same
+    # pin complaint can arrive twice. De-duplicate, order-preserving.
+    return list(dict.fromkeys(violations)), config
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -295,7 +398,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print(
         "OK — openclaw.json context windows + apiKey hydration paths + "
-        "prompt-caching reachability consistent."
+        "prompt-caching reachability + host/plugin compatibility consistent."
     )
     return 0
 

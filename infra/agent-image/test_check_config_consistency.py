@@ -144,6 +144,47 @@ class PromptCachingReachabilityTests(unittest.TestCase):
             [],
         )
 
+    def test_claude_4_model_is_not_falsely_rejected(self):
+        # Codex P2 on PR #1388: the plugin's `-4-` rule caches every versioned
+        # Claude 4 id, so omitting that token from the table would BLOCK a valid
+        # model rollout. This gate must not fail in that direction.
+        for model_id in (
+            "us.anthropic.claude-sonnet-4-5-20250929",
+            "anthropic.claude-opus-4-1",
+        ):
+            cfg = {
+                "agents": {"defaults": {"params": {"cacheRetention": "long"}}},
+                "models": {"providers": {"amazon-bedrock": {
+                    "models": [{"id": model_id}]}}},
+            }
+            self.assertEqual(
+                ccc.check_prompt_caching_reachable(
+                    cfg, self._dockerfile("2026.6.11")),
+                [], f"{model_id} matches the plugin's -4- rule",
+            )
+
+    def test_dotted_model_id_matches_via_normalized_candidate(self):
+        # The plugin also tries a `[\s_.:]+ -> -` normalized candidate, which is
+        # how a dotted id reaches the `-4-` rule. Testing only the raw id would
+        # under-match and reject a model the plugin actually caches.
+        cfg = {
+            "agents": {"defaults": {"params": {"cacheRetention": "long"}}},
+            "models": {"providers": {"amazon-bedrock": {
+                "models": [{"id": "anthropic.claude.sonnet.4.5"}]}}},
+        }
+        self.assertEqual(
+            ccc.check_prompt_caching_reachable(cfg, self._dockerfile("2026.6.11")),
+            [],
+        )
+
+    def test_lowest_matching_minimum_wins(self):
+        # An id matching several tokens caches as soon as ANY rule fires, so the
+        # gate must require the LOWEST minimum, not the strictest.
+        self.assertEqual(
+            ccc._match_candidates("US.Anthropic.Claude-Sonnet-4-5"),
+            ("us.anthropic.claude-sonnet-4-5", "us-anthropic-claude-sonnet-4-5"),
+        )
+
     def test_unknown_model_is_flagged_not_silently_passed(self):
         # A new model nobody checked against the allowlist must fail loudly —
         # silently assuming caching works is the whole bug.
@@ -187,6 +228,84 @@ class PromptCachingReachabilityTests(unittest.TestCase):
             fh.write("FROM scratch\n")
         v = ccc.check_prompt_caching_reachable(self.CONFIG, p)
         self.assertTrue(any("no `npm pack" in item for item in v))
+
+
+class HostPluginCompatibilityTests(unittest.TestCase):
+    """`npm pack` never enforces peerDependencies — this gate is the only check.
+
+    Codex P2 on PR #1388: the rollback path the Dockerfile documents (revert the
+    base image, leave the plugin) produces an incompatible pair that every other
+    check here passes.
+    """
+
+    BETA = ("2026.7.1-beta.2",
+            "sha256:" + "0e5680d7d58d3b6c08afa0fc992f4ad319b5586f60923e1985b7c6f838c535d5")
+    STABLE = ("2026.7.1",
+              "sha256:" + "6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c")
+
+    def _dockerfile(self, host, digest, plugin, from_digest=None):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "Dockerfile")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(
+                f"#   ghcr.io/openclaw/openclaw:{host}\n"
+                f"#   index: {digest}\n"
+                f"FROM ghcr.io/openclaw/openclaw@{from_digest or digest}\n"
+                f"RUN npm pack @openclaw/amazon-bedrock-provider@{plugin} && \\\n"
+                f"    tar -xzf openclaw-amazon-bedrock-provider-{plugin}.tgz && \\\n"
+                f"    rm openclaw-amazon-bedrock-provider-{plugin}.tgz\n"
+            )
+        return p
+
+    def test_matched_host_and_plugin_pass(self):
+        self.assertEqual(
+            ccc.check_host_plugin_compatibility(
+                self._dockerfile(*self.STABLE, "2026.7.1")),
+            [],
+        )
+
+    def test_host_rolled_back_alone_is_flagged(self):
+        v = ccc.check_host_plugin_compatibility(
+            self._dockerfile(*self.BETA, "2026.7.1"))
+        self.assertEqual(len(v), 1)
+        self.assertIn("older than amazon-bedrock-provider", v[0])
+
+    def test_host_and_plugin_rolled_back_together_pass(self):
+        # The documented, correct rollback must not be blocked.
+        self.assertEqual(
+            ccc.check_host_plugin_compatibility(
+                self._dockerfile(*self.BETA, "2026.6.11")),
+            [],
+        )
+
+    def test_from_digest_diverging_from_the_recorded_tag_is_flagged(self):
+        # Otherwise the tag comment is decoration and the version comparison
+        # above is made against something that is not being built.
+        v = ccc.check_host_plugin_compatibility(
+            self._dockerfile(*self.STABLE, "2026.7.1",
+                             from_digest=self.BETA[1]))
+        self.assertTrue(any("does not match the digest recorded" in x for x in v))
+
+    def test_missing_tag_comment_is_flagged(self):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "Dockerfile")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(
+                f"FROM ghcr.io/openclaw/openclaw@{self.STABLE[1]}\n"
+                "RUN npm pack @openclaw/amazon-bedrock-provider@2026.7.1 && \\\n"
+                "    tar -xzf openclaw-amazon-bedrock-provider-2026.7.1.tgz && \\\n"
+                "    rm openclaw-amazon-bedrock-provider-2026.7.1.tgz\n"
+            )
+        v = ccc.check_host_plugin_compatibility(p)
+        self.assertTrue(any("recording the base-image version" in x for x in v))
+
+    def test_repo_dockerfile_host_and_plugin_agree(self):
+        # Guards the live pin, not a fixture.
+        here = os.path.dirname(os.path.abspath(__file__))
+        self.assertEqual(
+            ccc.check_host_plugin_compatibility(os.path.join(here, "Dockerfile")),
+            [],
+        )
 
 
 class RealFilesTests(unittest.TestCase):
