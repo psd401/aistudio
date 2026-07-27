@@ -146,6 +146,7 @@
     "153-workspace-upload-reservations.sql",
     "154-workspace-upload-reservation-nullable-leases.sql",
     "155-unified-content-migration-retirement.sql",
-    "156-oneroster-user-role-source.sql"
+    "156-oneroster-user-role-source.sql",
+    "157-rooms.sql"
   ]
 }

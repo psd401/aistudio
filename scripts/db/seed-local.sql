@@ -104,7 +104,7 @@ ON CONFLICT (user_id, role_id) DO NOTHING;
 -- ============================================================================
 -- Capabilities (role-gated UI features; successor to the legacy tools table)
 -- ============================================================================
--- hasCapabilityAccess() reads from capabilities/role_capabilities. Seed ALL 8
+-- hasCapabilityAccess() reads from capabilities/role_capabilities. Seed all
 -- identifiers from CAPABILITY_MANIFEST (lib/capabilities/manifest.ts) so local
 -- test users keep access immediately on a freshly seeded DB — before the
 -- boot-time manifest sync has run:
@@ -113,6 +113,7 @@ ON CONFLICT (user_id, role_id) DO NOTHING;
 -- - knowledge-repositories: repositories, prompt library
 -- - decision-capture, voice-mode: Nexus features
 -- - atrium-content: Atrium content workspace (/atrium)
+-- - rooms-manage: teacher room composition (/rooms/manage)
 -- - internal-performance-monitoring, internal-system-administration: internal
 --   monitoring/admin APIs (would 403 for admin until first server boot otherwise)
 -- These are marked source='manual' here; the boot-time manifest sync flips
@@ -125,6 +126,7 @@ INSERT INTO capabilities (identifier, name, description, is_active, source) VALU
 ('decision-capture', 'Decision Capture', 'Extract and capture decisions from meeting transcripts into the context graph', true, 'manual'),
 ('voice-mode', 'Voice Mode', 'Real-time voice conversations in Nexus using AI speech providers', true, 'manual'),
 ('atrium-content', 'Atrium Content', 'Create and manage Atrium documents, artifacts, and collections', true, 'manual'),
+('rooms-manage', 'Room Management', 'Compose class rooms from roster sections and assign approved assistants', true, 'manual'),
 ('internal-performance-monitoring', 'Internal Performance Monitoring', 'Access internal performance monitoring dashboards and metrics.', true, 'manual'),
 ('internal-system-administration', 'Internal System Administration', 'Access internal system administration tooling and diagnostics.', true, 'manual')
 ON CONFLICT (identifier) DO UPDATE SET
@@ -139,16 +141,16 @@ SELECT r.id, c.id
 FROM roles r
 CROSS JOIN capabilities c
 WHERE r.name = 'administrator'
-  AND c.identifier IN ('assistant-architect', 'model-compare', 'knowledge-repositories', 'decision-capture', 'voice-mode', 'atrium-content', 'internal-performance-monitoring', 'internal-system-administration')
+  AND c.identifier IN ('assistant-architect', 'model-compare', 'knowledge-repositories', 'decision-capture', 'voice-mode', 'atrium-content', 'rooms-manage', 'internal-performance-monitoring', 'internal-system-administration')
 ON CONFLICT (role_id, capability_id) DO NOTHING;
 
--- Grant assistant-architect and model-compare to staff role
+-- Grant staff-facing capabilities to staff role
 INSERT INTO role_capabilities (role_id, capability_id)
 SELECT r.id, c.id
 FROM roles r
 CROSS JOIN capabilities c
 WHERE r.name = 'staff'
-  AND c.identifier IN ('assistant-architect', 'model-compare')
+  AND c.identifier IN ('assistant-architect', 'model-compare', 'rooms-manage')
 ON CONFLICT (role_id, capability_id) DO NOTHING;
 
 -- ============================================================================
@@ -189,7 +191,8 @@ INSERT INTO navigation_items (id, label, icon, link, parent_id, capability_id, r
 (7, 'Assistant Architect', 'IconBraces', '/utilities/assistant-architect', 19, (SELECT id FROM capabilities WHERE identifier = 'assistant-architect'), NULL, 10, true, NULL, 'link'),
 (37, 'Model Compare', 'IconRobot', '/compare', 19, (SELECT id FROM capabilities WHERE identifier = 'model-compare'), NULL, 20, true, 'Compare AI model responses side-by-side', 'link'),
 (36, 'Repositories', 'IconBuildingBank', '/repositories', 19, (SELECT id FROM capabilities WHERE identifier = 'knowledge-repositories'), NULL, 30, true, '', 'link'),
-(47, 'Decision Capture', 'IconGitBranch', '/nexus/decision-capture', 19, (SELECT id FROM capabilities WHERE identifier = 'decision-capture'), NULL, 40, true, 'Extract decisions from meeting transcripts', 'link');
+(47, 'Decision Capture', 'IconGitBranch', '/nexus/decision-capture', 19, (SELECT id FROM capabilities WHERE identifier = 'decision-capture'), NULL, 40, true, 'Extract decisions from meeting transcripts', 'link'),
+(48, 'Rooms', 'IconUsersGroup', '/rooms/manage', 21, (SELECT id FROM capabilities WHERE identifier = 'rooms-manage'), NULL, 10, true, 'Compose roster sections, individual students, and approved assistants', 'link');
 
 -- Update sequence to max id + 1
 SELECT setval('navigation_items_id_seq', (SELECT MAX(id) FROM navigation_items));

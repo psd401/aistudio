@@ -1,7 +1,7 @@
 {
   "summary": {
     "actions": 29,
-    "features": 9,
+    "features": 10,
     "scopes": 29,
     "agentInvocableActions": 22
   },
@@ -703,6 +703,16 @@
       "identifier": "model-compare",
       "name": "Model Compare",
       "description": "Compare AI model responses side-by-side.",
+      "defaultRoles": [
+        "administrator",
+        "staff"
+      ],
+      "humanDriven": true
+    },
+    {
+      "identifier": "rooms-manage",
+      "name": "Room Management",
+      "description": "Compose class rooms from roster sections and assign approved assistants.",
       "defaultRoles": [
         "administrator",
         "staff"

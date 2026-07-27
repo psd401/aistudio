@@ -244,6 +244,14 @@ export * from "./tables/oneroster-user-roles";
 export * from "./tables/oneroster-enrollments";
 
 // ============================================
+// Teacher-managed Rooms (Epic #1308 / Issue #1313)
+// ============================================
+export * from "./tables/rooms";
+export * from "./tables/room-classes";
+export * from "./tables/room-members";
+export * from "./tables/room-resources";
+
+// ============================================
 // Relations
 // ============================================
 export * from "./relations";
