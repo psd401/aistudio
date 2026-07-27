@@ -219,27 +219,24 @@ async function uploadAndShare(bytes, userEmail) {
   return publishArtifact(bytes, '.png', 'image/png');
 }
 
-async function main() {
-  const args = parseArgs(process.argv);
-  if (args.help) {
-    console.log('Usage: generate.js --user <email> --prompt "<text>" [--image <path>] [--size auto|1024x1024|1024x1536|1536x1024] [--quality auto|low|medium|high] [--background auto|opaque|transparent]');
-    process.exit(0);
-  }
+function optionalString(value, fallback) {
+  return value && value !== true ? String(value) : fallback;
+}
+
+function validateGenerationOptions(args) {
   if (!validateEmail(args.user)) {
     fail('--user is required and must be a valid email', 'bad_args');
   }
   if (!args.prompt || args.prompt === true) {
     fail('--prompt is required', 'bad_args');
   }
-  // Cap prompt length to prevent sending excessively large payloads to OpenAI
-  // and to give a clear client-side error instead of a raw upstream_error.
   if (args.prompt.length > 4000) {
     fail('--prompt must be 4000 characters or fewer', 'bad_args');
   }
-  const size = args.size > 0 && args.size !== true ? String(args.size) : 'auto';
-  const quality = args.quality && args.quality !== true ? String(args.quality) : 'auto';
-  const background = args.background && args.background !== true ? String(args.background) : 'auto';
 
+  const size = args.size > 0 ? optionalString(args.size, 'auto') : 'auto';
+  const quality = optionalString(args.quality, 'auto');
+  const background = optionalString(args.background, 'auto');
   if (!ALLOWED_SIZES.has(size)) {
     fail(`Invalid --size. Allowed: ${[...ALLOWED_SIZES].join(', ')}`, 'bad_args');
   }
@@ -249,13 +246,23 @@ async function main() {
   if (!ALLOWED_BACKGROUNDS.has(background)) {
     fail(`Invalid --background. Allowed: ${[...ALLOWED_BACKGROUNDS].join(', ')}`, 'bad_args');
   }
+  const imagePath = optionalString(args.image, null);
+  return { size, quality, background, imagePath };
+}
+
+async function main() {
+  const args = parseArgs(process.argv);
+  if (args.help) {
+    console.log('Usage: generate.js --user <email> --prompt "<text>" [--image <path>] [--size auto|1024x1024|1024x1536|1536x1024] [--quality auto|low|medium|high] [--background auto|opaque|transparent]');
+    process.exit(0);
+  }
+  const { size, quality, background, imagePath } = validateGenerationOptions(args);
 
   // --image is optional. When present it must be a real path (no `--image`
   // followed by another flag) and selects the /v1/images/edits endpoint so
   // the model composes the output around the reference image. Validate the
   // path up front — same tier as size/quality checks — so we fail fast
   // before the RBAC shell-out + API-key fetch.
-  const imagePath = args.image && args.image !== true ? String(args.image) : null;
   // Load + validate the reference image up front so a bad path fails fast,
   // before the RBAC shell-out and API-key fetch.
   const referenceImage = imagePath ? loadReferenceImage(imagePath) : null;

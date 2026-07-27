@@ -20,7 +20,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, desc, or, ilike, sql, inArray, isNull } from "drizzle-orm";
+import { eq, and, desc, or, ilike, sql, inArray, isNull, type SQL } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   promptLibrary,
@@ -215,52 +215,27 @@ export async function getPromptSettingsById(
   return row?.settings ?? null;
 }
 
-/**
- * List prompts with filtering and pagination
- */
-export async function listPrompts(
+function buildPromptListConditions(
   options: PromptSearchOptions,
   currentUserId: number
-): Promise<{ prompts: PromptListItem[]; total: number }> {
-  const {
-    visibility = "all",
-    tags,
-    search,
-    filterUserId,
-    sort = "recent",
-    limit = 20,
-    offset = 0,
-  } = options;
-
-  // Build where conditions
-  const conditions = [sql`${promptLibrary.deletedAt} IS NULL`];
+): SQL[] {
+  const { visibility = "all", search, filterUserId } = options;
+  const conditions: SQL[] = [sql`${promptLibrary.deletedAt} IS NULL`];
+  const approvedPublic = and(
+    eq(promptLibrary.visibility, "public"),
+    eq(promptLibrary.moderationStatus, "approved")
+  )!;
 
   if (visibility === "private") {
     conditions.push(eq(promptLibrary.userId, currentUserId));
   } else if (visibility === "public") {
-    conditions.push(
-      and(
-        eq(promptLibrary.visibility, "public"),
-        eq(promptLibrary.moderationStatus, "approved")
-      )!
-    );
+    conditions.push(approvedPublic);
   } else {
-    // Show user's own prompts OR approved public prompts
-    conditions.push(
-      or(
-        eq(promptLibrary.userId, currentUserId),
-        and(
-          eq(promptLibrary.visibility, "public"),
-          eq(promptLibrary.moderationStatus, "approved")
-        )
-      )!
-    );
+    conditions.push(or(eq(promptLibrary.userId, currentUserId), approvedPublic)!);
   }
-
   if (filterUserId) {
     conditions.push(eq(promptLibrary.userId, filterUserId));
   }
-
   if (search) {
     const searchPattern = `%${search}%`;
     conditions.push(
@@ -271,6 +246,24 @@ export async function listPrompts(
       )!
     );
   }
+  return conditions;
+}
+
+/**
+ * List prompts with filtering and pagination
+ */
+export async function listPrompts(
+  options: PromptSearchOptions,
+  currentUserId: number
+): Promise<{ prompts: PromptListItem[]; total: number }> {
+  const {
+    tags,
+    sort = "recent",
+    limit = 20,
+    offset = 0,
+  } = options;
+
+  const conditions = buildPromptListConditions(options, currentUserId);
 
   // Get total count
   const countResult = await executeQuery(

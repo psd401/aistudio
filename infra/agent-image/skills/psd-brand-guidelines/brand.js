@@ -137,6 +137,71 @@ function usage() {
   process.stdout.write(lines.join('\n') + '\n');
 }
 
+function printColors(config) {
+  for (const [name, hex] of Object.entries(flatColors(config))) {
+    process.stdout.write(`  ${name}: ${hex}\n`);
+  }
+}
+
+function printColor(config, argv) {
+  if (argv.length < 2) {
+    process.stderr.write('Usage: brand.js color <name>\n');
+    process.exit(1);
+  }
+  const color = getColor(config, argv[1]);
+  if (!color) {
+    process.stderr.write(`Color '${argv[1]}' not found. Available: ${Object.keys(flatColors(config)).join(', ')}\n`);
+    process.exit(1);
+  }
+  process.stdout.write(JSON.stringify(color, null, 2) + '\n');
+}
+
+function printLogo(config, argv) {
+  try {
+    const logoPath = resolveLogo(config, argv[1] || 'light', argv[2] || 'wide');
+    process.stdout.write(`Logo path: ${logoPath}\n`);
+  } catch (err) {
+    process.stderr.write(`Error: ${err.message}\n`);
+    process.exit(1);
+  }
+}
+
+function validateBrandPrompt(config, argv) {
+  if (argv.length < 2) {
+    process.stderr.write('Usage: brand.js validate "<prompt>"\n');
+    process.exit(1);
+  }
+  const result = validatePrompt(config, argv.slice(1).join(' '));
+  process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+  if (!result.valid) process.exit(1);
+}
+
+function printApplication(config, argv) {
+  if (argv.length < 2) {
+    process.stderr.write('Usage: brand.js application <presentations|documents|digital>\n');
+    process.exit(1);
+  }
+  const context = config.applications[argv[1]];
+  if (!context) {
+    process.stderr.write(`Unknown context '${argv[1]}'. Available: ${Object.keys(config.applications).join(', ')}\n`);
+    process.exit(1);
+  }
+  process.stdout.write(JSON.stringify(context, null, 2) + '\n');
+}
+
+const COMMAND_HANDLERS = {
+  colors: printColors,
+  color: printColor,
+  typography: (config) =>
+    process.stdout.write(JSON.stringify(config.typography, null, 2) + '\n'),
+  logo: printLogo,
+  logos: (config) => {
+    for (const logoPath of allLogoPaths(config)) process.stdout.write(logoPath + '\n');
+  },
+  validate: validateBrandPrompt,
+  application: printApplication,
+};
+
 function main(argv) {
   if (argv.length === 0) {
     usage();
@@ -144,76 +209,9 @@ function main(argv) {
   }
   const config = loadConfig();
   const command = argv[0];
-
-  if (command === 'colors') {
-    const colors = flatColors(config);
-    for (const [name, hex] of Object.entries(colors)) {
-      process.stdout.write(`  ${name}: ${hex}\n`);
-    }
-    return;
-  }
-
-  if (command === 'color') {
-    if (argv.length < 2) {
-      process.stderr.write('Usage: brand.js color <name>\n');
-      process.exit(1);
-    }
-    const color = getColor(config, argv[1]);
-    if (!color) {
-      process.stderr.write(`Color '${argv[1]}' not found. Available: ${Object.keys(flatColors(config)).join(', ')}\n`);
-      process.exit(1);
-    }
-    process.stdout.write(JSON.stringify(color, null, 2) + '\n');
-    return;
-  }
-
-  if (command === 'typography') {
-    process.stdout.write(JSON.stringify(config.typography, null, 2) + '\n');
-    return;
-  }
-
-  if (command === 'logo') {
-    const bg = argv[1] || 'light';
-    const space = argv[2] || 'wide';
-    try {
-      const p = resolveLogo(config, bg, space);
-      process.stdout.write(`Logo path: ${p}\n`);
-    } catch (err) {
-      process.stderr.write(`Error: ${err.message}\n`);
-      process.exit(1);
-    }
-    return;
-  }
-
-  if (command === 'logos') {
-    const paths = allLogoPaths(config);
-    for (const p of paths) process.stdout.write(p + '\n');
-    return;
-  }
-
-  if (command === 'validate') {
-    if (argv.length < 2) {
-      process.stderr.write('Usage: brand.js validate "<prompt>"\n');
-      process.exit(1);
-    }
-    const prompt = argv.slice(1).join(' ');
-    const result = validatePrompt(config, prompt);
-    process.stdout.write(JSON.stringify(result, null, 2) + '\n');
-    if (!result.valid) process.exit(1);
-    return;
-  }
-
-  if (command === 'application') {
-    if (argv.length < 2) {
-      process.stderr.write('Usage: brand.js application <presentations|documents|digital>\n');
-      process.exit(1);
-    }
-    const ctx = config.applications[argv[1]];
-    if (!ctx) {
-      process.stderr.write(`Unknown context '${argv[1]}'. Available: ${Object.keys(config.applications).join(', ')}\n`);
-      process.exit(1);
-    }
-    process.stdout.write(JSON.stringify(ctx, null, 2) + '\n');
+  const handler = COMMAND_HANDLERS[command];
+  if (handler) {
+    handler(config, argv);
     return;
   }
 
