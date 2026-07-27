@@ -158,247 +158,297 @@ export function shouldRollbackDestinationUpload(
   return destinationUploaded && !promotionCommitted;
 }
 
-export const handler: Handler<SkillBuildEvent> = async (event) => {
-  const log = createLogger({ skillId: event.skillId });
+type DependencyAuditEvidence =
+  | { status: "not_applicable" }
+  | { status: "clean"; lockfileSha256: string };
 
-  // Validate scope at the entry point so a bad value fails fast with a
-  // clear error rather than surfacing as a CAST failure inside the RDS Data
-  // API call. The DB enum is the source of truth for allowed values.
-  if (
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+type SkillBuildTerminalResult = {
+  status: string;
+  skillId: string;
+  findings?: ScanFindings;
+  error?: string;
+};
+
+type DependencyBuildResult =
+  | { ok: true; evidence: DependencyAuditEvidence }
+  | { ok: false; result: SkillBuildTerminalResult };
+
+interface SkillBuildState {
+  claimed: boolean;
+  destinationUploaded: boolean;
+  promotionCommitted: boolean;
+}
+
+function validateSkillBuildEvent(
+  event: SkillBuildEvent,
+  log: LambdaLogger,
+): void {
+  const valid =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
       event.skillId,
-    ) ||
-    typeof event.ownerKey !== "string" ||
-    !/^[^\s@/]+@[^\s@/]+\.[^\s@/]+$/.test(event.ownerKey) ||
-    !isValidScope(event.scope) ||
-    !Number.isSafeInteger(event.version) ||
-    event.version < 1 ||
-    !/^[0-9a-f-]{36}$/i.test(event.scanLeaseId) ||
-    typeof event.idempotencyKey !== "string" ||
-    event.idempotencyKey.length === 0 ||
-    event.idempotencyKey.length > 256
-  ) {
+    ) &&
+    typeof event.ownerKey === "string" &&
+    /^[^\s@/]+@[^\s@/]+\.[^\s@/]+$/.test(event.ownerKey) &&
+    isValidScope(event.scope) &&
+    Number.isSafeInteger(event.version) &&
+    event.version >= 1 &&
+    /^[0-9a-f-]{36}$/i.test(event.scanLeaseId) &&
+    typeof event.idempotencyKey === "string" &&
+    event.idempotencyKey.length > 0 &&
+    event.idempotencyKey.length <= 256;
+  if (!valid) {
     log.error("Invalid scope in SkillBuildEvent", { scope: event.scope });
     throw new Error("Invalid skill scan event");
   }
   assertSkillScanPrefixes(event);
+}
 
+async function handleFlaggedScan(
+  event: SkillBuildEvent,
+  findings: ScanFindings,
+): Promise<SkillBuildTerminalResult | null> {
+  if (findings.secrets.length === 0 && findings.pii.length === 0) return null;
+  if (!(await updateSkillStatus(event, "flagged", findings))) {
+    return { status: "stale", skillId: event.skillId };
+  }
+  await writeAuditLog(event.skillId, "scan_flagged", event.actorUserId, {
+    findings: findings.summary,
+  });
+  return {
+    status: "flagged",
+    skillId: event.skillId,
+    findings,
+  };
+}
+
+async function recordDependencyFailure(
+  event: SkillBuildEvent,
+  status: "build_failed" | "audit_error",
+  message: string,
+): Promise<DependencyBuildResult> {
+  const findings: ScanFindings = {
+    secrets: [],
+    pii: [],
+    npmAudit: [],
+    skillMdLint: [
+      status === "build_failed"
+        ? `npm install failed: ${message.substring(0, 500)}`
+        : `Dependency audit unavailable: ${message.substring(0, 500)}`,
+    ],
+    summary:
+      status === "build_failed"
+        ? "npm install failed"
+        : "dependency audit unavailable",
+  };
+  if (!(await updateSkillStatus(event, "flagged", findings))) {
+    return {
+      ok: false,
+      result: { status: "stale", skillId: event.skillId },
+    };
+  }
+  await writeAuditLog(
+    event.skillId,
+    status === "build_failed" ? "build_failed" : "audit_error",
+    event.actorUserId,
+    { error: message.substring(0, 500) },
+  );
+  return {
+    ok: false,
+    result: {
+      status,
+      skillId: event.skillId,
+      ...(status === "audit_error"
+        ? { findings }
+        : { error: message.substring(0, 500) }),
+    },
+  };
+}
+
+async function buildAndAuditDependencies(
+  event: SkillBuildEvent,
+  workDir: string,
+  log: LambdaLogger,
+): Promise<DependencyBuildResult> {
+  if (!validatedFs.existsSync(path.join(workDir, "package.json"))) {
+    return { ok: true, evidence: { status: "not_applicable" } };
+  }
+  try {
+    installSkillDependencies(workDir);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return recordDependencyFailure(event, "build_failed", message);
+  }
+
+  let npmAudit: { severity: string; title: string }[];
+  let lockfileSha256: string;
+  try {
+    npmAudit = auditInstalledDeps(workDir, log);
+    lockfileSha256 = hashDependencyLockfile(workDir);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return recordDependencyFailure(event, "audit_error", message);
+  }
+  const vulnerable = npmAudit.some(
+    (finding) =>
+      finding.severity === "critical" || finding.severity === "high",
+  );
+  if (!vulnerable) {
+    return { ok: true, evidence: { status: "clean", lockfileSha256 } };
+  }
+  const findings: ScanFindings = {
+    secrets: [],
+    pii: [],
+    npmAudit,
+    skillMdLint: [],
+    summary: `${npmAudit.length} high/critical npm vulnerability(ies)`,
+  };
+  if (!(await updateSkillStatus(event, "flagged", findings))) {
+    return {
+      ok: false,
+      result: { status: "stale", skillId: event.skillId },
+    };
+  }
+  await writeAuditLog(event.skillId, "scan_flagged", event.actorUserId, {
+    findings: findings.summary,
+    dependencyAudit: {
+      status: "vulnerable",
+      lockfileSha256,
+      findings: npmAudit,
+    },
+  });
+  return {
+    ok: false,
+    result: { status: "flagged", skillId: event.skillId, findings },
+  };
+}
+
+async function promoteBuiltSkill(
+  event: SkillBuildEvent,
+  workDir: string,
+  evidence: DependencyAuditEvidence,
+  state: SkillBuildState,
+): Promise<SkillBuildTerminalResult & { scope?: ValidScope; s3Key?: string }> {
+  await uploadSkillToS3(workDir, event.destinationPrefix);
+  state.destinationUploaded = true;
+  const promotionApplied = await updateSkillAfterPromotion(
+    event,
+    event.scope,
+    event.destinationPrefix,
+  );
+  if (!promotionApplied) {
+    await deleteSkillPrefix(event.destinationPrefix);
+    state.destinationUploaded = false;
+    return { status: "stale", skillId: event.skillId };
+  }
+  state.promotionCommitted = true;
+  const action =
+    event.scope === "shared" ? "promoted_to_shared" : "auto_promoted";
+  await writeAuditLog(event.skillId, action, event.actorUserId, {
+    destinationPrefix: event.destinationPrefix,
+    dependencyAudit: evidence,
+  });
+  return {
+    status: "promoted",
+    skillId: event.skillId,
+    scope: event.scope,
+    s3Key: event.destinationPrefix,
+  };
+}
+
+async function handleSkillBuildError(
+  event: SkillBuildEvent,
+  state: SkillBuildState,
+  error: unknown,
+  log: LambdaLogger,
+): Promise<void> {
+  const message = error instanceof Error ? error.message : String(error);
+  log.error("Skill build failed", { error: message });
+  if (
+    shouldRollbackDestinationUpload(
+      state.destinationUploaded,
+      state.promotionCommitted,
+    )
+  ) {
+    await deleteSkillPrefix(event.destinationPrefix).catch(() => undefined);
+  }
+  if (state.claimed) {
+    await clearFailedSkillClaim(event).catch(() => undefined);
+  }
+  await writeAuditLog(event.skillId, "build_error", event.actorUserId, {
+    error: message.substring(0, 1000),
+  }).catch((auditError: unknown) => {
+    log.error("Audit log failed (non-fatal)", {
+      error:
+        auditError instanceof Error ? auditError.message : String(auditError),
+    });
+  });
+}
+
+async function finishSkillBuild(
+  event: SkillBuildEvent,
+  state: SkillBuildState,
+  workDir: string,
+  log: LambdaLogger,
+): Promise<void> {
+  if (state.claimed) {
+    await finishSkillAdmission(event, 1).catch((error: unknown) => {
+      log.error("Failed to finish skill scan admission lease", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+  try {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  } catch {
+    // Best-effort cleanup.
+  }
+}
+
+export const handler: Handler<SkillBuildEvent> = async (event) => {
+  const log = createLogger({ skillId: event.skillId });
+  validateSkillBuildEvent(event, log);
   log.info("Skill build event received", {
     s3Key: event.s3Key,
     scope: event.scope,
   });
 
   const workDir = path.join("/tmp", `skill-${event.skillId}-${Date.now()}`);
-  let claimed = false;
-  let destinationUploaded = false;
-  let promotionCommitted = false;
+  const state: SkillBuildState = {
+    claimed: false,
+    destinationUploaded: false,
+    promotionCommitted: false,
+  };
 
   try {
-    claimed = await claimSkillScan(event);
-    if (!claimed) {
+    state.claimed = await claimSkillScan(event);
+    if (!state.claimed) {
       log.warn("Ignoring stale or duplicate skill scan event", {
         version: event.version,
       });
       return { status: "stale", skillId: event.skillId };
     }
-    // 1. Download skill files from S3
     await downloadSkillFromS3(event.s3Key, workDir, log);
-
-    // 2. Run automated scan
     const findings = await scanSkill(workDir);
+    const flaggedResult = await handleFlaggedScan(event, findings);
+    if (flaggedResult) return flaggedResult;
 
-    // 3. Check if scan is clean. Dependency-vulnerability auditing does NOT run
-    // here — `npm audit` needs a resolved lockfile/node_modules, which don't
-    // exist pre-install, so it runs post-install below (REV-INFRA-062). This
-    // gate covers the pre-install secret/PII checks only.
-    const isFlagged = findings.secrets.length > 0 || findings.pii.length > 0;
-
-    if (isFlagged) {
-      // Update DB: mark as flagged with findings
-      if (!(await updateSkillStatus(event, "flagged", findings))) {
-        return { status: "stale", skillId: event.skillId };
-      }
-      await writeAuditLog(event.skillId, "scan_flagged", event.actorUserId, {
-        findings: findings.summary,
-      });
-
-      return {
-        status: "flagged",
-        skillId: event.skillId,
-        findings,
-      };
-    }
-
-    // 4. Run npm install in sandbox
-    const packageJsonPath = path.join(workDir, "package.json");
-    let dependencyAuditEvidence:
-      | { status: "not_applicable" }
-      | { status: "clean"; lockfileSha256: string };
-    if (validatedFs.existsSync(packageJsonPath)) {
-      try {
-        installSkillDependencies(workDir);
-      } catch (npmErr: unknown) {
-        const message =
-          npmErr instanceof Error ? npmErr.message : String(npmErr);
-        if (
-          !(await updateSkillStatus(event, "flagged", {
-            secrets: [],
-            pii: [],
-            npmAudit: [],
-            skillMdLint: [`npm install failed: ${message.substring(0, 500)}`],
-            summary: "npm install failed",
-          }))
-        )
-          return { status: "stale", skillId: event.skillId };
-        await writeAuditLog(event.skillId, "build_failed", event.actorUserId, {
-          error: message.substring(0, 500),
-        });
-
-        return {
-          status: "build_failed",
-          skillId: event.skillId,
-          error: message.substring(0, 500),
-        };
-      }
-
-      // 4b. Audit the *resolved* dependency tree now that `npm install` has
-      // produced a package-lock.json + node_modules. npm audit is a no-op
-      // (ENOLOCK) before install, which is why the pre-install scan could never
-      // catch dependency CVEs (REV-INFRA-062). A high/critical advisory flags
-      // the skill and skips promotion — nothing has been uploaded yet.
-      let npmAudit: { severity: string; title: string }[];
-      let lockfileSha256: string;
-      try {
-        npmAudit = auditInstalledDeps(workDir, log);
-        lockfileSha256 = hashDependencyLockfile(workDir);
-      } catch (auditErr: unknown) {
-        const message =
-          auditErr instanceof Error ? auditErr.message : String(auditErr);
-        const auditFindings: ScanFindings = {
-          secrets: [],
-          pii: [],
-          npmAudit: [],
-          skillMdLint: [
-            `Dependency audit unavailable: ${message.substring(0, 500)}`,
-          ],
-          summary: "dependency audit unavailable",
-        };
-        if (!(await updateSkillStatus(event, "flagged", auditFindings))) {
-          return { status: "stale", skillId: event.skillId };
-        }
-        await writeAuditLog(event.skillId, "audit_error", event.actorUserId, {
-          error: message.substring(0, 500),
-        });
-        return {
-          status: "audit_error",
-          skillId: event.skillId,
-          findings: auditFindings,
-        };
-      }
-      if (
-        npmAudit.some((a) => a.severity === "critical" || a.severity === "high")
-      ) {
-        const auditFindings: ScanFindings = {
-          secrets: [],
-          pii: [],
-          npmAudit,
-          skillMdLint: [],
-          summary: `${npmAudit.length} high/critical npm vulnerability(ies)`,
-        };
-        if (!(await updateSkillStatus(event, "flagged", auditFindings))) {
-          return { status: "stale", skillId: event.skillId };
-        }
-        await writeAuditLog(event.skillId, "scan_flagged", event.actorUserId, {
-          findings: auditFindings.summary,
-          dependencyAudit: {
-            status: "vulnerable",
-            lockfileSha256,
-            findings: npmAudit,
-          },
-        });
-
-        return {
-          status: "flagged",
-          skillId: event.skillId,
-          findings: auditFindings,
-        };
-      }
-      dependencyAuditEvidence = { status: "clean", lockfileSha256 };
-    } else {
-      dependencyAuditEvidence = { status: "not_applicable" };
-    }
-
-    // 5. Upload built skill to destination prefix
-    await uploadSkillToS3(workDir, event.destinationPrefix);
-    destinationUploaded = true;
-
-    // 6. Update DB: mark as clean, update scope and s3_key
-    const promotionApplied = await updateSkillAfterPromotion(
+    const dependencyResult = await buildAndAuditDependencies(
       event,
-      event.scope,
-      event.destinationPrefix,
+      workDir,
+      log,
     );
-    if (!promotionApplied) {
-      await deleteSkillPrefix(event.destinationPrefix);
-      destinationUploaded = false;
-      return { status: "stale", skillId: event.skillId };
-    }
-    // The clean DB row now authoritatively points at these approved bytes.
-    // Audit is a subsequent side effect and must never make the catch path
-    // delete a destination that has already been durably committed.
-    promotionCommitted = true;
-
-    // 7. Write audit log
-    const action =
-      event.scope === "shared" ? "promoted_to_shared" : "auto_promoted";
-    await writeAuditLog(event.skillId, action, event.actorUserId, {
-      destinationPrefix: event.destinationPrefix,
-      dependencyAudit: dependencyAuditEvidence,
-    });
-
-    return {
-      status: "promoted",
-      skillId: event.skillId,
-      scope: event.scope,
-      s3Key: event.destinationPrefix,
-    };
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    log.error("Skill build failed", { error: message });
-
-    if (
-      shouldRollbackDestinationUpload(destinationUploaded, promotionCommitted)
-    ) {
-      await deleteSkillPrefix(event.destinationPrefix).catch(() => undefined);
-    }
-    if (claimed) {
-      await clearFailedSkillClaim(event).catch(() => undefined);
-    }
-    await writeAuditLog(event.skillId, "build_error", event.actorUserId, {
-      error: message.substring(0, 1000),
-    }).catch((auditErr: unknown) => {
-      const auditMsg =
-        auditErr instanceof Error ? auditErr.message : String(auditErr);
-      log.error("Audit log failed (non-fatal)", { error: auditMsg });
-    });
-
-    throw err;
+    if (!dependencyResult.ok) return dependencyResult.result;
+    return promoteBuiltSkill(
+      event,
+      workDir,
+      dependencyResult.evidence,
+      state,
+    );
+  } catch (error) {
+    await handleSkillBuildError(event, state, error, log);
+    throw error;
   } finally {
-    if (claimed)
-      await finishSkillAdmission(event, 1).catch((finishError: unknown) => {
-        log.error("Failed to finish skill scan admission lease", {
-          error:
-            finishError instanceof Error
-              ? finishError.message
-              : String(finishError),
-        });
-      });
-    // Cleanup /tmp
-    try {
-      fs.rmSync(workDir, { recursive: true, force: true });
-    } catch {
-      // Best-effort cleanup
-    }
+    await finishSkillBuild(event, state, workDir, log);
   }
 };
 
