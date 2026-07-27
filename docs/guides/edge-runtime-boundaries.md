@@ -93,6 +93,16 @@ graph from every Edge entrypoint — `middleware.ts`, `auth.ts`, and
 (`bun run test:ci`) with no build step, so a regression is caught on the PR that
 introduces it. If you create a *new* Edge entrypoint, add it to `ENTRIES`.
 
+CI also performs a real `next build --webpack` and runs
+`scripts/test/auth-edge-production.smoke.cjs`. That smoke loads the emitted
+middleware through Next's own Edge sandbox, presents an expired signed session,
+stubs a successful Cognito `REFRESH_TOKEN_AUTH` response inside the sandbox,
+and requires the protected request to remain authenticated with a refreshed
+session cookie. It decodes that cookie to verify the refreshed credentials were
+persisted and still belong to the signed session subject. This is the
+production-packaging boundary test; keep the static graph test as the faster,
+more precise explanation when an import regresses.
+
 ### The one allowlisted edge
 
 `auth.ts` still reaches `@/lib/auth/agent-token-sync` → `@/lib/logger` →

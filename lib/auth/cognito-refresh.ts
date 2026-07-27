@@ -267,6 +267,35 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined
 }
 
+/**
+ * Read the subject from a JWT payload without trusting its declared shape.
+ *
+ * This is deliberately not signature verification. The token arrived directly
+ * from the configured Cognito HTTPS endpoint in the same response as the access
+ * token, so TLS and the exact-host allowlist authenticate its source. The
+ * remaining application-level invariant is that Cognito refreshed the same
+ * subject as the signed NextAuth session that supplied the refresh token.
+ *
+ * Keep this implementation on Web Platform primitives so it remains usable in
+ * Next's Edge Runtime (no Buffer or Node crypto).
+ */
+function readJwtSubject(token: string): string | undefined {
+  const parts = token.split(".")
+  if (parts.length !== 3 || !parts[1]) return undefined
+
+  try {
+    const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/")
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=")
+    const bytes = Uint8Array.from(atob(padded), (character) => character.charCodeAt(0))
+    const payload: unknown = JSON.parse(new TextDecoder().decode(bytes))
+
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined
+    return nonEmptyString((payload as Record<string, unknown>).sub)
+  } catch {
+    return undefined
+  }
+}
+
 interface InitiateAuthResponse {
   AuthenticationResult?: {
     AccessToken?: string
@@ -557,6 +586,24 @@ async function performRefresh(params: RefreshCognitoTokensParams): Promise<Refre
       idTokenType: typeof authResult?.IdToken,
     })
     return { ok: false, reason: "transient", message: "Incomplete token refresh response" }
+  }
+
+  // Bind Cognito's response to the existing signed session before installing
+  // either credential into that session. Without this check, a mismatched
+  // refresh-token/session pairing would create a confused session whose local
+  // identity belongs to one user while its Cognito credentials belong to
+  // another. Malformed JWT payloads fail closed for the same reason.
+  if (readJwtSubject(idToken) !== tokenSub) {
+    log.warn("Refreshed token subject did not match requested session", {
+      tokenSub,
+      status: "error",
+      durationMs: elapsedMs(),
+    })
+    return {
+      ok: false,
+      reason: "permanent",
+      message: "Refreshed token subject mismatch",
+    }
   }
 
   const lifetimeSeconds = resolveLifetimeSeconds(authResult.ExpiresIn)

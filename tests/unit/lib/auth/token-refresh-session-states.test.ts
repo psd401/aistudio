@@ -22,6 +22,9 @@ import { __resetRefreshStateForTests } from "@/lib/auth/cognito-refresh"
 const ISSUER = "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc123"
 const REFRESH_TOKEN = "r".repeat(64)
 const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000
+const FRESH_ID_TOKEN = `eyJhbGciOiJub25lIn0.${Buffer.from(
+  JSON.stringify({ sub: "user-1" }),
+).toString("base64url")}.signature`
 
 // `@types/jest`'s `jest.Mock<TReturn, TArgs>` takes the RETURN type first and the
 // argument tuple second — it is not `jest.Mock<TSignature>` (that form belongs to
@@ -77,14 +80,18 @@ describe("#1297 session states", () => {
 
     fetchMock.mockResolvedValue(
       jsonResponse(200, {
-        AuthenticationResult: { AccessToken: "fresh-access", IdToken: "fresh-id", ExpiresIn: 43200 },
+        AuthenticationResult: {
+          AccessToken: "fresh-access",
+          IdToken: FRESH_ID_TOKEN,
+          ExpiresIn: 43200,
+        },
       }),
     )
 
     const refreshed = await refreshAccessToken(token)
     expect(refreshed).not.toBeNull()
     expect(refreshed?.accessToken).toBe("fresh-access")
-    expect(refreshed?.idToken).toBe("fresh-id")
+    expect(refreshed?.idToken).toBe(FRESH_ID_TOKEN)
     expect(refreshed?.expiresAt).toBeGreaterThan(Date.now())
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
@@ -95,7 +102,11 @@ describe("#1297 session states", () => {
 
     fetchMock.mockResolvedValue(
       jsonResponse(200, {
-        AuthenticationResult: { AccessToken: "fresh-access", IdToken: "fresh-id", ExpiresIn: 43200 },
+        AuthenticationResult: {
+          AccessToken: "fresh-access",
+          IdToken: FRESH_ID_TOKEN,
+          ExpiresIn: 43200,
+        },
       }),
     )
 

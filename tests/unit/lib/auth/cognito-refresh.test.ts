@@ -19,6 +19,8 @@ import {
 
 const ISSUER = "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc123"
 const VALID_REFRESH_TOKEN = "a".repeat(64)
+const idTokenFor = (sub: string): string =>
+  `eyJhbGciOiJub25lIn0.${Buffer.from(JSON.stringify({ sub })).toString("base64url")}.signature`
 
 // `@types/jest`'s `jest.Mock<TReturn, TArgs>` takes the RETURN type first and the
 // argument tuple second — it is not `jest.Mock<TSignature>` (that form belongs to
@@ -152,7 +154,7 @@ describe("refreshCognitoTokens", () => {
       jsonResponse(200, {
         AuthenticationResult: {
           AccessToken: "new-access",
-          IdToken: "new-id",
+          IdToken: idTokenFor("user-1"),
           ExpiresIn: 3600,
         },
       }),
@@ -167,7 +169,7 @@ describe("refreshCognitoTokens", () => {
     expect(result.ok).toBe(true)
     if (!result.ok) throw new Error("expected success")
     expect(result.tokens.accessToken).toBe("new-access")
-    expect(result.tokens.idToken).toBe("new-id")
+    expect(result.tokens.idToken).toBe(idTokenFor("user-1"))
     // REFRESH_TOKEN_AUTH does not rotate the refresh token — keep the old one so
     // the session stays refreshable.
     expect(result.tokens.refreshToken).toBe(VALID_REFRESH_TOKEN)
@@ -193,7 +195,7 @@ describe("refreshCognitoTokens", () => {
       jsonResponse(200, {
         AuthenticationResult: {
           AccessToken: "a",
-          IdToken: "b",
+          IdToken: idTokenFor("user-1"),
           RefreshToken: "rotated",
           ExpiresIn: 60,
         },
@@ -210,7 +212,9 @@ describe("refreshCognitoTokens", () => {
   it("falls back to the configured lifetime when ExpiresIn is absent", async () => {
     process.env.COGNITO_ACCESS_TOKEN_LIFETIME_SECONDS = "7200"
     fetchMock.mockResolvedValue(
-      jsonResponse(200, { AuthenticationResult: { AccessToken: "a", IdToken: "b" } }),
+      jsonResponse(200, {
+        AuthenticationResult: { AccessToken: "a", IdToken: idTokenFor("user-1") },
+      }),
     )
 
     const before = Date.now()
@@ -274,6 +278,48 @@ describe("refreshCognitoTokens", () => {
     expect(result).toMatchObject({ ok: false, reason: "transient" })
   })
 
+  it("fails closed when the refreshed ID token belongs to a different subject", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        AuthenticationResult: {
+          AccessToken: "victim-access",
+          IdToken: idTokenFor("victim-subject"),
+        },
+      }),
+    )
+
+    const result = await refreshCognitoTokens({
+      refreshToken: VALID_REFRESH_TOKEN,
+      tokenSub: "attacker-subject",
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "permanent",
+      message: expect.stringMatching(/subject mismatch/i),
+    })
+    expect(result).not.toHaveProperty("tokens")
+  })
+
+  it("fails closed when the refreshed ID token is not a JWT", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        AuthenticationResult: {
+          AccessToken: "fresh-access",
+          IdToken: "not-a-jwt",
+        },
+      }),
+    )
+
+    const result = await refreshCognitoTokens({
+      refreshToken: VALID_REFRESH_TOKEN,
+      tokenSub: "user-1",
+    })
+
+    expect(result).toMatchObject({ ok: false, reason: "permanent" })
+    expect(result).not.toHaveProperty("tokens")
+  })
+
   // A 2xx body whose token fields are the wrong TYPE is the dangerous case: the
   // values are truthy, so a bare `!authResult.AccessToken` check waves them
   // through and they end up installed in the NextAuth JWT as session tokens.
@@ -309,7 +355,11 @@ describe("refreshCognitoTokens", () => {
     // NEXT cycle — a failure that surfaces an hour later, far from its cause.
     fetchMock.mockResolvedValue(
       jsonResponse(200, {
-        AuthenticationResult: { AccessToken: "a", IdToken: "b", RefreshToken: 42 },
+        AuthenticationResult: {
+          AccessToken: "a",
+          IdToken: idTokenFor("user-1"),
+          RefreshToken: 42,
+        },
       }),
     )
 
@@ -374,7 +424,9 @@ describe("refreshCognitoTokens", () => {
 
   it("never follows a redirect — the refresh token is in the request body", async () => {
     fetchMock.mockResolvedValue(
-      jsonResponse(200, { AuthenticationResult: { AccessToken: "a", IdToken: "b" } }),
+      jsonResponse(200, {
+        AuthenticationResult: { AccessToken: "a", IdToken: idTokenFor("user-1") },
+      }),
     )
 
     await refreshCognitoTokens({ refreshToken: VALID_REFRESH_TOKEN, tokenSub: "user-1" })
@@ -388,7 +440,11 @@ describe("refreshCognitoTokens", () => {
     // the module's never-throws contract.
     fetchMock.mockResolvedValue(
       jsonResponse(200, {
-        AuthenticationResult: { AccessToken: "a", IdToken: "b", ExpiresIn: 1e15 },
+        AuthenticationResult: {
+          AccessToken: "a",
+          IdToken: idTokenFor("user-1"),
+          ExpiresIn: 1e15,
+        },
       }),
     )
 
@@ -406,7 +462,9 @@ describe("refreshCognitoTokens", () => {
     // sub alone let a revoked session ride along on a valid sibling's refresh.
     const otherToken = "b".repeat(64)
     fetchMock.mockResolvedValue(
-      jsonResponse(200, { AuthenticationResult: { AccessToken: "a", IdToken: "b" } }),
+      jsonResponse(200, {
+        AuthenticationResult: { AccessToken: "a", IdToken: idTokenFor("user-1") },
+      }),
     )
 
     await Promise.all([
@@ -428,7 +486,11 @@ describe("refreshCognitoTokens", () => {
     const a = refreshCognitoTokens({ refreshToken: VALID_REFRESH_TOKEN, tokenSub: "user-1" })
     const b = refreshCognitoTokens({ refreshToken: VALID_REFRESH_TOKEN, tokenSub: "user-1" })
 
-    release(jsonResponse(200, { AuthenticationResult: { AccessToken: "a", IdToken: "b" } }))
+    release(
+      jsonResponse(200, {
+        AuthenticationResult: { AccessToken: "a", IdToken: idTokenFor("user-1") },
+      }),
+    )
 
     const [ra, rb] = await Promise.all([a, b])
     expect(fetchMock).toHaveBeenCalledTimes(1)
@@ -437,7 +499,9 @@ describe("refreshCognitoTokens", () => {
 
   it("releases the dedup slot so a later refresh still runs", async () => {
     fetchMock.mockResolvedValue(
-      jsonResponse(200, { AuthenticationResult: { AccessToken: "a", IdToken: "b" } }),
+      jsonResponse(200, {
+        AuthenticationResult: { AccessToken: "a", IdToken: idTokenFor("user-1") },
+      }),
     )
 
     await refreshCognitoTokens({ refreshToken: VALID_REFRESH_TOKEN, tokenSub: "user-1" })
@@ -447,7 +511,9 @@ describe("refreshCognitoTokens", () => {
 
   it("rate limits a user after the per-window budget is spent", async () => {
     fetchMock.mockResolvedValue(
-      jsonResponse(200, { AuthenticationResult: { AccessToken: "a", IdToken: "b" } }),
+      jsonResponse(200, {
+        AuthenticationResult: { AccessToken: "a", IdToken: idTokenFor("burst-user") },
+      }),
     )
 
     for (let i = 0; i < 8; i++) {
@@ -466,6 +532,11 @@ describe("refreshCognitoTokens", () => {
     expect(fetchMock).toHaveBeenCalledTimes(8)
 
     // A different user is unaffected.
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        AuthenticationResult: { AccessToken: "a", IdToken: idTokenFor("other-user") },
+      }),
+    )
     const other = await refreshCognitoTokens({
       refreshToken: VALID_REFRESH_TOKEN,
       tokenSub: "other-user",
@@ -475,7 +546,9 @@ describe("refreshCognitoTokens", () => {
 
   it("grants polling contexts a larger budget", async () => {
     fetchMock.mockResolvedValue(
-      jsonResponse(200, { AuthenticationResult: { AccessToken: "a", IdToken: "b" } }),
+      jsonResponse(200, {
+        AuthenticationResult: { AccessToken: "a", IdToken: idTokenFor("poller") },
+      }),
     )
 
     for (let i = 0; i < 12; i++) {
