@@ -335,6 +335,135 @@ function validateSecretInputs(name: string, value: string, requestId: string): A
   return null
 }
 
+type CredentialRequestRecord =
+  typeof psdAgentCredentialRequests.$inferSelect
+type ProvisionAction = "created" | "rotated"
+
+async function writeRequestedSecret(params: {
+  request: CredentialRequestRecord
+  requestId: number
+  secretId: string
+  secretValue: string
+  scope: "shared" | "user"
+  environment: string
+  log: ReturnType<typeof createLogger>
+}): Promise<{ action: ProvisionAction; wroteSecret: boolean }> {
+  if (process.env.NODE_ENV === "development") {
+    params.log.info("Local dev — skipping Secrets Manager write", {
+      secretId: params.secretId,
+    })
+    return { action: "created", wroteSecret: false }
+  }
+  const {
+    PutSecretValueCommand,
+    CreateSecretCommand,
+    TagResourceCommand,
+    ResourceNotFoundException,
+  } = await import("@aws-sdk/client-secrets-manager")
+  const client = await getProvisionSecretsClient()
+  const tags = [
+    { Key: "Environment", Value: params.environment },
+    { Key: "ManagedBy", Value: "aistudio" },
+    { Key: "OwnerEmail", Value: params.request.requestedBy },
+  ]
+  try {
+    await client.send(
+      new PutSecretValueCommand({
+        SecretId: params.secretId,
+        SecretString: params.secretValue,
+      })
+    )
+    await client.send(
+      new TagResourceCommand({ SecretId: params.secretId, Tags: tags })
+    )
+    params.log.info("Secret rotated", { secretId: params.secretId })
+    return { action: "rotated", wroteSecret: true }
+  } catch (putError) {
+    if (!(putError instanceof ResourceNotFoundException)) throw putError
+  }
+  try {
+    await client.send(
+      new CreateSecretCommand({
+        Name: params.secretId,
+        SecretString: params.secretValue,
+        Description: `Agent credential ${params.request.credentialName} (${params.scope}) — request #${params.requestId}`,
+        Tags: tags,
+      })
+    )
+    params.log.info("Secret created", { secretId: params.secretId })
+    return { action: "created", wroteSecret: true }
+  } catch (createError: unknown) {
+    if (
+      !(createError instanceof Error) ||
+      createError.name !== "ResourceExistsException"
+    ) {
+      throw createError
+    }
+  }
+  await client.send(
+    new PutSecretValueCommand({
+      SecretId: params.secretId,
+      SecretString: params.secretValue,
+    })
+  )
+  await client.send(
+    new TagResourceCommand({ SecretId: params.secretId, Tags: tags })
+  )
+  params.log.info("Secret rotated (race recovery)", {
+    secretId: params.secretId,
+  })
+  return { action: "rotated", wroteSecret: true }
+}
+
+async function fulfillCredentialRequest(params: {
+  request: CredentialRequestRecord
+  requestId: number
+  adminUserId: number
+  scope: "shared" | "user"
+  secretId: string
+  action: ProvisionAction
+}) {
+  return executeTransaction(
+    async (tx) => {
+      const result = await tx
+        .update(psdAgentCredentialRequests)
+        .set({
+          status: "fulfilled",
+          resolvedBy: params.adminUserId,
+          resolvedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(psdAgentCredentialRequests.id, params.requestId),
+            eq(psdAgentCredentialRequests.status, "pending"),
+          ),
+        )
+        .returning({ id: psdAgentCredentialRequests.id })
+      if (result.length === 0) {
+        throw ErrorFactories.bizInvalidState(
+          "fulfill credential request",
+          "not pending",
+          "pending"
+        )
+      }
+      await tx.insert(psdAgentCredentialsAudit).values({
+        credentialName: params.request.credentialName,
+        scope: params.scope,
+        action: params.action,
+        actorUserId: params.adminUserId,
+        details: {
+          secretId: params.secretId,
+          requestId: params.requestId,
+          requestedBy: params.request.requestedBy,
+        },
+      })
+      return result
+    },
+    "agentCredentials.fulfillAndAudit",
+  )
+}
+
 /**
  * Provision the secret for a pending credential request in one atomic
  * admin action:
@@ -428,109 +557,30 @@ export async function provisionCredentialFromRequest(
       adminUserId,
     })
 
-    let action: "created" | "rotated"
-
-    if (process.env.NODE_ENV === "development") {
-      // Local dev shortcut — skip the actual Secrets Manager write so
-      // contributors can iterate on the UI without AWS creds.
-      log.info("Local dev — skipping Secrets Manager write", { secretId })
-      action = "created"
-    } else {
-      const {
-        PutSecretValueCommand,
-        CreateSecretCommand,
-        TagResourceCommand,
-        ResourceNotFoundException,
-      } = await import("@aws-sdk/client-secrets-manager")
-      const client = await getProvisionSecretsClient()
-      // Tags must align with the ECS task role's TagKeys condition
-      // (Environment, ManagedBy, OwnerEmail) — see ecs-service.ts.
-      // Extra tags like costCenter/requestedBy/scope would cause
-      // AccessDenied from the IAM boundary.
-      const tags = [
-        { Key: "Environment", Value: environment },
-        { Key: "ManagedBy", Value: "aistudio" },
-        { Key: "OwnerEmail", Value: request.requestedBy },
-      ]
-      try {
-        await client.send(
-          new PutSecretValueCommand({ SecretId: secretId, SecretString: secretValue }),
-        )
-        await client.send(new TagResourceCommand({ SecretId: secretId, Tags: tags }))
-        action = "rotated"
-        smWriteSucceeded = true
-        log.info("Secret rotated", { secretId })
-      } catch (putError) {
-        if (!(putError instanceof ResourceNotFoundException)) throw putError
-        try {
-          await client.send(
-            new CreateSecretCommand({
-              Name: secretId,
-              SecretString: secretValue,
-              Description: `Agent credential ${request.credentialName} (${scope}) — request #${requestId}`,
-              Tags: tags,
-            }),
-          )
-          action = "created"
-          smWriteSucceeded = true
-          log.info("Secret created", { secretId })
-        } catch (createError: unknown) {
-          const handleNestedBranch1 = () => {
-            if (!(createError instanceof Error) || createError.name !== "ResourceExistsException") {
-            throw createError
-          }
-          }
-          handleNestedBranch1()
-          await client.send(
-            new PutSecretValueCommand({ SecretId: secretId, SecretString: secretValue }),
-          )
-          await client.send(new TagResourceCommand({ SecretId: secretId, Tags: tags }))
-          action = "rotated"
-          smWriteSucceeded = true
-          log.info("Secret rotated (race recovery)", { secretId })
-        }
-      }
-    }
+    const writeResult = await writeRequestedSecret({
+      request,
+      requestId,
+      secretId,
+      secretValue,
+      scope,
+      environment,
+      log,
+    })
+    const { action } = writeResult
+    smWriteSucceeded = writeResult.wroteSecret
 
     // Step 3 + 4: atomically flip request to fulfilled + write audit
     // entry. The WHERE includes status='pending' so a concurrent admin
     // clicking the same button gets a clean "already fulfilled" error
     // instead of silently overwriting the secret.
-    const updated = await executeTransaction(
-      async (tx) => {
-        const result = await tx
-          .update(psdAgentCredentialRequests)
-          .set({
-            status: "fulfilled",
-            resolvedBy: adminUserId,
-            resolvedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(psdAgentCredentialRequests.id, requestId),
-              eq(psdAgentCredentialRequests.status, "pending"),
-            ),
-          )
-          .returning({ id: psdAgentCredentialRequests.id })
-        if (result.length === 0) {
-          throw ErrorFactories.bizInvalidState(
-            "fulfill credential request",
-            "not pending",
-            "pending"
-          )
-        }
-        await tx.insert(psdAgentCredentialsAudit).values({
-          credentialName: request.credentialName,
-          scope,
-          action,
-          actorUserId: adminUserId,
-          details: { secretId, requestId, requestedBy: request.requestedBy },
-        })
-        return result
-      },
-      "agentCredentials.fulfillAndAudit",
-    )
+    const updated = await fulfillCredentialRequest({
+      request,
+      requestId,
+      adminUserId,
+      scope,
+      secretId,
+      action,
+    })
     if (updated.length === 0) {
       return handleError(
         new Error("Concurrent provisioning"),
