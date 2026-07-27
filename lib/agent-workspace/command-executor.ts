@@ -238,16 +238,7 @@ function validateGmailModify(argv: readonly string[]): void {
   }
 }
 
-/**
- * Validate the complete argv at the trusted web boundary. The model-facing
- * runtime has no Google credential and no gws binary; only commands accepted
- * here are executed with an owner-derived token.
- */
-export function validateWorkspaceCommand(command: WorkspaceCommand): void {
-  const { argv, scope } = command
-  if (scope !== "agent" && scope !== "user") {
-    throw new Error("Workspace scope must be agent or user")
-  }
+function validateWorkspaceArguments(argv: readonly string[]): void {
   if (!Array.isArray(argv) || argv.length === 0 || argv.length > MAX_ARGUMENTS) {
     throw new Error("Workspace command has an invalid argument count")
   }
@@ -269,8 +260,15 @@ export function validateWorkspaceCommand(command: WorkspaceCommand): void {
   if (writesResponseToCallerPath(argv)) {
     throw new Error("Workspace command cannot write response data to a file")
   }
+}
 
-  const { operation, action, tokens } = normalizedOperation(argv)
+function validateWorkspaceMutation(
+  argv: readonly string[],
+  scope: WorkspaceCommand["scope"],
+  operation: string,
+  action: string,
+  tokens: string[]
+): void {
   if (READ_ACTIONS.has(action)) {
     if (tokens.slice(0, -1).some((token) => MUTATING_ACTIONS.has(token))) {
       throw new Error("Workspace read command contains a mutation operation")
@@ -297,6 +295,21 @@ export function validateWorkspaceCommand(command: WorkspaceCommand): void {
     throw new Error("This operation must use the agent-owned Workspace account")
   }
   if (operation === "gmail users messages modify") validateGmailModify(argv)
+}
+
+/**
+ * Validate the complete argv at the trusted web boundary. The model-facing
+ * runtime has no Google credential and no gws binary; only commands accepted
+ * here are executed with an owner-derived token.
+ */
+export function validateWorkspaceCommand(command: WorkspaceCommand): void {
+  const { argv, scope } = command
+  if (scope !== "agent" && scope !== "user") {
+    throw new Error("Workspace scope must be agent or user")
+  }
+  validateWorkspaceArguments(argv)
+  const { operation, action, tokens } = normalizedOperation(argv)
+  validateWorkspaceMutation(argv, scope, operation, action, tokens)
 }
 
 export interface WorkspaceScopeGap {

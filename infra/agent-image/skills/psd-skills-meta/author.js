@@ -18,6 +18,76 @@ const {
   skillBroker,
 } = require('./common');
 
+function validateAuthorArgs(args) {
+  if (!args.name) fail('--name is required (skill name)');
+  if (!args.summary) fail('--summary is required (one-line summary for catalog)');
+  if (!args.skill_md) {
+    fail('--skill-md is required (base64-encoded SKILL.md content)');
+  }
+  if (/^psd-/i.test(args.name)) {
+    fail(
+      `Skill name "${args.name}" uses the reserved "psd-" prefix. ` +
+      'User-authored skills must start with the caller\'s username ' +
+      '(e.g. "hagelk-weekly-digest"). The "psd-" prefix is reserved ' +
+      'for system-provided skills bundled into /opt/psd-skills/.'
+    );
+  }
+}
+
+function decodeSkillMarkdown(encoded) {
+  let content;
+  try {
+    content = Buffer.from(encoded, 'base64').toString('utf-8');
+  } catch {
+    fail('--skill-md must be valid base64');
+  }
+  if (!content.startsWith('---')) {
+    fail('SKILL.md must start with YAML frontmatter (---)');
+  }
+  const fmEnd = content.indexOf('---', 3);
+  if (fmEnd === -1) {
+    fail('SKILL.md frontmatter not closed (missing second ---)');
+  }
+  const frontmatter = content.slice(3, fmEnd);
+  if (!frontmatter.includes('name:')) {
+    fail('SKILL.md frontmatter missing required "name" field');
+  }
+  if (!frontmatter.includes('summary:')) {
+    fail('SKILL.md frontmatter missing required "summary" field');
+  }
+  return content;
+}
+
+function parseFiles(rawFiles) {
+  if (!rawFiles) return [];
+  try {
+    const files = JSON.parse(rawFiles);
+    if (!Array.isArray(files)) {
+      fail('--files must be a JSON array of {path, content_base64} objects');
+    }
+    return files;
+  } catch {
+    fail('--files must be valid JSON');
+  }
+}
+
+function validateFiles(files) {
+  const path = require('node:path');
+  const fakeRoot = '/safe-skill-root';
+  for (const file of files) {
+    if (!file.path || !file.content_base64) {
+      fail('Each file entry must have "path" and "content_base64" fields');
+    }
+    if (file.path.includes('..') || file.path.startsWith('/')) {
+      fail(`Invalid file path: "${file.path}" — no traversal or absolute paths allowed`);
+    }
+    const resolved = path.resolve(fakeRoot, file.path);
+    if (!resolved.startsWith(fakeRoot + path.sep) && resolved !== fakeRoot) {
+      fail(`Invalid file path: "${file.path}" — resolves outside skill directory`);
+    }
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
@@ -28,77 +98,10 @@ async function main() {
     process.exit(0);
   }
   rejectAuthorityArgs(args);
-
-  if (!args.name) fail('--name is required (skill name)');
-  if (!args.summary) fail('--summary is required (one-line summary for catalog)');
-  if (!args.skill_md) fail('--skill-md is required (base64-encoded SKILL.md content)');
-
-  // Reserved-prefix enforcement. The `psd-` prefix is reserved for
-  // system-provided skills bundled into /opt/psd-skills/ at image build
-  // time. User-authored skills must use a `{username}-{name}` form so
-  // they cannot shadow or collide with district-owned skills.
-  if (/^psd-/i.test(args.name)) {
-    fail(
-      `Skill name "${args.name}" uses the reserved "psd-" prefix. ` +
-      'User-authored skills must start with the caller\'s username ' +
-      '(e.g. "hagelk-weekly-digest"). The "psd-" prefix is reserved ' +
-      'for system-provided skills bundled into /opt/psd-skills/.'
-    );
-  }
-
-  // Decode SKILL.md
-  let skillMdContent;
-  try {
-    skillMdContent = Buffer.from(args.skill_md, 'base64').toString('utf-8');
-  } catch {
-    fail('--skill-md must be valid base64');
-  }
-
-  // Validate SKILL.md frontmatter
-  if (!skillMdContent.startsWith('---')) {
-    fail('SKILL.md must start with YAML frontmatter (---)');
-  }
-  const fmEnd = skillMdContent.indexOf('---', 3);
-  if (fmEnd === -1) {
-    fail('SKILL.md frontmatter not closed (missing second ---)');
-  }
-  const fm = skillMdContent.slice(3, fmEnd);
-  if (!fm.includes('name:')) {
-    fail('SKILL.md frontmatter missing required "name" field');
-  }
-  if (!fm.includes('summary:')) {
-    fail('SKILL.md frontmatter missing required "summary" field');
-  }
-
-  // Parse additional files
-  let files = [];
-  if (args.files) {
-    try {
-      files = JSON.parse(args.files);
-      if (!Array.isArray(files)) {
-        fail('--files must be a JSON array of {path, content_base64} objects');
-      }
-    } catch {
-      fail('--files must be valid JSON');
-    }
-  }
-
-  // Validate file entries
-  const path = require('node:path');
-  const fakeRoot = '/safe-skill-root';
-  for (const file of files) {
-    if (!file.path || !file.content_base64) {
-      fail('Each file entry must have "path" and "content_base64" fields');
-    }
-    // Security: prevent path traversal via .., absolute paths, and symlink-resolved paths
-    if (file.path.includes('..') || file.path.startsWith('/')) {
-      fail(`Invalid file path: "${file.path}" — no traversal or absolute paths allowed`);
-    }
-    const resolved = path.resolve(fakeRoot, file.path);
-    if (!resolved.startsWith(fakeRoot + path.sep) && resolved !== fakeRoot) {
-      fail(`Invalid file path: "${file.path}" — resolves outside skill directory`);
-    }
-  }
+  validateAuthorArgs(args);
+  const skillMdContent = decodeSkillMarkdown(args.skill_md);
+  const files = parseFiles(args.files);
+  validateFiles(files);
 
   try {
     const result = await skillBroker('author', {

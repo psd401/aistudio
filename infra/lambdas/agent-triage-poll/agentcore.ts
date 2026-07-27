@@ -446,50 +446,46 @@ export function parseAgentReply(raw: string): TaskCreationResult {
  *     extracted in order
  *   - Markdown code-fence wrappers stripped
  */
-function extractBodies(raw: string): string[] {
+function envelopeText(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const envelope = value as Record<string, unknown>;
+  const text = ["result", "message", "reply", "content"]
+    .map((key) => envelope[key])
+    .find((candidate): candidate is string => typeof candidate === "string");
+  return text;
+}
+
+function extractSseBodies(raw: string): string[] {
   const bodies: string[] = [];
-
-  // Detect SSE format: at least one line starts with `data: `.
-  const sseLines = raw.match(/^data:\s.+$/gm);
-  if (sseLines && sseLines.length > 0) {
-    for (const line of sseLines) {
-      const payload = line.replace(/^data:\s/, "").trim();
-      // The terminating `[DONE]` sentinel is from OpenAI-style streams;
-      // AgentCore doesn't use it but be safe.
-      if (payload === "[DONE]") continue;
-      try {
-        const obj = JSON.parse(payload);
-        const text =
-          (obj as { result?: string }).result ??
-          (obj as { message?: string }).message ??
-          (obj as { reply?: string }).reply ??
-          (obj as { content?: string }).content;
-        if (typeof text === "string" && text.trim()) {
-          bodies.push(stripFences(text));
-        }
-      } catch {
-        // Non-JSON SSE event; ignore.
+  for (const line of raw.match(/^data:\s.+$/gm) ?? []) {
+    const payload = line.replace(/^data:\s/, "").trim();
+    if (payload === "[DONE]") continue;
+    try {
+      const text = envelopeText(JSON.parse(payload));
+      if (text?.trim()) {
+        bodies.push(stripFences(text));
       }
+    } catch {
+      // Non-JSON SSE event; ignore.
     }
-    if (bodies.length > 0) return bodies;
   }
+  return bodies;
+}
 
-  // Try the whole thing as a single JSON envelope.
+function extractJsonEnvelope(raw: string): string | undefined {
   try {
-    const obj = JSON.parse(raw.trim());
-    if (obj && typeof obj === "object") {
-      const text =
-        (obj as { result?: string }).result ??
-        (obj as { message?: string }).message ??
-        (obj as { reply?: string }).reply ??
-        (obj as { content?: string }).content;
-      if (typeof text === "string") return [stripFences(text)];
-    }
+    const text = envelopeText(JSON.parse(raw.trim()));
+    return text === undefined ? undefined : stripFences(text);
   } catch {
-    /* not JSON */
+    return undefined;
   }
+}
 
-  // Plain text — return as-is, with any code-fence wrapping stripped.
+function extractBodies(raw: string): string[] {
+  const sseBodies = extractSseBodies(raw);
+  if (sseBodies.length > 0) return sseBodies;
+  const jsonBody = extractJsonEnvelope(raw);
+  if (jsonBody !== undefined) return [jsonBody];
   return [stripFences(raw)];
 }
 
