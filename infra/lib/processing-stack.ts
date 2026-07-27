@@ -21,6 +21,74 @@ import { VPCProvider, EnvironmentConfig } from "./constructs";
 import { UnifiedContentProcessing } from "./constructs/processing/unified-content-processing";
 import { GoogleContentSync } from "./constructs/processing/google-content-sync";
 
+/**
+ * Bundle a TypeScript Lambda from infra/lambdas/<dirName> at synth time.
+ *
+ * These functions previously deployed their directories as raw assets, so the
+ * committed compiled index.js twins WERE the deployed code and could silently
+ * go stale relative to their .ts sources (textract-processor shipped without
+ * the chunkText lineStart fix for weeks this way). Compiling at synth time
+ * makes that class of staleness impossible; the twins are no longer committed.
+ *
+ * The bundle vendors production node_modules so each Lambda runs against its
+ * own pinned dependency versions (file-processor needs pdf-parse 1.x — the
+ * shared processing layer's build script installs pdf-parse unpinned, which
+ * resolves to the incompatible 2.x API). Versions are pinned by each Lambda's
+ * committed bun.lock, installed with --frozen-lockfile; the lockfile is part
+ * of the SOURCE asset hash, so dependency updates deploy via lockfile changes
+ * rather than drifting silently under a range-only manifest.
+ *
+ * Same local-bun/Docker-npm split and SOURCE asset hash as the agent-router
+ * asset in agent-platform-stack — SOURCE because output-derived hashes have
+ * let CDK skip Lambda code updates when only TypeScript source changed.
+ */
+function bundledLambdaAsset(dirName: string): lambda.AssetCode {
+  const sourceDir = path.join(__dirname, "../lambdas", dirName);
+  return lambda.Code.fromAsset(sourceDir, {
+    assetHashType: cdk.AssetHashType.SOURCE,
+    // Local install/build state and tests are not bundling inputs; excluding
+    // them keeps the source hash identical across machines. bun.lock is NOT
+    // excluded: it pins the vendored dependencies, so it must invalidate the
+    // hash when it changes.
+    exclude: ["node_modules", "dist", "__tests__", "*.js", "*.d.ts"],
+    bundling: {
+      image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+      local: {
+        tryBundle(outputDir: string): boolean {
+          try {
+            // Build with all deps (including devDependencies for tsc),
+            // pinned exactly by the committed lockfile
+            execSync("bun install --frozen-lockfile && bunx tsc", { cwd: sourceDir, stdio: "inherit" });
+            execSync(`cp -r dist/* ${outputDir}/`, { cwd: sourceDir, stdio: "inherit" });
+            // Vendor production-only deps into the bundle at locked versions
+            execSync(`cp package.json bun.lock ${outputDir}/`, { cwd: sourceDir, stdio: "inherit" });
+            execSync("bun install --production --frozen-lockfile", { cwd: outputDir, stdio: "inherit" });
+            return true;
+          } catch (e) {
+            // Log the error so build failures aren't silently swallowed.
+            // eslint-disable-next-line no-console
+            console.error(`Local bundling failed for ${dirName}, falling back to Docker:`, e);
+            return false;
+          }
+        },
+      },
+      command: [
+        "bash", "-c",
+        [
+          // Docker fallback: npm is what the bundling image ships (no bun, so
+          // the bun.lock pin cannot be honored here — same accepted divergence
+          // as the agent-router asset; the local bun path is primary)
+          "npm install",
+          "npm run build",
+          "cp -r dist/* /asset-output/",
+          "cp package.json /asset-output/",
+          "cd /asset-output && npm install --production",
+        ].join(" && "),
+      ],
+    },
+  });
+}
+
 export interface ProcessingStackProps extends cdk.StackProps {
   environment: "dev" | "prod";
   // Cross-stack dependencies now retrieved from SSM Parameter Store
@@ -246,9 +314,7 @@ export class ProcessingStack extends cdk.Stack {
     const fileProcessor = new lambda.Function(this, "FileProcessor", {
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: "index.handler",
-      code: lambda.Code.fromAsset(
-        path.join(__dirname, "../lambdas/file-processor"),
-      ),
+      code: bundledLambdaAsset("file-processor"),
       timeout: cdk.Duration.minutes(10),
       memorySize: 1024, // Optimized via PowerTuning from 3GB
       environment: {
@@ -309,9 +375,7 @@ export class ProcessingStack extends cdk.Stack {
     const urlProcessor = new lambda.Function(this, "URLProcessor", {
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: "index.handler",
-      code: lambda.Code.fromAsset(
-        path.join(__dirname, "../lambdas/url-processor"),
-      ),
+      code: bundledLambdaAsset("url-processor"),
       timeout: cdk.Duration.minutes(5),
       memorySize: 1024, // 1GB
       environment: {
@@ -640,9 +704,7 @@ export class ProcessingStack extends cdk.Stack {
     const textractProcessor = new lambda.Function(this, "TextractProcessor", {
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: "index.handler",
-      code: lambda.Code.fromAsset(
-        path.join(__dirname, "../lambdas/textract-processor"),
-      ),
+      code: bundledLambdaAsset("textract-processor"),
       timeout: cdk.Duration.minutes(10),
       memorySize: 1024, // 1GB
       environment: {
