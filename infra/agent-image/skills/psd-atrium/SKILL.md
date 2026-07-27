@@ -1,6 +1,6 @@
 ---
 name: psd-atrium
-summary: Read and write AI Studio Atrium content — PSD's collaborative document + live-artifact workspace with an intranet publishing flow. Find/read/create/edit/archive/delete documents and artifacts and publish them, version-based, over /api/v1/content. Artifacts fully support HTML/CSS/JavaScript (including <script>/<style>).
+summary: Read and write AI Studio Atrium content — PSD's collaborative document + live-artifact workspace with an intranet publishing flow. Find/read/create/edit/archive/delete documents and artifacts, embed images in them, and publish them, version-based, over /api/v1/content. Artifacts fully support HTML/CSS/JavaScript (including <script>/<style>).
 description: Use this to work with Atrium, PSD's collaborative content workspace in AI Studio (documents + interactive artifacts, with an internal "intranet" publishing flow). Find and read Atrium documents/artifacts, create new ones, edit them (append or replace), archive them, hard-delete ones you own, and publish/unpublish to a destination. Interactive artifacts fully support real HTML, CSS, and JavaScript — including <script>, <style>, and inline style="…" — pass raw code; the skill base64-encodes it automatically so nothing is stripped or blocked (do NOT work around with legacy attributes like bgcolor/width). Atrium is REAL and live — never say the district has no content workspace. Version-based: reads return the last saved version and edits create a new version; the real-time collaborative editor rail is not reachable from here.
 allowed-tools: Bash(node:*)
 ---
@@ -33,9 +33,8 @@ surfaces.
   someone snapshots a version.
 - **A document's body TEXT** is not returned by `read` at all — it lives in the
   collaborative store. `read` gives a document's metadata; only small **artifact**
-  code comes back inline. You can still **replace** a document's body with
-  `edit --mode replace` (a full new version), you just can't read the old text
-  back or `append` to it.
+  code comes back inline. Use **`read-source`** to get a document's committed
+  body text, and `edit --mode replace` to write a new one.
 
 ## Authentication & identity
 
@@ -63,10 +62,45 @@ node run.js find --kind document --query "field trip" --status published
 # `read` gives a document's metadata only. Small ARTIFACT code IS returned inline
 # (in `body`); large artifacts are offloaded to storage and not inlined.
 node run.js read --id <uuid-or-slug>
+
+# Read a DOCUMENT's committed body text. This is the one command that returns it.
+node run.js read-source --id <uuid-or-slug>
 ```
 
 `find` filters: `--kind document|artifact`, `--collection <slug|id>`, `--tag <t>`,
 `--status draft|published|archived`, `--query <title text>` (case-insensitive).
+
+`read-source` returns the last **committed** version's source. A document someone
+has open in the live editor may be **ahead** of this until a version is snapshotted
+— say so rather than presenting it as the current text.
+
+### Images (authored assets)
+
+An image belongs to **one object**. Embedding it is a three-step flow, and the
+order matters: the object must exist before an asset can be attached to it, and
+the asset must be `ready` before a version may reference it.
+
+```bash
+# 1. create the document (or use an existing one)
+# 2. attach the image — reserves, uploads, and completes in one command
+node run.js upload-asset --id <objectId> --file /tmp/panel.png --alt "Printer control panel"
+# 3. put the returned `directive` on its OWN LINE in the body, then:
+node run.js edit --id <objectId> --body "<full markdown incl. the directive>"
+
+# List what is already attached, or copy an image OUT of an object.
+node run.js list-assets --id <objectId>
+node run.js get-asset --id <objectId> --asset-id <assetId> --out /tmp/copy.png
+```
+
+- **PNG, JPEG, and WebP only**, 20 MiB max. The type is detected from the file's
+  magic bytes, not its name — renaming a PDF to `.png` is refused.
+- **Assets do not cross objects.** A directive referencing an asset owned by a
+  different object is rejected when the version is saved. To reuse an image,
+  `get-asset` it from the source object and `upload-asset` it to the new one.
+- Always give `--alt`. Without it the alt text becomes the filename, which is
+  useless to a screen reader.
+- A plain markdown `![alt](https://…)` image also works for an image already
+  hosted at a stable public URL. `data:` URIs do **not** — they are stripped.
 
 ### Create (starts **private + draft**)
 
@@ -189,6 +223,9 @@ node run.js set-visibility --id <id> --level group --grants role:staff,building:
 2. **Version-based only.** Your reads are the last saved version and your writes are
    new versions; you cannot type on the live editor rail or leave live
    comments/suggestions.
+2b. **Preserve images.** If a source document has screenshots or diagrams, carry
+   them over with `upload-asset` — do not replace a picture with a description of
+   the picture.
 3. **You act as the signed workspace owner.** Do not imply a shared service
    principal owns or authorized the operation.
 4. **Relay approval_required verbatim.** A queued public publish is not a failure —
