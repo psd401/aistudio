@@ -102,4 +102,6 @@ export interface RepositoryRetrievalRequest {
   modalities?: RetrievalModality[];
   rerank?: boolean;
   denseWeight?: number;
+  /** Migration/shadow probes can exclude pre-canonical compatibility chunks. */
+  includeLegacyCompatibility?: boolean;
 }

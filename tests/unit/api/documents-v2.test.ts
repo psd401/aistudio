@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import type { NextRequest } from 'next/server';
 
+jest.mock('@/lib/repositories/content-platform/legacy-retirement-response', () => ({
+  legacyContentRetirementResponse: jest.fn(async () => null),
+}));
+
 // Mock AWS SDK clients BEFORE importing modules that use them
 const mockDynamoSend = jest.fn();
 const mockS3Send = jest.fn();

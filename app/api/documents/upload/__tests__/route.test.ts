@@ -10,6 +10,9 @@
  */
 
 const mockGetServerSession = jest.fn()
+jest.mock("@/lib/repositories/content-platform/legacy-retirement-response", () => ({
+  legacyContentRetirementResponse: jest.fn(async () => null),
+}))
 jest.mock("@/lib/auth/server-session", () => ({
   getServerSession: (...a: unknown[]) => mockGetServerSession(...a),
 }))

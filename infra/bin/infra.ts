@@ -30,6 +30,9 @@ const standardTags = {
 // Get configuration from context
 const baseDomain = app.node.tryGetContext('baseDomain');
 const alertEmail = app.node.tryGetContext('alertEmail');
+const retireLegacyContent =
+  app.node.tryGetContext('retireLegacyContent') === true ||
+  app.node.tryGetContext('retireLegacyContent') === 'true';
 
 // Atrium artifact sandbox (#1052): comma-separated CDN origins the sandbox CSP
 // permits for artifact script-src/style-src (e.g. "https://cdnjs.cloudflare.com").
@@ -424,7 +427,9 @@ if (baseDomain) {
   devFrontendStack.addDependency(devAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
   devFrontendStack.addDependency(devAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
   devFrontendStack.addDependency(devProcessingStack); // Need processing queue and Lambda exports
-  devFrontendStack.addDependency(devDocumentProcessingStack); // Need document queue and table exports
+  if (!retireLegacyContent) {
+    devFrontendStack.addDependency(devDocumentProcessingStack);
+  }
   cdk.Tags.of(devFrontendStack).add('Environment', 'Dev');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devFrontendStack).add(key, value));
 
@@ -448,7 +453,9 @@ if (baseDomain) {
   prodFrontendStack.addDependency(prodAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
   prodFrontendStack.addDependency(prodAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
   prodFrontendStack.addDependency(prodProcessingStack); // Need processing queue and Lambda exports
-  prodFrontendStack.addDependency(prodDocumentProcessingStack); // Need document queue and table exports
+  if (!retireLegacyContent) {
+    prodFrontendStack.addDependency(prodDocumentProcessingStack);
+  }
   cdk.Tags.of(prodFrontendStack).add('Environment', 'Prod');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodFrontendStack).add(key, value));
 

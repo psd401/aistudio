@@ -6,6 +6,9 @@ import { POST as presignedUrlHandler } from '@/app/api/documents/presigned-url/r
 import { POST as processHandler } from '@/app/api/documents/process/route'
 
 // Mock all dependencies
+jest.mock('@/lib/repositories/content-platform/legacy-retirement-response', () => ({
+  legacyContentRetirementResponse: jest.fn(async () => null),
+}))
 jest.mock('@/lib/auth/server-session')
 jest.mock('@/actions/db/get-current-user-action')
 jest.mock('@/lib/aws/s3-client')

@@ -27,8 +27,14 @@ import {
   SendMessageCommand,
   SQSClient,
 } from "@aws-sdk/client-sqs";
+import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+  type MetricDatum,
+  type StandardUnit,
+} from "@aws-sdk/client-cloudwatch";
 import { and, asc, eq, gt, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
-import { executeQuery, executeTransaction } from "../../../lib/db/drizzle-client";
+import { executeQuery } from "../../../lib/db/drizzle-client";
 import {
   repositoryItemChunks,
   repositoryArtifacts,
@@ -152,6 +158,14 @@ import {
 import { enforceNexusRepositoryLifecycle } from "../../../lib/repositories/content-platform/lifecycle-service";
 import { cleanupExpiredRepositoryUploads } from "../../../lib/repositories/content-platform/upload-lifecycle-service";
 import { cleanupExpiredContentIdempotencyRecords } from "../../../lib/content/idempotency-cleanup";
+import { processNextRepositoryMigrationBatch } from "../../../lib/repositories/content-platform/migration-runner";
+import { createS3RepositoryMigrationStorage } from "../../../lib/repositories/content-platform/migration-s3-storage";
+import { cleanupRepositoryRetrievalShadow } from "../../../lib/repositories/content-platform/retrieval-shadow";
+import {
+  CONTENT_PLATFORM_METRIC_UNITS,
+  contentPlatformMetricValues,
+  getContentPlatformOperationalSnapshot,
+} from "../../../lib/repositories/content-platform/operational-metrics";
 
 type JobMetrics = RepositoryProcessingMetrics;
 
@@ -170,7 +184,12 @@ const textract = new TextractClient({});
 const bedrock = new BedrockRuntimeClient({});
 const dataAutomation = new BedrockDataAutomationRuntimeClient({});
 const secrets = new SecretsManagerClient({});
+const cloudwatch = new CloudWatchClient({});
 const bucket = requiredEnvironment("DOCUMENTS_BUCKET_NAME");
+const migrationStorage = createS3RepositoryMigrationStorage({
+  bucket,
+  client: s3,
+});
 const queueUrl = requiredEnvironment("CONTENT_PROCESSING_QUEUE_URL");
 const processingDlqUrl = requiredEnvironment("CONTENT_PROCESSING_DLQ_URL");
 const embeddingQueueUrl = requiredEnvironment("EMBEDDING_QUEUE_URL");
@@ -181,6 +200,28 @@ const databaseSecretArn = requiredEnvironment("DATABASE_SECRET_ARN");
 const databaseHost = requiredEnvironment("DATABASE_HOST");
 const DEFER_SECONDS = 60;
 const DISPATCH_BATCH_SIZE = 25;
+const environment = requiredEnvironment("ENVIRONMENT");
+
+async function publishContentPlatformOperationalMetrics(): Promise<void> {
+  const snapshot = await getContentPlatformOperationalSnapshot();
+  const values = contentPlatformMetricValues(snapshot);
+  const metricData: MetricDatum[] = Object.entries(values).map(
+    ([metricName, value]) => ({
+      MetricName: metricName,
+      Value: value,
+      Unit: CONTENT_PLATFORM_METRIC_UNITS[
+        metricName as keyof typeof CONTENT_PLATFORM_METRIC_UNITS
+      ] as StandardUnit,
+      Dimensions: [{ Name: "Environment", Value: environment }],
+    })
+  );
+  await cloudwatch.send(
+    new PutMetricDataCommand({
+      Namespace: "AIStudio/UnifiedContent",
+      MetricData: metricData,
+    })
+  );
+}
 
 let databaseReady: Promise<void> | null = null;
 
@@ -226,6 +267,12 @@ async function getConfig(): Promise<ContentPlatformConfig> {
             "CONTENT_PLATFORM_ENABLED",
             "CONTENT_DUAL_WRITE_ENABLED",
             "CONTENT_READ_V2_ENABLED",
+            "CONTENT_REPOSITORY_CUTOVER_ENABLED",
+            "CONTENT_NEXUS_CUTOVER_ENABLED",
+            "CONTENT_ASSISTANT_ARCHITECT_CUTOVER_ENABLED",
+            "CONTENT_RETRIEVAL_SHADOW_ENABLED",
+            "CONTENT_LEGACY_RETIREMENT_ENABLED",
+            "CONTENT_MIGRATION_RECOVERY_DAYS",
             "NEXUS_ATTACHMENT_RETENTION_DAYS",
             "CONTENT_DELETION_GRACE_DAYS",
             "CONTENT_MAX_FILE_SIZE_GB",
@@ -1663,6 +1710,31 @@ export async function handler(
             recoverLegacyInlineTextSources(
               `legacy-inline-source-recovery:${context.awsRequestId}`
             ),
+        },
+        {
+          name: "repository-content-migration",
+          run: async () => {
+            const result =
+              await processNextRepositoryMigrationBatch(migrationStorage);
+            if (result.runId) {
+              log.info("Advanced unified content migration run", result);
+            }
+          },
+        },
+        {
+          name: "retrieval-shadow-retention",
+          run: async () => {
+            const deleted = await cleanupRepositoryRetrievalShadow();
+            if (deleted > 0) {
+              log.info("Removed expired retrieval shadow observations", {
+                deleted,
+              });
+            }
+          },
+        },
+        {
+          name: "content-platform-operational-metrics",
+          run: publishContentPlatformOperationalMetrics,
         },
         {
           name: "processing-dlq-reconciliation",

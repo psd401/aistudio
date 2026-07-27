@@ -93,6 +93,9 @@ export * from "./tables/repository-processing-jobs";
 export * from "./tables/repository-artifacts";
 export * from "./tables/repository-index-generations";
 export * from "./tables/skill-repository-bindings";
+export * from "./tables/repository-migration-runs";
+export * from "./tables/repository-migration-items";
+export * from "./tables/repository-retrieval-shadow-observations";
 
 // ============================================
 // Prompt Library

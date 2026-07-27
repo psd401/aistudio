@@ -42,6 +42,7 @@ const customJestConfig = {
   modulePathIgnorePatterns: [
     '<rootDir>/infra/cdk.out/',
     '<rootDir>/.next/',
+    '<rootDir>/.claude/worktrees/',
   ],
   testPathIgnorePatterns: [
     '/node_modules/',
@@ -49,6 +50,7 @@ const customJestConfig = {
     '/.next/',
     '/infra/', // Infra has its own Jest config
     '/infra/cdk.out/',
+    '/.claude/worktrees/',
     'mock-sse-factory.ts' // Utility file, not a test file
   ]
 };

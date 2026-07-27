@@ -5,6 +5,7 @@ import { sendToProcessingQueue } from '@/lib/aws/lambda-trigger';
 import { sanitizeFileName } from '@/lib/aws/document-upload';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { z } from 'zod';
+import { legacyContentRetirementResponse } from '@/lib/repositories/content-platform/legacy-retirement-response';
 
 const ConfirmUploadSchema = z.object({
   uploadId: z.string().min(1),
@@ -22,6 +23,8 @@ export async function POST(req: NextRequest) {
       log.warn('Unauthorized request');
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+    const retired = await legacyContentRetirementResponse();
+    if (retired) return retired;
     
     const body = await req.json();
     const { uploadId, jobId } = ConfirmUploadSchema.parse(body);

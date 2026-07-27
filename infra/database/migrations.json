@@ -144,6 +144,7 @@
     "151-agentic-cost-reconciliation.sql",
     "152-agent-skill-scan-leases.sql",
     "153-workspace-upload-reservations.sql",
-    "154-workspace-upload-reservation-nullable-leases.sql"
+    "154-workspace-upload-reservation-nullable-leases.sql",
+    "155-unified-content-migration-retirement.sql"
   ]
 }

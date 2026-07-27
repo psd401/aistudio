@@ -14,6 +14,9 @@
  * Uses @jest-environment node because the route calls file.stream() which requires
  * Node.js's native File/Blob stream support (not available in jsdom).
  */
+jest.mock('@/lib/repositories/content-platform/legacy-retirement-response', () => ({
+  legacyContentRetirementResponse: jest.fn(async () => null),
+}));
 
 // ── next/server must be mocked FIRST so NextResponse is a usable constructor ──
 // NextRequest needs formData() support for the upload tests.

@@ -19,6 +19,7 @@ import {
   ALLOWED_MIME_TYPES,
   getMaxFileSize
 } from '@/lib/file-validation';
+import { legacyContentRetirementResponse } from '@/lib/repositories/content-platform/legacy-retirement-response';
 
 // Multipart framing (boundary + part headers + filename) makes the request body
 // slightly larger than the file itself, so the early Content-Length guard allows
@@ -94,6 +95,9 @@ export async function POST(request: NextRequest) {
       { status: 401, headers }
     );
   }
+
+  const retired = await legacyContentRetirementResponse();
+  if (retired) return retired;
   
   const userId = currentUser.data.user.id;
   log.debug(`Current user ID: ${userId}, type: ${typeof userId}`);
@@ -458,4 +462,4 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// All previous code removed for this basic test 
+// All previous code removed for this basic test

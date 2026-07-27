@@ -176,6 +176,9 @@ export class EcsServiceConstruct extends Construct {
     super(scope, id);
 
     const { vpc, environment, documentsBucketName, agentWorkspaceBucketName } = props;
+    const retireLegacyContent =
+      this.node.tryGetContext('retireLegacyContent') === true ||
+      this.node.tryGetContext('retireLegacyContent') === 'true';
 
     // ============================================================================
     // ECR Repository for container images
@@ -907,18 +910,32 @@ export class EcsServiceConstruct extends Construct {
         DB_IDLE_TIMEOUT: '20',
         // Queue URLs from Processing Stack exports
         EMBEDDING_QUEUE_URL: cdk.Fn.importValue(`${environment}-EmbeddingQueueUrl`),
-        FILE_PROCESSING_QUEUE_URL: cdk.Fn.importValue(`${environment}-FileProcessingQueueUrl`),
         CONTENT_PROCESSING_QUEUE_URL: cdk.Fn.importValue(`${environment}-ContentProcessingQueueUrl`),
         GOOGLE_CONTENT_SYNC_QUEUE_URL: cdk.Fn.importValue(`${environment}-GoogleContentSyncQueueUrl`),
-        // Queue URLs from Document Processing Stack exports
-        PROCESSING_QUEUE_URL: cdk.Fn.importValue(`${environment}-ProcessingQueueUrl`),
-        HIGH_MEMORY_QUEUE_URL: cdk.Fn.importValue(`${environment}-HighMemoryQueueUrl`),
-        // Table names from stack exports
-        DOCUMENT_JOBS_TABLE: cdk.Fn.importValue(`${environment}-DocumentJobsTableName`),
-        JOB_STATUS_TABLE_NAME: cdk.Fn.importValue(`${environment}-JobStatusTableName`),
         // Lambda function names from Processing Stack exports
         EMBEDDING_GENERATOR_FUNCTION_NAME: cdk.Fn.importValue(`${environment}-EmbeddingGeneratorFunctionName`),
-        URL_PROCESSOR_FUNCTION_NAME: cdk.Fn.importValue(`${environment}-URLProcessorFunctionName`),
+        ...(!retireLegacyContent
+          ? {
+              FILE_PROCESSING_QUEUE_URL: cdk.Fn.importValue(
+                `${environment}-FileProcessingQueueUrl`,
+              ),
+              PROCESSING_QUEUE_URL: cdk.Fn.importValue(
+                `${environment}-ProcessingQueueUrl`,
+              ),
+              HIGH_MEMORY_QUEUE_URL: cdk.Fn.importValue(
+                `${environment}-HighMemoryQueueUrl`,
+              ),
+              DOCUMENT_JOBS_TABLE: cdk.Fn.importValue(
+                `${environment}-DocumentJobsTableName`,
+              ),
+              JOB_STATUS_TABLE_NAME: cdk.Fn.importValue(
+                `${environment}-JobStatusTableName`,
+              ),
+              URL_PROCESSOR_FUNCTION_NAME: cdk.Fn.importValue(
+                `${environment}-URLProcessorFunctionName`,
+              ),
+            }
+          : {}),
         // Application settings
         MAX_FILE_SIZE_MB: '100',
         SQL_LOGGING: 'false',

@@ -14,7 +14,7 @@ function synthesize(): Template {
   const documentsBucket = s3.Bucket.fromBucketName(
     stack,
     "DocumentsBucket",
-    "aistudio-dev-documents"
+    "aistudio-dev-documents",
   );
   const embeddingQueue = new sqs.Queue(stack, "EmbeddingQueue", {
     queueName: "aistudio-dev-embedding-queue",
@@ -22,7 +22,7 @@ function synthesize(): Template {
   const embeddingDeadLetterQueue = new sqs.Queue(
     stack,
     "EmbeddingDeadLetterQueue",
-    { queueName: "aistudio-dev-embedding-dlq" }
+    { queueName: "aistudio-dev-embedding-dlq" },
   );
   cdk.Tags.of(embeddingQueue).add("Environment", "dev");
   cdk.Tags.of(embeddingQueue).add("ManagedBy", "cdk");
@@ -40,7 +40,7 @@ function synthesize(): Template {
   return Template.fromStack(stack);
 }
 
-describe("UnifiedContentProcessing", () => {
+const defineUnifiedContentProcessingSuite1 = () => {
   const template = synthesize();
 
   test("deploys an encrypted durable queue and bounded DLQ retries", () => {
@@ -61,7 +61,7 @@ describe("UnifiedContentProcessing", () => {
     });
   });
 
-  test("alarms on stalled work, DLQ records, and worker persistence errors", () => {
+  test("alarms on stalled work, failures, migration blockers, and stale indexes", () => {
     template.hasResourceProperties("AWS::CloudWatch::Alarm", {
       AlarmName: "aistudio-dev-content-processing-dlq-visible",
       Threshold: 1,
@@ -76,6 +76,23 @@ describe("UnifiedContentProcessing", () => {
     template.hasResourceProperties("AWS::CloudWatch::Alarm", {
       AlarmName: "aistudio-dev-content-processing-worker-errors",
       Threshold: 1,
+      TreatMissingData: "notBreaching",
+    });
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "aistudio-dev-content-migration-blockers",
+      Threshold: 1,
+      TreatMissingData: "notBreaching",
+    });
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "aistudio-dev-content-stale-repositories",
+      Threshold: 1,
+      EvaluationPeriods: 2,
+      TreatMissingData: "notBreaching",
+    });
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "aistudio-dev-content-connector-failures",
+      Threshold: 1,
+      EvaluationPeriods: 2,
       TreatMissingData: "notBreaching",
     });
   });
@@ -97,11 +114,11 @@ describe("UnifiedContentProcessing", () => {
     });
     expect(iamResources).toContain("AllowRepositoryObjectScanAndTag");
     expect(iamResources).toContain(
-      ":s3:::aistudio-dev-documents/repositories/*"
+      ":s3:::aistudio-dev-documents/repositories/*",
     );
     expect(iamResources).toContain("AllowPutValidationObject");
     expect(iamResources).toContain(
-      ":s3:::aistudio-dev-documents/malware-protection-resource-validation-object"
+      ":s3:::aistudio-dev-documents/malware-protection-resource-validation-object",
     );
   });
 
@@ -191,19 +208,18 @@ describe("UnifiedContentProcessing", () => {
     };
     const workerRoles = template.findResources("AWS::IAM::Role", {
       Properties: {
-        RoleName:
-          "aistudio-dev-unified-content-processor-execution-role-dev",
+        RoleName: "aistudio-dev-unified-content-processor-execution-role-dev",
       },
     });
+    const lintNestedCallback1 = (policy: {
+      PolicyDocument?: { Statement?: PolicyStatement[] };
+    }) => policy.PolicyDocument?.Statement ?? [];
     const statements = Object.values(workerRoles).flatMap((role) =>
-      (role.Properties?.Policies ?? []).flatMap(
-        (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
-          policy.PolicyDocument?.Statement ?? []
-      )
+      (role.Properties?.Policies ?? []).flatMap(lintNestedCallback1),
     );
     expect(Object.keys(workerRoles)).toHaveLength(1);
     const repositoryAccess = statements.find(
-      (statement) => statement.Sid === "CanonicalRepositoryObjectAccess"
+      (statement) => statement.Sid === "CanonicalRepositoryObjectAccess",
     );
 
     expect(repositoryAccess).toMatchObject({
@@ -220,9 +236,36 @@ describe("UnifiedContentProcessing", () => {
       ],
     });
     expect(JSON.stringify(repositoryAccess?.Resource)).toContain(
-      ":s3:::aistudio-dev-documents/repositories/*"
+      ":s3:::aistudio-dev-documents/repositories/*",
     );
     expect(repositoryAccess?.Condition).toBeUndefined();
+
+    const migrationRead = statements.find(
+      (statement) => statement.Sid === "LegacyContentMigrationRead",
+    );
+    expect(migrationRead).toMatchObject({
+      Effect: "Allow",
+      Action: ["s3:GetObject", "s3:GetObjectVersion"],
+    });
+    expect(JSON.stringify(migrationRead?.Resource)).toContain(
+      ":s3:::aistudio-dev-documents/*",
+    );
+    expect(migrationRead?.Action).not.toEqual(
+      expect.arrayContaining(["s3:PutObject", "s3:DeleteObject"]),
+    );
+  });
+
+  test("publishes a tagged operational dashboard and namespace-scoped metrics", () => {
+    template.hasResourceProperties("AWS::CloudWatch::Dashboard", {
+      DashboardName: "aistudio-dev-unified-content",
+    });
+    const dashboards = template.findResources("AWS::CloudWatch::Dashboard");
+    const dashboardJson = JSON.stringify(dashboards);
+    expect(dashboardJson).toContain("Migration reconciliation");
+    expect(dashboardJson).toContain("Retrieval shadow parity");
+    const policies = JSON.stringify(template.findResources("AWS::IAM::Role"));
+    expect(policies).toContain("PublishUnifiedContentOperationalMetrics");
+    expect(policies).toContain("AIStudio/UnifiedContent");
   });
 
   test("dispatches embeddings through an exact queue ARN without tag conditions", () => {
@@ -235,19 +278,18 @@ describe("UnifiedContentProcessing", () => {
     };
     const workerRoles = template.findResources("AWS::IAM::Role", {
       Properties: {
-        RoleName:
-          "aistudio-dev-unified-content-processor-execution-role-dev",
+        RoleName: "aistudio-dev-unified-content-processor-execution-role-dev",
       },
     });
+    const lintNestedCallback2 = (policy: {
+      PolicyDocument?: { Statement?: PolicyStatement[] };
+    }) => policy.PolicyDocument?.Statement ?? [];
     const statements = Object.values(workerRoles).flatMap((role) =>
-      (role.Properties?.Policies ?? []).flatMap(
-        (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
-          policy.PolicyDocument?.Statement ?? []
-      )
+      (role.Properties?.Policies ?? []).flatMap(lintNestedCallback2),
     );
     expect(Object.keys(workerRoles)).toHaveLength(1);
     const embeddingDispatch = statements.find(
-      (statement) => statement.Sid === "CanonicalEmbeddingDispatch"
+      (statement) => statement.Sid === "CanonicalEmbeddingDispatch",
     );
 
     expect(embeddingDispatch).toMatchObject({
@@ -270,28 +312,24 @@ describe("UnifiedContentProcessing", () => {
     };
     const workerRoles = template.findResources("AWS::IAM::Role", {
       Properties: {
-        RoleName:
-          "aistudio-dev-unified-content-processor-execution-role-dev",
+        RoleName: "aistudio-dev-unified-content-processor-execution-role-dev",
       },
     });
+    const lintNestedCallback3 = (policy: {
+      PolicyDocument?: { Statement?: PolicyStatement[] };
+    }) => policy.PolicyDocument?.Statement ?? [];
     const statements = Object.values(workerRoles).flatMap((role) =>
-      (role.Properties?.Policies ?? []).flatMap(
-        (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
-          policy.PolicyDocument?.Statement ?? []
-      )
+      (role.Properties?.Policies ?? []).flatMap(lintNestedCallback3),
     );
     const recovery = statements.find(
-      (statement) => statement.Sid === "CanonicalEmbeddingDlqRecovery"
+      (statement) => statement.Sid === "CanonicalEmbeddingDlqRecovery",
     );
     expect(recovery).toMatchObject({
       Effect: "Allow",
       Action: ["sqs:ReceiveMessage", "sqs:DeleteMessage"],
     });
     expect(recovery?.Resource).toEqual({
-      "Fn::GetAtt": [
-        expect.stringMatching(/^EmbeddingDeadLetterQueue/),
-        "Arn",
-      ],
+      "Fn::GetAtt": [expect.stringMatching(/^EmbeddingDeadLetterQueue/), "Arn"],
     });
     expect(JSON.stringify(recovery?.Resource)).not.toContain("*");
   });
@@ -305,18 +343,17 @@ describe("UnifiedContentProcessing", () => {
     };
     const workerRoles = template.findResources("AWS::IAM::Role", {
       Properties: {
-        RoleName:
-          "aistudio-dev-unified-content-processor-execution-role-dev",
+        RoleName: "aistudio-dev-unified-content-processor-execution-role-dev",
       },
     });
+    const lintNestedCallback4 = (policy: {
+      PolicyDocument?: { Statement?: PolicyStatement[] };
+    }) => policy.PolicyDocument?.Statement ?? [];
     const statements = Object.values(workerRoles).flatMap((role) =>
-      (role.Properties?.Policies ?? []).flatMap(
-        (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
-          policy.PolicyDocument?.Statement ?? []
-      )
+      (role.Properties?.Policies ?? []).flatMap(lintNestedCallback4),
     );
     const recovery = statements.find(
-      (statement) => statement.Sid === "CanonicalProcessingDlqRecovery"
+      (statement) => statement.Sid === "CanonicalProcessingDlqRecovery",
     );
     expect(recovery).toMatchObject({
       Effect: "Allow",
@@ -337,7 +374,9 @@ describe("UnifiedContentProcessing", () => {
     for (const resource of Object.values(policies) as Array<{
       Properties?: { PolicyDocument?: { Statement?: Statement[] } };
     }>) {
-      statements.push(...(resource.Properties?.PolicyDocument?.Statement ?? []));
+      statements.push(
+        ...(resource.Properties?.PolicyDocument?.Statement ?? []),
+      );
     }
     for (const resource of Object.values(roles) as Array<{
       Properties?: {
@@ -349,15 +388,16 @@ describe("UnifiedContentProcessing", () => {
       }
     }
     for (const statement of statements) {
-        if (statement.Resource !== "*") continue;
-        const actions = Array.isArray(statement.Action)
-          ? statement.Action
-          : [statement.Action];
-        for (const action of actions) {
-          if (action) wildcardActions.add(action);
-        }
+      if (statement.Resource !== "*") continue;
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      for (const action of actions) {
+        if (action) wildcardActions.add(action);
+      }
     }
     expect([...wildcardActions].sort()).toEqual([
+      "cloudwatch:PutMetricData",
       "ec2:AssignPrivateIpAddresses",
       "ec2:CreateNetworkInterface",
       "ec2:DeleteNetworkInterface",
@@ -376,16 +416,16 @@ describe("UnifiedContentProcessing", () => {
       Action?: string | string[];
       Resource?: string | string[];
     };
+    const lintNestedCallback5 = (policy: {
+      PolicyDocument?: { Statement?: PolicyStatement[] };
+    }) => policy.PolicyDocument?.Statement ?? [];
     const statements = Object.values(
-      template.findResources("AWS::IAM::Role")
+      template.findResources("AWS::IAM::Role"),
     ).flatMap((role) =>
-      (role.Properties?.Policies ?? []).flatMap(
-        (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
-          policy.PolicyDocument?.Statement ?? []
-      )
+      (role.Properties?.Policies ?? []).flatMap(lintNestedCallback5),
     );
     const captioning = statements.find(
-      (statement) => statement.Sid === "CanonicalImageCaptioning"
+      (statement) => statement.Sid === "CanonicalImageCaptioning",
     );
     expect(captioning?.Action).toEqual("bedrock:InvokeModel");
     const resources = Array.isArray(captioning?.Resource)
@@ -393,10 +433,10 @@ describe("UnifiedContentProcessing", () => {
       : [captioning?.Resource];
     const resourcesJson = JSON.stringify(resources);
     expect(resourcesJson).toContain(
-      ":bedrock:us-east-1:123456789012:inference-profile/us.amazon.nova-"
+      ":bedrock:us-east-1:123456789012:inference-profile/us.amazon.nova-",
     );
     expect(resourcesJson).toContain(
-      ":bedrock:us-west-2::foundation-model/amazon.nova-"
+      ":bedrock:us-west-2::foundation-model/amazon.nova-",
     );
     expect(resources).not.toContain("*");
   });
@@ -410,47 +450,48 @@ describe("UnifiedContentProcessing", () => {
     };
     const workerRoles = template.findResources("AWS::IAM::Role", {
       Properties: {
-        RoleName:
-          "aistudio-dev-unified-content-processor-execution-role-dev",
+        RoleName: "aistudio-dev-unified-content-processor-execution-role-dev",
       },
     });
+    const lintNestedCallback6 = (policy: {
+      PolicyDocument?: { Statement?: PolicyStatement[] };
+    }) => policy.PolicyDocument?.Statement ?? [];
     const statements = Object.values(workerRoles).flatMap((role) =>
-      (role.Properties?.Policies ?? []).flatMap(
-        (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
-          policy.PolicyDocument?.Statement ?? []
-      )
+      (role.Properties?.Policies ?? []).flatMap(lintNestedCallback6),
     );
     expect(Object.keys(workerRoles)).toHaveLength(1);
     const invoke = statements.find(
-      (statement) => statement.Sid === "CanonicalMediaAnalysis"
+      (statement) => statement.Sid === "CanonicalMediaAnalysis",
     );
     const status = statements.find(
-      (statement) => statement.Sid === "CanonicalMediaAnalysisStatus"
+      (statement) => statement.Sid === "CanonicalMediaAnalysisStatus",
     );
     const discovery = statements.find(
-      (statement) => statement.Sid === "CanonicalRepositoryArtifactDiscovery"
+      (statement) => statement.Sid === "CanonicalRepositoryArtifactDiscovery",
     );
 
     expect(invoke?.Action).toBe("bedrock:InvokeDataAutomationAsync");
     expect(JSON.stringify(invoke?.Resource)).toContain(
-      "data-automation-profile/us.data-automation-v1"
+      "data-automation-profile/us.data-automation-v1",
     );
     expect(JSON.stringify(invoke?.Resource)).toContain("ProjectArn");
     expect(JSON.stringify(invoke?.Resource)).toContain(
-      "data-automation-invocation/*"
+      "data-automation-invocation/*",
     );
     expect(
       statements.some((statement) =>
-        JSON.stringify(statement.Action).includes("bedrock:TagResource")
-      )
+        JSON.stringify(statement.Action).includes("bedrock:TagResource"),
+      ),
     ).toBe(false);
     expect(status?.Action).toBe("bedrock:GetDataAutomationStatus");
     expect(JSON.stringify(status?.Resource)).toContain(
-      "data-automation-invocation/*"
+      "data-automation-invocation/*",
     );
     expect(discovery).toMatchObject({
       Action: ["s3:ListBucket", "s3:ListBucketVersions"],
       Condition: { StringLike: { "s3:prefix": ["repositories/*"] } },
     });
   });
-});
+};
+
+describe("UnifiedContentProcessing", defineUnifiedContentProcessingSuite1);

@@ -28,6 +28,9 @@ export class DocumentProcessingStack extends cdk.Stack {
     super(scope, id, props);
 
     const { environment, documentsBucketName } = props;
+    const retireLegacyContent =
+      this.node.tryGetContext('retireLegacyContent') === true ||
+      this.node.tryGetContext('retireLegacyContent') === 'true';
 
     // DynamoDB table for job tracking with fast polling
     this.documentJobsTable = new dynamodb.Table(this, 'DocumentJobs', {
@@ -282,24 +285,68 @@ export class DocumentProcessingStack extends cdk.Stack {
     // CloudWatch Dashboard removed - metrics now exported to consolidated dashboards via MonitoringStack
 
     // Stack outputs
-    new cdk.CfnOutput(this, 'DocumentJobsTableName', {
+    const legacyOutputs = [new cdk.CfnOutput(this, 'DocumentJobsTableName', {
       value: this.documentJobsTable.tableName,
       description: 'DynamoDB table for document job tracking',
       exportName: `${props.environment}-DocumentJobsTableName`,
-    });
+    })];
 
     // Note: DocumentsBucketName is already exported by StorageStack, don't duplicate it here
 
-    new cdk.CfnOutput(this, 'ProcessingQueueUrl', {
+    legacyOutputs.push(new cdk.CfnOutput(this, 'ProcessingQueueUrl', {
       value: this.processingQueue.queueUrl,
       description: 'SQS queue for standard document processing',
       exportName: `${props.environment}-ProcessingQueueUrl`,
-    });
+    }));
 
-    new cdk.CfnOutput(this, 'HighMemoryQueueUrl', {
+    legacyOutputs.push(new cdk.CfnOutput(this, 'HighMemoryQueueUrl', {
       value: this.highMemoryQueue.queueUrl,
       description: 'SQS queue for high-memory document processing',
       exportName: `${props.environment}-HighMemoryQueueUrl`,
-    });
+    }));
+
+    if (retireLegacyContent) {
+      // Keep the stack in the CDK assembly so `cdk deploy --all` can actually
+      // remove its resources. Omitting an already-deployed stack from an
+      // assembly leaves that CloudFormation stack running indefinitely.
+      const retainLegacyCondition = new cdk.CfnCondition(
+        this,
+        'RetainLegacyDocumentProcessing',
+        {
+          expression: cdk.Fn.conditionEquals('retired', 'retained'),
+        },
+      );
+      this.documentJobsTable.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+      this.processingDLQ.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+      this.processingQueue.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+      this.highMemoryQueue.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+
+      const legacyRoots: Construct[] = [
+        this.documentJobsTable,
+        this.processingDLQ,
+        this.processingQueue,
+        this.highMemoryQueue,
+        processorRole,
+        this.standardProcessor,
+        this.highMemoryProcessor,
+        ...legacyOutputs,
+      ];
+      const conditioned = new Set<cdk.CfnElement>();
+      for (const root of legacyRoots) {
+        for (const construct of root.node.findAll()) {
+          const element = construct as cdk.CfnElement;
+          if (element instanceof cdk.CfnResource && !conditioned.has(element)) {
+            element.cfnOptions.condition = retainLegacyCondition;
+            conditioned.add(element);
+          } else if (
+            element instanceof cdk.CfnOutput &&
+            !conditioned.has(element)
+          ) {
+            element.condition = retainLegacyCondition;
+            conditioned.add(element);
+          }
+        }
+      }
+    }
   }
 }

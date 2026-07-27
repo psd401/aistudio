@@ -5,7 +5,8 @@ import { getUserIdFromSession } from "@/actions/repositories/repository-permissi
 import {
   getContentPlatformConfig,
   initiateRepositoryUpload,
-  isCanonicalRepositoryUploadActive,
+  isCanonicalAssistantArchitectActive,
+  isCanonicalNexusAttachmentActive,
   isCanonicalUploadContentType,
   RepositoryUploadQuotaExceededError,
   validateRepositoryUploadFile,
@@ -63,8 +64,12 @@ async function initiateTemporaryAttachment(
     }
 
     const config = await getContentPlatformConfig();
+    const canonicalProductActive =
+      parsed.data.purpose === "nexus"
+        ? isCanonicalNexusAttachmentActive(config)
+        : isCanonicalAssistantArchitectActive(config);
     if (
-      !isCanonicalRepositoryUploadActive(config) ||
+      !canonicalProductActive ||
       !isCanonicalUploadContentType(parsed.data.contentType)
     ) {
       timer({ status: "success", mode: "legacy", purpose: parsed.data.purpose });
