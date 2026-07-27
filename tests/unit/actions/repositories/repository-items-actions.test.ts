@@ -20,9 +20,15 @@ const mockCreateRepositoryItem = jest.fn<(...a: unknown[]) => Promise<unknown>>(
 const mockUpdateRepositoryItemStatus = jest.fn<(...a: unknown[]) => Promise<unknown>>()
 const mockUploadDocument = jest.fn<(...a: unknown[]) => Promise<unknown>>()
 const mockQueueFileForProcessing = jest.fn<(...a: unknown[]) => Promise<unknown>>()
+const mockProcessUrl = jest.fn<(...a: unknown[]) => Promise<unknown>>()
+const mockGetContentPlatformConfig = jest.fn<(...a: unknown[]) => Promise<unknown>>(
+  () => Promise.resolve({})
+)
+const mockIsCanonicalRepositoryUploadActive = jest.fn(() => false)
 const mockRegisterCanonicalUploadIfEnabled = jest.fn<(...a: unknown[]) => Promise<unknown>>(
   () => Promise.resolve(null)
 )
+const mockRegisterCanonicalUpload = jest.fn<(...a: unknown[]) => Promise<unknown>>()
 const mockDispatchContentProcessingJob = jest.fn<(...a: unknown[]) => Promise<void>>(
   () => Promise.resolve()
 )
@@ -60,6 +66,10 @@ const mockAssertCanonicalRetryNotQuarantined = jest.fn<
 const mockRegisterCanonicalTextIfEnabled = jest.fn<
   (...a: unknown[]) => Promise<unknown>
 >(() => Promise.resolve(null))
+const mockRegisterCanonicalText = jest.fn<(...a: unknown[]) => Promise<unknown>>()
+const mockRegisterCanonicalUrlSnapshot = jest.fn<
+  (...a: unknown[]) => Promise<unknown>
+>()
 const mockExecuteTransaction = jest.fn<
   (...a: unknown[]) => Promise<unknown>
 >()
@@ -105,7 +115,7 @@ jest.mock('@/lib/aws/s3-client', () => ({
 }))
 jest.mock('@/lib/services/file-processing-service', () => ({
   queueFileForProcessing: mockQueueFileForProcessing,
-  processUrl: jest.fn(),
+  processUrl: mockProcessUrl,
 }))
 jest.mock('@/lib/repositories/content-platform', () => ({
   isCanonicalUploadContentType: (contentType: string) => [
@@ -121,12 +131,19 @@ jest.mock('@/lib/repositories/content-platform', () => ({
     ).test(objectKey) &&
     !objectKey.includes('..'),
   registerCanonicalTextIfEnabled: mockRegisterCanonicalTextIfEnabled,
+  registerCanonicalText: mockRegisterCanonicalText,
   registerCanonicalUploadIfEnabled: mockRegisterCanonicalUploadIfEnabled,
+  registerCanonicalUpload: mockRegisterCanonicalUpload,
+  registerCanonicalUrlSnapshot: mockRegisterCanonicalUrlSnapshot,
   dispatchContentProcessingJob: mockDispatchContentProcessingJob,
   deleteRepositoryItemStorage: mockDeleteRepositoryItemStorage,
   getCanonicalRepositoryItemStatuses: mockGetCanonicalRepositoryItemStatuses,
   retryCanonicalRepositoryItem: mockRetryCanonicalRepositoryItem,
   assertCanonicalRetryNotQuarantined: mockAssertCanonicalRetryNotQuarantined,
+}))
+jest.mock('@/lib/repositories/content-platform/config', () => ({
+  getContentPlatformConfig: mockGetContentPlatformConfig,
+  isCanonicalRepositoryUploadActive: mockIsCanonicalRepositoryUploadActive,
 }))
 jest.mock('@/lib/repositories/content-platform/deletion-service', () => ({
   beginRepositoryItemDeletion: mockBeginRepositoryItemDeletion,
@@ -153,6 +170,12 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     mockAssertNotSystemManagedRepository.mockResolvedValue(undefined)
     mockRegisterCanonicalUploadIfEnabled.mockResolvedValue(null)
     mockRegisterCanonicalTextIfEnabled.mockResolvedValue(null)
+    mockRegisterCanonicalUpload.mockReset()
+    mockRegisterCanonicalText.mockReset()
+    mockRegisterCanonicalUrlSnapshot.mockReset()
+    mockProcessUrl.mockReset()
+    mockGetContentPlatformConfig.mockResolvedValue({})
+    mockIsCanonicalRepositoryUploadActive.mockReturnValue(false)
     mockExecuteTransaction.mockReset()
     mockDispatchContentProcessingJob.mockResolvedValue(undefined)
     mockUpdateRepositoryItemStatus.mockResolvedValue(undefined)
@@ -520,6 +543,82 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     )
   })
 
+  it('uses only canonical processing after the repository cutover', async () => {
+    mockIsCanonicalRepositoryUploadActive.mockReturnValue(true)
+    mockCreateRepositoryItem.mockResolvedValue({
+      id: 5,
+      repositoryId: 7,
+      type: 'document',
+      name: 'Cutover document',
+      source: 'repositories/7/11111111-2222-4333-8444-555555555555/document.pdf',
+      metadata: {},
+      processingStatus: 'pending',
+      processingError: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+    mockRegisterCanonicalUpload.mockResolvedValue({
+      created: true,
+      version: { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' },
+      inspectJob: { id: 'ffffffff-1111-4222-8333-444444444444' },
+    })
+
+    const result = await mod.addDocumentItem({
+      repository_id: 7,
+      name: 'Cutover document',
+      file: {
+        content: Buffer.from('pdf-bytes'),
+        contentType: 'application/pdf',
+        size: 9,
+        fileName: 'document.pdf',
+      },
+    })
+
+    expect(result.isSuccess).toBe(true)
+    expect(mockRegisterCanonicalUpload).toHaveBeenCalledTimes(1)
+    expect(mockRegisterCanonicalUploadIfEnabled).not.toHaveBeenCalled()
+    expect(mockQueueFileForProcessing).not.toHaveBeenCalled()
+  })
+
+  it('captures a bounded canonical URL snapshot after the repository cutover', async () => {
+    mockIsCanonicalRepositoryUploadActive.mockReturnValue(true)
+    mockCreateRepositoryItem.mockResolvedValue({
+      id: 6,
+      repositoryId: 7,
+      type: 'url',
+      name: 'Reference',
+      source: 'https://example.com/reference',
+      metadata: {},
+      processingStatus: 'pending',
+      processingError: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+    mockRegisterCanonicalUrlSnapshot.mockResolvedValue({
+      created: true,
+      version: { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' },
+      inspectJob: { id: 'ffffffff-1111-4222-8333-444444444444' },
+    })
+
+    const result = await mod.addUrlItem({
+      repository_id: 7,
+      name: 'Reference',
+      url: 'https://example.com/reference',
+    })
+
+    expect(result.isSuccess).toBe(true)
+    expect(mockRegisterCanonicalUrlSnapshot).toHaveBeenCalledWith({
+      itemId: 6,
+      repositoryId: 7,
+      userId: 1,
+      name: 'Reference',
+      url: 'https://example.com/reference',
+      traceId: 't',
+    })
+    expect(mockDispatchContentProcessingJob).toHaveBeenCalledTimes(1)
+    expect(mockProcessUrl).not.toHaveBeenCalled()
+  })
+
   it('keeps the legacy upload available when the canonical shadow write fails', async () => {
     mockCreateRepositoryItem.mockResolvedValue({
       id: 2, repositoryId: 7, type: 'document', name: 'doc', source: 'repositories/7/abc/doc.pdf',
@@ -591,6 +690,51 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
       jobId: 'ffffffff-1111-4222-8333-444444444444',
       itemVersionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
     })
+  })
+
+  it('omits the legacy text chunk after the repository cutover', async () => {
+    mockIsCanonicalRepositoryUploadActive.mockReturnValue(true)
+    const itemValues = jest.fn(() => ({
+      returning: jest.fn(() => Promise.resolve([{ id: 38 }])),
+    }))
+    const chunkValues = jest.fn(() => Promise.resolve())
+    const insert = jest.fn((table: unknown) =>
+      table === mockRepositoryItemsTable
+        ? { values: itemValues }
+        : { values: chunkValues }
+    )
+    mockExecuteTransaction.mockImplementation(async (...args: unknown[]) => {
+      const operation = args[0]
+      return (operation as (tx: unknown) => Promise<unknown>)({ insert })
+    })
+    mockGetRepositoryItemById.mockResolvedValue({
+      id: 38,
+      repositoryId: 7,
+      type: 'text',
+      name: 'Canonical notes',
+      source: 'canonical only',
+      metadata: {},
+      processingStatus: 'pending',
+      processingError: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+    mockRegisterCanonicalText.mockResolvedValue({
+      created: true,
+      version: { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' },
+      inspectJob: { id: 'ffffffff-1111-4222-8333-444444444444' },
+    })
+
+    const result = await mod.addTextItem({
+      repository_id: 7,
+      name: 'Canonical notes',
+      content: 'canonical only',
+    })
+
+    expect(result.isSuccess).toBe(true)
+    expect(mockRegisterCanonicalText).toHaveBeenCalledTimes(1)
+    expect(mockRegisterCanonicalTextIfEnabled).not.toHaveBeenCalled()
+    expect(chunkValues).not.toHaveBeenCalled()
   })
 
   it('rejects a presigned upload when the stored object size differs', async () => {

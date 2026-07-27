@@ -11,6 +11,7 @@ import { createLogger, generateRequestId, startTimer } from '@/lib/logger'
 import { withActionState, unauthorized } from '@/lib/api-utils'
 import { handleError } from '@/lib/error-utils'
 import { type ActionState } from '@/types/actions-types'
+import { legacyContentRetirementResponse } from '@/lib/repositories/content-platform/legacy-retirement-response'
 import { 
   ALLOWED_MIME_TYPES,
   ALLOWED_FILE_EXTENSIONS,
@@ -59,6 +60,8 @@ export async function POST(request: NextRequest) {
     timer({ status: "error", reason: "user_not_found" });
     return unauthorized('User not found')
   }
+  const retired = await legacyContentRetirementResponse()
+  if (retired) return retired
 
   const userId = currentUser.data.user.id
   log.debug("Processing for user", { userId });

@@ -75,6 +75,7 @@
     "db:reset": "docker compose -f docker-compose.dev.yml down -v && docker compose -f docker-compose.dev.yml up -d postgres",
     "db:logs": "docker compose -f docker-compose.dev.yml logs -f postgres",
     "db:migrate": "bun scripts/db/run-migrations.ts",
+    "db:finalize-content-retirement": "bun scripts/db/finalize-unified-content-retirement.ts",
     "db:seed": "docker exec -i aistudio-postgres psql -U postgres -d aistudio < scripts/db/seed-local.sql",
     "db:studio": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run drizzle:studio",
     "db:psql": "docker exec -it aistudio-postgres psql -U postgres -d aistudio",

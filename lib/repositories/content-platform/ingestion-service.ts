@@ -5,6 +5,7 @@ import {
   repositoryItems,
   repositoryItemVersions,
   repositoryProcessingJobs,
+  type RepositorySourceKind,
   type RepositoryItemVersionRow,
   type RepositoryProcessingJobRow,
 } from "@/lib/db/schema";
@@ -26,6 +27,8 @@ export interface RegisterCanonicalUploadInput {
   byteSize: number;
   sha256?: string;
   traceId?: string;
+  sourceKind?: RepositorySourceKind;
+  metadata?: Record<string, unknown>;
 }
 
 export interface CanonicalUploadRegistration {
@@ -145,7 +148,7 @@ export async function registerCanonicalUpload(
         .values({
           itemId: input.itemId,
           versionNumber: (latest?.versionNumber ?? 0) + 1,
-          sourceKind: "upload",
+          sourceKind: input.sourceKind ?? "upload",
           sourceRevision,
           objectKey: input.objectKey,
           declaredContentType: input.declaredContentType,
@@ -154,7 +157,10 @@ export async function registerCanonicalUpload(
           storageStatus: "quarantined",
           processingStatus: "pending",
           processorVersion: CONTENT_PROCESSOR_CONTRACT_VERSION,
-          metadata: { originalFileName: input.originalFileName },
+          metadata: {
+            originalFileName: input.originalFileName,
+            ...(input.metadata ?? {}),
+          },
           createdBy: input.userId,
         })
         .returning();

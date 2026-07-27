@@ -152,6 +152,9 @@ ECS streaming infrastructure operations and monitoring.
 #### [operations/production-migration-checklist.md](./operations/production-migration-checklist.md)
 Comprehensive checklist for deploying to production.
 
+#### [operations/unified-content-migration-retirement.md](./operations/unified-content-migration-retirement.md)
+Inventory, backfill, reconciliation, cutover, rollback, and legacy-content retirement runbook.
+
 #### [operations/tool-management.md](./operations/tool-management.md)
 Managing Assistant Architect tools and permissions.
 

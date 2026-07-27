@@ -402,11 +402,30 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
     },
 
     getLegacyDocuments: async (conversationId) => {
-      const rows = await sql<{ id: number; url: string | null }[]>`
-        SELECT id, url
-        FROM documents
-        WHERE conversation_id = ${conversationId}::uuid
-      `;
+      const rows = await sql.begin(
+        async (tx): Promise<Array<{ id: number; url: string | null }>> => {
+          // Coordinate with migration/finalization so the legacy table cannot
+          // disappear between the existence check and the read.
+          await tx`
+            SELECT pg_advisory_xact_lock(
+              hashtext('repository-content-migration')
+            )
+          `;
+          const [table] = await tx<{ relation_name: string | null }[]>`
+            SELECT to_regclass('public.documents')::text AS relation_name
+          `;
+          if (!table?.relation_name) return [];
+
+          const legacyDocuments = await tx<
+            { id: number; url: string | null }[]
+          >`
+            SELECT id, url
+            FROM documents
+            WHERE conversation_id = ${conversationId}::uuid
+          `;
+          return [...legacyDocuments];
+        },
+      );
       // Every row is returned, including ones whose url yields no usable object
       // key: the row must go regardless, or documents.conversation_id's SET NULL
       // rule leaves a dangling row pointing at a conversation that no longer
@@ -490,7 +509,21 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
       // losing the race still costs the user nothing.
       try {
         const documents = await sql.begin(async (tx) => {
-          // Lock the conversation row FIRST, as its own statement.
+          // Coordinate with migration/finalization before inspecting the legacy
+          // table. This also makes the following existence check stable for the
+          // rest of this transaction.
+          await tx`
+            SELECT pg_advisory_xact_lock(
+              hashtext('repository-content-migration')
+            )
+          `;
+          const [legacyTable] = await tx<{
+            relation_name: string | null;
+          }[]>`
+            SELECT to_regclass('public.documents')::text AS relation_name
+          `;
+
+          // Lock the conversation row before any destructive statement.
           //
           // Without this, under READ COMMITTED the DELETE below can evaluate
           // its NOT EXISTS on a snapshot taken before a concurrent message
@@ -507,11 +540,13 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
             FOR UPDATE
           `;
 
-          const docRows = await tx<{ id: number; url: string | null }[]>`
-            DELETE FROM documents
-            WHERE conversation_id = ${conversationId}::uuid
-            RETURNING id, url
-          `;
+          const docRows = legacyTable?.relation_name
+            ? await tx<{ id: number; url: string | null }[]>`
+                DELETE FROM documents
+                WHERE conversation_id = ${conversationId}::uuid
+                RETURNING id, url
+              `
+            : [];
 
           // Cascades nexus_messages, nexus_conversation_events,
           // nexus_conversation_folders, nexus_cache_entries, nexus_shares and

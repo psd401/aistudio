@@ -5,6 +5,7 @@ import { createDocumentJob } from '@/lib/services/document-job-service';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { z } from 'zod';
 import { UploadRequestSchema } from '@/lib/validation/document-upload.validation';
+import { legacyContentRetirementResponse } from '@/lib/repositories/content-platform/legacy-retirement-response';
 
 export async function POST(req: NextRequest) {
   const requestId = generateRequestId();
@@ -18,6 +19,8 @@ export async function POST(req: NextRequest) {
       log.warn('Unauthorized request');
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+    const retired = await legacyContentRetirementResponse();
+    if (retired) return retired;
 
     const body = await req.json();
     const validatedData = UploadRequestSchema.parse(body);

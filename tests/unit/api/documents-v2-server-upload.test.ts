@@ -3,6 +3,10 @@
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { NextRequest } from 'next/server';
 
+jest.mock('@/lib/repositories/content-platform/legacy-retirement-response', () => ({
+  legacyContentRetirementResponse: jest.fn(async () => null),
+}));
+
 // ---------------------------------------------------------------------------
 // AWS SDK mocks — must be declared before any imports that pull in SDK clients
 // ---------------------------------------------------------------------------

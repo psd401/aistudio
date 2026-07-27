@@ -10,6 +10,7 @@ import { getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+import { legacyContentRetirementResponse } from '@/lib/repositories/content-platform/legacy-retirement-response';
 
 // Query parameter validation schemas
 // Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
@@ -55,6 +56,9 @@ export async function GET(request: NextRequest) {
       { status: 401, headers: { "X-Request-Id": requestId } }
     );
   }
+
+  const retired = await legacyContentRetirementResponse();
+  if (retired) return retired;
   
   const userId = currentUser.data.user.id;
   
@@ -272,6 +276,9 @@ export async function DELETE(request: NextRequest) {
       { status: 401, headers: { "X-Request-Id": requestId } }
     );
   }
+
+  const retired = await legacyContentRetirementResponse();
+  if (retired) return retired;
   
   const userId = currentUser.data.user.id;
 

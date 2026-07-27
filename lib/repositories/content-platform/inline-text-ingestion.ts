@@ -1,10 +1,17 @@
 import { createHash } from "node:crypto";
-import { uploadRepositoryTextSource } from "@/lib/aws/s3-client";
+import {
+  deleteRepositoryObjectVersions,
+  uploadRepositoryTextSource,
+} from "@/lib/aws/s3-client";
 import {
   type CanonicalUploadRegistration,
   registerCanonicalUpload,
 } from "./ingestion-service";
-import { getContentPlatformConfig, isContentDualWriteActive } from "./config";
+import {
+  getContentPlatformConfig,
+  isContentDualWriteActive,
+  type ContentPlatformConfig,
+} from "./config";
 
 export interface RegisterCanonicalTextInput {
   itemId: number;
@@ -31,24 +38,34 @@ function textSourceFileName(name: string): string {
  * inspection, processing, generation, and embedding pipeline as uploaded files.
  */
 export async function registerCanonicalTextIfEnabled(
-  input: RegisterCanonicalTextInput
+  input: RegisterCanonicalTextInput,
 ): Promise<CanonicalUploadRegistration | null> {
   const config = await getContentPlatformConfig();
   if (!isContentDualWriteActive(config)) return null;
+  return registerCanonicalText(input, config);
+}
+
+export async function registerCanonicalText(
+  input: RegisterCanonicalTextInput,
+  config?: ContentPlatformConfig,
+): Promise<CanonicalUploadRegistration> {
+  const resolvedConfig = config ?? (await getContentPlatformConfig());
   if (!input.content.trim()) throw new Error("Text content is required");
 
   const byteSize = Buffer.byteLength(input.content, "utf8");
   const maximumBytes = Math.min(
-    config.maxFileSizeGb * 1024 ** 3,
-    config.maxOfficeSizeMb * 1024 ** 2
+    resolvedConfig.maxFileSizeGb * 1024 ** 3,
+    resolvedConfig.maxOfficeSizeMb * 1024 ** 2,
   );
   if (byteSize > maximumBytes) {
     throw new Error(
-      `Text content must not exceed ${Math.floor(maximumBytes / 1024 ** 2)} MiB`
+      `Text content must not exceed ${Math.floor(maximumBytes / 1024 ** 2)} MiB`,
     );
   }
 
-  const sha256 = createHash("sha256").update(input.content, "utf8").digest("hex");
+  const sha256 = createHash("sha256")
+    .update(input.content, "utf8")
+    .digest("hex");
   const originalFileName = textSourceFileName(input.name);
   const source = await uploadRepositoryTextSource({
     repositoryId: input.repositoryId,
@@ -58,14 +75,26 @@ export async function registerCanonicalTextIfEnabled(
     content: input.content,
   });
 
-  return registerCanonicalUpload({
-    itemId: input.itemId,
-    userId: input.userId,
-    objectKey: source.key,
-    originalFileName,
-    declaredContentType: "text/plain",
-    byteSize: source.byteSize,
-    sha256,
-    traceId: input.traceId,
-  });
+  try {
+    return await registerCanonicalUpload({
+      itemId: input.itemId,
+      userId: input.userId,
+      objectKey: source.key,
+      originalFileName,
+      declaredContentType: "text/plain",
+      byteSize: source.byteSize,
+      sha256,
+      traceId: input.traceId,
+    });
+  } catch (registrationError) {
+    try {
+      await deleteRepositoryObjectVersions(source.key);
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [registrationError, cleanupError],
+        "Canonical text registration and source cleanup both failed",
+      );
+    }
+    throw registrationError;
+  }
 }

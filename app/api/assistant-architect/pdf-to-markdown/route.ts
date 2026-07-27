@@ -8,7 +8,7 @@ import { getErrorMessage } from "@/types/errors"
 import { ErrorFactories } from "@/lib/error-utils"
 import {
   getContentPlatformConfig,
-  isCanonicalRepositoryUploadActive,
+  isCanonicalAssistantArchitectActive,
 } from "@/lib/repositories/content-platform/config"
 
 // Easily change the model id here
@@ -83,7 +83,7 @@ async function processAuthenticatedPdfUpload(
     // so disabling the rollout flags remains an immediate rollback. Historical
     // job status stays readable through the separate status route.
     const contentPlatformConfig = await getContentPlatformConfig()
-    if (isCanonicalRepositoryUploadActive(contentPlatformConfig)) {
+    if (isCanonicalAssistantArchitectActive(contentPlatformConfig)) {
       log.warn("Legacy PDF conversion rejected after repository cutover")
       timer({ status: "error", reason: "legacy_endpoint_disabled" })
       return new NextResponse(

@@ -6,6 +6,9 @@ import { getDocumentsByConversationId, getDocumentChunksByDocumentId } from '@/l
 import { getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 
 // Mock dependencies
+jest.mock('@/lib/repositories/content-platform/legacy-retirement-response', () => ({
+  legacyContentRetirementResponse: jest.fn(async () => null),
+}));
 jest.mock('@/lib/auth/server-session', () => ({
   getServerSession: jest.fn()
 }));

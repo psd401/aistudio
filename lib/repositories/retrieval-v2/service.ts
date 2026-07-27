@@ -975,13 +975,16 @@ export async function retrieveRepositoryContent(
             )
           )
         ).flat();
-  const legacyCompatibility = await legacyCompatibilityCandidates(
-    authorizedIds,
-    principal,
-    query,
-    modalities,
-    candidateLimit
-  );
+  const legacyCompatibility =
+    request.includeLegacyCompatibility === false
+      ? []
+      : await legacyCompatibilityCandidates(
+          authorizedIds,
+          principal,
+          query,
+          modalities,
+          candidateLimit
+        );
   lexical.push(...legacyCompatibility);
 
   const visual: RetrievalCandidate[] = [];

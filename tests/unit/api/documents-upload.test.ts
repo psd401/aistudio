@@ -1,4 +1,7 @@
 // Mock Next.js server components first
+jest.mock('@/lib/repositories/content-platform/legacy-retirement-response', () => ({
+  legacyContentRetirementResponse: jest.fn(async () => null),
+}));
 jest.mock('next/server', () => ({
   NextRequest: jest.fn(),
   NextResponse: class NextResponse {
