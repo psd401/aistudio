@@ -3,6 +3,26 @@
 const { createHash, randomUUID } = require('node:crypto');
 const { requestAgentBroker } = require('./agent-broker');
 
+function hasRequiredUploadContract(prepared, byteLength, contentType, checksumSha256) {
+  const headers = prepared?.requiredHeaders;
+  if (
+    typeof prepared?.uploadUrl !== 'string' ||
+    typeof prepared?.reservationId !== 'string' ||
+    !headers ||
+    typeof headers !== 'object' ||
+    Array.isArray(headers)
+  ) {
+    return false;
+  }
+  return (
+    Object.keys(headers).sort().join(',') ===
+      'Content-Length,Content-Type,x-amz-checksum-sha256' &&
+    headers['Content-Length'] === String(byteLength) &&
+    headers['Content-Type'] === contentType &&
+    headers['x-amz-checksum-sha256'] === checksumSha256
+  );
+}
+
 async function publishArtifact(bytes, extension, contentType) {
   if (!Buffer.isBuffer(bytes) && !(bytes instanceof Uint8Array)) {
     throw new TypeError('Artifact body must be bytes');
@@ -19,24 +39,12 @@ async function publishArtifact(bytes, extension, contentType) {
     idempotencyKey: randomUUID(),
     checksumSha256,
   });
-  const requiredHeaders = prepared?.requiredHeaders;
-  if (
-    typeof prepared?.uploadUrl !== 'string' ||
-    typeof prepared?.reservationId !== 'string' ||
-    !requiredHeaders ||
-    typeof requiredHeaders !== 'object' ||
-    Array.isArray(requiredHeaders) ||
-    Object.keys(requiredHeaders).sort().join(',') !==
-      'Content-Length,Content-Type,x-amz-checksum-sha256' ||
-    requiredHeaders['Content-Length'] !== String(bytes.byteLength) ||
-    requiredHeaders['Content-Type'] !== contentType ||
-    requiredHeaders['x-amz-checksum-sha256'] !== checksumSha256
-  ) {
+  if (!hasRequiredUploadContract(prepared, bytes.byteLength, contentType, checksumSha256)) {
     throw new Error('Artifact broker returned an incomplete upload');
   }
   const response = await fetch(prepared.uploadUrl, {
     method: 'PUT',
-    headers: requiredHeaders,
+    headers: prepared.requiredHeaders,
     body: bytes,
     redirect: 'error',
     signal: AbortSignal.timeout(120_000),

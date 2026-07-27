@@ -23,6 +23,22 @@ interface NexusProviderMetricsRow extends DatabaseRow {
   cached_tokens_total: number | null;
 }
 
+const EMPTY_PROVIDER_METRICS: NexusProviderMetricsRow = {
+  request_count: 0,
+  total_tokens: null,
+  avg_cost: null,
+  avg_response_time: null,
+  cached_tokens_total: null
+};
+
+function calculateCacheHitRate(metrics: NexusProviderMetricsRow): number {
+  const cachedTokens = metrics.cached_tokens_total || 0;
+  const totalTokens = metrics.total_tokens || 0;
+  return cachedTokens > 0 && totalTokens > 0
+    ? cachedTokens / totalTokens
+    : 0;
+}
+
 interface NexusConversationEventRow extends DatabaseRow {
   event_data: Record<string, unknown>;
   created_at: string;
@@ -159,16 +175,8 @@ export class ConversationStateManager {
         WHERE conversation_id = $1
       `, [conversationId]);
       
-      const metrics = metricsResult[0] || {
-        request_count: 0,
-        total_tokens: null,
-        avg_cost: null,
-        avg_response_time: null,
-        cached_tokens_total: null
-      };
-      const cacheHitRate = (metrics.cached_tokens_total || 0) > 0 && (metrics.total_tokens || 0) > 0
-        ? (metrics.cached_tokens_total || 0) / (metrics.total_tokens || 1)
-        : 0;
+      const metrics = metricsResult[0] || EMPTY_PROVIDER_METRICS;
+      const cacheHitRate = calculateCacheHitRate(metrics);
       
       return {
         conversationId: row.conversation_id,

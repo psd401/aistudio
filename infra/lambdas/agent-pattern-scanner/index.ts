@@ -245,30 +245,18 @@ export const handler = async (
   return { detected: totalDetected, weeks: weeksToScan };
 };
 
-async function scanForWeek(
+interface WeekAggregate {
+  currentCount: number;
+  buildings: Set<string>;
+  priorTotals: Map<string, number>;
+}
+
+function aggregateSignalsForWeek(
+  signals: SignalItem[],
   currentWeek: string,
-  prefetchedSignals?: SignalItem[],
-): Promise<number> {
-  const rollingWeeks = new Set<string>();
-  for (let i = 1; i <= ROLLING_WEEKS; i++) {
-    rollingWeeks.add(priorWeek(currentWeek, i));
-  }
-
-  const signals = prefetchedSignals ?? (await scanAllSignals());
-  log("INFO", "Processing signals", {
-    total: signals.length,
-    currentWeek,
-    rollingWeeks: Array.from(rollingWeeks),
-    prefetched: !!prefetchedSignals,
-  });
-
-  // Aggregate: topic → { currentCount, buildings: Set, priorCounts: number[] }
-  interface Agg {
-    currentCount: number;
-    buildings: Set<string>;
-    priorTotals: Map<string, number>;
-  }
-  const byTopic = new Map<string, Agg>();
+  rollingWeeks: Set<string>,
+): { byTopic: Map<string, WeekAggregate>; weekRelevantSignals: number } {
+  const byTopic = new Map<string, WeekAggregate>();
   // Count signals that are relevant to this week (current or rolling window)
   // rather than using the total DynamoDB signal count which includes all weeks.
   let weekRelevantSignals = 0;
@@ -287,6 +275,30 @@ async function scanForWeek(
       agg.priorTotals.set(s.week, (agg.priorTotals.get(s.week) ?? 0) + s.count);
     }
   }
+  return { byTopic, weekRelevantSignals };
+}
+
+async function scanForWeek(
+  currentWeek: string,
+  prefetchedSignals?: SignalItem[],
+): Promise<number> {
+  const rollingWeeks = new Set<string>();
+  for (let i = 1; i <= ROLLING_WEEKS; i++) {
+    rollingWeeks.add(priorWeek(currentWeek, i));
+  }
+
+  const signals = prefetchedSignals ?? (await scanAllSignals());
+  log("INFO", "Processing signals", {
+    total: signals.length,
+    currentWeek,
+    rollingWeeks: Array.from(rollingWeeks),
+    prefetched: !!prefetchedSignals,
+  });
+  const { byTopic, weekRelevantSignals } = aggregateSignalsForWeek(
+    signals,
+    currentWeek,
+    rollingWeeks,
+  );
 
   const sql = await getSql();
   let detected = 0;

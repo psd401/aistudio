@@ -133,6 +133,35 @@ const PAYLOAD_PLACEHOLDERS = {
   },
 };
 
+function normalizePayloadFilePath(rawPath, fileFlag, reject) {
+  let filePath = rawPath;
+  const singleQuoted = filePath.startsWith("'") && filePath.endsWith("'");
+  const doubleQuoted = filePath.startsWith('"') && filePath.endsWith('"');
+  if (filePath.length >= 2 && (singleQuoted || doubleQuoted)) {
+    filePath = filePath.slice(1, -1);
+  }
+  if (!filePath.startsWith('/')) {
+    reject(`${fileFlag} requires an absolute path (got "${filePath}")`);
+  }
+  return filePath;
+}
+
+function readPayloadFile(filePath, fileFlag, kind, reject) {
+  let content;
+  try {
+    content = validatedFs.readFileSync(filePath, 'utf8');
+  } catch (err) {
+    reject(`${fileFlag}: cannot read ${filePath}: ${err.message}`);
+  }
+  if (kind !== 'json') return content;
+
+  try {
+    return JSON.stringify(JSON.parse(content));
+  } catch (err) {
+    reject(`${fileFlag}: ${filePath} is not valid JSON: ${err.message}`);
+  }
+}
+
 /**
  * Resolve `--json-file` / `--body-file` references in a --command string.
  *
@@ -174,38 +203,13 @@ function resolvePayloadFiles(commandString, options = {}) {
     if (spec.inlineMatcher.test(commandString)) {
       reject(`use either ${spec.flag} or ${fileFlag}, not both`);
     }
-    let filePath = matches[0][2];
+    const filePath = normalizePayloadFilePath(matches[0][2], fileFlag, reject);
     // Models habitually quote flag values (every SKILL.md example quotes
     // --params). \S+ captures those quotes, so strip one matching
     // surrounding pair before validating — otherwise a valid quoted path
     // fails the absolute-path check with a misleading error.
-    if (
-      filePath.length >= 2 &&
-      ((filePath.startsWith("'") && filePath.endsWith("'")) ||
-        (filePath.startsWith('"') && filePath.endsWith('"')))
-    ) {
-      filePath = filePath.slice(1, -1);
-    }
-    if (!filePath.startsWith('/')) {
-      reject(`${fileFlag} requires an absolute path (got "${filePath}")`);
-    }
-    let content;
-    try {
-      content = validatedFs.readFileSync(filePath, 'utf8');
-    } catch (err) {
-      reject(`${fileFlag}: cannot read ${filePath}: ${err.message}`);
-    }
-    if (spec.kind === 'json') {
-      try {
-        // Minify so the synthetic inline command is single-line — the
-        // marker injector's brace scanner and the gate regexes both operate
-        // on it, and a compact form keeps their behavior identical to the
-        // inline --json path.
-        content = JSON.stringify(JSON.parse(content));
-      } catch (err) {
-        reject(`${fileFlag}: ${filePath} is not valid JSON: ${err.message}`);
-      }
-    }
+    // JSON is minified so the marker injector and gates see one line.
+    const content = readPayloadFile(filePath, fileFlag, spec.kind, reject);
     payloads[spec.placeholder] = content;
     execCommand = execCommand.replace(
       spec.matcher,
@@ -857,15 +861,7 @@ function injectMarkers(commandString) {
  * inclusive) or null when there is no parseable --json object. Shared by
  * mutateJsonField (marker injection) and extractJsonArg (payload-file flow).
  */
-function findJsonSpan(commandString) {
-  // Match --json followed by a single-quoted or double-quoted JSON object.
-  // The simple/robust approach: find --json, then balanced-brace scan from
-  // the next non-quote character forward.
-  const jsonFlagIdx = commandString.search(/--json\s+['"]?\{/);
-  if (jsonFlagIdx === -1) return null;
-
-  // Find the start of the JSON object (`{`). Skip the `--json` token,
-  // any whitespace, and any opening quote.
+function findJsonObjectStart(commandString, jsonFlagIdx) {
   let i = jsonFlagIdx + '--json'.length;
   while (i < commandString.length && /\s/.test(commandString[i])) i++;
   let openQuote = '';
@@ -875,13 +871,14 @@ function findJsonSpan(commandString) {
   }
   const jsonStart = i;
   if (commandString[jsonStart] !== '{') return null;
+  return { jsonStart, openQuote };
+}
 
-  // Brace-balance scan to find the matching close.
+function findBalancedJsonEnd(commandString, jsonStart) {
   let depth = 0;
   let inString = false;
   let stringChar = '';
   let escape = false;
-  let jsonEnd = -1;
   for (let j = jsonStart; j < commandString.length; j++) {
     const ch = commandString[j];
     if (escape) { escape = false; continue; }
@@ -898,11 +895,19 @@ function findJsonSpan(commandString) {
     if (ch === '{') depth++;
     else if (ch === '}') {
       depth--;
-      if (depth === 0) { jsonEnd = j; break; }
+      if (depth === 0) return j;
     }
   }
-  if (jsonEnd === -1) return null;
-  return { jsonStart, jsonEnd, openQuote };
+  return -1;
+}
+
+function findJsonSpan(commandString) {
+  const jsonFlagIdx = commandString.search(/--json\s+['"]?\{/);
+  if (jsonFlagIdx === -1) return null;
+  const start = findJsonObjectStart(commandString, jsonFlagIdx);
+  if (!start) return null;
+  const jsonEnd = findBalancedJsonEnd(commandString, start.jsonStart);
+  return jsonEnd === -1 ? null : { ...start, jsonEnd };
 }
 
 /**
