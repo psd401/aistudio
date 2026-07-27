@@ -318,14 +318,7 @@ export function ModelCompare() {
   }, [model1State.selectedModel, model2State.selectedModel, prompt]);
 
   const handleNewComparison = useCallback(() => {
-    // Close any active stream
-    if (streamReaderRef.current) {
-      streamReaderRef.current.cancel().catch(() => {
-        // Ignore cancel errors
-      });
-      streamReaderRef.current = null;
-    }
-
+    cancelActiveReader(streamReaderRef);
     setModel1Response("");
     setModel2Response("");
     setModel1ImageUrl(undefined);
@@ -340,14 +333,7 @@ export function ModelCompare() {
   }, []);
 
   const handleStopStreaming = useCallback(() => {
-    // Close the stream
-    if (streamReaderRef.current) {
-      streamReaderRef.current.cancel().catch(() => {
-        // Ignore cancel errors
-      });
-      streamReaderRef.current = null;
-    }
-
+    cancelActiveReader(streamReaderRef);
     setIsStreaming(false);
     setIsLoading(false);
     setModel1Complete(false);
@@ -357,11 +343,7 @@ export function ModelCompare() {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (streamReaderRef.current) {
-        streamReaderRef.current.cancel().catch(() => {
-          // Ignore cancel errors
-        });
-      }
+      cancelActiveReader(streamReaderRef);
     };
   }, []);
 
