@@ -148,51 +148,49 @@ function promptForKey(userEmail, reason) {
  * Returns the same `{__ok, status, data|error}` envelope as before, including
  * the distinct 429 shape the callers already branch on.
  */
-async function fsFetch(apiKey, urlPath, init = {}) {
-  void apiKey;
-  // Kept from the original: a path must be relative and start with '/'. The
-  // broker re-validates, but failing here gives the caller the precise
-  // bad_args exit instead of a generic broker rejection.
-  if (typeof urlPath !== 'string' || !urlPath.startsWith('/')) {
-    fail(`fsFetch: urlPath must start with '/' (got: ${String(urlPath).slice(0, 50)})`, 'bad_args');
-  }
-
-  const method = (init.method || 'GET').toUpperCase();
-  let parsedBody;
-  if (init.body !== undefined && init.body !== null) {
-    try {
-      parsedBody = typeof init.body === 'string' ? JSON.parse(init.body) : init.body;
-    } catch (err) {
-      fail(`fsFetch: body is not valid JSON: ${err.message}`, 'bad_args');
-    }
-  }
-
-  let result;
+function parseFetchBody(body) {
+  if (body === undefined || body === null) return undefined;
+  if (typeof body !== 'string') return body;
   try {
-    result = await requestAgentBroker('/api/agent/credentials', {
+    return JSON.parse(body);
+  } catch (err) {
+    fail(`fsFetch: body is not valid JSON: ${err.message}`, 'bad_args');
+  }
+}
+
+function brokerRequestFailure(err) {
+  const status = (err && err.status) || 0;
+  if (status === 403) {
+    return {
+      __ok: false,
+      status: 403,
+      error: 'Freshservice access is not granted for this account.',
+      code: 'freshservice_forbidden',
+    };
+  }
+  return {
+    __ok: false,
+    status,
+    error: `Freshservice broker request failed: ${err && err.message}`,
+    code: 'freshservice_broker_error',
+  };
+}
+
+async function requestFreshserviceBroker(urlPath, method, parsedBody) {
+  try {
+    const result = await requestAgentBroker('/api/agent/credentials', {
       operation: 'freshservice',
       path: urlPath,
       method,
       ...(parsedBody === undefined ? {} : { body: parsedBody }),
     });
+    return { result };
   } catch (err) {
-    const status = (err && err.status) || 0;
-    if (status === 403) {
-      return {
-        __ok: false,
-        status: 403,
-        error: 'Freshservice access is not granted for this account.',
-        code: 'freshservice_forbidden',
-      };
-    }
-    return {
-      __ok: false,
-      status,
-      error: `Freshservice broker request failed: ${err && err.message}`,
-      code: 'freshservice_broker_error',
-    };
+    return { failure: brokerRequestFailure(err) };
   }
+}
 
+function normalizeFreshserviceResult(result) {
   // The owner has never registered a key. NOT an error — surface the
   // registration prompt the agent knows how to act on.
   if (result && result.code === 'credential_missing') {
@@ -215,6 +213,23 @@ async function fsFetch(apiKey, urlPath, init = {}) {
     };
   }
   return { __ok: true, status: result.status, data: result.data ?? {} };
+}
+
+async function fsFetch(apiKey, urlPath, init = {}) {
+  void apiKey;
+  // Kept from the original: a path must be relative and start with '/'. The
+  // broker re-validates, but failing here gives the caller the precise
+  // bad_args exit instead of a generic broker rejection.
+  if (typeof urlPath !== 'string' || !urlPath.startsWith('/')) {
+    fail(`fsFetch: urlPath must start with '/' (got: ${String(urlPath).slice(0, 50)})`, 'bad_args');
+  }
+
+  const method = (init.method || 'GET').toUpperCase();
+  const parsedBody = parseFetchBody(init.body);
+  const outcome = await requestFreshserviceBroker(urlPath, method, parsedBody);
+  return 'failure' in outcome
+    ? outcome.failure
+    : normalizeFreshserviceResult(outcome.result);
 }
 
 /**

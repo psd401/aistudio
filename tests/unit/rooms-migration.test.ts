@@ -26,9 +26,7 @@ describe("migration 157 — teacher-managed rooms", () => {
   it.each(["rooms", "room_classes", "room_members", "room_resources"])(
     "creates %s additively",
     (table) => {
-      expect(migration).toMatch(
-        new RegExp(`CREATE TABLE IF NOT EXISTS ${table} \\(`)
-      );
+      expect(migration).toContain(`CREATE TABLE IF NOT EXISTS ${table} (`);
     }
   );
 

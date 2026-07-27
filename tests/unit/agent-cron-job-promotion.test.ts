@@ -51,7 +51,6 @@ const baseInput = {
   originalPrompt: "Assemble the morning dispatch.",
 }
 
-describe("cron job promotion", () => {
   describe("payload contract with the runner", () => {
     it("round-trips through the router's parser", () => {
       // The load-bearing assertion: what cron emits is what the runner reads.
@@ -358,7 +357,9 @@ describe("cron job promotion", () => {
         "JOB_SECURITY_GROUP",
         "JOB_CONTAINER_NAME",
       ]) {
-        expect(stackSource).toContain(`cronLambda.addEnvironment('${key}'`)
+        expect(stackSource).toContain(
+          `resources.cronLambda.addEnvironment('${key}'`,
+        )
       }
     })
 
@@ -366,10 +367,10 @@ describe("cron job promotion", () => {
       // Without it the code declines to promote rather than launching a job
       // no one can lock — so a missing grant disables the feature silently.
       expect(stackSource).toContain(
-        "cronLambda.addEnvironment(\n      'SESSION_LOCKS_TABLE'",
+        "resources.cronLambda.addEnvironment(\n      'SESSION_LOCKS_TABLE'",
       )
       expect(stackSource).toContain(
-        "this.sessionLocksTable.grantReadWriteData(this.cronLambdaRole)",
+        "resources.sessionLocksTable.grantReadWriteData(resources.cronLambdaRole)",
       )
     })
 
@@ -377,7 +378,10 @@ describe("cron job promotion", () => {
       // PassRole on only the task role fails at launch with an opaque
       // AccessDenied — ECS assumes the execution role too.
       const cronPolicies = stackSource.slice(
-        stackSource.indexOf("JobRunnerLaunch", stackSource.indexOf("cronLambda.addEnvironment")),
+        stackSource.indexOf(
+          "JobRunnerLaunch",
+          stackSource.indexOf("resources.cronLambda.addEnvironment"),
+        ),
       )
       expect(cronPolicies).toContain("'ecs:RunTask'")
       expect(cronPolicies).toContain("'iam:PassRole'")
@@ -389,8 +393,11 @@ describe("cron job promotion", () => {
     it("keeps the router's own promotion wiring intact", () => {
       // The cron wiring reuses the router's cluster, task definition and
       // security group; breaking the router's half breaks both.
-      expect(stackSource).toContain("this.routerLambda.addEnvironment('JOB_CLUSTER_ARN'")
-      expect(stackSource).toContain("this.routerLambda.addEnvironment('JOB_TASK_DEF_ARN'")
+      expect(stackSource).toContain(
+        "resources.routerLambda.addEnvironment('JOB_CLUSTER_ARN'",
+      )
+      expect(stackSource).toContain(
+        "resources.routerLambda.addEnvironment('JOB_TASK_DEF_ARN'",
+      )
     })
   })
-})

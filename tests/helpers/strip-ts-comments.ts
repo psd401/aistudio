@@ -27,54 +27,89 @@
  * (and gotten wrong) more than once. Its behaviour is pinned by
  * tests/unit/strip-ts-comments.test.ts.
  */
+interface CommentScanState {
+  out: string
+  quote: string | null
+  inLine: boolean
+  inBlock: boolean
+}
+
+function consumeLineComment(state: CommentScanState, ch: string): void {
+  if (ch === "\n") {
+    state.inLine = false
+    state.out += ch
+  }
+}
+
+function consumeBlockComment(
+  state: CommentScanState,
+  ch: string,
+  next: string | undefined
+): boolean {
+  if (ch !== "*" || next !== "/") return false
+  state.inBlock = false
+  return true
+}
+
+function consumeQuotedCharacter(
+  state: CommentScanState,
+  ch: string
+): boolean {
+  if (ch === "\\") return true
+  if (ch === state.quote) state.quote = null
+  state.out += ch
+  return false
+}
+
+function startCommentOrQuote(
+  state: CommentScanState,
+  ch: string,
+  next: string | undefined
+): boolean {
+  if (ch === "'" || ch === '"' || ch === "`") {
+    state.quote = ch
+    state.out += ch
+    return true
+  }
+  if (ch === "/" && next === "/") {
+    state.inLine = true
+    return true
+  }
+  if (ch === "/" && next === "*") {
+    state.inBlock = true
+    return true
+  }
+  return false
+}
+
 export function stripComments(src: string): string {
-  let out = ""
-  let quote: string | null = null
-  let inLine = false
-  let inBlock = false
+  const state: CommentScanState = {
+    out: "",
+    quote: null,
+    inLine: false,
+    inBlock: false,
+  }
 
   for (let i = 0; i < src.length; i++) {
     const ch = src[i]
     const next = src[i + 1]
-
-    if (inLine) {
-      if (ch === "\n") {
-        inLine = false
-        out += ch
-      }
+    if (state.inLine) {
+      consumeLineComment(state, ch)
       continue
     }
-    if (inBlock) {
-      if (ch === "*" && next === "/") {
-        inBlock = false
-        i++
-      }
+    if (state.inBlock) {
+      if (consumeBlockComment(state, ch, next)) i++
       continue
     }
-    if (quote) {
-      if (ch === "\\") {
-        i++
-        continue
-      }
-      if (ch === quote) quote = null
-      out += ch
+    if (state.quote) {
+      if (consumeQuotedCharacter(state, ch)) i++
       continue
     }
-    if (ch === "'" || ch === '"' || ch === "`") {
-      quote = ch
-      out += ch
+    if (startCommentOrQuote(state, ch, next)) {
+      if (state.inBlock) i++
       continue
     }
-    if (ch === "/" && next === "/") {
-      inLine = true
-      continue
-    }
-    if (ch === "/" && next === "*") {
-      inBlock = true
-      i++
-      continue
-    }
-    out += ch
+    state.out += ch
   }
-  return out
+  return state.out
 }

@@ -49,6 +49,7 @@ import {
 } from './invocation-context';
 import {
   loadAuthorizedSchedule,
+  type AuthorizedSchedule,
   type ScheduleReferenceEvent,
 } from './schedule-record';
 
@@ -500,14 +501,26 @@ function toInvokeResult(responseBody: Record<string, unknown>): InvokeResult {
   };
 }
 
+interface AgentCoreInvocation {
+  prompt: string;
+  userEmail: string;
+  sessionId: string;
+  log: Logger;
+  userContext: { displayName?: string; workspacePrefix?: string };
+  remainingMs: () => number;
+}
+
 async function invokeAgentCore(
-  prompt: string,
-  userEmail: string,
-  sessionId: string,
-  log: Logger,
-  userContext: { displayName?: string; workspacePrefix?: string },
-  remainingMs: () => number,
+  invocation: AgentCoreInvocation,
 ): Promise<InvokeResult> {
+  const {
+    prompt,
+    userEmail,
+    sessionId,
+    log,
+    userContext,
+    remainingMs,
+  } = invocation;
   const runtimeId = await getRuntimeId(log);
   if (!runtimeId) {
     return invokeFailure('Agent is not yet deployed.');
@@ -654,13 +667,12 @@ async function releaseJobLock(
 }
 
 /**
- * Promote a deadline-expired SCHEDULED turn to the background job-runner.
+ * Promote a recoverable scheduled turn to the background job-runner.
  *
- * Launches the same ECS task the router uses for interactive turns
- * (agent-router/job-main.ts): it resumes the SAME AgentCore session with a
- * continuation prompt and a 2-hour deadline, then posts the finished answer to
- * the owner's Chat space. Lambda's 15-minute ceiling is an AWS hard limit, so
- * this is the only way a longer scheduled task can ever complete.
+ * A deadline resumes the same AgentCore session. Context overflow restarts in
+ * a derived fresh session because resuming the overflowing transcript would
+ * fail again. Both paths use the same ECS runner and post the finished answer
+ * to the owner's Chat space.
  *
  * Returns true when the job launched — the caller must then NOT post the
  * partial, or the owner gets two messages for one task.
@@ -670,87 +682,119 @@ async function releaseJobLock(
  * agent managed to produce. Promotion must never make things worse than the
  * status quo.
  */
+interface ScheduledJobInput {
+  sessionId: string;
+  runtimeId: string;
+  userEmail: string;
+  displayName: string;
+  workspacePrefix: string;
+  spaceName: string;
+  originalPrompt: string;
+  scheduleName: string;
+  reason: PromotionReason;
+}
+
+interface JobRunnerConfig {
+  clusterArn: string;
+  taskDefArn: string;
+  subnets: string[];
+  securityGroup: string;
+  containerName: string;
+}
+
+function readJobRunnerConfig(log: Logger): JobRunnerConfig | null {
+  const config = {
+    clusterArn: process.env.JOB_CLUSTER_ARN || '',
+    taskDefArn: process.env.JOB_TASK_DEF_ARN || '',
+    subnets: (process.env.JOB_SUBNETS || '').split(',').filter(Boolean),
+    securityGroup: process.env.JOB_SECURITY_GROUP || '',
+    containerName: process.env.JOB_CONTAINER_NAME || 'job-runner',
+  };
+  if (
+    !config.clusterArn
+    || !config.taskDefArn
+    || config.subnets.length === 0
+    || !config.securityGroup
+  ) {
+    log.warn('Job promotion not configured — posting the partial instead');
+    return null;
+  }
+  return config;
+}
+
+async function launchScheduledJob(
+  input: ScheduledJobInput,
+  lockToken: string,
+  config: JobRunnerConfig,
+  log: Logger,
+): Promise<void> {
+  const payload = buildJobPayload({
+    sessionId: input.sessionId,
+    reason: input.reason,
+    lockToken,
+    runtimeId: input.runtimeId,
+    userEmail: input.userEmail,
+    displayName: input.displayName,
+    workspacePrefix: input.workspacePrefix,
+    spaceName: input.spaceName,
+    // Scheduled tasks always deliver to the owner's DM, never a shared space.
+    isDM: true,
+    originalPrompt: input.originalPrompt,
+  });
+  const result = await ecsClient.send(
+    new RunTaskCommand({
+      cluster: config.clusterArn,
+      taskDefinition: config.taskDefArn,
+      launchType: 'FARGATE',
+      count: 1,
+      startedBy: 'agent-cron-promotion',
+      networkConfiguration: {
+        awsvpcConfiguration: {
+          subnets: config.subnets,
+          securityGroups: [config.securityGroup],
+          assignPublicIp: 'DISABLED',
+        },
+      },
+      overrides: {
+        containerOverrides: [
+          {
+            name: config.containerName,
+            environment: [{ name: 'JOB_PAYLOAD', value: payload }],
+          },
+        ],
+      },
+    }),
+  );
+  if (result.failures && result.failures.length > 0) {
+    throw new Error(
+      `RunTask failures: ${result.failures
+        .map((failure) => {
+          const detail = failure.detail ? ` (${failure.detail})` : '';
+          return `${failure.reason ?? 'unknown'}${detail}`;
+        })
+        .join('; ')}`,
+    );
+  }
+  log.info('Scheduled turn promoted to background job', {
+    marker: 'BACKGROUND_PROMOTION',
+    source: 'cron',
+    reason: input.reason,
+    scheduleName: input.scheduleName,
+    sessionId: input.sessionId,
+    taskArn: result.tasks?.[0]?.taskArn ?? 'unknown',
+  });
+}
+
 async function promoteScheduledTurnToJob(
-  input: {
-    sessionId: string;
-    runtimeId: string;
-    userEmail: string;
-    displayName: string;
-    workspacePrefix: string;
-    spaceName: string;
-    originalPrompt: string;
-    scheduleName: string;
-    reason: PromotionReason;
-  },
+  input: ScheduledJobInput,
   log: Logger,
 ): Promise<boolean> {
-  const clusterArn = process.env.JOB_CLUSTER_ARN || '';
-  const taskDefArn = process.env.JOB_TASK_DEF_ARN || '';
-  const subnets = (process.env.JOB_SUBNETS || '').split(',').filter(Boolean);
-  const securityGroup = process.env.JOB_SECURITY_GROUP || '';
-  const containerName = process.env.JOB_CONTAINER_NAME || 'job-runner';
-  if (!clusterArn || !taskDefArn || subnets.length === 0 || !securityGroup) {
-    log.warn('Job promotion not configured — posting the partial instead');
-    return false;
-  }
-
+  const config = readJobRunnerConfig(log);
+  if (!config) return false;
   const lockToken = await tryAcquireJobLock(input.sessionId, log);
   if (lockToken === null) return false;
-
   try {
-    const payload = buildJobPayload({
-      sessionId: input.sessionId,
-      reason: input.reason,
-      lockToken,
-      runtimeId: input.runtimeId,
-      userEmail: input.userEmail,
-      displayName: input.displayName,
-      workspacePrefix: input.workspacePrefix,
-      spaceName: input.spaceName,
-      // Scheduled tasks always deliver to the owner's DM, never a shared
-      // space, so the runner must not prefix the reply with "[Name's Agent]".
-      isDM: true,
-      originalPrompt: input.originalPrompt,
-    });
-
-    const result = await ecsClient.send(
-      new RunTaskCommand({
-        cluster: clusterArn,
-        taskDefinition: taskDefArn,
-        launchType: 'FARGATE',
-        count: 1,
-        startedBy: 'agent-cron-promotion',
-        networkConfiguration: {
-          awsvpcConfiguration: {
-            subnets,
-            securityGroups: [securityGroup],
-            assignPublicIp: 'DISABLED',
-          },
-        },
-        overrides: {
-          containerOverrides: [
-            { name: containerName, environment: [{ name: 'JOB_PAYLOAD', value: payload }] },
-          ],
-        },
-      }),
-    );
-    if (result.failures && result.failures.length > 0) {
-      throw new Error(
-        `RunTask failures: ${result.failures
-          .map((f) => `${f.reason ?? 'unknown'}${f.detail ? ` (${f.detail})` : ''}`)
-          .join('; ')}`,
-      );
-    }
-
-    log.info('Scheduled turn promoted to background job', {
-      // Stable marker for the BackgroundPromotion metric filter (#1161).
-      marker: 'BACKGROUND_PROMOTION',
-      source: 'cron',
-      reason: input.reason,
-      scheduleName: input.scheduleName,
-      sessionId: input.sessionId,
-      taskArn: result.tasks?.[0]?.taskArn ?? 'unknown',
-    });
+    await launchScheduledJob(input, lockToken, config, log);
     return true;
   } catch (error) {
     // Roll the lock back, or the owner's next message sits behind a job that
@@ -950,6 +994,154 @@ async function recordCronFailure(
   }
 }
 
+type HandlerResult = {
+  status: 'success' | 'error' | 'skipped';
+  scheduleId: string;
+};
+
+interface ScheduledResultContext {
+  schedule: AuthorizedSchedule;
+  scheduleName: string;
+  startTime: number;
+  sessionId: string;
+  result: InvokeResult;
+  log: Logger;
+}
+
+async function sendPromotionAcknowledgement(
+  context: ScheduledResultContext,
+  reason: PromotionReason,
+): Promise<void> {
+  const { schedule, scheduleName, log } = context;
+  const acknowledgement =
+    reason === 'context-overflow'
+      ? "⏳ This run grew too large to finish in one pass, so I'm starting it over in the background with a longer budget. I'll post the result here when it's done."
+      : "⏳ This is taking longer than one pass allows — I've moved it to a background job and will post the result here when it's done.";
+  try {
+    await sendChatMessage(
+      schedule.dmSpaceName,
+      `📋 **${scheduleName}**\n\n${acknowledgement}`,
+      log,
+    );
+  } catch (error) {
+    // The job is already running, so acknowledgement delivery is best-effort.
+    log.warn('Promotion ack delivery failed; job still running', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function recordPromotedRun(
+  context: ScheduledResultContext,
+): Promise<void> {
+  const { schedule, scheduleName, sessionId, result, startTime, log } = context;
+  await recordRun(
+    {
+      userEmail: schedule.ownerEmail,
+      scheduleId: schedule.scheduleId,
+      scheduleName,
+      sessionId,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      latencyMs: Date.now() - startTime,
+      status: 'promoted',
+    },
+    log,
+  );
+  log.info('Scheduled task handed to background job', {
+    scheduleId: schedule.scheduleId,
+    scheduleName,
+    sessionId,
+    email: sanitizeEmail(schedule.ownerEmail),
+    latencyMs: Date.now() - startTime,
+  });
+}
+
+async function tryPromoteScheduledResult(
+  context: ScheduledResultContext,
+): Promise<boolean> {
+  const { schedule, scheduleName, sessionId, result, log } = context;
+  const reason = promotionReason(result.errorClass);
+  if (reason === null) return false;
+  const runtimeId = await getRuntimeId(log);
+  if (!runtimeId) return false;
+  const promoted = await promoteScheduledTurnToJob(
+    {
+      sessionId,
+      runtimeId,
+      userEmail: schedule.ownerEmail,
+      displayName: schedule.displayName ?? '',
+      workspacePrefix: schedule.workspacePrefix,
+      spaceName: schedule.dmSpaceName,
+      originalPrompt: schedule.prompt,
+      scheduleName,
+      reason,
+    },
+    log,
+  );
+  if (!promoted) return false;
+  await sendPromotionAcknowledgement(context, reason);
+  await recordPromotedRun(context);
+  return true;
+}
+
+async function deliverScheduledResult(
+  context: ScheduledResultContext,
+): Promise<HandlerResult> {
+  const { schedule, scheduleName, sessionId, result, startTime, log } = context;
+  try {
+    await sendChatMessage(
+      schedule.dmSpaceName,
+      `📋 **${scheduleName}**\n\n${result.response}`,
+      log,
+    );
+  } catch (error) {
+    log.error('Failed to deliver scheduled response', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    await recordRun(
+      {
+        userEmail: schedule.ownerEmail,
+        scheduleId: schedule.scheduleId,
+        scheduleName,
+        sessionId,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        latencyMs: Date.now() - startTime,
+        status: 'error',
+        errorMessage: `Chat delivery failed: ${error instanceof Error ? error.message : String(error)}`,
+      },
+      log,
+    );
+    return { status: 'error', scheduleId: schedule.scheduleId };
+  }
+  const status: 'success' | 'error' = result.ok ? 'success' : 'error';
+  await recordRun(
+    {
+      userEmail: schedule.ownerEmail,
+      scheduleId: schedule.scheduleId,
+      scheduleName,
+      sessionId,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      latencyMs: Date.now() - startTime,
+      status,
+      errorMessage: result.ok ? undefined : result.response.substring(0, 500),
+    },
+    log,
+  );
+  log.info('Scheduled task completed', {
+    scheduleId: schedule.scheduleId,
+    scheduleName,
+    status,
+    email: sanitizeEmail(schedule.ownerEmail),
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    latencyMs: Date.now() - startTime,
+  });
+  return { status, scheduleId: schedule.scheduleId };
+}
+
 // ---------------------------------------------------------------------------
 // Main handler
 // ---------------------------------------------------------------------------
@@ -957,7 +1149,7 @@ async function recordCronFailure(
 export async function handler(
   event: ScheduleReferenceEvent,
   context: LambdaContext,
-): Promise<{ status: 'success' | 'error' | 'skipped'; scheduleId: string }> {
+): Promise<HandlerResult> {
   const referencedScheduleId =
     typeof event?.scheduleId === 'string' ? event.scheduleId : 'unknown';
   const requestId = generateRequestId();
@@ -1007,153 +1199,28 @@ export async function handler(
     sessionId,
   });
 
-  const result = await invokeAgentCore(
-    schedule.prompt,
-    schedule.ownerEmail,
+  const result = await invokeAgentCore({
+    prompt: schedule.prompt,
+    userEmail: schedule.ownerEmail,
     sessionId,
     log,
-    {
+    userContext: {
       displayName: schedule.displayName,
       workspacePrefix: schedule.workspacePrefix,
     },
-    () => context.getRemainingTimeInMillis(),
-  );
-
-  // The turn failed in a RECOVERABLE way. Hand it to the background job-runner
-  // instead of delivering a partial: Lambda's 15-minute ceiling is an AWS hard
-  // limit, so this is the only path by which a longer scheduled task can ever
-  // finish.
-  //
-  // Two recoverable shapes, handled differently by the runner:
-  //   deadline         — ran out of clock. Resume the same session.
-  //   context-overflow — the transcript outgrew the model window. Restart in a
-  //                      fresh session; resuming would re-overflow immediately.
-  //
-  // The deadline case is only reachable because the Lambda now sends an
-  // explicit deadline_s (turn-deadline.ts). Before that its own abort always
-  // fired first, so the harness never reported a deadline at all.
-  const promoteReason = promotionReason(result.errorClass);
-  if (promoteReason !== null) {
-    const runtimeId = await getRuntimeId(log);
-    const promoted = runtimeId
-      ? await promoteScheduledTurnToJob(
-          {
-            sessionId,
-            runtimeId,
-            userEmail: schedule.ownerEmail,
-            displayName: schedule.displayName ?? '',
-            workspacePrefix: schedule.workspacePrefix,
-            spaceName: schedule.dmSpaceName,
-            originalPrompt: schedule.prompt,
-            scheduleName,
-            reason: promoteReason,
-          },
-          log,
-        )
-      : false;
-
-    if (promoted) {
-      // Acknowledge so the owner is not left wondering. Delivery failure here
-      // is NOT fatal — the job is already running and will post the real
-      // answer; failing the invocation would misreport a healthy handoff.
-      try {
-        // Distinct wording per reason. A restart is NOT the same promise as a
-        // continuation: it discards the previous attempt's work, so telling
-        // the owner "I've moved it to a background job" would overstate what
-        // is being carried over.
-        const ack =
-          promoteReason === 'context-overflow'
-            ? "⏳ This run grew too large to finish in one pass, so I'm starting it over in the background with a longer budget. I'll post the result here when it's done."
-            : "⏳ This is taking longer than one pass allows — I've moved it to a background job and will post the result here when it's done.";
-        await sendChatMessage(
-          schedule.dmSpaceName,
-          `📋 **${scheduleName}**\n\n${ack}`,
-          log,
-        );
-      } catch (error) {
-        log.warn('Promotion ack delivery failed; job still running', {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-      await recordRun(
-        {
-          userEmail: schedule.ownerEmail,
-          scheduleId: schedule.scheduleId,
-          scheduleName,
-          sessionId,
-          inputTokens: result.inputTokens,
-          outputTokens: result.outputTokens,
-          latencyMs: Date.now() - startTime,
-          status: 'promoted',
-        },
-        log,
-      );
-      log.info('Scheduled task handed to background job', {
-        scheduleId: schedule.scheduleId,
-        scheduleName,
-        sessionId,
-        email: sanitizeEmail(schedule.ownerEmail),
-        latencyMs: Date.now() - startTime,
-      });
-      return { status: 'success', scheduleId: schedule.scheduleId };
-    }
-    // Promotion declined or failed — fall through and post the partial, which
-    // is strictly better than nothing and matches the previous behaviour.
-  }
-
-  // Deliver response to DM regardless of success (so user sees errors).
-  try {
-    await sendChatMessage(
-      schedule.dmSpaceName,
-      `📋 **${scheduleName}**\n\n${result.response}`,
-      log,
-    );
-  } catch (error) {
-    log.error('Failed to deliver scheduled response', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    await recordRun(
-      {
-        userEmail: schedule.ownerEmail,
-        scheduleId: schedule.scheduleId,
-        scheduleName,
-        sessionId,
-        inputTokens: result.inputTokens,
-        outputTokens: result.outputTokens,
-        latencyMs: Date.now() - startTime,
-        status: 'error',
-        errorMessage: `Chat delivery failed: ${error instanceof Error ? error.message : String(error)}`,
-      },
-      log,
-    );
-    return { status: 'error', scheduleId: schedule.scheduleId };
-  }
-
-  const status: 'success' | 'error' = result.ok ? 'success' : 'error';
-  await recordRun(
-    {
-      userEmail: schedule.ownerEmail,
-      scheduleId: schedule.scheduleId,
-      scheduleName,
-      sessionId,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-      latencyMs: Date.now() - startTime,
-      status,
-      errorMessage: result.ok ? undefined : result.response.substring(0, 500),
-    },
-    log,
-  );
-
-  log.info('Scheduled task completed', {
-    scheduleId: schedule.scheduleId,
-    scheduleName,
-    status,
-    email: sanitizeEmail(schedule.ownerEmail),
-    inputTokens: result.inputTokens,
-    outputTokens: result.outputTokens,
-    latencyMs: Date.now() - startTime,
+    remainingMs: () => context.getRemainingTimeInMillis(),
   });
 
-  return { status, scheduleId: schedule.scheduleId };
+  const scheduledResult = {
+    schedule,
+    scheduleName,
+    startTime,
+    sessionId,
+    result,
+    log,
+  };
+  if (await tryPromoteScheduledResult(scheduledResult)) {
+    return { status: 'success', scheduleId: schedule.scheduleId };
+  }
+  return deliverScheduledResult(scheduledResult);
 }
