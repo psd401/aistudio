@@ -422,6 +422,55 @@ describe("signed-owner Atrium operations", () => {
     expect(assetReadBytesMock).not.toHaveBeenCalled()
   })
 
+  // The authoring-capability assert is the security-relevant line in this
+  // module: reads run before it, every write must run after it. The refactor
+  // that split the handler into read/content/metadata/asset/publish functions
+  // makes it structurally possible for a new branch to land on the wrong side,
+  // and nothing would fail loudly if it did — the operation would simply work
+  // for a caller who should not be allowed to author. This pins it for EVERY
+  // mutating route at once: if the capability check throws, no service call for
+  // any of them may happen.
+  it.each([
+    ["POST", "", { kind: "document", title: "T" }],
+    ["POST", "/content-1/versions", { body: "x" }],
+    ["POST", "/content-1/assets", {
+      filename: "a.png",
+      contentType: "image/png",
+      byteLength: 10,
+      sha256: "A".repeat(43),
+      purpose: "document_image",
+    }],
+    ["POST", "/content-1/assets/asset-1/complete", { sha256: "A".repeat(43) }],
+    ["PATCH", "/content-1", { title: "T" }],
+    ["PATCH", "/content-1/visibility", { level: "internal" }],
+    ["DELETE", "/content-1", undefined],
+    ["POST", "/content-1/publish", { destination: "intranet" }],
+    ["DELETE", "/content-1/publish/intranet", undefined],
+  ])(
+    "refuses %s %s when the authoring capability is denied",
+    async (method, path, body) => {
+      assertContentAuthoringCapabilityMock.mockRejectedValueOnce(
+        new ForbiddenError("Atrium authoring is not permitted")
+      )
+      const result = await executeOwnerAtriumOperation({
+        ownerEmail: "owner@psd401.net",
+        requestId: "request-denied",
+        method: method as "POST" | "PATCH" | "DELETE",
+        path,
+        body,
+      })
+      expect(result.httpStatus).toBe(403)
+      for (const serviceCall of [
+        contentCreateMock,
+        publishMock,
+        assetInitiateMock,
+        assetCompleteMock,
+      ]) {
+        expect(serviceCall).not.toHaveBeenCalled()
+      }
+    }
+  )
+
   it("fails closed when the signed owner cannot become a requester", async () => {
     requesterForUserIdMock.mockResolvedValueOnce(null)
     await expect(
