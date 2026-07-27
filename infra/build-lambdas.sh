@@ -5,22 +5,11 @@ set -e
 
 echo "Building Lambda functions..."
 
-# Compile TypeScript files with strict settings
-echo "Compiling TypeScript..."
-bunx tsc lambdas/file-processor/index.ts --outDir lambdas/file-processor --lib es2022 --target es2022 --module commonjs --esModuleInterop --strict
-bunx tsc lambdas/url-processor/index.ts --outDir lambdas/url-processor --lib es2022 --target es2022 --module commonjs --esModuleInterop --strict
-
-# Install dependencies for file-processor
-echo "Installing dependencies for file-processor..."
-cd lambdas/file-processor
-bun install --production
-cd ../..
-
-# Install dependencies for url-processor
-echo "Installing dependencies for url-processor..."
-cd lambdas/url-processor
-bun install --production
-cd ../..
+# NOTE: file-processor, url-processor, and textract-processor compile at CDK
+# synth time (bundledLambdaAsset in lib/processing-stack.ts), as does the
+# secret-cache layer (lib/constructs/compute/secret-cache-layer.ts) and the
+# db-init Lambda (lib/database-stack.ts). None of them need a pre-deploy
+# build step here, and their compiled output is no longer committed.
 
 # Install dependencies and build agent-router
 echo "Building agent-router..."
@@ -33,14 +22,14 @@ rm -rf node_modules
 bun install --production
 cd ../..
 
-# Create processing layer
-echo "Creating processing layer..."
-mkdir -p layers/processing/nodejs
-cd layers/processing/nodejs
-if [ ! -f "package.json" ]; then
-    echo '{"name":"processing-layer","version":"1.0.0","private":true}' > package.json
-fi
-bun install pdf-parse mammoth @e965/xlsx csv-parse marked cheerio node-fetch @types/node-fetch
-cd ../../..
+# Populate the shared processing layer from its committed manifest.
+# layers/processing/nodejs/package.json pins the dependency versions
+# (node-fetch is deliberately held at ^2.7.0 — see B-013 / PR #1130).
+# Never install packages here by name: that rewrites the manifest with
+# whatever the latest versions happen to be.
+echo "Building processing layer..."
+cd layers/processing
+./build-layer.sh
+cd ../..
 
 echo "Lambda build complete!"

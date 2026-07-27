@@ -9,10 +9,18 @@ bin/**/*.js
 # Node modules everywhere
 **/node_modules/
 
-# Keep Lambda source code tracked (but not dist folders or node_modules)
+# Keep hand-written Lambda JavaScript tracked (but not dist folders or node_modules)
 !lambdas/**/*.js
-!database/lambda/*.js
 !jest.config.js
+
+# These Lambdas compile at CDK synth time from their .ts sources — compiled
+# output must never be committed again (stale committed twins were deployed
+# for weeks; see PR #1386)
+lambdas/file-processor/*.js
+lambdas/url-processor/*.js
+lambdas/textract-processor/*.js
+lambdas/layers/secret-cache/nodejs/*.js
+database/lambda/*.js
 
 # CDK asset staging directory  
 .cdk.staging

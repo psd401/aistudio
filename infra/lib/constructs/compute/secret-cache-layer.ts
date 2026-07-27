@@ -2,6 +2,7 @@ import * as cdk from "aws-cdk-lib"
 import * as lambda from "aws-cdk-lib/aws-lambda"
 import { Construct } from "constructs"
 import * as path from "path"
+import { execSync } from "child_process"
 
 /**
  * Props for SecretCacheLayer construct
@@ -54,12 +55,40 @@ export class SecretCacheLayer extends Construct {
   constructor(scope: Construct, id: string, props: SecretCacheLayerProps = {}) {
     super(scope, id)
 
-    // Point directly to the nodejs directory which contains the pre-built layer
-    // The layer must already be built (npm install && npm run build) before deployment
+    // Compile the layer from its TypeScript source at synth time, so a stale
+    // committed index.js can never ship (previously the directory was deployed
+    // as-is and required a manual pre-deploy build). The compiled index.js
+    // lands at the asset root, preserving the existing /opt/index.js layout;
+    // its only runtime dependency (@aws-sdk/client-secrets-manager) comes from
+    // the Node.js Lambda runtime, so no node_modules are vendored.
     const layerPath = path.join(__dirname, "../../../lambdas/layers/secret-cache/nodejs")
 
     this.layer = new lambda.LayerVersion(this, "Layer", {
-      code: lambda.Code.fromAsset(layerPath),
+      code: lambda.Code.fromAsset(layerPath, {
+        assetHashType: cdk.AssetHashType.SOURCE,
+        exclude: ["node_modules", "dist", "*.js", "*.d.ts", "bun.lock"],
+        bundling: {
+          image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+          local: {
+            tryBundle(outputDir: string): boolean {
+              try {
+                execSync("bun install && bunx tsc", { cwd: layerPath, stdio: "inherit" })
+                execSync(`cp -r dist/* ${outputDir}/`, { cwd: layerPath, stdio: "inherit" })
+                execSync(`cp package.json ${outputDir}/`, { cwd: layerPath, stdio: "inherit" })
+                return true
+              } catch (e) {
+                // eslint-disable-next-line no-console
+                console.error("Local bundling failed for secret-cache layer, falling back to Docker:", e)
+                return false
+              }
+            },
+          },
+          command: [
+            "bash", "-c",
+            "npm install && npm run build && cp -r dist/* /asset-output/ && cp package.json /asset-output/",
+          ],
+        },
+      }),
       compatibleRuntimes:
         props.compatibleRuntimes || [lambda.Runtime.NODEJS_18_X, lambda.Runtime.NODEJS_20_X],
       description: props.description || "Secret cache layer for AWS Lambda",
