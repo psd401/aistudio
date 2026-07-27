@@ -326,275 +326,347 @@ async function retryWithBackoff<T>(
   throw lastError ?? new Error('retryWithBackoff: exhausted retries with no captured error');
 }
 
+type EmbeddingDb = Awaited<ReturnType<typeof getDb>>;
+
+async function writeVisualEmbeddings(params: {
+  db: EmbeddingDb;
+  message: EmbeddingMessage;
+  baseSettings: EmbeddingSettings;
+  descriptor: ReturnType<typeof parseEmbeddingDescriptor>;
+}): Promise<void> {
+  const modalities =
+    params.message.modalities ??
+    params.message.chunkIds.map(() => 'text' as const);
+  const indexes = modalities.flatMap((modality, index) =>
+    modality === 'image' || modality === 'video' ? [index] : []
+  );
+  if (indexes.length === 0) return;
+  const visualSettings: EmbeddingSettings = {
+    ...params.baseSettings,
+    provider: params.descriptor.provider,
+    modelId: params.descriptor.modelId,
+    dimensions: params.descriptor.dimensions,
+  };
+  const sourceCache = new Map<string, string>();
+  const inputs = await Promise.all(
+    indexes.map(async (index) => ({
+      text: params.message.texts[index] ?? '',
+      imageDataUri: await loadVisualDataUri(
+        params.message.visualSources?.[index] ?? null,
+        sourceCache,
+      ),
+    })),
+  );
+  const embeddings = await retryWithBackoff(
+    () => generateVisualEmbeddings(inputs, visualSettings),
+    3,
+    2000
+  );
+  if (embeddings.length !== indexes.length) {
+    throw new Error('Visual embedding provider returned a mismatched vector count');
+  }
+  for (const [position, messageIndex] of indexes.entries()) {
+    const chunkId = params.message.chunkIds[messageIndex];
+    const embedding = embeddings[position];
+    if (!chunkId || !embedding) {
+      throw new Error('Visual embedding response could not be matched to a chunk');
+    }
+    const embeddingValue = `[${embedding.join(',')}]`;
+    const updated = await params.db.execute(sql`
+      UPDATE repository_item_chunks
+      SET visual_embedding = ${embeddingValue}::vector
+      WHERE id = ${chunkId}
+        AND index_generation_id = ${params.message.generationId}::uuid
+      RETURNING id
+    `);
+    if (updated.length !== 1) {
+      throw new Error(
+        `Visual chunk ${chunkId} does not belong to generation ${params.message.generationId}`
+      );
+    }
+  }
+}
+
+async function resolveRecordEmbeddingSettings(
+  db: EmbeddingDb,
+  message: EmbeddingMessage,
+): Promise<EmbeddingSettings | null> {
+  if (!message.generationId) return getEmbeddingSettings();
+  const [generation] = await db.execute<{
+    status: CanonicalGenerationStatus;
+    embedding_model: string | null;
+    embedding_dimensions: number | null;
+    visual_embedding_model: string | null;
+    visual_embedding_dimensions: number | null;
+  }>(sql`
+    SELECT status, embedding_model, embedding_dimensions,
+           visual_embedding_model, visual_embedding_dimensions
+    FROM repository_index_generations
+    WHERE id = ${message.generationId}::uuid
+    LIMIT 1
+  `);
+  if (!generation) {
+    throw new Error(`Index generation ${message.generationId} was not found`);
+  }
+  if (shouldSkipCanonicalGeneration(generation.status)) {
+    log.info(`Skipping stale embedding generation ${message.generationId}`, {
+      status: generation.status,
+    });
+    return null;
+  }
+  if (message.activationOnly) {
+    const activated = await activateCanonicalGeneration(
+      db,
+      message.generationId
+    );
+    if (!activated) {
+      throw new Error(
+        `Generation ${message.generationId} is not complete enough to activate`
+      );
+    }
+    log.info(`Activated recovered generation ${message.generationId}`, {
+      repositoryId: activated.repository_id,
+      embeddedItemCount: activated.embedded_item_count,
+    });
+    return null;
+  }
+  const baseSettings = await getEmbeddingSettings();
+  const descriptor = parseEmbeddingDescriptor(
+    generation.embedding_model,
+    generation.embedding_dimensions
+  );
+  const visualDescriptor = generation.visual_embedding_model
+    ? parseEmbeddingDescriptor(
+        generation.visual_embedding_model,
+        generation.visual_embedding_dimensions
+      )
+    : null;
+  if (visualDescriptor) {
+    await writeVisualEmbeddings({
+      db,
+      message,
+      baseSettings,
+      descriptor: visualDescriptor,
+    });
+  }
+  return {
+    ...baseSettings,
+    provider: descriptor.provider,
+    modelId: descriptor.modelId,
+    dimensions: descriptor.dimensions,
+  };
+}
+
+function assertValidEmbeddingVector(
+  embedding: number[],
+  dimensions: number,
+  chunkId: number,
+): void {
+  if (
+    embedding.length !== dimensions ||
+    !embedding.every((value) =>
+      typeof value === 'number' && Number.isFinite(value)
+    )
+  ) {
+    throw new Error(
+      `Invalid embedding for chunk ${chunkId}: expected ${dimensions} finite values`
+    );
+  }
+}
+
+async function writeTextEmbeddings(params: {
+  db: EmbeddingDb;
+  message: EmbeddingMessage;
+  settings: EmbeddingSettings;
+}): Promise<void> {
+  const embeddings = await retryWithBackoff(
+    () => generateEmbeddings(params.message.texts, params.settings),
+    3,
+    2000
+  );
+  if (embeddings.length !== params.message.chunkIds.length) {
+    throw new Error(
+      `Embedding provider returned ${embeddings.length} vectors for ${params.message.chunkIds.length} chunks (item ${params.message.itemId})`
+    );
+  }
+  for (const [index, chunkId] of params.message.chunkIds.entries()) {
+    const embedding = embeddings[index];
+    if (!embedding) {
+      throw new Error(`Embedding response omitted chunk ${chunkId}`);
+    }
+    assertValidEmbeddingVector(
+      embedding,
+      params.settings.dimensions,
+      chunkId
+    );
+    const embeddingValue = `[${embedding.join(',')}]`;
+    log.info(`Updating chunk ${chunkId} with embedding length: ${embedding.length}`);
+    if (params.message.generationId) {
+      const updated = await params.db.execute(sql`
+        UPDATE repository_item_chunks
+        SET embedding = ${embeddingValue}::vector
+        WHERE id = ${chunkId}
+          AND index_generation_id = ${params.message.generationId}::uuid
+        RETURNING id
+      `);
+      if (updated.length !== 1) {
+        throw new Error(
+          `Chunk ${chunkId} does not belong to generation ${params.message.generationId}`
+        );
+      }
+    } else {
+      await params.db.execute(
+        sql`UPDATE repository_item_chunks SET embedding = ${embeddingValue}::vector WHERE id = ${chunkId}`
+      );
+    }
+  }
+}
+
+async function countPendingGenerationChunks(
+  db: EmbeddingDb,
+  generationId: string | undefined,
+): Promise<number> {
+  if (!generationId) return 0;
+  const [generation] = await db.execute<{
+    visual_embedding_model: string | null;
+  }>(sql`
+    SELECT visual_embedding_model
+    FROM repository_index_generations
+    WHERE id = ${generationId}::uuid
+  `);
+  const [pending] = await db.execute<{ pending_count: number }>(sql`
+    SELECT count(*)::integer AS pending_count
+    FROM repository_item_chunks
+    WHERE index_generation_id = ${generationId}::uuid
+      AND (
+        embedding IS NULL
+        OR (
+          ${generation?.visual_embedding_model != null}
+          AND modality IN ('image', 'video')
+          AND visual_embedding IS NULL
+        )
+      )
+  `);
+  return pending?.pending_count ?? 0;
+}
+
+async function finalizeEmbeddingRecord(
+  db: EmbeddingDb,
+  message: EmbeddingMessage,
+  pendingGenerationChunks: number,
+): Promise<boolean> {
+  const generationComplete = shouldMarkItemEmbedded(
+    message,
+    pendingGenerationChunks
+  );
+  if (!generationComplete) return false;
+  if (message.generationId) {
+    await activateCanonicalGeneration(db, message.generationId);
+  } else {
+    await db
+      .update(repositoryItems)
+      .set({ processingStatus: 'embedded', updatedAt: new Date() })
+      .where(eq(repositoryItems.id, message.itemId));
+  }
+  return true;
+}
+
+async function recordTerminalEmbeddingFailure(params: {
+  db: EmbeddingDb;
+  message: EmbeddingMessage;
+  errorMessage: string;
+}): Promise<void> {
+  if (params.message.generationId) {
+    const failed = await failBuildingGeneration(
+      {
+        generationId: params.message.generationId,
+        itemId: params.message.itemId,
+        errorMessage: params.errorMessage,
+      },
+      async (query) =>
+        (await params.db.execute<{ item_id: number }>(query)) as Array<{
+          item_id: number;
+        }>
+    );
+    log.info('Canonical embedding generation terminal failure handled', {
+      generationId: params.message.generationId,
+      itemId: params.message.itemId,
+      failedCurrentGeneration: failed,
+    });
+    return;
+  }
+  await params.db
+    .update(repositoryItems)
+    .set({
+      processingStatus: 'embedding_failed',
+      processingError: params.errorMessage,
+      updatedAt: new Date(),
+    })
+    .where(eq(repositoryItems.id, params.message.itemId));
+}
+
+async function handleEmbeddingRecordFailure(params: {
+  db: EmbeddingDb;
+  message: EmbeddingMessage;
+  record: SQSRecord;
+  error: unknown;
+}): Promise<void> {
+  const errorMessage =
+    params.error instanceof Error ? params.error.message : String(params.error);
+  log.error(`Failed to generate embeddings for item ${params.message.itemId}`, {
+    error: errorMessage,
+  });
+  const receiveCount = params.record.attributes.ApproximateReceiveCount;
+  if (!isTerminalEmbeddingAttempt(receiveCount)) {
+    log.info('Embedding failure remains retryable', {
+      itemId: params.message.itemId,
+      generationId: params.message.generationId,
+      approximateReceiveCount: receiveCount ?? '1',
+    });
+    return;
+  }
+  try {
+    await recordTerminalEmbeddingFailure({
+      db: params.db,
+      message: params.message,
+      errorMessage,
+    });
+  } catch (dbError) {
+    log.error('Failed to record terminal embedding failure', {
+      itemId: params.message.itemId,
+      generationId: params.message.generationId,
+      error: String(dbError),
+    });
+  }
+}
+
 async function processRecord(record: SQSRecord): Promise<void> {
   const message: unknown = JSON.parse(record.body);
   assertValidEmbeddingMessage(message);
   const db = await getDb();
 
   try {
-    log.info(`Processing embeddings for item ${message.itemId} with ${message.chunkIds.length} chunks`);
-    let effectiveSettings: EmbeddingSettings;
-    if (message.generationId) {
-      const [generation] = await db.execute<{
-        status: CanonicalGenerationStatus;
-        embedding_model: string | null;
-        embedding_dimensions: number | null;
-        visual_embedding_model: string | null;
-        visual_embedding_dimensions: number | null;
-      }>(sql`
-        SELECT status, embedding_model, embedding_dimensions,
-               visual_embedding_model, visual_embedding_dimensions
-        FROM repository_index_generations
-        WHERE id = ${message.generationId}::uuid
-        LIMIT 1
-      `);
-      if (!generation) {
-        throw new Error(`Index generation ${message.generationId} was not found`);
-      }
-      if (shouldSkipCanonicalGeneration(generation.status)) {
-        log.info(`Skipping stale embedding generation ${message.generationId}`, {
-          status: generation.status,
-        });
-        return;
-      }
-      if (message.activationOnly) {
-        const activated = await activateCanonicalGeneration(
-          db,
-          message.generationId
-        );
-        if (!activated) {
-          throw new Error(
-            `Generation ${message.generationId} is not complete enough to activate`
-          );
-        }
-        log.info(`Activated recovered generation ${message.generationId}`, {
-          repositoryId: activated.repository_id,
-          embeddedItemCount: activated.embedded_item_count,
-        });
-        return;
-      }
-      const embSettings = await getEmbeddingSettings();
-      const descriptor = parseEmbeddingDescriptor(
-        generation.embedding_model,
-        generation.embedding_dimensions
-      );
-      effectiveSettings = {
-        ...embSettings,
-        provider: descriptor.provider,
-        modelId: descriptor.modelId,
-        dimensions: descriptor.dimensions,
-      };
-      const visualDescriptor = generation.visual_embedding_model
-        ? parseEmbeddingDescriptor(
-            generation.visual_embedding_model,
-            generation.visual_embedding_dimensions
-          )
-        : null;
-      if (visualDescriptor) {
-        const modalities =
-          message.modalities ?? message.chunkIds.map(() => 'text' as const);
-        const visualIndexes = modalities.flatMap((modality, index) =>
-          modality === 'image' || modality === 'video' ? [index] : []
-        );
-        if (visualIndexes.length > 0) {
-          const visualSettings: EmbeddingSettings = {
-            ...embSettings,
-            provider: visualDescriptor.provider,
-            modelId: visualDescriptor.modelId,
-            dimensions: visualDescriptor.dimensions,
-          };
-          const visualSourceCache = new Map<string, string>();
-          const visualInputs = await Promise.all(
-            visualIndexes.map(async (index) => ({
-              text: message.texts[index] ?? '',
-              imageDataUri: await loadVisualDataUri(
-                message.visualSources?.[index] ?? null,
-                visualSourceCache,
-              ),
-            })),
-          );
-          const visualEmbeddings = await retryWithBackoff(
-            () => generateVisualEmbeddings(visualInputs, visualSettings),
-            3,
-            2000
-          );
-          const handleNestedBranch1 = () => {
-            if (visualEmbeddings.length !== visualIndexes.length) {
-            throw new Error('Visual embedding provider returned a mismatched vector count');
-          }
-          }
-          handleNestedBranch1()
-          const handleNestedBranch2 = async () => {
-            for (const [position, messageIndex] of visualIndexes.entries()) {
-            const chunkId = message.chunkIds[messageIndex];
-            const visualEmbedding = visualEmbeddings[position];
-            if (!chunkId || !visualEmbedding) {
-              throw new Error('Visual embedding response could not be matched to a chunk');
-            }
-            const visualEmbeddingStr = `[${visualEmbedding.join(',')}]`;
-            const updated = await db.execute(sql`
-              UPDATE repository_item_chunks
-              SET visual_embedding = ${visualEmbeddingStr}::vector
-              WHERE id = ${chunkId}
-                AND index_generation_id = ${message.generationId}::uuid
-              RETURNING id
-            `);
-            if (updated.length !== 1) {
-              throw new Error(`Visual chunk ${chunkId} does not belong to generation ${message.generationId}`);
-            }
-          }
-          }
-          await handleNestedBranch2()
-        }
-      }
-    } else {
-      effectiveSettings = await getEmbeddingSettings();
-    }
-
-    const embeddings = await retryWithBackoff(
-      () => generateEmbeddings(message.texts, effectiveSettings),
-      3,
-      2000
+    log.info(
+      `Processing embeddings for item ${message.itemId} with ${message.chunkIds.length} chunks`
     );
-
-    if (embeddings.length !== message.chunkIds.length) {
-      throw new Error(
-        `Embedding provider returned ${embeddings.length} vectors for ${message.chunkIds.length} chunks (item ${message.itemId})`
-      );
-    }
-
-    for (let i = 0; i < message.chunkIds.length; i++) {
-      const chunkId = message.chunkIds[i];
-      const embedding = embeddings[i];
-
-      if (
-        embedding.length !== effectiveSettings.dimensions ||
-        !embedding.every((v) => typeof v === 'number' && Number.isFinite(v))
-      ) {
-        throw new Error(
-          `Invalid embedding for chunk ${chunkId}: expected ${effectiveSettings.dimensions} finite values`
-        );
-      }
-
-      const embeddingStr = `[${embedding.join(',')}]`;
-
-      log.info(`Updating chunk ${chunkId} with embedding length: ${embedding.length}`);
-
-      // Use raw SQL for the vector cast — postgres.js parameterised queries
-      // don't automatically coerce text to the vector column type.
-      if (message.generationId) {
-        const updated = await db.execute(sql`
-          UPDATE repository_item_chunks
-          SET embedding = ${embeddingStr}::vector
-          WHERE id = ${chunkId}
-            AND index_generation_id = ${message.generationId}::uuid
-          RETURNING id
-        `);
-        if (updated.length !== 1) {
-          throw new Error(`Chunk ${chunkId} does not belong to generation ${message.generationId}`);
-        }
-      } else {
-        await db.execute(
-          sql`UPDATE repository_item_chunks SET embedding = ${embeddingStr}::vector WHERE id = ${chunkId}`
-        );
-      }
-    }
-
-    let pendingGenerationChunks = 0;
-    if (message.generationId) {
-      const [generation] = await db.execute<{
-        visual_embedding_model: string | null;
-      }>(sql`
-        SELECT visual_embedding_model
-        FROM repository_index_generations
-        WHERE id = ${message.generationId}::uuid
-      `);
-      const [pending] = await db.execute<{ pending_count: number }>(sql`
-        SELECT count(*)::integer AS pending_count
-        FROM repository_item_chunks
-        WHERE index_generation_id = ${message.generationId}::uuid
-          AND (
-            embedding IS NULL
-            OR (
-              ${generation?.visual_embedding_model != null}
-              AND modality IN ('image', 'video')
-              AND visual_embedding IS NULL
-            )
-          )
-      `);
-      pendingGenerationChunks = pending?.pending_count ?? 0;
-    }
-    const generationComplete = shouldMarkItemEmbedded(
+    const settings = await resolveRecordEmbeddingSettings(db, message);
+    if (!settings) return;
+    await writeTextEmbeddings({ db, message, settings });
+    const pendingGenerationChunks = await countPendingGenerationChunks(
+      db,
+      message.generationId,
+    );
+    const generationComplete = await finalizeEmbeddingRecord(
+      db,
       message,
-      pendingGenerationChunks
+      pendingGenerationChunks,
     );
-    if (generationComplete) {
-      if (message.generationId) {
-        await activateCanonicalGeneration(db, message.generationId);
-      } else {
-        await db
-          .update(repositoryItems)
-          .set({ processingStatus: 'embedded', updatedAt: new Date() })
-          .where(eq(repositoryItems.id, message.itemId));
-      }
-    }
-
     log.info(`Successfully generated embeddings for item ${message.itemId}`, {
       generationComplete,
       pendingGenerationChunks,
     });
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    log.error(`Failed to generate embeddings for item ${message.itemId}`, { error: errorMessage });
-
-    const terminalAttempt = isTerminalEmbeddingAttempt(
-      record.attributes.ApproximateReceiveCount
-    );
-    if (terminalAttempt) {
-      try {
-        if (message.generationId) {
-          const failed = await failBuildingGeneration(
-            {
-              generationId: message.generationId,
-              itemId: message.itemId,
-              errorMessage,
-            },
-            async (query) =>
-              (await db.execute<{ item_id: number }>(query)) as Array<{
-                item_id: number;
-              }>
-          );
-          log.info(`Canonical embedding generation terminal failure handled`, {
-            generationId: message.generationId,
-            itemId: message.itemId,
-            failedCurrentGeneration: failed,
-          });
-        } else {
-          await db
-            .update(repositoryItems)
-            .set({
-              processingStatus: 'embedding_failed',
-              processingError: errorMessage,
-              updatedAt: new Date(),
-            })
-            .where(eq(repositoryItems.id, message.itemId));
-        }
-      } catch (dbError) {
-        log.error(`Failed to record terminal embedding failure`, {
-          itemId: message.itemId,
-          generationId: message.generationId,
-          error: String(dbError),
-        });
-      }
-    } else {
-      log.info(`Embedding failure remains retryable`, {
-        itemId: message.itemId,
-        generationId: message.generationId,
-        approximateReceiveCount:
-          record.attributes.ApproximateReceiveCount ?? '1',
-      });
-    }
-
+    await handleEmbeddingRecordFailure({ db, message, record, error });
     throw error;
   }
 }
