@@ -395,6 +395,14 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
 # a11y-audit.js (whose jsdom + axe-core resolve from psd-html-artifact's OWN
 # node_modules, installed by line ~402). Installed solely by `COPY skills` above —
 # NO npm install, NO new Docker layer.
+# psd-sop-creator is pure JS with ZERO npm deps of its own: it composes
+# psd-pdf-to-markdown / psd-workspace / psd-atrium via child_process and does its
+# own template validation with plain string/regex work. Installed solely by
+# `COPY skills` above — NO npm install, NO new RUN, NO new Docker layer, which
+# keeps this stage under the Firecracker overlay-mount 54-layer ceiling.
+# Its PDF path passes --extract-images to psd-pdf-to-markdown; that flag needs no
+# new Python dependency either (pymupdf4llm is already in /opt/agentcore-venv and
+# writes images itself), so the consolidated venv RUN above is untouched.
 
 # Upstream gws-* skills (#912) — per-API SKILL.md guidance for Gmail, Drive,
 # Docs, Sheets, Slides, Forms, Tasks, Calendar, Chat, Meet, Contacts, etc.

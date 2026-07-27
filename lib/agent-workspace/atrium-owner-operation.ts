@@ -245,9 +245,353 @@ function recordAudit(
   })
 }
 
+/** Hands a branch's audit record back to the top-level catch. */
+type SetAudit = (audit: MutationAudit) => void
+
+/**
+ * The READ half of the fixed surface.
+ *
+ * Split out so every read sits together on the near side of the
+ * authoring-capability assert. Reading is not authoring, and when the reads
+ * were interleaved with the writes in one long chain, nothing structural
+ * stopped a new read from being added below the gate — where it would demand
+ * authoring rights to look at a document.
+ *
+ * Returns `null` when nothing matched, so the caller falls through to writes.
+ */
+async function executeAtriumRead(
+  req: Requester,
+  input: AgentAtriumOperationInput,
+  segments: string[]
+): Promise<AgentAtriumOperationResult | null> {
+  if (input.method !== "GET") return null
+
+  if (segments.length === 0) {
+    const query = listQuerySchema.parse(input.query ?? {})
+    const collectionId = await resolveCollectionId(query.collection)
+    const items = await contentService.list(req, {
+      kind: query.kind,
+      collectionId,
+      tag: query.tag,
+      status: query.status,
+      query: query.query,
+    })
+    return success(items, input.requestId)
+  }
+
+  if (segments.length === 1) {
+    const object = await contentService.get(req, segments[0])
+    return success(
+      { ...object, url: contentDeepLink(object.slug) },
+      input.requestId
+    )
+  }
+
+  // Committed markdown source. `GET /<id>` deliberately omits a DOCUMENT's
+  // text (it lives in the collaborative store, `bodyLocation: "proof"`), so
+  // this is the only read that returns a document body — without it an agent
+  // cannot use an existing Atrium document as an input.
+  if (segments.length === 2 && segments[1] === "source") {
+    const source = await contentSourceService.read(req, segments[0])
+    return success(source, input.requestId)
+  }
+
+  if (segments.length === 2 && segments[1] === "assets") {
+    const assets = await contentAssetService.list(req, segments[0])
+    return success(assets, input.requestId)
+  }
+
+  if (
+    segments.length === 4 &&
+    segments[1] === "assets" &&
+    segments[3] === "bytes"
+  ) {
+    // Resolve through the OBJECT first so an asset id that belongs to some
+    // other object 404s here instead of being served under this object's
+    // path. `readBytes` re-runs its own permission check on the asset's real
+    // owner object, so this is a narrowing guard, not the only one.
+    const asset = await contentAssetService.get(req, segments[0], segments[2])
+    if (asset.byteLength > MAX_ASSET_READ_BYTES) {
+      throw new ValidationError(
+        `Asset is ${asset.byteLength} bytes; this surface serves at most ${MAX_ASSET_READ_BYTES} bytes inline`,
+        { assetId: asset.id, byteLength: asset.byteLength }
+      )
+    }
+    const bytes = await contentAssetService.readBytes(req, asset.id)
+    if (bytes.bytes.byteLength > MAX_ASSET_READ_BYTES) {
+      // The declared byteLength is pre-normalization; the stored bytes are
+      // what actually crosses the wire, so re-check the real length.
+      throw new ValidationError(
+        `Asset is ${bytes.bytes.byteLength} bytes; this surface serves at most ${MAX_ASSET_READ_BYTES} bytes inline`,
+        { assetId: asset.id }
+      )
+    }
+    return success(
+      {
+        id: asset.id,
+        objectId: asset.objectId,
+        filename: asset.filename,
+        contentType: bytes.contentType,
+        byteLength: bytes.bytes.byteLength,
+        encoding: "base64" as const,
+        data: Buffer.from(bytes.bytes).toString("base64"),
+      },
+      input.requestId
+    )
+  }
+
+  return null
+}
+
+/**
+ * Body writes: create an object, or snapshot a new version of one. Both take a
+ * `body` that may arrive base64-encoded to get past the edge WAF.
+ *
+ * Everything from here down runs only after the caller has asserted the
+ * authoring capability.
+ */
+async function executeContentWrite(
+  req: Requester,
+  input: AgentAtriumOperationInput,
+  segments: string[],
+  setAudit: SetAudit
+): Promise<AgentAtriumOperationResult | null> {
+  if (input.method === "POST" && segments.length === 0) {
+    const audit: MutationAudit = { action: "create" }
+    setAudit(audit)
+    const body = createSchema.parse(input.body ?? {})
+    const created = await contentService.create(
+      req,
+      {
+        kind: body.kind,
+        title: body.title,
+        collectionId: await resolveCollectionId(body.collectionId),
+        body: decodeContentBody(body.body, body.codeEncoding),
+        bodyFormat: body.bodyFormat,
+        visibility: body.visibility,
+        tags: body.tags,
+        sourceRef: body.sourceRef,
+      },
+      { hasPublishPublicCapability: false }
+    )
+    audit.objectId = created.id
+    recordAudit(req, audit, input.requestId, "ok")
+    return success(
+      { ...created, url: contentDeepLink(created.slug) },
+      input.requestId,
+      201
+    )
+  }
+
+  if (
+    input.method === "POST" &&
+    segments.length === 2 &&
+    segments[1] === "versions"
+  ) {
+    const audit: MutationAudit = {
+      action: "create_version",
+      objectId: segments[0],
+    }
+    setAudit(audit)
+    const body = versionSchema.parse(input.body ?? {})
+    const created = await contentService.createVersion(req, segments[0], {
+      body: decodeContentBody(body.body, body.codeEncoding) ?? body.body,
+      bodyFormat: body.bodyFormat,
+      summary: body.summary,
+    })
+    recordAudit(req, audit, input.requestId, "ok")
+    return success(created, input.requestId, 201)
+  }
+
+  return null
+}
+
+/**
+ * Metadata writes: title/tags/collection/status, visibility level, and delete.
+ * None of these carries a body — they change what an object IS or who may see
+ * it, never what it says.
+ */
+async function executeMetadataWrite(
+  req: Requester,
+  input: AgentAtriumOperationInput,
+  segments: string[],
+  setAudit: SetAudit
+): Promise<AgentAtriumOperationResult | null> {
+  if (input.method === "PATCH" && segments.length === 1) {
+    const audit: MutationAudit = { action: "update", objectId: segments[0] }
+    setAudit(audit)
+    const body = updateSchema.parse(input.body ?? {})
+    const collectionId =
+      body.collectionId === undefined
+        ? undefined
+        : body.collectionId === null
+          ? null
+          : await resolveCollectionId(body.collectionId)
+    const updated = await contentService.update(req, segments[0], {
+      title: body.title,
+      tags: body.tags,
+      collectionId,
+      status: body.status,
+    })
+    recordAudit(req, audit, input.requestId, "ok")
+    return success(updated, input.requestId)
+  }
+
+  if (
+    input.method === "PATCH" &&
+    segments.length === 2 &&
+    segments[1] === "visibility"
+  ) {
+    const audit: MutationAudit = {
+      action: "set_visibility",
+      objectId: segments[0],
+    }
+    setAudit(audit)
+    const body = visibilitySchema.parse(input.body ?? {})
+    const object = await contentService.loadForEdit(req, segments[0])
+    audit.objectId = object.id
+    const visibility = await visibilityService.setLevel(req, object.id, body, {
+      hasPublishPublicCapability: false,
+    })
+    recordAudit(req, audit, input.requestId, "ok")
+    return success({ id: object.id, visibility }, input.requestId)
+  }
+
+  if (input.method === "DELETE" && segments.length === 1) {
+    const audit: MutationAudit = { action: "delete", objectId: segments[0] }
+    setAudit(audit)
+    const deleted = await contentService.delete(req, segments[0], {
+      surface: "rest",
+    })
+    return success(deleted, input.requestId)
+  }
+
+  return null
+}
+
+/**
+ * Authored-image writes (#1284). Kept apart from the content writes: both
+ * branches share the reserve-then-complete lifecycle and their own audit
+ * actions, and neither touches versions, visibility, or publication.
+ */
+async function executeAssetWrite(
+  req: Requester,
+  input: AgentAtriumOperationInput,
+  segments: string[],
+  setAudit: SetAudit
+): Promise<AgentAtriumOperationResult | null> {
+  if (input.method !== "POST" || segments[1] !== "assets") return null
+
+  if (segments.length === 2) {
+    const audit: MutationAudit = {
+      action: "initiate_asset",
+      objectId: segments[0],
+    }
+    setAudit(audit)
+    const body = initiateAssetSchema.parse(input.body ?? {})
+    // No idempotency key: the broker has no stable client key to scope one to,
+    // and `initiate` treats an absent key as a plain (non-replayable)
+    // reservation. A retried upload just reserves a new asset id; the orphan
+    // expires and is swept by cleanupExpiredContentAssets.
+    const { asset } = await contentAssetService.initiate(req, segments[0], body)
+    recordAudit(req, audit, input.requestId, "ok")
+    return success(asset, input.requestId, 201)
+  }
+
+  if (segments.length === 4 && segments[3] === "complete") {
+    const audit: MutationAudit = {
+      action: "complete_asset",
+      objectId: segments[0],
+    }
+    setAudit(audit)
+    const body = completeAssetSchema.parse(input.body ?? {})
+    const asset = await contentAssetService.complete(
+      req,
+      segments[0],
+      segments[2],
+      body
+    )
+    recordAudit(req, audit, input.requestId, "ok")
+    return success(asset, input.requestId)
+  }
+
+  return null
+}
+
+/**
+ * Publication writes — the only branches carrying a `destination`, and the only
+ * ones that can raise `ApprovalRequiredError` for a public target.
+ */
+async function executePublishWrite(
+  req: Requester,
+  input: AgentAtriumOperationInput,
+  segments: string[],
+  setAudit: SetAudit
+): Promise<AgentAtriumOperationResult | null> {
+  if (segments[1] !== "publish") return null
+
+  if (input.method === "POST" && segments.length === 2) {
+    const body = publishSchema.parse(input.body ?? {})
+    const audit: MutationAudit = {
+      action: "publish",
+      objectId: segments[0],
+      destination: body.destination,
+    }
+    setAudit(audit)
+    const published = await publishService.publish(
+      req,
+      segments[0],
+      {
+        destination: body.destination,
+        visibility: body.visibility,
+      },
+      { hasPublishPublicCapability: false }
+    )
+    recordAudit(req, audit, input.requestId, "ok")
+    return success(
+      {
+        id: segments[0],
+        destination: body.destination,
+        publishedVersionId: published.publishedVersionId,
+      },
+      input.requestId
+    )
+  }
+
+  if (input.method === "DELETE" && segments.length === 3) {
+    const destination = z
+      .enum(["intranet", "public_web", "schoology", "google"])
+      .parse(segments[2])
+    const audit: MutationAudit = {
+      action: "unpublish",
+      objectId: segments[0],
+      destination,
+    }
+    setAudit(audit)
+    const unpublished = await publishService.unpublish(
+      req,
+      segments[0],
+      destination,
+      { hasPublishPublicCapability: false }
+    )
+    recordAudit(req, audit, input.requestId, "ok")
+    return success(
+      { id: segments[0], destination, ...unpublished },
+      input.requestId
+    )
+  }
+
+  return null
+}
+
 /**
  * Execute the fixed Atrium agent surface as the human named by the signed
  * invocation proof. No reusable service credential crosses into the workspace.
+ *
+ * The body is deliberately a short dispatch: reads, then the
+ * authoring-capability gate, then the three write families. The gate's position
+ * is the security-relevant line in this function, and it is only legible when
+ * the branches around it are this few.
  */
 export async function executeOwnerAtriumOperation(
   input: AgentAtriumOperationInput
@@ -255,285 +599,25 @@ export async function executeOwnerAtriumOperation(
   const segments = parsePath(input.path)
   const { req, cognitoSub } = await ownerRequester(input.ownerEmail)
   let audit: MutationAudit | undefined
+  const setAudit: SetAudit = (next) => {
+    audit = next
+  }
 
   try {
-    if (input.method === "GET" && segments.length === 0) {
-      const query = listQuerySchema.parse(input.query ?? {})
-      const collectionId = await resolveCollectionId(query.collection)
-      const items = await contentService.list(req, {
-        kind: query.kind,
-        collectionId,
-        tag: query.tag,
-        status: query.status,
-        query: query.query,
-      })
-      return success(items, input.requestId)
-    }
-
-    if (input.method === "GET" && segments.length === 1) {
-      const object = await contentService.get(req, segments[0])
-      return success(
-        { ...object, url: contentDeepLink(object.slug) },
-        input.requestId
-      )
-    }
-
-    // Committed markdown source. `GET /<id>` deliberately omits a DOCUMENT's
-    // text (it lives in the collaborative store, `bodyLocation: "proof"`), so
-    // this is the only read that returns a document body — without it an agent
-    // cannot use an existing Atrium document as an input.
-    if (
-      input.method === "GET" &&
-      segments.length === 2 &&
-      segments[1] === "source"
-    ) {
-      const source = await contentSourceService.read(req, segments[0])
-      return success(source, input.requestId)
-    }
-
-    if (
-      input.method === "GET" &&
-      segments.length === 2 &&
-      segments[1] === "assets"
-    ) {
-      const assets = await contentAssetService.list(req, segments[0])
-      return success(assets, input.requestId)
-    }
-
-    if (
-      input.method === "GET" &&
-      segments.length === 4 &&
-      segments[1] === "assets" &&
-      segments[3] === "bytes"
-    ) {
-      // Resolve through the OBJECT first so an asset id that belongs to some
-      // other object 404s here instead of being served under this object's
-      // path. `readBytes` re-runs its own permission check on the asset's real
-      // owner object, so this is a narrowing guard, not the only one.
-      const asset = await contentAssetService.get(
-        req,
-        segments[0],
-        segments[2]
-      )
-      if (asset.byteLength > MAX_ASSET_READ_BYTES) {
-        throw new ValidationError(
-          `Asset is ${asset.byteLength} bytes; this surface serves at most ${MAX_ASSET_READ_BYTES} bytes inline`,
-          { assetId: asset.id, byteLength: asset.byteLength }
-        )
-      }
-      const bytes = await contentAssetService.readBytes(req, asset.id)
-      if (bytes.bytes.byteLength > MAX_ASSET_READ_BYTES) {
-        // The declared byteLength is pre-normalization; the stored bytes are
-        // what actually crosses the wire, so re-check the real length.
-        throw new ValidationError(
-          `Asset is ${bytes.bytes.byteLength} bytes; this surface serves at most ${MAX_ASSET_READ_BYTES} bytes inline`,
-          { assetId: asset.id }
-        )
-      }
-      return success(
-        {
-          id: asset.id,
-          objectId: asset.objectId,
-          filename: asset.filename,
-          contentType: bytes.contentType,
-          byteLength: bytes.bytes.byteLength,
-          encoding: "base64" as const,
-          data: Buffer.from(bytes.bytes).toString("base64"),
-        },
-        input.requestId
-      )
-    }
+    const read = await executeAtriumRead(req, input, segments)
+    if (read) return read
 
     await assertContentAuthoringCapability({
       authType: "session",
       cognitoSub,
     })
 
-    if (input.method === "POST" && segments.length === 0) {
-      audit = { action: "create" }
-      const body = createSchema.parse(input.body ?? {})
-      const created = await contentService.create(
-        req,
-        {
-          kind: body.kind,
-          title: body.title,
-          collectionId: await resolveCollectionId(body.collectionId),
-          body: decodeContentBody(body.body, body.codeEncoding),
-          bodyFormat: body.bodyFormat,
-          visibility: body.visibility,
-          tags: body.tags,
-          sourceRef: body.sourceRef,
-        },
-        { hasPublishPublicCapability: false }
-      )
-      audit.objectId = created.id
-      recordAudit(req, audit, input.requestId, "ok")
-      return success(
-        { ...created, url: contentDeepLink(created.slug) },
-        input.requestId,
-        201
-      )
-    }
-
-    if (
-      input.method === "POST" &&
-      segments.length === 2 &&
-      segments[1] === "versions"
-    ) {
-      audit = { action: "create_version", objectId: segments[0] }
-      const body = versionSchema.parse(input.body ?? {})
-      const created = await contentService.createVersion(req, segments[0], {
-        body: decodeContentBody(body.body, body.codeEncoding) ?? body.body,
-        bodyFormat: body.bodyFormat,
-        summary: body.summary,
-      })
-      recordAudit(req, audit, input.requestId, "ok")
-      return success(created, input.requestId, 201)
-    }
-
-    if (
-      input.method === "POST" &&
-      segments.length === 2 &&
-      segments[1] === "assets"
-    ) {
-      audit = { action: "initiate_asset", objectId: segments[0] }
-      const body = initiateAssetSchema.parse(input.body ?? {})
-      // No idempotency key: the broker has no stable client key to scope one to,
-      // and `initiate` treats an absent key as a plain (non-replayable)
-      // reservation. A retried upload just reserves a new asset id; the orphan
-      // expires and is swept by cleanupExpiredContentAssets.
-      const { asset } = await contentAssetService.initiate(
-        req,
-        segments[0],
-        body
-      )
-      recordAudit(req, audit, input.requestId, "ok")
-      return success(asset, input.requestId, 201)
-    }
-
-    if (
-      input.method === "POST" &&
-      segments.length === 4 &&
-      segments[1] === "assets" &&
-      segments[3] === "complete"
-    ) {
-      audit = { action: "complete_asset", objectId: segments[0] }
-      const body = completeAssetSchema.parse(input.body ?? {})
-      const asset = await contentAssetService.complete(
-        req,
-        segments[0],
-        segments[2],
-        body
-      )
-      recordAudit(req, audit, input.requestId, "ok")
-      return success(asset, input.requestId)
-    }
-
-    if (input.method === "PATCH" && segments.length === 1) {
-      audit = { action: "update", objectId: segments[0] }
-      const body = updateSchema.parse(input.body ?? {})
-      const collectionId =
-        body.collectionId === undefined
-          ? undefined
-          : body.collectionId === null
-            ? null
-            : await resolveCollectionId(body.collectionId)
-      const updated = await contentService.update(req, segments[0], {
-        title: body.title,
-        tags: body.tags,
-        collectionId,
-        status: body.status,
-      })
-      recordAudit(req, audit, input.requestId, "ok")
-      return success(updated, input.requestId)
-    }
-
-    if (
-      input.method === "PATCH" &&
-      segments.length === 2 &&
-      segments[1] === "visibility"
-    ) {
-      audit = { action: "set_visibility", objectId: segments[0] }
-      const body = visibilitySchema.parse(input.body ?? {})
-      const object = await contentService.loadForEdit(req, segments[0])
-      audit.objectId = object.id
-      const visibility = await visibilityService.setLevel(
-        req,
-        object.id,
-        body,
-        { hasPublishPublicCapability: false }
-      )
-      recordAudit(req, audit, input.requestId, "ok")
-      return success(
-        { id: object.id, visibility },
-        input.requestId
-      )
-    }
-
-    if (input.method === "DELETE" && segments.length === 1) {
-      audit = { action: "delete", objectId: segments[0] }
-      const deleted = await contentService.delete(req, segments[0], {
-        surface: "rest",
-      })
-      return success(deleted, input.requestId)
-    }
-
-    if (
-      input.method === "POST" &&
-      segments.length === 2 &&
-      segments[1] === "publish"
-    ) {
-      const body = publishSchema.parse(input.body ?? {})
-      audit = {
-        action: "publish",
-        objectId: segments[0],
-        destination: body.destination,
-      }
-      const published = await publishService.publish(
-        req,
-        segments[0],
-        {
-          destination: body.destination,
-          visibility: body.visibility,
-        },
-        { hasPublishPublicCapability: false }
-      )
-      recordAudit(req, audit, input.requestId, "ok")
-      return success(
-        {
-          id: segments[0],
-          destination: body.destination,
-          publishedVersionId: published.publishedVersionId,
-        },
-        input.requestId
-      )
-    }
-
-    if (
-      input.method === "DELETE" &&
-      segments.length === 3 &&
-      segments[1] === "publish"
-    ) {
-      const destination = z
-        .enum(["intranet", "public_web", "schoology", "google"])
-        .parse(segments[2])
-      audit = {
-        action: "unpublish",
-        objectId: segments[0],
-        destination,
-      }
-      const unpublished = await publishService.unpublish(
-        req,
-        segments[0],
-        destination,
-        { hasPublishPublicCapability: false }
-      )
-      recordAudit(req, audit, input.requestId, "ok")
-      return success(
-        { id: segments[0], destination, ...unpublished },
-        input.requestId
-      )
-    }
+    const written =
+      (await executeContentWrite(req, input, segments, setAudit)) ??
+      (await executeMetadataWrite(req, input, segments, setAudit)) ??
+      (await executeAssetWrite(req, input, segments, setAudit)) ??
+      (await executePublishWrite(req, input, segments, setAudit))
+    if (written) return written
 
     throw new ForbiddenError("Atrium operation is outside the fixed surface")
   } catch (error) {

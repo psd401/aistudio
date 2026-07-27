@@ -92,6 +92,25 @@ jobs:
       env:
         CI: true
 
+    # psd-atrium. Same story again — plain CJS outside the jest roots, so its
+    # suite has never run in CI despite guarding every agent write into the
+    # content workspace. It now also covers the authored-image upload flow
+    # (reserve -> presigned PUT -> complete), where a wrong call order or a
+    # mis-derived checksum produces an asset that is reserved but never `ready`.
+    - name: Run psd-atrium skill tests (Bun)
+      run: bun run test:skill:atrium
+      env:
+        CI: true
+
+    # psd-sop-creator. The template gate is the whole point of the skill: every
+    # rule in it exists because breaking it loses content SILENTLY in Atrium
+    # (raw HTML dropped, data: URIs stripped, inline images splitting
+    # paragraphs). A regression here ships malformed SOPs with no error.
+    - name: Run psd-sop-creator skill tests (Bun)
+      run: bun run test:skill:sop-creator
+      env:
+        CI: true
+
     # Optional: Upload test coverage if you generate it
     # - name: Upload coverage reports
     #   uses: codecov/codecov-action@v3

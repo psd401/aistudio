@@ -15,11 +15,18 @@ const manifest = JSON.parse(
 ) as { migrationFiles: string[] };
 
 describe("migration 157 — teacher-managed rooms", () => {
-  it("is registered after the current OneRoster role-source migration", () => {
-    expect(manifest.migrationFiles.slice(-3, -1)).toEqual([
-      "156-oneroster-user-role-source.sql",
-      "157-rooms.sql",
-    ]);
+  it("is registered after the OneRoster role-source migration", () => {
+    // Asserted by RELATIVE position, not by a `slice` anchored to the end of
+    // the list. Rooms depend on the OneRoster role source having landed first;
+    // where the pair happens to sit relative to the LAST migration is not part
+    // of that contract, and pinning it there made this test fail on the next
+    // unrelated migration anyone added.
+    const oneRoster = manifest.migrationFiles.indexOf(
+      "156-oneroster-user-role-source.sql"
+    );
+    const rooms = manifest.migrationFiles.indexOf("157-rooms.sql");
+    expect(oneRoster).toBeGreaterThanOrEqual(0);
+    expect(rooms).toBeGreaterThan(oneRoster);
   });
 
   it.each(["rooms", "room_classes", "room_members", "room_resources"])(
