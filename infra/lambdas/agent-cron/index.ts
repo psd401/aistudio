@@ -28,6 +28,7 @@ import { Sha256 } from '@aws-crypto/sha256-js';
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { HttpRequest } from '@smithy/protocol-http';
 import type { Context as LambdaContext } from 'aws-lambda';
+import { resolveAbortMs, resolveTurnDeadlineS } from './turn-deadline';
 import * as chatPkg from '@googleapis/chat';
 import * as crypto from 'crypto';
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
@@ -332,11 +333,17 @@ async function invokeAgentCore(
   sessionId: string,
   log: Logger,
   userContext: { displayName?: string; workspacePrefix?: string },
+  remainingMs: () => number,
 ): Promise<InvokeResult> {
   const runtimeId = await getRuntimeId(log);
   if (!runtimeId) {
     return { response: 'Agent is not yet deployed.', inputTokens: 0, outputTokens: 0, ok: false };
   }
+
+  // Declared outside the try so the catch can report how long we waited before
+  // giving up — the single most useful number when diagnosing a timeout, and
+  // the one missing from the 2026-07-27 failure.
+  const invokeStart = Date.now();
 
   try {
     const region = process.env.AWS_REGION || 'us-east-1';
@@ -368,6 +375,10 @@ async function invokeAgentCore(
         workspacePrefix: userContext.workspacePrefix ?? '',
       },
     );
+    // Read the clock HERE, not at handler entry: fetching the runtime id and
+    // the signing secret above can take seconds, and the deadline we promise
+    // the agent has to reflect the time actually left.
+    const turnDeadlineS = resolveTurnDeadlineS(remainingMs());
     const body = JSON.stringify({
       prompt,
       user_email: userEmail,
@@ -378,6 +389,9 @@ async function invokeAgentCore(
         invocationSecret,
         invocationContext,
       ),
+      // Without this the harness falls back to its fixed 840s default, which is
+      // measured from a later start than our abort and so can never fire first.
+      deadline_s: turnDeadlineS,
       source: 'scheduled',
     });
 
@@ -401,11 +415,12 @@ async function invokeAgentCore(
       method: signed.method,
       headers: signed.headers as Record<string, string>,
       body: signed.body as string,
-      // 14:30 client-side cap. Sits above the harness adapter's 14-min chat
-      // deadline (so the agent has a chance to return a partial first) and
-      // 30s under the 15-min Lambda timeout (so we have time to record
-      // telemetry and post the chat fallback before Lambda kills us).
-      signal: AbortSignal.timeout(870 * 1000),
+      // Derived from the SAME clock as turnDeadlineS above, so the ordering
+      // harness-deadline < abort < Lambda-timeout actually holds. The old
+      // hardcoded 870s assumed a 900s Lambda and zero startup cost; when
+      // reaching the container took ~47s, the abort beat the harness and threw
+      // away a turn that had already succeeded.
+      signal: AbortSignal.timeout(resolveAbortMs(remainingMs())),
     });
     log.info('AgentCore response headers received', {
       status: response.status,
@@ -465,10 +480,26 @@ async function invokeAgentCore(
   } catch (error) {
     const errName = error instanceof Error ? error.name : 'Unknown';
     const errMsg = error instanceof Error ? error.message : String(error);
-    log.error('AgentCore invocation error', { errorName: errName, error: errMsg });
+    const elapsedMs = Date.now() - invokeStart;
+    log.error('AgentCore invocation error', {
+      errorName: errName,
+      error: errMsg,
+      elapsedMs,
+    });
     return {
-      // Sanitized user-facing message — full error details are in CloudWatch logs above.
-      response: 'Agent temporarily unavailable for scheduled task. Please try again later.',
+      // Sanitized user-facing message — full error details are in CloudWatch
+      // logs above.
+      //
+      // A timeout gets its OWN message. "Temporarily unavailable, try again
+      // later" is not merely unhelpful here, it is false: the agent was
+      // available and working the entire time, and on 2026-07-27 it finished
+      // its work 5.6 seconds after we hung up on it. Telling the owner to
+      // retry invites an identical 14-minute failure, and the wording sent the
+      // on-call investigation looking for an outage that never happened.
+      response:
+        errName === 'TimeoutError'
+          ? 'This scheduled task ran out of time before it could finish. It was still working when the deadline was reached — consider narrowing what it does, or splitting it into smaller scheduled tasks.'
+          : 'Agent temporarily unavailable for scheduled task. Please try again later.',
       inputTokens: 0,
       outputTokens: 0,
       ok: false,
@@ -660,7 +691,7 @@ async function recordCronFailure(
 
 export async function handler(
   event: ScheduleReferenceEvent,
-  _context: LambdaContext,
+  context: LambdaContext,
 ): Promise<{ status: 'success' | 'error' | 'skipped'; scheduleId: string }> {
   const referencedScheduleId =
     typeof event?.scheduleId === 'string' ? event.scheduleId : 'unknown';
@@ -720,6 +751,7 @@ export async function handler(
       displayName: schedule.displayName,
       workspacePrefix: schedule.workspacePrefix,
     },
+    () => context.getRemainingTimeInMillis(),
   );
 
   // Deliver response to DM regardless of success (so user sees errors).
