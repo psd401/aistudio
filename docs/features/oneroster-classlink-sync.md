@@ -1,16 +1,10 @@
 # ClassLink OneRoster synchronization
 
-Status: v1 ingestion foundation and administrator control surface implemented by Epic
-[#1308](https://github.com/psd401/aistudio/issues/1308), Issue
-[#1310](https://github.com/psd401/aistudio/issues/1310), and Issue
-[#1311](https://github.com/psd401/aistudio/issues/1311). Optional roster role
-reconciliation is implemented by Issue
-[#1312](https://github.com/psd401/aistudio/issues/1312). Teacher-managed room
-provisioning is implemented by Issue
-[#1313](https://github.com/psd401/aistudio/issues/1313). Student room access and
-assistant enforcement are implemented by Issue
-[#1314](https://github.com/psd401/aistudio/issues/1314). Reporting remains a
-separate workstream.
+Status: v1 ingestion, administrator controls, optional role reconciliation,
+teacher-managed rooms, student enforcement, and promotion reporting are
+implemented by Epic [#1308](https://github.com/psd401/aistudio/issues/1308) and
+its linked workstreams, including reporting Issue
+[#1315](https://github.com/psd401/aistudio/issues/1315).
 
 ## Scope and data boundary
 
@@ -175,6 +169,63 @@ The pass runs only after all six roster collections are confirmed successful,
 including a successful unchanged-revision night. It does not run for manual
 syncs. Its own failure is logged and rolled back but does not fail or undo the
 good roster snapshot. Disable the flag to stop future role changes immediately.
+
+## Roster email-match readiness report
+
+After a complete manual sync, run the read-only promotion report against the
+target database:
+
+Provide `DATABASE_URL` through the approved environment/secret-injection
+mechanism rather than typing credentials into shell history, then run:
+
+```bash
+DB_SSL=true bun run scripts/db/report-roster-email-match.ts
+```
+
+The report uses a single-connection `postgres.js` client and issues only
+`SELECT` statements. It reports:
+
+- the active OneRoster-user match rate against `users` with
+  `lower(oneroster_users.email) = lower(users.email)`, split between the
+  `@edtools.psd401.net` student domain and `@psd401.net` staff domain;
+- a bounded, identifier-redacted sample of unmatched roster email domains and
+  primary roles;
+- case-insensitive duplicate active roster emails; and
+- active enrollments that reference a missing or inactive roster user or class.
+
+Exit `0` means there are active roster users and the report found no unmatched
+emails, unexpected/missing domains, duplicate roster emails, or referential
+drift. Exit `1` means findings need an operator decision. Exit `2` means the
+report itself failed and its output is not valid promotion evidence.
+
+### Promotion decision rule
+
+Application users are provisioned lazily, so a roster-wide match rate below
+100% can consist entirely of people who have never signed in. Treat the
+percentage as a readiness signal, not an automatic deletion or remediation
+instruction:
+
+- **Investigate** either student or staff match rate below **95%**, or a drop of
+  more than **5 percentage points** from the accepted dev/manual-sync baseline.
+  Before proceeding, confirm sampled unmatched people are expected
+  never-signed-in users rather than a domain, casing, whitespace, or sync
+  defect. Record only aggregate counts and the explanation in delivery
+  evidence.
+- **Block role-sync and room-enforcement promotion** if any unexpected/missing
+  email domain, duplicate roster email, or active-enrollment referential drift
+  remains. Correct the upstream/configuration problem, run another confirmed
+  complete sync, and rerun the report.
+- A sub-95% cohort may proceed only with an explicit, documented operator
+  exception showing that the gap is expected lazy provisioning and that the
+  sampled domains/roles align with the district roster. Never weaken the
+  lowercase join or manufacture application users to improve the number.
+
+Sample emails and sourced IDs are redacted by default. If an identifier-level
+investigation is necessary, rerun from a private, non-captured operator session
+with `ROSTER_REPORT_INCLUDE_PII=true`. That opt-in output contains student or
+staff identifiers and is FERPA-sensitive: do not paste it into issues, pull
+requests, CI artifacts, or shared logs. Promotion evidence should contain only
+aggregate counts, exit code, investigation result, and any approved exception.
 
 ## Teacher-managed rooms
 
@@ -408,21 +459,45 @@ no-op/change behavior, retries, deletion normalization, empty/error
 preservation, transaction isolation at the sync boundary, changed fields, and
 checkpoint behavior.
 
-## Rollout and rollback
+## Production promotion checklist
 
-Roll out disabled:
+Promote with ingestion and authorization flags disabled:
 
-1. Deploy the Processing stack and confirm the Lambda, nightly rule, alarms,
-   IAM policy, VPC configuration, and log group.
-2. Create the scoped credential secret and populate the non-secret settings.
-3. Run a manual sync. Compare per-collection totals with ClassLink and inspect a
-   sample of lowercased emails and sourced-ID relationships.
-4. Confirm no application roles, rooms, assistants, or demographics data
-   changed.
-5. Set `ROSTER_SYNC_ENABLED=true`.
-6. Review the roster-to-user email match and role distribution before setting
-   `ROSTER_ROLE_SYNC_ENABLED=true`. Keep the role flag disabled if either needs
-   investigation.
+1. Deploy the application and Processing stack. Confirm migrations 141, 156,
+   157, and 158 are applied; the Lambda, disabled-until-configured nightly rule,
+   alarms, IAM policy, VPC configuration, and log group exist; and rollback
+   owners are identified.
+2. Create the production credential secret with the
+   `aistudio-prod-oneroster-*` name pattern, `Environment=prod` and
+   `ManagedBy=manual` tags, and exactly the credential shape for the selected
+   `oauth1` or `proxy` mode. Keep all secret values out of settings, shell
+   history, logs, issues, and pull requests.
+3. While `ROSTER_SYNC_ENABLED=false` and
+   `ROSTER_ROLE_SYNC_ENABLED=false`, set the five manual-sync configuration
+   rows: `ONEROSTER_BASE_URL`, `ONEROSTER_AUTH_MODE`,
+   `ONEROSTER_CREDENTIALS_SECRET_ARN`, `ONEROSTER_API_VERSION`, and
+   `ONEROSTER_PAGE_SIZE`.
+4. Run one manual sync from `/admin/rosters`. Require a terminal success for all
+   six collections, stable `x-perm-rev`, plausible ClassLink-comparable totals,
+   and no Lambda failure alarm. An empty, partial, inconsistent, or failed pull
+   is not promotion evidence and must not be followed by absence deactivation.
+5. Confirm the manual run did not change application roles, rooms, assistants,
+   capabilities, API-key scopes, or demographics. Inspect lowercased email and
+   sourced-ID relationships without exporting unnecessary roster data.
+6. Run `scripts/db/report-roster-email-match.ts` against production. Apply the
+   decision rule above; retain only aggregate counts, exit code, and the
+   documented investigation/exception as evidence.
+7. Set `ROSTER_SYNC_ENABLED=true`, observe the first scheduled success and both
+   alarms, and verify the revision checkpoint advances only after a complete
+   run.
+8. Enable `ROSTER_ROLE_SYNC_ENABLED=true` only after the report decision is
+   accepted and the fixed student/staff mapping is approved. Before teachers
+   create active rooms, confirm the same accepted roster snapshot is still
+   current. Keep either authorization path disabled/unpopulated if its evidence
+   needs investigation.
+
+No live ClassLink credential test is implied by CI or the mocked protocol suite.
+The production manual sync in step 4 is the credentialed validation boundary.
 
 To stop ingestion, set `ROSTER_SYNC_ENABLED=false` in `/admin/rosters`.
 Existing roster rows remain

@@ -175,6 +175,11 @@ jobs:
       env:
         CI: true
 
+    - name: Run OneRoster email-match report smoke
+      run: bun run test:smoke:roster-email-match
+      env:
+        CI: true
+
   # Production-build regression for #1297. Source-level import tests cannot
   # prove how Next/Webpack packages middleware, so exercise the compiled bundle
   # with Next's real Edge sandbox and a signed expired session on every PR/push.
