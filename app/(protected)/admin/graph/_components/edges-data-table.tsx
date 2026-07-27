@@ -80,17 +80,10 @@ function SortableHeader({
   )
 }
 
-export function EdgesDataTable({
-  edges,
-  onDeleteEdge,
-  loading = false,
-  className,
-}: EdgesDataTableProps) {
-  "use no memo"
-
-  const [sorting, setSorting] = useState<SortingState>([])
-
-  const columns = useMemo<ColumnDef<EdgeTableRow>[]>(
+function useEdgeColumns(
+  onDeleteEdge: EdgesDataTableProps["onDeleteEdge"]
+): ColumnDef<EdgeTableRow>[] {
+  return useMemo(
     () => [
       {
         accessorKey: "sourceNodeName",
@@ -157,33 +150,42 @@ export function EdgesDataTable({
       {
         id: "actions",
         header: () => <span className="sr-only">Actions</span>,
-        cell: ({ row }) => {
-          const edge = row.original
-          return (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-8 w-8">
-                  <IconDotsVertical className="h-4 w-4" />
-                  <span className="sr-only">Open menu</span>
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem
-                  onClick={() => onDeleteEdge(edge)}
-                  className="text-destructive focus:text-destructive"
-                >
-                  <IconTrash className="mr-2 h-4 w-4" />
-                  Delete Edge
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )
-        },
+        cell: ({ row }) => (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-8 w-8">
+                <IconDotsVertical className="h-4 w-4" />
+                <span className="sr-only">Open menu</span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                onClick={() => onDeleteEdge(row.original)}
+                className="text-destructive focus:text-destructive"
+              >
+                <IconTrash className="mr-2 h-4 w-4" />
+                Delete Edge
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ),
         size: 60,
       },
     ],
     [onDeleteEdge]
   )
+}
+
+export function EdgesDataTable({
+  edges,
+  onDeleteEdge,
+  loading = false,
+  className,
+}: EdgesDataTableProps) {
+  "use no memo"
+
+  const [sorting, setSorting] = useState<SortingState>([])
+  const columns = useEdgeColumns(onDeleteEdge)
 
   const table = useUncompiledReactTable({
     data: edges,

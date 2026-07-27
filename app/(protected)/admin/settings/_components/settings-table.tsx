@@ -47,6 +47,170 @@ interface SettingsTableProps {
   onDelete: (key: string) => void
 }
 
+function SettingValue({
+  setting,
+  visible,
+  actualValue,
+  loading,
+  onToggle,
+  onCopy,
+}: {
+  setting: Setting
+  visible: boolean
+  actualValue?: string
+  loading: boolean
+  onToggle: () => void
+  onCopy: () => void
+}) {
+  const hasValue =
+    setting.hasValue || Boolean(setting.value && setting.value !== "••••••••")
+  return (
+    <div className="flex items-center gap-2">
+      {setting.isSecret && hasValue ? (
+        <div className="flex flex-1 items-center gap-2">
+          <Input
+            type={visible ? "text" : "password"}
+            value={visible ? actualValue || setting.value || "" : "••••••••"}
+            readOnly
+            className="max-w-xs font-mono text-sm"
+          />
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onToggle}
+            disabled={loading}
+          >
+            {loading ? (
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+            ) : visible ? (
+              <EyeOff className="h-4 w-4" />
+            ) : (
+              <Eye className="h-4 w-4" />
+            )}
+          </Button>
+        </div>
+      ) : (
+        <span
+          className={
+            hasValue ? "font-mono text-sm" : "text-muted-foreground"
+          }
+        >
+          {hasValue ? setting.value : "Not set"}
+        </span>
+      )}
+      {hasValue && (
+        <Button variant="ghost" size="icon" onClick={onCopy}>
+          <Copy className="h-4 w-4" />
+        </Button>
+      )}
+    </div>
+  )
+}
+
+function SettingRow({
+  setting,
+  visible,
+  actualValue,
+  loading,
+  onToggleVisibility,
+  onCopy,
+  onEdit,
+  onDeleteRequest,
+}: {
+  setting: Setting
+  visible: boolean
+  actualValue?: string
+  loading: boolean
+  onToggleVisibility: () => void
+  onCopy: () => void
+  onEdit: () => void
+  onDeleteRequest: () => void
+}) {
+  return (
+    <TableRow>
+      <TableCell className="font-mono text-sm">{setting.key}</TableCell>
+      <TableCell>
+        <SettingValue
+          setting={setting}
+          visible={visible}
+          actualValue={actualValue}
+          loading={loading}
+          onToggle={onToggleVisibility}
+          onCopy={onCopy}
+        />
+      </TableCell>
+      <TableCell className="text-sm text-muted-foreground">
+        {setting.description}
+      </TableCell>
+      <TableCell>
+        <Badge variant={setting.isSecret ? "secondary" : "outline"}>
+          {setting.isSecret ? "Secret" : "Public"}
+        </Badge>
+      </TableCell>
+      <TableCell>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon">
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={onEdit}>
+              <Edit className="mr-2 h-4 w-4" />
+              Edit
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="text-destructive"
+              onClick={onDeleteRequest}
+            >
+              <Trash className="mr-2 h-4 w-4" />
+              Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </TableCell>
+    </TableRow>
+  )
+}
+
+function SettingsRows({
+  settings,
+  visibleValues,
+  actualValues,
+  loadingValues,
+  onToggleVisibility,
+  onCopy,
+  onEdit,
+  onDeleteRequest,
+}: {
+  settings: Setting[]
+  visibleValues: Set<string>
+  actualValues: Record<string, string>
+  loadingValues: Set<string>
+  onToggleVisibility: (key: string) => void
+  onCopy: (setting: Setting) => void
+  onEdit: (setting: Setting) => void
+  onDeleteRequest: (key: string) => void
+}) {
+  return (
+    <TableBody>
+      {settings.map((setting) => (
+        <SettingRow
+          key={setting.key}
+          setting={setting}
+          visible={visibleValues.has(setting.key)}
+          actualValue={actualValues[setting.key]}
+          loading={loadingValues.has(setting.key)}
+          onToggleVisibility={() => onToggleVisibility(setting.key)}
+          onCopy={() => onCopy(setting)}
+          onEdit={() => onEdit(setting)}
+          onDeleteRequest={() => onDeleteRequest(setting.key)}
+        />
+      ))}
+    </TableBody>
+  )
+}
+
 export function SettingsTable({ settings, onEdit, onDelete }: SettingsTableProps) {
   const [visibleValues, setVisibleValues] = useState<Set<string>>(new Set())
   const [actualValues, setActualValues] = useState<Record<string, string>>({})
@@ -139,93 +303,16 @@ export function SettingsTable({ settings, onEdit, onDelete }: SettingsTableProps
             <TableHead className="w-[50px]"></TableHead>
           </TableRow>
         </TableHeader>
-        <TableBody>
-          {settings.map((setting) => {
-            const isVisible = visibleValues.has(setting.key)
-            const hasValue = setting.hasValue || (setting.value && setting.value !== '••••••••')
-            
-            return (
-              <TableRow key={setting.key}>
-                <TableCell className="font-mono text-sm">
-                  {setting.key}
-                </TableCell>
-                <TableCell>
-                  <div className="flex items-center gap-2">
-                    {setting.isSecret && hasValue ? (
-                      <div className="flex items-center gap-2 flex-1">
-                        <Input
-                          type={isVisible ? "text" : "password"}
-                          value={isVisible ? (actualValues[setting.key] || setting.value || '') : '••••••••'}
-                          readOnly
-                          className="max-w-xs font-mono text-sm"
-                        />
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => toggleValueVisibility(setting.key)}
-                          disabled={loadingValues.has(setting.key)}
-                        >
-                          {loadingValues.has(setting.key) ? (
-                            <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                          ) : isVisible ? (
-                            <EyeOff className="h-4 w-4" />
-                          ) : (
-                            <Eye className="h-4 w-4" />
-                          )}
-                        </Button>
-                      </div>
-                    ) : (
-                      <span className={`${hasValue ? 'font-mono text-sm' : 'text-muted-foreground'}`}>
-                        {hasValue ? setting.value : 'Not set'}
-                      </span>
-                    )}
-                    {hasValue && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => copyToClipboard(setting)}
-                      >
-                        <Copy className="h-4 w-4" />
-                      </Button>
-                    )}
-                  </div>
-                </TableCell>
-                <TableCell className="text-sm text-muted-foreground">
-                  {setting.description}
-                </TableCell>
-                <TableCell>
-                  {setting.isSecret ? (
-                    <Badge variant="secondary">Secret</Badge>
-                  ) : (
-                    <Badge variant="outline">Public</Badge>
-                  )}
-                </TableCell>
-                <TableCell>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="icon">
-                        <MoreHorizontal className="h-4 w-4" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem onClick={() => onEdit(setting)}>
-                        <Edit className="h-4 w-4 mr-2" />
-                        Edit
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        className="text-destructive"
-                        onClick={() => setDeleteKey(setting.key)}
-                      >
-                        <Trash className="h-4 w-4 mr-2" />
-                        Delete
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </TableCell>
-              </TableRow>
-            )
-          })}
-        </TableBody>
+        <SettingsRows
+          settings={settings}
+          visibleValues={visibleValues}
+          actualValues={actualValues}
+          loadingValues={loadingValues}
+          onToggleVisibility={toggleValueVisibility}
+          onCopy={copyToClipboard}
+          onEdit={onEdit}
+          onDeleteRequest={setDeleteKey}
+        />
       </Table>
 
       <AlertDialog open={!!deleteKey} onOpenChange={() => setDeleteKey(null)}>
@@ -255,4 +342,3 @@ export function SettingsTable({ settings, onEdit, onDelete }: SettingsTableProps
     </>
   )
 }
-

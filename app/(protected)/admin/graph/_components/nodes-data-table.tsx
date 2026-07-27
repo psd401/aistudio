@@ -83,19 +83,15 @@ function SortableHeader({
   )
 }
 
-export function NodesDataTable({
-  nodes,
+function useNodeColumns({
   onViewNode,
   onEditNode,
   onDeleteNode,
-  loading = false,
-  className,
-}: NodesDataTableProps) {
-  "use no memo"
-
-  const [sorting, setSorting] = useState<SortingState>([])
-
-  const columns = useMemo<ColumnDef<NodeTableRow>[]>(
+}: Pick<
+  NodesDataTableProps,
+  "onViewNode" | "onEditNode" | "onDeleteNode"
+>): ColumnDef<NodeTableRow>[] {
+  return useMemo(
     () => [
       {
         accessorKey: "name",
@@ -146,42 +142,57 @@ export function NodesDataTable({
       {
         id: "actions",
         header: () => <span className="sr-only">Actions</span>,
-        cell: ({ row }) => {
-          const node = row.original
-          return (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-8 w-8">
-                  <IconDotsVertical className="h-4 w-4" />
-                  <span className="sr-only">Open menu</span>
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => onViewNode(node)}>
-                  <IconEye className="mr-2 h-4 w-4" />
-                  View Details
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onEditNode(node)}>
-                  <IconEdit className="mr-2 h-4 w-4" />
-                  Edit Node
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onClick={() => onDeleteNode(node)}
-                  className="text-destructive focus:text-destructive"
-                >
-                  <IconTrash className="mr-2 h-4 w-4" />
-                  Delete Node
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )
-        },
+        cell: ({ row }) => (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-8 w-8">
+                <IconDotsVertical className="h-4 w-4" />
+                <span className="sr-only">Open menu</span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => onViewNode(row.original)}>
+                <IconEye className="mr-2 h-4 w-4" />
+                View Details
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onEditNode(row.original)}>
+                <IconEdit className="mr-2 h-4 w-4" />
+                Edit Node
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={() => onDeleteNode(row.original)}
+                className="text-destructive focus:text-destructive"
+              >
+                <IconTrash className="mr-2 h-4 w-4" />
+                Delete Node
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ),
         size: 60,
       },
     ],
     [onViewNode, onEditNode, onDeleteNode]
   )
+}
+
+export function NodesDataTable({
+  nodes,
+  onViewNode,
+  onEditNode,
+  onDeleteNode,
+  loading = false,
+  className,
+}: NodesDataTableProps) {
+  "use no memo"
+
+  const [sorting, setSorting] = useState<SortingState>([])
+  const columns = useNodeColumns({
+    onViewNode,
+    onEditNode,
+    onDeleteNode,
+  })
 
   const table = useUncompiledReactTable({
     data: nodes,
