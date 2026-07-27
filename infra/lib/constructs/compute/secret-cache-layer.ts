@@ -1,8 +1,8 @@
 import * as cdk from "aws-cdk-lib"
 import * as lambda from "aws-cdk-lib/aws-lambda"
 import { Construct } from "constructs"
-import * as path from "path"
-import { execSync } from "child_process"
+import * as path from "node:path"
+import { execSync } from "node:child_process"
 
 /**
  * Props for SecretCacheLayer construct
@@ -77,9 +77,10 @@ export class SecretCacheLayer extends Construct {
                 execSync(`cp -r dist/* ${outputDir}/`, { cwd: layerPath, stdio: "inherit" })
                 execSync(`cp package.json ${outputDir}/`, { cwd: layerPath, stdio: "inherit" })
                 return true
-              } catch (e) {
-                // eslint-disable-next-line no-console
-                console.error("Local bundling failed for secret-cache layer, falling back to Docker:", e)
+              } catch (error) {
+                process.stderr.write(
+                  `Local secret-cache bundling failed; falling back to Docker: ${String(error)}\n`
+                )
                 return false
               }
             },

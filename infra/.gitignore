@@ -1,6 +1,9 @@
 # CDK compiled JavaScript files
 lib/**/*.js
 bin/**/*.js
+test/**/*.js
+scripts/audit-iam-policies.js
+scripts/secrets-migration/migrate-to-secrets-manager.js
 *.d.ts
 
 # Compiled Lambda distribution files
@@ -22,7 +25,7 @@ lambdas/textract-processor/*.js
 lambdas/layers/secret-cache/nodejs/*.js
 database/lambda/*.js
 
-# CDK asset staging directory  
+# CDK asset staging directory
 .cdk.staging
 cdk.out
 

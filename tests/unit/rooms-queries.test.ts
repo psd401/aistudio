@@ -13,26 +13,30 @@ jest.mock("@/lib/db/drizzle-client", () => ({
 import { searchActiveRosterStudents } from "@/lib/rooms/queries";
 
 const dialect = new PgDialect();
+let capturedQuery: SQL | undefined;
+
+async function captureSearchQuery(
+  callback: unknown,
+  label: unknown
+): Promise<unknown> {
+  expect(label).toBe("searchActiveRosterStudents");
+  const execute = jest.fn((query: SQL) => {
+    capturedQuery = query;
+    return Promise.resolve([]);
+  });
+  return (
+    callback as (db: { execute: typeof execute }) => Promise<unknown>
+  )({ execute });
+}
 
 describe("room roster queries", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    capturedQuery = undefined;
   });
 
   it("preserves literal LIKE metacharacters in student searches", async () => {
-    let capturedQuery: SQL | undefined;
-    mockExecuteQuery.mockImplementationOnce(
-      async (callback: unknown, label: unknown) => {
-        expect(label).toBe("searchActiveRosterStudents");
-        const execute = jest.fn((query: SQL) => {
-          capturedQuery = query;
-          return Promise.resolve([]);
-        });
-        return (
-          callback as (db: { execute: typeof execute }) => Promise<unknown>
-        )({ execute });
-      }
-    );
+    mockExecuteQuery.mockImplementationOnce(captureSearchQuery);
 
     await expect(
       searchActiveRosterStudents(

@@ -42,6 +42,46 @@ async function resolveJobCaller(): Promise<{ userId: number; isAdmin: boolean }>
   return { userId: currentUser.data.user.id, isAdmin }
 }
 
+type JobLogger = ReturnType<typeof createLogger>
+type JobOwnerResolution =
+  | { userId: number }
+  | { error: "Invalid userId provided." | "Requested userId does not exist." }
+
+function parseRequestedUserId(value: number | string): number | undefined {
+  const parsed = typeof value === "string" ? Number.parseInt(value, 10) : value
+  return Number.isNaN(parsed) ? undefined : parsed
+}
+
+async function resolveCreateJobOwner(
+  submittedUserId: number | string | undefined,
+  callerId: number,
+  isAdmin: boolean,
+  log: JobLogger
+): Promise<JobOwnerResolution> {
+  if (submittedUserId === undefined || submittedUserId === null || submittedUserId === "") {
+    return { userId: callerId }
+  }
+
+  const requested = parseRequestedUserId(submittedUserId)
+  if (requested === undefined) {
+    log.warn("Invalid userId provided", { userId: submittedUserId })
+    return { error: "Invalid userId provided." }
+  }
+  if (!isAdmin && requested !== callerId) {
+    log.warn("Non-admin attempted to attribute a job to another user", { requested })
+    throw ErrorFactories.authzInsufficientPermissions("create jobs for other users")
+  }
+  if (!isAdmin) return { userId: callerId }
+
+  try {
+    const targetUser = await getUserById(requested)
+    return { userId: targetUser.id }
+  } catch {
+    log.warn("Admin-requested userId does not exist", { userId: requested })
+    return { error: "Requested userId does not exist." }
+  }
+}
+
 export async function createJobAction(
   job: Omit<CreateGenericJobData, "userId"> & { userId?: number | string }
 ): Promise<ActionState<GenericJob>> {
@@ -70,46 +110,11 @@ export async function createJobAction(
     // The trusted, session-derived `isAdmin` flag is the leading condition on
     // every branch that can assign a caller-supplied value to `userIdNum`.
     const { userId: callerId, isAdmin } = await resolveJobCaller()
-    const hasRequestedUserId = job.userId !== undefined && job.userId !== null && job.userId !== ''
-    let userIdNum: number
-    if (isAdmin && hasRequestedUserId) {
-      const requested = typeof job.userId === 'string' ? Number.parseInt(job.userId, 10) : job.userId
-      if (typeof requested !== 'number' || Number.isNaN(requested)) {
-        log.warn("Invalid userId provided", { userId: job.userId })
-        return { isSuccess: false, message: "Invalid userId provided." };
-      }
-      // Resolve the target user from the trusted user store instead of trusting
-      // the caller-supplied id directly as the sink value: this rejects a
-      // nonexistent target user up front (instead of failing on the jobs table's
-      // FK constraint) and assigns userIdNum from the DB row's own `id`, not the
-      // request parameter, so the value is no longer directly attacker-controlled.
-      let targetUser
-      try {
-        targetUser = await getUserById(requested)
-      } catch {
-        log.warn("Admin-requested userId does not exist", { userId: requested })
-        return { isSuccess: false, message: "Requested userId does not exist." };
-      }
-      userIdNum = targetUser.id
-    } else if (!isAdmin && hasRequestedUserId) {
-      const requested = typeof job.userId === 'string' ? Number.parseInt(job.userId, 10) : job.userId
-      if (typeof requested !== 'number' || Number.isNaN(requested)) {
-        log.warn("Invalid userId provided", { userId: job.userId })
-        return { isSuccess: false, message: "Invalid userId provided." };
-      }
-      if (requested !== callerId) {
-        log.warn("Non-admin attempted to attribute a job to another user", { requested })
-        throw ErrorFactories.authzInsufficientPermissions("create jobs for other users")
-      }
-      // Assign the trusted, session-derived callerId rather than the
-      // tainted `requested` value — the equality check above proves they're
-      // the same number, but reusing `requested` here is what CodeQL's
-      // js/user-controlled-bypass rule keeps flagging (a user-controlled
-      // value reaching the sink, regardless of the preceding guard).
-      userIdNum = callerId
-    } else {
-      userIdNum = callerId
+    const owner = await resolveCreateJobOwner(job.userId, callerId, isAdmin, log)
+    if ("error" in owner) {
+      return { isSuccess: false, message: owner.error }
     }
+    const userIdNum = owner.userId
 
     log.info("Creating job in database", {
       userId: userIdNum,
@@ -392,4 +397,4 @@ export async function deleteJobAction(id: string): Promise<ActionState<void>> {
       metadata: { jobId: id }
     })
   }
-} 
+}

@@ -1,11 +1,15 @@
-import { LanguageModel } from 'ai';
-import { createProviderModelWithCapabilities } from '@/lib/ai/provider-factory';
-import { createLogger, generateRequestId, sanitizeForLogging } from '@/lib/logger';
-import { executeSQL, type DatabaseRow } from './db-helpers';
-import type { ProviderCapabilities } from '@/lib/streaming/types';
-import { hasCapability } from '@/lib/ai/capability-utils';
+import { LanguageModel } from "ai";
+import { createProviderModelWithCapabilities } from "@/lib/ai/provider-factory";
+import {
+  createLogger,
+  generateRequestId,
+  sanitizeForLogging,
+} from "@/lib/logger";
+import { executeSQL, type DatabaseRow } from "./db-helpers";
+import type { ProviderCapabilities } from "@/lib/streaming/types";
+import { hasCapability } from "@/lib/ai/capability-utils";
 
-const log = createLogger({ module: 'nexus-provider-factory' });
+const log = createLogger({ module: "nexus-provider-factory" });
 
 // Database model info interface
 interface DatabaseModelInfo extends DatabaseRow {
@@ -28,9 +32,9 @@ export interface NexusModelOptions {
   conversationId?: string;
   enableCaching?: boolean;
   enableOptimizations?: boolean;
-  routingStrategy?: 'cost' | 'latency' | 'quality' | 'intelligent';
-  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
-  responseMode?: 'standard' | 'flex' | 'priority';
+  routingStrategy?: "cost" | "latency" | "quality" | "intelligent";
+  reasoningEffort?: "minimal" | "low" | "medium" | "high";
+  responseMode?: "standard" | "flex" | "priority";
   backgroundMode?: boolean;
   thinkingBudget?: number;
   useResponsesAPI?: boolean;
@@ -47,7 +51,7 @@ export interface NexusModelCapabilities {
   supportsAudio: boolean;
   maxTimeoutMs: number;
   maxTokens?: number;
-  
+
   // Enhanced capabilities for Nexus features
   responsesAPI?: boolean;
   promptCaching?: boolean;
@@ -61,7 +65,7 @@ export interface NexusModelCapabilities {
   computerUse?: boolean;
   workspaceTools?: boolean;
   mcpSupport?: boolean;
-  
+
   // Performance characteristics
   costPerToken?: number;
   averageLatency?: number;
@@ -87,7 +91,7 @@ export interface NexusLanguageModel {
       contextWindow: number;
     };
   };
-  
+
   // Nexus-specific methods
   enableCaching?(): void;
   getCacheMetrics?(): Promise<CacheMetrics>;
@@ -101,6 +105,303 @@ export interface CacheMetrics {
   costSaved: number;
 }
 
+function includesAny(modelId: string, patterns: readonly string[]): boolean {
+  return patterns.some((pattern) => modelId.includes(pattern));
+}
+
+function baseNexusCapabilities(
+  base: ProviderCapabilities,
+  modelInfo: DatabaseModelInfo | null,
+): NexusModelCapabilities {
+  return {
+    supportsReasoning: base.supportsReasoning,
+    supportsThinking: base.supportsThinking,
+    supportsToolCalls: false,
+    supportsImages: false,
+    supportsAudio: false,
+    maxTimeoutMs: base.maxTimeoutMs,
+    maxTokens: modelInfo?.maxTokens,
+    responsesAPI: false,
+    promptCaching: false,
+    contextCaching: false,
+    artifacts: false,
+    canvas: false,
+    webSearch: false,
+    codeInterpreter: false,
+    grounding: false,
+    codeExecution: false,
+    computerUse: false,
+    workspaceTools: false,
+    mcpSupport: true,
+    supportsBatching: false,
+  };
+}
+
+function applyDatabaseCapabilities(
+  enhanced: NexusModelCapabilities,
+  modelInfo: DatabaseModelInfo,
+  base: ProviderCapabilities,
+): void {
+  const stored = modelInfo.capabilities;
+  if (stored) {
+    enhanced.responsesAPI = hasCapability(stored, "responsesAPI");
+    enhanced.promptCaching = hasCapability(stored, "promptCaching");
+    enhanced.contextCaching = hasCapability(stored, "contextCaching");
+    enhanced.artifacts = hasCapability(stored, "artifacts");
+    enhanced.canvas = hasCapability(stored, "canvas");
+    enhanced.webSearch = hasCapability(stored, "webSearch");
+    enhanced.codeInterpreter = hasCapability(stored, "codeInterpreter");
+    enhanced.grounding = hasCapability(stored, "grounding");
+    enhanced.codeExecution = hasCapability(stored, "codeExecution");
+    enhanced.computerUse = hasCapability(stored, "computerUse");
+    enhanced.workspaceTools = hasCapability(stored, "workspaceTools");
+    enhanced.supportsReasoning =
+      hasCapability(stored, "reasoning") || base.supportsReasoning;
+    enhanced.supportsThinking =
+      hasCapability(stored, "thinking") || base.supportsThinking;
+  }
+  enhanced.averageLatency =
+    modelInfo.averageLatencyMs || enhanced.averageLatency;
+  enhanced.maxConcurrency = modelInfo.maxConcurrency || enhanced.maxConcurrency;
+  enhanced.supportsBatching =
+    modelInfo.supportsBatching || enhanced.supportsBatching;
+  enhanced.costPerToken = modelInfo.inputCostPer1kTokens
+    ? modelInfo.inputCostPer1kTokens / 1000
+    : enhanced.costPerToken;
+}
+
+type ProviderEnhancer = (
+  capabilities: NexusModelCapabilities,
+  modelId: string,
+  hasDatabaseModel: boolean,
+) => void;
+
+const PROVIDER_ENHANCERS: Record<string, ProviderEnhancer> = {
+  openai(capabilities, modelId, hasDatabaseModel) {
+    if (!hasDatabaseModel) {
+      capabilities.responsesAPI = includesAny(modelId, [
+        "gpt-5",
+        "gpt-4.1",
+        "gpt-4o",
+      ]);
+      capabilities.canvas = includesAny(modelId, ["gpt-4o", "gpt-5"]);
+      capabilities.webSearch = true;
+      capabilities.codeInterpreter = true;
+    }
+    capabilities.averageLatency = 800;
+    capabilities.maxConcurrency = 50;
+    capabilities.supportsBatching = false;
+  },
+  "amazon-bedrock"(capabilities, modelId, hasDatabaseModel) {
+    if (!hasDatabaseModel) {
+      capabilities.promptCaching = includesAny(modelId, [
+        "claude-3",
+        "claude-4",
+        "claude-opus",
+        "claude-sonnet",
+      ]);
+      capabilities.artifacts = includesAny(modelId, [
+        "claude-3.5",
+        "claude-4",
+        "claude-opus",
+        "claude-sonnet",
+      ]);
+      capabilities.computerUse = modelId.includes("computer-use");
+    }
+    capabilities.averageLatency = 1200;
+    capabilities.maxConcurrency = 20;
+    capabilities.supportsBatching = true;
+  },
+  google(capabilities, modelId, hasDatabaseModel) {
+    if (!hasDatabaseModel) {
+      capabilities.contextCaching = includesAny(modelId, [
+        "gemini-2",
+        "gemini-1.5",
+      ]);
+      capabilities.grounding = true;
+      capabilities.codeExecution = true;
+      capabilities.workspaceTools = true;
+    }
+    capabilities.averageLatency = 600;
+    capabilities.maxConcurrency = 100;
+    capabilities.supportsBatching = true;
+  },
+  azure(capabilities, _modelId, hasDatabaseModel) {
+    if (!hasDatabaseModel) {
+      capabilities.webSearch = true;
+      capabilities.codeInterpreter = true;
+    }
+    capabilities.averageLatency = 900;
+    capabilities.maxConcurrency = 30;
+    capabilities.supportsBatching = false;
+  },
+};
+
+function applyProviderEnhancements(
+  capabilities: NexusModelCapabilities,
+  provider: string,
+  modelId: string,
+  hasDatabaseModel: boolean,
+): void {
+  PROVIDER_ENHANCERS[provider.toLowerCase()]?.(
+    capabilities,
+    modelId,
+    hasDatabaseModel,
+  );
+}
+
+const FEATURE_MATCHERS: Record<
+  string,
+  (capabilities: NexusModelCapabilities) => boolean
+> = {
+  reasoning: (capabilities) => capabilities.supportsReasoning,
+  thinking: (capabilities) => capabilities.supportsThinking,
+  caching: (capabilities) =>
+    Boolean(capabilities.promptCaching || capabilities.contextCaching),
+  web: (capabilities) =>
+    Boolean(capabilities.webSearch || capabilities.grounding),
+  code: (capabilities) =>
+    Boolean(capabilities.codeInterpreter || capabilities.codeExecution),
+  artifacts: (capabilities) => Boolean(capabilities.artifacts),
+  canvas: (capabilities) => Boolean(capabilities.canvas),
+  computer: (capabilities) => Boolean(capabilities.computerUse),
+};
+
+type ModelEstimate = { patterns: readonly string[]; value: number };
+
+function estimateFromPatterns(
+  modelId: string,
+  estimates: readonly ModelEstimate[],
+  fallback: number,
+): number {
+  return (
+    estimates.find((estimate) => includesAny(modelId, estimate.patterns))
+      ?.value ?? fallback
+  );
+}
+
+const COST_ESTIMATES: Record<
+  string,
+  { models: readonly ModelEstimate[]; fallback: number }
+> = {
+  openai: {
+    models: [
+      { patterns: ["gpt-5"], value: 0.00006 },
+      { patterns: ["gpt-4.1"], value: 0.00005 },
+      { patterns: ["gpt-4o"], value: 0.00003 },
+      { patterns: ["gpt-4"], value: 0.00005 },
+    ],
+    fallback: 0.000002,
+  },
+  "amazon-bedrock": {
+    models: [
+      { patterns: ["claude-opus"], value: 0.000015 },
+      {
+        patterns: ["claude-3.5-sonnet", "claude-sonnet"],
+        value: 0.000003,
+      },
+      {
+        patterns: ["claude-3-haiku", "claude-haiku"],
+        value: 0.00000025,
+      },
+      { patterns: ["deepseek"], value: 0.0000002 },
+    ],
+    fallback: 0.000008,
+  },
+  google: {
+    models: [
+      { patterns: ["gemini-2.5"], value: 0.0000025 },
+      { patterns: ["gemini-2.0-flash"], value: 0.0000015 },
+      { patterns: ["gemini-1.5-pro"], value: 0.00000125 },
+      { patterns: ["gemini-1.5-flash"], value: 0.000000075 },
+    ],
+    fallback: 0.000001,
+  },
+};
+
+function estimatedCostPerToken(provider: string, modelId: string): number {
+  const normalized = provider.toLowerCase();
+  if (normalized === "azure") {
+    return estimatedCostPerToken("openai", modelId) * 1.1;
+  }
+  const estimates = COST_ESTIMATES[normalized];
+  return estimates
+    ? estimateFromPatterns(modelId, estimates.models, estimates.fallback)
+    : 0.000001;
+}
+
+const CONTEXT_ESTIMATES: Record<
+  string,
+  { models: readonly ModelEstimate[]; fallback: number }
+> = {
+  openai: {
+    models: [
+      { patterns: ["gpt-5"], value: 200000 },
+      { patterns: ["gpt-4.1"], value: 1000000 },
+      { patterns: ["gpt-4o"], value: 128000 },
+    ],
+    fallback: 8000,
+  },
+  "amazon-bedrock": {
+    models: [
+      {
+        patterns: ["claude-opus", "claude-sonnet", "claude-3.5", "claude-4"],
+        value: 200000,
+      },
+      { patterns: ["deepseek"], value: 128000 },
+    ],
+    fallback: 100000,
+  },
+  google: {
+    models: [
+      { patterns: ["gemini-2"], value: 2000000 },
+      { patterns: ["gemini-1.5"], value: 1000000 },
+    ],
+    fallback: 32000,
+  },
+};
+
+function estimatedContextWindow(provider: string, modelId: string): number {
+  const normalized =
+    provider.toLowerCase() === "azure" ? "openai" : provider.toLowerCase();
+  const estimates = CONTEXT_ESTIMATES[normalized];
+  return estimates
+    ? estimateFromPatterns(modelId, estimates.models, estimates.fallback)
+    : 8000;
+}
+
+function providerPricing(
+  modelInfo: DatabaseModelInfo | null,
+  capabilities: NexusModelCapabilities,
+  fallbackCachingDiscount: number,
+): NonNullable<NexusLanguageModel["providerMetadata"]["pricing"]> {
+  return {
+    inputCostPerToken: modelInfo?.inputCostPer1kTokens
+      ? modelInfo.inputCostPer1kTokens / 1000
+      : capabilities.costPerToken || 0,
+    outputCostPerToken: modelInfo?.outputCostPer1kTokens
+      ? modelInfo.outputCostPer1kTokens / 1000
+      : (capabilities.costPerToken || 0) * 1.5,
+    cachingDiscount: modelInfo?.cachedInputCostPer1kTokens
+      ? 1 -
+        modelInfo.cachedInputCostPer1kTokens /
+          (modelInfo.inputCostPer1kTokens || 1)
+      : fallbackCachingDiscount,
+  };
+}
+
+function providerLimits(
+  modelInfo: DatabaseModelInfo | null,
+  capabilities: NexusModelCapabilities,
+  estimatedContext: number,
+): NonNullable<NexusLanguageModel["providerMetadata"]["limits"]> {
+  return {
+    maxTokens: modelInfo?.maxTokens || capabilities.maxTokens || 4000,
+    maxRequests: modelInfo?.maxConcurrency || capabilities.maxConcurrency || 10,
+    contextWindow: modelInfo?.maxTokens || estimatedContext,
+  };
+}
+
 /**
  * Enhanced provider factory for Nexus that extends the base provider factory
  * with advanced features like caching, optimization, and provider-specific capabilities
@@ -109,66 +410,71 @@ export class NexusProviderFactory {
   private responseCache: ResponseCacheManager;
   private costOptimizer: CostOptimizer;
   private metricsCollector: MetricsCollector;
-  
+
   constructor() {
     this.responseCache = new ResponseCacheManager();
     this.costOptimizer = new CostOptimizer();
     this.metricsCollector = new MetricsCollector();
   }
-  
+
   /**
    * Create an enhanced Nexus model with advanced capabilities
    */
   async createNexusModel(
     provider: string,
     modelId: string,
-    options: NexusModelOptions = {}
+    options: NexusModelOptions = {},
   ): Promise<NexusLanguageModel> {
     const _requestId = generateRequestId();
     const startTime = Date.now();
-    
-    log.info('Creating Nexus model', {
+
+    log.info("Creating Nexus model", {
       requestId: _requestId,
       provider,
       modelId,
-      options: sanitizeForLogging(options)
+      options: sanitizeForLogging(options),
     });
-    
+
     try {
       // Use existing factory for base model creation with capabilities
       const { model, capabilities } = await createProviderModelWithCapabilities(
-        provider, 
+        provider,
         modelId,
         {
           reasoningEffort: options.reasoningEffort,
           responseMode: options.responseMode,
           backgroundMode: options.backgroundMode,
-          thinkingBudget: options.thinkingBudget
-        }
+          thinkingBudget: options.thinkingBudget,
+        },
       );
-      
+
       // Enhance capabilities with Nexus-specific features
-      const nexusCapabilities = await this.enhanceCapabilities(provider, modelId, capabilities, options);
-      
+      const nexusCapabilities = await this.enhanceCapabilities(
+        provider,
+        modelId,
+        capabilities,
+        options,
+      );
+
       // Create enhanced model wrapper
       const nexusModel = await this.wrapWithNexusFeatures(model, {
         provider,
         modelId,
         capabilities: nexusCapabilities,
         options,
-        requestId: _requestId
+        requestId: _requestId,
       });
-      
+
       // Record metrics
       await this.metricsCollector.recordModelCreation({
         provider,
         modelId,
         capabilities: nexusCapabilities,
         creationTime: Date.now() - startTime,
-        requestId: _requestId
+        requestId: _requestId,
       });
-      
-      log.info('Nexus model created successfully', {
+
+      log.info("Nexus model created successfully", {
         requestId: _requestId,
         provider,
         modelId,
@@ -176,23 +482,23 @@ export class NexusProviderFactory {
           supportsReasoning: nexusCapabilities.supportsReasoning,
           supportsThinking: nexusCapabilities.supportsThinking,
           responsesAPI: nexusCapabilities.responsesAPI,
-          caching: nexusCapabilities.promptCaching || nexusCapabilities.contextCaching
-        }
+          caching:
+            nexusCapabilities.promptCaching || nexusCapabilities.contextCaching,
+        },
       });
-      
+
       return nexusModel;
-      
     } catch (error) {
-      log.error('Failed to create Nexus model', {
+      log.error("Failed to create Nexus model", {
         requestId: _requestId,
         provider,
         modelId,
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       });
       throw error;
     }
   }
-  
+
   /**
    * Enhance base capabilities with provider-specific Nexus features
    */
@@ -200,136 +506,95 @@ export class NexusProviderFactory {
     provider: string,
     modelId: string,
     baseCapabilities: ProviderCapabilities,
-    options: NexusModelOptions
+    options: NexusModelOptions,
   ): Promise<NexusModelCapabilities> {
-    // Get model info from database
     const modelInfo = await this.getModelInfoFromDatabase(provider, modelId);
-    
-    const enhanced: NexusModelCapabilities = {
-      // Base capabilities from provider
-      supportsReasoning: baseCapabilities.supportsReasoning,
-      supportsThinking: baseCapabilities.supportsThinking,
-      supportsToolCalls: false, // These would be detected from DB or model patterns
-      supportsImages: false,
-      supportsAudio: false,
-      maxTimeoutMs: baseCapabilities.maxTimeoutMs,
-      maxTokens: modelInfo?.maxTokens,
-      // Initialize Nexus-specific capabilities
-      responsesAPI: false,
-      promptCaching: false,
-      contextCaching: false,
-      artifacts: false,
-      canvas: false,
-      webSearch: false,
-      codeInterpreter: false,
-      grounding: false,
-      codeExecution: false,
-      computerUse: false,
-      workspaceTools: false,
-      mcpSupport: true, // All providers support MCP through our adapter
-      supportsBatching: false
-    };
-    
-    // Use capabilities from database if available
-    if (modelInfo?.capabilities) {
+    const enhanced = baseNexusCapabilities(baseCapabilities, modelInfo);
+    if (modelInfo) {
       try {
-        // Apply all capabilities from database using the unified capabilities field
-        enhanced.responsesAPI = hasCapability(modelInfo.capabilities, 'responsesAPI');
-        enhanced.promptCaching = hasCapability(modelInfo.capabilities, 'promptCaching');
-        enhanced.contextCaching = hasCapability(modelInfo.capabilities, 'contextCaching');
-        enhanced.artifacts = hasCapability(modelInfo.capabilities, 'artifacts');
-        enhanced.canvas = hasCapability(modelInfo.capabilities, 'canvas');
-        enhanced.webSearch = hasCapability(modelInfo.capabilities, 'webSearch');
-        enhanced.codeInterpreter = hasCapability(modelInfo.capabilities, 'codeInterpreter');
-        enhanced.grounding = hasCapability(modelInfo.capabilities, 'grounding');
-        enhanced.codeExecution = hasCapability(modelInfo.capabilities, 'codeExecution');
-        enhanced.computerUse = hasCapability(modelInfo.capabilities, 'computerUse');
-        enhanced.workspaceTools = hasCapability(modelInfo.capabilities, 'workspaceTools');
-        enhanced.supportsReasoning = hasCapability(modelInfo.capabilities, 'reasoning') || baseCapabilities.supportsReasoning;
-        enhanced.supportsThinking = hasCapability(modelInfo.capabilities, 'thinking') || baseCapabilities.supportsThinking;
+        applyDatabaseCapabilities(enhanced, modelInfo, baseCapabilities);
       } catch (error) {
-        log.warn('Failed to parse capabilities from database', {
+        log.warn("Failed to parse capabilities from database", {
           provider,
           modelId,
           capabilities: modelInfo?.capabilities,
-          error: error instanceof Error ? error.message : String(error)
+          error: error instanceof Error ? error.message : String(error),
         });
       }
     }
-    
-    // Also use performance characteristics from database
-    if (modelInfo) {
-      enhanced.averageLatency = modelInfo.averageLatencyMs || enhanced.averageLatency;
-      enhanced.maxConcurrency = modelInfo.maxConcurrency || enhanced.maxConcurrency;
-      enhanced.supportsBatching = modelInfo.supportsBatching || enhanced.supportsBatching;
-      enhanced.costPerToken = modelInfo.inputCostPer1kTokens ? modelInfo.inputCostPer1kTokens / 1000 : enhanced.costPerToken;
-    }
-    
-    // Provider-specific enhancements based on model patterns (fallback for models not in DB)
-    // These are inference-based on model naming patterns
-    switch (provider.toLowerCase()) {
-      case 'openai':
-        if (!modelInfo) {
-          enhanced.responsesAPI = modelId.includes('gpt-5') || modelId.includes('gpt-4.1') || modelId.includes('gpt-4o');
-          enhanced.canvas = modelId.includes('gpt-4o') || modelId.includes('gpt-5');
-          enhanced.webSearch = true;
-          enhanced.codeInterpreter = true;
-        }
-        enhanced.averageLatency = 800; // ms
-        enhanced.maxConcurrency = 50;
-        enhanced.supportsBatching = false;
-        break;
-        
-      case 'amazon-bedrock': // Claude and other models via Bedrock
-        if (!modelInfo) {
-          enhanced.promptCaching = modelId.includes('claude-3') || modelId.includes('claude-4') || modelId.includes('claude-opus') || modelId.includes('claude-sonnet');
-          enhanced.artifacts = modelId.includes('claude-3.5') || modelId.includes('claude-4') || modelId.includes('claude-opus') || modelId.includes('claude-sonnet');
-          enhanced.computerUse = modelId.includes('computer-use');
-        }
-        enhanced.averageLatency = 1200; // ms
-        enhanced.maxConcurrency = 20;
-        enhanced.supportsBatching = true;
-        break;
-        
-      case 'google':
-        if (!modelInfo) {
-          enhanced.contextCaching = modelId.includes('gemini-2') || modelId.includes('gemini-1.5');
-          enhanced.grounding = true;
-          enhanced.codeExecution = true;
-          enhanced.workspaceTools = true;
-        }
-        enhanced.averageLatency = 600; // ms
-        enhanced.maxConcurrency = 100;
-        enhanced.supportsBatching = true;
-        break;
-        
-      case 'azure':
-        if (!modelInfo) {
-          // Azure mirrors OpenAI capabilities
-          enhanced.webSearch = true;
-          enhanced.codeInterpreter = true;
-        }
-        enhanced.averageLatency = 900; // ms
-        enhanced.maxConcurrency = 30;
-        enhanced.supportsBatching = false;
-        break;
-    }
-    
-    // Get pricing info from database or use estimates
-    enhanced.costPerToken = await this.getModelCostFromDatabase(provider, modelId);
-    
+    applyProviderEnhancements(enhanced, provider, modelId, Boolean(modelInfo));
+    enhanced.costPerToken = await this.getModelCostFromDatabase(
+      provider,
+      modelId,
+    );
+
     // Apply user preferences
     if (options.enableCaching === false) {
       enhanced.promptCaching = false;
       enhanced.contextCaching = false;
     }
-    
+
     return enhanced;
   }
-  
+
   /**
    * Wrap the base model with Nexus-specific features
    */
+  private async providerMetadata(
+    provider: string,
+    modelId: string,
+    capabilities: NexusModelCapabilities,
+    modelInfo: DatabaseModelInfo | null,
+  ): Promise<NexusLanguageModel["providerMetadata"]> {
+    const estimatedContext =
+      modelInfo?.maxTokens || (await this.getContextWindow(provider, modelId));
+    return {
+      provider,
+      modelId,
+      pricing: providerPricing(
+        modelInfo,
+        capabilities,
+        this.getCachingDiscount(provider),
+      ),
+      limits: providerLimits(modelInfo, capabilities, estimatedContext),
+    };
+  }
+
+  private attachCacheMethods(
+    model: NexusLanguageModel,
+    config: {
+      provider: string;
+      modelId: string;
+      conversationId?: string;
+    },
+  ): void {
+    model.enableCaching = () => {
+      this.responseCache.enableForModel(
+        config.provider,
+        config.modelId,
+        config.conversationId,
+      );
+    };
+    model.getCacheMetrics = () => this.responseCache.getMetrics();
+  }
+
+  private attachCostEstimator(
+    model: NexusLanguageModel,
+    provider: string,
+    modelId: string,
+  ): void {
+    model.estimateCost = (tokens: number) => {
+      const inputCost = model.providerMetadata.pricing?.inputCostPerToken || 0;
+      const outputCost =
+        model.providerMetadata.pricing?.outputCostPerToken || 0;
+      const baseCost = tokens * (inputCost * 0.6 + outputCost * 0.4);
+      const discount = this.responseCache.isEnabled(provider, modelId)
+        ? model.providerMetadata.pricing?.cachingDiscount || 0
+        : 0;
+      return baseCost * (1 - discount);
+    };
+  }
+
   private async wrapWithNexusFeatures(
     model: LanguageModel,
     config: {
@@ -338,115 +603,91 @@ export class NexusProviderFactory {
       capabilities: NexusModelCapabilities;
       options: NexusModelOptions;
       requestId: string;
-    }
+    },
   ): Promise<NexusLanguageModel> {
     const { provider, modelId, capabilities, options } = config;
-    
+
     // Get model info from database for pricing and metadata
     const modelInfo = await this.getModelInfoFromDatabase(provider, modelId);
-    
-    // Create enhanced model wrapper
+
+    const providerMetadata = await this.providerMetadata(
+      provider,
+      modelId,
+      capabilities,
+      modelInfo,
+    );
     const nexusModel: NexusLanguageModel = {
       model,
       capabilities,
-      providerMetadata: {
+      providerMetadata,
+    };
+
+    if (capabilities.promptCaching || capabilities.contextCaching) {
+      this.attachCacheMethods(nexusModel, {
         provider,
         modelId,
-        pricing: {
-          inputCostPerToken: 0,
-          outputCostPerToken: 0,
-          cachingDiscount: 0
-        },
-        limits: {
-          maxTokens: 4000,
-          maxRequests: 10,
-          contextWindow: 4000
-        }
-      }
-    };
-    
-    // Add Nexus metadata
-    nexusModel.capabilities = capabilities;
-    nexusModel.providerMetadata = {
-      provider,
-      modelId,
-      pricing: {
-        inputCostPerToken: modelInfo?.inputCostPer1kTokens ? modelInfo.inputCostPer1kTokens / 1000 : capabilities.costPerToken || 0,
-        outputCostPerToken: modelInfo?.outputCostPer1kTokens ? modelInfo.outputCostPer1kTokens / 1000 : (capabilities.costPerToken || 0) * 1.5,
-        cachingDiscount: modelInfo?.cachedInputCostPer1kTokens 
-          ? 1 - (modelInfo.cachedInputCostPer1kTokens / (modelInfo.inputCostPer1kTokens || 1))
-          : this.getCachingDiscount(provider)
-      },
-      limits: {
-        maxTokens: modelInfo?.maxTokens || capabilities.maxTokens || 4000,
-        maxRequests: modelInfo?.maxConcurrency || capabilities.maxConcurrency || 10,
-        contextWindow: modelInfo?.maxTokens || await this.getContextWindow(provider, modelId)
-      }
-    };
-    
-    // Add caching methods if supported
-    if (capabilities.promptCaching || capabilities.contextCaching) {
-      nexusModel.enableCaching = () => {
-        this.responseCache.enableForModel(provider, modelId, options.conversationId);
-      };
-      
-      nexusModel.getCacheMetrics = async () => {
-        return await this.responseCache.getMetrics();
-      };
+        conversationId: options.conversationId,
+      });
     }
-    
-    // Add cost estimation
-    nexusModel.estimateCost = (tokens: number) => {
-      const inputCost = nexusModel.providerMetadata.pricing?.inputCostPerToken || 0;
-      const outputCost = nexusModel.providerMetadata.pricing?.outputCostPerToken || 0;
-      // Rough estimate: 60% input, 40% output
-      const baseCost = tokens * (inputCost * 0.6 + outputCost * 0.4);
-      const discount = this.responseCache.isEnabled(provider, modelId) 
-        ? (nexusModel.providerMetadata.pricing?.cachingDiscount || 0) 
-        : 0;
-      return baseCost * (1 - discount);
-    };
-    
+    this.attachCostEstimator(nexusModel, provider, modelId);
     return nexusModel;
   }
-  
+
   /**
    * Get available capabilities for a provider/model combination
    */
-  async getAvailableCapabilities(provider: string, modelId: string): Promise<NexusModelCapabilities> {
-    const baseCapabilities = await createProviderModelWithCapabilities(provider, modelId);
-    return this.enhanceCapabilities(provider, modelId, baseCapabilities.capabilities, {});
+  async getAvailableCapabilities(
+    provider: string,
+    modelId: string,
+  ): Promise<NexusModelCapabilities> {
+    const baseCapabilities = await createProviderModelWithCapabilities(
+      provider,
+      modelId,
+    );
+    return this.enhanceCapabilities(
+      provider,
+      modelId,
+      baseCapabilities.capabilities,
+      {},
+    );
   }
-  
+
   /**
    * Recommend optimal provider for given requirements
    */
   async recommendProvider(requirements: {
-    priority: 'cost' | 'speed' | 'quality' | 'features';
+    priority: "cost" | "speed" | "quality" | "features";
     features?: string[];
     maxCost?: number;
     maxLatency?: number;
   }): Promise<{ provider: string; modelId: string; score: number }[]> {
-    const providers = ['openai', 'google', 'amazon-bedrock', 'azure'];
-    const recommendations: { provider: string; modelId: string; score: number }[] = [];
-    
+    const providers = ["openai", "google", "amazon-bedrock", "azure"];
+    const recommendations: {
+      provider: string;
+      modelId: string;
+      score: number;
+    }[] = [];
+
     for (const provider of providers) {
       const models = await this.getModelsForProvider(provider);
       for (const modelId of models) {
-        const capabilities = await this.getAvailableCapabilities(provider, modelId);
+        const capabilities = await this.getAvailableCapabilities(
+          provider,
+          modelId,
+        );
         const score = this.calculateProviderScore(capabilities, requirements);
-        
+
         if (score > 0) {
           recommendations.push({ provider, modelId, score });
         }
       }
     }
-    
+
     return recommendations.sort((a, b) => b.score - a.score);
   }
-  
+
   // Private database-driven helper methods
-  
+
   private async loadModelsFromDatabase(): Promise<DatabaseModelInfo[]> {
     try {
       const results = await executeSQL<DatabaseModelInfo>(`
@@ -471,7 +712,7 @@ export class NexusProviderFactory {
 
       return results;
     } catch (error) {
-      log.error('Failed to load models from database', { error });
+      log.error("Failed to load models from database", { error });
       return [];
     }
   }
@@ -479,9 +720,13 @@ export class NexusProviderFactory {
   /**
    * Get model information from database
    */
-  private async getModelInfoFromDatabase(provider: string, modelId: string): Promise<DatabaseModelInfo | null> {
+  private async getModelInfoFromDatabase(
+    provider: string,
+    modelId: string,
+  ): Promise<DatabaseModelInfo | null> {
     try {
-      const result = await executeSQL<DatabaseModelInfo>(`
+      const result = await executeSQL<DatabaseModelInfo>(
+        `
         SELECT
           provider,
           model_id as "modelId",
@@ -499,7 +744,9 @@ export class NexusProviderFactory {
         FROM ai_models
         WHERE provider = $1 AND model_id = $2 AND active = true
         LIMIT 1
-      `, [provider, modelId]);
+      `,
+        [provider, modelId],
+      );
 
       if (result.length > 0) {
         return result[0];
@@ -507,242 +754,199 @@ export class NexusProviderFactory {
 
       return null;
     } catch (error) {
-      log.warn('Failed to get model info from database', {
+      log.warn("Failed to get model info from database", {
         provider,
         modelId,
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       });
       return null;
     }
   }
-  
+
   /**
    * Get model cost from database or use provider-based estimates
    */
-  private async getModelCostFromDatabase(provider: string, modelId: string): Promise<number> {
+  private async getModelCostFromDatabase(
+    provider: string,
+    modelId: string,
+  ): Promise<number> {
     try {
       // First check if we have the model in database with structured pricing columns
-      const result = await executeSQL<{input_cost_per_1k_tokens: number; output_cost_per_1k_tokens: number}>(`
+      const result = await executeSQL<{
+        input_cost_per_1k_tokens: number;
+        output_cost_per_1k_tokens: number;
+      }>(
+        `
         SELECT 
           input_cost_per_1k_tokens,
           output_cost_per_1k_tokens
         FROM ai_models 
         WHERE provider = $1 AND model_id = $2 AND active = true
         LIMIT 1
-      `, [provider, modelId]);
-      
+      `,
+        [provider, modelId],
+      );
+
       if (result.length > 0 && result[0].input_cost_per_1k_tokens !== null) {
         // Convert from per-1k-tokens to per-token and use input cost as base estimate
         // For cost estimation purposes, we use input token cost as the primary metric
         return result[0].input_cost_per_1k_tokens / 1000;
       }
-      
+
       // Fallback to provider-based estimates
       return this.estimateCostPerToken(provider, modelId);
     } catch (error) {
-      log.warn('Failed to get model cost from database', {
+      log.warn("Failed to get model cost from database", {
         provider,
         modelId,
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       });
       return this.estimateCostPerToken(provider, modelId);
     }
   }
-  
+
   /**
    * Estimate cost per token based on provider and model patterns
    */
   private estimateCostPerToken(provider: string, modelId: string): number {
-    switch (provider.toLowerCase()) {
-      case 'openai':
-        if (modelId.includes('gpt-5')) return 0.00006;
-        if (modelId.includes('gpt-4.1')) return 0.00005;
-        if (modelId.includes('gpt-4o')) return 0.00003;
-        if (modelId.includes('gpt-4')) return 0.00005;
-        return 0.000002;
-        
-      case 'amazon-bedrock':
-        if (modelId.includes('claude-opus')) return 0.000015;
-        if (modelId.includes('claude-3.5-sonnet') || modelId.includes('claude-sonnet')) return 0.000003;
-        if (modelId.includes('claude-3-haiku') || modelId.includes('claude-haiku')) return 0.00000025;
-        if (modelId.includes('deepseek')) return 0.0000002;
-        return 0.000008;
-        
-      case 'google':
-        if (modelId.includes('gemini-2.5')) return 0.0000025;
-        if (modelId.includes('gemini-2.0-flash')) return 0.0000015;
-        if (modelId.includes('gemini-1.5-pro')) return 0.00000125;
-        if (modelId.includes('gemini-1.5-flash')) return 0.000000075;
-        return 0.000001;
-        
-      case 'azure':
-        // Azure typically costs same as OpenAI with small premium
-        return this.estimateCostPerToken('openai', modelId) * 1.1;
-        
-      default:
-        return 0.000001;
-    }
+    return estimatedCostPerToken(provider, modelId);
   }
-  
+
   /**
    * Get caching discount based on provider
    */
   private getCachingDiscount(provider: string): number {
     switch (provider.toLowerCase()) {
-      case 'anthropic':
-      case 'amazon-bedrock':
+      case "anthropic":
+      case "amazon-bedrock":
         return 0.9; // 90% discount with prompt caching
-      case 'google':
+      case "google":
         return 0.75; // 75% discount with context caching
       default:
         return 0;
     }
   }
-  
+
   /**
    * Get context window from database or estimate
    */
-  private async getContextWindow(provider: string, modelId: string): Promise<number> {
+  private async getContextWindow(
+    provider: string,
+    modelId: string,
+  ): Promise<number> {
     try {
-      const result = await executeSQL<{max_tokens: number}>(`
+      const result = await executeSQL<{ max_tokens: number }>(
+        `
         SELECT max_tokens FROM ai_models 
         WHERE provider = $1 AND model_id = $2 AND active = true
         LIMIT 1
-      `, [provider, modelId]);
-      
+      `,
+        [provider, modelId],
+      );
+
       if (result.length > 0 && result[0].max_tokens) {
         return result[0].max_tokens;
       }
     } catch (error) {
-      log.warn('Failed to get context window from database', {
+      log.warn("Failed to get context window from database", {
         provider,
         modelId,
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       });
     }
-    
-    // Fallback estimates
-    switch (provider.toLowerCase()) {
-      case 'openai':
-        if (modelId.includes('gpt-5')) return 200000;
-        if (modelId.includes('gpt-4.1')) return 1000000;
-        if (modelId.includes('gpt-4o')) return 128000;
-        return 8000;
-      case 'amazon-bedrock':
-        if (modelId.includes('claude-opus') || modelId.includes('claude-sonnet')) return 200000;
-        if (modelId.includes('claude-3.5') || modelId.includes('claude-4')) return 200000;
-        if (modelId.includes('deepseek')) return 128000;
-        return 100000;
-      case 'google':
-        if (modelId.includes('gemini-2')) return 2000000;
-        if (modelId.includes('gemini-1.5')) return 1000000;
-        return 32000;
-      case 'azure':
-        return this.getContextWindow('openai', modelId);
-      default:
-        return 8000;
-    }
+
+    return estimatedContextWindow(provider, modelId);
   }
-  
+
   /**
    * Get available models for a provider from database
    */
   private async getModelsForProvider(provider: string): Promise<string[]> {
     try {
       // Note: RDS Data API adapter transforms snake_case to camelCase
-      const result = await executeSQL<{modelId: string}>(`
+      const result = await executeSQL<{ modelId: string }>(
+        `
         SELECT model_id FROM ai_models
         WHERE provider = $1 AND active = true AND nexus_enabled = true
         ORDER BY name
-      `, [provider]);
+      `,
+        [provider],
+      );
 
       if (result.length > 0) {
         return result.map((row) => row.modelId);
       }
     } catch (error) {
-      log.warn('Failed to get models from database', {
+      log.warn("Failed to get models from database", {
         provider,
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       });
     }
-    
+
     // Return empty array if no models found in database
     return [];
   }
-  
+
+  private satisfiesProviderConstraints(
+    capabilities: NexusModelCapabilities,
+    requirements: { maxCost?: number; maxLatency?: number },
+  ): boolean {
+    const cost = capabilities.costPerToken || 0;
+    const latency = capabilities.averageLatency || 0;
+    if (requirements.maxCost && cost > requirements.maxCost) return false;
+    if (requirements.maxLatency && latency > requirements.maxLatency)
+      return false;
+    return true;
+  }
+
+  private priorityScore(
+    capabilities: NexusModelCapabilities,
+    priority: "cost" | "speed" | "quality" | "features",
+    features: string[],
+  ): number {
+    if (priority === "cost") {
+      return 100 - (capabilities.costPerToken || 0) * 100000;
+    }
+    if (priority === "speed") {
+      return 100 - (capabilities.averageLatency || 0) / 50;
+    }
+    if (priority === "quality") {
+      return (
+        (capabilities.supportsReasoning ? 100 : 50) +
+        (capabilities.supportsThinking ? 20 : 0)
+      );
+    }
+    return this.countMatchingFeatures(capabilities, features) * 10;
+  }
+
   private calculateProviderScore(
     capabilities: NexusModelCapabilities,
     requirements: {
-      priority: 'cost' | 'speed' | 'quality' | 'features';
+      priority: "cost" | "speed" | "quality" | "features";
       features?: string[];
       maxCost?: number;
       maxLatency?: number;
-    }
+    },
   ): number {
-    let score = 0;
-    
-    // Check hard constraints
-    if (requirements.maxCost && (capabilities.costPerToken || 0) > requirements.maxCost) {
+    if (!this.satisfiesProviderConstraints(capabilities, requirements))
       return 0;
-    }
-    
-    if (requirements.maxLatency && (capabilities.averageLatency || 0) > requirements.maxLatency) {
-      return 0;
-    }
-    
-    // Score based on priority
-    switch (requirements.priority) {
-      case 'cost':
-        score = 100 - ((capabilities.costPerToken || 0) * 100000);
-        break;
-      case 'speed':
-        score = 100 - ((capabilities.averageLatency || 0) / 50);
-        break;
-      case 'quality':
-        score = capabilities.supportsReasoning ? 100 : 50;
-        score += capabilities.supportsThinking ? 20 : 0;
-        break;
-      case 'features':
-        score = this.countMatchingFeatures(capabilities, requirements.features || []) * 10;
-        break;
-    }
-    
-    return Math.max(0, score);
+    return Math.max(
+      0,
+      this.priorityScore(
+        capabilities,
+        requirements.priority,
+        requirements.features || [],
+      ),
+    );
   }
-  
-  private countMatchingFeatures(capabilities: NexusModelCapabilities, requiredFeatures: string[]): number {
-    let count = 0;
-    
-    for (const feature of requiredFeatures) {
-      switch (feature) {
-        case 'reasoning':
-          if (capabilities.supportsReasoning) count++;
-          break;
-        case 'thinking':
-          if (capabilities.supportsThinking) count++;
-          break;
-        case 'caching':
-          if (capabilities.promptCaching || capabilities.contextCaching) count++;
-          break;
-        case 'web':
-          if (capabilities.webSearch || capabilities.grounding) count++;
-          break;
-        case 'code':
-          if (capabilities.codeInterpreter || capabilities.codeExecution) count++;
-          break;
-        case 'artifacts':
-          if (capabilities.artifacts) count++;
-          break;
-        case 'canvas':
-          if (capabilities.canvas) count++;
-          break;
-        case 'computer':
-          if (capabilities.computerUse) count++;
-          break;
-      }
-    }
-    
-    return count;
+
+  private countMatchingFeatures(
+    capabilities: NexusModelCapabilities,
+    requiredFeatures: string[],
+  ): number {
+    return requiredFeatures.filter((feature) =>
+      FEATURE_MATCHERS[feature]?.(capabilities),
+    ).length;
   }
 }
 
@@ -750,22 +954,30 @@ export class NexusProviderFactory {
 
 class ResponseCacheManager {
   private enabledModels = new Set<string>();
-  
+
   enableForModel(provider: string, modelId: string, conversationId?: string) {
-    this.enabledModels.add(`${provider}:${modelId}:${conversationId || 'global'}`);
+    this.enabledModels.add(
+      `${provider}:${modelId}:${conversationId || "global"}`,
+    );
   }
-  
-  isEnabled(provider: string, modelId: string, conversationId?: string): boolean {
-    return this.enabledModels.has(`${provider}:${modelId}:${conversationId || 'global'}`);
+
+  isEnabled(
+    provider: string,
+    modelId: string,
+    conversationId?: string,
+  ): boolean {
+    return this.enabledModels.has(
+      `${provider}:${modelId}:${conversationId || "global"}`,
+    );
   }
-  
+
   async getMetrics(): Promise<CacheMetrics> {
     // This would query the nexus_cache_entries table
     return {
       hitRate: 0.75,
       totalRequests: 100,
       tokensSaved: 50000,
-      costSaved: 2.50
+      costSaved: 2.5,
     };
   }
 }
@@ -784,7 +996,7 @@ class MetricsCollector {
     requestId: string;
   }) {
     // This would record metrics to CloudWatch or database
-    log.debug('Model creation metrics recorded', data);
+    log.debug("Model creation metrics recorded", data);
   }
 }
 

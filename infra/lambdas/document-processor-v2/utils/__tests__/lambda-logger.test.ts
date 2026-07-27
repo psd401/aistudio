@@ -5,8 +5,8 @@
 import { createLambdaLogger } from '../lambda-logger';
 
 // sanitizeData is private; access it through a cast for unit testing.
-const sanitize = (data: unknown): any =>
-  (createLambdaLogger() as unknown as { sanitizeData: (d: unknown) => any }).sanitizeData(data);
+const sanitize = (data: unknown): unknown =>
+  (createLambdaLogger() as unknown as { sanitizeData: (d: unknown) => unknown }).sanitizeData(data);
 
 describe('LambdaLogger.sanitizeData (REV-INFRA-095)', () => {
   it('redacts the VALUE of a sensitive key, not the key name', () => {

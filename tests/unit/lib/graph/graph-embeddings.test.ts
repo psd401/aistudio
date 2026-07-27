@@ -41,7 +41,10 @@ function bedrockResponse(embedding: number[]) {
   }
 }
 
-const validEmbedding = new Array(GRAPH_EMBEDDING_DIMENSIONS).fill(0.02)
+const validEmbedding = Array.from(
+  { length: GRAPH_EMBEDDING_DIMENSIONS },
+  () => 0.02
+)
 
 describe("graph-embeddings", () => {
   beforeEach(() => {

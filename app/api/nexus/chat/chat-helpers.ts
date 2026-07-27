@@ -2,29 +2,37 @@
  * Chat Helpers for Nexus Chat Route
  * Extracted from route.ts to reduce complexity
  */
-import { UIMessage } from 'ai';
-import { sql, eq } from 'drizzle-orm';
-import { executeQuery, executeTransaction } from '@/lib/db/drizzle-client';
-import { nexusConversations, nexusMessages } from '@/lib/db/schema';
-import { sanitizeTextForDatabase, decodeHtmlEntitiesDeep } from '@/lib/utils/text-sanitizer';
-import { safeJsonbStringify } from '@/lib/db/json-utils';
-import { createLogger, sanitizeForLogging } from '@/lib/logger';
-import { repositoryAttachmentLabels } from '@/lib/nexus/repository-attachment-messages';
+import { UIMessage } from "ai";
+import { sql, eq } from "drizzle-orm";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
+import { nexusConversations, nexusMessages } from "@/lib/db/schema";
+import {
+  sanitizeTextForDatabase,
+  decodeHtmlEntitiesDeep,
+} from "@/lib/utils/text-sanitizer";
+import { safeJsonbStringify } from "@/lib/db/json-utils";
+import { createLogger, sanitizeForLogging } from "@/lib/logger";
+import { repositoryAttachmentLabels } from "@/lib/nexus/repository-attachment-messages";
 import {
   buildTemporaryAttachmentMarker,
   parseTemporaryAttachmentMarkers,
   removeTemporaryAttachmentMarkers,
   stripTemporaryAttachmentMarkers,
   type TemporaryAttachmentReference,
-} from '@/lib/repositories/temporary-attachment-contract';
+} from "@/lib/repositories/temporary-attachment-contract";
 
-const log = createLogger({ route: 'api.nexus.chat.helpers' });
+const log = createLogger({ route: "api.nexus.chat.helpers" });
 
 interface MessageWithContent {
   id: string;
-  role: 'user' | 'assistant' | 'system';
+  role: "user" | "assistant" | "system";
   content?: string | Array<{ type: string; text?: string; image?: string }>;
-  parts?: Array<{ type: string; text?: string; image?: string; [key: string]: unknown }>;
+  parts?: Array<{
+    type: string;
+    text?: string;
+    image?: string;
+    [key: string]: unknown;
+  }>;
 }
 
 /**
@@ -33,45 +41,51 @@ interface MessageWithContent {
 export function extractTextFromMessage(message: MessageWithContent): string {
   // Check if message has parts (new format)
   if (message.parts && Array.isArray(message.parts)) {
-    const textPart = message.parts.find((part): part is { type: 'text'; text: string } =>
-      part.type === 'text' && typeof (part as Record<string, unknown>).text === 'string'
+    const textPart = message.parts.find(
+      (part): part is { type: "text"; text: string } =>
+        part.type === "text" &&
+        typeof (part as Record<string, unknown>).text === "string",
     );
-    return textPart?.text || '';
+    return textPart?.text || "";
   }
 
   // Fallback to legacy content format
   if (message.content) {
-    if (typeof message.content === 'string') {
+    if (typeof message.content === "string") {
       return message.content;
     }
     if (Array.isArray(message.content)) {
-      const textPart = message.content.find(part => part.type === 'text' && part.text);
-      return textPart?.text || '';
+      const textPart = message.content.find(
+        (part) => part.type === "text" && part.text,
+      );
+      return textPart?.text || "";
     }
   }
 
-  return '';
+  return "";
 }
 
 /**
  * Generate conversation title from first user message
  */
-export function generateConversationTitle(messages: MessageWithContent[]): string {
-  const firstUserMessage = messages.find(m => m.role === 'user');
+export function generateConversationTitle(
+  messages: MessageWithContent[],
+): string {
+  const firstUserMessage = messages.find((m) => m.role === "user");
   if (!firstUserMessage) {
-    return 'New Conversation';
+    return "New Conversation";
   }
 
   const messageText = extractTextFromMessage(firstUserMessage);
   if (!messageText) {
-    return 'New Conversation';
+    return "New Conversation";
   }
 
   // Remove newlines and extra whitespace for header compatibility
-  const cleanedText = messageText.replace(/\s+/g, ' ').trim();
+  const cleanedText = messageText.replace(/\s+/g, " ").trim();
   let title = cleanedText.slice(0, 40).trim();
   if (cleanedText.length > 40) {
-    title += '...';
+    title += "...";
   }
   return title;
 }
@@ -85,45 +99,52 @@ export async function createConversation(params: {
   modelId: string;
   title: string;
   projectId?: string;
-}): Promise<{ conversationId: string } | { error: Response; requestId?: string }> {
+}): Promise<
+  { conversationId: string } | { error: Response; requestId?: string }
+> {
   const { userId, provider, modelId, title, projectId } = params;
 
   const sanitizedTitle = sanitizeTextForDatabase(title);
   const now = new Date();
 
   const createResult = await executeQuery(
-    (db) => db.insert(nexusConversations)
-      .values({
-        userId,
-        projectId,
-        provider,
-        modelUsed: modelId,
-        title: sanitizedTitle,
-        messageCount: 0,
-        totalTokens: 0,
-        metadata: sql`${safeJsonbStringify({ source: 'nexus', streaming: true })}::jsonb`,
-        createdAt: now,
-        updatedAt: now
-      })
-      .returning({ id: nexusConversations.id }),
-    'createNexusConversation'
+    (db) =>
+      db
+        .insert(nexusConversations)
+        .values({
+          userId,
+          projectId,
+          provider,
+          modelUsed: modelId,
+          title: sanitizedTitle,
+          messageCount: 0,
+          totalTokens: 0,
+          metadata: sql`${safeJsonbStringify({ source: "nexus", streaming: true })}::jsonb`,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: nexusConversations.id }),
+    "createNexusConversation",
   );
 
   if (!createResult || createResult.length === 0 || !createResult[0]?.id) {
-    log.error('Failed to create conversation - no ID returned', {
+    log.error("Failed to create conversation - no ID returned", {
       resultLength: createResult?.length,
-      result: createResult
+      result: createResult,
     });
     return {
       error: new Response(
-        JSON.stringify({ error: 'Failed to create conversation' }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
-      )
+        JSON.stringify({ error: "Failed to create conversation" }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      ),
     };
   }
 
   const conversationId = createResult[0].id as string;
-  log.info('Created new Nexus conversation', sanitizeForLogging({ conversationId, userId, title }));
+  log.info(
+    "Created new Nexus conversation",
+    sanitizeForLogging({ conversationId, userId, title }),
+  );
 
   return { conversationId };
 }
@@ -132,21 +153,25 @@ export async function createConversation(params: {
  * Process a single part from message parts array
  */
 function canonicalRepositoryAttachmentsFromMetadata(
-  value: unknown
+  value: unknown,
 ): TemporaryAttachmentReference[] {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
   const attachments = (value as Record<string, unknown>).repositoryAttachments;
   if (!Array.isArray(attachments)) return [];
   return attachments.flatMap((candidate) => {
-    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    if (
+      !candidate ||
+      typeof candidate !== "object" ||
+      Array.isArray(candidate)
+    ) {
       return [];
     }
     const reference = candidate as Record<string, unknown>;
     if (
-      typeof reference.bindingId !== 'string' ||
+      typeof reference.bindingId !== "string" ||
       !Number.isSafeInteger(reference.itemId) ||
       Number(reference.itemId) <= 0 ||
-      typeof reference.name !== 'string'
+      typeof reference.name !== "string"
     ) {
       return [];
     }
@@ -155,90 +180,111 @@ function canonicalRepositoryAttachmentsFromMetadata(
         bindingId: reference.bindingId,
         itemId: Number(reference.itemId),
         name: reference.name,
-      })
+      }),
     );
     return parsed;
   });
 }
 
-function processMessagePart(
-  part: { type: string; text?: string; image?: string; [key: string]: unknown }
-): { content: string; serialized: unknown } | null {
+type ProcessedMessagePart = { content: string; serialized: unknown };
+
+function canonicalAttachmentPart(
+  part: Record<string, unknown>,
+  attachments: TemporaryAttachmentReference[],
+): ProcessedMessagePart {
+  const metadata = part.metadata as Record<string, unknown>;
+  const text = sanitizeTextForDatabase(
+    typeof part.text === "string"
+      ? part.text
+      : attachments
+          .map(
+            (attachment) => `[Attached repository content: ${attachment.name}]`,
+          )
+          .join(" "),
+  );
+  const displayText = sanitizeTextForDatabase(
+    typeof metadata.repositoryAttachmentDisplayText === "string"
+      ? metadata.repositoryAttachmentDisplayText
+      : "",
+  );
+  return {
+    content: text,
+    serialized: {
+      type: "text",
+      text,
+      metadata: {
+        repositoryAttachments: attachments,
+        repositoryAttachmentDisplayText: displayText,
+      },
+    },
+  };
+}
+
+function legacyAttachmentPart(
+  part: Record<string, unknown>,
+  attachments: ReturnType<typeof repositoryAttachmentLabels>,
+): ProcessedMessagePart {
+  const rawText = typeof part.text === "string" ? part.text : "";
+  const text = sanitizeTextForDatabase(
+    rawText
+      ? stripTemporaryAttachmentMarkers(rawText)
+      : attachments.map((attachment) => attachment.text).join(" "),
+  );
+  const displayText = sanitizeTextForDatabase(
+    rawText ? removeTemporaryAttachmentMarkers(rawText) : "",
+  );
+  return {
+    content: text,
+    serialized: {
+      type: "text",
+      text,
+      metadata: {
+        repositoryAttachments: attachments.map(({ reference }) => reference),
+        repositoryAttachmentDisplayText: displayText,
+      },
+    },
+  };
+}
+
+function isStoredImagePart(part: Record<string, unknown>): boolean {
+  if (part.type === "image") return Boolean(part.image);
+  if (part.type !== "file") return false;
+  return (
+    (typeof part.mediaType === "string" &&
+      part.mediaType.startsWith("image/")) ||
+    (typeof part.url === "string" && part.url.startsWith("data:image/"))
+  );
+}
+
+function processMessagePart(part: {
+  type: string;
+  text?: string;
+  image?: string;
+  [key: string]: unknown;
+}): ProcessedMessagePart | null {
   const typedPart = part as Record<string, unknown>;
   const canonicalAttachments = canonicalRepositoryAttachmentsFromMetadata(
-    typedPart.metadata
+    typedPart.metadata,
   );
   if (canonicalAttachments.length > 0) {
-    const metadata = typedPart.metadata as Record<string, unknown>;
-    const text = sanitizeTextForDatabase(
-      typeof typedPart.text === 'string'
-        ? typedPart.text
-        : canonicalAttachments
-            .map((attachment) =>
-              `[Attached repository content: ${attachment.name}]`
-            )
-            .join(' ')
-    );
-    const displayText = sanitizeTextForDatabase(
-      typeof metadata.repositoryAttachmentDisplayText === 'string'
-        ? metadata.repositoryAttachmentDisplayText
-        : ''
-    );
-    return {
-      content: text,
-      serialized: {
-        type: 'text',
-        text,
-        metadata: {
-          repositoryAttachments: canonicalAttachments,
-          repositoryAttachmentDisplayText: displayText,
-        },
-      },
-    };
+    return canonicalAttachmentPart(typedPart, canonicalAttachments);
   }
   const repositoryAttachments = repositoryAttachmentLabels(typedPart);
   if (repositoryAttachments.length > 0) {
-    const rawText = typeof typedPart.text === 'string' ? typedPart.text : '';
-    const text = sanitizeTextForDatabase(
-      rawText
-        ? stripTemporaryAttachmentMarkers(rawText)
-        : repositoryAttachments.map((attachment) => attachment.text).join(' ')
-    );
-    const displayText = sanitizeTextForDatabase(
-      rawText ? removeTemporaryAttachmentMarkers(rawText) : ''
-    );
+    return legacyAttachmentPart(typedPart, repositoryAttachments);
+  }
+  if (part.type === "text" && typeof typedPart.text === "string") {
+    const sanitizedText = sanitizeTextForDatabase(typedPart.text);
     return {
-      content: text,
-      serialized: {
-        type: 'text',
-        text,
-        metadata: {
-          repositoryAttachments: repositoryAttachments.map(
-            ({ reference }) => reference
-          ),
-          repositoryAttachmentDisplayText: displayText,
-        },
-      },
+      content: sanitizedText,
+      serialized: { type: "text", text: sanitizedText },
     };
   }
-  if (part.type === 'text' && typeof typedPart.text === 'string') {
-    const sanitizedText = sanitizeTextForDatabase(typedPart.text);
-    return { content: sanitizedText, serialized: { type: 'text', text: sanitizedText } };
-  }
-  if (typedPart.type === 'image' && typedPart.image) {
-    return { content: '', serialized: { type: 'image', metadata: { hasImage: true } } };
-  }
-  // toCreateMessage converts image attachments to type:"file" parts with a url property.
-  // Detect these by checking mediaType or the data URL prefix so they are saved to the DB.
-  if (typedPart.type === 'file') {
-    const mediaType = typedPart.mediaType as string | undefined;
-    const url = typedPart.url as string | undefined;
-    if (
-      (typeof mediaType === 'string' && mediaType.startsWith('image/')) ||
-      (typeof url === 'string' && url.startsWith('data:image/'))
-    ) {
-      return { content: '', serialized: { type: 'image', metadata: { hasImage: true } } };
-    }
+  if (isStoredImagePart(typedPart)) {
+    return {
+      content: "",
+      serialized: { type: "image", metadata: { hasImage: true } },
+    };
   }
   return null;
 }
@@ -262,10 +308,10 @@ export function extractUserContent(message: MessageWithContent): {
         serializableParts.push(result.serialized);
       }
     }
-  } else if (typeof message.content === 'string') {
+  } else if (typeof message.content === "string") {
     const sanitizedText = sanitizeTextForDatabase(message.content);
     contentParts.push(sanitizedText);
-    serializableParts.push({ type: 'text', text: sanitizedText });
+    serializableParts.push({ type: "text", text: sanitizedText });
   } else if (Array.isArray(message.content)) {
     for (const part of message.content) {
       const result = processMessagePart(part);
@@ -276,7 +322,7 @@ export function extractUserContent(message: MessageWithContent): {
     }
   }
 
-  return { content: contentParts.join(' '), parts: serializableParts };
+  return { content: contentParts.join(" "), parts: serializableParts };
 }
 
 /**
@@ -300,36 +346,36 @@ export async function saveUserMessage(params: {
   // one transaction so a failure between them can never leave message_count out of
   // sync with the actual nexus_messages rows. Mirrors saveConversationSteps.
   await executeTransaction(async (tx) => {
-    await tx.insert(nexusMessages)
-      .values({
-        conversationId,
-        role: 'user',
-        content: content || '',
-        parts: parts.length > 0 ? sql`${safeJsonbStringify(parts)}::jsonb` : null,
-        modelId: dbModelId,
-        metadata: sql`${safeJsonbStringify({})}::jsonb`,
-        createdAt: new Date()
-      });
+    await tx.insert(nexusMessages).values({
+      conversationId,
+      role: "user",
+      content: content || "",
+      parts: parts.length > 0 ? sql`${safeJsonbStringify(parts)}::jsonb` : null,
+      modelId: dbModelId,
+      metadata: sql`${safeJsonbStringify({})}::jsonb`,
+      createdAt: new Date(),
+    });
 
-    await tx.update(nexusConversations)
+    await tx
+      .update(nexusConversations)
       .set({
         lastMessageAt: new Date(),
         messageCount: sql`${nexusConversations.messageCount} + 1`,
-        updatedAt: new Date()
+        updatedAt: new Date(),
       })
       .where(eq(nexusConversations.id, conversationId));
-  }, 'saveUserMessage');
+  }, "saveUserMessage");
 
-  log.debug('User message saved to nexus_messages');
+  log.debug("User message saved to nexus_messages");
 }
 
 /**
  * Convert messages to parts format for AI SDK v5
  */
-const NEXUS_ATTACHMENT_SEARCH_TOOL = 'searchNexusAttachments';
+const NEXUS_ATTACHMENT_SEARCH_TOOL = "searchNexusAttachments";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function sanitizeSourceLocator(value: unknown): Record<string, unknown> {
@@ -337,24 +383,25 @@ function sanitizeSourceLocator(value: unknown): Record<string, unknown> {
 
   const sanitized: Record<string, unknown> = {};
   const numericKeys = [
-    'page',
-    'pageEnd',
-    'paragraph',
-    'paragraphEnd',
-    'slide',
-    'timeStartMs',
-    'timeEndMs',
+    "page",
+    "pageEnd",
+    "paragraph",
+    "paragraphEnd",
+    "slide",
+    "timeStartMs",
+    "timeEndMs",
   ] as const;
   for (const key of numericKeys) {
-    if (typeof value[key] === 'number' && Number.isFinite(value[key])) {
+    if (typeof value[key] === "number" && Number.isFinite(value[key])) {
       sanitized[key] = value[key];
     }
   }
-  if (typeof value.sheet === 'string') sanitized.sheet = value.sheet;
-  if (typeof value.cellRange === 'string') sanitized.cellRange = value.cellRange;
+  if (typeof value.sheet === "string") sanitized.sheet = value.sheet;
+  if (typeof value.cellRange === "string")
+    sanitized.cellRange = value.cellRange;
   if (
     Array.isArray(value.headingPath) &&
-    value.headingPath.every((entry) => typeof entry === 'string')
+    value.headingPath.every((entry) => typeof entry === "string")
   ) {
     sanitized.headingPath = value.headingPath;
   }
@@ -363,42 +410,50 @@ function sanitizeSourceLocator(value: unknown): Record<string, unknown> {
       if (!isRecord(candidate)) return [];
       const { x, y, width, height } = candidate;
       if (
-        typeof x !== 'number' ||
+        typeof x !== "number" ||
         !Number.isFinite(x) ||
-        typeof y !== 'number' ||
+        typeof y !== "number" ||
         !Number.isFinite(y) ||
-        typeof width !== 'number' ||
+        typeof width !== "number" ||
         !Number.isFinite(width) ||
-        typeof height !== 'number' ||
+        typeof height !== "number" ||
         !Number.isFinite(height)
       ) {
         return [];
       }
-      return [{
-        ...(typeof candidate.page === 'number' && Number.isFinite(candidate.page)
-          ? { page: candidate.page }
-          : {}),
-        x,
-        y,
-        width,
-        height,
-      }];
+      return [
+        {
+          ...(typeof candidate.page === "number" &&
+          Number.isFinite(candidate.page)
+            ? { page: candidate.page }
+            : {}),
+          x,
+          y,
+          width,
+          height,
+        },
+      ];
     });
   }
   return sanitized;
 }
 
-function sanitizeAttachmentCitation(value: unknown): Record<string, unknown> | null {
+function sanitizeAttachmentCitation(
+  value: unknown,
+): Record<string, unknown> | null {
   if (!isRecord(value)) return null;
 
   const citation: Record<string, unknown> = {};
-  if (typeof value.itemVersionId === 'string') {
+  if (typeof value.itemVersionId === "string") {
     citation.itemVersionId = value.itemVersionId;
   }
-  if (typeof value.chunkId === 'number' && Number.isSafeInteger(value.chunkId)) {
+  if (
+    typeof value.chunkId === "number" &&
+    Number.isSafeInteger(value.chunkId)
+  ) {
     citation.chunkId = value.chunkId;
   }
-  if (typeof value.label === 'string') citation.label = value.label;
+  if (typeof value.label === "string") citation.label = value.label;
   if (isRecord(value.sourceLocator)) {
     citation.sourceLocator = sanitizeSourceLocator(value.sourceLocator);
   }
@@ -411,11 +466,13 @@ function sanitizeAttachmentCitation(value: unknown): Record<string, unknown> | n
  * history. Keep only the fields required to render/replay a paired tool result
  * and its exact citations.
  */
-function sanitizeAttachmentSearchResult(result: unknown): Record<string, unknown> {
+function sanitizeAttachmentSearchResult(
+  result: unknown,
+): Record<string, unknown> {
   if (!isRecord(result)) {
     return {
       success: false,
-      error: 'Attachment search result unavailable for replay',
+      error: "Attachment search result unavailable for replay",
       results: [],
     };
   }
@@ -426,22 +483,30 @@ function sanitizeAttachmentSearchResult(result: unknown): Record<string, unknown
         const citations = Array.isArray(candidate.citations)
           ? candidate.citations
               .map(sanitizeAttachmentCitation)
-              .filter((citation): citation is Record<string, unknown> => citation !== null)
+              .filter(
+                (citation): citation is Record<string, unknown> =>
+                  citation !== null,
+              )
           : [];
-        return [{
-          ...(typeof candidate.source === 'string' ? { source: candidate.source } : {}),
-          ...(typeof candidate.score === 'number' && Number.isFinite(candidate.score)
-            ? { score: candidate.score }
-            : {}),
-          citations,
-        }];
+        return [
+          {
+            ...(typeof candidate.source === "string"
+              ? { source: candidate.source }
+              : {}),
+            ...(typeof candidate.score === "number" &&
+            Number.isFinite(candidate.score)
+              ? { score: candidate.score }
+              : {}),
+            citations,
+          },
+        ];
       })
     : [];
 
   return {
     success: result.success === true,
-    ...(typeof result.query === 'string' ? { query: result.query } : {}),
-    ...(result.success !== true ? { error: 'Attachment search failed' } : {}),
+    ...(typeof result.query === "string" ? { query: result.query } : {}),
+    ...(result.success !== true ? { error: "Attachment search failed" } : {}),
     results: sanitizedResults,
   };
 }
@@ -453,25 +518,28 @@ function isNexusAttachmentSearchPart(part: Record<string, unknown>): boolean {
   );
 }
 
-function sanitizeMessagePartForReplay(
-  part: { type: string; [key: string]: unknown }
-): { type: string; [key: string]: unknown } {
+function sanitizeMessagePartForReplay(part: {
+  type: string;
+  [key: string]: unknown;
+}): { type: string; [key: string]: unknown } {
   if (!isNexusAttachmentSearchPart(part)) return part;
 
   const sanitized = { ...part };
   // These are the two combined tool-part representations used by persisted
   // Nexus messages (result) and AI SDK UI messages (output).
-  if ('result' in sanitized && sanitized.result != null) {
+  if ("result" in sanitized && sanitized.result != null) {
     sanitized.result = sanitizeAttachmentSearchResult(sanitized.result);
   }
-  if ('output' in sanitized && sanitized.output != null) {
+  if ("output" in sanitized && sanitized.output != null) {
     sanitized.output = sanitizeAttachmentSearchResult(sanitized.output);
   }
   return sanitized;
 }
 
-export function convertMessagesToPartsFormat(messages: MessageWithContent[]): UIMessage[] {
-  return messages.map(message => {
+export function convertMessagesToPartsFormat(
+  messages: MessageWithContent[],
+): UIMessage[] {
+  return messages.map((message) => {
     // Sanitize already-normalized UI parts too: reload sends static
     // tool-searchNexusAttachments output parts back on the next turn.
     if (message.parts) {
@@ -482,10 +550,10 @@ export function convertMessagesToPartsFormat(messages: MessageWithContent[]): UI
     }
 
     // Convert legacy content format to parts format
-    if (typeof message.content === 'string') {
+    if (typeof message.content === "string") {
       return {
         ...message,
-        parts: [{ type: 'text', text: message.content }]
+        parts: [{ type: "text", text: message.content }],
       } as unknown as UIMessage;
     }
 
@@ -493,14 +561,16 @@ export function convertMessagesToPartsFormat(messages: MessageWithContent[]): UI
       return {
         ...message,
         parts: message.content.map((part) =>
-          sanitizeMessagePartForReplay(part as { type: string; [key: string]: unknown })
-        )
+          sanitizeMessagePartForReplay(
+            part as { type: string; [key: string]: unknown },
+          ),
+        ),
       } as unknown as UIMessage;
     }
 
     return {
       ...message,
-      parts: []
+      parts: [],
     } as unknown as UIMessage;
   });
 }
@@ -522,7 +592,7 @@ type AssistantPart = {
   result?: unknown;
   isError?: boolean;
   // AI SDK v6 UIMessage tool-part fields — required by convertToModelMessages to emit tool_result blocks
-  state?: 'input-available' | 'output-available' | 'output-error';
+  state?: "input-available" | "output-available" | "output-error";
   input?: Record<string, unknown>;
 };
 
@@ -546,12 +616,12 @@ export type StepData = {
  */
 function buildAssistantParts(
   sanitizedContent: string,
-  toolCalls?: ToolCallData[]
+  toolCalls?: ToolCallData[],
 ): AssistantPart[] {
   const parts: AssistantPart[] = [];
 
   if (sanitizedContent) {
-    parts.push({ type: 'text', text: sanitizedContent });
+    parts.push({ type: "text", text: sanitizedContent });
   }
 
   if (toolCalls) {
@@ -560,17 +630,20 @@ function buildAssistantParts(
       // AI models may generate HTML-encoded characters (e.g., &amp; for &) in tool args,
       // which causes assistant-ui's append-only argsText check to fail when the conversation
       // is reloaded and argsText is recomputed from the parsed args object. (Issue #798)
-      const decodedArgs = decodeHtmlEntitiesDeep(tc.args) as Record<string, unknown>;
+      const decodedArgs = decodeHtmlEntitiesDeep(tc.args) as Record<
+        string,
+        unknown
+      >;
       // null when extraction missed the result (e.g. stream error before onFinish).
       // UI tool components handle null with loading/fallback states — verified in
       // web-search-ui.tsx, code-interpreter-ui.tsx, chart-visualization-ui.tsx.
       const persistedResult =
         tc.toolName === NEXUS_ATTACHMENT_SEARCH_TOOL && tc.result != null
           ? sanitizeAttachmentSearchResult(tc.result)
-          : tc.result ?? null;
+          : (tc.result ?? null);
       const hasResult = persistedResult != null;
       parts.push({
-        type: 'tool-call',
+        type: "tool-call",
         toolCallId: tc.toolCallId,
         toolName: tc.toolName,
         args: decodedArgs,
@@ -581,7 +654,7 @@ function buildAssistantParts(
         // paired tool_result blocks when this conversation is reloaded and replayed.
         // Without state+input, convertToModelMessages emits tool_use without tool_result,
         // causing AI_MissingToolResultsError on follow-up messages. (Issue #977)
-        state: hasResult ? 'output-available' : 'input-available',
+        state: hasResult ? "output-available" : "input-available",
         input: decodedArgs,
       });
     }
@@ -594,17 +667,24 @@ function buildAssistantParts(
  * Check if message has content to save
  */
 function hasMessageContent(text: string, toolCalls?: ToolCallData[]): boolean {
-  return (text && text.length > 0) || (toolCalls !== undefined && toolCalls.length > 0);
+  return (
+    (text && text.length > 0) ||
+    (toolCalls !== undefined && toolCalls.length > 0)
+  );
 }
 
 /**
  * Build token usage object with defaults
  */
-function buildTokenUsage(usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number }) {
+function buildTokenUsage(usage?: {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+}) {
   return {
     promptTokens: usage?.promptTokens || 0,
     completionTokens: usage?.completionTokens || 0,
-    totalTokens: usage?.totalTokens || 0
+    totalTokens: usage?.totalTokens || 0,
   };
 }
 
@@ -614,28 +694,40 @@ function buildTokenUsage(usage?: { promptTokens?: number; completionTokens?: num
 export async function saveAssistantMessage(params: {
   conversationId: string;
   text: string;
-  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
   finishReason?: string;
   toolCalls?: ToolCallData[];
   dbModelId: number;
   metadata?: Record<string, unknown>;
 }): Promise<void> {
-  const { conversationId, text, usage, finishReason, toolCalls, dbModelId, metadata = {} } = params;
+  const {
+    conversationId,
+    text,
+    usage,
+    finishReason,
+    toolCalls,
+    dbModelId,
+    metadata = {},
+  } = params;
 
   if (!hasMessageContent(text, toolCalls)) {
-    log.warn('No text or tool calls to save for assistant message');
+    log.warn("No text or tool calls to save for assistant message");
     return;
   }
 
-  const sanitizedContent = text ? sanitizeTextForDatabase(text) : '';
+  const sanitizedContent = text ? sanitizeTextForDatabase(text) : "";
   const assistantParts = buildAssistantParts(sanitizedContent, toolCalls);
   const tokenUsage = buildTokenUsage(usage);
 
   if (toolCalls && toolCalls.length > 0) {
-    log.info('Including tool calls in assistant message', {
+    log.info("Including tool calls in assistant message", {
       conversationId,
       toolCallCount: toolCalls.length,
-      toolNames: toolCalls.map(tc => tc.toolName)
+      toolNames: toolCalls.map((tc) => tc.toolName),
     });
   }
 
@@ -644,34 +736,34 @@ export async function saveAssistantMessage(params: {
   // atomically so a failure between them cannot desync the conversation counters from
   // the actual nexus_messages rows. Mirrors saveConversationSteps.
   await executeTransaction(async (tx) => {
-    await tx.insert(nexusMessages)
-      .values({
-        conversationId,
-        role: 'assistant',
-        content: sanitizedContent,
-        parts: sql`${safeJsonbStringify(assistantParts)}::jsonb`,
-        modelId: dbModelId,
-        tokenUsage: sql`${safeJsonbStringify(tokenUsage)}::jsonb`,
-        finishReason: finishReason || 'stop',
-        metadata: sql`${safeJsonbStringify(metadata)}::jsonb`,
-        createdAt: now,
-        updatedAt: now
-      });
+    await tx.insert(nexusMessages).values({
+      conversationId,
+      role: "assistant",
+      content: sanitizedContent,
+      parts: sql`${safeJsonbStringify(assistantParts)}::jsonb`,
+      modelId: dbModelId,
+      tokenUsage: sql`${safeJsonbStringify(tokenUsage)}::jsonb`,
+      finishReason: finishReason || "stop",
+      metadata: sql`${safeJsonbStringify(metadata)}::jsonb`,
+      createdAt: now,
+      updatedAt: now,
+    });
 
-    await tx.update(nexusConversations)
+    await tx
+      .update(nexusConversations)
       .set({
         messageCount: sql`${nexusConversations.messageCount} + 1`,
         totalTokens: sql`${nexusConversations.totalTokens} + ${usage?.totalTokens || 0}`,
         lastMessageAt: new Date(),
-        updatedAt: new Date()
+        updatedAt: new Date(),
       })
       .where(eq(nexusConversations.id, conversationId));
-  }, 'saveAssistantMessage');
+  }, "saveAssistantMessage");
 
-  log.info('Assistant message saved successfully', {
+  log.info("Assistant message saved successfully", {
     conversationId,
     textLength: text.length,
-    totalTokens: usage?.totalTokens
+    totalTokens: usage?.totalTokens,
   });
 }
 
@@ -691,11 +783,22 @@ export async function saveConversationSteps(params: {
   conversationId: string;
   steps: StepData[];
   dbModelId: number;
-  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
   finishReason?: string;
   metadata?: Record<string, unknown>;
 }): Promise<void> {
-  const { conversationId, steps, dbModelId, usage, finishReason, metadata = {} } = params;
+  const {
+    conversationId,
+    steps,
+    dbModelId,
+    usage,
+    finishReason,
+    metadata = {},
+  } = params;
 
   // Build all row data before opening a transaction (pure computation)
   type RowData = {
@@ -713,20 +816,33 @@ export async function saveConversationSteps(params: {
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
     const isLastStep = i === steps.length - 1;
-    const stepFinishReason = isLastStep ? (finishReason ?? 'stop') : step.finishReason;
+    const stepFinishReason = isLastStep
+      ? (finishReason ?? "stop")
+      : step.finishReason;
     const hasToolCalls = step.toolCalls.length > 0;
     const hasText = step.text.length > 0;
     if (!hasToolCalls && !hasText) continue;
-    const sanitizedContent = step.text ? sanitizeTextForDatabase(step.text) : '';
-    const parts = buildAssistantParts(sanitizedContent, hasToolCalls ? step.toolCalls : undefined);
+    const sanitizedContent = step.text
+      ? sanitizeTextForDatabase(step.text)
+      : "";
+    const parts = buildAssistantParts(
+      sanitizedContent,
+      hasToolCalls ? step.toolCalls : undefined,
+    );
     rowsToInsert.push({
-      sanitizedContent, parts, stepFinishReason, stepIndex: i,
-      hasToolCalls, toolCallCount: step.toolCalls.length, hasText, isLastStep,
+      sanitizedContent,
+      parts,
+      stepFinishReason,
+      stepIndex: i,
+      hasToolCalls,
+      toolCallCount: step.toolCalls.length,
+      hasText,
+      isLastStep,
     });
   }
 
   if (rowsToInsert.length === 0) {
-    log.warn('No step messages had content to save', { conversationId });
+    log.warn("No step messages had content to save", { conversationId });
     return;
   }
 
@@ -743,7 +859,7 @@ export async function saveConversationSteps(params: {
       const createdAt = new Date(baseTime.getTime() + row.stepIndex);
       await tx.insert(nexusMessages).values({
         conversationId,
-        role: 'assistant',
+        role: "assistant",
         content: row.sanitizedContent,
         parts: sql`${safeJsonbStringify(row.parts)}::jsonb`,
         modelId: dbModelId,
@@ -756,18 +872,21 @@ export async function saveConversationSteps(params: {
         updatedAt: baseTime,
       });
     }
-    await tx.update(nexusConversations)
+    await tx
+      .update(nexusConversations)
       .set({
         messageCount: sql`${nexusConversations.messageCount} + ${savedCount}`,
         totalTokens: sql`${nexusConversations.totalTokens} + ${usage?.totalTokens ?? 0}`,
-        lastMessageAt: new Date(baseTime.getTime() + rowsToInsert[rowsToInsert.length - 1].stepIndex),
+        lastMessageAt: new Date(
+          baseTime.getTime() + rowsToInsert[rowsToInsert.length - 1].stepIndex,
+        ),
         updatedAt: baseTime,
       })
       .where(eq(nexusConversations.id, conversationId));
-  }, 'saveConversationSteps');
+  }, "saveConversationSteps");
 
   for (const row of rowsToInsert) {
-    log.info('Saved step message', {
+    log.info("Saved step message", {
       conversationId,
       stepIndex: row.stepIndex,
       isLastStep: row.isLastStep,
@@ -777,7 +896,7 @@ export async function saveConversationSteps(params: {
     });
   }
 
-  log.info('Multi-step response saved', {
+  log.info("Multi-step response saved", {
     conversationId,
     stepCount: steps.length,
     savedCount,

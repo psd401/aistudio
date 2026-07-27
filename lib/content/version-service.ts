@@ -31,12 +31,21 @@ import {
   executeTransaction,
   type DbTransaction,
 } from "@/lib/db/drizzle-client";
-import { contentEmbedLinks, contentObjects, contentVersions } from "@/lib/db/schema";
+import {
+  contentEmbedLinks,
+  contentObjects,
+  contentVersions,
+} from "@/lib/db/schema";
 import { parseEmbeddedArtifactIds } from "./embed-directive";
 import { pinVersionAssetsInTx } from "./asset-references";
 import { pgTimestampAsText } from "@/lib/db/drizzle-helpers";
 import { createLogger } from "@/lib/logger";
-import { actorKindOf, agentIdOf, assertCanEdit, authorUserIdOf } from "./helpers";
+import {
+  actorKindOf,
+  agentIdOf,
+  assertCanEdit,
+  authorUserIdOf,
+} from "./helpers";
 import {
   assertScreened,
   screenAgentBodyForWrite,
@@ -122,7 +131,7 @@ function artifactFileName(format: BodyFormat): string {
 export async function syncEmbedBacklinksInTx(
   tx: DbTransaction,
   documentId: string,
-  markdown: string
+  markdown: string,
 ): Promise<void> {
   const referenced = parseEmbeddedArtifactIds(markdown);
   let validArtifactIds: string[] = [];
@@ -133,8 +142,8 @@ export async function syncEmbedBacklinksInTx(
       .where(
         and(
           inArray(contentObjects.id, referenced),
-          eq(contentObjects.kind, "artifact")
-        )
+          eq(contentObjects.kind, "artifact"),
+        ),
       );
     validArtifactIds = rows.map((r) => r.id);
   }
@@ -150,7 +159,7 @@ export async function syncEmbedBacklinksInTx(
         validArtifactIds.map((artifactObjectId) => ({
           documentObjectId: documentId,
           artifactObjectId,
-        }))
+        })),
       )
       .onConflictDoNothing();
   }
@@ -168,7 +177,7 @@ function isUniqueViolation(error: unknown): boolean {
 
 async function maxVersion(
   tx: DbTransaction,
-  objectId: string
+  objectId: string,
 ): Promise<number> {
   const rows = await tx
     .select({ max: sql<number | null>`max(${contentVersions.versionNumber})` })
@@ -200,7 +209,7 @@ interface SnapshotWriteOptions {
 async function assertExpectedVersionHead(
   tx: DbTransaction,
   objectId: string,
-  expectedVersionId: string | null | undefined
+  expectedVersionId: string | null | undefined,
 ): Promise<void> {
   if (expectedVersionId === undefined) return;
   // Serialize conditional writers on the object row. The service performs the
@@ -216,7 +225,7 @@ async function assertExpectedVersionHead(
   if (currentVersionId !== expectedVersionId) {
     throw new VersionPreconditionFailedError(
       expectedVersionId,
-      currentVersionId
+      currentVersionId,
     );
   }
 }
@@ -232,13 +241,112 @@ async function assertExpectedVersionHead(
 function assertHumanAuthorId(
   req: Requester,
   authorActor: "human" | "agent",
-  authorUserId: number | null
+  authorUserId: number | null,
 ): void {
   if (authorActor === "human" && authorUserId == null) {
     throw new ForbiddenError("Authentication required to author a version", {
       kind: req.kind,
     });
   }
+}
+
+function validatedBodyFormat(
+  kind: "document" | "artifact",
+  input: SnapshotInput,
+): BodyFormat {
+  if (typeof input.body !== "string" || input.body.trim().length === 0) {
+    throw new ValidationError("Version body is required");
+  }
+  const bodyFormat = input.bodyFormat ?? defaultBodyFormat(kind);
+  if (kind === "document" && bodyFormat !== "markdown") {
+    throw new ValidationError("Documents must use bodyFormat 'markdown'", {
+      bodyFormat,
+    });
+  }
+  if (kind === "artifact" && bodyFormat === "markdown") {
+    throw new ValidationError("Artifacts must use bodyFormat 'html' or 'jsx'", {
+      bodyFormat,
+    });
+  }
+  return bodyFormat;
+}
+
+interface SnapshotStoragePlan {
+  bodyLocation: string;
+  bodyInline: string | null;
+  renderLocation: string | null;
+  s3Writes: PendingS3Write[];
+}
+
+function documentStoragePlan(
+  objectId: string,
+  versionNumber: number,
+  body: string,
+): SnapshotStoragePlan {
+  const renderLocation = s3Store.key(objectId, versionNumber, "render.html");
+  return {
+    bodyLocation: "proof",
+    bodyInline: null,
+    renderLocation,
+    s3Writes: [
+      {
+        key: s3Store.key(objectId, versionNumber, "source.md"),
+        body,
+        contentType: "text/markdown",
+      },
+      {
+        key: renderLocation,
+        body: renderMarkdownToHtml(body),
+        contentType: "text/html",
+        contentDisposition: "attachment",
+      },
+    ],
+  };
+}
+
+function artifactStoragePlan(
+  objectId: string,
+  versionNumber: number,
+  body: string,
+  bodyFormat: BodyFormat,
+): SnapshotStoragePlan {
+  if (Buffer.byteLength(body, "utf8") <= INLINE_ARTIFACT_MAX_BYTES) {
+    return {
+      bodyLocation: "inline",
+      bodyInline: body,
+      renderLocation: null,
+      s3Writes: [],
+    };
+  }
+  const bodyLocation = s3Store.key(
+    objectId,
+    versionNumber,
+    artifactFileName(bodyFormat),
+  );
+  return {
+    bodyLocation,
+    bodyInline: null,
+    renderLocation: null,
+    s3Writes: [
+      {
+        key: bodyLocation,
+        body,
+        contentType: bodyFormat === "jsx" ? "text/jsx" : "text/html",
+        contentDisposition: "attachment",
+      },
+    ],
+  };
+}
+
+function snapshotStoragePlan(
+  obj: { id: string; kind: "document" | "artifact" },
+  versionNumber: number,
+  body: string,
+  bodyFormat: BodyFormat,
+): SnapshotStoragePlan {
+  return obj.kind === "document"
+    ? documentStoragePlan(obj.id, versionNumber, body)
+    : artifactStoragePlan(obj.id, versionNumber, body, bodyFormat);
 }
 
 /**
@@ -269,32 +377,13 @@ export async function snapshotInTx(
   req: Requester,
   obj: { id: string; kind: "document" | "artifact" },
   input: SnapshotInput,
-  options: SnapshotWriteOptions
+  options: SnapshotWriteOptions,
 ): Promise<SnapshotResult> {
   await assertExpectedVersionHead(tx, obj.id, options.expectedVersionId);
-  // Reject empty AND whitespace-only bodies, mirroring the `.trim()` title check
-  // in content-service so "   " is not silently snapshotted as content.
-  if (typeof input.body !== "string" || input.body.trim().length === 0) {
-    throw new ValidationError("Version body is required");
-  }
+  const bodyFormat = validatedBodyFormat(obj.kind, input);
   // §28.3 defense in depth (issue #1118 item 3): agent content must have been
   // screened before reaching this shared write primitive. No-op for human writers.
   assertScreened(req, input.body, options.proof, obj.id);
-  const bodyFormat = input.bodyFormat ?? defaultBodyFormat(obj.kind);
-  // The downstream branches assume documents are markdown (rendered via
-  // renderMarkdownToHtml) and artifacts are html/jsx (content-type + filename).
-  // Reject mismatched formats so storage/rendering stay consistent rather than
-  // silently producing the wrong content-type or rendering artifact code.
-  if (obj.kind === "document" && bodyFormat !== "markdown") {
-    throw new ValidationError("Documents must use bodyFormat 'markdown'", {
-      bodyFormat,
-    });
-  }
-  if (obj.kind === "artifact" && bodyFormat === "markdown") {
-    throw new ValidationError("Artifacts must use bodyFormat 'html' or 'jsx'", {
-      bodyFormat,
-    });
-  }
   // Enforce the DB invariant `actor_kind = 'human' ⟹ author_user_id IS NOT NULL`
   // at this boundary (see `assertHumanAuthorId`).
   const authorActor = actorKindOf(req);
@@ -302,52 +391,9 @@ export async function snapshotInTx(
   assertHumanAuthorId(req, authorActor, authorUserId);
 
   const next = (await maxVersion(tx, obj.id)) + 1;
-
   const isDocument = obj.kind === "document";
-  const inline =
-    !isDocument && Buffer.byteLength(input.body, "utf8") <= INLINE_ARTIFACT_MAX_BYTES;
-
-  const s3Writes: PendingS3Write[] = [];
-  let bodyLocation: string;
-  let bodyInline: string | null = null;
-  let renderLocation: string | null = null;
-
-  if (isDocument) {
-    // Document live state belongs to the Proof doc-store (Phase 1). Phase 0
-    // persists the canonical markdown + a rendered snapshot to S3 so content is
-    // legible/round-trippable before any editor exists.
-    bodyLocation = "proof";
-    renderLocation = s3Store.key(obj.id, next, "render.html");
-    s3Writes.push({
-      key: s3Store.key(obj.id, next, "source.md"),
-      body: input.body,
-      contentType: "text/markdown",
-    });
-    s3Writes.push({
-      key: renderLocation,
-      body: renderMarkdownToHtml(input.body),
-      contentType: "text/html",
-      // Force download (not inline render) when served from a presigned URL, so
-      // the rendered HTML is never executed on the S3/CloudFront origin.
-      contentDisposition: "attachment",
-    });
-  } else if (inline) {
-    bodyLocation = "inline";
-    bodyInline = input.body;
-  } else {
-    // SECURITY: artifact code is UNTRUSTED. It is stored verbatim and must only
-    // be rendered inside the cross-origin sandboxed iframe (§28.1) — never served
-    // directly as text/html nor injected as innerHTML. The sandbox is Phase 2.
-    bodyLocation = s3Store.key(obj.id, next, artifactFileName(bodyFormat));
-    s3Writes.push({
-      key: bodyLocation,
-      body: input.body,
-      contentType: bodyFormat === "jsx" ? "text/jsx" : "text/html",
-      // Untrusted artifact code: never let a presigned URL render it as a live
-      // document. It is served only inside the cross-origin sandbox (§28.1).
-      contentDisposition: "attachment",
-    });
-  }
+  const { bodyLocation, bodyInline, renderLocation, s3Writes } =
+    snapshotStoragePlan(obj, next, input.body, bodyFormat);
 
   // The unique (object_id, version_number) constraint guards concurrent writers:
   // two transactions can both read maxVersion()=N and both try to insert N+1; the
@@ -388,12 +434,7 @@ export async function snapshotInTx(
     // Resolve canonical ::atrium-asset directives against READY assets owned by
     // this object before advancing the head. These immutable join rows are the
     // authoritative asset set a publication pins with its version id.
-    await pinVersionAssetsInTx(
-      tx,
-      obj.id,
-      versionRow.id,
-      input.body
-    );
+    await pinVersionAssetsInTx(tx, obj.id, versionRow.id, input.body);
   }
 
   // Advance the object's working head.
@@ -437,20 +478,20 @@ export async function snapshotInTx(
  * it yet.
  */
 export async function flushSnapshotWrites(
-  writes: PendingS3Write[]
+  writes: PendingS3Write[],
 ): Promise<void> {
   const results = await Promise.allSettled(
     writes.map((w) =>
-      s3Store.putText(w.key, w.body, w.contentType, w.contentDisposition)
-    )
+      s3Store.putText(w.key, w.body, w.contentType, w.contentDisposition),
+    ),
   );
   const rejected = results.filter(
-    (r): r is PromiseRejectedResult => r.status === "rejected"
+    (r): r is PromiseRejectedResult => r.status === "rejected",
   );
   if (rejected.length > 0) {
     throw new AggregateError(
       rejected.map((r) => r.reason),
-      `Failed to persist ${rejected.length} of ${writes.length} snapshot blob(s)`
+      `Failed to persist ${rejected.length} of ${writes.length} snapshot blob(s)`,
     );
   }
 }
@@ -469,12 +510,11 @@ async function snapshotScreened(
   obj: { id: string; kind: "document" | "artifact" },
   input: SnapshotInput,
   proof: ScreeningProof,
-  expectedVersionId?: string | null
+  expectedVersionId?: string | null,
 ): Promise<ContentVersionDTO> {
   const { version, s3Writes } = await executeTransaction(
-    (tx) =>
-      snapshotInTx(tx, req, obj, input, { proof, expectedVersionId }),
-    "content.snapshot"
+    (tx) => snapshotInTx(tx, req, obj, input, { proof, expectedVersionId }),
+    "content.snapshot",
   );
   await flushSnapshotWrites(s3Writes);
 
@@ -505,7 +545,7 @@ export const versionService = {
   async snapshot(
     req: Requester,
     obj: { id: string; kind: "document" | "artifact" },
-    input: SnapshotInput
+    input: SnapshotInput,
   ): Promise<ContentVersionDTO> {
     // §28.3 — agent-authored bodies (document markdown AND artifact code) are
     // guardrails/PII-screened BEFORE the write, mirroring the agent bridge.
@@ -525,11 +565,11 @@ export const versionService = {
           .from(contentVersions)
           .innerJoin(
             contentObjects,
-            eq(contentObjects.currentVersionId, contentVersions.id)
+            eq(contentObjects.currentVersionId, contentVersions.id),
           )
           .where(eq(contentObjects.id, objectId))
           .limit(1),
-      "content.currentVersion"
+      "content.currentVersion",
     );
     return rows[0] ? rowToVersionDTO(rows[0] as VersionRowAsText) : null;
   },
@@ -543,7 +583,7 @@ export const versionService = {
           .from(contentVersions)
           .where(eq(contentVersions.objectId, objectId))
           .orderBy(desc(contentVersions.versionNumber)),
-      "content.listVersions"
+      "content.listVersions",
     );
     return rows.map((r) => rowToVersionDTO(r as VersionRowAsText));
   },
@@ -557,7 +597,7 @@ export const versionService = {
    */
   async getById(
     objectId: string,
-    versionId: string
+    versionId: string,
   ): Promise<ContentVersionDTO | null> {
     const rows = await executeQuery(
       (db) =>
@@ -567,11 +607,11 @@ export const versionService = {
           .where(
             and(
               eq(contentVersions.id, versionId),
-              eq(contentVersions.objectId, objectId)
-            )
+              eq(contentVersions.objectId, objectId),
+            ),
           )
           .limit(1),
-      "content.versionById"
+      "content.versionById",
     );
     return rows[0] ? rowToVersionDTO(rows[0] as VersionRowAsText) : null;
   },
@@ -586,12 +626,8 @@ export const versionService = {
       let body: string;
       if (version.bodyFormat === "markdown") {
         body = await s3Store.getTextBounded(
-          s3Store.key(
-            version.objectId,
-            version.versionNumber,
-            "source.md"
-          ),
-          MAX_DECODED_BODY_BYTES
+          s3Store.key(version.objectId, version.versionNumber, "source.md"),
+          MAX_DECODED_BODY_BYTES,
         );
       } else if (version.bodyLocation === "inline") {
         body = version.bodyInline ?? "";
@@ -601,7 +637,7 @@ export const versionService = {
       } else {
         body = await s3Store.getTextBounded(
           version.bodyLocation,
-          MAX_DECODED_BODY_BYTES
+          MAX_DECODED_BODY_BYTES,
         );
       }
       return {
@@ -610,9 +646,7 @@ export const versionService = {
         versionNumber: version.versionNumber,
         bodyFormat: version.bodyFormat,
         body,
-        sha256: createHash("sha256")
-          .update(body, "utf8")
-          .digest("base64url"),
+        sha256: createHash("sha256").update(body, "utf8").digest("base64url"),
       };
     } catch (error) {
       if (error instanceof StorageError) throw error;
@@ -623,7 +657,7 @@ export const versionService = {
           versionId: version.id,
           errorName:
             error instanceof Error ? error.name : "UnknownStorageError",
-        }
+        },
       );
       // Do not expose bucket names, object keys, presigned credentials, or raw
       // SDK messages through the API error.
@@ -651,7 +685,7 @@ export const versionService = {
     if (version.bodyFormat === "markdown") {
       throw new ValidationError(
         "loadArtifactCode called on a non-artifact (markdown) version",
-        { versionId: version.id }
+        { versionId: version.id },
       );
     }
     if (version.bodyLocation === "inline") {
@@ -693,7 +727,7 @@ export const versionService = {
   async rollback(
     req: Requester,
     objectId: string,
-    toVersionId: string
+    toVersionId: string,
   ): Promise<void> {
     const log = createLogger({ action: "content.rollback" });
 
@@ -713,7 +747,7 @@ export const versionService = {
           .from(contentObjects)
           .where(eq(contentObjects.id, objectId))
           .limit(1),
-      "content.rollback.loadOwner"
+      "content.rollback.loadOwner",
     );
     if (!owner[0]) {
       throw new NotFoundError("Content not found", { objectId });
@@ -740,15 +774,15 @@ export const versionService = {
         .where(
           and(
             eq(contentVersions.id, toVersionId),
-            eq(contentVersions.objectId, objectId)
-          )
+            eq(contentVersions.objectId, objectId),
+          ),
         )
         .limit(1);
       if (!target[0]) {
-        throw new ValidationError(
-          "Target version not found for this object",
-          { objectId, toVersionId }
-        );
+        throw new ValidationError("Target version not found for this object", {
+          objectId,
+          toVersionId,
+        });
       }
 
       const updated = await tx
@@ -799,7 +833,7 @@ async function reindexAfterRollbackBestEffort(objectId: string): Promise<void> {
         objectId,
         error:
           indexError instanceof Error ? indexError.message : String(indexError),
-      }
+      },
     );
   }
 }

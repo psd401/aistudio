@@ -1,3 +1,4 @@
+
 /**
  * Regression tests for run.js's CLI subcommand → Atrium content REST wiring.
  *
@@ -19,6 +20,8 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
 
 // bun loads every *.test.js into ONE process and common.js reads these env vars at
 // module-load time, so this file MUST set the SAME values as common.test.js — else
@@ -303,7 +306,7 @@ test('create-artifact reads code from --code-file (avoids the argv-size limit)',
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atrium-test-'));
   const file = path.join(dir, 'code.html');
   const code = '<html><body><h1>From file</h1><script>x()</script></body></html>';
-  fs.writeFileSync(file, code);
+  validatedFs.writeFileSync(file, code);
   try {
     await run('create-artifact', '--title', 'Big', '--code-file', file, '--body-format', 'html');
     const body = restCalls[0].opts.body;

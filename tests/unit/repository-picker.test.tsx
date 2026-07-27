@@ -17,8 +17,9 @@ jest.mock("@/components/ui/dialog", () => {
   const React = require("react")
   const pass =
     (tag: string) =>
-    ({ children }: { children?: React.ReactNode }) =>
-      React.createElement(tag, null, children)
+    function MockPassThrough({ children }: { children?: React.ReactNode }) {
+      return React.createElement(tag, null, children)
+    }
   return {
     Dialog: pass("div"),
     DialogContent: pass("div"),
@@ -29,7 +30,9 @@ jest.mock("@/components/ui/dialog", () => {
   }
 })
 jest.mock("lucide-react", () => {
-  const Icon = (props: React.SVGProps<SVGSVGElement>) => <svg {...props} />
+  function Icon(props: React.SVGProps<SVGSVGElement>) {
+    return <svg {...props} />
+  }
   return {
     AlertCircle: Icon,
     CheckCircle2: Icon,

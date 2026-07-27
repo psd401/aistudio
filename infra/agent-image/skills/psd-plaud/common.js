@@ -166,7 +166,7 @@ async function digestRecording(id, opts) {
   const args = ['/opt/psd-skills/psd-summarize/run.js', '--context', 'Plaud voice recording transcript'];
   if (opts.profiles) args.push('--profiles', opts.profiles);
   if (opts.output) args.push('--output', opts.output);
-  if (opts.length) args.push('--length', opts.length);
+  if (opts.length > 0) args.push('--length', opts.length);
   const res = spawnSync('node', args, {
     input: transcript, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
   });

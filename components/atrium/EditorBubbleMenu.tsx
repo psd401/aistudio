@@ -464,6 +464,66 @@ function useActiveMarks(editor: EditorBubbleMenuProps["editor"]) {
   });
 }
 
+function MarkButtons({
+  editor,
+  marks,
+}: {
+  editor: Editor;
+  marks: ReturnType<typeof useActiveMarks>;
+}): React.JSX.Element {
+  const buttons = [
+    {
+      key: "bold",
+      label: "Bold",
+      text: "B",
+      className: "mer-bubble-btn-b",
+      toggle: () => editor.chain().focus().toggleBold().run(),
+    },
+    {
+      key: "italic",
+      label: "Italic",
+      text: "I",
+      className: "mer-bubble-btn-i",
+      toggle: () => editor.chain().focus().toggleItalic().run(),
+    },
+    {
+      key: "underline",
+      label: "Underline",
+      text: "U",
+      className: "mer-bubble-btn-u",
+      toggle: () => editor.chain().focus().toggleUnderline().run(),
+    },
+    {
+      key: "strike",
+      label: "Strikethrough",
+      text: "S",
+      className: "mer-bubble-btn-s",
+      toggle: () => editor.chain().focus().toggleStrike().run(),
+    },
+  ] as const;
+
+  return (
+    <>
+      {buttons.map((button) => {
+        const active = marks[button.key];
+        return (
+          <button
+            key={button.key}
+            type="button"
+            className={`mer-bubble-btn ${button.className}`}
+            data-active={active ? "true" : "false"}
+            aria-label={button.label}
+            aria-pressed={active}
+            onClick={button.toggle}
+          >
+            {button.text}
+          </button>
+        );
+      })}
+    </>
+  );
+}
+
 export function EditorBubbleMenu({
   editor,
   askAgentHref,
@@ -530,46 +590,7 @@ export function EditorBubbleMenu({
         {pop === "text" && <BlockStylePopover editor={editor} onPick={closePops} />}
 
         <span className="mer-bubble-sep" aria-hidden="true" />
-        <button
-          type="button"
-          className="mer-bubble-btn mer-bubble-btn-b"
-          data-active={marks.bold ? "true" : "false"}
-          aria-label="Bold"
-          aria-pressed={marks.bold}
-          onClick={() => editor.chain().focus().toggleBold().run()}
-        >
-          B
-        </button>
-        <button
-          type="button"
-          className="mer-bubble-btn mer-bubble-btn-i"
-          data-active={marks.italic ? "true" : "false"}
-          aria-label="Italic"
-          aria-pressed={marks.italic}
-          onClick={() => editor.chain().focus().toggleItalic().run()}
-        >
-          I
-        </button>
-        <button
-          type="button"
-          className="mer-bubble-btn mer-bubble-btn-u"
-          data-active={marks.underline ? "true" : "false"}
-          aria-label="Underline"
-          aria-pressed={marks.underline}
-          onClick={() => editor.chain().focus().toggleUnderline().run()}
-        >
-          U
-        </button>
-        <button
-          type="button"
-          className="mer-bubble-btn mer-bubble-btn-s"
-          data-active={marks.strike ? "true" : "false"}
-          aria-label="Strikethrough"
-          aria-pressed={marks.strike}
-          onClick={() => editor.chain().focus().toggleStrike().run()}
-        >
-          S
-        </button>
+        <MarkButtons editor={editor} marks={marks} />
 
         <span className="mer-bubble-sep" aria-hidden="true" />
         <button

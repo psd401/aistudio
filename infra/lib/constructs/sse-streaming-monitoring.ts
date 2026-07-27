@@ -29,6 +29,15 @@ export interface SSEStreamingMonitoringProps {
   dashboard?: cloudwatch.Dashboard
 }
 
+interface SSEGraphWidgetConfig {
+  title: string
+  metricName: string
+  statistic: string
+  label: string
+  color: string
+  axisLabel: string
+}
+
 /**
  * Construct for SSE Streaming monitoring infrastructure
  */
@@ -188,153 +197,57 @@ Monitor Server-Sent Events streaming for field mismatches, parse errors, and unk
       })
     )
 
-    // Error metrics row
     dashboard.addWidgets(
-      // Field mismatches (most critical)
-      new cloudwatch.GraphWidget({
+      this.createMetricWidget(namespace, environment, {
         title: 'SSE Field Mismatches (Critical)',
-        width: 8,
-        height: 6,
-        left: [
-          new cloudwatch.Metric({
-            namespace,
-            metricName: 'SSEFieldMismatches',
-            statistic: cloudwatch.Stats.SUM,
-            period: cdk.Duration.minutes(5),
-            dimensionsMap: { Environment: environment },
-            label: 'Field Mismatches',
-            color: cloudwatch.Color.RED
-          })
-        ],
-        leftYAxis: {
-          min: 0,
-          label: 'Count',
-          showUnits: false
-        },
-        legendPosition: cloudwatch.LegendPosition.BOTTOM
+        metricName: 'SSEFieldMismatches',
+        statistic: cloudwatch.Stats.SUM,
+        label: 'Field Mismatches',
+        color: cloudwatch.Color.RED,
+        axisLabel: 'Count'
       }),
-
-      // Parse errors
-      new cloudwatch.GraphWidget({
+      this.createMetricWidget(namespace, environment, {
         title: 'SSE Parse Errors',
-        width: 8,
-        height: 6,
-        left: [
-          new cloudwatch.Metric({
-            namespace,
-            metricName: 'SSEParseErrors',
-            statistic: cloudwatch.Stats.SUM,
-            period: cdk.Duration.minutes(5),
-            dimensionsMap: { Environment: environment },
-            label: 'Parse Errors',
-            color: cloudwatch.Color.ORANGE
-          })
-        ],
-        leftYAxis: {
-          min: 0,
-          label: 'Count',
-          showUnits: false
-        },
-        legendPosition: cloudwatch.LegendPosition.BOTTOM
+        metricName: 'SSEParseErrors',
+        statistic: cloudwatch.Stats.SUM,
+        label: 'Parse Errors',
+        color: cloudwatch.Color.ORANGE,
+        axisLabel: 'Count'
       }),
-
-      // Unknown event types
-      new cloudwatch.GraphWidget({
+      this.createMetricWidget(namespace, environment, {
         title: 'Unknown Event Types',
-        width: 8,
-        height: 6,
-        left: [
-          new cloudwatch.Metric({
-            namespace,
-            metricName: 'SSEUnknownEvents',
-            statistic: cloudwatch.Stats.SUM,
-            period: cdk.Duration.minutes(5),
-            dimensionsMap: { Environment: environment },
-            label: 'Unknown Events',
-            color: cloudwatch.Color.BLUE
-          })
-        ],
-        leftYAxis: {
-          min: 0,
-          label: 'Count',
-          showUnits: false
-        },
-        legendPosition: cloudwatch.LegendPosition.BOTTOM
+        metricName: 'SSEUnknownEvents',
+        statistic: cloudwatch.Stats.SUM,
+        label: 'Unknown Events',
+        color: cloudwatch.Color.BLUE,
+        axisLabel: 'Count'
       })
     )
 
-    // Performance metrics row
     dashboard.addWidgets(
-      // Stream volume
-      new cloudwatch.GraphWidget({
+      this.createMetricWidget(namespace, environment, {
         title: 'SSE Stream Volume',
-        width: 8,
-        height: 6,
-        left: [
-          new cloudwatch.Metric({
-            namespace,
-            metricName: 'SSETotalEvents',
-            statistic: cloudwatch.Stats.SUM,
-            period: cdk.Duration.minutes(5),
-            dimensionsMap: { Environment: environment },
-            label: 'Total Events',
-            color: cloudwatch.Color.GREEN
-          })
-        ],
-        leftYAxis: {
-          min: 0,
-          label: 'Events',
-          showUnits: false
-        },
-        legendPosition: cloudwatch.LegendPosition.BOTTOM
+        metricName: 'SSETotalEvents',
+        statistic: cloudwatch.Stats.SUM,
+        label: 'Total Events',
+        color: cloudwatch.Color.GREEN,
+        axisLabel: 'Events'
       }),
-
-      // Stream duration
-      new cloudwatch.GraphWidget({
+      this.createMetricWidget(namespace, environment, {
         title: 'SSE Stream Duration',
-        width: 8,
-        height: 6,
-        left: [
-          new cloudwatch.Metric({
-            namespace,
-            metricName: 'SSEStreamDuration',
-            statistic: cloudwatch.Stats.AVERAGE,
-            period: cdk.Duration.minutes(5),
-            dimensionsMap: { Environment: environment },
-            label: 'Avg Duration (ms)',
-            color: cloudwatch.Color.PURPLE
-          })
-        ],
-        leftYAxis: {
-          min: 0,
-          label: 'Milliseconds',
-          showUnits: false
-        },
-        legendPosition: cloudwatch.LegendPosition.BOTTOM
+        metricName: 'SSEStreamDuration',
+        statistic: cloudwatch.Stats.AVERAGE,
+        label: 'Avg Duration (ms)',
+        color: cloudwatch.Color.PURPLE,
+        axisLabel: 'Milliseconds'
       }),
-
-      // Throughput
-      new cloudwatch.GraphWidget({
+      this.createMetricWidget(namespace, environment, {
         title: 'SSE Throughput',
-        width: 8,
-        height: 6,
-        left: [
-          new cloudwatch.Metric({
-            namespace,
-            metricName: 'SSEEventsPerSecond',
-            statistic: cloudwatch.Stats.AVERAGE,
-            period: cdk.Duration.minutes(5),
-            dimensionsMap: { Environment: environment },
-            label: 'Events/Second',
-            color: cloudwatch.Color.BROWN
-          })
-        ],
-        leftYAxis: {
-          min: 0,
-          label: 'Events per Second',
-          showUnits: false
-        },
-        legendPosition: cloudwatch.LegendPosition.BOTTOM
+        metricName: 'SSEEventsPerSecond',
+        statistic: cloudwatch.Stats.AVERAGE,
+        label: 'Events/Second',
+        color: cloudwatch.Color.BROWN,
+        axisLabel: 'Events per Second'
       })
     )
 
@@ -352,5 +265,34 @@ Monitor Server-Sent Events streaming for field mismatches, parse errors, and unk
         ]
       })
     )
+  }
+
+  private createMetricWidget(
+    namespace: string,
+    environment: string,
+    config: SSEGraphWidgetConfig
+  ): cloudwatch.GraphWidget {
+    return new cloudwatch.GraphWidget({
+      title: config.title,
+      width: 8,
+      height: 6,
+      left: [
+        new cloudwatch.Metric({
+          namespace,
+          metricName: config.metricName,
+          statistic: config.statistic,
+          period: cdk.Duration.minutes(5),
+          dimensionsMap: { Environment: environment },
+          label: config.label,
+          color: config.color
+        })
+      ],
+      leftYAxis: {
+        min: 0,
+        label: config.axisLabel,
+        showUnits: false
+      },
+      legendPosition: cloudwatch.LegendPosition.BOTTOM
+    })
   }
 }

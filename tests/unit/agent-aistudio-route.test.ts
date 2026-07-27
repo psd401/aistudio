@@ -93,7 +93,7 @@ afterAll(() => {
   }
 })
 
-describe("POST /api/agent/aistudio", () => {
+function definePOSTApiAgentAistudioSuite1Part1() {
   it("rejects missing context and model-supplied owner selectors", async () => {
     context = null
     expect(
@@ -183,7 +183,9 @@ describe("POST /api/agent/aistudio", () => {
     expect(JSON.stringify(payload)).not.toContain("owner-refresh-token")
   })
 
-  it("refreshes and persists a rotating OAuth grant before using it", async () => {
+  }
+
+function definePOSTApiAgentAistudioSuite1Part2() {it("refreshes and persists a rotating OAuth grant before using it", async () => {
     getSecretJsonMock.mockResolvedValue({
       access_token: "expired-oauth-token",
       refresh_token: "old-refresh-token",
@@ -291,4 +293,11 @@ describe("POST /api/agent/aistudio", () => {
     expect(response.status).toBe(400)
     expect(getSecretStringMock).not.toHaveBeenCalled()
   })
-})
+}
+
+const definePOSTApiAgentAistudioSuite1 = () => {
+  definePOSTApiAgentAistudioSuite1Part1()
+  definePOSTApiAgentAistudioSuite1Part2()
+};
+
+describe("POST /api/agent/aistudio", definePOSTApiAgentAistudioSuite1)

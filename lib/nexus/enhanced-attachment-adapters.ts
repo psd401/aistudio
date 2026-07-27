@@ -145,7 +145,7 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
       name: this.sanitizeFileName(file.name),
       contentType: file.type,
       file,
-      status: { 
+      status: {
         type: "running",
         reason: "uploading",
         progress: 0
@@ -155,7 +155,7 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
     // Start background processing immediately
     if (this.callbacks?.onProcessingStart) {
       this.callbacks.onProcessingStart(attachment.id);
-      
+
       // Start processing in background and cache the result
       const processingPromise = this.processServerSide(attachment)
         .then(result => {
@@ -249,7 +249,7 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
       // first; legacy processing remains available solely as a rollback.
       const uploadResult = await this.uploadViaServer(attachment);
       const processedContent = await this.pollForResults(uploadResult.jobId, attachment.name);
-      
+
       // Step 5: Return in assistant-ui format
       return {
         id: attachment.id,
@@ -337,7 +337,7 @@ Please try re-uploading. If the issue persists, contact support.`
         fileName: attachment.name,
         error: networkError instanceof Error ? networkError.message : String(networkError),
       });
-      throw new Error('Network error during upload - check your connection and try again');
+      throw new Error('Network error during upload - check your connection and try again', { cause: networkError });
     }
 
     if (!response.ok) {
@@ -610,8 +610,8 @@ Please try re-uploading. If the issue persists, contact support.`
 
   private static findByteSequence(haystack: Uint8Array, needle: number[]): number {
     outer: for (let i = 0; i <= haystack.length - needle.length; i++) {
-      for (let j = 0; j < needle.length; j++) {
-        if (haystack[i + j] !== needle[j]) continue outer;
+      for (const [j, element] of needle.entries()) {
+        if (haystack[i + j] !== element) continue outer;
       }
       return i;
     }
@@ -630,7 +630,7 @@ Please try re-uploading. If the issue persists, contact support.`
  */
 export class VisionImageAdapter implements AttachmentAdapter {
   accept = "image/jpeg,image/png,image/webp,image/gif";
-  
+
   private callbacks?: AttachmentProcessingCallbacks;
   private readonly options: NexusAttachmentAdapterOptions;
 
@@ -670,7 +670,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
       name: this.sanitizeFileName(file.name),
       contentType: file.type,
       file,
-      status: { 
+      status: {
         type: "running",
         reason: "uploading",
         progress: 0
@@ -723,7 +723,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
     };
   }
 
-   
+
   async remove(_attachment: PendingAttachment): Promise<void> {
     // Cleanup if needed (e.g., revoke object URLs if you created any)
   }
@@ -747,7 +747,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
       const header = Array.from(bytes)
         .map(byte => byte.toString(16).padStart(2, '0'))
         .join('');
-      
+
       // Check magic bytes for common image formats
       const imageHeaders = {
         '89504e47': 'image/png',
@@ -757,7 +757,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
         '47494638': 'image/gif',
         '52494646': 'image/webp', // Actually checks for RIFF, need to check WEBP after
       };
-      
+
       return Object.keys(imageHeaders).some(h => header.startsWith(h.toLowerCase()));
     } catch {
       return false;

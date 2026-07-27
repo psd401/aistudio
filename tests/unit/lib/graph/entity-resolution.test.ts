@@ -23,7 +23,8 @@ const mockGenerateEmbedding = generateGraphEmbedding as jest.MockedFunction<
   typeof generateGraphEmbedding
 >
 
-const fakeVector = () => new Array(GRAPH_EMBEDDING_DIMENSIONS).fill(0.01)
+const fakeVector = () =>
+  Array.from({ length: GRAPH_EMBEDDING_DIMENSIONS }, () => 0.01)
 
 function personNode(overrides: Partial<ResolvableNode> = {}): ResolvableNode {
   return { tempId: "p1", name: "Technology Committee", nodeType: "person", ...overrides }

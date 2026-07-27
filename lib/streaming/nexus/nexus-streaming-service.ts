@@ -4,7 +4,7 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import type { StreamRequest, StreamResponse, StreamingProgress, ProviderCapabilities, TelemetryConfig } from '@/lib/streaming/types';
 import { ConversationStateManager } from './conversation-state-manager';
 import { MultiProviderOrchestrator } from './multi-provider-orchestrator';
-import { ResponseCacheService } from './response-cache-service';
+import { ResponseCacheService, type CacheResult } from './response-cache-service';
 import { CostOptimizer } from './cost-optimizer';
 
 const log = createLogger({ module: 'nexus-streaming-service' });
@@ -85,6 +85,41 @@ export interface NexusStreamResponse extends StreamResponse {
     codeExecution?: boolean;
     responsesAPI?: boolean;
   };
+}
+
+function toCacheMessages(messages: NexusStreamRequest["messages"]) {
+  return messages.map((message) => {
+    let content = '';
+    if ('parts' in message && message.parts) {
+      content = message.parts
+        .map((part) => ('text' in part && part.text ? part.text : ''))
+        .join('');
+    } else if ('content' in message && typeof message.content === 'string') {
+      content = message.content;
+    }
+    return { role: message.role, content };
+  });
+}
+
+function nexusModelOptions(request: NexusStreamRequest) {
+  return {
+    conversationId: request.conversationId
+      ? String(request.conversationId)
+      : undefined,
+    enableCaching: request.nexusOptions?.enableCaching,
+    enableOptimizations: request.nexusOptions?.enableOptimizations,
+    useResponsesAPI: request.nexusOptions?.useResponsesAPI,
+    enablePromptCache: request.nexusOptions?.enablePromptCache,
+    enableContextCache: request.nexusOptions?.enableContextCache,
+    reasoningEffort: request.options?.reasoningEffort,
+    responseMode: request.options?.responseMode,
+    backgroundMode: request.options?.backgroundMode,
+    thinkingBudget: request.options?.thinkingBudget
+  };
+}
+
+function usageTotalTokens(usage: { totalTokens?: number } | undefined): number {
+  return usage?.totalTokens || 0;
 }
 
 /**
@@ -282,70 +317,23 @@ export class NexusStreamingService extends UnifiedStreamingService {
     });
     
     // Convert UIMessage to cache format
-    const cacheMessages = request.messages.map(msg => {
-      let content = '';
-      if ('parts' in msg && msg.parts) {
-        content = msg.parts.map(p => {
-          if ('text' in p && p.text) {
-            return p.text;
-          }
-          return '';
-        }).join('');
-      } else if ('content' in msg && typeof msg.content === 'string') {
-        content = msg.content;
-      }
-      return {
-        role: msg.role,
-        content
-      };
-    });
+    const cacheMessages = toCacheMessages(request.messages);
     
     // Check cache first
-    let cacheResult = null;
-    if (request.nexusOptions?.enableCaching !== false) {
-      cacheResult = await this.responseCacheService.checkCache({
-        provider: request.provider,
-        modelId: request.modelId,
-        messages: cacheMessages,
-        conversationId: request.conversationId ? String(request.conversationId) : undefined,
-        userId: request.userId
-      });
-      
-      if (cacheResult?.hit && cacheResult.response) {
-        log.info('Cache hit found', {
-          requestId,
-          cacheKey: cacheResult.key,
-          tokensSaved: cacheResult.tokensSaved
-        });
-        
-        // Return cached response - cast to required type since we've checked response exists
-        return this.buildCachedResponse({
-          response: cacheResult.response,
-          key: cacheResult.key || '',
-          tokensSaved: cacheResult.tokensSaved || 0,
-          costSaved: cacheResult.costSaved || 0,
-          provider: cacheResult.provider || request.provider,
-          capabilities: cacheResult.capabilities
-        }, requestId, timer, startTime);
-      }
-    }
+    const { cacheResult, cachedResponse } = await this.resolveCachedResponse(
+      request,
+      cacheMessages,
+      requestId,
+      timer,
+      startTime
+    );
+    if (cachedResponse) return cachedResponse;
     
     // Get enhanced model
     const nexusModel = await nexusProviderFactory.createNexusModel(
       request.provider,
       request.modelId,
-      {
-        conversationId: request.conversationId ? String(request.conversationId) : undefined,
-        enableCaching: request.nexusOptions?.enableCaching,
-        enableOptimizations: request.nexusOptions?.enableOptimizations,
-        useResponsesAPI: request.nexusOptions?.useResponsesAPI,
-        enablePromptCache: request.nexusOptions?.enablePromptCache,
-        enableContextCache: request.nexusOptions?.enableContextCache,
-        reasoningEffort: request.options?.reasoningEffort,
-        responseMode: request.options?.responseMode,
-        backgroundMode: request.options?.backgroundMode,
-        thinkingBudget: request.options?.thinkingBudget
-      }
+      nexusModelOptions(request)
     );
     
     // Enhance the base stream request
@@ -379,8 +367,9 @@ export class NexusStreamingService extends UnifiedStreamingService {
     // Calculate costs and metrics
     const endTime = Date.now();
     const usage = await baseResponse.result.usage;
+    const totalTokens = usageTotalTokens(usage);
     const costEstimate = nexusModel.estimateCost?.(
-      usage?.totalTokens || 0
+      totalTokens
     ) || 0;
     
     // Cache the response if enabled
@@ -403,7 +392,7 @@ export class NexusStreamingService extends UnifiedStreamingService {
       costBreakdown: [{
         provider: request.provider,
         cost: costEstimate,
-        tokens: usage?.totalTokens || 0,
+        tokens: totalTokens,
         cacheHitRate: 0 // No cache hit for this request
       }],
       performanceMetrics: {
@@ -430,7 +419,7 @@ export class NexusStreamingService extends UnifiedStreamingService {
     timer({ 
       status: 'success',
       provider: request.provider,
-      tokensUsed: usage?.totalTokens || 0,
+      tokensUsed: totalTokens,
       cost: costEstimate
     });
     
@@ -443,6 +432,48 @@ export class NexusStreamingService extends UnifiedStreamingService {
     });
     
     return response;
+  }
+
+  private async resolveCachedResponse(
+    request: NexusStreamRequest,
+    messages: ReturnType<typeof toCacheMessages>,
+    requestId: string,
+    timer: (metadata?: Record<string, unknown>) => void,
+    startTime: number
+  ): Promise<{
+    cacheResult: CacheResult | null;
+    cachedResponse?: NexusStreamResponse;
+  }> {
+    if (request.nexusOptions?.enableCaching === false) {
+      return { cacheResult: null };
+    }
+    const cacheResult = await this.responseCacheService.checkCache({
+      provider: request.provider,
+      modelId: request.modelId,
+      messages,
+      conversationId: request.conversationId
+        ? String(request.conversationId)
+        : undefined,
+      userId: request.userId
+    });
+    if (!cacheResult.hit || !cacheResult.response) return { cacheResult };
+
+    log.info('Cache hit found', {
+      requestId,
+      cacheKey: cacheResult.key,
+      tokensSaved: cacheResult.tokensSaved
+    });
+    return {
+      cacheResult,
+      cachedResponse: this.buildCachedResponse({
+        response: cacheResult.response,
+        key: cacheResult.key || '',
+        tokensSaved: cacheResult.tokensSaved || 0,
+        costSaved: cacheResult.costSaved || 0,
+        provider: cacheResult.provider || request.provider,
+        capabilities: cacheResult.capabilities
+      }, requestId, timer, startTime)
+    };
   }
   
   /**

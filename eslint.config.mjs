@@ -6,11 +6,17 @@ import securityPlugin from "eslint-plugin-security";
 import jsxA11yPlugin from "eslint-plugin-jsx-a11y";
 import reactPerfPlugin from "eslint-plugin-react-perf";
 import unicornPlugin from "eslint-plugin-unicorn";
+import globals from "globals";
 import loggingPlugin from "./eslint-plugin-logging/index.js";
 
 /**
- * ESLint Configuration for AI Studio (ESLint 9 Flat Config)
- * Phase 4: Enhanced Linting Rules (Issue #460)
+ * ESLint Configuration for AI Studio (ESLint 10 Flat Config)
+ *
+ * `eslint .` covers canonical first-party JavaScript and TypeScript, including
+ * application code, tests, scripts, infrastructure, packages, and root
+ * configuration/runtime files. The global ignore list is intentionally limited
+ * to generated output, vendored dependencies, caches, declarations, and
+ * tool-managed duplicate worktrees.
  *
  * LOGGING ENFORCEMENT:
  * - NO console.log/error/warn in server code (actions/, app/api/)
@@ -49,54 +55,117 @@ import loggingPlugin from "./eslint-plugin-logging/index.js";
  */
 
 export default [
-  // Ignore build outputs and generated files
+  // Generated output, vendored dependencies, caches, declarations, and
+  // tool-managed duplicate checkouts. Canonical source must not be added here.
   {
     ignores: [
-      ".next/**",
-      // e2e-local.sh builds into .next-e2e (E2E_PORT=3100 server, PR #1168) —
-      // generated output, same class as .next
-      ".next-e2e/**",
+      ".next*/**",
       "out/**",
       "build/**",
-      "dist/**",
-      "node_modules/**",
+      "**/dist/**",
+      "**/node_modules/**",
+      "coverage/**",
+      "test-results/**",
+      "playwright-report/**",
+      ".playwright-mcp/**",
+      "infra/cdk.out/**",
+      "infra/.cdk.staging/**",
+      // `infra/tsconfig.json` emits beside source. These paths are compiled
+      // counterparts of linted TypeScript and are never canonical inputs.
+      "infra/bin/**/*.js",
+      "infra/lib/**/*.js",
+      "infra/test/**/*.js",
+      "infra/scripts/audit-iam-policies.js",
+      "infra/scripts/secrets-migration/migrate-to-secrets-manager.js",
+      "infra/lambdas/shared/iso-week.js",
+      ".claude/worktrees/**",
       "next-env.d.ts",
-      "**/*.config.js",
-      "**/*.config.mjs",
-      "**/*.config.ts",
-      ".jest/**",
-      "jest.*.js",
-      "**/*.test.ts",
-      "**/*.test.tsx",
-      "**/*.spec.ts",
-      "**/*.spec.tsx",
-      ".eslintrc.custom.js",
-      "eslint-plugin-logging/**",
-      // Infrastructure - all files (CommonJS, CDK artifacts, build outputs)
-      "infra/**",
-      // TypeScript declaration files
       "**/*.d.ts",
-      // Jest setup and mocks (CommonJS)
-      "jest.setup.js",
-      "**/__mocks__/**",
-      "tests/mocks/**",
-      // Test scripts
-      "test-*.js",
-      // Package dist folders
-      "packages/**/dist/**",
+      "**/*.d.mts",
+      "**/*.d.cts",
     ],
   },
 
   // Base ESLint recommended rules
   js.configs.recommended,
 
-  // ESLint 10 promoted these to recommended-as-error. Keep them visible as warnings
-  // (consistent with this repo's 0-errors / warnings-tolerated lint policy) instead of
-  // blocking the ESLint 10 upgrade on 43 pre-existing call sites. Revisit to fix properly.
+  // ESLint 10 promoted these rules to recommended. They remain warnings so the
+  // diagnostics retain their intended category; --max-warnings 0 makes either
+  // severity release-blocking.
   {
     rules: {
       "preserve-caught-error": "warn",
       "no-useless-assignment": "warn",
+    },
+  },
+
+  // Node.js ESM/TypeScript entry points and support code.
+  {
+    files: [
+      "*.{config,setup}.{js,mjs,cjs,ts,mts,cts}",
+      "jest.*.js",
+      "scripts/**/*.{js,mjs,cjs,ts,mts,cts}",
+      "tests/**/*.{js,mjs,cjs,ts,mts,cts}",
+      "infra/**/*.{js,mjs,cjs,ts,mts,cts}",
+      "eslint-plugin-logging/**/*.js",
+      ".jest/**/*.js",
+      "packages/*/src/**/*.{js,mjs,cjs,ts,mts,cts}",
+      "auth.ts",
+      "instrumentation.ts",
+      "middleware.ts",
+      "server.ts",
+      "voice-server.js",
+    ],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
+
+  // CommonJS runtimes: standalone server/build code, Lambda handlers, agent
+  // skills, Jest support, and the repository-local ESLint plugin.
+  {
+    files: [
+      "**/*.cjs",
+      ".jest/**/*.js",
+      "**/__mocks__/**/*.js",
+      "eslint-plugin-logging/**/*.js",
+      "infra/**/*.js",
+      "jest.*.js",
+      "jest.setup.js",
+      "tests/**/*.js",
+      "voice-server.js",
+    ],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+        ...globals.commonjs,
+      },
+      sourceType: "commonjs",
+    },
+  },
+
+  // Jest test globals apply only to test and mock code.
+  {
+    files: [
+      "**/*.{test,spec}.{js,jsx,mjs,cjs,ts,tsx,mts,cts}",
+      "**/__mocks__/**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}",
+      "tests/**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}",
+      "jest.setup.js",
+    ],
+    languageOptions: {
+      globals: globals.jest,
+    },
+  },
+
+  // AudioWorkletGlobalScope is not included in the `globals` package.
+  {
+    files: ["public/audio-worklet-processor.js"],
+    languageOptions: {
+      globals: {
+        AudioWorkletProcessor: "readonly",
+        registerProcessor: "readonly",
+        sampleRate: "readonly",
+      },
     },
   },
 
@@ -299,7 +368,12 @@ export default [
   {
     rules: {
       "no-console": "error",
-      "@typescript-eslint/no-explicit-any": "error",
+      "@typescript-eslint/no-explicit-any": [
+        "error",
+        {
+          fixToUnknown: true,
+        },
+      ],
       "@typescript-eslint/no-unused-vars": [
         "error",
         {
@@ -355,48 +429,52 @@ export default [
     },
   },
 
-  // Rule 5: Allow console in test/performance files
+  // Rule 5: Console is the native logging interface for tests, command-line
+  // utilities, build scripts, Lambda handlers, and standalone agent skills.
+  // These runtimes cannot import the Next.js logger alias.
   {
     files: [
       "tests/**/*.ts",
       "tests/**/*.tsx",
+      "tests/**/*.js",
+      "infra/**/*.{js,ts}",
       "scripts/**/*.ts",
       "scripts/**/*.mjs",
+      "scripts/**/*.js",
     ],
     rules: {
       "no-console": "off",
     },
   },
 
-  // Rule 6: Relaxed rules for build/utility scripts (dynamic paths, complexity inherent)
+  // These overrides must follow typescript-eslint's presets so its generic
+  // module-style rule does not reject real CommonJS or Jest module isolation.
   {
-    files: ["scripts/**/*.ts", "scripts/**/*.mjs"],
+    files: [
+      "**/*.cjs",
+      ".jest/**/*.js",
+      "**/__mocks__/**/*.js",
+      "eslint-plugin-logging/**/*.js",
+      "infra/**/*.js",
+      "jest.*.js",
+      "jest.setup.js",
+      "tests/**/*.js",
+      "voice-server.js",
+    ],
     rules: {
-      "security/detect-non-literal-fs-filename": "off",
-      "max-depth": "off",
-      "complexity": "off",
-      "max-lines-per-function": "off",
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
+  {
+    files: [
+      "**/*.{test,spec}.{js,jsx,mjs,cjs,ts,tsx,mts,cts}",
+      "**/__mocks__/**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}",
+      "tests/**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}",
+      "jest.setup.js",
+    ],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
     },
   },
 
-  // Rule 6b: Node.js globals for ESM build scripts (console, process, etc.)
-  {
-    files: ["scripts/**/*.mjs"],
-    languageOptions: {
-      globals: {
-        console: "readonly",
-        process: "readonly",
-      },
-    },
-  },
-
-  // Rule 7: Relaxed complexity rules for test files
-  {
-    files: ["tests/**/*.ts"],
-    rules: {
-      "max-depth": "off",
-      "complexity": "off",
-      "max-lines-per-function": "off",
-    },
-  },
 ];

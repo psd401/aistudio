@@ -11,6 +11,17 @@ import { createLogger } from "@/lib/logger"
 
 const log = createLogger({ module: "canva-api-client" })
 
+function retryDelayMs(retryAfter: string | null, attempt: number): number {
+  const defaultDelay = INITIAL_BACKOFF_MS * Math.pow(2, attempt)
+  if (!retryAfter) return defaultDelay
+
+  const seconds = parseInt(retryAfter, 10)
+  if (!Number.isNaN(seconds)) return seconds * 1000
+
+  const dateMs = Date.parse(retryAfter)
+  return Number.isNaN(dateMs) ? defaultDelay : Math.max(0, dateMs - Date.now())
+}
+
 const BASE_URL = "https://api.canva.com/rest"
 const MAX_RETRIES = 3
 const INITIAL_BACKOFF_MS = 1000
@@ -122,6 +133,45 @@ export class CanvaApiClient {
   /**
    * Core request method with retry logic for 429 rate limits.
    */
+  private async handleRateLimit(
+    response: Response,
+    attempt: number,
+    url: string
+  ): Promise<CanvaApiClientError> {
+    const error = new CanvaApiClientError(
+      `Canva API rate limited (HTTP 429) after ${attempt + 1} attempt(s)`,
+      429,
+      "RATE_LIMITED"
+    )
+    const waitMs = retryDelayMs(response.headers.get("Retry-After"), attempt)
+    log.warn("Canva API rate limited", {
+      url,
+      attempt: attempt + 1,
+      waitMs,
+    })
+    if (attempt < MAX_RETRIES - 1) await sleep(waitMs)
+    return error
+  }
+
+  private async parseResponse<T>(response: Response): Promise<T> {
+    if (!response.ok) {
+      let errorBody: CanvaApiError | undefined
+      try {
+        errorBody = (await response.json()) as CanvaApiError
+      } catch {
+        // Response body may not be JSON
+      }
+      throw new CanvaApiClientError(
+        errorBody?.message ?? `Canva API error: HTTP ${response.status}`,
+        response.status,
+        errorBody?.code ?? `HTTP_${response.status}`
+      )
+    }
+    return response.status === 204
+      ? undefined as T
+      : (await response.json()) as T
+  }
+
   private async request<T>(
     method: string,
     url: string,
@@ -144,70 +194,11 @@ export class CanvaApiClient {
         })
 
         if (resp.status === 429) {
-          // Materialize the rate-limit as lastError so an all-429 run throws a
-          // 429-typed error rather than the generic "failed after retries" — the
-          // 429 branch continues without ever entering the catch that sets
-          // lastError, so without this the caller loses all rate-limit context
-          // (REV-COR-627).
-          lastError = new CanvaApiClientError(
-            `Canva API rate limited (HTTP 429) after ${attempt + 1} attempt(s)`,
-            429,
-            "RATE_LIMITED"
-          )
-
-          // Retry-After is seconds-delta per RFC 7231, but proxies/gateways may send
-          // an HTTP-date instead; parseInt alone yields NaN for a date and collapses
-          // waitMs to 0, causing an immediate retry with no backoff.
-          const retryAfter = resp.headers.get("Retry-After")
-          let waitMs = INITIAL_BACKOFF_MS * Math.pow(2, attempt)
-          if (retryAfter) {
-            const seconds = parseInt(retryAfter, 10)
-            if (!Number.isNaN(seconds)) {
-              waitMs = seconds * 1000
-            } else {
-              const dateMs = Date.parse(retryAfter)
-              if (!Number.isNaN(dateMs)) {
-                waitMs = Math.max(0, dateMs - Date.now())
-              }
-            }
-          }
-
-          log.warn("Canva API rate limited", {
-            url,
-            attempt: attempt + 1,
-            waitMs,
-          })
-
-          // Skip the backoff on the terminal attempt — the loop is about to exit
-          // and throw the recorded 429 error, so sleeping first only adds latency
-          // to a call that has already failed (REV-COR-627).
-          if (attempt < MAX_RETRIES - 1) {
-            await sleep(waitMs)
-          }
+          lastError = await this.handleRateLimit(resp, attempt, url)
           continue
         }
 
-        if (!resp.ok) {
-          let errorBody: CanvaApiError | undefined
-          try {
-            errorBody = (await resp.json()) as CanvaApiError
-          } catch {
-            // Response body may not be JSON
-          }
-
-          throw new CanvaApiClientError(
-            errorBody?.message ?? `Canva API error: HTTP ${resp.status}`,
-            resp.status,
-            errorBody?.code ?? `HTTP_${resp.status}`
-          )
-        }
-
-        // Handle 204 No Content
-        if (resp.status === 204) {
-          return undefined as T
-        }
-
-        return (await resp.json()) as T
+        return this.parseResponse<T>(resp)
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err))
 

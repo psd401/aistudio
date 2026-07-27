@@ -5,11 +5,12 @@
  * its duplicated setting names and deterministic invocation ARN from drifting.
  */
 
-import fs from "node:fs";
+
 import path from "node:path";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 function source(relativePath: string): string {
-  return fs.readFileSync(path.join(process.cwd(), relativePath), "utf8");
+  return validatedFs.readFileSync(path.join(process.cwd(), relativePath), "utf8");
 }
 
 describe("OneRoster sync cross-bundle contracts", () => {

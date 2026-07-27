@@ -10,7 +10,7 @@ import { sanitizeTextWithMetrics } from "@/lib/utils/text-sanitizer"
 
 /**
  * Document processing utility functions
- * 
+ *
  * These functions handle extracting text from different document types.
  * Currently supported: PDF, DOCX, TXT (PPT support planned for future)
  */
@@ -82,7 +82,7 @@ export async function extractTextFromDOCX(buffer: Buffer): Promise<{ text: strin
     };
   } catch (error) {
     logger.error('Error extracting text from DOCX', { error })
-    throw new Error('Failed to extract text from DOCX');
+    throw new Error('Failed to extract text from DOCX', { cause: error });
   }
 }
 
@@ -115,7 +115,7 @@ export async function extractTextFromTXT(buffer: Buffer): Promise<{ text: string
     };
   } catch (error) {
     logger.error('Error extracting text from TXT', { error })
-    throw new Error('Failed to extract text from TXT');
+    throw new Error('Failed to extract text from TXT', { cause: error });
   }
 }
 
@@ -123,7 +123,7 @@ export async function extractTextFromTXT(buffer: Buffer): Promise<{ text: string
  * Extract text from a document based on its type
  */
 export async function extractTextFromDocument(
-  buffer: Buffer, 
+  buffer: Buffer,
   fileType: string
 ): Promise<{ text: string, metadata: Record<string, unknown> }> {
   switch (fileType.toLowerCase()) {
@@ -164,12 +164,13 @@ export function chunkText(text: string, maxChunkSize: number = 1000): string[] {
           chunks.push(currentChunk.trim());
           currentChunk = '';
         }
-        
+
         // Handle case where a single sentence is longer than max chunk size
         if (sentence.length > maxChunkSize) {
           // Split long sentence by words to fit within chunk size
           const words = sentence.split(' ');
-          for (const word of words) {
+          const handleNestedBranch1 = () => {
+            for (const word of words) {
             if (currentChunk.length + word.length + 1 > maxChunkSize) {
               chunks.push(currentChunk.trim());
               currentChunk = word + ' ';
@@ -177,6 +178,8 @@ export function chunkText(text: string, maxChunkSize: number = 1000): string[] {
               currentChunk += word + ' ';
             }
           }
+          }
+          handleNestedBranch1()
         } else {
           currentChunk += sentence + ' ';
         }
@@ -199,7 +202,7 @@ export function chunkText(text: string, maxChunkSize: number = 1000): string[] {
  */
 export function getFileTypeFromFileName(fileName: string): string {
   const extension = fileName.split('.').pop()?.toLowerCase() || '';
-  
+
   switch (extension) {
     case 'pdf':
       return 'pdf';

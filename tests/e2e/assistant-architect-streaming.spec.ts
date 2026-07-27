@@ -43,7 +43,7 @@ test.describe('Assistant Architect Streaming API', () => {
       for (let i = 0; i < inputCount; i++) {
         try {
           await inputFields.nth(i).fill('Test streaming execution')
-        } catch (error) {
+        } catch {
           // Continue if field interaction fails
         }
       }
@@ -98,12 +98,15 @@ test.describe('Assistant Architect Streaming API', () => {
 
             // Should show validation error
             const errorMessages = page.locator('[data-testid="error-message"], .error, .validation-error')
-            if (await errorMessages.count() > 0) {
+            const handleNestedBranch1 = async () => {
+              if (await errorMessages.count() > 0) {
               const errorText = await errorMessages.first().textContent()
               expect(errorText?.toLowerCase()).toMatch(/limit|size|too large|maximum/i)
             }
+            }
+            await handleNestedBranch1()
           }
-        } catch (error) {
+        } catch {
           // Input may be rejected by browser limits
           console.log('Large input test handled with browser limitations')
         }
@@ -149,151 +152,6 @@ test.describe('Assistant Architect Streaming API', () => {
     }
   })
 
-  test.skip('should handle streaming errors gracefully', async ({ page }) => {
-    const architectCards = page.locator('[data-testid="assistant-architect-card"]')
-
-    if (await architectCards.count() > 0) {
-      await architectCards.nth(0).click()
-      await page.waitForTimeout(2000)
-
-      // Mock API to return error during streaming
-      await page.route('**/api/assistant-architect/execute', async (route) => {
-        const stream = new ReadableStream({
-          start(controller) {
-            // Send start event
-            controller.enqueue(new TextEncoder().encode('data: {"type":"start"}\n\n'))
-
-            // Send a text delta
-            controller.enqueue(new TextEncoder().encode('data: {"type":"text-delta","delta":"Starting execution..."}\n\n'))
-
-            // Send error event
-            controller.enqueue(new TextEncoder().encode('data: {"type":"error","error":"Simulated streaming error","code":"TEST_ERROR"}\n\n'))
-
-            controller.close()
-          }
-        })
-
-        await route.fulfill({
-          status: 200,
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive'
-          },
-          // body: stream // Not supported in Playwright route.fulfill
-        })
-      })
-
-      const inputFields = page.locator('input[type="text"], textarea')
-      const inputCount = await inputFields.count()
-
-      for (let i = 0; i < inputCount; i++) {
-        try {
-          await inputFields.nth(i).fill('Test error handling')
-        } catch (error) {
-          // Continue if field interaction fails
-        }
-      }
-
-      const executeButton = page.locator('[data-testid="execute-button"], button:has-text("Execute"), button:has-text("Run"), button[type="submit"]')
-      if (await executeButton.count() > 0) {
-        await executeButton.first().click()
-
-        // Wait for error to be displayed
-        await page.waitForTimeout(3000)
-
-        // Should show error message
-        const errorMessages = page.locator('[data-testid="error-message"], .error, [role="alert"]')
-        if (await errorMessages.count() > 0) {
-          const errorText = await errorMessages.first().textContent()
-          expect(errorText?.toLowerCase()).toMatch(/error|failed|problem/i)
-        }
-
-        // Execute button should be re-enabled after error
-        await expect(executeButton.first()).not.toBeDisabled({ timeout: 5000 })
-      }
-    } else {
-      test.skip(true, 'No assistant architects available for testing')
-    }
-  })
-
-  test.skip('should display text as it streams (progressive rendering)', async ({ page }) => {
-    const architectCards = page.locator('[data-testid="assistant-architect-card"]')
-
-    if (await architectCards.count() > 0) {
-      await architectCards.nth(0).click()
-      await page.waitForTimeout(2000)
-
-      // Mock API to return streaming response with delays
-      await page.route('**/api/assistant-architect/execute', async (route) => {
-        const stream = new ReadableStream({
-          async start(controller) {
-            const events = [
-              'data: {"type":"start"}\n\n',
-              'data: {"type":"text-start","id":"text-1"}\n\n',
-              'data: {"type":"text-delta","delta":"First "}\n\n',
-              'data: {"type":"text-delta","delta":"chunk "}\n\n',
-              'data: {"type":"text-delta","delta":"of "}\n\n',
-              'data: {"type":"text-delta","delta":"text"}\n\n',
-              'data: {"type":"text-end","id":"text-1"}\n\n',
-              'data: {"type":"finish"}\n\n'
-            ]
-
-            for (const event of events) {
-              controller.enqueue(new TextEncoder().encode(event))
-              await new Promise(resolve => setTimeout(resolve, 100))
-            }
-
-            controller.close()
-          }
-        })
-
-        await route.fulfill({
-          status: 200,
-          headers: {
-            'Content-Type': 'text/event-stream'
-          },
-          // body: stream // Not supported in Playwright route.fulfill
-        })
-      })
-
-      const inputFields = page.locator('input[type="text"], textarea')
-      const inputCount = await inputFields.count()
-
-      for (let i = 0; i < inputCount; i++) {
-        try {
-          await inputFields.nth(i).fill('Test progressive rendering')
-        } catch (error) {
-          // Continue if field interaction fails
-        }
-      }
-
-      const executeButton = page.locator('[data-testid="execute-button"], button:has-text("Execute"), button:has-text("Run"), button[type="submit"]')
-      if (await executeButton.count() > 0) {
-        await executeButton.first().click()
-
-        // Wait a bit for streaming to start
-        await page.waitForTimeout(300)
-
-        // Should show partial content during streaming
-        const messageContent = page.locator('[data-testid="assistant-message"], .message-content, .streaming-content')
-
-        // Wait for content to appear
-        await page.waitForTimeout(500)
-
-        // Should eventually contain the full text
-        await page.waitForTimeout(1500)
-
-        if (await messageContent.count() > 0) {
-          const finalText = await messageContent.first().textContent()
-          expect(finalText).toContain('text')
-        }
-      }
-    } else {
-      test.skip(true, 'No assistant architects available for testing')
-    }
-  })
-
   test('should handle follow-up conversations after execution', async ({ page }) => {
     const architectCards = page.locator('[data-testid="assistant-architect-card"]')
 
@@ -307,7 +165,7 @@ test.describe('Assistant Architect Streaming API', () => {
       for (let i = 0; i < inputCount; i++) {
         try {
           await inputFields.nth(i).fill('Initial execution')
-        } catch (error) {
+        } catch {
           // Continue if field interaction fails
         }
       }
@@ -335,73 +193,6 @@ test.describe('Assistant Architect Streaming API', () => {
             const messages = page.locator('[data-testid="assistant-message"], .message')
             expect(await messages.count()).toBeGreaterThan(0)
           }
-        }
-      }
-    } else {
-      test.skip(true, 'No assistant architects available for testing')
-    }
-  })
-
-  test.skip('should cancel streaming when requested', async ({ page }) => {
-    const architectCards = page.locator('[data-testid="assistant-architect-card"]')
-
-    if (await architectCards.count() > 0) {
-      await architectCards.nth(0).click()
-      await page.waitForTimeout(2000)
-
-      // Mock a long-running stream
-      await page.route('**/api/assistant-architect/execute', async (route) => {
-        const stream = new ReadableStream({
-          async start(controller) {
-            controller.enqueue(new TextEncoder().encode('data: {"type":"start"}\n\n'))
-            controller.enqueue(new TextEncoder().encode('data: {"type":"text-start","id":"text-1"}\n\n'))
-
-            // Send many deltas slowly to allow cancellation
-            for (let i = 0; i < 100; i++) {
-              controller.enqueue(new TextEncoder().encode(`data: {"type":"text-delta","delta":"Chunk ${i} "}\n\n`))
-              await new Promise(resolve => setTimeout(resolve, 100))
-            }
-
-            controller.close()
-          }
-        })
-
-        await route.fulfill({
-          status: 200,
-          headers: { 'Content-Type': 'text/event-stream' },
-          // body: stream // Not supported in Playwright route.fulfill
-        })
-      })
-
-      const inputFields = page.locator('input[type="text"], textarea')
-      const inputCount = await inputFields.count()
-
-      for (let i = 0; i < inputCount; i++) {
-        try {
-          await inputFields.nth(i).fill('Test cancellation')
-        } catch (error) {
-          // Continue if field interaction fails
-        }
-      }
-
-      const executeButton = page.locator('[data-testid="execute-button"], button:has-text("Execute"), button:has-text("Run"), button[type="submit"]')
-      if (await executeButton.count() > 0) {
-        await executeButton.first().click()
-
-        // Wait for streaming to start
-        await page.waitForTimeout(500)
-
-        // Look for cancel button
-        const cancelButton = page.locator('[data-testid="cancel-button"], button:has-text("Cancel"), button:has-text("Stop")')
-
-        if (await cancelButton.count() > 0 && await cancelButton.first().isVisible()) {
-          await cancelButton.first().click()
-
-          // Should stop streaming
-          await page.waitForTimeout(1000)
-
-          // Execute button should be re-enabled
-          await expect(executeButton.first()).not.toBeDisabled({ timeout: 5000 })
         }
       }
     } else {

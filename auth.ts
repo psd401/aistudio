@@ -1,6 +1,6 @@
 import NextAuth from "next-auth"
 import Cognito from "next-auth/providers/cognito"
-import type { NextAuthConfig } from "next-auth"
+import type { Account, NextAuthConfig, Profile, User } from "next-auth"
 import type { JWT } from "next-auth/jwt"
 import { refreshAccessToken, shouldRefreshToken } from "@/lib/auth/token-refresh-client"
 import { createLogger } from "@/lib/auth/edge-logger"
@@ -69,6 +69,168 @@ export function resolveSessionMaxAge(raw: string | undefined): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SESSION_MAX_AGE_SECONDS
 }
 
+type AuthLogger = ReturnType<typeof createLogger>
+
+function decodedIdToken(idToken: string): Record<string, unknown> {
+  const base64Payload = idToken.split(".")[1]
+  const payload = Buffer.from(base64Payload, "base64").toString("utf-8")
+  const decoded: unknown = JSON.parse(payload)
+  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
+    throw new TypeError("Cognito ID token payload must be an object")
+  }
+  return decoded as Record<string, unknown>
+}
+
+function stringClaim(
+  claims: Record<string, unknown>,
+  name: string
+): string | undefined {
+  const value = claims[name]
+  return typeof value === "string" ? value : undefined
+}
+
+function numberClaim(
+  claims: Record<string, unknown>,
+  name: string
+): number | undefined {
+  const value = claims[name]
+  return typeof value === "number" ? value : undefined
+}
+
+function fallbackInitialToken(
+  account: Account,
+  profile: Profile | undefined,
+  user: User | undefined
+): JWT {
+  const now = Date.now()
+  return {
+    sub: account.providerAccountId,
+    email: user?.email || profile?.email || undefined,
+    name: user?.name || profile?.name || undefined,
+    accessToken: account.access_token,
+    refreshToken: account.refresh_token,
+    idToken: account.id_token,
+    expiresAt: account.expires_at
+      ? account.expires_at * 1000
+      : now + 12 * 60 * 60 * 1000,
+    tokenLifetimeMs: 12 * 60 * 60 * 1000,
+    roleVersion: 0,
+  }
+}
+
+function initialCognitoToken(
+  account: Account,
+  profile: Profile | undefined,
+  user: User | undefined,
+  log: AuthLogger
+): JWT {
+  try {
+    const claims = decodedIdToken(account.id_token ?? "")
+    const issuedAt = numberClaim(claims, "iat")
+    const issuedAtMs = issuedAt ? issuedAt * 1000 : Date.now()
+    const expiresAt = account.expires_at
+      ? account.expires_at * 1000
+      : Date.now() + 12 * 60 * 60 * 1000
+    const email = stringClaim(claims, "email")
+    const token: JWT = {
+      sub: stringClaim(claims, "sub"),
+      email,
+      name:
+        stringClaim(claims, "name") ||
+        stringClaim(claims, "given_name") ||
+        stringClaim(claims, "preferred_username") ||
+        email,
+      given_name: stringClaim(claims, "given_name"),
+      family_name: stringClaim(claims, "family_name"),
+      preferred_username: stringClaim(claims, "preferred_username"),
+      accessToken: account.access_token,
+      refreshToken: account.refresh_token,
+      idToken: account.id_token,
+      expiresAt,
+      iat: issuedAt,
+      tokenLifetimeMs: expiresAt - issuedAtMs,
+      roleVersion: 0,
+    }
+    log.debug("Token lifetime information", {
+      issuedAt: new Date(issuedAtMs).toISOString(),
+      expiresAt: new Date(expiresAt).toISOString(),
+      tokenLifetimeHours: Math.round(
+        (expiresAt - issuedAtMs) / (1000 * 60 * 60)
+      ),
+      cognitoProvidedExpiry: Boolean(account.expires_at),
+    })
+    syncCognitoRefreshForAgentBackground(
+      token.email,
+      typeof token.refreshToken === "string"
+        ? token.refreshToken
+        : undefined
+    )
+    return token
+  } catch (error) {
+    log.warn("Failed to parse ID token, using fallback approach", {
+      error: error instanceof Error ? error.message : "Unknown error",
+    })
+    return fallbackInitialToken(account, profile, user)
+  }
+}
+
+async function refreshExistingJwt(
+  token: JWT,
+  log: AuthLogger
+): Promise<JWT | null> {
+  if (!token.expiresAt) {
+    log.warn("Token missing expiration time, allowing to continue")
+    return token
+  }
+  const expiresAt = token.expiresAt as number
+  const now = Date.now()
+  const isExpired = now > expiresAt
+  const isLongRunningOperation =
+    typeof global !== "undefined" &&
+    Boolean(
+      (global as { __POLLING_CONTEXT__?: boolean }).__POLLING_CONTEXT__
+    )
+  const shouldRefresh = shouldRefreshToken(token, {
+    isLongRunningOperation,
+    operationType: isLongRunningOperation ? "polling" : "normal",
+    estimatedDurationMs: isLongRunningOperation
+      ? 30 * 60 * 1000
+      : undefined,
+  })
+  if (!isExpired && !shouldRefresh) {
+    log.debug("Token is valid, no refresh needed")
+    return token
+  }
+  if (!token.refreshToken) {
+    log.warn("No refresh token available - forcing re-authentication")
+    return null
+  }
+  try {
+    const refreshedTokens = await refreshAccessToken(token)
+    if (!refreshedTokens) {
+      log.warn("Token refresh failed - forcing re-authentication")
+      return null
+    }
+    syncCognitoRefreshForAgentBackground(
+      typeof token.email === "string" ? token.email : undefined,
+      refreshedTokens.refreshToken
+    )
+    return {
+      ...token,
+      accessToken: refreshedTokens.accessToken,
+      idToken: refreshedTokens.idToken,
+      refreshToken: refreshedTokens.refreshToken,
+      expiresAt: refreshedTokens.expiresAt,
+      tokenLifetimeMs: token.tokenLifetimeMs,
+    }
+  } catch (error) {
+    log.error("Token refresh threw error - forcing re-authentication", {
+      error: error instanceof Error ? error.message : "Unknown error",
+    })
+    return null
+  }
+}
+
 export const authConfig: NextAuthConfig = {
   providers: [
     Cognito({
@@ -122,176 +284,10 @@ export const authConfig: NextAuthConfig = {
           hasIdToken: !!account.id_token,
           expiresAt: account.expires_at ? new Date(account.expires_at * 1000).toISOString() : 'unknown'
         })
-
-        try {
-          // SECURITY NOTE: This JWT parsing is safe here because the id_token comes directly
-          // from Cognito during the OAuth callback flow and has already been validated by NextAuth.
-          // The token signature has been verified by NextAuth before reaching this callback.
-          // DO NOT use this pattern for parsing JWTs from untrusted sources or user input.
-          // For untrusted JWTs, always use proper JWT verification libraries like 'jose'.
-          const base64Payload = account.id_token.split('.')[1];
-          const payload = Buffer.from(base64Payload, 'base64').toString('utf-8');
-          const decoded = JSON.parse(payload);
-
-        // Calculate token lifetime for accurate refresh timing
-        const issuedAt = decoded.iat ? decoded.iat * 1000 : Date.now()
-        const expiresAt = account.expires_at ? account.expires_at * 1000 : Date.now() + (12 * 60 * 60 * 1000) // 12 hours fallback
-        const tokenLifetimeMs = expiresAt - issuedAt
-
-        // Enhanced logging for token lifecycle debugging
-        log.debug("Token lifetime information", {
-          issuedAt: new Date(issuedAt).toISOString(),
-          expiresAt: new Date(expiresAt).toISOString(),
-          tokenLifetimeHours: Math.round(tokenLifetimeMs / (1000 * 60 * 60)),
-          cognitoProvidedExpiry: !!account.expires_at
-        })
-
-        const newToken: JWT = {
-          sub: decoded.sub,
-          email: decoded.email,
-          name: decoded.name || decoded.given_name || decoded.preferred_username || decoded.email,
-          given_name: decoded.given_name,
-          family_name: decoded.family_name,
-          preferred_username: decoded.preferred_username,
-          accessToken: account.access_token,
-          refreshToken: account.refresh_token,
-          idToken: account.id_token,
-          expiresAt: expiresAt,
-          iat: decoded.iat,
-          tokenLifetimeMs: tokenLifetimeMs, // Store calculated lifetime for accurate refresh timing
-          roleVersion: 0, // Initialize role version
-        };
-
-          log.info("Successfully created initial token", {
-            sub: newToken.sub,
-            email: newToken.email,
-            expiresAt: newToken.expiresAt ? new Date(newToken.expiresAt).toISOString() : 'unknown'
-          })
-
-          // Mirror the freshly-issued Cognito refresh token into Secrets
-          // Manager so the AgentCore agent (different environment) can
-          // authenticate as this user against the data MCP server. Best
-          // effort — see syncCognitoRefreshForAgentBackground above.
-          syncCognitoRefreshForAgentBackground(
-            typeof newToken.email === "string" ? newToken.email : undefined,
-            typeof newToken.refreshToken === "string" ? newToken.refreshToken : undefined,
-          )
-
-          return newToken
-        } catch (error) {
-          // Log error but don't fail authentication
-          // This handles malformed tokens gracefully
-          log.warn("Failed to parse ID token, using fallback approach", {
-            error: error instanceof Error ? error.message : 'Unknown error'
-          })
-
-          const now = Date.now()
-          const expiresAt = account.expires_at ? account.expires_at * 1000 : now + (12 * 60 * 60 * 1000) // 12 hours fallback
-          const tokenLifetimeMs = 12 * 60 * 60 * 1000 // 12 hours
-
-          const fallbackToken: JWT = {
-            sub: account.providerAccountId,
-            email: user?.email || profile?.email || undefined,
-            name: user?.name || profile?.name || undefined,
-            accessToken: account.access_token,
-            refreshToken: account.refresh_token,
-            idToken: account.id_token,
-            expiresAt: expiresAt,
-            tokenLifetimeMs: tokenLifetimeMs,
-            roleVersion: 0,
-          };
-
-          log.info("Created fallback token", {
-            sub: fallbackToken.sub,
-            email: fallbackToken.email
-          })
-
-          return fallbackToken
-        }
+        return initialCognitoToken(account, profile, user, log)
       }
 
-      // Existing session - check if token needs refresh
-      if (!token.expiresAt) {
-        log.warn("Token missing expiration time, allowing to continue")
-        return token
-      }
-
-      const expiresAt = token.expiresAt as number
-      const now = Date.now()
-      const isExpired = now > expiresAt
-
-      // Check if this is a long-running operation by examining request context
-      // TODO: Replace with AsyncLocalStorage for better request-scoped context
-      const isLongRunningOperation = (typeof global !== 'undefined' && (global as { __POLLING_CONTEXT__?: boolean }).__POLLING_CONTEXT__)
-
-      const shouldRefresh = shouldRefreshToken(token, {
-        isLongRunningOperation,
-        operationType: isLongRunningOperation ? 'polling' : 'normal',
-        estimatedDurationMs: isLongRunningOperation ? 30 * 60 * 1000 : undefined // 30 minutes
-      })
-
-      // Log token status for debugging
-      log.debug("Token status check", {
-        isExpired,
-        shouldRefresh,
-        timeUntilExpiryMinutes: Math.round((expiresAt - now) / (1000 * 60)),
-        expiresAt: new Date(expiresAt).toISOString()
-      })
-
-      // Attempt token refresh if expired or should be refreshed proactively
-      if (isExpired || shouldRefresh) {
-        log.info("Attempting token refresh", {
-          reason: isExpired ? 'expired' : 'proactive',
-          hasRefreshToken: !!token.refreshToken
-        })
-
-        if (!token.refreshToken) {
-          log.warn("No refresh token available - forcing re-authentication")
-          return null
-        }
-
-        try {
-          const refreshedTokens = await refreshAccessToken(token)
-
-          if (refreshedTokens) {
-            log.info("Token refresh successful", {
-              newExpiresAt: new Date(refreshedTokens.expiresAt).toISOString()
-            })
-
-            // Re-mirror the rotated refresh token to Secrets Manager so the
-            // agent's stored copy stays current. Best effort — see
-            // syncCognitoRefreshForAgentBackground above.
-            syncCognitoRefreshForAgentBackground(
-              typeof token.email === "string" ? token.email : undefined,
-              refreshedTokens.refreshToken,
-            )
-
-            // Return refreshed token with existing user data and preserve lifetime info
-            const tokenWithLifetime = token as JWT & { tokenLifetimeMs?: number }
-            return {
-              ...token,
-              accessToken: refreshedTokens.accessToken,
-              idToken: refreshedTokens.idToken,
-              refreshToken: refreshedTokens.refreshToken,
-              expiresAt: refreshedTokens.expiresAt,
-              // Preserve the original token lifetime for consistent refresh calculations
-              tokenLifetimeMs: tokenWithLifetime.tokenLifetimeMs
-            }
-          } else {
-            log.warn("Token refresh failed - forcing re-authentication")
-            return null
-          }
-        } catch (error) {
-          log.error("Token refresh threw error - forcing re-authentication", {
-            error: error instanceof Error ? error.message : 'Unknown error'
-          })
-          return null
-        }
-      }
-
-      // Token is still valid, return as-is
-      log.debug("Token is valid, no refresh needed")
-      return token;
+      return refreshExistingJwt(token, log)
     },
     async session({ session, token }) {
       const log = createLogger({

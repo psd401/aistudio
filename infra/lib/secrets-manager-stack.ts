@@ -2,8 +2,6 @@ import * as cdk from "aws-cdk-lib"
 import { Construct } from "constructs"
 import { IEnvironmentConfig } from "./constructs/config/environment-config"
 import {
-  ManagedSecret,
-  SecretType,
   ComplianceAuditor,
 } from "./constructs/security"
 import { SecretCacheLayer } from "./constructs/compute/secret-cache-layer"

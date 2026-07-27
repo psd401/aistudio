@@ -33,7 +33,7 @@ const emptyRules: TriageRules = {
   keywordRules: [],
 };
 
-describe("wildcardMatch", () => {
+const defineWildcardMatchSuite1 = () => {
   test("exact match", () => {
     expect(wildcardMatch("hi@example.com", "hi@example.com")).toBe(true);
   });
@@ -55,9 +55,11 @@ describe("wildcardMatch", () => {
     expect(wildcardMatch("", "a")).toBe(false);
     expect(wildcardMatch("a", "")).toBe(false);
   });
-});
+};
 
-describe("applyRules", () => {
+describe("wildcardMatch", defineWildcardMatchSuite1);
+
+const defineApplyRulesSuite2 = () => {
   test("undecided when no rules match", () => {
     const r = applyRules(makeFeatures(), emptyRules);
     expect(r).toEqual({ decided: false, reason: "no-rule-match" });
@@ -168,18 +170,16 @@ describe("applyRules", () => {
     );
     expect(r).toMatchObject({ label: "news" });
   });
-});
+};
 
-describe("shouldEscalate", () => {
-  const base: EscalationConfig = {
+describe("applyRules", defineApplyRulesSuite2);
+
+const base: EscalationConfig = {
     senders: [],
     keywords: [],
     labelTriggers: ["important"],
   };
-
-  // Convenience wrapper — most tests exercise the legacy `all` mode with an
-  // LLM-source `important` at confidence 1.
-  function esc(
+function esc(
     label: Parameters<typeof shouldEscalate>[0]["label"],
     features = makeFeatures(),
     escalation: EscalationConfig = base,
@@ -194,6 +194,13 @@ describe("shouldEscalate", () => {
       ...extra,
     });
   }
+
+function defineShouldEscalateSuite3Part1() {
+
+
+  // Convenience wrapper — most tests exercise the legacy `all` mode with an
+  // LLM-source `important` at confidence 1.
+
 
   describe("mode: all (default, legacy behaviour)", () => {
     test("non-important labels never escalate", () => {
@@ -305,7 +312,9 @@ describe("shouldEscalate", () => {
     });
   });
 
-  describe("mode: high-confidence", () => {
+  }
+
+function defineShouldEscalateSuite3Part2() {describe("mode: high-confidence", () => {
     test("rule-source always pings", () => {
       expect(
         shouldEscalate({
@@ -352,4 +361,11 @@ describe("shouldEscalate", () => {
       expect(atBar).toMatchObject({ escalate: true });
     });
   });
-});
+}
+
+const defineShouldEscalateSuite3 = () => {
+  defineShouldEscalateSuite3Part1()
+  defineShouldEscalateSuite3Part2()
+};
+
+describe("shouldEscalate", defineShouldEscalateSuite3);

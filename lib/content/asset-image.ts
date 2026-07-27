@@ -25,7 +25,7 @@ export interface NormalizedContentAsset {
 }
 
 export function isContentAssetContentType(
-  value: string
+  value: string,
 ): value is ContentAssetContentType {
   return CONTENT_ASSET_TYPES.includes(value as ContentAssetContentType);
 }
@@ -48,22 +48,18 @@ function mimeForFormat(format: string | undefined): ContentAssetContentType {
 function displayDimensions(
   width: number,
   height: number,
-  orientation: number | undefined
+  orientation: number | undefined,
 ): { width: number; height: number } {
   return orientation && orientation >= 5 && orientation <= 8
     ? { width: height, height: width }
     : { width, height };
 }
 
-export async function normalizeContentAsset(input: {
-  source: Uint8Array;
-  declaredContentType: ContentAssetContentType;
-  declaredWidth?: number;
-  declaredHeight?: number;
-}): Promise<NormalizedContentAsset> {
-  let metadata: Awaited<ReturnType<ReturnType<typeof sharp>["metadata"]>>;
+type SharpMetadata = Awaited<ReturnType<ReturnType<typeof sharp>["metadata"]>>;
+
+async function readAssetMetadata(source: Uint8Array): Promise<SharpMetadata> {
   try {
-    metadata = await sharp(input.source, {
+    return await sharp(source, {
       failOn: "error",
       limitInputPixels: CONTENT_ASSET_MAX_PIXELS,
       pages: 1,
@@ -73,12 +69,27 @@ export async function normalizeContentAsset(input: {
       rejectionCode: "IMAGE_DECODE_FAILED",
     });
   }
+}
 
-  const detectedContentType = mimeForFormat(metadata.format);
-  if (detectedContentType !== input.declaredContentType) {
-    throw new ValidationError("Asset MIME type does not match its byte signature", {
-      rejectionCode: "MIME_SIGNATURE_MISMATCH",
-    });
+function validatedAssetMetadata(
+  metadata: SharpMetadata,
+  input: {
+    declaredContentType: ContentAssetContentType;
+    declaredWidth?: number;
+    declaredHeight?: number;
+  },
+): {
+  contentType: ContentAssetContentType;
+  dimensions: { width: number; height: number };
+} {
+  const contentType = mimeForFormat(metadata.format);
+  if (contentType !== input.declaredContentType) {
+    throw new ValidationError(
+      "Asset MIME type does not match its byte signature",
+      {
+        rejectionCode: "MIME_SIGNATURE_MISMATCH",
+      },
+    );
   }
   if (!metadata.width || !metadata.height) {
     throw new ValidationError("Asset has no valid pixel dimensions", {
@@ -86,54 +97,78 @@ export async function normalizeContentAsset(input: {
     });
   }
   if ((metadata.pages ?? 1) !== 1) {
-    throw new ValidationError("Animated or multi-page images are not supported", {
-      rejectionCode: "MULTI_FRAME_IMAGE",
-    });
+    throw new ValidationError(
+      "Animated or multi-page images are not supported",
+      {
+        rejectionCode: "MULTI_FRAME_IMAGE",
+      },
+    );
   }
   const dimensions = displayDimensions(
     metadata.width,
     metadata.height,
-    metadata.orientation
+    metadata.orientation,
   );
-  if (
+  const exceedsPixelLimits =
     dimensions.width > CONTENT_ASSET_MAX_DIMENSION ||
     dimensions.height > CONTENT_ASSET_MAX_DIMENSION ||
-    dimensions.width * dimensions.height > CONTENT_ASSET_MAX_PIXELS
-  ) {
+    dimensions.width * dimensions.height > CONTENT_ASSET_MAX_PIXELS;
+  if (exceedsPixelLimits) {
     throw new ValidationError("Asset dimensions exceed the safe pixel limit", {
       rejectionCode: "PIXEL_LIMIT_EXCEEDED",
     });
   }
-  if (
-    (input.declaredWidth !== undefined &&
-      input.declaredWidth !== dimensions.width) ||
-    (input.declaredHeight !== undefined &&
-      input.declaredHeight !== dimensions.height)
-  ) {
+  const widthMismatch =
+    input.declaredWidth !== undefined &&
+    input.declaredWidth !== dimensions.width;
+  const heightMismatch =
+    input.declaredHeight !== undefined &&
+    input.declaredHeight !== dimensions.height;
+  if (widthMismatch || heightMismatch) {
     throw new ValidationError(
       "Declared asset dimensions do not match decoded pixels",
-      { rejectionCode: "DIMENSION_MISMATCH" }
+      { rejectionCode: "DIMENSION_MISMATCH" },
     );
   }
+  return { contentType, dimensions };
+}
 
-  // sharp strips EXIF/XMP/IPTC and other metadata unless keepMetadata/withMetadata
-  // is requested. rotate() applies orientation to pixels before that metadata is
-  // discarded, yielding one safe, deterministic display orientation.
-  let pipeline = sharp(input.source, {
+function normalizationPipeline(
+  source: Uint8Array,
+  contentType: ContentAssetContentType,
+) {
+  const pipeline = sharp(source, {
     failOn: "error",
     limitInputPixels: CONTENT_ASSET_MAX_PIXELS,
     pages: 1,
   }).rotate();
-  if (detectedContentType === "image/jpeg") {
-    pipeline = pipeline
+  if (contentType === "image/jpeg") {
+    return pipeline
       .flatten({ background: "#ffffff" })
       .jpeg({ quality: 92, progressive: true, mozjpeg: true });
-  } else if (detectedContentType === "image/png") {
-    pipeline = pipeline.png({ compressionLevel: 9, adaptiveFiltering: true });
-  } else {
-    pipeline = pipeline.webp({ quality: 92, effort: 5 });
   }
-  const bytes = await pipeline.toBuffer();
+  if (contentType === "image/png") {
+    return pipeline.png({ compressionLevel: 9, adaptiveFiltering: true });
+  }
+  return pipeline.webp({ quality: 92, effort: 5 });
+}
+
+export async function normalizeContentAsset(input: {
+  source: Uint8Array;
+  declaredContentType: ContentAssetContentType;
+  declaredWidth?: number;
+  declaredHeight?: number;
+}): Promise<NormalizedContentAsset> {
+  const metadata = await readAssetMetadata(input.source);
+  const { contentType, dimensions } = validatedAssetMetadata(metadata, input);
+
+  // sharp strips EXIF/XMP/IPTC and other metadata unless keepMetadata/withMetadata
+  // is requested. rotate() applies orientation to pixels before that metadata is
+  // discarded, yielding one safe, deterministic display orientation.
+  const bytes = await normalizationPipeline(
+    input.source,
+    contentType,
+  ).toBuffer();
   if (bytes.byteLength > CONTENT_ASSET_MAX_BYTES) {
     throw new ValidationError("Normalized asset exceeds the byte limit", {
       rejectionCode: "NORMALIZED_BYTE_LIMIT_EXCEEDED",
@@ -141,7 +176,7 @@ export async function normalizeContentAsset(input: {
   }
   return {
     bytes,
-    contentType: detectedContentType,
+    contentType,
     width: dimensions.width,
     height: dimensions.height,
     sha256: createHash("sha256").update(bytes).digest("base64url"),

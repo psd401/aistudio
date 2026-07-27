@@ -1,9 +1,10 @@
 import * as iam from "aws-cdk-lib/aws-iam"
 import * as cdk from "aws-cdk-lib"
 import { Construct } from "constructs"
-import * as fs from "fs"
-import * as path from "path"
+
+import * as path from "node:path"
 import { Environment } from "./types"
+import { validatedFs } from "../../validated-fs";
 
 export interface PermissionBoundaryConstructProps {
   environment: Environment
@@ -34,7 +35,7 @@ export class PermissionBoundaryConstruct extends Construct {
     cdk.Tags.of(this.policy).add("ManagedBy", "CDK")
   }
 
-  private loadPolicyDocument(environment: Environment): any {
+  private loadPolicyDocument(environment: Environment): unknown {
     // Map staging to dev boundary for now
     const boundaryEnv = environment === "staging" ? "dev" : environment
 
@@ -44,11 +45,11 @@ export class PermissionBoundaryConstruct extends Construct {
       `${boundaryEnv}-boundary.json`
     )
 
-    if (!fs.existsSync(policyPath)) {
+    if (!validatedFs.existsSync(policyPath)) {
       throw new Error(`Permission boundary policy not found: ${policyPath}`)
     }
 
-    return JSON.parse(fs.readFileSync(policyPath, "utf-8"))
+    return JSON.parse(validatedFs.readFileSync(policyPath, "utf-8"))
   }
 
   /**

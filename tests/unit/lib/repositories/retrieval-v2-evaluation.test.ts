@@ -8,7 +8,6 @@ import {
   type RetrievalEvaluationCase,
   type RetrievalQualityThresholds,
 } from "@/lib/repositories/retrieval-v2/evaluation";
-import { evaluateRepositoryRetrievalParity } from "@/lib/repositories/content-platform/retrieval-shadow";
 
 const thresholds: RetrievalQualityThresholds = {
   minimumRecallAtK: 0.9,
@@ -66,20 +65,5 @@ describe("retrieval v2 offline quality gate", () => {
       "p95 latency",
       "average cost",
     ]);
-  });
-
-  it("evaluates legacy-to-canonical shadow parity without serving shadow hits", () => {
-    expect(
-      evaluateRepositoryRetrievalParity({
-        legacyItemIds: [1, 2, 3],
-        canonicalItemIds: [2, 3, 4],
-        legacyDurationMs: 40,
-        canonicalDurationMs: 55,
-      })
-    ).toEqual({
-      canonicalResultDelta: 0,
-      latencyDeltaMs: 15,
-      overlapRatio: 2 / 3,
-    });
   });
 });

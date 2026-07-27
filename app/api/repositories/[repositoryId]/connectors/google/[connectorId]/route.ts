@@ -8,6 +8,7 @@ import {
   requireRepositoryConnectorManager,
 } from "@/lib/repositories/google-drive/route-access";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
+import { ErrorFactories } from "@/lib/error-utils";
 
 export async function DELETE(
   _request: Request,
@@ -28,7 +29,10 @@ export async function DELETE(
     if (
       !(await connectorBelongsToRepository(params.connectorId, repositoryId))
     ) {
-      throw new Error("Connector not found");
+      throw ErrorFactories.authzResourceNotFound(
+        "Google Drive connector",
+        params.connectorId
+      );
     }
     const disconnected = await disconnectGoogleDriveConnector({
       connectorId: params.connectorId,

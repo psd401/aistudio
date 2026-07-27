@@ -69,7 +69,7 @@ export function dateValue(value: unknown): string | null {
   if (!raw) return null;
   const parsed = new Date(raw);
   if (Number.isNaN(parsed.getTime())) {
-    throw new Error("OneRoster record contains an invalid date value");
+    throw new TypeError("OneRoster record contains an invalid date value");
   }
   return raw;
 }

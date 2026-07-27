@@ -35,7 +35,7 @@ async function chooseClaudeFamily(page: import("@playwright/test").Page) {
   await page.getByTestId("nexus-family-anthropic").click();
 }
 
-test.describe("Nexus workspace chat tools (§1087, authenticated)", () => {
+const defineNexusWorkspaceChatTools1087AuthenticatedSuite1 = () => {
   test.skip(
     process.env.PLAYWRIGHT_AUTH_ENABLED !== "true",
     "Requires the authed host dev server + seeded doc"
@@ -88,4 +88,6 @@ test.describe("Nexus workspace chat tools (§1087, authenticated)", () => {
       await context.close();
     }
   });
-});
+};
+
+test.describe("Nexus workspace chat tools (§1087, authenticated)", defineNexusWorkspaceChatTools1087AuthenticatedSuite1);

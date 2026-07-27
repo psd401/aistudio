@@ -300,7 +300,6 @@ describe("v1 assistant conversation follow-up repository boundaries", () => {
       "What changed?",
       [11, 12, 77],
       "executor-sub",
-      undefined,
       {
         maxChunks: 10,
         maxTokens: 4000,

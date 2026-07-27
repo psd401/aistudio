@@ -90,65 +90,59 @@ function repositoryAttachmentText(part: MessagePart): string | null {
  * Convert a part to content format, handling images as markdown and passing through tool parts.
  * For image parts with s3Key, generates a fresh presigned URL to replace expired ones.
  */
+function convertTextPart(part: MessagePart): ContentPart {
+  const attachmentText = repositoryAttachmentText(part)
+  if (attachmentText != null) {
+    return { type: 'text', text: attachmentText }
+  }
+  const text = part.text && typeof part.text === 'string' && part.text.length > MAX_CONTENT_LENGTH
+    ? part.text.substring(0, MAX_CONTENT_LENGTH) + '...[content truncated for size]'
+    : part.text || ''
+  return { type: 'text', text }
+}
+
+async function convertImagePart(
+  part: MessagePart,
+  conversationId: string
+): Promise<ContentPart | null> {
+  const s3Key = part.s3Key
+  if (s3Key && isKeyForConversation(s3Key, conversationId)) {
+    try {
+      const freshUrl = await getDocumentSignedUrl({ key: s3Key, expiresIn: 3600 })
+      return { type: 'text', text: `![Generated Image](${freshUrl})` }
+    } catch (error) {
+      const log = createLogger({ context: 'convertPartToTextContent' })
+      log.warn('Failed to refresh presigned URL from s3Key', {
+        s3Key,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+  } else if (s3Key) {
+    const log = createLogger({ context: 'convertPartToTextContent' })
+    log.warn('Refusing to presign s3Key outside the conversation prefix', { conversationId })
+  }
+  return part.imageUrl
+    ? { type: 'text', text: `![Generated Image](${part.imageUrl})` }
+    : null
+}
+
+function convertToolPart(part: MessagePart): ContentPart {
+  const { argsText: _stripArgsText, ...rest } = part as unknown as ContentPart & { argsText?: string }
+  const decodedArgs = rest.args && typeof rest.args === 'object'
+    ? { args: decodeHtmlEntitiesDeep(rest.args) }
+    : {};
+  return { ...rest, ...decodedArgs } as ContentPart
+}
+
 async function convertPartToTextContent(part: MessagePart, conversationId: string): Promise<ContentPart | null> {
   const partType = part.type as string
-
-  if (partType === 'text') {
-    const attachmentText = repositoryAttachmentText(part)
-    if (attachmentText != null) {
-      return { type: 'text', text: attachmentText }
-    }
-    const text = part.text && typeof part.text === 'string' && part.text.length > MAX_CONTENT_LENGTH
-      ? part.text.substring(0, MAX_CONTENT_LENGTH) + '...[content truncated for size]'
-      : part.text || ''
-    return { type: 'text', text }
-  }
-
-  if (partType === 'image') {
-    // Refresh presigned URL from s3Key if available (fixes expired URL issue)
-    const s3Key = part.s3Key
-    // REV-SEC-143: only presign a key that belongs to THIS conversation — a
-    // client-planted s3Key pointing at another user's object must never be signed.
-    if (s3Key && isKeyForConversation(s3Key, conversationId)) {
-      try {
-        const freshUrl = await getDocumentSignedUrl({ key: s3Key, expiresIn: 3600 })
-        return { type: 'text', text: `![Generated Image](${freshUrl})` }
-      } catch (error) {
-        // Log error and fall through to stored imageUrl if URL generation fails
-        const log = createLogger({ context: 'convertPartToTextContent' })
-        log.warn('Failed to refresh presigned URL from s3Key', {
-          s3Key,
-          error: error instanceof Error ? error.message : String(error)
-        })
-      }
-    } else if (s3Key) {
-      const log = createLogger({ context: 'convertPartToTextContent' })
-      log.warn('Refusing to presign s3Key outside the conversation prefix', { conversationId })
-    }
-    // Fallback to stored imageUrl if no (valid) s3Key or URL generation failed
-    const imageUrl = part.imageUrl
-    return imageUrl ? { type: 'text', text: `![Generated Image](${imageUrl})` } : null
-  }
-
-  // Pass through tool-call and tool-result parts for UI rendering.
-  // Strip argsText (the client recomputes it from args) and decode HTML entities
-  // in args to prevent argsText mismatch on conversation reload (Issue #798).
-  // Decode runs on both legacy (pre-fix) and new data — safe because
-  // decodeHtmlEntities is idempotent (already-decoded text passes through unchanged).
+  if (partType === 'text') return convertTextPart(part)
+  if (partType === 'image') return convertImagePart(part, conversationId)
   if (partType === 'tool-call' || partType === 'tool-result') {
-    const { argsText: _stripArgsText, ...rest } = part as unknown as ContentPart & { argsText?: string }
-    const decodedArgs = rest.args && typeof rest.args === 'object'
-      ? { args: decodeHtmlEntitiesDeep(rest.args) }
-      : {};
-    return { ...rest, ...decodedArgs } as ContentPart
+    return convertToolPart(part)
   }
+  if (partType === 'step-start' || partType === 'step-finish') return null
 
-  // Skip control types
-  if (partType === 'step-start' || partType === 'step-finish') {
-    return null
-  }
-
-  // For other types, try to extract text if available
   return part.text ? { type: 'text', text: part.text } : null
 }
 

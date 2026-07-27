@@ -3,6 +3,7 @@ import { getAIModels, createAIModel, updateAIModel, deleteAIModel } from '@/lib/
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { normalizeBoolean } from '@/lib/validations/api-schemas';
+import type { AIModelData } from '@/lib/db/drizzle/ai-models';
 
 // NOTE (#1207): per-model role/group access is set ONLY via the ResourceGrantsEditor
 // (resource_access_grants — see actions/db/resource-grants-actions.ts). The legacy
@@ -66,6 +67,47 @@ function validateCapabilities(
   }
 }
 
+interface CreateModelBody
+  extends Omit<AIModelData, "maxTokens" | "pricingUpdatedAt"> {
+  maxTokens?: number | string | null;
+  pricingUpdatedAt?: Date | string | null;
+}
+
+function missingCreateField(body: CreateModelBody): string | null {
+  if (!body.name?.trim()) return "Model name is required";
+  if (!body.modelId?.trim()) return "Model ID is required";
+  if (!body.provider) return "Provider is required";
+  return null;
+}
+
+function buildCreateModelData(
+  body: CreateModelBody,
+  capabilities: string | null
+): AIModelData {
+  return {
+    name: body.name,
+    modelId: body.modelId,
+    provider: body.provider,
+    description: body.description,
+    capabilities: capabilities || undefined,
+    maxTokens: body.maxTokens ? Number.parseInt(String(body.maxTokens)) : undefined,
+    active: body.active ?? true,
+    nexusEnabled: body.nexusEnabled ?? true,
+    architectEnabled: body.architectEnabled ?? true,
+    inputCostPer1kTokens: body.inputCostPer1kTokens || undefined,
+    outputCostPer1kTokens: body.outputCostPer1kTokens || undefined,
+    cachedInputCostPer1kTokens: body.cachedInputCostPer1kTokens || undefined,
+    cacheWriteCostPer1kTokens: body.cacheWriteCostPer1kTokens || undefined,
+    pricingUpdatedAt: body.pricingUpdatedAt
+      ? new Date(body.pricingUpdatedAt)
+      : undefined,
+    averageLatencyMs: body.averageLatencyMs || undefined,
+    maxConcurrency: body.maxConcurrency || undefined,
+    supportsBatching: body.supportsBatching ?? undefined,
+    providerMetadata: body.providerMetadata || undefined,
+  };
+}
+
 export async function GET() {
   const requestId = generateRequestId();
   const timer = startTimer("api.admin.models.list");
@@ -121,32 +163,16 @@ export async function POST(request: Request) {
       return authError;
     }
 
-    const body = await request.json();
+    const body = (await request.json()) as CreateModelBody;
 
-    // Validate required fields
-    if (!body.name?.trim()) {
-      log.warn("Model creation failed - missing name");
+    const validationMessage = missingCreateField(body);
+    if (validationMessage) {
+      log.warn("Model creation failed - missing required field", {
+        validationMessage,
+      });
       timer({ status: "error", reason: "validation" });
       return NextResponse.json(
-        { isSuccess: false, message: "Model name is required" },
-        { status: 400 }
-      );
-    }
-
-    if (!body.modelId?.trim()) {
-      log.warn("Model creation failed - missing modelId");
-      timer({ status: "error", reason: "validation" });
-      return NextResponse.json(
-        { isSuccess: false, message: "Model ID is required" },
-        { status: 400 }
-      );
-    }
-
-    if (!body.provider) {
-      log.warn("Model creation failed - missing provider");
-      timer({ status: "error", reason: "validation" });
-      return NextResponse.json(
-        { isSuccess: false, message: "Provider is required" },
+        { isSuccess: false, message: validationMessage },
         { status: 400 }
       );
     }
@@ -155,32 +181,7 @@ export async function POST(request: Request) {
 
     // Validate and sanitize capabilities
     const validatedCapabilities = validateCapabilities(body.capabilities, log);
-
-    const modelData = {
-      name: body.name,
-      modelId: body.modelId,
-      provider: body.provider,
-      description: body.description,
-      capabilities: validatedCapabilities || undefined,
-      maxTokens: body.maxTokens ? Number.parseInt(body.maxTokens) : undefined,
-      active: body.active ?? true,
-      nexusEnabled: body.nexusEnabled ?? true,
-      architectEnabled: body.architectEnabled ?? true,
-      // Pricing fields
-      inputCostPer1kTokens: body.inputCostPer1kTokens || undefined,
-      outputCostPer1kTokens: body.outputCostPer1kTokens || undefined,
-      cachedInputCostPer1kTokens: body.cachedInputCostPer1kTokens || undefined,
-      // Cache-WRITE rate (issue #1089) — without this the create path silently
-      // drops the admin form's cache-write price (update persists it via spread).
-      cacheWriteCostPer1kTokens: body.cacheWriteCostPer1kTokens || undefined,
-      pricingUpdatedAt: body.pricingUpdatedAt ? new Date(body.pricingUpdatedAt) : undefined,
-      // Performance fields
-      averageLatencyMs: body.averageLatencyMs || undefined,
-      maxConcurrency: body.maxConcurrency || undefined,
-      supportsBatching: body.supportsBatching ?? undefined,
-      // JSONB fields - providerMetadata only (nexusCapabilities removed in #594)
-      providerMetadata: body.providerMetadata || undefined
-    };
+    const modelData = buildCreateModelData(body, validatedCapabilities);
 
     const model = await createAIModel(modelData);
 
@@ -336,4 +337,4 @@ export async function DELETE(request: Request) {
       { status: 500, headers: { "X-Request-Id": requestId } }
     );
   }
-} 
+}

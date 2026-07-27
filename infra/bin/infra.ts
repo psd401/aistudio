@@ -117,7 +117,7 @@ const devPowerTuningStack = new PowerTuningStack(app, 'AIStudio-PowerTuningStack
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(devPowerTuningStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devPowerTuningStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(devPowerTuningStack).add(key, value);
 
 // Permission Boundary Stack - must be deployed first before other stacks
 const devPermissionBoundaryStack = new cdk.Stack(app, 'AIStudio-PermissionBoundary-Dev', {
@@ -127,17 +127,17 @@ new PermissionBoundaryConstruct(devPermissionBoundaryStack, 'PermissionBoundary'
   environment: 'dev',
 });
 cdk.Tags.of(devPermissionBoundaryStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devPermissionBoundaryStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(devPermissionBoundaryStack).add(key, value);
 
 // Access Analyzer Stack - continuous IAM compliance monitoring
 const devAccessAnalyzerStack = new AccessAnalyzerStack(app, 'AIStudio-AccessAnalyzer-Dev', {
-  config: {} as any, // Config not used by current implementation
+  config: EnvironmentConfig.get('dev'),
   environment: 'dev',
   alertEmail,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(devAccessAnalyzerStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAccessAnalyzerStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(devAccessAnalyzerStack).add(key, value);
 
 // Secrets Manager Stack - centralized secrets management
 const devSecretsManagerStack = new SecretsManagerStack(app, 'AIStudio-SecretsManagerStack-Dev', {
@@ -147,14 +147,14 @@ const devSecretsManagerStack = new SecretsManagerStack(app, 'AIStudio-SecretsMan
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(devSecretsManagerStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devSecretsManagerStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(devSecretsManagerStack).add(key, value);
 
 const devDbStack = new DatabaseStack(app, 'AIStudio-DatabaseStack-Dev', {
   environment: 'dev',
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(devDbStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devDbStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(devDbStack).add(key, value);
 
 const devUrls = getCallbackAndLogoutUrls('dev', baseDomain);
 const devAuthStack = new AuthStack(app, 'AIStudio-AuthStack-Dev', {
@@ -165,7 +165,7 @@ const devAuthStack = new AuthStack(app, 'AIStudio-AuthStack-Dev', {
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(devAuthStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAuthStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(devAuthStack).add(key, value);
 
 const devStorageStack = new StorageStack(app, 'AIStudio-StorageStack-Dev', {
   environment: 'dev',
@@ -173,7 +173,7 @@ const devStorageStack = new StorageStack(app, 'AIStudio-StorageStack-Dev', {
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(devStorageStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devStorageStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(devStorageStack).add(key, value);
 
 // Atrium artifact sandbox origin (#1052): separate-origin static host for the
 // cross-origin sandboxed artifact iframe. Decoupled from the app/ECS stack so the
@@ -196,7 +196,7 @@ const devAtriumSandboxStack = new AtriumSandboxStack(app, 'AIStudio-AtriumSandbo
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(devAtriumSandboxStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAtriumSandboxStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(devAtriumSandboxStack).add(key, value);
 
 // Atrium content events (#1055): SNS topic the app publishes content lifecycle
 // events to (injected as ATRIUM_EVENTS_TOPIC_ARN). Dedicated stack for clean
@@ -206,7 +206,7 @@ const devAtriumEventsStack = new AtriumEventsStack(app, 'AIStudio-AtriumEventsSt
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(devAtriumEventsStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAtriumEventsStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(devAtriumEventsStack).add(key, value);
 
 // K-12 Content Safety: Guardrails Stack - Bedrock Guardrails + PII tokenization
 const guardrailNotificationEmail = app.node.tryGetContext('guardrailNotificationEmail') || alertEmail;
@@ -216,7 +216,7 @@ const devGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-De
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(devGuardrailsStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devGuardrailsStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(devGuardrailsStack).add(key, value);
 
 // Agent Platform Stack — AgentCore Runtime, ECR, S3, DynamoDB, EventBridge, IAM, Router Lambda
 const devAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatformStack-Dev', {
@@ -239,7 +239,7 @@ devAgentPlatformStack.addDependency(devGuardrailsStack);
 // psd-data skill env vars (AUTH_COGNITO_USER_POOL_ID, AUTH_COGNITO_CLIENT_ID).
 devAgentPlatformStack.addDependency(devAuthStack);
 cdk.Tags.of(devAgentPlatformStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAgentPlatformStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(devAgentPlatformStack).add(key, value);
 
 const devProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-Dev', {
   environment: 'dev',
@@ -259,19 +259,25 @@ devProcessingStack.addDependency(devDbStack); // Reads database SSM parameters a
 devProcessingStack.addDependency(devStorageStack); // Reads the documents bucket SSM parameter
 devProcessingStack.addDependency(devAuthStack); // Owns Google content OAuth configuration
 cdk.Tags.of(devProcessingStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devProcessingStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(devProcessingStack).add(key, value);
 
-const devDocumentProcessingStack = new DocumentProcessingStack(app, 'AIStudio-DocumentProcessingStack-Dev', {
-  environment: 'dev',
-  rdsClusterArn: devDbStack.databaseResourceArn,
-  rdsSecretArn: devDbStack.databaseSecretArn,
-  documentsBucketName: devStorageStack.documentsBucketName,
-  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
-});
-devDocumentProcessingStack.addDependency(devDbStack);
-devDocumentProcessingStack.addDependency(devStorageStack);
-cdk.Tags.of(devDocumentProcessingStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devDocumentProcessingStack).add(key, value));
+const devDocumentProcessingStack = retireLegacyContent
+  ? null
+  : new DocumentProcessingStack(app, 'AIStudio-DocumentProcessingStack-Dev', {
+      environment: 'dev',
+      rdsClusterArn: devDbStack.databaseResourceArn,
+      rdsSecretArn: devDbStack.databaseSecretArn,
+      documentsBucketName: devStorageStack.documentsBucketName,
+      env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+    });
+if (devDocumentProcessingStack) {
+  devDocumentProcessingStack.addDependency(devDbStack);
+  devDocumentProcessingStack.addDependency(devStorageStack);
+  cdk.Tags.of(devDocumentProcessingStack).add('Environment', 'Dev');
+  for (const [key, value] of Object.entries(standardTags)) {
+    cdk.Tags.of(devDocumentProcessingStack).add(key, value);
+  }
+}
 
 // Prod environment
 // Permission Boundary Stack - must be deployed first before other stacks
@@ -282,7 +288,7 @@ new PermissionBoundaryConstruct(prodPermissionBoundaryStack, 'PermissionBoundary
   environment: 'prod',
 });
 cdk.Tags.of(prodPermissionBoundaryStack).add('Environment', 'Prod');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodPermissionBoundaryStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(prodPermissionBoundaryStack).add(key, value);
 
 // Secrets Manager Stack - centralized secrets management
 const prodSecretsManagerStack = new SecretsManagerStack(app, 'AIStudio-SecretsManagerStack-Prod', {
@@ -292,14 +298,14 @@ const prodSecretsManagerStack = new SecretsManagerStack(app, 'AIStudio-SecretsMa
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(prodSecretsManagerStack).add('Environment', 'Prod');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodSecretsManagerStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(prodSecretsManagerStack).add(key, value);
 
 const prodDbStack = new DatabaseStack(app, 'AIStudio-DatabaseStack-Prod', {
   environment: 'prod',
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(prodDbStack).add('Environment', 'Prod');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodDbStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(prodDbStack).add(key, value);
 
 const prodUrls = getCallbackAndLogoutUrls('prod', baseDomain);
 const prodAuthStack = new AuthStack(app, 'AIStudio-AuthStack-Prod', {
@@ -310,7 +316,7 @@ const prodAuthStack = new AuthStack(app, 'AIStudio-AuthStack-Prod', {
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(prodAuthStack).add('Environment', 'Prod');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAuthStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(prodAuthStack).add(key, value);
 
 const prodStorageStack = new StorageStack(app, 'AIStudio-StorageStack-Prod', {
   environment: 'prod',
@@ -318,7 +324,7 @@ const prodStorageStack = new StorageStack(app, 'AIStudio-StorageStack-Prod', {
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(prodStorageStack).add('Environment', 'Prod');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodStorageStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(prodStorageStack).add(key, value);
 
 // Atrium artifact sandbox origin (#1052): separate-origin static host (prod).
 const prodAtriumSandboxStack = new AtriumSandboxStack(app, 'AIStudio-AtriumSandboxStack-Prod', {
@@ -329,7 +335,7 @@ const prodAtriumSandboxStack = new AtriumSandboxStack(app, 'AIStudio-AtriumSandb
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(prodAtriumSandboxStack).add('Environment', 'Prod');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAtriumSandboxStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(prodAtriumSandboxStack).add(key, value);
 
 // Atrium content events (#1055) — prod SNS topic.
 const prodAtriumEventsStack = new AtriumEventsStack(app, 'AIStudio-AtriumEventsStack-Prod', {
@@ -337,7 +343,7 @@ const prodAtriumEventsStack = new AtriumEventsStack(app, 'AIStudio-AtriumEventsS
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(prodAtriumEventsStack).add('Environment', 'Prod');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAtriumEventsStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(prodAtriumEventsStack).add(key, value);
 
 // K-12 Content Safety: Guardrails Stack - Bedrock Guardrails + PII tokenization
 const prodGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-Prod', {
@@ -346,7 +352,7 @@ const prodGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-P
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(prodGuardrailsStack).add('Environment', 'Prod');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodGuardrailsStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(prodGuardrailsStack).add(key, value);
 
 // Agent Platform Stack — AgentCore Runtime, ECR, S3, DynamoDB, EventBridge, IAM, Router Lambda
 const prodAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatformStack-Prod', {
@@ -371,7 +377,7 @@ prodAgentPlatformStack.addDependency(prodDbStack);
 prodAgentPlatformStack.addDependency(prodGuardrailsStack);
 prodAgentPlatformStack.addDependency(prodAuthStack);
 cdk.Tags.of(prodAgentPlatformStack).add('Environment', 'Prod');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAgentPlatformStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(prodAgentPlatformStack).add(key, value);
 
 const prodProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-Prod', {
   environment: 'prod',
@@ -387,19 +393,25 @@ prodProcessingStack.addDependency(prodDbStack); // Reads database SSM parameters
 prodProcessingStack.addDependency(prodStorageStack); // Reads the documents bucket SSM parameter
 prodProcessingStack.addDependency(prodAuthStack); // Owns Google content OAuth configuration
 cdk.Tags.of(prodProcessingStack).add('Environment', 'Prod');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodProcessingStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(prodProcessingStack).add(key, value);
 
-const prodDocumentProcessingStack = new DocumentProcessingStack(app, 'AIStudio-DocumentProcessingStack-Prod', {
-  environment: 'prod',
-  rdsClusterArn: prodDbStack.databaseResourceArn,
-  rdsSecretArn: prodDbStack.databaseSecretArn,
-  documentsBucketName: prodStorageStack.documentsBucketName,
-  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
-});
-prodDocumentProcessingStack.addDependency(prodDbStack);
-prodDocumentProcessingStack.addDependency(prodStorageStack);
-cdk.Tags.of(prodDocumentProcessingStack).add('Environment', 'Prod');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodDocumentProcessingStack).add(key, value));
+const prodDocumentProcessingStack = retireLegacyContent
+  ? null
+  : new DocumentProcessingStack(app, 'AIStudio-DocumentProcessingStack-Prod', {
+      environment: 'prod',
+      rdsClusterArn: prodDbStack.databaseResourceArn,
+      rdsSecretArn: prodDbStack.databaseSecretArn,
+      documentsBucketName: prodStorageStack.documentsBucketName,
+      env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+    });
+if (prodDocumentProcessingStack) {
+  prodDocumentProcessingStack.addDependency(prodDbStack);
+  prodDocumentProcessingStack.addDependency(prodStorageStack);
+  cdk.Tags.of(prodDocumentProcessingStack).add('Environment', 'Prod');
+  for (const [key, value] of Object.entries(standardTags)) {
+    cdk.Tags.of(prodDocumentProcessingStack).add(key, value);
+  }
+}
 
 // Frontend stacks - ECS Fargate with ALB for streaming support
 if (baseDomain) {
@@ -427,11 +439,11 @@ if (baseDomain) {
   devFrontendStack.addDependency(devAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
   devFrontendStack.addDependency(devAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
   devFrontendStack.addDependency(devProcessingStack); // Need processing queue and Lambda exports
-  if (!retireLegacyContent) {
+  if (devDocumentProcessingStack) {
     devFrontendStack.addDependency(devDocumentProcessingStack);
   }
   cdk.Tags.of(devFrontendStack).add('Environment', 'Dev');
-  Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devFrontendStack).add(key, value));
+  for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(devFrontendStack).add(key, value);
 
   const prodFrontendStack = new FrontendStackEcs(app, 'AIStudio-FrontendStack-ECS-Prod', {
     environment: 'prod',
@@ -453,11 +465,11 @@ if (baseDomain) {
   prodFrontendStack.addDependency(prodAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
   prodFrontendStack.addDependency(prodAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
   prodFrontendStack.addDependency(prodProcessingStack); // Need processing queue and Lambda exports
-  if (!retireLegacyContent) {
+  if (prodDocumentProcessingStack) {
     prodFrontendStack.addDependency(prodDocumentProcessingStack);
   }
   cdk.Tags.of(prodFrontendStack).add('Environment', 'Prod');
-  Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodFrontendStack).add(key, value));
+  for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(prodFrontendStack).add(key, value);
 
   // To deploy, use:
   // cdk deploy AIStudio-FrontendStack-ECS-Dev --context baseDomain=yourdomain.com
@@ -475,7 +487,7 @@ const devMonitoringStack = new MonitoringStack(app, 'AIStudio-MonitoringStack-De
 // Ensure DatabaseStack deploys first - MonitoringStack requires Aurora metrics for consolidated dashboards
 devMonitoringStack.addDependency(devDbStack);
 cdk.Tags.of(devMonitoringStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devMonitoringStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(devMonitoringStack).add(key, value);
 
 const prodMonitoringStack = new MonitoringStack(app, 'AIStudio-MonitoringStack-Prod', {
   environment: 'prod',
@@ -486,7 +498,7 @@ const prodMonitoringStack = new MonitoringStack(app, 'AIStudio-MonitoringStack-P
 // Ensure DatabaseStack deploys first - MonitoringStack requires Aurora metrics for consolidated dashboards
 prodMonitoringStack.addDependency(prodDbStack);
 cdk.Tags.of(prodMonitoringStack).add('Environment', 'Prod');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodMonitoringStack).add(key, value));
+for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(prodMonitoringStack).add(key, value);
 
 // To deploy monitoring with email alerts:
 // cdk deploy AIStudio-MonitoringStack-Dev --context alertEmail=your-email@example.com

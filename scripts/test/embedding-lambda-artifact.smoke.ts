@@ -8,31 +8,27 @@
  */
 
 import { spawnSync } from "node:child_process";
-import {
-  existsSync,
-  readFileSync,
-  readdirSync,
-  statSync,
-} from "node:fs";
+
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 const repositoryRoot = resolve(
   fileURLToPath(new URL("../..", import.meta.url))
 );
 const cdkOutput = join(repositoryRoot, "infra", "cdk.out");
-const candidates = readdirSync(cdkOutput, { withFileTypes: true })
+const candidates = validatedFs.readdirSync(cdkOutput, { withFileTypes: true })
   .filter((entry) => entry.isDirectory() && entry.name.startsWith("asset."))
   .map((entry) => join(cdkOutput, entry.name))
   .filter((directory) => {
     const packagePath = join(directory, "package.json");
     const entryPath = join(directory, "index.js");
-    if (!existsSync(packagePath) || !existsSync(entryPath)) return false;
+    if (!validatedFs.existsSync(packagePath) || !validatedFs.existsSync(entryPath)) return false;
     try {
       return (
-        (JSON.parse(readFileSync(packagePath, "utf8")) as { name?: unknown })
+        (JSON.parse(validatedFs.readFileSync(packagePath, "utf8")) as { name?: unknown })
           .name === "embedding-generator" &&
-        readFileSync(entryPath, "utf8").includes(
+        validatedFs.readFileSync(entryPath, "utf8").includes(
           "buildBedrockEmbeddingBodyForRuntimeSmoke"
         )
       );
@@ -40,7 +36,7 @@ const candidates = readdirSync(cdkOutput, { withFileTypes: true })
       return false;
     }
   })
-  .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+  .sort((left, right) => validatedFs.statSync(right).mtimeMs - validatedFs.statSync(left).mtimeMs);
 
 const assetDirectory = candidates[0];
 if (!assetDirectory) {
@@ -56,7 +52,7 @@ for (const dependency of [
   "openai",
   "postgres",
 ]) {
-  if (!existsSync(join(assetDirectory, "node_modules", dependency))) {
+  if (!validatedFs.existsSync(join(assetDirectory, "node_modules", dependency))) {
     throw new Error(
       `Synthesized embedding artifact is missing production dependency ${dependency}`
     );

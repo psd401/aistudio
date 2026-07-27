@@ -2,19 +2,23 @@
  * Image Generation Handler for Nexus Chat
  * Extracted from route.ts to reduce complexity
  */
-import { UIMessage, createUIMessageStream, createUIMessageStreamResponse } from 'ai';
-import { sql, and, desc, eq } from 'drizzle-orm';
-import { executeQuery, executeTransaction } from '@/lib/db/drizzle-client';
-import { nexusConversations, nexusMessages } from '@/lib/db/schema';
-import { getAttachmentFromS3 } from '@/lib/services/attachment-storage-service';
-import { getObjectStream } from '@/lib/aws/s3-client';
-import { sanitizeTextForDatabase } from '@/lib/utils/text-sanitizer';
-import { safeJsonbStringify } from '@/lib/db/json-utils';
-import { assertSafeFetchUrl } from '@/lib/agents/agent-tools/web-fetch';
-import { deleteDocumentVersions } from '@/lib/aws/s3-client';
-import { createLogger } from '@/lib/logger';
-import type { NexusAttachmentImageSource } from '@/lib/nexus/ephemeral-repository-service';
-import { isRepositorySourceObjectKey } from '@/lib/repositories/content-platform/object-key';
+import {
+  UIMessage,
+  createUIMessageStream,
+  createUIMessageStreamResponse,
+} from "ai";
+import { sql, and, desc, eq } from "drizzle-orm";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
+import { nexusConversations, nexusMessages } from "@/lib/db/schema";
+import { getAttachmentFromS3 } from "@/lib/services/attachment-storage-service";
+import { getObjectStream } from "@/lib/aws/s3-client";
+import { sanitizeTextForDatabase } from "@/lib/utils/text-sanitizer";
+import { safeJsonbStringify } from "@/lib/db/json-utils";
+import { assertSafeFetchUrl } from "@/lib/agents/agent-tools/web-fetch";
+import { deleteDocumentVersions } from "@/lib/aws/s3-client";
+import { createLogger } from "@/lib/logger";
+import type { NexusAttachmentImageSource } from "@/lib/nexus/ephemeral-repository-service";
+import { isRepositorySourceObjectKey } from "@/lib/repositories/content-platform/object-key";
 
 /**
  * A client-supplied reference `s3Key` (or `s3://` URL) must live under the
@@ -23,11 +27,14 @@ import { isRepositorySourceObjectKey } from '@/lib/repositories/content-platform
  * outside that prefix points at another conversation/user's object and must be
  * rejected before any S3 read.
  */
-function isKeyInConversationPrefix(s3Key: string, conversationId: string): boolean {
+function isKeyInConversationPrefix(
+  s3Key: string,
+  conversationId: string,
+): boolean {
   return s3Key.startsWith(`conversations/${conversationId}/attachments/`);
 }
 
-const log = createLogger({ route: 'api.nexus.chat.image' });
+const log = createLogger({ route: "api.nexus.chat.image" });
 
 export interface ImageGenerationParams {
   messages: Array<{
@@ -58,10 +65,7 @@ export async function deleteUnpersistedGeneratedImage(params: {
   s3Key?: string;
 }): Promise<boolean> {
   const { conversationId, s3Key } = params;
-  if (
-    !s3Key ||
-    !s3Key.startsWith(`v2/generated-images/${conversationId}/`)
-  ) {
+  if (!s3Key || !s3Key.startsWith(`v2/generated-images/${conversationId}/`)) {
     return false;
   }
   await deleteDocumentVersions(s3Key);
@@ -73,15 +77,80 @@ interface ReferenceImage {
   url?: string;
   s3Key?: string;
   mimeType?: string;
-  role?: 'reference' | 'mask';
+  role?: "reference" | "mask";
 }
 
 const MAX_CANONICAL_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024;
 // SVG intentionally excluded — it can embed scripts and event handlers.
 const ALLOWED_IMAGE_MIMES = new Set([
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff',
-  'image/avif', 'image/heic', 'image/heif'
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "image/bmp",
+  "image/tiff",
+  "image/avif",
+  "image/heic",
+  "image/heif",
 ]);
+
+function invalidCanonicalImage(message: string): Error {
+  return Object.assign(new Error(message), { type: "INVALID_ATTACHMENT" });
+}
+
+async function loadCanonicalRepositoryImage(
+  source: NexusAttachmentImageSource,
+): Promise<ReferenceImage> {
+  if (!isRepositorySourceObjectKey(source.repositoryId, source.objectKey)) {
+    throw invalidCanonicalImage("Canonical image source is invalid");
+  }
+  if (
+    source.byteSize != null &&
+    source.byteSize > MAX_CANONICAL_REFERENCE_IMAGE_BYTES
+  ) {
+    throw invalidCanonicalImage("Canonical image source is too large");
+  }
+
+  const object = await getObjectStream(source.objectKey);
+  if (
+    object.contentLength != null &&
+    object.contentLength > MAX_CANONICAL_REFERENCE_IMAGE_BYTES
+  ) {
+    throw invalidCanonicalImage("Canonical image source is too large");
+  }
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  for await (const chunk of object.stream) {
+    const buffer =
+      typeof chunk === "string"
+        ? Buffer.from(chunk)
+        : Buffer.from(chunk as Uint8Array);
+    totalBytes += buffer.byteLength;
+    if (totalBytes > MAX_CANONICAL_REFERENCE_IMAGE_BYTES) {
+      object.stream.destroy();
+      throw invalidCanonicalImage("Canonical image source is too large");
+    }
+    chunks.push(buffer);
+  }
+
+  const mimeType = (
+    source.detectedContentType ??
+    object.contentType ??
+    source.declaredContentType ??
+    ""
+  )
+    .split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
+  if (!mimeType || !ALLOWED_IMAGE_MIMES.has(mimeType)) {
+    throw invalidCanonicalImage("Canonical image source is not an image");
+  }
+  return {
+    base64: `data:${mimeType};base64,${Buffer.concat(chunks).toString("base64")}`,
+    mimeType,
+    role: "reference",
+  };
+}
 
 /**
  * Load the exact immutable repository versions resolved for canonical markers.
@@ -89,68 +158,11 @@ const ALLOWED_IMAGE_MIMES = new Set([
  * present, preventing marker A from being paired with unrelated image B.
  */
 export async function extractCanonicalRepositoryImages(
-  sources: readonly NexusAttachmentImageSource[]
+  sources: readonly NexusAttachmentImageSource[],
 ): Promise<ReferenceImage[]> {
   const images: ReferenceImage[] = [];
   for (const source of sources) {
-    if (
-      !isRepositorySourceObjectKey(source.repositoryId, source.objectKey)
-    ) {
-      throw Object.assign(new Error('Canonical image source is invalid'), {
-        type: 'INVALID_ATTACHMENT',
-      });
-    }
-    if (
-      source.byteSize != null &&
-      source.byteSize > MAX_CANONICAL_REFERENCE_IMAGE_BYTES
-    ) {
-      throw Object.assign(new Error('Canonical image source is too large'), {
-        type: 'INVALID_ATTACHMENT',
-      });
-    }
-
-    const object = await getObjectStream(source.objectKey);
-    if (
-      object.contentLength != null &&
-      object.contentLength > MAX_CANONICAL_REFERENCE_IMAGE_BYTES
-    ) {
-      throw Object.assign(new Error('Canonical image source is too large'), {
-        type: 'INVALID_ATTACHMENT',
-      });
-    }
-    const chunks: Buffer[] = [];
-    let totalBytes = 0;
-    for await (const chunk of object.stream) {
-      const buffer =
-        typeof chunk === 'string'
-          ? Buffer.from(chunk)
-          : Buffer.from(chunk as Uint8Array);
-      totalBytes += buffer.byteLength;
-      if (totalBytes > MAX_CANONICAL_REFERENCE_IMAGE_BYTES) {
-        object.stream.destroy();
-        throw Object.assign(new Error('Canonical image source is too large'), {
-          type: 'INVALID_ATTACHMENT',
-        });
-      }
-      chunks.push(buffer);
-    }
-
-    const mimeType = (
-      source.detectedContentType ??
-      object.contentType ??
-      source.declaredContentType ??
-      ''
-    ).split(';', 1)[0]?.trim().toLowerCase();
-    if (!mimeType || !ALLOWED_IMAGE_MIMES.has(mimeType)) {
-      throw Object.assign(new Error('Canonical image source is not an image'), {
-        type: 'INVALID_ATTACHMENT',
-      });
-    }
-    images.push({
-      base64: `data:${mimeType};base64,${Buffer.concat(chunks).toString('base64')}`,
-      mimeType,
-      role: 'reference',
-    });
+    images.push(await loadCanonicalRepositoryImage(source));
   }
   return images;
 }
@@ -158,33 +170,39 @@ export async function extractCanonicalRepositoryImages(
 /**
  * Extract text prompt from the last user message
  */
-export function extractImagePrompt(messages: ImageGenerationParams['messages']): string {
+export function extractImagePrompt(
+  messages: ImageGenerationParams["messages"],
+): string {
   const lastMessage = messages[messages.length - 1];
-  if (!lastMessage || lastMessage.role !== 'user') {
-    return '';
+  if (!lastMessage || lastMessage.role !== "user") {
+    return "";
   }
 
-  const messageContent = (lastMessage as UIMessage & {
-    content?: string | Array<{ type: string; text?: string }>;
-  }).content;
+  const messageContent = (
+    lastMessage as UIMessage & {
+      content?: string | Array<{ type: string; text?: string }>;
+    }
+  ).content;
 
-  if (typeof messageContent === 'string') {
+  if (typeof messageContent === "string") {
     return messageContent.trim();
   }
 
   if (Array.isArray(messageContent)) {
-    const textPart = messageContent.find(part => part.type === 'text' && part.text);
-    return (textPart?.text || '').trim();
+    const textPart = messageContent.find(
+      (part) => part.type === "text" && part.text,
+    );
+    return (textPart?.text || "").trim();
   }
 
   if (lastMessage.parts && Array.isArray(lastMessage.parts)) {
-    const textPart = lastMessage.parts.find((part) =>
-      part.type === 'text' && part.text
+    const textPart = lastMessage.parts.find(
+      (part) => part.type === "text" && part.text,
     ) as { type: string; text: string } | undefined;
-    return (textPart?.text || '').trim();
+    return (textPart?.text || "").trim();
   }
 
-  return '';
+  return "";
 }
 
 /**
@@ -197,14 +215,17 @@ export function extractImagePrompt(messages: ImageGenerationParams['messages']):
  * health curriculum asking about "death" or "harm reduction" — and produced
  * the "Image prompt violates content policy" surfaced to users.
  */
-export function validateImagePrompt(prompt: string): { valid: boolean; error?: Response } {
+export function validateImagePrompt(prompt: string): {
+  valid: boolean;
+  error?: Response;
+} {
   if (prompt.length === 0) {
     return {
       valid: false,
       error: new Response(
-        JSON.stringify({ error: 'Image generation requires a text prompt' }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      )
+        JSON.stringify({ error: "Image generation requires a text prompt" }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      ),
     };
   }
 
@@ -213,12 +234,12 @@ export function validateImagePrompt(prompt: string): { valid: boolean; error?: R
       valid: false,
       error: new Response(
         JSON.stringify({
-          error: 'Image prompt is too long. Maximum 4000 characters allowed.',
+          error: "Image prompt is too long. Maximum 4000 characters allowed.",
           maxLength: 4000,
-          currentLength: prompt.length
+          currentLength: prompt.length,
         }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      )
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      ),
     };
   }
 
@@ -236,68 +257,89 @@ export async function getOrCreateImageConversation(params: {
   userId: number;
   requestId: string;
 }): Promise<{ conversationId: string; title: string } | { error: Response }> {
-  const { existingConversationId, imagePrompt, imageProvider, modelId, userId, requestId } = params;
+  const {
+    existingConversationId,
+    imagePrompt,
+    imageProvider,
+    modelId,
+    userId,
+    requestId,
+  } = params;
 
   if (existingConversationId) {
     const owned = await executeQuery(
-      (db) => db
-        .select({ id: nexusConversations.id })
-        .from(nexusConversations)
-        .where(and(
-          eq(nexusConversations.id, existingConversationId),
-          eq(nexusConversations.userId, userId)
-        ))
-        .limit(1),
-      'verifyImageConversationOwnership'
+      (db) =>
+        db
+          .select({ id: nexusConversations.id })
+          .from(nexusConversations)
+          .where(
+            and(
+              eq(nexusConversations.id, existingConversationId),
+              eq(nexusConversations.userId, userId),
+            ),
+          )
+          .limit(1),
+      "verifyImageConversationOwnership",
     );
     if (!owned || owned.length === 0) {
-      log.warn('Image conversation ownership check failed — access denied', { existingConversationId, userId });
+      log.warn("Image conversation ownership check failed — access denied", {
+        existingConversationId,
+        userId,
+      });
       return {
         error: new Response(
-          JSON.stringify({ error: 'Conversation not found or access denied', requestId }),
-          { status: 404, headers: { 'Content-Type': 'application/json' } }
-        )
+          JSON.stringify({
+            error: "Conversation not found or access denied",
+            requestId,
+          }),
+          { status: 404, headers: { "Content-Type": "application/json" } },
+        ),
       };
     }
-    return { conversationId: existingConversationId, title: 'Image Generation' };
+    return {
+      conversationId: existingConversationId,
+      title: "Image Generation",
+    };
   }
 
-  const cleanedPrompt = imagePrompt.replace(/\s+/g, ' ').trim();
+  const cleanedPrompt = imagePrompt.replace(/\s+/g, " ").trim();
   let title = cleanedPrompt.slice(0, 40).trim();
   if (cleanedPrompt.length > 40) {
-    title += '...';
+    title += "...";
   }
 
   const now = new Date();
   const createResult = await executeQuery(
-    (db) => db.insert(nexusConversations)
-      .values({
-        userId,
-        provider: imageProvider,
-        modelUsed: modelId,
-        title: sanitizeTextForDatabase(title),
-        messageCount: 0,
-        totalTokens: 0,
-        metadata: sql`${safeJsonbStringify({ source: 'nexus', type: 'image-generation' })}::jsonb`,
-        createdAt: now,
-        updatedAt: now
-      })
-      .returning({ id: nexusConversations.id }),
-    'createImageConversation'
+    (db) =>
+      db
+        .insert(nexusConversations)
+        .values({
+          userId,
+          provider: imageProvider,
+          modelUsed: modelId,
+          title: sanitizeTextForDatabase(title),
+          messageCount: 0,
+          totalTokens: 0,
+          metadata: sql`${safeJsonbStringify({ source: "nexus", type: "image-generation" })}::jsonb`,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: nexusConversations.id }),
+    "createImageConversation",
   );
 
   if (!createResult || createResult.length === 0 || !createResult[0]?.id) {
-    log.error('Failed to create image conversation');
+    log.error("Failed to create image conversation");
     return {
       error: new Response(
-        JSON.stringify({ error: 'Failed to create conversation' }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
-      )
+        JSON.stringify({ error: "Failed to create conversation" }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      ),
     };
   }
 
   const conversationId = createResult[0].id as string;
-  log.info('Created new image conversation', { conversationId });
+  log.info("Created new image conversation", { conversationId });
   return { conversationId, title };
 }
 
@@ -333,7 +375,7 @@ export async function persistImageExchange(params: {
     conversationId,
     imagePrompt,
     userContent = imagePrompt,
-    userParts = [{ type: 'text', text: imagePrompt }],
+    userParts = [{ type: "text", text: imagePrompt }],
     imageResult,
     dbModelId,
     routingMetadata = {},
@@ -349,67 +391,70 @@ export async function persistImageExchange(params: {
   }> = [];
 
   if (imageResult.altText && imageResult.altText.trim()) {
-    messageParts.push({ type: 'text', text: imageResult.altText.trim() });
+    messageParts.push({ type: "text", text: imageResult.altText.trim() });
   }
 
   messageParts.push({
-    type: 'image',
+    type: "image",
     imageUrl: imageResult.imageUrl,
     s3Key: imageResult.s3Key,
-    altText: 'Generated image'
+    altText: "Generated image",
   });
 
   const assistantMessageContent = JSON.stringify({
-    type: 'image',
+    type: "image",
     imageUrl: imageResult.imageUrl,
     s3Key: imageResult.s3Key,
     model: imageResult.model,
     provider: imageResult.provider,
     altText: imageResult.altText,
-    dimensions: imageResult.dimensions
+    dimensions: imageResult.dimensions,
   });
 
   await executeTransaction(async (tx) => {
     await tx.insert(nexusMessages).values({
       id: crypto.randomUUID(),
       conversationId,
-      role: 'user',
+      role: "user",
       content: userContent,
       parts: sql`${safeJsonbStringify(userParts)}::jsonb`,
       modelId: dbModelId,
       metadata: sql`${safeJsonbStringify({})}::jsonb`,
-      createdAt: new Date()
+      createdAt: new Date(),
     });
 
     await tx.insert(nexusMessages).values({
       conversationId,
-      role: 'assistant',
+      role: "assistant",
       content: assistantMessageContent,
       parts: sql`${safeJsonbStringify(messageParts)}::jsonb`,
       modelId: dbModelId,
       metadata: sql`${safeJsonbStringify({
-        generationType: 'image',
+        generationType: "image",
         estimatedCost: imageResult.estimatedCost,
         routing: routingMetadata,
       })}::jsonb`,
-      createdAt: new Date()
+      createdAt: new Date(),
     });
 
     // Both rows are inserted in this same transaction, so `+ 2` cannot desync.
-    await tx.update(nexusConversations).set({
-      messageCount: sql`${nexusConversations.messageCount} + 2`,
-      lastMessageAt: new Date(),
-      updatedAt: new Date()
-    }).where(eq(nexusConversations.id, conversationId));
-  }, 'persistImageExchange');
+    await tx
+      .update(nexusConversations)
+      .set({
+        messageCount: sql`${nexusConversations.messageCount} + 2`,
+        lastMessageAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(nexusConversations.id, conversationId));
+  }, "persistImageExchange");
 }
 
 /**
  * Extract reference images from message parts
  */
 export async function extractReferenceImages(
-  lastMessage: ImageGenerationParams['messages'][0] | undefined,
-  conversationId: string
+  lastMessage: ImageGenerationParams["messages"][0] | undefined,
+  conversationId: string,
 ): Promise<ReferenceImage[]> {
   const referenceImages: ReferenceImage[] = [];
 
@@ -417,26 +462,28 @@ export async function extractReferenceImages(
     return referenceImages;
   }
 
-  const partsArray = lastMessage.parts as unknown as Array<{
-    type: string;
-    text?: string;
-    image?: string;
-    imageUrl?: string;
-    s3Key?: string;
-    mediaType?: string;
-    mimeType?: string;
-    data?: string;
-    url?: string;
-  }> | undefined;
+  const partsArray = lastMessage.parts as unknown as
+    | Array<{
+        type: string;
+        text?: string;
+        image?: string;
+        imageUrl?: string;
+        s3Key?: string;
+        mediaType?: string;
+        mimeType?: string;
+        data?: string;
+        url?: string;
+      }>
+    | undefined;
 
   if (!partsArray || !Array.isArray(partsArray)) {
     return referenceImages;
   }
 
   for (const part of partsArray) {
-    if (part.type === 'image') {
+    if (part.type === "image") {
       await handleImagePart(part, referenceImages, conversationId);
-    } else if (part.type === 'file') {
+    } else if (part.type === "file") {
       await handleFilePart(part, referenceImages, conversationId);
     }
   }
@@ -447,13 +494,15 @@ export async function extractReferenceImages(
 async function handleImagePart(
   part: { s3Key?: string; image?: string; imageUrl?: string },
   referenceImages: ReferenceImage[],
-  conversationId: string
+  conversationId: string,
 ): Promise<void> {
   if (part.s3Key) {
     // REV-SEC-144: only read an s3Key that lives under this conversation's own
     // attachment prefix — a client can otherwise reference another tenant's key.
     if (!isKeyInConversationPrefix(part.s3Key, conversationId)) {
-      log.warn('Rejected reference image s3Key outside conversation prefix', { conversationId });
+      log.warn("Rejected reference image s3Key outside conversation prefix", {
+        conversationId,
+      });
       return;
     }
     try {
@@ -462,33 +511,33 @@ async function handleImagePart(
         referenceImages.push({
           base64: attachmentData.image,
           mimeType: attachmentData.contentType,
-          role: 'reference'
+          role: "reference",
         });
       }
     } catch (s3Error) {
-      log.warn('Failed to retrieve image from S3', {
+      log.warn("Failed to retrieve image from S3", {
         s3Key: part.s3Key,
-        error: s3Error instanceof Error ? s3Error.message : String(s3Error)
+        error: s3Error instanceof Error ? s3Error.message : String(s3Error),
       });
     }
-  } else if (part.image && !part.image.startsWith('s3://')) {
-    referenceImages.push({ base64: part.image, role: 'reference' });
-  } else if (part.image && part.image.startsWith('s3://')) {
+  } else if (part.image && !part.image.startsWith("s3://")) {
+    referenceImages.push({ base64: part.image, role: "reference" });
+  } else if (part.image && part.image.startsWith("s3://")) {
     // Before this guard, s3:// images without s3Key would fall through to the
     // imageUrl branch (if present) — silently using a URL that can't resolve.
     // Logging explicitly is safer than a silent fallback to an unusable URL.
-    log.warn('Image part has s3:// URL but no s3Key — cannot retrieve');
+    log.warn("Image part has s3:// URL but no s3Key — cannot retrieve");
   } else if (part.imageUrl) {
     // REV-SEC-142: a client-supplied reference URL is fetched server-side
     // downstream; reject private/loopback/link-local/metadata targets (SSRF)
     // before it can become a reference image. https-only in production.
     if (!isSafeReferenceUrl(part.imageUrl)) {
-      log.warn('Rejected unsafe reference image URL (SSRF guard)');
+      log.warn("Rejected unsafe reference image URL (SSRF guard)");
       return;
     }
     referenceImages.push({
       url: part.imageUrl,
-      role: 'reference'
+      role: "reference",
     });
   }
 }
@@ -510,9 +559,13 @@ function isSafeReferenceUrl(url: string): boolean {
 /**
  * Get S3 key from part data
  */
-function getS3KeyFromPart(part: { s3Key?: string; url?: string }): string | null {
+function getS3KeyFromPart(part: {
+  s3Key?: string;
+  url?: string;
+}): string | null {
   if (part.s3Key) return part.s3Key;
-  if (part.url && part.url.startsWith('s3://')) return part.url.replace('s3://', '');
+  if (part.url && part.url.startsWith("s3://"))
+    return part.url.replace("s3://", "");
   return null;
 }
 
@@ -522,7 +575,7 @@ function getS3KeyFromPart(part: { s3Key?: string; url?: string }): string | null
 async function handleS3FileImage(
   s3Key: string,
   mimeType: string,
-  referenceImages: ReferenceImage[]
+  referenceImages: ReferenceImage[],
 ): Promise<void> {
   try {
     const attachmentData = await getAttachmentFromS3(s3Key);
@@ -530,23 +583,29 @@ async function handleS3FileImage(
       referenceImages.push({
         base64: attachmentData.image,
         mimeType: attachmentData.contentType || mimeType,
-        role: 'reference'
+        role: "reference",
       });
     }
   } catch (s3Error) {
-    log.warn('Failed to retrieve file image from S3', {
+    log.warn("Failed to retrieve file image from S3", {
       s3Key,
-      error: s3Error instanceof Error ? s3Error.message : String(s3Error)
+      error: s3Error instanceof Error ? s3Error.message : String(s3Error),
     });
   }
 }
 
 async function handleFilePart(
-  part: { mediaType?: string; mimeType?: string; s3Key?: string; url?: string; data?: string },
+  part: {
+    mediaType?: string;
+    mimeType?: string;
+    s3Key?: string;
+    url?: string;
+    data?: string;
+  },
   referenceImages: ReferenceImage[],
-  conversationId: string
+  conversationId: string,
 ): Promise<void> {
-  const mimeType = part.mediaType || part.mimeType || '';
+  const mimeType = part.mediaType || part.mimeType || "";
   if (!ALLOWED_IMAGE_MIMES.has(mimeType)) {
     return;
   }
@@ -556,7 +615,9 @@ async function handleFilePart(
     // REV-SEC-144: reject a client-supplied key (incl. s3:// URLs) that is not
     // under this conversation's own attachment prefix before any S3 read.
     if (!isKeyInConversationPrefix(s3Key, conversationId)) {
-      log.warn('Rejected reference file s3Key outside conversation prefix', { conversationId });
+      log.warn("Rejected reference file s3Key outside conversation prefix", {
+        conversationId,
+      });
       return;
     }
     await handleS3FileImage(s3Key, mimeType, referenceImages);
@@ -564,10 +625,14 @@ async function handleFilePart(
   }
 
   if (part.data) {
-    const base64WithPrefix = part.data.startsWith('data:')
+    const base64WithPrefix = part.data.startsWith("data:")
       ? part.data
       : `data:${mimeType};base64,${part.data}`;
-    referenceImages.push({ base64: base64WithPrefix, mimeType, role: 'reference' });
+    referenceImages.push({
+      base64: base64WithPrefix,
+      mimeType,
+      role: "reference",
+    });
     return;
   }
 
@@ -575,10 +640,10 @@ async function handleFilePart(
     // REV-SEC-142: part.url here is a non-s3:// URL (getS3KeyFromPart already
     // handled s3://). Reject SSRF targets before it becomes a fetched reference.
     if (!isSafeReferenceUrl(part.url)) {
-      log.warn('Rejected unsafe reference file URL (SSRF guard)');
+      log.warn("Rejected unsafe reference file URL (SSRF guard)");
       return;
     }
-    referenceImages.push({ url: part.url, mimeType, role: 'reference' });
+    referenceImages.push({ url: part.url, mimeType, role: "reference" });
   }
 }
 
@@ -587,28 +652,29 @@ async function handleFilePart(
  */
 export async function getPreviousGeneratedImages(
   conversationId: string,
-  userId: number
+  userId: number,
 ): Promise<ReferenceImage[]> {
   const referenceImages: ReferenceImage[] = [];
 
   const previousImages = await executeQuery(
-    (db) => db
-      .select({ parts: nexusMessages.parts })
-      .from(nexusMessages)
-      .innerJoin(
-        nexusConversations,
-        eq(nexusMessages.conversationId, nexusConversations.id)
-      )
-      .where(
-        and(
-          eq(nexusMessages.conversationId, conversationId),
-          eq(nexusMessages.role, 'assistant'),
-          eq(nexusConversations.userId, userId)
+    (db) =>
+      db
+        .select({ parts: nexusMessages.parts })
+        .from(nexusMessages)
+        .innerJoin(
+          nexusConversations,
+          eq(nexusMessages.conversationId, nexusConversations.id),
         )
-      )
-      .orderBy(desc(nexusMessages.createdAt))
-      .limit(5),
-    'getPreviousGeneratedImages'
+        .where(
+          and(
+            eq(nexusMessages.conversationId, conversationId),
+            eq(nexusMessages.role, "assistant"),
+            eq(nexusConversations.userId, userId),
+          ),
+        )
+        .orderBy(desc(nexusMessages.createdAt))
+        .limit(5),
+    "getPreviousGeneratedImages",
   );
 
   if (!previousImages || previousImages.length === 0) {
@@ -618,12 +684,19 @@ export async function getPreviousGeneratedImages(
   for (const msg of previousImages) {
     if (msg.parts && Array.isArray(msg.parts)) {
       for (const part of msg.parts) {
-        const partData = part as { type: string; imageUrl?: string; s3Key?: string };
-        if (partData.type === 'image' && (partData.imageUrl || partData.s3Key)) {
+        const partData = part as {
+          type: string;
+          imageUrl?: string;
+          s3Key?: string;
+        };
+        if (
+          partData.type === "image" &&
+          (partData.imageUrl || partData.s3Key)
+        ) {
           referenceImages.push({
             url: partData.imageUrl,
             s3Key: partData.s3Key,
-            role: 'reference'
+            role: "reference",
           });
           return referenceImages; // Only use most recent
         }
@@ -640,23 +713,33 @@ export async function getPreviousGeneratedImages(
  * runs before the normal conversation ownership check.
  */
 export async function getImageRoutingContext(params: {
-  messages: ImageGenerationParams['messages'];
+  messages: ImageGenerationParams["messages"];
   conversationId?: string;
   userId: number;
 }): Promise<{ hasImageInput: boolean; hasPreviousGeneratedImage: boolean }> {
-  const lastUserMessage = [...params.messages].reverse().find(message => message.role === 'user');
-  const hasImageInput = lastUserMessage?.parts?.some(part => {
-    const mimeType = part.mimeType ?? part.mediaType;
-    return part.type === 'image'
-      || (part.type === 'file' && typeof mimeType === 'string' && mimeType.startsWith('image/'));
-  }) ?? false;
+  const lastUserMessage = [...params.messages]
+    .reverse()
+    .find((message) => message.role === "user");
+  const hasImageInput =
+    lastUserMessage?.parts?.some((part) => {
+      const mimeType = part.mimeType ?? part.mediaType;
+      return (
+        part.type === "image" ||
+        (part.type === "file" &&
+          typeof mimeType === "string" &&
+          mimeType.startsWith("image/"))
+      );
+    }) ?? false;
 
   if (hasImageInput || !params.conversationId) {
     return { hasImageInput, hasPreviousGeneratedImage: false };
   }
 
   try {
-    const previousImages = await getPreviousGeneratedImages(params.conversationId, params.userId);
+    const previousImages = await getPreviousGeneratedImages(
+      params.conversationId,
+      params.userId,
+    );
     return {
       hasImageInput: false,
       hasPreviousGeneratedImage: previousImages.length > 0,
@@ -665,7 +748,7 @@ export async function getImageRoutingContext(params: {
     // Prior-image context improves routing but is not required for an ordinary
     // chat request. Degrade to no context instead of turning a lookup failure
     // into a pre-stream 500.
-    log.warn('Could not load previous image context for routing', {
+    log.warn("Could not load previous image context for routing", {
       conversationId: params.conversationId,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -684,28 +767,37 @@ export function createImageStreamResponse(params: {
   requestId: string;
   routingMetadata?: Record<string, unknown>;
 }): Response {
-  const { imageResult, conversationId, conversationTitle, isNewConversation, requestId, routingMetadata } = params;
+  const {
+    imageResult,
+    conversationId,
+    conversationTitle,
+    isNewConversation,
+    requestId,
+    routingMetadata,
+  } = params;
 
-  let responseContent = '';
+  let responseContent = "";
   if (imageResult.altText && imageResult.altText.trim()) {
-    responseContent += imageResult.altText.trim() + '\n\n';
+    responseContent += imageResult.altText.trim() + "\n\n";
   }
   responseContent += `![Generated Image](${imageResult.imageUrl})`;
 
   const messageId = `img-${Date.now()}`;
 
   const responseHeaders: Record<string, string> = {
-    'X-Request-Id': requestId,
-    'X-Conversation-Id': conversationId,
-    'X-Image-Generated': 'true'
+    "X-Request-Id": requestId,
+    "X-Conversation-Id": conversationId,
+    "X-Image-Generated": "true",
   };
 
   if (isNewConversation) {
-    responseHeaders['X-Conversation-Title'] = encodeURIComponent(conversationTitle);
+    responseHeaders["X-Conversation-Title"] =
+      encodeURIComponent(conversationTitle);
   }
   if (routingMetadata) {
     const encodedRouting = encodeURIComponent(JSON.stringify(routingMetadata));
-    if (encodedRouting.length <= 4096) responseHeaders['X-Nexus-Routing'] = encodedRouting;
+    if (encodedRouting.length <= 4096)
+      responseHeaders["X-Nexus-Routing"] = encodedRouting;
   }
 
   return createUIMessageStreamResponse({
@@ -713,11 +805,15 @@ export function createImageStreamResponse(params: {
     headers: responseHeaders,
     stream: createUIMessageStream({
       async execute({ writer }) {
-        writer.write({ type: 'text-start', id: messageId });
-        writer.write({ type: 'text-delta', id: messageId, delta: responseContent });
-        writer.write({ type: 'text-end', id: messageId });
-      }
-    })
+        writer.write({ type: "text-start", id: messageId });
+        writer.write({
+          type: "text-delta",
+          id: messageId,
+          delta: responseContent,
+        });
+        writer.write({ type: "text-end", id: messageId });
+      },
+    }),
   });
 }
 
@@ -727,58 +823,74 @@ export function createImageStreamResponse(params: {
 export function handleImageGenerationError(
   error: unknown,
   conversationId: string,
-  requestId: string
+  requestId: string,
 ): Response {
   // Extract typed error properties with instanceof + in narrowing
   const errorMessage = error instanceof Error ? error.message : String(error);
-  const errorType = error instanceof Error && 'type' in error ? (error as { type: string }).type : undefined;
-  const retryAfter = error instanceof Error && 'retryAfter' in error ? (error as { retryAfter: number }).retryAfter : undefined;
+  const errorType =
+    error instanceof Error && "type" in error
+      ? (error as { type: string }).type
+      : undefined;
+  const retryAfter =
+    error instanceof Error && "retryAfter" in error
+      ? (error as { retryAfter: number }).retryAfter
+      : undefined;
 
-  if (errorType === 'CONTENT_POLICY') {
+  if (errorType === "CONTENT_POLICY") {
     // Cap logged message to avoid persisting full user prompt content that providers may echo back
-    log.warn('Image generation content policy violation', {
+    log.warn("Image generation content policy violation", {
       conversationId,
       errorMessage: errorMessage.slice(0, 200),
-      requestId
-    });
-    return new Response(
-      JSON.stringify({ error: 'Your image prompt was flagged by the content policy. Please revise your request.', code: 'CONTENT_POLICY', requestId }),
-      { status: 400, headers: { 'Content-Type': 'application/json' } }
-    );
-  }
-
-  if (errorType === 'RATE_LIMIT') {
-    log.warn('Image generation rate limited', {
-      conversationId,
-      errorMessage,
-      retryAfter,
-      requestId
+      requestId,
     });
     return new Response(
       JSON.stringify({
-        error: 'Image generation rate limit reached. Please wait and try again.',
-        code: 'RATE_LIMIT',
-        retryAfter: retryAfter || 60,
-        requestId
+        error:
+          "Your image prompt was flagged by the content policy. Please revise your request.",
+        code: "CONTENT_POLICY",
+        requestId,
       }),
-      { status: 429, headers: { 'Content-Type': 'application/json' } }
+      { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
 
-  if (errorType === 'AUTHENTICATION') {
-    log.warn('Image generation authentication failure', {
+  if (errorType === "RATE_LIMIT") {
+    log.warn("Image generation rate limited", {
       conversationId,
       errorMessage,
-      requestId
+      retryAfter,
+      requestId,
     });
     return new Response(
-      JSON.stringify({ error: 'Image generation service authentication failed', code: 'AUTH_ERROR', requestId }),
-      { status: 401, headers: { 'Content-Type': 'application/json' } }
+      JSON.stringify({
+        error:
+          "Image generation rate limit reached. Please wait and try again.",
+        code: "RATE_LIMIT",
+        retryAfter: retryAfter || 60,
+        requestId,
+      }),
+      { status: 429, headers: { "Content-Type": "application/json" } },
     );
   }
 
-  if (errorType === 'INVALID_ATTACHMENT') {
-    log.warn('Image generation canonical attachment rejected', {
+  if (errorType === "AUTHENTICATION") {
+    log.warn("Image generation authentication failure", {
+      conversationId,
+      errorMessage,
+      requestId,
+    });
+    return new Response(
+      JSON.stringify({
+        error: "Image generation service authentication failed",
+        code: "AUTH_ERROR",
+        requestId,
+      }),
+      { status: 401, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  if (errorType === "INVALID_ATTACHMENT") {
+    log.warn("Image generation canonical attachment rejected", {
       conversationId,
       errorMessage,
       requestId,
@@ -786,26 +898,26 @@ export function handleImageGenerationError(
     return new Response(
       JSON.stringify({
         error:
-          'The attached repository image is unavailable for image generation.',
-        code: 'INVALID_ATTACHMENT',
+          "The attached repository image is unavailable for image generation.",
+        code: "INVALID_ATTACHMENT",
         requestId,
       }),
-      { status: 400, headers: { 'Content-Type': 'application/json' } }
+      { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
 
   // Only log at error level for unexpected/untyped errors — not for expected error types above
-  log.error('Image generation failed', {
+  log.error("Image generation failed", {
     conversationId,
     errorMessage,
-    requestId
+    requestId,
   });
 
   return new Response(
     JSON.stringify({
-      error: 'Image generation failed. Please try again.',
-      requestId
+      error: "Image generation failed. Please try again.",
+      requestId,
     }),
-    { status: 500, headers: { 'Content-Type': 'application/json' } }
+    { status: 500, headers: { "Content-Type": "application/json" } },
   );
 }

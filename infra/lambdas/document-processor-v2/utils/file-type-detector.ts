@@ -18,11 +18,11 @@ export class FileTypeDetector {
   private static readonly MAGIC_NUMBERS = {
     // PDF signature
     pdf: [0x25, 0x50, 0x44, 0x46], // %PDF
-    
+
     // ZIP-based files (Office 2007+ formats are ZIP archives)
     // All modern Office files start with ZIP signature
     zip: [0x50, 0x4B, 0x03, 0x04], // PK..
-    
+
     // Alternative ZIP signatures
     zipEmpty: [0x50, 0x4B, 0x05, 0x06], // PK.. (empty archive)
     zipSpanned: [0x50, 0x4B, 0x07, 0x08], // PK.. (spanned archive)
@@ -160,7 +160,7 @@ export class FileTypeDetector {
       const officeType = this.detectOfficeTypeFromZip(buffer, fileName);
       if (officeType !== 'unknown') {
         return {
-          detectedType: officeType as any,
+          detectedType: officeType as unknown,
           confidence: 'high',
           method: 'magic-number',
           reason: `ZIP archive with ${officeType.toUpperCase()} content structure detected`
@@ -250,11 +250,11 @@ export class FileTypeDetector {
    */
   private static detectByExtension(fileName: string): FileTypeDetectionResult {
     const lowercaseFileName = fileName.toLowerCase();
-    
+
     for (const [ext, type] of Object.entries(this.EXTENSION_MAP)) {
       if (lowercaseFileName.endsWith(ext)) {
         return {
-          detectedType: type as any,
+          detectedType: type as unknown,
           confidence: 'medium',
           method: 'extension',
           reason: `File extension ${ext} indicates ${type.toUpperCase()} file`
@@ -275,11 +275,11 @@ export class FileTypeDetector {
    */
   private static detectByMimeType(mimeType: string): FileTypeDetectionResult {
     const normalizedMimeType = mimeType.toLowerCase().split(';')[0].trim();
-    
+
     const detectedType = this.MIME_TYPE_MAP[normalizedMimeType];
     if (detectedType) {
       return {
-        detectedType: detectedType as any,
+        detectedType: detectedType as unknown,
         confidence: 'medium',
         method: 'mime-type',
         reason: `MIME type ${mimeType} indicates ${detectedType.toUpperCase()} file`
@@ -340,12 +340,12 @@ export class FileTypeDetector {
       if (buffer.length >= 4) {
         const header = Array.from(buffer.slice(0, 4));
         const isZip = this.arraysEqual(header, this.MAGIC_NUMBERS.zip);
-        
+
         if (isZip) {
           const officeType = this.detectOfficeTypeFromZip(buffer);
           if (officeType !== 'unknown') {
             return {
-              detectedType: officeType as any,
+              detectedType: officeType as unknown,
               confidence: 'medium',
               method: 'fallback',
               reason: `Content inspection identified ${officeType.toUpperCase()} structure`
@@ -401,12 +401,12 @@ export class FileTypeDetector {
    */
   private static isPrintableText(text: string): boolean {
     if (!text) return false;
-    
+
     const printableChars = text.split('').filter(char => {
       const code = char.charCodeAt(0);
       return (code >= 32 && code <= 126) || code === 9 || code === 10 || code === 13;
     });
-    
+
     const printableRatio = printableChars.length / text.length;
     return printableRatio > 0.8;
   }

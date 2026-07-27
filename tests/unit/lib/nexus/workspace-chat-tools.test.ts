@@ -111,7 +111,7 @@ beforeEach(() => {
 // re-check permission per call), so every bound tool set now includes them.
 const ITEM3 = ["edit_atrium_document", "find_atrium_documents"];
 
-describe("buildWorkspaceChatTools", () => {
+function defineBuildWorkspaceChatToolsSuite1Part1() {
   it("returns null when the requester cannot be resolved", async () => {
     requesterMock.mockResolvedValue(null);
     const result = await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" });
@@ -212,7 +212,9 @@ describe("buildWorkspaceChatTools", () => {
     expect(String(out.error)).toMatch(/permission|owner|administrator/i);
   });
 
-  it("edit_workspace_document screens then applies via the agent bridge (append default)", async () => {
+  }
+
+function defineBuildWorkspaceChatToolsSuite1Part2() {it("edit_workspace_document screens then applies via the agent bridge (append default)", async () => {
     getMock.mockResolvedValue(DOC);
     canEditMock.mockReturnValue(true);
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
@@ -319,7 +321,9 @@ describe("buildWorkspaceChatTools", () => {
     });
   });
 
-  it("read_workspace_content reports an EMPTY live document as body:'' (not unavailable, not a refusal)", async () => {
+  }
+
+function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content reports an EMPTY live document as body:'' (not unavailable, not a refusal)", async () => {
     getMock.mockResolvedValue(DOC);
     canEditMock.mockReturnValue(true);
     // A new / title-only document: the live doc hydrates to empty text.
@@ -427,7 +431,9 @@ describe("buildWorkspaceChatTools", () => {
     expect(out.error).toBeDefined();
   });
 
-  it("unpublish_workspace_content takes the object offline via publishService", async () => {
+  }
+
+function defineBuildWorkspaceChatToolsSuite1Part4() {it("unpublish_workspace_content takes the object offline via publishService", async () => {
     getMock.mockResolvedValue(DOC);
     canEditMock.mockReturnValue(true);
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
@@ -499,4 +505,13 @@ describe("buildWorkspaceChatTools", () => {
     expect(applyAgentEditMock).not.toHaveBeenCalled();
     expect(out.error).toMatch(/not a document/i);
   });
-});
+}
+
+const defineBuildWorkspaceChatToolsSuite1 = () => {
+  defineBuildWorkspaceChatToolsSuite1Part1()
+  defineBuildWorkspaceChatToolsSuite1Part2()
+  defineBuildWorkspaceChatToolsSuite1Part3()
+  defineBuildWorkspaceChatToolsSuite1Part4()
+};
+
+describe("buildWorkspaceChatTools", defineBuildWorkspaceChatToolsSuite1);

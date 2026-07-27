@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, jest } from '@jest/globals';
-import { 
-  createResponsesAPIClient, 
+import {
+  createResponsesAPIClient,
   ResponsesAPIClient,
-  streamWithResponsesAPI 
+  streamWithResponsesAPI
 } from '../openai-responses-api';
 import type { StreamRequest, StreamingCallbacks } from '../types';
 
@@ -16,7 +16,7 @@ if (!global.ReadableStream) {
       enqueue: jest.MockedFunction<(chunk: unknown) => void>;
       close: jest.MockedFunction<() => void>;
     };
-    
+
     constructor(source: { start?: (controller: unknown) => void }) {
       this.controller = {
         enqueue: jest.fn(),
@@ -26,17 +26,17 @@ if (!global.ReadableStream) {
         source.start(this.controller);
       }
     }
-    
+
     getReader() {
       const controller = this.controller;
       let chunks: unknown[] = [];
       let currentIndex = 0;
-      
+
       // Extract chunks from controller.enqueue calls
       if (controller.enqueue.mock) {
         chunks = controller.enqueue.mock.calls.map((call: unknown[]) => call[0]);
       }
-      
+
       return {
         read: async () => {
           if (currentIndex < chunks.length) {
@@ -48,13 +48,13 @@ if (!global.ReadableStream) {
       };
     }
   } as unknown as typeof ReadableStream;
-  
+
   global.TextEncoder = class TextEncoder {
     encode(text: string): Uint8Array {
       return Buffer.from(text, 'utf-8');
     }
   } as unknown as typeof TextEncoder;
-  
+
   global.TextDecoder = class TextDecoder {
     decode(buffer: BufferSource): string {
       return Buffer.from(buffer as ArrayBuffer).toString('utf-8');
@@ -72,13 +72,7 @@ jest.mock('@/lib/logger', () => ({
   })
 }));
 
-describe('OpenAI Responses API', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    (global.fetch as jest.MockedFunction<typeof fetch>).mockClear();
-  });
-  
-  describe('ResponsesAPIClient', () => {
+function defineResponsesAPIClientSuite99Part1() {
     it('should create client with config', () => {
       const client = createResponsesAPIClient({
         apiKey: 'test-key',
@@ -86,10 +80,10 @@ describe('OpenAI Responses API', () => {
         reasoningEffort: 'high',
         backgroundMode: false
       });
-      
+
       expect(client).toBeInstanceOf(ResponsesAPIClient);
     });
-    
+
     it('should handle streaming responses with reasoning', async () => {
       // Mock SSE stream response
       const mockStream = new ReadableStream({
@@ -102,35 +96,35 @@ describe('OpenAI Responses API', () => {
           controller.close();
         }
       });
-      
+
       (global.fetch as jest.MockedFunction<typeof fetch>).mockResolvedValueOnce({
         ok: true,
         status: 200,
         statusText: 'OK',
         body: mockStream
       } as Response);
-      
+
       const client = createResponsesAPIClient({
         apiKey: 'test-key',
         modelId: 'o3-mini',
         reasoningEffort: 'medium'
       });
-      
+
       const callbacks: StreamingCallbacks = {
         onReasoning: jest.fn(),
         onProgress: jest.fn(),
         onFinish: jest.fn()
       };
-      
+
       const result = await client.stream([
         { role: 'user', content: 'What is the answer?' }
       ], callbacks);
-      
+
       expect(result.status).toBe('completed');
       expect(result.reasoning).toEqual(['Step 1: Analyzing']);
       expect(result.response).toBe('The answer is 42');
       expect(result.reasoningTokens).toBe(5);
-      
+
       expect(callbacks.onReasoning).toHaveBeenCalledWith('Step 1: Analyzing');
       expect(callbacks.onProgress).toHaveBeenCalled();
       expect(callbacks.onFinish).toHaveBeenCalledWith(expect.objectContaining({
@@ -143,7 +137,7 @@ describe('OpenAI Responses API', () => {
         })
       }));
     });
-    
+
     it('should handle background mode', async () => {
       (global.fetch as jest.MockedFunction<typeof fetch>).mockResolvedValueOnce({
         ok: true,
@@ -154,20 +148,20 @@ describe('OpenAI Responses API', () => {
           estimated_completion_time: 30000
         })
       } as Response);
-      
+
       const client = createResponsesAPIClient({
         apiKey: 'test-key',
         modelId: 'o4',
         backgroundMode: true
       });
-      
+
       const result = await client.stream([
         { role: 'user', content: 'Solve this complex problem' }
       ]);
-      
+
       expect(result.status).toBe('background');
       expect(result.jobId).toBe('job-123');
-      
+
       expect(global.fetch).toHaveBeenCalledWith(
         'https://api.openai.com/v1/responses',
         expect.objectContaining({
@@ -180,7 +174,7 @@ describe('OpenAI Responses API', () => {
         })
       );
     });
-    
+
     it('should poll for job status', async () => {
       (global.fetch as jest.MockedFunction<typeof fetch>).mockResolvedValueOnce({
         ok: true,
@@ -193,22 +187,24 @@ describe('OpenAI Responses API', () => {
           response: 'Complex solution'
         })
       } as Response);
-      
+
       const client = createResponsesAPIClient({
         apiKey: 'test-key',
         modelId: 'o4'
       });
-      
+
       const result = await client.getJobStatus('job-123');
-      
+
       expect(result.status).toBe('completed');
       expect(result.reasoning).toEqual(['Step 1', 'Step 2']);
       expect(result.thinkingTime).toBe(5000);
       expect(result.reasoningTokens).toBe(150);
       expect(result.response).toBe('Complex solution');
     });
-    
-    it('should handle tool calls in reasoning', async () => {
+
+    }
+
+function defineResponsesAPIClientSuite99Part2() {it('should handle tool calls in reasoning', async () => {
       const mockStream = new ReadableStream({
         start(controller) {
           controller.enqueue(new TextEncoder().encode('data: {"type":"tool_call","tool_name":"calculator","arguments":{"expression":"2+2"}}\n\n'));
@@ -217,25 +213,25 @@ describe('OpenAI Responses API', () => {
           controller.close();
         }
       });
-      
+
       (global.fetch as jest.MockedFunction<typeof fetch>).mockResolvedValueOnce({
         ok: true,
         body: mockStream
       } as Response);
-      
+
       const client = createResponsesAPIClient({
         apiKey: 'test-key',
         modelId: 'gpt-5'
       });
-      
+
       const callbacks: StreamingCallbacks = {
         onProgress: jest.fn()
       };
-      
+
       await client.stream([
         { role: 'user', content: 'Calculate 2+2' }
       ], callbacks);
-      
+
       expect(callbacks.onProgress).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'tool_call',
@@ -246,25 +242,38 @@ describe('OpenAI Responses API', () => {
         })
       );
     });
-    
+
     it('should handle API errors', async () => {
       (global.fetch as jest.MockedFunction<typeof fetch>).mockResolvedValueOnce({
         ok: false,
         status: 401,
         statusText: 'Unauthorized'
       } as Response);
-      
+
       const client = createResponsesAPIClient({
         apiKey: 'invalid-key',
         modelId: 'o3'
       });
-      
+
       await expect(client.stream([
         { role: 'user', content: 'Test' }
       ])).rejects.toThrow('Responses API error: 401 Unauthorized');
     });
+  }
+
+const defineResponsesAPIClientSuite99 = () => {
+  defineResponsesAPIClientSuite99Part1()
+  defineResponsesAPIClientSuite99Part2()
+};
+
+const defineOpenAIResponsesAPISuite1 = () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (global.fetch as jest.MockedFunction<typeof fetch>).mockClear();
   });
-  
+
+  describe('ResponsesAPIClient', defineResponsesAPIClientSuite99);
+
   describe('streamWithResponsesAPI', () => {
     it('should integrate with unified streaming format', async () => {
       const mockStream = new ReadableStream({
@@ -274,15 +283,15 @@ describe('OpenAI Responses API', () => {
           controller.close();
         }
       });
-      
+
       (global.fetch as jest.MockedFunction<typeof fetch>).mockResolvedValueOnce({
         ok: true,
         body: mockStream
       } as Response);
-      
+
       // Mock env variable
       process.env.OPENAI_API_KEY = 'test-key';
-      
+
       const request: StreamRequest = {
         messages: [
           {
@@ -300,15 +309,17 @@ describe('OpenAI Responses API', () => {
           backgroundMode: false
         }
       };
-      
+
       const result = await streamWithResponsesAPI(request);
-      
+
       expect(result.capabilities.supportsReasoning).toBe(true);
       expect(result.capabilities.supportsBackgroundMode).toBe(true);
       expect(result.result).toBeDefined();
-      
+
       const usage = await result.result.usage;
       expect(usage).toBeDefined();
     });
   });
-});
+};
+
+describe('OpenAI Responses API', defineOpenAIResponsesAPISuite1);

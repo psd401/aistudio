@@ -7,10 +7,10 @@
  */
 
 import { marshall } from '@aws-sdk/util-dynamodb';
-import { Readable } from 'stream';
+import { Readable } from 'node:stream';
 
 // DynamoDB: Query returns a job row (so updateJobStatus doesn't 404); Put resolves.
-const dynamoSend = jest.fn((command: any) => {
+const dynamoSend = jest.fn((command: unknown) => {
   if (command?.input?.KeyConditionExpression) {
     return Promise.resolve({ Items: [marshall({ jobId: 'j', fileName: 'f' })] });
   }
@@ -18,20 +18,20 @@ const dynamoSend = jest.fn((command: any) => {
 });
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(() => ({ send: dynamoSend })),
-  QueryCommand: class { constructor(public input: any) {} },
-  PutItemCommand: class { constructor(public input: any) {} },
+  QueryCommand: class { constructor(public input: unknown) {} },
+  PutItemCommand: class { constructor(public input: unknown) {} },
 }));
 
 // S3: GetObject returns a small stream body.
 jest.mock('@aws-sdk/client-s3', () => ({
   S3Client: jest.fn(() => ({ send: jest.fn(() => Promise.resolve({ Body: Readable.from([Buffer.from('data')]) })) })),
-  GetObjectCommand: class { constructor(public input: any) {} },
-  PutObjectCommand: class { constructor(public input: any) {} },
+  GetObjectCommand: class { constructor(public input: unknown) {} },
+  PutObjectCommand: class { constructor(public input: unknown) {} },
 }));
 
 jest.mock('@aws-sdk/client-sqs', () => ({
   SQSClient: jest.fn(() => ({ send: jest.fn(() => Promise.resolve({})) })),
-  SendMessageCommand: class { constructor(public input: any) {} },
+  SendMessageCommand: class { constructor(public input: unknown) {} },
 }));
 
 // Factory: the processor rejects for a file named FAIL.txt, resolves otherwise.
@@ -59,7 +59,7 @@ function record(jobId: string, fileName: string, messageId: string) {
   };
 }
 
-const ctx = { awsRequestId: 'req', memoryLimitInMB: '512', getRemainingTimeInMillis: () => 60000 } as any;
+const ctx = { awsRequestId: 'req', memoryLimitInMB: '512', getRemainingTimeInMillis: () => 60000 } as unknown;
 
 describe('handler reportBatchItemFailures (REV-INFRA-091)', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -71,7 +71,7 @@ describe('handler reportBatchItemFailures (REV-INFRA-091)', () => {
         record('j2', 'FAIL.txt', 'm2'),
         record('j3', 'ok2.txt', 'm3'),
       ],
-    } as any;
+    } as unknown;
 
     const result = await handler(event, ctx);
 
@@ -80,13 +80,13 @@ describe('handler reportBatchItemFailures (REV-INFRA-091)', () => {
   });
 
   it('returns an empty batchItemFailures when all succeed', async () => {
-    const event = { Records: [record('j1', 'ok.txt', 'm1')] } as any;
+    const event = { Records: [record('j1', 'ok.txt', 'm1')] } as unknown;
     const result = await handler(event, ctx);
     expect(result.batchItemFailures).toEqual([]);
   });
 
   it('returns every itemIdentifier when the whole batch fails', async () => {
-    const event = { Records: [record('j1', 'FAIL.txt', 'm1'), record('j2', 'FAIL.txt', 'm2')] } as any;
+    const event = { Records: [record('j1', 'FAIL.txt', 'm1'), record('j2', 'FAIL.txt', 'm2')] } as unknown;
     const result = await handler(event, ctx);
     expect(result.batchItemFailures.map((f) => f.itemIdentifier).sort()).toEqual(['m1', 'm2']);
   });
@@ -101,7 +101,7 @@ describe('handler poison-message reporting (REV-INFRA-097)', () => {
         record('j1', 'ok1.txt', 'm1'),
         { messageId: 'poison', body: '{not valid json' },
       ],
-    } as any;
+    } as unknown;
 
     const result = await handler(event, ctx);
 
@@ -114,7 +114,7 @@ describe('handler poison-message reporting (REV-INFRA-097)', () => {
         { messageId: 'poison1', body: '{not valid json' },
         { messageId: 'poison2', body: 'also not json' },
       ],
-    } as any;
+    } as unknown;
 
     const result = await handler(event, ctx);
 

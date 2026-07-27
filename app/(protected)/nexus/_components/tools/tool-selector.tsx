@@ -20,9 +20,77 @@ interface ToolSelectorProps {
 const TOOL_ICONS = {
   search: Globe,
   code: Code2,
-  analysis: Search, 
+  analysis: Search,
   creative: Brain
 } as const
+
+function groupToolsByCategory(tools: ToolConfig[]): Record<string, ToolConfig[]> {
+  const grouped: Record<string, ToolConfig[]> = Object.create(null)
+  for (const tool of tools) {
+    grouped[tool.category] ??= []
+    grouped[tool.category].push(tool)
+  }
+  return grouped
+}
+
+function ToolCategories({
+  tools,
+  enabledTools,
+  isLoading,
+  onToggle,
+}: {
+  tools: ToolConfig[]
+  enabledTools: string[]
+  isLoading: boolean
+  onToggle: (toolName: string, enabled: boolean) => void
+}) {
+  return Object.entries(groupToolsByCategory(tools)).map(
+    ([category, categoryTools], categoryIndex) => {
+      const IconComponent =
+        TOOL_ICONS[category as keyof typeof TOOL_ICONS] || Brain
+      return (
+        <div key={category}>
+          {categoryIndex > 0 && <Separator className="my-3" />}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <IconComponent className="h-3 w-3 text-muted-foreground" />
+              <span className="text-xs font-medium capitalize text-muted-foreground">
+                {category}
+              </span>
+            </div>
+            <div className="space-y-3 pl-5">
+              {categoryTools.map((tool) => (
+                <div
+                  key={tool.name}
+                  className="flex items-start justify-between space-x-3"
+                >
+                  <div className="flex-1 space-y-1">
+                    <Label
+                      htmlFor={`tool-${tool.name}`}
+                      className="text-xs font-medium cursor-pointer"
+                    >
+                      {tool.displayName}
+                    </Label>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      {tool.description}
+                    </p>
+                  </div>
+                  <Switch
+                    id={`tool-${tool.name}`}
+                    checked={enabledTools.includes(tool.name)}
+                    disabled={isLoading}
+                    onCheckedChange={(checked) => onToggle(tool.name, checked)}
+                    className="mt-0.5"
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )
+    }
+  )
+}
 
 export function ToolSelector({
   selectedModel,
@@ -47,8 +115,10 @@ export function ToolSelector({
         setAvailableTools(tools)
 
         // Auto-disable tools that are no longer available
+        const availableToolNames = new Set<string>()
+        for (const tool of tools) availableToolNames.add(tool.name)
         const newEnabledTools = enabledTools.filter(toolName =>
-          tools.some(tool => tool.name === toolName)
+          availableToolNames.has(toolName)
         )
         if (newEnabledTools.length !== enabledTools.length) {
           onToolsChange(newEnabledTools)
@@ -117,15 +187,6 @@ export function ToolSelector({
     )
   }
 
-  // Group tools by category
-  const toolsByCategory = availableTools.reduce((acc, tool) => {
-    if (!acc[tool.category]) {
-      acc[tool.category] = []
-    }
-    acc[tool.category].push(tool)
-    return acc
-  }, {} as Record<string, ToolConfig[]>)
-
   return (
     <Card data-testid="tool-selector">
       <CardHeader className="pb-3">
@@ -133,7 +194,7 @@ export function ToolSelector({
           <div>
             <CardTitle className="text-sm">AI Tools</CardTitle>
             <CardDescription className="text-xs">
-              {enabledTools.length > 0 
+              {enabledTools.length > 0
                 ? `${enabledTools.length} tool${enabledTools.length === 1 ? '' : 's'} enabled`
                 : 'No tools enabled'
               }
@@ -147,54 +208,12 @@ export function ToolSelector({
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {Object.entries(toolsByCategory).map(([category, tools], categoryIndex) => {
-          const IconComponent = TOOL_ICONS[category as keyof typeof TOOL_ICONS] || Brain
-
-          return (
-            <div key={category}>
-              {categoryIndex > 0 && <Separator className="my-3" />}
-              <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <IconComponent className="h-3 w-3 text-muted-foreground" />
-                  <span className="text-xs font-medium capitalize text-muted-foreground">
-                    {category}
-                  </span>
-                </div>
-                <div className="space-y-3 pl-5">
-                  {tools.map(tool => {
-                    const isEnabled = enabledTools.includes(tool.name)
-                    
-                    return (
-                      <div 
-                        key={tool.name}
-                        className="flex items-start justify-between space-x-3"
-                      >
-                        <div className="flex-1 space-y-1">
-                          <Label 
-                            htmlFor={`tool-${tool.name}`}
-                            className="text-xs font-medium cursor-pointer"
-                          >
-                            {tool.displayName}
-                          </Label>
-                          <p className="text-xs text-muted-foreground leading-relaxed">
-                            {tool.description}
-                          </p>
-                        </div>
-                        <Switch
-                          id={`tool-${tool.name}`}
-                          checked={isEnabled}
-                          disabled={isLoading}
-                          onCheckedChange={(checked) => handleToolToggle(tool.name, checked)}
-                          className="mt-0.5"
-                        />
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            </div>
-          )
-        })}
+        <ToolCategories
+          tools={availableTools}
+          enabledTools={enabledTools}
+          isLoading={isLoading}
+          onToggle={handleToolToggle}
+        />
       </CardContent>
     </Card>
   )

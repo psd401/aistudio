@@ -71,6 +71,35 @@ export interface JobPayload {
   promptExcerpt: string;
 }
 
+export interface JobInvocation {
+  invokeSessionId: string;
+  prompt: string;
+  restart: boolean;
+}
+
+/**
+ * Select the runner's session and prompt together. A deadline resumes the
+ * existing session, while context overflow must discard that transcript and
+ * restart from the original request.
+ */
+export function resolveJobInvocation(
+  job: Pick<
+    JobPayload,
+    'sessionId' | 'lockToken' | 'reason' | 'promptExcerpt'
+  >
+): JobInvocation {
+  const restart = job.reason === 'context-overflow';
+  return {
+    invokeSessionId: restart
+      ? restartSessionId(job.sessionId, job.lockToken)
+      : job.sessionId,
+    prompt: restart
+      ? buildOverflowRestartPrompt(job.promptExcerpt)
+      : buildContinuationPrompt(job.promptExcerpt),
+    restart,
+  };
+}
+
 const PROMPT_EXCERPT_MAX = 2000;
 
 /**

@@ -1,3 +1,4 @@
+
 /**
  * Unit tests for psd-workspace command parsing + payload-file transport
  * (#1138 follow-up: splitCommand has no escape syntax, so arbitrary text
@@ -7,12 +8,13 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
 
 const { describe, expect, test } = require('bun:test');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 
 const {
   APP_BASE_URL,
@@ -32,7 +34,7 @@ function tmpFile(content, ext = '.json') {
     fs.mkdtempSync(path.join(os.tmpdir(), 'psdws-test-')),
     `payload${ext}`
   );
-  fs.writeFileSync(p, content);
+  validatedFs.writeFileSync(p, content);
   return p;
 }
 
@@ -228,45 +230,45 @@ describe('extractJsonArg', () => {
   });
 });
 
-describe('resolvePayloadFiles error paths (fail() exits — run via subprocess)', () => {
+describe('resolvePayloadFiles error paths', () => {
   const runResolve = (command) =>
-    spawnSync(
-      process.execPath,
-      ['-e', `require('${__dirname}/common.js').resolvePayloadFiles(process.argv[1])`, command],
-      { encoding: 'utf8' }
-    );
+    resolvePayloadFiles(command, {
+      onError(message) {
+        throw new Error(message);
+      },
+    });
 
   test('relative path is rejected', () => {
-    const r = runResolve('docs write --json-file relative/path.json');
-    expect(r.status).toBe(1);
-    expect(r.stderr).toContain('absolute path');
+    expect(() =>
+      runResolve('docs write --json-file relative/path.json')
+    ).toThrow('absolute path');
   });
 
   test('unreadable file is rejected', () => {
-    const r = runResolve('docs write --json-file /nonexistent/nope.json');
-    expect(r.status).toBe(1);
-    expect(r.stderr).toContain('cannot read');
+    expect(() =>
+      runResolve('docs write --json-file /nonexistent/nope.json')
+    ).toThrow('cannot read');
   });
 
   test('invalid JSON in --json-file is rejected', () => {
     const p = tmpFile('not json at all');
-    const r = runResolve(`docs write --json-file ${p}`);
-    expect(r.status).toBe(1);
-    expect(r.stderr).toContain('not valid JSON');
+    expect(() => runResolve(`docs write --json-file ${p}`)).toThrow(
+      'not valid JSON'
+    );
   });
 
   test('--json and --json-file together are rejected', () => {
     const p = tmpFile('{}');
-    const r = runResolve(`docs write --json '{}' --json-file ${p}`);
-    expect(r.status).toBe(1);
-    expect(r.stderr).toContain('not both');
+    expect(() =>
+      runResolve(`docs write --json '{}' --json-file ${p}`)
+    ).toThrow('not both');
   });
 
   test('--body and --body-file together are rejected (review finding 1)', () => {
     const p = tmpFile('hello', '.txt');
-    const r = runResolve(`gmail +draft --body 'stale text' --body-file ${p}`);
-    expect(r.status).toBe(1);
-    expect(r.stderr).toContain('not both');
+    expect(() =>
+      runResolve(`gmail +draft --body 'stale text' --body-file ${p}`)
+    ).toThrow('not both');
   });
 });
 
@@ -284,14 +286,16 @@ describe('--text-file (chat +send message text)', () => {
 
   test('--text and --text-file together are rejected', () => {
     const p = tmpFile('hi', '.txt');
-    const r = spawnSync(
-      process.execPath,
-      ['-e', `require('${__dirname}/common.js').resolvePayloadFiles(process.argv[1])`,
-        `chat +send --text 'inline' --text-file ${p}`],
-      { encoding: 'utf8' }
-    );
-    expect(r.status).toBe(1);
-    expect(r.stderr).toContain('not both');
+    expect(() =>
+      resolvePayloadFiles(
+        `chat +send --text 'inline' --text-file ${p}`,
+        {
+          onError(message) {
+            throw new Error(message);
+          },
+        }
+      )
+    ).toThrow('not both');
   });
 });
 

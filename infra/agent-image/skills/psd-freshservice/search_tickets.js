@@ -25,7 +25,7 @@ async function main() {
   // Default to workspace 2 (Technology) — consistent with daily/weekly summary
   // scripts. Freshservice's workspace_id=0 behavior is undocumented.
   const workspaceId = args.workspace_id ? Number(args.workspace_id) : 2;
-  if (isNaN(workspaceId)) fail('--workspace-id must be a number', 'bad_args');
+  if (Number.isNaN(workspaceId)) fail('--workspace-id must be a number', 'bad_args');
 
   const apiKey = getApiKey(userEmail);
   // The query string is passed through to Freshservice's filter API as-is

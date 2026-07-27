@@ -101,7 +101,9 @@ describe("unified content migration reconciliation", () => {
       }),
     ).toEqual({ status: "verified", reasons: [] });
   });
+});
 
+describe("unified content migration lifecycle safeguards", () => {
   it("revisits each mismatch once per reconciliation run before finishing", () => {
     const runnerSource = readFileSync(
       join(
@@ -114,7 +116,10 @@ describe("unified content migration reconciliation", () => {
       "${repositoryMigrationItems.metadata} ->> 'lastReconciledRunId'",
     );
     expect(runnerSource).toContain(
-      "lastReconciledRunId: run.id",
+      "lastReconciledRunId: runId",
+    );
+    expect(runnerSource).toContain(
+      "reconcileMigrationCandidate(tx, candidate, run.id)",
     );
     expect(runnerSource).toContain(
       "WHERE status IN ('migrated', 'mismatch')",

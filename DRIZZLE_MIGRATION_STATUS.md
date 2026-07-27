@@ -80,7 +80,8 @@ The following legacy files have been permanently deleted:
 - **Legacy Files Removed**: ✅ data-api-adapter.ts (1,141 lines), ✅ field-mapper.ts (2.6K)
 - **Legacy Code Cleanup**: ✅ All `transformSnakeToCamel` usage removed
 - **Code Quality**: ✅ TypeScript typecheck passing, ✅ ESLint passing (0 errors)
-- **Remaining Work**: 4 test files need complete rewrites for Drizzle query builder
+- **Remaining Work**: No skipped legacy Data API suites remain; current Drizzle
+  behavior is covered by active tests
 
 ## 🎯 Phase 3: Cleanup Tasks
 
@@ -99,11 +100,13 @@ The following legacy files have been permanently deleted:
    - Removed RDS type helpers (`ensureRDSString`, `ensureRDSNumber`, etc.)
    - Now uses native Drizzle types
 
-4. ✅ **tests/unit/actions/user-creation-upsert.test.ts**
-   - Removed imports from data-api-adapter
-   - Updated to import from drizzle-client
-   - Marked tests as skipped (`describe.skip`) with TODO comments
-   - Tests need to be rewritten to match Drizzle implementation
+4. ✅ **Current-user provisioning coverage**
+   - Removed the obsolete, skipped
+     `tests/unit/actions/user-creation-upsert.test.ts` implementation-detail suite
+   - Active Drizzle coverage lives in
+     `tests/unit/actions/get-current-user-action.test.ts`
+   - The replacement exercises existing-user refresh, Cognito subject linking,
+     initial provisioning, role assignment, and uniqueness-conflict recovery
 
 ### ✅ Verification Complete
 4. **Legacy import verification**:
@@ -119,10 +122,11 @@ The following legacy files have been permanently deleted:
 
 ### ✅ Completed Cleanup Steps
 
-6. ✅ **Update test mocks** (2 test files updated):
-   - `tests/unit/actions/assistant-architect-delete.test.ts` (skipped, needs Drizzle rewrite)
-   - `tests/unit/actions/user-creation-upsert.test.ts` (skipped, needs Drizzle rewrite)
-   - All test files now mock `executeQuery` from drizzle-client
+6. ✅ **Update test coverage**:
+   - `tests/unit/actions/assistant-architect-delete.test.ts` actively covers the
+     Drizzle transaction boundary
+   - `tests/unit/actions/get-current-user-action.test.ts` actively covers the
+     current-user provisioning and reconciliation flow
 
 7. ✅ **Remove legacy files**:
    - ✅ `lib/db/data-api-adapter.ts` (1,141 lines) - DELETED
@@ -134,11 +138,12 @@ The following legacy files have been permanently deleted:
    - ✅ ESLint passes with 0 errors (`npm run lint`)
    - ✅ Zero imports from legacy files in production code
 
-### 🚧 Remaining Work
-9. **Rewrite skipped tests** (2 test files need complete rewrites for Drizzle):
-   - `tests/unit/actions/assistant-architect-delete.test.ts`
-   - `tests/unit/actions/user-creation-upsert.test.ts`
-   - Match new Drizzle-based implementation with callback-style executeQuery
+### ✅ Test Migration Complete
+9. **Replace skipped legacy tests**:
+   - `tests/unit/actions/assistant-architect-delete.test.ts` now exercises the
+     callback-style Drizzle transaction implementation
+   - `tests/unit/actions/get-current-user-action.test.ts` replaces the removed
+     legacy UPSERT mock suite with supported-behavior coverage
 
 10. **Final validation**:
    - Run full test suite (`npm test`)

@@ -185,7 +185,6 @@ export async function retrieveKnowledgeForPrompt(
   promptContent: string,
   repositoryIds: number[],
   userCognitoSub: string,
-  assistantOwnerSub?: string,
   options: KnowledgeRetrievalOptions = {},
   requestId?: string
 ): Promise<KnowledgeChunk[]> {
@@ -200,7 +199,6 @@ export async function retrieveKnowledgeForPrompt(
   }
   // Assistant ownership configures bindings; it never grants the executing
   // user data access. Both retrieval paths revalidate the current user.
-  void assistantOwnerSub
   try {
     const config = await getContentPlatformConfig()
     if (!isContentReadV2Active(config)) {
@@ -408,17 +406,17 @@ function truncateToTokenLimit(text: string, maxTokens: number): string {
   if (currentTokens <= maxTokens) {
     return text
   }
-  
+
   // Binary search to find the right truncation point
   let left = 0
   let right = text.length
   let bestFit = text
-  
+
   while (left < right) {
     const mid = Math.floor((left + right) / 2)
     const candidate = text.slice(0, mid)
     const tokens = countTokens(candidate)
-    
+
     if (tokens <= maxTokens) {
       bestFit = candidate
       left = mid + 1
@@ -426,21 +424,21 @@ function truncateToTokenLimit(text: string, maxTokens: number): string {
       right = mid
     }
   }
-  
+
   // Try to break at a sentence or word boundary
   const lastPeriod = bestFit.lastIndexOf('.')
   const lastNewline = bestFit.lastIndexOf('\n')
   const lastSpace = bestFit.lastIndexOf(' ')
-  
+
   const breakPoint = Math.max(lastPeriod, lastNewline)
   if (breakPoint > bestFit.length * 0.8) {
     return bestFit.slice(0, breakPoint + 1)
   }
-  
+
   if (lastSpace > bestFit.length * 0.8) {
     return bestFit.slice(0, lastSpace)
   }
-  
+
   return bestFit
 }
 

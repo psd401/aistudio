@@ -79,6 +79,49 @@ Environment:
   AWS_REGION                          Region for Secrets Manager (default: us-east-1)
 `
 
+const VALUE_FLAGS = new Set([
+  "--env",
+  "--secret-id",
+  "--owner",
+  "--session",
+  "--ttl",
+  "--mode",
+])
+
+function applyValueFlag(options: Options, flag: string, value: string): void {
+  switch (flag) {
+    case "--env":
+      options.environment = value
+      break
+    case "--secret-id":
+      options.secretId = value
+      break
+    case "--owner":
+      options.owner = value
+      break
+    case "--session":
+      options.sessionId = value
+      break
+    case "--ttl":
+      options.ttlSeconds = Number(value)
+      break
+    case "--mode":
+      if (value !== "owner" && value !== "consultation" && value !== "scheduled") {
+        throw new Error(`--mode must be owner|consultation|scheduled, got "${value}"`)
+      }
+      options.mode = value
+      break
+  }
+}
+
+function readFlagValue(argv: readonly string[], index: number, flag: string): string {
+  const value = argv[index + 1]
+  if (value === undefined || value.startsWith("--")) {
+    throw new Error(`${flag} requires a value`)
+  }
+  return value
+}
+
 function parseArgs(argv: readonly string[]): Options {
   const options: Options = {
     environment: process.env.ENVIRONMENT ?? "dev",
@@ -92,49 +135,20 @@ function parseArgs(argv: readonly string[]): Options {
 
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index]
-    const takeValue = (): string => {
-      const value = argv[index + 1]
-      if (value === undefined || value.startsWith("--")) {
-        throw new Error(`${flag} requires a value`)
-      }
+    if (VALUE_FLAGS.has(flag)) {
+      applyValueFlag(options, flag, readFlagValue(argv, index, flag))
       index += 1
-      return value
+      continue
     }
-    switch (flag) {
-      case "--env":
-        options.environment = takeValue()
-        break
-      case "--secret-id":
-        options.secretId = takeValue()
-        break
-      case "--owner":
-        options.owner = takeValue()
-        break
-      case "--session":
-        options.sessionId = takeValue()
-        break
-      case "--ttl":
-        options.ttlSeconds = Number(takeValue())
-        break
-      case "--mode": {
-        const mode = takeValue()
-        if (mode !== "owner" && mode !== "consultation" && mode !== "scheduled") {
-          throw new Error(`--mode must be owner|consultation|scheduled, got "${mode}"`)
-        }
-        options.mode = mode
-        break
-      }
-      case "--json":
-        options.json = true
-        break
-      case "-h":
-      case "--help":
-        console.log(USAGE)
-        process.exit(0)
-        break
-      default:
-        throw new Error(`Unknown argument "${flag}"\n\n${USAGE}`)
+    if (flag === "--json") {
+      options.json = true
+      continue
     }
+    if (flag === "-h" || flag === "--help") {
+      console.log(USAGE)
+      process.exit(0)
+    }
+    throw new Error(`Unknown argument "${flag}"\n\n${USAGE}`)
   }
 
   if (!SAFE_EMAIL_RE.test(options.owner)) {

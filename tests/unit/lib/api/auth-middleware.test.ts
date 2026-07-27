@@ -85,10 +85,10 @@ jest.mock("@/lib/db/schema", () => ({
 
 // Import after mocks — use require() to ensure mocks are registered first
 // (next/jest SWC transform may not properly hoist jest.mock before static imports)
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { authenticateRequest, requireScope, createErrorResponse, createApiResponse } = require("@/lib/api/auth-middleware")
 // Real role→scope mapping (single source of truth) for asserting session scopes.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { getScopesForRoles } = require("@/lib/api-keys/scopes")
 
 // ============================================
@@ -133,7 +133,7 @@ function isAuthContext(result: unknown): boolean {
 // Tests
 // ============================================
 
-describe("API Auth Middleware", () => {
+function defineAPIAuthMiddlewareSuite1Part1() {
   beforeEach(() => {
     jest.clearAllMocks()
     mockUpdateKeyLastUsed.mockResolvedValue(undefined)
@@ -143,7 +143,9 @@ describe("API Auth Middleware", () => {
   // ------------------------------------------
   // Bearer Token Authentication
   // ------------------------------------------
-  describe("Bearer token authentication", () => {
+  }
+
+function defineAPIAuthMiddlewareSuite1Part2() {describe("Bearer token authentication", () => {
     it("should authenticate valid API key and return ApiAuthContext", async () => {
       mockValidateApiKey.mockResolvedValue({
         userId: 42,
@@ -275,7 +277,9 @@ describe("API Auth Middleware", () => {
   // ------------------------------------------
   // Session Authentication (fallback)
   // ------------------------------------------
-  describe("Session authentication fallback", () => {
+  }
+
+function defineAPIAuthMiddlewareSuite1Part3() {describe("Session authentication fallback", () => {
     it("should authenticate via session with role-derived scopes, not wildcard (REV-SEC-161)", async () => {
       mockGetServerSession.mockResolvedValue({
         sub: "test-cognito-sub",
@@ -401,7 +405,9 @@ describe("API Auth Middleware", () => {
   // ------------------------------------------
   // JWT Bearer Authentication (REV-SEC-164)
   // ------------------------------------------
-  describe("JWT bearer authentication", () => {
+  }
+
+function defineAPIAuthMiddlewareSuite1Part4() {describe("JWT bearer authentication", () => {
     it("verifies the token with explicit issuer + audience constraints (REV-SEC-164)", async () => {
       mockJwtVerify.mockResolvedValue({
         payload: {
@@ -501,7 +507,9 @@ describe("API Auth Middleware", () => {
     })
   })
 
-  describe("requireScope", () => {
+  }
+
+function defineAPIAuthMiddlewareSuite1Part5() {describe("requireScope", () => {
     it("should return null when scope matches", () => {
       mockHasScope.mockReturnValue(true)
 
@@ -630,4 +638,14 @@ describe("API Auth Middleware", () => {
       expect(response.status).toBe(201)
     })
   })
-})
+}
+
+const defineAPIAuthMiddlewareSuite1 = () => {
+  defineAPIAuthMiddlewareSuite1Part1()
+  defineAPIAuthMiddlewareSuite1Part2()
+  defineAPIAuthMiddlewareSuite1Part3()
+  defineAPIAuthMiddlewareSuite1Part4()
+  defineAPIAuthMiddlewareSuite1Part5()
+};
+
+describe("API Auth Middleware", defineAPIAuthMiddlewareSuite1)

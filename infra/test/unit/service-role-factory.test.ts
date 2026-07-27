@@ -87,7 +87,7 @@ function synthesizeSecretRole(secretReference: IAMResourceReference): string {
   return JSON.stringify(Object.values(roles))
 }
 
-describe("ServiceRoleFactory resource ARN normalization", () => {
+function defineServiceRoleFactoryResourceARNNormalizationSuite1Part1() {
   it("preserves an unresolved secret ARN token as the exact policy resource", () => {
     const app = new cdk.App()
     const stack = new cdk.Stack(app, "TokenSecretRoleTest", {
@@ -190,7 +190,9 @@ describe("ServiceRoleFactory resource ARN normalization", () => {
     )
   })
 
-  it("expands an unresolved S3 bucket name token", () => {
+  }
+
+function defineServiceRoleFactoryResourceARNNormalizationSuite1Part2() {it("expands an unresolved S3 bucket name token", () => {
     const app = new cdk.App()
     const stack = new cdk.Stack(app, "TokenBucketNameRoleTest", {
       env: { account: "123456789012", region: "us-east-1" },
@@ -268,4 +270,11 @@ describe("ServiceRoleFactory resource ARN normalization", () => {
       '"Resource":"arn:aws:secretsmanager:us-east-1:123456789012:secret:aistudio-dev-known*"'
     )
   })
-})
+}
+
+const defineServiceRoleFactoryResourceARNNormalizationSuite1 = () => {
+  defineServiceRoleFactoryResourceARNNormalizationSuite1Part1()
+  defineServiceRoleFactoryResourceARNNormalizationSuite1Part2()
+};
+
+describe("ServiceRoleFactory resource ARN normalization", defineServiceRoleFactoryResourceARNNormalizationSuite1)

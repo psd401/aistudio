@@ -35,6 +35,113 @@ interface ToolVersionsClientProps {
   identifiers: ToolIdentifierSummary[]
 }
 
+function ToolVersionsTable({
+  selected,
+  versions,
+  loading,
+  onDeprecate,
+  onRestore,
+  onRemove,
+}: {
+  selected: string | null
+  versions: ToolVersionWithUsage[]
+  loading: boolean
+  onDeprecate: (row: ToolVersionWithUsage) => void
+  onRestore: (row: ToolVersionWithUsage) => void
+  onRemove: (row: ToolVersionWithUsage) => void
+}) {
+  return (
+    <div className="space-y-4">
+      <h2 className="text-xl font-semibold">
+        {selected ? <code className="text-base">{selected}</code> : "Select a tool"}
+      </h2>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Version</TableHead>
+            <TableHead>Source</TableHead>
+            <TableHead>Published</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Replaced by</TableHead>
+            <TableHead>Removal date</TableHead>
+            <TableHead className="text-right">Usage</TableHead>
+            <TableHead className="w-[220px]">Actions</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {loading ? (
+            <TableRow>
+              <TableCell colSpan={8} className="text-center text-muted-foreground">
+                Loading…
+              </TableCell>
+            </TableRow>
+          ) : versions.length === 0 ? (
+            <TableRow>
+              <TableCell colSpan={8} className="text-center text-muted-foreground">
+                No versions.
+              </TableCell>
+            </TableRow>
+          ) : (
+            versions.map((row) => (
+              <ToolVersionRow
+                key={`${row.identifier}@${row.version}`}
+                row={row}
+                onDeprecate={onDeprecate}
+                onRestore={onRestore}
+                onRemove={onRemove}
+              />
+            ))
+          )}
+        </TableBody>
+      </Table>
+    </div>
+  )
+}
+
+function RemoveVersionDialog({
+  version,
+  onClose,
+  onConfirm,
+}: {
+  version: ToolVersionWithUsage | null
+  onClose: () => void
+  onConfirm: (row: ToolVersionWithUsage) => void
+}) {
+  const usageCount =
+    (version?.usage.skillCount ?? 0)
+    + (version?.usage.assistantPromptCount ?? 0)
+  return (
+    <AlertDialog open={version !== null} onOpenChange={(open) => !open && onClose()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            Remove {version ? `${version.identifier}@${version.version}` : ""}?
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            This permanently deletes the version. Skills and assistants pinned
+            to it will fail with a clear error. This action cannot be undone.
+            {version && usageCount > 0 && (
+              <span className="mt-2 block font-medium text-destructive">
+                Currently referenced by {version.usage.skillCount} skill(s) and{" "}
+                {version.usage.assistantPromptCount} assistant prompt(s).
+              </span>
+            )}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            onClick={() => version && onConfirm(version)}
+          >
+            Remove permanently
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  )
+}
+
 export function ToolVersionsClient({ identifiers }: ToolVersionsClientProps) {
   const { toast } = useToast()
   const [selected, setSelected] = useState<string | null>(
@@ -137,50 +244,14 @@ export function ToolVersionsClient({ identifiers }: ToolVersionsClientProps) {
         onSelect={setSelected}
       />
 
-      <div className="space-y-4">
-        <h2 className="text-xl font-semibold">
-          {selected ? <code className="text-base">{selected}</code> : "Select a tool"}
-        </h2>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Version</TableHead>
-              <TableHead>Source</TableHead>
-              <TableHead>Published</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Replaced by</TableHead>
-              <TableHead>Removal date</TableHead>
-              <TableHead className="text-right">Usage</TableHead>
-              <TableHead className="w-[220px]">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {loading ? (
-              <TableRow>
-                <TableCell colSpan={8} className="text-center text-muted-foreground">
-                  Loading…
-                </TableCell>
-              </TableRow>
-            ) : versions.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={8} className="text-center text-muted-foreground">
-                  No versions.
-                </TableCell>
-              </TableRow>
-            ) : (
-              versions.map((row) => (
-                <ToolVersionRow
-                  key={`${row.identifier}@${row.version}`}
-                  row={row}
-                  onDeprecate={setDeprecating}
-                  onRestore={handleRestore}
-                  onRemove={handleRemove}
-                />
-              ))
-            )}
-          </TableBody>
-        </Table>
-      </div>
+      <ToolVersionsTable
+        selected={selected}
+        versions={versions}
+        loading={loading}
+        onDeprecate={setDeprecating}
+        onRestore={handleRestore}
+        onRemove={handleRemove}
+      />
 
       {deprecating && (
         <DeprecateVersionDialog
@@ -192,35 +263,11 @@ export function ToolVersionsClient({ identifiers }: ToolVersionsClientProps) {
         />
       )}
 
-      <AlertDialog open={removing !== null} onOpenChange={(open) => !open && setRemoving(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              Remove {removing ? `${removing.identifier}@${removing.version}` : ""}?
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              This permanently deletes the version. Skills and assistants pinned to it
-              will fail with a clear error. This action cannot be undone.
-              {removing &&
-                removing.usage.skillCount + removing.usage.assistantPromptCount > 0 && (
-                  <span className="mt-2 block font-medium text-destructive">
-                    Currently referenced by {removing.usage.skillCount} skill(s) and{" "}
-                    {removing.usage.assistantPromptCount} assistant prompt(s).
-                  </span>
-                )}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => removing && confirmRemove(removing)}
-            >
-              Remove permanently
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <RemoveVersionDialog
+        version={removing}
+        onClose={() => setRemoving(null)}
+        onConfirm={confirmRemove}
+      />
     </div>
   )
 }

@@ -1,6 +1,12 @@
 "use client"
 
-import { useState, useCallback, useMemo } from "react"
+import {
+  useState,
+  useCallback,
+  useMemo,
+  type Dispatch,
+  type SetStateAction,
+} from "react"
 import { useToast } from "@/components/ui/use-toast"
 import { Button } from "@/components/ui/button"
 import { IconRefresh, IconPlus, IconFileImport } from "@tabler/icons-react"
@@ -19,31 +25,208 @@ interface ModelsPageClientProps {
   initialModels: SelectAiModel[]
 }
 
-export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
+type SetModels = Dispatch<SetStateAction<SelectAiModel[]>>
+
+function calculateModelStats(models: SelectAiModel[]): ModelStats {
+  const byProvider: Record<string, number> = {}
+  let activeCount = 0
+  let nexusCount = 0
+
+  for (const model of models) {
+    const provider = model.provider || "Unknown"
+    byProvider[provider] = (byProvider[provider] || 0) + 1
+    if (model.active) activeCount++
+    if (model.nexusEnabled) nexusCount++
+  }
+
+  return {
+    totalModels: models.length,
+    activeModels: activeCount,
+    nexusEnabled: nexusCount,
+    byProvider,
+  }
+}
+
+function filterModels(
+  models: SelectAiModel[],
+  filters: ModelFiltersState
+): SelectAiModel[] {
+  return models.filter((model) => {
+    if (filters.search) {
+      const search = filters.search.toLowerCase()
+      const matchesName = model.name.toLowerCase().includes(search)
+      const matchesId = model.modelId.toLowerCase().includes(search)
+      if (!matchesName && !matchesId) return false
+    }
+    if (filters.status === "active" && !model.active) return false
+    if (filters.status === "inactive" && model.active) return false
+    if (filters.provider !== "all" && model.provider !== filters.provider) {
+      return false
+    }
+    if (filters.availability === "nexus" && !model.nexusEnabled) return false
+    if (filters.availability === "architect" && !model.architectEnabled) {
+      return false
+    }
+    return true
+  })
+}
+
+function toModelTableRow(model: SelectAiModel): ModelTableRow {
+  return {
+    id: model.id,
+    name: model.name,
+    provider: model.provider,
+    modelId: model.modelId,
+    description: model.description,
+    active: model.active,
+    nexusEnabled: model.nexusEnabled ?? true,
+    architectEnabled: model.architectEnabled ?? true,
+  }
+}
+
+function isSelectAiModel(model: unknown): model is SelectAiModel {
+  return (
+    model != null &&
+    typeof model === "object" &&
+    "id" in model &&
+    "name" in model &&
+    "provider" in model &&
+    "modelId" in model &&
+    typeof (model as { id: unknown }).id === "number" &&
+    typeof (model as { name: unknown }).name === "string" &&
+    typeof (model as { provider: unknown }).provider === "string" &&
+    typeof (model as { modelId: unknown }).modelId === "string"
+  )
+}
+
+function useModelLoader(
+  setModels: SetModels,
+  setLoading: Dispatch<SetStateAction<boolean>>
+) {
   const { toast } = useToast()
 
-  // State
-  const [models, setModels] = useState<SelectAiModel[]>(initialModels)
-  const [loading, setLoading] = useState(false)
+  return useCallback(async () => {
+    setLoading(true)
+    try {
+      const response = await fetch("/api/admin/models")
+      if (!response.ok) throw new Error("Failed to load models")
+      const data = await response.json()
+      if (data.isSuccess && Array.isArray(data.data)) {
+        setModels(data.data.filter(isSelectAiModel))
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description:
+          error instanceof Error ? error.message : "Failed to load models",
+        variant: "destructive",
+      })
+    } finally {
+      setLoading(false)
+    }
+  }, [setLoading, setModels, toast])
+}
+
+type ToggleField = "active" | "nexusEnabled" | "architectEnabled"
+
+interface ToggleCopy {
+  subject: "Model" | "Nexus" | "Architect"
+  enabled: "activated" | "enabled"
+  disabled: "deactivated" | "disabled"
+}
+
+function useModelToggles(setModels: SetModels) {
+  const { toast } = useToast()
   const [loadingToggles, setLoadingToggles] = useState<Set<number>>(new Set())
 
-  // Filters
-  const [filters, setFilters] = useState<ModelFiltersState>({
-    search: "",
-    status: "all",
-    provider: "all",
-    availability: "all",
-  })
+  const toggleModel = useCallback(
+    async (
+      modelId: number,
+      enabled: boolean,
+      field: ToggleField,
+      copy: ToggleCopy
+    ) => {
+      if (loadingToggles.has(modelId)) return
+      setLoadingToggles((previous) => new Set(previous).add(modelId))
+      setModels((previous) =>
+        previous.map((model) =>
+          model.id === modelId ? { ...model, [field]: enabled } : model
+        )
+      )
 
-  // Modal state
-  const [selectedModel, setSelectedModel] = useState<SelectAiModel | null>(null)
-  const [modalOpen, setModalOpen] = useState(false)
-  const [isNewModel, setIsNewModel] = useState(false)
+      try {
+        const response = await fetch("/api/admin/models", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: modelId, [field]: enabled }),
+        })
+        if (!response.ok) throw new Error("Failed to update model")
+        toast({
+          description: `${copy.subject} ${
+            enabled ? copy.enabled : copy.disabled
+          } successfully`,
+        })
+      } catch (error) {
+        setModels((previous) =>
+          previous.map((model) =>
+            model.id === modelId ? { ...model, [field]: !enabled } : model
+          )
+        )
+        toast({
+          title: "Error",
+          description:
+            error instanceof Error ? error.message : "Failed to update model",
+          variant: "destructive",
+        })
+      } finally {
+        setLoadingToggles((previous) => {
+          const next = new Set(previous)
+          next.delete(modelId)
+          return next
+        })
+      }
+    },
+    [loadingToggles, setModels, toast]
+  )
 
-  // Import dialog state
-  const [importDialogOpen, setImportDialogOpen] = useState(false)
+  const handleToggleActive = useCallback(
+    (modelId: number, enabled: boolean) =>
+      toggleModel(modelId, enabled, "active", {
+        subject: "Model",
+        enabled: "activated",
+        disabled: "deactivated",
+      }),
+    [toggleModel]
+  )
+  const handleToggleNexus = useCallback(
+    (modelId: number, enabled: boolean) =>
+      toggleModel(modelId, enabled, "nexusEnabled", {
+        subject: "Nexus",
+        enabled: "enabled",
+        disabled: "disabled",
+      }),
+    [toggleModel]
+  )
+  const handleToggleArchitect = useCallback(
+    (modelId: number, enabled: boolean) =>
+      toggleModel(modelId, enabled, "architectEnabled", {
+        subject: "Architect",
+        enabled: "enabled",
+        disabled: "disabled",
+      }),
+    [toggleModel]
+  )
 
-  // Replacement dialog state
+  return {
+    loadingToggles,
+    handleToggleActive,
+    handleToggleNexus,
+    handleToggleArchitect,
+  }
+}
+
+function useModelDeletion(models: SelectAiModel[], setModels: SetModels) {
+  const { toast } = useToast()
   const [replacementDialog, setReplacementDialog] = useState<{
     isOpen: boolean
     model: SelectAiModel | null
@@ -58,302 +241,6 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
     model: null,
     referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0, promptLibrary: 0 },
   })
-
-  // Calculate stats from models
-  const stats: ModelStats = useMemo(() => {
-    const byProvider: Record<string, number> = {}
-    let activeCount = 0
-    let nexusCount = 0
-
-    for (const model of models) {
-      // Count by provider
-      const provider = model.provider || "Unknown"
-      byProvider[provider] = (byProvider[provider] || 0) + 1
-
-      // Count active
-      if (model.active) {
-        activeCount++
-      }
-
-      // Count nexus enabled
-      if (model.nexusEnabled) {
-        nexusCount++
-      }
-    }
-
-    return {
-      totalModels: models.length,
-      activeModels: activeCount,
-      nexusEnabled: nexusCount,
-      byProvider,
-    }
-  }, [models])
-
-  // Filter models based on current filters
-  const filteredModels = useMemo(() => {
-    return models.filter((model) => {
-      // Search filter
-      if (filters.search) {
-        const search = filters.search.toLowerCase()
-        const matchesName = model.name.toLowerCase().includes(search)
-        const matchesId = model.modelId.toLowerCase().includes(search)
-        if (!matchesName && !matchesId) {
-          return false
-        }
-      }
-
-      // Status filter
-      if (filters.status === "active" && !model.active) {
-        return false
-      }
-      if (filters.status === "inactive" && model.active) {
-        return false
-      }
-
-      // Provider filter
-      if (filters.provider !== "all" && model.provider !== filters.provider) {
-        return false
-      }
-
-      // Availability filter
-      if (filters.availability === "nexus" && !model.nexusEnabled) {
-        return false
-      }
-      if (filters.availability === "architect" && !model.architectEnabled) {
-        return false
-      }
-
-      return true
-    })
-  }, [models, filters])
-
-  // Transform models for table
-  const tableModels: ModelTableRow[] = filteredModels.map((model) => ({
-    id: model.id,
-    name: model.name,
-    provider: model.provider,
-    modelId: model.modelId,
-    description: model.description,
-    active: model.active,
-    nexusEnabled: model.nexusEnabled ?? true,
-    architectEnabled: model.architectEnabled ?? true,
-  }))
-
-  // NOTE (#1207): the roles fetch (/api/admin/roles) was removed — it existed
-  // only to populate the legacy "Allowed Roles" model field, which is gone.
-  // Per-model role/group access is edited via the ResourceGrantsEditor inside the
-  // model modal (resource_access_grants).
-
-  // Refresh data
-  const loadData = useCallback(async () => {
-    setLoading(true)
-    try {
-      const response = await fetch("/api/admin/models")
-      if (!response.ok) {
-        throw new Error("Failed to load models")
-      }
-      const data = await response.json()
-
-      // Runtime validation for API response
-      if (data.isSuccess && Array.isArray(data.data)) {
-        const validModels = data.data.filter(
-          (
-            model: unknown
-          ): model is SelectAiModel =>
-            model != null &&
-            typeof model === "object" &&
-            "id" in model &&
-            "name" in model &&
-            "provider" in model &&
-            "modelId" in model &&
-            typeof (model as { id: unknown }).id === "number" &&
-            typeof (model as { name: unknown }).name === "string" &&
-            typeof (model as { provider: unknown }).provider === "string" &&
-            typeof (model as { modelId: unknown }).modelId === "string"
-        )
-
-        setModels(validModels)
-      }
-    } catch (error) {
-      // Error logged by server action
-      toast({
-        title: "Error",
-        description: error instanceof Error ? error.message : "Failed to load models",
-        variant: "destructive",
-      })
-    } finally {
-      setLoading(false)
-    }
-  }, [toast])
-
-  // Handle filter changes
-  const handleFiltersChange = useCallback((newFilters: ModelFiltersState) => {
-    setFilters(newFilters)
-  }, [])
-
-  // Handle view/edit model
-  const handleViewModel = useCallback((model: ModelTableRow) => {
-    const fullModel = models.find((m) => m.id === model.id)
-    if (fullModel) {
-      setSelectedModel(fullModel)
-      setIsNewModel(false)
-      setModalOpen(true)
-    }
-  }, [models])
-
-  // Handle add new model
-  const handleAddModel = useCallback(() => {
-    setSelectedModel(null)
-    setIsNewModel(true)
-    setModalOpen(true)
-  }, [])
-
-  // Handle toggle active
-  const handleToggleActive = useCallback(
-    async (modelId: number, active: boolean) => {
-      // Prevent concurrent toggles on same model
-      if (loadingToggles.has(modelId)) return
-
-      // Add to loading state
-      setLoadingToggles((prev) => new Set(prev).add(modelId))
-
-      // Optimistic update
-      setModels((prev) => prev.map((m) => (m.id === modelId ? { ...m, active } : m)))
-
-      try {
-        const response = await fetch("/api/admin/models", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: modelId, active }),
-        })
-
-        if (!response.ok) {
-          throw new Error("Failed to update model")
-        }
-
-        toast({
-          description: `Model ${active ? "activated" : "deactivated"} successfully`,
-        })
-      } catch (error) {
-        // Error logged by server action - revert optimistic update
-        setModels((prev) => prev.map((m) => (m.id === modelId ? { ...m, active: !active } : m)))
-
-        toast({
-          title: "Error",
-          description: error instanceof Error ? error.message : "Failed to update model",
-          variant: "destructive",
-        })
-      } finally {
-        // Remove from loading state
-        setLoadingToggles((prev) => {
-          const next = new Set(prev)
-          next.delete(modelId)
-          return next
-        })
-      }
-    },
-    [loadingToggles, toast]
-  )
-
-  // Handle toggle nexus
-  const handleToggleNexus = useCallback(
-    async (modelId: number, enabled: boolean) => {
-      // Prevent concurrent toggles on same model
-      if (loadingToggles.has(modelId)) return
-
-      // Add to loading state
-      setLoadingToggles((prev) => new Set(prev).add(modelId))
-
-      // Optimistic update
-      setModels((prev) => prev.map((m) => (m.id === modelId ? { ...m, nexusEnabled: enabled } : m)))
-
-      try {
-        const response = await fetch("/api/admin/models", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: modelId, nexusEnabled: enabled }),
-        })
-
-        if (!response.ok) {
-          throw new Error("Failed to update model")
-        }
-
-        toast({
-          description: `Nexus ${enabled ? "enabled" : "disabled"} successfully`,
-        })
-      } catch (error) {
-        // Error logged by server action - revert optimistic update
-        setModels((prev) =>
-          prev.map((m) => (m.id === modelId ? { ...m, nexusEnabled: !enabled } : m))
-        )
-
-        toast({
-          title: "Error",
-          description: error instanceof Error ? error.message : "Failed to update model",
-          variant: "destructive",
-        })
-      } finally {
-        // Remove from loading state
-        setLoadingToggles((prev) => {
-          const next = new Set(prev)
-          next.delete(modelId)
-          return next
-        })
-      }
-    },
-    [loadingToggles, toast]
-  )
-
-  // Handle toggle architect
-  const handleToggleArchitect = useCallback(
-    async (modelId: number, enabled: boolean) => {
-      // Prevent concurrent toggles on same model
-      if (loadingToggles.has(modelId)) return
-
-      // Add to loading state
-      setLoadingToggles((prev) => new Set(prev).add(modelId))
-
-      // Optimistic update
-      setModels((prev) =>
-        prev.map((m) => (m.id === modelId ? { ...m, architectEnabled: enabled } : m))
-      )
-
-      try {
-        const response = await fetch("/api/admin/models", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: modelId, architectEnabled: enabled }),
-        })
-
-        if (!response.ok) {
-          throw new Error("Failed to update model")
-        }
-
-        toast({
-          description: `Architect ${enabled ? "enabled" : "disabled"} successfully`,
-        })
-      } catch (error) {
-        // Error logged by server action - revert optimistic update
-        setModels((prev) =>
-          prev.map((m) => (m.id === modelId ? { ...m, architectEnabled: !enabled } : m))
-        )
-
-        toast({
-          title: "Error",
-          description: error instanceof Error ? error.message : "Failed to update model",
-          variant: "destructive",
-        })
-      } finally {
-        // Remove from loading state
-        setLoadingToggles((prev) => {
-          const next = new Set(prev)
-          next.delete(modelId)
-          return next
-        })
-      }
-    },
-    [loadingToggles, toast]
-  )
 
   // Handle delete model
   const handleDeleteModel = useCallback(
@@ -409,7 +296,7 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
         })
       }
     },
-    [models, toast]
+    [models, setModels, toast]
   )
 
   // Handle model replacement
@@ -457,9 +344,32 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
         })
       }
     },
-    [replacementDialog.model, toast]
+    [replacementDialog.model, setModels, toast]
   )
 
+  const closeReplacementDialog = useCallback(() => {
+    setReplacementDialog({
+      isOpen: false,
+      model: null,
+      referenceCounts: {
+        chainPrompts: 0,
+        conversations: 0,
+        modelComparisons: 0,
+        promptLibrary: 0,
+      },
+    })
+  }, [])
+
+  return {
+    replacementDialog,
+    handleDeleteModel,
+    handleModelReplacement,
+    closeReplacementDialog,
+  }
+}
+
+function useModelSave(setModels: SetModels, isNewModel: boolean) {
+  const { toast } = useToast()
   // Handle save model (add or update)
   const handleSaveModel = useCallback(
     async (data: ModelFormData) => {
@@ -550,8 +460,83 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
         throw error
       }
     },
-    [isNewModel, toast]
+    [isNewModel, setModels, toast]
   )
+
+  return handleSaveModel
+}
+
+export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
+  // State
+  const [models, setModels] = useState<SelectAiModel[]>(initialModels)
+  const [loading, setLoading] = useState(false)
+
+  // Filters
+  const [filters, setFilters] = useState<ModelFiltersState>({
+    search: "",
+    status: "all",
+    provider: "all",
+    availability: "all",
+  })
+
+  // Modal state
+  const [selectedModel, setSelectedModel] = useState<SelectAiModel | null>(null)
+  const [modalOpen, setModalOpen] = useState(false)
+  const [isNewModel, setIsNewModel] = useState(false)
+
+  // Import dialog state
+  const [importDialogOpen, setImportDialogOpen] = useState(false)
+
+  const stats = useMemo(() => calculateModelStats(models), [models])
+  const tableModels = useMemo(
+    () => filterModels(models, filters).map(toModelTableRow),
+    [models, filters]
+  )
+
+  // NOTE (#1207): the roles fetch (/api/admin/roles) was removed — it existed
+  // only to populate the legacy "Allowed Roles" model field, which is gone.
+  // Per-model role/group access is edited via the ResourceGrantsEditor inside the
+  // model modal (resource_access_grants).
+
+  const loadData = useModelLoader(setModels, setLoading)
+
+  // Handle filter changes
+  const handleFiltersChange = useCallback((newFilters: ModelFiltersState) => {
+    setFilters(newFilters)
+  }, [])
+
+  // Handle view/edit model
+  const handleViewModel = useCallback((model: ModelTableRow) => {
+    const fullModel = models.find((m) => m.id === model.id)
+    if (fullModel) {
+      setSelectedModel(fullModel)
+      setIsNewModel(false)
+      setModalOpen(true)
+    }
+  }, [models])
+
+  // Handle add new model
+  const handleAddModel = useCallback(() => {
+    setSelectedModel(null)
+    setIsNewModel(true)
+    setModalOpen(true)
+  }, [])
+
+  const {
+    loadingToggles,
+    handleToggleActive,
+    handleToggleNexus,
+    handleToggleArchitect,
+  } = useModelToggles(setModels)
+
+  const {
+    replacementDialog,
+    handleDeleteModel,
+    handleModelReplacement,
+    closeReplacementDialog,
+  } = useModelDeletion(models, setModels)
+
+  const handleSaveModel = useModelSave(setModels, isNewModel)
 
   // Handle delete from modal
   const handleDeleteFromModal = useCallback(
@@ -640,13 +625,7 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
       {replacementDialog.model && (
         <ModelReplacementDialog
           isOpen={replacementDialog.isOpen}
-          onClose={() =>
-            setReplacementDialog({
-              isOpen: false,
-              model: null,
-              referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0, promptLibrary: 0 },
-            })
-          }
+          onClose={closeReplacementDialog}
           modelToDelete={replacementDialog.model}
           availableModels={models}
           referenceCounts={replacementDialog.referenceCounts}

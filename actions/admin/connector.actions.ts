@@ -92,6 +92,70 @@ type McpServerUpdate = Partial<
   >
 >
 
+async function validateCredentialProfileChange(
+  input: UpdateMcpServerInput
+): Promise<void> {
+  if (input.url === undefined && input.credentialsKey === undefined) return
+
+  const [current] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          url: nexusMcpServers.url,
+          credentialsKey: nexusMcpServers.credentialsKey,
+        })
+        .from(nexusMcpServers)
+        .where(eq(nexusMcpServers.id, input.id))
+        .limit(1),
+    "updateMcpServer.credentialOrigin"
+  )
+  if (!current) {
+    throw ErrorFactories.dbRecordNotFound("nexus_mcp_servers", input.id)
+  }
+  assertCredentialProfileUpdate(
+    { url: current.url, profileId: current.credentialsKey },
+    { url: input.url, profileId: input.credentialsKey }
+  )
+}
+
+async function buildMcpServerUpdate(
+  input: UpdateMcpServerInput
+): Promise<McpServerUpdate> {
+  const { id: _, ...fields } = input
+  const updateData: McpServerUpdate = {}
+  if (fields.name !== undefined) updateData.name = fields.name
+  if (fields.url !== undefined) updateData.url = fields.url
+  if (fields.transport !== undefined) updateData.transport = fields.transport
+  if (fields.authType !== undefined) updateData.authType = fields.authType
+  if (fields.toolSource !== undefined) updateData.toolSource = fields.toolSource
+  if (fields.credentialsKey !== undefined) {
+    updateData.credentialsKey = fields.credentialsKey
+  }
+  if (fields.oauthCredentials === null) {
+    updateData.oauthCredentials = null
+  } else if (fields.oauthCredentials !== undefined) {
+    await validateOAuthCredentials(fields.oauthCredentials)
+    updateData.oauthCredentials = {
+      clientId: fields.oauthCredentials.clientId,
+      encryptedClientSecret: await encryptToken(
+        fields.oauthCredentials.clientSecret
+      ),
+      authorizationEndpointUrl:
+        fields.oauthCredentials.authorizationEndpointUrl,
+      tokenEndpointUrl: fields.oauthCredentials.tokenEndpointUrl,
+      scopes: fields.oauthCredentials.scopes,
+    }
+  }
+  if (fields.allowedUsers !== undefined) {
+    updateData.allowedUsers = fields.allowedUsers
+  }
+  if (fields.maxConnections !== undefined) {
+    updateData.maxConnections = fields.maxConnections
+  }
+  updateData.updatedAt = new Date()
+  return updateData
+}
+
 // ============================================
 // Validation
 // ============================================
@@ -412,60 +476,8 @@ export async function updateMcpServer(
 
     if (input.url !== undefined) await validateMcpUrl(input.url)
     validateServerInput(input)
-    if (input.url !== undefined || input.credentialsKey !== undefined) {
-      const [current] = await executeQuery(
-        (db) =>
-          db
-            .select({
-              url: nexusMcpServers.url,
-              credentialsKey: nexusMcpServers.credentialsKey,
-            })
-            .from(nexusMcpServers)
-            .where(eq(nexusMcpServers.id, input.id))
-            .limit(1),
-        "updateMcpServer.credentialOrigin"
-      )
-      if (!current) {
-        throw ErrorFactories.dbRecordNotFound("nexus_mcp_servers", input.id)
-      }
-      assertCredentialProfileUpdate(
-        { url: current.url, profileId: current.credentialsKey },
-        { url: input.url, profileId: input.credentialsKey }
-      )
-    }
-
-    // Typed update payload — avoids Record<string, unknown>
-    const { id: _, ...fields } = input
-    const updateData: McpServerUpdate = {}
-    if (fields.name !== undefined) updateData.name = fields.name
-    if (fields.url !== undefined) updateData.url = fields.url
-    if (fields.transport !== undefined) updateData.transport = fields.transport
-    if (fields.authType !== undefined) updateData.authType = fields.authType
-    if (fields.toolSource !== undefined) updateData.toolSource = fields.toolSource
-    if (fields.credentialsKey !== undefined)
-      updateData.credentialsKey = fields.credentialsKey
-    if (fields.oauthCredentials !== undefined) {
-      if (fields.oauthCredentials === null) {
-        // null clears inline credentials
-        updateData.oauthCredentials = null
-      } else {
-        await validateOAuthCredentials(fields.oauthCredentials)
-        updateData.oauthCredentials = {
-          clientId: fields.oauthCredentials.clientId,
-          encryptedClientSecret: await encryptToken(fields.oauthCredentials.clientSecret),
-          authorizationEndpointUrl: fields.oauthCredentials.authorizationEndpointUrl,
-          tokenEndpointUrl: fields.oauthCredentials.tokenEndpointUrl,
-          scopes: fields.oauthCredentials.scopes,
-        }
-      }
-    }
-    if (fields.allowedUsers !== undefined)
-      updateData.allowedUsers = fields.allowedUsers
-    if (fields.maxConnections !== undefined)
-      updateData.maxConnections = fields.maxConnections
-
-    // Drizzle does not auto-update timestamps — set explicitly
-    updateData.updatedAt = new Date()
+    await validateCredentialProfileChange(input)
+    const updateData = await buildMcpServerUpdate(input)
 
     if (Object.keys(updateData).length <= 1) {
       const [currentRow] = await executeQuery(

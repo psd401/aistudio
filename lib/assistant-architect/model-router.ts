@@ -150,6 +150,113 @@ function pinnedMetadata(
   }
 }
 
+async function pinnedRoute(
+  fallback: AIModelRow & { modelId: string; provider: string },
+  args: {
+    userId: number
+    routingMode: AssistantModelRoutingMode
+    requestedFamily?: AssistantModelFamily | null
+  },
+  runtimeMode: NexusRouterRuntimeMode,
+  requirements: ModelCapabilityRequirements
+): Promise<AssistantArchitectModelRoute> {
+  await assertModelAccess(args.userId, fallback.id)
+  return {
+    modelDbId: fallback.id,
+    modelId: fallback.modelId,
+    provider: fallback.provider,
+    model: fallback,
+    metadata: pinnedMetadata(
+      fallback,
+      args.routingMode,
+      runtimeMode,
+      requirements,
+      args.requestedFamily
+    ),
+  }
+}
+
+interface RoutingSelection {
+  selected: RoutableModel
+  fallbackUsed: boolean
+  proposedModelId?: string
+}
+
+async function resolveRoutingSelection(options: {
+  routed: ReturnType<typeof selectRoutedTextModel>
+  mode: NexusRouterRuntimeMode
+  fallback: AIModelRow & { modelId: string; provider: string }
+  userId: number
+  family: ModelRouterFamily
+}): Promise<RoutingSelection> {
+  const { routed, mode, fallback, userId, family } = options
+  if (!routed && mode !== "shadow") {
+    const target =
+      family === "auto" ? "the required capabilities" : `the ${family} family`
+    throw new Error(
+      `No accessible Assistant Architect model is available for ${target}`
+    )
+  }
+  if (mode === "shadow") {
+    await assertModelAccess(userId, fallback.id)
+    return {
+      selected: fallback,
+      fallbackUsed: Boolean(
+        routed?.fallbackUsed || routed?.model.id !== fallback.id
+      ),
+      proposedModelId: routed?.model.modelId,
+    }
+  }
+  return {
+    selected: routed?.model ?? fallback,
+    fallbackUsed: routed?.fallbackUsed ?? true,
+  }
+}
+
+function activeRoutingMetadata(options: {
+  config: NexusRouterConfig
+  mode: NexusRouterRuntimeMode
+  routingMode: AssistantModelRoutingMode
+  family: ModelRouterFamily
+  decision: NexusClassifierDecision
+  selected: RoutableModel
+  proposedModelId?: string
+  fallbackUsed: boolean
+  requirements: ModelCapabilityRequirements
+}): AssistantArchitectRoutingMetadata {
+  const {
+    config,
+    mode,
+    routingMode,
+    family,
+    decision,
+    selected,
+    proposedModelId,
+    fallbackUsed,
+    requirements,
+  } = options
+  return {
+    version: config.version,
+    runtimeMode: mode,
+    routingMode,
+    requestedFamily: family,
+    selectedFamily: inferModelFamily(selected) ?? "other",
+    intent: decision.intent,
+    tier: decision.tier,
+    confidence: decision.confidence,
+    reasonCodes: decision.reasonCodes,
+    decisionSource: decision.source,
+    selectedModelDbId: selected.id,
+    selectedModelId: selected.modelId,
+    selectedProvider: selected.provider,
+    proposedModelId,
+    fallbackUsed,
+    requiredTools: requirements.requiredTools ?? [],
+    requiresFunctionCalling: requirements.requiresFunctionCalling ?? false,
+    requiresVision: requirements.requiresVision ?? false,
+  }
+}
+
 export async function routeAssistantArchitectModel(args: {
   text: string
   userId: number
@@ -165,38 +272,12 @@ export async function routeAssistantArchitectModel(args: {
   const requirements = args.requirements ?? {}
 
   if (args.routingMode === "legacy") {
-    await assertModelAccess(args.userId, fallback.id)
-    return {
-      modelDbId: fallback.id,
-      modelId: fallback.modelId,
-      provider: fallback.provider,
-      model: fallback,
-      metadata: pinnedMetadata(
-        fallback,
-        args.routingMode,
-        "off",
-        requirements,
-        args.requestedFamily
-      ),
-    }
+    return pinnedRoute(fallback, args, "off", requirements)
   }
 
   const { config, mode } = await loadRouterConfiguration()
   if (mode === "off") {
-    await assertModelAccess(args.userId, fallback.id)
-    return {
-      modelDbId: fallback.id,
-      modelId: fallback.modelId,
-      provider: fallback.provider,
-      model: fallback,
-      metadata: pinnedMetadata(
-        fallback,
-        args.routingMode,
-        mode,
-        requirements,
-        args.requestedFamily
-      ),
-    }
+    return pinnedRoute(fallback, args, mode, requirements)
   }
 
   const models = await getArchitectEnabledModels()
@@ -220,45 +301,30 @@ export async function routeAssistantArchitectModel(args: {
     // are preferred through configuredCandidateIds, while another eligible model
     // can still provide a resilient fallback when Gemini is unavailable.
   })
-  if (!routed && mode !== "shadow") {
-    const target = family === "auto" ? "the required capabilities" : `the ${family} family`
-    throw new Error(`No accessible Assistant Architect model is available for ${target}`)
-  }
-
-  let selected = routed?.model ?? fallback as RoutableModel
-  let fallbackUsed = routed?.fallbackUsed ?? true
-  let proposedModelId: string | undefined
-  if (mode === "shadow") {
-    await assertModelAccess(args.userId, fallback.id)
-    selected = fallback as RoutableModel
-    fallbackUsed = fallbackUsed || routed?.model.id !== fallback.id
-    proposedModelId = routed?.model.modelId
-  }
+  const { selected, fallbackUsed, proposedModelId } =
+    await resolveRoutingSelection({
+      routed,
+      mode,
+      fallback,
+      userId: args.userId,
+      family,
+    })
   const selectedRow = selected.id === fallback.id
     ? fallback
     : models.find(model => model.id === selected.id)
   if (!selectedRow) throw new Error("The routed Assistant Architect model is unavailable")
 
-  const metadata: AssistantArchitectRoutingMetadata = {
-    version: config.version,
-    runtimeMode: mode,
+  const metadata = activeRoutingMetadata({
+    config,
+    mode,
     routingMode: args.routingMode,
-    requestedFamily: family,
-    selectedFamily: inferModelFamily(selected) ?? "other",
-    intent: decision.intent,
-    tier: decision.tier,
-    confidence: decision.confidence,
-    reasonCodes: decision.reasonCodes,
-    decisionSource: decision.source,
-    selectedModelDbId: selected.id,
-    selectedModelId: selected.modelId,
-    selectedProvider: selected.provider,
+    family,
+    decision,
+    selected,
     proposedModelId,
     fallbackUsed,
-    requiredTools: requirements.requiredTools ?? [],
-    requiresFunctionCalling: requirements.requiresFunctionCalling ?? false,
-    requiresVision: requirements.requiresVision ?? false,
-  }
+    requirements,
+  })
   log.info("Assistant Architect model routed", {
     runtimeMode: mode,
     routingMode: args.routingMode,

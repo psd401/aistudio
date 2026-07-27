@@ -14,7 +14,7 @@ function synthesize(): Template {
   const documentsBucket = s3.Bucket.fromBucketName(
     stack,
     "DocumentsBucket",
-    "aistudio-dev-documents",
+    "aistudio-dev-documents"
   );
   const embeddingQueue = new sqs.Queue(stack, "EmbeddingQueue", {
     queueName: "aistudio-dev-embedding-queue",
@@ -22,7 +22,7 @@ function synthesize(): Template {
   const embeddingDeadLetterQueue = new sqs.Queue(
     stack,
     "EmbeddingDeadLetterQueue",
-    { queueName: "aistudio-dev-embedding-dlq" },
+    { queueName: "aistudio-dev-embedding-dlq" }
   );
   cdk.Tags.of(embeddingQueue).add("Environment", "dev");
   cdk.Tags.of(embeddingQueue).add("ManagedBy", "cdk");
@@ -40,472 +40,492 @@ function synthesize(): Template {
   return Template.fromStack(stack);
 }
 
-const defineUnifiedContentProcessingSuite1 = () => {
-  const template = synthesize();
+type PolicyStatement = {
+  Action?: string | string[];
+  Resource?: unknown;
+};
 
-  test("deploys an encrypted durable queue and bounded DLQ retries", () => {
-    template.hasResourceProperties("AWS::SQS::Queue", {
-      QueueName: "aistudio-dev-content-processing-queue",
-      SqsManagedSseEnabled: true,
-      VisibilityTimeout: 5_400,
-      RedrivePolicy: Match.objectLike({ maxReceiveCount: 5 }),
-      Tags: Match.arrayWith([
-        { Key: "Environment", Value: "dev" },
-        { Key: "ManagedBy", Value: "cdk" },
-      ]),
-    });
-    template.hasResourceProperties("AWS::SQS::Queue", {
-      QueueName: "aistudio-dev-content-processing-dlq",
-      SqsManagedSseEnabled: true,
-      MessageRetentionPeriod: 1_209_600,
-    });
+function collectPolicyStatements(templateToInspect: Template): PolicyStatement[] {
+  const statements: PolicyStatement[] = [];
+  const policies = templateToInspect.findResources("AWS::IAM::Policy");
+  for (const resource of Object.values(policies) as Array<{
+    Properties?: { PolicyDocument?: { Statement?: PolicyStatement[] } };
+  }>) {
+    statements.push(...(resource.Properties?.PolicyDocument?.Statement ?? []));
+  }
+  const roles = templateToInspect.findResources("AWS::IAM::Role");
+  for (const resource of Object.values(roles) as Array<{
+    Properties?: {
+      Policies?: Array<{
+        PolicyDocument?: { Statement?: PolicyStatement[] };
+      }>;
+    };
+  }>) {
+    for (const policy of resource.Properties?.Policies ?? []) {
+      statements.push(...(policy.PolicyDocument?.Statement ?? []));
+    }
+  }
+  return statements;
+}
+
+function collectWildcardActions(statements: PolicyStatement[]): string[] {
+  const actions = new Set<string>();
+  for (const statement of statements) {
+    if (statement.Resource !== "*") {
+      continue;
+    }
+    const statementActions = Array.isArray(statement.Action)
+      ? statement.Action
+      : [statement.Action];
+    for (const action of statementActions) {
+      if (action) {
+        actions.add(action);
+      }
+    }
+  }
+  return [...actions].sort();
+}
+
+const template = synthesize();
+
+test("deploys an encrypted durable queue and bounded DLQ retries", () => {
+  template.hasResourceProperties("AWS::SQS::Queue", {
+    QueueName: "aistudio-dev-content-processing-queue",
+    SqsManagedSseEnabled: true,
+    VisibilityTimeout: 5_400,
+    RedrivePolicy: Match.objectLike({ maxReceiveCount: 5 }),
+    Tags: Match.arrayWith([
+      { Key: "Environment", Value: "dev" },
+      { Key: "ManagedBy", Value: "cdk" },
+    ]),
   });
-
-  test("alarms on stalled work, failures, migration blockers, and stale indexes", () => {
-    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
-      AlarmName: "aistudio-dev-content-processing-dlq-visible",
-      Threshold: 1,
-      TreatMissingData: "notBreaching",
-    });
-    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
-      AlarmName: "aistudio-dev-content-processing-oldest-message",
-      Threshold: 1_800,
-      EvaluationPeriods: 2,
-      TreatMissingData: "notBreaching",
-    });
-    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
-      AlarmName: "aistudio-dev-content-processing-worker-errors",
-      Threshold: 1,
-      TreatMissingData: "notBreaching",
-    });
-    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
-      AlarmName: "aistudio-dev-content-migration-blockers",
-      Threshold: 1,
-      TreatMissingData: "notBreaching",
-    });
-    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
-      AlarmName: "aistudio-dev-content-stale-repositories",
-      Threshold: 1,
-      EvaluationPeriods: 2,
-      TreatMissingData: "notBreaching",
-    });
-    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
-      AlarmName: "aistudio-dev-content-connector-failures",
-      Threshold: 1,
-      EvaluationPeriods: 2,
-      TreatMissingData: "notBreaching",
-    });
+  template.hasResourceProperties("AWS::SQS::Queue", {
+    QueueName: "aistudio-dev-content-processing-dlq",
+    SqsManagedSseEnabled: true,
+    MessageRetentionPeriod: 1_209_600,
   });
+});
 
-  test("scans only canonical repository objects and tags the verdict", () => {
-    template.hasResourceProperties("AWS::GuardDuty::MalwareProtectionPlan", {
-      Actions: { Tagging: { Status: "ENABLED" } },
-      ProtectedResource: {
-        S3Bucket: {
-          BucketName: "aistudio-dev-documents",
-          ObjectPrefixes: ["repositories/"],
-        },
+test("alarms on stalled work, failures, migration blockers, and stale indexes", () => {
+  template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+    AlarmName: "aistudio-dev-content-processing-dlq-visible",
+    Threshold: 1,
+    TreatMissingData: "notBreaching",
+  });
+  template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+    AlarmName: "aistudio-dev-content-processing-oldest-message",
+    Threshold: 1_800,
+    EvaluationPeriods: 2,
+    TreatMissingData: "notBreaching",
+  });
+  template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+    AlarmName: "aistudio-dev-content-processing-worker-errors",
+    Threshold: 1,
+    TreatMissingData: "notBreaching",
+  });
+  template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+    AlarmName: "aistudio-dev-content-migration-blockers",
+    Threshold: 1,
+    TreatMissingData: "notBreaching",
+  });
+  template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+    AlarmName: "aistudio-dev-content-stale-repositories",
+    Threshold: 1,
+    EvaluationPeriods: 2,
+    TreatMissingData: "notBreaching",
+  });
+  template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+    AlarmName: "aistudio-dev-content-connector-failures",
+    Threshold: 1,
+    EvaluationPeriods: 2,
+    TreatMissingData: "notBreaching",
+  });
+});
+
+test("scans only canonical repository objects and tags the verdict", () => {
+  template.hasResourceProperties("AWS::GuardDuty::MalwareProtectionPlan", {
+    Actions: { Tagging: { Status: "ENABLED" } },
+    ProtectedResource: {
+      S3Bucket: {
+        BucketName: "aistudio-dev-documents",
+        ObjectPrefixes: ["repositories/"],
       },
-      Role: Match.anyValue(),
-    });
-    const iamResources = JSON.stringify({
-      roles: template.findResources("AWS::IAM::Role"),
-      policies: template.findResources("AWS::IAM::Policy"),
-    });
-    expect(iamResources).toContain("AllowRepositoryObjectScanAndTag");
-    expect(iamResources).toContain(
-      ":s3:::aistudio-dev-documents/repositories/*",
-    );
-    expect(iamResources).toContain("AllowPutValidationObject");
-    expect(iamResources).toContain(
-      ":s3:::aistudio-dev-documents/malware-protection-resource-validation-object",
-    );
+    },
+    Role: Match.anyValue(),
   });
-
-  test("bundles the worker with its queues, VPC, and recovery schedule", () => {
-    template.hasResourceProperties("AWS::Lambda::Function", {
-      FunctionName: "aistudio-dev-unified-content-processor",
-      Runtime: "nodejs20.x",
-      Architectures: ["arm64"],
-      MemorySize: 3008,
-      Timeout: 900,
-      ReservedConcurrentExecutions: 3,
-      Environment: {
-        Variables: Match.objectLike({
-          DOCUMENTS_BUCKET_NAME: "aistudio-dev-documents",
-          DATABASE_HOST: "database.example.test",
-          DATABASE_NAME: "aistudio",
-          CONTENT_PROCESSING_DLQ_URL: Match.anyValue(),
-          EMBEDDING_DLQ_URL: Match.anyValue(),
-          BDA_DATA_AUTOMATION_PROJECT_ARN: Match.anyValue(),
-          BDA_DATA_AUTOMATION_PROFILE_ARN: Match.anyValue(),
-        }),
-      },
-      VpcConfig: Match.objectLike({ SecurityGroupIds: Match.anyValue() }),
-    });
-    template.hasResourceProperties("AWS::Lambda::EventSourceMapping", {
-      BatchSize: 1,
-      FunctionResponseTypes: ["ReportBatchItemFailures"],
-      ScalingConfig: { MaximumConcurrency: 2 },
-    });
-    template.hasResourceProperties("AWS::Events::Rule", {
-      ScheduleExpression: "rate(1 minute)",
-      State: "ENABLED",
-    });
+  const iamResources = JSON.stringify({
+    roles: template.findResources("AWS::IAM::Role"),
+    policies: template.findResources("AWS::IAM::Policy"),
   });
+  expect(iamResources).toContain("AllowRepositoryObjectScanAndTag");
+  expect(iamResources).toContain(
+    ":s3:::aistudio-dev-documents/repositories/*"
+  );
+  expect(iamResources).toContain("AllowPutValidationObject");
+  expect(iamResources).toContain(
+    ":s3:::aistudio-dev-documents/malware-protection-resource-validation-object"
+  );
+});
 
-  test("configures one tagged Bedrock Data Automation project for rich media", () => {
-    template.hasResourceProperties("AWS::Bedrock::DataAutomationProject", {
-      ProjectName: "aistudio-dev-repository-media",
-      ProjectType: "ASYNC",
-      StandardOutputConfiguration: {
-        Audio: {
-          Extraction: {
-            Category: {
-              State: "ENABLED",
-              Types: ["TRANSCRIPT"],
-              TypeConfiguration: {
-                Transcript: {
-                  SpeakerLabeling: { State: "ENABLED" },
-                  ChannelLabeling: { State: "ENABLED" },
-                },
+test("bundles the worker with its queues, VPC, and recovery schedule", () => {
+  template.hasResourceProperties("AWS::Lambda::Function", {
+    FunctionName: "aistudio-dev-unified-content-processor",
+    Runtime: "nodejs20.x",
+    Architectures: ["arm64"],
+    MemorySize: 3008,
+    Timeout: 900,
+    ReservedConcurrentExecutions: 3,
+    Environment: {
+      Variables: Match.objectLike({
+        DOCUMENTS_BUCKET_NAME: "aistudio-dev-documents",
+        DATABASE_HOST: "database.example.test",
+        DATABASE_NAME: "aistudio",
+        CONTENT_PROCESSING_DLQ_URL: Match.anyValue(),
+        EMBEDDING_DLQ_URL: Match.anyValue(),
+        BDA_DATA_AUTOMATION_PROJECT_ARN: Match.anyValue(),
+        BDA_DATA_AUTOMATION_PROFILE_ARN: Match.anyValue(),
+      }),
+    },
+    VpcConfig: Match.objectLike({ SecurityGroupIds: Match.anyValue() }),
+  });
+  template.hasResourceProperties("AWS::Lambda::EventSourceMapping", {
+    BatchSize: 1,
+    FunctionResponseTypes: ["ReportBatchItemFailures"],
+    ScalingConfig: { MaximumConcurrency: 2 },
+  });
+  template.hasResourceProperties("AWS::Events::Rule", {
+    ScheduleExpression: "rate(1 minute)",
+    State: "ENABLED",
+  });
+});
+
+test("configures one tagged Bedrock Data Automation project for rich media", () => {
+  template.hasResourceProperties("AWS::Bedrock::DataAutomationProject", {
+    ProjectName: "aistudio-dev-repository-media",
+    ProjectType: "ASYNC",
+    StandardOutputConfiguration: {
+      Audio: {
+        Extraction: {
+          Category: {
+            State: "ENABLED",
+            Types: ["TRANSCRIPT"],
+            TypeConfiguration: {
+              Transcript: {
+                SpeakerLabeling: { State: "ENABLED" },
+                ChannelLabeling: { State: "ENABLED" },
               },
             },
           },
-          GenerativeField: {
-            State: "ENABLED",
-            Types: ["AUDIO_SUMMARY", "TOPIC_SUMMARY"],
-          },
         },
-        Video: {
-          Extraction: {
-            Category: {
-              State: "ENABLED",
-              Types: ["TRANSCRIPT", "TEXT_DETECTION"],
-            },
-            BoundingBox: { State: "ENABLED" },
-          },
-          GenerativeField: {
-            State: "ENABLED",
-            Types: ["VIDEO_SUMMARY", "CHAPTER_SUMMARY"],
-          },
+        GenerativeField: {
+          State: "ENABLED",
+          Types: ["AUDIO_SUMMARY", "TOPIC_SUMMARY"],
         },
       },
-      Tags: Match.arrayWith([
-        { Key: "Environment", Value: "dev" },
-        { Key: "ManagedBy", Value: "cdk" },
-      ]),
-    });
-  });
-
-  test("grants the worker valid least-privilege access to canonical repository objects", () => {
-    type PolicyStatement = {
-      Sid?: string;
-      Effect?: string;
-      Action?: string[];
-      Resource?: unknown;
-      Condition?: unknown;
-    };
-    const workerRoles = template.findResources("AWS::IAM::Role", {
-      Properties: {
-        RoleName: "aistudio-dev-unified-content-processor-execution-role-dev",
+      Video: {
+        Extraction: {
+          Category: {
+            State: "ENABLED",
+            Types: ["TRANSCRIPT", "TEXT_DETECTION"],
+          },
+          BoundingBox: { State: "ENABLED" },
+        },
+        GenerativeField: {
+          State: "ENABLED",
+          Types: ["VIDEO_SUMMARY", "CHAPTER_SUMMARY"],
+        },
       },
-    });
-    const lintNestedCallback1 = (policy: {
-      PolicyDocument?: { Statement?: PolicyStatement[] };
-    }) => policy.PolicyDocument?.Statement ?? [];
-    const statements = Object.values(workerRoles).flatMap((role) =>
-      (role.Properties?.Policies ?? []).flatMap(lintNestedCallback1),
-    );
-    expect(Object.keys(workerRoles)).toHaveLength(1);
-    const repositoryAccess = statements.find(
-      (statement) => statement.Sid === "CanonicalRepositoryObjectAccess",
-    );
-
-    expect(repositoryAccess).toMatchObject({
-      Effect: "Allow",
-      Action: [
-        "s3:GetObject",
-        "s3:GetObjectVersion",
-        "s3:GetObjectTagging",
-        "s3:PutObject",
-        "s3:PutObjectTagging",
-        "s3:DeleteObject",
-        "s3:DeleteObjectVersion",
-        "s3:AbortMultipartUpload",
-      ],
-    });
-    expect(JSON.stringify(repositoryAccess?.Resource)).toContain(
-      ":s3:::aistudio-dev-documents/repositories/*",
-    );
-    expect(repositoryAccess?.Condition).toBeUndefined();
-
-    const migrationRead = statements.find(
-      (statement) => statement.Sid === "LegacyContentMigrationRead",
-    );
-    expect(migrationRead).toMatchObject({
-      Effect: "Allow",
-      Action: ["s3:GetObject", "s3:GetObjectVersion"],
-    });
-    expect(JSON.stringify(migrationRead?.Resource)).toContain(
-      ":s3:::aistudio-dev-documents/*",
-    );
-    expect(migrationRead?.Action).not.toEqual(
-      expect.arrayContaining(["s3:PutObject", "s3:DeleteObject"]),
-    );
-    const migrationDiscovery = statements.find(
-      (statement) => statement.Sid === "LegacyContentMigrationDiscovery",
-    );
-    expect(migrationDiscovery).toMatchObject({
-      Effect: "Allow",
-      Action: "s3:ListBucket",
-    });
-    expect(JSON.stringify(migrationDiscovery)).not.toContain(
-      "s3:ListBucketVersions",
-    );
-    expect(JSON.stringify(migrationDiscovery?.Resource)).toContain(
-      ":s3:::aistudio-dev-documents",
-    );
-    expect(migrationDiscovery?.Condition).toBeUndefined();
+    },
+    Tags: Match.arrayWith([
+      { Key: "Environment", Value: "dev" },
+      { Key: "ManagedBy", Value: "cdk" },
+    ]),
   });
+});
 
-  test("publishes a tagged operational dashboard and namespace-scoped metrics", () => {
-    template.hasResourceProperties("AWS::CloudWatch::Dashboard", {
-      DashboardName: "aistudio-dev-unified-content",
-    });
-    const dashboards = template.findResources("AWS::CloudWatch::Dashboard");
-    const dashboardJson = JSON.stringify(dashboards);
-    expect(dashboardJson).toContain("Migration reconciliation");
-    expect(dashboardJson).toContain("Retrieval shadow parity");
-    const policies = JSON.stringify(template.findResources("AWS::IAM::Role"));
-    expect(policies).toContain("PublishUnifiedContentOperationalMetrics");
-    expect(policies).toContain("AIStudio/UnifiedContent");
+test("grants the worker valid least-privilege access to canonical repository objects", () => {
+  type PolicyStatement = {
+    Sid?: string;
+    Effect?: string;
+    Action?: string[];
+    Resource?: unknown;
+    Condition?: unknown;
+  };
+  const workerRoles = template.findResources("AWS::IAM::Role", {
+    Properties: {
+      RoleName:
+        "aistudio-dev-unified-content-processor-execution-role-dev",
+    },
   });
+  const statements = Object.values(workerRoles).flatMap((role) =>
+    (role.Properties?.Policies ?? []).flatMap(
+      (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
+        policy.PolicyDocument?.Statement ?? []
+    )
+  );
+  expect(Object.keys(workerRoles)).toHaveLength(1);
+  const repositoryAccess = statements.find(
+    (statement) => statement.Sid === "CanonicalRepositoryObjectAccess"
+  );
 
-  test("dispatches embeddings through an exact queue ARN without tag conditions", () => {
-    type PolicyStatement = {
-      Sid?: string;
-      Effect?: string;
-      Action?: string | string[];
-      Resource?: unknown;
-      Condition?: unknown;
-    };
-    const workerRoles = template.findResources("AWS::IAM::Role", {
-      Properties: {
-        RoleName: "aistudio-dev-unified-content-processor-execution-role-dev",
-      },
-    });
-    const lintNestedCallback2 = (policy: {
-      PolicyDocument?: { Statement?: PolicyStatement[] };
-    }) => policy.PolicyDocument?.Statement ?? [];
-    const statements = Object.values(workerRoles).flatMap((role) =>
-      (role.Properties?.Policies ?? []).flatMap(lintNestedCallback2),
-    );
-    expect(Object.keys(workerRoles)).toHaveLength(1);
-    const embeddingDispatch = statements.find(
-      (statement) => statement.Sid === "CanonicalEmbeddingDispatch",
-    );
-
-    expect(embeddingDispatch).toMatchObject({
-      Effect: "Allow",
-      Action: "sqs:SendMessage",
-    });
-    expect(embeddingDispatch?.Resource).toEqual({
-      "Fn::GetAtt": [expect.stringMatching(/^EmbeddingQueue/), "Arn"],
-    });
-    expect(JSON.stringify(embeddingDispatch?.Resource)).not.toContain("*");
-    expect(embeddingDispatch?.Condition).toBeUndefined();
+  expect(repositoryAccess).toMatchObject({
+    Effect: "Allow",
+    Action: [
+      "s3:GetObject",
+      "s3:GetObjectVersion",
+      "s3:GetObjectTagging",
+      "s3:PutObject",
+      "s3:PutObjectTagging",
+      "s3:DeleteObject",
+      "s3:DeleteObjectVersion",
+      "s3:AbortMultipartUpload",
+    ],
   });
+  expect(JSON.stringify(repositoryAccess?.Resource)).toContain(
+    ":s3:::aistudio-dev-documents/repositories/*"
+  );
+  expect(repositoryAccess?.Condition).toBeUndefined();
 
-  test("reconciles only the exact embedding DLQ through bounded receive/delete access", () => {
-    type PolicyStatement = {
-      Sid?: string;
-      Effect?: string;
-      Action?: string | string[];
-      Resource?: unknown;
-    };
-    const workerRoles = template.findResources("AWS::IAM::Role", {
-      Properties: {
-        RoleName: "aistudio-dev-unified-content-processor-execution-role-dev",
-      },
-    });
-    const lintNestedCallback3 = (policy: {
-      PolicyDocument?: { Statement?: PolicyStatement[] };
-    }) => policy.PolicyDocument?.Statement ?? [];
-    const statements = Object.values(workerRoles).flatMap((role) =>
-      (role.Properties?.Policies ?? []).flatMap(lintNestedCallback3),
-    );
-    const recovery = statements.find(
-      (statement) => statement.Sid === "CanonicalEmbeddingDlqRecovery",
-    );
-    expect(recovery).toMatchObject({
-      Effect: "Allow",
-      Action: ["sqs:ReceiveMessage", "sqs:DeleteMessage"],
-    });
-    expect(recovery?.Resource).toEqual({
-      "Fn::GetAtt": [expect.stringMatching(/^EmbeddingDeadLetterQueue/), "Arn"],
-    });
-    expect(JSON.stringify(recovery?.Resource)).not.toContain("*");
+  const migrationRead = statements.find(
+    (statement) => statement.Sid === "LegacyContentMigrationRead"
+  );
+  expect(migrationRead).toMatchObject({
+    Effect: "Allow",
+    Action: ["s3:GetObject", "s3:GetObjectVersion"],
   });
-
-  test("reconciles only the exact processing DLQ through bounded receive/delete access", () => {
-    type PolicyStatement = {
-      Sid?: string;
-      Effect?: string;
-      Action?: string | string[];
-      Resource?: unknown;
-    };
-    const workerRoles = template.findResources("AWS::IAM::Role", {
-      Properties: {
-        RoleName: "aistudio-dev-unified-content-processor-execution-role-dev",
-      },
-    });
-    const lintNestedCallback4 = (policy: {
-      PolicyDocument?: { Statement?: PolicyStatement[] };
-    }) => policy.PolicyDocument?.Statement ?? [];
-    const statements = Object.values(workerRoles).flatMap((role) =>
-      (role.Properties?.Policies ?? []).flatMap(lintNestedCallback4),
-    );
-    const recovery = statements.find(
-      (statement) => statement.Sid === "CanonicalProcessingDlqRecovery",
-    );
-    expect(recovery).toMatchObject({
-      Effect: "Allow",
-      Action: ["sqs:ReceiveMessage", "sqs:DeleteMessage"],
-    });
-    expect(recovery?.Resource).toEqual({
-      "Fn::GetAtt": [expect.stringMatching(/DeadLetterQueue/), "Arn"],
-    });
-    expect(JSON.stringify(recovery?.Resource)).not.toContain("*");
+  expect(JSON.stringify(migrationRead?.Resource)).toContain(
+    ":s3:::aistudio-dev-documents/*"
+  );
+  expect(migrationRead?.Action).not.toEqual(
+    expect.arrayContaining(["s3:PutObject", "s3:DeleteObject"])
+  );
+  const migrationDiscovery = statements.find(
+    (statement) => statement.Sid === "LegacyContentMigrationDiscovery"
+  );
+  expect(migrationDiscovery).toMatchObject({
+    Effect: "Allow",
+    Action: "s3:ListBucket",
   });
+  expect(JSON.stringify(migrationDiscovery)).not.toContain(
+    "s3:ListBucketVersions"
+  );
+  expect(JSON.stringify(migrationDiscovery?.Resource)).toContain(
+    ":s3:::aistudio-dev-documents"
+  );
+  expect(migrationDiscovery?.Condition).toBeUndefined();
+});
 
-  test("grants only the documented wildcard APIs", () => {
-    const policies = template.findResources("AWS::IAM::Policy");
-    const roles = template.findResources("AWS::IAM::Role");
-    const wildcardActions = new Set<string>();
-    type Statement = { Action?: string | string[]; Resource?: unknown };
-    const statements: Statement[] = [];
-    for (const resource of Object.values(policies) as Array<{
-      Properties?: { PolicyDocument?: { Statement?: Statement[] } };
-    }>) {
-      statements.push(
-        ...(resource.Properties?.PolicyDocument?.Statement ?? []),
-      );
-    }
-    for (const resource of Object.values(roles) as Array<{
-      Properties?: {
-        Policies?: Array<{ PolicyDocument?: { Statement?: Statement[] } }>;
-      };
-    }>) {
-      for (const policy of resource.Properties?.Policies ?? []) {
-        statements.push(...(policy.PolicyDocument?.Statement ?? []));
-      }
-    }
-    for (const statement of statements) {
-      if (statement.Resource !== "*") continue;
-      const actions = Array.isArray(statement.Action)
-        ? statement.Action
-        : [statement.Action];
-      for (const action of actions) {
-        if (action) wildcardActions.add(action);
-      }
-    }
-    expect([...wildcardActions].sort()).toEqual([
-      "cloudwatch:PutMetricData",
-      "ec2:AssignPrivateIpAddresses",
-      "ec2:CreateNetworkInterface",
-      "ec2:DeleteNetworkInterface",
-      "ec2:DescribeNetworkInterfaces",
-      "ec2:UnassignPrivateIpAddresses",
-      "textract:GetDocumentTextDetection",
-      "textract:StartDocumentTextDetection",
-      "xray:PutTelemetryRecords",
-      "xray:PutTraceSegments",
-    ]);
+test("publishes a tagged operational dashboard and namespace-scoped metrics", () => {
+  template.hasResourceProperties("AWS::CloudWatch::Dashboard", {
+    DashboardName: "aistudio-dev-unified-content",
   });
+  const dashboards = template.findResources("AWS::CloudWatch::Dashboard");
+  const dashboardJson = JSON.stringify(dashboards);
+  expect(dashboardJson).toContain("Migration reconciliation");
+  expect(dashboardJson).toContain("Retrieval shadow parity");
+  const policies = JSON.stringify(template.findResources("AWS::IAM::Role"));
+  expect(policies).toContain("PublishUnifiedContentOperationalMetrics");
+  expect(policies).toContain("AIStudio/UnifiedContent");
+});
 
-  test("grants image captioning only to US Amazon Nova resources", () => {
-    type PolicyStatement = {
-      Sid?: string;
-      Action?: string | string[];
-      Resource?: string | string[];
-    };
-    const lintNestedCallback5 = (policy: {
-      PolicyDocument?: { Statement?: PolicyStatement[] };
-    }) => policy.PolicyDocument?.Statement ?? [];
-    const statements = Object.values(
-      template.findResources("AWS::IAM::Role"),
-    ).flatMap((role) =>
-      (role.Properties?.Policies ?? []).flatMap(lintNestedCallback5),
-    );
-    const captioning = statements.find(
-      (statement) => statement.Sid === "CanonicalImageCaptioning",
-    );
-    expect(captioning?.Action).toEqual("bedrock:InvokeModel");
-    const resources = Array.isArray(captioning?.Resource)
-      ? captioning.Resource
-      : [captioning?.Resource];
-    const resourcesJson = JSON.stringify(resources);
-    expect(resourcesJson).toContain(
-      ":bedrock:us-east-1:123456789012:inference-profile/us.amazon.nova-",
-    );
-    expect(resourcesJson).toContain(
-      ":bedrock:us-west-2::foundation-model/amazon.nova-",
-    );
-    expect(resources).not.toContain("*");
+test("dispatches embeddings through an exact queue ARN without tag conditions", () => {
+  type PolicyStatement = {
+    Sid?: string;
+    Effect?: string;
+    Action?: string | string[];
+    Resource?: unknown;
+    Condition?: unknown;
+  };
+  const workerRoles = template.findResources("AWS::IAM::Role", {
+    Properties: {
+      RoleName:
+        "aistudio-dev-unified-content-processor-execution-role-dev",
+    },
   });
+  const statements = Object.values(workerRoles).flatMap((role) =>
+    (role.Properties?.Policies ?? []).flatMap(
+      (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
+        policy.PolicyDocument?.Statement ?? []
+    )
+  );
+  expect(Object.keys(workerRoles)).toHaveLength(1);
+  const embeddingDispatch = statements.find(
+    (statement) => statement.Sid === "CanonicalEmbeddingDispatch"
+  );
 
-  test("grants BDA media processing only to the project, US profile, and invocation", () => {
-    type PolicyStatement = {
-      Sid?: string;
-      Action?: string | string[];
-      Resource?: unknown;
-      Condition?: unknown;
-    };
-    const workerRoles = template.findResources("AWS::IAM::Role", {
-      Properties: {
-        RoleName: "aistudio-dev-unified-content-processor-execution-role-dev",
-      },
-    });
-    const lintNestedCallback6 = (policy: {
-      PolicyDocument?: { Statement?: PolicyStatement[] };
-    }) => policy.PolicyDocument?.Statement ?? [];
-    const statements = Object.values(workerRoles).flatMap((role) =>
-      (role.Properties?.Policies ?? []).flatMap(lintNestedCallback6),
-    );
-    expect(Object.keys(workerRoles)).toHaveLength(1);
-    const invoke = statements.find(
-      (statement) => statement.Sid === "CanonicalMediaAnalysis",
-    );
-    const status = statements.find(
-      (statement) => statement.Sid === "CanonicalMediaAnalysisStatus",
-    );
-    const discovery = statements.find(
-      (statement) => statement.Sid === "CanonicalRepositoryArtifactDiscovery",
-    );
-
-    expect(invoke?.Action).toBe("bedrock:InvokeDataAutomationAsync");
-    expect(JSON.stringify(invoke?.Resource)).toContain(
-      "data-automation-profile/us.data-automation-v1",
-    );
-    expect(JSON.stringify(invoke?.Resource)).toContain("ProjectArn");
-    expect(JSON.stringify(invoke?.Resource)).toContain(
-      "data-automation-invocation/*",
-    );
-    expect(
-      statements.some((statement) =>
-        JSON.stringify(statement.Action).includes("bedrock:TagResource"),
-      ),
-    ).toBe(false);
-    expect(status?.Action).toBe("bedrock:GetDataAutomationStatus");
-    expect(JSON.stringify(status?.Resource)).toContain(
-      "data-automation-invocation/*",
-    );
-    expect(discovery).toMatchObject({
-      Action: ["s3:ListBucket", "s3:ListBucketVersions"],
-      Condition: { StringLike: { "s3:prefix": ["repositories/*"] } },
-    });
+  expect(embeddingDispatch).toMatchObject({
+    Effect: "Allow",
+    Action: "sqs:SendMessage",
   });
-};
+  expect(embeddingDispatch?.Resource).toEqual({
+    "Fn::GetAtt": [expect.stringMatching(/^EmbeddingQueue/), "Arn"],
+  });
+  expect(JSON.stringify(embeddingDispatch?.Resource)).not.toContain("*");
+  expect(embeddingDispatch?.Condition).toBeUndefined();
+});
 
-describe("UnifiedContentProcessing", defineUnifiedContentProcessingSuite1);
+test("reconciles only the exact embedding DLQ through bounded receive/delete access", () => {
+  type PolicyStatement = {
+    Sid?: string;
+    Effect?: string;
+    Action?: string | string[];
+    Resource?: unknown;
+  };
+  const workerRoles = template.findResources("AWS::IAM::Role", {
+    Properties: {
+      RoleName:
+        "aistudio-dev-unified-content-processor-execution-role-dev",
+    },
+  });
+  const statements = Object.values(workerRoles).flatMap((role) =>
+    (role.Properties?.Policies ?? []).flatMap(
+      (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
+        policy.PolicyDocument?.Statement ?? []
+    )
+  );
+  const recovery = statements.find(
+    (statement) => statement.Sid === "CanonicalEmbeddingDlqRecovery"
+  );
+  expect(recovery).toMatchObject({
+    Effect: "Allow",
+    Action: ["sqs:ReceiveMessage", "sqs:DeleteMessage"],
+  });
+  expect(recovery?.Resource).toEqual({
+    "Fn::GetAtt": [
+      expect.stringMatching(/^EmbeddingDeadLetterQueue/),
+      "Arn",
+    ],
+  });
+  expect(JSON.stringify(recovery?.Resource)).not.toContain("*");
+});
+
+test("reconciles only the exact processing DLQ through bounded receive/delete access", () => {
+  type PolicyStatement = {
+    Sid?: string;
+    Effect?: string;
+    Action?: string | string[];
+    Resource?: unknown;
+  };
+  const workerRoles = template.findResources("AWS::IAM::Role", {
+    Properties: {
+      RoleName:
+        "aistudio-dev-unified-content-processor-execution-role-dev",
+    },
+  });
+  const statements = Object.values(workerRoles).flatMap((role) =>
+    (role.Properties?.Policies ?? []).flatMap(
+      (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
+        policy.PolicyDocument?.Statement ?? []
+    )
+  );
+  const recovery = statements.find(
+    (statement) => statement.Sid === "CanonicalProcessingDlqRecovery"
+  );
+  expect(recovery).toMatchObject({
+    Effect: "Allow",
+    Action: ["sqs:ReceiveMessage", "sqs:DeleteMessage"],
+  });
+  expect(recovery?.Resource).toEqual({
+    "Fn::GetAtt": [expect.stringMatching(/DeadLetterQueue/), "Arn"],
+  });
+  expect(JSON.stringify(recovery?.Resource)).not.toContain("*");
+});
+
+test("grants only the documented wildcard APIs", () => {
+  expect(collectWildcardActions(collectPolicyStatements(template))).toEqual([
+    "cloudwatch:PutMetricData",
+    "ec2:AssignPrivateIpAddresses",
+    "ec2:CreateNetworkInterface",
+    "ec2:DeleteNetworkInterface",
+    "ec2:DescribeNetworkInterfaces",
+    "ec2:UnassignPrivateIpAddresses",
+    "textract:GetDocumentTextDetection",
+    "textract:StartDocumentTextDetection",
+    "xray:PutTelemetryRecords",
+    "xray:PutTraceSegments",
+  ]);
+});
+
+test("grants image captioning only to US Amazon Nova resources", () => {
+  type PolicyStatement = {
+    Sid?: string;
+    Action?: string | string[];
+    Resource?: string | string[];
+  };
+  const statements = Object.values(
+    template.findResources("AWS::IAM::Role")
+  ).flatMap((role) =>
+    (role.Properties?.Policies ?? []).flatMap(
+      (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
+        policy.PolicyDocument?.Statement ?? []
+    )
+  );
+  const captioning = statements.find(
+    (statement) => statement.Sid === "CanonicalImageCaptioning"
+  );
+  expect(captioning?.Action).toEqual("bedrock:InvokeModel");
+  const resources = Array.isArray(captioning?.Resource)
+    ? captioning.Resource
+    : [captioning?.Resource];
+  const resourcesJson = JSON.stringify(resources);
+  expect(resourcesJson).toContain(
+    ":bedrock:us-east-1:123456789012:inference-profile/us.amazon.nova-"
+  );
+  expect(resourcesJson).toContain(
+    ":bedrock:us-west-2::foundation-model/amazon.nova-"
+  );
+  expect(resources).not.toContain("*");
+});
+
+test("grants BDA media processing only to the project, US profile, and invocation", () => {
+  type PolicyStatement = {
+    Sid?: string;
+    Action?: string | string[];
+    Resource?: unknown;
+    Condition?: unknown;
+  };
+  const workerRoles = template.findResources("AWS::IAM::Role", {
+    Properties: {
+      RoleName:
+        "aistudio-dev-unified-content-processor-execution-role-dev",
+    },
+  });
+  const statements = Object.values(workerRoles).flatMap((role) =>
+    (role.Properties?.Policies ?? []).flatMap(
+      (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
+        policy.PolicyDocument?.Statement ?? []
+    )
+  );
+  expect(Object.keys(workerRoles)).toHaveLength(1);
+  const invoke = statements.find(
+    (statement) => statement.Sid === "CanonicalMediaAnalysis"
+  );
+  const status = statements.find(
+    (statement) => statement.Sid === "CanonicalMediaAnalysisStatus"
+  );
+  const discovery = statements.find(
+    (statement) => statement.Sid === "CanonicalRepositoryArtifactDiscovery"
+  );
+
+  expect(invoke?.Action).toBe("bedrock:InvokeDataAutomationAsync");
+  expect(JSON.stringify(invoke?.Resource)).toContain(
+    "data-automation-profile/us.data-automation-v1"
+  );
+  expect(JSON.stringify(invoke?.Resource)).toContain("ProjectArn");
+  expect(JSON.stringify(invoke?.Resource)).toContain(
+    "data-automation-invocation/*"
+  );
+  expect(
+    statements.some((statement) =>
+      JSON.stringify(statement.Action).includes("bedrock:TagResource")
+    )
+  ).toBe(false);
+  expect(status?.Action).toBe("bedrock:GetDataAutomationStatus");
+  expect(JSON.stringify(status?.Resource)).toContain(
+    "data-automation-invocation/*"
+  );
+  expect(discovery).toMatchObject({
+    Action: ["s3:ListBucket", "s3:ListBucketVersions"],
+    Condition: { StringLike: { "s3:prefix": ["repositories/*"] } },
+  });
+});

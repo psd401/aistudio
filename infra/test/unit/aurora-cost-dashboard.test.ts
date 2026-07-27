@@ -23,7 +23,7 @@ describe("AuroraCostDashboard", () => {
     )
   })
 
-  describe("Metrics Export", () => {
+
     test("exports Aurora metrics for consolidated dashboards", () => {
       const dashboard = new AuroraCostDashboard(stack, "Dashboard", {
         cluster: mockCluster,
@@ -58,7 +58,7 @@ describe("AuroraCostDashboard", () => {
         "prod",
       ]
 
-      environments.forEach((env) => {
+      for (const env of environments) {
         const envStack = new cdk.Stack(app, `${env}Stack`, {
           env: { region: "us-east-1" },
         })
@@ -76,11 +76,11 @@ describe("AuroraCostDashboard", () => {
         // Verify metrics are available for each environment
         expect(dashboard.metrics).toBeDefined()
         expect(dashboard.estimatedMonthlyCost).toBeDefined()
-      })
+      }
     })
-  })
 
-  describe("Metric Properties", () => {
+
+
     test("capacity metric is defined and available", () => {
       const dashboard = new AuroraCostDashboard(stack, "Dashboard", {
         cluster: mockCluster,
@@ -106,9 +106,9 @@ describe("AuroraCostDashboard", () => {
       // We can't access expression directly via IMetric interface, but we can verify it exists
       expect(costMetric.toString()).toBeDefined()
     })
-  })
 
-  describe("No Dashboard Creation", () => {
+
+
     test("does not export dashboard URL (dashboard removed)", () => {
       new AuroraCostDashboard(stack, "Dashboard", {
         cluster: mockCluster,
@@ -125,5 +125,5 @@ describe("AuroraCostDashboard", () => {
 
       expect(dashboardUrlOutputs.length).toBe(0)
     })
-  })
+
 })

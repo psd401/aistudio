@@ -1,4 +1,4 @@
-import * as path from "path";
+import * as path from "node:path";
 import * as cdk from "aws-cdk-lib";
 import * as bedrock from "aws-cdk-lib/aws-bedrock";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
@@ -26,6 +26,30 @@ export interface UnifiedContentProcessingProps {
   vpc: ec2.IVpc;
 }
 
+class UnifiedContentResources {
+  stack!: cdk.Stack;
+  functionName!: string;
+  dataAutomationProfileArn!: string;
+  mediaProject!: bedrock.CfnDataAutomationProject;
+  deadLetterQueue!: sqs.Queue;
+  queue!: sqs.Queue;
+  workerRole!: iam.Role;
+  workerSecurityGroup!: ec2.SecurityGroup;
+  worker!: lambdaNodejs.NodejsFunction;
+  dashboard!: cloudwatch.Dashboard;
+}
+
+function workerConcurrency(environment: "dev" | "prod"): {
+  reserved: number;
+  queueMaximum: number;
+} {
+  const reserved = environment === "prod" ? 10 : 3;
+  // EventBridge invokes this function every minute for durable recovery and
+  // maintenance. Keep one execution outside the SQS poller's ceiling so a
+  // sustained content queue cannot starve recurring work.
+  return { reserved, queueMaximum: reserved - 1 };
+}
+
 /**
  * Canonical repository ingestion worker, durable queue, and quarantine scanner.
  * Kept as an independently synthesizable construct so the security contract can
@@ -44,13 +68,33 @@ export class UnifiedContentProcessing extends Construct {
   ) {
     super(scope, id);
 
-    const stack = cdk.Stack.of(this);
-    const functionName = `aistudio-${props.environment}-unified-content-processor`;
-    const dataAutomationProfileArn =
-      `arn:${stack.partition}:bedrock:${stack.region}:${stack.account}:` +
+    const resources = new UnifiedContentResources();
+    this.createFoundation(props, resources);
+    this.createQueuesAndAlarms(props, resources);
+    this.createMalwareProtection(props, resources);
+    this.createWorkerInfrastructure(props, resources);
+    this.createWorker(props, resources);
+    this.configureWorkerTriggers(props, resources);
+    this.createOperationalDashboard(props, resources);
+
+    this.deadLetterQueue = resources.deadLetterQueue;
+    this.queue = resources.queue;
+    this.worker = resources.worker;
+    this.dashboard = resources.dashboard;
+  }
+
+  private createFoundation(
+    props: UnifiedContentProcessingProps,
+    resources: UnifiedContentResources
+  ): void {
+    resources.stack = cdk.Stack.of(this);
+    resources.functionName =
+      `aistudio-${props.environment}-unified-content-processor`;
+    resources.dataAutomationProfileArn =
+      `arn:${resources.stack.partition}:bedrock:${resources.stack.region}:${resources.stack.account}:` +
       "data-automation-profile/us.data-automation-v1";
 
-    const mediaProject = new bedrock.CfnDataAutomationProject(
+    resources.mediaProject = new bedrock.CfnDataAutomationProject(
       this,
       "MediaDataAutomationProject",
       {
@@ -97,13 +141,18 @@ export class UnifiedContentProcessing extends Construct {
         ],
       },
     );
+  }
 
-    this.deadLetterQueue = new sqs.Queue(this, "DeadLetterQueue", {
+  private createQueuesAndAlarms(
+    props: UnifiedContentProcessingProps,
+    resources: UnifiedContentResources
+  ): void {
+    resources.deadLetterQueue = new sqs.Queue(this, "DeadLetterQueue", {
       queueName: `aistudio-${props.environment}-content-processing-dlq`,
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       retentionPeriod: cdk.Duration.days(14),
     });
-    this.queue = new sqs.Queue(this, "Queue", {
+    resources.queue = new sqs.Queue(this, "Queue", {
       queueName: `aistudio-${props.environment}-content-processing-queue`,
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       // AWS recommends at least six times the Lambda timeout for SQS event
@@ -112,9 +161,9 @@ export class UnifiedContentProcessing extends Construct {
       // The durable database job owns the five-attempt processing budget.
       // Queue-level retries are reserved for malformed records or failure-state
       // persistence outages and must not remain invisible for 30 hours.
-      deadLetterQueue: { queue: this.deadLetterQueue, maxReceiveCount: 5 },
+      deadLetterQueue: { queue: resources.deadLetterQueue, maxReceiveCount: 5 },
     });
-    for (const resource of [this.deadLetterQueue, this.queue]) {
+    for (const resource of [resources.deadLetterQueue, resources.queue]) {
       cdk.Tags.of(resource).add("Environment", props.environment);
       cdk.Tags.of(resource).add("ManagedBy", "cdk");
     }
@@ -122,7 +171,7 @@ export class UnifiedContentProcessing extends Construct {
       alarmName: `aistudio-${props.environment}-content-processing-dlq-visible`,
       alarmDescription:
         "Unified repository content records reached the DLQ and require diagnosis/redrive",
-      metric: this.deadLetterQueue.metricApproximateNumberOfMessagesVisible({
+      metric: resources.deadLetterQueue.metricApproximateNumberOfMessagesVisible({
         period: cdk.Duration.minutes(5),
         statistic: "Maximum",
       }),
@@ -132,103 +181,114 @@ export class UnifiedContentProcessing extends Construct {
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    const oldestMessageAlarm = new cloudwatch.Alarm(
-      this,
-      "OldestMessageAlarm",
-      {
-        alarmName: `aistudio-${props.environment}-content-processing-oldest-message`,
-        alarmDescription:
-          "Unified repository content processing has not drained a message within 30 minutes",
-        metric: this.queue.metricApproximateAgeOfOldestMessage({
-          period: cdk.Duration.minutes(5),
-          statistic: "Maximum",
-        }),
-        threshold: cdk.Duration.minutes(30).toSeconds(),
-        evaluationPeriods: 2,
-        comparisonOperator:
-          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      },
-    );
+    const oldestMessageAlarm = new cloudwatch.Alarm(this, "OldestMessageAlarm", {
+      alarmName: `aistudio-${props.environment}-content-processing-oldest-message`,
+      alarmDescription:
+        "Unified repository content processing has not drained a message within 30 minutes",
+      metric: resources.queue.metricApproximateAgeOfOldestMessage({
+        period: cdk.Duration.minutes(5),
+        statistic: "Maximum",
+      }),
+      threshold: cdk.Duration.minutes(30).toSeconds(),
+      evaluationPeriods: 2,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
     for (const alarm of [deadLetterAlarm, oldestMessageAlarm]) {
       cdk.Tags.of(alarm).add("Environment", props.environment);
       cdk.Tags.of(alarm).add("ManagedBy", "cdk");
     }
+  }
 
-    const malwareProtectionRole = new iam.Role(this, "MalwareProtectionRole", {
-      assumedBy: new iam.ServicePrincipal(
-        "malware-protection-plan.guardduty.amazonaws.com",
-      ),
-      description: `GuardDuty repository-object scanner (${props.environment})`,
-      inlinePolicies: {
-        MalwareProtection: new iam.PolicyDocument({
-          statements: [
-            new iam.PolicyStatement({
-              sid: "AllowManagedRuleToSendS3EventsToGuardDuty",
-              actions: [
-                "events:PutRule",
-                "events:DeleteRule",
-                "events:PutTargets",
-                "events:RemoveTargets",
-              ],
-              resources: [
-                `arn:aws:events:${stack.region}:${stack.account}:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*`,
-              ],
-              conditions: {
-                StringLike: {
-                  "events:ManagedBy":
-                    "malware-protection-plan.guardduty.amazonaws.com",
+  private createMalwareProtection(
+    props: UnifiedContentProcessingProps,
+    resources: UnifiedContentResources
+  ): void {
+    const malwareProtectionRole = new iam.Role(
+      this,
+      "MalwareProtectionRole",
+      {
+        assumedBy: new iam.ServicePrincipal(
+          "malware-protection-plan.guardduty.amazonaws.com"
+        ),
+        description:
+          `GuardDuty repository-object scanner (${props.environment})`,
+        inlinePolicies: {
+          MalwareProtection: new iam.PolicyDocument({
+            statements: [
+              new iam.PolicyStatement({
+                sid: "AllowManagedRuleToSendS3EventsToGuardDuty",
+                actions: [
+                  "events:PutRule",
+                  "events:DeleteRule",
+                  "events:PutTargets",
+                  "events:RemoveTargets",
+                ],
+                resources: [
+                  `arn:aws:events:${resources.stack.region}:${resources.stack.account}:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*`,
+                ],
+                conditions: {
+                  StringLike: {
+                    "events:ManagedBy":
+                      "malware-protection-plan.guardduty.amazonaws.com",
+                  },
                 },
-              },
-            }),
-            new iam.PolicyStatement({
-              sid: "AllowGuardDutyToMonitorEventBridgeManagedRule",
-              actions: ["events:DescribeRule", "events:ListTargetsByRule"],
-              resources: [
-                `arn:aws:events:${stack.region}:${stack.account}:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*`,
-              ],
-            }),
-            new iam.PolicyStatement({
-              sid: "AllowRepositoryObjectScanAndTag",
-              actions: [
-                "s3:GetObject",
-                "s3:GetObjectVersion",
-                "s3:GetObjectTagging",
-                "s3:GetObjectVersionTagging",
-                "s3:PutObjectTagging",
-                "s3:PutObjectVersionTagging",
-              ],
-              resources: [`${props.documentsBucket.bucketArn}/repositories/*`],
-            }),
-            new iam.PolicyStatement({
-              sid: "CanonicalRepositoryArtifactDiscovery",
-              actions: ["s3:ListBucket"],
-              resources: [props.documentsBucket.bucketArn],
-              conditions: {
-                StringLike: { "s3:prefix": ["repositories/*"] },
-              },
-            }),
-            new iam.PolicyStatement({
-              sid: "AllowEnableS3EventBridgeEvents",
-              actions: ["s3:PutBucketNotification", "s3:GetBucketNotification"],
-              resources: [props.documentsBucket.bucketArn],
-            }),
-            new iam.PolicyStatement({
-              sid: "AllowPutValidationObject",
-              actions: ["s3:PutObject"],
-              resources: [
-                `${props.documentsBucket.bucketArn}/malware-protection-resource-validation-object`,
-              ],
-            }),
-            new iam.PolicyStatement({
-              sid: "AllowCheckBucketOwnership",
-              actions: ["s3:ListBucket"],
-              resources: [props.documentsBucket.bucketArn],
-            }),
-          ],
-        }),
-      },
-    });
+              }),
+              new iam.PolicyStatement({
+                sid: "AllowGuardDutyToMonitorEventBridgeManagedRule",
+                actions: ["events:DescribeRule", "events:ListTargetsByRule"],
+                resources: [
+                  `arn:aws:events:${resources.stack.region}:${resources.stack.account}:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*`,
+                ],
+              }),
+              new iam.PolicyStatement({
+                sid: "AllowRepositoryObjectScanAndTag",
+                actions: [
+                  "s3:GetObject",
+                  "s3:GetObjectVersion",
+                  "s3:GetObjectTagging",
+                  "s3:GetObjectVersionTagging",
+                  "s3:PutObjectTagging",
+                  "s3:PutObjectVersionTagging",
+                ],
+                resources: [
+                  `${props.documentsBucket.bucketArn}/repositories/*`,
+                ],
+              }),
+              new iam.PolicyStatement({
+                sid: "CanonicalRepositoryArtifactDiscovery",
+                actions: ["s3:ListBucket"],
+                resources: [props.documentsBucket.bucketArn],
+                conditions: {
+                  StringLike: { "s3:prefix": ["repositories/*"] },
+                },
+              }),
+              new iam.PolicyStatement({
+                sid: "AllowEnableS3EventBridgeEvents",
+                actions: [
+                  "s3:PutBucketNotification",
+                  "s3:GetBucketNotification",
+                ],
+                resources: [props.documentsBucket.bucketArn],
+              }),
+              new iam.PolicyStatement({
+                sid: "AllowPutValidationObject",
+                actions: ["s3:PutObject"],
+                resources: [
+                  `${props.documentsBucket.bucketArn}/malware-protection-resource-validation-object`,
+                ],
+              }),
+              new iam.PolicyStatement({
+                sid: "AllowCheckBucketOwnership",
+                actions: ["s3:ListBucket"],
+                resources: [props.documentsBucket.bucketArn],
+              }),
+            ],
+          }),
+        },
+      }
+    );
     cdk.Tags.of(malwareProtectionRole).add("Environment", props.environment);
     cdk.Tags.of(malwareProtectionRole).add("ManagedBy", "cdk");
 
@@ -251,150 +311,159 @@ export class UnifiedContentProcessing extends Construct {
       },
     );
     malwareProtectionPlan.node.addDependency(malwareProtectionRole);
+  }
 
-    const workerRole = ServiceRoleFactory.createLambdaRole(this, "WorkerRole", {
-      functionName,
-      environment: props.environment,
-      region: stack.region,
-      account: stack.account,
-      vpcEnabled: true,
-      // ServiceRoleFactory accepts physical queue names; unresolved ARN
-      // tokens would be prefixed a second time and synthesize an invalid ARN.
-      // This queue is owned and tagged by this construct, so the factory's
-      // resource-tag conditions are guaranteed to match. Embedding dispatch
-      // uses an explicit queue-ARN grant below because shared queues may have
-      // stack-level tags whose values do not match those conditions.
-      sqsQueues: [{ name: this.queue.queueName }],
-      additionalPolicies: [
-        new iam.PolicyDocument({
-          statements: [
-            new iam.PolicyStatement({
-              sid: "AuroraSecretAccess",
-              actions: ["secretsmanager:GetSecretValue"],
-              resources: [props.databaseSecretArn],
-            }),
-            new iam.PolicyStatement({
-              sid: "CanonicalEmbeddingDispatch",
-              actions: ["sqs:SendMessage"],
-              resources: [props.embeddingQueue.queueArn],
-            }),
-            new iam.PolicyStatement({
-              sid: "CanonicalEmbeddingDlqRecovery",
-              actions: ["sqs:ReceiveMessage", "sqs:DeleteMessage"],
-              resources: [props.embeddingDeadLetterQueue.queueArn],
-            }),
-            new iam.PolicyStatement({
-              sid: "CanonicalProcessingDlqRecovery",
-              actions: ["sqs:ReceiveMessage", "sqs:DeleteMessage"],
-              resources: [this.deadLetterQueue.queueArn],
-            }),
-            new iam.PolicyStatement({
-              // Do not use ServiceRoleFactory's generic s3Buckets grant here.
-              // Its bucket-tag condition is not evaluated for S3 object ARNs,
-              // so GetObject fails closed even when the bucket is tagged. This
-              // explicit prefix is both narrower and valid for object access.
-              sid: "CanonicalRepositoryObjectAccess",
-              actions: [
-                "s3:GetObject",
-                "s3:GetObjectVersion",
-                "s3:GetObjectTagging",
-                "s3:PutObject",
-                "s3:PutObjectTagging",
-                "s3:DeleteObject",
-                "s3:DeleteObjectVersion",
-                "s3:AbortMultipartUpload",
-              ],
-              resources: [`${props.documentsBucket.bucketArn}/repositories/*`],
-            }),
-            ...(props.legacyMigrationReadEnabled !== false
-              ? [
-                  new iam.PolicyStatement({
-                    // #1267 backfill reads historical Nexus/document objects
-                    // whose pre-canonical keys were user/job scoped. The
-                    // retirement assembly removes this temporary broad read.
-                    sid: "LegacyContentMigrationRead",
-                    actions: ["s3:GetObject", "s3:GetObjectVersion"],
-                    resources: [`${props.documentsBucket.bucketArn}/*`],
-                  }),
-                  new iam.PolicyStatement({
-                    // S3 reports a missing legacy object as AccessDenied unless
-                    // the caller can list the bucket. The migration needs that
-                    // distinction so reconciliation can classify genuinely
-                    // absent source bytes as unrecoverable. Historical keys
-                    // predate the repositories/ prefix, so this temporary
-                    // retirement-gated grant cannot be prefix-restricted.
-                    sid: "LegacyContentMigrationDiscovery",
-                    actions: ["s3:ListBucket"],
-                    resources: [props.documentsBucket.bucketArn],
-                  }),
-                ]
-              : []),
-            new iam.PolicyStatement({
-              sid: "CanonicalRepositoryArtifactDiscovery",
-              actions: ["s3:ListBucket", "s3:ListBucketVersions"],
-              resources: [props.documentsBucket.bucketArn],
-              conditions: {
-                StringLike: { "s3:prefix": ["repositories/*"] },
-              },
-            }),
-            // Textract asynchronous OCR does not support resource-level IAM.
-            new iam.PolicyStatement({
-              sid: "CanonicalPdfOcr",
-              actions: [
-                "textract:StartDocumentTextDetection",
-                "textract:GetDocumentTextDetection",
-              ],
-              resources: ["*"],
-            }),
-            new iam.PolicyStatement({
-              sid: "CanonicalImageCaptioning",
-              actions: ["bedrock:InvokeModel"],
-              resources: [
-                `arn:${stack.partition}:bedrock:${stack.region}:${stack.account}:inference-profile/us.amazon.nova-*-v1:0`,
-                ...["us-east-1", "us-east-2", "us-west-2"].map(
-                  (region) =>
-                    `arn:${stack.partition}:bedrock:${region}::foundation-model/amazon.nova-*-v1:0`,
-                ),
-              ],
-            }),
-            new iam.PolicyStatement({
-              sid: "CanonicalMediaAnalysis",
-              actions: ["bedrock:InvokeDataAutomationAsync"],
-              resources: [
-                mediaProject.attrProjectArn,
-                // The runtime authorizes creation of the asynchronous job
-                // against the invocation ARN as well as the selected
-                // project/profile. Without this resource the live service
-                // rejects InvokeDataAutomationAsync before returning the ARN.
-                `arn:${stack.partition}:bedrock:${stack.region}:${stack.account}:data-automation-invocation/*`,
-                ...["us-east-1", "us-east-2", "us-west-1", "us-west-2"].map(
-                  (region) =>
-                    `arn:${stack.partition}:bedrock:${region}:${stack.account}:data-automation-profile/us.data-automation-v1`,
-                ),
-              ],
-            }),
-            new iam.PolicyStatement({
-              sid: "CanonicalMediaAnalysisStatus",
-              actions: ["bedrock:GetDataAutomationStatus"],
-              resources: [
-                `arn:${stack.partition}:bedrock:${stack.region}:${stack.account}:data-automation-invocation/*`,
-              ],
-            }),
-            new iam.PolicyStatement({
-              sid: "PublishUnifiedContentOperationalMetrics",
-              actions: ["cloudwatch:PutMetricData"],
-              resources: ["*"],
-              conditions: {
-                StringEquals: {
-                  "cloudwatch:namespace": "AIStudio/UnifiedContent",
+  private createWorkerInfrastructure(
+    props: UnifiedContentProcessingProps,
+    resources: UnifiedContentResources
+  ): void {
+    resources.workerRole = ServiceRoleFactory.createLambdaRole(
+      this,
+      "WorkerRole",
+      {
+        functionName: resources.functionName,
+        environment: props.environment,
+        region: resources.stack.region,
+        account: resources.stack.account,
+        vpcEnabled: true,
+        // ServiceRoleFactory accepts physical queue names; unresolved ARN
+        // tokens would be prefixed a second time and synthesize an invalid ARN.
+        // This queue is owned and tagged by this construct, so the factory's
+        // resource-tag conditions are guaranteed to match. Embedding dispatch
+        // uses an explicit queue-ARN grant below because shared queues may have
+        // stack-level tags whose values do not match those conditions.
+        sqsQueues: [{ name: resources.queue.queueName }],
+        additionalPolicies: [
+          new iam.PolicyDocument({
+            statements: [
+              new iam.PolicyStatement({
+                sid: "AuroraSecretAccess",
+                actions: ["secretsmanager:GetSecretValue"],
+                resources: [props.databaseSecretArn],
+              }),
+              new iam.PolicyStatement({
+                sid: "CanonicalEmbeddingDispatch",
+                actions: ["sqs:SendMessage"],
+                resources: [props.embeddingQueue.queueArn],
+              }),
+              new iam.PolicyStatement({
+                sid: "CanonicalEmbeddingDlqRecovery",
+                actions: ["sqs:ReceiveMessage", "sqs:DeleteMessage"],
+                resources: [props.embeddingDeadLetterQueue.queueArn],
+              }),
+              new iam.PolicyStatement({
+                sid: "CanonicalProcessingDlqRecovery",
+                actions: ["sqs:ReceiveMessage", "sqs:DeleteMessage"],
+                resources: [resources.deadLetterQueue.queueArn],
+              }),
+              new iam.PolicyStatement({
+                // Do not use ServiceRoleFactory's generic s3Buckets grant here.
+                // Its bucket-tag condition is not evaluated for S3 object ARNs,
+                // so GetObject fails closed even when the bucket is tagged. This
+                // explicit prefix is both narrower and valid for object access.
+                sid: "CanonicalRepositoryObjectAccess",
+                actions: [
+                  "s3:GetObject",
+                  "s3:GetObjectVersion",
+                  "s3:GetObjectTagging",
+                  "s3:PutObject",
+                  "s3:PutObjectTagging",
+                  "s3:DeleteObject",
+                  "s3:DeleteObjectVersion",
+                  "s3:AbortMultipartUpload",
+                ],
+                resources: [
+                  `${props.documentsBucket.bucketArn}/repositories/*`,
+                ],
+              }),
+              ...(props.legacyMigrationReadEnabled !== false
+                ? [
+                    new iam.PolicyStatement({
+                      // #1267 backfill reads historical Nexus/document objects
+                      // whose pre-canonical keys were user/job scoped. The
+                      // retirement assembly removes this temporary broad read.
+                      sid: "LegacyContentMigrationRead",
+                      actions: ["s3:GetObject", "s3:GetObjectVersion"],
+                      resources: [`${props.documentsBucket.bucketArn}/*`],
+                    }),
+                    new iam.PolicyStatement({
+                      // S3 reports a missing legacy object as AccessDenied
+                      // unless the caller can list the bucket. Historical keys
+                      // predate repositories/, so this retirement-gated grant
+                      // cannot be prefix-restricted.
+                      sid: "LegacyContentMigrationDiscovery",
+                      actions: ["s3:ListBucket"],
+                      resources: [props.documentsBucket.bucketArn],
+                    }),
+                  ]
+                : []),
+              new iam.PolicyStatement({
+                sid: "CanonicalRepositoryArtifactDiscovery",
+                actions: ["s3:ListBucket", "s3:ListBucketVersions"],
+                resources: [props.documentsBucket.bucketArn],
+                conditions: {
+                  StringLike: { "s3:prefix": ["repositories/*"] },
                 },
-              },
-            }),
-          ],
-        }),
-      ],
-    });
-    const workerSecurityGroup = new ec2.SecurityGroup(
+              }),
+              // Textract asynchronous OCR does not support resource-level IAM.
+              new iam.PolicyStatement({
+                sid: "CanonicalPdfOcr",
+                actions: [
+                  "textract:StartDocumentTextDetection",
+                  "textract:GetDocumentTextDetection",
+                ],
+                resources: ["*"],
+              }),
+              new iam.PolicyStatement({
+                sid: "CanonicalImageCaptioning",
+                actions: ["bedrock:InvokeModel"],
+                resources: [
+                  `arn:${resources.stack.partition}:bedrock:${resources.stack.region}:${resources.stack.account}:inference-profile/us.amazon.nova-*-v1:0`,
+                  ...["us-east-1", "us-east-2", "us-west-2"].map(
+                    (region) =>
+                      `arn:${resources.stack.partition}:bedrock:${region}::foundation-model/amazon.nova-*-v1:0`
+                  ),
+                ],
+              }),
+              new iam.PolicyStatement({
+                sid: "CanonicalMediaAnalysis",
+                actions: ["bedrock:InvokeDataAutomationAsync"],
+                resources: [
+                  resources.mediaProject.attrProjectArn,
+                  // The runtime authorizes creation of the asynchronous job
+                  // against the invocation ARN as well as the selected
+                  // project/profile. Without this resource the live service
+                  // rejects InvokeDataAutomationAsync before returning the ARN.
+                  `arn:${resources.stack.partition}:bedrock:${resources.stack.region}:${resources.stack.account}:data-automation-invocation/*`,
+                  ...["us-east-1", "us-east-2", "us-west-1", "us-west-2"].map(
+                    (region) =>
+                      `arn:${resources.stack.partition}:bedrock:${region}:${resources.stack.account}:data-automation-profile/us.data-automation-v1`
+                  ),
+                ],
+              }),
+              new iam.PolicyStatement({
+                sid: "CanonicalMediaAnalysisStatus",
+                actions: ["bedrock:GetDataAutomationStatus"],
+                resources: [
+                  `arn:${resources.stack.partition}:bedrock:${resources.stack.region}:${resources.stack.account}:data-automation-invocation/*`,
+                ],
+              }),
+              new iam.PolicyStatement({
+                sid: "PublishUnifiedContentOperationalMetrics",
+                actions: ["cloudwatch:PutMetricData"],
+                resources: ["*"],
+                conditions: {
+                  StringEquals: {
+                    "cloudwatch:namespace": "AIStudio/UnifiedContent",
+                  },
+                },
+              }),
+            ],
+          }),
+        ],
+      }
+    );
+    resources.workerSecurityGroup = new ec2.SecurityGroup(
       this,
       "WorkerSecurityGroup",
       {
@@ -403,15 +472,15 @@ export class UnifiedContentProcessing extends Construct {
         allowAllOutbound: true,
       },
     );
+  }
 
-    const workerReservedConcurrency = props.environment === "prod" ? 10 : 3;
-    // EventBridge invokes this same function every minute for durable job
-    // recovery, migration, reconciliation, and retention. Leave one reserved
-    // execution outside the SQS poller's ceiling so a sustained content queue
-    // cannot starve recurring maintenance.
-    const workerQueueMaxConcurrency = workerReservedConcurrency - 1;
-    this.worker = new lambdaNodejs.NodejsFunction(this, "Worker", {
-      functionName,
+  private createWorker(
+    props: UnifiedContentProcessingProps,
+    resources: UnifiedContentResources
+  ): void {
+    const concurrency = workerConcurrency(props.environment);
+    resources.worker = new lambdaNodejs.NodejsFunction(this, "Worker", {
+      functionName: resources.functionName,
       runtime: lambda.Runtime.NODEJS_20_X,
       architecture: lambda.Architecture.ARM_64,
       entry: path.join(
@@ -421,20 +490,20 @@ export class UnifiedContentProcessing extends Construct {
       handler: "handler",
       timeout: cdk.Duration.minutes(15),
       memorySize: 3008,
-      reservedConcurrentExecutions: workerReservedConcurrency,
+      reservedConcurrentExecutions: concurrency.reserved,
       vpc: props.vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      securityGroups: [workerSecurityGroup],
-      role: workerRole,
+      securityGroups: [resources.workerSecurityGroup],
+      role: resources.workerRole,
       environment: {
         NODE_OPTIONS: "--enable-source-maps",
         DOCUMENTS_BUCKET_NAME: props.documentsBucket.bucketName,
-        CONTENT_PROCESSING_QUEUE_URL: this.queue.queueUrl,
-        CONTENT_PROCESSING_DLQ_URL: this.deadLetterQueue.queueUrl,
+        CONTENT_PROCESSING_QUEUE_URL: resources.queue.queueUrl,
+        CONTENT_PROCESSING_DLQ_URL: resources.deadLetterQueue.queueUrl,
         EMBEDDING_QUEUE_URL: props.embeddingQueue.queueUrl,
         EMBEDDING_DLQ_URL: props.embeddingDeadLetterQueue.queueUrl,
-        BDA_DATA_AUTOMATION_PROJECT_ARN: mediaProject.attrProjectArn,
-        BDA_DATA_AUTOMATION_PROFILE_ARN: dataAutomationProfileArn,
+        BDA_DATA_AUTOMATION_PROJECT_ARN: resources.mediaProject.attrProjectArn,
+        BDA_DATA_AUTOMATION_PROFILE_ARN: resources.dataAutomationProfileArn,
         DATABASE_HOST: props.databaseHost,
         DATABASE_SECRET_ARN: props.databaseSecretArn,
         DATABASE_NAME: "aistudio",
@@ -476,13 +545,13 @@ export class UnifiedContentProcessing extends Construct {
           'import { createRequire } from "module"; const require = createRequire(import.meta.url);',
       },
     });
-    cdk.Tags.of(this.worker).add("Environment", props.environment);
-    cdk.Tags.of(this.worker).add("ManagedBy", "cdk");
+    cdk.Tags.of(resources.worker).add("Environment", props.environment);
+    cdk.Tags.of(resources.worker).add("ManagedBy", "cdk");
     const workerErrorAlarm = new cloudwatch.Alarm(this, "WorkerErrorAlarm", {
       alarmName: `aistudio-${props.environment}-content-processing-worker-errors`,
       alarmDescription:
         "Unified repository content processing or scheduled recovery failed",
-      metric: this.worker.metricErrors({
+      metric: resources.worker.metricErrors({
         period: cdk.Duration.minutes(5),
         statistic: "Sum",
       }),
@@ -494,11 +563,17 @@ export class UnifiedContentProcessing extends Construct {
     });
     cdk.Tags.of(workerErrorAlarm).add("Environment", props.environment);
     cdk.Tags.of(workerErrorAlarm).add("ManagedBy", "cdk");
+  }
 
-    this.worker.addEventSource(
-      new lambdaEventSources.SqsEventSource(this.queue, {
+  private configureWorkerTriggers(
+    props: UnifiedContentProcessingProps,
+    resources: UnifiedContentResources
+  ): void {
+    const concurrency = workerConcurrency(props.environment);
+    resources.worker.addEventSource(
+      new lambdaEventSources.SqsEventSource(resources.queue, {
         batchSize: 1,
-        maxConcurrency: workerQueueMaxConcurrency,
+        maxConcurrency: concurrency.queueMaximum,
         reportBatchItemFailures: true,
       }),
     );
@@ -506,12 +581,17 @@ export class UnifiedContentProcessing extends Construct {
       description:
         "Recover and dispatch durable unified-content jobs left pending after send failures",
       schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
-      targets: [new eventsTargets.LambdaFunction(this.worker)],
+      targets: [new eventsTargets.LambdaFunction(resources.worker)],
     });
+  }
 
+  private createOperationalDashboard(
+    props: UnifiedContentProcessingProps,
+    resources: UnifiedContentResources
+  ): void {
     const operationalMetric = (
       metricName: string,
-      statistic = "Maximum",
+      statistic = "Maximum"
     ): cloudwatch.Metric =>
       new cloudwatch.Metric({
         namespace: "AIStudio/UnifiedContent",
@@ -520,10 +600,14 @@ export class UnifiedContentProcessing extends Construct {
         period: cdk.Duration.minutes(5),
         statistic,
       });
-    this.dashboard = new cloudwatch.Dashboard(this, "OperationalDashboard", {
-      dashboardName: `aistudio-${props.environment}-unified-content`,
-    });
-    this.dashboard.addWidgets(
+    resources.dashboard = new cloudwatch.Dashboard(
+      this,
+      "OperationalDashboard",
+      {
+        dashboardName: `aistudio-${props.environment}-unified-content`,
+      }
+    );
+    resources.dashboard.addWidgets(
       new cloudwatch.GraphWidget({
         title: "Pipeline state and stale indexes",
         left: [
@@ -553,20 +637,20 @@ export class UnifiedContentProcessing extends Construct {
       new cloudwatch.GraphWidget({
         title: "Canonical queue health",
         left: [
-          this.queue.metricApproximateNumberOfMessagesVisible({
+          resources.queue.metricApproximateNumberOfMessagesVisible({
             statistic: "Maximum",
           }),
-          this.deadLetterQueue.metricApproximateNumberOfMessagesVisible({
+          resources.deadLetterQueue.metricApproximateNumberOfMessagesVisible({
             statistic: "Maximum",
           }),
         ],
         right: [
-          this.queue.metricApproximateAgeOfOldestMessage({
+          resources.queue.metricApproximateAgeOfOldestMessage({
             statistic: "Maximum",
           }),
         ],
         width: 12,
-      }),
+      })
     );
     const migrationBlockerAlarm = new cloudwatch.Alarm(
       this,
@@ -589,7 +673,7 @@ export class UnifiedContentProcessing extends Construct {
         comparisonOperator:
           cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      },
+      }
     );
     const staleRepositoryAlarm = new cloudwatch.Alarm(
       this,
@@ -604,7 +688,7 @@ export class UnifiedContentProcessing extends Construct {
         comparisonOperator:
           cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      },
+      }
     );
     const connectorFailureAlarm = new cloudwatch.Alarm(
       this,
@@ -619,7 +703,7 @@ export class UnifiedContentProcessing extends Construct {
         comparisonOperator:
           cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      },
+      }
     );
     for (const alarm of [
       migrationBlockerAlarm,
@@ -629,7 +713,7 @@ export class UnifiedContentProcessing extends Construct {
       cdk.Tags.of(alarm).add("Environment", props.environment);
       cdk.Tags.of(alarm).add("ManagedBy", "cdk");
     }
-    cdk.Tags.of(this.dashboard).add("Environment", props.environment);
-    cdk.Tags.of(this.dashboard).add("ManagedBy", "cdk");
+    cdk.Tags.of(resources.dashboard).add("Environment", props.environment);
+    cdk.Tags.of(resources.dashboard).add("ManagedBy", "cdk");
   }
 }

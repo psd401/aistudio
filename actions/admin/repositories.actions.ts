@@ -1,46 +1,42 @@
-"use server"
+"use server";
 
-import { getServerSession } from "@/lib/auth/server-session"
-import { type ActionState } from "@/types/actions-types"
-import { hasRole } from "@/utils/roles"
+import { getServerSession } from "@/lib/auth/server-session";
+import { type ActionState } from "@/types/actions-types";
+import { hasRole } from "@/utils/roles";
 import {
   getAllRepositoriesWithOwner,
   updateRepository,
   getRepositoryItems,
   getRepositoryItemById,
-  isSystemManagedRepository
-} from "@/lib/db/drizzle"
+  isSystemManagedRepository,
+} from "@/lib/db/drizzle";
 import {
   assertNotSystemManagedRepository,
-  assertUserManagedDurableRepositoryForDeletion
-} from "@/lib/repositories/repository-access-guard"
-import {
-  handleError,
-  ErrorFactories,
-  createSuccess
-} from "@/lib/error-utils"
+  assertUserManagedDurableRepositoryForDeletion,
+} from "@/lib/repositories/repository-access-guard";
+import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils";
 import {
   createLogger,
   generateRequestId,
   startTimer,
-  sanitizeForLogging
-} from "@/lib/logger"
-import { revalidatePath } from "next/cache"
-import type { Repository } from "@/actions/repositories/repository.actions"
-import type { RepositoryItem } from "@/actions/repositories/repository-items.actions"
+  sanitizeForLogging,
+} from "@/lib/logger";
+import { revalidatePath } from "next/cache";
+import type { Repository } from "@/actions/repositories/repository.actions";
+import type { RepositoryItem } from "@/actions/repositories/repository-items.actions";
 import {
   deleteRepositoryItemStorage,
-  deleteRepositoryStorageTree
-} from "@/lib/repositories/content-platform/storage-cleanup"
+  deleteRepositoryStorageTree,
+} from "@/lib/repositories/content-platform/storage-cleanup";
 import {
   beginRepositoryDeletion,
   beginRepositoryItemDeletion,
   finalizeRepositoryDeletion,
-  finalizeRepositoryItemDeletion
-} from "@/lib/repositories/content-platform/deletion-service"
+  finalizeRepositoryItemDeletion,
+} from "@/lib/repositories/content-platform/deletion-service";
 
 export interface RepositoryWithOwner extends Repository {
-  ownerEmail: string | null
+  ownerEmail: string | null;
 }
 
 /**
@@ -48,62 +44,62 @@ export interface RepositoryWithOwner extends Repository {
  * Throws error if authorization fails
  */
 async function requireAdminSession(log?: ReturnType<typeof createLogger>) {
-  const session = await getServerSession()
+  const session = await getServerSession();
   if (!session) {
-    log?.warn("Unauthorized admin access attempt")
-    throw ErrorFactories.authNoSession()
+    log?.warn("Unauthorized admin access attempt");
+    throw ErrorFactories.authNoSession();
   }
 
-  log?.debug("Checking administrator role", { userId: session.sub })
-  const isAdmin = await hasRole("administrator")
+  log?.debug("Checking administrator role", { userId: session.sub });
+  const isAdmin = await hasRole("administrator");
   if (!isAdmin) {
     log?.warn("Admin access denied - insufficient privileges", {
-      userId: session.sub
-    })
-    throw ErrorFactories.authzAdminRequired()
+      userId: session.sub,
+    });
+    throw ErrorFactories.authzAdminRequired();
   }
 
-  log?.debug("Admin access granted", { userId: session.sub })
-  return session
+  log?.debug("Admin access granted", { userId: session.sub });
+  return session;
 }
 
 /**
  * Admin function to list all repositories with owner information
  */
-export async function listAllRepositories(): Promise<ActionState<RepositoryWithOwner[]>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("admin.listAllRepositories")
-  const log = createLogger({ requestId, action: "admin.listAllRepositories" })
-  
-  try {
-    log.info("Admin action started: Listing all repositories")
-    
-    await requireAdminSession(log)
+export async function listAllRepositories(): Promise<
+  ActionState<RepositoryWithOwner[]>
+> {
+  const requestId = generateRequestId();
+  const timer = startTimer("admin.listAllRepositories");
+  const log = createLogger({ requestId, action: "admin.listAllRepositories" });
 
-    log.debug("Fetching all repositories from database")
+  try {
+    log.info("Admin action started: Listing all repositories");
+
+    await requireAdminSession(log);
+
+    log.debug("Fetching all repositories from database");
     // Repository Manager is the durable product surface. Nexus/Assistant
     // Architect ephemeral repositories and system indexes have separate
     // lifecycle/authorization paths and must not appear as unmanageable rows.
-    const now = Date.now()
+    const now = Date.now();
     const repositoriesRaw = (
       await getAllRepositoriesWithOwner({ includeDeleting: true })
-    ).filter(
-      repo => {
-        const expiresAt = repo.expiresAt?.getTime()
-        const activeAndCurrent =
-          repo.lifecycleStatus === "active" &&
-          (expiresAt === undefined ||
-            (!Number.isNaN(expiresAt) && expiresAt > now))
-        return (
-          repo.repositoryKind === "durable" &&
-          !isSystemManagedRepository(repo) &&
-          (activeAndCurrent || repo.lifecycleStatus === "deleting")
-        )
-      }
-    )
+    ).filter((repo) => {
+      const expiresAt = repo.expiresAt?.getTime();
+      const activeAndCurrent =
+        repo.lifecycleStatus === "active" &&
+        (expiresAt === undefined ||
+          (!Number.isNaN(expiresAt) && expiresAt > now));
+      return (
+        repo.repositoryKind === "durable" &&
+        !isSystemManagedRepository(repo) &&
+        (activeAndCurrent || repo.lifecycleStatus === "deleting")
+      );
+    });
 
     // Convert to expected type
-    const repositories: RepositoryWithOwner[] = repositoriesRaw.map(repo => ({
+    const repositories: RepositoryWithOwner[] = repositoriesRaw.map((repo) => ({
       id: repo.id,
       name: repo.name,
       description: repo.description,
@@ -120,90 +116,98 @@ export async function listAllRepositories(): Promise<ActionState<RepositoryWithO
       ownerEmail: repo.ownerEmail,
       itemCount: repo.itemCount,
       canManage: true,
-    }))
+    }));
 
     log.info("All repositories fetched successfully", {
-      repositoryCount: repositories.length
-    })
+      repositoryCount: repositories.length,
+    });
 
-    timer({ status: "success", count: repositories.length })
+    timer({ status: "success", count: repositories.length });
 
-    return createSuccess(repositories, "Repositories loaded successfully")
+    return createSuccess(repositories, "Repositories loaded successfully");
   } catch (error) {
-    timer({ status: "error" })
-    
-    return handleError(error, "Failed to list repositories. Please try again or contact support.", {
-      context: "admin.listAllRepositories",
-      requestId,
-      operation: "admin.listAllRepositories"
-    })
+    timer({ status: "error" });
+
+    return handleError(
+      error,
+      "Failed to list repositories. Please try again or contact support.",
+      {
+        context: "admin.listAllRepositories",
+        requestId,
+        operation: "admin.listAllRepositories",
+      },
+    );
   }
 }
 
 /**
  * Admin function to update any repository
  */
-export async function adminUpdateRepository(
-  input: {
-    id: number
-    name?: string
-    description?: string
-    isPublic?: boolean
-    metadata?: Record<string, unknown>
+type AdminRepositoryUpdateInput = {
+  id: number;
+  name?: string;
+  description?: string;
+  isPublic?: boolean;
+  metadata?: Record<string, unknown>;
+};
+
+function adminRepositoryUpdateData(input: AdminRepositoryUpdateInput): {
+  name?: string;
+  description?: string | null;
+  isPublic?: boolean;
+  metadata?: Record<string, unknown> | null;
+} {
+  const updateData: {
+    name?: string;
+    description?: string | null;
+    isPublic?: boolean;
+    metadata?: Record<string, unknown> | null;
+  } = {};
+  if (input.name !== undefined) updateData.name = input.name;
+  if (input.description !== undefined) {
+    updateData.description = input.description ?? null;
   }
+  if (input.isPublic !== undefined) updateData.isPublic = input.isPublic;
+  if (input.metadata !== undefined) updateData.metadata = input.metadata;
+  return updateData;
+}
+
+export async function adminUpdateRepository(
+  input: AdminRepositoryUpdateInput,
 ): Promise<ActionState<Repository>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("admin.updateRepository")
-  const log = createLogger({ requestId, action: "admin.updateRepository" })
-  
+  const requestId = generateRequestId();
+  const timer = startTimer("admin.updateRepository");
+  const log = createLogger({ requestId, action: "admin.updateRepository" });
+
   try {
     log.info("Admin action started: Updating repository", {
       repositoryId: input.id,
-      updates: sanitizeForLogging(input)
-    })
-    
-    await requireAdminSession(log)
+      updates: sanitizeForLogging(input),
+    });
 
-    // Check if any fields provided
-    const hasUpdates =
-      input.name !== undefined ||
-      input.description !== undefined ||
-      input.isPublic !== undefined ||
-      input.metadata !== undefined
+    await requireAdminSession(log);
 
-    if (!hasUpdates) {
-      log.warn("No fields provided for update")
-      return { isSuccess: false, message: "No fields to update" }
+    const updateData = adminRepositoryUpdateData(input);
+    if (Object.keys(updateData).length === 0) {
+      log.warn("No fields provided for update");
+      return { isSuccess: false, message: "No fields to update" };
     }
 
     // A system-managed repository (the Atrium retrieval index, #1056) is
     // immutable through this generic admin path: editing it (e.g. flipping
     // `isPublic` to true, or stripping the `systemManaged` flag) would reopen the
     // shared-index bypass the system-managed guards close.
-    await assertNotSystemManagedRepository(input.id)
+    await assertNotSystemManagedRepository(input.id);
 
     log.info("Updating repository in database (admin)", {
-      repositoryId: input.id
-    })
+      repositoryId: input.id,
+    });
 
-    // Build update data object with only provided fields
-    const updateData: {
-      name?: string;
-      description?: string | null;
-      isPublic?: boolean;
-      metadata?: Record<string, unknown> | null;
-    } = {}
-
-    if (input.name !== undefined) updateData.name = input.name
-    if (input.description !== undefined) updateData.description = input.description ?? null
-    if (input.isPublic !== undefined) updateData.isPublic = input.isPublic
-    if (input.metadata !== undefined) updateData.metadata = input.metadata
-
-    const resultRaw = await updateRepository(input.id, updateData)
+    const resultRaw = await updateRepository(input.id, updateData);
 
     if (!resultRaw) {
-      log.error("Repository not found for update", { repositoryId: input.id })
-      throw ErrorFactories.dbRecordNotFound("knowledge_repositories", input.id)
+      log.error("Repository not found for update", { repositoryId: input.id });
+      throw ErrorFactories.dbRecordNotFound("knowledge_repositories", input.id);
     }
 
     // Convert to expected type
@@ -222,27 +226,31 @@ export async function adminUpdateRepository(
       createdAt: resultRaw.createdAt ?? new Date(),
       updatedAt: resultRaw.updatedAt ?? new Date(),
       canManage: true,
-    }
+    };
 
     log.info("Repository updated successfully (admin)", {
       repositoryId: result.id,
-      name: result.name
-    })
+      name: result.name,
+    });
 
-    timer({ status: "success", repositoryId: result.id })
+    timer({ status: "success", repositoryId: result.id });
 
-    revalidatePath("/admin/repositories")
-    revalidatePath(`/repositories/${input.id}`)
-    return createSuccess(result, "Repository updated successfully (admin)")
+    revalidatePath("/admin/repositories");
+    revalidatePath(`/repositories/${input.id}`);
+    return createSuccess(result, "Repository updated successfully (admin)");
   } catch (error) {
-    timer({ status: "error" })
-    
-    return handleError(error, "Failed to update repository. Please try again or contact support.", {
-      context: "admin.updateRepository",
-      requestId,
-      operation: "admin.updateRepository",
-      metadata: { repositoryId: input.id }
-    })
+    timer({ status: "error" });
+
+    return handleError(
+      error,
+      "Failed to update repository. Please try again or contact support.",
+      {
+        context: "admin.updateRepository",
+        requestId,
+        operation: "admin.updateRepository",
+        metadata: { repositoryId: input.id },
+      },
+    );
   }
 }
 
@@ -250,59 +258,63 @@ export async function adminUpdateRepository(
  * Admin function to delete any repository
  */
 export async function adminDeleteRepository(
-  id: number
+  id: number,
 ): Promise<ActionState<void>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("admin.deleteRepository")
-  const log = createLogger({ requestId, action: "admin.deleteRepository" })
-  
-  try {
-    log.info("Admin action started: Deleting repository", { repositoryId: id })
+  const requestId = generateRequestId();
+  const timer = startTimer("admin.deleteRepository");
+  const log = createLogger({ requestId, action: "admin.deleteRepository" });
 
-    await requireAdminSession(log)
+  try {
+    log.info("Admin action started: Deleting repository", { repositoryId: id });
+
+    await requireAdminSession(log);
 
     // Never delete a system-managed repo (the Atrium index, #1056) through the
     // generic admin path — it would destroy the retrieval index out-of-band.
-    await assertUserManagedDurableRepositoryForDeletion(id)
+    await assertUserManagedDurableRepositoryForDeletion(id);
 
     // Fence every upload/worker producer and snapshot manifests before cleanup.
     // A failed sweep leaves `deleting` and this same admin action is the
     // idempotent retry path.
-    log.debug("Fencing repository producers before S3 deletion")
-    const items = await beginRepositoryDeletion(id)
+    log.debug("Fencing repository producers before S3 deletion");
+    const items = await beginRepositoryDeletion(id);
 
     log.info("Cleaning repository storage before database deletion", {
       itemCount: items.length,
-      repositoryId: id
-    })
-    const cleanup = await deleteRepositoryStorageTree(id, items)
-    log.info("Repository storage cleanup completed", cleanup)
+      repositoryId: id,
+    });
+    const cleanup = await deleteRepositoryStorageTree(id, items);
+    log.info("Repository storage cleanup completed", cleanup);
 
     // Now delete the repository (this will cascade delete all items and chunks)
-    log.info("Deleting repository from database (admin)", { repositoryId: id })
-    const deleted = await finalizeRepositoryDeletion(id)
+    log.info("Deleting repository from database (admin)", { repositoryId: id });
+    const deleted = await finalizeRepositoryDeletion(id);
 
     if (!deleted) {
-      log.warn("Repository not found for deletion", { repositoryId: id })
-      throw ErrorFactories.dbRecordNotFound("knowledge_repositories", id)
+      log.warn("Repository not found for deletion", { repositoryId: id });
+      throw ErrorFactories.dbRecordNotFound("knowledge_repositories", id);
     }
 
-    log.info("Repository deleted successfully (admin)", { repositoryId: id })
-    
-    timer({ status: "success", repositoryId: id })
-    
-    revalidatePath("/admin/repositories")
-    revalidatePath("/repositories")
-    return createSuccess(undefined, "Repository deleted successfully (admin)")
+    log.info("Repository deleted successfully (admin)", { repositoryId: id });
+
+    timer({ status: "success", repositoryId: id });
+
+    revalidatePath("/admin/repositories");
+    revalidatePath("/repositories");
+    return createSuccess(undefined, "Repository deleted successfully (admin)");
   } catch (error) {
-    timer({ status: "error" })
-    
-    return handleError(error, "Failed to delete repository. Please try again or contact support.", {
-      context: "admin.deleteRepository",
-      requestId,
-      operation: "admin.deleteRepository",
-      metadata: { repositoryId: id }
-    })
+    timer({ status: "error" });
+
+    return handleError(
+      error,
+      "Failed to delete repository. Please try again or contact support.",
+      {
+        context: "admin.deleteRepository",
+        requestId,
+        operation: "admin.deleteRepository",
+        metadata: { repositoryId: id },
+      },
+    );
   }
 }
 
@@ -310,56 +322,64 @@ export async function adminDeleteRepository(
  * Admin function to get repository items
  */
 export async function adminGetRepositoryItems(
-  repositoryId: number
+  repositoryId: number,
 ): Promise<ActionState<RepositoryItem[]>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("admin.getRepositoryItems")
-  const log = createLogger({ requestId, action: "admin.getRepositoryItems" })
-  
+  const requestId = generateRequestId();
+  const timer = startTimer("admin.getRepositoryItems");
+  const log = createLogger({ requestId, action: "admin.getRepositoryItems" });
+
   try {
-    log.info("Admin action started: Getting repository items", { repositoryId })
-    
-    await requireAdminSession(log)
+    log.info("Admin action started: Getting repository items", {
+      repositoryId,
+    });
+
+    await requireAdminSession(log);
 
     // System-managed repositories (the Atrium retrieval index, #1056) are not
     // browsable through the generic admin UI — their per-object visibility is
     // enforced by `retrievalService`, not repository-level access.
-    await assertNotSystemManagedRepository(repositoryId)
+    await assertNotSystemManagedRepository(repositoryId);
 
-    log.debug("Fetching repository items from database (admin)", { repositoryId })
-    const itemsRaw = await getRepositoryItems(repositoryId)
+    log.debug("Fetching repository items from database (admin)", {
+      repositoryId,
+    });
+    const itemsRaw = await getRepositoryItems(repositoryId);
 
     // Convert to expected type
-    const items: RepositoryItem[] = itemsRaw.map(item => ({
+    const items: RepositoryItem[] = itemsRaw.map((item) => ({
       id: item.id,
       repositoryId: item.repositoryId,
-      type: item.type as 'document' | 'url' | 'text',
+      type: item.type as "document" | "url" | "text",
       name: item.name,
       source: item.source,
       metadata: item.metadata ?? {},
-      processingStatus: item.processingStatus ?? 'pending',
+      processingStatus: item.processingStatus ?? "pending",
       processingError: item.processingError,
       createdAt: item.createdAt ?? new Date(),
-      updatedAt: item.updatedAt ?? new Date()
-    }))
+      updatedAt: item.updatedAt ?? new Date(),
+    }));
 
     log.info("Repository items fetched successfully (admin)", {
       repositoryId,
-      itemCount: items.length
-    })
+      itemCount: items.length,
+    });
 
-    timer({ status: "success", count: items.length })
+    timer({ status: "success", count: items.length });
 
-    return createSuccess(items, "Items loaded successfully")
+    return createSuccess(items, "Items loaded successfully");
   } catch (error) {
-    timer({ status: "error" })
-    
-    return handleError(error, "Failed to list repository items. Please try again or contact support.", {
-      context: "admin.getRepositoryItems",
-      requestId,
-      operation: "admin.getRepositoryItems",
-      metadata: { repositoryId }
-    })
+    timer({ status: "error" });
+
+    return handleError(
+      error,
+      "Failed to list repository items. Please try again or contact support.",
+      {
+        context: "admin.getRepositoryItems",
+        requestId,
+        operation: "admin.getRepositoryItems",
+        metadata: { repositoryId },
+      },
+    );
   }
 }
 
@@ -367,82 +387,86 @@ export async function adminGetRepositoryItems(
  * Admin function to remove an item from any repository
  */
 export async function adminRemoveRepositoryItem(
-  itemId: number
+  itemId: number,
 ): Promise<ActionState<void>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("admin.removeRepositoryItem")
-  const log = createLogger({ requestId, action: "admin.removeRepositoryItem" })
-  
+  const requestId = generateRequestId();
+  const timer = startTimer("admin.removeRepositoryItem");
+  const log = createLogger({ requestId, action: "admin.removeRepositoryItem" });
+
   try {
-    log.info("Admin action started: Removing repository item", { itemId })
-    
-    await requireAdminSession(log)
+    log.info("Admin action started: Removing repository item", { itemId });
+
+    await requireAdminSession(log);
 
     // Resolve the item before cleanup because its version rows are the durable
     // namespace for derived storage.
-    log.debug("Fetching item details", { itemId })
-    const item = await getRepositoryItemById(itemId)
+    log.debug("Fetching item details", { itemId });
+    const item = await getRepositoryItemById(itemId);
 
     if (!item) {
-      log.warn("Item not found for removal", { itemId })
-      throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
+      log.warn("Item not found for removal", { itemId });
+      throw ErrorFactories.dbRecordNotFound("repository_items", itemId);
     }
 
     // Never mutate a system-managed repo's items (the Atrium index, #1056) —
     // deleting one out-of-band would desync the retrieval index.
-    await assertNotSystemManagedRepository(item.repositoryId)
+    await assertNotSystemManagedRepository(item.repositoryId);
 
     log.debug("Item found", {
       itemId,
       itemType: item.type,
-      repositoryId: item.repositoryId
-    })
+      repositoryId: item.repositoryId,
+    });
 
     const deletionItem = await beginRepositoryItemDeletion({
       repositoryId: item.repositoryId,
-      itemId
-    })
+      itemId,
+    });
 
     // Clean every item type before cascading its version rows. A failure must
     // preserve the database manifest so cleanup can be retried safely.
     log.info("Deleting repository item objects from S3 (admin)", {
       itemId,
       itemType: item.type,
-      repositoryId: item.repositoryId
-    })
+      repositoryId: item.repositoryId,
+    });
     const cleanup = await deleteRepositoryItemStorage({
       ...item,
-      ...deletionItem
-    })
-    log.info("Repository item objects deleted from S3 successfully", cleanup)
+      ...deletionItem,
+    });
+    log.info("Repository item objects deleted from S3 successfully", cleanup);
 
     // Delete from database (cascades to chunks)
-    log.info("Deleting item from database (admin)", { itemId })
-    const deleted = await finalizeRepositoryItemDeletion(itemId)
+    log.info("Deleting item from database (admin)", { itemId });
+    const deleted = await finalizeRepositoryItemDeletion(itemId);
 
     if (!deleted) {
-      log.warn("Item not found for deletion", { itemId })
-      throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
+      log.warn("Item not found for deletion", { itemId });
+      throw ErrorFactories.dbRecordNotFound("repository_items", itemId);
     }
 
     log.info("Repository item removed successfully (admin)", {
       itemId,
-      repositoryId: item.repositoryId
-    })
-    
-    timer({ status: "success", itemId })
-    
-    revalidatePath(`/admin/repositories`)
-    revalidatePath(`/repositories/${item.repositoryId}`)
-    return createSuccess(undefined, "Item removed successfully (admin)")
+      repositoryId: item.repositoryId,
+    });
+
+    timer({ status: "success", itemId });
+
+    revalidatePath(`/admin/repositories`);
+    revalidatePath(`/repositories/${item.repositoryId}`);
+    return createSuccess(undefined, "Item removed successfully (admin)");
   } catch (error) {
-    timer({ status: "error" })
-    
-    return handleError(error, "Failed to remove item. Please try again or contact support.", {
-      context: "admin.removeRepositoryItem",
-      requestId,
-      operation: "admin.removeRepositoryItem",
-      metadata: { itemId }
-    })
+    timer({ status: "error" });
+
+    return handleError(
+      error,
+      "Failed to remove item. Please try again or contact support.",
+      {
+        context: "admin.removeRepositoryItem",
+        requestId,
+        operation: "admin.removeRepositoryItem",
+        metadata: { itemId },
+      },
+    );
   }
 }

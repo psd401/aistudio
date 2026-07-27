@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
-import { useForm } from "react-hook-form"
+import { useForm, type UseFormReturn } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import { SelectNavigationItem } from "@/types/db-types"
@@ -52,6 +52,379 @@ const formSchema = z.object({
 
 type FormValues = z.infer<typeof formSchema>
 
+function getNavigationDefaults(
+  initialData?: SelectNavigationItem
+): FormValues {
+  const defaults: FormValues = {
+    label: "",
+    icon: "IconHome",
+    link: "",
+    description: "",
+    type: "link",
+    capabilityId: null,
+    requiresRole: null,
+    position: 0,
+    isActive: true,
+  }
+  if (!initialData) return defaults
+  return {
+    ...defaults,
+    id: initialData.id,
+    label: initialData.label,
+    icon: (initialData.icon as IconName) || defaults.icon,
+    link: initialData.link || defaults.link,
+    description: initialData.description || defaults.description,
+    type:
+      (initialData.type as "link" | "section" | "page") || defaults.type,
+    parentId: initialData.parentId || undefined,
+    capabilityId: initialData.capabilityId || null,
+    requiresRole: initialData.requiresRole || null,
+    position: initialData.position || 0,
+    isActive: initialData.isActive ?? true,
+  }
+}
+
+function LabelTypeFields({ form }: { form: UseFormReturn<FormValues> }) {
+  return (
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <FormField<FormValues>
+        control={form.control}
+        name="label"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Label</FormLabel>
+            <FormControl>
+              <Input {...field} value={String(field.value || "")} />
+            </FormControl>
+            <FormDescription>
+              This is the label that will be displayed in the navigation.
+            </FormDescription>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+      <FormField<FormValues>
+        control={form.control}
+        name="type"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Type</FormLabel>
+            <Select
+              onValueChange={field.onChange}
+              defaultValue={String(field.value || "")}
+            >
+              <FormControl>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select type" />
+                </SelectTrigger>
+              </FormControl>
+              <SelectContent>
+                <SelectItem value="link">Link</SelectItem>
+                <SelectItem value="section">Section</SelectItem>
+                <SelectItem value="page">Page</SelectItem>
+              </SelectContent>
+            </Select>
+            <FormDescription>
+              This determines how the navigation item will be displayed.
+            </FormDescription>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+    </div>
+  )
+}
+
+function IconLinkFields({ form }: { form: UseFormReturn<FormValues> }) {
+  return (
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <FormField<FormValues>
+        control={form.control}
+        name="icon"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Icon</FormLabel>
+            <Select
+              onValueChange={field.onChange}
+              defaultValue={String(field.value || "")}
+            >
+              <FormControl>
+                <SelectTrigger>
+                  <SelectValue>
+                    <div className="flex items-center gap-2">
+                      {field.value && iconMap[field.value as IconName] && (
+                        <>
+                          <div className="flex h-4 w-4 items-center justify-center">
+                            {React.createElement(
+                              iconMap[field.value as IconName],
+                              { className: "h-4 w-4" }
+                            )}
+                          </div>
+                          <span>{field.value}</span>
+                        </>
+                      )}
+                    </div>
+                  </SelectValue>
+                </SelectTrigger>
+              </FormControl>
+              <SelectContent>
+                <ScrollArea className="h-[200px]">
+                  {Object.entries(iconMap).map(([name, Icon]) => (
+                    <SelectItem key={name} value={name}>
+                      <div className="flex items-center gap-2">
+                        <div className="flex h-4 w-4 items-center justify-center">
+                          {React.createElement(Icon, {
+                            className: "h-4 w-4",
+                          })}
+                        </div>
+                        <span>{name}</span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </ScrollArea>
+              </SelectContent>
+            </Select>
+            <FormDescription>
+              This is the icon displayed next to the label.
+            </FormDescription>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+      <FormField<FormValues>
+        control={form.control}
+        name="link"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Link</FormLabel>
+            <FormControl>
+              <Input {...field} value={String(field.value || "")} />
+            </FormControl>
+            <FormDescription>
+              This is the link used when the item is clicked.
+            </FormDescription>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+    </div>
+  )
+}
+
+function DescriptionField({ form }: { form: UseFormReturn<FormValues> }) {
+  return (
+    <FormField<FormValues>
+      control={form.control}
+      name="description"
+      render={({ field }) => (
+        <FormItem>
+          <FormLabel>Description</FormLabel>
+          <FormControl>
+            <Textarea
+              {...field}
+              value={String(field.value || "")}
+              className="h-20"
+            />
+          </FormControl>
+          <FormDescription>
+            This is displayed when the navigation item is a page.
+          </FormDescription>
+          <FormMessage />
+        </FormItem>
+      )}
+    />
+  )
+}
+
+function PlacementFields({
+  capabilities,
+  form,
+  parents,
+}: {
+  capabilities: { id: string; name: string }[]
+  form: UseFormReturn<FormValues>
+  parents: SelectNavigationItem[]
+}) {
+  return (
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <FormField<FormValues>
+        control={form.control}
+        name="parentId"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Parent</FormLabel>
+            <Select
+              onValueChange={value =>
+                field.onChange(value === "none" ? undefined : Number(value))
+              }
+              defaultValue={field.value ? String(field.value) : "none"}
+            >
+              <FormControl>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select parent" />
+                </SelectTrigger>
+              </FormControl>
+              <SelectContent className="max-h-60 overflow-y-auto">
+                <SelectItem value="none">None</SelectItem>
+                {parents.map(parent => (
+                  <SelectItem key={parent.id} value={String(parent.id)}>
+                    {parent.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <FormDescription>
+              This determines where the item appears in the hierarchy.
+            </FormDescription>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+      <FormField<FormValues>
+        control={form.control}
+        name="capabilityId"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Required Capability</FormLabel>
+            <Select
+              onValueChange={value =>
+                field.onChange(value === "none" ? null : Number(value))
+              }
+              defaultValue={field.value ? String(field.value) : "none"}
+            >
+              <FormControl>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select capability" />
+                </SelectTrigger>
+              </FormControl>
+              <SelectContent>
+                <SelectItem value="none">None</SelectItem>
+                {capabilities.map(capability => (
+                  <SelectItem
+                    key={capability.id}
+                    value={String(capability.id)}
+                  >
+                    {capability.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+    </div>
+  )
+}
+
+function RequiredRoleField({
+  form,
+  roles,
+}: {
+  form: UseFormReturn<FormValues>
+  roles: { id: string; name: string }[]
+}) {
+  return (
+    <FormField<FormValues>
+      control={form.control}
+      name="requiresRole"
+      render={({ field }) => (
+        <FormItem>
+          <FormLabel>Required Role</FormLabel>
+          <Select
+            onValueChange={value =>
+              field.onChange(value === "none" ? null : value)
+            }
+            defaultValue={String(field.value || "none")}
+          >
+            <FormControl>
+              <SelectTrigger>
+                <SelectValue placeholder="Select role" />
+              </SelectTrigger>
+            </FormControl>
+            <SelectContent>
+              <SelectItem value="none">None</SelectItem>
+              {roles.map(role => (
+                <SelectItem key={role.id} value={role.name}>
+                  {role.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <FormMessage />
+        </FormItem>
+      )}
+    />
+  )
+}
+
+function NavigationDialog({
+  capabilities,
+  form,
+  initialData,
+  open,
+  parents,
+  roles,
+  onOpenChange,
+  onFormSubmit,
+}: {
+  capabilities: { id: string; name: string }[]
+  form: UseFormReturn<FormValues>
+  initialData?: SelectNavigationItem
+  open: boolean
+  parents: SelectNavigationItem[]
+  roles: { id: string; name: string }[]
+  onOpenChange: (open: boolean) => void
+  onFormSubmit: (values: FormValues) => Promise<void>
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="h-[90vh] max-h-[90vh] p-0 sm:max-w-[700px] flex flex-col">
+        <DialogHeader className="bg-background p-6 pb-4 border-b">
+          <DialogTitle>
+            {initialData ? "Edit Navigation Item" : "Add Navigation Item"}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="flex-1 overflow-y-auto px-6 pb-6">
+          <Form {...form}>
+            <form
+              id="navigation-form"
+              onSubmit={form.handleSubmit(onFormSubmit)}
+              className="space-y-4"
+            >
+              <div className="grid gap-4 py-4">
+                <LabelTypeFields form={form} />
+                <IconLinkFields form={form} />
+                <DescriptionField form={form} />
+                <PlacementFields
+                  capabilities={capabilities}
+                  form={form}
+                  parents={parents}
+                />
+                <RequiredRoleField form={form} roles={roles} />
+              </div>
+            </form>
+          </Form>
+        </div>
+        <div className="bg-muted p-4 border-t">
+          <div className="flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" form="navigation-form">
+              {initialData ? "Update" : "Create"}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 export function NavigationItemForm({
   open,
   onOpenChange,
@@ -65,19 +438,7 @@ export function NavigationItemForm({
 
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
-    defaultValues: {
-      id: initialData?.id,
-      label: initialData?.label || "",
-      icon: (initialData?.icon as IconName) || "IconHome",
-      link: initialData?.link || "",
-      description: initialData?.description || "",
-      type: (initialData?.type as "link" | "section" | "page") || "link",
-      parentId: initialData?.parentId || undefined,
-      capabilityId: initialData?.capabilityId || null,
-      requiresRole: initialData?.requiresRole || null,
-      position: initialData?.position || 0,
-      isActive: initialData?.isActive ?? true
-    }
+    defaultValues: getNavigationDefaults(initialData),
   })
 
   useEffect(() => {
@@ -167,264 +528,15 @@ export function NavigationItemForm({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="h-[90vh] max-h-[90vh] p-0 sm:max-w-[700px] flex flex-col">
-        <DialogHeader className="bg-background p-6 pb-4 border-b">
-          <DialogTitle>
-            {initialData ? "Edit Navigation Item" : "Add Navigation Item"}
-          </DialogTitle>
-        </DialogHeader>
-
-        <div className="flex-1 overflow-y-auto px-6 pb-6">
-          <Form {...form}>
-            <form id="navigation-form" onSubmit={form.handleSubmit(onFormSubmit)} className="space-y-4">
-              <div className="grid gap-4 py-4">
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <FormField<FormValues>
-                    control={form.control}
-                    name="label"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Label</FormLabel>
-                        <FormControl>
-                          <Input {...field} value={typeof field.value === 'boolean' ? '' : (field.value || '')} />
-                        </FormControl>
-                        <FormDescription>
-                          This is the label that will be displayed in the navigation.
-                        </FormDescription>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-
-                  <FormField<FormValues>
-                    control={form.control}
-                    name="type"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Type</FormLabel>
-                        <Select
-                          onValueChange={field.onChange}
-                          defaultValue={String(field.value || '')}
-                        >
-                          <FormControl>
-                            <SelectTrigger>
-                              <SelectValue placeholder="Select type" />
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent>
-                            <SelectItem value="link">Link</SelectItem>
-                            <SelectItem value="section">Section</SelectItem>
-                            <SelectItem value="page">Page</SelectItem>
-                          </SelectContent>
-                        </Select>
-                        <FormDescription>
-                          This determines how the navigation item will be displayed.
-                        </FormDescription>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <FormField<FormValues>
-                    control={form.control}
-                    name="icon"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Icon</FormLabel>
-                        <Select
-                          onValueChange={field.onChange}
-                          defaultValue={String(field.value || '')}
-                        >
-                          <FormControl>
-                            <SelectTrigger>
-                              <SelectValue>
-                                <div className="flex items-center gap-2">
-                                  {field.value && (
-                                    <>
-                                      {iconMap[field.value as IconName] && (
-                                        <div className="flex h-4 w-4 items-center justify-center">
-                                          {React.createElement(iconMap[field.value as IconName], { className: "h-4 w-4" })}
-                                        </div>
-                                      )}
-                                      <span>{field.value}</span>
-                                    </>
-                                  )}
-                                </div>
-                              </SelectValue>
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent>
-                            <ScrollArea className="h-[200px]">
-                              {Object.entries(iconMap).map(([name, Icon]) => (
-                                <SelectItem key={name} value={name}>
-                                  <div className="flex items-center gap-2">
-                                    <div className="flex h-4 w-4 items-center justify-center">
-                                      {React.createElement(Icon, { className: "h-4 w-4" })}
-                                    </div>
-                                    <span>{name}</span>
-                                  </div>
-                                </SelectItem>
-                              ))}
-                            </ScrollArea>
-                          </SelectContent>
-                        </Select>
-                        <FormDescription>
-                          This is the icon that will be displayed next to the label.
-                        </FormDescription>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-
-                  <FormField<FormValues>
-                    control={form.control}
-                    name="link"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Link</FormLabel>
-                        <FormControl>
-                          <Input {...field} value={typeof field.value === 'boolean' ? '' : (field.value || '')} />
-                        </FormControl>
-                        <FormDescription>
-                          This is the link that will be used when the item is clicked.
-                        </FormDescription>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                </div>
-
-                <FormField<FormValues>
-                  control={form.control}
-                  name="description"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Description</FormLabel>
-                      <FormControl>
-                        <Textarea {...field} value={typeof field.value === 'boolean' ? '' : (field.value || '')} className="h-20" />
-                      </FormControl>
-                      <FormDescription>
-                        This will be displayed when the navigation item is of type page.
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <FormField<FormValues>
-                    control={form.control}
-                    name="parentId"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Parent</FormLabel>
-                        <Select
-                          onValueChange={(value) => field.onChange(value === "none" ? undefined : Number(value))}
-                          defaultValue={field.value ? String(field.value) : "none"}
-                        >
-                          <FormControl>
-                            <SelectTrigger>
-                              <SelectValue placeholder="Select parent" />
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent className="max-h-60 overflow-y-auto">
-                            <SelectItem value="none">None</SelectItem>
-                            {parents.map((parent) => (
-                              <SelectItem key={parent.id} value={String(parent.id)}>
-                                {parent.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                        <FormDescription>
-                          This determines where in the navigation hierarchy this item will be placed.
-                        </FormDescription>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-
-                  <FormField<FormValues>
-                    control={form.control}
-                    name="capabilityId"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Required Capability</FormLabel>
-                        <Select
-                          onValueChange={(value) => field.onChange(value === "none" ? null : Number(value))}
-                          defaultValue={field.value ? String(field.value) : "none"}
-                        >
-                          <FormControl>
-                            <SelectTrigger>
-                              <SelectValue placeholder="Select capability" />
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent>
-                            <SelectItem value="none">None</SelectItem>
-                            {capabilities.map((capability) => (
-                              <SelectItem key={capability.id} value={String(capability.id)}>
-                                {capability.name}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                </div>
-
-                <FormField<FormValues>
-                  control={form.control}
-                  name="requiresRole"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Required Role</FormLabel>
-                      <Select
-                        onValueChange={(value) => field.onChange(value === "none" ? null : value)}
-                        defaultValue={String(field.value || "none")}
-                      >
-                        <FormControl>
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select role" />
-                          </SelectTrigger>
-                        </FormControl>
-                        <SelectContent>
-                          <SelectItem value="none">None</SelectItem>
-                          {roles.map((role) => (
-                            <SelectItem key={role.id} value={role.name}>
-                              {role.name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              </div>
-            </form>
-          </Form>
-        </div>
-
-        <div className="bg-muted p-4 border-t">
-          <div className="flex justify-end gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => onOpenChange(false)}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" form="navigation-form">
-              {initialData ? "Update" : "Create"}
-            </Button>
-          </div>
-        </div>
-      </DialogContent>
-    </Dialog>
+    <NavigationDialog
+      capabilities={capabilities}
+      form={form}
+      initialData={initialData}
+      open={open}
+      parents={parents}
+      roles={roles}
+      onOpenChange={onOpenChange}
+      onFormSubmit={onFormSubmit}
+    />
   )
-} 
+}

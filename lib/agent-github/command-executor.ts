@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process"
-import { chmod, mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { validatedFsPromises } from "@/lib/filesystem/validated-fs";
 
 interface CommandPolicy {
   valueFlags: ReadonlySet<string>
@@ -90,7 +91,7 @@ function isRepositoryName(value: string): boolean {
   return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value)
 }
 
-export function validateGitHubCommand(argv: readonly string[]): void {
+function validateArgumentEnvelope(argv: readonly string[]): void {
   if (!Array.isArray(argv) || argv.length < 2 || argv.length > 100) {
     throw new Error("Invalid GitHub command arguments")
   }
@@ -109,6 +110,109 @@ export function validateGitHubCommand(argv: readonly string[]): void {
   if (total > MAX_TOTAL_ARGUMENT_LENGTH) {
     throw new Error("GitHub command is too large")
   }
+}
+
+interface CommandValidationState {
+  positionals: number
+  repository?: string
+}
+
+function validateBooleanFlag(arg: string, name: string): void {
+  if (!arg.includes("=")) return
+  if (/^(?:true|false)$/.test(arg.slice(arg.indexOf("=") + 1))) return
+  throw new Error(`Invalid boolean flag syntax: ${name}`)
+}
+
+function readFlagValue(
+  argv: readonly string[],
+  index: number,
+  name: string
+): { value: string; consumedNext: boolean } {
+  const arg = argv[index]
+  const consumedNext = !arg.includes("=")
+  const value = consumedNext
+    ? argv[index + 1]
+    : arg.slice(arg.indexOf("=") + 1)
+  if (!value || hasControlCharacter(value)) {
+    throw new Error(`Missing or invalid value for ${name}`)
+  }
+  return { value, consumedNext }
+}
+
+function validatePositionalArgument(
+  command: string,
+  commandPolicy: CommandPolicy,
+  state: CommandValidationState
+): void {
+  state.positionals += 1
+  if (state.positionals > commandPolicy.maxPositionals) {
+    throw new Error(`Too many positional arguments for ${command}`)
+  }
+}
+
+function validateRepositoryFlag(
+  name: string,
+  value: string,
+  state: CommandValidationState
+): void {
+  if (name !== "--repo" && name !== "-R") return
+  if (!isRepositoryName(value)) {
+    throw new Error("GitHub repository must use owner/name syntax")
+  }
+  state.repository = value
+}
+
+function validateCommandArgument(options: {
+  argv: readonly string[]
+  index: number
+  command: string
+  commandPolicy: CommandPolicy
+  state: CommandValidationState
+}): boolean {
+  const { argv, index, command, commandPolicy, state } = options
+  const arg = argv[index]
+  if (arg === "--" || !arg) {
+    throw new Error("GitHub argument forwarding is not allowed")
+  }
+  if (!arg.startsWith("-")) {
+    validatePositionalArgument(command, commandPolicy, state)
+    return false
+  }
+
+  const name = flagName(arg)
+  if (commandPolicy.booleanFlags.has(name)) {
+    validateBooleanFlag(arg, name)
+    return false
+  }
+  if (!commandPolicy.valueFlags.has(name)) {
+    throw new Error(`GitHub flag is not allowed for ${command}: ${name}`)
+  }
+  const { value, consumedNext } = readFlagValue(argv, index, name)
+  validateRepositoryFlag(name, value, state)
+  return consumedNext
+}
+
+function validatePolicyArguments(
+  argv: readonly string[],
+  command: string,
+  commandPolicy: CommandPolicy
+): CommandValidationState {
+  const state: CommandValidationState = { positionals: 0 }
+  for (let index = 2; index < argv.length; index += 1) {
+    const consumedNext = validateCommandArgument({
+      argv,
+      index,
+      command,
+      commandPolicy,
+      state,
+    })
+    if (consumedNext) index += 1
+  }
+  return state
+}
+
+export function validateGitHubCommand(argv: readonly string[]): void {
+  validateArgumentEnvelope(argv)
 
   const command = `${argv[0].toLowerCase()} ${argv[1].toLowerCase()}`
   const commandPolicy = COMMAND_POLICIES.get(command)
@@ -119,51 +223,8 @@ export function validateGitHubCommand(argv: readonly string[]): void {
     throw new Error("GitHub auth status does not accept arguments")
   }
 
-  let positionals = 0
-  let repository: string | undefined
-  for (let index = 2; index < argv.length; index += 1) {
-    const arg = argv[index]
-    if (arg === "--" || !arg) {
-      throw new Error("GitHub argument forwarding is not allowed")
-    }
-    if (!arg.startsWith("-")) {
-      positionals += 1
-      if (positionals > commandPolicy.maxPositionals) {
-        throw new Error(`Too many positional arguments for ${command}`)
-      }
-      continue
-    }
-    const name = flagName(arg)
-    if (commandPolicy.booleanFlags.has(name)) {
-      if (
-        arg.includes("=") &&
-        !/^(?:true|false)$/.test(arg.slice(arg.indexOf("=") + 1))
-      ) {
-        throw new Error(`Invalid boolean flag syntax: ${name}`)
-      }
-      continue
-    }
-    if (!commandPolicy.valueFlags.has(name)) {
-      throw new Error(`GitHub flag is not allowed for ${command}: ${name}`)
-    }
-    let value: string
-    if (arg.includes("=")) {
-      value = arg.slice(arg.indexOf("=") + 1)
-    } else {
-      index += 1
-      value = argv[index]
-    }
-    if (!value || hasControlCharacter(value)) {
-      throw new Error(`Missing or invalid value for ${name}`)
-    }
-    if (name === "--repo" || name === "-R") {
-      if (!isRepositoryName(value)) {
-        throw new Error("GitHub repository must use owner/name syntax")
-      }
-      repository = value
-    }
-  }
-  if (commandPolicy.requireRepo && !repository) {
+  const state = validatePolicyArguments(argv, command, commandPolicy)
+  if (commandPolicy.requireRepo && !state.repository) {
     throw new Error(`GitHub operation requires an explicit --repo owner/name: ${command}`)
   }
 }
@@ -239,7 +300,7 @@ export async function executeGitHubCommand(
 ): Promise<{ stdout: string; stderr: string }> {
   validateGitHubCommand(argv)
   const directory = await mkdtemp(join(tmpdir(), "gh-broker-"))
-  await chmod(directory, 0o700)
+  await validatedFsPromises.chmod(directory, 0o700)
   try {
     return await new Promise((resolve, reject) => {
       execFile(

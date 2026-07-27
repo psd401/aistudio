@@ -21,11 +21,9 @@
  */
 
 import {
-  buildContinuationPrompt,
-  buildOverflowRestartPrompt,
   JOB_DEADLINE_S,
   parseJobPayload,
-  restartSessionId,
+  resolveJobInvocation,
 } from './job-promotion';
 import {
   createLogger,
@@ -89,13 +87,11 @@ async function main(): Promise<number> {
   // The lock stays on the ORIGINAL session id: that is what the router checks
   // to answer "still working on your earlier task", and what cron acquired
   // before launching this task.
-  const isRestart = job.reason === 'context-overflow';
-  const invokeSessionId = isRestart
-    ? restartSessionId(job.sessionId, job.lockToken)
-    : job.sessionId;
-  const prompt = isRestart
-    ? buildOverflowRestartPrompt(job.promptExcerpt)
-    : buildContinuationPrompt(job.promptExcerpt);
+  const {
+    invokeSessionId,
+    prompt,
+    restart: isRestart,
+  } = resolveJobInvocation(job);
 
   log.info('Background job started', {
     sessionId: job.sessionId,

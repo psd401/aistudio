@@ -43,6 +43,129 @@ interface Props {
   fetchError: string | null
 }
 
+function transportLabel(transport: string) {
+  if (transport === "http") return "HTTP"
+  if (transport === "stdio") return "Stdio"
+  if (transport === "websocket") return "WebSocket"
+  return transport
+}
+
+function authLabel(authType: string) {
+  if (authType === "oauth") return "OAuth"
+  if (authType === "api_key") return "API Key"
+  if (authType === "jwt") return "JWT"
+  if (authType === "cognito_passthrough") return "Cognito Passthrough"
+  if (authType === "none") return "None"
+  return authType
+}
+
+function ConnectorsTable({
+  servers,
+  deletingId,
+  onEdit,
+  onDelete,
+}: {
+  servers: McpServerWithStats[]
+  deletingId: string | null
+  onEdit: (server: McpServerWithStats) => void
+  onDelete: (id: string) => void
+}) {
+  return (
+    <div className="rounded-lg border">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Name</TableHead>
+            <TableHead>ID</TableHead>
+            <TableHead>URL</TableHead>
+            <TableHead>Transport</TableHead>
+            <TableHead>Auth</TableHead>
+            <TableHead>Connections</TableHead>
+            <TableHead>Max</TableHead>
+            <TableHead className="w-24">Actions</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {servers.map((server) => (
+            <TableRow key={server.id}>
+              <TableCell className="font-medium">{server.name}</TableCell>
+              <TableCell>
+                <code className="select-all rounded bg-muted px-1 py-0.5 font-mono text-xs">
+                  {server.id}
+                </code>
+              </TableCell>
+              <TableCell>
+                <code className="block max-w-[200px] truncate rounded bg-muted px-1 py-0.5 text-xs">
+                  {server.url}
+                </code>
+              </TableCell>
+              <TableCell>
+                <Badge variant="outline">
+                  {transportLabel(server.transport)}
+                </Badge>
+              </TableCell>
+              <TableCell>
+                <Badge variant="secondary">{authLabel(server.authType)}</Badge>
+              </TableCell>
+              <TableCell>
+                <span className="text-sm">{server.connectionCount}</span>
+              </TableCell>
+              <TableCell>
+                <span className="text-sm text-muted-foreground">
+                  {server.maxConnections ?? 10}
+                </span>
+              </TableCell>
+              <TableCell>
+                <div className="flex gap-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => onEdit(server)}
+                    aria-label={`Edit ${server.name}`}
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </Button>
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        aria-label={`Delete ${server.name}`}
+                        disabled={deletingId === server.id}
+                      >
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Delete Connector</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          This will permanently delete the MCP server &quot;
+                          {server.name}&quot; and all its connections. This
+                          action cannot be undone.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction
+                          onClick={() => onDelete(server.id)}
+                          disabled={deletingId === server.id}
+                        >
+                          {deletingId === server.id ? "Deleting…" : "Delete"}
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </div>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  )
+}
+
 export function ConnectorsPageClient({ initialServers, fetchError: initialFetchError }: Props) {
   const [servers, setServers] = useState(initialServers)
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -92,36 +215,6 @@ export function ConnectorsPageClient({ initialServers, fetchError: initialFetchE
     void refresh()
   }, [refresh])
 
-  const transportLabel = (transport: string) => {
-    switch (transport) {
-      case "http":
-        return "HTTP"
-      case "stdio":
-        return "Stdio"
-      case "websocket":
-        return "WebSocket"
-      default:
-        return transport
-    }
-  }
-
-  const authLabel = (authType: string) => {
-    switch (authType) {
-      case "oauth":
-        return "OAuth"
-      case "api_key":
-        return "API Key"
-      case "jwt":
-        return "JWT"
-      case "cognito_passthrough":
-        return "Cognito Passthrough"
-      case "none":
-        return "None"
-      default:
-        return authType
-    }
-  }
-
   return (
     <div>
       <div className="flex justify-end mb-4">
@@ -162,104 +255,12 @@ export function ConnectorsPageClient({ initialServers, fetchError: initialFetchE
       {/* Show table when servers exist, empty state when no servers and no error.
          When error + no servers, only the error banner above is shown. */}
       {servers.length > 0 ? (
-        <div className="border rounded-lg">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>ID</TableHead>
-                  <TableHead>URL</TableHead>
-                  <TableHead>Transport</TableHead>
-                  <TableHead>Auth</TableHead>
-                  <TableHead>Connections</TableHead>
-                  <TableHead>Max</TableHead>
-                  <TableHead className="w-24">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {servers.map((server) => (
-                  <TableRow key={server.id}>
-                    <TableCell className="font-medium">{server.name}</TableCell>
-                    <TableCell>
-                      <code className="text-xs bg-muted px-1 py-0.5 rounded font-mono select-all">
-                        {server.id}
-                      </code>
-                    </TableCell>
-                    <TableCell>
-                      <code className="text-xs bg-muted px-1 py-0.5 rounded max-w-[200px] truncate block">
-                        {server.url}
-                      </code>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline">
-                        {transportLabel(server.transport)}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="secondary">
-                        {authLabel(server.authType)}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <span className="text-sm">
-                        {server.connectionCount}
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <span className="text-sm text-muted-foreground">
-                        {server.maxConnections ?? 10}
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex gap-1">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleEdit(server)}
-                          aria-label={`Edit ${server.name}`}
-                        >
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                        <AlertDialog>
-                          <AlertDialogTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              aria-label={`Delete ${server.name}`}
-                              disabled={deletingId === server.id}
-                            >
-                              <Trash2 className="h-4 w-4 text-destructive" />
-                            </Button>
-                          </AlertDialogTrigger>
-                          <AlertDialogContent>
-                            <AlertDialogHeader>
-                              <AlertDialogTitle>
-                                Delete Connector
-                              </AlertDialogTitle>
-                              <AlertDialogDescription>
-                                This will permanently delete the MCP server &quot;
-                                {server.name}&quot; and all its connections.
-                                This action cannot be undone.
-                              </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                              <AlertDialogCancel>Cancel</AlertDialogCancel>
-                              <AlertDialogAction
-                                onClick={() => handleDelete(server.id)}
-                                disabled={deletingId === server.id}
-                              >
-                                {deletingId === server.id ? "Deleting…" : "Delete"}
-                              </AlertDialogAction>
-                            </AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+        <ConnectorsTable
+          servers={servers}
+          deletingId={deletingId}
+          onEdit={handleEdit}
+          onDelete={handleDelete}
+        />
       ) : !error ? (
         <div className="text-center py-12 text-muted-foreground">
           No MCP connectors registered yet.

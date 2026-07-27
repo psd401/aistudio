@@ -223,6 +223,13 @@ async function getIterationStats(
   }
 }
 
+function firstNumeric<T extends object, K extends keyof T>(
+  rows: T[],
+  key: K
+): number {
+  return Number(rows[0]?.[key] ?? 0)
+}
+
 // ============================================
 // Actions
 // ============================================
@@ -363,23 +370,20 @@ export async function getAgentTelemetryStats(
       getIterationStats(threshold),
     ])
 
-    const msgRow = messageStats[0]
-    const sessRow = sessionStats[0]
-    const fbRow = feedbackStats[0]
-    const totalFeedback = Number(fbRow?.totalFeedback ?? 0)
-    const positiveCount = Number(fbRow?.positiveCount ?? 0)
+    const totalFeedback = firstNumeric(feedbackStats, "totalFeedback")
+    const positiveCount = firstNumeric(feedbackStats, "positiveCount")
 
     const stats: AgentTelemetryStats = {
-      totalMessages: Number(msgRow?.totalMessages ?? 0),
-      totalSessions: Number(sessRow?.totalSessions ?? 0),
-      totalTokens: Number(msgRow?.totalTokens ?? 0),
+      totalMessages: firstNumeric(messageStats, "totalMessages"),
+      totalSessions: firstNumeric(sessionStats, "totalSessions"),
+      totalTokens: firstNumeric(messageStats, "totalTokens"),
       totalFeedback,
       positiveRate: totalFeedback > 0 ? positiveCount / totalFeedback : 0,
-      activeUsers7d: Number(activeUsers7d[0]?.userCount ?? 0),
-      messages24h: Number(messages24h[0]?.cnt ?? 0),
-      messages7d: Number(messages7d[0]?.cnt ?? 0),
-      guardrailFlags: Number(guardrailFlags[0]?.cnt ?? 0),
-      avgLatencyMs: Math.round(Number(msgRow?.avgLatencyMs ?? 0)),
+      activeUsers7d: firstNumeric(activeUsers7d, "userCount"),
+      messages24h: firstNumeric(messages24h, "cnt"),
+      messages7d: firstNumeric(messages7d, "cnt"),
+      guardrailFlags: firstNumeric(guardrailFlags, "cnt"),
+      avgLatencyMs: Math.round(firstNumeric(messageStats, "avgLatencyMs")),
       ...iterationStats,
     }
 

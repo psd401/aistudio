@@ -1,10 +1,6 @@
 const TEMPORARY_ATTACHMENT_MARKER_PREFIX = "repository-attachment:v1";
-const UUID_PATTERN =
-  "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
-const MARKER_PATTERN = new RegExp(
-  String.raw`\[\[${TEMPORARY_ATTACHMENT_MARKER_PREFIX}:(${UUID_PATTERN}):([1-9]\d*):([^\]]{1,768})\]\]`,
-  "gi"
-);
+const MARKER_PATTERN =
+  /\[\[repository-attachment:v1:([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):([1-9]\d*):([^\]]{1,768})\]\]/gi;
 
 export interface TemporaryAttachmentReference {
   bindingId: string;

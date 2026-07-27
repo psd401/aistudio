@@ -45,7 +45,7 @@ const authoredAssetPng = Buffer.from(
  * so default CI (no seeded session) skips.
  */
 
-test.describe('Atrium content v1 — session capability gate (authenticated)', () => {
+function defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1Part1() {
   test.skip(
     process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
     'Requires authenticated session — set PLAYWRIGHT_AUTH_ENABLED=true and run against the host :3100 dev server (see docs/guides/e2e-authenticated-testing.md)'
@@ -147,7 +147,9 @@ test.describe('Atrium content v1 — session capability gate (authenticated)', (
     expect((await created.json())?.data?.collectionId).toBe(target.id)
   })
 
-  test('codeEncoding base64 -> a <script>/<style> artifact round-trips as the DECODED code', async ({
+  }
+
+function defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1Part2() {test('codeEncoding base64 -> a <script>/<style> artifact round-trips as the DECODED code', async ({
     page,
   }) => {
     await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
@@ -236,7 +238,9 @@ test.describe('Atrium content v1 — session capability gate (authenticated)', (
     expect(JSON.stringify(payload)).not.toContain('uploadKey')
   })
 
-  test('direct asset upload, retry, audience denial, and public-version pinning', async ({
+  }
+
+function defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1Part3() {test('direct asset upload, retry, audience denial, and public-version pinning', async ({
     page,
     request,
   }) => {
@@ -347,7 +351,9 @@ test.describe('Atrium content v1 — session capability gate (authenticated)', (
     expect(publicBytes.headers()['cache-control']).toBe('private, no-store')
   })
 
-  test('codeEncoding base64 with an invalid body -> 400 (never silently stored)', async ({
+  }
+
+function defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1Part4() {test('codeEncoding base64 with an invalid body -> 400 (never silently stored)', async ({
     page,
   }) => {
     await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
@@ -364,9 +370,18 @@ test.describe('Atrium content v1 — session capability gate (authenticated)', (
     })
     expect(res.status()).toBe(400)
   })
-})
+}
 
-test.describe('Atrium content v1 — deployed OAuth access JWT (#1285)', () => {
+const defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1 = () => {
+  defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1Part1()
+  defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1Part2()
+  defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1Part3()
+  defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1Part4()
+};
+
+test.describe('Atrium content v1 — session capability gate (authenticated)', defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1)
+
+const defineAtriumContentV1DeployedOAuthAccessJWT1285Suite2 = () => {
   test.skip(
     !process.env.ATRIUM_E2E_OAUTH_ACCESS_TOKEN,
     'Requires a deployed public-client OAuth access JWT in ATRIUM_E2E_OAUTH_ACCESS_TOKEN'
@@ -399,4 +414,6 @@ test.describe('Atrium content v1 — deployed OAuth access JWT (#1285)', () => {
     })
     expect([200, 204]).toContain(cleanup.status())
   })
-})
+};
+
+test.describe('Atrium content v1 — deployed OAuth access JWT (#1285)', defineAtriumContentV1DeployedOAuthAccessJWT1285Suite2)

@@ -1,4 +1,7 @@
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
+
 /**
  * Unit tests for psd-hyperframes/render.js (#1175).
  *
@@ -16,6 +19,8 @@ const path = require('node:path');
 const {
   parseArgs,
   buildPayload,
+  findCompositionRootOpenTagEnd,
+  injectAudioElement,
   invokeRender,
   validateEmail,
   main,
@@ -148,7 +153,7 @@ test('buildPayload rejects a --dry-run given a value', () => {
 test('buildPayload caps the combined html+css+js size', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hf-skill-big-'));
   const cssPath = path.join(dir, 'big.css');
-  fs.writeFileSync(cssPath, 'a'.repeat(5 * 1024 * 1024));
+  validatedFs.writeFileSync(cssPath, 'a'.repeat(5 * 1024 * 1024));
   try {
     expect(() => buildPayload(parseArgs(argv(
       '--user', 'p@psd401.net', '--html', HTML, '--duration', '3', '--css-file', cssPath,
@@ -162,7 +167,7 @@ test('buildPayload caps the combined html+css+js size', () => {
 test('buildPayload reads css/js from files and carries dryRun', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hf-skill-'));
   const cssPath = path.join(dir, 'a.css');
-  fs.writeFileSync(cssPath, 'body{color:red}');
+  validatedFs.writeFileSync(cssPath, 'body{color:red}');
   try {
     const p = buildPayload(parseArgs(argv(
       '--user', 'p@psd401.net', '--html', HTML, '--duration', '3',
@@ -185,6 +190,24 @@ test('buildPayload injects an <audio> track from --audio-url into the compositio
   expect(p.html).toContain('data-track-index="0"');
   // Injected as the first child of the data-composition-id root element.
   expect(p.html).toMatch(/data-composition-id="demo"[^>]*>\s*<audio /);
+});
+
+test('composition-root lookup is linear and ignores attribute-like quoted text', () => {
+  const html =
+    `<div title="data-composition-id > ${'<A'.repeat(50_000)}">decoy</div>` +
+    '<main title="1 > 0" data-composition-id="real">content</main>';
+  const end = findCompositionRootOpenTagEnd(html);
+
+  expect(end).toBe(html.indexOf('>content') + 1);
+  const injected = injectAudioElement(
+    html,
+    'https://example.com/audio.mp3',
+    3,
+  );
+  expect(injected.indexOf('<audio')).toBeGreaterThan(
+    injected.indexOf('data-composition-id="real"'),
+  );
+  expect(injected.indexOf('<audio')).toBeLessThan(injected.indexOf('content'));
 });
 
 test('buildPayload rejects an unsafe / non-https --audio-url', () => {

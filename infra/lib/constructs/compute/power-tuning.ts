@@ -15,6 +15,16 @@ export interface PowerTuningStateMachineProps {
   timeout?: cdk.Duration
 }
 
+function tagPowerTuningLogGroup(
+  logGroup: logs.LogGroup,
+  environment: string
+): void {
+  cdk.Tags.of(logGroup).add("Environment", environment)
+  cdk.Tags.of(logGroup).add("CostCenter", "Compute")
+  cdk.Tags.of(logGroup).add("Component", "PowerTuning")
+  cdk.Tags.of(logGroup).add("ManagedBy", "CDK")
+}
+
 /**
  * AWS Lambda PowerTuning State Machine
  *
@@ -142,10 +152,7 @@ export class PowerTuningStateMachine extends Construct {
     })
 
     // Add tags for cost tracking
-    cdk.Tags.of(initializerLogGroup).add("Environment", props.environment)
-    cdk.Tags.of(initializerLogGroup).add("CostCenter", "Compute")
-    cdk.Tags.of(initializerLogGroup).add("Component", "PowerTuning")
-    cdk.Tags.of(initializerLogGroup).add("ManagedBy", "CDK")
+    tagPowerTuningLogGroup(initializerLogGroup, props.environment)
 
     const fn = new lambda.Function(this, "Initializer", {
       functionName: `power-tuning-initializer-${props.environment}`,
@@ -211,10 +218,7 @@ export class PowerTuningStateMachine extends Construct {
     })
 
     // Add tags for cost tracking
-    cdk.Tags.of(executorLogGroup).add("Environment", props.environment)
-    cdk.Tags.of(executorLogGroup).add("CostCenter", "Compute")
-    cdk.Tags.of(executorLogGroup).add("Component", "PowerTuning")
-    cdk.Tags.of(executorLogGroup).add("ManagedBy", "CDK")
+    tagPowerTuningLogGroup(executorLogGroup, props.environment)
 
     const fn = new lambda.Function(this, "Executor", {
       functionName: `power-tuning-executor-${props.environment}`,
@@ -396,10 +400,7 @@ export class PowerTuningStateMachine extends Construct {
     })
 
     // Add tags for cost tracking
-    cdk.Tags.of(cleanerLogGroup).add("Environment", props.environment)
-    cdk.Tags.of(cleanerLogGroup).add("CostCenter", "Compute")
-    cdk.Tags.of(cleanerLogGroup).add("Component", "PowerTuning")
-    cdk.Tags.of(cleanerLogGroup).add("ManagedBy", "CDK")
+    tagPowerTuningLogGroup(cleanerLogGroup, props.environment)
 
     const fn = new lambda.Function(this, "Cleaner", {
       functionName: `power-tuning-cleaner-${props.environment}`,
@@ -436,10 +437,7 @@ export class PowerTuningStateMachine extends Construct {
     })
 
     // Add tags for cost tracking
-    cdk.Tags.of(analyzerLogGroup).add("Environment", props.environment)
-    cdk.Tags.of(analyzerLogGroup).add("CostCenter", "Compute")
-    cdk.Tags.of(analyzerLogGroup).add("Component", "PowerTuning")
-    cdk.Tags.of(analyzerLogGroup).add("ManagedBy", "CDK")
+    tagPowerTuningLogGroup(analyzerLogGroup, props.environment)
 
     const fn = new lambda.Function(this, "Analyzer", {
       functionName: `power-tuning-analyzer-${props.environment}`,
@@ -537,10 +535,7 @@ export class PowerTuningStateMachine extends Construct {
     })
 
     // Add tags for cost tracking
-    cdk.Tags.of(optimizerLogGroup).add("Environment", props.environment)
-    cdk.Tags.of(optimizerLogGroup).add("CostCenter", "Compute")
-    cdk.Tags.of(optimizerLogGroup).add("Component", "PowerTuning")
-    cdk.Tags.of(optimizerLogGroup).add("ManagedBy", "CDK")
+    tagPowerTuningLogGroup(optimizerLogGroup, props.environment)
 
     const fn = new lambda.Function(this, "Optimizer", {
       functionName: `power-tuning-optimizer-${props.environment}`,

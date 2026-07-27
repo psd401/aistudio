@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto"
 import { and, eq, isNull, sql } from "drizzle-orm"
 import { createLogger, generateRequestId, sanitizeForLogging, startTimer } from "@/lib/logger"
-import { createSuccess, handleError } from "@/lib/error-utils"
+import { createSuccess, ErrorFactories, handleError } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema"
@@ -138,6 +138,29 @@ interface TokenResponse {
   error?: string
 }
 
+async function lookupAistudioCallbackNonce(state: string) {
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+  const [row] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          ownerEmail: psdAgentWorkspaceConsentNonces.ownerEmail,
+          tokenKind: psdAgentWorkspaceConsentNonces.tokenKind,
+          codeVerifier: psdAgentWorkspaceConsentNonces.codeVerifier,
+        })
+        .from(psdAgentWorkspaceConsentNonces)
+        .where(
+          sql`${psdAgentWorkspaceConsentNonces.nonce} = ${state}
+              AND ${psdAgentWorkspaceConsentNonces.consumedAt} IS NULL
+              AND ${psdAgentWorkspaceConsentNonces.createdAt} >
+                ${oneHourAgo}::timestamptz`
+        )
+        .limit(1),
+    "lookupAistudioCallbackNonce"
+  )
+  return row
+}
+
 async function readJsonObject(response: Response): Promise<Record<string, unknown>> {
   try {
     const value: unknown = await response.json()
@@ -160,24 +183,7 @@ export async function handleAistudioCallback(
     // Treat the server-side, single-use nonce record as the state validator.
     // A format check is not an authorization boundary: only an exact,
     // unconsumed, unexpired nonce issued by this application may proceed.
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
-    const [row] = await executeQuery(
-      (db) =>
-        db
-          .select({
-            ownerEmail: psdAgentWorkspaceConsentNonces.ownerEmail,
-            tokenKind: psdAgentWorkspaceConsentNonces.tokenKind,
-            codeVerifier: psdAgentWorkspaceConsentNonces.codeVerifier,
-          })
-          .from(psdAgentWorkspaceConsentNonces)
-          .where(
-            sql`${psdAgentWorkspaceConsentNonces.nonce} = ${state}
-                AND ${psdAgentWorkspaceConsentNonces.consumedAt} IS NULL
-                AND ${psdAgentWorkspaceConsentNonces.createdAt} > ${oneHourAgo}::timestamptz`
-          )
-          .limit(1),
-      "lookupAistudioCallbackNonce"
-    )
+    const row = await lookupAistudioCallbackNonce(state)
     if (!row || row.tokenKind !== "aistudio" || !row.codeVerifier) {
       timer({ status: "error" })
       return createSuccess({
@@ -287,7 +293,11 @@ export async function handleAistudioCallback(
       "consumeAistudioConsentNonce"
     )
     if (consumed.length !== 1) {
-      throw new Error("AI Studio consent nonce was consumed concurrently")
+      throw ErrorFactories.bizInvalidState(
+        "consume AI Studio consent nonce",
+        "already consumed",
+        "unconsumed"
+      )
     }
     timer({ status: "success" })
     log.info(

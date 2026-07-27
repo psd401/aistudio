@@ -20,7 +20,11 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { validateApiKey, hasScope, updateKeyLastUsed } from "@/lib/api-keys/key-service";
+import {
+  validateApiKey,
+  hasScope,
+  updateKeyLastUsed,
+} from "@/lib/api-keys/key-service";
 import { getServerSession } from "@/lib/auth/server-session";
 import { getUserIdByCognitoSubAsNumber } from "@/lib/db/drizzle/utils";
 import { getUserRolesByCognitoSub } from "@/lib/db/drizzle/users";
@@ -62,6 +66,189 @@ export interface ApiErrorResponse {
 
 const BEARER_PREFIX = "Bearer ";
 
+type AuthLogger = ReturnType<typeof createLogger>;
+type AuthTimer = ReturnType<typeof startTimer>;
+
+async function authenticateApiKey(
+  token: string,
+  requestId: string,
+  timer: AuthTimer,
+  log: AuthLogger,
+): Promise<ApiAuthContext | NextResponse> {
+  try {
+    const keyAuth = await validateApiKey(token);
+    if (!keyAuth) {
+      timer({ status: "error" });
+      log.warn("API key validation failed");
+      return createErrorResponse(
+        requestId,
+        401,
+        "INVALID_TOKEN",
+        "Invalid API key",
+      );
+    }
+    const cognitoSub = await getCognitoSubByUserId(keyAuth.userId);
+    if (!cognitoSub) {
+      timer({ status: "error" });
+      log.error("User lookup failed during API key auth", {
+        keyId: keyAuth.keyId,
+      });
+      return createErrorResponse(
+        requestId,
+        401,
+        "INVALID_TOKEN",
+        "Invalid API key",
+      );
+    }
+    void updateKeyLastUsed(keyAuth.keyId);
+    timer({ status: "success" });
+    log.info("Authenticated via API key", {
+      userId: keyAuth.userId,
+      keyId: keyAuth.keyId,
+      authType: "api_key",
+    });
+    return {
+      userId: keyAuth.userId,
+      cognitoSub,
+      authType: "api_key",
+      scopes: keyAuth.scopes,
+      apiKeyId: keyAuth.keyId,
+    };
+  } catch (error) {
+    timer({ status: "error" });
+    log.error("API key authentication error", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return createErrorResponse(
+      requestId,
+      500,
+      "INTERNAL_ERROR",
+      "Authentication failed",
+    );
+  }
+}
+
+async function authenticateJwt(
+  token: string,
+  requestId: string,
+  timer: AuthTimer,
+  log: AuthLogger,
+): Promise<ApiAuthContext | NextResponse> {
+  try {
+    const result = await verifyJwtToken(token, log);
+    if (!result) {
+      timer({ status: "error" });
+      log.warn("JWT verification failed");
+      return createErrorResponse(
+        requestId,
+        401,
+        "INVALID_TOKEN",
+        "Invalid token",
+      );
+    }
+    timer({ status: "success" });
+    log.info("Authenticated via JWT", {
+      userId: result.userId,
+      clientId: result.clientId,
+      authType: "jwt",
+    });
+    return {
+      userId: result.userId,
+      cognitoSub: result.cognitoSub,
+      authType: "jwt",
+      scopes: result.scopes,
+      oauthClientId: result.clientId,
+      delegatedForUserId: result.delegatedForUserId,
+    };
+  } catch (error) {
+    timer({ status: "error" });
+    log.error("JWT authentication error", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return createErrorResponse(
+      requestId,
+      401,
+      "INVALID_TOKEN",
+      "Invalid token",
+    );
+  }
+}
+
+async function authenticateBearer(
+  authHeader: string,
+  requestId: string,
+  timer: AuthTimer,
+  log: AuthLogger,
+): Promise<ApiAuthContext | NextResponse> {
+  const token = authHeader.slice(BEARER_PREFIX.length).trim();
+  if (!token) {
+    timer({ status: "error" });
+    log.warn("Empty Bearer token");
+    return createErrorResponse(
+      requestId,
+      401,
+      "INVALID_TOKEN",
+      "Invalid token",
+    );
+  }
+  return token.startsWith("sk-")
+    ? authenticateApiKey(token, requestId, timer, log)
+    : authenticateJwt(token, requestId, timer, log);
+}
+
+async function authenticateSession(
+  requestId: string,
+  timer: AuthTimer,
+  log: AuthLogger,
+): Promise<ApiAuthContext | NextResponse> {
+  try {
+    const session = await getServerSession();
+    if (!session?.sub) {
+      timer({ status: "error" });
+      log.debug("No session found");
+      return createErrorResponse(
+        requestId,
+        401,
+        "UNAUTHORIZED",
+        "Authentication required",
+      );
+    }
+    const userId = await getUserIdByCognitoSubAsNumber(session.sub);
+    if (!userId) {
+      timer({ status: "error" });
+      log.warn("Session user not found in database", {
+        cognitoSub: session.sub,
+      });
+      return createErrorResponse(
+        requestId,
+        401,
+        "UNAUTHORIZED",
+        "Authentication required",
+      );
+    }
+    const roleNames = await getUserRolesByCognitoSub(session.sub);
+    timer({ status: "success" });
+    log.info("Authenticated via session", { userId, authType: "session" });
+    return {
+      userId,
+      cognitoSub: session.sub,
+      authType: "session",
+      scopes: getScopesForRoles(roleNames),
+    };
+  } catch (error) {
+    timer({ status: "error" });
+    log.error("Session authentication error", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return createErrorResponse(
+      requestId,
+      500,
+      "INTERNAL_ERROR",
+      "Authentication failed",
+    );
+  }
+}
+
 // ============================================
 // Core Middleware
 // ============================================
@@ -82,7 +269,7 @@ const BEARER_PREFIX = "Bearer ";
  * ```
  */
 export async function authenticateRequest(
-  request: NextRequest
+  request: NextRequest,
 ): Promise<ApiAuthContext | NextResponse> {
   const requestId = generateRequestId();
   const timer = startTimer("authenticateRequest");
@@ -90,139 +277,10 @@ export async function authenticateRequest(
 
   const authHeader = request.headers.get("authorization");
 
-  // Path 1: Bearer token authentication (API key or JWT)
   if (authHeader && authHeader.startsWith(BEARER_PREFIX)) {
-    const token = authHeader.slice(BEARER_PREFIX.length).trim();
-
-    if (!token) {
-      timer({ status: "error" });
-      log.warn("Empty Bearer token");
-      return createErrorResponse(requestId, 401, "INVALID_TOKEN", "Invalid token");
-    }
-
-    // Path 1a: API key (sk- prefix)
-    if (token.startsWith("sk-")) {
-      try {
-        const keyAuth = await validateApiKey(token);
-
-        if (!keyAuth) {
-          timer({ status: "error" });
-          log.warn("API key validation failed");
-          return createErrorResponse(requestId, 401, "INVALID_TOKEN", "Invalid API key");
-        }
-
-        // Look up cognitoSub for the key's userId
-        const cognitoSub = await getCognitoSubByUserId(keyAuth.userId);
-        if (!cognitoSub) {
-          timer({ status: "error" });
-          log.error("User lookup failed during API key auth", { keyId: keyAuth.keyId });
-          return createErrorResponse(requestId, 401, "INVALID_TOKEN", "Invalid API key");
-        }
-
-        // Fire-and-forget: update lastUsedAt
-        void updateKeyLastUsed(keyAuth.keyId);
-
-        timer({ status: "success" });
-        log.info("Authenticated via API key", {
-          userId: keyAuth.userId,
-          keyId: keyAuth.keyId,
-          authType: "api_key",
-        });
-
-        return {
-          userId: keyAuth.userId,
-          cognitoSub,
-          authType: "api_key",
-          scopes: keyAuth.scopes,
-          apiKeyId: keyAuth.keyId,
-        };
-      } catch (error) {
-        timer({ status: "error" });
-        log.error("API key authentication error", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-        return createErrorResponse(requestId, 500, "INTERNAL_ERROR", "Authentication failed");
-      }
-    }
-
-    // Path 1b: JWT token (non-sk- prefix Bearer token)
-    try {
-      const jwtResult = await verifyJwtToken(token, log);
-
-      if (!jwtResult) {
-        timer({ status: "error" });
-        log.warn("JWT verification failed");
-        return createErrorResponse(requestId, 401, "INVALID_TOKEN", "Invalid token");
-      }
-
-      timer({ status: "success" });
-      log.info("Authenticated via JWT", {
-        userId: jwtResult.userId,
-        clientId: jwtResult.clientId,
-        authType: "jwt",
-      });
-
-      return {
-        userId: jwtResult.userId,
-        cognitoSub: jwtResult.cognitoSub,
-        authType: "jwt",
-        scopes: jwtResult.scopes,
-        oauthClientId: jwtResult.clientId,
-        delegatedForUserId: jwtResult.delegatedForUserId,
-      };
-    } catch (error) {
-      timer({ status: "error" });
-      log.error("JWT authentication error", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return createErrorResponse(requestId, 401, "INVALID_TOKEN", "Invalid token");
-    }
+    return authenticateBearer(authHeader, requestId, timer, log);
   }
-
-  // Path 2: Session-based authentication (fallback)
-  try {
-    const session = await getServerSession();
-
-    if (!session?.sub) {
-      timer({ status: "error" });
-      log.debug("No session found");
-      return createErrorResponse(requestId, 401, "UNAUTHORIZED", "Authentication required");
-    }
-
-    const userId = await getUserIdByCognitoSubAsNumber(session.sub);
-    if (!userId) {
-      timer({ status: "error" });
-      log.warn("Session user not found in database", { cognitoSub: session.sub });
-      return createErrorResponse(requestId, 401, "UNAUTHORIZED", "Authentication required");
-    }
-
-    // Derive session scopes from the caller's roles (single source of truth:
-    // ROLE_SCOPES), mirroring API-key and nexus/chat auth. Previously every session
-    // received ["*"], letting any logged-in user satisfy admin-only scope-gated
-    // routes (e.g. graph:write) with just their browser cookie (REV-SEC-161).
-    // Resolved before the success timer/log so a thrown lookup is recorded as
-    // the error it is, not double-counted as a success followed by an error.
-    const roleNames = await getUserRolesByCognitoSub(session.sub);
-
-    timer({ status: "success" });
-    log.info("Authenticated via session", {
-      userId,
-      authType: "session",
-    });
-
-    return {
-      userId,
-      cognitoSub: session.sub,
-      authType: "session",
-      scopes: getScopesForRoles(roleNames),
-    };
-  } catch (error) {
-    timer({ status: "error" });
-    log.error("Session authentication error", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return createErrorResponse(requestId, 500, "INTERNAL_ERROR", "Authentication failed");
-  }
+  return authenticateSession(requestId, timer, log);
 }
 
 // ============================================
@@ -245,7 +303,7 @@ export async function authenticateRequest(
 export function requireScope(
   auth: ApiAuthContext,
   scope: string,
-  requestId?: string
+  requestId?: string,
 ): NextResponse | null {
   if (hasScope(auth.scopes, scope)) {
     return null; // Allowed
@@ -260,7 +318,12 @@ export function requireScope(
     apiKeyId: auth.apiKeyId,
   });
 
-  return createErrorResponse(rid, 403, "INSUFFICIENT_SCOPE", `Missing required scope: ${scope}`);
+  return createErrorResponse(
+    rid,
+    403,
+    "INSUFFICIENT_SCOPE",
+    `Missing required scope: ${scope}`,
+  );
 }
 
 /**
@@ -271,34 +334,34 @@ export function requireScope(
 export function requireAssistantScope(
   auth: ApiAuthContext,
   assistantId: number,
-  requestId?: string
+  requestId?: string,
 ): NextResponse | null {
   // Check broad scope first: assistants:execute or assistants:*
   if (hasScope(auth.scopes, "assistants:execute")) {
-    return null
+    return null;
   }
 
   // Check per-assistant scope: assistant:{id}:execute
-  const perAssistantScope = `assistant:${assistantId}:execute`
+  const perAssistantScope = `assistant:${assistantId}:execute`;
   if (auth.scopes.includes(perAssistantScope)) {
-    return null
+    return null;
   }
 
-  const rid = requestId || generateRequestId()
-  const log = createLogger({ requestId: rid, action: "requireAssistantScope" })
+  const rid = requestId || generateRequestId();
+  const log = createLogger({ requestId: rid, action: "requireAssistantScope" });
   log.warn("Assistant scope check failed", {
     userId: auth.userId,
     authType: auth.authType,
     assistantId,
     apiKeyId: auth.apiKeyId,
-  })
+  });
 
   return createErrorResponse(
     rid,
     403,
     "INSUFFICIENT_SCOPE",
-    `Missing required scope: assistants:execute or assistant:${assistantId}:execute`
-  )
+    `Missing required scope: assistants:execute or assistant:${assistantId}:execute`,
+  );
 }
 
 // ============================================
@@ -314,7 +377,7 @@ export function createErrorResponse(
   status: number,
   code: string,
   message: string,
-  details?: unknown
+  details?: unknown,
 ): NextResponse {
   const body: ApiErrorResponse = {
     error: {
@@ -340,7 +403,7 @@ export function createErrorResponse(
 export function createApiResponse<T>(
   data: T,
   requestId: string,
-  status: number = 200
+  status: number = 200,
 ): NextResponse {
   return NextResponse.json(data, {
     status,
@@ -387,7 +450,7 @@ interface JwtAuthResult {
  * Returns the numeric user id, or `undefined` for an absent / non-integer value.
  */
 export function parseDelegatedForClaim(
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
 ): number | undefined {
   const raw = payload.delegated_for as string | number | undefined;
   return raw != null && Number.isInteger(Number(raw)) ? Number(raw) : undefined;
@@ -399,7 +462,7 @@ export function parseDelegatedForClaim(
  */
 async function verifyJwtToken(
   token: string,
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
 ): Promise<JwtAuthResult | null> {
   try {
     const { jwtVerify } = await import("jose");
@@ -419,10 +482,7 @@ async function verifyJwtToken(
 
     // Numeric database ids are canonical decimal strings. parseInt alone accepts
     // dangerous partial values such as "5garbage".
-    if (
-      typeof payload.sub !== "string" ||
-      !/^[1-9]\d*$/.test(payload.sub)
-    ) {
+    if (typeof payload.sub !== "string" || !/^[1-9]\d*$/.test(payload.sub)) {
       log.warn("JWT missing or invalid sub claim");
       return null;
     }
@@ -458,10 +518,13 @@ async function verifyJwtToken(
           })
         : await getCognitoSubByUserId(userId);
     if (!cognitoSub) {
-      log.warn("JWT is revoked, expired, inactive, or references an unknown user", {
-        userId,
-        clientId,
-      });
+      log.warn(
+        "JWT is revoked, expired, inactive, or references an unknown user",
+        {
+          userId,
+          clientId,
+        },
+      );
       return null;
     }
 
@@ -488,7 +551,7 @@ interface PersistedOidcTokenIdentity {
 }
 
 async function validatePersistedOidcAccessToken(
-  identity: PersistedOidcTokenIdentity
+  identity: PersistedOidcTokenIdentity,
 ): Promise<string | null> {
   if (!identity.jti || !identity.clientId) return null;
   const jti = identity.jti;
@@ -496,9 +559,8 @@ async function validatePersistedOidcAccessToken(
 
   const { executeQuery } = await import("@/lib/db/drizzle-client");
   const { and, eq, gt, isNull } = await import("drizzle-orm");
-  const { oauthAccessTokens, oauthClients, users } = await import(
-    "@/lib/db/schema"
-  );
+  const { oauthAccessTokens, oauthClients, users } =
+    await import("@/lib/db/schema");
 
   const rows = await executeQuery(
     (db) =>
@@ -513,7 +575,7 @@ async function validatePersistedOidcAccessToken(
         .innerJoin(users, eq(users.id, oauthAccessTokens.userId))
         .innerJoin(
           oauthClients,
-          eq(oauthClients.clientId, oauthAccessTokens.clientId)
+          eq(oauthClients.clientId, oauthAccessTokens.clientId),
         )
         .where(
           and(
@@ -522,20 +584,18 @@ async function validatePersistedOidcAccessToken(
             eq(oauthAccessTokens.clientId, clientId),
             isNull(oauthAccessTokens.revokedAt),
             gt(oauthAccessTokens.expiresAt, new Date()),
-            eq(oauthClients.isActive, true)
-          )
+            eq(oauthClients.isActive, true),
+          ),
         )
         .limit(1),
-    "validatePersistedOidcAccessToken"
+    "validatePersistedOidcAccessToken",
   );
 
   const token = rows[0];
   if (!token) return null;
 
   const persistedScopes = Array.isArray(token.scopes)
-    ? token.scopes.filter(
-        (scope): scope is string => typeof scope === "string"
-      )
+    ? token.scopes.filter((scope): scope is string => typeof scope === "string")
     : [];
   const expected = [...new Set(identity.scopes)].sort();
   const actual = [...new Set(persistedScopes)].sort();
@@ -565,7 +625,7 @@ async function getCognitoSubByUserId(userId: number): Promise<string | null> {
         .from(users)
         .where(eq(users.id, userId))
         .limit(1),
-    "getCognitoSubByUserId"
+    "getCognitoSubByUserId",
   );
 
   return result[0]?.cognitoSub ?? null;

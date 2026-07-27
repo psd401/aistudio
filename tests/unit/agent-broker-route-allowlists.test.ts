@@ -24,8 +24,9 @@
  * route needs BOTH an apex and a wildcard-subdomain entry.
  */
 
-import fs from "node:fs"
+
 import path from "node:path"
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 const root = process.cwd()
 
@@ -75,7 +76,7 @@ function stripComments(src: string, marker: "//" | "#"): string {
 /** Block comments never contain an active allowlist entry. */
 const stripBlocks = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "")
 
-const read = (rel: string) => fs.readFileSync(path.join(root, rel), "utf8")
+const read = (rel: string) => validatedFs.readFileSync(path.join(root, rel), "utf8")
 
 const helperSrc = stripComments(
   stripBlocks(read("infra/agent-image/skills/_shared/agent-broker.js")),

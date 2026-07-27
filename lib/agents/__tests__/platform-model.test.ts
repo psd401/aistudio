@@ -1,6 +1,7 @@
-import { readFileSync } from "fs"
-import { join, resolve } from "path"
+
+import { join, resolve } from "node:path"
 import { AGENT_MODEL_ID, AGENT_REQUEST_MODEL_ID } from "@/lib/agents/platform-model"
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 /**
  * Drift guard (PR #1087 review finding #4).
@@ -31,7 +32,7 @@ import { AGENT_MODEL_ID, AGENT_REQUEST_MODEL_ID } from "@/lib/agents/platform-mo
 const REPO_ROOT = resolve(__dirname, "../../..")
 
 const read = (rel: string): string =>
-  readFileSync(join(REPO_ROOT, rel), "utf8")
+  validatedFs.readFileSync(join(REPO_ROOT, rel), "utf8")
 
 interface OpenClawModel {
   id: string
@@ -44,7 +45,7 @@ interface OpenClawConfig {
   agents: { defaults: { model: { primary: string } } }
 }
 
-describe("agent platform model id consistency (#1083 / #1087 #4)", () => {
+const defineAgentPlatformModelIdConsistency108310874Suite1 = () => {
   const openclaw = JSON.parse(
     read("infra/agent-image/openclaw.json")
   ) as OpenClawConfig
@@ -75,4 +76,6 @@ describe("agent platform model id consistency (#1083 / #1087 #4)", () => {
     // Request id seeded as an alias too (defensive, in case Mantle ever echoes it).
     expect(sql).toContain(`'${AGENT_REQUEST_MODEL_ID}'`)
   })
-})
+};
+
+describe("agent platform model id consistency (#1083 / #1087 #4)", defineAgentPlatformModelIdConsistency108310874Suite1)

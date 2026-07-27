@@ -16,8 +16,8 @@
  * bundled node_modules and never loads the ESM-only layer packages. The module importing
  * successfully here is itself the REV-INFRA-122 "initializes without ERR_REQUIRE_ESM" smoke.
  */
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 jest.mock(
   '@aws-sdk/client-rds-data',
@@ -64,7 +64,7 @@ jest.mock('cheerio', () => ({ load: () => ({}) }), { virtual: true });
 jest.mock('marked', () => ({ marked: { parse: async (s: string) => s } }), { virtual: true });
 jest.mock('dns/promises', () => ({ lookup: jest.fn() }));
 
-import { lookup } from 'dns/promises';
+import { lookup } from 'node:dns/promises';
 import * as rdsData from '@aws-sdk/client-rds-data';
 import * as dynamo from '@aws-sdk/client-dynamodb';
 import {
@@ -224,7 +224,9 @@ describe('chunkText lineStart (REV-INFRA-135)', () => {
       expect(starts[i]).toBeGreaterThan(starts[i - 1]); // increasing
     }
     expect(starts[0]).toBe(0);
-    chunks.forEach((c, i) => expect(c.chunkIndex).toBe(i)); // ordinal preserved
+    for (const [i, c] of chunks.entries()) {
+expect(c.chunkIndex).toBe(i);
+}; // ordinal preserved
   });
 });
 
@@ -234,7 +236,7 @@ describe('storeChunks targets repository_item_chunks (REV-INFRA-121)', () => {
     const sqls = rdsSends.map((c) => c.input.sql as string);
     expect(sqls.some((s) => /DELETE FROM repository_item_chunks/.test(s))).toBe(true);
     expect(sqls.some((s) => /INSERT INTO repository_item_chunks/.test(s))).toBe(true);
-    expect(sqls.every((s) => !new RegExp(LEGACY_CHUNK_TABLE).test(s))).toBe(true);
+    expect(sqls.every((sql) => !sql.includes(LEGACY_CHUNK_TABLE))).toBe(true);
   });
 });
 
@@ -280,7 +282,7 @@ describe('deployed artifact source (REV-INFRA-121 / REV-INFRA-122 Done-when)', (
   });
 
   it('contains no legacy chunk-table reference', () => {
-    expect(src).not.toMatch(new RegExp(LEGACY_CHUNK_TABLE));
+    expect(src).not.toContain(LEGACY_CHUNK_TABLE);
   });
 
   it('targets repository_item_chunks', () => {

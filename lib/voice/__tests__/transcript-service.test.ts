@@ -48,6 +48,22 @@ const mockCheckInputSafety = jest.fn()
 const mockCheckOutputSafety = jest.fn()
 const mockIsGuardrailsEnabled = jest.fn()
 
+function createCapturingTransaction(
+  onValues: (values: unknown[]) => void
+): Record<string, unknown> {
+  const captureValues = (values: unknown[]) => onValues(values)
+  const createInsert = () => ({
+    values: jest.fn().mockImplementation(captureValues),
+  })
+
+  return {
+    insert: jest.fn().mockImplementation(createInsert),
+    update: jest.fn().mockReturnValue({
+      set: jest.fn().mockReturnValue({ where: jest.fn() }),
+    }),
+  }
+}
+
 jest.mock("@/lib/safety", () => ({
   getContentSafetyService: () => ({
     isGuardrailsEnabled: mockIsGuardrailsEnabled,
@@ -73,7 +89,7 @@ jest.mock("@/lib/logger", () => {
   }
 })
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+
 const { __mockLogger: mockLogger } = require("@/lib/logger") as { __mockLogger: {
   info: jest.Mock; warn: jest.Mock; error: jest.Mock; debug: jest.Mock
 }}
@@ -99,7 +115,7 @@ function makeEntry(
 // Tests: prepareTranscriptEntries
 // ============================================
 
-describe("prepareTranscriptEntries", () => {
+const definePrepareTranscriptEntriesSuite1 = () => {
   it("should filter out non-final entries", () => {
     const entries = [
       makeEntry("user", "hello", { isFinal: false }),
@@ -212,13 +228,15 @@ describe("prepareTranscriptEntries", () => {
     const result = prepareTranscriptEntries(entries)
     expect(result[0].text).toBe("hello world")
   })
-})
+};
+
+describe("prepareTranscriptEntries", definePrepareTranscriptEntriesSuite1)
 
 // ============================================
 // Tests: saveVoiceTranscript
 // ============================================
 
-describe("saveVoiceTranscript", () => {
+function defineSaveVoiceTranscriptSuite2Part1() {
   beforeEach(() => {
     jest.clearAllMocks()
     mockIsGuardrailsEnabled.mockReturnValue(false)
@@ -328,7 +346,9 @@ describe("saveVoiceTranscript", () => {
     expect(result.titleGenerated).toBe(false)
   })
 
-  it("should apply guardrails and filter blocked content", async () => {
+  }
+
+function defineSaveVoiceTranscriptSuite2Part2() {it("should apply guardrails and filter blocked content", async () => {
     mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Test" })
     mockIsGuardrailsEnabled.mockReturnValue(true)
 
@@ -423,7 +443,9 @@ describe("saveVoiceTranscript", () => {
     )
   })
 
-  it("should use processedContent from guardrails when content is transformed", async () => {
+  }
+
+function defineSaveVoiceTranscriptSuite2Part3() {it("should use processedContent from guardrails when content is transformed", async () => {
     mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Test" })
     mockIsGuardrailsEnabled.mockReturnValue(true)
     // Simulate safety service returning transformed content (e.g., PII redaction)
@@ -431,15 +453,11 @@ describe("saveVoiceTranscript", () => {
     mockCheckOutputSafety.mockResolvedValue({ allowed: true, processedContent: "transformed response" })
 
     let capturedValues: unknown[] = []
+    const transaction = createCapturingTransaction((values) => {
+      capturedValues = values
+    })
     mockExecuteTransaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
-      await fn({
-        insert: jest.fn().mockImplementation((_table: unknown) => ({
-          values: jest.fn().mockImplementation((vals: unknown[]) => {
-            capturedValues = vals
-          }),
-        })),
-        update: jest.fn().mockReturnValue({ set: jest.fn().mockReturnValue({ where: jest.fn() }) }),
-      })
+      await fn(transaction)
     })
 
     const entries = [
@@ -527,7 +545,9 @@ describe("saveVoiceTranscript", () => {
     expect(result.guardrailsBypassed).toBe(false)
   })
 
-  it("should write modelUsed to conversation metadata when voiceModel is provided", async () => {
+  }
+
+function defineSaveVoiceTranscriptSuite2Part4() {it("should write modelUsed to conversation metadata when voiceModel is provided", async () => {
     mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Existing" })
     mockIsGuardrailsEnabled.mockReturnValue(false)
 
@@ -617,7 +637,9 @@ describe("saveVoiceTranscript", () => {
     ).rejects.toThrow("Connection refused")
   })
 
-  it("should warn when processedContent is null or undefined from safety service", async () => {
+  }
+
+function defineSaveVoiceTranscriptSuite2Part5() {it("should warn when processedContent is null or undefined from safety service", async () => {
     mockLogger.warn.mockClear()
     mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Test" })
     mockIsGuardrailsEnabled.mockReturnValue(true)
@@ -653,15 +675,11 @@ describe("saveVoiceTranscript", () => {
     mockCheckOutputSafety.mockResolvedValue({ allowed: true, processedContent: undefined })
 
     let capturedValues: unknown[] = []
+    const transaction = createCapturingTransaction((values) => {
+      capturedValues = values
+    })
     mockExecuteTransaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
-      await fn({
-        insert: jest.fn().mockImplementation((_table: unknown) => ({
-          values: jest.fn().mockImplementation((vals: unknown[]) => {
-            capturedValues = vals
-          }),
-        })),
-        update: jest.fn().mockReturnValue({ set: jest.fn().mockReturnValue({ where: jest.fn() }) }),
-      })
+      await fn(transaction)
     })
 
     const entries = [
@@ -684,15 +702,11 @@ describe("saveVoiceTranscript", () => {
     mockCheckOutputSafety.mockResolvedValue({ allowed: true, processedContent: "assistant msg" })
 
     let capturedValues: unknown[] = []
+    const transaction = createCapturingTransaction((values) => {
+      capturedValues = values
+    })
     mockExecuteTransaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
-      await fn({
-        insert: jest.fn().mockImplementation((_table: unknown) => ({
-          values: jest.fn().mockImplementation((vals: unknown[]) => {
-            capturedValues = vals
-          }),
-        })),
-        update: jest.fn().mockReturnValue({ set: jest.fn().mockReturnValue({ where: jest.fn() }) }),
-      })
+      await fn(transaction)
     })
 
     // 25 entries — crosses the GUARDRAIL_CONCURRENCY_LIMIT (20) boundary
@@ -709,13 +723,23 @@ describe("saveVoiceTranscript", () => {
     // Verify guardrail checks were called for all entries
     expect(mockCheckInputSafety.mock.calls.length + mockCheckOutputSafety.mock.calls.length).toBe(25)
   })
-})
+}
+
+const defineSaveVoiceTranscriptSuite2 = () => {
+  defineSaveVoiceTranscriptSuite2Part1()
+  defineSaveVoiceTranscriptSuite2Part2()
+  defineSaveVoiceTranscriptSuite2Part3()
+  defineSaveVoiceTranscriptSuite2Part4()
+  defineSaveVoiceTranscriptSuite2Part5()
+};
+
+describe("saveVoiceTranscript", defineSaveVoiceTranscriptSuite2)
 
 // ============================================
 // Tests: Title Generation (via saveVoiceTranscript)
 // ============================================
 
-describe("voice title generation", () => {
+const defineVoiceTitleGenerationSuite3 = () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockIsGuardrailsEnabled.mockReturnValue(false)
@@ -781,4 +805,6 @@ describe("voice title generation", () => {
     expect(result.titleGenerated).toBe(false)
     expect(updateArgs.title).toBeUndefined()
   })
-})
+};
+
+describe("voice title generation", defineVoiceTitleGenerationSuite3)

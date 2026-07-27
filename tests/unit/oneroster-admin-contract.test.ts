@@ -5,12 +5,13 @@
  * Lambda status writer and the admin-registry route, which cannot share imports.
  */
 
-import fs from "node:fs";
+
 import path from "node:path";
 import { ALL_ADMIN_PAGES } from "@/app/(protected)/admin/_lib/admin-pages";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 function source(relativePath: string): string {
-  return fs.readFileSync(path.join(process.cwd(), relativePath), "utf8");
+  return validatedFs.readFileSync(path.join(process.cwd(), relativePath), "utf8");
 }
 
 describe("OneRoster administrator contracts", () => {

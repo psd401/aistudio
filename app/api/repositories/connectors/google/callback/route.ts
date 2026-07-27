@@ -16,6 +16,7 @@ import {
 } from "@/lib/repositories/google-drive/oauth-state";
 import { requireRepositoryConnectorManager } from "@/lib/repositories/google-drive/route-access";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
+import { ErrorFactories } from "@/lib/error-utils";
 
 const STATE_MAX_AGE_MS = 5 * 60_000;
 const oauthStateSchema = z.object({
@@ -102,18 +103,20 @@ export async function GET(request: Request): Promise<Response> {
         googleContentOAuthStateCookieName(repositoryId) ||
       Date.now() - state.createdAt > STATE_MAX_AGE_MS
     ) {
-      throw new Error("OAuth state is invalid or expired");
+      throw ErrorFactories.authInvalidToken("Google OAuth state");
     }
     const manager = await requireRepositoryConnectorManager(repositoryId);
     if (manager.userId !== state.userId) {
-      throw new Error("OAuth session changed");
+      throw ErrorFactories.authInvalidToken("Google OAuth session");
     }
 
     // OAuth error callbacks do not carry a code. Treat the absence of a code as
     // failure after unconditional state validation rather than branching on
     // the provider-controlled `error` parameter.
     const code = searchParams.get("code");
-    if (!code) throw new Error("Authorization code is missing");
+    if (!code) {
+      throw ErrorFactories.missingRequiredField("authorization code");
+    }
 
     const tokens = await exchangeGoogleAuthorizationCode({
       code,
@@ -121,7 +124,10 @@ export async function GET(request: Request): Promise<Response> {
       redirectUri: `${getIssuerUrl()}/api/repositories/connectors/google/callback`,
     });
     if (!tokens.refreshToken) {
-      throw new Error("Google did not return an offline refresh token");
+      throw ErrorFactories.externalServiceError(
+        "Google OAuth",
+        new Error("Offline refresh token was missing")
+      );
     }
     const connectorId = await upsertPersonalGoogleDriveConnector({
       repositoryId,

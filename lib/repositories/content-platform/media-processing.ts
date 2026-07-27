@@ -123,28 +123,24 @@ function unwrapStandardOutput(value: unknown, depth = 0): JsonObject | null {
     metadata && asString(metadata.semantic_modality)?.toUpperCase();
   if (modality === "AUDIO" || modality === "VIDEO") return object;
 
-  const standardOutput = asObject(
-    object.standardOutput ?? object.standard_output,
-  );
-  if (standardOutput) {
-    const unwrapped = unwrapStandardOutput(standardOutput, depth + 1);
-    if (unwrapped) return unwrapped;
-  }
-
-  const outputSegments = Array.isArray(object.outputSegments)
-    ? object.outputSegments
-    : [];
-  for (const segment of outputSegments) {
-    const unwrapped = unwrapStandardOutput(segment, depth + 1);
-    if (unwrapped) return unwrapped;
-  }
-
-  for (const child of Object.values(object)) {
-    if (Array.isArray(child)) continue;
-    const unwrapped = unwrapStandardOutput(child, depth + 1);
+  for (const candidate of standardOutputCandidates(object)) {
+    const unwrapped = unwrapStandardOutput(candidate, depth + 1);
     if (unwrapped) return unwrapped;
   }
   return null;
+}
+
+function standardOutputCandidates(object: JsonObject): unknown[] {
+  const candidates: unknown[] = [];
+  const standardOutput = object.standardOutput ?? object.standard_output;
+  if (asObject(standardOutput)) candidates.push(standardOutput);
+  if (Array.isArray(object.outputSegments)) {
+    candidates.push(...object.outputSegments);
+  }
+  for (const child of Object.values(object)) {
+    if (!Array.isArray(child)) candidates.push(child);
+  }
+  return candidates;
 }
 
 function contentHash(content: string): string {
@@ -287,13 +283,23 @@ function locatorFor(item: TimedText): RepositorySourceLocator {
 }
 
 function addSegment(
-  segments: PublishableSegment[],
-  content: string,
-  sourceLocator: RepositorySourceLocator,
-  modality: MediaKind,
-  segmentLevel: "document" | "section" | "chunk" = "chunk",
-  parentChunkIndex?: number,
+  options: {
+    segments: PublishableSegment[];
+    content: string;
+    sourceLocator: RepositorySourceLocator;
+    modality: MediaKind;
+    segmentLevel?: "document" | "section" | "chunk";
+    parentChunkIndex?: number;
+  }
 ): void {
+  const {
+    segments,
+    content,
+    sourceLocator,
+    modality,
+    segmentLevel = "chunk",
+    parentChunkIndex,
+  } = options;
   const normalized = content.trim();
   if (!normalized) return;
   segments.push({
@@ -411,9 +417,55 @@ export function processBdaMediaOutput(
   value: unknown,
   expectedModality: MediaKind,
 ): ProcessedMediaOutput {
+  const root = requireMediaStandardOutput(value, expectedModality);
+  const metadata = mediaMetadata(root, expectedModality);
+  const summary = mediaSummary(root, expectedModality);
+  const transcript = sortedTimedText(root, "audio_segments", parseTimedText);
+  const groupedTranscript = groupTranscript(transcript);
+  const topics = expectedModality === "audio" ? parseTopics(root) : [];
+  const chapters = expectedModality === "video" ? parseChapters(root) : [];
+  const frames =
+    expectedModality === "video"
+      ? sortedTimedText(root, "frames", parseFrameText)
+      : [];
+  const segments = buildMediaSegments({
+    expectedModality,
+    metadata,
+    summary,
+    topics,
+    chapters,
+    groupedTranscript,
+    frames,
+  });
+
+  const transcriptText = transcript.map(transcriptLine).join("\n");
+  const canonicalText = buildCanonicalMediaText({
+    expectedModality,
+    summary,
+    topics,
+    chapters,
+    transcriptText,
+    frames,
+  });
+
+  return {
+    modality: expectedModality,
+    canonicalText,
+    transcriptText,
+    summary,
+    segments,
+    metadata,
+  };
+}
+
+function requireMediaStandardOutput(
+  value: unknown,
+  expectedModality: MediaKind,
+): JsonObject {
   const root = unwrapStandardOutput(value);
-  if (!root)
+  if (!root) {
     throw new Error("BDA output does not contain media standard output");
+  }
   const metadataObject = nestedObject(root, "metadata");
   const semanticModality =
     metadataObject && asString(metadataObject.semantic_modality)?.toLowerCase();
@@ -422,107 +474,148 @@ export function processBdaMediaOutput(
       `BDA returned ${semanticModality ?? "unknown"} output for ${expectedModality}`,
     );
   }
+  return root;
+}
 
-  const metadata = mediaMetadata(root, expectedModality);
-  const summary = mediaSummary(root, expectedModality);
-  const transcript = findArray(root, "audio_segments")
-    .map(parseTimedText)
+function sortedTimedText(
+  root: JsonObject,
+  key: string,
+  parser: (value: unknown) => TimedText | null,
+): TimedText[] {
+  return findArray(root, key)
+    .map(parser)
     .filter((item): item is TimedText => item !== null)
     .sort((left, right) => left.startMs - right.startMs);
-  const groupedTranscript = groupTranscript(transcript);
-  const topics = expectedModality === "audio" ? parseTopics(root) : [];
-  const chapters = expectedModality === "video" ? parseChapters(root) : [];
-  const frames =
-    expectedModality === "video"
-      ? findArray(root, "frames")
-          .map(parseFrameText)
-          .filter((item): item is TimedText => item !== null)
-          .sort((left, right) => left.startMs - right.startMs)
-      : [];
+}
 
+interface MediaSegmentInput {
+  expectedModality: MediaKind;
+  metadata: MediaMetadata;
+  summary?: string;
+  topics: TimedText[];
+  chapters: TimedText[];
+  groupedTranscript: TimedText[];
+  frames: TimedText[];
+}
+
+function buildMediaSegments(input: MediaSegmentInput): PublishableSegment[] {
   const segments: PublishableSegment[] = [];
-  if (summary) {
-    addSegment(
-      segments,
-      summary,
-      { timeStartMs: 0, timeEndMs: metadata.durationMs },
-      expectedModality,
-      "document",
-    );
-  }
-  for (const topic of topics) {
-    addSegment(
-      segments,
-      `Topic summary: ${topic.text}`,
-      locatorFor(topic),
-      "audio",
-      "section",
-      segments[0]?.chunkIndex,
-    );
-  }
-  for (const chapter of chapters) {
-    addSegment(
-      segments,
-      `Chapter summary: ${chapter.text}`,
-      locatorFor(chapter),
-      "video",
-      "section",
-      segments[0]?.chunkIndex,
-    );
-  }
-  for (const item of groupedTranscript) {
-    const label = labelForTimedText(item);
-    addSegment(
-      segments,
-      `${label ? `${label}: ` : ""}${item.text}`,
-      locatorFor(item),
-      expectedModality,
-      "chunk",
-      parentForTime(segments, item.startMs),
-    );
-  }
-  for (const frame of frames) {
-    addSegment(
-      segments,
-      `On-screen text: ${frame.text}`,
-      locatorFor(frame),
-      "video",
-      "chunk",
-      parentForTime(segments, frame.startMs),
-    );
-  }
-  if (segments.length === 0) {
-    addSegment(
-      segments,
-      `${expectedModality === "audio" ? "Audio" : "Video"} with no detected speech or text`,
-      { timeStartMs: 0, timeEndMs: metadata.durationMs },
-      expectedModality,
-      "document",
-    );
-  }
+  addMediaSummarySegment(segments, input);
+  addMediaSectionSegments(segments, input.topics, "audio", "Topic summary");
+  addMediaSectionSegments(segments, input.chapters, "video", "Chapter summary");
+  addTranscriptSegments(segments, input.groupedTranscript, input.expectedModality);
+  addFrameSegments(segments, input.frames);
+  if (segments.length === 0) addEmptyMediaSegment(segments, input);
+  return segments;
+}
 
-  const transcriptText = transcript.map(transcriptLine).join("\n");
-  const sections = [
-    `# ${expectedModality === "audio" ? "Audio" : "Video"} analysis`,
-    summary ? `## Summary\n\n${summary}` : "",
-    topics.length
-      ? `## Topics\n\n${topics.map((item) => transcriptLine(item)).join("\n\n")}`
-      : "",
-    chapters.length
-      ? `## Chapters\n\n${chapters.map((item) => transcriptLine(item)).join("\n\n")}`
-      : "",
-    transcriptText ? `## Transcript\n\n${transcriptText}` : "",
-    frames.length
-      ? `## On-screen text\n\n${frames.map((item) => transcriptLine(item)).join("\n")}`
-      : "",
-  ].filter(Boolean);
-
-  return {
-    modality: expectedModality,
-    canonicalText: sections.join("\n\n"),
-    transcriptText,
-    summary,
+function addMediaSummarySegment(
+  segments: PublishableSegment[],
+  input: MediaSegmentInput,
+): void {
+  if (!input.summary) return;
+  addSegment({
     segments,
-    metadata,
-  };
+    content: input.summary,
+    sourceLocator: { timeStartMs: 0, timeEndMs: input.metadata.durationMs },
+    modality: input.expectedModality,
+    segmentLevel: "document",
+  });
+}
+
+function addMediaSectionSegments(
+  segments: PublishableSegment[],
+  items: TimedText[],
+  modality: MediaKind,
+  prefix: string,
+): void {
+  for (const item of items) {
+    addSegment({
+      segments,
+      content: `${prefix}: ${item.text}`,
+      sourceLocator: locatorFor(item),
+      modality,
+      segmentLevel: "section",
+      parentChunkIndex: segments[0]?.chunkIndex,
+    });
+  }
+}
+
+function addTranscriptSegments(
+  segments: PublishableSegment[],
+  items: TimedText[],
+  modality: MediaKind,
+): void {
+  for (const item of items) {
+    const label = labelForTimedText(item);
+    addSegment({
+      segments,
+      content: `${label ? `${label}: ` : ""}${item.text}`,
+      sourceLocator: locatorFor(item),
+      modality,
+      segmentLevel: "chunk",
+      parentChunkIndex: parentForTime(segments, item.startMs),
+    });
+  }
+}
+
+function addFrameSegments(
+  segments: PublishableSegment[],
+  frames: TimedText[],
+): void {
+  for (const frame of frames) {
+    addSegment({
+      segments,
+      content: `On-screen text: ${frame.text}`,
+      sourceLocator: locatorFor(frame),
+      modality: "video",
+      segmentLevel: "chunk",
+      parentChunkIndex: parentForTime(segments, frame.startMs),
+    });
+  }
+}
+
+function addEmptyMediaSegment(
+  segments: PublishableSegment[],
+  input: MediaSegmentInput,
+): void {
+  const label = input.expectedModality === "audio" ? "Audio" : "Video";
+  addSegment({
+    segments,
+    content: `${label} with no detected speech or text`,
+    sourceLocator: { timeStartMs: 0, timeEndMs: input.metadata.durationMs },
+    modality: input.expectedModality,
+    segmentLevel: "document",
+  });
+}
+
+interface CanonicalMediaTextInput {
+  expectedModality: MediaKind;
+  summary?: string;
+  topics: TimedText[];
+  chapters: TimedText[];
+  transcriptText: string;
+  frames: TimedText[];
+}
+
+function buildCanonicalMediaText(input: CanonicalMediaTextInput): string {
+  const sections = [
+    `# ${input.expectedModality === "audio" ? "Audio" : "Video"} analysis`,
+    input.summary ? `## Summary\n\n${input.summary}` : "",
+    timedTextSection("Topics", input.topics, "\n\n"),
+    timedTextSection("Chapters", input.chapters, "\n\n"),
+    input.transcriptText ? `## Transcript\n\n${input.transcriptText}` : "",
+    timedTextSection("On-screen text", input.frames, "\n"),
+  ].filter(Boolean);
+  return sections.join("\n\n");
+}
+
+function timedTextSection(
+  heading: string,
+  items: TimedText[],
+  separator: string,
+): string {
+  return items.length > 0
+    ? `## ${heading}\n\n${items.map(transcriptLine).join(separator)}`
+    : "";
 }
