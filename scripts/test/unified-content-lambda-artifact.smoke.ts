@@ -138,7 +138,10 @@ try {
     'const imageSource = await readFile("/fixture/runtime.png");',
     'const image = await worker.prepareRepositoryImageForRuntimeSmoke(imageSource, "image/png");',
     'if (image.width !== 4 || image.height !== 3 || image.thumbnail.byteLength === 0) throw new Error("Sharp image processing failed in the bundled runtime");',
-    'const sharpModule = await import("file:///var/task/node_modules/sharp/lib/index.js"); const sharp = sharpModule.default;',
+    // Resolve sharp through its package.json entry map (createRequire) instead of a
+    // hardcoded deep path: sharp 0.35 moved its entry from lib/index.js to
+    // dist/index.cjs, and future layouts should keep working without edits here.
+    'const { createRequire } = await import("node:module"); const sharp = createRequire("file:///var/task/index.mjs")("sharp");',
     'for (const [format, mediaType] of [["jpeg", "image/jpeg"], ["webp", "image/webp"], ["gif", "image/gif"], ["tiff", "image/tiff"]]) { const encoded = await sharp(imageSource).toFormat(format).toBuffer(); const prepared = await worker.prepareRepositoryImageForRuntimeSmoke(encoded, mediaType); if (prepared.detectedContentType !== mediaType || prepared.thumbnail.byteLength === 0) throw new Error(`Sharp ${format} processing failed in the bundled runtime`); }',
     'const officeSource = await readFile("/fixture/runtime.xlsx");',
     'const office = await worker.extractOfficeDocumentForRuntimeSmoke(officeSource, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");',
