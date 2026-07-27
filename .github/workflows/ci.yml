@@ -241,7 +241,7 @@ jobs:
       run: bun install -g aws-cdk@2
 
     - name: Enable ARM64 Lambda artifact execution
-      uses: docker/setup-qemu-action@v3
+      uses: docker/setup-qemu-action@v4
       with:
         platforms: arm64
 
