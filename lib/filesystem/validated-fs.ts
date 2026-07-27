@@ -59,7 +59,14 @@ function isWithin(candidate: string, root: string): boolean {
 
 function allowedRoots(access: AccessKind): string[] {
   const tempRoot = resolve(tmpdir());
-  const roots = [resolve(process.cwd()), tempRoot];
+  const roots = [
+    resolve(process.cwd()),
+    tempRoot,
+    // Operational scripts and local storage configuration intentionally use
+    // the stable POSIX temp path instead of the host-specific os.tmpdir().
+    "/tmp",
+    "/private/tmp",
+  ];
   // macOS reports /var and /tmp through both their public names and the
   // canonical /private aliases. Child processes can return the opposite form.
   if (tempRoot === "/tmp" || tempRoot.startsWith("/var/")) {
