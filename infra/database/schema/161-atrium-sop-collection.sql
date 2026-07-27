@@ -1,5 +1,5 @@
 -- ============================================================================
--- 159 — Atrium collection for Standard Operating Procedures
+-- 161 — Atrium collection for Standard Operating Procedures
 --
 -- The psd-sop-creator agent skill files every SOP it drafts into a dedicated
 -- Atrium collection so SOPs are findable as a set (`find --collection

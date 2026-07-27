@@ -110,7 +110,10 @@ import {
   type ContentProcessingMessage,
 } from "./contract";
 import { CONTENT_SWEEP_REDISPATCHABLE_STATUSES } from "../../../lib/repositories/content-platform/job-state";
-import { releasePostDeployRecoveryJobs } from "../../../lib/repositories/content-platform/post-deploy-recovery";
+import {
+  releasePostDeployEmbeddingGenerations,
+  releasePostDeployRecoveryJobs,
+} from "../../../lib/repositories/content-platform/post-deploy-recovery";
 import {
   claimRepositoryProcessingJob,
   reconcileRepositoryProcessingDlqMessage,
@@ -984,9 +987,16 @@ async function storeCanonicalText(
   itemVersionId: string,
   canonicalText: string,
   processorVersion: string,
-): Promise<{ canonicalText?: string; canonicalTextObjectKey?: string }> {
+): Promise<{
+  canonicalText?: string;
+  canonicalTextObjectKey?: string;
+  canonicalTextSha256: string;
+}> {
+  const canonicalTextSha256 = createHash("sha256")
+    .update(canonicalText)
+    .digest("hex");
   if (canonicalText.length <= MAX_INLINE_ARTIFACT_CHARACTERS) {
-    return { canonicalText };
+    return { canonicalText, canonicalTextSha256 };
   }
   const objectKey = canonicalTextArtifactObjectKey(repositoryId, itemVersionId, processorVersion);
   await s3.send(
@@ -995,9 +1005,12 @@ async function storeCanonicalText(
       Key: objectKey,
       Body: canonicalText,
       ContentType: "text/markdown; charset=utf-8",
+      ChecksumSHA256: Buffer.from(canonicalTextSha256, "hex").toString(
+        "base64",
+      ),
     }),
   );
-  return { canonicalTextObjectKey: objectKey };
+  return { canonicalTextObjectKey: objectKey, canonicalTextSha256 };
 }
 
 async function processMessage(message: ContentProcessingMessage, workerId: string): Promise<void> {
@@ -1339,6 +1352,7 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
       canonicalText = extracted.canonicalText;
       processorVersion = extracted.processorVersion;
       processorName = "aistudio-text";
+      detectedContentType = extracted.detectedContentType;
       artifactMetadata = extracted.metadata;
     } else {
       const prepared = await prepareRepositoryImage(source, declaredContentType);
@@ -1661,10 +1675,18 @@ export async function handler(
           name: "post-deploy-recovery",
           run: async () => {
             const released = await releasePostDeployRecoveryJobs();
+            const releasedGenerations =
+              await releasePostDeployEmbeddingGenerations();
             if (released.length > 0) {
               log.info("Released post-deployment unified content recovery jobs", {
                 count: released.length,
               });
+            }
+            if (releasedGenerations.length > 0) {
+              log.info(
+                "Released post-deployment embedding recovery generations",
+                { count: releasedGenerations.length }
+              );
             }
           },
         },

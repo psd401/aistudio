@@ -85,8 +85,19 @@ export function resolveGoogleDriveExportFormat(
     matches(sourceMimeType),
   );
   if (!mapping) return null;
+  const contentType =
+    mapping.type === "text" &&
+    sourceMimeType !== "text/markdown" &&
+    sourceMimeType !== "text/csv"
+      ? "text/plain"
+      : sourceMimeType;
   return {
-    contentType: sourceMimeType,
+    // The canonical text processor deliberately has a narrow media-type
+    // contract. Drive uses many vendor text subtypes (for example
+    // text/x-python); their original MIME type remains in connector/version
+    // metadata while the byte-identical UTF-8 source is processed as plain
+    // text.
+    contentType,
     extension: "",
     method: "blob",
     repositoryItemType: mapping.type,

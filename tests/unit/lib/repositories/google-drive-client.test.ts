@@ -195,6 +195,21 @@ describe("Google Drive canonical format mapping", () => {
     ).toBeNull();
   });
 
+  test("normalizes Drive vendor text types to the canonical text contract", () => {
+    expect(resolveGoogleDriveExportFormat("text/x-python")).toEqual({
+      contentType: "text/plain",
+      extension: "",
+      method: "blob",
+      repositoryItemType: "text",
+    });
+    expect(resolveGoogleDriveExportFormat("text/markdown")?.contentType).toBe(
+      "text/markdown",
+    );
+    expect(resolveGoogleDriveExportFormat("text/csv")?.contentType).toBe(
+      "text/csv",
+    );
+  });
+
   test("sanitizes exported source names", () => {
     const format = resolveGoogleDriveExportFormat(
       "application/vnd.google-apps.document",

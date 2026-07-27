@@ -147,6 +147,15 @@ export async function getRepositoryMigrationInventory(): Promise<
         WHERE item.lifecycle_status = 'active'
           AND repository.lifecycle_status = 'active'
           AND item.type IN ('document', 'text', 'url')
+          AND NOT (
+            COALESCE(item.metadata, '{}'::jsonb) ? 'migrationSourceKind'
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM repository_connector_sources connector_source
+            WHERE connector_source.repository_item_id = item.id
+              AND connector_source.status = 'unsupported'
+          )
           AND (
             item.current_version_id IS NULL
             OR EXISTS (
@@ -210,6 +219,7 @@ export async function getRepositoryMigrationInventory(): Promise<
           COUNT(*)::integer AS tracked,
           COUNT(*) FILTER (WHERE status = 'verified')::integer AS verified
         FROM repository_migration_items
+        WHERE status <> 'excluded'
         GROUP BY source_kind
       `),
     );
@@ -632,17 +642,20 @@ function migrationMetricsFromRows(
   const counts = Object.fromEntries(
     rows.map((row) => [row.status, numberFromDatabase(row.count)]),
   ) as Partial<Record<RepositoryMigrationItemStatus, number>>;
+  const excluded = counts.excluded ?? 0;
   return {
-    discovered: Object.values(counts).reduce(
-      (total, value) => total + (value ?? 0),
-      0,
-    ),
+    discovered:
+      Object.values(counts).reduce(
+        (total, value) => total + (value ?? 0),
+        0,
+      ) - excluded,
     migrated:
       (counts.migrated ?? 0) + (counts.verified ?? 0) + (counts.mismatch ?? 0),
     verified: counts.verified ?? 0,
     mismatched: counts.mismatch ?? 0,
     failed: counts.failed ?? 0,
     unrecoverable: counts.unrecoverable ?? 0,
+    excluded,
     rolledBack: counts.rolled_back ?? 0,
   };
 }

@@ -1,5 +1,7 @@
 /** @jest-environment node */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   assessContentRetirementReadiness,
   buildMigrationContentEvidence,
@@ -7,9 +9,41 @@ import {
   isMigrationOwnedCanonicalVersion,
   reconcileMigrationEvidence,
 } from "@/lib/repositories/content-platform/migration-reconciliation";
-import { deterministicMigrationSourceId } from "@/lib/repositories/content-platform/migration-runner";
+import {
+  buildLegacyMigrationFallbackBody,
+  deterministicMigrationSourceId,
+  isMissingMigrationSourceObject,
+} from "@/lib/repositories/content-platform/migration-runner";
 
 describe("unified content migration reconciliation", () => {
+  it("recognizes only definitive S3 missing-object responses", () => {
+    expect(
+      isMissingMigrationSourceObject({
+        name: "NoSuchKey",
+        $metadata: { httpStatusCode: 404 },
+      }),
+    ).toBe(true);
+    expect(
+      isMissingMigrationSourceObject({
+        name: "AccessDenied",
+        $metadata: { httpStatusCode: 403 },
+      }),
+    ).toBe(false);
+    expect(
+      isMissingMigrationSourceObject(new Error("network timeout")),
+    ).toBe(false);
+  });
+
+  it("reconstructs a deterministic text source only from non-empty legacy segments", () => {
+    expect(
+      new TextDecoder().decode(
+        buildLegacyMigrationFallbackBody([" first ", "", "second\n"]) ??
+          undefined,
+      ),
+    ).toBe("first\nsecond");
+    expect(buildLegacyMigrationFallbackBody([" ", "\n"])).toBeNull();
+  });
+
   it("builds stable normalized evidence and deterministic source ids", () => {
     expect(
       buildMigrationContentEvidence(["alpha  \r\nbeta", "", "gamma"]),
@@ -50,9 +84,40 @@ describe("unified content migration reconciliation", () => {
       expect.arrayContaining([
         "canonical processing is failed",
         "source object SHA-256 differs",
-        "extracted record count differs",
         "extracted content SHA-256 differs",
       ]),
+    );
+  });
+
+  it("allows canonical resegmentation when full normalized text is unchanged", () => {
+    expect(
+      reconcileMigrationEvidence({
+        sourceObjectSha256: null,
+        canonicalObjectSha256: "a".repeat(64),
+        sourceContent: { recordCount: 3, sha256: "b".repeat(64) },
+        canonicalContent: { recordCount: 17, sha256: "b".repeat(64) },
+        processingStatus: "completed",
+        approvedMismatch: false,
+      }),
+    ).toEqual({ status: "verified", reasons: [] });
+  });
+
+  it("revisits each mismatch once per reconciliation run before finishing", () => {
+    const runnerSource = readFileSync(
+      join(
+        process.cwd(),
+        "lib/repositories/content-platform/migration-runner.ts",
+      ),
+      "utf8",
+    );
+    expect(runnerSource).toContain(
+      "${repositoryMigrationItems.metadata} ->> 'lastReconciledRunId'",
+    );
+    expect(runnerSource).toContain(
+      "lastReconciledRunId: run.id",
+    );
+    expect(runnerSource).toContain(
+      "WHERE status IN ('migrated', 'mismatch')",
     );
   });
 
@@ -111,6 +176,15 @@ describe("unified content migration reconciliation", () => {
       ready: true,
       blockers: [],
     });
+    expect(
+      assessContentRetirementReadiness({
+        ...readyInput,
+        migrationMetrics: {
+          ...readyInput.migrationMetrics,
+          excluded: 3,
+        },
+      }),
+    ).toEqual({ ready: true, blockers: [] });
     expect(
       assessContentRetirementReadiness({
         ...readyInput,

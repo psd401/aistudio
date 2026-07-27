@@ -12,6 +12,7 @@
  */
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { eq, sql, type SQL } from "drizzle-orm";
@@ -29,6 +30,8 @@ import {
   repositoryItemChunks,
   repositoryItems,
   repositoryItemVersions,
+  repositoryMigrationItems,
+  repositoryMigrationRuns,
   repositoryProcessingJobs,
   repositoryUploadSessions,
   users,
@@ -54,19 +57,26 @@ import {
   OFFICE_CONTENT_TYPES,
   IMAGE_PROCESSOR_VERSION,
   POST_DEPLOY_ARTIFACT_RECOVERY_MARKER,
+  POST_DEPLOY_EMBEDDING_CONCURRENCY_MARKER,
   publishDocumentVersion,
   publishPdfVersion,
   POST_DEPLOY_RECOVERY_MARKER,
+  processNextRepositoryMigrationBatch,
   recordRepositoryProcessingFailure,
   recordRepositorySecurityBlock,
   reconcileRepositoryProcessingDlqMessage,
   releaseIncompleteEmbeddingGenerationClaim,
+  releasePostDeployEmbeddingGenerations,
   releasePostDeployRecoveryJobs,
   getCanonicalRepositoryItemStatuses,
+  getRepositoryMigrationInventory,
   registerCanonicalUpload,
   retryCanonicalRepositoryItem,
   segmentPdfPages,
   sourceRevisionForObjectKey,
+  startRepositoryRollbackRun,
+  updateRepositoryMigrationRunCursor,
+  type RepositoryMigrationStorage,
   type RepositoryUploadStorage,
 } from "@/lib/repositories/content-platform";
 import { keywordSearch } from "@/lib/repositories/search-service";
@@ -101,6 +111,29 @@ const artifactStateRecoveryStatements = artifactStateRecoverySql
   .split(/;\s*(?:\r?\n|$)/)
   .map((statement) => statement.trim())
   .filter((statement) => statement.length > 0);
+const embeddingConcurrencyRecoverySql = readFileSync(
+  resolve(
+    process.cwd(),
+    "infra/database/schema/159-unified-content-concurrency-recovery.sql"
+  ),
+  "utf8"
+);
+const embeddingConcurrencyRecoveryStatements =
+  embeddingConcurrencyRecoverySql
+    .split(/;\s*(?:\r?\n|$)/)
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0);
+const migrationSourceEligibilitySql = readFileSync(
+  resolve(
+    process.cwd(),
+    "infra/database/schema/160-unified-content-migration-source-eligibility.sql"
+  ),
+  "utf8"
+);
+const migrationSourceEligibilityStatements = migrationSourceEligibilitySql
+  .split(/;\s*(?:\r?\n|$)/)
+  .map((statement) => statement.trim())
+  .filter((statement) => statement.length > 0);
 
 async function applyPostDeployHandoff(context: string): Promise<void> {
   for (const [index, statement] of postDeployHandoffStatements.entries()) {
@@ -120,12 +153,44 @@ async function applyArtifactStateRecovery(context: string): Promise<void> {
   }
 }
 
+async function applyEmbeddingConcurrencyRecovery(
+  context: string
+): Promise<void> {
+  for (const [
+    index,
+    statement,
+  ] of embeddingConcurrencyRecoveryStatements.entries()) {
+    await executeQuery(
+      (db) => db.execute(sql.raw(statement)),
+      `${context}.${index + 1}`
+    );
+  }
+}
+
+async function applyMigrationSourceEligibility(context: string): Promise<void> {
+  for (const [
+    index,
+    statement,
+  ] of migrationSourceEligibilityStatements.entries()) {
+    await executeQuery(
+      (db) => db.execute(sql.raw(statement)),
+      `${context}.${index + 1}`
+    );
+  }
+}
+
 // The deployment always migrates the database before the application or worker
 // loads the expanded Drizzle schema. Reproduce that order in the standalone
 // smoke, whose local database may predate this branch.
 await applyPostDeployHandoff("smoke.unifiedContent.ensurePostDeploySchema");
 await applyArtifactStateRecovery(
   "smoke.unifiedContent.ensureArtifactRecoverySchema"
+);
+await applyMigrationSourceEligibility(
+  "smoke.unifiedContent.ensureMigrationSourceEligibility"
+);
+await applyMigrationSourceEligibility(
+  "smoke.unifiedContent.reapplyMigrationSourceEligibility"
 );
 const font = await pdf.embedFont(StandardFonts.Helvetica);
 for (const text of [
@@ -170,6 +235,175 @@ const [repository] = await executeQuery(
 assert.ok(repository);
 
 try {
+  const repositoryInventoryBefore = (
+    await getRepositoryMigrationInventory()
+  ).find((entry) => entry.sourceKind === "repository_item");
+  assert.ok(repositoryInventoryBefore);
+  await executeQuery(
+    (db) =>
+      db.insert(repositoryItems).values({
+        repositoryId: repository.id,
+        type: "document",
+        name: "Migration-created canonical target",
+        source: "legacy/missing-source.pdf",
+        metadata: {
+          migrationSourceKind: "nexus_document",
+          migrationSourceId: 999_999,
+        },
+      }),
+    "smoke.unifiedContent.createMigrationTargetInventoryExclusion"
+  );
+  const repositoryInventoryAfter = (
+    await getRepositoryMigrationInventory()
+  ).find((entry) => entry.sourceKind === "repository_item");
+  assert.equal(
+    repositoryInventoryAfter?.discovered,
+    repositoryInventoryBefore.discovered
+  );
+
+  const [cursorRun] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryMigrationRuns)
+        .values({
+          mode: "backfill",
+          status: "running",
+          requestedBy: owner.id,
+          sourceKinds: ["repository_item"],
+          cursor: {},
+          snapshot: {
+            counts: { repository_item: 1 },
+            maximumIds: { repository_item: 8 },
+          },
+          metrics: { discovered: 1 },
+        })
+        .returning({ id: repositoryMigrationRuns.id }),
+    "smoke.unifiedContent.createCursorRun"
+  );
+  assert.ok(cursorRun);
+  try {
+    const advanced = await updateRepositoryMigrationRunCursor(
+      cursorRun.id,
+      "repository_item",
+      8
+    );
+    assert.equal(advanced.cursor.repository_item, 8);
+    assert.deepEqual(advanced.sourceKinds, ["repository_item"]);
+    assert.equal(advanced.snapshot.maximumIds?.repository_item, 8);
+    assert.equal(advanced.metrics.discovered, 1);
+    const monotonic = await updateRepositoryMigrationRunCursor(
+      cursorRun.id,
+      "repository_item",
+      5
+    );
+    assert.equal(monotonic.cursor.repository_item, 8);
+  } finally {
+    await executeQuery(
+      (db) =>
+        db
+          .delete(repositoryMigrationRuns)
+          .where(eq(repositoryMigrationRuns.id, cursorRun.id)),
+      "smoke.unifiedContent.cleanupCursorRun"
+    );
+  }
+
+  const [excludedRollbackParent] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryMigrationRuns)
+        .values({
+          mode: "backfill",
+          status: "completed_with_errors",
+          requestedBy: owner.id,
+          sourceKinds: ["assistant_pdf_job"],
+          snapshot: {
+            counts: { assistant_pdf_job: 1 },
+            maximumIds: { assistant_pdf_job: 1 },
+          },
+          metrics: { discovered: 1, excluded: 1 },
+          recoveryWindowEndsAt: new Date(Date.now() + 60_000),
+          startedAt: new Date(),
+          finishedAt: new Date(),
+        })
+        .returning({ id: repositoryMigrationRuns.id }),
+    "smoke.unifiedContent.createExcludedRollbackParent"
+  );
+  assert.ok(excludedRollbackParent);
+  let excludedRollbackRunId: string | null = null;
+  try {
+    await executeQuery(
+      (db) =>
+        db.insert(repositoryMigrationItems).values({
+          runId: excludedRollbackParent.id,
+          originRunId: excludedRollbackParent.id,
+          sourceKind: "assistant_pdf_job",
+          sourceId: Date.now(),
+          ownerId: owner.id,
+          status: "excluded",
+          lastErrorCode: "MIGRATION_SOURCE_EXCLUDED",
+          metadata: {
+            exclusionReason: "unsupported_connector_source",
+            excludedAt: new Date().toISOString(),
+          },
+        }),
+      "smoke.unifiedContent.createExcludedRollbackItem"
+    );
+    const excludedRollbackRun = await startRepositoryRollbackRun({
+      parentRunId: excludedRollbackParent.id,
+      requestedBy: owner.id,
+    });
+    excludedRollbackRunId = excludedRollbackRun.id;
+    const rollbackStorage: RepositoryMigrationStorage = {
+      inspectAndCopyObject: async () => {
+        throw new Error("Excluded rollback must not inspect source objects");
+      },
+      putObject: async () => {
+        throw new Error("Excluded rollback must not create source objects");
+      },
+      deleteObject: async () => {
+        throw new Error("Excluded rollback must not delete source objects");
+      },
+    };
+    assert.deepEqual(
+      await processNextRepositoryMigrationBatch(rollbackStorage),
+      { runId: excludedRollbackRun.id, mode: "rollback" }
+    );
+    const [completedExcludedRollback] = await executeQuery(
+      (db) =>
+        db
+          .select({
+            status: repositoryMigrationRuns.status,
+            metrics: repositoryMigrationRuns.metrics,
+          })
+          .from(repositoryMigrationRuns)
+          .where(eq(repositoryMigrationRuns.id, excludedRollbackRun.id))
+          .limit(1),
+      "smoke.unifiedContent.readExcludedRollback"
+    );
+    assert.deepEqual(completedExcludedRollback, {
+      status: "rolled_back",
+      metrics: { rolledBack: 0, excluded: 1 },
+    });
+  } finally {
+    const rollbackRunId = excludedRollbackRunId;
+    if (rollbackRunId) {
+      await executeQuery(
+        (db) =>
+          db
+            .delete(repositoryMigrationRuns)
+            .where(eq(repositoryMigrationRuns.id, rollbackRunId)),
+        "smoke.unifiedContent.cleanupExcludedRollbackRun"
+      );
+    }
+    await executeQuery(
+      (db) =>
+        db
+          .delete(repositoryMigrationRuns)
+          .where(eq(repositoryMigrationRuns.id, excludedRollbackParent.id)),
+      "smoke.unifiedContent.cleanupExcludedRollbackParent"
+    );
+  }
+
   const uploadStorage: RepositoryUploadStorage = {
     createSingleUpload: async () => ({ uploadUrl: "https://smoke.invalid/upload" }),
     createMultipartUpload: async () => {
@@ -1821,6 +2055,92 @@ try {
     segments: textExtraction.segments,
     artifactMetadata: textExtraction.metadata,
   });
+  const [canonicalTextArtifact] = await executeQuery(
+    (db) =>
+      db
+        .select({ sha256: repositoryArtifacts.sha256 })
+        .from(repositoryArtifacts)
+        .where(eq(repositoryArtifacts.id, textPublication.artifactId))
+        .limit(1),
+    "smoke.unifiedContent.canonicalTextHash"
+  );
+  assert.equal(
+    canonicalTextArtifact?.sha256,
+    createHash("sha256").update(textExtraction.canonicalText).digest("hex")
+  );
+  const canonicalTextSha256 = createHash("sha256")
+    .update(textExtraction.canonicalText)
+    .digest("hex");
+  const canonicalTextObjectKey =
+    `repositories/${repository.id}/artifacts/${textRegistration.version.id}/canonical-text.md`;
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryArtifacts)
+        .set({
+          objectKey: canonicalTextObjectKey,
+          textInline: null,
+          sha256: null,
+        })
+        .where(eq(repositoryArtifacts.id, textPublication.artifactId)),
+    "smoke.unifiedContent.createLegacyObjectBackedArtifact"
+  );
+  await assert.rejects(
+    publishDocumentVersion({
+      itemVersionId: textRegistration.version.id,
+      processorVersion: textExtraction.processorVersion,
+      processorName: "aistudio-text",
+      detectedContentType: textExtraction.detectedContentType,
+      inspectionStatus: "clean",
+      malwareScanRequired: true,
+      canonicalTextObjectKey: `${canonicalTextObjectKey}.mismatched`,
+      canonicalTextSha256,
+      segments: textExtraction.segments,
+      artifactMetadata: textExtraction.metadata,
+    }),
+    /object key does not match the replay/
+  );
+  const [rejectedReplayArtifact] = await executeQuery(
+    (db) =>
+      db
+        .select({ sha256: repositoryArtifacts.sha256 })
+        .from(repositoryArtifacts)
+        .where(eq(repositoryArtifacts.id, textPublication.artifactId))
+        .limit(1),
+    "smoke.unifiedContent.readRejectedLegacyArtifactReplay"
+  );
+  assert.equal(rejectedReplayArtifact?.sha256, null);
+  const legacyArtifactReplay = await publishDocumentVersion({
+    itemVersionId: textRegistration.version.id,
+    processorVersion: textExtraction.processorVersion,
+    processorName: "aistudio-text",
+    detectedContentType: textExtraction.detectedContentType,
+    inspectionStatus: "clean",
+    malwareScanRequired: true,
+    canonicalTextObjectKey,
+    canonicalTextSha256,
+    segments: textExtraction.segments,
+    artifactMetadata: textExtraction.metadata,
+  });
+  assert.equal(legacyArtifactReplay.replayed, true);
+  const [backfilledLegacyArtifact] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          objectKey: repositoryArtifacts.objectKey,
+          textInline: repositoryArtifacts.textInline,
+          sha256: repositoryArtifacts.sha256,
+        })
+        .from(repositoryArtifacts)
+        .where(eq(repositoryArtifacts.id, textPublication.artifactId))
+        .limit(1),
+    "smoke.unifiedContent.readBackfilledLegacyArtifact"
+  );
+  assert.deepEqual(backfilledLegacyArtifact, {
+    objectKey: canonicalTextObjectKey,
+    textInline: null,
+    sha256: canonicalTextSha256,
+  });
   const canonicalTextResults = await retrieveRepositoryContent({
     query: "MOONLIT-HARBOR-SMOKE",
     repositoryIds: [repository.id],
@@ -2112,6 +2432,119 @@ try {
     replayedActivation?.embedded_item_count,
     activation?.embedded_item_count
   );
+
+  const [connectionStormGeneration] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryIndexGenerations)
+        .values({
+          repositoryId: repository.id,
+          status: "failed",
+          embeddingModel: "amazon-bedrock:amazon.titan-embed-text-v1",
+          embeddingDimensions: 1536,
+          segmentationVersion: "retrieval-v2",
+          processorVersion: "connection-storm-smoke-v1",
+          sourceVersionCount: 1,
+          segmentCount: 1,
+          embeddingRecoveryAttempts: 3,
+          errorMessage:
+            "Failed query: SELECT status FROM repository_index_generations",
+        })
+        .returning({ id: repositoryIndexGenerations.id }),
+    "smoke.unifiedContent.createConnectionStormGeneration"
+  );
+  assert.ok(connectionStormGeneration);
+  await executeQuery(
+    (db) =>
+      db.insert(repositoryItemChunks).values({
+        itemId: item.id,
+        itemVersionId: first.version.id,
+        indexGenerationId: connectionStormGeneration.id,
+        content: "Connection storm recovery test content.",
+        chunkIndex: 0,
+        metadata: {},
+        modality: "text",
+        contentHash: "e".repeat(64),
+        sourceLocator: { headingPath: ["Recovery"] },
+        contextPrefix: "Recovery",
+        segmentLevel: "section",
+        accessScope: {},
+        tokens: 6,
+      }),
+    "smoke.unifiedContent.createConnectionStormChunk"
+  );
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        UPDATE repository_item_chunks
+        SET embedding = ${smokeVector}::vector
+        WHERE index_generation_id = ${connectionStormGeneration.id}::uuid
+      `),
+    "smoke.unifiedContent.completeConnectionStormEmbeddings"
+  );
+  await applyEmbeddingConcurrencyRecovery(
+    "smoke.unifiedContent.applyEmbeddingConcurrencyRecovery"
+  );
+  await applyEmbeddingConcurrencyRecovery(
+    "smoke.unifiedContent.reapplyEmbeddingConcurrencyRecovery"
+  );
+  const [fencedConnectionStormGeneration] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          status: repositoryIndexGenerations.status,
+          recoveryQueuedAt:
+            repositoryIndexGenerations.embeddingRecoveryQueuedAt,
+          recoveryAttempts:
+            repositoryIndexGenerations.embeddingRecoveryAttempts,
+          errorMessage: repositoryIndexGenerations.errorMessage,
+        })
+        .from(repositoryIndexGenerations)
+        .where(
+          eq(repositoryIndexGenerations.id, connectionStormGeneration.id)
+        )
+        .limit(1),
+    "smoke.unifiedContent.readFencedConnectionStormGeneration"
+  );
+  assert.equal(fencedConnectionStormGeneration?.status, "failed");
+  assert.ok(fencedConnectionStormGeneration?.recoveryQueuedAt);
+  assert.equal(fencedConnectionStormGeneration?.recoveryAttempts, 3);
+  assert.equal(
+    fencedConnectionStormGeneration?.errorMessage?.startsWith(
+      `${POST_DEPLOY_EMBEDDING_CONCURRENCY_MARKER}:`
+    ),
+    true
+  );
+  assert.equal(
+    (
+      await claimIncompleteEmbeddingGenerations({
+        now: new Date(Date.now() + 60_000),
+        intervalMinutes: 0,
+      })
+    ).some(
+      (generation) => generation.id === connectionStormGeneration.id
+    ),
+    false
+  );
+  assert.deepEqual(await releasePostDeployEmbeddingGenerations(), []);
+  assert.deepEqual(
+    await releasePostDeployEmbeddingGenerations({
+      graceMinutes: 0,
+      now: new Date(Date.now() + 60_000),
+    }),
+    [{ id: connectionStormGeneration.id }]
+  );
+  const rearmedConnectionStormGeneration = (
+    await claimIncompleteEmbeddingGenerations({
+      now: new Date(Date.now() + 2 * 60_000),
+      intervalMinutes: 0,
+    })
+  ).find((generation) => generation.id === connectionStormGeneration.id);
+  assert.ok(rearmedConnectionStormGeneration);
+  assert.equal(rearmedConnectionStormGeneration.recoveryAttempt, 1);
+  assert.equal(rearmedConnectionStormGeneration.previousStatus, "failed");
+  assert.equal(rearmedConnectionStormGeneration.activationOnly, true);
+
   const [activeLegacyItem] = await executeQuery(
     (db) =>
       db

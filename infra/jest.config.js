@@ -8,6 +8,12 @@ module.exports = {
       // `tsc` emits ignored JavaScript beside the TypeScript source. Resolve
       // TypeScript first so a prior build cannot make Jest exercise stale code.
       moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
+      // CDK local bundling installs Lambda dependencies in-place. Pin this
+      // package to the infra workspace copy so Jest mocks it consistently
+      // before and after a synth has populated nested node_modules folders.
+      moduleNameMapper: {
+        '^@aws-sdk/client-sqs$': '<rootDir>/../node_modules/@aws-sdk/client-sqs'
+      },
       transform: {
         '^.+\\.tsx?$': 'ts-jest'
       }

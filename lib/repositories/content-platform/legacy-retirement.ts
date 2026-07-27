@@ -98,6 +98,7 @@ export async function isLegacyContentRetirementActive(): Promise<boolean> {
           (
             SELECT COUNT(*)::integer
             FROM repository_migration_items
+            WHERE status <> 'excluded'
           ) AS discovered,
           (
             SELECT COUNT(*)::integer
@@ -180,6 +181,15 @@ export async function isLegacyContentRetirementActive(): Promise<boolean> {
             WHERE item.lifecycle_status = 'active'
               AND repository.lifecycle_status = 'active'
               AND item.type IN ('document', 'text', 'url')
+              AND NOT (
+                COALESCE(item.metadata, '{}'::jsonb) ? 'migrationSourceKind'
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM repository_connector_sources connector_source
+                WHERE connector_source.repository_item_id = item.id
+                  AND connector_source.status = 'unsupported'
+              )
               AND (
                 item.current_version_id IS NULL
                 OR EXISTS (

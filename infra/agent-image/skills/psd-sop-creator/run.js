@@ -45,7 +45,7 @@ function appBaseUrl() {
   return (process.env.APP_BASE_URL || '').replace(/\/+$/, '');
 }
 
-/** The Atrium collection every SOP is filed into (seeded by migration 159). */
+/** The Atrium collection every SOP is filed into (seeded by migration 161). */
 const DEFAULT_COLLECTION = 'standard-operating-procedures';
 
 /** Path of the hosted district logo, relative to APP_BASE_URL. */
