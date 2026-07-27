@@ -259,6 +259,19 @@ export class DatabaseStack extends cdk.Stack {
     // connection pooling (max 20 connections, idle timeout 20s), making
     // RDS Proxy redundant. Saves ~$81/month. See issue #832.
 
+    this.costDashboard = this.configureCostOptimization(props, restoreFromSnapshot);
+
+    this.configureDatabaseInitialization(props, restoreFromSnapshot, dbSecret);
+
+    this.configureConversationRetention(props, restoreFromSnapshot, dbSecret, vpc);
+
+    this.configureOutputs(props, restoreFromSnapshot);
+  }
+
+  private configureCostOptimization(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean
+  ): AuroraCostDashboard | undefined {
     // Add cost optimization features (skip for snapshot restoration as AuroraCostOptimizer requires DatabaseCluster)
     if (!restoreFromSnapshot && this.cluster instanceof rds.DatabaseCluster) {
       new AuroraCostOptimizer(this, 'CostOptimizer', {
@@ -294,12 +307,20 @@ export class DatabaseStack extends cdk.Stack {
       });
 
       // Export Aurora metrics for consolidated monitoring dashboard
-      this.costDashboard = new AuroraCostDashboard(this, 'CostDashboard', {
+      return new AuroraCostDashboard(this, 'CostDashboard', {
         cluster: this.cluster,
         environment: props.environment,
       });
     }
 
+    return undefined;
+  }
+
+  private configureDatabaseInitialization(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean,
+    dbSecret: secretsmanager.ISecret
+  ): void {
     // Database initialization Lambda (SKIP when restoring from snapshot)
     // Note: Snapshot already contains schema and data, so no initialization needed
     if (!restoreFromSnapshot) {
@@ -428,6 +449,16 @@ export class DatabaseStack extends cdk.Stack {
         dbInit.node.addDependency(this.cluster);
       }
     }
+
+  }
+
+  private configureConversationRetention(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean,
+    dbSecret: secretsmanager.ISecret,
+    vpc: ec2.IVpc
+  ): void {
+    const config = EnvironmentConfig.get(props.environment);
 
     // =====================================================================
     // Nexus conversation retention sweep (Issue #1330)
@@ -609,6 +640,12 @@ export class DatabaseStack extends cdk.Stack {
       });
     }
 
+  }
+
+  private configureOutputs(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean
+  ): void {
     // Outputs
     if (!restoreFromSnapshot) {
       new cdk.CfnOutput(this, 'ClusterEndpoint', {
