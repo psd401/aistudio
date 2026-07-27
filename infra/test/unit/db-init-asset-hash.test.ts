@@ -52,6 +52,22 @@ describe('computeDbInitAssetHash', () => {
     expect(computeDbInitAssetHash(databaseDir)).not.toBe(before);
   });
 
+  it('changes when a nested Lambda source changes', () => {
+    write('lambda/lib/helper.ts', 'export const nested = 1;');
+    const before = computeDbInitAssetHash(databaseDir);
+    write('lambda/lib/helper.ts', 'export const nested = 2;');
+    expect(computeDbInitAssetHash(databaseDir)).not.toBe(before);
+  });
+
+  it('changes when a Lambda source file is renamed', () => {
+    const before = computeDbInitAssetHash(databaseDir);
+    fs.renameSync(
+      path.join(databaseDir, 'lambda/db-init-handler.ts'),
+      path.join(databaseDir, 'lambda/db-init-handler-renamed.ts')
+    );
+    expect(computeDbInitAssetHash(databaseDir)).not.toBe(before);
+  });
+
   it('changes when the Lambda package.json changes', () => {
     const before = computeDbInitAssetHash(databaseDir);
     write('lambda/package.json', '{"name":"db-init-lambda","version":"2.0.0"}');
@@ -87,8 +103,9 @@ describe('computeDbInitAssetHash', () => {
     write('lambda/db-init-handler.js', '"use strict"; // compiled twin');
     write('lambda/db-init-handler.d.ts', 'export declare const handler: () => number;');
     write('lambda/bun.lock', '{}');
-    write('lambda/node_modules/some-dep/index.js', 'module.exports = {};');
+    write('lambda/node_modules/some-dep/index.ts', 'export const dep = true;');
     write('lambda/dist/db-init-handler.js', '"use strict";');
+    write('lambda/dist/nested/emit.ts', 'export const emitted = true;');
     expect(computeDbInitAssetHash(databaseDir)).toBe(before);
   });
 });
