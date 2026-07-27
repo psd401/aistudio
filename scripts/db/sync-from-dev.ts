@@ -26,6 +26,27 @@ const LOCAL_DB_URL =
   process.env.LOCAL_DATABASE_URL ||
   "postgresql://postgres:postgres@localhost:5432/aistudio";
 
+/**
+ * Split a libpq connection URL into a password-free URL plus the password, so
+ * the password can travel in PGPASSWORD instead of argv (out of `ps` output and
+ * out of the "Command failed: psql <argv>" text that execFileSync puts on the
+ * thrown error, which this script logs).
+ *
+ * LOCAL_DATABASE_URL is operator-supplied and may not parse; fall back to using
+ * it verbatim rather than failing the sync.
+ */
+function splitConnectionUrl(url: string): { url: string; password?: string } {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.password) return { url };
+    const password = decodeURIComponent(parsed.password);
+    parsed.password = "";
+    return { url: parsed.toString(), password };
+  } catch {
+    return { url };
+  }
+}
+
 // Tables to exclude from sync (contain sensitive production data)
 const EXCLUDED_TABLES = [
   "users", // Contains real user emails/PII
@@ -78,12 +99,36 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // The password is deliberately NOT in this URL. libpq picks it up from
-  // PGPASSWORD (set on the child's env below), which keeps it out of the argv
-  // — and therefore out of `ps` output and out of the "Command failed: pg_dump
-  // <argv>" message that execFileSync puts on the thrown error, which we log.
-  const awsDbUrl = `postgresql://${awsUser}@${awsHost}:5432/${awsDatabase}?sslmode=require`;
-  const childEnv = { ...process.env, PGPASSWORD: awsPassword };
+  // The AWS connection is passed entirely through libpq's environment
+  // variables rather than assembled into a URL argv entry. Three reasons, all
+  // of them things the URL form got wrong:
+  //
+  //  - The password never reaches argv, so it is not in `ps` output and not in
+  //    the "Command failed: pg_dump <argv>" message execFileSync puts on the
+  //    thrown error (which this script logs).
+  //  - Nothing is interpolated into a string libpq has to re-parse. In the URL
+  //    form the user and host were injected unencoded, so
+  //    AWS_DEV_DB_USER='x@evil.example/' silently redirected the connection to
+  //    evil.example — and sslmode=require does not verify the host, so that
+  //    server would have received the credentials.
+  //  - No argv entry can be mistaken for an option (see the psql calls below).
+  const childEnv = {
+    ...process.env,
+    PGHOST: awsHost,
+    PGPORT: "5432",
+    PGUSER: awsUser,
+    PGPASSWORD: awsPassword,
+    PGDATABASE: awsDatabase,
+    PGSSLMODE: "require",
+  };
+
+  // Same treatment for the local connection: password into PGPASSWORD, so it is
+  // neither in argv nor in a logged error message.
+  const local = splitConnectionUrl(LOCAL_DB_URL);
+  const localDbUrl = local.url;
+  const localEnv = local.password
+    ? { ...process.env, PGPASSWORD: local.password }
+    : process.env;
 
   // Create temp directory for dump files.
   // mkdirSync({ recursive: true }) is already a no-op on an existing directory,
@@ -105,7 +150,7 @@ async function main(): Promise<void> {
     try {
       // Export from AWS.
       // execFileSync (argv array, no shell) rather than execSync (one shell
-      // string): the connection URLs are assembled from AWS_DEV_DB_* /
+      // string): the connection details come from AWS_DEV_DB_* /
       // LOCAL_DATABASE_URL environment variables, so interpolating them into a
       // shell command lets a hostile env value break out of the quotes and run
       // arbitrary commands (CodeQL js/indirect-command-line-injection). With
@@ -119,7 +164,6 @@ async function main(): Promise<void> {
         execFileSync(
           "pg_dump",
           [
-            awsDbUrl,
             `--table=${table}`,
             "--data-only",
             "--column-inserts",
@@ -131,28 +175,36 @@ async function main(): Promise<void> {
         fs.closeSync(dumpFd);
       }
 
-      // Import to local
+      // Import to local.
+      // --dbname=<url>, not a bare positional: removing the shell does not
+      // remove psql's own option parser, and LOCAL_DATABASE_URL is
+      // operator-supplied. A value beginning with "-" would be read as an
+      // option, and psql's \! meta-command shells out — so
+      // LOCAL_DATABASE_URL='-c\! <cmd>' would still be arbitrary code
+      // execution. Binding the value to --dbname= leaves nothing to reinterpret.
       log.debug(`  Importing to local...`);
-      execFileSync("psql", [LOCAL_DB_URL, "-f", dumpFile], {
+      execFileSync("psql", [`--dbname=${localDbUrl}`, "-f", dumpFile], {
         stdio: "pipe",
+        env: localEnv,
       });
 
       // Get row count
       const countResult = execFileSync(
         "psql",
-        [LOCAL_DB_URL, "-t", "-c", `SELECT COUNT(*) FROM ${table};`],
-        { encoding: "utf8" }
+        [`--dbname=${localDbUrl}`, "-t", "-c", `SELECT COUNT(*) FROM ${table};`],
+        { encoding: "utf8", env: localEnv }
       );
       log.success(`${table} (${countResult.trim()} rows)`);
     } catch (error: unknown) {
       const err = error as Error;
-      // execFileSync puts the whole argv in the message ("Command failed:
-      // pg_dump <argv>"). The password is no longer in there (PGPASSWORD), but
-      // the host/user/database still are — scrub the connection strings rather
-      // than print an operator's infrastructure into the log.
+      // execFileSync puts the whole argv in the message ("Command failed: psql
+      // <argv>"). Passwords are no longer in argv at all (PGPASSWORD), and the
+      // AWS connection is entirely in the env — but the local --dbname= value
+      // still appears, so scrub it rather than print an operator's connection
+      // string into the log.
       const safeMessage = (err.message ?? "")
-        .split(awsDbUrl)
-        .join("<aws-connection>")
+        .split(localDbUrl)
+        .join("<local-connection>")
         .split(LOCAL_DB_URL)
         .join("<local-connection>");
       log.warn(`Failed to sync ${table}: ${safeMessage}`);
