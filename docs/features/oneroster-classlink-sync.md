@@ -5,8 +5,10 @@ Status: v1 ingestion foundation and administrator control surface implemented by
 [#1310](https://github.com/psd401/aistudio/issues/1310), and Issue
 [#1311](https://github.com/psd401/aistudio/issues/1311). Optional roster role
 reconciliation is implemented by Issue
-[#1312](https://github.com/psd401/aistudio/issues/1312). Room provisioning and
-reporting are separate workstreams.
+[#1312](https://github.com/psd401/aistudio/issues/1312). Teacher-managed room
+provisioning is implemented by Issue
+[#1313](https://github.com/psd401/aistudio/issues/1313). Student room access
+enforcement and reporting remain separate workstreams.
 
 ## Scope and data boundary
 
@@ -171,6 +173,49 @@ The pass runs only after all six roster collections are confirmed successful,
 including a successful unchanged-revision night. It does not run for manual
 syncs. Its own failure is logged and rolled back but does not fail or undo the
 good roster snapshot. Disable the flag to stop future role changes immediately.
+
+## Teacher-managed rooms
+
+Migration 157 adds application-owned `rooms`, `room_classes`, `room_members`,
+and `room_resources` tables. They do not change the ownership of sync data:
+
+- A room is owned by its creator and is soft-deleted with `is_active=false`.
+  Only that creator or an application administrator may update or delete it.
+- `room_classes.class_sourced_id` deliberately has no FK to the sync-owned
+  OneRoster tables. A ClassLink refresh or soft deletion cannot cascade into an
+  application-owned room.
+- Section membership is dynamic. `lib/rooms/membership.ts` resolves the union of
+  active students in linked active sections and explicit room-member emails.
+  It lowercases both sides of email comparisons.
+- Explicit students are stored by lowercased email, not by `users.id`, so a
+  teacher can compose a room before a student first signs in.
+- `room_resources` admits only `resource_type='assistant'` in v1. The resource
+  ID uses the same text representation as `resource_access_grants`.
+
+The teacher surface is `/rooms/manage`, gated at both the layout and server
+action layers by the `rooms-manage` human UI capability. The code-managed
+capability is initially granted to `staff` and `administrator`; it is not an
+API-key scope.
+
+The section picker is server-filtered to active teacher enrollments whose
+OneRoster user email matches the signed-in teacher with
+`lower(roster_email) = lower(application_email)`. A submitted class sourced ID
+that was not already on the room must be in that server-derived set. The
+individual-student search is limited to active students in the signed-in
+teacher's schools (administrators may search the full active roster), and every
+submitted explicit-member email is revalidated against that same server-side
+scope before it is stored. The
+assistant picker lists only approved assistants admitted by
+`filterAccessibleResourceIds`, and every create/update re-runs the same
+existence, approval, and access checks before writing. A crafted client cannot
+assign another teacher's section or an inaccessible assistant.
+
+Room mutations full-replace their class, explicit-member, and assistant link
+sets in one `executeTransaction` call. Ownership is rechecked while the room
+row is locked, and child rows cascade if a room is manually hard-deleted.
+Neither room management nor membership resolution writes users, roster rows,
+roles, capabilities, API scopes, resource grants, or administrator access.
+Student-facing assistant grant/restriction behavior remains owned by #1314.
 
 ## Administrator control surface
 
@@ -359,3 +404,9 @@ To remove only the administrator UI, remove its `ADMIN_SECTIONS` registry entry
 and route. The settings and last-known-good roster snapshot can remain. Older
 Lambda versions ignore `ONEROSTER_SYNC_STATUS`; removing that internal settings
 row is optional and must not be coupled to roster-row deletion.
+
+To roll back only teacher room management, revoke the `rooms-manage`
+capability or deploy the previous application version. The additive migration
+may remain. If the room data itself must be removed, migration 157 documents
+the child-first manual drop order; export or confirm that the room definitions
+are disposable before running those destructive statements.

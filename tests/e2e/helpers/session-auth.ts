@@ -36,6 +36,8 @@ export const SEEDED_ADMIN_EMAIL = 'test@example.com'
 // cognito_sub of the seeded admin user (see scripts/db/seed-local.sql). Holds
 // every capability, so capability guards resolve to 200.
 export const SEEDED_ADMIN_SUB = 'e2e-test-user'
+export const SEEDED_STAFF_EMAIL = 'staff@example.com'
+export const SEEDED_STAFF_SUB = 'e2e-staff-user'
 // cognito_sub of the seeded student user. The student role is granted NO
 // role_capabilities, so capability guards resolve to 403 for this identity —
 // used to exercise the capability-denied path (Issue #928).

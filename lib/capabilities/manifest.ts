@@ -113,6 +113,13 @@ export const CAPABILITY_MANIFEST: readonly CapabilityManifestEntry[] = [
     defaultRoles: ["administrator", "staff"],
   },
   {
+    identifier: "rooms-manage",
+    name: "Room Management",
+    description:
+      "Compose class rooms from roster sections and assign approved assistants.",
+    defaultRoles: ["administrator", "staff"],
+  },
+  {
     identifier: "skill.redrover",
     name: "Agent skill: Red Rover",
     description:
