@@ -1937,10 +1937,17 @@ export class AgentPlatformStack extends cdk.Stack {
       // 15 min is Lambda's hard ceiling. The morning brief on May 1, 2026
       // hit our 13-min client-side abort while the agent was still
       // streaming heartbeats every 30s — it just hadn't finished yet.
-      // Stack: harness deadline 840s (14:00) < AbortSignal 870s (14:30) <
-      // Lambda 900s (15:00). Each layer has ~30s headroom over the next
-      // so failure modes degrade in order: harness returns partial → abort
-      // fires with whatever streamed → Lambda kills as last resort.
+      //
+      // The ordering harness-deadline < abort < Lambda-timeout still holds,
+      // but the first two are NO LONGER CONSTANTS: they are derived from the
+      // Lambda's real remaining time (lambdas/agent-cron/turn-deadline.ts).
+      // The old fixed 840s/870s pair silently assumed the turn starts when the
+      // request is sent; it starts once AgentCore has cold-started the microVM,
+      // and on 2026-07-27 that ~47s gap made the abort fire 5.6s BEFORE the
+      // agent finished, discarding a completed 13.7-minute dispatch.
+      //
+      // A turn that genuinely needs longer than this Lambda is now promoted to
+      // the background job-runner rather than truncated (JOB_* env below).
       timeout: cdk.Duration.minutes(15),
       architecture: lambda.Architecture.ARM_64,
       role: this.cronLambdaRole,
@@ -2913,6 +2920,53 @@ export class AgentPlatformStack extends cdk.Stack {
     );
     this.routerLambda.addEnvironment('JOB_SECURITY_GROUP', jobRunnerSg.securityGroupId);
     this.routerLambda.addEnvironment('JOB_CONTAINER_NAME', 'job-runner');
+
+    // The cron Lambda promotes long SCHEDULED turns into the SAME job-runner.
+    // Lambda's 15-minute ceiling is an AWS hard limit, so without this a
+    // scheduled task that legitimately needs longer can never finish — it gets
+    // truncated every single run, with no configuration that helps.
+    //
+    // Same task definition, same payload contract, same delivery path as the
+    // router's interactive promotion; only the trigger differs. The runner does
+    // not need to know which Lambda launched it.
+    const jobSubnetIds = vpc
+      .selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS })
+      .subnetIds.join(',');
+    cronLambda.addEnvironment('JOB_CLUSTER_ARN', jobCluster.clusterArn);
+    cronLambda.addEnvironment('JOB_TASK_DEF_ARN', jobTaskDef.taskDefinitionArn);
+    cronLambda.addEnvironment('JOB_SUBNETS', jobSubnetIds);
+    cronLambda.addEnvironment('JOB_SECURITY_GROUP', jobRunnerSg.securityGroupId);
+    cronLambda.addEnvironment('JOB_CONTAINER_NAME', 'job-runner');
+    // Cron pre-acquires the kind='job' session lock so nothing else touches the
+    // session during the ~60s of Fargate cold start before the runner's first
+    // renewal. Without the table the cron code declines to promote rather than
+    // launching an unlockable job.
+    cronLambda.addEnvironment(
+      'SESSION_LOCKS_TABLE',
+      this.sessionLocksTable.tableName,
+    );
+    this.sessionLocksTable.grantReadWriteData(this.cronLambdaRole);
+
+    this.cronLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'JobRunnerLaunch',
+      effect: iam.Effect.ALLOW,
+      actions: ['ecs:RunTask'],
+      resources: [jobTaskDef.taskDefinitionArn],
+    }));
+    // RunTask needs PassRole on BOTH roles the task assumes; granting only the
+    // task role fails at launch with an opaque AccessDenied.
+    this.cronLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'JobRunnerPassRole',
+      effect: iam.Effect.ALLOW,
+      actions: ['iam:PassRole'],
+      resources: [
+        jobTaskDef.taskRole.roleArn,
+        jobTaskDef.obtainExecutionRole().roleArn,
+      ],
+      conditions: {
+        StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' },
+      },
+    }));
 
     cdk.Tags.of(jobCluster).add('Environment', environment);
     cdk.Tags.of(jobCluster).add('ManagedBy', 'cdk');

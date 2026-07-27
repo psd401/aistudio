@@ -34,77 +34,7 @@ import path from "node:path"
 
 const root = process.cwd()
 
-/**
- * Quote-aware comment stripper — ONE pass handling both comment forms.
- *
- * A commented-out policy statement still contains the literal text, so a raw
- * substring check would stay green while the deployed role denies every model
- * call.
- *
- * Regexes cannot do this job, and both naive forms fail on THIS file:
- *   • /\/\/.*$/    mangles the ARNs and URLs inside string literals.
- *   • /\/\*[\s\S]*?\*\//  is worse and silently catastrophic: a string literal
- *     containing "/*" opens a comment that never legitimately closes, so the
- *     regex deletes everything up to the next "*\/" elsewhere in the file.
- *     Measured on agent-platform-stack.ts, that removed 100,907 of 203,156
- *     characters — HALF the source, including the grant under test — and every
- *     assertion here would have reported a missing grant that is present.
- *
- * So this walks the source once, tracking whether it is inside a string, a
- * template literal, or a comment, and only treats a marker found in code as a
- * comment. Escapes are honored so "\'" does not end a string.
- */
-function stripComments(src: string): string {
-  let out = ""
-  let quote: string | null = null
-  let inLine = false
-  let inBlock = false
-
-  for (let i = 0; i < src.length; i++) {
-    const ch = src[i]
-    const next = src[i + 1]
-
-    if (inLine) {
-      if (ch === "\n") {
-        inLine = false
-        out += ch
-      }
-      continue
-    }
-    if (inBlock) {
-      if (ch === "*" && next === "/") {
-        inBlock = false
-        i++
-      }
-      continue
-    }
-    if (quote) {
-      if (ch === "\\") {
-        i++
-        continue
-      }
-      if (ch === quote) quote = null
-      out += ch
-      continue
-    }
-    if (ch === "'" || ch === '"' || ch === "`") {
-      quote = ch
-      out += ch
-      continue
-    }
-    if (ch === "/" && next === "/") {
-      inLine = true
-      continue
-    }
-    if (ch === "/" && next === "*") {
-      inBlock = true
-      i++
-      continue
-    }
-    out += ch
-  }
-  return out
-}
+import { stripComments } from "../helpers/strip-ts-comments"
 
 const stackSource = stripComments(
   fs.readFileSync(path.join(root, "infra/lib/agent-platform-stack.ts"), "utf8"),
@@ -135,35 +65,16 @@ const openclaw = JSON.parse(
 const PROFILE_REGIONS = ["us-east-1", "us-east-2", "us-west-2"]
 
 describe("agent Bedrock access via execution-role SigV4", () => {
-  it("strips commented-out grants without eating live code (negative control)", () => {
-    // Without this control the suite is untrustworthy in BOTH directions: a
-    // no-op stripper passes on commented-out grants, and an over-eager one
-    // deletes the real grant and fails on correct source. Both have happened.
-    const sample = [
-      'const url = "https://psd401.ai/x"',
-      'const glob = "/*.ts"', // the literal that broke the regex version
-      "// const dead = DEAD_LINE",
-      "/* const dead2 = DEAD_BLOCK */",
-      "const live = KEEP_ME",
-    ].join("\n")
-    const stripped = stripComments(sample)
-
-    expect(stripped).toContain("https://psd401.ai/x")
-    expect(stripped).toContain("/*.ts")
-    expect(stripped).toContain("KEEP_ME")
-    expect(stripped).not.toContain("DEAD_LINE")
-    expect(stripped).not.toContain("DEAD_BLOCK")
-  })
-
-  it("preserves the bulk of the real stack source", () => {
-    // Bounds the catastrophic-strip failure directly: the regex version cut
-    // agent-platform-stack.ts roughly in half. Comments are dense here, but
-    // losing more than 70% means the stripper is eating code again.
+  it("reads real, comment-stripped source (parser guard)", () => {
+    // The stripper's own behaviour is pinned in strip-ts-comments.test.ts.
+    // Here we only confirm it produced usable source, so the assertions below
+    // cannot pass vacuously against an empty or gutted string.
     const raw = fs.readFileSync(
       path.join(root, "infra/lib/agent-platform-stack.ts"),
       "utf8",
     )
     expect(stackSource.length).toBeGreaterThan(raw.length * 0.3)
+    expect(stackSource).toContain("AgentCoreExecutionRole")
   })
 
   it("grants the chat model to the execution role", () => {

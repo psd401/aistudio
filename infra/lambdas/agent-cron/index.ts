@@ -17,7 +17,12 @@
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import {
+  DynamoDBDocumentClient,
+  DeleteCommand,
+  PutCommand,
+} from '@aws-sdk/lib-dynamodb';
+import { ECSClient, RunTaskCommand } from '@aws-sdk/client-ecs';
 import {
   SecretsManagerClient,
   GetSecretValueCommand,
@@ -29,6 +34,7 @@ import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { HttpRequest } from '@smithy/protocol-http';
 import type { Context as LambdaContext } from 'aws-lambda';
 import { resolveAbortMs, resolveTurnDeadlineS } from './turn-deadline';
+import { buildJobPayload, shouldPromoteToJob } from './job-promotion';
 import * as chatPkg from '@googleapis/chat';
 import * as crypto from 'crypto';
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
@@ -100,6 +106,7 @@ const dynamoClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const secretsClient = new SecretsManagerClient({});
 const ssmClient = new SSMClient({});
 const rdsDataClient = new RDSDataClient({});
+const ecsClient = new ECSClient({});
 
 const agentCoreCredentials = defaultProvider();
 const agentCoreSigner = new SignatureV4({
@@ -149,6 +156,14 @@ interface InvokeResult {
   inputTokens: number;
   outputTokens: number;
   ok: boolean;
+  /**
+   * Harness error class from the response metadata, when the turn failed.
+   *
+   * Previously discarded. It is what distinguishes "ran out of clock" (
+   * ChatDeadlineExpired) from "actually broke", and therefore what decides
+   * whether a failed scheduled turn is worth promoting to a background job.
+   */
+  errorClass?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -476,7 +491,15 @@ async function invokeAgentCore(
         : {};
     const inputTokens = typeof metadata.input_tokens === 'number' ? metadata.input_tokens : 0;
     const outputTokens = typeof metadata.output_tokens === 'number' ? metadata.output_tokens : 0;
-    return { response: result, inputTokens, outputTokens, ok };
+    // `ok` above is "did we get any text back", which a deadline-expired turn
+    // ALSO satisfies — the harness returns a failure frame as its result. The
+    // error class is the only reliable signal of why a turn ended, so carry it
+    // through rather than inferring intent from the response text.
+    const errorClass =
+      typeof metadata.error_class === 'string' && metadata.error_class
+        ? metadata.error_class
+        : undefined;
+    return { response: result, inputTokens, outputTokens, ok, errorClass };
   } catch (error) {
     const errName = error instanceof Error ? error.name : 'Unknown';
     const errMsg = error instanceof Error ? error.message : String(error);
@@ -504,6 +527,202 @@ async function invokeAgentCore(
       outputTokens: 0,
       ok: false,
     };
+  }
+}
+
+/**
+ * Acquire the `kind='job'` session lock before launching a background job.
+ *
+ * Mirrors the router's tryAcquireSessionLock. Pre-acquiring closes the gap
+ * between promotion and the runner's first renewal (~60s of Fargate cold
+ * start); without it a user message arriving in that window would start a
+ * second turn against the same session the job is about to resume.
+ *
+ * Returns null when the lock is contended (someone else owns the session —
+ * skip promotion), or a token to pass to the runner, which renews it every 10
+ * minutes and releases it on exit.
+ *
+ * NOTE the deliberate asymmetry with the router: if the table is unset or
+ * DynamoDB errors, the router falls through to a pass-through token so a user's
+ * message is never blocked. Here we return null and DO NOT promote. An
+ * unlockable background job is worse than no background job: nothing would stop
+ * a concurrent turn from corrupting the session it resumes, and a scheduled
+ * task has no human watching to notice.
+ */
+async function tryAcquireJobLock(
+  sessionId: string,
+  log: Logger,
+): Promise<string | null> {
+  const tableName = process.env.SESSION_LOCKS_TABLE;
+  if (!tableName) {
+    log.warn('Job promotion skipped — SESSION_LOCKS_TABLE not configured');
+    return null;
+  }
+  const lockToken = crypto.randomUUID();
+  const nowS = Math.floor(Date.now() / 1000);
+  try {
+    await dynamoClient.send(
+      new PutCommand({
+        TableName: tableName,
+        Item: {
+          sessionId,
+          expiresAt: nowS + 14 * 60,
+          lockToken,
+          kind: 'job',
+          claimedAt: new Date().toISOString(),
+        },
+        ConditionExpression:
+          'attribute_not_exists(sessionId) OR expiresAt < :now',
+        ExpressionAttributeValues: { ':now': nowS },
+      }),
+    );
+    return lockToken;
+  } catch (error) {
+    const errName = (error as { name?: string } | null)?.name;
+    if (errName === 'ConditionalCheckFailedException') {
+      log.warn('Job promotion aborted — session lock contended');
+      return null;
+    }
+    log.warn('Job promotion aborted — session lock acquire failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+/**
+ * Release a job lock we acquired but could not hand to a running task.
+ * Conditional on the token so we can never delete a newer holder's lock.
+ */
+async function releaseJobLock(
+  sessionId: string,
+  lockToken: string,
+  log: Logger,
+): Promise<void> {
+  const tableName = process.env.SESSION_LOCKS_TABLE;
+  if (!tableName) return;
+  try {
+    await dynamoClient.send(
+      new DeleteCommand({
+        TableName: tableName,
+        Key: { sessionId },
+        ConditionExpression: 'lockToken = :tok',
+        ExpressionAttributeValues: { ':tok': lockToken },
+      }),
+    );
+  } catch (error) {
+    const errName = (error as { name?: string } | null)?.name;
+    if (errName === 'ConditionalCheckFailedException') return;
+    log.warn('Job lock release failed; relying on TTL backstop', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
+ * Promote a deadline-expired SCHEDULED turn to the background job-runner.
+ *
+ * Launches the same ECS task the router uses for interactive turns
+ * (agent-router/job-main.ts): it resumes the SAME AgentCore session with a
+ * continuation prompt and a 2-hour deadline, then posts the finished answer to
+ * the owner's Chat space. Lambda's 15-minute ceiling is an AWS hard limit, so
+ * this is the only way a longer scheduled task can ever complete.
+ *
+ * Returns true when the job launched — the caller must then NOT post the
+ * partial, or the owner gets two messages for one task.
+ *
+ * Returns false on ANY failure (missing config, lock contention, RunTask
+ * error), and the caller falls back to today's behaviour of posting what the
+ * agent managed to produce. Promotion must never make things worse than the
+ * status quo.
+ */
+async function promoteScheduledTurnToJob(
+  input: {
+    sessionId: string;
+    runtimeId: string;
+    userEmail: string;
+    displayName: string;
+    workspacePrefix: string;
+    spaceName: string;
+    originalPrompt: string;
+    scheduleName: string;
+  },
+  log: Logger,
+): Promise<boolean> {
+  const clusterArn = process.env.JOB_CLUSTER_ARN || '';
+  const taskDefArn = process.env.JOB_TASK_DEF_ARN || '';
+  const subnets = (process.env.JOB_SUBNETS || '').split(',').filter(Boolean);
+  const securityGroup = process.env.JOB_SECURITY_GROUP || '';
+  const containerName = process.env.JOB_CONTAINER_NAME || 'job-runner';
+  if (!clusterArn || !taskDefArn || subnets.length === 0 || !securityGroup) {
+    log.warn('Job promotion not configured — posting the partial instead');
+    return false;
+  }
+
+  const lockToken = await tryAcquireJobLock(input.sessionId, log);
+  if (lockToken === null) return false;
+
+  try {
+    const payload = buildJobPayload({
+      sessionId: input.sessionId,
+      lockToken,
+      runtimeId: input.runtimeId,
+      userEmail: input.userEmail,
+      displayName: input.displayName,
+      workspacePrefix: input.workspacePrefix,
+      spaceName: input.spaceName,
+      // Scheduled tasks always deliver to the owner's DM, never a shared
+      // space, so the runner must not prefix the reply with "[Name's Agent]".
+      isDM: true,
+      originalPrompt: input.originalPrompt,
+    });
+
+    const result = await ecsClient.send(
+      new RunTaskCommand({
+        cluster: clusterArn,
+        taskDefinition: taskDefArn,
+        launchType: 'FARGATE',
+        count: 1,
+        startedBy: 'agent-cron-promotion',
+        networkConfiguration: {
+          awsvpcConfiguration: {
+            subnets,
+            securityGroups: [securityGroup],
+            assignPublicIp: 'DISABLED',
+          },
+        },
+        overrides: {
+          containerOverrides: [
+            { name: containerName, environment: [{ name: 'JOB_PAYLOAD', value: payload }] },
+          ],
+        },
+      }),
+    );
+    if (result.failures && result.failures.length > 0) {
+      throw new Error(
+        `RunTask failures: ${result.failures
+          .map((f) => `${f.reason ?? 'unknown'}${f.detail ? ` (${f.detail})` : ''}`)
+          .join('; ')}`,
+      );
+    }
+
+    log.info('Scheduled turn promoted to background job', {
+      // Stable marker for the BackgroundPromotion metric filter (#1161).
+      marker: 'BACKGROUND_PROMOTION',
+      source: 'cron',
+      scheduleName: input.scheduleName,
+      sessionId: input.sessionId,
+      taskArn: result.tasks?.[0]?.taskArn ?? 'unknown',
+    });
+    return true;
+  } catch (error) {
+    // Roll the lock back, or the owner's next message sits behind a job that
+    // never started until the 14-minute TTL expires.
+    await releaseJobLock(input.sessionId, lockToken, log);
+    log.error('Job promotion failed — posting the partial instead', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
   }
 }
 
@@ -559,7 +778,16 @@ async function recordRun(params: {
   inputTokens: number;
   outputTokens: number;
   latencyMs: number;
-  status: 'success' | 'error' | 'skipped';
+  /**
+   * 'promoted' means this leg handed the work to the background job-runner;
+   * the answer is delivered by that task, not here. It is neither a success
+   * (nothing was produced yet) nor an error (nothing broke), and recording it
+   * as either would make run history lie about what happened.
+   *
+   * Safe without a migration: agent_scheduled_runs.status is VARCHAR(32) with
+   * no CHECK constraint (schema/066-agent-operations-tables.sql).
+   */
+  status: 'success' | 'error' | 'skipped' | 'promoted';
   errorMessage?: string;
 }, log: Logger): Promise<void> {
   if (!DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) {
@@ -753,6 +981,74 @@ export async function handler(
     },
     () => context.getRemainingTimeInMillis(),
   );
+
+  // The turn ran out of clock rather than breaking. Hand it to the background
+  // job-runner instead of delivering a partial: Lambda's 15-minute ceiling is
+  // an AWS hard limit, so this is the only path by which a longer scheduled
+  // task can ever finish. The runner resumes the SAME session with a 2-hour
+  // deadline and posts the finished answer itself.
+  //
+  // Only reachable because the Lambda now sends an explicit deadline_s
+  // (turn-deadline.ts). Before that its own abort always fired first, so the
+  // harness never reported a deadline and this branch could never be taken.
+  if (shouldPromoteToJob(result.errorClass)) {
+    const runtimeId = await getRuntimeId(log);
+    const promoted = runtimeId
+      ? await promoteScheduledTurnToJob(
+          {
+            sessionId,
+            runtimeId,
+            userEmail: schedule.ownerEmail,
+            displayName: schedule.displayName ?? '',
+            workspacePrefix: schedule.workspacePrefix,
+            spaceName: schedule.dmSpaceName,
+            originalPrompt: schedule.prompt,
+            scheduleName,
+          },
+          log,
+        )
+      : false;
+
+    if (promoted) {
+      // Acknowledge so the owner is not left wondering. Delivery failure here
+      // is NOT fatal — the job is already running and will post the real
+      // answer; failing the invocation would misreport a healthy handoff.
+      try {
+        await sendChatMessage(
+          schedule.dmSpaceName,
+          `📋 **${scheduleName}**\n\n⏳ This is taking longer than one pass allows — I've moved it to a background job and will post the result here when it's done.`,
+          log,
+        );
+      } catch (error) {
+        log.warn('Promotion ack delivery failed; job still running', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      await recordRun(
+        {
+          userEmail: schedule.ownerEmail,
+          scheduleId: schedule.scheduleId,
+          scheduleName,
+          sessionId,
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+          latencyMs: Date.now() - startTime,
+          status: 'promoted',
+        },
+        log,
+      );
+      log.info('Scheduled task handed to background job', {
+        scheduleId: schedule.scheduleId,
+        scheduleName,
+        sessionId,
+        email: sanitizeEmail(schedule.ownerEmail),
+        latencyMs: Date.now() - startTime,
+      });
+      return { status: 'success', scheduleId: schedule.scheduleId };
+    }
+    // Promotion declined or failed — fall through and post the partial, which
+    // is strictly better than nothing and matches the previous behaviour.
+  }
 
   // Deliver response to DM regardless of success (so user sees errors).
   try {
