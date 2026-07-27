@@ -377,6 +377,15 @@ const PARITY_CASES = [
   ['quote, no space', '<div class="x"data-composition-id>y</div>'],
   ['nested <', '<<a data-composition-id>'],
   ['comment first', '<!-- data-composition-id --><div data-composition-id>x</div>'],
+  // An apostrophe inside a comment is not an attribute quote. Quote-tracking a
+  // non-element `<` let `don't` open a quote that never closed, so every later
+  // `>` was swallowed, the scan hit end-of-input and returned -1 — the audio
+  // was then appended outside the composition root and silently dropped from
+  // the MP4. Only `<` + ASCII letter starts a tag, exactly as the old regex.
+  ['apostrophe in comment', "<!-- don't inject here --><div data-composition-id=\"root\">x</div>"],
+  ['apostrophe in text', "it's here <div data-composition-id=\"r\">x</div>"],
+  ['doctype before root', '<!DOCTYPE html><div data-composition-id="r">x</div>'],
+  ['closing tag before root', '</p><div data-composition-id="r">x</div>'],
   // <data-composition-id> is a legal custom-element name. The old regex could
   // never match it (its mandatory [a-zA-Z] ate the name's first character), so
   // an element *named* this must not be mistaken for one *carrying* the attr.
@@ -409,6 +418,7 @@ test('findCompositionRootTagEnd stays linear on quote-heavy witnesses', () => {
     '<a'.repeat(200000), // unclosed tags
     '<"'.repeat(200000), // quote open/close churn
     '<a x="' + 'a'.repeat(400000), // one never-closed quote
+    '<!--' + "'".repeat(400000), // apostrophe churn inside a non-element token
     '<a ' + 'data-composition-idz '.repeat(19047) + '>', // many near-misses in one tag
   ];
   for (const html of shapes) {

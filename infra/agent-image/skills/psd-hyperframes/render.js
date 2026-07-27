@@ -182,6 +182,20 @@ function findCompositionRootTagEnd(html) {
       i++;
       continue;
     }
+    // Only an element open tag starts attribute-quote tracking. The regex this
+    // replaces could begin a match solely at `<` followed by an ASCII letter,
+    // so a comment, a doctype, a closing `</` or a stray `<` in text is just
+    // ordinary text and must be stepped over. Entering the quote state for it
+    // was a regression: in `<!-- don't inject here --><div
+    // data-composition-id="root">` the apostrophe opened a quote that never
+    // closed, so every following `>` was swallowed, the scan ran to
+    // end-of-input and returned -1 — and injectAudioElement then appended the
+    // narration outside the composition root, where hyperframes does not mux
+    // it and the audio silently vanishes from the MP4.
+    if (!isAsciiLetter(html[i + 1])) {
+      i++;
+      continue;
+    }
     let j = i + 1;
     let quote = ''; // the open quote character while inside an attribute value
     while (j < n) {
@@ -200,7 +214,8 @@ function findCompositionRootTagEnd(html) {
       i = j; // malformed: restart at the nested '<' without rescanning
       continue;
     }
-    if (isAsciiLetter(html[i + 1]) && hasCompositionIdAttr(html.slice(i, j + 1))) {
+    // `html[i + 1]` is already known to be an ASCII letter (guarded above).
+    if (hasCompositionIdAttr(html.slice(i, j + 1))) {
       return j + 1;
     }
     i = j + 1;
