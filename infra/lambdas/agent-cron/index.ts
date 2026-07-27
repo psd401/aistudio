@@ -34,7 +34,11 @@ import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { HttpRequest } from '@smithy/protocol-http';
 import type { Context as LambdaContext } from 'aws-lambda';
 import { resolveAbortMs, resolveTurnDeadlineS } from './turn-deadline';
-import { buildJobPayload, shouldPromoteToJob } from './job-promotion';
+import {
+  buildJobPayload,
+  promotionReason,
+  type PromotionReason,
+} from './job-promotion';
 import * as chatPkg from '@googleapis/chat';
 import * as crypto from 'crypto';
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
@@ -646,6 +650,7 @@ async function promoteScheduledTurnToJob(
     spaceName: string;
     originalPrompt: string;
     scheduleName: string;
+    reason: PromotionReason;
   },
   log: Logger,
 ): Promise<boolean> {
@@ -665,6 +670,7 @@ async function promoteScheduledTurnToJob(
   try {
     const payload = buildJobPayload({
       sessionId: input.sessionId,
+      reason: input.reason,
       lockToken,
       runtimeId: input.runtimeId,
       userEmail: input.userEmail,
@@ -710,6 +716,7 @@ async function promoteScheduledTurnToJob(
       // Stable marker for the BackgroundPromotion metric filter (#1161).
       marker: 'BACKGROUND_PROMOTION',
       source: 'cron',
+      reason: input.reason,
       scheduleName: input.scheduleName,
       sessionId: input.sessionId,
       taskArn: result.tasks?.[0]?.taskArn ?? 'unknown',
@@ -982,16 +989,21 @@ export async function handler(
     () => context.getRemainingTimeInMillis(),
   );
 
-  // The turn ran out of clock rather than breaking. Hand it to the background
-  // job-runner instead of delivering a partial: Lambda's 15-minute ceiling is
-  // an AWS hard limit, so this is the only path by which a longer scheduled
-  // task can ever finish. The runner resumes the SAME session with a 2-hour
-  // deadline and posts the finished answer itself.
+  // The turn failed in a RECOVERABLE way. Hand it to the background job-runner
+  // instead of delivering a partial: Lambda's 15-minute ceiling is an AWS hard
+  // limit, so this is the only path by which a longer scheduled task can ever
+  // finish.
   //
-  // Only reachable because the Lambda now sends an explicit deadline_s
-  // (turn-deadline.ts). Before that its own abort always fired first, so the
-  // harness never reported a deadline and this branch could never be taken.
-  if (shouldPromoteToJob(result.errorClass)) {
+  // Two recoverable shapes, handled differently by the runner:
+  //   deadline         — ran out of clock. Resume the same session.
+  //   context-overflow — the transcript outgrew the model window. Restart in a
+  //                      fresh session; resuming would re-overflow immediately.
+  //
+  // The deadline case is only reachable because the Lambda now sends an
+  // explicit deadline_s (turn-deadline.ts). Before that its own abort always
+  // fired first, so the harness never reported a deadline at all.
+  const promoteReason = promotionReason(result.errorClass);
+  if (promoteReason !== null) {
     const runtimeId = await getRuntimeId(log);
     const promoted = runtimeId
       ? await promoteScheduledTurnToJob(
@@ -1004,6 +1016,7 @@ export async function handler(
             spaceName: schedule.dmSpaceName,
             originalPrompt: schedule.prompt,
             scheduleName,
+            reason: promoteReason,
           },
           log,
         )
@@ -1014,9 +1027,17 @@ export async function handler(
       // is NOT fatal — the job is already running and will post the real
       // answer; failing the invocation would misreport a healthy handoff.
       try {
+        // Distinct wording per reason. A restart is NOT the same promise as a
+        // continuation: it discards the previous attempt's work, so telling
+        // the owner "I've moved it to a background job" would overstate what
+        // is being carried over.
+        const ack =
+          promoteReason === 'context-overflow'
+            ? "⏳ This run grew too large to finish in one pass, so I'm starting it over in the background with a longer budget. I'll post the result here when it's done."
+            : "⏳ This is taking longer than one pass allows — I've moved it to a background job and will post the result here when it's done.";
         await sendChatMessage(
           schedule.dmSpaceName,
-          `📋 **${scheduleName}**\n\n⏳ This is taking longer than one pass allows — I've moved it to a background job and will post the result here when it's done.`,
+          `📋 **${scheduleName}**\n\n${ack}`,
           log,
         );
       } catch (error) {
