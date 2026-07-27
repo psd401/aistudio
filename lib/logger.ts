@@ -44,10 +44,26 @@ function sanitizeForLoggerInternal(data: unknown, maxDepth: number, seen: WeakSe
   }
 
   if (typeof data === "string") {
-    // CodeQL-compliant sanitization: explicit character allowlisting
+    // CodeQL-compliant sanitization: line breaks and tabs are turned into spaces
+    // FIRST, then everything outside printable ASCII is dropped.
+    //
+    // Order matters twice over:
+    //
+    // 1. Behaviour. The allowlist deletes CR/LF/TAB outright, so running it
+    //    first fused tokens across the removed break: a CRLF in "ok<CRLF>WARN"
+    //    left "okWARN". Substituting a space first preserves the separation and
+    //    matches what sanitizeLogMessage() has always done to the message.
+    // 2. CodeQL. Its log-injection sanitizer only recognises a
+    //    String.prototype.replace whose regex root is a constant it can
+    //    enumerate. A negated class (/[^\u0020-\u007E]/) and a positive one
+    //    (/[\t\n\r]/) both parse to a RegExpCharacterClass, so neither cleared
+    //    the taint and every logger call downstream stayed flagged. Single
+    //    character literal regexes are the form it models.
     const safe = data
-      .replace(/[^\u0020-\u007E]/g, '') // Only allow printable ASCII characters (space to tilde)
-      .replace(/[\t\n\r]/g, ' ')    // Replace line breaks with spaces
+      .replace(/\t/g, ' ')            // Tabs to spaces
+      .replace(/\n/g, ' ')            // Newlines to spaces (CodeQL barrier)
+      .replace(/\r/g, ' ')            // Carriage returns to spaces (CodeQL barrier)
+      .replace(/[^\u0020-\u007E]/g, '') // Then allow only printable ASCII (space to tilde)
       .substring(0, 1000)           // Explicit length limit to prevent log bloat
     return safe
   }
@@ -355,16 +371,21 @@ function sanitizeLogMessage(input: unknown): string {
   // Explicitly remove characters that could forge log entries
   // This follows CodeQL log injection prevention guidance
 
-  // Replace newlines with spaces
-  str = str.replace(/[\n\r]/g, ' ')
+  // Replace newlines with spaces.
+  // Two separate single-character literal regexes rather than the character
+  // class /[\n\r]/: CodeQL's js/log-injection sanitizer only recognises a
+  // replace() whose regex root is an enumerable constant, and a character class
+  // is not one. Behaviour is identical; this is what makes the barrier visible.
+  str = str.replace(/\n/g, ' ').replace(/\r/g, ' ')
 
-  // Remove control characters (0x00-0x1F and 0x7F)
-  // Using String.fromCharCode to avoid eslint no-control-regex warning
-  const controlCharsPattern = new RegExp(
-    `[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]`,
-    'g'
-  )
-  str = str.replace(controlCharsPattern, '')
+  // Remove control characters (0x00-0x1F and 0x7F).
+  // A regex *literal* with the repo-standard no-control-regex disable, not a
+  // `new RegExp(...)` built from String.fromCharCode: CodeQL only models regex
+  // literals, so the dynamic form was invisible to its taint analysis (and to
+  // any reader). Same character set, same behaviour. Matches the convention in
+  // lib/utils/text-sanitizer.ts.
+  // eslint-disable-next-line no-control-regex
+  str = str.replace(/[\u0000-\u001F\u007F]/g, '')
 
   // Limit length to prevent log bloat
   str = str.substring(0, 1000)
@@ -384,8 +405,34 @@ function sanitizeLogMetadata(data: unknown): Record<string, unknown> {
   const filtered = filterSensitiveData(data)
   // Then sanitize for CodeQL (removes taint)
   const sanitized = sanitizeForLogger(filtered)
-  // Return as typed object
-  return sanitized as Record<string, unknown>
+
+  // Final barrier, applied immediately before the value is handed to winston.
+  //
+  // sanitizeForLogger() already neutralises every string, but it does so from
+  // inside a depth-limited self-recursive traversal that rebuilds objects
+  // through Maps and `as unknown` casts. Taint analysis follows property reads
+  // straight through that shape without ever seeing the barrier land on the
+  // value that reaches the sink — which is why the createLogger() sinks stayed
+  // flagged even though the data was already clean at runtime (this repo has
+  // the same finding recorded in
+  // docs/learnings/security/2026-02-20-codeql-taint-break-static-data-block.md).
+  // Re-applying literal-regex line-break stripping to the top-level entries
+  // here is O(keys) on an already-sanitised, small object, and puts the barrier
+  // one step from the sink where it is visible.
+  if (sanitized === null || typeof sanitized !== 'object' || Array.isArray(sanitized)) {
+    // Every caller passes an object literal; anything else has no key/value
+    // shape to walk, and Object.entries() on a string would explode it into
+    // per-character entries.
+    return {}
+  }
+
+  const result: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(sanitized as Record<string, unknown>)) {
+    const safeKey = key.replace(/\n/g, ' ').replace(/\r/g, ' ')
+    result[safeKey] =
+      typeof value === 'string' ? value.replace(/\n/g, ' ').replace(/\r/g, ' ') : value
+  }
+  return result
 }
 
 /**
@@ -451,13 +498,21 @@ export function logPerformance(
 ): void {
   const duration = Date.now() - startTime
   const context = getLogContext()
-  
-  logger.info(`Performance: ${operation}`, {
-    ...context,
-    operation,
-    duration,
-    ...metadata,
-  })
+
+  // Route through the same sanitizers the createLogger() methods use. This sink
+  // previously took `operation` and `...metadata` straight to winston with no
+  // sanitization at all — and `operation` is caller-supplied on every
+  // startTimer() call across the server actions, so a value carrying CR/LF
+  // could forge log entries (js/log-injection).
+  logger.info(
+    sanitizeLogMessage(`Performance: ${operation}`),
+    sanitizeLogMetadata({
+      ...context,
+      operation,
+      duration,
+      ...metadata,
+    })
+  )
 }
 
 /**
