@@ -1,81 +1,33 @@
 /**
- * Durable OneRoster sync status shared by the administrator UI.
+ * Durable OneRoster sync status — the SERVER half.
  *
- * The isolated Lambda duplicates this serialized contract deliberately because
- * its bundle cannot import Next.js application code. Keep the state names and
- * collection fields synchronized with infra/lambdas/oneroster-sync/index.ts.
+ * The pure schema/predicate half lives in ./status-shared so the admin UI can
+ * import it without dragging the Drizzle client (and therefore winston, fs and
+ * net) into the browser bundle. Server callers can keep importing everything
+ * from here; the shared surface is re-exported below.
  */
 
-import { z } from "zod";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { getSettingValue } from "@/lib/db/drizzle/settings";
 import { settings } from "@/lib/db/schema";
 import { ONEROSTER_SETTING_KEYS } from "./settings";
+import {
+  oneRosterSyncStatusSchema,
+  parseOneRosterSyncStatus,
+  type OneRosterSyncStatus,
+} from "./status-shared";
 
-export const oneRosterCollectionNameSchema = z.enum([
-  "orgs",
-  "academicSessions",
-  "courses",
-  "classes",
-  "users",
-  "enrollments",
-]);
-
-export type OneRosterCollectionName = z.infer<
-  typeof oneRosterCollectionNameSchema
->;
-
-const collectionStatusSchema = z.object({
-  name: oneRosterCollectionNameSchema,
-  recordsTotal: z.number().int().nonnegative(),
-  synced: z.number().int().nonnegative(),
-  deactivated: z.number().int().nonnegative(),
-  failed: z.number().int().nonnegative(),
-});
-
-export const oneRosterSyncStatusSchema = z.object({
-  runId: z.string().min(1).max(100),
-  trigger: z.enum(["manual", "schedule"]),
-  state: z.enum(["queued", "running", "succeeded", "failed", "skipped"]),
-  startedAt: z.iso.datetime(),
-  completedAt: z.iso.datetime().nullable(),
-  unchanged: z.boolean(),
-  collections: z.array(collectionStatusSchema),
-  error: z.string().max(500).nullable(),
-});
-
-export type OneRosterSyncStatus = z.infer<typeof oneRosterSyncStatusSchema>;
-
-// CDK disables implicit async retries and caps queued event age at 30 minutes,
-// so one hour covers dispatch plus the 15-minute execution timeout with margin
-// while still recovering abandoned status rows.
-export const ONEROSTER_SYNC_ACTIVE_WINDOW_MS = 60 * 60 * 1000;
-
-export function isOneRosterSyncStatusActive(
-  status: OneRosterSyncStatus,
-  now = Date.now()
-): boolean {
-  if (status.state !== "queued" && status.state !== "running") return false;
-  const startedAt = Date.parse(status.startedAt);
-  return (
-    Number.isFinite(startedAt) &&
-    startedAt <= now &&
-    now - startedAt <= ONEROSTER_SYNC_ACTIVE_WINDOW_MS
-  );
-}
-
-export function parseOneRosterSyncStatus(
-  value: string | null
-): OneRosterSyncStatus | null {
-  if (!value) return null;
-  try {
-    const parsed: unknown = JSON.parse(value);
-    const result = oneRosterSyncStatusSchema.safeParse(parsed);
-    return result.success ? result.data : null;
-  } catch {
-    return null;
-  }
-}
+export {
+  ONEROSTER_SYNC_ACTIVE_WINDOW_MS,
+  isOneRosterSyncStatusActive,
+  oneRosterCollectionNameSchema,
+  oneRosterSyncStatusSchema,
+  parseOneRosterSyncStatus,
+} from "./status-shared";
+export type {
+  OneRosterCollectionName,
+  OneRosterSyncStatus,
+} from "./status-shared";
 
 export async function getOneRosterSyncStatus(): Promise<OneRosterSyncStatus | null> {
   return parseOneRosterSyncStatus(

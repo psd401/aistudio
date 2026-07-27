@@ -59,10 +59,13 @@ import type {
   OneRosterAuthMode,
   OneRosterApiVersion,
 } from "@/lib/roster/settings"
+// status-shared, NOT status: this is a client component, and status.ts imports
+// the Drizzle client (-> logger -> winston -> fs/net), which webpack cannot
+// bundle for the browser.
 import {
   isOneRosterSyncStatusActive,
   type OneRosterSyncStatus,
-} from "@/lib/roster/status"
+} from "@/lib/roster/status-shared"
 
 type DateValue = Date | string | null
 
