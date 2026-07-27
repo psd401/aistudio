@@ -244,6 +244,16 @@ layer, not a new capability or API-key scope:
   grants the assistant only; every model/repository used by a run must still
   pass its existing access checks.
 
+The browser execution route normally requires the `assistant-architect` human
+feature capability. An assignment to the exact requested assistant is the one
+narrow alternative for a room member: it is evaluated only after session
+authentication and assistant visibility, and it does not grant the broad
+capability or any API-key scope. The exported assistant-detail server actions
+also resolve the session and shared resource gate before returning input fields
+or prompt contents, so invoking the action RPC directly cannot bypass room
+visibility. Trusted REST/MCP loaders are marked server-only and continue to
+apply their route-level authentication, scope, visibility, and resource checks.
+
 `userCanAccessResource` is the single-assistant execution/detail gate and
 `filterAccessibleResourceIds` is the batch list gate. The web catalog and
 gallery, v1 REST list/detail/execution routes, and MCP list/execution handlers

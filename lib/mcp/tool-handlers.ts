@@ -31,6 +31,7 @@ import {
 import { listAccessibleAssistants } from "@/lib/api/assistant-service"
 import { isAdminByUserId, checkAssistantResourceGrants } from "@/lib/api/route-helpers"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
+import { INTERNAL_ASSISTANT_LOOKUP } from "@/lib/assistant-architect/internal-access"
 import { AGENT_TOOL_HANDLERS } from "@/lib/agents/agent-tools"
 import { CONTENT_TOOL_HANDLERS } from "./content-tool-handlers"
 import {
@@ -488,7 +489,10 @@ async function handleExecuteAssistant(
   // produces the canonical "Record not found in assistant_architects" error that
   // agent clients (psd-aistudio) map to a clean not_executable result, and that
   // wire contract must not change.
-  const architectResult = await getAssistantArchitectByIdAction(String(assistantId))
+  const architectResult = await getAssistantArchitectByIdAction(
+    String(assistantId),
+    INTERNAL_ASSISTANT_LOOKUP
+  )
   if (architectResult.isSuccess && architectResult.data) {
     const architect = architectResult.data
     const check = await checkAssistantResourceGrants({

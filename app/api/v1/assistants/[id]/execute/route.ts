@@ -32,6 +32,7 @@ import {
   type PreparedAssistantExecutionInputs,
 } from "@/lib/api/assistant-execution-service"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
+import { INTERNAL_ASSISTANT_LOOKUP } from "@/lib/assistant-architect/internal-access"
 import { jobManagementService } from "@/lib/streaming/job-management-service"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 import { createLogger, startTimer } from "@/lib/logger"
@@ -141,7 +142,10 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   // Shared with the conversations and follow-up-message v1 entry points so a
   // caller can't bypass a resource grant by picking a different entry point
   // into the same assistant.
-  const architectResult = await getAssistantArchitectByIdAction(assistantId.toString())
+  const architectResult = await getAssistantArchitectByIdAction(
+    assistantId.toString(),
+    INTERNAL_ASSISTANT_LOOKUP
+  )
   if (!architectResult.isSuccess || !architectResult.data) {
     return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
   }

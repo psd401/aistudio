@@ -235,6 +235,37 @@ test.describe("Student room access (#1314)", () => {
       await expect(
         page.getByRole("heading", { name: assignedName })
       ).toBeVisible({ timeout: 15_000 });
+
+      // Exercise the real server authorization boundary, not only the page.
+      // This fixture intentionally has no prompts, so a room-backed student
+      // must pass capability/resource authorization and reach prompt validation
+      // (400). The former bug returned 403 before evaluating room assignment.
+      const assignedExecution = await page.request.post(
+        "/api/assistant-architect/execute",
+        {
+          data: {
+            toolId: assignedAssistant.id,
+            inputs: {},
+          },
+        }
+      );
+      expect(assignedExecution.status()).toBe(400);
+      await expect(assignedExecution.json()).resolves.toEqual(
+        expect.objectContaining({
+          error: "No prompts configured for this assistant architect",
+        })
+      );
+
+      const hiddenExecution = await page.request.post(
+        "/api/assistant-architect/execute",
+        {
+          data: {
+            toolId: hiddenAssistant.id,
+            inputs: {},
+          },
+        }
+      );
+      expect(hiddenExecution.status()).toBe(403);
     } finally {
       if (assignedAssistantId !== null) {
         await sql`

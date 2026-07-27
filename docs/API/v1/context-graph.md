@@ -844,6 +844,13 @@ provider call:
   active rooms keep the ordinary owner/resource-grant behavior; and
 - room assignment never grants a model or repository.
 
+For the browser Assistant Architect route, an assignment to the exact requested
+assistant is also a narrowly scoped alternative to the general
+`assistant-architect` human capability. That decision occurs only after session
+authentication and assistant visibility; it does not change API-key scope
+requirements. Direct browser server-action lookups apply the same session and
+resource gate before returning assistant prompts or input definitions.
+
 `GET /api/v1/assistants` and MCP `list_assistants` use the same batch filter.
 `GET /api/v1/assistants/{id}` masks an assistant excluded by the room rule as
 `404`. Execution, conversation start, and follow-up message routes first apply
