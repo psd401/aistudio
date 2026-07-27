@@ -269,6 +269,15 @@ async function loadNextCandidate(
               AND item.lifecycle_status = 'active'
               AND repository.lifecycle_status = 'active'
               AND item.type IN ('document', 'text', 'url')
+              AND NOT (
+                COALESCE(item.metadata, '{}'::jsonb) ? 'migrationSourceKind'
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM repository_connector_sources connector_source
+                WHERE connector_source.repository_item_id = item.id
+                  AND connector_source.status = 'unsupported'
+              )
               AND (
                 item.current_version_id IS NULL
                 OR EXISTS (
@@ -646,6 +655,33 @@ function textCandidateBody(candidate: RepositoryCandidate): Uint8Array | null {
   return null;
 }
 
+export function isMissingMigrationSourceObject(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as {
+    name?: unknown;
+    Code?: unknown;
+    code?: unknown;
+    $metadata?: { httpStatusCode?: unknown };
+  };
+  const errorCode = [candidate.name, candidate.Code, candidate.code].find(
+    (value): value is string => typeof value === "string"
+  );
+  return (
+    ["NoSuchKey", "NotFound", "NoSuchBucket"].includes(errorCode ?? "") ||
+    candidate.$metadata?.httpStatusCode === 404
+  );
+}
+
+export function buildLegacyMigrationFallbackBody(
+  legacySegments: string[]
+): Uint8Array | null {
+  const content = legacySegments
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0)
+    .join("\n");
+  return content ? Buffer.from(content, "utf8") : null;
+}
+
 async function migrateCandidate(
   run: RepositoryMigrationRunRow,
   candidate: MigrationCandidate,
@@ -731,6 +767,7 @@ async function migrateCandidate(
 
     let stored: MigrationStoredObject;
     let declaredContentType: string;
+    let sourceObjectBytesAvailable = true;
     let comparisonSegments = candidate.legacySegments;
     let textBody =
       candidate.sourceKind === "repository_item"
@@ -782,11 +819,36 @@ async function migrateCandidate(
         candidate.sourceKind === "repository_item"
           ? (stringValue(metadata, "contentType") ?? "application/octet-stream")
           : candidate.contentType || "application/octet-stream";
-      stored = await storage.inspectAndCopyObject({
-        sourceKey: candidate.source,
-        targetKey,
-      });
-      declaredContentType = stored.contentType ?? declaredContentType;
+      try {
+        stored = await storage.inspectAndCopyObject({
+          sourceKey: candidate.source,
+          targetKey,
+        });
+        declaredContentType = stored.contentType ?? declaredContentType;
+      } catch (error) {
+        if (!isMissingMigrationSourceObject(error)) throw error;
+        const fallbackBody = buildLegacyMigrationFallbackBody(
+          candidate.legacySegments
+        );
+        if (!fallbackBody) {
+          throw new UnrecoverableMigrationSourceError(
+            "Legacy source object and extracted content are unavailable"
+          );
+        }
+        sourceObjectBytesAvailable = false;
+        comparisonSegments = candidate.legacySegments;
+        declaredContentType = "text/plain";
+        stored = await storage.putObject({
+          targetKey,
+          body: fallbackBody,
+          contentType: declaredContentType,
+          metadata: {
+            migrationSourceKind: candidate.sourceKind,
+            migrationSourceId: candidate.sourceId.toString(),
+            recoveredFromLegacySegments: "true",
+          },
+        });
+      }
     }
 
     const registration = await registerCanonicalUpload({
@@ -822,9 +884,17 @@ async function migrateCandidate(
           canonicalObjectKey: targetKey,
           sourceRecordCount: sourceContent.recordCount,
           sourceContentSha256: sourceContent.sha256,
-          sourceObjectSha256: stored.sha256,
+          sourceObjectSha256: sourceObjectBytesAvailable
+            ? stored.sha256
+            : null,
           canonicalObjectSha256: stored.sha256,
           status: "migrated",
+          metadata: {
+            ...reserved.migration.metadata,
+            ...(sourceObjectBytesAvailable
+              ? {}
+              : { recoveredFromLegacySegments: true }),
+          },
           lastErrorCode: null,
           lastErrorMessage: null,
           migratedAt: new Date(),
@@ -855,7 +925,7 @@ async function migrateCandidate(
   }
 }
 
-async function updateRunCursor(
+export async function updateRepositoryMigrationRunCursor(
   runId: string,
   sourceKind: RepositoryMigrationSourceKind,
   sourceId: number,
@@ -865,15 +935,29 @@ async function updateRunCursor(
       db.execute(sql`
         UPDATE repository_migration_runs
         SET cursor = cursor || jsonb_build_object(
-              ${sourceKind},
+              ${sourceKind}::text,
               GREATEST(
-                COALESCE((cursor->>${sourceKind})::bigint, 0),
+                COALESCE((cursor->>${sourceKind}::text)::bigint, 0),
                 ${sourceId}
               )
             ),
             updated_at = NOW()
         WHERE id = ${runId}::uuid
-        RETURNING *
+        RETURNING
+          id,
+          mode,
+          status,
+          requested_by AS "requestedBy",
+          source_kinds AS "sourceKinds",
+          cursor,
+          snapshot,
+          metrics,
+          recovery_window_ends_at AS "recoveryWindowEndsAt",
+          error_message AS "errorMessage",
+          started_at AS "startedAt",
+          finished_at AS "finishedAt",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
       `),
     "contentMigration.advanceCursor",
   );
@@ -900,9 +984,8 @@ async function updateRunCursor(
   };
 }
 
-async function metricsForRun(
+export async function getRepositoryMigrationRunMetrics(
   runId: string | null,
-  useOriginRun = false,
 ): Promise<RepositoryMigrationMetrics> {
   const rows = toPgRows<{ status: string; count: number }>(
     await executeQuery(
@@ -912,11 +995,7 @@ async function metricsForRun(
           FROM repository_migration_items
           ${
             runId
-              ? sql`WHERE ${
-                  useOriginRun
-                    ? sql`origin_run_id = ${runId}::uuid`
-                    : sql`run_id = ${runId}::uuid`
-                }`
+              ? sql`WHERE run_id = ${runId}::uuid`
               : sql``
           }
           GROUP BY status
@@ -925,17 +1004,18 @@ async function metricsForRun(
     ),
   );
   const counts = Object.fromEntries(rows.map((row) => [row.status, row.count]));
+  const excluded = counts.excluded ?? 0;
   return {
-    discovered: Object.values(counts).reduce(
-      (total, count) => total + count,
-      0,
-    ),
+    discovered:
+      Object.values(counts).reduce((total, count) => total + count, 0) -
+      excluded,
     migrated:
       (counts.migrated ?? 0) + (counts.verified ?? 0) + (counts.mismatch ?? 0),
     verified: counts.verified ?? 0,
     mismatched: counts.mismatch ?? 0,
     failed: counts.failed ?? 0,
     unrecoverable: counts.unrecoverable ?? 0,
+    excluded,
     rolledBack: counts.rolled_back ?? 0,
   };
 }
@@ -943,7 +1023,11 @@ async function metricsForRun(
 async function finishBackfillRun(
   run: RepositoryMigrationRunRow,
 ): Promise<void> {
-  const metrics = await metricsForRun(run.id, true);
+  // A retry preserves origin_run_id so rollback still belongs to the original
+  // backfill, but its operational result belongs to the retry run that
+  // currently owns the item. Count run_id here so one-source retries retain
+  // accurate discovered/migrated/error evidence.
+  const metrics = await getRepositoryMigrationRunMetrics(run.id);
   const recoveryDaysRow = toPgRows<{ value: string | null }>(
     await executeQuery(
       (db) =>
@@ -997,7 +1081,7 @@ async function processBackfillBatch(
     ) {
       const candidate = await loadNextCandidate(run, sourceKind);
       if (!candidate) {
-        run = await updateRunCursor(
+        run = await updateRepositoryMigrationRunCursor(
           run.id,
           sourceKind,
           run.snapshot.maximumIds?.[sourceKind] ?? 0,
@@ -1005,7 +1089,11 @@ async function processBackfillBatch(
         break;
       }
       await migrateCandidate(run, candidate, storage);
-      run = await updateRunCursor(run.id, sourceKind, candidate.sourceId);
+      run = await updateRepositoryMigrationRunCursor(
+        run.id,
+        sourceKind,
+        candidate.sourceId
+      );
       processed += 1;
     }
     if (processed >= MIGRATION_BATCH_SIZE) break;
@@ -1030,6 +1118,10 @@ async function reconcileNextBatch(
           and(
             inArray(repositoryMigrationItems.status, ["migrated", "mismatch"]),
             sql`${repositoryMigrationItems.canonicalVersionId} IS NOT NULL`,
+            sql`COALESCE(
+              ${repositoryMigrationItems.metadata} ->> 'lastReconciledRunId',
+              ''
+            ) <> ${run.id}`,
           ),
         )
         .orderBy(repositoryMigrationItems.updatedAt)
@@ -1057,19 +1149,35 @@ async function reconcileNextBatch(
       const evidence = toPgRows<{
         processing_status: string | null;
         object_sha256: string | null;
-        canonical_segments: string[];
+        canonical_record_count: number;
+        canonical_text_sha256: string | null;
       }>(
         await tx.execute(sql`
           SELECT
             version.processing_status,
             version.sha256 AS object_sha256,
-            ARRAY(
-              SELECT chunk.content
+            (
+              SELECT COUNT(*)::integer
               FROM repository_item_chunks chunk
               WHERE chunk.item_version_id = version.id
-                AND chunk.segment_level = 'chunk'
-              ORDER BY chunk.chunk_index, chunk.id
-            ) AS canonical_segments
+            ) AS canonical_record_count,
+            (
+              SELECT COALESCE(
+                artifact.sha256,
+                CASE
+                  WHEN artifact.text_inline IS NOT NULL
+                  THEN encode(
+                    sha256(convert_to(artifact.text_inline, 'UTF8')),
+                    'hex'
+                  )
+                END
+              )
+              FROM repository_artifacts artifact
+              WHERE artifact.item_version_id = version.id
+                AND artifact.kind = 'canonical_text'
+              ORDER BY artifact.created_at DESC
+              LIMIT 1
+            ) AS canonical_text_sha256
           FROM repository_item_versions version
           WHERE version.id = ${migration.canonicalVersionId}::uuid
           LIMIT 1
@@ -1081,9 +1189,10 @@ async function reconcileNextBatch(
       ) {
         return "pending" as const;
       }
-      const canonicalContent = buildMigrationContentEvidence(
-        evidence?.canonical_segments ?? [],
-      );
+      const canonicalContent = {
+        recordCount: evidence?.canonical_record_count ?? 0,
+        sha256: evidence?.canonical_text_sha256 ?? null,
+      };
       const approvedMismatch =
         typeof migration.metadata.approvedMismatchAt === "string";
       const decision = reconcileMigrationEvidence({
@@ -1113,6 +1222,10 @@ async function reconcileNextBatch(
               ? decision.reasons.join("; ").slice(0, 4_000)
               : null,
           verifiedAt: decision.status === "verified" ? new Date() : null,
+          metadata: {
+            ...migration.metadata,
+            lastReconciledRunId: run.id,
+          },
           updatedAt: new Date(),
         })
         .where(eq(repositoryMigrationItems.id, migration.id));
@@ -1127,13 +1240,15 @@ async function reconcileNextBatch(
           db.execute(sql`
           SELECT COUNT(*)::integer AS count
           FROM repository_migration_items
-          WHERE status = 'migrated'
+          WHERE status IN ('migrated', 'mismatch')
+            AND canonical_version_id IS NOT NULL
+            AND COALESCE(metadata ->> 'lastReconciledRunId', '') <> ${run.id}
         `),
         "contentMigration.remainingReconciliation",
       ),
     )[0]?.count ?? 0;
   if (remaining === 0 && pending === 0) {
-    const metrics = await metricsForRun(null);
+    const metrics = await getRepositoryMigrationRunMetrics(null);
     await executeQuery(
       (db) =>
         db

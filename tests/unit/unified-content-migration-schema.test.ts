@@ -32,3 +32,66 @@ describe("migration 155 unified content retirement safety", () => {
     expect(migration).not.toMatch(/\bTRUNCATE\b/i);
   });
 });
+
+describe("migration 160 unified content source eligibility", () => {
+  const migrationPath = path.join(
+    process.cwd(),
+    "infra/database/schema/160-unified-content-migration-source-eligibility.sql",
+  );
+  const migration = fs.readFileSync(migrationPath, "utf8");
+  const migrationRunner = fs.readFileSync(
+    path.join(
+      process.cwd(),
+      "lib/repositories/content-platform/migration-runner.ts",
+    ),
+    "utf8",
+  );
+  const migrationControl = fs.readFileSync(
+    path.join(
+      process.cwd(),
+      "lib/repositories/content-platform/migration-control-service.ts",
+    ),
+    "utf8",
+  );
+  const manifest = JSON.parse(
+    fs.readFileSync(
+      path.join(process.cwd(), "infra/database/migrations.json"),
+      "utf8",
+    ),
+  ) as { migrationFiles: string[] };
+
+  it("records unsupported connector discoveries without hiding migrated data", () => {
+    expect(manifest.migrationFiles).toContain(
+      "160-unified-content-migration-source-eligibility.sql",
+    );
+    expect(migration).toContain("'excluded'");
+    expect(migration).toContain(
+      "connector_source.status = 'unsupported'",
+    );
+    expect(migration).toContain(
+      "migration.canonical_version_id IS NULL",
+    );
+    expect(migration).toContain(
+      "migration.canonical_object_key IS NULL",
+    );
+    expect(migration).toContain(
+      "'exclusionReason', 'unsupported_connector_source'",
+    );
+    expect(migration).not.toMatch(/\bDELETE\b/i);
+    expect(migration).not.toMatch(/\bTRUNCATE\b/i);
+  });
+
+  it("excludes unsupported connector discoveries from inventory and backfill", () => {
+    for (const source of [migrationRunner, migrationControl]) {
+      expect(source).toContain(
+        "FROM repository_connector_sources connector_source",
+      );
+      expect(source).toContain(
+        "connector_source.status = 'unsupported'",
+      );
+      expect(source).toContain(
+        "COALESCE(item.metadata, '{}'::jsonb) ? 'migrationSourceKind'",
+      );
+    }
+  });
+});

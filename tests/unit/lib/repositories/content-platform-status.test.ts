@@ -116,21 +116,27 @@ describe("canonical repository item status", () => {
   });
 
   it("keeps post-deployment recovery quarantined and disables manual retry", () => {
-    expect(
-      resolveCanonicalItemStatus(
-        statusRow({
-          versionStatus: "cancelled",
-          jobStatus: "cancelled",
-          jobError: "Awaiting the replacement runtime",
-          postDeployRecovery: "unified-content-runtime-v2",
-        })
-      )
-    ).toEqual({
-      itemId: 7,
-      processingStatus: "retrying",
-      processingError: null,
-      canRetry: false,
-    });
+    for (const postDeployRecovery of [
+      "unified-content-runtime-v2",
+      "unified-content-artifact-v3",
+      "embedding-concurrency-v1",
+    ] as const) {
+      expect(
+        resolveCanonicalItemStatus(
+          statusRow({
+            versionStatus: "cancelled",
+            jobStatus: "cancelled",
+            jobError: "Awaiting the replacement runtime",
+            postDeployRecovery,
+          })
+        )
+      ).toEqual({
+        itemId: 7,
+        processingStatus: "retrying",
+        processingError: null,
+        canRetry: false,
+      });
+    }
   });
 
   it("shows pending work with a consumed attempt as retrying", () => {

@@ -135,3 +135,46 @@ describe("unified-content artifact and embedding recovery migration", () => {
     );
   });
 });
+
+describe("unified-content embedding concurrency recovery migration", () => {
+  const migration = readFileSync(
+    resolve(
+      process.cwd(),
+      "infra/database/schema/159-unified-content-concurrency-recovery.sql"
+    ),
+    "utf8"
+  );
+
+  it("quarantines only the known transient query failures for the replacement worker", () => {
+    expect(migration).toContain(
+      "job.last_error_code = 'RETRY_BUDGET_EXHAUSTED'"
+    );
+    expect(migration).toContain(
+      "job.last_error_message ILIKE 'Failed query:%repository_index_generations%'"
+    );
+    expect(migration).toContain(
+      "post_deploy_recovery = 'embedding-concurrency-v1'"
+    );
+    expect(migration).toContain("SET status = 'cancelled'");
+    expect(migration).toContain("available_at = 'infinity'::timestamptz");
+    expect(migration).not.toContain("No searchable text was extracted");
+  });
+
+  it("never revives blocked, noncanonical, or inactive versions", () => {
+    expect(migration).toContain("item.current_version_id = version.id");
+    expect(migration).toContain("item.lifecycle_status = 'active'");
+    expect(migration).toContain("version.storage_status <> 'blocked'");
+    expect(migration).toContain("version.inspection_status <> 'blocked'");
+    expect(migration).toContain("version.object_key ~ (");
+  });
+
+  it("fences only the latest incomplete failed generation until the bounded worker drains", () => {
+    expect(migration).toContain("embedding_recovery_queued_at = now()");
+    expect(migration).toContain("embedding_recovery_attempts = 3");
+    expect(migration).toContain(
+      "'embedding-concurrency-v1: '"
+    );
+    expect(migration).toContain("chunk.embedding IS NULL");
+    expect(migration).toContain("newer_generation.status IN ('building', 'active', 'failed')");
+  });
+});

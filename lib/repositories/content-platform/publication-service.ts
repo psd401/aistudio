@@ -1,4 +1,13 @@
-import { and, desc, eq, inArray, ne, sql } from "drizzle-orm";
+import { createHash } from "node:crypto";
+import {
+  and,
+  desc,
+  eq,
+  inArray,
+  ne,
+  sql,
+  type SQLWrapper,
+} from "drizzle-orm";
 import { executeTransaction } from "@/lib/db/drizzle-client";
 import {
   knowledgeRepositories,
@@ -53,6 +62,7 @@ export interface PublishDocumentVersionInput {
   malwareScanRequired: boolean;
   canonicalText?: string;
   canonicalTextObjectKey?: string;
+  canonicalTextSha256?: string;
   segments: PublishableSegment[];
   artifactMetadata?: Record<string, unknown>;
   additionalArtifacts?: PublishableArtifact[];
@@ -103,6 +113,29 @@ export function isPublicationTargetActive(
 export type PublishPdfVersionResult = PublishDocumentVersionResult;
 
 export const MAX_INLINE_ARTIFACT_CHARACTERS = 1_000_000;
+export const REPOSITORY_PUBLICATION_STATEMENT_TIMEOUT_MS = 240_000;
+export const REPOSITORY_PUBLICATION_TRANSACTION_DEADLINE_MS = 270_000;
+
+/**
+ * Repository publication copies the previous immutable generation before
+ * swapping in one changed item. Large repositories can legitimately exceed
+ * the dev pool's global 60-second statement limit while copying vectors.
+ * Keep the override local to this transaction and below both the transaction
+ * deadline and the 15-minute worker timeout.
+ */
+export async function configureRepositoryPublicationTransaction(
+  tx: {
+    execute(query: string | SQLWrapper): PromiseLike<unknown>;
+  }
+): Promise<void> {
+  await tx.execute(sql`
+    SELECT set_config(
+      'statement_timeout',
+      ${REPOSITORY_PUBLICATION_STATEMENT_TIMEOUT_MS.toString()},
+      true
+    )
+  `);
+}
 
 function artifactKey(input: PublishDocumentVersionInput): string {
   return `${input.itemVersionId}:canonical_text:${input.processorVersion}`;
@@ -123,6 +156,19 @@ function validatePublicationInput(input: PublishDocumentVersionInput): void {
   }
   if (!input.canonicalText && !input.canonicalTextObjectKey) {
     throw new Error("Canonical text or its object key is required");
+  }
+  if (
+    input.canonicalTextSha256 &&
+    !/^[0-9a-f]{64}$/.test(input.canonicalTextSha256)
+  ) {
+    throw new Error("Canonical text SHA-256 must be lowercase hex");
+  }
+  if (
+    input.canonicalTextObjectKey &&
+    !input.canonicalText &&
+    !input.canonicalTextSha256
+  ) {
+    throw new Error("Object-backed canonical text requires a SHA-256");
   }
   if (
     input.canonicalText &&
@@ -197,6 +243,7 @@ export async function publishDocumentVersion(
 
   return executeTransaction(
     async (tx) => {
+      await configureRepositoryPublicationTransaction(tx);
       const [coordinates] = await tx
         .select({
           itemId: repositoryItemVersions.itemId,
@@ -341,6 +388,13 @@ export async function publishDocumentVersion(
               kind: "canonical_text",
               mediaType: "text/markdown",
               objectKey: input.canonicalTextObjectKey,
+              sha256:
+                input.canonicalTextSha256 ??
+                (input.canonicalText
+                  ? createHash("sha256")
+                      .update(input.canonicalText)
+                      .digest("hex")
+                  : undefined),
               textInline:
                 input.canonicalText &&
                 input.canonicalText.length <= MAX_INLINE_ARTIFACT_CHARACTERS
@@ -550,7 +604,10 @@ export async function publishDocumentVersion(
       };
     },
     "contentPlatform.publishDocumentVersion",
-    { isolationLevel: "serializable" }
+    {
+      isolationLevel: "serializable",
+      deadlineMs: REPOSITORY_PUBLICATION_TRANSACTION_DEADLINE_MS,
+    }
   );
 }
 

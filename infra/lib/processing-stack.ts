@@ -476,6 +476,13 @@ export class ProcessingStack extends cdk.Stack {
       },
     );
 
+    // Each invocation opens one direct Aurora connection. An unbounded SQS
+    // event source scaled past 400 concurrent dev invocations during the
+    // Unified Content backfill, exhausting connection establishment before
+    // any embedding work could start. Keep Lambda reservation and poller
+    // scaling identical so throttled receives do not churn invisibly.
+    const embeddingGeneratorMaxConcurrency =
+      props.environment === "prod" ? 10 : 5;
     const embeddingGenerator = new lambda.Function(this, "EmbeddingGenerator", {
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: "index.handler",
@@ -535,6 +542,7 @@ export class ProcessingStack extends cdk.Stack {
       ),
       timeout: cdk.Duration.minutes(5),
       memorySize: 1024, // 1GB
+      reservedConcurrentExecutions: embeddingGeneratorMaxConcurrency,
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [embeddingGeneratorSg],
@@ -741,6 +749,7 @@ export class ProcessingStack extends cdk.Stack {
       new lambdaEventSources.SqsEventSource(this.embeddingQueue, {
         batchSize: 1, // Process one item at a time to avoid rate limits
         maxBatchingWindow: cdk.Duration.seconds(5),
+        maxConcurrency: embeddingGeneratorMaxConcurrency,
       }),
     );
 

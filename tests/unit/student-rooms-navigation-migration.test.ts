@@ -18,10 +18,11 @@ const manifest = JSON.parse(
 
 describe("migration 158 — student room navigation", () => {
   it("is the registered migration immediately after rooms", () => {
-    expect(manifest.migrationFiles.slice(-2)).toEqual([
-      "157-rooms.sql",
-      "158-student-rooms-navigation.sql",
-    ]);
+    const roomsIndex = manifest.migrationFiles.indexOf("157-rooms.sql");
+    expect(roomsIndex).toBeGreaterThanOrEqual(0);
+    expect(manifest.migrationFiles[roomsIndex + 1]).toBe(
+      "158-student-rooms-navigation.sql"
+    );
   });
 
   it("adds a student-only read route without a management capability", () => {
