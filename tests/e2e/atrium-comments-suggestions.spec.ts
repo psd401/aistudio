@@ -56,18 +56,33 @@ test.describe("Atrium comments + track-changes (authenticated)", () => {
       // selection from its end.
       const markerParagraph = pm.locator("p").filter({ hasText: marker }).last();
       await expect(markerParagraph).toBeVisible();
-      await markerParagraph.click();
-      await page.keyboard.press("End");
-      await page.keyboard.down("Shift");
-      for (let i = 0; i < "comment-me here".length; i++) {
-        await page.keyboard.press("ArrowLeft");
-      }
-      await page.keyboard.up("Shift");
       const sidebar = page.getByTestId("comment-sidebar");
       const composer = sidebar.getByLabel("New comment");
-      await expect(composer).toBeEnabled({ timeout: 15000 }); // enabled by the selection
-      await composer.fill("Please clarify this line.");
-      await sidebar.getByRole("button", { name: "Add comment" }).click();
+      // Since the #1336 B3 rail redesign the comment rail is COLLAPSED by
+      // default on a document with no open threads (it only auto-opens when
+      // threads already exist). The composer stays mounted but hidden, so any
+      // fill would stall on visibility. Open the rail like a user would.
+      await page.getByTestId("comments-toggle").click();
+      await expect(composer).toBeVisible({ timeout: 15000 });
+      // The editor can rebase a freshly-typed line a beat after typing (the
+      // save/attribution cycle lands as a transaction), which collapses the
+      // selection and flips the selection-gated composer back to disabled
+      // between an enabled-check and the fill — the fill then stalls forever.
+      // Make selection → fill → submit one atomic, retryable unit instead.
+      await expect(async () => {
+        await markerParagraph.click();
+        await page.keyboard.press("End");
+        await page.keyboard.down("Shift");
+        for (let i = 0; i < "comment-me here".length; i++) {
+          await page.keyboard.press("ArrowLeft");
+        }
+        await page.keyboard.up("Shift");
+        await expect(composer).toBeEnabled({ timeout: 5000 }); // enabled by the selection
+        await composer.fill("Please clarify this line.", { timeout: 5000 });
+        await sidebar
+          .getByRole("button", { name: "Add comment" })
+          .click({ timeout: 5000 });
+      }).toPass({ timeout: 45000 });
       // The thread appears in the sidebar and the span carries the comment mark.
       await expect(page.getByTestId("comment-thread").first()).toBeVisible({ timeout: 30000 });
       await expect(pm.locator("span.atrium-comment").first()).toBeVisible({ timeout: 30000 });
