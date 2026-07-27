@@ -266,6 +266,84 @@ describe("Agent model credential broker", () => {
     expect(forwarded.anthropic_version).toBe("bedrock-2099-01-01")
   })
 
+  it("serves the request when the token/cost budget is over threshold", async () => {
+    // OBSERVE-ONLY. These limits were added in #1353 calibrated as if one
+    // model call per turn; an agentic turn makes many, each re-sending the
+    // whole context, so a single conversation could exhaust the hourly cap and
+    // the user got "I couldn't complete that" with no explanation. Until we
+    // know what normal consumption looks like, over-limit must MEASURE, never
+    // reject.
+    // beforeEach queues mockResolvedValueOnce values that would otherwise
+    // take priority over this override and make the test vacuous.
+    acquireAdmissionMock.mockReset()
+    acquireAdmissionMock.mockImplementation((req: unknown) => {
+      const kind = (req as { kind: string }).kind
+      if (kind === "model-proxy-total-tokens" || kind === "model-proxy-cost-microcents") {
+        return Promise.resolve({ allowed: false, reason: "owner_hourly_units" })
+      }
+      return Promise.resolve({ allowed: true, leaseId: `lease-${kind}`, reservedUnits: 1 })
+    })
+
+    const response = await POST(
+      request({
+        model: "us.anthropic.claude-sonnet-5",
+        max_tokens: 1_024,
+        messages: [{ role: "user", content: "hello" }],
+      }) as never,
+      { params: Promise.resolve({ path: ["anthropic", "v1", "messages"] }) },
+    )
+
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalled()
+    // Only the granted lease may be settled — a denial carries no leaseId.
+    const settled = finishAdmissionMock.mock.calls.map((c) => c[0])
+    expect(settled).not.toContain(undefined)
+  })
+
+  it("serves the request when the call-rate limit is over threshold", async () => {
+    // beforeEach queues mockResolvedValueOnce values that would otherwise
+    // take priority over this override and make the test vacuous.
+    acquireAdmissionMock.mockReset()
+    acquireAdmissionMock.mockImplementation((req: unknown) => {
+      const kind = (req as { kind: string }).kind
+      if (kind === "model-proxy-call") {
+        return Promise.resolve({ allowed: false, reason: "owner_hourly_units" })
+      }
+      return Promise.resolve({ allowed: true, leaseId: `lease-${kind}`, reservedUnits: 1 })
+    })
+
+    const response = await POST(
+      request({
+        model: "us.anthropic.claude-sonnet-5",
+        max_tokens: 1_024,
+        messages: [{ role: "user", content: "hello" }],
+      }) as never,
+      { params: Promise.resolve({ path: ["anthropic", "v1", "messages"] }) },
+    )
+
+    expect(response.status).toBe(200)
+  })
+
+  it("never answers 429 for a budget or capacity threshold", async () => {
+    // The contract in one line: thresholds are telemetry, not a gate.
+    // beforeEach queues mockResolvedValueOnce values that would otherwise
+    // take priority over this override and make the test vacuous.
+    acquireAdmissionMock.mockReset()
+    acquireAdmissionMock.mockResolvedValue({ allowed: false, reason: "owner_hourly_units" })
+
+    const response = await POST(
+      request({
+        model: "us.anthropic.claude-sonnet-5",
+        max_tokens: 1_024,
+        messages: [{ role: "user", content: "hello" }],
+      }) as never,
+      { params: Promise.resolve({ path: ["anthropic", "v1", "messages"] }) },
+    )
+
+    expect(response.status).not.toBe(429)
+    expect(response.status).toBe(200)
+  })
+
   it("retains conservative reservations after an ambiguous dispatch failure", async () => {
     fetchMock.mockRejectedValueOnce(new Error("client aborted after dispatch"))
     const response = await POST(

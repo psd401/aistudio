@@ -130,10 +130,25 @@ export async function POST(
     units: 1,
     limits: MODEL_PROXY_CALL_LIMITS,
   })
+  // OBSERVE-ONLY (2026-07-27, Hagel). Admission still MEASURES every call so
+  // we accumulate real consumption data, but it must never reject a user's
+  // request. The limits added in #1353 were calibrated as if one model call
+  // per turn; an agentic turn makes many, each re-sending the whole context,
+  // so a single conversation could exhaust the hourly cap and the agent
+  // answered "I couldn't complete that" with nothing explaining why.
+  //
+  // We do not yet know what normal consumption looks like for this workload.
+  // Until we do, over-limit is a LOG LINE, not a 429 — the numbers are here
+  // to be read, and limits can be set from evidence later.
   if (!callAdmission.allowed) {
-    return NextResponse.json(
-      { error: "Model request capacity is exhausted" },
-      { status: 429, headers: { "Retry-After": "60" } },
+    log.warn(
+      "Model call rate over threshold (observe-only — request allowed)",
+      sanitizeForLogging({
+        requestId,
+        ownerEmail: context.ownerEmail,
+        reason: callAdmission.reason,
+        limit: "MODEL_PROXY_CALL_LIMITS",
+      }),
     )
   }
 
@@ -141,7 +156,7 @@ export async function POST(
   try {
     body = await readBoundedModelRequest(request)
   } catch (error) {
-    await releaseResourceAdmission(callAdmission.leaseId)
+    if (callAdmission.allowed) await releaseResourceAdmission(callAdmission.leaseId)
     if (error instanceof ModelRequestBodyError) {
       return NextResponse.json({ error: error.message }, { status: error.status })
     }
@@ -151,7 +166,7 @@ export async function POST(
   try {
     parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)) as ModelRequest
   } catch {
-    await releaseResourceAdmission(callAdmission.leaseId)
+    if (callAdmission.allowed) await releaseResourceAdmission(callAdmission.leaseId)
     return NextResponse.json({ error: "Model request must be JSON" }, { status: 400 })
   }
   if (
@@ -162,7 +177,7 @@ export async function POST(
     parsed.max_tokens < 1 ||
     parsed.max_tokens > MAX_OUTPUT_TOKENS
   ) {
-    await releaseResourceAdmission(callAdmission.leaseId)
+    if (callAdmission.allowed) await releaseResourceAdmission(callAdmission.leaseId)
     return NextResponse.json({ error: "Model or output limit is not allowed" }, { status: 400 })
   }
   // UTF-8 bytes are a conservative upper bound on input tokens. Admission uses
@@ -170,7 +185,7 @@ export async function POST(
   // string can escape accounting by changing the request shape.
   const inputTokenUpperBound = body.byteLength
   if (inputTokenUpperBound > MAX_INPUT_TOKEN_UPPER_BOUND) {
-    await releaseResourceAdmission(callAdmission.leaseId)
+    if (callAdmission.allowed) await releaseResourceAdmission(callAdmission.leaseId)
     return NextResponse.json(
       { error: "Model input exceeds the supported context budget" },
       { status: 413 },
@@ -207,26 +222,38 @@ export async function POST(
     units: reservedTokens,
     limits: MODEL_PROXY_TOKEN_LIMITS,
   })
-  const costAdmission = tokenAdmission.allowed
-    ? await acquireResourceAdmission({
-        kind: "model-proxy-cost-microcents",
-        ownerKey: context.ownerEmail,
-        contextKey,
-        idempotencyKey: `${context.nonce}:${bodyDigest}:cost`,
-        units: reservedCostMicrocents,
-        limits: MODEL_PROXY_COST_LIMITS,
-      })
-    : tokenAdmission
+  // Measured unconditionally — previously cost was only sampled when tokens
+  // were under limit, which blinded us to spend in exactly the situation
+  // worth observing.
+  const costAdmission = await acquireResourceAdmission({
+    kind: "model-proxy-cost-microcents",
+    ownerKey: context.ownerEmail,
+    contextKey,
+    idempotencyKey: `${context.nonce}:${bodyDigest}:cost`,
+    units: reservedCostMicrocents,
+    limits: MODEL_PROXY_COST_LIMITS,
+  })
   if (!tokenAdmission.allowed || !costAdmission.allowed) {
-    if (tokenAdmission.allowed) {
-      await releaseResourceAdmission(tokenAdmission.leaseId)
-    }
-    await releaseResourceAdmission(callAdmission.leaseId)
-    return NextResponse.json(
-      { error: "Model token or cost budget is exhausted" },
-      { status: 429, headers: { "Retry-After": "60" } },
+    // OBSERVE-ONLY — see the note above. Log the numbers; serve the request.
+    log.warn(
+      "Model token/cost over threshold (observe-only — request allowed)",
+      sanitizeForLogging({
+        requestId,
+        ownerEmail: context.ownerEmail,
+        reservedTokens,
+        reservedCostMicrocents,
+        tokenReason: tokenAdmission.allowed ? null : tokenAdmission.reason,
+        costReason: costAdmission.allowed ? null : costAdmission.reason,
+      }),
     )
   }
+
+  // Only granted leases can be released or settled; a denied admission has no
+  // leaseId. Collecting them here keeps the lifecycle correct now that a
+  // denial no longer short-circuits the request.
+  const activeLeaseIds = [callAdmission, tokenAdmission, costAdmission]
+    .filter((a) => a.allowed)
+    .map((a) => a.leaseId)
 
   const secretId =
     process.env.AGENT_BEDROCK_API_KEY_SECRET_ID ||
@@ -234,11 +261,7 @@ export async function POST(
   const apiKey = await getSecretString(secretId)
   if (!apiKey) {
     log.error("Model broker credential is not configured", { requestId })
-    await Promise.all([
-      releaseResourceAdmission(callAdmission.leaseId),
-      releaseResourceAdmission(tokenAdmission.leaseId),
-      releaseResourceAdmission(costAdmission.leaseId),
-    ])
+    await Promise.all(activeLeaseIds.map((id) => releaseResourceAdmission(id)))
     return NextResponse.json({ error: "Model broker is not configured" }, { status: 503 })
   }
 
@@ -259,11 +282,7 @@ export async function POST(
     // Once fetch has been dispatched, a transport error or caller abort is
     // ambiguous: the provider may already have accepted and billed the work.
     // Retain the conservative reservation instead of reopening quota.
-    await Promise.all([
-      finishResourceAdmission(callAdmission.leaseId),
-      finishResourceAdmission(tokenAdmission.leaseId),
-      finishResourceAdmission(costAdmission.leaseId),
-    ])
+    await Promise.all(activeLeaseIds.map((id) => finishResourceAdmission(id)))
     log.error(
       "Model broker upstream request failed",
       sanitizeForLogging({
@@ -298,9 +317,5 @@ export async function POST(
     const value = upstream.headers.get(name)
     if (value) headers.set(name, value)
   }
-  return responseWithAdmissionLifecycle(upstream, headers, [
-    callAdmission.leaseId,
-    tokenAdmission.leaseId,
-    costAdmission.leaseId,
-  ])
+  return responseWithAdmissionLifecycle(upstream, headers, activeLeaseIds)
 }
