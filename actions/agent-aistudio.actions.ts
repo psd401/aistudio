@@ -138,6 +138,29 @@ interface TokenResponse {
   error?: string
 }
 
+async function lookupAistudioCallbackNonce(state: string) {
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+  const [row] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          ownerEmail: psdAgentWorkspaceConsentNonces.ownerEmail,
+          tokenKind: psdAgentWorkspaceConsentNonces.tokenKind,
+          codeVerifier: psdAgentWorkspaceConsentNonces.codeVerifier,
+        })
+        .from(psdAgentWorkspaceConsentNonces)
+        .where(
+          sql`${psdAgentWorkspaceConsentNonces.nonce} = ${state}
+              AND ${psdAgentWorkspaceConsentNonces.consumedAt} IS NULL
+              AND ${psdAgentWorkspaceConsentNonces.createdAt} >
+                ${oneHourAgo}::timestamptz`
+        )
+        .limit(1),
+    "lookupAistudioCallbackNonce"
+  )
+  return row
+}
+
 async function readJsonObject(response: Response): Promise<Record<string, unknown>> {
   try {
     const value: unknown = await response.json()
@@ -160,24 +183,7 @@ export async function handleAistudioCallback(
     // Treat the server-side, single-use nonce record as the state validator.
     // A format check is not an authorization boundary: only an exact,
     // unconsumed, unexpired nonce issued by this application may proceed.
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
-    const [row] = await executeQuery(
-      (db) =>
-        db
-          .select({
-            ownerEmail: psdAgentWorkspaceConsentNonces.ownerEmail,
-            tokenKind: psdAgentWorkspaceConsentNonces.tokenKind,
-            codeVerifier: psdAgentWorkspaceConsentNonces.codeVerifier,
-          })
-          .from(psdAgentWorkspaceConsentNonces)
-          .where(
-            sql`${psdAgentWorkspaceConsentNonces.nonce} = ${state}
-                AND ${psdAgentWorkspaceConsentNonces.consumedAt} IS NULL
-                AND ${psdAgentWorkspaceConsentNonces.createdAt} > ${oneHourAgo}::timestamptz`
-          )
-          .limit(1),
-      "lookupAistudioCallbackNonce"
-    )
+    const row = await lookupAistudioCallbackNonce(state)
     if (!row || row.tokenKind !== "aistudio" || !row.codeVerifier) {
       timer({ status: "error" })
       return createSuccess({

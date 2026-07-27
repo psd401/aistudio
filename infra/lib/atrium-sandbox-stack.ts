@@ -61,6 +61,28 @@ export interface AtriumSandboxStackProps extends cdk.StackProps {
   allowedMediaOrigins?: string[];
 }
 
+function normalizeAtriumOrigin(raw: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(
+      `AtriumSandboxStack: allowedParentOrigins entry is not a valid absolute URL: "${raw}"`
+    );
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new Error(
+      `AtriumSandboxStack: allowedParentOrigins entry must be an http(s) origin: "${raw}"`
+    );
+  }
+  if (url.origin === 'null') {
+    throw new Error(
+      `AtriumSandboxStack: allowedParentOrigins entry resolves to an opaque origin: "${raw}"`
+    );
+  }
+  return url.origin;
+}
+
 export class AtriumSandboxStack extends cdk.Stack {
   /** The CloudFront domain serving the sandbox host (e.g. dxxxx.cloudfront.net). */
   public readonly sandboxDomainName: string;
@@ -79,45 +101,18 @@ export class AtriumSandboxStack extends cdk.Stack {
     // (the sandbox would be unreachable by the real app with no error). THROW at
     // synth on an invalid entry rather than baking the raw string in — a
     // misconfiguration must fail the deploy loudly, not produce a dead sandbox.
-    function normalizeOriginStr(raw: string): string {
-      let url: URL;
-      try {
-        url = new URL(raw);
-      } catch {
-        throw new Error(
-          `AtriumSandboxStack: allowedParentOrigins entry is not a valid absolute URL: "${raw}"`
-        );
-      }
-      // Only http(s) origins are valid embedding parents / CDN sources. Reject
-      // any other scheme (ftp:, ws:, etc.) — `new URL("ftp://h").origin` is the
-      // non-opaque "ftp://h", so the "null" check below does NOT catch it. Without
-      // this guard a cdk.json entry like "ftp://evil" or a non-web scheme would be
-      // baked into the sandbox CSP / parent-origin allowlist. Mirrors the protocol
-      // guard in lib/content/artifact-sandbox-config.ts:normalizeOrigin so all
-      // three origin resolvers (app config, middleware via that config, and this
-      // CDK synth) agree on what a valid origin is.
-      if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-        throw new Error(
-          `AtriumSandboxStack: allowedParentOrigins entry must be an http(s) origin: "${raw}"`
-        );
-      }
-      // `new URL("data:...").origin` etc. yields the literal "null" (opaque) — reject it.
-      if (url.origin === 'null') {
-        throw new Error(
-          `AtriumSandboxStack: allowedParentOrigins entry resolves to an opaque origin: "${raw}"`
-        );
-      }
-      return url.origin;
-    }
-    const normalizedParentOrigins = props.allowedParentOrigins.map(normalizeOriginStr);
+    const normalizedParentOrigins =
+      props.allowedParentOrigins.map(normalizeAtriumOrigin);
     // CDN allowlist entries are baked verbatim into the sandbox CSP script-src/
     // style-src/img-src. Run them through the SAME normalizer (protocol + opaque-
     // origin guard) so a non-http(s) cdk.json entry (e.g. "file://…", "ftp://…")
     // fails synth loudly instead of silently widening the CSP with a bogus source.
-    const normalizedCdns = (props.allowedArtifactCdns ?? []).map(normalizeOriginStr);
+    const normalizedCdns =
+      (props.allowedArtifactCdns ?? []).map(normalizeAtriumOrigin);
     // media-src origins (workspace media bucket for agent-generated MP3/MP4).
     // Same normalizer so a bogus cdk.json entry fails synth loudly.
-    const normalizedMediaOrigins = (props.allowedMediaOrigins ?? []).map(normalizeOriginStr);
+    const normalizedMediaOrigins =
+      (props.allowedMediaOrigins ?? []).map(normalizeAtriumOrigin);
 
     // Fail-closed is correct (an empty allowlist → frame-ancestors 'none' + the
     // host accepts no render messages), but a SILENT empty allowlist almost always
