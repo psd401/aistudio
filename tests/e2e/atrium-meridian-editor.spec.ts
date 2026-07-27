@@ -48,11 +48,12 @@ test.describe("Atrium Meridian editor (authenticated)", () => {
     try {
       const page = await context.newPage();
       const runToken = Date.now();
+      const marker = `Meridian ${runToken}`;
       const created = await page.request.post("/api/v1/content", {
         data: {
           kind: "document",
           title: `Meridian editor probe ${runToken}`,
-          body: `# Meridian editor probe\n\nSeed ${runToken}`,
+          body: marker,
           bodyFormat: "markdown",
         },
       });
@@ -89,16 +90,9 @@ test.describe("Atrium Meridian editor (authenticated)", () => {
         timeout: 60000,
       });
 
-      // Type a fresh line (Enter isolates it), then select EXACTLY the marker by
-      // walking back char-by-char. The shared collab doc accumulates content across
-      // every run into large paragraphs, so Shift+Home would grab a huge multi-line
-      // range; a fixed-length backward selection is deterministic regardless of the
-      // doc's size or wrapping, so bold/underline act on the marker alone.
-      const marker = `Meridian ${Date.now()}`;
-      await pm.click();
-      await page.keyboard.press("End");
-      await page.keyboard.press("Enter");
-      await page.keyboard.type(marker);
+      // Select the unique marker loaded from this run's isolated document. Avoid an
+      // approximate editor click: its target changes with viewport layout and can
+      // place typed text inside the title paragraph instead of a standalone line.
       const markerText = pm.getByText(marker, { exact: true });
       await expect(markerText).toBeVisible({ timeout: 15000 });
       await markerText.selectText();
