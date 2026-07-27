@@ -17,7 +17,8 @@ import * as events from "aws-cdk-lib/aws-events";
 import * as eventsTargets from "aws-cdk-lib/aws-events-targets";
 import { execSync } from "node:child_process";
 import { ServiceRoleFactory } from "./constructs/security";
-import { VPCProvider, EnvironmentConfig } from "./constructs";
+import { EnvironmentConfig } from "./constructs/config/environment-config";
+import { VPCProvider } from "./constructs/network/vpc-provider";
 import { UnifiedContentProcessing } from "./constructs/processing/unified-content-processing";
 import { GoogleContentSync } from "./constructs/processing/google-content-sync";
 

@@ -95,9 +95,7 @@ async function readCount(
   return count(rows[0]?.count);
 }
 
-async function readSnapshot(
-  sql: RetirementSql,
-): Promise<LegacyRetirementDatabaseSnapshot> {
+async function loadGateRow(sql: RetirementSql): Promise<GateRow> {
   const [gate] = await sql<GateRow[]>`
     SELECT
       (
@@ -224,7 +222,10 @@ async function readSnapshot(
       ), false) AS retirement_enabled
   `;
   if (!gate) throw new Error("Retirement gate query returned no row");
+  return gate;
+}
 
+async function loadTableState(sql: RetirementSql): Promise<TableStateRow> {
   const [tableState] = await sql<TableStateRow[]>`
     SELECT
       to_regclass('public.documents') IS NOT NULL AS documents_table_present,
@@ -232,13 +233,20 @@ async function readSnapshot(
         AS document_chunks_table_present
   `;
   if (!tableState) throw new Error("Legacy table-state query returned no row");
+  return tableState;
+}
 
-  let uncovered = 0;
+async function readUncoveredCount(
+  sql: RetirementSql,
+  tableState: TableStateRow,
+): Promise<number> {
   if (
-    tableState.documents_table_present &&
-    tableState.document_chunks_table_present
+    !tableState.documents_table_present ||
+    !tableState.document_chunks_table_present
   ) {
-    const [coverage] = await sql<CountRow[]>`
+    return 0;
+  }
+  const [coverage] = await sql<CountRow[]>`
       SELECT (
         SELECT COUNT(*)::integer
         FROM repository_items item
@@ -292,12 +300,18 @@ async function readSnapshot(
             WHERE migration.source_kind = 'assistant_pdf_job'
               AND migration.source_id = job.id
               AND migration.status = 'verified'
-          )
+        )
       ) AS count
     `;
-    uncovered = count(coverage?.count);
-  }
+  return count(coverage?.count);
+}
 
+async function buildSnapshot(
+  sql: RetirementSql,
+  gate: GateRow,
+  tableState: TableStateRow,
+  uncovered: number,
+): Promise<LegacyRetirementDatabaseSnapshot> {
   return {
     activeRuns: count(gate.active_runs),
     dryRuns: count(gate.dry_runs),
@@ -330,6 +344,17 @@ async function readSnapshot(
     priorRetirementEvents: await readCount(sql, "retirement_events"),
     inventoryComplete: uncovered === 0,
   };
+}
+
+async function readSnapshot(
+  sql: RetirementSql,
+): Promise<LegacyRetirementDatabaseSnapshot> {
+  const [gate, tableState] = await Promise.all([
+    loadGateRow(sql),
+    loadTableState(sql),
+  ]);
+  const uncovered = await readUncoveredCount(sql, tableState);
+  return buildSnapshot(sql, gate, tableState, uncovered);
 }
 
 function logSnapshot(

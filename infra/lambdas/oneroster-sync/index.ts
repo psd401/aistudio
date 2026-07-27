@@ -159,6 +159,9 @@ export async function handler(
       });
       return { status: "skipped", reason: skip.reason };
     }
+    if (!config.credentialsSecretArn || !config.authMode || !config.baseUrl) {
+      throw new Error("OneRoster settings became incomplete during sync");
+    }
 
     const credentials = parseCredentials(
       await loadSecret(config.credentialsSecretArn),

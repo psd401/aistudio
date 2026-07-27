@@ -108,20 +108,33 @@ function uploadInitiationErrorResponse(
   );
 }
 
+async function authorizeUploadInitiation(
+  log: UploadLogger,
+): Promise<{ userId: string } | { response: NextResponse }> {
+  const session = await getServerSession();
+  if (!session?.sub) {
+    log.warn('Unauthorized request');
+    return {
+      response: NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 },
+      ),
+    };
+  }
+  const retired = await legacyContentRetirementResponse();
+  return retired
+    ? { response: retired }
+    : { userId: session.sub };
+}
+
 export async function POST(req: NextRequest) {
   const requestId = generateRequestId();
   const timer = startTimer('api.documents.v2.initiate-upload');
   const log = createLogger({ requestId, route: 'api.documents.v2.initiate-upload' });
   
   try {
-    // Authentication
-    const session = await getServerSession();
-    if (!session?.sub) {
-      log.warn('Unauthorized request');
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    const retired = await legacyContentRetirementResponse();
-    if (retired) return retired;
+    const authorization = await authorizeUploadInitiation(log);
+    if ('response' in authorization) return authorization.response;
 
     const body = await req.json();
     const validatedData = UploadRequestSchema.parse(body);
@@ -133,7 +146,7 @@ export async function POST(req: NextRequest) {
       fileSize,
       fileType,
       purpose,
-      userId: session.sub
+      userId: authorization.userId
     });
     
     const validationResponse = validateUploadRequest(validatedData, log);
@@ -147,7 +160,7 @@ export async function POST(req: NextRequest) {
       fileSize,
       fileType,
       purpose,
-      userId: session.sub,
+      userId: authorization.userId,
       processingOptions: {
         extractText: processingOptions?.extractText ?? true,
         convertToMarkdown: processingOptions?.convertToMarkdown ?? false,

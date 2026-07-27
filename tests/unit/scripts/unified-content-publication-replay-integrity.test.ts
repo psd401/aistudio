@@ -24,7 +24,10 @@ describe("unified content publication replay integrity", () => {
       "assertCanonicalArtifactReplayBinding",
     );
     expect(publicationSource).toContain(
-      "artifact.itemVersionId !== input.itemVersionId",
+      "canonicalArtifactCoordinatesMatch(input, artifact)",
+    );
+    expect(publicationSource).toContain(
+      "artifact.itemVersionId === input.itemVersionId",
     );
     expect(publicationSource).toContain(
       "artifact.objectKey !== (input.canonicalTextObjectKey ?? null)",

@@ -370,6 +370,52 @@ class ClaimLostError extends Error {
   }
 }
 
+async function getLegacyDocuments(
+  sql: postgres.Sql,
+  conversationId: string,
+): Promise<LegacyDocument[]> {
+  const rows = await sql.begin(
+    async (tx): Promise<Array<{ id: number; url: string | null }>> => {
+      // Coordinate with migration/finalization so the legacy table cannot
+      // disappear between the existence check and the read.
+      await tx`
+        SELECT pg_advisory_xact_lock(
+          hashtext('repository-content-migration')
+        )
+      `;
+      const [table] = await tx<{ relation_name: string | null }[]>`
+        SELECT to_regclass('public.documents')::text AS relation_name
+      `;
+      if (!table?.relation_name) return [];
+
+      const legacyDocuments = await tx<
+        { id: number; url: string | null }[]
+      >`
+        SELECT id, url
+        FROM documents
+        WHERE conversation_id = ${conversationId}::uuid
+      `;
+      return [...legacyDocuments];
+    },
+  );
+  // Every row is returned, including ones whose url yields no usable object
+  // key: the row must go regardless, or documents.conversation_id's SET NULL
+  // rule leaves a dangling row pointing at a conversation that no longer
+  // exists. A null objectKey just means no S3 delete is attempted.
+  return rows.map<LegacyDocument>((row) => {
+    const objectKey = documentUrlToObjectKey(row.url);
+    if (objectKey === null && row.url) {
+      // Observable rather than silent: an operator can tell the difference
+      // between "no objects to clean" and "we could not resolve this one".
+      log.warn("document_url_unresolvable", {
+        conversationId,
+        documentId: row.id,
+      });
+    }
+    return { id: row.id, objectKey };
+  });
+}
+
 function buildPorts(sql: postgres.Sql): SweepPorts {
   return {
     getRetentionSetting: async () => {
@@ -445,48 +491,8 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
       return rows.map((row) => row.repository_id);
     },
 
-    getLegacyDocuments: async (conversationId) => {
-      const rows = await sql.begin(
-        async (tx): Promise<Array<{ id: number; url: string | null }>> => {
-          // Coordinate with migration/finalization so the legacy table cannot
-          // disappear between the existence check and the read.
-          await tx`
-            SELECT pg_advisory_xact_lock(
-              hashtext('repository-content-migration')
-            )
-          `;
-          const [table] = await tx<{ relation_name: string | null }[]>`
-            SELECT to_regclass('public.documents')::text AS relation_name
-          `;
-          if (!table?.relation_name) return [];
-
-          const legacyDocuments = await tx<
-            { id: number; url: string | null }[]
-          >`
-            SELECT id, url
-            FROM documents
-            WHERE conversation_id = ${conversationId}::uuid
-          `;
-          return [...legacyDocuments];
-        },
-      );
-      // Every row is returned, including ones whose url yields no usable object
-      // key: the row must go regardless, or documents.conversation_id's SET NULL
-      // rule leaves a dangling row pointing at a conversation that no longer
-      // exists. A null objectKey just means no S3 delete is attempted.
-      return rows.map<LegacyDocument>((row) => {
-        const objectKey = documentUrlToObjectKey(row.url);
-        if (objectKey === null && row.url) {
-          // Observable rather than silent: an operator can tell the difference
-          // between "no objects to clean" and "we could not resolve this one".
-          log.warn("document_url_unresolvable", {
-            conversationId,
-            documentId: row.id,
-          });
-        }
-        return { id: row.id, objectKey };
-      });
-    },
+    getLegacyDocuments: (conversationId) =>
+      getLegacyDocuments(sql, conversationId),
 
     getMessageObjectKeys: async (conversationId, ownerUserId) => {
       const rows = await sql<MessagePartRow[]>`
