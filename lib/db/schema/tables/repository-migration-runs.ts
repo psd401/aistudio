@@ -47,6 +47,7 @@ export interface RepositoryMigrationMetrics {
   mismatched?: number;
   failed?: number;
   unrecoverable?: number;
+  excluded?: number;
   rolledBack?: number;
 }
 

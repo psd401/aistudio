@@ -107,6 +107,21 @@ describe('ProcessingStack embedding visual-artifact access', () => {
     });
   });
 
+  it('bounds embedding concurrency at the Lambda and SQS poller boundaries', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      ReservedConcurrentExecutions: 5,
+      Role: Match.anyValue(),
+      VpcConfig: Match.objectLike({
+        SecurityGroupIds: Match.anyValue(),
+        SubnetIds: Match.anyValue(),
+      }),
+    });
+    template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
+      BatchSize: 1,
+      ScalingConfig: { MaximumConcurrency: 5 },
+    });
+  });
+
   it('routes group-sync alarms through the shared monitoring topic', () => {
     const alarms = Object.values(
       template.findResources('AWS::CloudWatch::Alarm'),

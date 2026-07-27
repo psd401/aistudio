@@ -188,6 +188,7 @@ export function MigrationControlPanel() {
         <div className="flex flex-wrap gap-2">
           <Badge variant="secondary">{metrics.migrated ?? 0} migrated</Badge>
           <Badge variant="secondary">{metrics.verified ?? 0} verified</Badge>
+          <Badge variant="outline">{metrics.excluded ?? 0} excluded</Badge>
           <Badge
             variant={
               (metrics.mismatched ?? 0) > 0 ? "destructive" : "secondary"

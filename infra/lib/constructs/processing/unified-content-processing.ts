@@ -316,6 +316,17 @@ export class UnifiedContentProcessing extends Construct {
                     actions: ["s3:GetObject", "s3:GetObjectVersion"],
                     resources: [`${props.documentsBucket.bucketArn}/*`],
                   }),
+                  new iam.PolicyStatement({
+                    // S3 reports a missing legacy object as AccessDenied unless
+                    // the caller can list the bucket. The migration needs that
+                    // distinction so reconciliation can classify genuinely
+                    // absent source bytes as unrecoverable. Historical keys
+                    // predate the repositories/ prefix, so this temporary
+                    // retirement-gated grant cannot be prefix-restricted.
+                    sid: "LegacyContentMigrationDiscovery",
+                    actions: ["s3:ListBucket"],
+                    resources: [props.documentsBucket.bucketArn],
+                  }),
                 ]
               : []),
             new iam.PolicyStatement({
@@ -393,6 +404,12 @@ export class UnifiedContentProcessing extends Construct {
       },
     );
 
+    const workerReservedConcurrency = props.environment === "prod" ? 10 : 3;
+    // EventBridge invokes this same function every minute for durable job
+    // recovery, migration, reconciliation, and retention. Leave one reserved
+    // execution outside the SQS poller's ceiling so a sustained content queue
+    // cannot starve recurring maintenance.
+    const workerQueueMaxConcurrency = workerReservedConcurrency - 1;
     this.worker = new lambdaNodejs.NodejsFunction(this, "Worker", {
       functionName,
       runtime: lambda.Runtime.NODEJS_20_X,
@@ -404,7 +421,7 @@ export class UnifiedContentProcessing extends Construct {
       handler: "handler",
       timeout: cdk.Duration.minutes(15),
       memorySize: 3008,
-      reservedConcurrentExecutions: props.environment === "prod" ? 10 : 3,
+      reservedConcurrentExecutions: workerReservedConcurrency,
       vpc: props.vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [workerSecurityGroup],
@@ -481,7 +498,7 @@ export class UnifiedContentProcessing extends Construct {
     this.worker.addEventSource(
       new lambdaEventSources.SqsEventSource(this.queue, {
         batchSize: 1,
-        maxConcurrency: props.environment === "prod" ? 10 : 3,
+        maxConcurrency: workerQueueMaxConcurrency,
         reportBatchItemFailures: true,
       }),
     );

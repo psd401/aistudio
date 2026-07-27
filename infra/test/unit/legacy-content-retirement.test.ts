@@ -103,6 +103,9 @@ describe("legacy content infrastructure retirement", () => {
     expect(JSON.stringify(template.Resources)).not.toContain(
       "LegacyContentMigrationRead",
     );
+    expect(JSON.stringify(template.Resources)).not.toContain(
+      "LegacyContentMigrationDiscovery",
+    );
   });
 
   it("keeps the document stack deployable while removing every v2 legacy resource", () => {

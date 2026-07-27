@@ -91,7 +91,11 @@ deleted, a database cleanup trigger marks its retained repository items
 unavailable before connector/source cascades remove the reconciliation link.
 
 Google Docs, Sheets, Slides, and Drawings export to DOCX, XLSX, PPTX, and PDF.
-Drive blobs retain their supported MIME type. Google Vids and other Drive
+Drive blobs retain their supported MIME type except vendor text subtypes, which
+are processed as `text/plain` while their original MIME type remains in source
+and version metadata. This keeps files such as `text/x-python` inside the
+canonical text allowlist without changing their bytes or external identity.
+Google Vids and other Drive
 long-running downloads persist the operation name and resume later instead of
 holding a Lambda invocation open. Unsupported native types remain visible with
 an `unsupported` source status instead of silently disappearing.
@@ -191,3 +195,12 @@ After deployment, complete a labeled live matrix for create, edit, move into and
 out of a selected folder, delete/restore, Shared Drive permission loss/restore,
 notification loss followed by scheduled cursor resume, and one native export of
 each supported Workspace type.
+
+The 2026-07-27 dev readiness run verified the deployed personal OAuth connector,
+Picker selection, a 241-source initial reconciliation, and a later incremental
+sync with no queue or Lambda failure. It also classified five exported Google
+Docs with zero Word text characters as visible terminal “no searchable text”
+sources and repaired a `text/x-python` source through the canonical text
+compatibility path. This is operational evidence, not a substitute for the
+create/edit/move/delete/permission-loss matrix above; that matrix requires
+authorized mutations to external Drive content and remains a rollout gate.

@@ -146,7 +146,7 @@ const defineUnifiedContentProcessingSuite1 = () => {
     template.hasResourceProperties("AWS::Lambda::EventSourceMapping", {
       BatchSize: 1,
       FunctionResponseTypes: ["ReportBatchItemFailures"],
-      ScalingConfig: { MaximumConcurrency: 3 },
+      ScalingConfig: { MaximumConcurrency: 2 },
     });
     template.hasResourceProperties("AWS::Events::Rule", {
       ScheduleExpression: "rate(1 minute)",
@@ -253,6 +253,20 @@ const defineUnifiedContentProcessingSuite1 = () => {
     expect(migrationRead?.Action).not.toEqual(
       expect.arrayContaining(["s3:PutObject", "s3:DeleteObject"]),
     );
+    const migrationDiscovery = statements.find(
+      (statement) => statement.Sid === "LegacyContentMigrationDiscovery",
+    );
+    expect(migrationDiscovery).toMatchObject({
+      Effect: "Allow",
+      Action: "s3:ListBucket",
+    });
+    expect(JSON.stringify(migrationDiscovery)).not.toContain(
+      "s3:ListBucketVersions",
+    );
+    expect(JSON.stringify(migrationDiscovery?.Resource)).toContain(
+      ":s3:::aistudio-dev-documents",
+    );
+    expect(migrationDiscovery?.Condition).toBeUndefined();
   });
 
   test("publishes a tagged operational dashboard and namespace-scoped metrics", () => {

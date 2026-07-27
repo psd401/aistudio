@@ -1313,3 +1313,71 @@ retirement frontend templates before the Processing and DocumentProcessing
 templates; and run the irreversible database finalizer only after the
 post-deployment checks. Until that boundary, disabling a single product flag
 restores its legacy read path without deleting canonical evidence.
+
+### Epic readiness audit continuation (2026-07-27)
+
+The post-merge audit selected #1267 again as the next actionable workstream
+because this plan explicitly makes live migration, shadowing, rollback, and
+retirement the next dependency. PR #1350 addressed only #1297's expired
+edge-session refresh proof; it did not satisfy the unified-content rollout
+gates.
+
+The dev execution exposed and corrected issues that pre-production tests did
+not model:
+
+- embedding concurrency could exhaust Aurora connection establishment, and SQS
+  load could consume every unified-worker reservation before scheduled recovery
+  ran;
+- a failed backfill lost retry-run metrics, large repository publication used
+  the default transaction deadline, and genuinely missing legacy S3 objects had
+  no deterministic segment fallback;
+- connector sources already classified unsupported and migration-created
+  canonical targets could re-enter inventory;
+- reconciliation omitted `section` segments, treated intentional canonical
+  resegmentation as a count mismatch, and stopped after the first batch of
+  previously mismatched rows;
+- Google vendor text MIME types could be accepted by Drive sync but rejected by
+  the canonical processor.
+
+Migrations 159 and 160, bounded Lambda/SQS concurrency, a reserved maintenance
+slot, exact retry metrics, extended publication deadlines, deterministic
+missing-object recovery, explicit eligibility, complete artifact hashing,
+per-run reconciliation bookkeeping, and Google text normalization address
+those defects with unit, PostgreSQL smoke, and CDK assertions.
+
+A requested full Claude review of the review-ready diff then found three
+additional recovery defects before merge: migration 159 omitted generations
+that had written every vector but failed during atomic activation; replaying a
+preexisting object-backed canonical artifact did not backfill its missing
+SHA-256; and full rollback counted explicitly excluded sources as unfinished
+while never selecting them. The corrected implementation fences and releases
+activation-only failures, conditionally backfills only null artifact hashes,
+and completes rollback with excluded-source metrics. The real PostgreSQL smoke
+now applies migrations 159 and 160 twice, exercises the activation-only handoff,
+replays a legacy object-backed artifact, and completes an excluded-only rollback
+without invoking object storage.
+
+The follow-up security pass found that the first SHA repair bound a digest only
+to an artifact row, not its immutable payload coordinates, and that the route
+gate/finalizer still counted explicitly excluded connectors in their
+verification denominator. Publication replay now rejects item, processor,
+object-key, inline-text, or existing-hash drift; object-backed writes carry an
+S3 SHA-256 checksum; and both retirement entry points share the dashboard's
+fail-closed exclusion rules. PostgreSQL smoke covers mismatched object-key
+rejection before hash repair, while unit guards keep both retirement queries
+aligned.
+
+Live dev evidence now records 45 eligible sources, 44 migrated and verified,
+zero failed or unapproved mismatches, three explicitly excluded unsupported
+connector rows, and one genuinely missing Nexus source. A reversible rollback
+drill passed and restored the exact current version transactionally. The Google
+infrastructure and connector are deployed and incremental sync succeeds; the
+external mutation matrix remains outstanding.
+
+The epic is not ready for retirement. The missing Nexus source needs restore or
+an explicit product-data disposition; retrieval shadowing and the three
+independent product cutovers still require authenticated observation; the full
+quiet/recovery window must then elapse; and Cohere Embed v4/Rerank 3.5 remain
+blocked on an AWS Marketplace subscription that the current principal is not
+authorized to accept. #1263 and #1267 must remain open until those external and
+time-based gates have durable evidence.

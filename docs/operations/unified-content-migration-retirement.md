@@ -9,7 +9,10 @@ rollback drills, the recovery window, and irreversible legacy retirement.
 ## Safety contract
 
 - Deploy migration `155-unified-content-migration-retirement.sql` before the
-  application or worker.
+  application or worker. Deploy migrations
+  `159-unified-content-concurrency-recovery.sql` and
+  `160-unified-content-migration-source-eligibility.sql` before resuming a
+  backfill that was interrupted by database connection exhaustion.
 - Keep every new setting at its default until the dry run and backfill evidence
   are reviewed.
 - Never approve a reconciliation mismatch without comparing the immutable
@@ -77,7 +80,10 @@ must not contain source text, credentials, raw URLs, or signed URLs.
    left in an intermediate state.
 4. Run reconciliation. Each mapping compares:
    - source and canonical object SHA-256 when source bytes exist;
-   - ordered normalized extraction count and SHA-256;
+   - the complete canonical-text artifact SHA-256;
+   - extraction record counts as segmentation telemetry, not a parity
+     predicate, because the canonical tokenizer intentionally resegments
+     legacy extracts;
    - canonical processing completion.
 5. Reprocess retryable failures. Mark a source unrecoverable only when the
    original bytes and recoverable job input are genuinely absent.
@@ -87,10 +93,43 @@ must not contain source text, credentials, raw URLs, or signed URLs.
 7. Do not continue while any failure, unrecoverable source, or unapproved
    mismatch remains.
 
+The migration worker has bounded database pressure. In dev the embedding
+generator reserves five concurrent invocations and its SQS mapping has the same
+maximum; production uses ten. The unified-content worker reserves one
+invocation for scheduled maintenance in addition to its SQS maximum, so
+outbox recovery and bounded migration batches cannot be starved by queue load.
+Migration publication sets a four-minute PostgreSQL statement timeout inside a
+270-second application transaction deadline for large repositories.
+
+If a pre-cap deployment exhausted Aurora connections, migration 159 fences only
+the exact exhausted generation and failed inspect rows carrying the known
+connection-establishment errors. This includes a generation whose vectors were
+fully written but whose final activation transaction failed. The scheduled
+worker releases that marker after the old Lambda runtime has drained, and the
+bounded recovery path either fills missing vectors or performs activation only.
+It never re-arms arbitrary processing failures.
+
+Repository connector sources explicitly classified `unsupported`, and
+canonical targets created by the migration itself, are excluded from migration
+inventory without deleting their audit rows. A missing legacy S3 object is
+recoverable only when ordered legacy segments are present; the worker writes a
+deterministic text source and records `recoveredFromLegacySegments`. Access
+denials, network errors, and a source with neither bytes nor segments remain
+fail-closed.
+
+The route gate and irreversible finalizer use the same inventory and metric
+denominators as the operator dashboard: excluded connector sources are reported
+separately, not counted as discovered work requiring verification, and never
+make a destructive retirement gate easier to satisfy for a supported source.
+
 Repository items that already had a canonical version are shadow-audited
 without replacing that version. Newly created migration repositories, items,
 versions, jobs, and S3 objects are recorded separately so rollback never
-deletes preexisting canonical data.
+deletes preexisting canonical data. Replaying a pre-hash canonical publication
+first verifies the immutable item, processor, payload locator, and any existing
+inline bytes. Object-backed producers send the expected SHA-256 checksum to S3,
+then the transaction conditionally backfills a missing canonical-text hash
+before returning the existing generation.
 
 ## 3. Shadow retrieval and product cutover
 
@@ -125,7 +164,9 @@ backfill. The drill verifies the deletion plan and records
 `snapshot.rollbackDrill=true`; it does not delete canonical data. A full
 rollback, if needed, fences processing jobs, deletes only migration-created
 canonical objects/rows, preserves preexisting canonical versions, and marks
-the mappings rolled back.
+the mappings rolled back. Explicitly excluded sources are retained as audit
+evidence, skipped because they created no canonical data, and reported in the
+completed rollback metrics instead of preventing the run from finishing.
 
 After a successful drill:
 
@@ -227,3 +268,26 @@ If a problem is found after finalization, stop new ingestion with the
 product-specific setting, preserve evidence, and use the standard Aurora/S3
 restore process. Do not recreate empty compatibility tables or re-enable old
 workers against a partially restored database.
+
+## Dev readiness evidence (2026-07-27)
+
+The dev backfill and reconciliation discovered 45 eligible legacy sources.
+Forty-four migrated and verified, three unsupported connector records were
+explicitly excluded, and no failed or unapproved mismatch remained. Nine
+Assistant Architect PDF rows retained byte-identical immutable PDF hashes but
+had expected legacy-markdown versus `pdf-text-v2` plain-text extraction drift;
+an administrator approval recorded the processor evidence, both hashes, time,
+and reason without deleting the mismatch history. A final reconciliation run
+completed with `verified=44`, `mismatched=0`, and `failed=0`.
+
+The rollback drill temporarily selected the legacy chunks for one verified
+Repository item, proved the legacy read source existed, restored the exact
+canonical version in the same transaction, and recorded
+`snapshot.rollbackDrill=true`.
+
+Retirement is not approved. One Nexus document is genuinely unrecoverable
+because both its legacy object and chunks are absent. Retrieval shadowing and
+all three product cutovers remain disabled, so the required observation and
+seven-day quiet windows have not started. Restore or formally disposition the
+missing source, complete the live shadow/cutover matrix, and let the full
+recovery window elapse before enabling retirement or running the finalizer.

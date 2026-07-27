@@ -28,6 +28,7 @@ export type RepositoryMigrationItemStatus =
   | "mismatch"
   | "failed"
   | "unrecoverable"
+  | "excluded"
   | "rolled_back";
 
 export interface RepositoryMigrationItemMetadata {
@@ -42,6 +43,9 @@ export interface RepositoryMigrationItemMetadata {
   approvedMismatchReason?: string;
   rollbackPrepared?: boolean;
   rollbackObjectKeys?: string[];
+  exclusionReason?: string;
+  excludedAt?: string;
+  lastReconciledRunId?: string;
 }
 
 export const repositoryMigrationItems = pgTable(

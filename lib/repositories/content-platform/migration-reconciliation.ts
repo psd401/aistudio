@@ -99,12 +99,10 @@ export function reconcileMigrationEvidence(
   if (evidence.canonicalContent.recordCount === 0) {
     reasons.push("canonical extraction produced no content records");
   }
-  if (
-    evidence.sourceContent.recordCount > 0 &&
-    evidence.sourceContent.recordCount !== evidence.canonicalContent.recordCount
-  ) {
-    reasons.push("extracted record count differs");
-  }
+  // Record counts remain useful rollout telemetry, but they cannot be a parity
+  // predicate: canonical processing intentionally resegments legacy extracts
+  // under the current tokenizer/section contract. Full normalized text hashes
+  // prove content parity independently of those chunk boundaries.
   if (
     evidence.sourceContent.sha256 &&
     evidence.sourceContent.sha256 !== evidence.canonicalContent.sha256

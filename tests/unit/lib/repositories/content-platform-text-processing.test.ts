@@ -1,5 +1,7 @@
 /** @jest-environment node */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   extractCanonicalTextDocument,
   isCanonicalTextContentType,
@@ -46,7 +48,15 @@ describe("canonical text processing", () => {
     expect(isCanonicalTextContentType("text/plain")).toBe(true);
     expect(isCanonicalTextContentType("text/markdown")).toBe(true);
     expect(isCanonicalTextContentType("text/csv")).toBe(true);
+    expect(isCanonicalTextContentType("text/x-python")).toBe(true);
     expect(isCanonicalTextContentType("application/zip")).toBe(false);
+    expect(
+      extractCanonicalTextDocument(
+        Buffer.from("print('canonical')"),
+        "text/x-python",
+        "example.py",
+      ).detectedContentType,
+    ).toBe("text/plain");
     expect(() =>
       extractCanonicalTextDocument(
         Uint8Array.from([0xff, 0xfe, 0xfd]),
@@ -56,5 +66,18 @@ describe("canonical text processing", () => {
     expect(() =>
       extractCanonicalTextDocument(Buffer.from("safe\0binary"), "text/plain")
     ).toThrow("binary null bytes");
+  });
+
+  it("publishes the normalized text MIME type from the worker", () => {
+    const workerSource = readFileSync(
+      join(
+        process.cwd(),
+        "infra/lambdas/unified-content-processor/index.ts",
+      ),
+      "utf8",
+    );
+    expect(workerSource).toContain(
+      "detectedContentType = extracted.detectedContentType;",
+    );
   });
 });

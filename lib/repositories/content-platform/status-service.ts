@@ -38,6 +38,7 @@ interface CanonicalStatusRow {
   postDeployRecovery:
     | "unified-content-runtime-v2"
     | "unified-content-artifact-v3"
+    | "embedding-concurrency-v1"
     | null;
   active: boolean;
   buildingGeneration: boolean;

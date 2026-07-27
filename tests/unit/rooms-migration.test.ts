@@ -16,10 +16,11 @@ const manifest = JSON.parse(
 
 describe("migration 157 — teacher-managed rooms", () => {
   it("is registered after the current OneRoster role-source migration", () => {
-    expect(manifest.migrationFiles.slice(-3, -1)).toEqual([
+    const roleSourceIndex = manifest.migrationFiles.indexOf(
       "156-oneroster-user-role-source.sql",
-      "157-rooms.sql",
-    ]);
+    );
+    expect(roleSourceIndex).toBeGreaterThanOrEqual(0);
+    expect(manifest.migrationFiles[roleSourceIndex + 1]).toBe("157-rooms.sql");
   });
 
   it.each(["rooms", "room_classes", "room_members", "room_resources"])(
