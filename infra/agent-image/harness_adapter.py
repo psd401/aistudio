@@ -29,6 +29,17 @@ logger = logging.getLogger("harness_adapter")
 _SAFE_PATH_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
+def _is_safe_path_component(value: str) -> bool:
+    """True when `value` is safe to interpolate as a single path segment.
+
+    The charset check alone is not enough. `.` is a legal id character, so
+    ".." passes the regex while still walking a directory upward once joined —
+    the one traversal a `/`-free component can still perform. Excluding the
+    dot-only names closes that without banning dots from ids generally.
+    """
+    return bool(_SAFE_PATH_ID.match(value or "")) and value not in {".", ".."}
+
+
 @dataclasses.dataclass
 class TurnResult:
     """Structured result of a single agent turn.
@@ -398,21 +409,45 @@ class OpenClawAdapter(HarnessAdapter):
             )
             return empty
         # The session/agent ids arrive on the gateway event stream, so treat
-        # them as untrusted path input: anything outside this charset could
-        # traverse out of the sessions directory.
-        if not _SAFE_PATH_ID.match(session_uuid) or (
-            agent_id and not _SAFE_PATH_ID.match(agent_id)
+        # them as untrusted path input. The charset alone is NOT sufficient:
+        # `.` is a legal id character, so ".." satisfies the regex and
+        # `<workspace>/agents/../sessions/<id>.jsonl` normalizes one directory
+        # above the intended agent — enough to read and bill another
+        # transcript. Reject dot-only components explicitly.
+        if not _is_safe_path_component(session_uuid) or (
+            agent_id and not _is_safe_path_component(agent_id)
         ):
             logger.warning("transcript usage skipped — unsafe session/agent id")
             return empty
 
-        path = os.path.join(
+        sessions_dir = os.path.join(
             self.WORKSPACE_DIR, "agents", agent_id or "main", "sessions",
-            f"{session_uuid}.jsonl",
         )
-        if not os.path.exists(path):
+        path = os.path.join(sessions_dir, f"{session_uuid}.jsonl")
+        # Containment: the resolved file must sit directly beneath the resolved
+        # sessions directory. Mirrors the Zip-Slip containment workspace_sync.py
+        # applies to restore paths, and catches a SYMLINKED transcript.
+        #
+        # It does NOT substitute for the dot-name rejection above. `sessions_dir`
+        # is built from the same untrusted agent_id, so an agent_id of ".."
+        # moves BOTH sides of this comparison to the escaped directory and they
+        # match — the check would pass on a path that already climbed out. The
+        # component check is what stops that vector; this is defence against a
+        # different one. (test_dot_dot_agent_id_cannot_climb_out_of_the_agent_
+        # directory fails if the dot-name rejection is removed, even with this
+        # check in place — verified, not assumed.)
+        resolved = os.path.realpath(path)
+        resolved_dir = os.path.realpath(sessions_dir)
+        if os.path.dirname(resolved) != resolved_dir:
+            logger.warning(
+                "transcript usage skipped — resolved path escapes the sessions "
+                "directory",
+            )
+            return empty
+        if not os.path.exists(resolved):
             logger.warning("transcript usage skipped — no transcript at %s", path)
             return empty
+        path = resolved
 
         # OpenClaw creates the transcript at session start and appends the
         # turn-ending assistant record before it emits the chat `final` event

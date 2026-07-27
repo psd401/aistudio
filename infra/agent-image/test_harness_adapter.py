@@ -412,6 +412,47 @@ class TranscriptUsageTests(unittest.TestCase):
                 f"unsafe ids must not read a file: {sid!r} {aid!r}",
             )
 
+    def test_dot_dot_agent_id_cannot_climb_out_of_the_agent_directory(self):
+        # `.` is a legal id character, so ".." satisfies the charset regex —
+        # the one traversal a slash-free component can still perform. Plant a
+        # READABLE transcript at exactly the path it would reach
+        # (<workspace>/agents/../sessions/ == <workspace>/sessions/) so this
+        # fails loudly if the guard regresses, instead of passing because the
+        # file merely happened not to exist.
+        sibling = pathlib.Path(self.tmp.name) / "sessions"
+        sibling.mkdir(parents=True, exist_ok=True)
+        (sibling / "s1.jsonl").write_text(
+            json.dumps(_assistant(5_000, inp=4242)) + "\n", encoding="utf-8",
+        )
+        for aid in ("..", "."):
+            usage = self.adapter._read_turn_usage("s1", aid, 0)
+            self.assertEqual(
+                usage["input"], 0, f"agentId={aid!r} must not read a transcript",
+            )
+            self.assertEqual(usage["model_calls"], 0)
+
+    def test_symlinked_transcript_is_rejected_by_containment(self):
+        # realpath containment also covers a transcript symlinked in from
+        # elsewhere in the workspace.
+        outside = pathlib.Path(self.tmp.name) / "elsewhere.jsonl"
+        outside.write_text(
+            json.dumps(_assistant(5_000, inp=99)) + "\n", encoding="utf-8",
+        )
+        (self.sessions / "linked.jsonl").symlink_to(outside)
+        self.assertEqual(
+            self.adapter._read_turn_usage("linked", "main", 0)["input"], 0,
+        )
+
+    def test_dot_names_rejected_by_the_component_check(self):
+        self.assertFalse(harness_adapter._is_safe_path_component(".."))
+        self.assertFalse(harness_adapter._is_safe_path_component("."))
+        self.assertFalse(harness_adapter._is_safe_path_component("a/b"))
+        self.assertFalse(harness_adapter._is_safe_path_component(""))
+        # Dots remain legal INSIDE an id — only the dot-only names are banned.
+        self.assertTrue(harness_adapter._is_safe_path_component("..a"))
+        self.assertTrue(harness_adapter._is_safe_path_component("fc4b475b-65d9"))
+        self.assertTrue(harness_adapter._is_safe_path_component("main.v2"))
+
     def test_missing_session_id_is_a_no_op(self):
         self.assertEqual(
             self.adapter._read_turn_usage(None, "main", 0)["model_calls"], 0,
