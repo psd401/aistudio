@@ -36,7 +36,7 @@ describe("job runner restart handling", () => {
 
   it("invokes with the RESTART session id, never the original, on overflow", () => {
     // The load-bearing line. Passing job.sessionId here is the whole bug.
-    expect(source).toContain("restartSessionId(job.sessionId)")
+    expect(source).toContain("restartSessionId(job.sessionId, job.lockToken)")
     expect(source).toContain("invokeSessionId")
 
     // The invoke must use the derived id.

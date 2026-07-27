@@ -112,6 +112,13 @@ export interface JobPayload {
 
 const PROMPT_EXCERPT_MAX = 2000;
 
+/**
+ * RunTask caps the ENTIRE container-override payload at 8 KiB. Enforced here so
+ * an oversized job fails at build time, where the caller can fall back, rather
+ * than at launch with an opaque RunTask rejection.
+ */
+const MAX_PAYLOAD_BYTES = 8 * 1024;
+
 export function buildJobPayload(input: {
   sessionId: string;
   reason?: PromotionReason;
@@ -136,7 +143,24 @@ export function buildJobPayload(input: {
     spaceName: input.spaceName,
     ...(input.threadName ? { threadName: input.threadName } : {}),
     isDM: input.isDM,
-    promptExcerpt: (input.originalPrompt || '').slice(0, PROMPT_EXCERPT_MAX),
+    // A CONTINUATION resumes a session whose transcript already holds the full
+    // request, so an excerpt is context garnish. A RESTART has no transcript —
+    // a truncated prompt there means the agent silently executes an incomplete
+    // request, which is worse than not restarting at all. Schedule validation
+    // accepts prompts up to 20,000 chars, well past the old 2,000 cap.
+    promptExcerpt:
+      input.reason === 'context-overflow'
+        ? input.originalPrompt || ''
+        : (input.originalPrompt || '').slice(0, PROMPT_EXCERPT_MAX),
   };
-  return JSON.stringify(payload);
+  const serialized = JSON.stringify(payload);
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_PAYLOAD_BYTES) {
+    // Deliberately fatal rather than truncating back down: the caller catches
+    // this and posts the partial instead. Restarting with half the
+    // instructions would look like success and produce the wrong work.
+    throw new Error(
+      `JOB_PAYLOAD exceeds the ${MAX_PAYLOAD_BYTES}-byte RunTask override cap`
+    );
+  }
+  return serialized;
 }

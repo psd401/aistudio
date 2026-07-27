@@ -91,7 +91,7 @@ async function main(): Promise<number> {
   // before launching this task.
   const isRestart = job.reason === 'context-overflow';
   const invokeSessionId = isRestart
-    ? restartSessionId(job.sessionId)
+    ? restartSessionId(job.sessionId, job.lockToken)
     : job.sessionId;
   const prompt = isRestart
     ? buildOverflowRestartPrompt(job.promptExcerpt)

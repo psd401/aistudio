@@ -109,15 +109,53 @@ describe("cron job promotion", () => {
       expect(shouldPromoteFromRouter("ContextOverflow")).toBe(false)
     })
 
-    it("stays inside the 8 KiB RunTask override cap", () => {
-      // AWS caps the total container-override payload. A long prompt must be
-      // truncated by the builder, not rejected by RunTask at launch.
+    it("truncates a CONTINUATION prompt and stays inside the 8 KiB cap", () => {
+      // AWS caps the total container-override payload. A continuation resumes
+      // a session whose transcript already holds the full request, so an
+      // excerpt is only context garnish.
       const payload = buildFromCron({
         ...baseInput,
         originalPrompt: "x".repeat(50_000),
       })
       expect(Buffer.byteLength(payload, "utf8")).toBeLessThan(8 * 1024)
       expect(parseJobPayload(payload).promptExcerpt.length).toBe(2000)
+    })
+
+    it("carries a RESTART prompt in full, past the excerpt cap", () => {
+      // A restart has NO transcript to supply the omitted half. Schedule
+      // validation accepts up to 20,000 chars, so truncating to 2,000 would
+      // let an overflowed task silently execute an incomplete request —
+      // which looks like success and produces the wrong work.
+      const prompt = "y".repeat(5_000)
+      const parsed = parseJobPayload(
+        buildFromCron({
+          ...baseInput,
+          reason: "context-overflow",
+          originalPrompt: prompt,
+        }),
+      )
+
+      expect(parsed.promptExcerpt).toBe(prompt)
+      expect(parsed.promptExcerpt.length).toBe(5_000)
+    })
+
+    it("refuses to build a restart that would not fit, rather than truncating", () => {
+      // Falling back to a truncated restart would be the silent-wrong-work
+      // failure again. The caller catches this and posts the partial instead.
+      expect(() =>
+        buildFromCron({
+          ...baseInput,
+          reason: "context-overflow",
+          originalPrompt: "z".repeat(20_000),
+        }),
+      ).toThrow(/RunTask override cap/)
+    })
+
+    it("keeps continuation payloads buildable no matter the prompt size", () => {
+      // The cap must never break the deadline path, which truncates first.
+      expect(() =>
+        buildFromCron({ ...baseInput, originalPrompt: "z".repeat(100_000) }),
+      ).not.toThrow()
     })
   })
 
@@ -207,30 +245,51 @@ describe("cron job promotion", () => {
   })
 
   describe("restart session ids", () => {
+    const original = "hagelk-db0f32b5-sched-5123b45b-2026-07-27"
+
     it("derives a fresh id so the overflowing transcript is discarded", () => {
       // AgentCore sticky-routes by session id. Reusing it would hand the
       // runner the exact history that blew the context window.
-      const original = "hagelk-db0f32b5-sched-5123b45b-2026-07-27"
-      expect(restartSessionId(original)).toBe(`${original}-r2`)
-      expect(restartSessionId(original)).not.toBe(original)
+      const restart = restartSessionId(original, "aaaaaaaa-1111-2222-3333-444444444444")
+      expect(restart).not.toBe(original)
+      expect(restart.startsWith(original)).toBe(true)
     })
 
-    it("keeps a single suffix across repeated restarts", () => {
-      // AgentCore enforces a session-id length limit, so the suffix must not
-      // accumulate (…-r2-r3-r4) on a task that overflows repeatedly.
-      const first = restartSessionId("task-2026-07-27")
-      const second = restartSessionId(first)
-      const third = restartSessionId(second)
+    it("is unique per PROMOTION, not per day", () => {
+      // THE BUG THIS REPLACED. A scheduled session id is date-based and stable
+      // for the whole UTC day, and cron always passes that original id — never
+      // a derived one. A counter-based suffix therefore returned the SAME
+      // "-r2" on every promotion that day, so a task overflowing twice would
+      // sticky-route the second restart into the first restart's transcript.
+      const first = restartSessionId(original, "11111111-aaaa-bbbb-cccc-dddddddddddd")
+      const second = restartSessionId(original, "22222222-aaaa-bbbb-cccc-dddddddddddd")
 
-      expect(second).toBe("task-2026-07-27-r3")
-      expect(third).toBe("task-2026-07-27-r4")
-      expect(third.match(/-r\d+/g)).toHaveLength(1)
+      expect(first).not.toBe(second)
+    })
+
+    it("replaces the suffix rather than accumulating it", () => {
+      // AgentCore enforces a session-id length limit, so a repeatedly
+      // overflowing task must not grow the id without bound.
+      const first = restartSessionId(original, "11111111-aaaa-bbbb-cccc-dddddddddddd")
+      const second = restartSessionId(first, "22222222-aaaa-bbbb-cccc-dddddddddddd")
+
+      expect(second.match(/-r[0-9a-f]+/g)).toHaveLength(1)
+      expect(second.length).toBeLessThanOrEqual(first.length)
     })
 
     it("stays traceable to the run that spawned it", () => {
       // Derived rather than random, so a restart in the logs can be tied back
       // to the original scheduled run.
-      expect(restartSessionId("abc-2026-07-27")).toContain("abc-2026-07-27")
+      expect(restartSessionId(original, "abcdef01-0000-0000-0000-000000000000")).toContain(
+        "sched-5123b45b-2026-07-27",
+      )
+    })
+
+    it("never returns a bare base id, even on a malformed token", () => {
+      // Falling back to the original id would silently resume the overflowing
+      // session — the exact failure this function exists to prevent.
+      expect(restartSessionId(original, "")).not.toBe(original)
+      expect(restartSessionId(original, "!!!!")).not.toBe(original)
     })
   })
 

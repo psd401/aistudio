@@ -73,6 +73,13 @@ export interface JobPayload {
 
 const PROMPT_EXCERPT_MAX = 2000;
 
+/**
+ * RunTask caps the ENTIRE container-override payload at 8 KiB. Enforced here so
+ * an oversized job fails at build time, where the caller can fall back, rather
+ * than at launch with an opaque RunTask rejection.
+ */
+const MAX_PAYLOAD_BYTES = 8 * 1024;
+
 export function buildJobPayload(input: {
   sessionId: string;
   reason?: PromotionReason;
@@ -97,9 +104,26 @@ export function buildJobPayload(input: {
     spaceName: input.spaceName,
     ...(input.threadName ? { threadName: input.threadName } : {}),
     isDM: input.isDM,
-    promptExcerpt: (input.originalPrompt || '').slice(0, PROMPT_EXCERPT_MAX),
+    // A CONTINUATION resumes a session whose transcript already holds the full
+    // request, so an excerpt is context garnish. A RESTART has no transcript —
+    // a truncated prompt there means the agent silently executes an incomplete
+    // request, which is worse than not restarting at all. Schedule validation
+    // accepts prompts up to 20,000 chars, well past the old 2,000 cap.
+    promptExcerpt:
+      input.reason === 'context-overflow'
+        ? input.originalPrompt || ''
+        : (input.originalPrompt || '').slice(0, PROMPT_EXCERPT_MAX),
   };
-  return JSON.stringify(payload);
+  const serialized = JSON.stringify(payload);
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_PAYLOAD_BYTES) {
+    // Deliberately fatal rather than truncating back down: the caller catches
+    // this and posts the partial instead. Restarting with half the
+    // instructions would look like success and produce the wrong work.
+    throw new Error(
+      `JOB_PAYLOAD exceeds the ${MAX_PAYLOAD_BYTES}-byte RunTask override cap`
+    );
+  }
+  return serialized;
 }
 
 /**
@@ -201,18 +225,26 @@ export function buildOverflowRestartPrompt(promptExcerpt: string): string {
 }
 
 /**
- * Session id for a restart leg.
+ * Session id for a restart leg — unique per PROMOTION, not per day.
  *
- * A fresh id is what actually discards the overflowing transcript — AgentCore
- * sticky-routes by session, so reusing the id would hand the runner the very
- * history that blew the window. Derived from the original (rather than random)
- * so the restart stays traceable to the run that spawned it, and suffixed
- * once: a restart of a restart keeps a single suffix rather than growing the
- * id without bound, since AgentCore enforces a session-id length limit.
+ * A fresh id is what actually discards the overflowing transcript: AgentCore
+ * sticky-routes by session, so reusing the id hands the runner the very history
+ * that blew the window.
+ *
+ * The uniqueness has to come from the lock token, not a counter. A scheduled
+ * session id is date-based and STABLE for the whole UTC day
+ * (`…-sched-<id>-2026-07-27`), and cron always passes that original id — never
+ * a previously derived one. So an incrementing suffix returns the same value on
+ * every promotion that day: a task overflowing twice would sticky-route the
+ * second restart straight into the first restart's transcript, re-overflowing
+ * or blending two separate runs. The lock token is a fresh UUID per promotion,
+ * which makes each restart distinct while staying deterministic for tests.
+ *
+ * Suffix replaced rather than appended, and bounded to 8 hex chars, because
+ * AgentCore enforces a session-id length limit.
  */
-export function restartSessionId(sessionId: string): string {
-  const base = sessionId.replace(/-r\d+$/, '');
-  const previous = /-r(\d+)$/.exec(sessionId);
-  const attempt = previous ? Number(previous[1]) + 1 : 2;
-  return `${base}-r${attempt}`;
+export function restartSessionId(sessionId: string, lockToken: string): string {
+  const base = sessionId.replace(/-r[0-9a-f]{1,12}$/i, '');
+  const unique = (lockToken || '').replace(/[^0-9a-f]/gi, '').slice(0, 8).toLowerCase();
+  return `${base}-r${unique || '0'}`;
 }
