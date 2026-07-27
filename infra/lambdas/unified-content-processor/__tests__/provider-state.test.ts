@@ -81,7 +81,9 @@ describe("unified content managed-service state", () => {
       textractJobId: "textract-new",
     });
   });
+});
 
+describe("unified content managed-service run isolation", () => {
   test("keeps provider calls idempotent within a run and refreshes tokens for retries or new artifacts", () => {
     const firstRun = new Date("2026-07-22T12:00:00.000Z");
     const retryRun = new Date("2026-07-22T13:00:00.000Z");
