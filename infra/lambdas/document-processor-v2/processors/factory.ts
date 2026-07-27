@@ -136,51 +136,33 @@ export class DocumentProcessorFactory {
 
     logger.debug('Legacy detection starting', { fileType, fileName });
 
-    // Check PDF first
     if (normalizedType.includes('pdf') || normalizedFileName.endsWith('.pdf')) {
       return 'pdf';
     }
+    const extensionTypes = [
+      ['xlsx', ['.xlsx', '.xls']],
+      ['pptx', ['.pptx', '.ppt']],
+      ['docx', ['.docx', '.doc']],
+      ['txt', ['.txt']],
+      ['csv', ['.csv']],
+      ['md', ['.md', '.markdown']],
+    ] as const;
+    const extensionMatch = extensionTypes.find(([, extensions]) =>
+      extensions.some((extension) => normalizedFileName.endsWith(extension))
+    );
+    if (extensionMatch) return extensionMatch[0];
 
-    // Check file extensions first (more reliable than MIME type keywords)
-    if (fileName) {
-      if (normalizedFileName.endsWith('.xlsx') || normalizedFileName.endsWith('.xls')) {
-        return 'xlsx';
-      }
-      if (normalizedFileName.endsWith('.pptx') || normalizedFileName.endsWith('.ppt')) {
-        return 'pptx';
-      }
-      if (normalizedFileName.endsWith('.docx') || normalizedFileName.endsWith('.doc')) {
-        return 'docx';
-      }
-      if (normalizedFileName.endsWith('.txt')) {
-        return 'txt';
-      }
-      if (normalizedFileName.endsWith('.csv')) {
-        return 'csv';
-      }
-      if (normalizedFileName.endsWith('.md') || normalizedFileName.endsWith('.markdown')) {
-        return 'md';
-      }
-    }
-
-    // Fallback to MIME type analysis (but prioritize XLSX and PPTX over DOCX)
-    if (normalizedType.includes('sheet') || normalizedType.includes('excel')) {
-      return 'xlsx';
-    }
-    if (normalizedType.includes('presentation') || normalizedType.includes('powerpoint')) {
-      return 'pptx';
-    }
-    if (normalizedType.includes('word') || normalizedType.includes('document')) {
-      return 'docx';
-    }
-    if (normalizedType.includes('text') || normalizedType.includes('plain')) {
-      return 'txt';
-    }
-    if (normalizedType.includes('csv')) {
-      return 'csv';
-    }
-
-    // If we still can't detect, return unknown
-    return 'unknown';
+    const mimeTypes = [
+      ['xlsx', ['sheet', 'excel']],
+      ['pptx', ['presentation', 'powerpoint']],
+      ['docx', ['word', 'document']],
+      ['txt', ['text', 'plain']],
+      ['csv', ['csv']],
+    ] as const;
+    return (
+      mimeTypes.find(([, terms]) =>
+        terms.some((term) => normalizedType.includes(term))
+      )?.[0] || 'unknown'
+    );
   }
 }

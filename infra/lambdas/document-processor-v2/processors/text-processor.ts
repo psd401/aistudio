@@ -14,6 +14,22 @@ import { sanitizeTextWithMetrics } from '../../../../lib/utils/text-sanitizer';
 // correct implementation.
 import { sanitizeHtml } from '../utils/html-sanitizer';
 
+interface ExtractedTextContent {
+  text: string;
+  method?: string;
+  markdown?: string;
+  metadata?: Record<string, unknown>;
+  rawData?: unknown;
+}
+
+async function reportProgress(
+  onProgress: ProcessingParams['onProgress'],
+  stage: string,
+  progress: number
+): Promise<void> {
+  await onProgress?.(stage, progress);
+}
+
 export class TextProcessor implements DocumentProcessor {
   constructor(private config: ProcessorConfig) {}
 
@@ -29,7 +45,7 @@ export class TextProcessor implements DocumentProcessor {
 
     logger.info('Starting text document processing', { fileName, fileType, bufferSize: buffer.length });
 
-    await onProgress?.('parsing_text', 40);
+    await reportProgress(onProgress, 'parsing_text', 40);
 
     const textContent = buffer.toString('utf-8');
 
@@ -45,39 +61,17 @@ export class TextProcessor implements DocumentProcessor {
       });
     }
 
-    let extractedContent: unknown;
-
-    try {
-      // Determine specific text format
-      const extension = fileName.split('.').pop()?.toLowerCase() || '';
-
-      switch (extension) {
-        case 'csv':
-          extractedContent = await this.processCsv(sanitizationResult.sanitized);
-          break;
-        case 'md':
-        case 'markdown':
-          extractedContent = await this.processMarkdown(sanitizationResult.sanitized);
-          break;
-        case 'json':
-          extractedContent = await this.processJson(sanitizationResult.sanitized);
-          break;
-        case 'xml':
-          extractedContent = await this.processXml(sanitizationResult.sanitized);
-          break;
-        default:
-          extractedContent = await this.processPlainText(sanitizationResult.sanitized);
-      }
-    } catch (error) {
-      logger.error('Error processing text document', error);
-      throw new Error(`Failed to process text: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
-    }
+    const extractedContent = await this.extractTextContent(
+      fileName,
+      sanitizationResult.sanitized,
+      logger
+    );
 
     if (!extractedContent.text) {
       throw new Error('No text content extracted from document');
     }
 
-    await onProgress?.('post_processing', 70);
+    await reportProgress(onProgress, 'post_processing', 70);
 
     // Build result
     const result: ProcessingResult = {
@@ -93,7 +87,7 @@ export class TextProcessor implements DocumentProcessor {
 
     // Convert to Markdown if requested (and not already markdown)
     if (this.config.convertToMarkdown && extractedContent.method !== 'markdown') {
-      await onProgress?.('converting_markdown', 80);
+      await reportProgress(onProgress, 'converting_markdown', 80);
       result.markdown = await this.convertToMarkdown(extractedContent);
     } else if (extractedContent.markdown) {
       result.markdown = extractedContent.markdown;
@@ -101,7 +95,7 @@ export class TextProcessor implements DocumentProcessor {
 
     // Generate chunks if requested
     if (this.config.generateEmbeddings) {
-      await onProgress?.('chunking_text', 90);
+      await reportProgress(onProgress, 'chunking_text', 90);
       result.chunks = await this.chunkText(extractedContent.text);
     }
 
@@ -115,6 +109,34 @@ export class TextProcessor implements DocumentProcessor {
       extractionMethod: result.metadata.extractionMethod
     });
     return result;
+  }
+
+  private async extractTextContent(
+    fileName: string,
+    content: string,
+    logger: ReturnType<typeof createLambdaLogger>
+  ): Promise<ExtractedTextContent> {
+    try {
+      const extension = fileName.split('.').pop()?.toLowerCase() || '';
+      let extracted: unknown;
+      if (extension === 'csv') extracted = await this.processCsv(content);
+      else if (extension === 'md' || extension === 'markdown') {
+        extracted = await this.processMarkdown(content);
+      } else if (extension === 'json') {
+        extracted = await this.processJson(content);
+      } else if (extension === 'xml') {
+        extracted = await this.processXml(content);
+      } else {
+        extracted = await this.processPlainText(content);
+      }
+      return extracted as ExtractedTextContent;
+    } catch (error) {
+      logger.error('Error processing text document', error);
+      throw new Error(
+        `Failed to process text: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        { cause: error }
+      );
+    }
   }
 
   private async processCsv(content: string): Promise<unknown> {
