@@ -718,19 +718,16 @@ async function handleDeepResearch(params: {
   // persistence. A denied request must not leave durable chat state, and every
   // failure before the stream takes ownership must release the active lease.
   const reservation = await reserveDeepResearch(userId);
+  // OBSERVE-ONLY (2026-07-27, Hagel): the #1353 thresholds were set without
+  // data on real consumption, so crossing one is telemetry, not a refusal.
+  // A denial carries no leaseId, hence the nullable lease below.
   if (!reservation.allowed) {
-    timer({ status: 'rate_limited', reason: reservation.reason });
-    return new Response(
-      JSON.stringify({
-        error: 'Deep Research capacity or cost budget is currently exhausted. Try again later.',
-        requestId,
-      }),
-      {
-        status: 429,
-        headers: { 'Content-Type': 'application/json', 'Retry-After': '60' },
-      }
-    );
+    log.warn('Deep Research over threshold (observe-only — request allowed)', {
+      requestId,
+      reason: reservation.reason,
+    });
   }
+  const deepResearchLeaseId = reservation.allowed ? reservation.leaseId : null;
 
   // Conversation setup — same shape the standard flow uses, so the
   // conversation list, history, and resume work without special-casing.
@@ -746,7 +743,7 @@ async function handleDeepResearch(params: {
       log,
     });
     if ('error' in convSetup) {
-      await releaseDeepResearch(reservation.leaseId);
+      if (deepResearchLeaseId) await releaseDeepResearch(deepResearchLeaseId);
       return convSetup.error;
     }
     await persistLastUserMessage({
@@ -755,10 +752,10 @@ async function handleDeepResearch(params: {
       dbModelId,
     });
   } catch (error) {
-    await releaseDeepResearch(reservation.leaseId).catch(
+    if (deepResearchLeaseId) await releaseDeepResearch(deepResearchLeaseId).catch(
       (releaseError: unknown) => {
         log.error('Failed to release Deep Research pre-stream lease', {
-          leaseId: reservation.leaseId,
+          leaseId: deepResearchLeaseId,
           error:
             releaseError instanceof Error
               ? releaseError.message
@@ -876,9 +873,9 @@ async function handleDeepResearch(params: {
           }
           timer({ status: 'error', conversationId, errType });
         } finally {
-          await releaseDeepResearch(reservation.leaseId).catch((releaseError: unknown) => {
+          if (deepResearchLeaseId) await releaseDeepResearch(deepResearchLeaseId).catch((releaseError: unknown) => {
             log.error('Failed to release Deep Research concurrency lease', {
-              leaseId: reservation.leaseId,
+              leaseId: deepResearchLeaseId,
               error:
                 releaseError instanceof Error
                   ? releaseError.message

@@ -172,12 +172,19 @@ export async function POST(request: NextRequest) {
     units: 1,
     limits: CLASSIFIED_GATEWAY_LIMITS,
   })
+  // OBSERVE-ONLY (2026-07-27, Hagel): admission MEASURES but must never
+  // reject a user's request. The #1353 limits were set without data on
+  // what this workload actually consumes; over-threshold is telemetry
+  // until real numbers say otherwise.
   if (!admission.allowed) {
-    return NextResponse.json(
-      { error: "Classified evaluation capacity is exhausted" },
-      { status: 429, headers: { "Retry-After": "60" } },
-    )
+    log.warn("Classified gateway over threshold (observe-only — request allowed)", {
+      requestId,
+      reason: admission.reason,
+    })
   }
+  // A denied admission carries no leaseId, so settlement is conditional now
+  // that a denial no longer short-circuits the request.
+  const admissionLeaseId = admission.allowed ? admission.leaseId : null
 
   try {
     const result = await classifiedGatewayDependencies.execute(
@@ -219,13 +226,13 @@ export async function POST(request: NextRequest) {
     )
   } finally {
     try {
-      await finishResourceAdmission(admission.leaseId)
+      if (admissionLeaseId) await finishResourceAdmission(admissionLeaseId)
     } catch (finishError) {
       log.error(
         "Classified gateway admission settlement failed",
         sanitizeForLogging({
           requestId,
-          leaseId: admission.leaseId,
+          leaseId: admissionLeaseId,
           error:
             finishError instanceof Error
               ? finishError.message
