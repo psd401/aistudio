@@ -154,6 +154,102 @@ export function useModelPersistence(storageKey: string) {
   return [selectedModel, setSelectedModel, setTransientModel] as const
 }
 
+interface ModelValidationRef {
+  current: string | null | undefined
+}
+
+function applyPreferredModel(options: {
+  models: SelectAiModel[]
+  preferredModelId?: string | null
+  requiredCapabilities?: string[]
+  currentModelId: string | null
+  setTransientModel: (model: SelectAiModel | null) => void
+  lastValidatedModelId: ModelValidationRef
+}): boolean {
+  const {
+    models,
+    preferredModelId,
+    requiredCapabilities,
+    currentModelId,
+    setTransientModel,
+    lastValidatedModelId,
+  } = options
+  if (!preferredModelId) return false
+  const preferredModel = models.find(
+    (model) => model.modelId === preferredModelId
+  )
+  if (!preferredModel) {
+    log.warn('Preferred model not available, falling back', {
+      preferredModelId,
+      availableModelCount: models.length
+    })
+    return false
+  }
+  const capsSatisfied =
+    !requiredCapabilities?.length ||
+    meetsRequiredCapabilities(preferredModel, requiredCapabilities)
+  if (!capsSatisfied) {
+    log.warn('Preferred model does not meet required capabilities, falling back', {
+      preferredModelId,
+      requiredCapabilities
+    })
+    return false
+  }
+  if (currentModelId !== preferredModelId) {
+    setTransientModel(preferredModel)
+    log.info('Selected preferred model', {
+      modelId: preferredModel.modelId,
+      name: preferredModel.name
+    })
+  }
+  lastValidatedModelId.current = preferredModel.modelId
+  return true
+}
+
+function applyDefaultModel(options: {
+  models: SelectAiModel[]
+  selectedModel: SelectAiModel | null
+  requiredCapabilities?: string[]
+  isStale: boolean
+  setSelectedModel: (model: SelectAiModel | null) => void
+  lastValidatedModelId: ModelValidationRef
+}): void {
+  const {
+    models,
+    selectedModel,
+    requiredCapabilities,
+    isStale,
+    setSelectedModel,
+    lastValidatedModelId,
+  } = options
+  if (isStale && selectedModel) {
+    log.info('Stale model detected, auto-selecting new model', {
+      staleModelId: selectedModel.modelId,
+      staleName: selectedModel.name,
+      availableCount: models.length
+    })
+  }
+  const hasRequirements = Boolean(requiredCapabilities?.length)
+  const candidate = hasRequirements
+    ? models.find((model) =>
+        meetsRequiredCapabilities(model, requiredCapabilities ?? [])
+      ) ?? null
+    : models[0]
+  if (hasRequirements && !candidate) {
+    log.warn('No models match required capabilities', {
+      requiredCapabilities,
+      availableModelCount: models.length
+    })
+  }
+  if (!candidate) return
+  setSelectedModel(candidate)
+  lastValidatedModelId.current = candidate.modelId
+  log.info('Auto-selected model', {
+    modelId: candidate.modelId,
+    name: candidate.name
+  })
+}
+
 /**
  * Combined hook for models with persistence
  * Convenience wrapper that combines fetching and persistence
@@ -185,80 +281,26 @@ export function useModelsWithPersistence(
 
     const isStale = currentModelId && !models.some(m => m.modelId === currentModelId)
 
-    // If a preferred model ID is specified (e.g. from URL), try to use it first
-    if (preferredModelId) {
-      const preferredModel = models.find(m => m.modelId === preferredModelId)
-      if (preferredModel) {
-        // Verify the preferred model meets required capabilities before selecting
-        const capsSatisfied = !requiredCapabilities?.length || meetsRequiredCapabilities(preferredModel, requiredCapabilities)
-
-        if (capsSatisfied) {
-          if (currentModelId !== preferredModelId) {
-            // Use transient setter — URL/prompt-driven selection should not overwrite
-            // the user's persisted localStorage preference
-            setTransientModel(preferredModel)
-            lastValidatedModelId.current = preferredModel.modelId
-            log.info('Selected preferred model', {
-              modelId: preferredModel.modelId,
-              name: preferredModel.name
-            })
-            return
-          }
-          // Already selected — just record validation
-          lastValidatedModelId.current = currentModelId
-          return
-        }
-
-        log.warn('Preferred model does not meet required capabilities, falling back', {
-          preferredModelId,
-          requiredCapabilities
-        })
-      } else {
-        // Preferred model not available — warn and fall through to default selection
-        log.warn('Preferred model not available, falling back', {
-          preferredModelId,
-          availableModelCount: models.length
-        })
-      }
-    }
+    if (
+      applyPreferredModel({
+        models,
+        preferredModelId,
+        requiredCapabilities,
+        currentModelId,
+        setTransientModel,
+        lastValidatedModelId,
+      })
+    ) return
 
     if (!currentModelId || isStale) {
-      if (isStale && selectedModel) {
-        log.info('Stale model detected, auto-selecting new model', {
-          staleModelId: selectedModel.modelId,
-          staleName: selectedModel.name,
-          availableCount: models.length
-        })
-      }
-
-      // Find a model that matches required capabilities
-      const hasCapabilityRequirements =
-        requiredCapabilities && requiredCapabilities.length > 0
-      const candidateModel: SelectAiModel | null = hasCapabilityRequirements
-        ? models.find(model =>
-            meetsRequiredCapabilities(model, requiredCapabilities)
-          ) ?? null
-        : models[0]
-
-      if (hasCapabilityRequirements) {
-        // If no model matches required capabilities, don't fall back to models[0]
-        // Instead, leave it null to prompt user selection
-        if (!candidateModel) {
-          log.warn('No models match required capabilities', {
-            requiredCapabilities,
-            availableModelCount: models.length
-          })
-        }
-      }
-
-      if (candidateModel) {
-        setSelectedModel(candidateModel)
-        lastValidatedModelId.current = candidateModel.modelId
-        log.info('Auto-selected model', {
-          modelId: candidateModel.modelId,
-          name: candidateModel.name
-        })
-      }
+      applyDefaultModel({
+        models,
+        selectedModel,
+        requiredCapabilities,
+        isStale: Boolean(isStale),
+        setSelectedModel,
+        lastValidatedModelId,
+      })
     } else {
       // Current model is valid — record it so we don't re-validate
       lastValidatedModelId.current = currentModelId

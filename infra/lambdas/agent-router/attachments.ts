@@ -152,6 +152,62 @@ function deriveDriveName(mimeType: string): string {
   return map[mimeType] || 'Drive file';
 }
 
+function appendChatAttachment(
+  attachment: ChatAttachment | null | undefined,
+  out: AgentAttachment[],
+  seenDriveIds: Set<string>,
+): void {
+  // External payload — an array hole / null element must not crash the Lambda.
+  if (!attachment || typeof attachment !== 'object') return;
+
+  const driveFileId = sanitizeDriveFileId(attachment.driveDataRef?.driveFileId);
+  const resourceName = attachment.attachmentDataRef?.resourceName;
+  const mimeType = sanitizeField(attachment.contentType, 100);
+  if (driveFileId) {
+    if (seenDriveIds.has(driveFileId)) return;
+    seenDriveIds.add(driveFileId);
+    out.push({
+      name: sanitizeField(attachment.contentName, 256) || deriveDriveName(mimeType),
+      mimeType,
+      source: 'drive-link',
+      driveFileId,
+    });
+    return;
+  }
+
+  if (!resourceName && attachment.source !== 'UPLOADED_CONTENT') return;
+  out.push({
+    name: sanitizeField(attachment.contentName, 256) || 'uploaded file',
+    mimeType,
+    source: 'chat-upload',
+    ...(resourceName ? { attachmentResourceName: resourceName } : {}),
+  });
+}
+
+function appendDriveAnnotation(
+  annotation: ChatAnnotation | null | undefined,
+  out: AgentAttachment[],
+  seenDriveIds: Set<string>,
+): void {
+  if (!annotation || typeof annotation !== 'object') return;
+  if (annotation.type !== 'RICH_LINK') return;
+
+  const link = annotation.richLinkMetadata;
+  const driveFileId = sanitizeDriveFileId(
+    link?.driveLinkData?.driveDataRef?.driveFileId
+  );
+  if (!driveFileId || seenDriveIds.has(driveFileId)) return;
+
+  seenDriveIds.add(driveFileId);
+  const mimeType = sanitizeField(link?.driveLinkData?.mimeType, 100);
+  out.push({
+    name: deriveDriveName(mimeType),
+    mimeType,
+    source: 'drive-link',
+    driveFileId,
+  });
+}
+
 /**
  * Extract normalized attachment metadata from a Chat message's `attachment[]`
  * and `annotations[]`. Returns [] when there is nothing to forward. De-dupes
@@ -165,46 +221,11 @@ export function extractAttachments(message: {
   const seenDriveIds = new Set<string>();
 
   for (const att of message.attachment ?? []) {
-    // External payload — an array hole / null element must not crash the Lambda.
-    if (!att || typeof att !== 'object') continue;
-    const driveFileId = sanitizeDriveFileId(att.driveDataRef?.driveFileId);
-    const resourceName = att.attachmentDataRef?.resourceName;
-    const mimeType = sanitizeField(att.contentType, 100);
-    if (driveFileId) {
-      if (seenDriveIds.has(driveFileId)) continue;
-      seenDriveIds.add(driveFileId);
-      out.push({
-        name: sanitizeField(att.contentName, 256) || deriveDriveName(mimeType),
-        mimeType,
-        source: 'drive-link',
-        driveFileId,
-      });
-    } else if (resourceName || att.source === 'UPLOADED_CONTENT') {
-      out.push({
-        name: sanitizeField(att.contentName, 256) || 'uploaded file',
-        mimeType,
-        source: 'chat-upload',
-        ...(resourceName ? { attachmentResourceName: resourceName } : {}),
-      });
-    }
+    appendChatAttachment(att, out, seenDriveIds);
   }
 
   for (const ann of message.annotations ?? []) {
-    if (!ann || typeof ann !== 'object') continue;
-    if (ann.type !== 'RICH_LINK') continue;
-    const link = ann.richLinkMetadata;
-    const driveFileId = sanitizeDriveFileId(
-      link?.driveLinkData?.driveDataRef?.driveFileId
-    );
-    if (!driveFileId || seenDriveIds.has(driveFileId)) continue;
-    seenDriveIds.add(driveFileId);
-    const mimeType = sanitizeField(link?.driveLinkData?.mimeType, 100);
-    out.push({
-      name: deriveDriveName(mimeType),
-      mimeType,
-      source: 'drive-link',
-      driveFileId,
-    });
+    appendDriveAnnotation(ann, out, seenDriveIds);
   }
 
   return out;

@@ -51,6 +51,108 @@ type PollingProgress = {
   metadata?: Record<string, unknown>;
 };
 
+type PollingGlobal = typeof globalThis & {
+  __POLLING_CONTEXT__?: boolean;
+};
+
+type PollJobOptions = {
+  abortSignal?: AbortSignal;
+  onProgress?: (progress: PollingProgress) => void;
+  onStatusChange?: (status: string) => void;
+};
+
+function pollingResponseError(response: Response): Error | null {
+  if (response.ok) return null;
+  if (response.status === 404) return new Error('Job not found');
+  if (response.status === 403) return new Error('Access denied');
+  return new Error(`Polling failed: ${response.status} ${response.statusText}`);
+}
+
+async function fetchPollingStatus(
+  jobId: string,
+  signal: AbortSignal,
+): Promise<JobPollingResponse> {
+  const response = await fetch(`/api/nexus/chat/jobs/${jobId}`, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    signal,
+  });
+  const responseError = pollingResponseError(response);
+  if (responseError) throw responseError;
+  return response.json() as Promise<JobPollingResponse>;
+}
+
+function publishStatusChange(
+  jobId: string,
+  jobData: JobPollingResponse,
+  lastStatus: string,
+  onStatusChange: PollJobOptions['onStatusChange'],
+): string {
+  if (jobData.status === lastStatus) return lastStatus;
+  onStatusChange?.(jobData.status);
+  log.info('Job status changed', { jobId, status: jobData.status });
+  return jobData.status;
+}
+
+function partialJobUpdate(
+  jobData: JobPollingResponse,
+  lastContent: string,
+): PollingProgress | null {
+  if (!jobData.partialContent || jobData.partialContent === lastContent) {
+    return null;
+  }
+  return {
+    content: jobData.partialContent,
+    metadata: {
+      status: jobData.status,
+      progressInfo: jobData.progressInfo,
+      tokensStreamed: jobData.progressInfo.tokensStreamed,
+      completionPercentage: jobData.progressInfo.completionPercentage,
+      currentPhase: jobData.progressInfo.currentPhase
+    }
+  };
+}
+
+type PollDirective = 'continue' | 'completed' | 'stop' | Error;
+
+function getPollDirective(
+  jobId: string,
+  jobData: JobPollingResponse,
+): PollDirective {
+  if (jobData.status === 'completed') {
+    log.info('Job completed successfully', {
+      jobId,
+      finalContentLength: jobData.responseData?.text?.length,
+    });
+    return 'completed';
+  }
+  if (jobData.status === 'failed') {
+    log.error('Job failed', {
+      jobId,
+      errorMessage: jobData.errorMessage,
+    });
+    return new Error(jobData.errorMessage || 'AI request failed');
+  }
+  if (jobData.status === 'cancelled') {
+    log.info('Job was cancelled', { jobId });
+    return new Error('Request was cancelled');
+  }
+  if (!jobData.shouldContinuePolling) {
+    log.warn('Server indicated to stop polling', {
+      jobId,
+      status: jobData.status,
+    });
+    return 'stop';
+  }
+  return 'continue';
+}
+
+function isRetryablePollingError(error: unknown): error is TypeError {
+  return error instanceof TypeError && error.message.includes('fetch');
+}
+
 function* completedJobUpdates(
   jobData: JobPollingResponse,
   lastContent: string,
@@ -93,12 +195,8 @@ export class UniversalPollingAdapter {
    */
   async *pollJob(
     jobId: string,
-    options: {
-      abortSignal?: AbortSignal;
-      onProgress?: (progress: { content: string; metadata?: Record<string, unknown> }) => void;
-      onStatusChange?: (status: string) => void;
-    } = {}
-  ): AsyncGenerator<{ content: string; metadata?: Record<string, unknown> }, void, unknown> {
+    options: PollJobOptions = {}
+  ): AsyncGenerator<PollingProgress, void, unknown> {
     const { abortSignal, onProgress, onStatusChange } = options;
 
     log.info('Starting job polling', { jobId });
@@ -107,8 +205,7 @@ export class UniversalPollingAdapter {
     // TODO: Replace with AsyncLocalStorage for better request isolation
     // This global approach works for current use case but could have race conditions in high-concurrency scenarios
     if (typeof global !== 'undefined') {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (global as any).__POLLING_CONTEXT__ = true;
+      (global as PollingGlobal).__POLLING_CONTEXT__ = true;
     }
 
     // Create internal abort controller for cleanup
@@ -125,30 +222,7 @@ export class UniversalPollingAdapter {
     try {
       while (!combinedSignal.aborted) {
         try {
-          // Poll job status - determine correct endpoint based on context
-          const pollingEndpoint = `/api/nexus/chat/jobs/${jobId}`;
-          const response = await fetch(pollingEndpoint, {
-            method: 'GET',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            signal: combinedSignal,
-          });
-
-          if (!response.ok) {
-            const handleNestedBranch1 = () => {
-              if (response.status === 404) {
-              throw new Error('Job not found');
-            } else if (response.status === 403) {
-              throw new Error('Access denied');
-            } else {
-              throw new Error(`Polling failed: ${response.status} ${response.statusText}`);
-            }
-            }
-            handleNestedBranch1()
-          }
-
-          const jobData: JobPollingResponse = await response.json();
+          const jobData = await fetchPollingStatus(jobId, combinedSignal);
 
           log.debug('Job poll response', {
             jobId,
@@ -160,89 +234,47 @@ export class UniversalPollingAdapter {
 
           // Update polling interval from server recommendation
           pollingInterval = jobData.pollingInterval;
+          lastStatus = publishStatusChange(
+            jobId,
+            jobData,
+            lastStatus,
+            onStatusChange,
+          );
 
-          // Check for status changes
-          if (jobData.status !== lastStatus) {
-            lastStatus = jobData.status;
-            onStatusChange?.(jobData.status);
-            log.info('Job status changed', { jobId, status: jobData.status });
-          }
-
-          // Yield new content if available
-          if (jobData.partialContent && jobData.partialContent !== lastContent) {
-            const newContent = jobData.partialContent;
-            lastContent = newContent;
-
-            const progressData = {
-              content: newContent,
-              metadata: {
-                status: jobData.status,
-                progressInfo: jobData.progressInfo,
-                tokensStreamed: jobData.progressInfo.tokensStreamed,
-                completionPercentage: jobData.progressInfo.completionPercentage,
-                currentPhase: jobData.progressInfo.currentPhase
-              }
-            };
-
+          const progressData = partialJobUpdate(jobData, lastContent);
+          if (progressData) {
+            lastContent = progressData.content;
             onProgress?.(progressData);
             yield progressData;
           }
 
-          // Handle completion states
-          if (jobData.status === 'completed') {
-            log.info('Job completed successfully', { jobId, finalContentLength: jobData.responseData?.text?.length });
+          const directive = getPollDirective(jobId, jobData);
+          if (directive instanceof Error) throw directive;
+          if (directive === 'completed') {
             yield* completedJobUpdates(jobData, lastContent, onProgress);
             break;
           }
-
-          if (jobData.status === 'failed') {
-            log.error('Job failed', { jobId, errorMessage: jobData.errorMessage });
-            throw new Error(jobData.errorMessage || 'AI request failed');
-          }
-
-          if (jobData.status === 'cancelled') {
-            log.info('Job was cancelled', { jobId });
-            throw new Error('Request was cancelled');
-          }
-
-          // Check if we should continue polling
-          if (!jobData.shouldContinuePolling) {
-            log.warn('Server indicated to stop polling', { jobId, status: jobData.status });
-            break;
-          }
+          if (directive === 'stop') break;
 
           // Wait before next poll
           await this.sleep(pollingInterval, combinedSignal);
 
         } catch (error) {
-          if (combinedSignal.aborted) {
-            log.info('Polling cancelled by abort signal', { jobId });
-            break;
-          }
-
-          // Handle network errors with retry logic
-          if (error instanceof TypeError && error.message.includes('fetch')) {
-            log.warn('Network error during polling, retrying...', { jobId, error: error.message });
-            await this.sleep(Math.min(pollingInterval * 2, 5000), combinedSignal); // Exponential backoff, max 5s
-            continue;
-          }
-
-          // Other errors are thrown
-          throw error;
+          const recovery = await this.recoverPollingError({
+            error,
+            combinedSignal,
+            jobId,
+            pollingInterval,
+          });
+          if (recovery === 'stop') break;
+          continue;
         }
       }
 
       // Handle cancellation
       if (combinedSignal.aborted) {
         log.info('Job polling cancelled', { jobId });
-
-        // Try to cancel the job on the server
-        try {
-          await this.cancelJob(jobId);
-        } catch (cancelError) {
-          log.warn('Failed to cancel job on server', { jobId, error: cancelError });
-        }
-
+        await this.cancelAbortedJob(jobId);
         throw new Error('Request cancelled by user');
       }
 
@@ -253,11 +285,40 @@ export class UniversalPollingAdapter {
       // Clear global polling context
       // TODO: When migrating to AsyncLocalStorage, this cleanup will be automatic
       if (typeof global !== 'undefined') {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        delete (global as any).__POLLING_CONTEXT__;
+        delete (global as PollingGlobal).__POLLING_CONTEXT__;
       }
 
       log.debug('Job polling cleanup completed', { jobId });
+    }
+  }
+
+  private async recoverPollingError(options: {
+    error: unknown;
+    combinedSignal: AbortSignal;
+    jobId: string;
+    pollingInterval: number;
+  }): Promise<'retry' | 'stop'> {
+    const { error, combinedSignal, jobId, pollingInterval } = options;
+    if (combinedSignal.aborted) {
+      log.info('Polling cancelled by abort signal', { jobId });
+      return 'stop';
+    }
+    if (!isRetryablePollingError(error)) throw error;
+
+    log.warn('Network error during polling, retrying...', {
+      jobId,
+      error: error.message,
+    });
+    // Exponential backoff, capped at five seconds.
+    await this.sleep(Math.min(pollingInterval * 2, 5000), combinedSignal);
+    return 'retry';
+  }
+
+  private async cancelAbortedJob(jobId: string): Promise<void> {
+    try {
+      await this.cancelJob(jobId);
+    } catch (error) {
+      log.warn('Failed to cancel job on server', { jobId, error });
     }
   }
 
