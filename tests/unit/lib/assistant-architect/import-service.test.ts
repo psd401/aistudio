@@ -5,14 +5,16 @@ var mockExecuteQuery: jest.Mock;
 var mockExecuteTransaction: jest.Mock;
 var mockCheckUserRole: jest.Mock;
 var mockUserCanAccessResource: jest.Mock;
+var mockLogWarn: jest.Mock;
 /* eslint-enable no-var */
 
 mockCheckUserRole = jest.fn();
 mockUserCanAccessResource = jest.fn();
+mockLogWarn = jest.fn();
 
 jest.mock("drizzle-orm", () => ({
   eq: (left: unknown, right: unknown) => ({ left, right }),
-  inArray: jest.fn(),
+  inArray: (left: unknown, right: unknown) => ({ left, right }),
 }));
 
 jest.mock("@/lib/db/schema", () => ({
@@ -24,7 +26,12 @@ jest.mock("@/lib/db/schema", () => ({
   },
   chainPrompts: {
     table: "prompts",
+    id: "prompts.id",
     assistantArchitectId: "prompts.assistant_id",
+  },
+  promptResults: {
+    table: "results",
+    promptId: "results.prompt_id",
   },
   toolInputFields: {
     table: "fields",
@@ -43,14 +50,15 @@ jest.mock("@/lib/db/drizzle/resource-access", () => ({
 }));
 
 jest.mock("@/lib/logger", () => ({
+  __esModule: true,
   default: {
     info: jest.fn(),
-    warn: jest.fn(),
+    warn: (...args: unknown[]) => mockLogWarn(...args),
     error: jest.fn(),
   },
   createLogger: () => ({
     info: jest.fn(),
-    warn: jest.fn(),
+    warn: (...args: unknown[]) => mockLogWarn(...args),
     error: jest.fn(),
   }),
 }));
@@ -68,6 +76,7 @@ import {
 import {
   assistantArchitects,
   chainPrompts,
+  promptResults,
   toolInputFields,
 } from "@/lib/db/schema";
 import { getAssistantDataForExport } from "@/lib/assistant-export-import";
@@ -88,10 +97,21 @@ interface AssistantState {
   imagePath?: string | null;
   isParallel?: boolean;
   timeoutSeconds?: number | null;
+  mode?: string;
+  modelRoutingMode?: string;
+  modelRoutingFamily?: string | null;
+  agentEnabledTools?: string[];
+  agentEnabledConnectors?: string[];
+  agentMaxSteps?: number;
+  agentTimeoutSeconds?: number;
+  agentCostCapCents?: number | null;
+  agentMaxRequestsPerHour?: number | null;
+  retrievalScope?: Record<string, unknown> | null;
 }
 
 interface ChildState {
-  assistantArchitectId: number;
+  id?: number;
+  assistantArchitectId: number | null;
   name: string;
   [key: string]: unknown;
 }
@@ -100,6 +120,7 @@ interface DatabaseState {
   assistants: AssistantState[];
   prompts: ChildState[];
   fields: ChildState[];
+  promptResults: Array<{ promptId: number; outputData: string }>;
 }
 
 interface EqualityCondition {
@@ -132,7 +153,7 @@ const baseAssistant = {
 };
 
 function envelope(
-  assistant: typeof baseAssistant = baseAssistant,
+  assistant: Record<string, unknown> = baseAssistant,
 ): Record<string, unknown> {
   return {
     version: "1.0",
@@ -146,11 +167,40 @@ function cloneState(state: DatabaseState): DatabaseState {
     assistants: state.assistants.map((row) => ({ ...row })),
     prompts: state.prompts.map((row) => ({ ...row })),
     fields: state.fields.map((row) => ({ ...row })),
+    promptResults: state.promptResults.map((row) => ({ ...row })),
   };
 }
 
 function thenable<T>(work: () => T): Promise<T> {
   return Promise.resolve().then(work);
+}
+
+function insertAssistantRow(
+  state: DatabaseState,
+  values: Record<string, unknown>,
+): { id: number } {
+  const id = Math.max(0, ...state.assistants.map((row) => row.id)) + 1;
+  state.assistants.push({
+    id,
+    name: String(values.name),
+    description: String(values.description),
+    status: String(values.status),
+    userId: Number(values.userId),
+    imagePath: values.imagePath as string | null,
+    isParallel: Boolean(values.isParallel),
+    timeoutSeconds: values.timeoutSeconds as number | null,
+    mode: String(values.mode),
+    modelRoutingMode: String(values.modelRoutingMode),
+    modelRoutingFamily: values.modelRoutingFamily as string | null,
+    agentEnabledTools: values.agentEnabledTools as string[],
+    agentEnabledConnectors: values.agentEnabledConnectors as string[],
+    agentMaxSteps: Number(values.agentMaxSteps),
+    agentTimeoutSeconds: Number(values.agentTimeoutSeconds),
+    agentCostCapCents: values.agentCostCapCents as number | null,
+    agentMaxRequestsPerHour: values.agentMaxRequestsPerHour as number | null,
+    retrievalScope: values.retrievalScope as Record<string, unknown> | null,
+  });
+  return { id };
 }
 
 function createTransaction(state: DatabaseState) {
@@ -163,19 +213,7 @@ function createTransaction(state: DatabaseState) {
               throw new Error("prompt insert failed");
             }
             if (table === assistantArchitects) {
-              const id =
-                Math.max(0, ...state.assistants.map((row) => row.id)) + 1;
-              state.assistants.push({
-                id,
-                name: String(values.name),
-                description: String(values.description),
-                status: String(values.status),
-                userId: Number(values.userId),
-                imagePath: values.imagePath as string | null,
-                isParallel: Boolean(values.isParallel),
-                timeoutSeconds: values.timeoutSeconds as number | null,
-              });
-              return { id };
+              return insertAssistantRow(state, values);
             }
             const child = {
               ...values,
@@ -197,7 +235,32 @@ function createTransaction(state: DatabaseState) {
     },
     select() {
       return {
-        from() {
+        from(table: unknown) {
+          if (table === chainPrompts) {
+            return {
+              innerJoin(joinedTable: unknown) {
+                expect(joinedTable).toBe(promptResults);
+                return {
+                  where(condition: EqualityCondition) {
+                    const assistantId = Number(condition.right);
+                    const referencedPromptIds = new Set(
+                      state.promptResults.map((row) => row.promptId),
+                    );
+                    return thenable(() =>
+                      state.prompts
+                        .filter(
+                          (row) =>
+                            row.assistantArchitectId === assistantId &&
+                            row.id !== undefined &&
+                            referencedPromptIds.has(row.id),
+                        )
+                        .map((row) => ({ id: row.id as number })),
+                    );
+                  },
+                };
+              },
+            };
+          }
           return {
             where(condition: EqualityCondition) {
               return {
@@ -221,6 +284,17 @@ function createTransaction(state: DatabaseState) {
           return {
             where(condition: EqualityCondition) {
               const operation = thenable(() => {
+                if (table === chainPrompts) {
+                  const ids = Array.isArray(condition.right)
+                    ? condition.right
+                    : [];
+                  for (const row of state.prompts) {
+                    if (row.id !== undefined && ids.includes(row.id)) {
+                      Object.assign(row, values);
+                    }
+                  }
+                  return undefined;
+                }
                 if (table !== assistantArchitects) return undefined;
                 const id =
                   typeof condition.right === "number"
@@ -268,12 +342,13 @@ function createTransaction(state: DatabaseState) {
 }
 
 beforeEach(() => {
-  database = { assistants: [], prompts: [], fields: [] };
+  database = { assistants: [], prompts: [], fields: [], promptResults: [] };
   failPromptName = null;
   mockExecuteQuery.mockReset();
   mockExecuteTransaction.mockReset();
   mockCheckUserRole.mockReset();
   mockUserCanAccessResource.mockReset();
+  mockLogWarn.mockReset();
 
   mockExecuteQuery.mockImplementation((_query: unknown, operation: unknown) =>
     operation === "getActiveModelsForImport"
@@ -352,6 +427,7 @@ it("lets an owner replace prompts and fields and resets approval", async () => {
     ],
     prompts: [{ assistantArchitectId: 12, name: "Old prompt" }],
     fields: [{ assistantArchitectId: 12, name: "old_field" }],
+    promptResults: [],
   };
 
   const result = await updateAssistantFromImport(12, envelope(), 7);
@@ -369,6 +445,50 @@ it("lets an owner replace prompts and fields and resets approval", async () => {
   });
   expect(database.prompts.map((row) => row.name)).toEqual(["Prompt one"]);
   expect(database.fields.map((row) => row.name)).toEqual(["topic"]);
+});
+
+it("retains historical prompt results when replacing an executed graph", async () => {
+  database = {
+    assistants: [
+      {
+        id: 12,
+        name: "Executed",
+        description: "Has history",
+        status: "approved",
+        userId: 7,
+      },
+    ],
+    prompts: [
+      { id: 41, assistantArchitectId: 12, name: "Executed prompt" },
+      { id: 42, assistantArchitectId: 12, name: "Never executed" },
+    ],
+    fields: [],
+    promptResults: [{ promptId: 41, outputData: "Historical output" }],
+  };
+
+  await updateAssistantFromImport(12, envelope(), 7);
+
+  expect(database.promptResults).toEqual([
+    { promptId: 41, outputData: "Historical output" },
+  ]);
+  expect(database.prompts).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        id: 41,
+        assistantArchitectId: null,
+        name: "Executed prompt",
+      }),
+      expect.objectContaining({
+        assistantArchitectId: 12,
+        name: "Prompt one",
+      }),
+    ]),
+  );
+  expect(database.prompts).not.toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ id: 42, name: "Never executed" }),
+    ]),
+  );
 });
 
 it("denies a staff caller updating an assistant they do not own", async () => {
@@ -418,6 +538,7 @@ it("rolls back the whole replacement on a mid-update failure", async () => {
     ],
     prompts: [{ assistantArchitectId: 12, name: "Original prompt" }],
     fields: [{ assistantArchitectId: 12, name: "original_field" }],
+    promptResults: [],
   };
   failPromptName = "Prompt one";
   const before = cloneState(database);
@@ -454,6 +575,7 @@ it("forks into a caller-owned pending copy without changing the source", async (
     ],
     prompts: [{ assistantArchitectId: 12, name: "Source prompt" }],
     fields: [],
+    promptResults: [],
   };
   mockExecuteQuery.mockImplementation((_query: unknown, operation: unknown) => {
     switch (operation) {
@@ -469,6 +591,20 @@ it("forks into a caller-owned pending copy without changing the source", async (
             imagePath: null,
             isParallel: false,
             timeoutSeconds: null,
+            mode: "agentic",
+            modelRoutingMode: "advanced",
+            modelRoutingFamily: "anthropic",
+            agentEnabledTools: ["repositories.search"],
+            agentEnabledConnectors: ["connector-1"],
+            agentMaxSteps: 12,
+            agentTimeoutSeconds: 240,
+            agentCostCapCents: 75,
+            agentMaxRequestsPerHour: 20,
+            retrievalScope: {
+              collectionId: "collection-1",
+              tags: ["family"],
+              maxVisibilityLevel: "internal",
+            },
           },
         ]);
       case "getPromptsForExport":
@@ -481,6 +617,8 @@ it("forks into a caller-owned pending copy without changing the source", async (
             parallelGroup: null,
             inputMapping: null,
             timeoutSeconds: null,
+            repositoryIds: [17],
+            enabledTools: ["repositories.search"],
             modelName: "gpt-source",
           },
         ]);
@@ -512,14 +650,51 @@ it("forks into a caller-owned pending copy without changing the source", async (
     status: "approved",
     userId: 7,
   });
+  expect(
+    database.prompts.find((row) => row.assistantArchitectId !== 12),
+  ).toMatchObject({
+    repositoryIds: [17],
+    enabledTools: ["repositories.search"],
+  });
   expect(database.assistants.find((row) => row.id !== 12)).toMatchObject({
     name: "Caller copy",
     status: "pending_approval",
     userId: 7,
+    mode: "agentic",
+    modelRoutingMode: "advanced",
+    modelRoutingFamily: "anthropic",
+    agentEnabledTools: ["repositories.search"],
+    agentEnabledConnectors: ["connector-1"],
+    agentMaxSteps: 12,
+    agentTimeoutSeconds: 240,
+    agentCostCapCents: 75,
+    agentMaxRequestsPerHour: 20,
+    retrievalScope: {
+      collectionId: "collection-1",
+      tags: ["family"],
+      maxVisibilityLevel: "internal",
+    },
   });
   expect(
     database.prompts.some(
       (row) => row.assistantArchitectId === 12 && row.name === "Source prompt",
     ),
   ).toBe(true);
+});
+
+it("logs when an imported prompt has no active model mapping", async () => {
+  mockExecuteQuery.mockResolvedValue([]);
+
+  const result = await createAssistantsFromImport(envelope(), 7);
+
+  expect(result.successful).toBe(1);
+  expect(database.prompts).toEqual([]);
+  expect(mockLogWarn).toHaveBeenCalledWith(
+    "Skipping imported prompt without an active model mapping",
+    expect.objectContaining({
+      assistantName: "Imported assistant",
+      promptName: "Prompt one",
+      modelName: "gpt-source",
+    }),
+  );
 });

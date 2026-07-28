@@ -807,11 +807,22 @@ Every write preserves the existing human approval gate:
   `pending_approval`, regardless of the envelope's `status`;
 - update: staff may replace only their own assistants; administrators may
   replace any assistant; prompts and input fields are wholesale-replaced in the
-  same transaction and status resets to `pending_approval`; and
+  same transaction and status resets to `pending_approval`. Prompts referenced
+  by earlier execution results are detached from the live graph rather than
+  deleted, preserving their outputs, errors, timings, feedback, and original
+  prompt configuration in execution history; and
 - fork: any assistant visible under the same owner/admin/approved plus
   resource/room rules as the v1 detail endpoint may be copied. The source is
   never modified, and the caller owns the new `pending_approval` copy. Missing
   and invisible sources both return `404`.
+
+ExportFormat v1.0 carries the complete executable configuration needed for a
+behavior-preserving fork: assistant mode, model routing, agent tools and
+connectors, agent limits, retrieval scope, prompt input mappings, repository
+ids, and prompt tools. These properties are optional for compatibility with
+older v1.0 files; missing values use the existing database defaults. Unsupported
+input field types and invalid configuration values fail envelope validation
+before any assistant transaction begins.
 
 Each assistant create runs in its own transaction, so a failed prompt or input
 field leaves no partial rows for that assistant while successful siblings in a

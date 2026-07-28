@@ -2,11 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/admin-check";
 import { getServerSession } from "@/lib/auth/server-session";
 import { resolveUserId } from "@/lib/auth/resolve-user";
+import type { ExportFormat } from "@/lib/assistant-export-import";
 import {
-  validateImportFile,
-  type ExportFormat,
-} from "@/lib/assistant-export-import";
-import {
+  AssistantImportServiceError,
   createAssistantsFromImport,
   IMPORTED_ASSISTANT_STATUS,
 } from "@/lib/assistant-architect/import-service";
@@ -93,15 +91,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate file structure
-    const validation = validateImportFile(importData);
-    if (!validation.valid) {
-      return NextResponse.json(
-        { isSuccess: false, message: validation.error },
-        { status: 400 },
-      );
-    }
-
     log.info("Starting import", {
       assistantCount: importData.assistants.length,
     });
@@ -151,6 +140,18 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     timer({ status: "error" });
+    if (
+      error instanceof AssistantImportServiceError &&
+      error.code === "VALIDATION_ERROR"
+    ) {
+      log.warn("Assistant import validation failed", {
+        error: error.message,
+      });
+      return NextResponse.json(
+        { isSuccess: false, message: error.message },
+        { status: 400 },
+      );
+    }
     log.error("Error importing assistants:", error);
 
     return NextResponse.json(

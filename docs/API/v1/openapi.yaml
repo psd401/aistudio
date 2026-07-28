@@ -3528,6 +3528,14 @@ components:
         timeout_seconds:
           type: integer
           minimum: 1
+        repository_ids:
+          type: array
+          items: { type: integer, minimum: 1 }
+          description: Repository ids configured for this prompt.
+        enabled_tools:
+          type: array
+          items: { type: string }
+          description: Tool identifiers configured for this prompt.
 
     AssistantImportField:
       type: object
@@ -3560,6 +3568,49 @@ components:
         timeout_seconds:
           type: integer
           minimum: 1
+        mode:
+          type: string
+          enum: [prompt_chain, agentic]
+          default: prompt_chain
+        model_routing_mode:
+          type: string
+          enum: [legacy, standard, advanced]
+          default: legacy
+        model_routing_family:
+          type: [string, "null"]
+          enum: [openai, anthropic, google, null]
+        agent_enabled_tools:
+          type: array
+          items: { type: string }
+        agent_enabled_connectors:
+          type: array
+          items: { type: string }
+        agent_max_steps:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+        agent_timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 900
+          default: 300
+        agent_cost_cap_cents:
+          type: [integer, "null"]
+          minimum: 0
+        agent_max_requests_per_hour:
+          type: [integer, "null"]
+          minimum: 1
+        retrieval_scope:
+          type: [object, "null"]
+          properties:
+            collectionId: { type: [string, "null"] }
+            tags:
+              type: array
+              items: { type: string }
+            maxVisibilityLevel:
+              type: string
+              enum: [private, group, internal, public]
         prompts:
           type: array
           maxItems: 20

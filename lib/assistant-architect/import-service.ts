@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import {
   createExportFile,
   getAssistantDataForExport,
@@ -16,6 +16,7 @@ import {
 import {
   assistantArchitects,
   chainPrompts,
+  promptResults,
   toolInputFields,
 } from "@/lib/db/schema";
 import { userCanAccessResource } from "@/lib/db/drizzle/resource-access";
@@ -126,10 +127,18 @@ async function insertImportedPrompts(
   assistantId: number,
   assistant: ImportedAssistant,
   modelMap: Map<string, number>,
+  log: ReturnType<typeof createLogger>,
 ): Promise<void> {
   for (const prompt of assistant.prompts) {
     const modelId = modelMap.get(prompt.model_name);
-    if (!modelId) continue;
+    if (!modelId) {
+      log.warn("Skipping imported prompt without an active model mapping", {
+        assistantName: assistant.name,
+        promptName: prompt.name,
+        modelName: prompt.model_name,
+      });
+      continue;
+    }
 
     await tx.insert(chainPrompts).values({
       assistantArchitectId: assistantId,
@@ -141,10 +150,10 @@ async function insertImportedPrompts(
       modelId,
       position: prompt.position,
       parallelGroup: prompt.parallel_group ?? null,
-      // Preserve the existing admin-import behavior. Export v1 carries this
-      // field, but the current importer intentionally does not restore it.
-      inputMapping: null,
+      inputMapping: prompt.input_mapping ?? null,
       timeoutSeconds: prompt.timeout_seconds ?? null,
+      repositoryIds: prompt.repository_ids ?? [],
+      enabledTools: prompt.enabled_tools ?? [],
     });
   }
 }
@@ -166,11 +175,27 @@ async function insertImportedFields(
   }
 }
 
+function importedAssistantRuntimeValues(assistant: ImportedAssistant) {
+  return {
+    mode: assistant.mode ?? "prompt_chain",
+    modelRoutingMode: assistant.model_routing_mode ?? "legacy",
+    modelRoutingFamily: assistant.model_routing_family ?? null,
+    agentEnabledTools: assistant.agent_enabled_tools ?? [],
+    agentEnabledConnectors: assistant.agent_enabled_connectors ?? [],
+    agentMaxSteps: assistant.agent_max_steps ?? 10,
+    agentTimeoutSeconds: assistant.agent_timeout_seconds ?? 300,
+    agentCostCapCents: assistant.agent_cost_cap_cents ?? null,
+    agentMaxRequestsPerHour: assistant.agent_max_requests_per_hour ?? null,
+    retrievalScope: assistant.retrieval_scope ?? null,
+  };
+}
+
 async function insertAssistantGraph(
   tx: DbTransaction,
   assistant: ImportedAssistant,
   modelMap: Map<string, number>,
   userId: number,
+  log: ReturnType<typeof createLogger>,
 ): Promise<AssistantImportSuccess> {
   const [createdAssistant] = await tx
     .insert(assistantArchitects)
@@ -182,6 +207,7 @@ async function insertAssistantGraph(
       isParallel: assistant.is_parallel ?? false,
       timeoutSeconds: assistant.timeout_seconds ?? null,
       userId,
+      ...importedAssistantRuntimeValues(assistant),
     })
     .returning({ id: assistantArchitects.id });
 
@@ -189,7 +215,7 @@ async function insertAssistantGraph(
     throw new Error("Assistant insert did not return a row");
   }
 
-  await insertImportedPrompts(tx, createdAssistant.id, assistant, modelMap);
+  await insertImportedPrompts(tx, createdAssistant.id, assistant, modelMap, log);
   await insertImportedFields(tx, createdAssistant.id, assistant);
 
   return {
@@ -218,7 +244,7 @@ export async function createAssistantsFromImport(
   for (const assistant of importData.assistants) {
     try {
       const result = await executeTransaction(
-        (tx) => insertAssistantGraph(tx, assistant, modelMap, userId),
+        (tx) => insertAssistantGraph(tx, assistant, modelMap, userId, log),
         "createAssistantFromImport",
       );
       results.push(result);
@@ -257,6 +283,7 @@ async function replaceAssistantGraph(
   assistantId: number,
   assistant: ImportedAssistant,
   modelMap: Map<string, number>,
+  log: ReturnType<typeof createLogger>,
 ): Promise<AssistantImportSuccess> {
   const [updated] = await tx
     .update(assistantArchitects)
@@ -267,6 +294,7 @@ async function replaceAssistantGraph(
       imagePath: assistant.image_path ?? null,
       isParallel: assistant.is_parallel ?? false,
       timeoutSeconds: assistant.timeout_seconds ?? null,
+      ...importedAssistantRuntimeValues(assistant),
       updatedAt: new Date(),
     })
     .where(eq(assistantArchitects.id, assistantId))
@@ -279,13 +307,28 @@ async function replaceAssistantGraph(
     );
   }
 
+  const historicalPromptRows = await tx
+    .select({ id: chainPrompts.id })
+    .from(chainPrompts)
+    .innerJoin(promptResults, eq(promptResults.promptId, chainPrompts.id))
+    .where(eq(chainPrompts.assistantArchitectId, assistantId));
+  const historicalPromptIds = Array.from(
+    new Set(historicalPromptRows.map(({ id }) => id)),
+  );
+  if (historicalPromptIds.length > 0) {
+    await tx
+      .update(chainPrompts)
+      .set({ assistantArchitectId: null, updatedAt: new Date() })
+      .where(inArray(chainPrompts.id, historicalPromptIds));
+  }
+
   await tx
     .delete(chainPrompts)
     .where(eq(chainPrompts.assistantArchitectId, assistantId));
   await tx
     .delete(toolInputFields)
     .where(eq(toolInputFields.assistantArchitectId, assistantId));
-  await insertImportedPrompts(tx, assistantId, assistant, modelMap);
+  await insertImportedPrompts(tx, assistantId, assistant, modelMap, log);
   await insertImportedFields(tx, assistantId, assistant);
 
   return {
@@ -316,6 +359,10 @@ export async function updateAssistantFromImport(
   const assistant = importData.assistants[0];
   const modelMap = await mapImportModels([assistant]);
   const isAdmin = await checkUserRole(callerUserId, "administrator");
+  const log = createLogger({
+    action: "updateAssistantFromImport",
+    assistantId,
+  });
 
   const result = await executeTransaction(async (tx) => {
     const [existing] = await tx
@@ -337,7 +384,7 @@ export async function updateAssistantFromImport(
       );
     }
 
-    return replaceAssistantGraph(tx, assistantId, assistant, modelMap);
+    return replaceAssistantGraph(tx, assistantId, assistant, modelMap, log);
   }, "updateAssistantFromImport");
 
   return { result, modelMappings: modelMappings(modelMap) };

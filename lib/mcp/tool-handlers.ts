@@ -617,6 +617,10 @@ async function handleCreateAssistant(
       context.userId,
     )
     if (result.successful === 0) {
+      log.error("Assistant import created no assistants via MCP", {
+        userId: context.userId,
+        failed: result.failed,
+      })
       return {
         content: [
           {

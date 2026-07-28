@@ -72,6 +72,54 @@ describe('validateImportFile', () => {
     expect(validateImportFile(data)).toEqual({ valid: true })
   })
 
+  it('rejects unsupported input field types before import writes begin', () => {
+    const data = {
+      ...validImport,
+      assistants: [{
+        ...validAssistant,
+        input_fields: [{
+          name: 'format',
+          label: 'Format',
+          field_type: 'radio',
+          position: 0,
+        }],
+      }],
+    }
+    const result = validateImportFile(data)
+    expect(result.valid).toBe(false)
+    expect(result.error).toMatch(/unsupported input field type: radio/)
+  })
+
+  it('accepts the full-fidelity agentic and prompt-tool configuration', () => {
+    const data = {
+      ...validImport,
+      assistants: [{
+        ...validAssistant,
+        mode: 'agentic',
+        model_routing_mode: 'advanced',
+        model_routing_family: 'anthropic',
+        agent_enabled_tools: ['repositories.search'],
+        agent_enabled_connectors: ['connector-1'],
+        agent_max_steps: 12,
+        agent_timeout_seconds: 240,
+        agent_cost_cap_cents: 75,
+        agent_max_requests_per_hour: 20,
+        retrieval_scope: {
+          collectionId: 'collection-1',
+          tags: ['family'],
+          maxVisibilityLevel: 'internal',
+        },
+        prompts: [{
+          ...validAssistant.prompts[0],
+          input_mapping: { topic: 'input.topic' },
+          repository_ids: [17],
+          enabled_tools: ['repositories.search'],
+        }],
+      }],
+    }
+    expect(validateImportFile(data)).toEqual({ valid: true })
+  })
+
   it('rejects prompt content exceeding 10,000,000 characters', () => {
     const content = 'x'.repeat(10_000_001)
     const data = {
