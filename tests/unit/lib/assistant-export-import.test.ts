@@ -96,4 +96,17 @@ describe('validateImportFile', () => {
     expect(result.valid).toBe(false)
     expect(result.error).toMatch(/system_context too large/)
   })
+
+  it('rejects an import envelope whose serialized size exceeds 10 MB', () => {
+    const data = {
+      ...validImport,
+      assistants: [{
+        ...validAssistant,
+        description: 'x'.repeat(10 * 1024 * 1024),
+      }],
+    }
+    const result = validateImportFile(data)
+    expect(result.valid).toBe(false)
+    expect(result.error).toMatch(/payload too large/)
+  })
 })

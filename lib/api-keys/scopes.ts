@@ -39,6 +39,9 @@ export const API_SCOPES = {
   "mcp:search_decisions": "Search decision graph nodes via MCP",
   "mcp:capture_decision": "Create decision graph nodes and edges via MCP",
   "mcp:execute_assistant": "Execute an assistant via MCP",
+  "mcp:create_assistant": "Create assistant architects via MCP",
+  "mcp:update_assistant": "Update owned assistant architects via MCP",
+  "mcp:fork_assistant": "Fork visible assistant architects via MCP",
   "mcp:list_assistants": "List available assistants via MCP",
   "mcp:get_decision_graph": "Get decision node details and connections via MCP",
   // Atrium content scopes (Phase 5 — REST/MCP surfaces, Issue #1059).
@@ -82,6 +85,7 @@ export const ROLE_SCOPES: Record<string, ApiScope[]> = {
     "chat:read",
     "chat:write",
     "assistants:read",
+    "assistants:write",
     "assistants:list",
     "assistants:execute",
     "models:read",
@@ -95,6 +99,9 @@ export const ROLE_SCOPES: Record<string, ApiScope[]> = {
     "graph:read",
     "mcp:search_decisions",
     "mcp:list_assistants",
+    "mcp:create_assistant",
+    "mcp:update_assistant",
+    "mcp:fork_assistant",
     "mcp:get_decision_graph",
     // Staff may execute assistants over MCP so an agent acting with a staff
     // member's own API key can do what that staff member can already do in the UI

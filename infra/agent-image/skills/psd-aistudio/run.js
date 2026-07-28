@@ -9,7 +9,8 @@
  *     list          raw MCP tools/list (scope-filtered to the resolved key)
  *
  *   ACTION (#1223) — each maps 1:1 to an MCP tools/call and runs as the OWNER:
- *     list-assistants   / execute-assistant
+ *     list-assistants / execute-assistant / create-assistant /
+ *     update-assistant / fork-assistant
  *     search-decisions  / capture-decision / get-decision-graph
  *
  * IDENTITY MODEL: every operation crosses the local owner-bound broker. The
@@ -26,6 +27,9 @@
  *   node run.js list [--user <email>]
  *   node run.js list-assistants   [--user <email>] [--search <t>] [--status <s>] [--limit N] [--cursor C]
  *   node run.js execute-assistant [--user <email>] --id <n> [--inputs '{"field":"value"}']
+ *   node run.js create-assistant [--user <email>] (--file <export.json> | --json '<ExportFormat>')
+ *   node run.js update-assistant [--user <email>] --id <n> (--file <export.json> | --json '<ExportFormat>')
+ *   node run.js fork-assistant [--user <email>] --id <n> [--name <text>]
  *   node run.js search-decisions  [--user <email>] [--query <t>] [--node-type T] [--node-class C] [--limit N] [--cursor C]
  *   node run.js capture-decision  [--user <email>] --decision "<t>" --decided-by "<t>"
  *                            [--reasoning <t>] [--evidence a,b] [--constraints a,b] [--conditions a,b]
@@ -43,6 +47,7 @@
 
 "use strict";
 
+const fs = require("node:fs");
 const {
   fail,
   emit,
@@ -86,6 +91,11 @@ function usage() {
       "      exception is session-only, i.e. web UI); a draft/pending or missing id",
       "      returns a clean not_executable result (exit 0). Needs",
       "      mcp:execute_assistant (staff + admin).",
+      "  create-assistant [--user <email>] (--file <export.json> | --json '<ExportFormat>')",
+      "  update-assistant [--user <email>] --id <n> (--file <export.json> | --json '<ExportFormat>')",
+      "  fork-assistant   [--user <email>] --id <n> [--name <text>]",
+      "      Create/update/fork always lands in pending_approval. Update is",
+      "      owner-or-admin; fork uses the caller's current assistant visibility.",
       "  search-decisions  [--user <email>] [--query <t>] [--node-type T] [--node-class C]",
       "                    [--limit N] [--cursor C]",
       '  capture-decision  [--user <email>] --decision "<t>" --decided-by "<t>"',
@@ -155,6 +165,44 @@ function parseIntegerList(value, label) {
     fail(`--${label} must be a comma-separated list of positive integers`);
   }
   return numbers;
+}
+
+function parseImportEnvelope(args) {
+  const json = optStr(args, "json", "json");
+  const file = optStr(args, "file", "file");
+  if ((json === undefined) === (file === undefined)) {
+    fail(
+      "Provide exactly one of --file <export.json> or --json '<ExportFormat>'",
+    );
+  }
+
+  let raw;
+  if (file !== undefined) {
+    try {
+      // The CLI contract intentionally accepts a caller-selected local export.
+      // eslint-disable-next-line security/detect-non-literal-fs-filename
+      raw = fs.readFileSync(file, "utf8");
+    } catch (error) {
+      fail(`Unable to read --file: ${error.message}`);
+    }
+  } else {
+    raw = json;
+  }
+
+  let envelope;
+  try {
+    envelope = JSON.parse(raw);
+  } catch (error) {
+    fail(`Assistant import envelope must be valid JSON: ${error.message}`);
+  }
+  if (
+    envelope === null ||
+    typeof envelope !== "object" ||
+    Array.isArray(envelope)
+  ) {
+    fail("Assistant import envelope must be a JSON object");
+  }
+  return envelope;
 }
 
 function requiredScopeForTool(toolName) {
@@ -337,6 +385,31 @@ async function executeAssistantCommand(args, email) {
   emit(res.payload);
 }
 
+async function createAssistantCommand(args, email) {
+  await runToolAndEmit("create_assistant", parseImportEnvelope(args), email);
+}
+
+async function updateAssistantCommand(args, email) {
+  const assistantId = optInt(args, "id", "id");
+  if (assistantId === undefined) fail("--id <assistant-id> is required");
+  await runToolAndEmit(
+    "update_assistant",
+    { assistantId, ...parseImportEnvelope(args) },
+    email,
+  );
+}
+
+async function forkAssistantCommand(args, email) {
+  const assistantId = optInt(args, "id", "id");
+  if (assistantId === undefined) fail("--id <assistant-id> is required");
+  const name = optStr(args, "name", "name");
+  await runToolAndEmit(
+    "fork_assistant",
+    { assistantId, ...(name !== undefined ? { name } : {}) },
+    email,
+  );
+}
+
 async function searchDecisionsCommand(args, email) {
   const toolArgs = {};
   const optionalArgs = {
@@ -440,6 +513,9 @@ const COMMAND_HANDLERS = {
   list: listCommand,
   "list-assistants": listAssistantsCommand,
   "execute-assistant": executeAssistantCommand,
+  "create-assistant": createAssistantCommand,
+  "update-assistant": updateAssistantCommand,
+  "fork-assistant": forkAssistantCommand,
   "search-decisions": searchDecisionsCommand,
   "capture-decision": captureDecisionCommand,
   "get-decision-graph": getDecisionGraphCommand,

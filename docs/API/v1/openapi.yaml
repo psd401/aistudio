@@ -1090,6 +1090,93 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /assistants/import:
+    post:
+      operationId: createAssistants
+      tags: [Assistants]
+      summary: Create Assistant Architects from an export envelope
+      description: |
+        Imports one or more Assistant Architects from the portable ExportFormat
+        v1.0 JSON envelope. Each assistant (row + prompts + input fields) is
+        created atomically and owned by the authenticated caller. Caller-supplied
+        `status` is ignored: every created assistant enters `pending_approval`.
+        Model names are resolved by exact model id, then provider-family
+        fallback, then the first active model; the applied mappings are returned.
+        Import envelopes are limited to 10 MB on every surface.
+        Requires `assistants:write`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssistantImportEnvelope"
+            example:
+              version: "1.0"
+              exported_at: "2026-07-28T12:00:00.000Z"
+              export_source: District agent
+              assistants:
+                - name: Family newsletter helper
+                  description: Drafts a family-facing newsletter
+                  status: approved
+                  prompts:
+                    - name: Draft
+                      content: "Draft a newsletter about {{topic}}"
+                      model_name: gpt-5
+                      position: 0
+                  input_fields:
+                    - name: topic
+                      label: Topic
+                      field_type: short_text
+                      position: 0
+      responses:
+        "201":
+          description: At least one assistant was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantImportBatchResponse"
+              example:
+                data:
+                  total: 1
+                  successful: 1
+                  failed: 0
+                  results:
+                    - name: Family newsletter helper
+                      id: 41
+                      status: pending_approval
+                  modelMappings:
+                    - modelName: gpt-5
+                      mappedToId: 7
+                meta:
+                  requestId: req_abc123
+        "400":
+          description: Invalid JSON or ExportFormat validation failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The caller lacks `assistants:write`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Import payload exceeds the 10 MB limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /assistants/{id}:
     get:
       operationId: getAssistant
@@ -1129,6 +1216,176 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+    put:
+      operationId: updateAssistant
+      tags: [Assistants]
+      summary: Replace an Assistant Architect from an export envelope
+      description: |
+        Atomically replaces the assistant's import-controlled fields, prompts,
+        and input fields from a single-assistant ExportFormat v1.0 envelope.
+        Staff callers may update only assistants they own; administrators may
+        update any assistant. Every successful update resets status to
+        `pending_approval`. Requires `assistants:write`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssistantImportEnvelope"
+            example:
+              version: "1.0"
+              exported_at: "2026-07-28T12:00:00.000Z"
+              assistants:
+                - name: Updated family newsletter helper
+                  description: Updated by an agent
+                  status: approved
+                  prompts:
+                    - name: Draft
+                      content: "Draft three newsletter sections about {{topic}}"
+                      model_name: gpt-5
+                      position: 0
+                  input_fields:
+                    - name: topic
+                      label: Topic
+                      field_type: short_text
+                      position: 0
+      responses:
+        "200":
+          description: Assistant replaced and returned to pending approval.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantMutationResponse"
+              example:
+                data:
+                  result:
+                    name: Updated family newsletter helper
+                    id: 41
+                    status: pending_approval
+                  modelMappings:
+                    - modelName: gpt-5
+                      mappedToId: 7
+                meta:
+                  requestId: req_abc123
+        "400":
+          description: Invalid ID, JSON, or envelope (including an envelope containing other than one assistant).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Missing `assistants:write`, or a non-admin caller does not own the assistant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /assistants/{id}/fork:
+    post:
+      operationId: forkAssistant
+      tags: [Assistants]
+      summary: Fork a visible Assistant Architect
+      description: |
+        Copies an assistant visible to the caller through the same
+        owner/admin/approved and resource/room rules as assistant detail. The
+        source is unchanged. The fork is owned by the caller and enters
+        `pending_approval`; an optional `name` overrides the copied name.
+        Invisible and missing sources both return 404. Requires
+        `assistants:write`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+            example:
+              name: My family newsletter helper
+      responses:
+        "201":
+          description: Caller-owned fork created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/AssistantMutationResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          sourceAssistantId:
+                            type: integer
+              example:
+                data:
+                  sourceAssistantId: 41
+                  result:
+                    name: My family newsletter helper
+                    id: 52
+                    status: pending_approval
+                  modelMappings:
+                    - modelName: gpt-5
+                      mappedToId: 7
+                meta:
+                  requestId: req_abc123
+        "400":
+          description: Invalid ID, JSON, or name override.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The caller lacks `assistants:write`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Source assistant is missing or not visible to the caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /assistants/{id}/execute:
     post:
@@ -3249,6 +3506,160 @@ components:
         updatedAt: { type: [string, "null"], format: date-time }
 
     # -- Assistants --
+    AssistantImportPrompt:
+      type: object
+      required: [name, content, model_name, position]
+      properties:
+        name: { type: string }
+        content:
+          type: string
+          maxLength: 10000000
+        system_context:
+          type: string
+          maxLength: 10000000
+        model_name:
+          type: string
+          description: Portable model id/name resolved against active models.
+        position: { type: integer }
+        parallel_group: { type: integer }
+        input_mapping:
+          type: object
+          additionalProperties: true
+        timeout_seconds:
+          type: integer
+          minimum: 1
+
+    AssistantImportField:
+      type: object
+      required: [name, label, field_type, position]
+      properties:
+        name: { type: string }
+        label: { type: string }
+        field_type:
+          type: string
+          enum: [short_text, long_text, select, multi_select, file_upload]
+        position: { type: integer }
+        options:
+          type: object
+          additionalProperties: true
+
+    AssistantImportDefinition:
+      type: object
+      required: [name, prompts, input_fields]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description: { type: string }
+        status:
+          type: string
+          description: Accepted for format compatibility but ignored; writes always use pending_approval.
+        image_path: { type: string }
+        is_parallel: { type: boolean }
+        timeout_seconds:
+          type: integer
+          minimum: 1
+        prompts:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/AssistantImportPrompt"
+        input_fields:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssistantImportField"
+
+    AssistantImportEnvelope:
+      type: object
+      required: [version, assistants]
+      properties:
+        version:
+          type: string
+          const: "1.0"
+        exported_at:
+          type: string
+          format: date-time
+        export_source:
+          type: string
+        assistants:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssistantImportDefinition"
+
+    AssistantModelMapping:
+      type: object
+      required: [modelName, mappedToId]
+      properties:
+        modelName: { type: string }
+        mappedToId:
+          type: integer
+          minimum: 1
+
+    AssistantImportResult:
+      oneOf:
+        - type: object
+          required: [name, id, status]
+          properties:
+            name: { type: string }
+            id:
+              type: integer
+              minimum: 1
+            status:
+              type: string
+              const: pending_approval
+        - type: object
+          required: [name, status, error]
+          properties:
+            name: { type: string }
+            status:
+              type: string
+              const: error
+            error: { type: string }
+
+    AssistantImportBatchResult:
+      type: object
+      required: [total, successful, failed, results, modelMappings]
+      properties:
+        total: { type: integer, minimum: 0 }
+        successful: { type: integer, minimum: 0 }
+        failed: { type: integer, minimum: 0 }
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssistantImportResult"
+        modelMappings:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssistantModelMapping"
+
+    AssistantImportBatchResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/AssistantImportBatchResult"
+        meta:
+          type: object
+          properties:
+            requestId: { type: string }
+
+    AssistantMutationResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            result:
+              $ref: "#/components/schemas/AssistantImportResult"
+            modelMappings:
+              type: array
+              items:
+                $ref: "#/components/schemas/AssistantModelMapping"
+        meta:
+          type: object
+          properties:
+            requestId: { type: string }
+
     AssistantListItem:
       type: object
       properties:

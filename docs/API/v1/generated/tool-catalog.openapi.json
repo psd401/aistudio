@@ -43,6 +43,54 @@
         }
       }
     },
+    "/api/v1/assistants/{id}": {
+      "put": {
+        "operationId": "updateAssistant",
+        "summary": "Replace an assistant from an ExportFormat envelope",
+        "x-tool-identifier": "assistants.update",
+        "x-tool-version": "v1",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "assistants:write"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Validation error — malformed body or invalid inputs."
+          },
+          "401": {
+            "description": "Missing or invalid API credentials."
+          },
+          "403": {
+            "description": "Authenticated but missing a required scope."
+          },
+          "404": {
+            "description": "Resource not found, or the tool is disabled in the catalog."
+          },
+          "429": {
+            "description": "Concurrent-execution or rate limit exceeded."
+          },
+          "500": {
+            "description": "Internal error."
+          }
+        }
+      }
+    },
     "/api/v1/assistants/{id}/execute": {
       "post": {
         "operationId": "executeAssistant",
@@ -73,6 +121,92 @@
           },
           "202": {
             "description": "Async job accepted; poll for completion (Accept: application/json)."
+          },
+          "400": {
+            "description": "Validation error — malformed body or invalid inputs."
+          },
+          "401": {
+            "description": "Missing or invalid API credentials."
+          },
+          "403": {
+            "description": "Authenticated but missing a required scope."
+          },
+          "404": {
+            "description": "Resource not found, or the tool is disabled in the catalog."
+          },
+          "429": {
+            "description": "Concurrent-execution or rate limit exceeded."
+          },
+          "500": {
+            "description": "Internal error."
+          }
+        }
+      }
+    },
+    "/api/v1/assistants/{id}/fork": {
+      "post": {
+        "operationId": "forkAssistant",
+        "summary": "Fork a visible assistant",
+        "x-tool-identifier": "assistants.fork",
+        "x-tool-version": "v1",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "assistants:write"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Validation error — malformed body or invalid inputs."
+          },
+          "401": {
+            "description": "Missing or invalid API credentials."
+          },
+          "403": {
+            "description": "Authenticated but missing a required scope."
+          },
+          "404": {
+            "description": "Resource not found, or the tool is disabled in the catalog."
+          },
+          "429": {
+            "description": "Concurrent-execution or rate limit exceeded."
+          },
+          "500": {
+            "description": "Internal error."
+          }
+        }
+      }
+    },
+    "/api/v1/assistants/import": {
+      "post": {
+        "operationId": "createAssistants",
+        "summary": "Create assistants from an ExportFormat envelope",
+        "x-tool-identifier": "assistants.create",
+        "x-tool-version": "v1",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "assistants:write"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
           },
           "400": {
             "description": "Validation error — malformed body or invalid inputs."

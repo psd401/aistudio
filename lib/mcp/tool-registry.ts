@@ -160,6 +160,90 @@ Example:
     },
   },
   {
+    name: "create_assistant",
+    description:
+      "Create one or more Assistant Architects from an ExportFormat v1.0 envelope. Created assistants are owned by the caller and always enter pending_approval.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        version: {
+          type: "string",
+          description: "Export format version. Must be 1.0.",
+          enum: ["1.0"],
+        },
+        exported_at: {
+          type: "string",
+          description: "ISO timestamp from the portable export envelope.",
+        },
+        export_source: {
+          type: "string",
+          description: "Optional source label from the export envelope.",
+        },
+        assistants: {
+          type: "array",
+          items: { type: "object" },
+          description:
+            "Assistant definitions from ExportFormat v1.0, including prompts, model_name values, and input_fields.",
+        },
+      },
+      required: ["version", "assistants"],
+    },
+  },
+  {
+    name: "update_assistant",
+    description:
+      "Replace an Assistant Architect from a single-assistant ExportFormat v1.0 envelope. Owners may update their own assistants; administrators may update any. Status always resets to pending_approval.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        assistantId: {
+          type: "number",
+          description: "Numeric ID of the assistant to replace.",
+        },
+        version: {
+          type: "string",
+          description: "Export format version. Must be 1.0.",
+          enum: ["1.0"],
+        },
+        exported_at: {
+          type: "string",
+          description: "ISO timestamp from the portable export envelope.",
+        },
+        export_source: {
+          type: "string",
+          description: "Optional source label from the export envelope.",
+        },
+        assistants: {
+          type: "array",
+          items: { type: "object" },
+          description:
+            "Exactly one Assistant definition from ExportFormat v1.0.",
+        },
+      },
+      required: ["assistantId", "version", "assistants"],
+    },
+  },
+  {
+    name: "fork_assistant",
+    description:
+      "Fork a visible Assistant Architect into a new caller-owned pending_approval assistant. The source is not modified.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        assistantId: {
+          type: "number",
+          description: "Numeric ID of the visible assistant to fork.",
+        },
+        name: {
+          type: "string",
+          description:
+            "Optional name for the fork. Defaults to the source assistant name.",
+        },
+      },
+      required: ["assistantId"],
+    },
+  },
+  {
     name: "list_assistants",
     description:
       "List AI assistants the authenticated user has access to execute.",

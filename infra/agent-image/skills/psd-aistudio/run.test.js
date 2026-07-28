@@ -241,6 +241,58 @@ test('execute-assistant on a genuine tool error → tool-error, exit 12', async 
   expect(emitted[0].status).toBe('tool-error');
 });
 
+// ── create/update/fork assistant ─────────────────────────────────────────────
+
+test('create-assistant sends the ExportFormat envelope from --json', async () => {
+  const envelope = {
+    version: '1.0',
+    exported_at: '2026-07-28T00:00:00.000Z',
+    assistants: [],
+  };
+  await run('create-assistant', '--json', JSON.stringify(envelope));
+  expect(toolCalls[0]).toMatchObject({
+    toolName: 'create_assistant',
+    toolArgs: envelope,
+  });
+});
+
+test('update-assistant adds numeric assistantId to the envelope', async () => {
+  const envelope = {
+    version: '1.0',
+    exported_at: '2026-07-28T00:00:00.000Z',
+    assistants: [],
+  };
+  await run(
+    'update-assistant',
+    '--id',
+    '17',
+    '--json',
+    JSON.stringify(envelope),
+  );
+  expect(toolCalls[0]).toMatchObject({
+    toolName: 'update_assistant',
+    toolArgs: { assistantId: 17, ...envelope },
+  });
+});
+
+test('fork-assistant sends assistantId and optional name', async () => {
+  await run('fork-assistant', '--id', '17', '--name', 'My copy');
+  expect(toolCalls[0]).toMatchObject({
+    toolName: 'fork_assistant',
+    toolArgs: { assistantId: 17, name: 'My copy' },
+  });
+});
+
+test('create-assistant requires exactly one envelope source', async () => {
+  let code;
+  try {
+    await run('create-assistant');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+});
+
 // ── insufficient-scope hint (never retried / key-swapped) ──────────────────────
 
 test('insufficient scope on the SHARED key → verbatim error + "store your own key" hint, exit 12', async () => {

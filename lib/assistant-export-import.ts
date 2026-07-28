@@ -141,13 +141,50 @@ export function createExportFile(assistants: ExportedAssistant[]): ExportFormat 
 const IMPORT_MAX_ASSISTANT_NAME_LENGTH = 255
 const IMPORT_MAX_PROMPT_CONTENT_LENGTH = 10_000_000
 const IMPORT_MAX_PROMPTS_PER_ASSISTANT = 20
+export const ASSISTANT_IMPORT_MAX_BYTES = 10 * 1024 * 1024
+
+export function assistantImportContentLengthExceedsLimit(
+  contentLength: string | null
+): boolean {
+  if (!contentLength) return false
+  const parsed = Number(contentLength)
+  return Number.isFinite(parsed) && parsed > ASSISTANT_IMPORT_MAX_BYTES
+}
+
+function validateSerializedImportSize(data: unknown): string | undefined {
+  try {
+    const serialized = JSON.stringify(data)
+    if (
+      serialized !== undefined &&
+      new TextEncoder().encode(serialized).byteLength >
+        ASSISTANT_IMPORT_MAX_BYTES
+    ) {
+      return "Import payload too large (maximum 10 MB)"
+    }
+  } catch {
+    return "Invalid file format"
+  }
+  return undefined
+}
 
 function validateImportedPrompt(
   assistantName: string,
-  prompt: Record<string, unknown>
+  prompt: unknown
 ): string | undefined {
+  if (!prompt || typeof prompt !== "object" || Array.isArray(prompt)) {
+    return `Assistant ${assistantName}: invalid prompt`
+  }
+  const promptData = prompt as Record<string, unknown>
+  if (
+    typeof promptData.name !== "string" ||
+    typeof promptData.content !== "string" ||
+    typeof promptData.model_name !== "string" ||
+    !Number.isInteger(promptData.position)
+  ) {
+    return `Assistant ${assistantName}: prompt is missing required fields`
+  }
   const oversizedFields = ["content", "system_context"].filter(field => {
-    const value = prompt[field]
+    const value = promptData[field]
     return typeof value === "string" && value.length > IMPORT_MAX_PROMPT_CONTENT_LENGTH
   })
 
@@ -155,29 +192,65 @@ function validateImportedPrompt(
   return `Assistant ${assistantName}: prompt ${oversizedFields[0]} too large (max ${IMPORT_MAX_PROMPT_CONTENT_LENGTH} characters)`
 }
 
-function validateImportedAssistant(assistant: Record<string, unknown>): string | undefined {
-  if (!assistant.name || typeof assistant.name !== "string") {
-    return "Invalid assistant: missing name"
+function validateImportedPrompts(
+  assistantName: string,
+  prompts: unknown
+): string | undefined {
+  if (!Array.isArray(prompts)) {
+    return `Invalid assistant ${assistantName}: missing prompts array`
   }
-  if (assistant.name.length > IMPORT_MAX_ASSISTANT_NAME_LENGTH) {
-    return `Assistant name too long (max ${IMPORT_MAX_ASSISTANT_NAME_LENGTH} characters)`
+  if (prompts.length > IMPORT_MAX_PROMPTS_PER_ASSISTANT) {
+    return `Assistant ${assistantName}: too many prompts (max ${IMPORT_MAX_PROMPTS_PER_ASSISTANT})`
   }
-  if (!Array.isArray(assistant.prompts)) {
-    return `Invalid assistant ${assistant.name}: missing prompts array`
-  }
-  if (assistant.prompts.length > IMPORT_MAX_PROMPTS_PER_ASSISTANT) {
-    return `Assistant ${assistant.name}: too many prompts (max ${IMPORT_MAX_PROMPTS_PER_ASSISTANT})`
-  }
-
-  for (const prompt of assistant.prompts as Record<string, unknown>[]) {
-    const promptError = validateImportedPrompt(assistant.name, prompt)
+  for (const prompt of prompts) {
+    const promptError = validateImportedPrompt(assistantName, prompt)
     if (promptError) return promptError
   }
+  return undefined
+}
 
-  if (!Array.isArray(assistant.input_fields)) {
-    return `Invalid assistant ${assistant.name}: missing input_fields array`
+function validateImportedInputFields(
+  assistantName: string,
+  fields: unknown
+): string | undefined {
+  if (!Array.isArray(fields)) {
+    return `Invalid assistant ${assistantName}: missing input_fields array`
+  }
+  for (const field of fields) {
+    if (!field || typeof field !== "object" || Array.isArray(field)) {
+      return `Assistant ${assistantName}: invalid input field`
+    }
+    const fieldData = field as Record<string, unknown>
+    if (
+      typeof fieldData.name !== "string" ||
+      typeof fieldData.label !== "string" ||
+      typeof fieldData.field_type !== "string" ||
+      !Number.isInteger(fieldData.position)
+    ) {
+      return `Assistant ${assistantName}: input field is missing required fields`
+    }
   }
   return undefined
+}
+
+function validateImportedAssistant(assistant: unknown): string | undefined {
+  if (!assistant || typeof assistant !== "object" || Array.isArray(assistant)) {
+    return "Invalid assistant"
+  }
+  const assistantData = assistant as Record<string, unknown>
+  if (!assistantData.name || typeof assistantData.name !== "string") {
+    return "Invalid assistant: missing name"
+  }
+  if (assistantData.name.length > IMPORT_MAX_ASSISTANT_NAME_LENGTH) {
+    return `Assistant name too long (max ${IMPORT_MAX_ASSISTANT_NAME_LENGTH} characters)`
+  }
+  return (
+    validateImportedPrompts(assistantData.name, assistantData.prompts) ??
+    validateImportedInputFields(
+      assistantData.name,
+      assistantData.input_fields
+    )
+  )
 }
 
 /**
@@ -205,10 +278,13 @@ export function validateImportFile(data: unknown): { valid: boolean; error?: str
     return { valid: false, error: "Missing or invalid assistants array" }
   }
 
-  for (const assistant of importData.assistants as Record<string, unknown>[]) {
+  for (const assistant of importData.assistants) {
     const assistantError = validateImportedAssistant(assistant)
     if (assistantError) return { valid: false, error: assistantError }
   }
+
+  const sizeError = validateSerializedImportSize(data)
+  if (sizeError) return { valid: false, error: sizeError }
 
   return { valid: true }
 }

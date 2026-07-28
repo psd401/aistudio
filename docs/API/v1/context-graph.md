@@ -780,6 +780,157 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 
 ---
 
+## Assistant Architect create, update, and fork
+
+Programmatic callers can create, replace, and fork Assistant Architects through
+the same portable ExportFormat v1.0 used by the admin export/import UI:
+
+- `POST /api/v1/assistants/import`
+- `PUT /api/v1/assistants/{id}`
+- `POST /api/v1/assistants/{id}/fork`
+
+All three require `assistants:write` on REST. Their MCP equivalents are
+`create_assistant` (`mcp:create_assistant`), `update_assistant`
+(`mcp:update_assistant`), and `fork_assistant` (`mcp:fork_assistant`). These
+scopes are available to staff and administrators. Catalog metadata is the scope
+source of truth on both surfaces; the REST routes use `assistants:write` as a
+fallback only when the catalog entry is unavailable.
+
+Import envelopes are limited to 10 MB across the admin, REST, and MCP surfaces.
+REST create and update reject an advertised oversized `Content-Length` with
+`413 PAYLOAD_TOO_LARGE` before parsing; shared validation enforces the same cap
+after parsing, including for chunked REST requests and MCP tool arguments.
+
+Every write preserves the existing human approval gate:
+
+- create: every assistant is owned by the authenticated caller and enters
+  `pending_approval`, regardless of the envelope's `status`;
+- update: staff may replace only their own assistants; administrators may
+  replace any assistant; prompts and input fields are wholesale-replaced in the
+  same transaction and status resets to `pending_approval`; and
+- fork: any assistant visible under the same owner/admin/approved plus
+  resource/room rules as the v1 detail endpoint may be copied. The source is
+  never modified, and the caller owns the new `pending_approval` copy. Missing
+  and invisible sources both return `404`.
+
+Each assistant create runs in its own transaction, so a failed prompt or input
+field leaves no partial rows for that assistant while successful siblings in a
+multi-assistant import remain committed. Model names use the existing importer
+resolution order: exact active `modelId`, provider-family fallback
+(OpenAI/Anthropic/Google), then the first active model. Responses report every
+`modelName` → `mappedToId` choice.
+
+**Create example**
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "version": "1.0",
+    "exported_at": "2026-07-28T12:00:00.000Z",
+    "assistants": [{
+      "name": "Family newsletter helper",
+      "description": "Drafts a family-facing newsletter",
+      "status": "approved",
+      "prompts": [{
+        "name": "Draft",
+        "content": "Draft a newsletter about {{topic}}",
+        "model_name": "gpt-5",
+        "position": 0
+      }],
+      "input_fields": [{
+        "name": "topic",
+        "label": "Topic",
+        "field_type": "short_text",
+        "position": 0
+      }]
+    }]
+  }' \
+  "https://your-domain/api/v1/assistants/import"
+```
+
+**Create response `201`**
+
+```json
+{
+  "data": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0,
+    "results": [{
+      "name": "Family newsletter helper",
+      "id": 41,
+      "status": "pending_approval"
+    }],
+    "modelMappings": [{
+      "modelName": "gpt-5",
+      "mappedToId": 7
+    }]
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+**Update example**
+
+```bash
+curl -X PUT \
+  -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "version": "1.0",
+    "exported_at": "2026-07-28T12:30:00.000Z",
+    "assistants": [{
+      "name": "Updated family newsletter helper",
+      "description": "Updated by an agent",
+      "status": "approved",
+      "prompts": [{
+        "name": "Draft",
+        "content": "Draft three newsletter sections about {{topic}}",
+        "model_name": "gpt-5",
+        "position": 0
+      }],
+      "input_fields": [{
+        "name": "topic",
+        "label": "Topic",
+        "field_type": "short_text",
+        "position": 0
+      }]
+    }]
+  }' \
+  "https://your-domain/api/v1/assistants/41"
+```
+
+The update envelope must contain exactly one assistant. A successful response is
+`200` with `data.result` (`name`, `id`, `status`) plus `modelMappings`.
+
+**Fork example**
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"My family newsletter helper"}' \
+  "https://your-domain/api/v1/assistants/41/fork"
+```
+
+The optional body may be omitted. A successful `201` response contains
+`data.sourceAssistantId`, the new `data.result`, and `modelMappings`.
+
+**Errors**
+
+- `400` — Invalid JSON, unsupported export version/shape, an update envelope
+  containing other than one assistant, or an invalid fork name.
+- `401` — Missing or invalid authentication.
+- `403` — Missing `assistants:write`; update also returns 403 when a non-admin
+  caller does not own the assistant.
+- `404` — Update target is missing, or a fork source is missing/not visible.
+- `429` — API-key rate limit exceeded.
+- `500` — Import persistence or another internal failure.
+
+---
+
 ## Assistant execution runtime files
 
 `POST /api/v1/assistants/{id}/execute` and
