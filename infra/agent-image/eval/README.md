@@ -39,9 +39,11 @@ issue-specific temporary path; do not commit run transcripts.
 
 Resolved short-lived AWS credentials are passed into the candidate container's
 environment and are therefore visible to users with access to the local Docker
-daemon (for example through `docker inspect`). Run evals only on a trusted
-workstation. The runner removes its containers on completion and logs a warning
-if Docker cannot remove one.
+daemon (for example through `docker inspect`). They are also briefly present in
+the `docker run` process arguments and may be visible to local process-inspection
+tools while the container starts. Run evals only on a trusted workstation. The
+runner removes its containers on completion and logs a warning if Docker cannot
+remove one.
 
 Every trial gets:
 
