@@ -54,6 +54,7 @@ const listQuerySchema = z
     tag: z.string().min(1).max(100).optional(),
     status: z.enum(["draft", "published", "archived"]).optional(),
     query: z.string().min(1).max(200).optional(),
+    since: z.string().datetime({ offset: true }).optional(),
   })
   .strict()
 
@@ -275,8 +276,15 @@ async function executeAtriumRead(
       tag: query.tag,
       status: query.status,
       query: query.query,
+      since: query.since,
     })
-    return success(items, input.requestId)
+    return success(
+      items.map((item) => ({
+        ...item,
+        url: contentDeepLink(item.slug),
+      })),
+      input.requestId
+    )
   }
 
   if (segments.length === 1) {
@@ -554,6 +562,7 @@ async function executePublishWrite(
         id: segments[0],
         destination: body.destination,
         publishedVersionId: published.publishedVersionId,
+        readerUrl: published.readerUrl,
       },
       input.requestId
     )

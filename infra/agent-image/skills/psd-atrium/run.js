@@ -232,6 +232,7 @@ async function findObjects(args) {
     collection: optStr(args, 'collection', 'collection'),
     tag: optStr(args, 'tag', 'tag'),
     query: optStr(args, 'query', 'query'),
+    since: optStr(args, 'since', 'since'),
   };
   const { payload } = await restFetch('GET', '', { query });
   emit(payload);

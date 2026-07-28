@@ -266,6 +266,8 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     identifier: "content.list",
     requiredScope: "content:read",
     internalScopes: ["content:read"],
+    // v2: #1414 added the optional ISO 8601 `since` lower-bound filter.
+    version: "v2",
   },
   update_content: {
     identifier: "content.update",

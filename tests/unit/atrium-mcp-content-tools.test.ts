@@ -109,6 +109,17 @@ describe("Atrium MCP content tools registry", () => {
     expect(tool?.inputSchema.required ?? []).not.toContain("query");
   });
 
+  it("list_content exposes an optional ISO date-time `since` property", () => {
+    const tool = CONTENT_MCP_TOOLS.find((t) => t.name === "list_content");
+    const manifestEntry = TOOL_MANIFEST.find((t) => t.name === "list_content");
+    expect(tool?.inputSchema.properties.since).toMatchObject({
+      type: "string",
+      format: "date-time",
+    });
+    expect(tool?.inputSchema.required ?? []).not.toContain("since");
+    expect(manifestEntry?.version).toBe("v2");
+  });
+
   it("the body-carrying create/version tools expose an optional codeEncoding: base64", () => {
     // WAF-opaque transit: an artifact whose code contains <script>/<style> must be
     // sendable base64-encoded so the edge WAF's CrossSiteScripting_BODY rule can't

@@ -1,5 +1,5 @@
 /**
- * GET /api/v1/content — `query` filter pass-through (Epic #1059 completion).
+ * GET /api/v1/content — `query` and `since` filter pass-through.
  *
  * The REST list endpoint exposes the same bounded title-search `query` the MCP
  * `list_content` tool does. These tests drive the real route handler (withApiAuth
@@ -122,6 +122,42 @@ describe("GET /api/v1/content — query filter", () => {
 
     expect(mockCreateErrorResponse).toHaveBeenCalledWith(
       "req-3",
+      400,
+      "VALIDATION_ERROR",
+      "Invalid query parameters",
+      expect.anything()
+    );
+    expect(mockList).not.toHaveBeenCalled();
+    expect(result).toEqual({ __marker: "error" });
+  });
+});
+
+describe("GET /api/v1/content — since filter", () => {
+  it("passes a valid ISO 8601 lower bound through to contentService.list", async () => {
+    const since = "2026-07-27T12:34:56.789Z";
+
+    const result = await handler(
+      request(`?since=${encodeURIComponent(since)}`),
+      AUTH,
+      "req-since"
+    );
+
+    expect(mockList).toHaveBeenCalledWith(
+      REQ,
+      expect.objectContaining({ since })
+    );
+    expect(result).toEqual({ __marker: "ok" });
+  });
+
+  it("rejects an invalid since with a 400 validation error", async () => {
+    const result = await handler(
+      request("?since=not-a-timestamp"),
+      AUTH,
+      "req-bad-since"
+    );
+
+    expect(mockCreateErrorResponse).toHaveBeenCalledWith(
+      "req-bad-since",
       400,
       "VALIDATION_ERROR",
       "Invalid query parameters",

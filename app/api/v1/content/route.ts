@@ -51,6 +51,7 @@ const listQuerySchema = z.object({
   // Case-insensitive title search (service-side ILIKE); bounded at 200 chars —
   // same contract as the MCP list_content tool.
   query: z.string().min(1).max(200).optional(),
+  since: z.string().datetime({ offset: true }).optional(),
 });
 
 const createBodySchema = z.object({
@@ -115,6 +116,7 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
       tag: parsed.data.tag,
       status: parsed.data.status,
       query: parsed.data.query,
+      since: parsed.data.since,
     });
     return createApiResponse(
       { data: items, meta: { requestId, count: items.length } },

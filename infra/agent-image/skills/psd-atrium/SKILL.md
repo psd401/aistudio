@@ -55,7 +55,7 @@ attributed to that owner, never to a shared service principal.
 
 ```bash
 # Find content you can view (permission-filtered). All filters optional.
-node run.js find --kind document --query "field trip" --status published
+node run.js find --kind document --query "field trip" --status published --since "2026-07-27T00:00:00Z"
 
 # Read one object + its last saved version.
 # Document TEXT is NOT returned here — it lives in the collaborative store, so
@@ -68,7 +68,9 @@ node run.js read-source --id <uuid-or-slug>
 ```
 
 `find` filters: `--kind document|artifact`, `--collection <slug|id>`, `--tag <t>`,
-`--status draft|published|archived`, `--query <title text>` (case-insensitive).
+`--status draft|published|archived`, `--query <title text>` (case-insensitive),
+`--since <ISO-8601 timestamp>` (inclusive `updatedAt` lower bound). Each returned
+item includes its canonical `url`.
 
 `read-source` returns the last **committed** version's source. A document someone
 has open in the live editor may be **ahead** of this until a version is snapshotted
@@ -199,7 +201,8 @@ node run.js unpublish --id <id> --destination intranet
 `content:publish_internal`. A **public** destination the key may not publish
 directly returns a structured **approval_required** result (HTTP 202) — this is a
 SUCCESS, not an error. **Relay its `message` verbatim** so the user knows the
-request was queued for a human/admin to approve.
+request was queued for a human/admin to approve. A completed publish includes
+`readerUrl` when the destination has a reader link.
 
 ### Change who can view it
 

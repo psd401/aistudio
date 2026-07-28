@@ -11,7 +11,7 @@
  * visibility widening (`setLevel`) lands with the publish service in Phase 5/7.
  */
 
-import { and, desc, eq, ilike, ne, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, ilike, ne, sql, type SQL } from "drizzle-orm";
 import {
   executeQuery,
   executeTransaction,
@@ -743,6 +743,15 @@ export const visibilityService = {
     ];
     if (filter.collectionId) filters.push(eq(o.collectionId, filter.collectionId));
     if (filter.kind) filters.push(eq(o.kind, filter.kind));
+    if (filter.since) {
+      const since = new Date(filter.since);
+      if (Number.isNaN(since.getTime())) {
+        throw new ValidationError("Invalid since timestamp", {
+          since: filter.since,
+        });
+      }
+      filters.push(gte(o.updatedAt, since));
+    }
     if (filter.owner === "shared") {
       // "Shared with me": content the caller can see but does not own, that
       // reached them through an explicit grant (group/private) rather than the

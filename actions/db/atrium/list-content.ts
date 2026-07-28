@@ -28,6 +28,13 @@ import { contentService } from "@/lib/content";
 import type { ContentObjectDTO, ListFilter } from "@/lib/content";
 import type { ActionState } from "@/types";
 import { getOptionalRequester } from "./requester";
+import { z } from "zod";
+
+const listFilterSchema = z
+  .object({
+    since: z.string().datetime({ offset: true }).optional(),
+  })
+  .passthrough();
 
 export async function listContentAction(
   filter: ListFilter = {}
@@ -37,6 +44,7 @@ export async function listContentAction(
   const log = createLogger({ requestId, action: "listContentAction" });
 
   try {
+    listFilterSchema.parse(filter);
     log.info("Action started: list content", {
       filter: sanitizeForLogging(filter),
     });
