@@ -57,6 +57,47 @@ describe("agent-cron run telemetry", () => {
     )
   })
 
+  it("mirrors a contended pre-invocation lock with its phase", async () => {
+    const { telemetry, execute, log } = harness()
+
+    await telemetry.recordRun(
+      {
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        scheduleName: "Morning brief",
+        sessionId: "schedule-session",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 3,
+        status: "skipped",
+        errorMessage: "Session lock contended",
+        failure: {
+          severity: "warn",
+          context: { phase: "lock-contention" },
+        },
+      },
+      log,
+    )
+
+    expect(execute).toHaveBeenCalledTimes(2)
+    expect(execute.mock.calls[1][0].parameters).toEqual(
+      expect.arrayContaining([
+        { name: "severity", value: { stringValue: "warn" } },
+        {
+          name: "context",
+          value: {
+            stringValue: JSON.stringify({
+              scheduleId: "schedule-id",
+              phase: "lock-contention",
+            }),
+          },
+        },
+      ]),
+    )
+  })
+})
+
+describe("agent-cron failure telemetry", () => {
   it("mirrors a lookup error into the cron failure stream", async () => {
     const { telemetry, execute, error, log } = harness()
 
@@ -109,10 +150,10 @@ describe("agent-cron run telemetry", () => {
         scheduleId: "schedule-id",
         scheduleName: "Morning brief",
         sessionId: "session-id",
-        errorMessage: "Session lock contended",
-        severity: "warn",
+        errorMessage: "RunTask failed",
+        severity: "error",
         context: {
-          phase: "lock-contention",
+          phase: "run-task",
           promotionReason: "deadline",
         },
       },
@@ -122,13 +163,13 @@ describe("agent-cron run telemetry", () => {
     const failureInput = execute.mock.calls[0][0]
     expect(failureInput.parameters).toEqual(
       expect.arrayContaining([
-        { name: "severity", value: { stringValue: "warn" } },
+        { name: "severity", value: { stringValue: "error" } },
         {
           name: "context",
           value: {
             stringValue: JSON.stringify({
               scheduleId: "schedule-id",
-              phase: "lock-contention",
+              phase: "run-task",
               promotionReason: "deadline",
             }),
           },

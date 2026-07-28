@@ -22,6 +22,17 @@ export type JobLockResult =
       errorMessage: string;
     };
 
+export type JobLockFailure = Exclude<JobLockResult, { acquired: true }>;
+
+export interface LockedJobExecution<T> {
+  value: T;
+  retainLock: boolean;
+}
+
+export type LockedJobResult<T> =
+  | { executed: true; value: T }
+  | { executed: false; lock: JobLockFailure };
+
 export async function tryAcquireJobLock(
   sessionId: string,
   tableName: string,
@@ -30,7 +41,7 @@ export async function tryAcquireJobLock(
 ): Promise<JobLockResult> {
   if (!tableName) {
     const errorMessage = 'SESSION_LOCKS_TABLE is not configured';
-    log.warn(`Job promotion skipped — ${errorMessage}`);
+    log.warn(`Scheduled run skipped — ${errorMessage}`);
     return {
       acquired: false,
       phase: 'lock-config',
@@ -46,7 +57,9 @@ export async function tryAcquireJobLock(
         TableName: tableName,
         Item: {
           sessionId,
-          expiresAt: nowS + 14 * 60,
+          // Covers the Lambda's full 15-minute budget plus Fargate handoff.
+          // The job runner renews the same token after a successful promotion.
+          expiresAt: nowS + 20 * 60,
           lockToken,
           kind: 'job',
           claimedAt: new Date().toISOString(),
@@ -62,7 +75,7 @@ export async function tryAcquireJobLock(
     if (errorName === 'ConditionalCheckFailedException') {
       const errorMessage =
         'Session lock contended; another invocation owns this schedule session';
-      log.warn('Job promotion aborted — session lock contended');
+      log.warn('Scheduled run skipped — session lock contended');
       return {
         acquired: false,
         phase: 'lock-contention',
@@ -74,7 +87,7 @@ export async function tryAcquireJobLock(
       `Session lock acquire failed: ${
         error instanceof Error ? error.message : String(error)
       }`;
-    log.warn('Job promotion aborted — session lock acquire failed', {
+    log.warn('Scheduled run aborted — session lock acquire failed', {
       error: error instanceof Error ? error.message : String(error),
     });
     return {
@@ -109,5 +122,44 @@ export async function releaseJobLock(
     log.warn('Job lock release failed; relying on TTL backstop', {
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+}
+
+/**
+ * Acquire a session lock before executing any scheduled turn. Normal turns
+ * release it after delivery; successful promotions retain the same token for
+ * the background runner, preventing a duplicate invocation from reaching
+ * AgentCore or launching a second job.
+ */
+export async function runWithJobLock<T>(
+  sessionId: string,
+  tableName: string,
+  dynamoClient: JobLockDynamoClient,
+  log: JobLockLogger,
+  execute: (lockToken: string) => Promise<LockedJobExecution<T>>,
+): Promise<LockedJobResult<T>> {
+  const lock = await tryAcquireJobLock(
+    sessionId,
+    tableName,
+    dynamoClient,
+    log,
+  );
+  if (!lock.acquired) return { executed: false, lock };
+
+  let retainLock = false;
+  try {
+    const execution = await execute(lock.lockToken);
+    retainLock = execution.retainLock;
+    return { executed: true, value: execution.value };
+  } finally {
+    if (!retainLock) {
+      await releaseJobLock(
+        sessionId,
+        lock.lockToken,
+        tableName,
+        dynamoClient,
+        log,
+      );
+    }
   }
 }

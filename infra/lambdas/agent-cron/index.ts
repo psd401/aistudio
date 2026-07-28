@@ -57,9 +57,9 @@ import {
   type ScheduleReferenceEvent,
 } from './schedule-record';
 import {
-  releaseJobLock,
-  tryAcquireJobLock,
-  type JobLockResult,
+  runWithJobLock,
+  type JobLockFailure,
+  type LockedJobExecution,
 } from './job-lock';
 import { createRunTelemetry } from './run-telemetry';
 import { runSchedulePreflight } from './schedule-preflight';
@@ -647,10 +647,7 @@ type PromotionResult =
   | { promoted: true }
   | {
       promoted: false;
-      phase:
-        | 'job-runner-config'
-        | Exclude<JobLockResult, { acquired: true }>['phase']
-        | 'run-task';
+      phase: 'job-runner-config' | 'run-task';
       severity: 'error' | 'warn';
       errorMessage: string;
     };
@@ -740,6 +737,7 @@ async function launchScheduledJob(
 
 async function promoteScheduledTurnToJob(
   input: ScheduledJobInput,
+  lockToken: string,
   log: Logger,
 ): Promise<PromotionResult> {
   const config = readJobRunnerConfig(log);
@@ -751,33 +749,10 @@ async function promoteScheduledTurnToJob(
       errorMessage: 'Background job runner configuration is incomplete',
     };
   }
-  const lock = await tryAcquireJobLock(
-    input.sessionId,
-    SESSION_LOCKS_TABLE,
-    jobLockDynamoClient,
-    log,
-  );
-  if (!lock.acquired) {
-    return {
-      promoted: false,
-      phase: lock.phase,
-      severity: lock.severity,
-      errorMessage: lock.errorMessage,
-    };
-  }
   try {
-    await launchScheduledJob(input, lock.lockToken, config, log);
+    await launchScheduledJob(input, lockToken, config, log);
     return { promoted: true };
   } catch (error) {
-    // Roll the lock back, or the owner's next message sits behind a job that
-    // never started until the 14-minute TTL expires.
-    await releaseJobLock(
-      input.sessionId,
-      lock.lockToken,
-      SESSION_LOCKS_TABLE,
-      jobLockDynamoClient,
-      log,
-    );
     const errorMessage =
       `RunTask failed: ${
         error instanceof Error ? error.message : String(error)
@@ -903,6 +878,7 @@ async function recordPromotedRun(
 
 async function tryPromoteScheduledResult(
   context: ScheduledResultContext,
+  lockToken: string,
 ): Promise<boolean> {
   const { schedule, scheduleName, sessionId, result, log } = context;
   const reason = promotionReason(result.errorClass);
@@ -937,6 +913,7 @@ async function tryPromoteScheduledResult(
       scheduleName,
       reason,
     },
+    lockToken,
     log,
   );
   if (!promotion.promoted) {
@@ -1019,6 +996,92 @@ async function deliverScheduledResult(
   return { status, scheduleId: schedule.scheduleId };
 }
 
+interface LockedScheduleContext {
+  schedule: AuthorizedSchedule;
+  scheduleName: string;
+  sessionId: string;
+  startTime: number;
+  lambdaContext: LambdaContext;
+  log: Logger;
+}
+
+async function executeLockedScheduledTurn(
+  context: LockedScheduleContext,
+  lockToken: string,
+): Promise<LockedJobExecution<HandlerResult>> {
+  const {
+    schedule,
+    scheduleName,
+    sessionId,
+    startTime,
+    lambdaContext,
+    log,
+  } = context;
+  log.info('Invoking agent for scheduled task', {
+    email: sanitizeEmail(schedule.ownerEmail),
+    scheduleName,
+    sessionId,
+  });
+
+  const result = await invokeAgentCore({
+    prompt: schedule.prompt,
+    userEmail: schedule.ownerEmail,
+    sessionId,
+    log,
+    userContext: {
+      displayName: schedule.displayName,
+      workspacePrefix: schedule.workspacePrefix,
+    },
+    remainingMs: () => lambdaContext.getRemainingTimeInMillis(),
+  });
+  const scheduledResult = {
+    schedule,
+    scheduleName,
+    startTime,
+    sessionId,
+    result,
+    log,
+  };
+  if (await tryPromoteScheduledResult(scheduledResult, lockToken)) {
+    return {
+      value: { status: 'success', scheduleId: schedule.scheduleId },
+      retainLock: true,
+    };
+  }
+  return {
+    value: await deliverScheduledResult(scheduledResult),
+    retainLock: false,
+  };
+}
+
+async function recordScheduleLockFailure(
+  context: Omit<LockedScheduleContext, 'lambdaContext'>,
+  failure: JobLockFailure,
+): Promise<HandlerResult> {
+  const { schedule, scheduleName, sessionId, startTime, log } = context;
+  const status: HandlerResult['status'] =
+    failure.severity === 'warn' ? 'skipped' : 'error';
+  await runTelemetry.recordRun(
+    {
+      userEmail: schedule.ownerEmail,
+      scheduleId: schedule.scheduleId,
+      scheduleName,
+      sessionId,
+      inputTokens: 0,
+      outputTokens: 0,
+      latencyMs: Date.now() - startTime,
+      status,
+      errorMessage: failure.errorMessage,
+      failure: {
+        severity: failure.severity,
+        context: { phase: failure.phase },
+      },
+    },
+    log,
+  );
+  return { status, scheduleId: schedule.scheduleId };
+}
+
 // ---------------------------------------------------------------------------
 // Main handler
 // ---------------------------------------------------------------------------
@@ -1057,43 +1120,31 @@ export async function handler(
     email: sanitizeEmail(schedule.ownerEmail),
   });
 
-  // Session ID — unique per schedule invocation, not shared with interactive
-  // sessions. Keeps scheduled context isolated. Bound the length so a long
-  // workspace prefix can't push us past AgentCore's session-id limits.
+  // Session ID — stable for a schedule within a calendar day and isolated from
+  // interactive sessions. The shared ID lets the conditional lock serialize
+  // repeated fires. Bound the length for AgentCore's session-id limits.
   const dateKey = new Date().toISOString().split('T')[0];
   const prefix = schedule.workspacePrefix.substring(0, 40);
   const sessionId =
     `${prefix}-sched-${schedule.scheduleId.substring(0, 12)}-${dateKey}`;
 
-  // Invoke AgentCore.
-  log.info('Invoking agent for scheduled task', {
-    email: sanitizeEmail(schedule.ownerEmail),
-    scheduleName,
-    sessionId,
-  });
-
-  const result = await invokeAgentCore({
-    prompt: schedule.prompt,
-    userEmail: schedule.ownerEmail,
-    sessionId,
-    log,
-    userContext: {
-      displayName: schedule.displayName,
-      workspacePrefix: schedule.workspacePrefix,
-    },
-    remainingMs: () => context.getRemainingTimeInMillis(),
-  });
-
-  const scheduledResult = {
+  const lockedContext = {
     schedule,
     scheduleName,
-    startTime,
     sessionId,
-    result,
+    startTime,
+    lambdaContext: context,
     log,
   };
-  if (await tryPromoteScheduledResult(scheduledResult)) {
-    return { status: 'success', scheduleId: schedule.scheduleId };
+  const locked = await runWithJobLock(
+    sessionId,
+    SESSION_LOCKS_TABLE,
+    jobLockDynamoClient,
+    log,
+    (lockToken) => executeLockedScheduledTurn(lockedContext, lockToken),
+  );
+  if (!locked.executed) {
+    return recordScheduleLockFailure(lockedContext, locked.lock);
   }
-  return deliverScheduledResult(scheduledResult);
+  return locked.value;
 }

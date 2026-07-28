@@ -25,6 +25,10 @@ export interface ScheduledRunRecord {
   latencyMs: number;
   status: 'success' | 'error' | 'skipped' | 'promoted';
   errorMessage?: string;
+  failure?: {
+    severity: 'error' | 'warn';
+    context: Record<string, unknown>;
+  };
 }
 
 export interface RunTelemetryConfig {
@@ -157,7 +161,7 @@ export function createRunTelemetry(
       }
     }
 
-    if (params.status === 'error') {
+    if (params.status === 'error' || params.failure) {
       await recordCronFailure(
         {
           userEmail: params.userEmail,
@@ -165,7 +169,8 @@ export function createRunTelemetry(
           scheduleId: params.scheduleId,
           scheduleName: params.scheduleName,
           errorMessage: params.errorMessage ?? null,
-          context: { phase: 'scheduled-run' },
+          severity: params.failure?.severity,
+          context: params.failure?.context ?? { phase: 'scheduled-run' },
         },
         log,
       );
