@@ -3,10 +3,12 @@ var mockGetServerSession = jest.fn()
 var mockHasCapabilityAccess = jest.fn()
 var mockGetUserId = jest.fn()
 var mockExecuteQuery = jest.fn()
+var mockExecuteTransaction = jest.fn()
 var mockSave = jest.fn()
 var mockUpdate = jest.fn()
 var mockForget = jest.fn()
-var mockSafeJsonbStringify = jest.fn()
+var mockIsNexusMemoryGloballyEnabled = jest.fn()
+var mockMergeNexusUserSettings = jest.fn()
 var mockRevalidatePath = jest.fn()
 /* eslint-enable no-var */
 
@@ -26,6 +28,8 @@ jest.mock("@/lib/db/drizzle", () => ({
 
 jest.mock("@/lib/db/drizzle-client", () => ({
   executeQuery: (...args: unknown[]) => mockExecuteQuery(...args),
+  executeTransaction: (...args: unknown[]) =>
+    mockExecuteTransaction(...args),
 }))
 
 jest.mock("@/lib/nexus/memory/memory-service", () => ({
@@ -36,9 +40,14 @@ jest.mock("@/lib/nexus/memory/memory-service", () => ({
   },
 }))
 
-jest.mock("@/lib/db/json-utils", () => ({
-  safeJsonbStringify: (...args: unknown[]) =>
-    mockSafeJsonbStringify(...args),
+jest.mock("@/lib/nexus/memory/memory-availability", () => ({
+  isNexusMemoryGloballyEnabled: (...args: unknown[]) =>
+    mockIsNexusMemoryGloballyEnabled(...args),
+}))
+
+jest.mock("@/lib/nexus/user-settings", () => ({
+  mergeNexusUserSettings: (...args: unknown[]) =>
+    mockMergeNexusUserSettings(...args),
 }))
 
 jest.mock("next/cache", () => ({
@@ -85,14 +94,52 @@ const invalidMutationCases: ReadonlyArray<
   ["bulk delete", () => bulkDeleteNexusMemories([])],
 ]
 
-describe("Nexus memory settings actions", () => {
-  beforeEach(() => {
-    jest.clearAllMocks()
-    mockGetServerSession.mockResolvedValue({ sub: "cognito-sub" })
-    mockHasCapabilityAccess.mockResolvedValue(true)
-    mockGetUserId.mockResolvedValue(7)
-    mockSafeJsonbStringify.mockReturnValue("serialized-settings")
+interface BulkMemoryRow {
+  id: string
+  userId: number
+}
+
+interface BulkTransactionDouble {
+  select: jest.Mock
+  update: jest.Mock
+}
+
+function useBulkTransaction(
+  rows: BulkMemoryRow[],
+  deletedIds = rows.map((row) => row.id),
+): BulkTransactionDouble {
+  const lockRows = jest.fn().mockResolvedValue(rows)
+  const selectWhere = jest.fn(() => ({ for: lockRows }))
+  const from = jest.fn(() => ({ where: selectWhere }))
+  const select = jest.fn(() => ({ from }))
+  const returning = jest
+    .fn()
+    .mockResolvedValue(deletedIds.map((id) => ({ id })))
+  const updateWhere = jest.fn(() => ({ returning }))
+  const set = jest.fn(() => ({ where: updateWhere }))
+  const update = jest.fn(() => ({ set }))
+  const transaction = { select, update }
+  mockExecuteTransaction.mockImplementationOnce(
+    (
+      operation: (tx: BulkTransactionDouble) => Promise<unknown>,
+    ) => operation(transaction),
+  )
+  return transaction
+}
+
+function resetMemoryActionMocks() {
+  jest.clearAllMocks()
+  mockGetServerSession.mockResolvedValue({ sub: "cognito-sub" })
+  mockHasCapabilityAccess.mockResolvedValue(true)
+  mockGetUserId.mockResolvedValue(7)
+  mockIsNexusMemoryGloballyEnabled.mockResolvedValue(true)
+  mockMergeNexusUserSettings.mockResolvedValue({
+    memoryEnabled: false,
   })
+}
+
+describe("Nexus memory settings action authorization", () => {
+  beforeEach(resetMemoryActionMocks)
 
   it.each([
     ["list", () => listNexusMemories()],
@@ -168,9 +215,13 @@ describe("Nexus memory settings actions", () => {
     expect(result.isSuccess).toBe(false)
     expect(mockForget).not.toHaveBeenCalled()
   })
+})
+
+describe("Nexus memory settings action mutations", () => {
+  beforeEach(resetMemoryActionMocks)
 
   it("rejects a bulk delete containing another user's memory", async () => {
-    mockExecuteQuery.mockResolvedValue([
+    const transaction = useBulkTransaction([
       { id: MEMORY_ID, userId: 7 },
       { id: FOREIGN_MEMORY_ID, userId: 8 },
     ])
@@ -181,7 +232,46 @@ describe("Nexus memory settings actions", () => {
     ])
 
     expect(result.isSuccess).toBe(false)
-    expect(mockExecuteQuery).toHaveBeenCalledTimes(1)
+    expect(mockExecuteTransaction).toHaveBeenCalledTimes(1)
+    expect(transaction.update).not.toHaveBeenCalled()
+  })
+
+  it("rolls back a bulk delete when the locked row count changes", async () => {
+    useBulkTransaction(
+      [
+        { id: MEMORY_ID, userId: 7 },
+        { id: FOREIGN_MEMORY_ID, userId: 7 },
+      ],
+      [MEMORY_ID],
+    )
+
+    const result = await bulkDeleteNexusMemories([
+      MEMORY_ID,
+      FOREIGN_MEMORY_ID,
+    ])
+
+    expect(result.isSuccess).toBe(false)
+    expect(mockExecuteTransaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      "bulkSoftDeleteOwnedNexusMemories",
+    )
+  })
+
+  it("bulk-deletes all selected owned memories atomically", async () => {
+    useBulkTransaction([
+      { id: MEMORY_ID, userId: 7 },
+      { id: FOREIGN_MEMORY_ID, userId: 7 },
+    ])
+
+    const result = await bulkDeleteNexusMemories([
+      MEMORY_ID,
+      FOREIGN_MEMORY_ID,
+    ])
+
+    expect(result).toMatchObject({
+      isSuccess: true,
+      data: { deletedCount: 2 },
+    })
   })
 
   it("routes an owned edit through the shared re-sanitize and re-embed service", async () => {
@@ -214,28 +304,45 @@ describe("Nexus memory settings actions", () => {
     })
   })
 
-  it("merges memoryEnabled in TypeScript without discarding other settings", async () => {
-    mockExecuteQuery
-      .mockResolvedValueOnce([
-        {
-          settings: {
-            nexusMode: "advanced",
-            preferredModelFamily: "google",
-          },
-        },
-      ])
-      .mockResolvedValueOnce([])
-
+  it("delegates the memory toggle to the atomic settings merge", async () => {
     const result = await setNexusMemoryEnabled(false)
 
     expect(result).toMatchObject({
       isSuccess: true,
       data: { enabled: false },
     })
-    expect(mockSafeJsonbStringify).toHaveBeenCalledWith({
-      nexusMode: "advanced",
-      preferredModelFamily: "google",
+    expect(mockMergeNexusUserSettings).toHaveBeenCalledWith(7, {
       memoryEnabled: false,
     })
+  })
+
+  it.each([
+    [
+      "add",
+      () =>
+        addNexusMemory({
+          content: "Prefers concise answers",
+          category: "preference",
+        }),
+    ],
+    [
+      "update",
+      () =>
+        updateNexusMemory({
+          memoryId: MEMORY_ID,
+          content: "Prefers concise answers",
+          category: "preference",
+        }),
+    ],
+  ])("rejects %s when the global memory switch is off", async (
+    _name,
+    action,
+  ) => {
+    mockIsNexusMemoryGloballyEnabled.mockResolvedValue(false)
+
+    await expect(action()).resolves.toMatchObject({ isSuccess: false })
+    expect(mockSave).not.toHaveBeenCalled()
+    expect(mockUpdate).not.toHaveBeenCalled()
+    expect(mockExecuteQuery).not.toHaveBeenCalled()
   })
 })

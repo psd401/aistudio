@@ -1,7 +1,7 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm"
+import { and, desc, eq, inArray, isNull } from "drizzle-orm"
 import type { z } from "zod"
 import type { ActionState } from "@/types"
 import {
@@ -16,16 +16,19 @@ import {
 } from "@/lib/error-utils"
 import { getServerSession } from "@/lib/auth/server-session"
 import { getUserIdByCognitoSubAsNumber } from "@/lib/db/drizzle"
-import { executeQuery } from "@/lib/db/drizzle-client"
+import {
+  executeQuery,
+  executeTransaction,
+} from "@/lib/db/drizzle-client"
 import {
   nexusUserMemories,
   nexusUserPreferences,
   type NexusMemoryCategory,
   type NexusMemorySource,
 } from "@/lib/db/schema"
-import type { NexusUserSettings } from "@/lib/db/types/jsonb"
-import { safeJsonbStringify } from "@/lib/db/json-utils"
 import { memoryService } from "@/lib/nexus/memory/memory-service"
+import { isNexusMemoryGloballyEnabled } from "@/lib/nexus/memory/memory-availability"
+import { mergeNexusUserSettings } from "@/lib/nexus/user-settings"
 import {
   AddNexusMemorySchema,
   BulkDeleteNexusMemoriesSchema,
@@ -118,6 +121,17 @@ async function requireOwnedMemory(
   return memory
 }
 
+async function requireMemoryWritesEnabled(): Promise<void> {
+  if (!(await isNexusMemoryGloballyEnabled())) {
+    throw ErrorFactories.bizInvalidState(
+      "write Nexus memory",
+      "disabled",
+      "enabled",
+      { userMessage: "Nexus memory is currently disabled" },
+    )
+  }
+}
+
 function memoryListItem(memory: {
   id: string
   content: string
@@ -206,6 +220,7 @@ export async function addNexusMemory(
 
   try {
     const requester = await requireMemoryRequester()
+    await requireMemoryWritesEnabled()
     const parsed = AddNexusMemorySchema.safeParse(input)
     if (!parsed.success) {
       throw ErrorFactories.validationFailed(validationFields(parsed.error))
@@ -249,6 +264,7 @@ export async function updateNexusMemory(
 
   try {
     const requester = await requireMemoryRequester()
+    await requireMemoryWritesEnabled()
     const parsed = UpdateNexusMemorySchema.safeParse(input)
     if (!parsed.success) {
       throw ErrorFactories.validationFailed(validationFields(parsed.error))
@@ -353,9 +369,9 @@ export async function bulkDeleteNexusMemories(
     if (!parsed.success) {
       throw ErrorFactories.validationFailed(validationFields(parsed.error))
     }
-    const rows = await executeQuery(
-      (db) =>
-        db
+    const deletedCount = await executeTransaction(
+      async (tx) => {
+        const rows = await tx
           .select({
             id: nexusUserMemories.id,
             userId: nexusUserMemories.userId,
@@ -366,28 +382,25 @@ export async function bulkDeleteNexusMemories(
               inArray(nexusUserMemories.id, parsed.data.memoryIds),
               isNull(nexusUserMemories.deletedAt),
             ),
-          ),
-      "getNexusMemoriesForBulkOwnershipCheck",
-    )
-    const byId = new Map(rows.map((row) => [row.id, row]))
-    for (const memoryId of parsed.data.memoryIds) {
-      const row = byId.get(memoryId)
-      if (!row) {
-        throw ErrorFactories.dbRecordNotFound(
-          "nexus_user_memories",
-          memoryId,
-        )
-      }
-      if (row.userId !== requester.userId) {
-        throw ErrorFactories.authzOwnerRequired(
-          "delete these memories",
-        )
-      }
-    }
-    const now = new Date()
-    const deleted = await executeQuery(
-      (db) =>
-        db
+          )
+          .for("update")
+        const byId = new Map(rows.map((row) => [row.id, row]))
+        for (const memoryId of parsed.data.memoryIds) {
+          const row = byId.get(memoryId)
+          if (!row) {
+            throw ErrorFactories.dbRecordNotFound(
+              "nexus_user_memories",
+              memoryId,
+            )
+          }
+          if (row.userId !== requester.userId) {
+            throw ErrorFactories.authzOwnerRequired(
+              "delete these memories",
+            )
+          }
+        }
+        const now = new Date()
+        const deleted = await tx
           .update(nexusUserMemories)
           .set({ deletedAt: now, updatedAt: now })
           .where(
@@ -397,23 +410,25 @@ export async function bulkDeleteNexusMemories(
               isNull(nexusUserMemories.deletedAt),
             ),
           )
-          .returning({ id: nexusUserMemories.id }),
+          .returning({ id: nexusUserMemories.id })
+        if (deleted.length !== parsed.data.memoryIds.length) {
+          throw ErrorFactories.dbQueryFailed(
+            "Some Nexus memories changed before they could be deleted",
+          )
+        }
+        return deleted.length
+      },
       "bulkSoftDeleteOwnedNexusMemories",
     )
-    if (deleted.length !== parsed.data.memoryIds.length) {
-      throw ErrorFactories.dbQueryFailed(
-        "Some Nexus memories changed before they could be deleted",
-      )
-    }
     timer({ status: "success" })
     log.info("Nexus memories bulk deleted", {
       userId: requester.userId,
-      count: deleted.length,
+      count: deletedCount,
     })
     revalidatePath("/settings")
     return createSuccess(
-      { deletedCount: deleted.length },
-      `${deleted.length} memories deleted`,
+      { deletedCount },
+      `${deletedCount} memories deleted`,
     )
   } catch (error) {
     timer({ status: "error" })
@@ -441,36 +456,9 @@ export async function setNexusMemoryEnabled(
     if (!parsed.success) {
       throw ErrorFactories.validationFailed(validationFields(parsed.error))
     }
-    const [existing] = await executeQuery(
-      (db) =>
-        db
-          .select({ settings: nexusUserPreferences.settings })
-          .from(nexusUserPreferences)
-          .where(eq(nexusUserPreferences.userId, requester.userId))
-          .limit(1),
-      "getNexusMemoryPreferenceForUpdate",
-    )
-    const settings: NexusUserSettings = {
-      ...(existing?.settings ?? {}),
+    await mergeNexusUserSettings(requester.userId, {
       memoryEnabled: parsed.data.enabled,
-    }
-    const settingsSql = sql`${safeJsonbStringify(settings)}::jsonb`
-    const now = new Date()
-    await executeQuery(
-      (db) =>
-        db
-          .insert(nexusUserPreferences)
-          .values({
-            userId: requester.userId,
-            settings: settingsSql,
-            updatedAt: now,
-          })
-          .onConflictDoUpdate({
-            target: nexusUserPreferences.userId,
-            set: { settings: settingsSql, updatedAt: now },
-          }),
-      "setNexusMemoryEnabled",
-    )
+    })
     timer({ status: "success" })
     log.info("Nexus memory preference updated", {
       userId: requester.userId,
