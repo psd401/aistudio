@@ -197,9 +197,14 @@ export async function completeScheduleFire(
       },
     });
   } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
     log.warn('Schedule fire completion marker failed', {
-      error: error instanceof Error ? error.message : String(error),
+      error: detail,
     });
+    throw new Error(
+      `Schedule fire completion marker failed: ${detail}`,
+      { cause: error },
+    );
   }
 }
 
@@ -218,8 +223,38 @@ export async function releaseScheduleFire(
     });
   } catch (error) {
     if (errorName(error) === 'ConditionalCheckFailedException') return;
-    log.warn('Schedule fire claim release failed; relying on TTL backstop', {
-      error: error instanceof Error ? error.message : String(error),
+    const deleteDetail =
+      error instanceof Error ? error.message : String(error);
+    log.warn('Schedule fire claim delete failed; expiring the claim', {
+      error: deleteDetail,
     });
+    try {
+      await dynamoClient.update({
+        TableName: tableName,
+        Key: { sessionId: claim.identity.key },
+        UpdateExpression:
+          'SET #status = :failed, expiresAt = :expiredAt',
+        ConditionExpression: 'lockToken = :token',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':failed': 'failed',
+          ':expiredAt': Math.floor(Date.now() / 1000) - 1,
+          ':token': claim.claimToken,
+        },
+      });
+    } catch (expireError) {
+      if (errorName(expireError) === 'ConditionalCheckFailedException') return;
+      const expireDetail =
+        expireError instanceof Error
+          ? expireError.message
+          : String(expireError);
+      log.warn('Schedule fire claim expiration failed', {
+        error: expireDetail,
+      });
+      throw new Error(
+        `Schedule fire cleanup failed: ${deleteDetail}; ${expireDetail}`,
+        { cause: expireError },
+      );
+    }
   }
 }

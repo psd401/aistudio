@@ -169,3 +169,66 @@ describe("agent-cron scheduled fire idempotency", () => {
     })
   })
 })
+
+describe("agent-cron scheduled fire durability", () => {
+  it("does not acknowledge a failed completion marker write", async () => {
+    const dynamo = client({
+      update: jest.fn().mockRejectedValue(new Error("DynamoDB throttled")),
+    })
+    const claim = {
+      claimed: true as const,
+      identity,
+      claimToken: "owned-token",
+    }
+
+    await expect(
+      completeScheduleFire(claim, TABLE, dynamo, logger())
+    ).rejects.toThrow(
+      "Schedule fire completion marker failed: DynamoDB throttled"
+    )
+  })
+
+  it("expires a failed claim immediately when conditional delete fails", async () => {
+    const dynamo = client({
+      delete: jest.fn().mockRejectedValue(new Error("delete throttled")),
+    })
+    const claim = {
+      claimed: true as const,
+      identity,
+      claimToken: "owned-token",
+    }
+
+    await expect(
+      releaseScheduleFire(claim, TABLE, dynamo, logger())
+    ).resolves.toBeUndefined()
+    expect(dynamo.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Key: { sessionId: identity.key },
+        UpdateExpression: "SET #status = :failed, expiresAt = :expiredAt",
+        ConditionExpression: "lockToken = :token",
+        ExpressionAttributeValues: expect.objectContaining({
+          ":failed": "failed",
+          ":token": "owned-token",
+        }),
+      })
+    )
+  })
+
+  it("propagates cleanup failure when delete and expiry both fail", async () => {
+    const dynamo = client({
+      delete: jest.fn().mockRejectedValue(new Error("delete unavailable")),
+      update: jest.fn().mockRejectedValue(new Error("update unavailable")),
+    })
+    const claim = {
+      claimed: true as const,
+      identity,
+      claimToken: "owned-token",
+    }
+
+    await expect(
+      releaseScheduleFire(claim, TABLE, dynamo, logger())
+    ).rejects.toThrow(
+      "Schedule fire cleanup failed: delete unavailable; update unavailable"
+    )
+  })
+})
