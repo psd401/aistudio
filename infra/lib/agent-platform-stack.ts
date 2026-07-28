@@ -237,6 +237,7 @@ export class AgentPlatformStack extends cdk.Stack {
     this.createAgentRuntimeAndPolicies(props, resources);
     this.createSkillBuilder(props, resources);
     this.createCronAndScheduler(props, resources);
+    this.createScheduleTargetBackfill(props, resources);
     this.createTriageFoundation(props, resources);
     this.createTriageWorker(props, resources);
     this.createTriageDispatcher(props, resources);
@@ -2242,6 +2243,194 @@ export class AgentPlatformStack extends cdk.Stack {
     });
     resources.cronLambda.grantInvoke(resources.schedulerInvokeRole);
     resources.agentAsyncDlq.grantSendMessages(resources.schedulerInvokeRole);
+  }
+
+  /**
+   * Existing EventBridge Scheduler targets retain their original Input across
+   * deployments. Backfill the immutable scheduled-time context once during
+   * rollout so pre-feature targets receive the same fire-stable identity as
+   * newly created schedules. Pages continue through self-invocation and use the
+   * existing alarmed async DLQ for failures.
+   */
+  private createScheduleTargetBackfill(
+    props: AgentPlatformStackProps,
+    resources: AgentPlatformBuildResources,
+  ): void {
+    const { environment } = props;
+    const functionName = `psd-agent-schedule-target-backfill-${environment}`;
+    const groupName = `psd-agent-${environment}`;
+    const scheduleArn =
+      `arn:aws:scheduler:${this.region}:${this.account}:schedule/${groupName}/*`;
+    const role = ServiceRoleFactory.createLambdaRole(
+      this,
+      'ScheduleTargetBackfillRole',
+      {
+        functionName,
+        environment,
+        region: this.region,
+        account: this.account,
+        vpcEnabled: false,
+        dynamodbTables: [],
+        additionalPolicies: [
+          new iam.PolicyDocument({
+            statements: [
+              new iam.PolicyStatement({
+                sid: 'ScheduleTargetBackfillUpdateTargets',
+                effect: iam.Effect.ALLOW,
+                actions: [
+                  'scheduler:GetSchedule',
+                  'scheduler:UpdateSchedule',
+                ],
+                resources: [scheduleArn],
+              }),
+              new iam.PolicyStatement({
+                sid: 'ScheduleTargetBackfillPassInvokeRole',
+                effect: iam.Effect.ALLOW,
+                actions: ['iam:PassRole'],
+                resources: [resources.schedulerInvokeRole.roleArn],
+                conditions: {
+                  StringEquals: {
+                    'iam:PassedToService': 'scheduler.amazonaws.com',
+                  },
+                },
+              }),
+            ],
+          }),
+        ],
+      },
+    );
+    // AWS does not support resource-level authorization for ListSchedules.
+    // Keep the required wildcard outside the factory validator; runtime always
+    // supplies the fixed GroupName and all mutating actions remain ARN-scoped.
+    role.addToPolicy(new iam.PolicyStatement({
+      sid: 'ScheduleTargetBackfillReadGroup',
+      effect: iam.Effect.ALLOW,
+      actions: ['scheduler:ListSchedules'],
+      resources: ['*'],
+    }));
+    const logGroup = new logs.LogGroup(
+      this,
+      'ScheduleTargetBackfillLogGroup',
+      {
+        logGroupName: `/aws/lambda/${functionName}`,
+        retention: props.config.monitoring.logRetention,
+        removalPolicy: environment === 'prod'
+          ? cdk.RemovalPolicy.RETAIN
+          : cdk.RemovalPolicy.DESTROY,
+      },
+    );
+    cdk.Tags.of(logGroup).add('Environment', environment);
+    cdk.Tags.of(logGroup).add('ManagedBy', 'cdk');
+
+    const backfill = new lambda.Function(
+      this,
+      'ScheduleTargetBackfillLambda',
+      {
+        functionName,
+        runtime: AGENT_LAMBDA_RUNTIME,
+        handler: 'index.handler',
+        code: this.scheduleTargetBackfillCode(),
+        memorySize: 512,
+        timeout: cdk.Duration.minutes(10),
+        architecture: lambda.Architecture.ARM_64,
+        role,
+        logGroup,
+        deadLetterQueue: resources.agentAsyncDlq,
+        retryAttempts: 2,
+        environment: {
+          SCHEDULE_GROUP: groupName,
+        },
+      },
+    );
+    cdk.Tags.of(backfill).add('Environment', environment);
+    cdk.Tags.of(backfill).add('ManagedBy', 'cdk');
+    role.addToPolicy(new iam.PolicyStatement({
+      sid: 'ScheduleTargetBackfillContinue',
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: [backfill.functionArn],
+    }));
+
+    const trigger = new customResources.AwsCustomResource(
+      this,
+      'ScheduleTargetBackfillCustomResource',
+      {
+        onCreate: {
+          service: 'Lambda',
+          action: 'invoke',
+          parameters: {
+            FunctionName: backfill.functionName,
+            Payload: JSON.stringify({
+              RequestType: 'Create',
+              migrationVersion: 'scheduled-time-v1',
+            }),
+          },
+          physicalResourceId: customResources.PhysicalResourceId.of(
+            'agent-schedule-target-backfill-scheduled-time-v1',
+          ),
+        },
+        policy: customResources.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ['lambda:InvokeFunction'],
+            resources: [backfill.functionArn],
+          }),
+        ]),
+        installLatestAwsSdk: false,
+      },
+    );
+    trigger.node.addDependency(resources.scheduleGroup);
+    trigger.node.addDependency(resources.schedulerInvokeRole);
+  }
+
+  private scheduleTargetBackfillCode(): lambda.Code {
+    const inputDir = path.join(
+      __dirname,
+      '..',
+      'lambdas',
+      'agent-schedule-target-backfill',
+    );
+    return lambda.Code.fromAsset(inputDir, {
+      assetHashType: cdk.AssetHashType.SOURCE,
+      bundling: {
+        image: AGENT_LAMBDA_RUNTIME.bundlingImage,
+        local: {
+          tryBundle(outputDir: string): boolean {
+            try {
+              execSync('bun install && bunx tsc', {
+                cwd: inputDir,
+                stdio: 'inherit',
+              });
+              execSync(`cp -r dist/* ${outputDir}/`, {
+                cwd: inputDir,
+                stdio: 'inherit',
+              });
+              execSync(`cp package.json ${outputDir}/`, {
+                cwd: inputDir,
+                stdio: 'inherit',
+              });
+              execSync('bun install --production', {
+                cwd: outputDir,
+                stdio: 'inherit',
+              });
+              return true;
+            } catch {
+              return false;
+            }
+          },
+        },
+        command: [
+          'bash',
+          '-c',
+          [
+            'npm install',
+            'npm run build',
+            'cp -r dist/* /asset-output/',
+            'cp package.json /asset-output/',
+            'cd /asset-output && npm install --production',
+          ].join(' && '),
+        ],
+      },
+    });
   }
 
   private createTriageFoundation(

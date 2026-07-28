@@ -88,12 +88,14 @@ import {
 } from './run-telemetry';
 import { runSchedulePreflight } from './schedule-preflight';
 import {
+  beginScheduleFireExecution,
   claimScheduleFire,
   completeScheduleFire,
   releaseScheduleFire,
   resolveScheduleLockContention,
   scheduleFireIdentity,
   scheduleFireLaunchIdentity,
+  ScheduleFireExecutionError,
   scheduledRunStartedBy,
   type ScheduleFireClaim,
   type ScheduleFireFailure,
@@ -1654,8 +1656,17 @@ function isHandlerResult(
 
 async function runLockedScheduleTurn(
   context: LockedScheduleContext,
+  fireClaim: OwnedScheduleFireClaim | null,
 ): Promise<LockedJobResult<HandlerResult>> {
   try {
+    if (fireClaim) {
+      await beginScheduleFireExecution(
+        fireClaim,
+        SESSION_LOCKS_TABLE,
+        scheduleFireDynamoClient,
+        context.log,
+      );
+    }
     return await runWithJobLock(
       context.sessionId,
       SESSION_LOCKS_TABLE,
@@ -1665,6 +1676,16 @@ async function runLockedScheduleTurn(
     );
   } catch (error) {
     if (error instanceof JobLockAcquisitionError) {
+      await recordScheduleGuardFailure(
+        context,
+        error.failure,
+        'error',
+      );
+    }
+    if (
+      error instanceof ScheduleFireExecutionError
+      && error.failure.recordRun
+    ) {
       await recordScheduleGuardFailure(
         context,
         error.failure,
@@ -1733,7 +1754,7 @@ async function runGuardedScheduleTurn(
 ): Promise<HandlerResult> {
   let locked: LockedJobResult<HandlerResult>;
   try {
-    locked = await runLockedScheduleTurn(context);
+    locked = await runLockedScheduleTurn(context, fireClaim);
   } catch (error) {
     if (fireClaim) {
       await releaseScheduleFire(

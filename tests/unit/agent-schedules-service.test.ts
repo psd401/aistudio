@@ -151,7 +151,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
     })
     expect(target?.RetryPolicy).toEqual({
       MaximumEventAgeInSeconds: 3600,
-      MaximumRetryAttempts: 2,
+      MaximumRetryAttempts: 5,
     })
 
     const transaction = dynamoSend.mock.calls[3][0]
@@ -208,7 +208,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
       DeadLetterConfig: { Arn: config.scheduleDlqArn },
       RetryPolicy: {
         MaximumEventAgeInSeconds: 3600,
-        MaximumRetryAttempts: 2,
+        MaximumRetryAttempts: 5,
       },
     })
     const putCommand = dynamoSend.mock.calls[4][0] as PutCommand

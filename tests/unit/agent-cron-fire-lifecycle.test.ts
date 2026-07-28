@@ -25,4 +25,17 @@ describe("agent-cron fire lifecycle", () => {
       "await completeScheduleFire(",
     )
   })
+
+  it("advances a recoverable fire claim immediately before job execution", () => {
+    const start = source.indexOf("async function runLockedScheduleTurn(")
+    const end = source.indexOf("async function finalizeScheduleFire(", start)
+    const lifecycle = source.slice(start, end)
+
+    expect(lifecycle.indexOf("await beginScheduleFireExecution(")).toBeLessThan(
+      lifecycle.indexOf("runWithJobLock("),
+    )
+    expect(lifecycle.indexOf("runWithJobLock(")).toBeLessThan(
+      lifecycle.indexOf("executeLockedScheduledTurn("),
+    )
+  })
 })

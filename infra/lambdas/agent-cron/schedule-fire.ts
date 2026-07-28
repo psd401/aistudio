@@ -9,10 +9,13 @@ import type { JobLockFailure } from './job-lock';
 import type { ScheduleReferenceEvent } from './schedule-record';
 import { sanitizeDiagnostic } from './diagnostic-sanitization';
 
-// EventBridge Scheduler retries this target for at most 60 minutes. Keeping an
-// in-progress fire claimed beyond that horizon prevents a Lambda crash after
-// ECS acceptance from reacquiring a fresh job lock and issuing a second task.
-const RUNNING_LEASE_SECONDS = 65 * 60;
+// A newly acquired fire has not performed external work and can be reclaimed
+// quickly after a hard crash. Immediately before execution, the owner
+// conditionally advances it to the long lease below.
+const ACQUIRED_LEASE_SECONDS = 5;
+// EventBridge Scheduler retries this target for at most 60 minutes. Once work
+// may have started, keep the fire claimed beyond that horizon to prevent replay.
+const EXECUTING_LEASE_SECONDS = 65 * 60;
 const COMPLETED_MARKER_SECONDS = 65 * 60;
 const ECS_STARTED_BY_MAX_LENGTH = 36;
 const SCHEDULED_STARTED_BY_PREFIX = 'scheduled-';
@@ -46,7 +49,9 @@ export interface ScheduleFireFailure {
   phase:
     | 'fire-config'
     | 'fire-acquire'
+    | 'fire-begin'
     | 'fire-in-progress'
+    | 'fire-executing'
     | 'fire-completed'
     | 'fire-completion';
   severity: 'error' | 'warn';
@@ -72,6 +77,16 @@ export type ScheduleFireCompletion =
       persisted: false;
       errorMessage: string;
     };
+
+export class ScheduleFireExecutionError extends Error {
+  readonly failure: ScheduleFireFailure;
+
+  constructor(failure: ScheduleFireFailure) {
+    super(failure.errorMessage);
+    this.name = 'ScheduleFireExecutionError';
+    this.failure = failure;
+  }
+}
 
 export type ScheduleLockContentionResolution =
   | {
@@ -206,15 +221,22 @@ export async function claimScheduleFire(
       Item: {
         sessionId: identity.key,
         kind: 'schedule-fire',
-        status: 'running',
+        status: 'claimed',
         scheduledTime: identity.scheduledTime,
         lockToken: claimToken,
         claimedAt: new Date().toISOString(),
-        expiresAt: nowS + RUNNING_LEASE_SECONDS,
+        expiresAt: nowS + ACQUIRED_LEASE_SECONDS,
       },
+      // A claimed marker has not crossed the execution boundary, so a
+      // redelivery may safely replace it immediately. The predecessor's
+      // conditional begin then fails before external work.
       ConditionExpression:
-        'attribute_not_exists(sessionId) OR expiresAt < :now',
-      ExpressionAttributeValues: { ':now': nowS },
+        'attribute_not_exists(sessionId) OR #status = :claimed OR expiresAt < :now',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: {
+        ':claimed': 'claimed',
+        ':now': nowS,
+      },
     });
     return { claimed: true, identity, claimToken };
   } catch (error) {
@@ -254,6 +276,19 @@ export async function claimScheduleFire(
         },
       };
     }
+    if (existing.Item?.status === 'executing') {
+      return {
+        claimed: false,
+        failure: {
+          phase: 'fire-executing',
+          severity: 'error',
+          errorMessage:
+            'Scheduled fire execution may have started; replay is blocked',
+          retryable: true,
+          recordRun: false,
+        },
+      };
+    }
     return {
       claimed: false,
       failure: {
@@ -279,6 +314,60 @@ export async function claimScheduleFire(
         recordRun: true,
       },
     };
+  }
+}
+
+/**
+ * Advance a recoverable claim to the replay-blocking phase immediately before
+ * the invocation can perform external work. The token condition ensures a
+ * predecessor that stalled past the short claim lease cannot start after a
+ * retry has taken ownership.
+ */
+export async function beginScheduleFireExecution(
+  claim: Extract<ScheduleFireClaim, { claimed: true }>,
+  tableName: string,
+  dynamoClient: ScheduleFireDynamoClient,
+  log: ScheduleFireLogger,
+): Promise<void> {
+  try {
+    await dynamoClient.update({
+      TableName: tableName,
+      Key: { sessionId: claim.identity.key },
+      UpdateExpression:
+        'SET #status = :executing, executionStartedAt = :startedAt, expiresAt = :expiresAt',
+      ConditionExpression: 'lockToken = :token AND #status = :claimed',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: {
+        ':executing': 'executing',
+        ':claimed': 'claimed',
+        ':startedAt': new Date().toISOString(),
+        ':expiresAt':
+          Math.floor(Date.now() / 1000) + EXECUTING_LEASE_SECONDS,
+        ':token': claim.claimToken,
+      },
+    });
+  } catch (error) {
+    const ownershipLost =
+      errorName(error) === 'ConditionalCheckFailedException';
+    const detail = sanitizeDiagnostic(
+      ownershipLost
+        ? 'schedule fire execution ownership was lost'
+        : error instanceof Error
+          ? error.message
+          : String(error),
+    );
+    log.warn('Schedule fire execution transition failed', {
+      error: detail,
+    });
+    throw new ScheduleFireExecutionError({
+      phase: 'fire-begin',
+      severity: 'error',
+      errorMessage: `Schedule fire execution transition failed: ${detail}`,
+      retryable: true,
+      // A replacement owns this same fire and may succeed. Do not append a
+      // newer error row that could mask its terminal result.
+      recordRun: !ownershipLost,
+    });
   }
 }
 

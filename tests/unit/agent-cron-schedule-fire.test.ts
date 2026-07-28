@@ -1,4 +1,5 @@
 import {
+  beginScheduleFireExecution,
   claimScheduleFire,
   completeScheduleFire,
   releaseScheduleFire,
@@ -67,7 +68,7 @@ describe("agent-cron scheduled fire idempotency", () => {
     expect(first.startedBy).toHaveLength(36)
   })
 
-  it("claims a fire past Scheduler's one-hour retry horizon", async () => {
+  it("starts with a short recoverable claim lease", async () => {
     const dynamo = client()
     const beforeClaim = Math.floor(Date.now() / 1000)
     await expect(
@@ -83,17 +84,20 @@ describe("agent-cron scheduled fire idempotency", () => {
         Item: expect.objectContaining({
           sessionId: identity.key,
           kind: "schedule-fire",
-          status: "running",
+          status: "claimed",
           expiresAt: expect.any(Number),
         }),
         ConditionExpression:
-          "attribute_not_exists(sessionId) OR expiresAt < :now",
+          "attribute_not_exists(sessionId) OR #status = :claimed OR expiresAt < :now",
+        ExpressionAttributeValues: {
+          ":claimed": "claimed",
+          ":now": expect.any(Number),
+        },
       })
     )
     const putInput = (dynamo.put as jest.Mock).mock.calls[0][0]
-    expect(putInput.Item.expiresAt).toBeGreaterThanOrEqual(
-      beforeClaim + 65 * 60
-    )
+    expect(putInput.Item.expiresAt).toBeGreaterThanOrEqual(beforeClaim + 5)
+    expect(putInput.Item.expiresAt).toBeLessThan(beforeClaim + 60)
   })
 
   it("acknowledges a completed duplicate without rerunning it", async () => {
@@ -120,14 +124,14 @@ describe("agent-cron scheduled fire idempotency", () => {
     })
   })
 
-  it("rejects an in-progress retry instead of acknowledging stale work", async () => {
+  it("distinguishes a fire whose external execution may have started", async () => {
     const contention = Object.assign(new Error("claimed"), {
       name: "ConditionalCheckFailedException",
     })
     const dynamo = client({
       put: jest.fn().mockRejectedValue(contention),
       get: jest.fn().mockResolvedValue({
-        Item: { status: "running" },
+        Item: { status: "executing" },
       }),
     })
     await expect(
@@ -135,9 +139,10 @@ describe("agent-cron scheduled fire idempotency", () => {
     ).resolves.toEqual({
       claimed: false,
       failure: {
-        phase: "fire-in-progress",
+        phase: "fire-executing",
         severity: "error",
-        errorMessage: "Scheduled fire is still in progress",
+        errorMessage:
+          "Scheduled fire execution may have started; replay is blocked",
         retryable: true,
         recordRun: false,
       },
@@ -165,6 +170,59 @@ describe("agent-cron scheduled fire idempotency", () => {
 })
 
 describe("agent-cron scheduled fire lifecycle", () => {
+  it("advances the owner to a long execution lease conditionally", async () => {
+    const dynamo = client()
+    const beforeExecution = Math.floor(Date.now() / 1000)
+    const claim = {
+      claimed: true as const,
+      identity,
+      claimToken: "owned-token",
+    }
+
+    await beginScheduleFireExecution(claim, TABLE, dynamo, logger())
+
+    expect(dynamo.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Key: { sessionId: identity.key },
+        ConditionExpression: "lockToken = :token AND #status = :claimed",
+        ExpressionAttributeValues: expect.objectContaining({
+          ":claimed": "claimed",
+          ":executing": "executing",
+          ":expiresAt": expect.any(Number),
+          ":token": "owned-token",
+        }),
+      })
+    )
+    const updateInput = (dynamo.update as jest.Mock).mock.calls[0][0]
+    expect(updateInput.ExpressionAttributeValues[":expiresAt"])
+      .toBeGreaterThanOrEqual(beforeExecution + 65 * 60)
+  })
+
+  it("stops a predecessor whose recoverable claim was replaced", async () => {
+    const ownershipLost = Object.assign(new Error("replaced"), {
+      name: "ConditionalCheckFailedException",
+    })
+    const dynamo = client({
+      update: jest.fn().mockRejectedValue(ownershipLost),
+    })
+    const claim = {
+      claimed: true as const,
+      identity,
+      claimToken: "stale-token",
+    }
+
+    await expect(
+      beginScheduleFireExecution(claim, TABLE, dynamo, logger()),
+    ).rejects.toMatchObject({
+      name: "ScheduleFireExecutionError",
+      failure: {
+        phase: "fire-begin",
+        retryable: true,
+        recordRun: false,
+      },
+    })
+  })
+
   it("marks success idempotently and conditionally releases failures", async () => {
     const dynamo = client()
     const claim = {
