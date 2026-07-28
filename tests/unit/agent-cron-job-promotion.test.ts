@@ -374,26 +374,40 @@ const baseInput = {
       expect(parseJobPayload(payload).threadName).toBeUndefined()
     })
 
-    it("persists promoted state before task launch and acknowledgement", () => {
+    it("queues recovery before persisting and launching the promoted task", () => {
       const promotion = cronSource.slice(
         cronSource.indexOf("async function tryPromoteScheduledResult("),
         cronSource.indexOf("async function deliverScheduledResult("),
       )
-      expect(promotion.indexOf("() => recordPromotedRun(context)")).toBeLessThan(
+      expect(promotion.indexOf("persistRun: (scheduledRunId) =>")).toBeLessThan(
         promotion.indexOf("await sendPromotionAcknowledgement(context, reason)"),
       )
       const launch = cronSource.slice(
         cronSource.indexOf("async function promoteScheduledTurnToJob("),
         cronSource.indexOf("async function sendChatMessage("),
       )
-      expect(launch.indexOf("await beforeLaunch()")).toBeLessThan(
+      const preparation = cronSource.slice(
+        cronSource.indexOf("async function prepareScheduledJobPromotion("),
+        cronSource.indexOf("function readJobRunnerConfig("),
+      )
+      expect(preparation.indexOf("await reserveRun()")).toBeLessThan(
+        preparation.indexOf("await prepareLaunch("),
+      )
+      expect(preparation.indexOf("await prepareLaunch(")).toBeLessThan(
+        preparation.indexOf("await persistRun("),
+      )
+      expect(launch.indexOf("await prepareScheduledJobPromotion(")).toBeLessThan(
         launch.indexOf("await launchScheduledJob("),
       )
       expect(launch.indexOf("await afterLaunchFailure(")).toBeLessThan(
         launch.indexOf("phase: 'run-task'"),
       )
+      expect(cronSource).toContain("scheduleFireLaunchIdentity(fireIdentity)")
       expect(cronSource).toContain(
-        "const startedBy = `scheduled-${scheduledRunId}`",
+        "clientToken: launchIdentity.clientToken",
+      )
+      expect(cronSource).toContain(
+        "startedBy: launchIdentity.startedBy",
       )
       expect(cronSource).toContain(
         "reconcileRunTaskLaunch({",
@@ -423,7 +437,10 @@ const baseInput = {
         "if (error instanceof AmbiguousRunTaskError)",
       )
       expect(launch).toContain(
-        "return { promoted: true, ambiguity: error.message }",
+        "return { promoted: true, ambiguity: detail }",
+      )
+      expect(cronSource).toContain(
+        "return sanitizeDiagnostic(",
       )
     })
   })
@@ -464,6 +481,38 @@ const baseInput = {
       )
       expect(stackSource).toContain(
         "resources.sessionLocksTable.grantReadWriteData(resources.cronLambdaRole)",
+      )
+    })
+
+    it("durably delays ambiguous-launch reconciliation before RunTask", () => {
+      expect(stackSource).toContain("'CronReconciliationQueue'")
+      expect(stackSource).toContain(
+        "SCHEDULE_RECONCILIATION_QUEUE_URL:",
+      )
+      expect(stackSource).toContain(
+        "resources.cronReconciliationQueue.grantSendMessages(",
+      )
+      expect(stackSource).toContain(
+        "new lambdaEventSources.SqsEventSource(",
+      )
+      expect(cronSource).toContain(
+        "new SendMessageCommand({",
+      )
+      expect(cronSource).toContain(
+        "DelaySeconds: SCHEDULED_RUN_RECONCILIATION_DELAY_SECONDS",
+      )
+      expect(cronSource).toContain(
+        "abortSignal: AbortSignal.timeout(RUN_TASK_ATTEMPT_TIMEOUT_MS)",
+      )
+      const preparation = cronSource.slice(
+        cronSource.indexOf("async function prepareScheduledJobPromotion("),
+        cronSource.indexOf("function readJobRunnerConfig("),
+      )
+      expect(preparation.indexOf("await prepareLaunch(")).toBeLessThan(
+        preparation.indexOf("await persistRun("),
+      )
+      expect(cronSource).toContain(
+        "Delayed promotion reconciliation terminalized ambiguity",
       )
     })
 

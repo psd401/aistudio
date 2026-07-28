@@ -1,3 +1,5 @@
+import { sanitizeDiagnostic } from './diagnostic-sanitization';
+
 export interface RunTaskFailure {
   reason?: string;
   detail?: string;
@@ -18,14 +20,18 @@ export interface ReconciledTaskDescription {
   startedBy?: string;
 }
 
-export interface RunTaskReconciliationDependencies {
+export interface RunTaskLookupDependencies {
   startedBy: string;
-  runTask: () => Promise<RunTaskAttempt>;
   listRunningTasks: () => Promise<string[]>;
   listStoppedTasks: (nextToken?: string) => Promise<TaskLookupPage>;
   describeTasks: (
     taskArns: string[],
   ) => Promise<ReconciledTaskDescription[]>;
+}
+
+export interface RunTaskReconciliationDependencies
+  extends RunTaskLookupDependencies {
+  runTask: () => Promise<RunTaskAttempt>;
   wait: (delayMs: number) => Promise<void>;
 }
 
@@ -53,7 +59,6 @@ type ThrownRunTaskResult = {
 // rejected the launch because ECS is eventually consistent.
 const RECONCILIATION_DELAYS_MS = [0, 1_000, 2_000, 4_000, 8_000] as const;
 const MAX_STOPPED_TASK_PAGES = 10;
-const MAX_DIAGNOSTIC_LENGTH = 500;
 const MAX_FORMATTED_ERROR_LENGTH = 200;
 
 const DEFINITIVE_RUN_TASK_ERRORS = new Set([
@@ -103,36 +108,13 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function boundedDiagnostic(value: string): string {
-  const withoutControls = Array.from(value, (character) => {
-    const codePoint = character.codePointAt(0) ?? 0;
-    return codePoint < 32 || codePoint === 127 ? ' ' : character;
-  }).join('');
-  return withoutControls
-    .replace(
-      /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi,
-      'Bearer [REDACTED]',
-    )
-    .replace(
-      /((?:authorization|password|secret|token|api[-_]?key)\s*[:=]\s*)[^\s,;]+/gi,
-      '$1[REDACTED]',
-    )
-    .replace(
-      /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
-      '[REDACTED_EMAIL]',
-    )
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, MAX_DIAGNOSTIC_LENGTH);
-}
-
 function stringProperty(
   record: Record<string, unknown> | null,
   property: string,
 ): string | undefined {
   const value = record?.[property];
   return typeof value === 'string' && value.length > 0
-    ? boundedDiagnostic(value)
+    ? sanitizeDiagnostic(value)
     : undefined;
 }
 
@@ -151,12 +133,14 @@ function formatRunTaskError(error: unknown): string {
   const metadata = asRecord(record?.$metadata);
   const name =
     stringProperty(record, 'name') ??
-    (error instanceof Error ? boundedDiagnostic(error.name) : 'UnknownError');
+    (error instanceof Error
+      ? sanitizeDiagnostic(error.name)
+      : 'UnknownError');
   const message =
     stringProperty(record, 'message') ??
     (error instanceof Error
-      ? boundedDiagnostic(error.message)
-      : boundedDiagnostic(String(error)));
+      ? sanitizeDiagnostic(error.message)
+      : sanitizeDiagnostic(String(error)));
   const attributes = [
     numberProperty(metadata, 'httpStatusCode') !== undefined
       ? `HTTP ${numberProperty(metadata, 'httpStatusCode')}`
@@ -206,7 +190,7 @@ function classifyThrownRunTask(error: unknown): ThrownRunTaskResult {
 }
 
 async function findStoppedTask(
-  dependencies: RunTaskReconciliationDependencies,
+  dependencies: RunTaskLookupDependencies,
 ): Promise<string | undefined> {
   let nextToken: string | undefined;
   const seenTokens = new Set<string>();
@@ -237,6 +221,19 @@ async function findStoppedTask(
   );
 }
 
+/**
+ * Find the exact task for a startedBy marker across live and recently stopped
+ * ECS tasks. Empty means "not visible in this lookup"; callers decide whether
+ * their elapsed consistency window makes that terminal.
+ */
+export async function findRunTaskByStartedBy(
+  dependencies: RunTaskLookupDependencies,
+): Promise<string | undefined> {
+  const running = await dependencies.listRunningTasks();
+  if (running[0]) return running[0];
+  return findStoppedTask(dependencies);
+}
+
 async function findAcceptedTask(
   dependencies: RunTaskReconciliationDependencies,
   attemptErrors: readonly [string, string],
@@ -247,19 +244,11 @@ async function findAcceptedTask(
   for (const delayMs of RECONCILIATION_DELAYS_MS) {
     if (delayMs > 0) await dependencies.wait(delayMs);
     try {
-      const running = await dependencies.listRunningTasks();
-      if (running[0]) {
+      const taskArn = await findRunTaskByStartedBy(dependencies);
+      if (taskArn) {
         return {
           status: 'accepted',
-          taskArn: running[0],
-          reconciled: true,
-        };
-      }
-      const stopped = await findStoppedTask(dependencies);
-      if (stopped) {
-        return {
-          status: 'accepted',
-          taskArn: stopped,
+          taskArn,
           reconciled: true,
         };
       }

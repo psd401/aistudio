@@ -1,5 +1,6 @@
 import type { ExecuteStatementCommandInput } from '@aws-sdk/client-rds-data';
 import { sanitizeEmailForLog } from './log-sanitization';
+import { sanitizeDiagnostic } from './diagnostic-sanitization';
 
 export interface CronTelemetryLogger {
   warn: (message: string, metadata?: Record<string, unknown>) => void;
@@ -157,6 +158,35 @@ export async function writeScheduledRun(
 }
 
 /**
+ * Reserve the identity-column value before any promoted-row side effect. A
+ * skipped sequence value is harmless; it lets the durable SQS resolver carry
+ * the exact future row ID before that row exists.
+ */
+export async function reservePromotedRunId(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+): Promise<string> {
+  if (!config.databaseResourceArn || !config.databaseSecretArn) {
+    throw new Error('Scheduled-run telemetry database is not configured');
+  }
+  const result = await rdsDataClient.execute({
+    resourceArn: config.databaseResourceArn,
+    secretArn: config.databaseSecretArn,
+    database: config.databaseName,
+    sql: `SELECT CAST(
+            nextval(
+              pg_get_serial_sequence('agent_scheduled_runs', 'id')
+            ) AS TEXT
+          )`,
+  });
+  const scheduledRunId = firstStringValue(result);
+  if (!scheduledRunId || !/^\d{1,20}$/.test(scheduledRunId)) {
+    throw new Error('Promoted scheduled run reserved no valid ID');
+  }
+  return scheduledRunId;
+}
+
+/**
  * Strictly create the promoted row before RunTask and return its database ID.
  * That ID is the per-fire correlation key carried in JOB_PAYLOAD; the daily
  * AgentCore session ID is deliberately not unique enough for this purpose.
@@ -172,19 +202,32 @@ export async function createPromotedRun(
   if (params.status !== 'promoted') {
     throw new Error('Promoted scheduled run must use promoted status');
   }
+  const usesReservedId = typeof params.scheduledRunId === 'string';
   const result = await rdsDataClient.execute(
     {
       resourceArn: config.databaseResourceArn,
       secretArn: config.databaseSecretArn,
       database: config.databaseName,
-      sql: `INSERT INTO agent_scheduled_runs
+      sql: usesReservedId
+        ? `INSERT INTO agent_scheduled_runs
+              (id, user_id, schedule_id, schedule_name, session_id,
+               input_tokens, output_tokens, latency_ms, status, error_message)
+            OVERRIDING SYSTEM VALUE
+            VALUES
+              (CAST(:scheduled_run_id AS bigint), :user_id, :schedule_id,
+               :schedule_name, :session_id, :input_tokens, :output_tokens,
+               :latency_ms, :status, :error_message)
+            RETURNING CAST(id AS TEXT)`
+        : `INSERT INTO agent_scheduled_runs
               (user_id, schedule_id, schedule_name, session_id,
                input_tokens, output_tokens, latency_ms, status, error_message)
             VALUES
               (:user_id, :schedule_id, :schedule_name, :session_id,
                :input_tokens, :output_tokens, :latency_ms, :status, :error_message)
             RETURNING CAST(id AS TEXT)`,
-      parameters: scheduledRunParameters(params),
+      parameters: usesReservedId
+        ? promotedRunParameters(params)
+        : scheduledRunParameters(params),
     },
   );
   const scheduledRunId = firstStringValue(result);
@@ -194,14 +237,23 @@ export async function createPromotedRun(
   ) {
     throw new Error('Promoted scheduled run returned no valid ID');
   }
+  if (
+    params.scheduledRunId
+    && scheduledRunId !== params.scheduledRunId
+  ) {
+    throw new Error('Promoted scheduled run returned the wrong reserved ID');
+  }
   return scheduledRunId;
 }
 
-async function hasExactTerminalRun(
+async function exactScheduledRunStatus(
   config: RunTelemetryConfig,
   rdsDataClient: RunTelemetryRdsClient,
-  params: ScheduledRunRecord & { scheduledRunId: string },
-): Promise<boolean> {
+  params: Pick<
+    ScheduledRunRecord,
+    'scheduledRunId' | 'userEmail' | 'scheduleId' | 'sessionId'
+  > & { scheduledRunId: string },
+): Promise<string | undefined> {
   const result = await rdsDataClient.execute(
     {
       resourceArn: config.databaseResourceArn,
@@ -224,7 +276,35 @@ async function hasExactTerminalRun(
       ],
     },
   );
-  const status = firstStringValue(result);
+  return firstStringValue(result);
+}
+
+export async function isPromotedRunPending(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  params: Pick<
+    ScheduledRunRecord,
+    'scheduledRunId' | 'userEmail' | 'scheduleId' | 'sessionId'
+  > & { scheduledRunId: string },
+): Promise<boolean> {
+  if (!config.databaseResourceArn || !config.databaseSecretArn) {
+    throw new Error('Scheduled-run telemetry database is not configured');
+  }
+  return (
+    await exactScheduledRunStatus(config, rdsDataClient, params)
+  ) === 'promoted';
+}
+
+async function hasExactTerminalRun(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  params: ScheduledRunRecord & { scheduledRunId: string },
+): Promise<boolean> {
+  const status = await exactScheduledRunStatus(
+    config,
+    rdsDataClient,
+    params,
+  );
   return status === 'success' || status === 'error';
 }
 
@@ -291,7 +371,9 @@ export function createRunTelemetry(
     log: CronTelemetryLogger,
   ): Promise<void> {
     const severity = params.severity ?? 'error';
-    const truncatedError = params.errorMessage?.slice(0, 4000) ?? null;
+    const truncatedError = params.errorMessage
+      ? sanitizeDiagnostic(params.errorMessage, 4000)
+      : null;
     const context = JSON.stringify({
       scheduleId: params.scheduleId,
       ...params.context,
@@ -304,7 +386,9 @@ export function createRunTelemetry(
       sessionId: params.sessionId,
       scheduleId: params.scheduleId,
       scheduleName: params.scheduleName ?? null,
-      errorMessage: truncatedError?.slice(0, 500) ?? null,
+      errorMessage: truncatedError
+        ? sanitizeDiagnostic(truncatedError)
+        : null,
       context: params.context ?? {},
     });
 
@@ -334,7 +418,9 @@ export function createRunTelemetry(
     } catch (error) {
       log.error('Failed to record cron failure mirror', {
         scheduleId: params.scheduleId,
-        error: error instanceof Error ? error.message : String(error),
+        error: sanitizeDiagnostic(
+          error instanceof Error ? error.message : String(error),
+        ),
       });
     }
   }

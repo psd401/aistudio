@@ -8,7 +8,10 @@ import * as crypto from 'node:crypto';
 import type { JobLockFailure } from './job-lock';
 import type { ScheduleReferenceEvent } from './schedule-record';
 
-const RUNNING_LEASE_SECONDS = 16 * 60;
+// EventBridge Scheduler retries this target for at most 60 minutes. Keeping an
+// in-progress fire claimed beyond that horizon prevents a Lambda crash after
+// ECS acceptance from reacquiring a fresh job lock and issuing a second task.
+const RUNNING_LEASE_SECONDS = 65 * 60;
 const COMPLETED_MARKER_SECONDS = 65 * 60;
 
 interface ScheduleFireLogger {
@@ -27,6 +30,11 @@ export interface ScheduleFireDynamoClient {
 export interface ScheduleFireIdentity {
   key: string;
   scheduledTime: string;
+}
+
+export interface ScheduleFireLaunchIdentity {
+  clientToken: string;
+  startedBy: string;
 }
 
 export interface ScheduleFireFailure {
@@ -134,6 +142,23 @@ export function scheduleFireIdentity(
   return {
     key: `schedule-fire#${event.scheduleId}#${event.scheduledTime}`,
     scheduledTime: event.scheduledTime,
+  };
+}
+
+/**
+ * ECS launch identity is derived from immutable Scheduler fire identity, not
+ * from a renewable lock token or a newly inserted telemetry row.
+ */
+export function scheduleFireLaunchIdentity(
+  identity: ScheduleFireIdentity,
+): ScheduleFireLaunchIdentity {
+  const digest = crypto
+    .createHash('sha256')
+    .update(identity.key)
+    .digest('hex');
+  return {
+    clientToken: digest,
+    startedBy: `scheduled-${digest}`,
   };
 }
 

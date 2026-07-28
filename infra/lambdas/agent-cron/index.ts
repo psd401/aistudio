@@ -36,12 +36,19 @@ import {
   SecretsManagerClient,
   GetSecretValueCommand,
 } from '@aws-sdk/client-secrets-manager';
+import {
+  SendMessageCommand,
+  SQSClient,
+} from '@aws-sdk/client-sqs';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { SignatureV4 } from '@smithy/signature-v4';
 import { Sha256 } from '@aws-crypto/sha256-js';
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { HttpRequest } from '@smithy/protocol-http';
-import type { Context as LambdaContext } from 'aws-lambda';
+import type {
+  Context as LambdaContext,
+  SQSEvent,
+} from 'aws-lambda';
 import { resolveAbortMs, resolveTurnDeadlineS } from './turn-deadline';
 import {
   buildJobPayload,
@@ -75,6 +82,8 @@ import {
 import {
   createPromotedRun,
   createRunTelemetry,
+  isPromotedRunPending,
+  reservePromotedRunId,
   updatePromotedRunTerminal,
 } from './run-telemetry';
 import { runSchedulePreflight } from './schedule-preflight';
@@ -84,8 +93,10 @@ import {
   releaseScheduleFire,
   resolveScheduleLockContention,
   scheduleFireIdentity,
+  scheduleFireLaunchIdentity,
   type ScheduleFireClaim,
   type ScheduleFireFailure,
+  type ScheduleFireIdentity,
 } from './schedule-fire';
 import { sanitizeEmailForLog } from './log-sanitization';
 import {
@@ -94,9 +105,18 @@ import {
   type JobRunnerStoppedEvent,
 } from './job-monitor';
 import {
+  findRunTaskByStartedBy,
   reconcileRunTaskLaunch,
   type RunTaskAttempt,
+  type RunTaskLookupDependencies,
 } from './run-task-reconciliation';
+import {
+  parseScheduledRunReconciliationMessage,
+  reconcileScheduledRun,
+  SCHEDULED_RUN_RECONCILIATION_DELAY_SECONDS,
+  type ScheduledRunReconciliationMessage,
+} from './scheduled-run-reconciliation';
+import { sanitizeDiagnostic } from './diagnostic-sanitization';
 
 // ---------------------------------------------------------------------------
 // Structured logging
@@ -146,9 +166,16 @@ const secretsClient = new SecretsManagerClient({});
 const ssmClient = new SSMClient({});
 const rdsDataClient = new RDSDataClient({});
 const ecsClient = new ECSClient({});
+const sqsClient = new SQSClient({});
+const RDS_DATA_REQUEST_TIMEOUT_MS = 30_000;
 const runTelemetryRdsClient = {
   execute: (input: ConstructorParameters<typeof ExecuteStatementCommand>[0]) =>
-    rdsDataClient.send(new ExecuteStatementCommand(input)),
+    rdsDataClient.send(
+      new ExecuteStatementCommand(input),
+      {
+        abortSignal: AbortSignal.timeout(RDS_DATA_REQUEST_TIMEOUT_MS),
+      },
+    ),
 };
 const jobLockDynamoClient = {
   put: (input: ConstructorParameters<typeof PutCommand>[0]) =>
@@ -190,6 +217,8 @@ const AGENT_INVOCATION_SIGNING_SECRET_ID =
   process.env.AGENT_INVOCATION_SIGNING_SECRET_ID || '';
 const SESSION_LOCKS_TABLE = process.env.SESSION_LOCKS_TABLE || '';
 const JOB_CONTAINER_NAME = process.env.JOB_CONTAINER_NAME || 'job-runner';
+const SCHEDULE_RECONCILIATION_QUEUE_URL =
+  process.env.SCHEDULE_RECONCILIATION_QUEUE_URL || '';
 
 const runTelemetry = createRunTelemetry(
   {
@@ -675,6 +704,43 @@ interface JobRunnerConfig {
   containerName: string;
 }
 
+interface ScheduledJobLaunchIdentity {
+  clientToken: string;
+  startedBy: string;
+}
+
+// The resolver is delivered eight minutes after it is queued. The promoted-row
+// insert is bounded to 30 seconds and each of two idempotent RunTask attempts
+// to 20 seconds, so even the latest possible acceptance precedes the resolver
+// by well over ECS's documented five-minute consistency backoff window.
+const RUN_TASK_ATTEMPT_TIMEOUT_MS = 20_000;
+
+interface LaunchScheduledJobOptions {
+  input: ScheduledJobInput;
+  lockToken: string;
+  scheduledRunId: string;
+  launchIdentity: ScheduledJobLaunchIdentity;
+  config: JobRunnerConfig;
+  log: Logger;
+}
+
+interface PromoteScheduledTurnOptions {
+  input: ScheduledJobInput;
+  lockToken: string;
+  fireIdentity: ScheduleFireIdentity | null;
+  log: Logger;
+  reserveRun: () => Promise<string>;
+  prepareLaunch: (
+    scheduledRunId: string,
+    launchIdentity: ScheduledJobLaunchIdentity,
+  ) => Promise<void>;
+  persistRun: (scheduledRunId: string) => Promise<void>;
+  afterLaunchFailure: (
+    scheduledRunId: string,
+    errorMessage: string,
+  ) => Promise<void>;
+}
+
 type PromotionResult =
   | {
       promoted: true;
@@ -688,9 +754,21 @@ type PromotionResult =
         | 'lock-config'
         | 'lock-renew'
         | 'run-telemetry'
+        | 'reconciliation-enqueue'
         | 'run-task';
       severity: 'error' | 'warn';
       errorMessage: string;
+    };
+
+type PromotionPreparation =
+  | {
+      prepared: true;
+      scheduledRunId: string;
+      launchIdentity: ScheduledJobLaunchIdentity;
+    }
+  | {
+      prepared: false;
+      failure: Extract<PromotionResult, { promoted: false }>;
     };
 
 class AmbiguousRunTaskError extends Error {
@@ -698,6 +776,87 @@ class AmbiguousRunTaskError extends Error {
     super(message);
     this.name = 'AmbiguousRunTaskError';
   }
+}
+
+function errorDetail(error: unknown): string {
+  return sanitizeDiagnostic(
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
+async function prepareScheduledJobPromotion(
+  options: PromoteScheduledTurnOptions,
+): Promise<PromotionPreparation> {
+  const {
+    fireIdentity,
+    lockToken,
+    log,
+    reserveRun,
+    prepareLaunch,
+    persistRun,
+  } = options;
+  let scheduledRunId: string;
+  try {
+    // Reserve the exact future row ID without creating any non-terminal state.
+    scheduledRunId = await reserveRun();
+  } catch (error) {
+    const detail = errorDetail(error);
+    log.error('Job promotion telemetry failed — posting the partial instead', {
+      error: detail,
+    });
+    return {
+      prepared: false,
+      failure: {
+        promoted: false,
+        phase: 'run-telemetry',
+        severity: 'error',
+        errorMessage: `Promotion telemetry failed: ${detail}`,
+      },
+    };
+  }
+  const launchIdentity = fireIdentity
+    ? scheduleFireLaunchIdentity(fireIdentity)
+    : legacyScheduledJobLaunchIdentity(lockToken);
+  try {
+    // Install the delayed, durable resolver before making the side effect.
+    await prepareLaunch(scheduledRunId, launchIdentity);
+  } catch (error) {
+    const detail = errorDetail(error);
+    log.error(
+      'Job promotion reconciliation could not be prepared — task not launched',
+      { error: detail },
+    );
+    return {
+      prepared: false,
+      failure: {
+        promoted: false,
+        phase: 'reconciliation-enqueue',
+        severity: 'error',
+        errorMessage: `Promotion reconciliation setup failed: ${detail}`,
+      },
+    };
+  }
+  try {
+    // The durable resolver already carries this reserved ID. A hard crash
+    // before/during this insert either leaves no row or a row the resolver can
+    // close; no promoted row can exist without a resolver.
+    await persistRun(scheduledRunId);
+  } catch (error) {
+    const detail = errorDetail(error);
+    log.error('Job promotion telemetry failed — task not launched', {
+      error: detail,
+    });
+    return {
+      prepared: false,
+      failure: {
+        promoted: false,
+        phase: 'run-telemetry',
+        severity: 'error',
+        errorMessage: `Promotion telemetry failed: ${detail}`,
+      },
+    };
+  }
+  return { prepared: true, scheduledRunId, launchIdentity };
 }
 
 function readJobRunnerConfig(log: Logger): JobRunnerConfig | null {
@@ -720,13 +879,78 @@ function readJobRunnerConfig(log: Logger): JobRunnerConfig | null {
   return config;
 }
 
-async function launchScheduledJob(
-  input: ScheduledJobInput,
+function legacyScheduledJobLaunchIdentity(
   lockToken: string,
-  scheduledRunId: string,
-  config: JobRunnerConfig,
-  log: Logger,
+): ScheduledJobLaunchIdentity {
+  const digest = crypto
+    .createHash('sha256')
+    .update(`legacy-scheduled-lock#${lockToken}`)
+    .digest('hex');
+  return {
+    clientToken: lockToken,
+    startedBy: `scheduled-${digest}`,
+  };
+}
+
+function ecsTaskLookupDependencies(
+  clusterArn: string,
+  startedBy: string,
+): RunTaskLookupDependencies {
+  return {
+    startedBy,
+    // ECS requires startedBy to be the only ListTasks filter. With no status
+    // filter this returns live tasks for the exact schedule fire.
+    listRunningTasks: async () => {
+      const result = await ecsClient.send(
+        new ListTasksCommand({
+          cluster: clusterArn,
+          startedBy,
+        }),
+      );
+      return result.taskArns ?? [];
+    },
+    // Stopped tasks cannot be queried with startedBy. Page through the bounded
+    // recent STOPPED set, then DescribeTasks and filter the exact startedBy.
+    listStoppedTasks: async (nextToken) => {
+      const result = await ecsClient.send(
+        new ListTasksCommand({
+          cluster: clusterArn,
+          desiredStatus: 'STOPPED',
+          maxResults: 100,
+          ...(nextToken ? { nextToken } : {}),
+        }),
+      );
+      return {
+        taskArns: result.taskArns ?? [],
+        ...(result.nextToken ? { nextToken: result.nextToken } : {}),
+      };
+    },
+    describeTasks: async (taskArns) => {
+      const result = await ecsClient.send(
+        new DescribeTasksCommand({
+          cluster: clusterArn,
+          tasks: taskArns,
+        }),
+      );
+      return result.tasks?.map((task) => ({
+        ...(task.taskArn ? { taskArn: task.taskArn } : {}),
+        ...(task.startedBy ? { startedBy: task.startedBy } : {}),
+      })) ?? [];
+    },
+  };
+}
+
+async function launchScheduledJob(
+  options: LaunchScheduledJobOptions,
 ): Promise<void> {
+  const {
+    input,
+    lockToken,
+    scheduledRunId,
+    launchIdentity,
+    config,
+    log,
+  } = options;
   const payload = buildJobPayload({
     sessionId: input.sessionId,
     reason: input.reason,
@@ -743,14 +967,13 @@ async function launchScheduledJob(
     isDM: true,
     originalPrompt: input.originalPrompt,
   });
-  const startedBy = `scheduled-${scheduledRunId}`;
   const runTaskInput = {
     cluster: config.clusterArn,
     taskDefinition: config.taskDefArn,
     launchType: 'FARGATE',
     count: 1,
-    clientToken: lockToken,
-    startedBy,
+    clientToken: launchIdentity.clientToken,
+    startedBy: launchIdentity.startedBy,
     networkConfiguration: {
       awsvpcConfiguration: {
         subnets: config.subnets,
@@ -768,9 +991,17 @@ async function launchScheduledJob(
     },
   } satisfies RunTaskCommandInput;
   const launch = await reconcileRunTaskLaunch({
-    startedBy,
+    ...ecsTaskLookupDependencies(
+      config.clusterArn,
+      launchIdentity.startedBy,
+    ),
     runTask: async (): Promise<RunTaskAttempt> => {
-      const result = await ecsClient.send(new RunTaskCommand(runTaskInput));
+      const result = await ecsClient.send(
+        new RunTaskCommand(runTaskInput),
+        {
+          abortSignal: AbortSignal.timeout(RUN_TASK_ATTEMPT_TIMEOUT_MS),
+        },
+      );
       return {
         taskArns: result.tasks
           ?.map((task) => task.taskArn)
@@ -780,45 +1011,6 @@ async function launchScheduledJob(
           ...(failure.detail ? { detail: failure.detail } : {}),
         })) ?? [],
       };
-    },
-    // ECS requires startedBy to be the only ListTasks filter. With no status
-    // filter this returns live tasks for the exact schedule fire.
-    listRunningTasks: async () => {
-      const result = await ecsClient.send(
-        new ListTasksCommand({
-          cluster: config.clusterArn,
-          startedBy,
-        }),
-      );
-      return result.taskArns ?? [];
-    },
-    // Stopped tasks cannot be queried with startedBy. Page through the bounded
-    // recent STOPPED set, then DescribeTasks and filter the exact startedBy.
-    listStoppedTasks: async (nextToken) => {
-      const result = await ecsClient.send(
-        new ListTasksCommand({
-          cluster: config.clusterArn,
-          desiredStatus: 'STOPPED',
-          maxResults: 100,
-          ...(nextToken ? { nextToken } : {}),
-        }),
-      );
-      return {
-        taskArns: result.taskArns ?? [],
-        ...(result.nextToken ? { nextToken: result.nextToken } : {}),
-      };
-    },
-    describeTasks: async (taskArns) => {
-      const result = await ecsClient.send(
-        new DescribeTasksCommand({
-          cluster: config.clusterArn,
-          tasks: taskArns,
-        }),
-      );
-      return result.tasks?.map((task) => ({
-        ...(task.taskArn ? { taskArn: task.taskArn } : {}),
-        ...(task.startedBy ? { startedBy: task.startedBy } : {}),
-      })) ?? [];
     },
     wait: (delayMs) =>
       new Promise((resolve) => {
@@ -838,20 +1030,20 @@ async function launchScheduledJob(
     scheduleName: input.scheduleName,
     sessionId: input.sessionId,
     taskArn: launch.taskArn,
+    startedBy: launchIdentity.startedBy,
     reconciled: launch.reconciled,
   });
 }
 
 async function promoteScheduledTurnToJob(
-  input: ScheduledJobInput,
-  lockToken: string,
-  log: Logger,
-  beforeLaunch: () => Promise<string>,
-  afterLaunchFailure: (
-    scheduledRunId: string,
-    errorMessage: string,
-  ) => Promise<void>,
+  options: PromoteScheduledTurnOptions,
 ): Promise<PromotionResult> {
+  const {
+    input,
+    lockToken,
+    log,
+    afterLaunchFailure,
+  } = options;
   const config = readJobRunnerConfig(log);
   if (!config) {
     return {
@@ -876,48 +1068,33 @@ async function promoteScheduledTurnToJob(
       errorMessage: renewal.errorMessage,
     };
   }
-  let scheduledRunId: string;
+  const preparation = await prepareScheduledJobPromotion(options);
+  if (!preparation.prepared) return preparation.failure;
+  const { scheduledRunId, launchIdentity } = preparation;
   try {
-    // Persist the intermediate row and recover its per-fire primary key before
-    // RunTask. The task and its STOPPED supervisor update this exact row.
-    scheduledRunId = await beforeLaunch();
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    log.error('Job promotion telemetry failed — posting the partial instead', {
-      error: detail,
-    });
-    return {
-      promoted: false,
-      phase: 'run-telemetry',
-      severity: 'error',
-      errorMessage: `Promotion telemetry failed: ${detail}`,
-    };
-  }
-  try {
-    await launchScheduledJob(
+    await launchScheduledJob({
       input,
       lockToken,
       scheduledRunId,
+      launchIdentity,
       config,
       log,
-    );
+    });
     return { promoted: true };
   } catch (error) {
-    let errorMessage =
-      `RunTask failed: ${
-        error instanceof Error ? error.message : String(error)
-      }`;
+    const detail = errorDetail(error);
+    let errorMessage = `RunTask failed: ${detail}`;
     if (error instanceof AmbiguousRunTaskError) {
       // An accepted task may already own this payload. Do not terminalize its
       // row or post the partial: either action can conflict with the eventual
       // full result. Retain the lock and expose the uncertainty to monitoring.
       log.error('Job promotion outcome is ambiguous — retaining the job state', {
-        error: error.message,
+        error: detail,
       });
-      return { promoted: true, ambiguity: error.message };
+      return { promoted: true, ambiguity: detail };
     }
     log.error('Job promotion failed — posting the partial instead', {
-      error: error instanceof Error ? error.message : String(error),
+      error: detail,
     });
     try {
       // No task exists to emit STOPPED, so close the exact promoted row before
@@ -997,6 +1174,7 @@ interface ScheduledResultContext {
   scheduleName: string;
   startTime: number;
   sessionId: string;
+  fireIdentity: ScheduleFireIdentity | null;
   result: InvokeResult;
   log: Logger;
 }
@@ -1047,9 +1225,10 @@ async function sendPromotionAmbiguityAcknowledgement(
 
 async function recordPromotedRun(
   context: ScheduledResultContext,
-): Promise<string> {
+  scheduledRunId: string,
+): Promise<void> {
   const { schedule, scheduleName, sessionId, result, startTime, log } = context;
-  const scheduledRunId = await createPromotedRun(
+  await createPromotedRun(
     {
       databaseResourceArn: DATABASE_RESOURCE_ARN,
       databaseSecretArn: DATABASE_SECRET_ARN,
@@ -1057,6 +1236,7 @@ async function recordPromotedRun(
     },
     runTelemetryRdsClient,
     {
+      scheduledRunId,
       userEmail: schedule.ownerEmail,
       scheduleId: schedule.scheduleId,
       scheduleName,
@@ -1075,7 +1255,17 @@ async function recordPromotedRun(
     email: sanitizeEmailForLog(schedule.ownerEmail),
     latencyMs: Date.now() - startTime,
   });
-  return scheduledRunId;
+}
+
+async function reservePromotionRunId(): Promise<string> {
+  return reservePromotedRunId(
+    {
+      databaseResourceArn: DATABASE_RESOURCE_ARN,
+      databaseSecretArn: DATABASE_SECRET_ARN,
+      databaseName: DATABASE_NAME,
+    },
+    runTelemetryRdsClient,
+  );
 }
 
 async function recordPromotionLaunchFailure(
@@ -1112,6 +1302,54 @@ async function recordPromotionLaunchFailure(
   });
 }
 
+async function enqueuePromotionReconciliation(
+  context: ScheduledResultContext,
+  scheduledRunId: string,
+  launchIdentity: ScheduledJobLaunchIdentity,
+): Promise<void> {
+  const { schedule, scheduleName, sessionId, log } = context;
+  const message: ScheduledRunReconciliationMessage = {
+    type: 'scheduled-run-reconciliation',
+    scheduledRunId,
+    userEmail: schedule.ownerEmail,
+    scheduleId: schedule.scheduleId,
+    scheduleName,
+    sessionId,
+    startedBy: launchIdentity.startedBy,
+  };
+  try {
+    if (!SCHEDULE_RECONCILIATION_QUEUE_URL) {
+      throw new Error(
+        'SCHEDULE_RECONCILIATION_QUEUE_URL is not configured',
+      );
+    }
+    const result = await sqsClient.send(
+      new SendMessageCommand({
+        QueueUrl: SCHEDULE_RECONCILIATION_QUEUE_URL,
+        DelaySeconds: SCHEDULED_RUN_RECONCILIATION_DELAY_SECONDS,
+        MessageBody: JSON.stringify(message),
+      }),
+    );
+    if (!result.MessageId) {
+      throw new Error('SQS accepted no reconciliation message ID');
+    }
+    log.info('Delayed promotion reconciliation queued', {
+      scheduledRunId,
+      scheduleId: schedule.scheduleId,
+      startedBy: launchIdentity.startedBy,
+      messageId: result.MessageId,
+      delaySeconds: SCHEDULED_RUN_RECONCILIATION_DELAY_SECONDS,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Delayed promotion reconciliation enqueue failed: ` +
+        detail,
+      { cause: error },
+    );
+  }
+}
+
 async function tryPromoteScheduledResult(
   context: ScheduledResultContext,
   lockToken: string,
@@ -1137,8 +1375,8 @@ async function tryPromoteScheduledResult(
     );
     return false;
   }
-  const promotion = await promoteScheduledTurnToJob(
-    {
+  const promotion = await promoteScheduledTurnToJob({
+    input: {
       sessionId,
       scheduleId: schedule.scheduleId,
       runtimeId,
@@ -1151,11 +1389,20 @@ async function tryPromoteScheduledResult(
       reason,
     },
     lockToken,
+    fireIdentity: context.fireIdentity,
     log,
-    () => recordPromotedRun(context),
-    (scheduledRunId, errorMessage) =>
+    reserveRun: reservePromotionRunId,
+    prepareLaunch: (scheduledRunId, launchIdentity) =>
+      enqueuePromotionReconciliation(
+        context,
+        scheduledRunId,
+        launchIdentity,
+      ),
+    persistRun: (scheduledRunId) =>
+      recordPromotedRun(context, scheduledRunId),
+    afterLaunchFailure: (scheduledRunId, errorMessage) =>
       recordPromotionLaunchFailure(context, scheduledRunId, errorMessage),
-  );
+  });
   if (promotion.promoted && promotion.ambiguity) {
     await runTelemetry.recordCronFailure(
       {
@@ -1259,6 +1506,7 @@ interface LockedScheduleContext {
   scheduleName: string;
   sessionId: string;
   startTime: number;
+  fireIdentity: ScheduleFireIdentity | null;
   lambdaContext: LambdaContext;
   log: Logger;
 }
@@ -1297,6 +1545,7 @@ async function executeLockedScheduledTurn(
     scheduleName,
     startTime,
     sessionId,
+    fireIdentity: context.fireIdentity,
     result,
     log,
   };
@@ -1543,12 +1792,119 @@ async function handleJobRunnerStopped(
   );
 }
 
+function isSqsEvent(event: unknown): event is SQSEvent {
+  if (!event || typeof event !== 'object') return false;
+  const records = (event as { Records?: unknown }).Records;
+  return Array.isArray(records)
+    && records.length > 0
+    && records.every(
+      (record) =>
+        !!record
+        && typeof record === 'object'
+        && (record as { eventSource?: unknown }).eventSource === 'aws:sqs',
+    );
+}
+
+async function handleScheduledRunReconciliation(
+  message: ScheduledRunReconciliationMessage,
+  log: Logger,
+): Promise<HandlerResult> {
+  const clusterArn = process.env.JOB_CLUSTER_ARN || '';
+  if (!clusterArn) {
+    throw new Error(
+      'JOB_CLUSTER_ARN is not configured for scheduled-run reconciliation',
+    );
+  }
+
+  const reconciliation = await reconcileScheduledRun(message, {
+    isPending: (pendingMessage) =>
+      isPromotedRunPending(
+        {
+          databaseResourceArn: DATABASE_RESOURCE_ARN,
+          databaseSecretArn: DATABASE_SECRET_ARN,
+          databaseName: DATABASE_NAME,
+        },
+        runTelemetryRdsClient,
+        {
+          scheduledRunId: pendingMessage.scheduledRunId,
+          userEmail: pendingMessage.userEmail,
+          scheduleId: pendingMessage.scheduleId,
+          sessionId: pendingMessage.sessionId,
+        },
+      ),
+    findTask: (startedBy) =>
+      findRunTaskByStartedBy(
+        ecsTaskLookupDependencies(clusterArn, startedBy),
+      ),
+    terminalize: (record) =>
+      updatePromotedRunTerminal(
+        {
+          databaseResourceArn: DATABASE_RESOURCE_ARN,
+          databaseSecretArn: DATABASE_SECRET_ARN,
+          databaseName: DATABASE_NAME,
+        },
+        runTelemetryRdsClient,
+        record,
+      ),
+    recordFailure: (record) =>
+      runTelemetry.recordCronFailure(record, log),
+  });
+  if (reconciliation.status === 'task-found') {
+    log.info('Delayed promotion reconciliation found the ECS task', {
+      scheduledRunId: message.scheduledRunId,
+      scheduleId: message.scheduleId,
+      startedBy: message.startedBy,
+      taskArn: reconciliation.taskArn,
+    });
+    return { status: 'success', scheduleId: message.scheduleId };
+  }
+  if (reconciliation.status === 'no-pending-run') {
+    log.info('Delayed promotion reconciliation found no pending run row', {
+      scheduledRunId: message.scheduledRunId,
+      scheduleId: message.scheduleId,
+    });
+    return { status: 'success', scheduleId: message.scheduleId };
+  }
+
+  log.error('Delayed promotion reconciliation terminalized ambiguity', {
+    scheduledRunId: message.scheduledRunId,
+    scheduleId: message.scheduleId,
+    startedBy: message.startedBy,
+  });
+  return { status: 'error', scheduleId: message.scheduleId };
+}
+
+async function handleScheduledRunReconciliationEvent(
+  event: SQSEvent,
+  requestId: string,
+): Promise<HandlerResult> {
+  let result: HandlerResult | null = null;
+  for (const record of event.Records) {
+    const message = parseScheduledRunReconciliationMessage(record.body);
+    const log = createLogger({
+      requestId,
+      environment: ENVIRONMENT,
+      scheduleId: message.scheduleId,
+      scheduledRunId: message.scheduledRunId,
+      reconciliationMessageId: record.messageId,
+    });
+    result = await handleScheduledRunReconciliation(message, log);
+  }
+  if (!result) {
+    throw new Error('Scheduled-run reconciliation event had no records');
+  }
+  return result;
+}
+
 export async function handler(
-  event: ScheduleReferenceEvent | JobRunnerStoppedEvent,
+  event: ScheduleReferenceEvent | JobRunnerStoppedEvent | SQSEvent,
   context: LambdaContext,
 ): Promise<HandlerResult> {
   const handlerStartedAt = Date.now();
   const requestId = generateRequestId();
+  if (isSqsEvent(event)) {
+    return handleScheduledRunReconciliationEvent(event, requestId);
+  }
   if (isJobRunnerStoppedEvent(event)) {
     const log = createLogger({
       requestId,
@@ -1602,6 +1958,7 @@ export async function handler(
     scheduleName,
     sessionId,
     startTime,
+    fireIdentity,
     lambdaContext: context,
     log,
   };

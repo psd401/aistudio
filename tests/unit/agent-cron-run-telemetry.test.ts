@@ -1,6 +1,8 @@
 import {
   createPromotedRun,
   createRunTelemetry,
+  isPromotedRunPending,
+  reservePromotedRunId,
   updatePromotedRunTerminal,
   type CronTelemetryLogger,
 } from "../../infra/lambdas/agent-cron/run-telemetry"
@@ -24,6 +26,22 @@ function harness(overrides: Partial<typeof config> = {}) {
 }
 
 describe("agent-cron run telemetry", () => {
+  it("reserves a promoted row ID without creating the row", async () => {
+    const execute = jest.fn().mockResolvedValue({
+      records: [[{ stringValue: "900" }]],
+    })
+
+    await expect(
+      reservePromotedRunId(config, { execute }),
+    ).resolves.toBe("900")
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sql: expect.stringContaining("pg_get_serial_sequence"),
+      }),
+    )
+    expect(execute.mock.calls[0][0].sql).not.toContain("INSERT INTO")
+  })
+
   it("creates a promoted row and returns its per-fire primary key", async () => {
     const execute = jest.fn().mockResolvedValue({
       records: [[{ stringValue: "901" }]],
@@ -53,6 +71,62 @@ describe("agent-cron run telemetry", () => {
     )
   })
 
+  it("inserts a pre-reserved ID only after the resolver can carry it", async () => {
+    const execute = jest.fn().mockResolvedValue({
+      records: [[{ stringValue: "901" }]],
+    })
+
+    await expect(
+      createPromotedRun(
+        config,
+        { execute },
+        {
+          scheduledRunId: "901",
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          sessionId: "shared-daily-session",
+          inputTokens: 1,
+          outputTokens: 2,
+          latencyMs: 3,
+          status: "promoted",
+        },
+      ),
+    ).resolves.toBe("901")
+
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sql: expect.stringMatching(
+          /INSERT INTO agent_scheduled_runs[\s\S]+OVERRIDING SYSTEM VALUE/,
+        ),
+        parameters: expect.arrayContaining([{
+          name: "scheduled_run_id",
+          value: { stringValue: "901" },
+        }]),
+      }),
+    )
+  })
+
+  it("recognizes whether the exact reserved row is still promoted", async () => {
+    const execute = jest.fn().mockResolvedValue({
+      records: [[{ stringValue: "promoted" }]],
+    })
+
+    await expect(
+      isPromotedRunPending(
+        config,
+        { execute },
+        {
+          scheduledRunId: "901",
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          sessionId: "shared-daily-session",
+        },
+      ),
+    ).resolves.toBe(true)
+  })
+})
+
+describe("agent-cron promoted run terminal repair", () => {
   it("keys the STOPPED terminal repair by the promoted row ID", async () => {
     const execute = jest.fn().mockResolvedValue({ numberOfRecordsUpdated: 1 })
 
@@ -333,5 +407,44 @@ describe("agent-cron failure telemetry", () => {
       "AGENT_FAILURE_RECORD",
       expect.objectContaining({ source: "cron" }),
     )
+  })
+
+  it("redacts downstream diagnostics before logging or persistence", async () => {
+    const { telemetry, execute, error, log } = harness()
+
+    await telemetry.recordCronFailure(
+      {
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        sessionId: "session-id",
+        errorMessage:
+          "DB failed for student@psd401.net " +
+          "Authorization: Bearer abc.def token=top-secret " +
+          "https://login.example.test/callback?code=secret-code",
+      },
+      log,
+    )
+
+    expect(error).toHaveBeenCalledWith(
+      "AGENT_FAILURE_RECORD",
+      expect.objectContaining({
+        errorMessage: expect.stringContaining("[REDACTED_EMAIL]"),
+      }),
+    )
+    const logged = error.mock.calls[0][1].errorMessage
+    expect(logged).not.toContain("student@psd401.net")
+    expect(logged).not.toContain("abc.def")
+    expect(logged).not.toContain("top-secret")
+    expect(logged).not.toContain("secret-code")
+    expect(logged).toContain("[REDACTED_URL]")
+
+    const failureInput = execute.mock.calls[0][0]
+    const errorParameter = failureInput.parameters.find(
+      (parameter: { name: string }) => parameter.name === "error_message",
+    )
+    expect(errorParameter.value.stringValue).toContain("[REDACTED_EMAIL]")
+    expect(errorParameter.value.stringValue).not.toContain("student@psd401.net")
+    expect(errorParameter.value.stringValue).not.toContain("top-secret")
+    expect(errorParameter.value.stringValue).not.toContain("secret-code")
   })
 })

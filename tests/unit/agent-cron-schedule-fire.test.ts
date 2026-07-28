@@ -4,6 +4,7 @@ import {
   releaseScheduleFire,
   resolveScheduleLockContention,
   scheduleFireIdentity,
+  scheduleFireLaunchIdentity,
   type ScheduleFireDynamoClient,
 } from "../../infra/lambdas/agent-cron/schedule-fire"
 
@@ -50,8 +51,23 @@ describe("agent-cron scheduled fire idempotency", () => {
     ).toBeNull()
   })
 
-  it("claims a fire with a lease that can expire after a Lambda timeout", async () => {
+  it("derives an ECS identity from the immutable fire, not a lock token", () => {
+    const first = scheduleFireLaunchIdentity(identity)
+    const second = scheduleFireLaunchIdentity(identity)
+    const other = scheduleFireLaunchIdentity({
+      ...identity,
+      key: `${identity.key}-other`,
+    })
+
+    expect(first).toEqual(second)
+    expect(first).not.toEqual(other)
+    expect(first.clientToken).toMatch(/^[a-f0-9]{64}$/)
+    expect(first.startedBy).toBe(`scheduled-${first.clientToken}`)
+  })
+
+  it("claims a fire past Scheduler's one-hour retry horizon", async () => {
     const dynamo = client()
+    const beforeClaim = Math.floor(Date.now() / 1000)
 
     await expect(
       claimScheduleFire(identity, TABLE, dynamo, logger())
@@ -68,10 +84,15 @@ describe("agent-cron scheduled fire idempotency", () => {
           sessionId: identity.key,
           kind: "schedule-fire",
           status: "running",
+          expiresAt: expect.any(Number),
         }),
         ConditionExpression:
           "attribute_not_exists(sessionId) OR expiresAt < :now",
       })
+    )
+    const putInput = (dynamo.put as jest.Mock).mock.calls[0][0]
+    expect(putInput.Item.expiresAt).toBeGreaterThanOrEqual(
+      beforeClaim + 65 * 60
     )
   })
 

@@ -146,6 +146,7 @@ class AgentPlatformBuildResources {
   agentInternalApiKeySecret!: secretsmanager.Secret;
   agentInvocationSigningSecret!: secretsmanager.Secret;
   agentAsyncDlq!: sqs.Queue;
+  cronReconciliationQueue!: sqs.Queue;
   cronLogGroup!: logs.LogGroup;
   cronLambda!: lambda.Function;
   scheduleGroup!: scheduler.CfnScheduleGroup;
@@ -2081,6 +2082,29 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(resources.cronLogGroup).add('Environment', environment);
     cdk.Tags.of(resources.cronLogGroup).add('ManagedBy', 'cdk');
 
+    // A promotion writes this delayed resolver before calling ECS RunTask.
+    // The eight-minute delay exceeds ECS's eventual-consistency window, so a
+    // lost RunTask response cannot leave the promoted row non-terminal forever.
+    resources.cronReconciliationQueue = new sqs.Queue(
+      this,
+      'CronReconciliationQueue',
+      {
+        queueName: `psd-agent-cron-reconciliation-${environment}`,
+        encryption: sqs.QueueEncryption.SQS_MANAGED,
+        retentionPeriod: cdk.Duration.days(2),
+        // Six times the 15-minute Lambda timeout, per SQS/Lambda guidance.
+        visibilityTimeout: cdk.Duration.minutes(90),
+        deadLetterQueue: {
+          queue: resources.agentAsyncDlq,
+          maxReceiveCount: 3,
+        },
+      },
+    );
+    cdk.Tags.of(resources.cronReconciliationQueue)
+      .add('Environment', environment);
+    cdk.Tags.of(resources.cronReconciliationQueue)
+      .add('ManagedBy', 'cdk');
+
     resources.cronLambda = new lambda.Function(this, 'CronLambda', {
       deadLetterQueue: resources.agentAsyncDlq, // async-invoke failures → DLQ + alarm (REV-INFRA-128)
       // Fleet-level capacity. Per-schedule overlap is guarded by the
@@ -2160,6 +2184,8 @@ export class AgentPlatformStack extends cdk.Stack {
         DATABASE_NAME: props.databaseName ?? 'aistudio',
         AWS_ACCOUNT_ID: this.account,
         AGENT_INVOCATION_SIGNING_SECRET_ID: resources.agentInvocationSigningSecret.secretName,
+        SCHEDULE_RECONCILIATION_QUEUE_URL:
+          resources.cronReconciliationQueue.queueUrl,
       },
     });
 
@@ -2169,6 +2195,20 @@ export class AgentPlatformStack extends cdk.Stack {
     // Grant Cron Lambda access to Google credentials secret
     resources.googleCredentialsSecret.grantRead(resources.cronLambdaRole);
     resources.agentInvocationSigningSecret.grantRead(resources.cronLambdaRole);
+    resources.cronReconciliationQueue.grantSendMessages(
+      resources.cronLambdaRole,
+    );
+    resources.cronLambda.addEventSource(
+      new lambdaEventSources.SqsEventSource(
+        resources.cronReconciliationQueue,
+        {
+          batchSize: 1,
+          maxBatchingWindow: cdk.Duration.seconds(0),
+          // Preserve most of cron's reserved concurrency for live schedules.
+          maxConcurrency: 2,
+        },
+      ),
+    );
 
     // CloudWatch Logs permissions are granted automatically by CDK when the
     // function is constructed with a managed logGroup prop (see CronLambda
