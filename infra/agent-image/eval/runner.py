@@ -96,6 +96,9 @@ REQUIRED_METADATA_FIELDS = frozenset(
         "session_id",
     }
 )
+BROKER_CAPTURE_GRADER_TYPES = frozenset(
+    {"broker_request", "no_route_called"}
+)
 BROKER_CONTROL_TMPFS_OPTIONS = (
     f"{DEFAULT_CONTROL_DIRECTORY}:"
     "rw,noexec,nosuid,nodev,size=268435456,mode=0700,uid=0,gid=0"
@@ -1192,6 +1195,20 @@ def _task_from_mapping(value: Mapping[str, object], source: Path) -> Task:
         raise EvalRunnerError(f"{source}: workspace must be pure or mutating")
     if task.trials < 1 or task.trials > 20:
         raise EvalRunnerError(f"{source}: trials must be between 1 and 20")
+    broker_graders = sorted(
+        {
+            str(spec["type"])
+            for spec in task.graders
+            if spec.get("type") in BROKER_CAPTURE_GRADER_TYPES
+        }
+    )
+    if task.level != "L1" and broker_graders:
+        raise EvalRunnerError(
+            f"{source}: broker graders require level L1: "
+            + ", ".join(broker_graders)
+        )
+    if task.level != "L1" and task.fixture_paths:
+        raise EvalRunnerError(f"{source}: fixtures require level L1")
     if task.level == "L1" and not task.graders:
         raise EvalRunnerError(f"{source}: L1 tasks must configure at least one grader")
     return task

@@ -141,7 +141,9 @@ allowlisted route without a matching fixture returns a named
 `EvalFixtureMissing` response and automatically fails the trial; it never
 falls through to a live service or a silent empty response.
 Broker operations mirror production: fixtures and requests must use `POST`,
-and request bodies must be JSON objects.
+and request bodies must be JSON objects. Fixture files plus the
+`broker_request` and `no_route_called` graders require `level: L1`; live L0/L2
+tasks reject them instead of grading an empty capture.
 
 Available graders:
 

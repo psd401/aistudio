@@ -269,6 +269,54 @@ class SuiteLoadingTests(unittest.TestCase):
             ):
                 runner.load_suite(task_path)
 
+    def test_live_tasks_reject_broker_capture_graders(self):
+        for level in ("L0", "L2"):
+            for grader_type in ("broker_request", "no_route_called"):
+                with self.subTest(level=level, grader=grader_type):
+                    with self.assertRaisesRegex(
+                        runner.EvalRunnerError,
+                        "broker graders require level L1",
+                    ):
+                        runner._task_from_mapping(
+                            {
+                                "id": "invalid-live-grader",
+                                "skill": "runner-core",
+                                "level": level,
+                                "workspace": "pure",
+                                "prompt": "hello",
+                                "graders": [
+                                    {
+                                        "type": grader_type,
+                                        "route": (
+                                            "/api/agent/directory-lookup"
+                                        ),
+                                    }
+                                ],
+                            },
+                            Path("inline.yaml"),
+                        )
+
+    def test_live_tasks_reject_ignored_fixture_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture_path = Path(directory) / "fixture.json"
+            fixture_path.write_text("[]", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                runner.EvalRunnerError,
+                "fixtures require level L1",
+            ):
+                runner._task_from_mapping(
+                    {
+                        "id": "invalid-live-fixture",
+                        "skill": "runner-core",
+                        "level": "L0",
+                        "workspace": "pure",
+                        "prompt": "hello",
+                        "fixtures": [fixture_path.name],
+                    },
+                    Path(directory) / "task.yaml",
+                )
+
     def test_fixture_loading_rejects_non_post_methods_and_scalar_selectors(self):
         invalid_fixtures = (
             {
