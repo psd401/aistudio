@@ -58,7 +58,7 @@ export function isCanonicalTextContentType(
   );
 }
 
-function normalizeText(source: Uint8Array): string {
+export function normalizeCanonicalTextSource(source: Uint8Array): string {
   let decoded: string;
   try {
     decoded = new TextDecoder("utf-8", { fatal: true }).decode(source);
@@ -116,7 +116,7 @@ export function extractCanonicalTextDocument(
   const canonicalContentType =
     TEXT_CONTENT_TYPE_ALIASES[contentType] ??
     (contentType as CanonicalTextContentType);
-  const canonicalText = normalizeText(source);
+  const canonicalText = normalizeCanonicalTextSource(source);
   const sections =
     canonicalContentType === "text/markdown"
       ? markdownSections(canonicalText)
