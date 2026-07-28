@@ -222,6 +222,29 @@ class OutputAndTrajectoryGraderTests(unittest.TestCase):
 
 
 class ReliabilityAggregationTests(unittest.TestCase):
+    def test_failed_invocation_cannot_pass_a_negative_route_grader(self):
+        decision = grade(
+            [
+                {
+                    "type": "no_route_called",
+                    "route": "/api/agent/email-triage",
+                }
+            ],
+            metadata={
+                "tool_calls": [],
+                "failed": True,
+                "error_class": "AgentDeadlineExceeded",
+            },
+        )
+
+        self.assertFalse(decision["passed"])
+        self.assertEqual(decision["results"][0]["grader"], "invocation")
+        self.assertIn(
+            "AgentDeadlineExceeded",
+            decision["results"][0]["reason"],
+        )
+        self.assertTrue(decision["results"][1]["passed"])
+
     def test_pass_k_fails_when_only_two_of_three_trials_pass(self):
         records = [
             {

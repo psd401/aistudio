@@ -468,10 +468,25 @@ def grade_trial(
 ) -> dict[str, object]:
     """Run every configured grader and preserve human-readable reasons."""
 
-    grader_results: list[GraderResult] = [
+    grader_results: list[GraderResult] = []
+    if metadata.get("failed") is True:
+        error_class = metadata.get("error_class")
+        detail = (
+            str(error_class)
+            if isinstance(error_class, str) and error_class
+            else "unknown runtime error"
+        )
+        grader_results.append(
+            GraderResult(
+                "invocation",
+                False,
+                f"invocation metadata reported failure: {detail}",
+            )
+        )
+    grader_results.extend(
         GraderResult("broker_stub", False, error)
         for error in artifacts.broker_errors
-    ]
+    )
     for spec in specs:
         grader = str(spec["type"])
         if grader == "broker_request":
