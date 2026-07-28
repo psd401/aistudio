@@ -331,6 +331,14 @@ class DockerRuntime:
 
     def _resolve_credentials_for_invocation(self) -> AwsCredentials:
         credentials = self._credential_provider.resolve()
+        if (
+            credentials.environment.get("AWS_SESSION_TOKEN")
+            and credentials.expires_at is None
+        ):
+            raise EvalRunnerError(
+                "active AWS temporary credentials have unknown expiration; "
+                "refresh the AWS login before continuing"
+            )
         if credentials.expires_at is not None:
             required_seconds = (
                 self._invocation_timeout_seconds

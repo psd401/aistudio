@@ -29,7 +29,9 @@ container before every trial, after any container boot, and after context
 minting immediately before invocation. If temporary credentials rotate, a
 shared pure-task container is recycled with the new values; credentials that
 cannot outlive the configured invocation timeout fail closed before the trial
-starts.
+starts. Temporary credentials carrying a session token must also report their
+expiration; manually exported temporary triples with unknown lifetime are
+rejected rather than risking a mid-trial expiry.
 When a post-mint credential check recycles the runtime, the runner discards
 that authority and remints it for the ready container before invoking.
 

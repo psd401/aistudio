@@ -547,7 +547,7 @@ def aws_credentials(
     access_key: str = "access-1",
     session_token: str = "token-1",
     *,
-    expires_at: datetime | None = None,
+    expires_at: datetime | None = datetime.max.replace(tzinfo=timezone.utc),
 ) -> runner.AwsCredentials:
     return runner.AwsCredentials(
         environment={
@@ -796,6 +796,53 @@ class DockerRuntimeTests(unittest.TestCase):
         self.assertFalse(
             any(call[:2] == ("docker", "run") for call in executor.calls)
         )
+
+    def test_temporary_credentials_require_known_expiration(self):
+        executor = RecordingExecutor()
+        runtime = runner.DockerRuntime(
+            executor,
+            "candidate@sha256:digest",
+            "linux/arm64",
+            {"APP_BASE_URL": "https://dev.example.invalid"},
+            SequenceCredentialProvider([aws_credentials(expires_at=None)]),
+            boot_timeout_seconds=120,
+            invocation_timeout_seconds=900,
+            poll_interval_seconds=0,
+            name_prefix="psd-agent-eval-issue-1422-test",
+        )
+
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "temporary credentials have unknown expiration",
+        ):
+            runtime.prepare()
+        self.assertFalse(
+            any(call[:2] == ("docker", "run") for call in executor.calls)
+        )
+
+    def test_static_credentials_do_not_require_expiration(self):
+        executor = RecordingExecutor()
+        credentials = runner.AwsCredentials(
+            environment={
+                "AWS_ACCESS_KEY_ID": "static-access",
+                "AWS_SECRET_ACCESS_KEY": "static-secret",
+            },
+            expires_at=None,
+        )
+        runtime = runner.DockerRuntime(
+            executor,
+            "candidate@sha256:digest",
+            "linux/arm64",
+            {"APP_BASE_URL": "https://dev.example.invalid"},
+            SequenceCredentialProvider([credentials]),
+            boot_timeout_seconds=120,
+            invocation_timeout_seconds=900,
+            poll_interval_seconds=0,
+            name_prefix="psd-agent-eval-issue-1422-test",
+        )
+
+        self.assertTrue(runtime.prepare())
+        runtime.stop()
 
     def test_credentials_are_rechecked_after_container_startup(self):
         executor = RecordingExecutor()
