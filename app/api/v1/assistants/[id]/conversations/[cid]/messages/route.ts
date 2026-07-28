@@ -42,6 +42,7 @@ import {
 import { createRepositoryTools } from "@/lib/tools/repository-tools"
 import { parseBoundAssistantConversationMetadata } from "@/lib/api/assistant-conversation-metadata"
 import {
+  compareAssistantPromptExecutionOrder,
   createCoordinatedAssistantExecution,
   remainingAssistantExecutionTimeoutMs,
   settleCoordinatedAssistantExecution,
@@ -205,7 +206,7 @@ async function loadFollowUpSetup(
   }
   const architect = architectResult.data
   const prompts = (architect.prompts || []).sort(
-    (left, right) => left.position - right.position
+    compareAssistantPromptExecutionOrder
   )
   const lastPrompt = prompts.at(-1)
   if (!lastPrompt?.modelId) {

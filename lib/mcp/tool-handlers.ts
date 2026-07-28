@@ -106,6 +106,18 @@ function jsonResult(value: unknown): McpToolResult {
   return { content: [{ type: "text", text: JSON.stringify(value) }] }
 }
 
+function assistantExecutionFailureMessage(error: unknown): string {
+  if (isValidationError(error)) {
+    const details = error.fields?.map(({ message }) => message).join("; ")
+    return details
+      ? `Invalid assistant configuration: ${details}`
+      : "Invalid assistant configuration"
+  }
+  return `Assistant execution failed: ${
+    error instanceof Error ? error.message : "Unknown error"
+  }`
+}
+
 async function handleRepositoriesList(
   args: Record<string, unknown>,
   context: { cognitoSub: string }
@@ -604,7 +616,10 @@ async function handleExecuteAssistant(
     })
     return {
       content: [
-        { type: "text", text: `Assistant execution failed: ${error instanceof Error ? error.message : "Unknown error"}` },
+        {
+          type: "text",
+          text: assistantExecutionFailureMessage(error),
+        },
       ],
       isError: true,
     }

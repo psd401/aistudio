@@ -46,6 +46,7 @@ import {
   type AssistantRuntimeRepositoryInputs,
 } from "@/lib/assistant-architect/runtime-repository-inputs"
 import {
+  compareAssistantPromptExecutionOrder,
   createCoordinatedAssistantExecution,
   remainingAssistantExecutionTimeoutMs,
 } from "@/lib/assistant-architect/execution-coordinator"
@@ -260,6 +261,13 @@ async function prepareAssistantExecution(
     requireApproved: params.requireApproved,
   })
   if (!coordinated.created) {
+    if (coordinated.reason === "invalid_graph") {
+      throw ErrorFactories.validationFailed([{
+        field: "prompts",
+        message:
+          `Assistant prompt count must be between 1 and ${coordinated.maxPromptCount}`,
+      }])
+    }
     throw ErrorFactories.sysInternalError(
       "Unexpected assistant execution rate-limit result"
     )
@@ -356,7 +364,9 @@ function requirePromptChainArchitect(architect: ArchitectResult): ChainPrompt[] 
         "Agentic assistants are not supported on this execution surface. Run agentic assistants through the Assistant Architect UI.",
     }])
   }
-  const prompts = (architect.prompts || []).sort((left, right) => left.position - right.position)
+  const prompts = (architect.prompts || []).sort(
+    compareAssistantPromptExecutionOrder
+  )
   if (prompts.length === 0) {
     throw ErrorFactories.validationFailed([{
       field: "prompts",
@@ -1279,7 +1289,7 @@ export function substituteVariables(
   const positionToPromptId = new Map<number, number>()
   const sortedPrevPrompts = allPrompts
     .filter(p => p.position < currentPromptPosition)
-    .sort((a, b) => a.position - b.position)
+    .sort(compareAssistantPromptExecutionOrder)
 
   for (const [i, prevPrompt] of sortedPrevPrompts.entries()) {
     const output = previousOutputs.get(prevPrompt.id)

@@ -18,6 +18,13 @@ const PROMPT_CHAIN_DEFAULT_TIMEOUT_SECONDS =
   AGENT_LIMIT_CEILINGS.timeoutSeconds
 export const ASSISTANT_EXECUTION_MAX_PROMPTS = 20
 
+export function compareAssistantPromptExecutionOrder(
+  left: { id: number; position: number },
+  right: { id: number; position: number }
+): number {
+  return left.position - right.position || left.id - right.id
+}
+
 /**
  * Grace after an enforced execution deadline before an abandoned active row is
  * reconciled. The runtime deadline itself is derived by
@@ -187,11 +194,10 @@ async function requireCurrentExecutionAccess(
       tx
     )
     if (!isAdmin) {
-      throw ErrorFactories.authzToolAccessDenied("assistant execution", {
-        userMessage: "You do not have permission to access this assistant",
-        technicalMessage:
-          "Assistant visibility changed before the execution lock was acquired",
-      })
+      throw ErrorFactories.dbRecordNotFound(
+        "assistant_architects",
+        assistant.id
+      )
     }
   }
 
@@ -212,6 +218,7 @@ async function requireCurrentExecutionAccess(
 
   const promptModels = await tx
     .select({
+      id: chainPrompts.id,
       modelId: chainPrompts.modelId,
       position: chainPrompts.position,
     })
@@ -221,10 +228,13 @@ async function requireCurrentExecutionAccess(
     modelAccessMode === "final_prompt"
       ? [
           promptModels.reduce<
-            { modelId: number; position: number } | undefined
+            { id: number; modelId: number; position: number } | undefined
           >(
             (last, prompt) =>
-              !last || prompt.position > last.position ? prompt : last,
+              !last ||
+              compareAssistantPromptExecutionOrder(prompt, last) > 0
+                ? prompt
+                : last,
             undefined
           )?.modelId,
         ].filter((modelId): modelId is number => Boolean(modelId))

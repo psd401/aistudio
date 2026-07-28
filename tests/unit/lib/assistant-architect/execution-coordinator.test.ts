@@ -31,7 +31,8 @@ interface AssistantRow {
 function createTransaction(
   assistant: AssistantRow,
   modelIds: number[],
-  recentExecutionCount?: number
+  recentExecutionCount?: number,
+  promptRows?: Array<{ id: number; modelId: number; position: number }>
 ) {
   const values = jest.fn<
     (input: Record<string, unknown>) => {
@@ -55,7 +56,12 @@ function createTransaction(
     .mockReturnValueOnce({
       from: () => ({
         where: async () =>
-          modelIds.map((modelId, position) => ({ modelId, position })),
+          promptRows ??
+          modelIds.map((modelId, position) => ({
+            id: position + 1,
+            modelId,
+            position,
+          })),
       }),
     })
   if (recentExecutionCount !== undefined) {
@@ -187,27 +193,6 @@ describe("createCoordinatedAssistantExecution", () => {
     expect(insert).toHaveBeenCalledTimes(1)
   })
 
-  it("rechecks only the final stored model for a direct follow-up", async () => {
-    const automaticallyRoutedAssistant = {
-      ...approvedAssistant,
-      modelRoutingMode: "standard",
-    }
-    const { tx } = createTransaction(automaticallyRoutedAssistant, [2, 3])
-
-    await expect(
-      createCoordinatedAssistantExecution({
-        assistantId: 5,
-        userId: 7,
-        inputs: {},
-        modelAccessMode: "final_prompt",
-      }, coordinatorDependencies(tx))
-    ).resolves.toMatchObject({ created: true, executionId: 123 })
-    expect(mockUserCanAccessResource.mock.calls as unknown[][]).toEqual([
-      [7, "assistant", 5, { ownerUserId: 99 }, tx],
-      [7, "model", 3, {}, tx],
-    ])
-  })
-
   it("fails before graph reads or insert when assistant access was revoked", async () => {
     const { tx, insert } = createTransaction(approvedAssistant, [3])
     mockUserCanAccessResource.mockResolvedValueOnce(false)
@@ -267,6 +252,81 @@ describe("createCoordinatedAssistantExecution", () => {
       }, coordinatorDependencies(tx))
     ).resolves.toMatchObject({ created: true, executionId: 123 })
     expect(insert).toHaveBeenCalledTimes(1)
+  })
+
+})
+
+describe("coordinated final-prompt and visibility checks", () => {
+  it("rechecks only the final stored model for a direct follow-up", async () => {
+    const automaticallyRoutedAssistant = {
+      ...approvedAssistant,
+      modelRoutingMode: "standard",
+    }
+    const { tx } = createTransaction(automaticallyRoutedAssistant, [2, 3])
+
+    await expect(
+      createCoordinatedAssistantExecution({
+        assistantId: 5,
+        userId: 7,
+        inputs: {},
+        modelAccessMode: "final_prompt",
+      }, coordinatorDependencies(tx))
+    ).resolves.toMatchObject({ created: true, executionId: 123 })
+    expect(mockUserCanAccessResource.mock.calls as unknown[][]).toEqual([
+      [7, "assistant", 5, { ownerUserId: 99 }, tx],
+      [7, "model", 3, {}, tx],
+    ])
+  })
+
+  it("uses prompt id to deterministically select the final tied position", async () => {
+    const automaticallyRoutedAssistant = {
+      ...approvedAssistant,
+      modelRoutingMode: "standard",
+    }
+    const { tx } = createTransaction(
+      automaticallyRoutedAssistant,
+      [],
+      undefined,
+      [
+        { id: 12, modelId: 4, position: 3 },
+        { id: 10, modelId: 2, position: 1 },
+        { id: 11, modelId: 3, position: 3 },
+      ]
+    )
+
+    await expect(
+      createCoordinatedAssistantExecution({
+        assistantId: 5,
+        userId: 7,
+        inputs: {},
+        modelAccessMode: "final_prompt",
+      }, coordinatorDependencies(tx))
+    ).resolves.toMatchObject({ created: true, executionId: 123 })
+    expect(mockUserCanAccessResource.mock.calls as unknown[][]).toEqual([
+      [7, "assistant", 5, { ownerUserId: 99 }, tx],
+      [7, "model", 4, {}, tx],
+    ])
+  })
+
+  it("masks a draft visibility change for a non-owner session caller", async () => {
+    const pendingAssistant = {
+      ...approvedAssistant,
+      status: "pending_approval",
+    }
+    const { tx, insert } = createTransaction(pendingAssistant, [3])
+
+    await expect(
+      createCoordinatedAssistantExecution({
+        assistantId: 5,
+        userId: 7,
+        inputs: {},
+      }, coordinatorDependencies(tx))
+    ).rejects.toThrow(/Record not found in assistant_architects/)
+    expect(mockCheckUserRole.mock.calls as unknown[][]).toEqual([
+      [7, "administrator", tx],
+    ])
+    expect(tx.select).toHaveBeenCalledTimes(1)
+    expect(insert).not.toHaveBeenCalled()
   })
 })
 

@@ -201,6 +201,25 @@ function defineAssistantExecutionServiceRepositoryPreflightSuite1Part1() {
     expect(mockUnifiedStream).not.toHaveBeenCalled()
   })
 
+  it("returns a validation error when the coordinator rejects graph cardinality", async () => {
+    mockCreateCoordinatedAssistantExecution.mockResolvedValueOnce({
+      created: false,
+      reason: "invalid_graph",
+      promptCount: 21,
+      maxPromptCount: 20,
+    })
+
+    await expect(executeAssistant({
+      assistantId: 5,
+      inputs: {},
+      userId: 7,
+      cognitoSub: "executor-sub",
+      requestId: "request-invalid-graph",
+    })).rejects.toThrow("mock-error:validationFailed")
+    expect(mockGetAssistantArchitectByIdAction).not.toHaveBeenCalled()
+    expect(mockUnifiedStream).not.toHaveBeenCalled()
+  })
+
   }
 
 function defineAssistantExecutionServiceRepositoryPreflightSuite1Part2() {it.each([

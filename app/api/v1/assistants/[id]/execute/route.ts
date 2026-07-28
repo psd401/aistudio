@@ -10,6 +10,7 @@
 
 import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
+import { isValidationError } from "@/types/error-types"
 import {
   withApiAuth,
   requireScope,
@@ -237,6 +238,15 @@ function assistantExecutionErrorResponse(
       "CONTENT_BLOCKED",
       error.message,
       { categories: error.blockedCategories, source: error.source }
+    )
+  }
+  if (isValidationError(error)) {
+    return createErrorResponse(
+      requestId,
+      400,
+      "CONFIGURATION_ERROR",
+      error.fields?.map(({ message }) => message).join("; ") ||
+        "Assistant configuration is invalid"
     )
   }
   if (isExecutionHttpError(error)) {

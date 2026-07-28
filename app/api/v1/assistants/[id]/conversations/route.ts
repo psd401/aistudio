@@ -10,6 +10,7 @@
 
 import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
+import { isValidationError } from "@/types/error-types"
 import {
   withApiAuth,
   requireAssistantScope,
@@ -44,6 +45,7 @@ import {
   NexusAttachmentBindingRejectedError,
   rollbackNewNexusAttachmentConversation,
 } from "@/lib/nexus/request-attachment-binding"
+import { compareAssistantPromptExecutionOrder } from "@/lib/assistant-architect/execution-coordinator"
 
 export const maxDuration = 900
 
@@ -115,7 +117,7 @@ async function verifyStartAuthorization(
   }
   const architect = architectResult.data
   const prompts = (architect.prompts || []).sort(
-    (left, right) => left.position - right.position
+    compareAssistantPromptExecutionOrder
   )
   const lastPromptModelId = prompts.at(-1)?.modelId
   if (!lastPromptModelId) {
@@ -275,6 +277,15 @@ function mapStartConversationError(
       categories: error.blockedCategories,
       source: error.source,
     })
+  }
+  if (isValidationError(error)) {
+    return createErrorResponse(
+      requestId,
+      400,
+      "CONFIGURATION_ERROR",
+      error.fields?.map(({ message }) => message).join("; ") ||
+        "Assistant configuration is invalid"
+    )
   }
   if (isExecutionHttpError(error)) {
     const isNotFound = error.statusCode === 404
