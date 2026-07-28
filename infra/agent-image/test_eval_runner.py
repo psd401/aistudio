@@ -148,7 +148,7 @@ class FakeRuntime:
         self.invocations: list[tuple[str, str]] = []
         self.memory: dict[str, str] = {}
 
-    def start(self) -> None:
+    def prepare(self) -> None:
         self.started = True
 
     def invoke(
@@ -377,7 +377,64 @@ class RecordingExecutor:
         return runner.CommandResult(0, "true\n", "")
 
 
+class SequenceCredentialProvider:
+    def __init__(self, credentials: list[runner.AwsCredentials]) -> None:
+        self.credentials = credentials
+        self.calls = 0
+
+    def resolve(self) -> runner.AwsCredentials:
+        index = min(self.calls, len(self.credentials) - 1)
+        self.calls += 1
+        return self.credentials[index]
+
+
+def aws_credentials(
+    access_key: str = "access-1",
+    session_token: str = "token-1",
+    *,
+    expires_at: datetime | None = None,
+) -> runner.AwsCredentials:
+    return runner.AwsCredentials(
+        environment={
+            "AWS_ACCESS_KEY_ID": access_key,
+            "AWS_SECRET_ACCESS_KEY": f"secret-{access_key}",
+            "AWS_SESSION_TOKEN": session_token,
+        },
+        expires_at=expires_at,
+    )
+
+
 class DockerRuntimeTests(unittest.TestCase):
+    def test_process_credentials_preserve_expiration_for_refresh_decisions(self):
+        expiration = "2026-07-28T18:00:00Z"
+        executor = mock.Mock()
+        executor.run.return_value = runner.CommandResult(
+            0,
+            json.dumps(
+                {
+                    "Version": 1,
+                    "AccessKeyId": "access",
+                    "SecretAccessKey": "secret",
+                    "SessionToken": "token",
+                    "Expiration": expiration,
+                }
+            ),
+            "",
+        )
+
+        credentials = runner._resolve_aws_credentials(executor)
+
+        self.assertEqual(credentials.environment["AWS_SESSION_TOKEN"], "token")
+        self.assertEqual(
+            credentials.expires_at,
+            datetime(2026, 7, 28, 18, tzinfo=timezone.utc),
+        )
+        executor.run.assert_called_once_with(
+            ["aws", "configure", "export-credentials", "--format", "process"],
+            check=False,
+            timeout=30,
+        )
+
     def test_invocation_sends_agentcore_session_header(self):
         executor = RecordingExecutor()
         runtime = runner.DockerRuntime(
@@ -386,15 +443,14 @@ class DockerRuntimeTests(unittest.TestCase):
             "linux/arm64",
             {
                 "APP_BASE_URL": "https://dev.example.invalid",
-                "AWS_ACCESS_KEY_ID": "test",
-                "AWS_SECRET_ACCESS_KEY": "test",
             },
+            SequenceCredentialProvider([aws_credentials()]),
             boot_timeout_seconds=120,
             invocation_timeout_seconds=900,
             poll_interval_seconds=0,
             name_prefix="psd-agent-eval-issue-1422-test",
         )
-        runtime.start()
+        runtime.prepare()
         session_id = str("a" * 36)
         authority = runner.InvocationAuthority(
             invocation_context="context",
@@ -419,6 +475,65 @@ class DockerRuntimeTests(unittest.TestCase):
         self.assertIn(
             f"X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: {session_id}",
             invocation_call,
+        )
+
+    def test_rotated_credentials_recycle_shared_runtime_before_next_trial(self):
+        executor = RecordingExecutor()
+        first = aws_credentials()
+        second = aws_credentials("access-2", "token-2")
+        provider = SequenceCredentialProvider([first, first, second])
+        runtime = runner.DockerRuntime(
+            executor,
+            "candidate@sha256:digest",
+            "linux/arm64",
+            {"APP_BASE_URL": "https://dev.example.invalid"},
+            provider,
+            boot_timeout_seconds=120,
+            invocation_timeout_seconds=900,
+            poll_interval_seconds=0,
+            name_prefix="psd-agent-eval-issue-1422-test",
+        )
+
+        runtime.prepare()
+        runtime.prepare()
+        runtime.prepare()
+        runtime.stop()
+
+        docker_runs = [
+            call for call in executor.calls if call[:2] == ("docker", "run")
+        ]
+        self.assertEqual(provider.calls, 3)
+        self.assertEqual(len(docker_runs), 2)
+        self.assertEqual(
+            sum(call[:3] == ("docker", "rm", "-f") for call in executor.calls),
+            2,
+        )
+        self.assertTrue(
+            any(value == "AWS_SESSION_TOKEN=token-2" for value in docker_runs[1])
+        )
+
+    def test_credentials_must_outlive_invocation_timeout(self):
+        executor = RecordingExecutor()
+        now = datetime(2026, 7, 28, tzinfo=timezone.utc)
+        runtime = runner.DockerRuntime(
+            executor,
+            "candidate@sha256:digest",
+            "linux/arm64",
+            {"APP_BASE_URL": "https://dev.example.invalid"},
+            SequenceCredentialProvider(
+                [aws_credentials(expires_at=now + timedelta(seconds=959))]
+            ),
+            boot_timeout_seconds=120,
+            invocation_timeout_seconds=900,
+            poll_interval_seconds=0,
+            name_prefix="psd-agent-eval-issue-1422-test",
+            now=lambda: now,
+        )
+
+        with self.assertRaisesRegex(runner.EvalRunnerError, "refresh the AWS login"):
+            runtime.prepare()
+        self.assertFalse(
+            any(call[:2] == ("docker", "run") for call in executor.calls)
         )
 
 

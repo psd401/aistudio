@@ -32,6 +32,7 @@ else:
 LOGGER = logging.getLogger("agent_eval")
 DEFAULT_OWNER_EMAIL = "canary@build-gate.invalid"
 DEFAULT_CONTEXT_TTL_SECONDS = 900
+AWS_CREDENTIAL_EXPIRY_MARGIN_SECONDS = 60
 REQUIRED_METADATA_FIELDS = frozenset(
     {
         "input_tokens",
@@ -70,6 +71,20 @@ class InvocationAuthority:
     owner_email: str
     session_id: str
     expires_at: datetime
+
+
+@dataclass(frozen=True)
+class AwsCredentials:
+    environment: Mapping[str, str]
+    expires_at: datetime | None
+
+    @property
+    def identity(self) -> tuple[str, str, str]:
+        return (
+            self.environment["AWS_ACCESS_KEY_ID"],
+            self.environment["AWS_SECRET_ACCESS_KEY"],
+            self.environment.get("AWS_SESSION_TOKEN", ""),
+        )
 
 
 @dataclass(frozen=True)
@@ -124,8 +139,8 @@ class ContextMinter(Protocol):
 
 
 class Runtime(Protocol):
-    def start(self) -> None:
-        """Boot and health-check the candidate container."""
+    def prepare(self) -> None:
+        """Ensure the candidate is running with credentials valid for a trial."""
 
     def invoke(
         self,
@@ -142,6 +157,21 @@ class Runtime(Protocol):
 class RuntimeFactory(Protocol):
     def create(self) -> Runtime:
         """Create an unstarted, independently owned runtime."""
+
+
+class CredentialProvider(Protocol):
+    def resolve(self) -> AwsCredentials:
+        """Resolve the active AWS chain without retaining stale credentials."""
+
+
+class ActiveAwsCredentialProvider:
+    """Re-resolve the AWS CLI credential chain before every trial."""
+
+    def __init__(self, executor: CommandExecutor) -> None:
+        self._executor = executor
+
+    def resolve(self) -> AwsCredentials:
+        return _resolve_aws_credentials(self._executor)
 
 
 class ProbeContextMinter:
@@ -215,6 +245,7 @@ class DockerRuntime:
         image: str,
         platform: str,
         environment_values: Mapping[str, str],
+        credential_provider: CredentialProvider,
         *,
         boot_timeout_seconds: int,
         invocation_timeout_seconds: int,
@@ -222,18 +253,26 @@ class DockerRuntime:
         name_prefix: str,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self._executor = executor
         self._image = image
         self._platform = platform
         self._environment_values = dict(environment_values)
+        self._credential_provider = credential_provider
         self._boot_timeout_seconds = boot_timeout_seconds
         self._invocation_timeout_seconds = invocation_timeout_seconds
         self._poll_interval_seconds = poll_interval_seconds
-        self._name = f"{name_prefix}-{uuid.uuid4().hex[:10]}"
+        self._name_prefix = name_prefix
+        self._name = self._new_name()
         self._monotonic = monotonic
         self._sleep = sleep
+        self._now = now or (lambda: datetime.now(timezone.utc))
         self._container_id: str | None = None
+        self._active_credentials: AwsCredentials | None = None
+
+    def _new_name(self) -> str:
+        return f"{self._name_prefix}-{uuid.uuid4().hex[:10]}"
 
     @property
     def container_id(self) -> str:
@@ -241,9 +280,42 @@ class DockerRuntime:
             raise EvalRunnerError("container has not been started")
         return self._container_id
 
-    def start(self) -> None:
+    def prepare(self) -> None:
+        credentials = self._credential_provider.resolve()
+        if credentials.expires_at is not None:
+            required_seconds = (
+                self._invocation_timeout_seconds
+                + AWS_CREDENTIAL_EXPIRY_MARGIN_SECONDS
+            )
+            remaining_seconds = (
+                credentials.expires_at - self._now()
+            ).total_seconds()
+            if remaining_seconds < required_seconds:
+                raise EvalRunnerError(
+                    "active AWS credentials expire before the configured invocation "
+                    "timeout; refresh the AWS login before continuing"
+                )
+        if self._container_id is None:
+            self._active_credentials = credentials
+            self._start()
+            return
+        if (
+            self._active_credentials is not None
+            and credentials.identity == self._active_credentials.identity
+        ):
+            self._active_credentials = credentials
+            return
+        LOGGER.info("AWS credentials rotated; recycling candidate container")
+        self.stop()
+        self._active_credentials = credentials
+        self._name = self._new_name()
+        self._start()
+
+    def _start(self) -> None:
         if self._container_id is not None:
             raise EvalRunnerError("container was already started")
+        if self._active_credentials is None:
+            raise EvalRunnerError("AWS credentials were not prepared")
         arguments = [
             "docker",
             "run",
@@ -253,7 +325,11 @@ class DockerRuntime:
             "--name",
             self._name,
         ]
-        for key, value in sorted(self._environment_values.items()):
+        environment_values = {
+            **self._environment_values,
+            **self._active_credentials.environment,
+        }
+        for key, value in sorted(environment_values.items()):
             arguments.extend(["-e", f"{key}={value}"])
         arguments.append(self._image)
         result = self._executor.run(arguments, timeout=60)
@@ -397,6 +473,7 @@ class DockerRuntimeFactory:
         image: str,
         platform: str,
         environment_values: Mapping[str, str],
+        credential_provider: CredentialProvider,
         *,
         boot_timeout_seconds: int,
         invocation_timeout_seconds: int,
@@ -407,6 +484,7 @@ class DockerRuntimeFactory:
         self._image = image
         self._platform = platform
         self._environment_values = dict(environment_values)
+        self._credential_provider = credential_provider
         self._boot_timeout_seconds = boot_timeout_seconds
         self._invocation_timeout_seconds = invocation_timeout_seconds
         self._poll_interval_seconds = poll_interval_seconds
@@ -418,6 +496,7 @@ class DockerRuntimeFactory:
             self._image,
             self._platform,
             self._environment_values,
+            self._credential_provider,
             boot_timeout_seconds=self._boot_timeout_seconds,
             invocation_timeout_seconds=self._invocation_timeout_seconds,
             poll_interval_seconds=self._poll_interval_seconds,
@@ -464,11 +543,12 @@ class EvaluationRunner:
                     else:
                         if pure_runtime is None:
                             pure_runtime = self._runtime_factory.create()
-                            pure_runtime.start()
                         runtime = pure_runtime
                     try:
-                        if owns_runtime:
-                            runtime.start()
+                        # Re-resolve the active credential chain before every
+                        # trial. Pure runtimes remain shared while credentials
+                        # are stable and are recycled immediately on rotation.
+                        runtime.prepare()
                         session_id = self._session_id_factory()
                         if len(session_id) < 33 or len(session_id) > 256:
                             raise EvalRunnerError(
@@ -723,34 +803,51 @@ def _resolve_app_base_url(
     return resolved
 
 
-def _resolve_aws_credentials(executor: CommandExecutor) -> dict[str, str]:
+def _resolve_aws_credentials(executor: CommandExecutor) -> AwsCredentials:
     allowed = {
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
     }
     exported = executor.run(
-        ["aws", "configure", "export-credentials", "--format", "env-no-export"],
+        ["aws", "configure", "export-credentials", "--format", "process"],
         check=False,
         timeout=30,
     )
     credentials: dict[str, str] = {}
+    expires_at: datetime | None = None
     if exported.returncode == 0:
-        for line in exported.stdout.splitlines():
-            key, separator, value = line.partition("=")
-            if separator and key in allowed and value:
-                credentials[key] = value
+        try:
+            process_credentials = json.loads(exported.stdout)
+            credentials = {
+                "AWS_ACCESS_KEY_ID": str(process_credentials["AccessKeyId"]),
+                "AWS_SECRET_ACCESS_KEY": str(process_credentials["SecretAccessKey"]),
+            }
+            session_token = process_credentials.get("SessionToken")
+            if session_token:
+                credentials["AWS_SESSION_TOKEN"] = str(session_token)
+            expiration = process_credentials.get("Expiration")
+            if expiration:
+                expires_at = datetime.fromisoformat(
+                    str(expiration).replace("Z", "+00:00")
+                )
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            credentials = {}
+            expires_at = None
     if not {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}.issubset(credentials):
         credentials = {
             key: os.environ[key]
             for key in allowed
             if os.environ.get(key)
         }
+        expires_at = None
     if not {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}.issubset(credentials):
         raise EvalRunnerError(
             "could not resolve AWS credentials for the candidate container"
         )
-    return credentials
+    return AwsCredentials(environment=credentials, expires_at=expires_at)
 
 
 def _positive_integer(value: str) -> int:
@@ -824,7 +921,6 @@ def main(argv: list[str] | None = None) -> int:
             "AWS_REGION": args.region,
             "APP_BASE_URL": app_base_url,
             "BUILD_MARKER": f"eval:{args.image}",
-            **_resolve_aws_credentials(executor),
         }
         name_token = re.sub(r"[^a-z0-9-]", "-", f"issue-1422-{os.getpid()}".lower())
         runtime_factory = DockerRuntimeFactory(
@@ -832,6 +928,7 @@ def main(argv: list[str] | None = None) -> int:
             args.image,
             args.platform,
             environment_values,
+            ActiveAwsCredentialProvider(executor),
             boot_timeout_seconds=args.boot_timeout,
             invocation_timeout_seconds=args.invocation_timeout,
             poll_interval_seconds=args.poll_interval,
