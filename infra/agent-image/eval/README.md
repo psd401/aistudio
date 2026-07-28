@@ -62,9 +62,10 @@ read-only bind mount of `eval/broker_stub.py`. The candidate image is not
 modified. A second, runner-owned `0700` bind mount carries only the active
 trial's fixtures and `0600` request capture. The stub implements the same 16
 fixed `/api/agent/*` routes as `agent-broker.js` and `mantle_proxy.py`, plus the
-health, usage, and finalization endpoints the wrapper needs. L0 and L2 tasks
-retain the image's real proxy; pure live and stubbed tasks use separate
-containers.
+health, usage, and finalization endpoints the wrapper needs. Finalization
+drains already-active broker requests and rejects new work before acknowledging
+the boundary, so captures cannot spill across trials. L0 and L2 tasks retain
+the image's real proxy; pure live and stubbed tasks use separate containers.
 
 ## Task and suite files
 

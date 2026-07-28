@@ -14,6 +14,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -65,9 +66,14 @@ class RunningStub:
             prefix="issue-1424-broker-test-"
         )
         self.control_directory = Path(self.temporary_directory.name)
+        self.flush_token = "f" * 43
+        self.flush_token_path = self.control_directory / "workspace-flush-token"
+        self.flush_token_path.write_text(self.flush_token, encoding="ascii")
+        os.chmod(self.flush_token_path, 0o600)
         self.server = broker_stub.create_server(
             self.control_directory,
             port=0,
+            workspace_flush_token_path=self.flush_token_path,
         )
         self.thread = threading.Thread(
             target=self.server.serve_forever,
@@ -105,13 +111,16 @@ class RunningStub:
         *,
         method: str = "GET",
         body: object | None = None,
+        headers: dict[str, str] | None = None,
     ) -> tuple[int, object]:
         data = None if body is None else json.dumps(body).encode("utf-8")
+        request_headers = {"Content-Type": "application/json"}
+        request_headers.update(headers or {})
         request = urllib.request.Request(
             self.base_url + path,
             data=data,
             method=method,
-            headers={"Content-Type": "application/json"},
+            headers=request_headers,
         )
         try:
             with urllib.request.urlopen(request, timeout=2) as response:
@@ -344,10 +353,12 @@ class BrokerStubHttpTests(unittest.TestCase):
         begin_status, begin = self.stub.request(
             "/internal/finalization/begin",
             method="POST",
+            headers={"X-Agent-Workspace-Flush": self.stub.flush_token},
         )
         end_status, end = self.stub.request(
             "/internal/finalization/end",
             method="POST",
+            headers={"X-Agent-Workspace-Flush": self.stub.flush_token},
         )
 
         self.assertEqual(health_status, 200)
@@ -355,6 +366,118 @@ class BrokerStubHttpTests(unittest.TestCase):
         self.assertEqual(usage_status, 200)
         self.assertEqual(usage["usage_events"], 0)
         self.assertEqual((begin_status, begin), (200, {"finalizing": True}))
+        self.assertEqual((end_status, end), (200, {"finalizing": False}))
+
+    def test_finalization_drains_in_flight_request_and_rejects_new_work(self):
+        self.stub.configure(
+            [
+                {
+                    "route": "/api/agent/directory-lookup",
+                    "response": {"body": {"people": []}},
+                },
+                {
+                    "route": "/api/agent/workspace-storage",
+                    "request_body": {"operation": "upload"},
+                    "response": {"body": {"stored": True}},
+                }
+            ]
+        )
+        entered_fixture = threading.Event()
+        release_fixture = threading.Event()
+        original_find_fixture = self.stub.server.state.find_fixture
+
+        def blocking_find_fixture(*args, **kwargs):
+            entered_fixture.set()
+            if not release_fixture.wait(timeout=2):
+                raise AssertionError("test did not release the in-flight request")
+            return original_find_fixture(*args, **kwargs)
+
+        self.stub.server.state.find_fixture = blocking_find_fixture
+        results: dict[str, tuple[int, object]] = {}
+
+        in_flight = threading.Thread(
+            target=lambda: results.setdefault(
+                "in_flight",
+                self.stub.request(
+                    "/agent-broker/api/agent/directory-lookup",
+                    method="POST",
+                    body={"query": "Ada"},
+                ),
+            ),
+            daemon=True,
+        )
+        in_flight.start()
+        self.assertTrue(entered_fixture.wait(timeout=1))
+
+        begin = threading.Thread(
+            target=lambda: results.setdefault(
+                "begin",
+                self.stub.request(
+                    "/internal/finalization/begin",
+                    method="POST",
+                    headers={
+                        "X-Agent-Workspace-Flush": self.stub.flush_token,
+                    },
+                ),
+            ),
+            daemon=True,
+        )
+        begin.start()
+        deadline = time.monotonic() + 1
+        while (
+            self.stub.server.state.finalization_state != "draining"
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.005)
+        self.assertEqual(
+            self.stub.server.state.finalization_state,
+            "draining",
+        )
+        self.assertTrue(begin.is_alive())
+
+        rejected_status, rejected = self.stub.request(
+            "/agent-broker/api/agent/directory-lookup",
+            method="POST",
+            body={"query": "Grace"},
+        )
+        self.assertEqual(rejected_status, 503)
+        self.assertEqual(rejected["error"], broker_stub.FINALIZING_ERROR)
+
+        release_fixture.set()
+        in_flight.join(timeout=1)
+        begin.join(timeout=1)
+        self.assertFalse(in_flight.is_alive())
+        self.assertFalse(begin.is_alive())
+        self.assertEqual(results["in_flight"][0], 200)
+        self.assertEqual(results["begin"], (200, {"finalizing": True}))
+        self.assertTrue(
+            any(
+                capture["body"] == {"query": "Ada"}
+                for capture in self.stub.captures()
+            )
+        )
+
+        rejected_status, rejected = self.stub.request(
+            "/agent-broker/api/agent/directory-lookup",
+            method="POST",
+            body={"query": "Katherine"},
+        )
+        self.assertEqual(rejected_status, 503)
+        self.assertEqual(rejected["error"], broker_stub.FINALIZING_ERROR)
+
+        flush_status, flush = self.stub.request(
+            "/agent-broker/api/agent/workspace-storage",
+            method="POST",
+            body={"operation": "upload"},
+            headers={"X-Agent-Workspace-Flush": self.stub.flush_token},
+        )
+        self.assertEqual((flush_status, flush), (200, {"stored": True}))
+
+        end_status, end = self.stub.request(
+            "/internal/finalization/end",
+            method="POST",
+            headers={"X-Agent-Workspace-Flush": self.stub.flush_token},
+        )
         self.assertEqual((end_status, end), (200, {"finalizing": False}))
 
 

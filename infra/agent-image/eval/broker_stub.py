@@ -9,10 +9,12 @@ through a separate runner-owned bind mount.
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
 import threading
+import time
 from collections.abc import Mapping
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,12 +26,17 @@ from urllib.parse import urlsplit
 LOGGER = logging.getLogger("agent_eval_broker_stub")
 CONTROL_DIRECTORY_ENV = "AGENT_EVAL_BROKER_CONTROL_DIR"
 DEFAULT_CONTROL_DIRECTORY = "/run/psd-agent-eval-broker"
+DEFAULT_WORKSPACE_FLUSH_TOKEN_PATH = (
+    "/run/psd-agent-authority/workspace-flush-token"
+)
 TRIAL_CONFIG_FILENAME = "trial.json"
 CAPTURE_FILENAME = "capture.jsonl"
 MAX_REQUEST_BYTES = 50 * 1024 * 1024
+FINALIZATION_DRAIN_TIMEOUT_SECONDS = 120
 MISSING_FIXTURE_ERROR = "EvalFixtureMissing"
 UNSUPPORTED_METHOD_ERROR = "EvalUnsupportedAgentMethod"
 INVALID_REQUEST_BODY_ERROR = "EvalInvalidRequestBody"
+FINALIZING_ERROR = "EvalFinalizationInProgress"
 
 ALLOWED_AGENT_BROKER_ROUTES = frozenset(
     {
@@ -82,9 +89,21 @@ def _mapping_contains(actual: object, expected: object) -> bool:
 class BrokerStubState:
     """Read active fixtures and append captures under a runner-owned directory."""
 
-    def __init__(self, control_directory: Path) -> None:
+    def __init__(
+        self,
+        control_directory: Path,
+        *,
+        workspace_flush_token_path: Path | None = None,
+    ) -> None:
         self.control_directory = control_directory
+        self.workspace_flush_token_path = (
+            workspace_flush_token_path
+            or Path(DEFAULT_WORKSPACE_FLUSH_TOKEN_PATH)
+        )
         self._capture_lock = threading.Lock()
+        self._finalization_condition = threading.Condition()
+        self._finalization_state = "open"
+        self._active_requests = 0
 
     @property
     def trial_config_path(self) -> Path:
@@ -154,6 +173,61 @@ class BrokerStubState:
                 except OSError:
                     pass
                 raise
+
+    def valid_flush_token(self, supplied_token: str | None) -> bool:
+        try:
+            expected_token = self.workspace_flush_token_path.read_text(
+                encoding="ascii"
+            ).strip()
+        except OSError:
+            return False
+        return (
+            isinstance(supplied_token, str)
+            and bool(expected_token)
+            and hmac.compare_digest(supplied_token, expected_token)
+        )
+
+    def enter_request(self, *, final_flush: bool = False) -> bool:
+        with self._finalization_condition:
+            if self._finalization_state == "draining":
+                return False
+            if self._finalization_state == "flushing" and not final_flush:
+                return False
+            self._active_requests += 1
+            return True
+
+    def leave_request(self) -> None:
+        with self._finalization_condition:
+            if self._active_requests <= 0:
+                raise RuntimeError("finalization gate request count underflow")
+            self._active_requests -= 1
+            if self._active_requests == 0:
+                self._finalization_condition.notify_all()
+
+    def begin_finalization(
+        self,
+        timeout_seconds: float = FINALIZATION_DRAIN_TIMEOUT_SECONDS,
+    ) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        with self._finalization_condition:
+            self._finalization_state = "draining"
+            while self._active_requests:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._finalization_condition.wait(timeout=remaining)
+            self._finalization_state = "flushing"
+            return True
+
+    def end_finalization(self) -> None:
+        with self._finalization_condition:
+            self._finalization_state = "open"
+            self._finalization_condition.notify_all()
+
+    @property
+    def finalization_state(self) -> str:
+        with self._finalization_condition:
+            return self._finalization_state
 
 
 class BrokerStubServer(ThreadingHTTPServer):
@@ -234,10 +308,27 @@ class BrokerStubRequestHandler(BaseHTTPRequestHandler):
             return True
         if path == "/internal/finalization/begin" and self.command == "POST":
             self._read_body()
+            if not self.server.state.valid_flush_token(
+                self.headers.get("X-Agent-Workspace-Flush")
+            ):
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "NotFound"})
+                return True
+            if not self.server.state.begin_finalization():
+                self._send_json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": "PrivilegedRequestDrainTimedOut"},
+                )
+                return True
             self._send_json(HTTPStatus.OK, {"finalizing": True})
             return True
         if path == "/internal/finalization/end" and self.command == "POST":
             self._read_body()
+            if not self.server.state.valid_flush_token(
+                self.headers.get("X-Agent-Workspace-Flush")
+            ):
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "NotFound"})
+                return True
+            self.server.state.end_finalization()
             self._send_json(HTTPStatus.OK, {"finalizing": False})
             return True
         if path in self.CONTROL_ENDPOINTS:
@@ -373,12 +464,51 @@ class BrokerStubRequestHandler(BaseHTTPRequestHandler):
                 {"error": MISSING_FIXTURE_ERROR, "message": message},
             )
 
+    def _capture_finalization_rejection(self, route: str) -> None:
+        try:
+            trial = self.server.state.load_trial()
+            self.server.state.capture(
+                {
+                    "trial_id": trial.get("trial_id"),
+                    "task_id": trial.get("task_id"),
+                    "route": route,
+                    "method": self.command,
+                    "headers": {
+                        key.lower(): value
+                        for key, value in self.headers.items()
+                    },
+                    "body": None,
+                    "stub_error": (
+                        f"{FINALIZING_ERROR}: rejected {self.command} {route}"
+                    ),
+                }
+            )
+        except (BrokerStubConfigurationError, OSError):
+            pass
+
     def _handle(self) -> None:
         path = urlsplit(self.path).path
         if self._handle_control(path):
             return
         if path.startswith("/agent-broker/"):
-            self._handle_agent_broker(path)
+            route = path[len("/agent-broker") :]
+            final_flush = (
+                route == "/api/agent/workspace-storage"
+                and self.server.state.valid_flush_token(
+                    self.headers.get("X-Agent-Workspace-Flush")
+                )
+            )
+            if not self.server.state.enter_request(final_flush=final_flush):
+                self._capture_finalization_rejection(route)
+                self._send_json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": FINALIZING_ERROR},
+                )
+                return
+            try:
+                self._handle_agent_broker(path)
+            finally:
+                self.server.state.leave_request()
             return
         self._send_json(
             HTTPStatus.NOT_FOUND,
@@ -397,10 +527,17 @@ def create_server(
     *,
     host: str = "127.0.0.1",
     port: int = 18791,
+    workspace_flush_token_path: Path | None = None,
 ) -> BrokerStubServer:
     control_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(control_directory, 0o700)
-    return BrokerStubServer((host, port), BrokerStubState(control_directory))
+    return BrokerStubServer(
+        (host, port),
+        BrokerStubState(
+            control_directory,
+            workspace_flush_token_path=workspace_flush_token_path,
+        ),
+    )
 
 
 def main() -> None:

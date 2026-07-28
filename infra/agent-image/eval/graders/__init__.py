@@ -418,19 +418,37 @@ def _parse_tools_catalog_names(log_text: str) -> set[str]:
 
     def collect(value: object) -> None:
         if isinstance(value, Mapping):
+            compact_names = value.get("names")
+            if isinstance(compact_names, list):
+                observed.update(
+                    item
+                    for item in compact_names
+                    if isinstance(item, str) and item
+                )
+                return
             name = value.get("name")
             if isinstance(name, str) and name:
                 observed.add(name)
-            for nested in value.values():
-                if isinstance(nested, (Mapping, list)):
-                    collect(nested)
+                return
+            for group in value.values():
+                if isinstance(group, list):
+                    collect(group)
+                elif isinstance(group, Mapping):
+                    group_tools = group.get("tools")
+                    if isinstance(group_tools, list):
+                        collect(group_tools)
+                    else:
+                        group_name = group.get("name")
+                        if isinstance(group_name, str) and group_name:
+                            observed.add(group_name)
             return
         if isinstance(value, list):
-            for nested in value:
-                if isinstance(nested, str) and nested:
-                    observed.add(nested)
-                else:
-                    collect(nested)
+            for entry in value:
+                if not isinstance(entry, Mapping):
+                    continue
+                name = entry.get("name")
+                if isinstance(name, str) and name:
+                    observed.add(name)
 
     marker = "tools.catalog ok:"
     for line in log_text.splitlines():

@@ -41,31 +41,35 @@ def _is_safe_path_component(value: str) -> bool:
 
 
 def _catalog_tool_names(catalog: object) -> List[str]:
-    """Return every exact tool name from the gateway catalog, in source order."""
+    """Return explicit catalog-entry names without traversing their schemas."""
 
     names: List[str] = []
     seen: set[str] = set()
 
-    def collect(value: object) -> None:
-        if isinstance(value, dict):
-            name = value.get("name")
-            if isinstance(name, str) and name and name not in seen:
-                seen.add(name)
-                names.append(name)
-            for nested in value.values():
-                if isinstance(nested, (dict, list, tuple)):
-                    collect(nested)
-            return
-        if isinstance(value, (list, tuple)):
-            for nested in value:
-                if isinstance(nested, str):
-                    if nested and nested not in seen:
-                        seen.add(nested)
-                        names.append(nested)
-                else:
-                    collect(nested)
+    entries: List[object] = []
+    if isinstance(catalog, (list, tuple)):
+        entries.extend(catalog)
+    elif isinstance(catalog, dict):
+        if isinstance(catalog.get("name"), str):
+            entries.append(catalog)
+        else:
+            for group in catalog.values():
+                if isinstance(group, (list, tuple)):
+                    entries.extend(group)
+                elif isinstance(group, dict):
+                    group_tools = group.get("tools")
+                    if isinstance(group_tools, (list, tuple)):
+                        entries.extend(group_tools)
+                    elif isinstance(group.get("name"), str):
+                        entries.append(group)
 
-    collect(catalog)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if isinstance(name, str) and name and name not in seen:
+            seen.add(name)
+            names.append(name)
     return names
 
 

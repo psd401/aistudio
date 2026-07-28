@@ -220,6 +220,24 @@ class OutputAndTrajectoryGraderTests(unittest.TestCase):
 
         self.assertTrue(decision["passed"])
 
+    def test_tools_catalog_ignores_schema_strings_that_look_like_tools(self):
+        decision = grade(
+            [
+                {
+                    "type": "tools_catalog",
+                    "expected": ["workspace.execute"],
+                }
+            ],
+            catalog=(
+                'tools.catalog ok: [{"name":"read","inputSchema":'
+                '{"required":["workspace.execute"],'
+                '"properties":{"choice":{'
+                '"name":"workspace.execute"}}}}]'
+            ),
+        )
+
+        self.assertFalse(decision["passed"])
+
 
 class ReliabilityAggregationTests(unittest.TestCase):
     def test_failed_invocation_cannot_pass_a_negative_route_grader(self):

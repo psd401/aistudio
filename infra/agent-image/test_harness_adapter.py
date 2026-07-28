@@ -75,6 +75,26 @@ class CatalogDiagnosticTests(unittest.TestCase):
             ["workspace.execute", "skills.search", "read"],
         )
 
+    def test_ignores_strings_and_name_fields_nested_inside_tool_schemas(self):
+        names = harness_adapter._catalog_tool_names(
+            [
+                {
+                    "name": "actual.tool",
+                    "inputSchema": {
+                        "required": ["phantom.required"],
+                        "properties": {
+                            "choice": {
+                                "enum": ["phantom.enum"],
+                                "name": "phantom.nested-name",
+                            }
+                        },
+                    },
+                }
+            ]
+        )
+
+        self.assertEqual(names, ["actual.tool"])
+
 
 class GatewayTokenTests(unittest.TestCase):
     def test_token_generated_and_nonempty(self):
