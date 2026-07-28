@@ -841,6 +841,11 @@ ids, and prompt tools. These properties are optional for compatibility with
 older v1.0 files; missing values use the existing database defaults. Unsupported
 input field types and invalid configuration values fail envelope validation
 before any assistant transaction begins.
+Advanced model routing requires an OpenAI, Anthropic, or Google routing family,
+while legacy and standard routing reject a non-null family. Agent cost caps,
+when present, must be positive. An update cannot reverse an agentic assistant
+to prompt-chain mode; because omitted legacy fields use their v1.0 defaults, an
+agentic update must explicitly retain `mode: "agentic"`.
 
 Agent tool and connector identifiers are also checked against the importing
 author's role-derived scopes and connector visibility before any write starts.
@@ -861,7 +866,8 @@ field leaves no partial rows for that assistant while successful siblings in a
 multi-assistant import remain committed. Model names use the existing importer
 resolution order: exact active `modelId`, provider-family fallback
 (OpenAI/Anthropic/Google), then the first active model. Responses report every
-`modelName` → `mappedToId` choice.
+`modelName` → `mappedToId` choice. If no active model can be mapped for any
+prompt, validation fails before a create or replacement transaction starts.
 
 **Create example**
 
@@ -965,6 +971,8 @@ The optional body may be omitted. A successful `201` response contains
 
 - `400` — Invalid JSON, unsupported export version/shape or collection limit, an
   inaccessible agent tool/connector, mapped model, or durable repository, a
+  prompt with no active model mapping, an invalid routing/agent limit
+  combination, an unsupported agentic-to-prompt-chain update,
   non-positive or partially numeric path ID, an update envelope containing
   other than one assistant, or an invalid fork name.
 - `401` — Missing or invalid authentication.

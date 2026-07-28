@@ -65,6 +65,48 @@ function defineImportCollectionLimitTests() {
   })
 }
 
+function defineAssistantConfigInvariantTests() {
+  it('rejects advanced model routing without a model family', () => {
+    const data = {
+      ...validImport,
+      assistants: [{
+        ...validAssistant,
+        model_routing_mode: 'advanced',
+      }],
+    }
+    const result = validateImportFile(data)
+    expect(result.valid).toBe(false)
+    expect(result.error).toMatch(/advanced model routing requires model_routing_family/)
+  })
+
+  it('rejects a model family unless advanced routing is selected', () => {
+    const data = {
+      ...validImport,
+      assistants: [{
+        ...validAssistant,
+        model_routing_mode: 'standard',
+        model_routing_family: 'anthropic',
+      }],
+    }
+    const result = validateImportFile(data)
+    expect(result.valid).toBe(false)
+    expect(result.error).toMatch(/model_routing_family requires advanced model routing/)
+  })
+
+  it('rejects a zero agent cost cap before persistence', () => {
+    const data = {
+      ...validImport,
+      assistants: [{
+        ...validAssistant,
+        agent_cost_cap_cents: 0,
+      }],
+    }
+    const result = validateImportFile(data)
+    expect(result.valid).toBe(false)
+    expect(result.error).toMatch(/agent_cost_cap_cents must be a positive integer/)
+  })
+}
+
 describe('validateImportFile', () => {
   it('accepts a valid import file', () => {
     expect(validateImportFile(validImport)).toEqual({ valid: true })
@@ -163,6 +205,8 @@ describe('validateImportFile', () => {
     }
     expect(validateImportFile(data)).toEqual({ valid: true })
   })
+
+  defineAssistantConfigInvariantTests()
 
   it('rejects prompt content exceeding 10,000,000 characters', () => {
     const content = 'x'.repeat(10_000_001)

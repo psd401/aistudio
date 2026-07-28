@@ -130,7 +130,13 @@ async function validateImportedPromptResourceAccess(
   for (const assistant of assistants) {
     for (const prompt of assistant.prompts) {
       const modelId = modelMap.get(prompt.model_name);
-      if (modelId) modelIds.add(modelId);
+      if (!modelId) {
+        throw new AssistantImportServiceError(
+          "VALIDATION_ERROR",
+          "One or more prompt models are unavailable",
+        );
+      }
+      modelIds.add(modelId);
       for (const repositoryId of prompt.repository_ids ?? []) {
         repositoryIds.add(repositoryId);
       }
@@ -287,17 +293,14 @@ async function insertImportedPrompts(
   assistantId: number,
   assistant: ImportedAssistant,
   modelMap: Map<string, number>,
-  log: ReturnType<typeof createLogger>,
 ): Promise<void> {
   for (const prompt of assistant.prompts) {
     const modelId = modelMap.get(prompt.model_name);
     if (!modelId) {
-      log.warn("Skipping imported prompt without an active model mapping", {
-        assistantName: assistant.name,
-        promptName: prompt.name,
-        modelName: prompt.model_name,
-      });
-      continue;
+      throw new AssistantImportServiceError(
+        "VALIDATION_ERROR",
+        "One or more prompt models are unavailable",
+      );
     }
 
     await tx.insert(chainPrompts).values({
@@ -355,7 +358,6 @@ async function insertAssistantGraph(
   assistant: ImportedAssistant,
   modelMap: Map<string, number>,
   userId: number,
-  log: ReturnType<typeof createLogger>,
 ): Promise<AssistantImportSuccess> {
   const [createdAssistant] = await tx
     .insert(assistantArchitects)
@@ -375,7 +377,7 @@ async function insertAssistantGraph(
     throw new Error("Assistant insert did not return a row");
   }
 
-  await insertImportedPrompts(tx, createdAssistant.id, assistant, modelMap, log);
+  await insertImportedPrompts(tx, createdAssistant.id, assistant, modelMap);
   await insertImportedFields(tx, createdAssistant.id, assistant);
 
   return {
@@ -411,7 +413,7 @@ export async function createAssistantsFromImport(
   for (const assistant of importData.assistants) {
     try {
       const result = await executeTransaction(
-        (tx) => insertAssistantGraph(tx, assistant, modelMap, userId, log),
+        (tx) => insertAssistantGraph(tx, assistant, modelMap, userId),
         "createAssistantFromImport",
       );
       results.push(result);
@@ -450,7 +452,6 @@ async function replaceAssistantGraph(
   assistantId: number,
   assistant: ImportedAssistant,
   modelMap: Map<string, number>,
-  log: ReturnType<typeof createLogger>,
 ): Promise<AssistantImportSuccess> {
   await tx
     .update(capabilities)
@@ -500,7 +501,7 @@ async function replaceAssistantGraph(
   await tx
     .delete(toolInputFields)
     .where(eq(toolInputFields.assistantArchitectId, assistantId));
-  await insertImportedPrompts(tx, assistantId, assistant, modelMap, log);
+  await insertImportedPrompts(tx, assistantId, assistant, modelMap);
   await insertImportedFields(tx, assistantId, assistant);
 
   return {
@@ -538,14 +539,12 @@ export async function updateAssistantFromImport(
   );
   await validateImportedPromptTools([assistant], modelMap, callerUserId);
   const isAdmin = await checkUserRole(callerUserId, "administrator");
-  const log = createLogger({
-    action: "updateAssistantFromImport",
-    assistantId,
-  });
-
   const result = await executeTransaction(async (tx) => {
     const [existing] = await tx
-      .select({ userId: assistantArchitects.userId })
+      .select({
+        userId: assistantArchitects.userId,
+        mode: assistantArchitects.mode,
+      })
       .from(assistantArchitects)
       .where(eq(assistantArchitects.id, assistantId))
       .limit(1)
@@ -561,6 +560,15 @@ export async function updateAssistantFromImport(
       throw new AssistantImportServiceError(
         "NOT_FOUND",
         `Assistant not found: ${assistantId}`,
+      );
+    }
+    if (
+      existing.mode === "agentic" &&
+      (assistant.mode ?? "prompt_chain") === "prompt_chain"
+    ) {
+      throw new AssistantImportServiceError(
+        "VALIDATION_ERROR",
+        "Cannot convert an agentic assistant back to prompt-chain mode",
       );
     }
 
@@ -581,7 +589,7 @@ export async function updateAssistantFromImport(
       );
     }
 
-    return replaceAssistantGraph(tx, assistantId, assistant, modelMap, log);
+    return replaceAssistantGraph(tx, assistantId, assistant, modelMap);
   }, "updateAssistantFromImport");
 
   return { result, modelMappings: modelMappings(modelMap) };

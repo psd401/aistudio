@@ -410,6 +410,34 @@ function isOptionalNullableInteger(
       (maximum === undefined || Number(value) <= maximum))
 }
 
+function validateAssistantModelRoutingFamily(
+  assistantName: string,
+  assistant: Record<string, unknown>
+): string | undefined {
+  const family = assistant.model_routing_family
+  if (
+    family !== undefined &&
+    family !== null &&
+    (typeof family !== "string" || !MODEL_ROUTING_FAMILIES.has(family))
+  ) {
+    return `Assistant ${assistantName}: unsupported model_routing_family`
+  }
+  if (
+    assistant.model_routing_mode === "advanced" &&
+    (family === undefined || family === null)
+  ) {
+    return `Assistant ${assistantName}: advanced model routing requires model_routing_family`
+  }
+  if (
+    family !== undefined &&
+    family !== null &&
+    assistant.model_routing_mode !== "advanced"
+  ) {
+    return `Assistant ${assistantName}: model_routing_family requires advanced model routing`
+  }
+  return undefined
+}
+
 function validateAssistantRoutingConfiguration(
   assistantName: string,
   assistant: Record<string, unknown>
@@ -427,15 +455,7 @@ function validateAssistantRoutingConfiguration(
   ) {
     return `Assistant ${assistantName}: unsupported model_routing_mode`
   }
-  if (
-    assistant.model_routing_family !== undefined &&
-    assistant.model_routing_family !== null &&
-    (typeof assistant.model_routing_family !== "string" ||
-      !MODEL_ROUTING_FAMILIES.has(assistant.model_routing_family))
-  ) {
-    return `Assistant ${assistantName}: unsupported model_routing_family`
-  }
-  return undefined
+  return validateAssistantModelRoutingFamily(assistantName, assistant)
 }
 
 function validateAssistantAgentConfiguration(
@@ -454,8 +474,8 @@ function validateAssistantAgentConfiguration(
   if (!isOptionalNullableInteger(assistant.agent_timeout_seconds, 1, 900)) {
     return `Assistant ${assistantName}: agent_timeout_seconds must be between 1 and 900`
   }
-  if (!isOptionalNullableInteger(assistant.agent_cost_cap_cents, 0)) {
-    return `Assistant ${assistantName}: agent_cost_cap_cents must be a non-negative integer`
+  if (!isOptionalNullableInteger(assistant.agent_cost_cap_cents, 1)) {
+    return `Assistant ${assistantName}: agent_cost_cap_cents must be a positive integer`
   }
   if (!isOptionalNullableInteger(assistant.agent_max_requests_per_hour, 1)) {
     return `Assistant ${assistantName}: agent_max_requests_per_hour must be a positive integer`

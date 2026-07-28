@@ -799,6 +799,62 @@ it("lets an owner replace prompts and fields and resets approval", async () => {
   expect(database.fields.map((row) => row.name)).toEqual(["topic"]);
 });
 
+it("rejects an update that would implicitly reverse agentic mode", async () => {
+  database = {
+    assistants: [
+      {
+        id: 12,
+        name: "Agentic",
+        description: "Keep agentic",
+        status: "approved",
+        userId: 7,
+        mode: "agentic",
+        agentEnabledTools: ["repositories.search"],
+      },
+    ],
+    capabilities: [{ promptChainToolId: 12, isActive: true }],
+    prompts: [{ assistantArchitectId: 12, name: "Agent prompt" }],
+    fields: [],
+    promptResults: [],
+    executions: [],
+  };
+  const before = cloneState(database);
+
+  await expect(
+    updateAssistantFromImport(12, envelope(), 7),
+  ).rejects.toMatchObject({
+    code: "VALIDATION_ERROR",
+    message: "Cannot convert an agentic assistant back to prompt-chain mode",
+  } satisfies Partial<AssistantImportServiceError>);
+
+  expect(database).toEqual(before);
+});
+
+it("rejects an explicit agentic-to-prompt-chain update", async () => {
+  database.assistants.push({
+    id: 12,
+    name: "Agentic",
+    description: "Keep agentic",
+    status: "approved",
+    userId: 7,
+    mode: "agentic",
+  });
+  const before = cloneState(database);
+
+  await expect(
+    updateAssistantFromImport(
+      12,
+      envelope({ ...baseAssistant, mode: "prompt_chain" }),
+      7,
+    ),
+  ).rejects.toMatchObject({
+    code: "VALIDATION_ERROR",
+    message: "Cannot convert an agentic assistant back to prompt-chain mode",
+  } satisfies Partial<AssistantImportServiceError>);
+
+  expect(database).toEqual(before);
+});
+
 it("retains historical prompt results when replacing an executed graph", async () => {
   database = {
     assistants: [
@@ -1071,19 +1127,16 @@ it("forks into a caller-owned pending copy without changing the source", async (
   ).toBe(true);
 });
 
-it("logs when an imported prompt has no active model mapping", async () => {
+it("rejects an imported prompt with no active model mapping before writes", async () => {
   mockExecuteQuery.mockResolvedValue([]);
 
-  const result = await createAssistantsFromImport(envelope(), 7);
+  await expect(
+    createAssistantsFromImport(envelope(), 7),
+  ).rejects.toMatchObject({
+    code: "VALIDATION_ERROR",
+    message: "One or more prompt models are unavailable",
+  } satisfies Partial<AssistantImportServiceError>);
 
-  expect(result.successful).toBe(1);
   expect(database.prompts).toEqual([]);
-  expect(mockLogWarn).toHaveBeenCalledWith(
-    "Skipping imported prompt without an active model mapping",
-    expect.objectContaining({
-      assistantName: "Imported assistant",
-      promptName: "Prompt one",
-      modelName: "gpt-source",
-    }),
-  );
+  expect(mockExecuteTransaction).not.toHaveBeenCalled();
 });

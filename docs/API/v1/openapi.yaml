@@ -3612,9 +3612,11 @@ components:
           type: string
           enum: [legacy, standard, advanced]
           default: legacy
+          description: Advanced routing requires model_routing_family; other modes reject a non-null family.
         model_routing_family:
           type: [string, "null"]
           enum: [openai, anthropic, google, null]
+          description: Required when model_routing_mode is advanced and otherwise must be null or omitted.
         agent_enabled_tools:
           type: array
           description: Internal agent-callable tool identifiers available under the author's role-derived scopes.
@@ -3635,7 +3637,7 @@ components:
           default: 300
         agent_cost_cap_cents:
           type: [integer, "null"]
-          minimum: 0
+          minimum: 1
         agent_max_requests_per_hour:
           type: [integer, "null"]
           minimum: 1
