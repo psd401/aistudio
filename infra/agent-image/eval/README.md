@@ -22,10 +22,10 @@ broker from the deployed router Lambda. Set `AGENT_EVAL_APP_BASE_URL` or pass
 `--app-base-url` to override discovery. The same credentials must be able to
 read `psd-agent/<environment>/invocation-signing-key` so the runner can mint
 short-lived invocation authority. The active chain is re-resolved before every
-trial and again after any container boot. If temporary credentials rotate, a
-shared pure-task container is recycled with the new values; credentials that
-cannot outlive the configured invocation timeout fail closed before the trial
-starts.
+trial, after any container boot, and after context minting immediately before
+invocation. If temporary credentials rotate, a shared pure-task container is
+recycled with the new values; credentials that cannot outlive the configured
+invocation timeout fail closed before the trial starts.
 
 JSONL output is created with owner-only (`0600`) permissions because complete
 metadata can contain prompts, messages, and tool details. Keep it in an

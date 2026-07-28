@@ -266,6 +266,36 @@ class EvaluationRunnerTests(unittest.TestCase):
             [record["metadata"]["error_class"] for record in records],
         )
 
+    def test_credentials_are_rechecked_after_context_minting(self):
+        clock = AdvancingClock()
+        events: list[str] = []
+
+        class OrderedRuntime(FakeRuntime):
+            def prepare(self):
+                events.append("prepare")
+                super().prepare()
+
+            def invoke(self, task, session_id, authority):
+                events.append("invoke")
+                return super().invoke(task, session_id, authority)
+
+        class OrderedFactory:
+            def create(self):
+                return OrderedRuntime(clock)
+
+        class OrderedMinter(FakeMinter):
+            def mint(self, session_id):
+                events.append("mint")
+                return super().mint(session_id)
+
+        runner.EvaluationRunner(
+            OrderedFactory(),
+            OrderedMinter(clock),
+            now=clock.now,
+        ).run(self.tasks[:1], io.StringIO(), trials_override=1)
+
+        self.assertEqual(events, ["prepare", "mint", "prepare", "invoke"])
+
     def test_mutating_task_gets_a_fresh_container_per_trial(self):
         task = runner.Task(
             id="mutating-task",

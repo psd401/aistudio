@@ -578,6 +578,10 @@ class EvaluationRunner:
                         # than a timer-based refresh: even a multi-hour suite can
                         # never begin a turn with a context from an earlier trial.
                         authority = self._context_minter.mint(session_id)
+                        # Context minting can take up to 90 seconds. Revalidate
+                        # after it completes so the invocation cannot inherit a
+                        # credential that became unsafe during that wait.
+                        runtime.prepare()
                         event = runtime.invoke(task, session_id, authority)
                         record = self._make_record(
                             task,
