@@ -14,10 +14,8 @@ import logging
 import math
 import os
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -29,9 +27,10 @@ from typing import Protocol, TextIO
 if __package__:
     from .broker_stub import (
         ALLOWED_AGENT_BROKER_ROUTES,
-        CAPTURE_FILENAME,
         CONTROL_DIRECTORY_ENV,
-        TRIAL_CONFIG_FILENAME,
+        DEFAULT_CONTROL_DIRECTORY,
+        RUNNER_READ_CAPTURES_COMMAND,
+        RUNNER_WRITE_TRIAL_COMMAND,
     )
     from .graders import (
         GraderConfigurationError,
@@ -48,9 +47,10 @@ if __package__:
 else:
     from broker_stub import (
         ALLOWED_AGENT_BROKER_ROUTES,
-        CAPTURE_FILENAME,
         CONTROL_DIRECTORY_ENV,
-        TRIAL_CONFIG_FILENAME,
+        DEFAULT_CONTROL_DIRECTORY,
+        RUNNER_READ_CAPTURES_COMMAND,
+        RUNNER_WRITE_TRIAL_COMMAND,
     )
     from graders import (
         GraderConfigurationError,
@@ -96,6 +96,11 @@ REQUIRED_METADATA_FIELDS = frozenset(
         "session_id",
     }
 )
+BROKER_CONTROL_TMPFS_OPTIONS = (
+    f"{DEFAULT_CONTROL_DIRECTORY}:"
+    "rw,noexec,nosuid,nodev,size=268435456,mode=0700,uid=0,gid=0"
+)
+BROKER_STUB_CONTAINER_PATH = "/app/mantle_proxy.py"
 
 
 class EvalRunnerError(RuntimeError):
@@ -405,70 +410,21 @@ def _load_fixture_files(paths: Sequence[Path]) -> list[dict[str, object]]:
     return fixtures
 
 
-def _open_owner_only(path: Path, flags: int) -> int:
-    descriptor = os.open(
-        path,
-        flags | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-    )
-    os.fchmod(descriptor, 0o600)
-    return descriptor
+def _parse_captures(serialized: str) -> tuple[Mapping[str, object], ...]:
+    """Validate captures copied from the root-only in-container control tmpfs."""
 
-
-def _write_trial_configuration(
-    control_directory: Path,
-    value: Mapping[str, object],
-) -> None:
-    temporary_path = control_directory / (
-        f".{TRIAL_CONFIG_FILENAME}.{uuid.uuid4().hex}.tmp"
-    )
-    descriptor = _open_owner_only(
-        temporary_path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-    )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(value, handle, separators=(",", ":"))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_path, control_directory / TRIAL_CONFIG_FILENAME)
-    except Exception:
-        try:
-            temporary_path.unlink()
-        except OSError:
-            pass
-        raise
-
-
-def _reset_capture(control_directory: Path) -> None:
-    descriptor = _open_owner_only(
-        control_directory / CAPTURE_FILENAME,
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-    )
-    os.close(descriptor)
-
-
-def _read_captures(control_directory: Path) -> tuple[Mapping[str, object], ...]:
-    path = control_directory / CAPTURE_FILENAME
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        return ()
-    except OSError as error:
-        raise EvalRunnerError(
-            f"could not read broker capture {path}: {error}"
-        ) from error
+    lines = serialized.splitlines()
     captures: list[Mapping[str, object]] = []
     for line_number, line in enumerate(lines, start=1):
         try:
             record = json.loads(line)
         except json.JSONDecodeError as error:
             raise EvalRunnerError(
-                f"broker capture {path}:{line_number} is malformed"
+                f"broker capture line {line_number} is malformed"
             ) from error
         if not isinstance(record, Mapping):
             raise EvalRunnerError(
-                f"broker capture {path}:{line_number} is not an object"
+                f"broker capture line {line_number} is not an object"
             )
         captures.append(record)
     return tuple(captures)
@@ -510,7 +466,6 @@ class DockerRuntime:
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._container_id: str | None = None
         self._active_credentials: AwsCredentials | None = None
-        self._broker_control_directory: Path | None = None
         self._trial_log_since: datetime | None = None
         self._capture_tools_catalog = False
         self._trial_active = False
@@ -596,14 +551,6 @@ class DockerRuntime:
                 or not self._broker_stub_path.is_file()
             ):
                 raise EvalRunnerError("eval broker stub source is unavailable")
-            if self._broker_control_directory is not None:
-                raise EvalRunnerError("eval broker control directory was not cleaned")
-            self._broker_control_directory = Path(
-                tempfile.mkdtemp(
-                    prefix=f"issue-1424-broker-{os.getpid()}-",
-                )
-            )
-            os.chmod(self._broker_control_directory, 0o700)
         arguments = [
             "docker",
             "run",
@@ -614,22 +561,16 @@ class DockerRuntime:
             self._name,
         ]
         if self._use_broker_stub:
-            if self._broker_control_directory is None:
-                raise EvalRunnerError("eval broker control directory was not created")
             arguments.extend(
                 [
                     "--mount",
                     (
                         "type=bind,"
                         f"src={self._broker_stub_path.resolve()},"
-                        "dst=/app/mantle_proxy.py,readonly"
+                        f"dst={BROKER_STUB_CONTAINER_PATH},readonly"
                     ),
-                    "--mount",
-                    (
-                        "type=bind,"
-                        f"src={self._broker_control_directory.resolve()},"
-                        "dst=/run/psd-agent-eval-broker"
-                    ),
+                    "--tmpfs",
+                    BROKER_CONTROL_TMPFS_OPTIONS,
                 ]
             )
         environment_values = {
@@ -637,9 +578,7 @@ class DockerRuntime:
             **self._active_credentials.environment,
         }
         if self._use_broker_stub:
-            environment_values[CONTROL_DIRECTORY_ENV] = (
-                "/run/psd-agent-eval-broker"
-            )
+            environment_values[CONTROL_DIRECTORY_ENV] = DEFAULT_CONTROL_DIRECTORY
         for key, value in sorted(environment_values.items()):
             arguments.extend(["-e", f"{key}={value}"])
         arguments.append(self._image)
@@ -775,6 +714,40 @@ class DockerRuntime:
         except ProbeProtocolError as error:
             raise EvalRunnerError(f"invalid invocation response: {error}") from error
 
+    def _write_broker_trial(self, value: Mapping[str, object]) -> None:
+        serialized = json.dumps(value, separators=(",", ":"))
+        self._executor.run(
+            [
+                "docker",
+                "exec",
+                "--user",
+                "0:0",
+                "--interactive",
+                self.container_id,
+                "python3",
+                BROKER_STUB_CONTAINER_PATH,
+                RUNNER_WRITE_TRIAL_COMMAND,
+            ],
+            input_text=serialized,
+            timeout=60,
+        )
+
+    def _read_broker_captures(self) -> tuple[Mapping[str, object], ...]:
+        result = self._executor.run(
+            [
+                "docker",
+                "exec",
+                "--user",
+                "0:0",
+                self.container_id,
+                "python3",
+                BROKER_STUB_CONTAINER_PATH,
+                RUNNER_READ_CAPTURES_COMMAND,
+            ],
+            timeout=60,
+        )
+        return _parse_captures(result.stdout)
+
     def begin_trial(
         self,
         task: Task,
@@ -792,12 +765,8 @@ class DockerRuntime:
                 raise EvalRunnerError("L1 task started without the eval broker stub")
             self._trial_active = True
             return
-        if self._broker_control_directory is None:
-            raise EvalRunnerError("eval broker control directory is unavailable")
         fixtures = _load_fixture_files(task.fixture_paths)
-        _reset_capture(self._broker_control_directory)
-        _write_trial_configuration(
-            self._broker_control_directory,
+        self._write_broker_trial(
             {
                 "task_id": task.id,
                 "trial_id": f"{task.id}:{trial_number}:{session_id}",
@@ -812,18 +781,7 @@ class DockerRuntime:
         try:
             captures: tuple[Mapping[str, object], ...] = ()
             if self._use_broker_stub:
-                if self._broker_control_directory is None:
-                    raise EvalRunnerError(
-                        "eval broker control directory is unavailable"
-                    )
-                captures = _read_captures(self._broker_control_directory)
-                try:
-                    (
-                        self._broker_control_directory
-                        / TRIAL_CONFIG_FILENAME
-                    ).unlink()
-                except FileNotFoundError:
-                    pass
+                captures = self._read_broker_captures()
             broker_errors = tuple(
                 str(capture["stub_error"])
                 for capture in captures
@@ -891,17 +849,6 @@ class DockerRuntime:
                     "failed to remove candidate container %s: %s",
                     container_id,
                     detail[-500:] or f"docker rm exited {result.returncode}",
-                )
-        if self._broker_control_directory is not None and removed:
-            control_directory = self._broker_control_directory
-            self._broker_control_directory = None
-            try:
-                shutil.rmtree(control_directory)
-            except OSError as error:
-                LOGGER.warning(
-                    "failed to remove eval broker control directory %s: %s",
-                    control_directory,
-                    error,
                 )
         self._trial_active = False
         self._trial_log_since = None

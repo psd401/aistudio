@@ -59,13 +59,16 @@ container for every trial so local files and memory cannot leak.
 
 `level: L1` tasks replace the image's `/app/mantle_proxy.py` at runtime with a
 read-only bind mount of `eval/broker_stub.py`. The candidate image is not
-modified. A second, runner-owned `0700` bind mount carries only the active
-trial's fixtures and `0600` request capture. The stub implements the same 16
-fixed `/api/agent/*` routes as `agent-broker.js` and `mantle_proxy.py`, plus the
-health, usage, and finalization endpoints the wrapper needs. Finalization
-drains already-active broker requests and rejects new work before acknowledging
-the boundary, so captures cannot spill across trials. L0 and L2 tasks retain
-the image's real proxy; pure live and stubbed tasks use separate containers.
+modified. A root-owned `0700` in-container tmpfs carries only the active trial's
+fixtures and `0600` request capture; the runner installs and collects that state
+through root-only Docker execs, so the image's `node` user cannot read fixtures
+or forge grader inputs even when its numeric UID matches the host runner. The
+stub implements the same 16 fixed `/api/agent/*` routes as `agent-broker.js` and
+`mantle_proxy.py`, plus the health, usage, and finalization endpoints the wrapper
+needs. Finalization drains already-active broker requests and rejects new work
+before acknowledging the boundary, so captures cannot spill across trials. L0
+and L2 tasks retain the image's real proxy; pure live and stubbed tasks use
+separate containers.
 
 ## Task and suite files
 

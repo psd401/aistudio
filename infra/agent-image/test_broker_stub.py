@@ -161,6 +161,58 @@ class BrokerRouteParityTests(unittest.TestCase):
         )
 
 
+class BrokerControlStorageTests(unittest.TestCase):
+    def test_runner_commands_install_and_collect_owner_only_state(self):
+        with tempfile.TemporaryDirectory(
+            prefix="issue-1424-control-test-"
+        ) as directory:
+            control_directory = Path(directory) / "control"
+            serialized = json.dumps(
+                {
+                    "task_id": "control-test",
+                    "trial_id": "control-test:1:session",
+                    "fixtures": [],
+                }
+            ).encode("utf-8")
+
+            broker_stub.install_trial_configuration(
+                control_directory,
+                serialized,
+            )
+            trial_path = (
+                control_directory / broker_stub.TRIAL_CONFIG_FILENAME
+            )
+            capture_path = control_directory / broker_stub.CAPTURE_FILENAME
+            self.assertEqual(
+                control_directory.stat().st_mode & 0o777,
+                0o700,
+            )
+            self.assertEqual(trial_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(capture_path.stat().st_mode & 0o777, 0o600)
+            capture_path.write_bytes(b'{"route":"/api/agent/skills"}\n')
+
+            captured = broker_stub.collect_trial_captures(control_directory)
+
+            self.assertEqual(
+                captured,
+                b'{"route":"/api/agent/skills"}\n',
+            )
+            self.assertFalse(trial_path.exists())
+
+    def test_runner_write_rejects_non_object_configuration(self):
+        with tempfile.TemporaryDirectory(
+            prefix="issue-1424-control-test-"
+        ) as directory:
+            with self.assertRaisesRegex(
+                broker_stub.BrokerStubConfigurationError,
+                "must be an object",
+            ):
+                broker_stub.install_trial_configuration(
+                    Path(directory),
+                    b"[]",
+                )
+
+
 class BrokerStubHttpTests(unittest.TestCase):
     def setUp(self) -> None:
         self.stub = RunningStub()

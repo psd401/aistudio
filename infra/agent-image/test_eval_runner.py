@@ -718,11 +718,19 @@ class EvaluationRunnerTests(unittest.TestCase):
 class RecordingExecutor:
     def __init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
+        self.broker_trial_config: dict[str, object] | None = None
+        self.broker_capture = ""
 
     def run(self, arguments, **options):
-        del options
         call = tuple(arguments)
         self.calls.append(call)
+        if call[-1:] == (runner.RUNNER_WRITE_TRIAL_COMMAND,):
+            self.broker_trial_config = json.loads(options["input_text"])
+            self.broker_capture = ""
+            return runner.CommandResult(0, "", "")
+        if call[-1:] == (runner.RUNNER_READ_CAPTURES_COMMAND,):
+            self.broker_trial_config = None
+            return runner.CommandResult(0, self.broker_capture, "")
         if call[:2] == ("docker", "run"):
             return runner.CommandResult(0, "container-123\n", "")
         if call[:2] == ("docker", "logs"):
@@ -976,7 +984,7 @@ class DockerRuntimeTests(unittest.TestCase):
             invocation_call,
         )
 
-    def test_l1_runtime_bind_mounts_stub_and_collects_per_trial_capture(self):
+    def test_l1_runtime_uses_root_tmpfs_and_collects_per_trial_capture(self):
         executor = RecordingExecutor()
         with tempfile.TemporaryDirectory() as directory:
             fixture_path = Path(directory) / "fixture.json"
@@ -1026,20 +1034,13 @@ class DockerRuntimeTests(unittest.TestCase):
             )
             session_id = "a" * 36
             runtime.begin_trial(task, 1, session_id)
-            control_directory = runtime._broker_control_directory
-            self.assertIsNotNone(control_directory)
-            trial = json.loads(
-                (
-                    control_directory / runner.TRIAL_CONFIG_FILENAME
-                ).read_text(encoding="utf-8")
-            )
+            trial = executor.broker_trial_config
+            self.assertIsNotNone(trial)
             self.assertEqual(
                 trial["fixtures"][0]["route"],
                 "/api/agent/directory-lookup",
             )
-            (
-                control_directory / runner.CAPTURE_FILENAME
-            ).write_text(
+            executor.broker_capture = (
                 json.dumps(
                     {
                         "route": "/api/agent/directory-lookup",
@@ -1048,8 +1049,7 @@ class DockerRuntimeTests(unittest.TestCase):
                         "stub_error": None,
                     }
                 )
-                + "\n",
-                encoding="utf-8",
+                + "\n"
             )
 
             artifacts = runtime.end_trial()
@@ -1060,7 +1060,11 @@ class DockerRuntimeTests(unittest.TestCase):
         )
         joined = "\n".join(docker_run)
         self.assertIn("dst=/app/mantle_proxy.py,readonly", joined)
-        self.assertIn("dst=/run/psd-agent-eval-broker", joined)
+        self.assertIn("--tmpfs", docker_run)
+        self.assertIn(runner.BROKER_CONTROL_TMPFS_OPTIONS, docker_run)
+        self.assertIn("mode=0700,uid=0,gid=0", joined)
+        self.assertNotIn("dst=/run/psd-agent-eval-broker", joined)
+        self.assertEqual(docker_run.count("--mount"), 1)
         self.assertIn(
             "AGENT_EVAL_BROKER_CONTROL_DIR=/run/psd-agent-eval-broker",
             docker_run,
@@ -1069,7 +1073,24 @@ class DockerRuntimeTests(unittest.TestCase):
             artifacts.broker_requests[0]["route"],
             "/api/agent/directory-lookup",
         )
-        self.assertFalse(control_directory.exists())
+        broker_execs = [
+            call
+            for call in executor.calls
+            if call[:2] == ("docker", "exec")
+            and call[-1]
+            in {
+                runner.RUNNER_WRITE_TRIAL_COMMAND,
+                runner.RUNNER_READ_CAPTURES_COMMAND,
+            }
+        ]
+        self.assertEqual(len(broker_execs), 2)
+        self.assertTrue(
+            all(
+                ("--user", "0:0") == call[2:4]
+                for call in broker_execs
+            )
+        )
+        self.assertIsNone(executor.broker_trial_config)
 
     def test_runtime_collects_tools_catalog_diagnostic_for_its_trial(self):
         executor = CatalogExecutor()

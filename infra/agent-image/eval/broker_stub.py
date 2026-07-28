@@ -4,7 +4,7 @@
 The eval runner bind-mounts this file over ``/app/mantle_proxy.py`` in L1
 candidate containers. The existing wrapper therefore starts it on
 127.0.0.1:18791 without modifying the image. Trial fixtures and captures move
-through a separate runner-owned bind mount.
+through a root-owned in-container tmpfs.
 """
 
 from __future__ import annotations
@@ -13,8 +13,10 @@ import hmac
 import json
 import logging
 import os
+import sys
 import threading
 import time
+import uuid
 from collections.abc import Mapping
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,6 +39,8 @@ MISSING_FIXTURE_ERROR = "EvalFixtureMissing"
 UNSUPPORTED_METHOD_ERROR = "EvalUnsupportedAgentMethod"
 INVALID_REQUEST_BODY_ERROR = "EvalInvalidRequestBody"
 FINALIZING_ERROR = "EvalFinalizationInProgress"
+RUNNER_WRITE_TRIAL_COMMAND = "--runner-write-trial"
+RUNNER_READ_CAPTURES_COMMAND = "--runner-read-captures"
 
 ALLOWED_AGENT_BROKER_ROUTES = frozenset(
     {
@@ -62,6 +66,78 @@ ALLOWED_AGENT_BROKER_ROUTES = frozenset(
 
 class BrokerStubConfigurationError(RuntimeError):
     """The runner supplied an invalid or unreadable trial fixture."""
+
+
+def install_trial_configuration(
+    control_directory: Path,
+    serialized: bytes,
+) -> None:
+    """Atomically install trial state inside the root-owned control tmpfs."""
+
+    try:
+        configuration = json.loads(serialized)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BrokerStubConfigurationError(
+            "runner trial configuration is not valid JSON"
+        ) from error
+    if not isinstance(configuration, Mapping):
+        raise BrokerStubConfigurationError(
+            "runner trial configuration must be an object"
+        )
+    control_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(control_directory, 0o700)
+
+    capture_path = control_directory / CAPTURE_FILENAME
+    capture_flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    capture_flags |= getattr(os, "O_NOFOLLOW", 0)
+    capture_descriptor = os.open(capture_path, capture_flags, 0o600)
+    try:
+        os.fchmod(capture_descriptor, 0o600)
+    finally:
+        os.close(capture_descriptor)
+
+    temporary_path = control_directory / (
+        f".{TRIAL_CONFIG_FILENAME}.{uuid.uuid4().hex}.tmp"
+    )
+    trial_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    trial_flags |= getattr(os, "O_NOFOLLOW", 0)
+    trial_descriptor = os.open(temporary_path, trial_flags, 0o600)
+    try:
+        os.fchmod(trial_descriptor, 0o600)
+        with os.fdopen(trial_descriptor, "wb") as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, control_directory / TRIAL_CONFIG_FILENAME)
+    except Exception:
+        try:
+            os.close(trial_descriptor)
+        except OSError:
+            pass
+        try:
+            temporary_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def collect_trial_captures(control_directory: Path) -> bytes:
+    """Read the capture and remove the no-longer-active trial config."""
+
+    capture_path = control_directory / CAPTURE_FILENAME
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(capture_path, flags)
+    except FileNotFoundError:
+        serialized = b""
+    else:
+        with os.fdopen(descriptor, "rb") as handle:
+            serialized = handle.read()
+    try:
+        (control_directory / TRIAL_CONFIG_FILENAME).unlink()
+    except FileNotFoundError:
+        pass
+    return serialized
 
 
 def _strict_equal(actual: object, expected: object) -> bool:
@@ -540,13 +616,23 @@ def create_server(
     )
 
 
-def main() -> None:
+def main(arguments: list[str] | None = None) -> None:
+    requested = list(sys.argv[1:] if arguments is None else arguments)
+    control_directory = Path(
+        os.environ.get(CONTROL_DIRECTORY_ENV, DEFAULT_CONTROL_DIRECTORY)
+    )
+    if requested == [RUNNER_WRITE_TRIAL_COMMAND]:
+        install_trial_configuration(control_directory, sys.stdin.buffer.read())
+        return
+    if requested == [RUNNER_READ_CAPTURES_COMMAND]:
+        sys.stdout.buffer.write(collect_trial_captures(control_directory))
+        return
+    if requested:
+        raise SystemExit("unsupported eval broker stub command")
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
-    )
-    control_directory = Path(
-        os.environ.get(CONTROL_DIRECTORY_ENV, DEFAULT_CONTROL_DIRECTORY)
     )
     server = create_server(control_directory)
     LOGGER.info(
