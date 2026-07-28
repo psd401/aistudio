@@ -24,6 +24,16 @@ export type JobLockResult =
 
 export type JobLockFailure = Exclude<JobLockResult, { acquired: true }>;
 
+export class JobLockAcquisitionError extends Error {
+  readonly failure: JobLockFailure;
+
+  constructor(failure: JobLockFailure) {
+    super(failure.errorMessage);
+    this.name = 'JobLockAcquisitionError';
+    this.failure = failure;
+  }
+}
+
 export interface LockedJobExecution<T> {
   value: T;
   retainLock: boolean;
@@ -59,7 +69,7 @@ export async function tryAcquireJobLock(
           sessionId,
           // Covers the Lambda's full 15-minute budget plus Fargate handoff.
           // The job runner renews the same token after a successful promotion.
-          expiresAt: nowS + 20 * 60,
+          expiresAt: nowS + 16 * 60,
           lockToken,
           kind: 'job',
           claimedAt: new Date().toISOString(),
@@ -144,7 +154,10 @@ export async function runWithJobLock<T>(
     dynamoClient,
     log,
   );
-  if (!lock.acquired) return { executed: false, lock };
+  if (!lock.acquired) {
+    if (lock.severity === 'error') throw new JobLockAcquisitionError(lock);
+    return { executed: false, lock };
+  }
 
   let retainLock = false;
   try {

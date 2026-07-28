@@ -109,7 +109,7 @@ function harness(
 }
 
 function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
-  it("creates a target containing only owner, schedule id, and version", async () => {
+  it("creates a target with a reference and Scheduler fire identity", async () => {
     const { service, dynamoSend, schedulerSend } = harness()
     dynamoSend
       .mockResolvedValueOnce({ Items: [] })
@@ -142,6 +142,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
       ownerEmail: OWNER,
       scheduleId: created.scheduleId,
       version: 1,
+      scheduledTime: "<aws.scheduler.scheduled-time>",
     })
     expect(target?.Input).not.toContain("prompt")
     expect(target?.Input).not.toContain("dmSpaceName")
@@ -201,6 +202,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
       ownerEmail: OWNER,
       scheduleId: SCHEDULE_ID,
       version: 2,
+      scheduledTime: "<aws.scheduler.scheduled-time>",
     })
     expect((updateCommand as UpdateScheduleCommand).input.Target).toMatchObject({
       DeadLetterConfig: { Arn: config.scheduleDlqArn },

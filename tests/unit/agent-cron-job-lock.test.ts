@@ -65,6 +65,29 @@ describe("agent-cron per-schedule promotion lock", () => {
     expect(deleteItem).not.toHaveBeenCalled()
   })
 
+  it("rejects operational lock failures so the invocation can retry", async () => {
+    const put = jest.fn().mockRejectedValue(new Error("DynamoDB throttled"))
+    const execute = jest.fn()
+
+    await expect(
+      runWithJobLock(
+        SESSION_ID,
+        TABLE,
+        { put, delete: jest.fn() },
+        logger(),
+        execute,
+      ),
+    ).rejects.toMatchObject({
+      name: "JobLockAcquisitionError",
+      failure: {
+        phase: "lock-acquire",
+        severity: "error",
+        errorMessage: "Session lock acquire failed: DynamoDB throttled",
+      },
+    })
+    expect(execute).not.toHaveBeenCalled()
+  })
+
   it("releases only the lock token owned by the failed promotion", async () => {
     const put = jest.fn().mockResolvedValue({})
     const deleteItem = jest.fn().mockResolvedValue({})

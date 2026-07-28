@@ -9,7 +9,8 @@
  *   {
  *     ownerEmail: "hagelk@psd401.net",
  *     scheduleId: "3f1e9d...",
- *     version: 3
+ *     version: 3,
+ *     scheduledTime: "2026-07-28T15:00:00Z"
  *   }
  *
  * Cron loads the authoritative DynamoDB row and validates owner, version,
@@ -22,6 +23,7 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
+  UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { ECSClient, RunTaskCommand } from '@aws-sdk/client-ecs';
 import {
@@ -57,12 +59,22 @@ import {
   type ScheduleReferenceEvent,
 } from './schedule-record';
 import {
+  JobLockAcquisitionError,
   runWithJobLock,
   type JobLockFailure,
   type LockedJobExecution,
+  type LockedJobResult,
 } from './job-lock';
 import { createRunTelemetry } from './run-telemetry';
 import { runSchedulePreflight } from './schedule-preflight';
+import {
+  claimScheduleFire,
+  completeScheduleFire,
+  releaseScheduleFire,
+  scheduleFireIdentity,
+  type ScheduleFireClaim,
+  type ScheduleFireFailure,
+} from './schedule-fire';
 
 // ---------------------------------------------------------------------------
 // PII sanitization — mask email addresses in logs (FERPA compliance)
@@ -132,6 +144,13 @@ const jobLockDynamoClient = {
     dynamoClient.send(new PutCommand(input)),
   delete: (input: ConstructorParameters<typeof DeleteCommand>[0]) =>
     dynamoClient.send(new DeleteCommand(input)),
+};
+const scheduleFireDynamoClient = {
+  ...jobLockDynamoClient,
+  get: (input: ConstructorParameters<typeof GetCommand>[0]) =>
+    dynamoClient.send(new GetCommand(input)),
+  update: (input: ConstructorParameters<typeof UpdateCommand>[0]) =>
+    dynamoClient.send(new UpdateCommand(input)),
 };
 const scheduleRecordDynamoClient = {
   get: (input: ConstructorParameters<typeof GetCommand>[0]) =>
@@ -1054,13 +1073,15 @@ async function executeLockedScheduledTurn(
   };
 }
 
-async function recordScheduleLockFailure(
+type ScheduleGuardFailure = JobLockFailure | ScheduleFireFailure;
+
+async function recordScheduleGuardFailure(
   context: Omit<LockedScheduleContext, 'lambdaContext'>,
-  failure: JobLockFailure,
+  failure: ScheduleGuardFailure,
+  status: HandlerResult['status'],
+  mirrorFailure = true,
 ): Promise<HandlerResult> {
   const { schedule, scheduleName, sessionId, startTime, log } = context;
-  const status: HandlerResult['status'] =
-    failure.severity === 'warn' ? 'skipped' : 'error';
   await runTelemetry.recordRun(
     {
       userEmail: schedule.ownerEmail,
@@ -1072,14 +1093,145 @@ async function recordScheduleLockFailure(
       latencyMs: Date.now() - startTime,
       status,
       errorMessage: failure.errorMessage,
-      failure: {
-        severity: failure.severity,
-        context: { phase: failure.phase },
-      },
+      failure: mirrorFailure
+        ? {
+            severity: failure.severity,
+            context: { phase: failure.phase },
+          }
+        : undefined,
     },
     log,
   );
   return { status, scheduleId: schedule.scheduleId };
+}
+
+type OwnedScheduleFireClaim = Extract<
+  ScheduleFireClaim,
+  { claimed: true }
+>;
+
+async function acquireScheduleFireClaim(
+  identity: ReturnType<typeof scheduleFireIdentity>,
+  context: LockedScheduleContext,
+): Promise<OwnedScheduleFireClaim | HandlerResult | null> {
+  if (!identity) {
+    context.log.warn(
+      'Schedule target has no scheduled-time identity; contention will retry',
+    );
+    return null;
+  }
+  const claim = await claimScheduleFire(
+    identity,
+    SESSION_LOCKS_TABLE,
+    scheduleFireDynamoClient,
+    context.log,
+  );
+  if (claim.claimed) return claim;
+
+  const status = claim.failure.retryable ? 'error' : 'skipped';
+  const result = await recordScheduleGuardFailure(
+    context,
+    claim.failure,
+    status,
+    claim.failure.phase !== 'fire-completed',
+  );
+  if (claim.failure.retryable) {
+    throw new Error(claim.failure.errorMessage);
+  }
+  return result;
+}
+
+function isHandlerResult(
+  value: OwnedScheduleFireClaim | HandlerResult | null,
+): value is HandlerResult {
+  return value !== null && 'status' in value;
+}
+
+async function runLockedScheduleTurn(
+  context: LockedScheduleContext,
+): Promise<LockedJobResult<HandlerResult>> {
+  try {
+    return await runWithJobLock(
+      context.sessionId,
+      SESSION_LOCKS_TABLE,
+      jobLockDynamoClient,
+      context.log,
+      (lockToken) => executeLockedScheduledTurn(context, lockToken),
+    );
+  } catch (error) {
+    if (error instanceof JobLockAcquisitionError) {
+      await recordScheduleGuardFailure(
+        context,
+        error.failure,
+        'error',
+      );
+    }
+    throw error;
+  }
+}
+
+async function handleScheduleLockContention(
+  context: LockedScheduleContext,
+  failure: JobLockFailure,
+  fireClaim: OwnedScheduleFireClaim | null,
+): Promise<HandlerResult> {
+  if (!fireClaim) {
+    const retryFailure: JobLockFailure = {
+      ...failure,
+      severity: 'error',
+      errorMessage:
+        'Legacy scheduled fire contended; retrying without acknowledging',
+    };
+    await recordScheduleGuardFailure(context, retryFailure, 'error');
+    throw new JobLockAcquisitionError(retryFailure);
+  }
+  const result = await recordScheduleGuardFailure(
+    context,
+    failure,
+    'skipped',
+  );
+  await completeScheduleFire(
+    fireClaim,
+    SESSION_LOCKS_TABLE,
+    scheduleFireDynamoClient,
+    context.log,
+  );
+  return result;
+}
+
+async function runGuardedScheduleTurn(
+  context: LockedScheduleContext,
+  fireClaim: OwnedScheduleFireClaim | null,
+): Promise<HandlerResult> {
+  try {
+    const locked = await runLockedScheduleTurn(context);
+    if (!locked.executed) {
+      return await handleScheduleLockContention(
+        context,
+        locked.lock,
+        fireClaim,
+      );
+    }
+    if (fireClaim) {
+      await completeScheduleFire(
+        fireClaim,
+        SESSION_LOCKS_TABLE,
+        scheduleFireDynamoClient,
+        context.log,
+      );
+    }
+    return locked.value;
+  } catch (error) {
+    if (fireClaim) {
+      await releaseScheduleFire(
+        fireClaim,
+        SESSION_LOCKS_TABLE,
+        scheduleFireDynamoClient,
+        context.log,
+      );
+    }
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1120,10 +1272,14 @@ export async function handler(
     email: sanitizeEmail(schedule.ownerEmail),
   });
 
+  const fireIdentity = scheduleFireIdentity(event);
+
   // Session ID — stable for a schedule within a calendar day and isolated from
   // interactive sessions. The shared ID lets the conditional lock serialize
   // repeated fires. Bound the length for AgentCore's session-id limits.
-  const dateKey = new Date().toISOString().split('T')[0];
+  const dateKey =
+    fireIdentity?.scheduledTime.slice(0, 10)
+    ?? new Date().toISOString().split('T')[0];
   const prefix = schedule.workspacePrefix.substring(0, 40);
   const sessionId =
     `${prefix}-sched-${schedule.scheduleId.substring(0, 12)}-${dateKey}`;
@@ -1136,15 +1292,11 @@ export async function handler(
     lambdaContext: context,
     log,
   };
-  const locked = await runWithJobLock(
-    sessionId,
-    SESSION_LOCKS_TABLE,
-    jobLockDynamoClient,
-    log,
-    (lockToken) => executeLockedScheduledTurn(lockedContext, lockToken),
+
+  const fireClaim = await acquireScheduleFireClaim(
+    fireIdentity,
+    lockedContext,
   );
-  if (!locked.executed) {
-    return recordScheduleLockFailure(lockedContext, locked.lock);
-  }
-  return locked.value;
+  if (isHandlerResult(fireClaim)) return fireClaim;
+  return runGuardedScheduleTurn(lockedContext, fireClaim);
 }

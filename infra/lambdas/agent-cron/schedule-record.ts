@@ -9,6 +9,7 @@ export interface ScheduleReferenceEvent {
   ownerEmail?: unknown;
   scheduleId?: unknown;
   version?: unknown;
+  scheduledTime?: unknown;
 }
 
 export interface ScheduleRecordDynamoClient {

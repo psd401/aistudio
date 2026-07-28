@@ -439,7 +439,12 @@ export class AgentScheduleService {
     scheduleId: string,
     version: number,
   ): string {
-    return JSON.stringify({ ownerEmail, scheduleId, version });
+    return JSON.stringify({
+      ownerEmail,
+      scheduleId,
+      version,
+      scheduledTime: "<aws.scheduler.scheduled-time>",
+    });
   }
 
   private async trustedOwnerProfile(
