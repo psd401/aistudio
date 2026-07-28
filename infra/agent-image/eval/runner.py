@@ -819,17 +819,17 @@ def _task_from_mapping(value: Mapping[str, object], source: Path) -> Task:
         if not isinstance(raw_value, str):
             raise EvalRunnerError(f"{source}: task {field} must be a string")
         text_fields[field] = raw_value
-    try:
-        task = Task(
-            id=text_fields["id"],
-            skill=text_fields["skill"],
-            level=text_fields["level"],
-            workspace=text_fields["workspace"],
-            prompt=text_fields["prompt"],
-            trials=int(value.get("trials", 3)),
-        )
-    except (TypeError, ValueError) as error:
-        raise EvalRunnerError(f"{source}: malformed task definition") from error
+    raw_trials = value.get("trials", 3)
+    if isinstance(raw_trials, bool) or not isinstance(raw_trials, int):
+        raise EvalRunnerError(f"{source}: task trials must be an integer")
+    task = Task(
+        id=text_fields["id"],
+        skill=text_fields["skill"],
+        level=text_fields["level"],
+        workspace=text_fields["workspace"],
+        prompt=text_fields["prompt"],
+        trials=raw_trials,
+    )
     if not task.id or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", task.id):
         raise EvalRunnerError(f"{source}: task id must be lowercase kebab-case")
     if not task.skill or not task.prompt.strip():

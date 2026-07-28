@@ -129,6 +129,24 @@ class SuiteLoadingTests(unittest.TestCase):
                     Path("inline.yaml"),
                 )
 
+    def test_non_integer_trial_counts_are_rejected(self):
+        base_task: dict[str, object] = {
+            "id": "invalid-trials",
+            "skill": "runner-core",
+            "level": "L0",
+            "workspace": "pure",
+            "prompt": "hello",
+        }
+        for invalid_trials in (True, "3", 3.9):
+            with self.subTest(trials=invalid_trials), self.assertRaisesRegex(
+                runner.EvalRunnerError,
+                "trials must be an integer",
+            ):
+                runner._task_from_mapping(
+                    {**base_task, "trials": invalid_trials},
+                    Path("inline.yaml"),
+                )
+
     def test_context_ttl_outlives_the_invocation_timeout(self):
         self.assertEqual(runner._context_ttl_seconds(900), 965)
         with self.assertRaisesRegex(runner.EvalRunnerError, "7135"):
