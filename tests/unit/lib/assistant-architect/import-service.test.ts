@@ -1024,6 +1024,32 @@ it("masks a resource-invisible fork source as not found", async () => {
   } satisfies Partial<AssistantImportServiceError>);
 });
 
+it("rechecks current fork visibility in the copy transaction before insert", async () => {
+  database.assistants.push({
+    id: 12,
+    name: "Shared source",
+    description: "",
+    status: "approved",
+    userId: 99,
+  });
+  mockUserCanAccessResource
+    .mockResolvedValueOnce(true)
+    .mockResolvedValueOnce(false);
+
+  await expect(forkAssistant(12, 7)).rejects.toMatchObject({
+    code: "NOT_FOUND",
+    message: "Assistant not found: 12",
+  } satisfies Partial<AssistantImportServiceError>);
+
+  expect(mockUserCanAccessResource).toHaveBeenCalledTimes(2);
+  const copyTransaction = mockUserCanAccessResource.mock.calls[1]?.[4];
+  expect(copyTransaction).toBeDefined();
+  expect(mockCheckUserRole.mock.calls[1]?.[2]).toBe(copyTransaction);
+  expect(database.assistants).toEqual([
+    expect.objectContaining({ id: 12, name: "Shared source" }),
+  ]);
+});
+
 it("masks a non-owner pending fork source before resource lookup", async () => {
   database.assistants.push({
     id: 12,
@@ -1124,6 +1150,11 @@ it("forks into a caller-owned pending copy without changing the source", async (
   expect(snapshotTransaction).toBeDefined();
   expect(mockUserCanAccessResource.mock.calls[0]?.[4]).toBe(
     snapshotTransaction,
+  );
+  const copyTransaction = mockCheckUserRole.mock.calls[1]?.[2];
+  expect(copyTransaction).toBeDefined();
+  expect(mockUserCanAccessResource.mock.calls[1]?.[4]).toBe(
+    copyTransaction,
   );
   expect(result.result).toMatchObject({
     name: "Caller copy",

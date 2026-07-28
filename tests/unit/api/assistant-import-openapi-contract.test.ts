@@ -53,4 +53,20 @@ describe("Assistant Architect import OpenAPI contract", () => {
       /timeout_seconds:\n\s+type: \[integer, "null"\]\n\s+minimum: 1/
     )
   })
+
+  it("documents the update route's bounded-body 413 response", () => {
+    const assistantPath = openapi.indexOf("  /assistants/{id}:")
+    const updateOperation = openapi.indexOf("    put:", assistantPath)
+    const forkPath = openapi.indexOf(
+      "  /assistants/{id}/fork:",
+      updateOperation
+    )
+    expect(assistantPath).toBeGreaterThanOrEqual(0)
+    expect(updateOperation).toBeGreaterThan(assistantPath)
+    expect(forkPath).toBeGreaterThan(updateOperation)
+
+    expect(openapi.slice(updateOperation, forkPath)).toMatch(
+      /"413":\n\s+description: Assistant import envelope exceeds the 10 MB limit\./
+    )
+  })
 })

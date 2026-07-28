@@ -813,7 +813,8 @@ length is rejected immediately. The shared MCP transport has a separate 64 MiB
 ceiling so existing multi-file tools such as `import_okf` retain their larger
 request contract; shared import validation still rejects an Assistant Architect
 envelope above 10 MB before any write. The optional REST fork body is
-independently stream-bounded to 4 KiB before JSON decoding.
+independently stream-bounded to 4 KiB before JSON decoding. Oversized REST
+create and update envelopes return `413 PAYLOAD_TOO_LARGE`.
 
 Every write preserves the existing human approval gate:
 
@@ -850,9 +851,11 @@ Every write preserves the existing human approval gate:
   resource/room rules as the v1 detail endpoint may be copied. The source is
   never modified, and the caller owns the new `pending_approval` copy. The
   visibility/resource decision and source export are read in one
-  repeatable-read transaction so concurrent deapproval or grant changes cannot
-  yield a stale authorized graph. Missing and invisible sources both return
-  `404`.
+  repeatable-read transaction. After authoring validation, current source
+  visibility is checked again under the source row lock in the destination
+  create transaction immediately before insert, so a grant or room revocation
+  committed during validation returns the same masked `404` without persisting
+  a fork. Missing and invisible sources both return `404`.
 
 ExportFormat v1.0 carries the complete executable configuration needed for a
 behavior-preserving fork: assistant mode, model routing, agent tools and

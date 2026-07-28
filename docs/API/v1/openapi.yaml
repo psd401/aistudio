@@ -1332,6 +1332,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Assistant import envelope exceeds the 10 MB limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -1348,8 +1354,11 @@ paths:
         source is unchanged. The fork is owned by the caller and enters
         `pending_approval`; an optional `name` overrides the copied name.
         The visibility/resource authorization decision and exported source graph
-        are read in one repeatable-read transaction, preventing a concurrent
-        deapproval or grant change from producing a stale authorized snapshot.
+        are read in one repeatable-read transaction. After authoring validation,
+        current source visibility is rechecked under the source row lock in the
+        destination create transaction immediately before the copied assistant
+        is inserted, so a grant or room revocation committed during validation
+        fails with the same masked 404 without persisting a fork.
         The optional JSON body is stream-bounded to 4 KB before decoding.
         Copied agent tools and connectors must be available to the caller as an
         author, and copied prompt tools must be supported by their mapped/routed

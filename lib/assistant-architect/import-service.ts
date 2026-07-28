@@ -401,7 +401,15 @@ async function insertAssistantGraph(
 export async function createAssistantsFromImport(
   data: unknown,
   userId: number,
-  options: { throwOnAssistantFailure?: boolean } = {},
+  options: {
+    throwOnAssistantFailure?: boolean;
+    /**
+     * Internal policy hook used when the create is derived from another
+     * protected object. It runs in the same transaction immediately before
+     * the new assistant row is inserted.
+     */
+    beforeAssistantInsert?: (tx: DbTransaction) => Promise<void>;
+  } = {},
 ): Promise<AssistantImportBatchResult> {
   const importData = asValidatedImport(data);
   await validateAgentAuthoringPermissions(importData.assistants, userId);
@@ -418,7 +426,10 @@ export async function createAssistantsFromImport(
   for (const assistant of importData.assistants) {
     try {
       const result = await executeTransaction(
-        (tx) => insertAssistantGraph(tx, assistant, modelMap, userId),
+        async (tx) => {
+          await options.beforeAssistantInsert?.(tx);
+          return insertAssistantGraph(tx, assistant, modelMap, userId);
+        },
         "createAssistantFromImport",
       );
       results.push(result);
@@ -631,6 +642,45 @@ export async function updateAssistantFromImport(
   return { result, modelMappings: modelMappings(modelMap) };
 }
 
+async function requireForkSourceAccess(
+  tx: DbTransaction,
+  assistantId: number,
+  callerUserId: number,
+  notFound: () => AssistantImportServiceError,
+): Promise<void> {
+  const [source] = await tx
+    .select({
+      userId: assistantArchitects.userId,
+      status: assistantArchitects.status,
+    })
+    .from(assistantArchitects)
+    .where(eq(assistantArchitects.id, assistantId))
+    .limit(1)
+    .for("update");
+
+  if (!source) throw notFound();
+
+  const isAdmin = await checkUserRole(
+    callerUserId,
+    "administrator",
+    tx,
+  );
+  const hasBaseVisibility =
+    source.userId === callerUserId ||
+    isAdmin ||
+    source.status === "approved";
+  if (!hasBaseVisibility) throw notFound();
+
+  const hasResourceVisibility = await userCanAccessResource(
+    callerUserId,
+    "assistant",
+    assistantId,
+    { ownerUserId: source.userId },
+    tx,
+  );
+  if (!hasResourceVisibility) throw notFound();
+}
+
 /**
  * Fork a visible assistant through the existing portable export format.
  * Visibility denials are deliberately existence-masked as 404-equivalent
@@ -648,37 +698,12 @@ export async function forkAssistant(
     );
   const exportedSource = await executeTransaction(
     async (tx) => {
-      const [source] = await tx
-        .select({
-          userId: assistantArchitects.userId,
-          status: assistantArchitects.status,
-        })
-        .from(assistantArchitects)
-        .where(eq(assistantArchitects.id, assistantId))
-        .limit(1)
-        .for("update");
-
-      if (!source) throw notFound();
-
-      const isAdmin = await checkUserRole(
-        callerUserId,
-        "administrator",
+      await requireForkSourceAccess(
         tx,
-      );
-      const hasBaseVisibility =
-        source.userId === callerUserId ||
-        isAdmin ||
-        source.status === "approved";
-      if (!hasBaseVisibility) throw notFound();
-
-      const hasResourceVisibility = await userCanAccessResource(
-        callerUserId,
-        "assistant",
         assistantId,
-        { ownerUserId: source.userId },
-        tx,
+        callerUserId,
+        notFound,
       );
-      if (!hasResourceVisibility) throw notFound();
 
       const exported = await getAssistantDataForExport([assistantId], tx);
       const snapshot = exported[0];
@@ -698,7 +723,21 @@ export async function forkAssistant(
   const created = await createAssistantsFromImport(
     forkData,
     callerUserId,
-    { throwOnAssistantFailure: true },
+    {
+      throwOnAssistantFailure: true,
+      // Model/tool/repository authoring validation happens after the source
+      // snapshot. Re-read current source visibility in the destination create
+      // transaction so a revocation committed during that work fails before
+      // any copied row is persisted.
+      beforeAssistantInsert: async (tx) => {
+        await requireForkSourceAccess(
+          tx,
+          assistantId,
+          callerUserId,
+          notFound,
+        );
+      },
+    },
   );
   const result = created.results[0];
   if (!result || result.status === "error") {
