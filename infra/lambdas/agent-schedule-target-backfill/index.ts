@@ -45,6 +45,15 @@ const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 const runtimeDependencies: ScheduleTargetBackfillDependencies = {
   scheduleDlqArn: SCHEDULE_DLQ_ARN,
+  recordInvalidTarget: (name, errorMessage) => {
+    process.stderr.write(`${JSON.stringify({
+      level: 'ERROR',
+      marker: 'AGENT_FAILURE_RECORD',
+      event: 'schedule_target_backfill_invalid_target',
+      scheduleName: name,
+      errorMessage,
+    })}\n`);
+  },
   list: async (nextToken) => {
     const page = await scheduler.send(
       new ListSchedulesCommand({
@@ -137,7 +146,12 @@ export async function handler(
     throw new Error('SCHEDULE_DLQ_ARN is not configured');
   }
   if (event.RequestType === 'Delete') {
-    return { scanned: 0, updated: 0, continuationQueued: false };
+    return {
+      scanned: 0,
+      updated: 0,
+      invalid: 0,
+      continuationQueued: false,
+    };
   }
   const result = await backfillScheduleTargetPage(
     event.nextToken,

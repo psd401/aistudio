@@ -24,12 +24,21 @@ export interface ScheduleTargetBackfillDependencies {
     identity: ScheduleMutationIdentity,
     execute: () => Promise<T>,
   ): Promise<T>;
+  recordInvalidTarget(name: string, errorMessage: string): void;
 }
 
 export interface ScheduleTargetBackfillResult {
   scanned: number;
   updated: number;
+  invalid: number;
   continuationQueued: boolean;
+}
+
+export class InvalidScheduleTargetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidScheduleTargetError';
+  }
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {
@@ -49,12 +58,18 @@ export interface ScheduleTargetReference extends ScheduleMutationIdentity {
 export function scheduleTargetReference(
   rawInput: string | undefined,
 ): ScheduleTargetReference {
-  if (!rawInput) throw new Error('Schedule target is missing Input');
+  if (!rawInput) {
+    throw new InvalidScheduleTargetError(
+      'Schedule target is missing Input',
+    );
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(rawInput);
   } catch {
-    throw new Error('Schedule target Input is not valid JSON');
+    throw new InvalidScheduleTargetError(
+      'Schedule target Input is not valid JSON',
+    );
   }
   const input = objectValue(parsed);
   if (
@@ -63,7 +78,9 @@ export function scheduleTargetReference(
     || typeof input.scheduleId !== 'string'
     || typeof input.version !== 'number'
   ) {
-    throw new Error('Schedule target Input has no owner-bound reference');
+    throw new InvalidScheduleTargetError(
+      'Schedule target Input has no owner-bound reference',
+    );
   }
   return {
     ownerEmail: input.ownerEmail.trim().toLowerCase(),
@@ -79,16 +96,26 @@ export function scheduleTargetReference(
 export function backfilledTargetInput(
   rawInput: string | undefined,
 ): string | null {
-  if (!rawInput) throw new Error('Schedule target is missing Input');
+  if (!rawInput) {
+    throw new InvalidScheduleTargetError(
+      'Schedule target is missing Input',
+    );
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(rawInput);
   } catch {
-    throw new Error('Schedule target Input is not valid JSON');
+    throw new InvalidScheduleTargetError(
+      'Schedule target Input is not valid JSON',
+    );
   }
   const input = objectValue(parsed);
   scheduleTargetReference(rawInput);
-  if (!input) throw new Error('Schedule target Input is not an object');
+  if (!input) {
+    throw new InvalidScheduleTargetError(
+      'Schedule target Input is not an object',
+    );
+  }
   if (input.scheduledTime === SCHEDULED_TIME_PLACEHOLDER) return null;
   return JSON.stringify({
     ...input,
@@ -110,7 +137,9 @@ function requiredScheduleFields(
     || !schedule.FlexibleTimeWindow
     || !schedule.Target
   ) {
-    throw new Error('Scheduler returned an incomplete schedule');
+    throw new InvalidScheduleTargetError(
+      'Scheduler returned an incomplete schedule',
+    );
   }
 }
 
@@ -220,6 +249,7 @@ export async function backfillScheduleTargetPage(
 ): Promise<ScheduleTargetBackfillResult> {
   const page = await dependencies.list(nextToken);
   let updated = 0;
+  let invalid = 0;
   for (
     let offset = 0;
     offset < page.names.length;
@@ -228,9 +258,25 @@ export async function backfillScheduleTargetPage(
     const outcomes = await Promise.all(
       page.names
         .slice(offset, offset + UPDATE_CONCURRENCY)
-        .map((name) => updateOne(name, dependencies)),
+        .map(async (name) => {
+          try {
+            return {
+              updated: await updateOne(name, dependencies),
+              invalid: false,
+            };
+          } catch (error) {
+            // A permanently malformed legacy target must not poison this
+            // one-shot fleet migration and strand every later page. Skip only
+            // validation failures; operational Scheduler/Dynamo/Lambda errors
+            // still reject the invocation for async retry and DLQ handling.
+            if (!(error instanceof InvalidScheduleTargetError)) throw error;
+            dependencies.recordInvalidTarget(name, error.message);
+            return { updated: false, invalid: true };
+          }
+        }),
     );
-    updated += outcomes.filter(Boolean).length;
+    updated += outcomes.filter((outcome) => outcome.updated).length;
+    invalid += outcomes.filter((outcome) => outcome.invalid).length;
   }
   if (page.nextToken) {
     await dependencies.queueContinuation(page.nextToken);
@@ -238,6 +284,7 @@ export async function backfillScheduleTargetPage(
   return {
     scanned: page.names.length,
     updated,
+    invalid,
     continuationQueued: Boolean(page.nextToken),
   };
 }

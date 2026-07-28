@@ -71,6 +71,7 @@ function dependencies(
     update: jest.fn().mockResolvedValue(undefined),
     queueContinuation: jest.fn().mockResolvedValue(undefined),
     withMutationLock: async (_identity, execute) => execute(),
+    recordInvalidTarget: jest.fn(),
     ...overrides,
   }
 }
@@ -153,10 +154,60 @@ describe("agent schedule target deployment backfill", () => {
     ).resolves.toEqual({
       scanned: 2,
       updated: 1,
+      invalid: 0,
       continuationQueued: true,
     })
     expect(deps.update).toHaveBeenCalledTimes(1)
     expect(deps.queueContinuation).toHaveBeenCalledWith("next-page")
+  })
+
+  it("isolates a malformed target and continues the fleet migration", async () => {
+    const valid = schedule()
+    const malformed = schedule()
+    malformed.Name = `${valid.Name}-malformed`
+    malformed.Target.Input = "not-json"
+    const deps = dependencies({
+      list: jest.fn().mockResolvedValue({
+        names: [malformed.Name, valid.Name],
+        nextToken: "next-page",
+      }),
+      get: jest.fn(async (name: string) =>
+        name === malformed.Name ? malformed : valid
+      ),
+    })
+
+    await expect(
+      backfillScheduleTargetPage(undefined, deps),
+    ).resolves.toEqual({
+      scanned: 2,
+      updated: 1,
+      invalid: 1,
+      continuationQueued: true,
+    })
+    expect(deps.recordInvalidTarget).toHaveBeenCalledWith(
+      malformed.Name,
+      expect.stringMatching(/valid JSON/),
+    )
+    expect(deps.update).toHaveBeenCalledTimes(1)
+    expect(deps.queueContinuation).toHaveBeenCalledWith("next-page")
+  })
+
+  it("still retries operational failures instead of skipping them", async () => {
+    const current = schedule()
+    const outage = new Error("Scheduler throttled")
+    const deps = dependencies({
+      list: jest.fn().mockResolvedValue({
+        names: [current.Name],
+        nextToken: "next-page",
+      }),
+      get: jest.fn().mockRejectedValue(outage),
+    })
+
+    await expect(
+      backfillScheduleTargetPage(undefined, deps),
+    ).rejects.toBe(outage)
+    expect(deps.recordInvalidTarget).not.toHaveBeenCalled()
+    expect(deps.queueContinuation).not.toHaveBeenCalled()
   })
 })
 
