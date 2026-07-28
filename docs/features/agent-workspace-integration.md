@@ -40,11 +40,12 @@ tokens for two slots:
 | UI | `/agent-connect`, `/agent-connect/callback` | Public OAuth bootstrap (off-nav) |
 | Admin | "Workspace" tab in `/admin/agents` | Per-user status dashboard |
 | Skill | `infra/agent-image/skills/psd-workspace/` | Agent-side `gws` wrapper |
+| Workflow skill | `infra/agent-image/skills/psd-workflows/` | Dynamically discovers the PSD Agent Gateway MCP roster, describes schemas, and calls owner-bound workflows (#1403) |
 | Binary | `gws` (pinned in `Dockerfile`) | Google Workspace CLI |
 | Upstream skills | `gws-gmail`, `gws-calendar`, `gws-sheets`, … (cloned at image build, same tag as the binary) | Per-API guidance for the agent |
 | Rules | `infra/agent-image/skills/psd-rules/SKILL.md` | Tier 1 progressive-disclosure rules (think silently, never fabricate URLs/memory, no empty promises, Chat formatting) |
 | Formatter | `infra/agent-image/chat_format.py` | Markdown → Google Chat transform applied at the harness boundary |
-| Secrets | `psd-agent/{env}/google-oauth-client`, `psd-agent/{env}/internal-api-key`, `psd-agent/{env}/gcp-dwd-config` (#1232/#1233), `psd-agent/{env}/agent-gateway` (#1230), `psd-agent-creds/{env}/user/{email}/google-workspace-user` (user slot) | OAuth client, PSK, GCP DWD config JSON, gateway URL+token JSON, per-user refresh tokens. The agent slot no longer stores a refresh token (#1232). |
+| Secrets | `psd-agent/{env}/google-oauth-client`, `psd-agent/{env}/internal-api-key`, `psd-agent/{env}/gcp-dwd-config` (#1232/#1233), `psd-agent/{env}/agent-gateway` (#1230/#1403), `psd-agent-creds/{env}/user/{email}/google-workspace-user` (user slot) | OAuth client, PSK, GCP DWD config JSON, dynamic workflow-gateway URL+token JSON, per-user refresh tokens. The agent slot no longer stores a refresh token (#1232). |
 | DWD config | `psd-agent/{env}/gcp-dwd-config` JSON: `{projectNumber, wifPoolId, wifProviderId, serviceAccountEmail, provisioningSheetId}` (Secrets Manager, IT-supplied; env-var overrides for local dev) | Keyless WIF → service-account impersonation for the broker + OneSync provisioning-sheet id. Read lazily (5-min cached); broker fails closed until populated. |
 | Cedar | `psd-agent-governance.cedar` | Allowlists for oauth2.googleapis.com + n8n gateway (`n8n.psd401.net/mcp/*`, #1230) + consent-link + workspace-token + account-request, secret.read on `psd-agent/*` |
 
@@ -144,16 +145,26 @@ paste it verbatim into Chat and stop the turn. Exit 14 carries **no** URL.
    container-credentials endpoint the same way it did for the ECS task role — see
    the `credential_source` note in `lib/agent-workspace/gcp-wif.ts`); no
    service-account key is downloaded.
-6. **Agent gateway (#1230)** — populate ONE JSON secret with both the n8n MCP
-   Server Trigger URL and its bearer token (again, no CDK context flag):
+6. **Agent workflow gateway (#1230/#1403)** — populate ONE JSON secret with
+   both the n8n MCP Server Trigger URL and its bearer token (again, no CDK
+   context flag):
    ```bash
    aws secretsmanager create-secret \
      --name psd-agent/dev/agent-gateway \
      --tags Key=Environment,Value=dev Key=ManagedBy,Value=aistudio \
      --secret-string '{"url":"https://n8n.psd401.net/mcp/…/sse","token":"…"}'
    ```
-   The psd-classified-evaluation skill reads it lazily; an absent/incomplete
-   secret → exit 11 `not-configured`.
+   The `psd-workflows` skill discovers the gateway's live MCP `tools/list`
+   roster through the signed web broker; an absent/incomplete secret → exit 11
+   `not-configured`. Every gateway parameter that represents the verified
+   caller must be a top-level string property actually consumed by the workflow
+   and include `[caller-bound]` in that property's `inputSchema` description.
+   The broker replaces all marked values with the signed owner. Only lowercase
+   `get_*` and `list_*` names are treated as read-only; every other tool fails
+   closed without a marker, regardless of case or naming style. For one release,
+   `list_supervised_employees.evaluator_email` and
+   `submit_classified_evaluation.evaluator_email` are also owner-bound
+   explicitly so older gateway schemas remain safe during the marker rollout.
 7. Deploy infra (AgentPlatformStack + FrontendStack) and the new agent image. No
    `-c` context flags are needed for the gateway or DWD config.
 8. **Remediation (one-off, run manually):**

@@ -83,6 +83,25 @@ PLAYWRIGHT_AUTH_ENABLED=true PLAYWRIGHT_BASE_URL=http://localhost:3100 \
   bunx playwright test tests/e2e/capability-functional.spec.ts
 ```
 
+## Running the live workflow-gateway E2E
+
+`tests/e2e/workflow-gateway.spec.ts` always exercises the unsigned guard on the
+new and legacy broker routes. Its live case drives the complete signed
+Next.js-broker → SSE MCP `tools/list` → schema-tool call and is gated because it
+requires a deployed dev gateway plus a fresh router-issued invocation context:
+
+```bash
+WORKFLOW_GATEWAY_E2E_CONTEXT='<fresh compact invocation token>' \
+WORKFLOW_GATEWAY_E2E_PROOF_KEY='<proof key derived for that token>' \
+WORKFLOW_GATEWAY_E2E_SCHEMA_TOOL='get_counselor_evaluation_schema' \
+PLAYWRIGHT_BASE_URL='https://<dev-host>' \
+bunx playwright test tests/e2e/workflow-gateway.spec.ts
+```
+
+Do not persist the context or proof key. Both are scoped to one short-lived
+router invocation; the test creates a fresh request nonce and body-bound
+signature for each broker request.
+
 ## The auth helper
 
 `tests/e2e/helpers/session-auth.ts` exports:

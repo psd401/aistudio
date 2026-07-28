@@ -92,6 +92,8 @@ interface BundledSkillManifestEntry {
   imageTag: string;
 }
 
+const RETIRED_BUNDLED_SKILL_NAMES = ['psd-classified-evaluation'] as const;
+
 /**
  * AgentPlatformStack - Foundational infrastructure for the PSD AI Agent Platform
  *
@@ -877,8 +879,9 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(resources.agentInvocationSigningSecret).add('Environment', environment);
     cdk.Tags.of(resources.agentInvocationSigningSecret).add('ManagedBy', 'cdk');
 
-    // 4f-b. PSD Agent Gateway config (#1230). The psd-classified-evaluation skill
-    // reads ONE JSON secret `psd-agent/{env}/agent-gateway` shaped
+    // 4f-b. PSD Agent Gateway config (#1230/#1403). The psd-workflows skill
+    // discovers the live MCP roster and reads ONE JSON secret
+    // `psd-agent/{env}/agent-gateway` shaped
     // {"url":"…","token":"…"} — the n8n MCP Server Trigger /sse endpoint AND its
     // Bearer token. Both are owned by the n8n side and must NOT live in this
     // PUBLIC repo, so there is deliberately NO CDK Secret resource and NO CDK
@@ -4295,10 +4298,12 @@ export class AgentPlatformStack extends cdk.Stack {
 
     // Trigger string forces the Custom Resource to re-fire on every deploy
     // so manifest updates land even when the Lambda code hash is unchanged.
-    const skillInitTrigger = bundledSkillsManifest
-      .map((s) => `${s.name}:${s.sourceHash.slice(0, 8)}`)
-      .sort()
-      .join(',');
+    const skillInitTrigger = [
+      ...bundledSkillsManifest.map(
+        (skill) => `${skill.name}:${skill.sourceHash.slice(0, 8)}`,
+      ),
+      ...RETIRED_BUNDLED_SKILL_NAMES.map((name) => `retired:${name}`),
+    ].sort().join(',');
 
     const agentImageTagContext = this.node.tryGetContext('agentImageTag') ?? 'unset';
 
@@ -4312,6 +4317,7 @@ export class AgentPlatformStack extends cdk.Stack {
             RequestType: 'Create',
             ResourceProperties: {
               skills: bundledSkillsManifest,
+              retiredSkills: RETIRED_BUNDLED_SKILL_NAMES,
               imageTag: agentImageTagContext,
               trigger: skillInitTrigger,
             },
@@ -4328,6 +4334,7 @@ export class AgentPlatformStack extends cdk.Stack {
             RequestType: 'Update',
             ResourceProperties: {
               skills: bundledSkillsManifest,
+              retiredSkills: RETIRED_BUNDLED_SKILL_NAMES,
               imageTag: agentImageTagContext,
               trigger: skillInitTrigger,
             },
