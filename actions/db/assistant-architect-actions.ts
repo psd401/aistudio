@@ -5,7 +5,6 @@ import {
   type SelectAssistantArchitect,
   type InsertToolInputField,
   type InsertChainPrompt,
-  type InsertToolExecution,
   type SelectToolInputField,
   type SelectChainPrompt,
   type SelectAiModel,
@@ -68,7 +67,7 @@ import {
   getRepositoryById,
 } from "@/lib/db/drizzle";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
-import { eq, and, inArray, desc, sql } from "drizzle-orm";
+import { eq, and, inArray, desc } from "drizzle-orm";
 import { navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities, type AssistantRetrievalScope } from "@/lib/db/schema";
 import type { AssistantModelFamily, AssistantModelRoutingMode } from "@/lib/db/schema/tables/assistant-architects";
 import {
@@ -2126,77 +2125,6 @@ export async function updatePromptPositionAction(
     timer({ status: "error" })
     log.error("Error updating prompt position:", error)
     return { isSuccess: false, message: "Failed to update prompt position" }
-  }
-}
-
-// Tool Execution Actions
-
-export async function createToolExecutionAction(
-  execution: InsertToolExecution
-): Promise<ActionState<string>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("createToolExecution")
-  const log = createLogger({ requestId, action: "createToolExecution" })
-  
-  try {
-    log.info("Action started: Creating tool execution", {
-      toolId: execution.assistantArchitectId
-    })
-
-    const session = await getServerSession();
-    if (!session || !session.sub) {
-      log.warn("Unauthorized tool execution attempt")
-      return { isSuccess: false, message: "Unauthorized" }
-    }
-
-    log.debug("User authenticated", { userId: session.sub })
-
-    const currentUserResult = await getCurrentUserAction()
-    if (!currentUserResult.isSuccess || !currentUserResult.data) {
-      return { isSuccess: false, message: "User not found" }
-    }
-    const userId = currentUserResult.data.user.id
-
-    execution.userId = userId
-
-    // CRITICAL: Drizzle's AWS Data API driver doesn't properly serialize JSONB.
-    // The driver bypasses customType.toDriver() and passes objects directly,
-    // causing RDS Data API to fail. We must use raw SQL to work around this.
-    // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
-    const inputData = execution.inputData && Object.keys(execution.inputData).length > 0
-      ? execution.inputData
-      : { __no_inputs: true };
-    const inputDataJson = JSON.stringify(inputData);
-
-    const executionResult = await executeQuery(
-      (db) => db.execute(sql`
-        INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
-        VALUES (${execution.userId}, ${inputDataJson}::jsonb, 'pending', ${new Date().toISOString()}::timestamp, ${execution.assistantArchitectId})
-        RETURNING id
-      `),
-      "createToolExecution"
-    );
-
-    // postgres.js returns result directly as array-like object (no .rows property - Issue #603)
-    const rows = executionResult as unknown as Array<{ id: number }>;
-    if (!rows || rows.length === 0 || !rows[0]?.id) {
-      throw ErrorFactories.dbQueryFailed("INSERT INTO tool_executions", new Error("No rows returned"))
-    }
-
-    const executionId = rows[0].id
-
-    log.info("Tool execution created successfully", { executionId })
-    timer({ status: "success", executionId })
-
-    return {
-      isSuccess: true,
-      message: "Tool execution created successfully",
-      data: executionId.toString()
-    }
-  } catch (error) {
-    timer({ status: "error" })
-    log.error("Error creating tool execution:", error)
-    return { isSuccess: false, message: "Failed to create tool execution" }
   }
 }
 

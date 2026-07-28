@@ -23,6 +23,23 @@ describe("Assistant Architect runtime repository execution integration", () => {
     );
   });
 
+  it("reloads the executable graph only after coordinated execution creation", () => {
+    const createIndex = routeSource.indexOf(
+      "const created = await createToolExecutionRecord({"
+    );
+    const protectedReloadIndex = routeSource.indexOf(
+      "const protectedGraph = await loadProtectedExecutionGraph({"
+    );
+
+    expect(routeSource).toContain(
+      "createCoordinatedAssistantExecution({"
+    );
+    expect(protectedReloadIndex).toBeGreaterThan(createIndex);
+    expect(routeSource).toContain(
+      "executionDeadlineAt: deadlineAt"
+    );
+  });
+
   it("merges runtime repositories into retrieval and repository tools", () => {
     expect(routeSource).toContain("...context.runtimeRepositoryIds");
     expect(routeSource).toContain(

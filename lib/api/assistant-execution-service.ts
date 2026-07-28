@@ -13,16 +13,9 @@ import { z } from "zod"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
 import { INTERNAL_ASSISTANT_LOOKUP } from "@/lib/assistant-architect/internal-access"
 import { createLogger, startTimer, sanitizeForLogging } from "@/lib/logger"
-import { checkUserRole, getUserById } from "@/lib/db/drizzle"
-import {
-  executeQuery,
-  executeTransaction,
-} from "@/lib/db/drizzle-client"
-import { eq, sql } from "drizzle-orm"
-import {
-  assistantArchitects,
-  toolExecutions,
-} from "@/lib/db/schema"
+import { getUserById } from "@/lib/db/drizzle"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { sql } from "drizzle-orm"
 import { unifiedStreamingService } from "@/lib/streaming/unified-streaming-service"
 import {
   retrieveKnowledgeForPrompt,
@@ -52,6 +45,10 @@ import {
   resolveAssistantRuntimeRepositoryInputs,
   type AssistantRuntimeRepositoryInputs,
 } from "@/lib/assistant-architect/runtime-repository-inputs"
+import {
+  createCoordinatedAssistantExecution,
+  remainingAssistantExecutionTimeoutMs,
+} from "@/lib/assistant-architect/execution-coordinator"
 
 // ============================================
 // Constants
@@ -110,6 +107,8 @@ interface PromptExecutionContext {
   assistantOwnerSub?: string
   userId: number
   executionStartTime: number
+  /** Shared wall-clock deadline established with the execution row. */
+  executionDeadlineAt: Date
   /** The assistant being executed — keys the Atrium retrieval_scope lookup. */
   assistantId: number
   modelRoutingMode: AssistantModelRoutingMode
@@ -248,11 +247,17 @@ async function prepareAssistantExecution(
   // transaction. Updates use the same row lock before checking active records:
   // whichever operation wins the lock establishes a safe ordering, so an
   // execution can never load prompt ids that a concurrent update then deletes.
-  const executionId = await createAssistantExecutionRecord(
+  const coordinated = await createCoordinatedAssistantExecution({
     userId,
     assistantId,
-    preparedInputs.inputs
-  )
+    inputs: preparedInputs.inputs,
+  })
+  if (!coordinated.created) {
+    throw ErrorFactories.sysInternalError(
+      "Unexpected assistant execution rate-limit result"
+    )
+  }
+  const { executionId, startedAt, deadlineAt } = coordinated
   log.info("Execution record created", { executionId, assistantId })
 
   try {
@@ -308,7 +313,8 @@ async function prepareAssistantExecution(
       userCognitoSub: cognitoSub,
       assistantOwnerSub,
       userId,
-      executionStartTime: Date.now(),
+      executionStartTime: startedAt.getTime(),
+      executionDeadlineAt: deadlineAt,
       assistantId,
       modelRoutingMode: architect.modelRoutingMode ?? "legacy",
       modelRoutingFamily: architect.modelRoutingFamily ?? null,
@@ -388,64 +394,6 @@ async function requireAssistantRepositoryAccess(
     technicalMessage:
       "Executing principal cannot access every repository bound to the assistant",
   })
-}
-
-async function createAssistantExecutionRecord(
-  userId: number,
-  assistantId: number,
-  inputs: Record<string, unknown>
-): Promise<number> {
-  const inputData = Object.keys(inputs).length > 0 ? inputs : { __no_inputs: true }
-  return executeTransaction(
-    async (tx) => {
-      const [assistant] = await tx
-        .select({
-          id: assistantArchitects.id,
-          userId: assistantArchitects.userId,
-          status: assistantArchitects.status,
-        })
-        .from(assistantArchitects)
-        .where(eq(assistantArchitects.id, assistantId))
-        .limit(1)
-        .for("update")
-      if (!assistant) {
-        throw ErrorFactories.dbRecordNotFound(
-          "assistant_architects",
-          assistantId
-        )
-      }
-      const isAdmin = await checkUserRole(userId, "administrator", tx)
-      if (
-        assistant.userId !== userId &&
-        !isAdmin &&
-        assistant.status !== "approved"
-      ) {
-        throw ErrorFactories.authzToolAccessDenied("assistant execution", {
-          userMessage: "You do not have permission to access this assistant",
-          technicalMessage:
-            "Assistant access changed before the execution lock was acquired",
-        })
-      }
-
-      const [execution] = await tx
-        .insert(toolExecutions)
-        .values({
-          userId,
-          inputData,
-          status: "running",
-          startedAt: new Date(),
-          assistantArchitectId: assistantId,
-        })
-        .returning({ id: toolExecutions.id })
-      if (!execution?.id) {
-        throw ErrorFactories.sysInternalError(
-          "Failed to create execution record"
-        )
-      }
-      return execution.id
-    },
-    "createToolExecutionWithAssistantLock"
-  )
 }
 
 async function resolveAssistantOwnerSub(
@@ -927,6 +875,9 @@ function promptStreamRequest(
     sessionId: run.context.userCognitoSub,
     conversationId: undefined,
     source: "assistant_execution",
+    timeout: remainingAssistantExecutionTimeoutMs(
+      run.context.executionDeadlineAt
+    ),
     systemPrompt: run.prompt.systemContext || undefined,
     enabledTools: run.enabledTools,
     tools: Object.keys(run.promptTools).length > 0 ? run.promptTools : undefined,

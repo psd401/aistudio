@@ -1,7 +1,7 @@
 const mockRepositoryAccessPreflight = jest.fn()
 const mockGetAssistantArchitectByIdAction = jest.fn()
 const mockExecuteQuery = jest.fn()
-const mockExecuteTransaction = jest.fn()
+const mockCreateCoordinatedAssistantExecution = jest.fn()
 const mockUnifiedStream = jest.fn()
 const mockResolveRuntimeRepositoryInputs = jest.fn()
 const mockRetrieveKnowledgeForPrompt = jest.fn()
@@ -29,12 +29,16 @@ jest.mock("@/actions/db/assistant-architect-actions", () => ({
 
 jest.mock("@/lib/db/drizzle-client", () => ({
   executeQuery: (...args: unknown[]) => mockExecuteQuery(...args),
-  executeTransaction: (...args: unknown[]) => mockExecuteTransaction(...args),
 }))
 
 jest.mock("@/lib/db/drizzle", () => ({
-  checkUserRole: jest.fn(() => Promise.resolve(false)),
   getUserById: jest.fn(),
+}))
+
+jest.mock("@/lib/assistant-architect/execution-coordinator", () => ({
+  createCoordinatedAssistantExecution: (...args: unknown[]) =>
+    mockCreateCoordinatedAssistantExecution(...args),
+  remainingAssistantExecutionTimeoutMs: jest.fn(() => 60_000),
 }))
 
 jest.mock("@/lib/streaming/unified-streaming-service", () => ({
@@ -112,29 +116,12 @@ function defineAssistantExecutionServiceRepositoryPreflightSuite1Part1() {
       isAllowed: true,
       repositoryIds: [42],
     })
-    mockExecuteTransaction.mockImplementation(
-      async (callback: (tx: unknown) => Promise<unknown>) =>
-        callback({
-          select: () => ({
-            from: () => ({
-              where: () => ({
-                limit: () => ({
-                  for: async () => [{
-                    id: 5,
-                    userId: 7,
-                    status: "approved",
-                  }],
-                }),
-              }),
-            }),
-          }),
-          insert: () => ({
-            values: () => ({
-              returning: async () => [{ id: 123 }],
-            }),
-          }),
-        }),
-    )
+    mockCreateCoordinatedAssistantExecution.mockResolvedValue({
+      created: true,
+      executionId: 123,
+      startedAt: new Date("2026-07-28T00:00:00.000Z"),
+      deadlineAt: new Date("2026-07-28T00:15:00.000Z"),
+    })
     mockExecuteQuery.mockResolvedValue([{ id: 123 }])
     mockRetrieveKnowledgeForPrompt.mockResolvedValue([])
     mockRetrieveAtriumKnowledgeForPrompt.mockResolvedValue([])
@@ -204,8 +191,10 @@ function defineAssistantExecutionServiceRepositoryPreflightSuite1Part1() {
       expect.any(Array),
       "executor-sub"
     )
-    expect(mockExecuteTransaction).toHaveBeenCalledTimes(1)
-    expect(mockExecuteTransaction.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(mockCreateCoordinatedAssistantExecution).toHaveBeenCalledTimes(1)
+    expect(
+      mockCreateCoordinatedAssistantExecution.mock.invocationCallOrder[0]
+    ).toBeLessThan(
       mockGetAssistantArchitectByIdAction.mock.invocationCallOrder[0]
     )
     expect(mockExecuteQuery).toHaveBeenCalled()

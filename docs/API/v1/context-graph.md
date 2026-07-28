@@ -821,11 +821,15 @@ Every write preserves the existing human approval gate:
   `pending_approval`. The assistant row is
   locked for replacement, and a pending or running execution returns
   `409 CONFLICT` before any graph mutation so its in-memory prompt ids remain
-  valid. Abandoned pending/running rows older than the assistant timeout plus a
-  one-minute grace are marked failed before this conflict check, so a crashed
-  worker cannot block replacement forever. Execution startup acquires the same
-  assistant-row lock, rechecks owner/admin/approved access on the locked row,
-  and creates its active execution row before loading prompts, closing both the
+  valid. Abandoned pending/running rows are marked failed only after the same
+  immutable per-execution wall-clock deadline the executor persists and enforces
+  (`agent_timeout_seconds` for agentic runs; `timeout_seconds`, or the
+  900-second platform ceiling when unset, for prompt chains) plus a one-minute
+  grace, so a crashed worker cannot block replacement forever without expiring
+  a legitimate long-running agent. Execution startup acquires the same
+  assistant-row lock, rechecks owner/admin/approved visibility plus the current
+  assistant and every prompt-model resource grant in that transaction, and
+  creates its active execution row before loading prompts, closing the
   load-before-record and authorization-snapshot races. Prompts referenced
   by earlier execution results are detached from the live graph rather than
   deleted, preserving their outputs, errors, timings, feedback, and original
@@ -1030,8 +1034,10 @@ conversation message, the server:
    inside retrieval, and inside each repository tool.
 
 Assistant ownership never lends repository access. The synchronous REST path,
-the `Accept: application/json` async-job path, and MCP
-`execute_assistant` all use the same execution service and authorization rules.
+the `Accept: application/json` async-job path, MCP `execute_assistant`, and the
+browser Assistant Architect route all use the same assistant-lock execution
+coordinator. Its mode-specific deadline is also the enforced streaming timeout,
+so update reconciliation and live runtimes agree on when a row can be stale.
 The conversation endpoint reuses the exact server-prepared input for execution,
 so it does not persist raw marker data or resolve the source twice. It binds
 temporary references to the new owned conversation before the first message

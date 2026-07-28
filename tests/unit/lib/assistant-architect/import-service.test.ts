@@ -30,7 +30,9 @@ jest.mock("drizzle-orm", () => ({
   and: (...conditions: unknown[]) => ({ conditions }),
   eq: (left: unknown, right: unknown) => ({ left, right }),
   inArray: (left: unknown, right: unknown) => ({ left, right }),
+  isNull: (value: unknown) => ({ isNull: value }),
   lt: (left: unknown, right: unknown) => ({ left, right }),
+  or: (...conditions: unknown[]) => ({ conditions }),
 }));
 
 jest.mock("@/lib/db/schema", () => ({
@@ -59,6 +61,8 @@ jest.mock("@/lib/db/schema", () => ({
     id: "executions.id",
     assistantArchitectId: "executions.assistant_id",
     status: "executions.status",
+    startedAt: "executions.started_at",
+    deadlineAt: "executions.deadline_at",
   },
   toolInputFields: {
     table: "fields",

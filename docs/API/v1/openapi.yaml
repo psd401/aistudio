@@ -1243,8 +1243,12 @@ paths:
         update any assistant. Missing assistants and assistants owned by another
         user both return a masked `404 NOT_FOUND`. An update returns
         `409 CONFLICT` while a non-stale pending or running execution can still
-        reference the live prompt rows; abandoned rows expire after the
-        assistant timeout plus a one-minute grace. Every successful update resets status to
+        reference the live prompt rows. Abandoned rows expire only after the
+        same immutable, per-execution wall-clock deadline persisted and
+        enforced by execution
+        (`agent_timeout_seconds` for agentic runs; `timeout_seconds`, or the
+        900-second platform ceiling when unset, for prompt chains) plus a
+        one-minute grace. Every successful update resets status to
         `pending_approval` and atomically deactivates its linked UI capability
         until re-approval. Reapproval reuses the capability's stable identifier
         even when the replacement renamed the assistant. Agent tools, connectors,
@@ -1446,8 +1450,11 @@ paths:
         - `Accept: application/json` returns 202 with a jobId for async polling
 
         Beyond the assistant scope check, the caller must have per-resource access
-        (Epic #1202 Phase 3) to BOTH the assistant and the model its last prompt
-        uses. Active room assignment grants access to the assistant, even when
+        (Epic #1202 Phase 3) to BOTH the assistant and every model its prompt
+        graph can use. Execution creation takes the same assistant-row lock as
+        import replacement, rechecks those current grants in that transaction,
+        creates the active execution row, and only then loads the executable
+        prompt graph. Active room assignment grants access to the assistant, even when
         its role/Google-group grants would deny the caller. A caller whose only
         AI Studio role is `student` and who has an active room may execute only
         room-assigned assistants; assistant ownership and zero-grant
@@ -1463,7 +1470,9 @@ paths:
         executing user, rejects missing/foreign/expired sources, replaces
         caller-carried names with authoritative item names, and adds the resolved
         repositories to retrieval and repository tools for every prompt. Current
-        repository ACLs are rechecked at execution and retrieval time.
+        repository ACLs are rechecked at execution and retrieval time. The
+        coordinated execution deadline is persisted with the execution and
+        enforced as the streaming abort timeout on every prompt or agent run.
 
         Required scope: `assistants:execute` (or the narrower
         `assistant:{id}:execute`; administrators may hold `*`).

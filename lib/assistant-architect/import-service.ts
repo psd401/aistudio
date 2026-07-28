@@ -1,4 +1,4 @@
-import { and, eq, inArray, lt } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, or } from "drizzle-orm";
 import {
   createExportFile,
   getAssistantDataForExport,
@@ -37,6 +37,10 @@ import {
 import type { ToolInputFieldOptions } from "@/lib/db/types/jsonb";
 import { createLogger } from "@/lib/logger";
 import { decodeMdxEditorEscapes } from "@/lib/utils/text-sanitizer";
+import {
+  assistantExecutionDeadlineStaleBefore,
+  legacyAssistantExecutionStaleBefore,
+} from "@/lib/assistant-architect/execution-coordinator";
 
 export const IMPORTED_ASSISTANT_STATUS = "pending_approval" as const;
 
@@ -544,7 +548,6 @@ export async function updateAssistantFromImport(
       .select({
         userId: assistantArchitects.userId,
         mode: assistantArchitects.mode,
-        timeoutSeconds: assistantArchitects.timeoutSeconds,
       })
       .from(assistantArchitects)
       .where(eq(assistantArchitects.id, assistantId))
@@ -573,9 +576,11 @@ export async function updateAssistantFromImport(
       );
     }
 
-    const staleBefore = new Date(
-      Date.now() - ((existing.timeoutSeconds ?? 300) + 60) * 1000,
-    );
+    const now = new Date();
+    const staleDeadlineBefore =
+      assistantExecutionDeadlineStaleBefore(now);
+    const legacyStaleBefore =
+      legacyAssistantExecutionStaleBefore(now);
     await tx
       .update(toolExecutions)
       .set({
@@ -587,7 +592,13 @@ export async function updateAssistantFromImport(
         and(
           eq(toolExecutions.assistantArchitectId, assistantId),
           inArray(toolExecutions.status, ["pending", "running"]),
-          lt(toolExecutions.startedAt, staleBefore),
+          or(
+            lt(toolExecutions.deadlineAt, staleDeadlineBefore),
+            and(
+              isNull(toolExecutions.deadlineAt),
+              lt(toolExecutions.startedAt, legacyStaleBefore),
+            ),
+          ),
         ),
       );
 
