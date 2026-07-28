@@ -5,6 +5,7 @@ import {
 } from "@/actions/settings/user-settings.actions"
 import { listNexusMemories } from "@/actions/nexus/memory.actions"
 import { PageBranding } from "@/components/ui/page-branding"
+import { createLogger } from "@/lib/logger"
 import { hasCapabilityAccess } from "@/utils/roles"
 import { SettingsClient } from "./_components/settings-client"
 
@@ -12,8 +13,21 @@ export const metadata = {
   title: "Settings | AI Studio",
 }
 
+const log = createLogger({ moduleName: "settings-page" })
+
+async function resolveMemoryCapability(): Promise<boolean> {
+  try {
+    return await hasCapabilityAccess("nexus-memory")
+  } catch (error) {
+    log.error("Failed to resolve Nexus memory capability", {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
+  }
+}
+
 export default async function SettingsPage() {
-  const hasMemoryCapability = await hasCapabilityAccess("nexus-memory")
+  const hasMemoryCapability = await resolveMemoryCapability()
   const [profileResult, keysResult, preferencesResult, memoryResult] =
     await Promise.all([
       getUserProfile(),
