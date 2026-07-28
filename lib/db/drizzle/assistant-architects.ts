@@ -42,8 +42,12 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, desc, sql, inArray } from "drizzle-orm";
-import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
+import { eq, and, desc, sql, inArray, isNull, ne } from "drizzle-orm";
+import {
+  executeQuery,
+  executeTransaction,
+  type DbTransaction,
+} from "@/lib/db/drizzle-client";
 import {
   assistantArchitects,
   chainPrompts,
@@ -545,34 +549,61 @@ export async function deleteAssistantArchitect(id: number) {
         .delete(navigationItems)
         .where(eq(navigationItems.link, navLink));
 
-      // 1. Delete prompt_results (references chain_prompts via prompt_id)
+      // 1. Capture historical prompts detached by an assistant graph update.
+      // Their prompt_results still link them to this assistant's executions even
+      // though assistant_architect_id is null.
+      const detachedHistoryPromptRows = await tx
+        .select({ id: chainPrompts.id })
+        .from(chainPrompts)
+        .innerJoin(promptResults, eq(promptResults.promptId, chainPrompts.id))
+        .innerJoin(
+          toolExecutions,
+          eq(promptResults.executionId, toolExecutions.id)
+        )
+        .where(
+          and(
+            eq(toolExecutions.assistantArchitectId, id),
+            isNull(chainPrompts.assistantArchitectId)
+          )
+        );
+      const detachedHistoryPromptIds = Array.from(
+        new Set(detachedHistoryPromptRows.map((row) => row.id))
+      );
+
+      // 2. Delete prompt_results for both the current graph and every execution
+      // owned by this assistant. This releases detached historical prompt rows.
       await tx
         .delete(promptResults)
         .where(
-          sql`${promptResults.promptId} IN (SELECT id FROM chain_prompts WHERE assistant_architect_id = ${id})`
+          sql`${promptResults.promptId} IN (SELECT id FROM chain_prompts WHERE assistant_architect_id = ${id}) OR ${promptResults.executionId} IN (SELECT id FROM tool_executions WHERE assistant_architect_id = ${id})`
         );
 
-      // 2. Delete chain_prompts
+      // 3. Delete the current graph and any now-unreferenced detached history.
       await tx
         .delete(chainPrompts)
         .where(eq(chainPrompts.assistantArchitectId, id));
+      if (detachedHistoryPromptIds.length > 0) {
+        await tx
+          .delete(chainPrompts)
+          .where(inArray(chainPrompts.id, detachedHistoryPromptIds));
+      }
 
-      // 3. Delete tool_input_fields
+      // 4. Delete tool_input_fields
       await tx
         .delete(toolInputFields)
         .where(eq(toolInputFields.assistantArchitectId, id));
 
-      // 4. Delete tool_executions
+      // 5. Delete tool_executions
       await tx
         .delete(toolExecutions)
         .where(eq(toolExecutions.assistantArchitectId, id));
 
-      // 5. Delete tool_edits (audit log rows — FK with no onDelete cascade)
+      // 6. Delete tool_edits (audit log rows — FK with no onDelete cascade)
       await tx
         .delete(toolEdits)
         .where(eq(toolEdits.assistantArchitectId, id));
 
-      // 6b. Delete per-resource access grants for this assistant (#1206) so no
+      // 7. Delete per-resource access grants for this assistant (#1206) so no
       // orphan grant lingers and matches a recycled serial id.
       await tx
         .delete(resourceAccessGrants)
@@ -583,7 +614,7 @@ export async function deleteAssistantArchitect(id: number) {
           )
         );
 
-      // 7. Finally delete the assistant architect itself
+      // 8. Finally delete the assistant architect itself
       const result = await tx
         .delete(assistantArchitects)
         .where(eq(assistantArchitects.id, id))
@@ -603,11 +634,40 @@ export async function deleteAssistantArchitect(id: number) {
  * Approve an assistant architect
  * Also creates the corresponding tool entry if it doesn't exist
  */
-export async function approveAssistantArchitect(id: number) {
+export class AssistantApprovalValidationError extends Error {
+  constructor() {
+    super("Assistant failed final approval validation");
+    this.name = "AssistantApprovalValidationError";
+  }
+}
+
+export async function approveAssistantArchitect(
+  id: number,
+  validateBeforeApproval?: (transaction: DbTransaction) => Promise<boolean>
+) {
   // Use executeTransaction directly (never nest db.transaction inside
   // executeQuery — the wrapper's retry could replay a partially-committed tx).
   return executeTransaction(
     async (tx) => {
+      // Import replacement uses the same assistant-row lock. Hold it while the
+      // final audience check runs and until approval commits, so a caller cannot
+      // swap the reviewed graph between validation and publication.
+      const [lockedAssistant] = await tx
+        .select({ id: assistantArchitects.id })
+        .from(assistantArchitects)
+        .where(eq(assistantArchitects.id, id))
+        .limit(1)
+        .for("update");
+      if (!lockedAssistant) {
+        throw ErrorFactories.dbRecordNotFound("assistant_architects", id);
+      }
+      if (
+        validateBeforeApproval &&
+        !(await validateBeforeApproval(tx))
+      ) {
+        throw new AssistantApprovalValidationError();
+      }
+
       // Update status to approved
       const result = await tx
         .update(assistantArchitects)
@@ -628,12 +688,54 @@ export async function approveAssistantArchitect(id: number) {
         throw new Error(`Assistant architect ${id} has no name`);
       }
 
-      // Create tool entry if it doesn't already exist
-      // Use INSERT ... ON CONFLICT DO NOTHING to handle race conditions
-      // If another transaction creates the tool first, this silently succeeds.
-      // A name that slugifies to a code-manifest identifier is disambiguated with
-      // an id suffix so the approval upsert can never hijack a manifest-owned
-      // capability row (which would overwrite its source/promptChainToolId).
+      // Capability identity follows the assistant, not its mutable name. Reuse
+      // the row already linked by prompt_chain_tool_id on reapproval (including
+      // after an import rename) so approval cannot create a second capability
+      // and wire navigation/role grants to a stale inactive row.
+      const linkedCapabilities = await tx
+        .select({
+          id: capabilities.id,
+          identifier: capabilities.identifier,
+        })
+        .from(capabilities)
+        .where(eq(capabilities.promptChainToolId, assistant.id))
+        .orderBy(capabilities.id);
+      const existingCapability = linkedCapabilities[0];
+      if (existingCapability) {
+        await tx
+          .update(capabilities)
+          .set({
+            name: assistant.name,
+            description: assistant.description,
+            isActive: true,
+            source: "manual",
+            updatedAt: new Date(),
+          })
+          .where(eq(capabilities.id, existingCapability.id));
+
+        // Repair legacy duplicate rows left by older rename/reapproval behavior.
+        // Only the reused identity remains linked to this assistant.
+        if (linkedCapabilities.length > 1) {
+          await tx
+            .update(capabilities)
+            .set({
+              promptChainToolId: null,
+              isActive: false,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(capabilities.promptChainToolId, assistant.id),
+                ne(capabilities.id, existingCapability.id)
+              )
+            );
+        }
+        return assistant;
+      }
+
+      // First approval creates the stable capability identity. A name that
+      // slugifies to a code-manifest identifier is disambiguated with an id
+      // suffix so it cannot hijack a manifest-owned row.
       let toolIdentifier = buildAssistantToolIdentifier(
         assistant.name,
         assistant.id

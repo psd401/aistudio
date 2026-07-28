@@ -29,7 +29,8 @@ import {
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq, sql } from "drizzle-orm"
 import { nexusUserPreferences, users } from "@/lib/db/schema"
-import type { NexusUserSettings, UserProfile } from "@/lib/db/types/jsonb"
+import type { UserProfile } from "@/lib/db/types/jsonb"
+import { mergeNexusUserSettings } from "@/lib/nexus/user-settings"
 import { z } from "zod"
 import {
   generateApiKey,
@@ -140,27 +141,10 @@ export async function updateNexusChatPreferences(
     const userId = await getUserIdByCognitoSubAsNumber(session.sub)
     if (!userId) throw ErrorFactories.dbRecordNotFound("users", session.sub)
 
-    const [existing] = await executeQuery(
-      db => db.select({ settings: nexusUserPreferences.settings })
-        .from(nexusUserPreferences)
-        .where(eq(nexusUserPreferences.userId, userId))
-        .limit(1),
-      "getNexusChatPreferencesForUpdate"
-    )
-    const settings: NexusUserSettings = {
-      ...(existing?.settings ?? {}),
+    await mergeNexusUserSettings(userId, {
       nexusMode: parsed.data.mode,
       preferredModelFamily: parsed.data.family,
-    }
-    await executeQuery(
-      db => db.insert(nexusUserPreferences)
-        .values({ userId, settings, updatedAt: new Date() })
-        .onConflictDoUpdate({
-          target: nexusUserPreferences.userId,
-          set: { settings, updatedAt: new Date() },
-        }),
-      "updateNexusChatPreferences"
-    )
+    })
     timer({ status: "success" })
     log.info("Nexus chat preferences updated", { userId, ...parsed.data })
     return createSuccess(parsed.data)

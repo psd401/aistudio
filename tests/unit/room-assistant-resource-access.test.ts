@@ -15,6 +15,7 @@ import {
   filterAccessibleResourceIds,
   userCanAccessResource,
 } from "@/lib/db/drizzle/resource-access";
+import type { DbTransaction } from "@/lib/db/drizzle-client";
 
 const NO_ROOM = {
   isAdministrator: false,
@@ -86,6 +87,18 @@ describe("shared assistant room authorization", () => {
       userCanAccessResource(42, "assistant", 7)
     ).resolves.toBe(true);
     expect(mockExecuteQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps room and grant checks on the supplied transaction snapshot", async () => {
+    const execute = jest.fn().mockResolvedValue([{ allowed: true }]);
+    const transaction = { execute } as unknown as DbTransaction;
+
+    await expect(
+      userCanAccessResource(42, "assistant", 7, {}, transaction)
+    ).resolves.toBe(true);
+    expect(mockRoomAccess).toHaveBeenCalledWith(42, ["7"], transaction);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(mockExecuteQuery).not.toHaveBeenCalled();
   });
 
   it("batch restriction returns only room-assigned assistant ids", async () => {

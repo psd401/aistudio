@@ -47,6 +47,9 @@ export async function getModelConfig(modelId: string | number) {
     // Include capabilities so callers (e.g. Nexus chat) can derive image/deep-research
     // routing from this single fetched row instead of re-reading the same ai_models
     // row via getAIModelById (REV-PERF-002).
-    capabilities: model.capabilities
+    capabilities: model.capabilities,
+    // Memory and other caller-bound tools must honor the same model metadata
+    // used by the shared router's function-calling eligibility checks.
+    providerMetadata: model.providerMetadata,
   };
 }

@@ -9,7 +9,8 @@
  *     list          raw MCP tools/list (scope-filtered to the resolved key)
  *
  *   ACTION (#1223) — each maps 1:1 to an MCP tools/call and runs as the OWNER:
- *     list-assistants   / execute-assistant
+ *     list-assistants / execute-assistant / create-assistant /
+ *     update-assistant / fork-assistant
  *     search-decisions  / capture-decision / get-decision-graph
  *
  * IDENTITY MODEL: every operation crosses the local owner-bound broker. The
@@ -26,6 +27,9 @@
  *   node run.js list [--user <email>]
  *   node run.js list-assistants   [--user <email>] [--search <t>] [--status <s>] [--limit N] [--cursor C]
  *   node run.js execute-assistant [--user <email>] --id <n> [--inputs '{"field":"value"}']
+ *   node run.js create-assistant [--user <email>] (--file <export.json> | --json '<ExportFormat>')
+ *   node run.js update-assistant [--user <email>] --id <n> (--file <export.json> | --json '<ExportFormat>')
+ *   node run.js fork-assistant [--user <email>] --id <n> [--name <text>]
  *   node run.js search-decisions  [--user <email>] [--query <t>] [--node-type T] [--node-class C] [--limit N] [--cursor C]
  *   node run.js capture-decision  [--user <email>] --decision "<t>" --decided-by "<t>"
  *                            [--reasoning <t>] [--evidence a,b] [--constraints a,b] [--conditions a,b]
@@ -43,6 +47,7 @@
 
 "use strict";
 
+const fs = require("node:fs");
 const {
   fail,
   emit,
@@ -55,6 +60,7 @@ const {
 
 const SECTIONS = ["actions", "features", "scopes", "all"];
 const SURFACES = ["mcp", "ai_sdk", "rest", "internal"];
+const ASSISTANT_IMPORT_MAX_BYTES = 10 * 1024 * 1024;
 
 function usage() {
   process.stdout.write(
@@ -86,6 +92,11 @@ function usage() {
       "      exception is session-only, i.e. web UI); a draft/pending or missing id",
       "      returns a clean not_executable result (exit 0). Needs",
       "      mcp:execute_assistant (staff + admin).",
+      "  create-assistant [--user <email>] (--file <export.json> | --json '<ExportFormat>')",
+      "  update-assistant [--user <email>] --id <n> (--file <export.json> | --json '<ExportFormat>')",
+      "  fork-assistant   [--user <email>] --id <n> [--name <text>]",
+      "      Create/update/fork always lands in pending_approval. Update is",
+      "      owner-or-admin; fork uses the caller's current assistant visibility.",
       "  search-decisions  [--user <email>] [--query <t>] [--node-type T] [--node-class C]",
       "                    [--limit N] [--cursor C]",
       '  capture-decision  [--user <email>] --decision "<t>" --decided-by "<t>"',
@@ -155,6 +166,81 @@ function parseIntegerList(value, label) {
     fail(`--${label} must be a comma-separated list of positive integers`);
   }
   return numbers;
+}
+
+function readBoundedImportFile(file) {
+  // Open once, inspect that exact descriptor, and read no more than its
+  // inspected size. A concurrently growing file is therefore still bounded.
+  // O_NONBLOCK lets the CLI reject devices/FIFOs after fstat without hanging
+  // in open() while, for example, a FIFO waits for a writer.
+  // The caller-selected path is an intentional part of the CLI contract.
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  const descriptor = fs.openSync(
+    file,
+    fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+  );
+  try {
+    const fileStats = fs.fstatSync(descriptor);
+    if (!fileStats.isFile()) {
+      throw new Error("--file must refer to a regular file");
+    }
+    if (fileStats.size > ASSISTANT_IMPORT_MAX_BYTES) {
+      throw new Error("assistant import file exceeds the 10 MB limit");
+    }
+
+    const buffer = Buffer.alloc(fileStats.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const bytesRead = fs.readSync(
+        descriptor,
+        buffer,
+        offset,
+        buffer.length - offset,
+        offset,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return buffer.subarray(0, offset).toString("utf8");
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function parseImportEnvelope(args) {
+  const json = optStr(args, "json", "json");
+  const file = optStr(args, "file", "file");
+  if ((json === undefined) === (file === undefined)) {
+    fail(
+      "Provide exactly one of --file <export.json> or --json '<ExportFormat>'",
+    );
+  }
+
+  let raw;
+  if (file !== undefined) {
+    try {
+      raw = readBoundedImportFile(file);
+    } catch (error) {
+      fail(`Unable to read --file: ${error.message}`);
+    }
+  } else {
+    raw = json;
+  }
+
+  let envelope;
+  try {
+    envelope = JSON.parse(raw);
+  } catch (error) {
+    fail(`Assistant import envelope must be valid JSON: ${error.message}`);
+  }
+  if (
+    envelope === null ||
+    typeof envelope !== "object" ||
+    Array.isArray(envelope)
+  ) {
+    fail("Assistant import envelope must be a JSON object");
+  }
+  return envelope;
 }
 
 function requiredScopeForTool(toolName) {
@@ -337,6 +423,31 @@ async function executeAssistantCommand(args, email) {
   emit(res.payload);
 }
 
+async function createAssistantCommand(args, email) {
+  await runToolAndEmit("create_assistant", parseImportEnvelope(args), email);
+}
+
+async function updateAssistantCommand(args, email) {
+  const assistantId = optInt(args, "id", "id");
+  if (assistantId === undefined) fail("--id <assistant-id> is required");
+  await runToolAndEmit(
+    "update_assistant",
+    { ...parseImportEnvelope(args), assistantId },
+    email,
+  );
+}
+
+async function forkAssistantCommand(args, email) {
+  const assistantId = optInt(args, "id", "id");
+  if (assistantId === undefined) fail("--id <assistant-id> is required");
+  const name = optStr(args, "name", "name");
+  await runToolAndEmit(
+    "fork_assistant",
+    { assistantId, ...(name !== undefined ? { name } : {}) },
+    email,
+  );
+}
+
 async function searchDecisionsCommand(args, email) {
   const toolArgs = {};
   const optionalArgs = {
@@ -440,6 +551,9 @@ const COMMAND_HANDLERS = {
   list: listCommand,
   "list-assistants": listAssistantsCommand,
   "execute-assistant": executeAssistantCommand,
+  "create-assistant": createAssistantCommand,
+  "update-assistant": updateAssistantCommand,
+  "fork-assistant": forkAssistantCommand,
   "search-decisions": searchDecisionsCommand,
   "capture-decision": captureDecisionCommand,
   "get-decision-graph": getDecisionGraphCommand,

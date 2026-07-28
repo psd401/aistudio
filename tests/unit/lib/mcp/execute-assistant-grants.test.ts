@@ -90,12 +90,13 @@ const ARCHITECT = {
   id: 7,
   userId: 99, // not the caller — assistant grant check applies
   status: "approved",
+  modelRoutingMode: "legacy",
   prompts: [
     { id: 1, position: 0, modelId: 11 },
     { id: 2, position: 1, modelId: 12 },
     { id: 3, position: 2, modelId: null }, // must be filtered out, not sent as 0/null
   ],
-} as never
+}
 
 function executeHandler(args: Record<string, unknown> = { assistantId: 7 }) {
   return TOOL_HANDLERS.execute_assistant(args, CONTEXT)
@@ -152,6 +153,23 @@ describe("MCP execute_assistant — per-resource grant gate (#1206/#1223)", () =
       architectUserId: 99,
       architectId: 7,
       modelDbIds: [11, 12], // null modelId filtered out
+    })
+  })
+
+  it("defers automatic-routing model authorization to the selected model", async () => {
+    mockGetArchitect.mockResolvedValueOnce({
+      isSuccess: true,
+      message: "ok",
+      data: { ...ARCHITECT, modelRoutingMode: "advanced" },
+    } as never)
+
+    await executeHandler()
+
+    expect(mockCheckGrants).toHaveBeenCalledWith({
+      userId: 42,
+      architectUserId: 99,
+      architectId: 7,
+      modelDbIds: [],
     })
   })
 

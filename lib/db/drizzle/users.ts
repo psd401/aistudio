@@ -11,7 +11,10 @@
  */
 
 import { eq, and, desc, sql } from "drizzle-orm";
-import { executeQuery } from "@/lib/db/drizzle-client";
+import {
+  executeQuery,
+  type DbTransaction,
+} from "@/lib/db/drizzle-client";
 import {
   users,
   userRoles,
@@ -301,18 +304,19 @@ export async function deleteUser(id: number) {
  */
 export async function checkUserRole(
   userId: number,
-  roleName: string
+  roleName: string,
+  transaction?: DbTransaction
 ): Promise<boolean> {
-  const result = await executeQuery(
-    (db) =>
-      db
-        .select({ userId: userRoles.userId })
-        .from(userRoles)
-        .innerJoin(roles, eq(userRoles.roleId, roles.id))
-        .where(and(eq(userRoles.userId, userId), eq(roles.name, roleName)))
-        .limit(1),
-    "checkUserRole"
-  );
+  const query = (db: Pick<DbTransaction, "select">) =>
+    db
+      .select({ userId: userRoles.userId })
+      .from(userRoles)
+      .innerJoin(roles, eq(userRoles.roleId, roles.id))
+      .where(and(eq(userRoles.userId, userId), eq(roles.name, roleName)))
+      .limit(1);
+  const result = transaction
+    ? await query(transaction)
+    : await executeQuery((db) => query(db), "checkUserRole");
   return result.length > 0;
 }
 

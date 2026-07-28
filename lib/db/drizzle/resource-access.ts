@@ -24,7 +24,11 @@
  */
 
 import { and, eq, sql } from "drizzle-orm";
-import { executeQuery, toPgRows, type DbTransaction } from "@/lib/db/drizzle-client";
+import {
+  executeQuery,
+  toPgRows,
+  type DbTransaction,
+} from "@/lib/db/drizzle-client";
 import {
   resourceAccessGrants,
   type ResourceGrantType,
@@ -82,13 +86,18 @@ export async function userCanAccessResource(
   userId: number,
   resourceType: ResourceGrantType,
   resourceId: number | string,
-  options: ResourceAccessOptions = {}
+  options: ResourceAccessOptions = {},
+  transaction?: DbTransaction
 ): Promise<boolean> {
   const idText = resourceIdText(resourceId);
   const validUser = Number.isInteger(userId) && userId > 0;
 
   if (resourceType === "assistant") {
-    const roomAccess = await getRoomAssistantAccessContext(userId, [idText]);
+    const roomAccess = await getRoomAssistantAccessContext(
+      userId,
+      [idText],
+      transaction
+    );
     if (roomAccess.isAdministrator) return true;
     if (roomAccess.assignedAssistantIds.has(idText)) return true;
     if (roomAccess.isStudentOnly && roomAccess.hasActiveRoomMembership) {
@@ -97,9 +106,8 @@ export async function userCanAccessResource(
     if (validUser && options.ownerUserId === userId) return true;
   }
 
-  const result = await executeQuery(
-    (db) =>
-      db.execute(sql`
+  const query = (db: Pick<DbTransaction, "execute">) =>
+    db.execute(sql`
         SELECT (
           NOT EXISTS (
             SELECT 1 FROM resource_access_grants g
@@ -138,9 +146,10 @@ export async function userCanAccessResource(
             )
           )
         ) AS allowed
-      `),
-    "userCanAccessResource"
-  );
+      `);
+  const result = transaction
+    ? await query(transaction)
+    : await executeQuery((db) => query(db), "userCanAccessResource");
 
   const [row] = toPgRows<{ allowed: boolean }>(result);
   return row?.allowed === true;
@@ -308,11 +317,11 @@ export async function filterAccessibleResourceIds(
 /** List a resource's grants (role grants first, then group, each by value). */
 export async function listResourceGrants(
   resourceType: ResourceGrantType,
-  resourceId: number | string
+  resourceId: number | string,
+  transaction?: DbTransaction
 ): Promise<ResourceGrant[]> {
   const idText = resourceIdText(resourceId);
-  const rows = await executeQuery(
-    (db) =>
+  const query = (db: Pick<DbTransaction, "select">) =>
       db
         .select({
           grantKind: resourceAccessGrants.grantKind,
@@ -325,9 +334,10 @@ export async function listResourceGrants(
             eq(resourceAccessGrants.resourceId, idText)
           )
         )
-        .orderBy(resourceAccessGrants.grantKind, resourceAccessGrants.grantValue),
-    "listResourceGrants"
-  );
+        .orderBy(resourceAccessGrants.grantKind, resourceAccessGrants.grantValue);
+  const rows = transaction
+    ? await query(transaction)
+    : await executeQuery(query, "listResourceGrants");
   return rows;
 }
 

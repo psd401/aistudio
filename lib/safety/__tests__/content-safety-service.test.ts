@@ -36,6 +36,7 @@ describe('ContentSafetyService', () => {
       expect(result).toHaveProperty('allowed');
       expect(result).toHaveProperty('processedContent');
       expect(result).toHaveProperty('hasPII');
+      expect(result.piiScanCompleted).toBe(false);
     });
 
     it('should skip tokenization when disabled', async () => {
@@ -52,6 +53,7 @@ describe('ContentSafetyService', () => {
 
       expect(result.processedContent).toBe('Hello John');
       expect(result.hasPII).toBe(false);
+      expect(result.piiScanCompleted).toBe(false);
     });
   });
 

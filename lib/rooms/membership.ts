@@ -10,7 +10,11 @@
  */
 
 import { and, eq, sql, type SQL } from "drizzle-orm";
-import { executeQuery, toPgRows } from "@/lib/db/drizzle-client";
+import {
+  executeQuery,
+  toPgRows,
+  type DbTransaction,
+} from "@/lib/db/drizzle-client";
 import {
   onerosterClasses,
   onerosterEnrollments,
@@ -181,7 +185,8 @@ export async function roomForUser(
  */
 export async function getRoomAssistantAccessContext(
   userId: number,
-  assistantIds: Array<number | string>
+  assistantIds: Array<number | string>,
+  transaction?: DbTransaction
 ): Promise<RoomAssistantAccessContext> {
   const validUser = Number.isInteger(userId) && userId > 0;
   if (!validUser) {
@@ -202,9 +207,8 @@ export async function getRoomAssistantAccessContext(
           sql`, `
         )})`;
 
-  const result = await executeQuery(
-    (db) =>
-      db.execute(sql`
+  const query = (db: Pick<DbTransaction, "execute">) =>
+    db.execute(sql`
         WITH member_rooms AS (
           ${memberRoomsQuery(userId)}
         )
@@ -244,9 +248,13 @@ export async function getRoomAssistantAccessContext(
             ),
             ARRAY[]::text[]
           ) AS "assignedAssistantIds"
-      `),
-    "getRoomAssistantAccessContext"
-  );
+      `);
+  const result = transaction
+    ? await query(transaction)
+    : await executeQuery(
+        (db) => query(db),
+        "getRoomAssistantAccessContext"
+      );
   const [row] = toPgRows<{
     isAdministrator: boolean;
     isStudentOnly: boolean;

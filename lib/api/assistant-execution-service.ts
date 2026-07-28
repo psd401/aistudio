@@ -45,6 +45,11 @@ import {
   resolveAssistantRuntimeRepositoryInputs,
   type AssistantRuntimeRepositoryInputs,
 } from "@/lib/assistant-architect/runtime-repository-inputs"
+import {
+  compareAssistantPromptExecutionOrder,
+  createCoordinatedAssistantExecution,
+  remainingAssistantExecutionTimeoutMs,
+} from "@/lib/assistant-architect/execution-coordinator"
 
 // ============================================
 // Constants
@@ -66,6 +71,12 @@ export interface ExecuteAssistantParams {
   userId: number
   cognitoSub: string
   requestId: string
+  /**
+   * Programmatic API/MCP callers may execute only approved assistants. The
+   * coordinator enforces this again under the assistant-row lock so an approval
+   * change cannot race execution startup.
+   */
+  requireApproved?: boolean
   /**
    * A server-created preparation may be reused by entry points that must
    * validate and sanitize inputs before creating their own durable records.
@@ -103,6 +114,8 @@ interface PromptExecutionContext {
   assistantOwnerSub?: string
   userId: number
   executionStartTime: number
+  /** Shared wall-clock deadline established with the execution row. */
+  executionDeadlineAt: Date
   /** The assistant being executed — keys the Atrium retrieval_scope lookup. */
   assistantId: number
   modelRoutingMode: AssistantModelRoutingMode
@@ -232,86 +245,110 @@ async function prepareAssistantExecution(
 
   log.info("Starting assistant execution", { assistantId, userId })
 
-  // 1. Load assistant configuration
-  const architectResult = await getAssistantArchitectByIdAction(
-    assistantId.toString(),
-    INTERNAL_ASSISTANT_LOOKUP
-  )
-  if (!architectResult.isSuccess || !architectResult.data) {
-    throw ErrorFactories.dbRecordNotFound("assistant_architects", assistantId)
-  }
-
-  const architect = architectResult.data
-  const prompts = requirePromptChainArchitect(architect)
-
   // Runtime markers are owner-bound and must be resolved before the execution
-  // row/event writes below. Their repository IDs then join the normal
-  // executor-ACL preflight; ownership of an assistant never lends access.
+  // row below. Their repository IDs later join the normal executor-ACL
+  // preflight; ownership of an assistant never lends access.
   const preparedInputs = await resolvePreparedAssistantInputs(params)
-  await requireAssistantRepositoryAccess(
-    prompts,
-    preparedInputs,
-    cognitoSub,
-    { assistantId, userId, log }
-  )
 
-  log.info("Assistant loaded", sanitizeForLogging({
-    assistantId,
-    modelRoutingMode: architect.modelRoutingMode ?? "legacy",
-    modelRoutingFamily: architect.modelRoutingFamily ?? null,
-    name: architect.name,
-    promptCount: prompts.length,
-  }))
-
-  // 2. Create tool_execution record
-  const executionId = await createAssistantExecutionRecord(
+  // 1. Lock the assistant row and create the active execution record in one
+  // transaction. Updates use the same row lock before checking active records:
+  // whichever operation wins the lock establishes a safe ordering, so an
+  // execution can never load prompt ids that a concurrent update then deletes.
+  const coordinated = await createCoordinatedAssistantExecution({
     userId,
     assistantId,
-    preparedInputs.inputs
-  )
+    inputs: preparedInputs.inputs,
+    requireApproved: params.requireApproved,
+  })
+  if (!coordinated.created) {
+    if (coordinated.reason === "invalid_graph") {
+      throw ErrorFactories.validationFailed([{
+        field: "prompts",
+        message:
+          `Assistant prompt count must be between 1 and ${coordinated.maxPromptCount}`,
+      }])
+    }
+    throw ErrorFactories.sysInternalError(
+      "Unexpected assistant execution rate-limit result"
+    )
+  }
+  const { executionId, startedAt, deadlineAt } = coordinated
   log.info("Execution record created", { executionId, assistantId })
 
-  // 3. Emit execution-start event
-  await storeExecutionEvent(executionId, "execution-start", {
-    executionId,
-    totalPrompts: prompts.length,
-    toolName: architect.name,
-  })
+  try {
+    // 2. Load the configuration only after the execution record is visible.
+    // A concurrent updater must now observe this record and return 409.
+    const architectResult = await getAssistantArchitectByIdAction(
+      assistantId.toString(),
+      INTERNAL_ASSISTANT_LOOKUP
+    )
+    if (!architectResult.isSuccess || !architectResult.data) {
+      throw ErrorFactories.dbRecordNotFound("assistant_architects", assistantId)
+    }
 
-  // 4. Build execution context. The Atrium requester resolves the key owner's
-  // roles/org for canView-bounded content retrieval (Phase 6, #1056);
-  // requesterForUserId never throws — a failed resolve yields null, which
-  // skips Atrium retrieval without failing the execution.
-  // Resolve the assistant creator's cognito_sub so owner-based repository access
-  // resolves for non-owner runs. This was String(architect.userId) — a numeric
-  // users.id, which never equals the users.cognito_sub the knowledge/repository
-  // access predicates compare against, so owner-shared private repos silently
-  // returned zero chunks (REV-COR-511).
-  const assistantOwnerSub = await resolveAssistantOwnerSub(architect.userId, log)
+    const architect = architectResult.data
+    const prompts = requirePromptChainArchitect(architect)
+    await requireAssistantRepositoryAccess(
+      prompts,
+      preparedInputs,
+      cognitoSub,
+      { assistantId, userId, log }
+    )
 
-  const context: PromptExecutionContext = {
-    previousOutputs: new Map(),
-    accumulatedMessages: [],
-    executionId,
-    userCognitoSub: cognitoSub,
-    assistantOwnerSub,
-    userId,
-    executionStartTime: Date.now(),
-    assistantId,
-    modelRoutingMode: architect.modelRoutingMode ?? "legacy",
-    modelRoutingFamily: architect.modelRoutingFamily ?? null,
-    modelRoutes: new Map(),
-    atriumRequester: await requesterForUserId(userId),
-    runtimeRepositoryIds: preparedInputs.runtimeRepositoryIds,
-    runtimeRepositoryQuery: preparedInputs.runtimeRepositoryQuery,
-  }
+    log.info("Assistant loaded", sanitizeForLogging({
+      assistantId,
+      modelRoutingMode: architect.modelRoutingMode ?? "legacy",
+      modelRoutingFamily: architect.modelRoutingFamily ?? null,
+      name: architect.name,
+      promptCount: prompts.length,
+    }))
 
-  return {
-    prompts: prompts as ChainPrompt[],
-    context,
-    executionId,
-    inputs: preparedInputs.inputs,
-    log,
+    // 3. Emit execution-start event
+    await storeExecutionEvent(executionId, "execution-start", {
+      executionId,
+      totalPrompts: prompts.length,
+      toolName: architect.name,
+    })
+
+    // 4. Build execution context. The Atrium requester resolves the key owner's
+    // roles/org for canView-bounded content retrieval (Phase 6, #1056);
+    // requesterForUserId never throws — a failed resolve yields null, which
+    // skips Atrium retrieval without failing the execution.
+    // Resolve the assistant creator's cognito_sub so owner-based repository access
+    // resolves for non-owner runs. This was String(architect.userId) — a numeric
+    // users.id, which never equals the users.cognito_sub the knowledge/repository
+    // access predicates compare against, so owner-shared private repos silently
+    // returned zero chunks (REV-COR-511).
+    const assistantOwnerSub = await resolveAssistantOwnerSub(architect.userId, log)
+
+    const context: PromptExecutionContext = {
+      previousOutputs: new Map(),
+      accumulatedMessages: [],
+      executionId,
+      userCognitoSub: cognitoSub,
+      assistantOwnerSub,
+      userId,
+      executionStartTime: startedAt.getTime(),
+      executionDeadlineAt: deadlineAt,
+      assistantId,
+      modelRoutingMode: architect.modelRoutingMode ?? "legacy",
+      modelRoutingFamily: architect.modelRoutingFamily ?? null,
+      modelRoutes: new Map(),
+      atriumRequester: await requesterForUserId(userId),
+      runtimeRepositoryIds: preparedInputs.runtimeRepositoryIds,
+      runtimeRepositoryQuery: preparedInputs.runtimeRepositoryQuery,
+    }
+
+    return {
+      prompts: prompts as ChainPrompt[],
+      context,
+      executionId,
+      inputs: preparedInputs.inputs,
+      log,
+    }
+  } catch (setupError) {
+    await handleExecutionFailure(executionId, setupError, log)
+    throw setupError
   }
 }
 
@@ -327,7 +364,9 @@ function requirePromptChainArchitect(architect: ArchitectResult): ChainPrompt[] 
         "Agentic assistants are not supported on this execution surface. Run agentic assistants through the Assistant Architect UI.",
     }])
   }
-  const prompts = (architect.prompts || []).sort((left, right) => left.position - right.position)
+  const prompts = (architect.prompts || []).sort(
+    compareAssistantPromptExecutionOrder
+  )
   if (prompts.length === 0) {
     throw ErrorFactories.validationFailed([{
       field: "prompts",
@@ -372,28 +411,6 @@ async function requireAssistantRepositoryAccess(
     technicalMessage:
       "Executing principal cannot access every repository bound to the assistant",
   })
-}
-
-async function createAssistantExecutionRecord(
-  userId: number,
-  assistantId: number,
-  inputs: Record<string, unknown>
-): Promise<number> {
-  const inputData = Object.keys(inputs).length > 0 ? inputs : { __no_inputs: true }
-  const inputDataJson = JSON.stringify(inputData)
-  const result = await executeQuery(
-    (db) => db.execute(sql`
-      INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
-      VALUES (${userId}, ${inputDataJson}::jsonb, 'running', ${new Date().toISOString()}::timestamp, ${assistantId})
-      RETURNING id
-    `),
-    "createToolExecution"
-  )
-  const rows = result as unknown as Array<{ id: number }>
-  if (!rows[0]?.id) {
-    throw ErrorFactories.sysInternalError("Failed to create execution record")
-  }
-  return Number(rows[0].id)
 }
 
 async function resolveAssistantOwnerSub(
@@ -551,6 +568,7 @@ async function executePromptChain(
           log,
           totalPrompts: prompts.length,
           isLastPrompt: isLastPosition && idx === 0,
+          completeExecution: false,
           prompts,
         })
       )
@@ -566,16 +584,30 @@ async function executePromptChain(
           { cause: firstError instanceof Error ? firstError : undefined }
         )
       }
+      if (isLastPosition) {
+        const completedUsages = results
+          .filter((result) => result.status === "fulfilled")
+          .map((result) => result.value.usage)
+        await recordAssistantExecutionCompletion(
+          context,
+          log,
+          aggregatePromptUsage(completedUsages)
+        )
+      }
 
-      const successResults = results.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<typeof lastStreamResponse>[]
-      const uiStreamResult = successResults.find((r) => r.value !== undefined)
-      if (uiStreamResult?.value) {
-        lastStreamResponse = uiStreamResult.value
+      const successResults = results.filter(
+        (r) => r.status === "fulfilled"
+      ) as PromiseFulfilledResult<CompletedPromptStream>[]
+      const uiStreamResult = successResults.find(
+        (r) => r.value.streamResponse !== undefined
+      )
+      if (uiStreamResult?.value.streamResponse) {
+        lastStreamResponse = uiStreamResult.value.streamResponse
       }
     } else {
       const prompt = promptsAtPosition[0]
       const isLastPrompt = isLastPosition
-      const streamResponse = await executeSinglePromptWithCompletion({
+      const promptResult = await executeSinglePromptWithCompletion({
         prompt,
         inputs,
         context,
@@ -586,8 +618,8 @@ async function executePromptChain(
         prompts,
       })
 
-      if (streamResponse) {
-        lastStreamResponse = streamResponse
+      if (promptResult.streamResponse) {
+        lastStreamResponse = promptResult.streamResponse
       }
     }
   }
@@ -625,6 +657,7 @@ async function executePromptChainForText(
   for (const position of sortedPositions) {
     const promptsAtPosition = positionGroups.get(position)!
     const isLastPosition = position === sortedPositions[sortedPositions.length - 1]
+    const positionUsages: Array<CollectedPromptText["usage"]> = []
 
     for (const prompt of promptsAtPosition) {
       const isLast = isLastPosition && prompt === promptsAtPosition[0]
@@ -636,16 +669,21 @@ async function executePromptChainForText(
         log,
         totalPrompts: prompts.length,
         isLastPrompt: isLast,
+        completeExecution: false,
         prompts,
       })
+      positionUsages.push(result.usage)
 
       if (isLast) {
         lastText = result.text
-        lastUsage = result.usage
       }
+    }
+    if (isLastPosition) {
+      lastUsage = aggregatePromptUsage(positionUsages)
     }
   }
 
+  await recordAssistantExecutionCompletion(context, log, lastUsage)
   return { text: lastText, usage: lastUsage }
 }
 
@@ -752,6 +790,7 @@ interface SinglePromptExecutionOptions {
   log: ReturnType<typeof createLogger>
   totalPrompts: number
   isLastPrompt: boolean
+  completeExecution?: boolean
   prompts: ChainPrompt[]
 }
 
@@ -773,6 +812,7 @@ interface PreparedPromptRun {
   promptTools: NonNullable<StreamRequest["tools"]>
   modelRoute: Awaited<ReturnType<typeof routeAssistantArchitectModel>>
   isLastPrompt: boolean
+  completeExecution: boolean
 }
 
 async function emitPromptStart(
@@ -847,6 +887,8 @@ async function preparePromptRun(
     promptTools,
     modelRoute,
     isLastPrompt: options.isLastPrompt,
+    completeExecution:
+      options.completeExecution ?? options.isLastPrompt,
   }
 }
 
@@ -875,6 +917,9 @@ function promptStreamRequest(
     sessionId: run.context.userCognitoSub,
     conversationId: undefined,
     source: "assistant_execution",
+    timeout: remainingAssistantExecutionTimeoutMs(
+      run.context.executionDeadlineAt
+    ),
     systemPrompt: run.prompt.systemContext || undefined,
     enabledTools: run.enabledTools,
     tools: Object.keys(run.promptTools).length > 0 ? run.promptTools : undefined,
@@ -906,7 +951,9 @@ async function recordPromptCompletion(
   }).catch((error) => {
     run.log.error("Failed to store prompt-complete event", { error })
   })
-  if (run.isLastPrompt) await recordAssistantExecutionCompletion(run, usage)
+  if (run.completeExecution) {
+    await recordAssistantExecutionCompletion(run.context, run.log, usage)
+  }
 }
 
 async function saveCompletedPromptResult(
@@ -931,24 +978,25 @@ async function saveCompletedPromptResult(
 }
 
 async function recordAssistantExecutionCompletion(
-  run: PreparedPromptRun,
+  context: PromptExecutionContext,
+  log: ReturnType<typeof createLogger>,
   usage?: PromptUsage
 ): Promise<void> {
   await executeQuery(
     (db) => db.execute(sql`
       UPDATE tool_executions
       SET status = 'completed', completed_at = ${new Date().toISOString()}::timestamp
-      WHERE id = ${run.context.executionId}
+      WHERE id = ${context.executionId}
     `),
     "updateToolExecutionCompleted"
   )
-  await storeExecutionEvent(run.context.executionId, "execution-complete", {
-    executionId: run.context.executionId,
+  await storeExecutionEvent(context.executionId, "execution-complete", {
+    executionId: context.executionId,
     totalTokens: usage?.totalTokens || 0,
-    duration: Date.now() - run.context.executionStartTime,
+    duration: Date.now() - context.executionStartTime,
     success: true,
   }).catch((error) => {
-    run.log.error("Failed to store execution-complete event", { error })
+    log.error("Failed to store execution-complete event", { error })
   })
 }
 
@@ -972,11 +1020,16 @@ async function executeSinglePromptWithCompletion(
 
 type StreamResult = Awaited<ReturnType<typeof unifiedStreamingService.stream>>
 
+interface CompletedPromptStream {
+  streamResponse?: StreamResult
+  usage?: PromptUsage
+}
+
 function streamPromptWithCompletion(
   run: PreparedPromptRun,
   promptStartTime: number,
   promptTimer: ReturnType<typeof startTimer>
-): Promise<StreamResult | undefined> {
+): Promise<CompletedPromptStream> {
   return new Promise((resolve, reject) => {
     let resolveStream!: (value: StreamResult) => void
     let rejectStream!: (error: Error) => void
@@ -994,7 +1047,12 @@ function streamPromptWithCompletion(
             promptStartTime,
             promptTimer
           )
-          resolve(run.isLastPrompt ? await streamResponse : undefined)
+          resolve({
+            streamResponse: run.isLastPrompt
+              ? await streamResponse
+              : undefined,
+            usage,
+          })
         } catch (error) {
           run.log.error("Failed to save prompt result", {
             error,
@@ -1140,6 +1198,37 @@ function publicPromptUsage(
     : undefined
 }
 
+function aggregatePromptUsage(
+  usages: Array<
+    | {
+        promptTokens: number
+        completionTokens: number
+        totalTokens: number
+      }
+    | undefined
+  >
+): CollectedPromptText["usage"] {
+  const reported = usages.filter(
+    (
+      usage
+    ): usage is {
+      promptTokens: number
+      completionTokens: number
+      totalTokens: number
+    } => usage !== undefined
+  )
+  if (reported.length === 0) return undefined
+  return reported.reduce(
+    (total, usage) => ({
+      promptTokens: total.promptTokens + usage.promptTokens,
+      completionTokens:
+        total.completionTokens + usage.completionTokens,
+      totalTokens: total.totalTokens + usage.totalTokens,
+    }),
+    { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+  )
+}
+
 // ============================================
 // Variable Substitution
 // ============================================
@@ -1200,7 +1289,7 @@ export function substituteVariables(
   const positionToPromptId = new Map<number, number>()
   const sortedPrevPrompts = allPrompts
     .filter(p => p.position < currentPromptPosition)
-    .sort((a, b) => a.position - b.position)
+    .sort(compareAssistantPromptExecutionOrder)
 
   for (const [i, prevPrompt] of sortedPrevPrompts.entries()) {
     const output = previousOutputs.get(prevPrompt.id)

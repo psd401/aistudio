@@ -3,6 +3,8 @@ import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest"
 describe("tool manifest immutable contract versions", () => {
   it.each([
     "assistants.execute",
+    "assistants.create",
+    "assistants.update",
     "assistants.list",
     "chat.show_chart",
     "chat.web_search",

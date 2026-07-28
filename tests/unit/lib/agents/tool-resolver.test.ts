@@ -27,7 +27,11 @@ jest.mock("@/lib/logger", () => {
   return { createLogger: () => singleton }
 })
 
-import { resolveAgentTools, closeAgentConnectorClients } from "@/lib/agents/tool-resolver"
+import {
+  resolveAgentTools,
+  closeAgentConnectorClients,
+  withAgentConnectorCleanupOnError,
+} from "@/lib/agents/tool-resolver"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 
 const listMock = toolCatalogInstance.list as jest.Mock
@@ -386,3 +390,44 @@ const defineCloseAgentConnectorClientsSuite2 = () => {
 };
 
 describe("closeAgentConnectorClients", defineCloseAgentConnectorClientsSuite2)
+
+describe("withAgentConnectorCleanupOnError", () => {
+  it("closes resolved connector clients when later model setup fails", async () => {
+    const routingError = new Error("fallback model unavailable")
+    const connector = {
+      serverId: "connector-1",
+      serverName: "Connector",
+      tools: {},
+      close: jest.fn(async () => undefined),
+    }
+
+    await expect(
+      withAgentConnectorCleanupOnError(
+        [connector],
+        "req-routing-failure",
+        async () => {
+          throw routingError
+        }
+      )
+    ).rejects.toBe(routingError)
+    expect(connector.close).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps connector clients open when setup succeeds", async () => {
+    const connector = {
+      serverId: "connector-1",
+      serverName: "Connector",
+      tools: {},
+      close: jest.fn(async () => undefined),
+    }
+
+    await expect(
+      withAgentConnectorCleanupOnError(
+        [connector],
+        "req-routing-success",
+        async () => "prepared"
+      )
+    ).resolves.toBe("prepared")
+    expect(connector.close).not.toHaveBeenCalled()
+  })
+})

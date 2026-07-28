@@ -29,6 +29,12 @@ import {
   validateExecutionInputs,
 } from "@/lib/api/assistant-execution-service"
 import { listAccessibleAssistants } from "@/lib/api/assistant-service"
+import {
+  AssistantImportServiceError,
+  createAssistantsFromImport,
+  forkAssistant,
+  updateAssistantFromImport,
+} from "@/lib/assistant-architect/import-service"
 import { isAdminByUserId, checkAssistantResourceGrants } from "@/lib/api/route-helpers"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
 import { INTERNAL_ASSISTANT_LOOKUP } from "@/lib/assistant-architect/internal-access"
@@ -60,6 +66,9 @@ export const TOOL_HANDLERS: Record<string, McpToolHandler> = {
   search_decisions: handleSearchDecisions,
   capture_decision: handleCaptureDecision,
   execute_assistant: handleExecuteAssistant,
+  create_assistant: handleCreateAssistant,
+  update_assistant: handleUpdateAssistant,
+  fork_assistant: handleForkAssistant,
   list_assistants: handleListAssistants,
   get_decision_graph: handleGetDecisionGraph,
   repositories_list: handleRepositoriesList,
@@ -95,6 +104,18 @@ function positiveIntegerArray(value: unknown): number[] {
 
 function jsonResult(value: unknown): McpToolResult {
   return { content: [{ type: "text", text: JSON.stringify(value) }] }
+}
+
+function assistantExecutionFailureMessage(error: unknown): string {
+  if (isValidationError(error)) {
+    const details = error.fields?.map(({ message }) => message).join("; ")
+    return details
+      ? `Invalid assistant configuration: ${details}`
+      : "Invalid assistant configuration"
+  }
+  return `Assistant execution failed: ${
+    error instanceof Error ? error.message : "Unknown error"
+  }`
 }
 
 async function handleRepositoriesList(
@@ -440,9 +461,47 @@ async function handleCaptureDecision(
   }
 }
 
+function assistantImportEnvelope(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    version: args.version,
+    exported_at: args.exported_at,
+    export_source: args.export_source,
+    assistants: args.assistants,
+  }
+}
+
+function assistantMutationError(
+  action: "create" | "update" | "fork",
+  error: unknown,
+): McpToolResult {
+  const message =
+    error instanceof AssistantImportServiceError
+      ? error.message
+      : `Failed to ${action} assistant`
+  return {
+    content: [{ type: "text", text: message }],
+    isError: true,
+  }
+}
+
 // ============================================
 // execute_assistant
 // ============================================
+
+function storedPromptModelGrantIds(architect: {
+  modelRoutingMode?: string | null
+  prompts?: Array<{ modelId?: number | null }> | null
+}): number[] {
+  if ((architect.modelRoutingMode ?? "legacy") !== "legacy") return []
+  return (architect.prompts ?? [])
+    .map((prompt) => prompt.modelId)
+    .filter(
+      (modelId): modelId is number =>
+        typeof modelId === "number" && modelId > 0
+    )
+}
 
 async function handleExecuteAssistant(
   args: Record<string, unknown>,
@@ -499,9 +558,7 @@ async function handleExecuteAssistant(
       userId: context.userId,
       architectUserId: architect.userId,
       architectId: architect.id,
-      modelDbIds: (architect.prompts || [])
-        .map((p) => p.modelId)
-        .filter((m): m is number => typeof m === "number" && m > 0),
+      modelDbIds: storedPromptModelGrantIds(architect),
     })
     if (!check.granted) {
       log.warn("execute_assistant denied by per-resource grant", {
@@ -532,6 +589,7 @@ async function handleExecuteAssistant(
       userId: context.userId,
       cognitoSub: context.cognitoSub,
       requestId: context.requestId,
+      requireApproved: true,
     })
 
     log.info("Assistant executed via MCP", {
@@ -558,10 +616,163 @@ async function handleExecuteAssistant(
     })
     return {
       content: [
-        { type: "text", text: `Assistant execution failed: ${error instanceof Error ? error.message : "Unknown error"}` },
+        {
+          type: "text",
+          text: assistantExecutionFailureMessage(error),
+        },
       ],
       isError: true,
     }
+  }
+}
+
+// ============================================
+// create_assistant / update_assistant / fork_assistant
+// ============================================
+
+async function handleCreateAssistant(
+  args: Record<string, unknown>,
+  context: { userId: number; requestId: string },
+): Promise<McpToolResult> {
+  const log = createLogger({
+    requestId: context.requestId,
+    action: "mcp.create_assistant",
+  })
+  try {
+    const result = await createAssistantsFromImport(
+      assistantImportEnvelope(args),
+      context.userId,
+    )
+    if (result.successful === 0) {
+      log.error("Assistant import created no assistants via MCP", {
+        userId: context.userId,
+        failed: result.failed,
+      })
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ data: result }),
+          },
+        ],
+        isError: true,
+      }
+    }
+    log.info("Assistants created via MCP", {
+      userId: context.userId,
+      successful: result.successful,
+      failed: result.failed,
+    })
+    return jsonResult({ data: result })
+  } catch (error) {
+    log.warn("create_assistant failed", {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return assistantMutationError("create", error)
+  }
+}
+
+async function handleUpdateAssistant(
+  args: Record<string, unknown>,
+  context: { userId: number; requestId: string },
+): Promise<McpToolResult> {
+  const assistantId = positiveInteger(args.assistantId)
+  if (!assistantId) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: "Missing or invalid required field: assistantId (number)",
+        },
+      ],
+      isError: true,
+    }
+  }
+
+  const log = createLogger({
+    requestId: context.requestId,
+    action: "mcp.update_assistant",
+  })
+  try {
+    const result = await updateAssistantFromImport(
+      assistantId,
+      assistantImportEnvelope(args),
+      context.userId,
+    )
+    log.info("Assistant updated via MCP", {
+      assistantId,
+      userId: context.userId,
+    })
+    return jsonResult({ data: result })
+  } catch (error) {
+    log.warn("update_assistant failed", {
+      assistantId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return assistantMutationError("update", error)
+  }
+}
+
+async function handleForkAssistant(
+  args: Record<string, unknown>,
+  context: { userId: number; requestId: string },
+): Promise<McpToolResult> {
+  const assistantId = positiveInteger(args.assistantId)
+  if (!assistantId) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: "Missing or invalid required field: assistantId (number)",
+        },
+      ],
+      isError: true,
+    }
+  }
+  if (
+    args.name !== undefined &&
+    (typeof args.name !== "string" ||
+      args.name.length === 0 ||
+      args.name.length > 255)
+  ) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: "name must be a non-empty string up to 255 characters",
+        },
+      ],
+      isError: true,
+    }
+  }
+
+  const log = createLogger({
+    requestId: context.requestId,
+    action: "mcp.fork_assistant",
+  })
+  try {
+    const result = await forkAssistant(
+      assistantId,
+      context.userId,
+      typeof args.name === "string" ? args.name : undefined,
+    )
+    log.info("Assistant forked via MCP", {
+      sourceAssistantId: assistantId,
+      forkAssistantId: result.result.id,
+      userId: context.userId,
+    })
+    return jsonResult({
+      data: {
+        ...result,
+        sourceAssistantId: assistantId,
+      },
+    })
+  } catch (error) {
+    log.warn("fork_assistant failed", {
+      sourceAssistantId: assistantId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return assistantMutationError("fork", error)
   }
 }
 

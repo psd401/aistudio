@@ -8,7 +8,8 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { getUserById } from '@/lib/db/drizzle';
 import { userCanAccessResource, filterAccessibleResourceIds } from '@/lib/db/drizzle/resource-access';
 import { executeQuery } from '@/lib/db/drizzle-client';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
+import { assistantArchitects, chainPrompts } from '@/lib/db/schema';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import {
   retrieveKnowledgeForPrompt,
@@ -27,8 +28,8 @@ import { getScopesForRoles } from '@/lib/api-keys/scopes';
 import {
   resolveAgentTools,
   closeAgentConnectorClients,
+  withAgentConnectorCleanupOnError,
   resolveAgentRunLimits,
-  AGENT_RATE_LIMIT_WINDOW_MS,
   extractImageInputParts,
 } from '@/lib/agents';
 import type { ToolInvocationAudit } from '@/lib/agents';
@@ -71,6 +72,11 @@ import {
 import {
   AGENT_LIMIT_CEILINGS,
 } from '@/lib/agents/types';
+import {
+  ASSISTANT_EXECUTION_MAX_PROMPTS,
+  createCoordinatedAssistantExecution,
+  remainingAssistantExecutionTimeoutMs,
+} from '@/lib/assistant-architect/execution-coordinator';
 
 // Allow streaming responses up to 15 minutes for long chains
 export const maxDuration = 900;
@@ -78,7 +84,7 @@ export const maxDuration = 900;
 // Constants for resource limits
 const MAX_INPUT_SIZE_BYTES = 100000; // 100KB max input size
 const MAX_INPUT_FIELDS = 50; // Max 50 input fields
-const MAX_PROMPT_CHAIN_LENGTH = 20; // Max 20 prompts per execution
+const MAX_PROMPT_CHAIN_LENGTH = ASSISTANT_EXECUTION_MAX_PROMPTS;
 const MAX_PROMPT_CONTENT_SIZE = 10000000; // 10MB max prompt content size (allows large context)
 const MAX_VARIABLE_REPLACEMENTS = 50; // Max 50 variable placeholders per prompt (realistic upper bound)
 
@@ -145,6 +151,8 @@ interface PromptExecutionContext {
   /** Non-sensitive attachment labels that improve retrieval query relevance. */
   runtimeRepositoryQuery: string;
   executionStartTime: number;
+  /** Shared wall-clock deadline established with the execution row. */
+  executionDeadlineAt: Date;
   /** The executing assistant's id, for the Atrium retrieval-scope gate (§16.4). */
   assistantId: number;
   modelRoutingMode: AssistantModelRoutingMode;
@@ -221,12 +229,23 @@ type ValidatedRequest = z.infer<typeof ExecuteRequestSchema>;
 type LoadedArchitect = NonNullable<
   Awaited<ReturnType<typeof getAssistantArchitectByIdAction>>['data']
 >;
+type ArchitectAccessSnapshot = Pick<
+  LoadedArchitect,
+  'id' | 'userId' | 'status'
+>;
 // `architect.prompts` is optional on the row; after `(architect.prompts || [])`
 // the value is always a defined array, so the loaded/validated list is non-null.
 type LoadedPrompts = NonNullable<LoadedArchitect['prompts']>;
 type CurrentUserData = NonNullable<
   Awaited<ReturnType<typeof getCurrentUserAction>>['data']
 >;
+
+function assistantArchitectNotFoundResponse(requestId: string): Response {
+  return new Response(
+    JSON.stringify({ error: 'Assistant architect not found', requestId }),
+    { status: 404, headers: { 'Content-Type': 'application/json' } }
+  );
+}
 
 /**
  * Phase (a): parse + validate the request body. Returns a 400 Response for an
@@ -309,7 +328,7 @@ async function loadArchitectPrincipal(
   session: NonNullable<Awaited<ReturnType<typeof getServerSession>>>;
   currentUserData: CurrentUserData;
   userId: number;
-  architect: LoadedArchitect;
+  architect: ArchitectAccessSnapshot;
 }>> {
   const session = await getServerSession();
   if (!session) {
@@ -323,18 +342,24 @@ async function loadArchitectPrincipal(
     log.error('Failed to get current user');
     return { ok: false, response: new Response('Unauthorized', { status: 401 }) };
   }
-  const architectResult = await getAssistantArchitectByIdAction(
-    toolId.toString(),
-    INTERNAL_ASSISTANT_LOOKUP
+  const [architect] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: assistantArchitects.id,
+          userId: assistantArchitects.userId,
+          status: assistantArchitects.status,
+        })
+        .from(assistantArchitects)
+        .where(eq(assistantArchitects.id, toolId))
+        .limit(1),
+    'getAssistantExecutionAccessSnapshot'
   );
-  if (!architectResult.isSuccess || !architectResult.data) {
+  if (!architect) {
     log.error('Assistant architect not found', { toolId });
     return {
       ok: false,
-      response: new Response(
-        JSON.stringify({ error: 'Assistant architect not found', requestId }),
-        { status: 404, headers: { 'Content-Type': 'application/json' } }
-      ),
+      response: assistantArchitectNotFoundResponse(requestId),
     };
   }
   return {
@@ -343,13 +368,13 @@ async function loadArchitectPrincipal(
       session,
       currentUserData: currentUser.data,
       userId: currentUser.data.user.id,
-      architect: architectResult.data,
+      architect,
     },
   };
 }
 
 async function authorizeArchitectResource(params: {
-  architect: LoadedArchitect;
+  architect: ArchitectAccessSnapshot;
   userId: number;
   toolId: number;
   requestId: string;
@@ -383,15 +408,10 @@ async function authorizeArchitectResource(params: {
     });
     return {
       ok: false,
-      response: new Response(
-        JSON.stringify({
-          error: 'Access denied',
-          message:
-            'You do not have permission to execute this assistant architect',
-          requestId: params.requestId,
-        }),
-        { status: 403, headers: { 'Content-Type': 'application/json' } }
-      ),
+      // Preserve the ordinary private-assistant existence mask. Returning 403
+      // here while a missing id returns 404 lets any authenticated user
+      // enumerate another author's draft/pending assistants.
+      response: assistantArchitectNotFoundResponse(params.requestId),
     };
   }
 
@@ -459,18 +479,18 @@ async function authorizeArchitectResource(params: {
   };
 }
 
-async function validateArchitectPrompts(params: {
-  architect: LoadedArchitect;
-  sessionSub: string;
-  userId: number;
+/**
+ * Reject stable graph-shape failures before the assistant-wide agentic rate
+ * cap is counted. The executable graph is still reloaded and revalidated after
+ * the coordinated execution row protects it from import replacement.
+ */
+function validatePromptChainCardinality(params: {
+  promptCount: number;
   toolId: number;
   requestId: string;
   log: RouteLogger;
-}): Promise<PhaseResult<{ prompts: LoadedPrompts }>> {
-  const prompts = (params.architect.prompts || []).sort(
-    (left, right) => left.position - right.position
-  );
-  if (prompts.length === 0) {
+}): PhaseResult<void> {
+  if (params.promptCount === 0) {
     params.log.error('No prompts configured for assistant architect', {
       toolId: params.toolId,
     });
@@ -485,9 +505,9 @@ async function validateArchitectPrompts(params: {
       ),
     };
   }
-  if (prompts.length > MAX_PROMPT_CHAIN_LENGTH) {
+  if (params.promptCount > MAX_PROMPT_CHAIN_LENGTH) {
     params.log.warn('Prompt chain too long', {
-      promptCount: prompts.length,
+      promptCount: params.promptCount,
       toolId: params.toolId,
       maxAllowed: MAX_PROMPT_CHAIN_LENGTH,
     });
@@ -503,6 +523,87 @@ async function validateArchitectPrompts(params: {
       ),
     };
   }
+  return { ok: true, value: undefined };
+}
+
+/**
+ * Reject stable graph and repository-access failures before the
+ * assistant-wide agentic rate cap is counted. This graph is authorization-only
+ * and is deliberately discarded: the executable graph is still reloaded and
+ * revalidated after the coordinated execution row protects it from import
+ * replacement.
+ */
+async function preflightExecutionGraphBeforeRateCap(params: {
+  assistantId: number;
+  executorCognitoSub: string;
+  userId: number;
+  requestId: string;
+  log: RouteLogger;
+}): Promise<PhaseResult<void>> {
+  const repositoryBindings = await executeQuery(
+    (db) =>
+      db
+        .select({ repositoryIds: chainPrompts.repositoryIds })
+        .from(chainPrompts)
+        .where(eq(chainPrompts.assistantArchitectId, params.assistantId)),
+    'getAssistantGraphBeforeRateCap'
+  );
+  const cardinality = validatePromptChainCardinality({
+    promptCount: repositoryBindings.length,
+    toolId: params.assistantId,
+    requestId: params.requestId,
+    log: params.log,
+  });
+  if (!cardinality.ok) return cardinality;
+
+  const repositoryAccess = await preflightAssistantRepositoryAccess(
+    repositoryBindings,
+    params.executorCognitoSub
+  );
+  if (repositoryAccess.isAllowed) {
+    return { ok: true, value: undefined };
+  }
+
+  params.log.warn(
+    'Assistant execution blocked before rate accounting because repository access changed',
+    {
+      userId: params.userId,
+      toolId: params.assistantId,
+      repositoryCount: repositoryAccess.repositoryIds.length,
+    }
+  );
+  return {
+    ok: false,
+    response: new Response(
+      JSON.stringify({
+        error: 'Access denied',
+        message: REPOSITORY_ACCESS_CHANGED_MESSAGE,
+        requestId: params.requestId,
+      }),
+      { status: 403, headers: { 'Content-Type': 'application/json' } }
+    ),
+  };
+}
+
+async function validateArchitectPrompts(params: {
+  architect: LoadedArchitect;
+  sessionSub: string;
+  userId: number;
+  toolId: number;
+  requestId: string;
+  log: RouteLogger;
+}): Promise<PhaseResult<{ prompts: LoadedPrompts }>> {
+  const prompts = (params.architect.prompts || []).sort(
+    (left, right) => left.position - right.position
+  );
+  const cardinality = validatePromptChainCardinality({
+    promptCount: prompts.length,
+    toolId: params.toolId,
+    requestId: params.requestId,
+    log: params.log,
+  });
+  if (!cardinality.ok) return cardinality;
+
   const repositoryAccess = await preflightAssistantRepositoryAccess(
     prompts,
     params.sessionSub
@@ -568,11 +669,10 @@ async function validateArchitectPrompts(params: {
 }
 
 /**
- * Phase (b): authenticate the user, check tool access + per-architect
- * authorization, load the architect, and validate its prompt chain. Returns the
- * appropriate 401/403/404/400 Response on any failure; otherwise the
- * authenticated user, architect, and sorted prompt list. Behavior (including the
- * unauthorized timer call) is identical to the original inline POST logic.
+ * Phase (b): authenticate the user and perform the ordinary feature/access
+ * preflight. The prompt graph is deliberately not returned as executable state:
+ * it is reloaded only after the coordinated execution row has taken the shared
+ * assistant lock.
  */
 async function authorizeAndLoadArchitect(
   toolId: number,
@@ -583,8 +683,7 @@ async function authorizeAndLoadArchitect(
   session: NonNullable<Awaited<ReturnType<typeof getServerSession>>>;
   currentUserData: CurrentUserData;
   userId: number;
-  architect: LoadedArchitect;
-  prompts: LoadedPrompts;
+  architect: ArchitectAccessSnapshot;
 }>> {
   const principal = await loadArchitectPrincipal(
     toolId,
@@ -603,6 +702,15 @@ async function authorizeAndLoadArchitect(
     sessionSub: session.sub,
   });
   if (!access.ok) return access;
+  const repositoryAccess =
+    await preflightExecutionGraphBeforeRateCap({
+      assistantId: architect.id,
+      executorCognitoSub: session.sub,
+      userId,
+      requestId,
+      log,
+    });
+  if (!repositoryAccess.ok) return repositoryAccess;
   log.info('Authorization granted for assistant architect execution', {
     userId,
     toolId,
@@ -611,24 +719,6 @@ async function authorizeAndLoadArchitect(
     accessReason: access.value.accessReason,
     featureAccessReason: access.value.featureAccessReason,
   });
-  const promptResult = await validateArchitectPrompts({
-    architect,
-    sessionSub: session.sub,
-    userId,
-    toolId,
-    requestId,
-    log,
-  });
-  if (!promptResult.ok) return promptResult;
-  log.info(
-    'Assistant architect loaded',
-    sanitizeForLogging({
-      toolId,
-      name: architect.name,
-      promptCount: promptResult.value.prompts.length,
-      userId,
-    })
-  );
   return {
     ok: true,
     value: {
@@ -636,107 +726,152 @@ async function authorizeAndLoadArchitect(
       currentUserData,
       userId,
       architect,
-      prompts: promptResult.value.prompts,
     },
   };
 }
 
 /**
- * Phase (c): create the tool_execution record. For an agentic assistant with a
- * per-assistant hourly cap (Issue #926), the insert is GUARDED atomically:
- * INSERT ... SELECT ... WHERE <window count> < cap. Collapsing the count +
- * insert into ONE statement removes the prior check-then-insert TOCTOU. A
- * guarded insert that returns no row means the cap is reached -> 429. NULL/unset
- * cap => unguarded insert.
- *
- * input_data is bound (${...}::jsonb) — postgres.js is the active driver, which
- * binds parameterized casts correctly (the old sql.raw() JSONB workaround was
- * for the retired RDS Data API driver). See Issue #599.
+ * Phase (c): lock the assistant, recheck current resource/model grants, apply
+ * the agentic rate cap, and create the active execution row in one transaction.
+ * Import updates use the same assistant row lock before replacing the graph.
  */
 async function createToolExecutionRecord(args: {
-  architect: LoadedArchitect;
   toolId: number;
   userId: number;
   inputs: Record<string, unknown>;
   requestId: string;
   log: RouteLogger;
   timer: RouteTimer;
-}): Promise<PhaseResult<{ executionId: number }>> {
-  const { architect, toolId, userId, inputs, requestId, log, timer } = args;
-  const inputData = Object.keys(inputs).length > 0 ? inputs : { __no_inputs: true };
-  const inputDataJson = JSON.stringify(inputData);
-  const startedAtIso = new Date().toISOString();
-
-  const rateCap = architect.mode === 'agentic'
-    ? (architect as { agentMaxRequestsPerHour?: number | null }).agentMaxRequestsPerHour
-    : null;
-  const rateCapped = typeof rateCap === 'number' && rateCap > 0;
-
-  const executionResult = await executeQuery(
-    (db) => {
-      if (rateCapped) {
-        const windowStartIso = new Date(Date.now() - AGENT_RATE_LIMIT_WINDOW_MS).toISOString();
-        return db.execute(sql`
-          INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
-          SELECT ${userId}, ${inputDataJson}::jsonb, 'running', ${startedAtIso}::timestamp, ${toolId}
-          WHERE (
-            SELECT count(*) FROM tool_executions
-            WHERE assistant_architect_id = ${toolId} AND started_at >= ${windowStartIso}::timestamp
-          ) < ${rateCap}
-          RETURNING id
-        `);
-      }
-      return db.execute(sql`
-        INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
-        VALUES (${userId}, ${inputDataJson}::jsonb, 'running', ${startedAtIso}::timestamp, ${toolId})
-        RETURNING id
-      `);
-    },
-    'createToolExecution'
-  );
-
-  // postgres.js returns result directly as array-like object (no .rows property - Issue #603)
-  const rows = executionResult as unknown as Array<{ id: number }>;
-  if (!rows || rows.length === 0 || !rows[0]?.id) {
-    if (rateCapped) {
-      // Guarded insert added no row => the assistant is at/over its hourly cap.
-      log.warn('Assistant rate limit exceeded', { toolId, rateCap });
-      timer({ status: 'rate_limited' });
-      return {
-        ok: false,
-        response: new Response(
-          JSON.stringify({
-            error: 'Rate limit exceeded',
-            message: `This assistant is limited to ${rateCap} run(s) per hour. Please try again later.`,
-            requestId
-          }),
-          {
-            status: 429,
-            headers: {
-              'Content-Type': 'application/json',
-              'Retry-After': '3600',
-              'X-Request-Id': requestId
-            }
-          }
-        )
-      };
+}): Promise<
+  PhaseResult<{ executionId: number; startedAt: Date; deadlineAt: Date }>
+> {
+  const { toolId, userId, inputs, requestId, log, timer } = args;
+  const coordinated = await createCoordinatedAssistantExecution({
+    assistantId: toolId,
+    userId,
+    inputs,
+    enforceAgentRateCap: true,
+  });
+  if (!coordinated.created) {
+    if (coordinated.reason === 'invalid_graph') {
+      const invalidGraph = validatePromptChainCardinality({
+        promptCount: coordinated.promptCount,
+        toolId,
+        requestId,
+        log,
+      });
+      if (!invalidGraph.ok) return invalidGraph;
+      throw ErrorFactories.sysInternalError(
+        'Execution coordinator returned a valid graph as invalid'
+      );
     }
-    log.error('Failed to create tool execution', { toolId });
+    const { rateCap } = coordinated;
+    log.warn('Assistant rate limit exceeded', { toolId, rateCap });
+    timer({ status: 'rate_limited' });
     return {
       ok: false,
       response: new Response(
         JSON.stringify({
-          error: 'Failed to create execution record',
+          error: 'Rate limit exceeded',
+          message: `This assistant is limited to ${rateCap} run(s) per hour. Please try again later.`,
           requestId
         }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
+        {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/json',
+            'Retry-After': '3600',
+            'X-Request-Id': requestId
+          }
+        }
       )
     };
   }
 
-  const executionId = Number(rows[0].id);
+  const { executionId, startedAt, deadlineAt } = coordinated;
   log.info('Tool execution created', { executionId, toolId });
-  return { ok: true, value: { executionId } };
+  return {
+    ok: true,
+    value: { executionId, startedAt, deadlineAt },
+  };
+}
+
+async function failExecutionDuringSetup(
+  executionId: number,
+  errorMessage: string
+): Promise<void> {
+  await executeQuery(
+    (db) => db.execute(sql`
+      UPDATE tool_executions
+         SET status = 'failed',
+             completed_at = ${new Date().toISOString()}::timestamp,
+             error_message = ${errorMessage}
+       WHERE id = ${executionId}
+         AND status IN ('pending', 'running')
+    `),
+    'failToolExecutionDuringSetup'
+  );
+}
+
+async function loadProtectedExecutionGraph(args: {
+  executionId: number;
+  toolId: number;
+  sessionSub: string;
+  userId: number;
+  requestId: string;
+  log: RouteLogger;
+}): Promise<
+  PhaseResult<{ architect: LoadedArchitect; prompts: LoadedPrompts }>
+> {
+  const currentArchitect = await getAssistantArchitectByIdAction(
+    args.toolId.toString(),
+    INTERNAL_ASSISTANT_LOOKUP
+  );
+  if (!currentArchitect.isSuccess || !currentArchitect.data) {
+    await failExecutionDuringSetup(
+      args.executionId,
+      'Assistant configuration unavailable after execution start'
+    );
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Assistant architect not found',
+          requestId: args.requestId,
+        }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } }
+      ),
+    };
+  }
+  const architect = currentArchitect.data;
+  const promptResult = await validateArchitectPrompts({
+    architect,
+    sessionSub: args.sessionSub,
+    userId: args.userId,
+    toolId: args.toolId,
+    requestId: args.requestId,
+    log: args.log,
+  });
+  if (!promptResult.ok) {
+    await failExecutionDuringSetup(
+      args.executionId,
+      'Assistant configuration failed post-lock validation'
+    );
+    return promptResult;
+  }
+  args.log.info(
+    'Assistant architect loaded after execution coordination',
+    sanitizeForLogging({
+      toolId: args.toolId,
+      name: architect.name,
+      promptCount: promptResult.value.prompts.length,
+      userId: args.userId,
+    })
+  );
+  return {
+    ok: true,
+    value: { architect, prompts: promptResult.value.prompts },
+  };
 }
 
 /**
@@ -907,6 +1042,36 @@ function buildExecuteRouteErrorResponse(
       }
     );
   }
+  if (
+    error !== null &&
+    typeof error === 'object' &&
+    'statusCode' in error &&
+    typeof error.statusCode === 'number' &&
+    (error.statusCode === 403 || error.statusCode === 404)
+  ) {
+    const message =
+      'userMessage' in error && typeof error.userMessage === 'string'
+        ? error.userMessage
+        : 'You do not have permission to execute this assistant';
+    log.warn('Assistant execution access changed during coordination', {
+      statusCode: error.statusCode,
+    });
+    timer({ status: 'error', reason: 'access_changed' });
+    return new Response(
+      JSON.stringify({
+        error: error.statusCode === 404 ? 'Assistant architect not found' : 'Access denied',
+        message,
+        requestId,
+      }),
+      {
+        status: error.statusCode,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Request-Id': requestId,
+        },
+      }
+    );
+  }
   log.error('Assistant architect execution error', {
     error:
       error instanceof Error
@@ -956,7 +1121,7 @@ export async function POST(req: Request) {
     // 2-5. Authenticate, authorize, load architect + validate prompt chain
     const authorized = await authorizeAndLoadArchitect(toolId, requestId, log, timer);
     if (!authorized.ok) return authorized.response;
-    const { session, currentUserData, userId, architect, prompts } = authorized.value;
+    const { session, currentUserData, userId } = authorized.value;
 
     // Runtime file inputs are opaque references to caller-owned ephemeral
     // repositories. Resolve them before creating an execution record so forged,
@@ -986,7 +1151,6 @@ export async function POST(req: Request) {
 
     // 6. Create the tool_execution record (rate-cap guarded for agentic mode)
     const created = await createToolExecutionRecord({
-      architect,
       toolId,
       userId,
       inputs: modelInputs,
@@ -995,7 +1159,22 @@ export async function POST(req: Request) {
       timer,
     });
     if (!created.ok) return created.response;
-    const { executionId } = created.value;
+    const { executionId, startedAt, deadlineAt } = created.value;
+
+    // The coordinated row now protects this graph from import replacement.
+    // Reload after the lock transaction commits so an update that won the race
+    // is reflected here; an update that lost observes this active row and
+    // returns 409 without mutating the graph.
+    const protectedGraph = await loadProtectedExecutionGraph({
+      executionId,
+      toolId,
+      sessionSub: session.sub,
+      userId,
+      requestId,
+      log,
+    });
+    if (!protectedGraph.ok) return protectedGraph.response;
+    const { architect, prompts } = protectedGraph.value;
 
     // 7. Emit execution-start event
     await storeExecutionEvent(executionId, 'execution-start', {
@@ -1046,7 +1225,8 @@ export async function POST(req: Request) {
       userId,
       runtimeRepositoryIds: runtimeRepositoryInputs.repositoryIds,
       runtimeRepositoryQuery: runtimeRepositoryInputs.queryContext,
-      executionStartTime: Date.now(),
+      executionStartTime: startedAt.getTime(),
+      executionDeadlineAt: deadlineAt,
       assistantId: toolId,
       modelRoutingMode: architect.modelRoutingMode ?? 'legacy',
       modelRoutingFamily: architect.modelRoutingFamily ?? null,
@@ -1085,15 +1265,21 @@ export async function POST(req: Request) {
   }
 }
 
-/** Resolved value of executeSinglePromptWithCompletion (UI stream or undefined). */
-type SinglePromptResult = Awaited<ReturnType<typeof executeSinglePromptWithCompletion>>;
+type PromptStreamResponse = Awaited<ReturnType<typeof unifiedStreamingService.stream>>;
+
+/** Persistence result for one prompt, including its optional UI stream. */
+interface SinglePromptResult {
+  streamResponse?: PromptStreamResponse;
+  usage?: PromptFinishUsage;
+}
 
 /**
  * Execute every prompt at one position IN PARALLEL. On any rejection, logs the
  * failed prompt ids (mapped positionally to the original prompts) and throws a
  * wrapped sysInternalError. On success, returns the UI stream response from the
  * prompt explicitly marked for UI streaming (only one is), or undefined.
- * Behavior matches the original inline `if (isParallel)` branch exactly.
+ * The execution-complete transition deliberately occurs only after the final
+ * position's entire sibling set has settled.
  */
 async function executeParallelPositionGroup(args: {
   promptsAtPosition: ChainPrompt[];
@@ -1104,7 +1290,7 @@ async function executeParallelPositionGroup(args: {
   requestId: string;
   log: ReturnType<typeof createLogger>;
   totalPrompts: number;
-}): Promise<SinglePromptResult> {
+}): Promise<PromptStreamResponse | undefined> {
   const { promptsAtPosition, position, isLastPosition, inputs, context, requestId, log, totalPrompts } = args;
 
   // Validate parallelGroup field usage
@@ -1126,7 +1312,8 @@ async function executeParallelPositionGroup(args: {
       log,
       totalPrompts,
       // First prompt in last position gets stream response for UI
-      isLastPrompt: isLastPosition && idx === 0
+      isLastPrompt: isLastPosition && idx === 0,
+      completeExecution: false
     })
   );
 
@@ -1172,13 +1359,27 @@ async function executeParallelPositionGroup(args: {
       }
     );
   }
+  if (isLastPosition) {
+    const completedUsages = results
+      .filter((result) => result.status === 'fulfilled')
+      .map((result) => result.value.usage);
+    await finalizeExecutionOnLastPrompt(
+      context,
+      aggregatePromptUsage(completedUsages),
+      totalPrompts,
+      log
+    );
+  }
 
   // Extract successful stream responses
   const successResults = results.filter(r => r.status === 'fulfilled') as PromiseFulfilledResult<SinglePromptResult>[];
   // Find the result explicitly marked for UI streaming (isLastPosition && idx === 0)
-  // Only one parallel prompt gets isLastPrompt=true, so only one result has value !== undefined
-  const uiStreamResult = successResults.find(r => r.value !== undefined);
-  const lastStreamResponse: SinglePromptResult = uiStreamResult?.value;
+  // Only one parallel prompt gets isLastPrompt=true, so only one result carries
+  // a streamResponse; every result carries its own usage when reported.
+  const uiStreamResult = successResults.find(
+    result => result.value.streamResponse !== undefined
+  );
+  const lastStreamResponse = uiStreamResult?.value.streamResponse;
 
   // Verify UI stream was assigned for last position
   if (isLastPosition && !lastStreamResponse) {
@@ -1275,7 +1476,7 @@ async function executePromptChain(
       const prompt = promptsAtPosition[0];
       const isLastPrompt = position === sortedPositions[sortedPositions.length - 1] && promptsAtPosition.length === 1;
 
-      const streamResponse = await executeSinglePromptWithCompletion({
+      const promptResult = await executeSinglePromptWithCompletion({
         prompt,
         inputs,
         context,
@@ -1285,8 +1486,8 @@ async function executePromptChain(
         isLastPrompt
       });
 
-      if (streamResponse) {
-        lastStreamResponse = streamResponse;
+      if (promptResult.streamResponse) {
+        lastStreamResponse = promptResult.streamResponse;
       }
     }
   }
@@ -1644,6 +1845,7 @@ async function prepareAgenticRun(args: {
       { details: { executionId: args.context.executionId } }
     );
   }
+  const drivingModelId = drivingPrompt.modelId;
   const resolved = await resolveAgentTools({
     enabledToolIdentifiers: config.enabledToolIdentifiers,
     enabledConnectorIds: config.enabledConnectorIds,
@@ -1663,65 +1865,71 @@ async function prepareAgenticRun(args: {
         event
       ),
   });
-  const repositoryContext = createAgenticRepositoryContext({
-    prompts: orderedPrompts,
-    runtimeRepositoryIds: args.context.runtimeRepositoryIds,
-    userCognitoSub: args.context.userCognitoSub,
-  });
-  const effectiveTools: ToolSet = {
-    ...resolved.tools,
-    ...repositoryContext.tools,
-  };
-  args.log.info('Agentic tools resolved', {
-    executionId: args.context.executionId,
-    granted: resolved.grantedToolIdentifiers.length,
-    denied: resolved.deniedToolIdentifiers.length,
-    connectorTools: resolved.connectorResults.length,
-    repositoryCount: repositoryContext.repositoryIds.length,
-    maxSteps: config.maxSteps,
-  });
-  const { systemPrompt, userText } = buildAgenticInitialMessage(
-    orderedPrompts,
-    args.inputs
+  return withAgentConnectorCleanupOnError(
+    resolved.connectorResults,
+    args.requestId,
+    async () => {
+      const repositoryContext = createAgenticRepositoryContext({
+        prompts: orderedPrompts,
+        runtimeRepositoryIds: args.context.runtimeRepositoryIds,
+        userCognitoSub: args.context.userCognitoSub,
+      });
+      const effectiveTools: ToolSet = {
+        ...resolved.tools,
+        ...repositoryContext.tools,
+      };
+      args.log.info('Agentic tools resolved', {
+        executionId: args.context.executionId,
+        granted: resolved.grantedToolIdentifiers.length,
+        denied: resolved.deniedToolIdentifiers.length,
+        connectorTools: resolved.connectorResults.length,
+        repositoryCount: repositoryContext.repositoryIds.length,
+        maxSteps: config.maxSteps,
+      });
+      const { systemPrompt, userText } = buildAgenticInitialMessage(
+        orderedPrompts,
+        args.inputs
+      );
+      const effectiveSystemPrompt =
+        [systemPrompt, repositoryContext.systemGuidance]
+          .filter(Boolean)
+          .join('\n\n') || undefined;
+      const imageParts = extractImageInputParts(args.inputs);
+      if (imageParts.length > 0) {
+        args.log.info('Attaching image inputs to agentic run', {
+          executionId: args.context.executionId,
+          imageCount: imageParts.length,
+        });
+      }
+      const userMessage: UIMessage = {
+        id: `agentic-${args.context.executionId}-${Date.now()}`,
+        role: 'user',
+        parts: [{ type: 'text', text: userText }, ...imageParts],
+      };
+      const modelRoute = await routeAssistantArchitectModel({
+        text: userText,
+        userId: args.context.userId,
+        fallbackModelDbId: drivingModelId,
+        routingMode: args.context.modelRoutingMode,
+        requestedFamily: args.context.modelRoutingFamily,
+        requirements: {
+          requiredTools: config.enabledToolIdentifiers,
+          requiresFunctionCalling: Object.keys(effectiveTools).length > 0,
+          requiresVision: imageParts.length > 0,
+        },
+      });
+      args.context.modelRoutes.set(drivingPrompt.id, modelRoute.metadata);
+      return {
+        config,
+        drivingPrompt,
+        resolved,
+        effectiveTools,
+        effectiveSystemPrompt,
+        userMessage,
+        modelRoute,
+      };
+    }
   );
-  const effectiveSystemPrompt =
-    [systemPrompt, repositoryContext.systemGuidance]
-      .filter(Boolean)
-      .join('\n\n') || undefined;
-  const imageParts = extractImageInputParts(args.inputs);
-  if (imageParts.length > 0) {
-    args.log.info('Attaching image inputs to agentic run', {
-      executionId: args.context.executionId,
-      imageCount: imageParts.length,
-    });
-  }
-  const userMessage: UIMessage = {
-    id: `agentic-${args.context.executionId}-${Date.now()}`,
-    role: 'user',
-    parts: [{ type: 'text', text: userText }, ...imageParts],
-  };
-  const modelRoute = await routeAssistantArchitectModel({
-    text: userText,
-    userId: args.context.userId,
-    fallbackModelDbId: drivingPrompt.modelId,
-    routingMode: args.context.modelRoutingMode,
-    requestedFamily: args.context.modelRoutingFamily,
-    requirements: {
-      requiredTools: config.enabledToolIdentifiers,
-      requiresFunctionCalling: Object.keys(effectiveTools).length > 0,
-      requiresVision: imageParts.length > 0,
-    },
-  });
-  args.context.modelRoutes.set(drivingPrompt.id, modelRoute.metadata);
-  return {
-    config,
-    drivingPrompt,
-    resolved,
-    effectiveTools,
-    effectiveSystemPrompt,
-    userMessage,
-    modelRoute,
-  };
 }
 
 async function reserveAgenticRunCost(args: {
@@ -1822,7 +2030,7 @@ function createAgenticCleanup(args: {
   };
 }
 
-function startAgenticStream(args: {
+async function startAgenticStream(args: {
   run: PreparedAgenticRun;
   cost: AgenticCostReservation;
   context: PromptExecutionContext;
@@ -1838,6 +2046,21 @@ function startAgenticStream(args: {
     log: args.log,
   });
   const modelData = args.run.modelRoute.model;
+  let timeout: number;
+  try {
+    timeout = Math.min(
+      args.run.config.timeoutSeconds * 1000,
+      remainingAssistantExecutionTimeoutMs(
+        args.context.executionDeadlineAt
+      )
+    );
+  } catch (error) {
+    // Connector discovery and cost admission happen before this remaining-time
+    // check. If setup consumed the coordinated deadline, the stream callbacks
+    // will never be installed, so release both resources here.
+    await cleanup();
+    throw error;
+  }
   return new Promise<
     Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined
   >((resolve, reject) => {
@@ -1857,7 +2080,7 @@ function startAgenticStream(args: {
       maxTokens: args.cost.maxOutputTokens,
       costCapCents: args.run.config.costCapCents,
       costRates: args.cost.costRates,
-      timeout: args.run.config.timeoutSeconds * 1000,
+      timeout,
       callbacks: {
         onFinish: async ({ text, usage, finishReason, steps }) => {
           try {
@@ -1974,6 +2197,7 @@ interface SinglePromptOptions {
   log: ReturnType<typeof createLogger>;
   totalPrompts: number;
   isLastPrompt: boolean;
+  completeExecution?: boolean;
 }
 
 function getPromptRepositoryIds(
@@ -2157,7 +2381,10 @@ async function emitVariableSubstitutionEvent(
   inputMapping: Record<string, string>,
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
-  const substitutedVars: Record<string, string> = {};
+  const substitutedVars: Record<string, string> = Object.create(null) as Record<
+    string,
+    string
+  >;
   const sourcePrompts: number[] = [];
 
   // Extract which variables were substituted
@@ -2176,7 +2403,7 @@ async function emitVariableSubstitutionEvent(
           truncated: value.length > 500
         });
       }
-    } else if (varName in inputs) {
+    } else if (Object.hasOwn(inputs, varName)) {
       const inputValue = String(inputs[varName]);
       substitutedVars[varName] = String(sanitizeForLogging(inputValue)).substring(0, 500);
       if (inputValue.length > 500) {
@@ -2235,6 +2462,24 @@ interface PromptFinishUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+}
+
+function aggregatePromptUsage(
+  usages: Array<PromptFinishUsage | undefined>
+): PromptFinishUsage | undefined {
+  const reported = usages.filter(
+    (usage): usage is PromptFinishUsage => usage !== undefined
+  );
+  if (reported.length === 0) return undefined;
+  return reported.reduce(
+    (total, usage) => ({
+      promptTokens: total.promptTokens + usage.promptTokens,
+      completionTokens:
+        total.completionTokens + usage.completionTokens,
+      totalTokens: total.totalTokens + usage.totalTokens,
+    }),
+    { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+  );
 }
 
 /**
@@ -2380,19 +2625,28 @@ async function finalizeExecutionOnLastPrompt(
 async function resolveOnFinish(args: {
   isLastPrompt: boolean;
   streamResponsePromise: Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>>>;
-  resolve: (value: Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined) => void;
+  resolve: (value: SinglePromptResult) => void;
   reject: (reason?: unknown) => void;
   prompt: ChainPrompt;
+  usage: PromptFinishUsage | undefined;
   log: ReturnType<typeof createLogger>;
 }): Promise<void> {
-  const { isLastPrompt, streamResponsePromise, resolve, reject, prompt, log } = args;
+  const {
+    isLastPrompt,
+    streamResponsePromise,
+    resolve,
+    reject,
+    prompt,
+    usage,
+    log,
+  } = args;
   if (!isLastPrompt) {
-    resolve(undefined);
+    resolve({ usage });
     return;
   }
   try {
     const streamResponse = await streamResponsePromise;
-    resolve(streamResponse);
+    resolve({ streamResponse, usage });
   } catch (streamError) {
     // Stream creation failed, propagate error
     log.error('Stream response promise rejected', {
@@ -2420,14 +2674,21 @@ async function runPromptOnFinish(args: {
   repositoryContext: string;
   userMessage: UIMessage;
   streamResponsePromise: Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>>>;
-  resolve: (value: Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined) => void;
+  resolve: (value: SinglePromptResult) => void;
   reject: (reason?: unknown) => void;
 }): Promise<void> {
   const {
     options, finish, promptStartTime, promptTimer, processedContent,
     repositoryContext, userMessage, streamResponsePromise, resolve, reject,
   } = args;
-  const { prompt, context, totalPrompts, isLastPrompt, log } = options;
+  const {
+    prompt,
+    context,
+    totalPrompts,
+    isLastPrompt,
+    completeExecution,
+    log,
+  } = options;
   const { text, usage, finishReason } = finish;
   // Compute once and reuse — identical to the original repeated `text || ''` and
   // `text?.length || 0` expressions (both map undefined/'' to the same value).
@@ -2493,15 +2754,24 @@ async function runPromptOnFinish(args: {
     // Each prompt in the chain gets its own message for later resumption
     await savePromptConversationMessage({ prompt, context, text: safeText, usage, executionTimeMs, log });
 
-    // If this is the last prompt, update execution status to completed
-    if (isLastPrompt) {
+    // Sequential last prompts finalize here. Parallel groups defer this until
+    // every sibling's onFinish persistence has settled.
+    if (completeExecution ?? isLastPrompt) {
       await finalizeExecutionOnLastPrompt(context, usage, totalPrompts, log);
     }
 
     // CRITICAL: Wait for stream response to be ready, then resolve. This ensures
     // no race condition between stream assignment and onFinish (extracted to keep
     // this callback under the complexity limit; control flow is identical).
-    await resolveOnFinish({ isLastPrompt, streamResponsePromise, resolve, reject, prompt, log });
+    await resolveOnFinish({
+      isLastPrompt,
+      streamResponsePromise,
+      resolve,
+      reject,
+      prompt,
+      usage,
+      log,
+    });
 
   } catch (saveError) {
     log.error('Failed to save prompt result', {
@@ -2614,7 +2884,7 @@ async function handlePromptFailure(
  */
 async function executeSinglePromptWithCompletion(
   options: SinglePromptOptions
-) {
+): Promise<SinglePromptResult> {
   const { prompt, inputs, context, requestId, log, totalPrompts, isLastPrompt } = options;
   const promptStartTime = Date.now();
   const promptTimer = startTimer(`prompt.${prompt.id}.execution`);
@@ -2688,7 +2958,7 @@ async function executeSinglePromptWithCompletion(
 
     // 6. Wrap streaming in Promise that resolves on completion
     // Use Promise-based pattern to avoid race condition between stream creation and onFinish
-    return new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined>((resolve, reject) => {
+    return new Promise<SinglePromptResult>((resolve, reject) => {
       // Promise to track when stream response is ready
       // Must handle both resolve AND reject to prevent hanging if IIFE fails
       let resolveStreamResponse!: (value: Awaited<ReturnType<typeof unifiedStreamingService.stream>>) => void;
@@ -2706,6 +2976,9 @@ async function executeSinglePromptWithCompletion(
         sessionId: context.userCognitoSub,
         conversationId: undefined, // Assistant architect doesn't use conversations
         source: 'assistant_execution' as const,
+        timeout: remainingAssistantExecutionTimeoutMs(
+          context.executionDeadlineAt
+        ),
         systemPrompt: prompt.systemContext || undefined,
         enabledTools, // Keep for backward compatibility with other tools
         tools: Object.keys(promptTools).length > 0 ? promptTools : undefined, // Repository search tools
@@ -2775,7 +3048,7 @@ async function executeSinglePromptWithCompletion(
   } catch (promptError) {
     // Failure side-effects (events, failed prompt_result, failure message) and
     // the wrapped throw are extracted; order/behavior is identical.
-    await handlePromptFailure(options, promptTimer, promptError);
+    return handlePromptFailure(options, promptTimer, promptError);
   }
 }
 
@@ -2822,7 +3095,7 @@ function substituteVariables(
     const varName = dollarVar || braceVar;
 
     // 1. Check if there's an input mapping for this variable
-    if (mapping[varName]) {
+    if (Object.hasOwn(mapping, varName) && mapping[varName]) {
       const mappedPath = mapping[varName];
 
       // Handle prompt output references: "prompt_X.output"
@@ -2843,7 +3116,7 @@ function substituteVariables(
     }
 
     // 2. Try direct input lookup
-    if (varName in inputs) {
+    if (Object.hasOwn(inputs, varName)) {
       const value = inputs[varName];
       return value !== undefined && value !== null ? String(value) : match;
     }
@@ -2864,7 +3137,11 @@ function resolvePath(
   let current: unknown = context;
 
   for (const part of parts) {
-    if (current && typeof current === 'object') {
+    if (
+      current &&
+      typeof current === 'object' &&
+      Object.hasOwn(current, part)
+    ) {
       current = (current as Record<string, unknown>)[part];
     } else {
       return undefined;

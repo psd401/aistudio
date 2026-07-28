@@ -41,6 +41,12 @@ import {
 } from "@/lib/assistant-architect/knowledge-retrieval"
 import { createRepositoryTools } from "@/lib/tools/repository-tools"
 import { parseBoundAssistantConversationMetadata } from "@/lib/api/assistant-conversation-metadata"
+import {
+  compareAssistantPromptExecutionOrder,
+  createCoordinatedAssistantExecution,
+  remainingAssistantExecutionTimeoutMs,
+  settleCoordinatedAssistantExecution,
+} from "@/lib/assistant-architect/execution-coordinator"
 
 export const maxDuration = 900
 
@@ -94,6 +100,17 @@ type FollowUpSetupResult =
   | { setup: FollowUpSetup; response?: never }
   | { setup?: never; response: NextResponse }
 
+function isExecutionHttpError(
+  error: unknown
+): error is { statusCode: 403 | 404; userMessage?: string } {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "statusCode" in error &&
+    (error.statusCode === 403 || error.statusCode === 404)
+  )
+}
+
 function parseFollowUpIds(
   request: NextRequest,
   requestId: string
@@ -130,7 +147,12 @@ async function verifyFollowUpAccess(
 ): Promise<NextResponse | null> {
   const scopeError = requireAssistantScope(auth, ids.assistantId, requestId)
   if (scopeError) return scopeError
-  return verifyAssistantAccess(ids.assistantId, auth, requestId)
+  return verifyAssistantAccess(
+    ids.assistantId,
+    auth,
+    requestId,
+    { requireApproved: auth.authType !== "session" }
+  )
 }
 
 async function loadConversationBinding(
@@ -184,7 +206,7 @@ async function loadFollowUpSetup(
   }
   const architect = architectResult.data
   const prompts = (architect.prompts || []).sort(
-    (left, right) => left.position - right.position
+    compareAssistantPromptExecutionOrder
   )
   const lastPrompt = prompts.at(-1)
   if (!lastPrompt?.modelId) {
@@ -348,19 +370,38 @@ async function saveAssistantFollowUp(
 function createFollowUpCallbacks(
   context: FollowUpContext,
   promptModelId: number,
+  executionId: number,
 ): StreamingCallbacks {
   return {
-    onFinish: ({ text, usage, finishReason }) =>
-      saveAssistantFollowUp(context, {
+    onFinish: async ({ text, usage, finishReason }) => {
+      await saveAssistantFollowUp(context, {
         promptModelId,
         text,
         usage,
         finishReason,
-      }),
+      })
+      await settleCoordinatedAssistantExecution({
+        executionId,
+        status: "completed",
+      })
+    },
     onError: (error) => {
       context.log.error("Streaming error in follow-up", {
         error,
         conversationId: context.ids.conversationId,
+      })
+      void settleCoordinatedAssistantExecution({
+        executionId,
+        status: "failed",
+        errorMessage: error.message,
+      }).catch((settlementError) => {
+        context.log.error("Failed to settle follow-up execution", {
+          executionId,
+          error:
+            settlementError instanceof Error
+              ? settlementError.message
+              : String(settlementError),
+        })
       })
     },
   }
@@ -372,6 +413,8 @@ async function streamFollowUp(
     setup: FollowUpSetup
     messages: UIMessage[]
     tools: StreamRequest["tools"]
+    executionId: number
+    deadlineAt: Date
   }
 ): Promise<NextResponse> {
   const streamRequest: StreamRequest = {
@@ -382,10 +425,16 @@ async function streamFollowUp(
     sessionId: context.auth.cognitoSub,
     conversationId: context.ids.conversationId,
     source: "assistant_execution",
+    executionId: input.executionId,
     systemPrompt: input.setup.systemPrompt,
     tools: input.tools,
     maxSteps: 5,
-    callbacks: createFollowUpCallbacks(context, input.setup.promptModelId),
+    timeout: remainingAssistantExecutionTimeoutMs(input.deadlineAt),
+    callbacks: createFollowUpCallbacks(
+      context,
+      input.setup.promptModelId,
+      input.executionId
+    ),
   }
   try {
     const streamResponse = await unifiedStreamingService.stream(streamRequest)
@@ -400,6 +449,20 @@ async function streamFollowUp(
       headers: Object.fromEntries(response.headers.entries()),
     })
   } catch (error) {
+    await settleCoordinatedAssistantExecution({
+      executionId: input.executionId,
+      status: "failed",
+      errorMessage:
+        error instanceof Error ? error.message : "Failed to start stream",
+    }).catch((settlementError) => {
+      context.log.error("Failed to settle follow-up execution", {
+        executionId: input.executionId,
+        error:
+          settlementError instanceof Error
+            ? settlementError.message
+            : String(settlementError),
+      })
+    })
     context.log.error("Failed to start follow-up stream", {
       error,
       conversationId: context.ids.conversationId,
@@ -418,46 +481,98 @@ async function sendFollowUp(
   request: NextRequest,
   runtimeRepositoryIds: number[]
 ): Promise<NextResponse> {
-  const setupResult = await loadFollowUpSetup(
-    context.ids,
-    runtimeRepositoryIds,
-    context.auth,
-    context.requestId,
-    context.log
-  )
-  if (setupResult.response) return setupResult.response
-
   const bodyResult = await parseRequestBody(
     request,
     sendMessageSchema,
-    context.requestId
+    context.requestId,
+    { maximumBytes: 128 * 1024 }
   )
   if (isErrorResponse(bodyResult)) return bodyResult
   const userMessage = bodyResult.data.message
-  const messageContext = await buildFollowUpMessages(
-    context.ids,
-    userMessage,
-    setupResult.setup,
-    context.auth,
-    context.requestId
-  )
-  await createMessageWithStats({
-    conversationId: context.ids.conversationId,
-    role: "user",
-    content: userMessage,
-    parts: [{ type: "text", text: userMessage }],
-    metadata: { source: "api" },
-  })
-  context.log.info("Sending follow-up message", {
-    conversationId: context.ids.conversationId,
+  const coordinated = await createCoordinatedAssistantExecution({
     assistantId: context.ids.assistantId,
-    historyLength: messageContext.messages.length - 1,
+    userId: context.auth.userId,
+    inputs: { message: userMessage },
+    requireApproved: context.auth.authType !== "session",
+    modelAccessMode: "final_prompt",
   })
-  return streamFollowUp(context, {
-    setup: setupResult.setup,
-    messages: messageContext.messages,
-    tools: messageContext.tools,
-  })
+  if (!coordinated.created) {
+    if (coordinated.reason === "rate_limited") {
+      return createErrorResponse(
+        context.requestId,
+        429,
+        "RATE_LIMITED",
+        "Assistant execution rate limit exceeded"
+      )
+    }
+    return createErrorResponse(
+      context.requestId,
+      400,
+      "CONFIGURATION_ERROR",
+      `Assistant prompt count must be between 1 and ${coordinated.maxPromptCount}`
+    )
+  }
+  const executionId = coordinated.executionId
+  try {
+    const setupResult = await loadFollowUpSetup(
+      context.ids,
+      runtimeRepositoryIds,
+      context.auth,
+      context.requestId,
+      context.log
+    )
+    if (setupResult.response) {
+      await settleCoordinatedAssistantExecution({
+        executionId,
+        status: "failed",
+        errorMessage: "Assistant follow-up setup rejected",
+      })
+      return setupResult.response
+    }
+
+    const messageContext = await buildFollowUpMessages(
+      context.ids,
+      userMessage,
+      setupResult.setup,
+      context.auth,
+      context.requestId
+    )
+    await createMessageWithStats({
+      conversationId: context.ids.conversationId,
+      role: "user",
+      content: userMessage,
+      parts: [{ type: "text", text: userMessage }],
+      metadata: { source: "api" },
+    })
+    context.log.info("Sending follow-up message", {
+      conversationId: context.ids.conversationId,
+      assistantId: context.ids.assistantId,
+      historyLength: messageContext.messages.length - 1,
+    })
+    return streamFollowUp(context, {
+      setup: setupResult.setup,
+      messages: messageContext.messages,
+      tools: messageContext.tools,
+      executionId,
+      deadlineAt: coordinated.deadlineAt,
+    })
+  } catch (error) {
+    await settleCoordinatedAssistantExecution({
+      executionId,
+      status: "failed",
+      errorMessage:
+        error instanceof Error ? error.message : "Follow-up execution failed",
+    }).catch((settlementError) => {
+      context.log.error("Failed to settle follow-up execution", {
+        executionId,
+        error:
+          settlementError instanceof Error
+            ? settlementError.message
+            : String(settlementError),
+      })
+    })
+    throw error
+  }
 }
 
 // ============================================
@@ -487,6 +602,18 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       binding.runtimeRepositoryIds
     )
   } catch (error) {
+    if (isExecutionHttpError(error)) {
+      const isNotFound = error.statusCode === 404
+      return createErrorResponse(
+        requestId,
+        error.statusCode,
+        isNotFound ? "NOT_FOUND" : "FORBIDDEN",
+        error.userMessage ||
+          (isNotFound
+            ? `Assistant not found: ${parsedIds.ids.assistantId}`
+            : "You do not have access to this assistant")
+      )
+    }
     log.error("Failed to send message", {
       error: error instanceof Error ? error.message : String(error),
       assistantId: parsedIds.ids.assistantId,

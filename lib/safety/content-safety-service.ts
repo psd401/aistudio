@@ -37,6 +37,8 @@ export interface ContentSafetyResult extends SafetyCheckResult {
   processingTimeMs: number;
   /** Whether content was modified (tokenized/detokenized) */
   contentModified: boolean;
+  /** Whether input PII detection and any required token storage completed */
+  piiScanCompleted: boolean;
 }
 
 /**
@@ -123,6 +125,7 @@ export class ContentSafetyService {
             requestId,
             processingTimeMs: Date.now() - startTime,
             contentModified: false,
+            piiScanCompleted: false,
           };
         }
       }
@@ -132,6 +135,7 @@ export class ContentSafetyService {
       let tokens: TokenMapping[] = [];
       let hasPII = false;
       let contentModified = false;
+      let piiScanCompleted = false;
 
       if (this.piiService.isEnabled()) {
         const tokenizationResult = await this.piiService.tokenize(
@@ -142,6 +146,7 @@ export class ContentSafetyService {
         tokens = tokenizationResult.tokens;
         hasPII = tokenizationResult.hasPII;
         contentModified = hasPII;
+        piiScanCompleted = tokenizationResult.scanCompleted;
 
         if (hasPII) {
           this.log.info('PII tokenized in input', {
@@ -160,6 +165,7 @@ export class ContentSafetyService {
         requestId,
         processingTimeMs: Date.now() - startTime,
         contentModified,
+        piiScanCompleted,
       };
 
       this.log.info('Input processing complete', {
@@ -183,6 +189,7 @@ export class ContentSafetyService {
         requestId,
         processingTimeMs: Date.now() - startTime,
         contentModified: false,
+        piiScanCompleted: false,
       };
     }
   }
@@ -241,6 +248,7 @@ export class ContentSafetyService {
             requestId,
             processingTimeMs: Date.now() - startTime,
             contentModified: false,
+            piiScanCompleted: false,
           };
         }
       }
@@ -269,6 +277,7 @@ export class ContentSafetyService {
         requestId,
         processingTimeMs: Date.now() - startTime,
         contentModified,
+        piiScanCompleted: false,
       };
 
       this.log.info('Output processing complete', {
@@ -291,6 +300,7 @@ export class ContentSafetyService {
         requestId,
         processingTimeMs: Date.now() - startTime,
         contentModified: false,
+        piiScanCompleted: false,
       };
     }
   }
