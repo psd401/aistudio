@@ -134,14 +134,18 @@ export const drizzleMemoryRepository: MemoryRepository = {
         )
         const literal = vectorLiteral(record.embedding)
         const nearestResult = await tx.execute(sql`
+          WITH owner_memories AS MATERIALIZED (
+            SELECT id, embedding
+            FROM nexus_user_memories
+            WHERE user_id = ${record.userId}
+              AND deleted_at IS NULL
+              AND embedding IS NOT NULL
+            FOR UPDATE
+          )
           SELECT id, 1 - (embedding <=> ${literal}::vector) AS similarity
-          FROM nexus_user_memories
-          WHERE user_id = ${record.userId}
-            AND deleted_at IS NULL
-            AND embedding IS NOT NULL
+          FROM owner_memories
           ORDER BY embedding <=> ${literal}::vector
           LIMIT 1
-          FOR UPDATE
         `)
         const [nearest] = toPgRows<SimilarMemoryRow>(nearestResult)
         const shouldUpdate = shouldUpdateSimilarMemory(
@@ -224,6 +228,23 @@ export const drizzleMemoryRepository: MemoryRepository = {
     const result = await executeQuery(
       (db) =>
         db.execute(sql`
+          WITH owner_memories AS MATERIALIZED (
+            SELECT
+              id,
+              user_id,
+              content,
+              category,
+              source,
+              source_conversation_id,
+              embedding,
+              created_at,
+              updated_at
+            FROM nexus_user_memories
+            WHERE user_id = ${userId}
+              AND category IN ('preference', 'context')
+              AND deleted_at IS NULL
+              AND embedding IS NOT NULL
+          )
           SELECT
             id,
             user_id,
@@ -233,12 +254,8 @@ export const drizzleMemoryRepository: MemoryRepository = {
             source_conversation_id,
             created_at,
             updated_at
-          FROM nexus_user_memories
-          WHERE user_id = ${userId}
-            AND category IN ('preference', 'context')
-            AND deleted_at IS NULL
-            AND embedding IS NOT NULL
-            AND 1 - (embedding <=> ${literal}::vector) >= ${threshold}
+          FROM owner_memories
+          WHERE 1 - (embedding <=> ${literal}::vector) >= ${threshold}
           ORDER BY embedding <=> ${literal}::vector
           LIMIT ${limit}
         `),

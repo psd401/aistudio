@@ -139,11 +139,37 @@ describe("Nexus memory repository deduplication", () => {
       throw new TypeError("Expected the second transaction statement to be SQL")
     }
     const renderedNearest = new PgDialect().sqlToQuery(nearestStatement)
+    expect(renderedNearest.sql).toContain("AS MATERIALIZED")
     expect(renderedNearest.sql).toContain("FOR UPDATE")
     expect(mockExecuteTransaction).toHaveBeenCalledWith(
       expect.any(Function),
       "saveNexusUserMemory",
       { isolationLevel: "read committed" },
     )
+  })
+
+  it("materializes the complete owner subset before relevant-memory ranking", async () => {
+    const execute = jest.fn().mockResolvedValue({})
+    mockExecuteQuery.mockImplementation(
+      async (operation: (value: { execute: typeof execute }) => unknown) =>
+        operation({ execute }),
+    )
+    mockToPgRows.mockReturnValue([])
+
+    await drizzleMemoryRepository.findRelevantMemories(
+      7,
+      [0.1, 0.2],
+      0.3,
+      6,
+    )
+
+    const statement = execute.mock.calls[0]?.[0]
+    if (!(statement instanceof SQL)) {
+      throw new TypeError("Expected the relevant-memory query to be SQL")
+    }
+    const rendered = new PgDialect().sqlToQuery(statement)
+    expect(rendered.sql).toContain("AS MATERIALIZED")
+    expect(rendered.sql).toContain("FROM owner_memories")
+    expect(rendered.params).toContain(7)
   })
 })
