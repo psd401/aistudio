@@ -168,6 +168,7 @@ function expectCompleteAssistantImportSchemas(): void {
     required: ["assistantId"],
     properties: {
       assistantId: { type: "integer", minimum: 1 },
+      name: { type: "string", minLength: 1, maxLength: 255 },
     },
   })
 }

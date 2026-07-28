@@ -117,7 +117,8 @@ async function verifyStartAuthorization(
   const prompts = (architect.prompts || []).sort(
     (left, right) => left.position - right.position
   )
-  if (!prompts.at(-1)?.modelId) {
+  const lastPromptModelId = prompts.at(-1)?.modelId
+  if (!lastPromptModelId) {
     return createErrorResponse(
       requestId,
       400,
@@ -129,12 +130,15 @@ async function verifyStartAuthorization(
     auth,
     architectUserId: architect.userId,
     architectId: architect.id,
-    modelDbIds: prompts
-      .map((prompt) => prompt.modelId)
-      .filter(
-        (modelId): modelId is number =>
-          typeof modelId === "number" && modelId > 0
-      ),
+    modelDbIds:
+      (architect.modelRoutingMode ?? "legacy") === "legacy"
+        ? prompts
+            .map((prompt) => prompt.modelId)
+            .filter(
+              (modelId): modelId is number =>
+                typeof modelId === "number" && modelId > 0
+            )
+        : [lastPromptModelId],
     assistantId,
     requestId,
     log,

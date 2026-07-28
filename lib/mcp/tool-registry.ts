@@ -467,6 +467,8 @@ Example:
           type: "string",
           description:
             "Optional name for the fork. Defaults to the source assistant name.",
+          minLength: 1,
+          maxLength: 255,
         },
       },
       required: ["assistantId"],

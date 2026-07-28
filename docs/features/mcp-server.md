@@ -29,6 +29,9 @@ Three auth paths supported:
 | `capture_decision` | `mcp:capture_decision` | Create decision nodes and edges |
 | `execute_assistant` | `mcp:execute_assistant` | Execute an AI assistant |
 | `list_assistants` | `mcp:list_assistants` | List accessible assistants |
+| `create_assistant` | `mcp:create_assistant` | Create caller-owned pending-approval assistants |
+| `update_assistant` | `mcp:update_assistant` | Replace an owned assistant and reset approval |
+| `fork_assistant` | `mcp:fork_assistant` | Fork a visible assistant into a caller-owned pending-approval copy |
 | `get_decision_graph` | `mcp:get_decision_graph` | Get node details + connections |
 
 **Atrium content tools** (`create_document`, `create_artifact`, `get_content`, `list_content`, `update_content`, `create_version`, `set_visibility`, `publish_content`, `unpublish_content`, `export_okf`, `import_okf`) are registered alongside these, scoped via `content:*` — see [atrium-agent-access.md](./atrium-agent-access.md) for the per-tool scope table, semantics (version-based, private+draft, §28.3-screened), and agent integration guide.

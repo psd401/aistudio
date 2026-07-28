@@ -283,7 +283,10 @@ function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part1() {
         id: 5,
         userId: 9,
         modelRoutingMode: "standard",
-        prompts: [{ id: 10, position: 0, modelId: 3 }],
+        prompts: [
+          { id: 10, position: 0, modelId: 2 },
+          { id: 11, position: 1, modelId: 3 },
+        ],
       },
     } as never)
     mockPrepareAssistantExecutionInputs.mockResolvedValue({
@@ -309,7 +312,43 @@ function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part1() {
 
   }
 
-function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part2() {it("compensates the bound empty conversation when first-message persistence fails", async () => {
+function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part2() {
+  it("retains every prompt-model authorization for legacy conversations", async () => {
+    mockGetAssistantArchitect.mockResolvedValueOnce({
+      isSuccess: true,
+      message: "ok",
+      data: {
+        id: 5,
+        userId: 9,
+        modelRoutingMode: "legacy",
+        prompts: [
+          { id: 10, position: 0, modelId: 2 },
+          { id: 11, position: 1, modelId: 3 },
+        ],
+      },
+    } as never)
+    mockPrepareAssistantExecutionInputs.mockResolvedValue({
+      ownerId: 7,
+      inputs: {},
+      runtimeRepositoryIds: [],
+      runtimeRepositoryQuery: "",
+      references: [],
+    })
+
+    const response = await POST(
+      new NextRequest("http://localhost/api/v1/assistants/5/conversations", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ id: "5" }) }
+    )
+
+    expect(response.status).toBe(200)
+    expect(mockVerifyAssistantResourceGrants).toHaveBeenCalledWith(
+      expect.objectContaining({ architectId: 5, modelDbIds: [2, 3] })
+    )
+  })
+
+  it("compensates the bound empty conversation when first-message persistence fails", async () => {
     const preparedInputs = {
       ownerId: 7,
       inputs: {
