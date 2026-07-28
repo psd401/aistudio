@@ -13,6 +13,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Real
 
+try:
+    from ..broker_stub import ALLOWED_AGENT_BROKER_ROUTES
+except ImportError:
+    from broker_stub import ALLOWED_AGENT_BROKER_ROUTES
+
 
 SUPPORTED_GRADERS = frozenset(
     {
@@ -74,13 +79,22 @@ def _validate_route(spec: Mapping[str, object], grader: str) -> None:
         grader=grader,
         field="route",
     )
-    if not route.startswith("/api/agent/"):
+    if route not in ALLOWED_AGENT_BROKER_ROUTES:
         raise GraderConfigurationError(
-            f"{grader} grader route must start with /api/agent/"
+            f"{grader} grader route is not an allowed agent broker route: "
+            f"{route}"
         )
     method = spec.get("method")
     if method is not None:
-        _require_nonempty_string(method, grader=grader, field="method")
+        validated_method = _require_nonempty_string(
+            method,
+            grader=grader,
+            field="method",
+        )
+        if validated_method.upper() != "POST":
+            raise GraderConfigurationError(
+                f"{grader} grader method must be POST"
+            )
 
 
 def _validate_body_matchers(value: object) -> None:

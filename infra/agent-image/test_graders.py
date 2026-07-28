@@ -293,6 +293,39 @@ class ReliabilityAggregationTests(unittest.TestCase):
 
 
 class GraderValidationTests(unittest.TestCase):
+    def test_broker_graders_reject_routes_outside_the_allowlist(self):
+        for grader_type in ("broker_request", "no_route_called"):
+            with self.subTest(grader=grader_type):
+                with self.assertRaisesRegex(
+                    graders.GraderConfigurationError,
+                    "not an allowed agent broker route",
+                ):
+                    graders.validate_grader_specs(
+                        [
+                            {
+                                "type": grader_type,
+                                "route": "/api/agent/email-traige",
+                            }
+                        ]
+                    )
+
+    def test_broker_graders_reject_non_post_methods(self):
+        for grader_type in ("broker_request", "no_route_called"):
+            with self.subTest(grader=grader_type):
+                with self.assertRaisesRegex(
+                    graders.GraderConfigurationError,
+                    "method must be POST",
+                ):
+                    graders.validate_grader_specs(
+                        [
+                            {
+                                "type": grader_type,
+                                "route": "/api/agent/email-triage",
+                                "method": "GET",
+                            }
+                        ]
+                    )
+
     def test_invalid_regex_fails_when_the_suite_loads(self):
         with self.assertRaisesRegex(
             graders.GraderConfigurationError,

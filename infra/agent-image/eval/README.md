@@ -153,6 +153,8 @@ Available graders:
   are `exact`, `contains_any`, and `numeric_equals`; dot paths address nested
   fields.
 - `no_route_called` asserts the selected route/method received no request.
+- Broker grader routes must be in the production agent-broker allowlist; an
+  explicit method must be `POST`.
 - `output_match` applies a regular expression to the final result.
 - `trajectory_in_order` requires relative tool order while allowing extra
   intervening steps.
