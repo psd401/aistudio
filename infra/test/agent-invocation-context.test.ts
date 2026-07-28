@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
-import { Template } from 'aws-cdk-lib/assertions';
+import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AgentPlatformStack } from '../lib/agent-platform-stack';
 import { EnvironmentConfig } from '../lib/constructs';
 
@@ -280,5 +280,60 @@ describe('Agent invocation context trust boundary', () => {
     );
     expect(cronEnvironment).toHaveProperty('SCHEDULES_TABLE');
     expect(cronEnvironment).not.toHaveProperty('USERS_TABLE');
+  });
+});
+
+describe('Agent schedule reliability infrastructure', () => {
+  let template: Template;
+
+  beforeAll(() => {
+    template = buildTemplate();
+  });
+
+  it('sizes cron for fleet bursts while preserving the per-session lock', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      FunctionName: `psd-agent-cron-${ENV}`,
+      ReservedConcurrentExecutions: 10,
+    });
+  });
+
+  it('lets EventBridge Scheduler send failed targets to the agent DLQ', () => {
+    const sendToDlq = allStatements(template).find((statement) => {
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      return (
+        actions.includes('sqs:SendMessage') &&
+        JSON.stringify(statement.Resource).includes('AgentAsyncDLQ')
+      );
+    });
+    expect(sendToDlq).toMatchObject({
+      Effect: 'Allow',
+    });
+  });
+
+  it('alarms cron errors and throttles through the agent alarm topic', () => {
+    for (const [alarmName, metricName] of [
+      [`psd-agent-cron-errors-${ENV}`, 'Errors'],
+      [`psd-agent-cron-throttles-${ENV}`, 'Throttles'],
+    ]) {
+      template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+        AlarmName: alarmName,
+        Namespace: 'AWS/Lambda',
+        MetricName: metricName,
+        Threshold: 1,
+        AlarmActions: Match.anyValue(),
+      });
+    }
+  });
+
+  it('alarms Scheduler and Lambda DLQ depth through the agent alarm topic', () => {
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: `psd-agent-async-dlq-${ENV}`,
+      Namespace: 'AWS/SQS',
+      MetricName: 'ApproximateNumberOfMessagesVisible',
+      Threshold: 1,
+      AlarmActions: Match.anyValue(),
+    });
   });
 });

@@ -1014,6 +1014,8 @@ export class EcsServiceConstruct extends Construct {
         `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-cron-${environment}`,
       AGENT_SCHEDULER_ROLE_ARN:
         `arn:aws:iam::${cdk.Stack.of(this).account}:role/psd-agent-scheduler-invoke-${environment}`,
+      AGENT_SCHEDULE_DLQ_ARN:
+        `arn:aws:sqs:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:psd-agent-async-dlq-${environment}`,
       // DWD token broker (#1232) + agnt_ auto-provisioning (#1233) config —
       // the GCP project number, WIF pool/provider ids, DWD service-account
       // email, and the OneSync provisioning sheet id all live in ONE JSON

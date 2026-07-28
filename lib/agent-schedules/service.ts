@@ -29,9 +29,17 @@ import {
   validateSchedulePrompt,
   validateScheduleTimezone,
 } from "@/lib/agent-schedules/validation";
+import {
+  DrizzleAgentScheduleRunReader,
+  type AgentScheduleLastRun,
+  type AgentScheduleRunReader,
+} from "@/lib/agent-schedules/run-reader";
 
 const DEFAULT_TIMEZONE = "America/Los_Angeles";
 const DEFAULT_MAX_SCHEDULES_PER_OWNER = 50;
+const LAST_RUN_ERROR_MAX_LENGTH = 500;
+const SCHEDULE_MAXIMUM_EVENT_AGE_SECONDS = 60 * 60;
+const SCHEDULE_MAXIMUM_RETRY_ATTEMPTS = 2;
 const GOOGLE_IDENTITY_RE = /^users\/\d+$/;
 const DM_SPACE_RE = /^spaces\/[\w-]{1,256}$/;
 type ScheduleTransactItems = NonNullable<
@@ -68,7 +76,11 @@ export type PublicAgentSchedule = Pick<
   | "enabled"
   | "createdAt"
   | "updatedAt"
->;
+> & {
+  lastRunAt: string | null;
+  lastRunStatus: string | null;
+  lastRunError: string | null;
+};
 
 export interface CreateAgentScheduleInput {
   name: unknown;
@@ -166,6 +178,7 @@ export interface AgentScheduleServiceConfig {
   scheduleGroup: string;
   cronLambdaArn: string;
   schedulerRoleArn: string;
+  scheduleDlqArn: string;
   maxSchedulesPerOwner: number;
 }
 
@@ -230,7 +243,10 @@ export function scheduleTransactionToken(
     .slice(0, 36);
 }
 
-function publicSchedule(record: AgentScheduleRecord): PublicAgentSchedule {
+function publicSchedule(
+  record: AgentScheduleRecord,
+  lastRun?: AgentScheduleLastRun,
+): PublicAgentSchedule {
   return {
     scheduleId: record.scheduleId,
     version: record.version,
@@ -241,6 +257,11 @@ function publicSchedule(record: AgentScheduleRecord): PublicAgentSchedule {
     enabled: record.enabled,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+    lastRunAt: lastRun?.createdAt.toISOString() ?? null,
+    lastRunStatus: lastRun?.status ?? null,
+    lastRunError: lastRun?.errorMessage
+      ? lastRun.errorMessage.slice(0, LAST_RUN_ERROR_MAX_LENGTH)
+      : null,
   };
 }
 
@@ -385,6 +406,7 @@ export class AgentScheduleService {
     private readonly config: AgentScheduleServiceConfig,
     private readonly dynamo: AgentScheduleDynamoClient,
     private readonly scheduler: SchedulerClient,
+    private readonly runReader: AgentScheduleRunReader,
   ) {}
 
   private scheduleName(scheduleId: string): string {
@@ -641,15 +663,21 @@ export class AgentScheduleService {
 
   async list(owner: string): Promise<PublicAgentSchedule[]> {
     const ownerEmail = normalizeOwnerEmail(owner);
-    return (await this.ownerItems(ownerEmail))
+    const records = (await this.ownerItems(ownerEmail))
       .filter(
         (item) =>
           typeof item.scheduleId === "string" &&
           !item.scheduleId.startsWith("__"),
       )
       .map((item) => parseRecord(item, ownerEmail))
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-      .map(publicSchedule);
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    const lastRuns = await this.runReader.latestBySchedule(
+      ownerEmail,
+      records.map((record) => record.scheduleId),
+    );
+    return records.map((record) =>
+      publicSchedule(record, lastRuns.get(record.scheduleId)),
+    );
   }
 
   async create(
@@ -702,6 +730,11 @@ export class AgentScheduleService {
           Arn: this.config.cronLambdaArn,
           RoleArn: this.config.schedulerRoleArn,
           Input: this.targetInput(ownerEmail, scheduleId, version),
+          DeadLetterConfig: { Arn: this.config.scheduleDlqArn },
+          RetryPolicy: {
+            MaximumEventAgeInSeconds: SCHEDULE_MAXIMUM_EVENT_AGE_SECONDS,
+            MaximumRetryAttempts: SCHEDULE_MAXIMUM_RETRY_ATTEMPTS,
+          },
         },
         Description: `PSD agent schedule ${scheduleId}`,
       }),
@@ -863,6 +896,11 @@ export class AgentScheduleService {
             Arn: this.config.cronLambdaArn,
             RoleArn: this.config.schedulerRoleArn,
             Input: this.targetInput(ownerEmail, scheduleId, updated.version),
+            DeadLetterConfig: { Arn: this.config.scheduleDlqArn },
+            RetryPolicy: {
+              MaximumEventAgeInSeconds: SCHEDULE_MAXIMUM_EVENT_AGE_SECONDS,
+              MaximumRetryAttempts: SCHEDULE_MAXIMUM_RETRY_ATTEMPTS,
+            },
           },
           Description: `PSD agent schedule ${scheduleId}`,
         }),
@@ -954,6 +992,7 @@ export function createAgentScheduleService(): AgentScheduleService {
     scheduleGroup: requiredEnvironment("AGENT_SCHEDULE_GROUP"),
     cronLambdaArn: requiredEnvironment("AGENT_CRON_LAMBDA_ARN"),
     schedulerRoleArn: requiredEnvironment("AGENT_SCHEDULER_ROLE_ARN"),
+    scheduleDlqArn: requiredEnvironment("AGENT_SCHEDULE_DLQ_ARN"),
     maxSchedulesPerOwner:
       Number.isInteger(maximum) && maximum > 0
         ? maximum
@@ -965,5 +1004,6 @@ export function createAgentScheduleService(): AgentScheduleService {
       new DynamoDBClient({ region }),
     ) as unknown as AgentScheduleDynamoClient,
     new SchedulerClient({ region }),
+    new DrizzleAgentScheduleRunReader(),
   );
 }

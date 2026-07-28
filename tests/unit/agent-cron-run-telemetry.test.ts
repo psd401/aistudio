@@ -1,0 +1,166 @@
+import {
+  createRunTelemetry,
+  type CronTelemetryLogger,
+} from "../../infra/lambdas/agent-cron/run-telemetry"
+
+const config = {
+  databaseResourceArn: "arn:aws:rds:us-east-1:123:cluster:test",
+  databaseSecretArn: "arn:aws:secretsmanager:us-east-1:123:secret:test",
+  databaseName: "aistudio",
+}
+
+function harness(overrides: Partial<typeof config> = {}) {
+  const execute = jest.fn().mockResolvedValue({})
+  const warn = jest.fn()
+  const error = jest.fn()
+  const telemetry = createRunTelemetry(
+    { ...config, ...overrides },
+    { execute },
+  )
+  const log = { warn, error } satisfies CronTelemetryLogger
+  return { telemetry, execute, warn, error, log }
+}
+
+describe("agent-cron run telemetry", () => {
+  it("records a rejected reference as a skipped scheduled run", async () => {
+    const { telemetry, execute, log } = harness()
+
+    await telemetry.recordRun(
+      {
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        sessionId: "reference-session",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 12,
+        status: "skipped",
+        errorMessage: "Schedule reference rejected: version-mismatch",
+      },
+      log,
+    )
+
+    expect(execute).toHaveBeenCalledTimes(1)
+    const input = execute.mock.calls[0][0]
+    expect(input.sql).toContain(
+      "INSERT INTO agent_scheduled_runs",
+    )
+    expect(input.parameters).toEqual(
+      expect.arrayContaining([
+        { name: "status", value: { stringValue: "skipped" } },
+        {
+          name: "error_message",
+          value: {
+            stringValue: "Schedule reference rejected: version-mismatch",
+          },
+        },
+      ]),
+    )
+  })
+
+  it("mirrors a lookup error into the cron failure stream", async () => {
+    const { telemetry, execute, error, log } = harness()
+
+    await telemetry.recordRun(
+      {
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        sessionId: "reference-session",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 20,
+        status: "error",
+        errorMessage: "Authoritative schedule lookup failed: unavailable",
+      },
+      log,
+    )
+
+    expect(execute).toHaveBeenCalledTimes(2)
+    const failureInput = execute.mock.calls[1][0]
+    expect(failureInput.sql).toContain("INSERT INTO agent_failures")
+    expect(failureInput.parameters).toEqual(
+      expect.arrayContaining([
+        { name: "severity", value: { stringValue: "error" } },
+        {
+          name: "context",
+          value: {
+            stringValue: JSON.stringify({
+              scheduleId: "schedule-id",
+              phase: "scheduled-run",
+            }),
+          },
+        },
+      ]),
+    )
+    expect(error).toHaveBeenCalledWith(
+      "AGENT_FAILURE_RECORD",
+      expect.objectContaining({
+        source: "cron",
+        scheduleId: "schedule-id",
+      }),
+    )
+  })
+
+  it("records promotion abort phase and severity", async () => {
+    const { telemetry, execute, log } = harness()
+
+    await telemetry.recordCronFailure(
+      {
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        scheduleName: "Morning brief",
+        sessionId: "session-id",
+        errorMessage: "Session lock contended",
+        severity: "warn",
+        context: {
+          phase: "lock-contention",
+          promotionReason: "deadline",
+        },
+      },
+      log,
+    )
+
+    const failureInput = execute.mock.calls[0][0]
+    expect(failureInput.parameters).toEqual(
+      expect.arrayContaining([
+        { name: "severity", value: { stringValue: "warn" } },
+        {
+          name: "context",
+          value: {
+            stringValue: JSON.stringify({
+              scheduleId: "schedule-id",
+              phase: "lock-contention",
+              promotionReason: "deadline",
+            }),
+          },
+        },
+      ]),
+    )
+  })
+
+  it("still emits the failure marker when database telemetry is unavailable", async () => {
+    const { telemetry, execute, error, log } = harness({
+      databaseResourceArn: "",
+      databaseSecretArn: "",
+    })
+
+    await telemetry.recordRun(
+      {
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        sessionId: "reference-session",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 1,
+        status: "error",
+        errorMessage: "lookup failed",
+      },
+      log,
+    )
+
+    expect(execute).not.toHaveBeenCalled()
+    expect(error).toHaveBeenCalledWith(
+      "AGENT_FAILURE_RECORD",
+      expect.objectContaining({ source: "cron" }),
+    )
+  })
+})

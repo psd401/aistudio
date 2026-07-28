@@ -220,9 +220,17 @@ function defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1Part2() {it('injects on
       'AGENT_SCHEDULE_GROUP',
       'AGENT_CRON_LAMBDA_ARN',
       'AGENT_SCHEDULER_ROLE_ARN',
+      'AGENT_SCHEDULE_DLQ_ARN',
     ]) {
       expect(environment.find((entry) => entry.Name === variable)).toBeDefined();
     }
+    expect(
+      environment.find((entry) => entry.Name === 'AGENT_SCHEDULE_DLQ_ARN')
+    ).toEqual({
+      Name: 'AGENT_SCHEDULE_DLQ_ARN',
+      Value:
+        'arn:aws:sqs:us-east-1:123456789012:psd-agent-async-dlq-dev',
+    });
   });
 
   it('injects the dedicated OIDC cookie secret into the frontend container', () => {

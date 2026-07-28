@@ -2083,7 +2083,9 @@ export class AgentPlatformStack extends cdk.Stack {
 
     resources.cronLambda = new lambda.Function(this, 'CronLambda', {
       deadLetterQueue: resources.agentAsyncDlq, // async-invoke failures → DLQ + alarm (REV-INFRA-128)
-      reservedConcurrentExecutions: 1, // prevent overlapping scheduled runs (REV-INFRA-128)
+      // Fleet-level capacity. Per-schedule overlap is guarded by the
+      // conditional session-lock put in lambdas/agent-cron/job-lock.ts.
+      reservedConcurrentExecutions: 10,
       functionName: resources.cronFunctionName,
       runtime: AGENT_LAMBDA_RUNTIME,
       handler: 'index.handler',
@@ -2199,6 +2201,7 @@ export class AgentPlatformStack extends cdk.Stack {
       description: 'Assumed by EventBridge Scheduler to invoke the agent cron Lambda',
     });
     resources.cronLambda.grantInvoke(resources.schedulerInvokeRole);
+    resources.agentAsyncDlq.grantSendMessages(resources.schedulerInvokeRole);
   }
 
   private createTriageFoundation(
@@ -3471,6 +3474,40 @@ export class AgentPlatformStack extends cdk.Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+
+    const cronErrorAlarm = new cloudwatch.Alarm(this, 'CronLambdaErrorAlarm', {
+      alarmName: `psd-agent-cron-errors-${environment}`,
+      alarmDescription:
+        'Agent cron Lambda errors detected — scheduled work may be retrying or headed to the DLQ',
+      metric: resources.cronLambda.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    const cronThrottleAlarm = new cloudwatch.Alarm(this, 'CronLambdaThrottleAlarm', {
+      alarmName: `psd-agent-cron-throttles-${environment}`,
+      alarmDescription:
+        'Agent cron Lambda throttled — fleet-sized schedule bursts are exceeding reserved capacity',
+      metric: resources.cronLambda.metricThrottles({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    if (resources.agentAlarmTopic) {
+      const alarmAction = new cloudwatchActions.SnsAction(resources.agentAlarmTopic);
+      cronErrorAlarm.addAlarmAction(alarmAction);
+      cronThrottleAlarm.addAlarmAction(alarmAction);
+    }
 
     // CloudWatch metric filter — emit a metric every time an
     // AGENT_FAILURE_RECORD line lands in the router Lambda log. Combined with

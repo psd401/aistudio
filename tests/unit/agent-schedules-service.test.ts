@@ -45,6 +45,10 @@ import {
   type AgentScheduleDynamoClient,
   type AgentScheduleRecord,
 } from "@/lib/agent-schedules/service"
+import type {
+  AgentScheduleLastRun,
+  AgentScheduleRunReader,
+} from "@/lib/agent-schedules/run-reader"
 import {
   AgentScheduleInputError,
   toSchedulerExpression,
@@ -61,6 +65,7 @@ const config = {
   scheduleGroup: "psd-agent-dev",
   cronLambdaArn: "arn:aws:lambda:us-east-1:123:function:cron",
   schedulerRoleArn: "arn:aws:iam::123:role/scheduler",
+  scheduleDlqArn: "arn:aws:sqs:us-east-1:123:schedule-dlq",
   maxSchedulesPerOwner: 50,
 }
 
@@ -88,15 +93,19 @@ function scheduleRecord(
   }
 }
 
-function harness() {
+function harness(
+  latestRuns: Map<string, AgentScheduleLastRun> = new Map(),
+) {
   const dynamoSend = jest.fn()
   const schedulerSend = jest.fn()
+  const latestBySchedule = jest.fn().mockResolvedValue(latestRuns)
   const service = new AgentScheduleService(
     config,
     { send: dynamoSend } as unknown as AgentScheduleDynamoClient,
-    { send: schedulerSend } as unknown as SchedulerClient
+    { send: schedulerSend } as unknown as SchedulerClient,
+    { latestBySchedule } as AgentScheduleRunReader,
   )
-  return { service, dynamoSend, schedulerSend }
+  return { service, dynamoSend, schedulerSend, latestBySchedule }
 }
 
 function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
@@ -136,6 +145,13 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
     })
     expect(target?.Input).not.toContain("prompt")
     expect(target?.Input).not.toContain("dmSpaceName")
+    expect(target?.DeadLetterConfig).toEqual({
+      Arn: config.scheduleDlqArn,
+    })
+    expect(target?.RetryPolicy).toEqual({
+      MaximumEventAgeInSeconds: 3600,
+      MaximumRetryAttempts: 2,
+    })
 
     const transaction = dynamoSend.mock.calls[3][0]
     expect(transaction).toBeInstanceOf(TransactWriteCommand)
@@ -185,6 +201,13 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
       ownerEmail: OWNER,
       scheduleId: SCHEDULE_ID,
       version: 2,
+    })
+    expect((updateCommand as UpdateScheduleCommand).input.Target).toMatchObject({
+      DeadLetterConfig: { Arn: config.scheduleDlqArn },
+      RetryPolicy: {
+        MaximumEventAgeInSeconds: 3600,
+        MaximumRetryAttempts: 2,
+      },
     })
     const putCommand = dynamoSend.mock.calls[4][0] as PutCommand
     expect(putCommand.input.Item).toMatchObject({
@@ -253,6 +276,50 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part2() {it("rolls bac
     expect(
       (dynamoSend.mock.calls[1][0] as QueryCommand).input.ExclusiveStartKey,
     ).toEqual({ userId: OWNER, scheduleId: SCHEDULE_ID })
+  })
+
+  it("joins each schedule to its latest run and truncates the error", async () => {
+    const latestRunAt = new Date("2026-07-28T15:30:00.000Z")
+    const longError = "failure ".repeat(100)
+    const { service, dynamoSend, latestBySchedule } = harness(
+      new Map([
+        [
+          SCHEDULE_ID,
+          {
+            createdAt: latestRunAt,
+            status: "error",
+            errorMessage: longError,
+          },
+        ],
+      ]),
+    )
+    dynamoSend.mockResolvedValueOnce({
+      Items: [
+        scheduleRecord(),
+        scheduleRecord({
+          scheduleId: "a273413f-7a93-4e43-9b49-1bc8880be024",
+          name: "Never run",
+          createdAt: "2026-07-26T00:00:00.000Z",
+        }),
+      ],
+    })
+
+    const schedules = await service.list(OWNER)
+
+    expect(latestBySchedule).toHaveBeenCalledWith(OWNER, [
+      SCHEDULE_ID,
+      "a273413f-7a93-4e43-9b49-1bc8880be024",
+    ])
+    expect(schedules[0]).toMatchObject({
+      lastRunAt: latestRunAt.toISOString(),
+      lastRunStatus: "error",
+      lastRunError: longError.slice(0, 500),
+    })
+    expect(schedules[1]).toMatchObject({
+      lastRunAt: null,
+      lastRunStatus: null,
+      lastRunError: null,
+    })
   })
 
   it("seeds legacy quota from all existing rows before admitting a create", async () => {
@@ -340,6 +407,9 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
       config,
       { send: dynamoSend } as unknown as AgentScheduleDynamoClient,
       { send: schedulerSend } as unknown as SchedulerClient,
+      {
+        latestBySchedule: jest.fn().mockResolvedValue(new Map()),
+      },
     )
     await expect(service.delete(OWNER, SCHEDULE_ID)).resolves.toBe(SCHEDULE_ID)
     expect(events).toEqual([

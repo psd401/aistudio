@@ -18,8 +18,8 @@
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
-  DynamoDBDocumentClient,
   DeleteCommand,
+  DynamoDBDocumentClient,
   PutCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { ECSClient, RunTaskCommand } from '@aws-sdk/client-ecs';
@@ -41,7 +41,10 @@ import {
 } from './job-promotion';
 import * as chatPkg from '@googleapis/chat';
 import * as crypto from 'node:crypto';
-import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
+import {
+  ExecuteStatementCommand,
+  RDSDataClient,
+} from '@aws-sdk/client-rds-data';
 import { extractRichEnvelope } from './rich-envelope';
 import {
   createScheduledInvocationContextToken,
@@ -52,6 +55,13 @@ import {
   type AuthorizedSchedule,
   type ScheduleReferenceEvent,
 } from './schedule-record';
+import {
+  releaseJobLock,
+  tryAcquireJobLock,
+  type JobLockResult,
+} from './job-lock';
+import { createRunTelemetry } from './run-telemetry';
+import { runSchedulePreflight } from './schedule-preflight';
 
 // ---------------------------------------------------------------------------
 // PII sanitization — mask email addresses in logs (FERPA compliance)
@@ -112,6 +122,16 @@ const secretsClient = new SecretsManagerClient({});
 const ssmClient = new SSMClient({});
 const rdsDataClient = new RDSDataClient({});
 const ecsClient = new ECSClient({});
+const runTelemetryRdsClient = {
+  execute: (input: ConstructorParameters<typeof ExecuteStatementCommand>[0]) =>
+    rdsDataClient.send(new ExecuteStatementCommand(input)),
+};
+const jobLockDynamoClient = {
+  put: (input: ConstructorParameters<typeof PutCommand>[0]) =>
+    dynamoClient.send(new PutCommand(input)),
+  delete: (input: ConstructorParameters<typeof DeleteCommand>[0]) =>
+    dynamoClient.send(new DeleteCommand(input)),
+};
 
 const agentCoreCredentials = defaultProvider();
 const agentCoreSigner = new SignatureV4({
@@ -133,6 +153,16 @@ const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || '';
 const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
 const AGENT_INVOCATION_SIGNING_SECRET_ID =
   process.env.AGENT_INVOCATION_SIGNING_SECRET_ID || '';
+const SESSION_LOCKS_TABLE = process.env.SESSION_LOCKS_TABLE || '';
+
+const runTelemetry = createRunTelemetry(
+  {
+    databaseResourceArn: DATABASE_RESOURCE_ARN,
+    databaseSecretArn: DATABASE_SECRET_ARN,
+    databaseName: DATABASE_NAME,
+  },
+  runTelemetryRdsClient,
+);
 
 // ---------------------------------------------------------------------------
 // Cached secrets and clients
@@ -578,95 +608,6 @@ async function invokeAgentCore(
 }
 
 /**
- * Acquire the `kind='job'` session lock before launching a background job.
- *
- * Mirrors the router's tryAcquireSessionLock. Pre-acquiring closes the gap
- * between promotion and the runner's first renewal (~60s of Fargate cold
- * start); without it a user message arriving in that window would start a
- * second turn against the same session the job is about to resume.
- *
- * Returns null when the lock is contended (someone else owns the session —
- * skip promotion), or a token to pass to the runner, which renews it every 10
- * minutes and releases it on exit.
- *
- * NOTE the deliberate asymmetry with the router: if the table is unset or
- * DynamoDB errors, the router falls through to a pass-through token so a user's
- * message is never blocked. Here we return null and DO NOT promote. An
- * unlockable background job is worse than no background job: nothing would stop
- * a concurrent turn from corrupting the session it resumes, and a scheduled
- * task has no human watching to notice.
- */
-async function tryAcquireJobLock(
-  sessionId: string,
-  log: Logger,
-): Promise<string | null> {
-  const tableName = process.env.SESSION_LOCKS_TABLE;
-  if (!tableName) {
-    log.warn('Job promotion skipped — SESSION_LOCKS_TABLE not configured');
-    return null;
-  }
-  const lockToken = crypto.randomUUID();
-  const nowS = Math.floor(Date.now() / 1000);
-  try {
-    await dynamoClient.send(
-      new PutCommand({
-        TableName: tableName,
-        Item: {
-          sessionId,
-          expiresAt: nowS + 14 * 60,
-          lockToken,
-          kind: 'job',
-          claimedAt: new Date().toISOString(),
-        },
-        ConditionExpression:
-          'attribute_not_exists(sessionId) OR expiresAt < :now',
-        ExpressionAttributeValues: { ':now': nowS },
-      }),
-    );
-    return lockToken;
-  } catch (error) {
-    const errName = (error as { name?: string } | null)?.name;
-    if (errName === 'ConditionalCheckFailedException') {
-      log.warn('Job promotion aborted — session lock contended');
-      return null;
-    }
-    log.warn('Job promotion aborted — session lock acquire failed', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  }
-}
-
-/**
- * Release a job lock we acquired but could not hand to a running task.
- * Conditional on the token so we can never delete a newer holder's lock.
- */
-async function releaseJobLock(
-  sessionId: string,
-  lockToken: string,
-  log: Logger,
-): Promise<void> {
-  const tableName = process.env.SESSION_LOCKS_TABLE;
-  if (!tableName) return;
-  try {
-    await dynamoClient.send(
-      new DeleteCommand({
-        TableName: tableName,
-        Key: { sessionId },
-        ConditionExpression: 'lockToken = :tok',
-        ExpressionAttributeValues: { ':tok': lockToken },
-      }),
-    );
-  } catch (error) {
-    const errName = (error as { name?: string } | null)?.name;
-    if (errName === 'ConditionalCheckFailedException') return;
-    log.warn('Job lock release failed; relying on TTL backstop', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
-
-/**
  * Promote a recoverable scheduled turn to the background job-runner.
  *
  * A deadline resumes the same AgentCore session. Context overflow restarts in
@@ -674,13 +615,8 @@ async function releaseJobLock(
  * fail again. Both paths use the same ECS runner and post the finished answer
  * to the owner's Chat space.
  *
- * Returns true when the job launched — the caller must then NOT post the
- * partial, or the owner gets two messages for one task.
- *
- * Returns false on ANY failure (missing config, lock contention, RunTask
- * error), and the caller falls back to today's behaviour of posting what the
- * agent managed to produce. Promotion must never make things worse than the
- * status quo.
+ * Returns a structured outcome. The caller reports every abort to
+ * agent_failures, then falls back to posting the partial response.
  */
 interface ScheduledJobInput {
   sessionId: string;
@@ -701,6 +637,18 @@ interface JobRunnerConfig {
   securityGroup: string;
   containerName: string;
 }
+
+type PromotionResult =
+  | { promoted: true }
+  | {
+      promoted: false;
+      phase:
+        | 'job-runner-config'
+        | Exclude<JobLockResult, { acquired: true }>['phase']
+        | 'run-task';
+      severity: 'error' | 'warn';
+      errorMessage: string;
+    };
 
 function readJobRunnerConfig(log: Logger): JobRunnerConfig | null {
   const config = {
@@ -788,22 +736,56 @@ async function launchScheduledJob(
 async function promoteScheduledTurnToJob(
   input: ScheduledJobInput,
   log: Logger,
-): Promise<boolean> {
+): Promise<PromotionResult> {
   const config = readJobRunnerConfig(log);
-  if (!config) return false;
-  const lockToken = await tryAcquireJobLock(input.sessionId, log);
-  if (lockToken === null) return false;
+  if (!config) {
+    return {
+      promoted: false,
+      phase: 'job-runner-config',
+      severity: 'error',
+      errorMessage: 'Background job runner configuration is incomplete',
+    };
+  }
+  const lock = await tryAcquireJobLock(
+    input.sessionId,
+    SESSION_LOCKS_TABLE,
+    jobLockDynamoClient,
+    log,
+  );
+  if (!lock.acquired) {
+    return {
+      promoted: false,
+      phase: lock.phase,
+      severity: lock.severity,
+      errorMessage: lock.errorMessage,
+    };
+  }
   try {
-    await launchScheduledJob(input, lockToken, config, log);
-    return true;
+    await launchScheduledJob(input, lock.lockToken, config, log);
+    return { promoted: true };
   } catch (error) {
     // Roll the lock back, or the owner's next message sits behind a job that
     // never started until the 14-minute TTL expires.
-    await releaseJobLock(input.sessionId, lockToken, log);
+    await releaseJobLock(
+      input.sessionId,
+      lock.lockToken,
+      SESSION_LOCKS_TABLE,
+      jobLockDynamoClient,
+      log,
+    );
+    const errorMessage =
+      `RunTask failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
     log.error('Job promotion failed — posting the partial instead', {
       error: error instanceof Error ? error.message : String(error),
     });
-    return false;
+    return {
+      promoted: false,
+      phase: 'run-task',
+      severity: 'error',
+      errorMessage,
+    };
   }
 }
 
@@ -851,149 +833,6 @@ async function sendChatMessage(
   });
 }
 
-async function recordRun(params: {
-  userEmail: string;
-  scheduleId: string;
-  scheduleName: string;
-  sessionId: string;
-  inputTokens: number;
-  outputTokens: number;
-  latencyMs: number;
-  /**
-   * 'promoted' means this leg handed the work to the background job-runner;
-   * the answer is delivered by that task, not here. It is neither a success
-   * (nothing was produced yet) nor an error (nothing broke), and recording it
-   * as either would make run history lie about what happened.
-   *
-   * Safe without a migration: agent_scheduled_runs.status is VARCHAR(32) with
-   * no CHECK constraint (schema/066-agent-operations-tables.sql).
-   */
-  status: 'success' | 'error' | 'skipped' | 'promoted';
-  errorMessage?: string;
-}, log: Logger): Promise<void> {
-  if (!DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) {
-    log.warn('Database not configured — skipping run telemetry', {
-      scheduleId: params.scheduleId,
-    });
-    return;
-  }
-  try {
-    await rdsDataClient.send(
-      new ExecuteStatementCommand({
-        resourceArn: DATABASE_RESOURCE_ARN,
-        secretArn: DATABASE_SECRET_ARN,
-        database: DATABASE_NAME,
-        sql: `INSERT INTO agent_scheduled_runs
-                (user_id, schedule_id, schedule_name, session_id,
-                 input_tokens, output_tokens, latency_ms, status, error_message)
-              VALUES
-                (:user_id, :schedule_id, :schedule_name, :session_id,
-                 :input_tokens, :output_tokens, :latency_ms, :status, :error_message)`,
-        parameters: [
-          { name: 'user_id', value: { stringValue: params.userEmail } },
-          { name: 'schedule_id', value: { stringValue: params.scheduleId } },
-          { name: 'schedule_name', value: { stringValue: params.scheduleName } },
-          { name: 'session_id', value: { stringValue: params.sessionId } },
-          { name: 'input_tokens', value: { longValue: params.inputTokens } },
-          { name: 'output_tokens', value: { longValue: params.outputTokens } },
-          { name: 'latency_ms', value: { longValue: params.latencyMs } },
-          { name: 'status', value: { stringValue: params.status } },
-          params.errorMessage
-            ? { name: 'error_message', value: { stringValue: params.errorMessage } }
-            : { name: 'error_message', value: { isNull: true } },
-        ],
-      }),
-    );
-  } catch (error) {
-    // Telemetry failure must not break delivery; log and continue.
-    log.error('Failed to record scheduled run', {
-      scheduleId: params.scheduleId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-
-  // Mirror error/skipped runs into agent_failures so the admin dashboard sees
-  // them alongside router/harness failures. agent_scheduled_runs remains the
-  // source of truth for cron analytics.
-  if (params.status === 'error') {
-    await recordCronFailure(
-      {
-        userEmail: params.userEmail,
-        sessionId: params.sessionId,
-        scheduleId: params.scheduleId,
-        scheduleName: params.scheduleName,
-        errorMessage: params.errorMessage ?? null,
-      },
-      log,
-    );
-  }
-}
-
-/**
- * Mirror a failed scheduled run into agent_failures. Best-effort, never throws.
- */
-async function recordCronFailure(
-  params: {
-    userEmail: string;
-    sessionId: string;
-    scheduleId: string;
-    scheduleName: string;
-    errorMessage: string | null;
-  },
-  log: Logger,
-): Promise<void> {
-  // Emit a structured CloudWatch line so the metric filter on AGENT_FAILURE_RECORD
-  // fires regardless of whether the DB write below succeeds. Include the error
-  // message (truncated) as a fallback for triage when the DB write fails.
-  log.error('AGENT_FAILURE_RECORD', {
-    source: 'cron',
-    severity: 'error',
-    userId: params.userEmail,
-    sessionId: params.sessionId,
-    scheduleName: params.scheduleName,
-    errorMessage: typeof params.errorMessage === 'string'
-      ? params.errorMessage.slice(0, 500)
-      : null,
-  });
-  if (!DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) return;
-  try {
-    const truncated =
-      typeof params.errorMessage === 'string'
-        ? params.errorMessage.slice(0, 4000)
-        : null;
-    const context = JSON.stringify({
-      scheduleId: params.scheduleId,
-    });
-    await rdsDataClient.send(
-      new ExecuteStatementCommand({
-        resourceArn: DATABASE_RESOURCE_ARN,
-        secretArn: DATABASE_SECRET_ARN,
-        database: DATABASE_NAME,
-        sql: `INSERT INTO agent_failures
-                (source, severity, user_id, session_id, schedule_name,
-                 error_message, context, occurred_at)
-              VALUES
-                ('cron', 'error', :user_id, :session_id, :schedule_name,
-                 :error_message, CAST(:context AS jsonb), NOW())`,
-        parameters: [
-          { name: 'user_id', value: { stringValue: params.userEmail } },
-          { name: 'session_id', value: { stringValue: params.sessionId } },
-          { name: 'schedule_name', value: { stringValue: params.scheduleName } },
-          truncated
-            ? { name: 'error_message', value: { stringValue: truncated } }
-            : { name: 'error_message', value: { isNull: true } },
-          { name: 'context', value: { stringValue: context } },
-        ],
-      }),
-    );
-  } catch (error) {
-    log.error('Failed to record cron failure mirror', {
-      scheduleId: params.scheduleId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
-
 type HandlerResult = {
   status: 'success' | 'error' | 'skipped';
   scheduleId: string;
@@ -1035,7 +874,7 @@ async function recordPromotedRun(
   context: ScheduledResultContext,
 ): Promise<void> {
   const { schedule, scheduleName, sessionId, result, startTime, log } = context;
-  await recordRun(
+  await runTelemetry.recordRun(
     {
       userEmail: schedule.ownerEmail,
       scheduleId: schedule.scheduleId,
@@ -1064,8 +903,24 @@ async function tryPromoteScheduledResult(
   const reason = promotionReason(result.errorClass);
   if (reason === null) return false;
   const runtimeId = await getRuntimeId(log);
-  if (!runtimeId) return false;
-  const promoted = await promoteScheduledTurnToJob(
+  if (!runtimeId) {
+    await runTelemetry.recordCronFailure(
+      {
+        userEmail: schedule.ownerEmail,
+        scheduleId: schedule.scheduleId,
+        scheduleName,
+        sessionId,
+        errorMessage: 'AgentCore Runtime ID is unavailable for job promotion',
+        context: {
+          phase: 'runtime-config',
+          promotionReason: reason,
+        },
+      },
+      log,
+    );
+    return false;
+  }
+  const promotion = await promoteScheduledTurnToJob(
     {
       sessionId,
       runtimeId,
@@ -1079,7 +934,24 @@ async function tryPromoteScheduledResult(
     },
     log,
   );
-  if (!promoted) return false;
+  if (!promotion.promoted) {
+    await runTelemetry.recordCronFailure(
+      {
+        userEmail: schedule.ownerEmail,
+        scheduleId: schedule.scheduleId,
+        scheduleName,
+        sessionId,
+        errorMessage: promotion.errorMessage,
+        severity: promotion.severity,
+        context: {
+          phase: promotion.phase,
+          promotionReason: reason,
+        },
+      },
+      log,
+    );
+    return false;
+  }
   await sendPromotionAcknowledgement(context, reason);
   await recordPromotedRun(context);
   return true;
@@ -1099,7 +971,7 @@ async function deliverScheduledResult(
     log.error('Failed to deliver scheduled response', {
       error: error instanceof Error ? error.message : String(error),
     });
-    await recordRun(
+    await runTelemetry.recordRun(
       {
         userEmail: schedule.ownerEmail,
         scheduleId: schedule.scheduleId,
@@ -1116,7 +988,7 @@ async function deliverScheduledResult(
     return { status: 'error', scheduleId: schedule.scheduleId };
   }
   const status: 'success' | 'error' = result.ok ? 'success' : 'error';
-  await recordRun(
+  await runTelemetry.recordRun(
     {
       userEmail: schedule.ownerEmail,
       scheduleId: schedule.scheduleId,
@@ -1150,27 +1022,23 @@ export async function handler(
   event: ScheduleReferenceEvent,
   context: LambdaContext,
 ): Promise<HandlerResult> {
-  const referencedScheduleId =
-    typeof event?.scheduleId === 'string' ? event.scheduleId : 'unknown';
+  const handlerStartedAt = Date.now();
   const requestId = generateRequestId();
   const log = createLogger({
     requestId,
     environment: ENVIRONMENT,
-    scheduleId: referencedScheduleId,
+    scheduleId:
+      typeof event?.scheduleId === 'string' ? event.scheduleId : 'unknown',
   });
-  let loaded;
-  try {
-    loaded = await loadAuthorizedSchedule(event, dynamoClient, SCHEDULES_TABLE);
-  } catch (error) {
-    log.error('Authoritative schedule lookup failed', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return { status: 'error', scheduleId: referencedScheduleId };
-  }
+  const { loaded, referencedScheduleId } = await runSchedulePreflight(event, {
+    requestId,
+    startedAt: handlerStartedAt,
+    load: () =>
+      loadAuthorizedSchedule(event, dynamoClient, SCHEDULES_TABLE),
+    telemetry: runTelemetry,
+    log,
+  });
   if (!loaded.authorized) {
-    log.warn('Schedule reference rejected before invocation', {
-      reason: loaded.reason,
-    });
     return { status: 'skipped', scheduleId: referencedScheduleId };
   }
   const schedule = loaded.schedule;
