@@ -365,8 +365,8 @@ function MemoryRow({
                 <div className="space-y-2">
                   <MemoryBadges memory={memory} />
                   <p className="text-xs text-muted-foreground">
-                    Updated{" "}
-                    {formatDistanceToNow(new Date(memory.updatedAt), {
+                    Created{" "}
+                    {formatDistanceToNow(new Date(memory.createdAt), {
                       addSuffix: true,
                     })}
                   </p>

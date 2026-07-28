@@ -205,11 +205,11 @@ export async function addNexusMemory(
   const log = createLogger({ requestId, action: "addNexusMemory" })
 
   try {
+    const requester = await requireMemoryRequester()
     const parsed = AddNexusMemorySchema.safeParse(input)
     if (!parsed.success) {
       throw ErrorFactories.validationFailed(validationFields(parsed.error))
     }
-    const requester = await requireMemoryRequester()
     const result = await memoryService.save({
       userId: requester.userId,
       sessionId: requester.cognitoSub,
@@ -248,11 +248,11 @@ export async function updateNexusMemory(
   const log = createLogger({ requestId, action: "updateNexusMemory" })
 
   try {
+    const requester = await requireMemoryRequester()
     const parsed = UpdateNexusMemorySchema.safeParse(input)
     if (!parsed.success) {
       throw ErrorFactories.validationFailed(validationFields(parsed.error))
     }
-    const requester = await requireMemoryRequester()
     await requireOwnedMemory(
       parsed.data.memoryId,
       requester.userId,
@@ -296,11 +296,11 @@ export async function deleteNexusMemory(
   const log = createLogger({ requestId, action: "deleteNexusMemory" })
 
   try {
+    const requester = await requireMemoryRequester()
     const parsed = DeleteNexusMemorySchema.safeParse({ memoryId })
     if (!parsed.success) {
       throw ErrorFactories.validationFailed(validationFields(parsed.error))
     }
-    const requester = await requireMemoryRequester()
     await requireOwnedMemory(
       parsed.data.memoryId,
       requester.userId,
@@ -348,11 +348,11 @@ export async function bulkDeleteNexusMemories(
   })
 
   try {
+    const requester = await requireMemoryRequester()
     const parsed = BulkDeleteNexusMemoriesSchema.safeParse({ memoryIds })
     if (!parsed.success) {
       throw ErrorFactories.validationFailed(validationFields(parsed.error))
     }
-    const requester = await requireMemoryRequester()
     const rows = await executeQuery(
       (db) =>
         db
@@ -436,11 +436,11 @@ export async function setNexusMemoryEnabled(
   })
 
   try {
+    const requester = await requireMemoryRequester()
     const parsed = SetNexusMemoryEnabledSchema.safeParse({ enabled })
     if (!parsed.success) {
       throw ErrorFactories.validationFailed(validationFields(parsed.error))
     }
-    const requester = await requireMemoryRequester()
     const [existing] = await executeQuery(
       (db) =>
         db

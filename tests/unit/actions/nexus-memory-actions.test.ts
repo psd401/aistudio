@@ -68,6 +68,22 @@ import {
 
 const MEMORY_ID = "11111111-1111-4111-8111-111111111111"
 const FOREIGN_MEMORY_ID = "22222222-2222-4222-8222-222222222222"
+const invalidMutationCases: ReadonlyArray<
+  readonly [string, () => Promise<unknown>]
+> = [
+  ["add", () => addNexusMemory({ content: "", category: "context" })],
+  [
+    "update",
+    () =>
+      updateNexusMemory({
+        memoryId: "invalid",
+        content: "",
+        category: "context",
+      }),
+  ],
+  ["delete", () => deleteNexusMemory("invalid")],
+  ["bulk delete", () => bulkDeleteNexusMemories([])],
+]
 
 describe("Nexus memory settings actions", () => {
   beforeEach(() => {
@@ -112,6 +128,20 @@ describe("Nexus memory settings actions", () => {
     expect(mockUpdate).not.toHaveBeenCalled()
     expect(mockForget).not.toHaveBeenCalled()
   })
+
+  it.each(invalidMutationCases)(
+    "checks capability before validating %s input",
+    async (_name, action) => {
+      mockHasCapabilityAccess.mockResolvedValue(false)
+
+      await expect(action()).resolves.toMatchObject({ isSuccess: false })
+      expect(mockHasCapabilityAccess).toHaveBeenCalledWith(
+        "nexus-memory",
+        "cognito-sub",
+      )
+      expect(mockExecuteQuery).not.toHaveBeenCalled()
+    },
+  )
 
   it("rejects editing another user's memory before the write pipeline", async () => {
     mockExecuteQuery.mockResolvedValue([
