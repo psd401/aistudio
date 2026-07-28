@@ -25,7 +25,18 @@ const mockGetAccessibleRepositoryIds = jest.fn<
   (repositoryIds: number[], userId: number) => Promise<number[]>
 >()
 const mockGetRepositoryById = jest.fn<(repositoryId: number) => Promise<unknown>>()
-const mockApproveAssistantArchitect = jest.fn<() => Promise<unknown>>()
+class MockAssistantApprovalValidationError extends Error {}
+const mockApproveAssistantArchitect = jest.fn<
+  (
+    id: number,
+    validate?: () => Promise<boolean>
+  ) => Promise<unknown>
+>(async (_id, validate) => {
+  if (validate && !(await validate())) {
+    throw new MockAssistantApprovalValidationError()
+  }
+  return { id: 5, name: "Approved assistant" }
+})
 const mockSubmitForApproval = jest.fn<() => Promise<unknown>>()
 const mockGetToolInputFields = jest.fn<() => Promise<unknown[]>>(
   () => Promise.resolve([])
@@ -70,6 +81,7 @@ jest.mock('@/lib/db/drizzle', () => ({
   getAccessibleRepositoryIds: mockGetAccessibleRepositoryIds,
   getRepositoryById: mockGetRepositoryById,
   approveAssistantArchitect: mockApproveAssistantArchitect,
+  AssistantApprovalValidationError: MockAssistantApprovalValidationError,
   submitForApproval: mockSubmitForApproval,
 }))
 jest.mock('@/lib/assistant-architect/repository-audience', () => ({
@@ -524,7 +536,7 @@ function defineAssistantArchitectMutationAuthorizationSuite1Part4() {it('recheck
 
     expect(res.isSuccess).toBe(false)
     expect(res.message).toContain('Repository permissions')
-    expect(mockApproveAssistantArchitect).not.toHaveBeenCalled()
+    expect(mockApproveAssistantArchitect).toHaveBeenCalledTimes(1)
   })
 
   // REV-COR-033

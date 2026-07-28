@@ -3,9 +3,9 @@ import {
   createApiResponse,
   createErrorResponse,
   extractNumericParam,
-  requireScope,
   withApiAuth,
 } from "@/lib/api";
+import { requireActiveRestTool } from "@/lib/api/active-tool-route";
 import {
   AssistantImportServiceError,
   forkAssistant,
@@ -15,7 +15,6 @@ import {
   parseBoundedJsonRequest,
 } from "@/lib/api/bounded-json-request";
 import { createLogger } from "@/lib/logger";
-import { toolCatalogInstance } from "@/lib/tools/catalog/catalog";
 
 const FORK_TOOL_IDENTIFIER = "assistants.fork";
 const MAX_ASSISTANT_NAME_LENGTH = 255;
@@ -90,17 +89,12 @@ async function parseForkName(
 
 export const POST = withApiAuth(
   async (request: NextRequest, auth, requestId) => {
-    const restScopes = await toolCatalogInstance.getRequiredScopes(
-      FORK_TOOL_IDENTIFIER,
-      "rest",
-    );
-    const scopesToCheck = restScopes?.length
-      ? restScopes
-      : ["assistants:write"];
-    for (const scope of scopesToCheck) {
-      const scopeError = requireScope(auth, scope, requestId);
-      if (scopeError) return scopeError;
-    }
+    const catalogError = await requireActiveRestTool(auth, requestId, {
+      identifier: FORK_TOOL_IDENTIFIER,
+      fallbackScopes: ["assistants:write"],
+      unavailableMessage: "Assistant forking is not available",
+    });
+    if (catalogError) return catalogError;
 
     const assistantId = extractNumericParam(request.url, "assistants");
     if (!assistantId) {

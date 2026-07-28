@@ -15,15 +15,13 @@ import {
   parseBoundedJsonRequest,
 } from "@/lib/api/bounded-json-request"
 import { checkRateLimit, createRateLimitResponse, addRateLimitHeaders, recordUsage } from "@/lib/api/rate-limiter"
-import { ASSISTANT_IMPORT_MAX_BYTES } from "@/lib/assistant-export-import"
 import { parseJsonRpcRequest, handleJsonRpcRequest } from "@/lib/mcp/jsonrpc-handler"
+import { MCP_REQUEST_MAX_BYTES } from "@/lib/mcp/request-limits"
 import { JSONRPC_ERRORS } from "@/lib/mcp/types"
 import type { McpToolContext, JsonRpcResponse } from "@/lib/mcp/types"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 
 export const maxDuration = 900
-const MCP_REQUEST_MAX_BYTES = ASSISTANT_IMPORT_MAX_BYTES + 64 * 1024
-
 // ============================================
 // POST /api/mcp
 // ============================================

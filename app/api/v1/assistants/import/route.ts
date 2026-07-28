@@ -2,9 +2,9 @@ import { NextRequest } from "next/server"
 import {
   createApiResponse,
   createErrorResponse,
-  requireScope,
   withApiAuth,
 } from "@/lib/api"
+import { requireActiveRestTool } from "@/lib/api/active-tool-route"
 import {
   AssistantImportServiceError,
   createAssistantsFromImport,
@@ -17,23 +17,17 @@ import {
   parseBoundedJsonRequest,
 } from "@/lib/api/bounded-json-request"
 import { createLogger } from "@/lib/logger"
-import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 
 const CREATE_TOOL_IDENTIFIER = "assistants.create"
 
 export const POST = withApiAuth(
   async (request: NextRequest, auth, requestId) => {
-    const restScopes = await toolCatalogInstance.getRequiredScopes(
-      CREATE_TOOL_IDENTIFIER,
-      "rest",
-    )
-    const scopesToCheck = restScopes?.length
-      ? restScopes
-      : ["assistants:write"]
-    for (const scope of scopesToCheck) {
-      const scopeError = requireScope(auth, scope, requestId)
-      if (scopeError) return scopeError
-    }
+    const catalogError = await requireActiveRestTool(auth, requestId, {
+      identifier: CREATE_TOOL_IDENTIFIER,
+      fallbackScopes: ["assistants:write"],
+      unavailableMessage: "Assistant creation is not available",
+    })
+    if (catalogError) return catalogError
 
     let body: unknown
     try {

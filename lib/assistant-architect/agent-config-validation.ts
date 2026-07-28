@@ -1,5 +1,8 @@
 import { getScopesForRoles } from "@/lib/api-keys/scopes";
+import { createLogger } from "@/lib/logger";
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog";
+
+const log = createLogger({ action: "validateAgentToolsForAuthor" });
 
 export interface AgentToolValidationResult {
   isValid: boolean;
@@ -41,10 +44,13 @@ export async function validateAgentToolsForAuthor(
     }
     return { isValid: true, invalidTools: [] };
   } catch (error) {
+    log.error("Failed to validate agent tools against the catalog", {
+      error: error instanceof Error ? error.message : String(error),
+    });
     return {
       isValid: false,
       invalidTools: agentEnabledTools,
-      message: `Error validating agent tools: ${error instanceof Error ? error.message : "Unknown error"}`,
+      message: "Unable to validate agent tools",
     };
   }
 }

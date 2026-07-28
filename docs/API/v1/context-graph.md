@@ -794,18 +794,21 @@ All three require `assistants:write` on REST. Their MCP equivalents are
 (`mcp:update_assistant`), and `fork_assistant` (`mcp:fork_assistant`). These
 scopes are available to staff and administrators. Catalog metadata is the scope
 source of truth on both surfaces; the REST routes use `assistants:write` as a
-fallback only when the catalog entry is unavailable.
+fallback only when the catalog entry is unavailable. When an administrator
+disables a cataloged create, update, or fork operation, both MCP and REST reject
+it; REST uses a masked `404` before body parsing or mutation.
 
 Import envelopes are limited to 10 MB, 100 assistants, 50 input fields per
 assistant (matching the execution-time input cap), and 500 prompt
 repository bindings across the admin, REST, and MCP surfaces. REST create/update
-and the MCP transport count bytes while reading the request stream and cancel
-before buffering more than the limit, so a missing or understated
-`Content-Length` cannot bypass the pre-parse bound. An advertised oversized
-length is rejected immediately. The MCP transport reserves 64 KiB for the
-JSON-RPC envelope while shared import validation keeps the assistant payload
-itself at 10 MB. The optional REST fork body is independently stream-bounded to
-4 KiB before JSON decoding.
+count bytes while reading the request stream and cancel before buffering more
+than the limit, so a missing or understated `Content-Length` cannot bypass the
+pre-parse bound. An advertised oversized length is rejected immediately. The
+shared MCP transport has a separate 64 MiB ceiling so existing multi-file tools
+such as `import_okf` retain their larger request contract; shared import
+validation still rejects an Assistant Architect envelope above 10 MB before
+any write. The optional REST fork body is independently stream-bounded to 4 KiB
+before JSON decoding.
 
 Every write preserves the existing human approval gate:
 
@@ -826,7 +829,10 @@ Every write preserves the existing human approval gate:
   prompt configuration in execution history. Any linked UI capability is
   deactivated atomically until the assistant is approved again. Reapproval
   reuses that capability's stable identifier even when the import renamed the
-  assistant, and re-syncs the existing navigation item to it; and
+  assistant, and re-syncs the existing navigation item to it. Final repository
+  audience validation holds the same assistant-row lock through the approval
+  transition, so a concurrent replacement cannot publish a graph that was not
+  reviewed; and
 - fork: any assistant visible under the same owner/admin/approved plus
   resource/room rules as the v1 detail endpoint may be copied. The source is
   never modified, and the caller owns the new `pending_approval` copy. The
@@ -978,8 +984,8 @@ The optional body may be omitted. A successful `201` response contains
   other than one assistant, or an invalid fork name.
 - `401` — Missing or invalid authentication.
 - `403` — Missing `assistants:write`.
-- `404` — Update target is missing/owned by another user, or a fork source is
-  missing/not visible.
+- `404` — A cataloged mutation is disabled, an update target is missing/owned
+  by another user, or a fork source is missing/not visible.
 - `429` — API-key rate limit exceeded.
 - `500` — Import persistence or another internal failure.
 

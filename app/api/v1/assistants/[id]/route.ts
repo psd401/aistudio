@@ -13,6 +13,7 @@ import {
   extractNumericParam,
   verifyAssistantAccess,
 } from "@/lib/api"
+import { requireActiveRestTool } from "@/lib/api/active-tool-route"
 import {
   getAssistantById,
   getAssistantForAccessCheck,
@@ -30,7 +31,6 @@ import {
 } from "@/lib/api/bounded-json-request"
 import { userCanAccessResource } from "@/lib/db/drizzle/resource-access"
 import { createLogger } from "@/lib/logger"
-import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 
 const UPDATE_TOOL_IDENTIFIER = "assistants.update"
 
@@ -102,17 +102,12 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
 // ============================================
 
 export const PUT = withApiAuth(async (request: NextRequest, auth, requestId) => {
-  const restScopes = await toolCatalogInstance.getRequiredScopes(
-    UPDATE_TOOL_IDENTIFIER,
-    "rest",
-  )
-  const scopesToCheck = restScopes?.length
-    ? restScopes
-    : ["assistants:write"]
-  for (const scope of scopesToCheck) {
-    const scopeError = requireScope(auth, scope, requestId)
-    if (scopeError) return scopeError
-  }
+  const catalogError = await requireActiveRestTool(auth, requestId, {
+    identifier: UPDATE_TOOL_IDENTIFIER,
+    fallbackScopes: ["assistants:write"],
+    unavailableMessage: "Assistant updates are not available",
+  })
+  if (catalogError) return catalogError
 
   const assistantId = extractNumericParam(request.url, "assistants")
   if (!assistantId) {

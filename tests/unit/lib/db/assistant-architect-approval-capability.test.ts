@@ -24,6 +24,7 @@ interface UpdateCall {
 
 let updateCalls: UpdateCall[];
 let insertCalls: unknown[];
+let events: string[];
 
 function transactionDouble() {
   return {
@@ -63,6 +64,12 @@ function transactionDouble() {
                         { id: 92, identifier: "renamed-assistant" },
                       ]
                     : [],
+                limit: () => ({
+                  for: async () => {
+                    events.push("assistant-locked");
+                    return table === assistantArchitects ? [{ id: 12 }] : [];
+                  },
+                }),
               };
             },
           };
@@ -80,6 +87,7 @@ describe("approveAssistantArchitect capability identity", () => {
   beforeEach(() => {
     updateCalls = [];
     insertCalls = [];
+    events = [];
     mockExecuteTransaction.mockReset();
     mockExecuteTransaction.mockImplementation(
       async (callback: (tx: ReturnType<typeof transactionDouble>) => unknown) =>
@@ -88,7 +96,10 @@ describe("approveAssistantArchitect capability identity", () => {
   });
 
   it("reuses the oldest linked capability when a renamed assistant is reapproved", async () => {
-    await expect(approveAssistantArchitect(12)).resolves.toMatchObject({
+    await expect(approveAssistantArchitect(12, async () => {
+      events.push("final-validation");
+      return true;
+    })).resolves.toMatchObject({
       id: 12,
       name: "Renamed assistant",
     });
@@ -116,5 +127,18 @@ describe("approveAssistantArchitect capability identity", () => {
       ]),
     );
     expect(insertCalls).toEqual([]);
+    expect(events).toEqual(["assistant-locked", "final-validation"]);
+  });
+
+  it("does not publish when final validation fails under the assistant lock", async () => {
+    await expect(
+      approveAssistantArchitect(12, async () => {
+        events.push("final-validation");
+        return false;
+      }),
+    ).rejects.toThrow("final approval validation");
+
+    expect(events).toEqual(["assistant-locked", "final-validation"]);
+    expect(updateCalls).toEqual([]);
   });
 });

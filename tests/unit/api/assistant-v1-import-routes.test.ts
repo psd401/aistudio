@@ -13,12 +13,14 @@ var mockCreateAssistantsFromImport: jest.Mock
 var mockUpdateAssistantFromImport: jest.Mock
 var mockForkAssistant: jest.Mock
 var mockGetRequiredScopes: jest.Mock
+var mockGetCatalogEntry: jest.Mock
 /* eslint-enable no-var */
 
 mockCreateAssistantsFromImport = jest.fn()
 mockUpdateAssistantFromImport = jest.fn()
 mockForkAssistant = jest.fn()
 mockGetRequiredScopes = jest.fn()
+mockGetCatalogEntry = jest.fn()
 
 jest.mock("@/lib/api", () => ({
   withApiAuth: (handler: unknown) => handler,
@@ -102,6 +104,7 @@ jest.mock("@/lib/assistant-architect/import-service", () => {
 
 jest.mock("@/lib/tools/catalog/catalog", () => ({
   toolCatalogInstance: {
+    get: (...args: unknown[]) => mockGetCatalogEntry(...args),
     getRequiredScopes: (...args: unknown[]) => mockGetRequiredScopes(...args),
   },
 }))
@@ -184,7 +187,9 @@ function resetMocks(): void {
   mockCreateAssistantsFromImport.mockReset()
   mockUpdateAssistantFromImport.mockReset()
   mockForkAssistant.mockReset()
+  mockGetCatalogEntry.mockReset()
   mockGetRequiredScopes.mockReset()
+  mockGetCatalogEntry.mockResolvedValue(undefined)
   mockGetRequiredScopes.mockResolvedValue(["assistants:write"])
 }
 
@@ -205,6 +210,35 @@ describe("Assistant import REST v1 routes", () => {
     expect(response.status).toBe(403)
     expect(mockCreateAssistantsFromImport).not.toHaveBeenCalled()
   })
+
+  it.each([
+    ["create", createRoute, "http://localhost/api/v1/assistants/import", "POST"],
+    ["update", updateRoute, "http://localhost/api/v1/assistants/12", "PUT"],
+    ["fork", forkRoute, "http://localhost/api/v1/assistants/12/fork", "POST"],
+  ])(
+    "returns a masked 404 when the %s catalog operation is disabled",
+    async (_operation, route, url, method) => {
+      mockGetCatalogEntry.mockResolvedValue({
+        isActive: false,
+        requiredScopes: ["assistants:write"],
+        surfaceScopes: { rest: ["assistants:write"] },
+      })
+
+      const response = await route(
+        jsonRequest(url, method, JSON.stringify(importEnvelope)),
+        { userId: 7, scopes: ["assistants:write"] },
+        "req-disabled",
+      )
+
+      expect(response.status).toBe(404)
+      expect(await response.json()).toMatchObject({
+        error: { code: "NOT_FOUND" },
+      })
+      expect(mockCreateAssistantsFromImport).not.toHaveBeenCalled()
+      expect(mockUpdateAssistantFromImport).not.toHaveBeenCalled()
+      expect(mockForkAssistant).not.toHaveBeenCalled()
+    },
+  )
 
   it("denies update when the API key lacks assistants:write", async () => {
     const response = await updateRoute(

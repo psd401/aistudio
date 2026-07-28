@@ -277,6 +277,7 @@ export {
   type AssistantArchitectUpdateData,
   type AssistantArchitectWithCreator,
   type ToolStatus,
+  AssistantApprovalValidationError,
   // Query operations
   getAssistantArchitects,
   getAssistantArchitectById,

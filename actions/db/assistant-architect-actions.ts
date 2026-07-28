@@ -48,6 +48,7 @@ import {
   updateAssistantArchitect as drizzleUpdateAssistantArchitect,
   deleteAssistantArchitect as drizzleDeleteAssistantArchitect,
   approveAssistantArchitect as drizzleApproveAssistantArchitect,
+  AssistantApprovalValidationError,
   rejectAssistantArchitect as drizzleRejectAssistantArchitect,
   submitForApproval as drizzleSubmitForApproval,
   getPendingAssistantArchitects as drizzleGetPendingAssistantArchitects,
@@ -2337,25 +2338,23 @@ export async function approveAssistantArchitectAction(
       return { isSuccess: false, message: "Invalid ID format" }
     }
 
-    // Re-check at the final approval boundary. Submission-time validation alone
-    // is insufficient because assistant or repository grants may change while
-    // the request is pending.
-    const audienceCompatibility =
-      await validateAssistantRepositoryAudience(idInt)
-    if (!audienceCompatibility.isCompatible) {
-      log.warn("Assistant repository audience mismatch blocked approval", {
-        assistantId: idInt,
-        mismatches: audienceCompatibility.mismatches,
-      })
-      return {
-        isSuccess: false,
-        message:
-          "Repository permissions do not cover this assistant's audience. Update repository permissions or restrict assistant access before approval.",
-      }
-    }
-
-    // Approve the assistant architect and create its capability entry (transaction)
-    const updatedTool = await drizzleApproveAssistantArchitect(idInt)
+    // Lock the assistant before the final audience validation and hold that lock
+    // through the approval transition. Import replacement takes the same lock,
+    // so the graph that is approved is exactly the graph that was validated.
+    const updatedTool = await drizzleApproveAssistantArchitect(
+      idInt,
+      async () => {
+        const audienceCompatibility =
+          await validateAssistantRepositoryAudience(idInt)
+        if (!audienceCompatibility.isCompatible) {
+          log.warn("Assistant repository audience mismatch blocked approval", {
+            assistantId: idInt,
+            mismatches: audienceCompatibility.mismatches,
+          })
+        }
+        return audienceCompatibility.isCompatible
+      },
+    )
 
     // Fetch the capability row created in the same approval transaction. Its id
     // backs both the navigation item (navigation_items.capability_id) and the
@@ -2444,6 +2443,13 @@ export async function approveAssistantArchitectAction(
   } catch (error) {
     timer({ status: "error" })
     log.error("Error approving tool:", error)
+    if (error instanceof AssistantApprovalValidationError) {
+      return {
+        isSuccess: false,
+        message:
+          "Repository permissions do not cover this assistant's audience. Update repository permissions or restrict assistant access before approval.",
+      }
+    }
     return { isSuccess: false, message: "Failed to approve tool" }
   }
 }

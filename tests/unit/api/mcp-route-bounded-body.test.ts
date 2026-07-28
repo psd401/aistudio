@@ -2,18 +2,19 @@
 
 import { beforeEach, describe, expect, it } from "@jest/globals";
 import { NextRequest } from "next/server";
-import { ASSISTANT_IMPORT_MAX_BYTES } from "@/lib/assistant-export-import";
 
 /* eslint-disable no-var */
 var mockAuthenticateRequest: jest.Mock;
 var mockCheckRateLimit: jest.Mock;
 var mockRecordUsage: jest.Mock;
+var mockParseJsonRpcRequest: jest.Mock;
 var mockHandleJsonRpcRequest: jest.Mock;
 /* eslint-enable no-var */
 
 mockAuthenticateRequest = jest.fn();
 mockCheckRateLimit = jest.fn();
 mockRecordUsage = jest.fn();
+mockParseJsonRpcRequest = jest.fn();
 mockHandleJsonRpcRequest = jest.fn();
 
 jest.mock("@/lib/api/auth-middleware", () => ({
@@ -28,7 +29,7 @@ jest.mock("@/lib/api/rate-limiter", () => ({
 }));
 
 jest.mock("@/lib/mcp/jsonrpc-handler", () => ({
-  parseJsonRpcRequest: jest.fn(),
+  parseJsonRpcRequest: (...args: unknown[]) => mockParseJsonRpcRequest(...args),
   handleJsonRpcRequest: (...args: unknown[]) =>
     mockHandleJsonRpcRequest(...args),
 }));
@@ -44,12 +45,14 @@ jest.mock("@/lib/logger", () => ({
 }));
 
 import { POST } from "@/app/api/mcp/route";
+import { MCP_REQUEST_MAX_BYTES } from "@/lib/mcp/request-limits";
 
 describe("MCP request body limits", () => {
   beforeEach(() => {
     mockAuthenticateRequest.mockReset();
     mockCheckRateLimit.mockReset();
     mockRecordUsage.mockReset();
+    mockParseJsonRpcRequest.mockReset();
     mockHandleJsonRpcRequest.mockReset();
     mockAuthenticateRequest.mockResolvedValue({
       userId: 7,
@@ -66,16 +69,16 @@ describe("MCP request body limits", () => {
   });
 
   it("rejects an oversized chunked-style body before JSON-RPC dispatch", async () => {
-    const mcpEnvelopeAllowance = 64 * 1024;
-    const body = `{"padding":"${"x".repeat(
-      ASSISTANT_IMPORT_MAX_BYTES + mcpEnvelopeAllowance,
-    )}"}`;
+    const body = "{\"padding\":\"small\"}";
     const bytes = new TextEncoder().encode(body);
     const request = {
       url: "http://localhost/api/mcp",
       nextUrl: new URL("http://localhost/api/mcp"),
       method: "POST",
-      headers: new Headers({ "Content-Type": "application/json" }),
+      headers: new Headers({
+        "Content-Type": "application/json",
+        "Content-Length": String(MCP_REQUEST_MAX_BYTES + 1),
+      }),
       body: new ReadableStream<Uint8Array>({
         start(controller) {
           controller.enqueue(bytes);
@@ -84,7 +87,6 @@ describe("MCP request body limits", () => {
       }),
     } as unknown as NextRequest;
 
-    expect(request.headers.get("content-length")).toBeNull();
     const response = await POST(request);
 
     expect(response.status).toBe(413);
@@ -100,5 +102,38 @@ describe("MCP request body limits", () => {
       413,
       expect.any(Number),
     );
+  });
+
+  it("preserves non-assistant MCP operations above the assistant envelope limit", async () => {
+    const body = `{"padding":"${"x".repeat(11 * 1024 * 1024)}"}`;
+    const bytes = new TextEncoder().encode(body);
+    const request = {
+      url: "http://localhost/api/mcp",
+      nextUrl: new URL("http://localhost/api/mcp"),
+      method: "POST",
+      headers: new Headers({ "Content-Type": "application/json" }),
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      }),
+    } as unknown as NextRequest;
+    mockParseJsonRpcRequest.mockReturnValue({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "import_okf", arguments: {} },
+    });
+    mockHandleJsonRpcRequest.mockResolvedValue({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { content: [] },
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(200);
+    expect(mockHandleJsonRpcRequest).toHaveBeenCalled();
   });
 });

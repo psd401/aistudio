@@ -43,7 +43,11 @@
  */
 
 import { eq, and, desc, sql, inArray, isNull, ne } from "drizzle-orm";
-import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
+import {
+  executeQuery,
+  executeTransaction,
+  type DbTransaction,
+} from "@/lib/db/drizzle-client";
 import {
   assistantArchitects,
   chainPrompts,
@@ -630,11 +634,40 @@ export async function deleteAssistantArchitect(id: number) {
  * Approve an assistant architect
  * Also creates the corresponding tool entry if it doesn't exist
  */
-export async function approveAssistantArchitect(id: number) {
+export class AssistantApprovalValidationError extends Error {
+  constructor() {
+    super("Assistant failed final approval validation");
+    this.name = "AssistantApprovalValidationError";
+  }
+}
+
+export async function approveAssistantArchitect(
+  id: number,
+  validateBeforeApproval?: (transaction: DbTransaction) => Promise<boolean>
+) {
   // Use executeTransaction directly (never nest db.transaction inside
   // executeQuery — the wrapper's retry could replay a partially-committed tx).
   return executeTransaction(
     async (tx) => {
+      // Import replacement uses the same assistant-row lock. Hold it while the
+      // final audience check runs and until approval commits, so a caller cannot
+      // swap the reviewed graph between validation and publication.
+      const [lockedAssistant] = await tx
+        .select({ id: assistantArchitects.id })
+        .from(assistantArchitects)
+        .where(eq(assistantArchitects.id, id))
+        .limit(1)
+        .for("update");
+      if (!lockedAssistant) {
+        throw ErrorFactories.dbRecordNotFound("assistant_architects", id);
+      }
+      if (
+        validateBeforeApproval &&
+        !(await validateBeforeApproval(tx))
+      ) {
+        throw new AssistantApprovalValidationError();
+      }
+
       // Update status to approved
       const result = await tx
         .update(assistantArchitects)

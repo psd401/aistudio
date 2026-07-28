@@ -1106,10 +1106,12 @@ paths:
         capabilities before any assistant transaction starts.
         Model names are resolved by exact model id, then provider-family
         fallback, then the first active model; the applied mappings are returned.
-        Import envelopes are limited to 10 MB, 100 assistants, and 500 prompt
-        repository bindings on every surface. The REST transport enforces the
-        byte limit while reading the request stream, including when
+        Import envelopes are limited to 10 MB, 100 assistants, 50 input fields
+        per assistant, and 500 prompt repository bindings on every surface. The
+        REST transport enforces the byte limit while reading the request stream, including when
         `Content-Length` is missing or understated.
+        A cataloged but administratively disabled create operation returns a
+        masked 404 and does not parse or persist the envelope.
         Requires `assistants:write`.
       security:
         - BearerAuth: []
@@ -1169,6 +1171,12 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           description: The caller lacks `assistants:write`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: The cataloged create operation is administratively disabled.
           content:
             application/json:
               schema:
@@ -1242,6 +1250,8 @@ paths:
         mapped prompt models, durable prompt repositories, and per-prompt enabled
         tools are validated against the caller's authoring permissions and the
         mapped/routed model's capabilities before writes.
+        A cataloged but administratively disabled update operation returns a
+        masked 404 before parsing or mutation.
         Requires `assistants:write`.
       security:
         - BearerAuth: []
@@ -1338,6 +1348,8 @@ paths:
         Copied agent tools and connectors must be available to the caller as an
         author, and copied prompt tools must be supported by their mapped/routed
         models, before the fork is persisted.
+        A cataloged but administratively disabled fork operation returns a
+        masked 404 before parsing or mutation.
         Invisible and missing sources both return 404. Requires
         `assistants:write`.
       security:
