@@ -56,14 +56,14 @@ const startConversationSchema = z.object({
   title: z.string().max(500).optional(),
 })
 
-function isForbiddenExecutionError(
+function isExecutionHttpError(
   error: unknown
-): error is { statusCode: 403; userMessage?: string } {
+): error is { statusCode: 403 | 404; userMessage?: string } {
   return (
     error !== null &&
     typeof error === "object" &&
     "statusCode" in error &&
-    error.statusCode === 403
+    (error.statusCode === 403 || error.statusCode === 404)
   )
 }
 
@@ -275,13 +275,16 @@ function mapStartConversationError(
       source: error.source,
     })
   }
-  if (isForbiddenExecutionError(error)) {
+  if (isExecutionHttpError(error)) {
+    const isNotFound = error.statusCode === 404
     return createErrorResponse(
       requestId,
-      403,
-      "FORBIDDEN",
+      error.statusCode,
+      isNotFound ? "NOT_FOUND" : "FORBIDDEN",
       error.userMessage ||
-        "You do not have access to repository content used by this assistant"
+        (isNotFound
+          ? `Assistant not found: ${assistantId}`
+          : "You do not have access to repository content used by this assistant")
     )
   }
   log.error("Failed to start conversation", {

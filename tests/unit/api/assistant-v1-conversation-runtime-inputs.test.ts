@@ -422,6 +422,36 @@ function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part2() {
     expect(mockCreateConversation).not.toHaveBeenCalled()
     expect(mockCreateMessageWithStats).not.toHaveBeenCalled()
   })
+
+  it("preserves a coordinator 404 when approval changes under the execution lock", async () => {
+    mockPrepareAssistantExecutionInputs.mockResolvedValue({
+      ownerId: 7,
+      inputs: {},
+      runtimeRepositoryIds: [],
+      runtimeRepositoryQuery: "",
+      references: [],
+    })
+    mockExecuteAssistant.mockRejectedValue({
+      statusCode: 404,
+      userMessage: "Assistant not found: 5",
+    })
+
+    const response = await POST(
+      new NextRequest("http://localhost/api/v1/assistants/5/conversations", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ id: "5" }) }
+    )
+
+    expect(response.status).toBe(404)
+    expect(JSON.parse(String(response.body))).toEqual({
+      requestId: "request-1",
+      error: {
+        code: "NOT_FOUND",
+        message: "Assistant not found: 5",
+      },
+    })
+  })
 }
 
 const defineV1AssistantConversationRuntimeRepositoryInputsSuite1 = () => {
