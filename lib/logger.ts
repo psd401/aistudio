@@ -17,13 +17,24 @@ type AsyncLocalStorageType<T> = {
 
 let asyncLocalStorageModule: AsyncLocalStorageType<LogContext> | null = null
 
+type AsyncHooksModule = {
+  AsyncLocalStorage: new <T>() => AsyncLocalStorageType<T>
+}
+
+type ProcessWithBuiltinModules = NodeJS.Process & {
+  getBuiltinModule?: (specifier: string) => unknown
+}
+
 // Only import in Node.js runtime (not Edge)
 // EdgeRuntime is defined in Edge Runtime environments
 if (typeof (globalThis as { EdgeRuntime?: unknown }).EdgeRuntime === 'undefined') {
   try {
-    // Dynamic require to avoid bundling in Edge Runtime
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { AsyncLocalStorage } = require('node:async_hooks')
+    // Resolve dynamically so Edge bundles do not include node:async_hooks.
+    const getBuiltinModule =
+      (process as ProcessWithBuiltinModules).getBuiltinModule
+    const { AsyncLocalStorage } = getBuiltinModule?.(
+      'node:async_hooks'
+    ) as AsyncHooksModule
     asyncLocalStorageModule = new AsyncLocalStorage() as AsyncLocalStorageType<LogContext>
   } catch {
     // Silently fail - Edge Runtime or environment without async_hooks
@@ -37,130 +48,133 @@ function sanitizeForLogger(data: unknown): unknown {
   return sanitizeForLoggerInternal(data, 10, new WeakSet<object>())
 }
 
-// Neutralises every line-terminator a log line could be forged with, plus
-// control characters. Shared by the string branch below and the unknown-type
-// fallback so the two cannot drift apart.
-//
-// Order matters twice over:
-//
-// 1. Behaviour. The printable-ASCII allowlist deletes CR/LF/TAB outright, so
-//    running it first fused tokens across the removed break: a CRLF in
-//    "ok<CRLF>WARN" left "okWARN". Substituting a space first keeps them apart.
-// 2. CodeQL. Its log-injection sanitizer only recognises a
-//    String.prototype.replace whose regex root is a constant it can enumerate.
-//    A negated class (/[^\u0020-\u007E]/) and a positive one (/[\t\n\r]/) both
-//    parse to a RegExpCharacterClass, so neither cleared the taint and every
-//    logger call downstream stayed flagged. Single-character literal regexes
-//    are the form it models.
-function sanitizeLogString(value: string): string {
+function sanitizeLoggerString(value: string): string {
   return value
-    .replace(/\t/g, ' ')            // Tabs to spaces
-    .replace(/\n/g, ' ')            // Newlines to spaces (CodeQL barrier)
-    .replace(/\r/g, ' ')            // Carriage returns to spaces (CodeQL barrier)
-    .replace(/[^\u0020-\u007E]/g, '') // Then allow only printable ASCII
+    // Keep these single-character replacements explicit: besides preserving
+    // word boundaries, they are the static-analysis barriers for log forging.
+    .replace(/\t/g, ' ')
+    .replace(/\n/g, ' ')
+    .replace(/\r/g, ' ')
+    .replace(/[^\u0020-\u007E]/g, '')
+    .substring(0, 1000)
+}
+
+const UNSAFE_PROPERTY_NAMES = new Set([
+  '__proto__',
+  'constructor',
+  'prototype',
+])
+
+function cleanPropertyName(value: string): string | null {
+  const clean = String(value).replace(/[^\w.-]/g, '_')
+  if (!clean || UNSAFE_PROPERTY_NAMES.has(clean)) return null
+  return clean
+}
+
+function markSeen(value: object, seen: WeakSet<object>): boolean {
+  if (seen.has(value)) return false
+  seen.add(value)
+  return true
+}
+
+function sanitizeLoggerError(
+  error: Error,
+  maxDepth: number,
+  seen: WeakSet<object>
+): Record<string, unknown> {
+  const safeError: Record<string, unknown> = {
+    name: sanitizeForLoggerInternal(error.name, maxDepth - 1, seen),
+    message: sanitizeForLoggerInternal(error.message, maxDepth - 1, seen),
+    stack:
+      typeof error.stack === "string"
+        ? sanitizeForLoggerInternal(error.stack, maxDepth - 1, seen)
+        : "",
+  }
+  const customProps = new Map<string, unknown>()
+  for (const key of Object.keys(error)) {
+    if (key === 'cause' || key in safeError) continue
+    const safeKey = cleanPropertyName(key)
+    if (!safeKey) continue
+    const value = (error as unknown as Record<string, unknown>)[key]
+    customProps.set(
+      safeKey,
+      sanitizeForLoggerInternal(value, maxDepth - 1, seen)
+    )
+  }
+  if (customProps.size > 0) {
+    safeError.customProperties = Object.fromEntries(customProps)
+  }
+  return safeError
+}
+
+function sanitizeLoggerObject(
+  data: object,
+  maxDepth: number,
+  seen: WeakSet<object>
+): unknown {
+  if (!markSeen(data, seen)) return '[Circular]'
+  if (data instanceof Error) {
+    return sanitizeLoggerError(data, maxDepth, seen)
+  }
+  const propMap = new Map<string, unknown>()
+  for (const [key, value] of Object.entries(data)) {
+    const cleanKey = cleanPropertyName(key)
+    if (!cleanKey) continue
+    propMap.set(
+      cleanKey,
+      sanitizeForLoggerInternal(value, maxDepth - 1, seen)
+    )
+  }
+  return Object.fromEntries(propMap)
+}
+
+function sanitizeLoggerArray(
+  data: unknown[],
+  maxDepth: number,
+  seen: WeakSet<object>
+): unknown {
+  if (!markSeen(data, seen)) return '[Circular]'
+  return data.map(
+    (item) => sanitizeForLoggerInternal(item, maxDepth - 1, seen)
+  )
 }
 
 // Private recursive implementation - WeakSet shared across all recursive calls
 function sanitizeForLoggerInternal(data: unknown, maxDepth: number, seen: WeakSet<object>): unknown {
-  if (data === null || data === undefined) {
-    return data
-  }
-
-  if (typeof data === "string") {
-    // See sanitizeLogString() above for why the order and the single-character
-    // literal regexes matter.
-    return sanitizeLogString(data).substring(0, 1000)
-  }
-
+  if (data === null || data === undefined) return data
+  if (typeof data === "string") return sanitizeLoggerString(data)
   if (typeof data === "number" || typeof data === "boolean") {
     // Create new primitives to break taint flow
     return typeof data === "number" ? Number(data) : Boolean(data)
   }
-
-  // CRITICAL: Check depth limit BEFORE recursion to prevent stack overflow
-  if (maxDepth <= 0) {
-    return '[Max Depth Reached]'
-  }
-
+  if (maxDepth <= 0) return '[Max Depth Reached]'
   if (Array.isArray(data)) {
-    // CRITICAL: Circular reference detection for arrays
-    if (seen.has(data)) {
-      return '[Circular]'
-    }
-    seen.add(data)
-    // Create a new array with sanitized elements
-    return data.map(item => sanitizeForLoggerInternal(item, maxDepth - 1, seen))
+    return sanitizeLoggerArray(data, maxDepth, seen)
   }
-
-  // Enhanced: Sanitize Error objects so message, name, and stack are safe
   if (typeof data === "object") {
-    // Dates have no own enumerable properties, so the generic object branch
-    // below turns them into `{}` — the timestamp just vanishes from the log.
-    // Emit the ISO string instead. This matters now that logPerformance()
-    // routes its metadata through here: startTimer(...)({ completedAt: date })
-    // used to reach winston as a real Date and would otherwise start logging
-    // as an empty object.
+    // Dates have no own enumerable properties, so sanitizeLoggerObject() below
+    // turns them into `{}` — the timestamp just vanishes from the log. Emit the
+    // ISO string instead. This matters now that logPerformance() routes its
+    // metadata through here: startTimer(...)({ completedAt: date }) used to
+    // reach winston as a real Date and would otherwise start logging as an
+    // empty object.
     //
-    // Tested BEFORE the circular-reference bookkeeping below: a Date is a leaf
-    // and cannot take part in a cycle, but `seen` is shared across the whole
-    // traversal, so recording it there made the SECOND reference to one Date
-    // instance in a single payload — `{ startedAt: d, endedAt: d }`, or the
-    // same Date in two array slots — render as '[Circular]' instead of its
-    // timestamp.
+    // Tested BEFORE the circular-reference bookkeeping in sanitizeLoggerObject:
+    // a Date is a leaf and cannot take part in a cycle, but `seen` is shared
+    // across the whole traversal, so recording it there made the SECOND
+    // reference to one Date instance in a single payload — `{ startedAt: d,
+    // endedAt: d }`, or the same Date in two array slots — render as
+    // '[Circular]' instead of its timestamp.
     if (data instanceof Date) {
       return Number.isNaN(data.getTime()) ? '[Invalid Date]' : data.toISOString()
     }
-
-    // CRITICAL: Circular reference detection for objects
-    if (seen.has(data)) {
-      return '[Circular]'
-    }
-    seen.add(data)
-
-    if (data instanceof Error) {
-      // Make a new plain object with sanitized message/name/stack
-      // DON'T recurse into Error.cause to prevent infinite error chains
-      const safeError: Record<string, unknown> = {}
-      safeError.name = sanitizeForLoggerInternal(data.name, maxDepth - 1, seen)
-      safeError.message = sanitizeForLoggerInternal(data.message, maxDepth - 1, seen)
-      safeError.stack = typeof data.stack === "string" ? sanitizeForLoggerInternal(data.stack, maxDepth - 1, seen) : ""
-      // Use Map to avoid any prototype pollution risks
-      const customProps = new Map<string, unknown>()
-      for (const key of Object.keys(data)) {
-        // Skip 'cause' property to prevent infinite error chains
-        if (key === 'cause') {
-          continue
-        }
-        if (!(key in safeError)) {
-          const safeKey = String(key).replace(/[^\w.-]/g, '_')
-          if (safeKey && safeKey !== '__proto__' && safeKey !== 'constructor' && safeKey !== 'prototype') {
-            customProps.set(safeKey, sanitizeForLoggerInternal((data as unknown as Record<string, unknown>)[key], maxDepth - 1, seen))
-          }
-        }
-      }
-      // Convert Map to plain object safely
-      if (customProps.size > 0) {
-        safeError.customProperties = Object.fromEntries(customProps)
-      }
-      return safeError
-    } else {
-      // Use Map to avoid prototype pollution completely
-      const propMap = new Map<string, unknown>()
-      for (const [key, value] of Object.entries(data)) {
-        const cleanKey = String(key).replace(/[^\w.-]/g, '_')
-        if (cleanKey && cleanKey !== '__proto__' && cleanKey !== 'constructor' && cleanKey !== 'prototype') {
-          propMap.set(cleanKey, sanitizeForLoggerInternal(value, maxDepth - 1, seen))
-        }
-      }
-      return Object.fromEntries(propMap)
-    }
+    return sanitizeLoggerObject(data, maxDepth, seen)
   }
-
-  // Fallback for unknown types (functions, symbols, bigint). Route through
-  // the same string sanitization as the string branch — String(fn) can carry
+  // Fallback for unknown types (functions, symbols, bigint). Route through the
+  // same string sanitization as the string branch — String(fn) can carry
   // newlines straight out of the function source, and nested values never see
   // the final barrier pass in sanitizeLogMetadata().
-  return sanitizeLogString(String(data)).slice(0, 100)
+  return sanitizeLoggerString(String(data)).slice(0, 100)
 }
 
 const isProd = process.env.NODE_ENV === "production"
@@ -212,19 +226,61 @@ function filterSensitiveData(data: unknown): unknown {
   return filterSensitiveDataInternal(data, 10, new WeakSet<object>())
 }
 
+function filterSensitiveString(value: string): string {
+  let filtered = value
+  for (const pattern of SENSITIVE_PATTERNS) {
+    filtered = filtered.replace(pattern, "[REDACTED]")
+  }
+  return filtered.replace(EMAIL_PATTERN, "***@$1")
+}
+
+const SENSITIVE_KEY_FRAGMENTS = [
+  "password",
+  "token",
+  "secret",
+  "apikey",
+  "api_key",
+]
+
+function filterSensitiveValue(
+  key: string,
+  value: unknown,
+  maxDepth: number,
+  seen: WeakSet<object>
+): unknown {
+  const lowerKey = key.toLowerCase()
+  if (SENSITIVE_KEY_FRAGMENTS.some((fragment) => lowerKey.includes(fragment))) {
+    return "[REDACTED]"
+  }
+  if (lowerKey.includes("email")) {
+    return typeof value === "string"
+      ? value.replace(EMAIL_PATTERN, "***@$1")
+      : value
+  }
+  return filterSensitiveDataInternal(value, maxDepth - 1, seen)
+}
+
+function filterSensitiveObject(
+  data: object,
+  maxDepth: number,
+  seen: WeakSet<object>
+): unknown {
+  if (!markSeen(data, seen)) return '[Circular]'
+  const propMap = new Map<string, unknown>()
+  for (const [key, value] of Object.entries(data)) {
+    const cleanKey = cleanPropertyName(key)
+    if (!cleanKey) continue
+    propMap.set(
+      cleanKey,
+      filterSensitiveValue(cleanKey, value, maxDepth, seen)
+    )
+  }
+  return Object.fromEntries(propMap)
+}
+
 // Private recursive implementation - WeakSet shared across all recursive calls
 function filterSensitiveDataInternal(data: unknown, maxDepth: number, seen: WeakSet<object>): unknown {
-  if (typeof data === "string") {
-    let filtered = data
-    // Filter out sensitive patterns
-    for (const pattern of SENSITIVE_PATTERNS) {
-      filtered = filtered.replace(pattern, "[REDACTED]")
-    }
-    // Mask email addresses (keep domain for debugging)
-    filtered = filtered.replace(EMAIL_PATTERN, "***@$1")
-    return filtered
-  }
-
+  if (typeof data === "string") return filterSensitiveString(data)
   // Dates are leaf values, not containers. Without this branch the generic
   // object traversal below reaches them first and Object.entries(date) is
   // empty, so the timestamp is flattened to {} before sanitizeForLogger()'s
@@ -234,60 +290,17 @@ function filterSensitiveDataInternal(data: unknown, maxDepth: number, seen: Weak
   // Date unchanged hands it on intact; the two callers that do not run it
   // through sanitizeForLogger() afterwards both JSON.stringify it, which
   // serialises a Date as its ISO string rather than as {}.
-  if (data instanceof Date) {
-    return data
-  }
-
-  // CRITICAL: Check depth limit to prevent stack overflow
-  if (maxDepth <= 0) {
-    return '[Max Depth Reached]'
-  }
-
+  if (data instanceof Date) return data
+  if (maxDepth <= 0) return '[Max Depth Reached]'
   if (Array.isArray(data)) {
-    // CRITICAL: Circular reference detection
-    if (seen.has(data)) {
-      return '[Circular]'
-    }
-    seen.add(data)
-    return data.map(item => filterSensitiveDataInternal(item, maxDepth - 1, seen))
+    if (!markSeen(data, seen)) return '[Circular]'
+    return data.map(
+      (item) => filterSensitiveDataInternal(item, maxDepth - 1, seen)
+    )
   }
-
   if (data && typeof data === "object") {
-    // CRITICAL: Circular reference detection
-    if (seen.has(data)) {
-      return '[Circular]'
-    }
-    seen.add(data)
-
-    const propMap = new Map<string, unknown>()
-    for (const [key, value] of Object.entries(data)) {
-      const cleanKey = String(key).replace(/[^\w.-]/g, '_')
-      if (!cleanKey || cleanKey === '__proto__' || cleanKey === 'constructor' || cleanKey === 'prototype') {
-        continue
-      }
-
-      const lowerKey = cleanKey.toLowerCase()
-      let filteredValue: unknown
-
-      if (lowerKey.includes("password") ||
-          lowerKey.includes("token") ||
-          lowerKey.includes("secret") ||
-          lowerKey.includes("apikey") ||
-          lowerKey.includes("api_key")) {
-        filteredValue = "[REDACTED]"
-      } else if (lowerKey.includes("email")) {
-        filteredValue = typeof value === "string"
-          ? value.replace(EMAIL_PATTERN, "***@$1")
-          : value
-      } else {
-        filteredValue = filterSensitiveDataInternal(value, maxDepth - 1, seen)
-      }
-
-      propMap.set(cleanKey, filteredValue)
-    }
-    return Object.fromEntries(propMap)
+    return filterSensitiveObject(data, maxDepth, seen)
   }
-
   return data
 }
 
@@ -297,13 +310,13 @@ function filterSensitiveDataInternal(data: unknown, maxDepth: number, seen: Weak
 const devFormat = winston.format.printf(({ timestamp, level, message, ...meta }) => {
   const context = getLogContext()
   const allMeta = { ...context, ...meta }
-  
+
   // Filter sensitive data in dev
   const filteredMeta = filterSensitiveData(allMeta)
-  const metaString = Object.keys(filteredMeta as object).length > 0 
-    ? `\n${JSON.stringify(filteredMeta, null, 2)}` 
+  const metaString = Object.keys(filteredMeta as object).length > 0
+    ? `\n${JSON.stringify(filteredMeta, null, 2)}`
     : ""
-  
+
   const requestId = context?.requestId ? `[${context.requestId}] ` : ""
   return `${timestamp} ${requestId}${level}: ${message}${metaString}`
 })
@@ -328,7 +341,7 @@ const prodFormat = winston.format.combine(
   winston.format.printf((info) => {
     const context = getLogContext()
     const { timestamp, level, message, stack, ...meta } = info
-    
+
     const logEntry: LogEntryWithStack = {
       timestamp: timestamp as string,
       level: level as string,
@@ -339,11 +352,11 @@ const prodFormat = winston.format.combine(
       version: process.env.APP_VERSION || "unknown",
       region: process.env.AWS_REGION || "unknown",
     }
-    
+
     if (stack) {
       logEntry.stack = stack as string
     }
-    
+
     // Filter sensitive data in production
     return JSON.stringify(filterSensitiveData(logEntry))
   })
@@ -418,34 +431,25 @@ export function sanitizeLogMessage(input: unknown): string {
   // Explicitly remove characters that could forge log entries
   // This follows CodeQL log injection prevention guidance
 
-  // Replace newlines with spaces.
-  // Two separate single-character literal regexes rather than the character
-  // class /[\n\r]/: CodeQL's js/log-injection sanitizer only recognises a
-  // replace() whose regex root is an enumerable constant, and a character class
-  // is not one. Behaviour is identical; this is what makes the barrier visible.
+  // Keep these as separate literal replacements so both the runtime behavior
+  // and the CodeQL log-forging barriers are explicit.
   str = str.replace(/\n/g, ' ').replace(/\r/g, ' ')
 
-  // Remove control characters (0x00-0x1F and 0x7F).
-  // A regex *literal* with the repo-standard no-control-regex disable, not a
-  // `new RegExp(...)` built from String.fromCharCode: CodeQL only models regex
-  // literals, so the dynamic form was invisible to its taint analysis (and to
-  // any reader). Same character set, same behaviour. Matches the convention in
-  // lib/utils/text-sanitizer.ts.
-  // eslint-disable-next-line no-control-regex
-  str = str.replace(/[\u0000-\u001F\u007F]/g, '')
+  // Remove control characters (0x00-0x1F and 0x7F) without constructing a
+  // dynamic regular expression.
+  str = [...str]
+    .filter((character) => {
+      const codePoint = character.codePointAt(0) ?? 0
+      return codePoint > 31 && codePoint !== 127
+    })
+    .join('')
 
-  // Non-ASCII line terminators: NEL (U+0085), LINE SEPARATOR (U+2028) and
-  // PARAGRAPH SEPARATOR (U+2029). None are in the C0/DEL range above, and
-  // JSON.stringify does NOT escape U+2028/U+2029 in string values, so before
-  // this they reached the log line as raw bytes — the dev formatter
-  // interpolates the message into plain text (terminals render U+2028 as a
-  // hard break) and Unicode-aware log splitters mis-split the prod JSON.
-  //
-  // Targeted removal rather than the metadata path's full printable-ASCII
-  // allowlist: the goal is to stop line forging, and messages legitimately
-  // carry accented and non-Latin text that the allowlist would silently
-  // mangle. Metadata keeps the stricter allowlist.
-  str = str.replace(/\u0085/g, ' ').replace(/\u2028/g, ' ').replace(/\u2029/g, ' ')
+  // Unicode line separators are not C0 control characters, but terminals and
+  // Unicode-aware log processors still treat them as line boundaries.
+  str = str
+    .replace(/\u0085/g, ' ')
+    .replace(/\u2028/g, ' ')
+    .replace(/\u2029/g, ' ')
 
   // Limit length to prevent log bloat
   str = str.substring(0, 1000)
@@ -611,4 +615,4 @@ export function startTimer(operation: string): (metadata?: object) => void {
   }
 }
 
-export default logger 
+export default logger

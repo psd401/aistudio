@@ -2,6 +2,8 @@
 
 import {
   DEFAULT_CONTENT_PLATFORM_CONFIG,
+  isCanonicalAssistantArchitectActive,
+  isCanonicalNexusAttachmentActive,
   isCanonicalRepositoryUploadActive,
   isContentDualWriteActive,
   isContentReadV2Active,
@@ -21,6 +23,12 @@ describe("content platform configuration", () => {
         CONTENT_PLATFORM_ENABLED: "true",
         CONTENT_DUAL_WRITE_ENABLED: "true",
         CONTENT_READ_V2_ENABLED: "true",
+        CONTENT_REPOSITORY_CUTOVER_ENABLED: "true",
+        CONTENT_NEXUS_CUTOVER_ENABLED: "true",
+        CONTENT_ASSISTANT_ARCHITECT_CUTOVER_ENABLED: "true",
+        CONTENT_RETRIEVAL_SHADOW_ENABLED: "true",
+        CONTENT_LEGACY_RETIREMENT_ENABLED: "true",
+        CONTENT_MIGRATION_RECOVERY_DAYS: "21",
         NEXUS_ATTACHMENT_RETENTION_DAYS: "45",
         CONTENT_DELETION_GRACE_DAYS: "14",
         CONTENT_MAX_FILE_SIZE_GB: "20",
@@ -48,6 +56,12 @@ describe("content platform configuration", () => {
       enabled: true,
       dualWriteEnabled: true,
       readV2Enabled: true,
+      repositoryCutoverEnabled: true,
+      nexusCutoverEnabled: true,
+      assistantArchitectCutoverEnabled: true,
+      retrievalShadowEnabled: true,
+      legacyRetirementEnabled: true,
+      migrationRecoveryDays: 21,
       nexusAttachmentRetentionDays: 45,
       deletionGraceDays: 14,
       maxFileSizeGb: 20,
@@ -76,6 +90,7 @@ describe("content platform configuration", () => {
   it("falls back for malformed and out-of-bounds values", () => {
     const parsed = parseContentPlatformConfig({
       CONTENT_PLATFORM_ENABLED: "yes",
+      CONTENT_MIGRATION_RECOVERY_DAYS: "0",
       NEXUS_ATTACHMENT_RETENTION_DAYS: "0",
       CONTENT_DELETION_GRACE_DAYS: "366",
       CONTENT_MAX_FILE_SIZE_GB: "1.5",
@@ -106,14 +121,21 @@ describe("content platform configuration", () => {
       enabled: false,
       dualWriteEnabled: true,
       readV2Enabled: true,
+      repositoryCutoverEnabled: true,
+      nexusCutoverEnabled: true,
+      assistantArchitectCutoverEnabled: true,
     };
     expect(isContentDualWriteActive(childFlagsOnly)).toBe(false);
     expect(isContentReadV2Active(childFlagsOnly)).toBe(false);
     expect(isCanonicalRepositoryUploadActive(childFlagsOnly)).toBe(false);
+    expect(isCanonicalNexusAttachmentActive(childFlagsOnly)).toBe(false);
+    expect(isCanonicalAssistantArchitectActive(childFlagsOnly)).toBe(false);
 
     const enabled = { ...childFlagsOnly, enabled: true };
     expect(isContentDualWriteActive(enabled)).toBe(true);
     expect(isContentReadV2Active(enabled)).toBe(true);
     expect(isCanonicalRepositoryUploadActive(enabled)).toBe(true);
+    expect(isCanonicalNexusAttachmentActive(enabled)).toBe(true);
+    expect(isCanonicalAssistantArchitectActive(enabled)).toBe(true);
   });
 });

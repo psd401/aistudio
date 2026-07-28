@@ -158,7 +158,7 @@ const bindingId = "123e4567-e89b-42d3-a456-426614174000"
 const rawMarker =
   `[[repository-attachment:v1:${bindingId}:44:caller-forged-name.pdf]]`
 
-describe("v1 assistant conversation runtime repository inputs", () => {
+function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part1() {
   beforeEach(() => {
     jest.clearAllMocks()
     mockParseRequestBody.mockResolvedValue({
@@ -261,7 +261,9 @@ describe("v1 assistant conversation runtime repository inputs", () => {
     expect(mockRollbackNewNexusAttachmentConversation).not.toHaveBeenCalled()
   })
 
-  it("compensates the bound empty conversation when first-message persistence fails", async () => {
+  }
+
+function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part2() {it("compensates the bound empty conversation when first-message persistence fails", async () => {
     const preparedInputs = {
       ownerId: 7,
       inputs: {
@@ -335,4 +337,11 @@ describe("v1 assistant conversation runtime repository inputs", () => {
     expect(mockCreateConversation).not.toHaveBeenCalled()
     expect(mockCreateMessageWithStats).not.toHaveBeenCalled()
   })
-})
+}
+
+const defineV1AssistantConversationRuntimeRepositoryInputsSuite1 = () => {
+  defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part1()
+  defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part2()
+};
+
+describe("v1 assistant conversation runtime repository inputs", defineV1AssistantConversationRuntimeRepositoryInputsSuite1)

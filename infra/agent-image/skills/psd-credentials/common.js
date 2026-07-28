@@ -64,7 +64,7 @@ async function requestCredentialOperation(payload) {
   try {
     return await requestAgentBroker('/api/agent/credentials', payload);
   } catch (error) {
-    throw new Error(`Credential broker rejected the request: ${error.message}`);
+    throw new Error(`Credential broker rejected the request: ${error.message}`, { cause: error });
   }
 }
 

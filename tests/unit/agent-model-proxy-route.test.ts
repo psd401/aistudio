@@ -67,10 +67,20 @@ function request(body: unknown) {
   }
 }
 
-describe("Agent model credential broker", () => {
-  let POST: typeof import("@/app/api/agent/model-proxy/[...path]/route").POST
-  let readBoundedModelRequest:
+let POST: typeof import("@/app/api/agent/model-proxy/[...path]/route").POST
+let readBoundedModelRequest:
     typeof import("@/lib/agent-workspace/bounded-model-request").readBoundedModelRequest
+const forwardedBody = (): string => {
+    const call = fetchMock.mock.calls[0]
+    if (!call) throw new Error("fetch was never called")
+    const init = call[1] as { body?: unknown } | undefined
+    if (!init?.body) throw new Error("fetch was called without a body")
+    return Buffer.from(init.body as Buffer).toString("utf8")
+  }
+
+function defineAgentModelCredentialBrokerSuite1Part1() {
+
+
 
   beforeAll(async () => {
     ;({ POST } = await import(
@@ -158,7 +168,9 @@ describe("Agent model credential broker", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it("rejects unapproved endpoints, models, and output limits", async () => {
+  }
+
+function defineAgentModelCredentialBrokerSuite1Part2() {it("rejects unapproved endpoints, models, and output limits", async () => {
     const wrongPath = await POST(
       request({
         model: "us.anthropic.claude-sonnet-5",
@@ -222,13 +234,7 @@ describe("Agent model credential broker", () => {
   })
 
   /** The JSON actually dispatched upstream, as a string. */
-  const forwardedBody = (): string => {
-    const call = fetchMock.mock.calls[0]
-    if (!call) throw new Error("fetch was never called")
-    const init = call[1] as { body?: unknown } | undefined
-    if (!init?.body) throw new Error("fetch was called without a body")
-    return Buffer.from(init.body as Buffer).toString("utf8")
-  }
+
 
   it("supplies anthropic_version, which Bedrock requires in the BODY", async () => {
     // Bedrock's Anthropic-compatible endpoint requires `anthropic_version` as
@@ -271,7 +277,9 @@ describe("Agent model credential broker", () => {
     expect(forwarded.anthropic_version).toBe("bedrock-2099-01-01")
   })
 
-  it("serves the request when the token/cost budget is over threshold", async () => {
+  }
+
+function defineAgentModelCredentialBrokerSuite1Part3() {it("serves the request when the token/cost budget is over threshold", async () => {
     // OBSERVE-ONLY. These limits were added in #1353 calibrated as if one
     // model call per turn; an agentic turn makes many, each re-sending the
     // whole context, so a single conversation could exhaust the hourly cap and
@@ -369,7 +377,9 @@ describe("Agent model credential broker", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it("retains conservative reservations after an ambiguous dispatch failure", async () => {
+  }
+
+function defineAgentModelCredentialBrokerSuite1Part4() {it("retains conservative reservations after an ambiguous dispatch failure", async () => {
     fetchMock.mockRejectedValueOnce(new Error("client aborted after dispatch"))
     const response = await POST(
       request({
@@ -412,4 +422,13 @@ describe("Agent model credential broker", () => {
     ).rejects.toThrow("too large")
     expect(cancelled).toBe(true)
   })
-})
+}
+
+const defineAgentModelCredentialBrokerSuite1 = () => {
+  defineAgentModelCredentialBrokerSuite1Part1()
+  defineAgentModelCredentialBrokerSuite1Part2()
+  defineAgentModelCredentialBrokerSuite1Part3()
+  defineAgentModelCredentialBrokerSuite1Part4()
+};
+
+describe("Agent model credential broker", defineAgentModelCredentialBrokerSuite1)

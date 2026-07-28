@@ -93,6 +93,9 @@ export * from "./tables/repository-processing-jobs";
 export * from "./tables/repository-artifacts";
 export * from "./tables/repository-index-generations";
 export * from "./tables/skill-repository-bindings";
+export * from "./tables/repository-migration-runs";
+export * from "./tables/repository-migration-items";
+export * from "./tables/repository-retrieval-shadow-observations";
 
 // ============================================
 // Prompt Library
@@ -239,6 +242,14 @@ export * from "./tables/oneroster-class-terms";
 export * from "./tables/oneroster-users";
 export * from "./tables/oneroster-user-roles";
 export * from "./tables/oneroster-enrollments";
+
+// ============================================
+// Teacher-managed Rooms (Epic #1308 / Issue #1313)
+// ============================================
+export * from "./tables/rooms";
+export * from "./tables/room-classes";
+export * from "./tables/room-members";
+export * from "./tables/room-resources";
 
 // ============================================
 // Relations

@@ -14,83 +14,41 @@ import assert from "node:assert/strict";
 import postgres from "postgres";
 import { scriptLogger as log } from "../../scripts/db/script-logger";
 
-async function main(): Promise<void> {
-  const databaseUrl =
-    process.env.DATABASE_URL ??
-    "postgresql://postgres:postgres@localhost:5432/aistudio";
-  const sslEnabled = process.env.DB_SSL !== "false";
-  const sql = postgres(databaseUrl, {
-    ssl: sslEnabled ? "require" : false,
-    max: 1,
-    idle_timeout: 20,
-    connect_timeout: 10,
-  });
-
-  let transactionStarted = false;
-
-  try {
-    await sql`BEGIN`;
-    transactionStarted = true;
-
+async function upsertConfidentialClient(sql: postgres.Sql): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     await sql`
-    INSERT INTO oauth_clients (
-      client_id,
-      client_name,
-      client_secret_hash,
-      redirect_uris,
-      allowed_scopes,
-      grant_types,
-      response_types,
-      token_endpoint_auth_method,
-      require_pkce,
-      is_active
-    )
-    VALUES (
-      'oauth-trust-audit-smoke-confidential',
-      'OAuth trust audit confidential upsert smoke',
-      'test-only-not-a-secret',
-      '[]'::jsonb,
-      '[]'::jsonb,
-      '["client_credentials"]'::jsonb,
-      '[]'::jsonb,
-      'client_secret_basic',
-      false,
-      true
-    )
-    ON CONFLICT (client_id) DO UPDATE
-    SET allowed_scopes = EXCLUDED.allowed_scopes
-  `;
+      INSERT INTO oauth_clients (
+        client_id,
+        client_name,
+        client_secret_hash,
+        redirect_uris,
+        allowed_scopes,
+        grant_types,
+        response_types,
+        token_endpoint_auth_method,
+        require_pkce,
+        is_active
+      )
+      VALUES (
+        'oauth-trust-audit-smoke-confidential',
+        'OAuth trust audit confidential upsert smoke',
+        'test-only-not-a-secret',
+        '[]'::jsonb,
+        '[]'::jsonb,
+        '["client_credentials"]'::jsonb,
+        '[]'::jsonb,
+        'client_secret_basic',
+        false,
+        true
+      )
+      ON CONFLICT (client_id) DO UPDATE
+      SET allowed_scopes = EXCLUDED.allowed_scopes
+    `;
+  }
+}
 
-    await sql`
-    INSERT INTO oauth_clients (
-      client_id,
-      client_name,
-      client_secret_hash,
-      redirect_uris,
-      allowed_scopes,
-      grant_types,
-      response_types,
-      token_endpoint_auth_method,
-      require_pkce,
-      is_active
-    )
-    VALUES (
-      'oauth-trust-audit-smoke-confidential',
-      'OAuth trust audit confidential upsert smoke',
-      'test-only-not-a-secret',
-      '[]'::jsonb,
-      '[]'::jsonb,
-      '["client_credentials"]'::jsonb,
-      '[]'::jsonb,
-      'client_secret_basic',
-      false,
-      true
-    )
-    ON CONFLICT (client_id) DO UPDATE
-    SET allowed_scopes = EXCLUDED.allowed_scopes
-  `;
-
-    await sql`
+async function upsertFirstPartyClient(sql: postgres.Sql): Promise<void> {
+  await sql`
     INSERT INTO oauth_clients (
       client_id,
       client_name,
@@ -119,8 +77,8 @@ async function main(): Promise<void> {
     SET is_first_party = EXCLUDED.is_first_party
   `;
 
-    for (const isFirstParty of [true, true]) {
-      await sql`
+  for (const isFirstParty of [true, true]) {
+    await sql`
       INSERT INTO oauth_clients (
         client_id,
         client_name,
@@ -148,16 +106,18 @@ async function main(): Promise<void> {
       ON CONFLICT (client_id) DO UPDATE
       SET is_first_party = EXCLUDED.is_first_party
     `;
-    }
+  }
+}
 
-    const [result] = await sql<
-      {
-        confidentialUpsertRows: number;
-        confidentialAuditRows: number;
-        firstPartyAuditRows: number;
-        legacyAuditRules: number;
-      }[]
-    >`
+async function assertTrustAudit(sql: postgres.Sql): Promise<void> {
+  const [result] = await sql<
+    {
+      confidentialUpsertRows: number;
+      confidentialAuditRows: number;
+      firstPartyAuditRows: number;
+      legacyAuditRules: number;
+    }[]
+  >`
     SELECT
       (
         SELECT COUNT(*)::integer
@@ -187,15 +147,38 @@ async function main(): Promise<void> {
       ) AS "legacyAuditRules"
   `;
 
-    assert.deepEqual(result, {
-      confidentialUpsertRows: 1,
-      confidentialAuditRows: 0,
-      firstPartyAuditRows: 1,
-      legacyAuditRules: 0,
-    });
-    log.success(
-      "OAuth client upserts remain usable and first-party trust changes are audited once",
-    );
+  assert.deepEqual(result, {
+    confidentialUpsertRows: 1,
+    confidentialAuditRows: 0,
+    firstPartyAuditRows: 1,
+    legacyAuditRules: 0,
+  });
+  log.success(
+    "OAuth client upserts remain usable and first-party trust changes are audited once",
+  );
+}
+
+async function main(): Promise<void> {
+  const databaseUrl =
+    process.env.DATABASE_URL ??
+    "postgresql://postgres:postgres@localhost:5432/aistudio";
+  const sslEnabled = process.env.DB_SSL !== "false";
+  const sql = postgres(databaseUrl, {
+    ssl: sslEnabled ? "require" : false,
+    max: 1,
+    idle_timeout: 20,
+    connect_timeout: 10,
+  });
+
+  let transactionStarted = false;
+
+  try {
+    await sql`BEGIN`;
+    transactionStarted = true;
+
+    await upsertConfidentialClient(sql);
+    await upsertFirstPartyClient(sql);
+    await assertTrustAudit(sql);
   } finally {
     if (transactionStarted) {
       await sql`ROLLBACK`;

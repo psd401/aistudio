@@ -7,13 +7,12 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as cr from 'aws-cdk-lib/custom-resources';
-import * as path from 'path';
-import * as crypto from 'crypto';
-import * as fs from 'fs';
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
-import { execSync } from 'child_process';
+import { execSync } from 'node:child_process';
 import {
   AuroraCostOptimizer,
   AuroraCostDashboard,
@@ -21,9 +20,79 @@ import {
   EnvironmentConfig,
   ServiceRoleFactory,
 } from './constructs';
+import { validatedFs } from "./validated-fs";
 
 export interface DatabaseStackProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
+}
+
+/**
+ * Recursively collect the db-init Lambda's build inputs: TypeScript sources
+ * (excluding declaration files) plus package.json/tsconfig.json manifests,
+ * at any depth — the Lambda's tsconfig has no restrictive `include`, so a
+ * nested source like lambda/lib/helper.ts is a compilation input too.
+ * Generated and installed state (node_modules/, dist/) is skipped.
+ * Returns paths relative to the starting directory, sorted for
+ * deterministic hashing.
+ */
+function collectLambdaSourceFiles(dir: string, prefix = ''): { rel: string; abs: string }[] {
+  const out: { rel: string; abs: string }[] = [];
+  const entries = validatedFs.readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const entry of entries) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const abs = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+      out.push(...collectLambdaSourceFiles(abs, rel));
+    } else if (entry.isFile()
+      && ((entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts'))
+        || entry.name === 'package.json' || entry.name === 'tsconfig.json')) {
+      out.push({ rel, abs });
+    }
+  }
+  return out;
+}
+
+/**
+ * Compute the custom asset hash for the db-init Lambda.
+ *
+ * With assetHashType CUSTOM, CDK's default source hash is fully replaced, so
+ * any input left out of this hash can change without the asset ever being
+ * rebuilt or redeployed. It must therefore cover everything that shapes the
+ * bundled Lambda:
+ *  - Lambda sources (*.ts, recursively), package.json, tsconfig.json — the
+ *    bundler compiles these at synth time; omitting them meant a handler-only
+ *    fix kept the old asset hash and silently never reached deployed
+ *    environments
+ *  - migrations.json + schema files, which the bundler copies in from the
+ *    parent directory (outside the asset source path)
+ * Generated artifacts (*.js, *.d.ts, bun.lock, node_modules/, dist/) are
+ * intentionally excluded: they are not bundling inputs. Every file is hashed
+ * with its relative path, so renames change the hash too.
+ *
+ * @param databaseDir Absolute path to infra/database
+ */
+export function computeDbInitAssetHash(databaseDir: string): string {
+  const hash = crypto.createHash('sha256');
+  for (const f of collectLambdaSourceFiles(path.join(databaseDir, 'lambda'))) {
+    hash.update(`${f.rel}\0`);
+    hash.update(validatedFs.readFileSync(f.abs, 'utf8'));
+  }
+  hash.update(validatedFs.readFileSync(path.join(databaseDir, 'migrations.json'), 'utf8'));
+  const schemaDir = path.join(databaseDir, 'schema');
+  // isSymbolicLink() as well as isFile(): a Dirent reports the directory
+  // entry's own kind and does not follow links. Without the second test a
+  // symlinked schema file would drop silently out of the hash, and CDK would
+  // reuse a stale migration Lambda asset when only that file changed.
+  const schemaEntries = validatedFs.readdirSync(schemaDir, { withFileTypes: true })
+    .filter(e => e.isFile() || e.isSymbolicLink())
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const e of schemaEntries) {
+    hash.update(`${e.name}\0`);
+    hash.update(validatedFs.readFileSync(path.join(schemaDir, e.name), 'utf8'));
+  }
+  return hash.digest('hex').substring(0, 16);
 }
 
 export class DatabaseStack extends cdk.Stack {
@@ -194,6 +263,19 @@ export class DatabaseStack extends cdk.Stack {
     // connection pooling (max 20 connections, idle timeout 20s), making
     // RDS Proxy redundant. Saves ~$81/month. See issue #832.
 
+    this.costDashboard = this.configureCostOptimization(props, restoreFromSnapshot);
+
+    this.configureDatabaseInitialization(props, restoreFromSnapshot, dbSecret);
+
+    this.configureConversationRetention(props, restoreFromSnapshot, dbSecret, vpc);
+
+    this.configureOutputs(props, restoreFromSnapshot);
+  }
+
+  private configureCostOptimization(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean
+  ): AuroraCostDashboard | undefined {
     // Add cost optimization features (skip for snapshot restoration as AuroraCostOptimizer requires DatabaseCluster)
     if (!restoreFromSnapshot && this.cluster instanceof rds.DatabaseCluster) {
       new AuroraCostOptimizer(this, 'CostOptimizer', {
@@ -229,12 +311,20 @@ export class DatabaseStack extends cdk.Stack {
       });
 
       // Export Aurora metrics for consolidated monitoring dashboard
-      this.costDashboard = new AuroraCostDashboard(this, 'CostDashboard', {
+      return new AuroraCostDashboard(this, 'CostDashboard', {
         cluster: this.cluster,
         environment: props.environment,
       });
     }
 
+    return undefined;
+  }
+
+  private configureDatabaseInitialization(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean,
+    dbSecret: secretsmanager.ISecret
+  ): void {
     // Database initialization Lambda (SKIP when restoring from snapshot)
     // Note: Snapshot already contains schema and data, so no initialization needed
     if (!restoreFromSnapshot) {
@@ -257,34 +347,11 @@ export class DatabaseStack extends cdk.Stack {
         ],
       });
 
-      // Compute asset hash that includes migrations.json and schema files
-      // CDK's default hash only covers infra/database/lambda/, but the bundler
-      // copies in schema/ and migrations.json from the parent directory.
-      // Without this, CDK reuses stale Lambda assets when only migrations change.
-      const migrationsPath = path.join(__dirname, '../database/migrations.json');
-      const schemaDir = path.join(__dirname, '../database/schema');
-      const externalHash = crypto.createHash('sha256');
-      externalHash.update(fs.readFileSync(migrationsPath, 'utf8'));
-      // readdirSync({ withFileTypes: true }) carries the file/directory kind on
-      // the entry itself, so the regular-file test no longer needs a separate
-      // fs.statSync() on the path we are about to read. Stat-then-read is a
-      // TOCTOU race (CodeQL js/file-system-race) — the path can change kind
-      // between the two syscalls — and dropping the extra stat also halves the
-      // syscalls per schema file during synth.
-      const schemaEntries = fs
-        .readdirSync(schemaDir, { withFileTypes: true })
-        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-      for (const entry of schemaEntries) {
-        // isSymbolicLink() as well as isFile(): a Dirent reports the directory
-        // entry's own kind and does not follow links, whereas the statSync()
-        // this replaced did. Without the second test a symlinked schema file
-        // would drop silently out of the hash, and CDK would reuse a stale
-        // migration Lambda asset when only that file changed.
-        if (entry.isFile() || entry.isSymbolicLink()) {
-          externalHash.update(fs.readFileSync(path.join(schemaDir, entry.name), 'utf8'));
-        }
-      }
-      const migrationAssetHash = externalHash.digest('hex').substring(0, 16);
+      // Custom asset hash covering everything that shapes the bundled Lambda:
+      // sources + package.json/tsconfig (compiled at synth time) and the
+      // migrations.json/schema files the bundler copies in from the parent
+      // directory. See computeDbInitAssetHash for why nothing may be omitted.
+      const migrationAssetHash = computeDbInitAssetHash(path.join(__dirname, '../database'));
 
       // Database initialization Lambda
       // Note: Lambda doesn't need to be in VPC since it uses RDS Data API
@@ -307,7 +374,6 @@ export class DatabaseStack extends cdk.Stack {
             local: {
               tryBundle(outputDir: string) {
                 try {
-                  const execSync = require('child_process').execSync;
                   const lambdaDir = path.join(__dirname, '../database/lambda');
 
                   // Run npm install and build
@@ -387,6 +453,16 @@ export class DatabaseStack extends cdk.Stack {
         dbInit.node.addDependency(this.cluster);
       }
     }
+
+  }
+
+  private configureConversationRetention(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean,
+    dbSecret: secretsmanager.ISecret,
+    vpc: ec2.IVpc
+  ): void {
+    const config = EnvironmentConfig.get(props.environment);
 
     // =====================================================================
     // Nexus conversation retention sweep (Issue #1330)
@@ -515,7 +591,7 @@ export class DatabaseStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }
@@ -568,6 +644,12 @@ export class DatabaseStack extends cdk.Stack {
       });
     }
 
+  }
+
+  private configureOutputs(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean
+  ): void {
     // Outputs
     if (!restoreFromSnapshot) {
       new cdk.CfnOutput(this, 'ClusterEndpoint', {

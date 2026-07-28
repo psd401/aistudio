@@ -27,8 +27,14 @@ import {
   SendMessageCommand,
   SQSClient,
 } from "@aws-sdk/client-sqs";
+import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+  type MetricDatum,
+  type StandardUnit,
+} from "@aws-sdk/client-cloudwatch";
 import { and, asc, eq, gt, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
-import { executeQuery, executeTransaction } from "../../../lib/db/drizzle-client";
+import { executeQuery } from "../../../lib/db/drizzle-client";
 import {
   repositoryItemChunks,
   repositoryArtifacts,
@@ -104,7 +110,10 @@ import {
   type ContentProcessingMessage,
 } from "./contract";
 import { CONTENT_SWEEP_REDISPATCHABLE_STATUSES } from "../../../lib/repositories/content-platform/job-state";
-import { releasePostDeployRecoveryJobs } from "../../../lib/repositories/content-platform/post-deploy-recovery";
+import {
+  releasePostDeployEmbeddingGenerations,
+  releasePostDeployRecoveryJobs,
+} from "../../../lib/repositories/content-platform/post-deploy-recovery";
 import {
   claimRepositoryProcessingJob,
   reconcileRepositoryProcessingDlqMessage,
@@ -152,6 +161,14 @@ import {
 import { enforceNexusRepositoryLifecycle } from "../../../lib/repositories/content-platform/lifecycle-service";
 import { cleanupExpiredRepositoryUploads } from "../../../lib/repositories/content-platform/upload-lifecycle-service";
 import { cleanupExpiredContentIdempotencyRecords } from "../../../lib/content/idempotency-cleanup";
+import { processNextRepositoryMigrationBatch } from "../../../lib/repositories/content-platform/migration-runner";
+import { createS3RepositoryMigrationStorage } from "../../../lib/repositories/content-platform/migration-s3-storage";
+import { cleanupRepositoryRetrievalShadow } from "../../../lib/repositories/content-platform/retrieval-shadow";
+import {
+  CONTENT_PLATFORM_METRIC_UNITS,
+  contentPlatformMetricValues,
+  getContentPlatformOperationalSnapshot,
+} from "../../../lib/repositories/content-platform/operational-metrics";
 
 type JobMetrics = RepositoryProcessingMetrics;
 
@@ -170,7 +187,12 @@ const textract = new TextractClient({});
 const bedrock = new BedrockRuntimeClient({});
 const dataAutomation = new BedrockDataAutomationRuntimeClient({});
 const secrets = new SecretsManagerClient({});
+const cloudwatch = new CloudWatchClient({});
 const bucket = requiredEnvironment("DOCUMENTS_BUCKET_NAME");
+const migrationStorage = createS3RepositoryMigrationStorage({
+  bucket,
+  client: s3,
+});
 const queueUrl = requiredEnvironment("CONTENT_PROCESSING_QUEUE_URL");
 const processingDlqUrl = requiredEnvironment("CONTENT_PROCESSING_DLQ_URL");
 const embeddingQueueUrl = requiredEnvironment("EMBEDDING_QUEUE_URL");
@@ -181,6 +203,28 @@ const databaseSecretArn = requiredEnvironment("DATABASE_SECRET_ARN");
 const databaseHost = requiredEnvironment("DATABASE_HOST");
 const DEFER_SECONDS = 60;
 const DISPATCH_BATCH_SIZE = 25;
+const environment = requiredEnvironment("ENVIRONMENT");
+
+async function publishContentPlatformOperationalMetrics(): Promise<void> {
+  const snapshot = await getContentPlatformOperationalSnapshot();
+  const values = contentPlatformMetricValues(snapshot);
+  const metricData: MetricDatum[] = Object.entries(values).map(
+    ([metricName, value]) => ({
+      MetricName: metricName,
+      Value: value,
+      Unit: CONTENT_PLATFORM_METRIC_UNITS[
+        metricName as keyof typeof CONTENT_PLATFORM_METRIC_UNITS
+      ] as StandardUnit,
+      Dimensions: [{ Name: "Environment", Value: environment }],
+    })
+  );
+  await cloudwatch.send(
+    new PutMetricDataCommand({
+      Namespace: "AIStudio/UnifiedContent",
+      MetricData: metricData,
+    })
+  );
+}
 
 let databaseReady: Promise<void> | null = null;
 
@@ -197,7 +241,7 @@ async function ensureDatabaseCredentials(): Promise<void> {
       if (!result.SecretString) throw new Error("Database secret has no SecretString");
       const parsed = JSON.parse(result.SecretString) as Record<string, unknown>;
       if (typeof parsed.username !== "string" || typeof parsed.password !== "string") {
-        throw new Error("Database secret is missing username or password");
+        throw new TypeError("Database secret is missing username or password");
       }
       process.env.DB_HOST = databaseHost;
       process.env.DB_PORT = process.env.DATABASE_PORT ?? "5432";
@@ -226,6 +270,12 @@ async function getConfig(): Promise<ContentPlatformConfig> {
             "CONTENT_PLATFORM_ENABLED",
             "CONTENT_DUAL_WRITE_ENABLED",
             "CONTENT_READ_V2_ENABLED",
+            "CONTENT_REPOSITORY_CUTOVER_ENABLED",
+            "CONTENT_NEXUS_CUTOVER_ENABLED",
+            "CONTENT_ASSISTANT_ARCHITECT_CUTOVER_ENABLED",
+            "CONTENT_RETRIEVAL_SHADOW_ENABLED",
+            "CONTENT_LEGACY_RETIREMENT_ENABLED",
+            "CONTENT_MIGRATION_RECOVERY_DAYS",
             "NEXUS_ATTACHMENT_RETENTION_DAYS",
             "CONTENT_DELETION_GRACE_DAYS",
             "CONTENT_MAX_FILE_SIZE_GB",
@@ -937,9 +987,16 @@ async function storeCanonicalText(
   itemVersionId: string,
   canonicalText: string,
   processorVersion: string,
-): Promise<{ canonicalText?: string; canonicalTextObjectKey?: string }> {
+): Promise<{
+  canonicalText?: string;
+  canonicalTextObjectKey?: string;
+  canonicalTextSha256: string;
+}> {
+  const canonicalTextSha256 = createHash("sha256")
+    .update(canonicalText)
+    .digest("hex");
   if (canonicalText.length <= MAX_INLINE_ARTIFACT_CHARACTERS) {
-    return { canonicalText };
+    return { canonicalText, canonicalTextSha256 };
   }
   const objectKey = canonicalTextArtifactObjectKey(repositoryId, itemVersionId, processorVersion);
   await s3.send(
@@ -948,20 +1005,87 @@ async function storeCanonicalText(
       Key: objectKey,
       Body: canonicalText,
       ContentType: "text/markdown; charset=utf-8",
+      ChecksumSHA256: Buffer.from(canonicalTextSha256, "hex").toString(
+        "base64",
+      ),
     }),
   );
-  return { canonicalTextObjectKey: objectKey };
+  return { canonicalTextObjectKey: objectKey, canonicalTextSha256 };
 }
 
-async function processMessage(message: ContentProcessingMessage, workerId: string): Promise<void> {
-  const job = await claimRepositoryProcessingJob(message, workerId);
-  if (!job) return;
-  if (!job.startedAt) {
+type ClaimedProcessingJob = NonNullable<
+  Awaited<ReturnType<typeof claimRepositoryProcessingJob>>
+> & { startedAt: Date };
+
+interface ProcessingSource {
+  itemId: number;
+  objectKey: string;
+  declaredContentType: string;
+  byteSize: number | null;
+  metadata: unknown;
+  repositoryId: number;
+}
+
+interface MessageProcessingState {
+  message: ContentProcessingMessage;
+  job: ClaimedProcessingJob;
+  source: ProcessingSource;
+  config: ContentPlatformConfig;
+  metrics: JobMetrics;
+  isPdf: boolean;
+  isImage: boolean;
+  isText: boolean;
+  mediaKind: MediaKind | null;
+}
+
+interface InspectionResult {
+  status: "clean" | "not_required";
+  details: Record<string, unknown>;
+}
+
+interface ProcessedContent {
+  segments: PublishableSegment[];
+  canonicalText: string;
+  processorVersion: string;
+  processorName: string;
+  detectedContentType: string;
+  artifactMetadata: Record<string, unknown>;
+  additionalArtifacts?: PublishableArtifact[];
+}
+
+function processingLimitBytes(
+  state: Pick<
+    MessageProcessingState,
+    "config" | "isImage" | "isPdf" | "mediaKind"
+  >,
+): number {
+  if (state.mediaKind) {
+    return Math.min(
+      maximumMediaBytes(state.mediaKind),
+      state.config.maxFileSizeGb * 1024 ** 3,
+    );
+  }
+  const limitMb = state.isPdf
+    ? state.config.maxPdfSizeMb
+    : state.isImage
+      ? state.config.maxImageSizeMb
+      : state.config.maxOfficeSizeMb;
+  return limitMb * 1024 ** 2;
+}
+
+async function loadMessageProcessingState(
+  message: ContentProcessingMessage,
+  workerId: string,
+): Promise<MessageProcessingState | null> {
+  const claimedJob = await claimRepositoryProcessingJob(message, workerId);
+  if (!claimedJob) {
+    return null;
+  }
+  if (!claimedJob.startedAt) {
     throw new Error("Claimed processing job has no durable run start time");
   }
-  let metrics = (job.metrics ?? {}) as JobMetrics;
 
-  const [context] = await executeQuery(
+  const [source] = await executeQuery(
     (db) =>
       db
         .select({
@@ -973,488 +1097,676 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
           repositoryId: repositoryItems.repositoryId,
         })
         .from(repositoryItemVersions)
-        .innerJoin(repositoryItems, eq(repositoryItems.id, repositoryItemVersions.itemId))
+        .innerJoin(
+          repositoryItems,
+          eq(repositoryItems.id, repositoryItemVersions.itemId),
+        )
         .where(eq(repositoryItemVersions.id, message.itemVersionId))
         .limit(1),
     "contentProcessor.getVersion",
   );
-  if (!context?.objectKey) {
+  if (!source?.objectKey) {
     throw new PermanentContentProcessingError(
       "SOURCE_OBJECT_MISSING",
-      "Item version has no S3 object key"
+      "Item version has no S3 object key",
     );
   }
-  if (!isRepositoryObjectKey(context.repositoryId, context.objectKey)) {
+  if (!isRepositoryObjectKey(source.repositoryId, source.objectKey)) {
     throw new PermanentContentProcessingError(
       "SOURCE_NAMESPACE_INVALID",
-      "Item version object key is outside its repository namespace"
+      "Item version object key is outside its repository namespace",
     );
   }
-  const declaredContentType = context.declaredContentType;
-  if (!declaredContentType) {
+  if (!source.declaredContentType) {
     throw new PermanentContentProcessingError(
       "SOURCE_CONTENT_TYPE_MISSING",
-      "Item version has no declared content type"
+      "Item version has no declared content type",
     );
   }
+
+  const declaredContentType = source.declaredContentType;
   const isPdf = declaredContentType === "application/pdf";
   const isImage = isImageContentType(declaredContentType);
   const isText = isCanonicalTextContentType(declaredContentType);
   const mediaKind = mediaKindForContentType(declaredContentType);
-  if (
-    !isPdf &&
-    !isImage &&
-    !isText &&
-    !mediaKind &&
-    !isOfficeContentType(declaredContentType)
-  ) {
+  const isOffice = isOfficeContentType(declaredContentType);
+  if (!isPdf && !isImage && !isText && !mediaKind && !isOffice) {
     throw new PermanentContentProcessingError(
       "SOURCE_CONTENT_TYPE_UNSUPPORTED",
-      "Unified content worker received an unsupported content type"
+      "Unified content worker received an unsupported content type",
     );
   }
 
-  const config = await getConfig();
-  const processingLimitBytes = mediaKind
-    ? Math.min(maximumMediaBytes(mediaKind), config.maxFileSizeGb * 1024 ** 3)
-    : (isPdf
-        ? config.maxPdfSizeMb
-        : isImage
-          ? config.maxImageSizeMb
-          : config.maxOfficeSizeMb) * 1024 ** 2;
-  if (context.byteSize != null && context.byteSize > processingLimitBytes) {
+  const state: MessageProcessingState = {
+    message,
+    job: claimedJob as ClaimedProcessingJob,
+    source: {
+      ...source,
+      objectKey: source.objectKey,
+      declaredContentType,
+    },
+    config: await getConfig(),
+    metrics: (claimedJob.metrics ?? {}) as JobMetrics,
+    isPdf,
+    isImage,
+    isText,
+    mediaKind,
+  };
+  const limitBytes = processingLimitBytes(state);
+  if (source.byteSize != null && source.byteSize > limitBytes) {
     throw new PermanentContentProcessingError(
       "SOURCE_SIZE_LIMIT_EXCEEDED",
-      `File exceeds the configured ${Math.floor(processingLimitBytes / 1024 ** 2)} MiB processing limit`
+      `File exceeds the configured ${Math.floor(limitBytes / 1024 ** 2)} MiB processing limit`,
     );
   }
-  let inspectionStatus: "clean" | "not_required" = "not_required";
-  let inspectionDetails: Record<string, unknown> = { provider: "disabled" };
-  const objectTags = await getObjectTags(context.objectKey);
+  return state;
+}
+
+async function inspectMessageSource(
+  state: MessageProcessingState,
+): Promise<InspectionResult | null> {
+  const objectTags = await getObjectTags(state.source.objectKey);
   const malwareStatus =
     objectTags.find((tag) => tag.Key === "GuardDutyMalwareScanStatus")
       ?.Value ?? null;
-  const inspectionDecision = decideMalwareInspection(config.malwareScanRequired, malwareStatus);
-  if (inspectionDecision.status === "awaiting") {
-    await deferJob(message, metrics, "AWAITING_SECURITY_SCAN", job.attempt);
-    return;
+  const decision = decideMalwareInspection(
+    state.config.malwareScanRequired,
+    malwareStatus,
+  );
+  if (decision.status === "awaiting") {
+    await deferJob(
+      state.message,
+      state.metrics,
+      "AWAITING_SECURITY_SCAN",
+      state.job.attempt,
+    );
+    return null;
   }
-  if (inspectionDecision.status === "blocked") {
-    await blockVersion(message, inspectionDecision.providerStatus);
-    return;
+  if (decision.status === "blocked") {
+    await blockVersion(state.message, decision.providerStatus);
+    return null;
   }
-  if (inspectionDecision.status === "clean") {
-    inspectionStatus = "clean";
-    inspectionDetails = {
-      provider: "guardduty",
-      status: inspectionDecision.providerStatus,
-    };
-  }
+
+  const inspection: InspectionResult = decision.status === "clean"
+    ? {
+        status: "clean",
+        details: {
+          provider: "guardduty",
+          status: decision.providerStatus,
+        },
+      }
+    : {
+        status: "not_required",
+        details: { provider: "disabled" },
+      };
   const permanentTags = permanentRepositoryUploadTags(
     objectTags,
-    inspectionDecision.status
+    decision.status,
   );
   if (!permanentTags) {
     throw new Error("Unsafe upload-tag promotion was rejected");
   }
-  // PutObjectTagging replaces the entire set. Merge only after a terminal clean
-  // decision, preserving GuardDutyMalwareScanStatus so a clean result is not
-  // lost and a blocked result can never be overwritten or bypassed.
   await s3.send(
     new PutObjectTaggingCommand({
       Bucket: bucket,
-      Key: context.objectKey,
+      Key: state.source.objectKey,
       Tagging: { TagSet: permanentTags },
-    })
+    }),
   );
-  if (!config.enabled) {
-    await deferJob(message, metrics, "CONTENT_PLATFORM_DISABLED", job.attempt);
-    return;
+  if (!state.config.enabled) {
+    await deferJob(
+      state.message,
+      state.metrics,
+      "CONTENT_PLATFORM_DISABLED",
+      state.job.attempt,
+    );
+    return null;
   }
+  return inspection;
+}
 
-  let segments: PublishableSegment[];
-  let canonicalText: string;
-  let processorVersion: string;
-  let processorName: string;
-  let detectedContentType = declaredContentType;
-  let artifactMetadata: Record<string, unknown>;
-  let additionalArtifacts: PublishableArtifact[] | undefined;
-  if (mediaKind) {
-    const clientToken = buildManagedServiceClientToken(
-      "bedrock-data-automation",
-      message.jobId,
-      job.startedAt,
-      context.objectKey
-    );
-    const bdaState = reconcileBdaState(
-      metrics,
-      context.objectKey,
-      mediaArtifactObjectPrefix(context.repositoryId, message.itemVersionId),
-      clientToken
-    );
-    metrics = bdaState.metrics;
-    if (bdaState.reset) {
-      log.info("Discarded incompatible BDA invocation state", {
-        jobId: message.jobId,
-        itemVersionId: message.itemVersionId,
-      });
-    }
-    let invocationArn = bdaState.invocationArn;
-    if (!invocationArn) {
-      invocationArn = await startMediaAnalysis({
-        clientToken,
-        sourceObjectKey: context.objectKey,
-        outputPrefix: bdaState.outputPrefix,
-      });
-      metrics = attachBdaInvocation(
-        metrics,
-        context.objectKey,
-        bdaState.outputPrefix,
-        invocationArn
-      );
-      await deferJob(message, metrics, "AWAITING_MEDIA_ANALYSIS", job.attempt);
-      return;
-    }
-    const analysis = await pollMediaAnalysis({
-      invocationArn,
-      outputPrefix: bdaState.outputPrefix,
-      modality: mediaKind,
-      onTerminal: async (status) => {
-        metrics = await persistBdaTerminalState({
-          message,
-          metrics,
-          invocationArn,
-          status,
-        });
+type CompletedMediaAnalysis = Extract<
+  Awaited<ReturnType<typeof pollMediaAnalysis>>,
+  { status: "complete" }
+>;
+
+function recordMediaMetrics(
+  metrics: JobMetrics,
+  analysis: CompletedMediaAnalysis,
+): void {
+  Object.assign(metrics, {
+    provider: "amazon-bedrock-data-automation",
+    bdaResultObjectKey: analysis.objectKey,
+    mediaDurationMs: analysis.output.metadata.durationMs,
+    mediaFormat: analysis.output.metadata.format,
+    mediaCodec: analysis.output.metadata.codec,
+    mediaChannels: analysis.output.metadata.channels,
+    frameRate: analysis.output.metadata.frameRate,
+    frameWidth: analysis.output.metadata.frameWidth,
+    frameHeight: analysis.output.metadata.frameHeight,
+    wordCount: analysis.output.metadata.wordCount,
+    topicCount: analysis.output.metadata.topicCount,
+    shotCount: analysis.output.metadata.shotCount,
+    chapterCount: analysis.output.metadata.chapterCount,
+    speakerCount: analysis.output.metadata.speakerCount,
+  });
+}
+
+function buildMediaArtifacts(input: {
+  source: ProcessingSource;
+  mediaKind: MediaKind;
+  analysis: CompletedMediaAnalysis;
+  transcriptObjectKey: string;
+  largeTranscript: boolean;
+}): PublishableArtifact[] {
+  const { source, mediaKind, analysis, transcriptObjectKey, largeTranscript } =
+    input;
+  const artifacts: PublishableArtifact[] = [
+    {
+      kind: mediaKind,
+      mediaType: source.declaredContentType,
+      objectKey: source.objectKey,
+      timeStartMs: 0,
+      timeEndMs: analysis.output.metadata.durationMs,
+      metadata: { role: "source" },
+    },
+    {
+      kind: "layout",
+      mediaType: "application/json",
+      objectKey: analysis.objectKey,
+      timeStartMs: 0,
+      timeEndMs: analysis.output.metadata.durationMs,
+      metadata: {
+        provider: "amazon-bedrock-data-automation",
+        projectArn: dataAutomationProjectArn,
+      },
+    },
+  ];
+  if (analysis.output.transcriptText) {
+    artifacts.push({
+      kind: "transcript",
+      mediaType: "text/plain",
+      textInline: largeTranscript
+        ? undefined
+        : analysis.output.transcriptText,
+      objectKey: largeTranscript ? transcriptObjectKey : undefined,
+      timeStartMs: 0,
+      timeEndMs: analysis.output.metadata.durationMs,
+      metadata: {
+        provider: "amazon-bedrock-data-automation",
+        speakerCount: analysis.output.metadata.speakerCount,
+        wordCount: analysis.output.metadata.wordCount,
       },
     });
-    if (analysis.status === "pending") {
-      await deferJob(message, metrics, "AWAITING_MEDIA_ANALYSIS", job.attempt);
-      return;
-    }
-    const maximumDurationMs = config.maxMediaHours * 60 * 60 * 1_000;
-    if (analysis.output.metadata.durationMs > maximumDurationMs) {
-      throw new Error(`Media duration exceeds the configured ${config.maxMediaHours} hour limit`);
-    }
+  }
+  if (analysis.output.summary) {
+    artifacts.push({
+      kind: "caption",
+      mediaType: "text/plain",
+      textInline: analysis.output.summary,
+      timeStartMs: 0,
+      timeEndMs: analysis.output.metadata.durationMs,
+      metadata: {
+        provider: "amazon-bedrock-data-automation",
+        role: "media-summary",
+      },
+    });
+  }
+  return artifacts;
+}
 
-    const transcriptObjectKey = `${bdaState.outputPrefix}transcript.txt`;
-    const largeTranscript = analysis.output.transcriptText.length > MAX_INLINE_ARTIFACT_CHARACTERS;
-    if (largeTranscript) {
-      await storeTextDerivative(transcriptObjectKey, analysis.output.transcriptText);
-    }
+async function processMediaContent(
+  state: MessageProcessingState,
+  mediaKind: MediaKind,
+): Promise<ProcessedContent | null> {
+  const { message, source, config, job } = state;
+  const clientToken = buildManagedServiceClientToken(
+    "bedrock-data-automation",
+    message.jobId,
+    job.startedAt,
+    source.objectKey,
+  );
+  const bdaState = reconcileBdaState(
+    state.metrics,
+    source.objectKey,
+    mediaArtifactObjectPrefix(source.repositoryId, message.itemVersionId),
+    clientToken,
+  );
+  state.metrics = bdaState.metrics;
+  if (bdaState.reset) {
+    log.info("Discarded incompatible BDA invocation state", {
+      jobId: message.jobId,
+      itemVersionId: message.itemVersionId,
+    });
+  }
 
-    metrics.provider = "amazon-bedrock-data-automation";
-    metrics.bdaResultObjectKey = analysis.objectKey;
-    metrics.mediaDurationMs = analysis.output.metadata.durationMs;
-    metrics.mediaFormat = analysis.output.metadata.format;
-    metrics.mediaCodec = analysis.output.metadata.codec;
-    metrics.mediaChannels = analysis.output.metadata.channels;
-    metrics.frameRate = analysis.output.metadata.frameRate;
-    metrics.frameWidth = analysis.output.metadata.frameWidth;
-    metrics.frameHeight = analysis.output.metadata.frameHeight;
-    metrics.wordCount = analysis.output.metadata.wordCount;
-    metrics.topicCount = analysis.output.metadata.topicCount;
-    metrics.shotCount = analysis.output.metadata.shotCount;
-    metrics.chapterCount = analysis.output.metadata.chapterCount;
-    metrics.speakerCount = analysis.output.metadata.speakerCount;
-    segments = analysis.output.segments;
-    canonicalText = analysis.output.canonicalText;
-    processorVersion = MEDIA_PROCESSOR_VERSION;
-    processorName = "aistudio-media";
-    artifactMetadata = {
+  let invocationArn = bdaState.invocationArn;
+  if (!invocationArn) {
+    invocationArn = await startMediaAnalysis({
+      clientToken,
+      sourceObjectKey: source.objectKey,
+      outputPrefix: bdaState.outputPrefix,
+    });
+    state.metrics = attachBdaInvocation(
+      state.metrics,
+      source.objectKey,
+      bdaState.outputPrefix,
+      invocationArn,
+    );
+    await deferJob(
+      message,
+      state.metrics,
+      "AWAITING_MEDIA_ANALYSIS",
+      job.attempt,
+    );
+    return null;
+  }
+
+  const analysis = await pollMediaAnalysis({
+    invocationArn,
+    outputPrefix: bdaState.outputPrefix,
+    modality: mediaKind,
+    onTerminal: async (status) => {
+      state.metrics = await persistBdaTerminalState({
+        message,
+        metrics: state.metrics,
+        invocationArn,
+        status,
+      });
+    },
+  });
+  if (analysis.status === "pending") {
+    await deferJob(
+      message,
+      state.metrics,
+      "AWAITING_MEDIA_ANALYSIS",
+      job.attempt,
+    );
+    return null;
+  }
+  const maximumDurationMs = config.maxMediaHours * 60 * 60 * 1_000;
+  if (analysis.output.metadata.durationMs > maximumDurationMs) {
+    throw new Error(
+      `Media duration exceeds the configured ${config.maxMediaHours} hour limit`,
+    );
+  }
+
+  const transcriptObjectKey = `${bdaState.outputPrefix}transcript.txt`;
+  const largeTranscript =
+    analysis.output.transcriptText.length > MAX_INLINE_ARTIFACT_CHARACTERS;
+  if (largeTranscript) {
+    await storeTextDerivative(
+      transcriptObjectKey,
+      analysis.output.transcriptText,
+    );
+  }
+
+  recordMediaMetrics(state.metrics, analysis);
+  const additionalArtifacts = buildMediaArtifacts({
+    source,
+    mediaKind,
+    analysis,
+    transcriptObjectKey,
+    largeTranscript,
+  });
+
+  return {
+    segments: analysis.output.segments,
+    canonicalText: analysis.output.canonicalText,
+    processorVersion: MEDIA_PROCESSOR_VERSION,
+    processorName: "aistudio-media",
+    detectedContentType: source.declaredContentType,
+    artifactMetadata: {
       provider: "amazon-bedrock-data-automation",
       projectArn: dataAutomationProjectArn,
       ...analysis.output.metadata,
-    };
-    additionalArtifacts = [
-      {
-        kind: mediaKind,
-        mediaType: declaredContentType,
-        objectKey: context.objectKey,
-        timeStartMs: 0,
-        timeEndMs: analysis.output.metadata.durationMs,
-        metadata: { role: "source" },
-      },
-      {
-        kind: "layout",
-        mediaType: "application/json",
-        objectKey: analysis.objectKey,
-        timeStartMs: 0,
-        timeEndMs: analysis.output.metadata.durationMs,
-        metadata: {
-          provider: "amazon-bedrock-data-automation",
-          projectArn: dataAutomationProjectArn,
-        },
-      },
-      ...(analysis.output.transcriptText
-        ? [
-            {
-              kind: "transcript" as const,
-              mediaType: "text/plain",
-              textInline: largeTranscript ? undefined : analysis.output.transcriptText,
-              objectKey: largeTranscript ? transcriptObjectKey : undefined,
-              timeStartMs: 0,
-              timeEndMs: analysis.output.metadata.durationMs,
-              metadata: {
-                provider: "amazon-bedrock-data-automation",
-                speakerCount: analysis.output.metadata.speakerCount,
-                wordCount: analysis.output.metadata.wordCount,
-              },
-            },
-          ]
-        : []),
-      ...(analysis.output.summary
-        ? [
-            {
-              kind: "caption" as const,
-              mediaType: "text/plain",
-              textInline: analysis.output.summary,
-              timeStartMs: 0,
-              timeEndMs: analysis.output.metadata.durationMs,
-              metadata: {
-                provider: "amazon-bedrock-data-automation",
-                role: "media-summary",
-              },
-            },
-          ]
-        : []),
-    ];
-  } else {
-    const source = await downloadObject(context.objectKey);
-    if (isPdf) {
-      const extracted = await extractPdfText(source);
-      let pages = extracted.pages;
-      if (extracted.needsOcrPages.length > 0) {
-        if (config.ocrStrategy === "disabled") {
-          throw new Error("PDF contains scanned pages but OCR is disabled");
-        }
-        const textractState = reconcileTextractState(
-          metrics,
-          context.objectKey
-        );
-        metrics = textractState.metrics;
-        if (textractState.reset) {
-          log.info("Discarded incompatible PDF Textract state", {
-            jobId: message.jobId,
-            itemVersionId: message.itemVersionId,
-          });
-        }
-        if (!textractState.jobId) {
-          metrics = attachTextractJob(
-            metrics,
-            context.objectKey,
-            await startTextract(
-              context.objectKey,
-              buildManagedServiceClientToken(
-                "textract",
-                message.jobId,
-                job.startedAt,
-                context.objectKey
-              )
-            )
-          );
-          await deferJob(message, metrics, "AWAITING_OCR", job.attempt);
-          return;
-        }
-        const ocr = await pollTextract(textractState.jobId);
-        if (ocr.status === "pending") {
-          await deferJob(message, metrics, "AWAITING_OCR", job.attempt);
-          return;
-        }
-        const ocrPages = pagesFromTextract(ocr.blocks, extracted.pageCount);
-        const needsOcr = new Set(extracted.needsOcrPages);
-        pages = pages.map((page) => (needsOcr.has(page.page) ? (ocrPages[page.page - 1] ?? page) : page));
-      }
-      segments = segmentPdfPages(pages);
-      canonicalText = pages.map((page) => `<!-- page:${page.page} -->\n${page.text}`).join("\n\n");
-      processorVersion = PDF_PROCESSOR_VERSION;
-      processorName = "aistudio-pdf";
-      artifactMetadata = { pageCount: pages.length };
-    } else if (isOfficeContentType(declaredContentType)) {
-      const extracted = await extractOfficeDocument(source, declaredContentType);
-      segments = extracted.segments;
-      canonicalText = extracted.canonicalText;
-      processorVersion = extracted.processorVersion;
-      processorName = "aistudio-office";
-      artifactMetadata = extracted.metadata;
-    } else if (isText) {
-      const metadata = (context.metadata ?? {}) as Record<string, unknown>;
-      const originalFileName =
-        typeof metadata.originalFileName === "string"
-          ? metadata.originalFileName
-          : undefined;
-      const extracted = extractCanonicalTextDocument(
-        source,
-        declaredContentType,
-        originalFileName
-      );
-      segments = extracted.segments;
-      canonicalText = extracted.canonicalText;
-      processorVersion = extracted.processorVersion;
-      processorName = "aistudio-text";
-      artifactMetadata = extracted.metadata;
-    } else {
-      const prepared = await prepareRepositoryImage(source, declaredContentType);
-      const thumbnailObjectKey = imageArtifactObjectKey(context.repositoryId, message.itemVersionId, "thumbnail.jpg");
-      const ocrSourceObjectKey = imageArtifactObjectKey(context.repositoryId, message.itemVersionId, "ocr-source.jpg");
-      await Promise.all([
-        storeImageDerivative(thumbnailObjectKey, prepared.thumbnail),
-        storeImageDerivative(ocrSourceObjectKey, prepared.ocrImage),
-      ]);
+    },
+    additionalArtifacts,
+  };
+}
 
-      let ocrBlocks: Block[] = [];
-      if (config.ocrStrategy !== "disabled") {
-        const textractState = reconcileTextractState(
-          metrics,
-          ocrSourceObjectKey
-        );
-        metrics = textractState.metrics;
-        if (textractState.reset) {
-          log.info("Discarded incompatible image Textract state", {
-            jobId: message.jobId,
-            itemVersionId: message.itemVersionId,
-          });
-        }
-        if (!textractState.jobId) {
-          metrics = attachTextractJob(
-            metrics,
-            ocrSourceObjectKey,
-            await startTextract(
-              ocrSourceObjectKey,
-              buildManagedServiceClientToken(
-                "textract",
-                message.jobId,
-                job.startedAt,
-                ocrSourceObjectKey
-              )
-            )
-          );
-          await deferJob(message, metrics, "AWAITING_OCR", job.attempt);
-          return;
-        }
-        const ocr = await pollTextract(textractState.jobId);
-        if (ocr.status === "pending") {
-          await deferJob(message, metrics, "AWAITING_OCR", job.attempt);
-          return;
-        }
-        ocrBlocks = ocr.blocks;
-      }
-
-      const ocrLines = imageLinesFromTextract(ocrBlocks);
-      const caption = await captionImage(prepared.captionImage, config.imageCaptionModelId);
-      const searchable = buildImageSearchDocument({
-        caption: caption.caption,
-        ocrLines,
-        width: prepared.width,
-        height: prepared.height,
-        detectedContentType: prepared.detectedContentType,
-      });
-      const ocrArtifactObjectKey = imageArtifactObjectKey(context.repositoryId, message.itemVersionId, "ocr.txt");
-      const largeOcrText = searchable.ocrText.length > MAX_INLINE_ARTIFACT_CHARACTERS;
-      if (largeOcrText) {
-        await storeTextDerivative(ocrArtifactObjectKey, searchable.ocrText);
-      }
-
-      metrics.provider = "amazon-bedrock";
-      metrics.modelId = config.imageCaptionModelId;
-      metrics.inputTokens = caption.inputTokens;
-      metrics.outputTokens = caption.outputTokens;
-      metrics.captionLatencyMs = caption.latencyMs;
-      metrics.imageWidth = prepared.width;
-      metrics.imageHeight = prepared.height;
-      metrics.thumbnailBytes = prepared.thumbnail.byteLength;
-      metrics.ocrLines = ocrLines.length;
-      segments = searchable.segments;
-      canonicalText = searchable.canonicalText;
-      processorVersion = IMAGE_PROCESSOR_VERSION;
-      processorName = "aistudio-image";
-      detectedContentType = prepared.detectedContentType;
-      artifactMetadata = {
-        ...prepared.metadata,
-        captionModelId: config.imageCaptionModelId,
-        captionStopReason: caption.stopReason,
-        ocrStrategy: config.ocrStrategy,
-        ocrLineCount: ocrLines.length,
-        visualIndexEligible: true,
-        visualIndexEnabled: config.visualIndexEnabled,
-      };
-      additionalArtifacts = [
-        {
-          kind: "image",
-          mediaType: prepared.detectedContentType,
-          objectKey: context.objectKey,
-          sha256: prepared.sourceSha256,
-          metadata: prepared.metadata,
-        },
-        {
-          kind: "thumbnail",
-          mediaType: "image/jpeg",
-          objectKey: thumbnailObjectKey,
-          sha256: prepared.thumbnailSha256,
-          metadata: {
-            sourceWidth: prepared.width,
-            sourceHeight: prepared.height,
-          },
-        },
-        {
-          kind: "caption",
-          mediaType: "text/plain",
-          textInline: caption.caption,
-          sourceRegions: [{ x: 0, y: 0, width: 1, height: 1 }],
-          metadata: {
-            provider: "amazon-bedrock",
-            modelId: config.imageCaptionModelId,
-            stopReason: caption.stopReason,
-          },
-        },
-        ...(searchable.ocrText
-          ? [
-              {
-                kind: "layout" as const,
-                mediaType: "text/plain",
-                textInline: largeOcrText ? undefined : searchable.ocrText,
-                objectKey: largeOcrText ? ocrArtifactObjectKey : undefined,
-                sourceRegions: searchable.ocrRegions.slice(0, 1_000),
-                metadata: {
-                  provider: "amazon-textract",
-                  lineCount: ocrLines.length,
-                  regionCount: searchable.ocrRegions.length,
-                },
-              },
-            ]
-          : []),
-      ];
+async function processPdfContent(
+  state: MessageProcessingState,
+  sourceBuffer: Uint8Array,
+): Promise<ProcessedContent | null> {
+  const extracted = await extractPdfText(sourceBuffer);
+  let pages = extracted.pages;
+  if (extracted.needsOcrPages.length > 0) {
+    if (state.config.ocrStrategy === "disabled") {
+      throw new Error("PDF contains scanned pages but OCR is disabled");
     }
+    const textractState = reconcileTextractState(
+      state.metrics,
+      state.source.objectKey,
+    );
+    state.metrics = textractState.metrics;
+    if (textractState.reset) {
+      log.info("Discarded incompatible PDF Textract state", {
+        jobId: state.message.jobId,
+        itemVersionId: state.message.itemVersionId,
+      });
+    }
+    if (!textractState.jobId) {
+      state.metrics = attachTextractJob(
+        state.metrics,
+        state.source.objectKey,
+        await startTextract(
+          state.source.objectKey,
+          buildManagedServiceClientToken(
+            "textract",
+            state.message.jobId,
+            state.job.startedAt,
+            state.source.objectKey,
+          ),
+        ),
+      );
+      await deferJob(
+        state.message,
+        state.metrics,
+        "AWAITING_OCR",
+        state.job.attempt,
+      );
+      return null;
+    }
+    const ocr = await pollTextract(textractState.jobId);
+    if (ocr.status === "pending") {
+      await deferJob(
+        state.message,
+        state.metrics,
+        "AWAITING_OCR",
+        state.job.attempt,
+      );
+      return null;
+    }
+    const ocrPages = pagesFromTextract(ocr.blocks, extracted.pageCount);
+    const pagesNeedingOcr = new Set(extracted.needsOcrPages);
+    pages = pages.map((page) =>
+      pagesNeedingOcr.has(page.page)
+        ? (ocrPages[page.page - 1] ?? page)
+        : page,
+    );
   }
+  return {
+    segments: segmentPdfPages(pages),
+    canonicalText: pages
+      .map((page) => `<!-- page:${page.page} -->\n${page.text}`)
+      .join("\n\n"),
+    processorVersion: PDF_PROCESSOR_VERSION,
+    processorName: "aistudio-pdf",
+    detectedContentType: state.source.declaredContentType,
+    artifactMetadata: { pageCount: pages.length },
+  };
+}
+
+function processOfficeContent(
+  state: MessageProcessingState,
+  sourceBuffer: Uint8Array,
+): Promise<ProcessedContent> {
+  return extractOfficeDocument(
+    sourceBuffer,
+    state.source.declaredContentType,
+  ).then((extracted) => ({
+    segments: extracted.segments,
+    canonicalText: extracted.canonicalText,
+    processorVersion: extracted.processorVersion,
+    processorName: "aistudio-office",
+    detectedContentType: state.source.declaredContentType,
+    artifactMetadata: extracted.metadata,
+  }));
+}
+
+function processTextContent(
+  state: MessageProcessingState,
+  sourceBuffer: Uint8Array,
+): ProcessedContent {
+  const metadata = (state.source.metadata ?? {}) as Record<string, unknown>;
+  const originalFileName =
+    typeof metadata.originalFileName === "string"
+      ? metadata.originalFileName
+      : undefined;
+  const extracted = extractCanonicalTextDocument(
+    sourceBuffer,
+    state.source.declaredContentType,
+    originalFileName,
+  );
+  return {
+    segments: extracted.segments,
+    canonicalText: extracted.canonicalText,
+    processorVersion: extracted.processorVersion,
+    processorName: "aistudio-text",
+    detectedContentType: extracted.detectedContentType,
+    artifactMetadata: extracted.metadata,
+  };
+}
+
+async function resolveImageOcrBlocks(
+  state: MessageProcessingState,
+  ocrSourceObjectKey: string,
+): Promise<Block[] | null> {
+  if (state.config.ocrStrategy === "disabled") {
+    return [];
+  }
+  const textractState = reconcileTextractState(
+    state.metrics,
+    ocrSourceObjectKey,
+  );
+  state.metrics = textractState.metrics;
+  if (textractState.reset) {
+    log.info("Discarded incompatible image Textract state", {
+      jobId: state.message.jobId,
+      itemVersionId: state.message.itemVersionId,
+    });
+  }
+  if (!textractState.jobId) {
+    state.metrics = attachTextractJob(
+      state.metrics,
+      ocrSourceObjectKey,
+      await startTextract(
+        ocrSourceObjectKey,
+        buildManagedServiceClientToken(
+          "textract",
+          state.message.jobId,
+          state.job.startedAt,
+          ocrSourceObjectKey,
+        ),
+      ),
+    );
+    await deferJob(
+      state.message,
+      state.metrics,
+      "AWAITING_OCR",
+      state.job.attempt,
+    );
+    return null;
+  }
+  const ocr = await pollTextract(textractState.jobId);
+  if (ocr.status === "pending") {
+    await deferJob(
+      state.message,
+      state.metrics,
+      "AWAITING_OCR",
+      state.job.attempt,
+    );
+    return null;
+  }
+  return ocr.blocks;
+}
+
+async function processImageContent(
+  state: MessageProcessingState,
+  sourceBuffer: Uint8Array,
+): Promise<ProcessedContent | null> {
+  const prepared = await prepareRepositoryImage(
+    sourceBuffer,
+    state.source.declaredContentType,
+  );
+  const thumbnailObjectKey = imageArtifactObjectKey(
+    state.source.repositoryId,
+    state.message.itemVersionId,
+    "thumbnail.jpg",
+  );
+  const ocrSourceObjectKey = imageArtifactObjectKey(
+    state.source.repositoryId,
+    state.message.itemVersionId,
+    "ocr-source.jpg",
+  );
+  await Promise.all([
+    storeImageDerivative(thumbnailObjectKey, prepared.thumbnail),
+    storeImageDerivative(ocrSourceObjectKey, prepared.ocrImage),
+  ]);
+
+  const ocrBlocks = await resolveImageOcrBlocks(state, ocrSourceObjectKey);
+  if (ocrBlocks === null) {
+    return null;
+  }
+  const ocrLines = imageLinesFromTextract(ocrBlocks);
+  const caption = await captionImage(
+    prepared.captionImage,
+    state.config.imageCaptionModelId,
+  );
+  const searchable = buildImageSearchDocument({
+    caption: caption.caption,
+    ocrLines,
+    width: prepared.width,
+    height: prepared.height,
+    detectedContentType: prepared.detectedContentType,
+  });
+  const ocrArtifactObjectKey = imageArtifactObjectKey(
+    state.source.repositoryId,
+    state.message.itemVersionId,
+    "ocr.txt",
+  );
+  const largeOcrText =
+    searchable.ocrText.length > MAX_INLINE_ARTIFACT_CHARACTERS;
+  if (largeOcrText) {
+    await storeTextDerivative(ocrArtifactObjectKey, searchable.ocrText);
+  }
+
+  Object.assign(state.metrics, {
+    provider: "amazon-bedrock",
+    modelId: state.config.imageCaptionModelId,
+    inputTokens: caption.inputTokens,
+    outputTokens: caption.outputTokens,
+    captionLatencyMs: caption.latencyMs,
+    imageWidth: prepared.width,
+    imageHeight: prepared.height,
+    thumbnailBytes: prepared.thumbnail.byteLength,
+    ocrLines: ocrLines.length,
+  });
+  const additionalArtifacts: PublishableArtifact[] = [
+    {
+      kind: "image",
+      mediaType: prepared.detectedContentType,
+      objectKey: state.source.objectKey,
+      sha256: prepared.sourceSha256,
+      metadata: prepared.metadata,
+    },
+    {
+      kind: "thumbnail",
+      mediaType: "image/jpeg",
+      objectKey: thumbnailObjectKey,
+      sha256: prepared.thumbnailSha256,
+      metadata: {
+        sourceWidth: prepared.width,
+        sourceHeight: prepared.height,
+      },
+    },
+    {
+      kind: "caption",
+      mediaType: "text/plain",
+      textInline: caption.caption,
+      sourceRegions: [{ x: 0, y: 0, width: 1, height: 1 }],
+      metadata: {
+        provider: "amazon-bedrock",
+        modelId: state.config.imageCaptionModelId,
+        stopReason: caption.stopReason,
+      },
+    },
+  ];
+  if (searchable.ocrText) {
+    additionalArtifacts.push({
+      kind: "layout",
+      mediaType: "text/plain",
+      textInline: largeOcrText ? undefined : searchable.ocrText,
+      objectKey: largeOcrText ? ocrArtifactObjectKey : undefined,
+      sourceRegions: searchable.ocrRegions.slice(0, 1_000),
+      metadata: {
+        provider: "amazon-textract",
+        lineCount: ocrLines.length,
+        regionCount: searchable.ocrRegions.length,
+      },
+    });
+  }
+
+  return {
+    segments: searchable.segments,
+    canonicalText: searchable.canonicalText,
+    processorVersion: IMAGE_PROCESSOR_VERSION,
+    processorName: "aistudio-image",
+    detectedContentType: prepared.detectedContentType,
+    artifactMetadata: {
+      ...prepared.metadata,
+      captionModelId: state.config.imageCaptionModelId,
+      captionStopReason: caption.stopReason,
+      ocrStrategy: state.config.ocrStrategy,
+      ocrLineCount: ocrLines.length,
+      visualIndexEligible: true,
+      visualIndexEnabled: state.config.visualIndexEnabled,
+    },
+    additionalArtifacts,
+  };
+}
+
+async function processNonMediaContent(
+  state: MessageProcessingState,
+): Promise<ProcessedContent | null> {
+  const sourceBuffer = await downloadObject(state.source.objectKey);
+  if (state.isPdf) {
+    return processPdfContent(state, sourceBuffer);
+  }
+  if (isOfficeContentType(state.source.declaredContentType)) {
+    return processOfficeContent(state, sourceBuffer);
+  }
+  if (state.isText) {
+    return processTextContent(state, sourceBuffer);
+  }
+  return processImageContent(state, sourceBuffer);
+}
+
+async function publishProcessedContent(
+  state: MessageProcessingState,
+  inspection: InspectionResult,
+  content: ProcessedContent,
+): Promise<void> {
   const canonicalArtifact = await storeCanonicalText(
-    context.repositoryId,
-    message.itemVersionId,
-    canonicalText,
-    processorVersion,
+    state.source.repositoryId,
+    state.message.itemVersionId,
+    content.canonicalText,
+    content.processorVersion,
   );
   const embeddingConfiguration = await getEmbeddingConfiguration();
   const visualEmbeddingConfiguration = repositoryVisualEmbeddingConfiguration(
-    config.visualIndexEnabled,
-    config.visualEmbeddingModelId,
-    config.visualEmbeddingDimensions,
+    state.config.visualIndexEnabled,
+    state.config.visualEmbeddingModelId,
+    state.config.visualEmbeddingDimensions,
   );
   const published = await publishDocumentVersion({
-    itemVersionId: message.itemVersionId,
-    processorVersion,
-    processorName,
-    detectedContentType,
-    inspectionStatus,
-    inspectionDetails,
-    malwareScanRequired: config.malwareScanRequired,
-    artifactMetadata,
-    additionalArtifacts,
+    itemVersionId: state.message.itemVersionId,
+    processorVersion: content.processorVersion,
+    processorName: content.processorName,
+    detectedContentType: content.detectedContentType,
+    inspectionStatus: inspection.status,
+    inspectionDetails: inspection.details,
+    malwareScanRequired: state.config.malwareScanRequired,
+    artifactMetadata: content.artifactMetadata,
+    additionalArtifacts: content.additionalArtifacts,
     embeddingModel: embeddingConfiguration.descriptor,
     embeddingDimensions: embeddingConfiguration.dimensions,
     visualEmbeddingModel: visualEmbeddingConfiguration?.descriptor,
     visualEmbeddingDimensions: visualEmbeddingConfiguration?.dimensions,
     segmentationVersion: "retrieval-v2",
     ...canonicalArtifact,
-    segments,
+    segments: content.segments,
   });
   await queueEmbeddings(
     published.generationId,
@@ -1466,7 +1778,7 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
         .update(repositoryProcessingJobs)
         .set({
           status: "succeeded",
-          metrics: { ...metrics, segments: segments.length },
+          metrics: { ...state.metrics, segments: content.segments.length },
           leaseOwner: null,
           leaseExpiresAt: null,
           lastErrorCode: null,
@@ -1474,9 +1786,31 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
           finishedAt: new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(repositoryProcessingJobs.id, message.jobId)),
+        .where(eq(repositoryProcessingJobs.id, state.message.jobId)),
     "contentProcessor.completeJob",
   );
+}
+
+async function processMessage(
+  message: ContentProcessingMessage,
+  workerId: string,
+): Promise<void> {
+  const state = await loadMessageProcessingState(message, workerId);
+  if (!state) {
+    return;
+  }
+  const inspection = await inspectMessageSource(state);
+  if (!inspection) {
+    return;
+  }
+
+  const content = state.mediaKind
+    ? await processMediaContent(state, state.mediaKind)
+    : await processNonMediaContent(state);
+  if (!content) {
+    return;
+  }
+  await publishProcessedContent(state, inspection, content);
 }
 
 async function handleProcessingFailure(
@@ -1614,10 +1948,18 @@ export async function handler(
           name: "post-deploy-recovery",
           run: async () => {
             const released = await releasePostDeployRecoveryJobs();
+            const releasedGenerations =
+              await releasePostDeployEmbeddingGenerations();
             if (released.length > 0) {
               log.info("Released post-deployment unified content recovery jobs", {
                 count: released.length,
               });
+            }
+            if (releasedGenerations.length > 0) {
+              log.info(
+                "Released post-deployment embedding recovery generations",
+                { count: releasedGenerations.length },
+              );
             }
           },
         },
@@ -1663,6 +2005,31 @@ export async function handler(
             recoverLegacyInlineTextSources(
               `legacy-inline-source-recovery:${context.awsRequestId}`
             ),
+        },
+        {
+          name: "repository-content-migration",
+          run: async () => {
+            const result =
+              await processNextRepositoryMigrationBatch(migrationStorage);
+            if (result.runId) {
+              log.info("Advanced unified content migration run", result);
+            }
+          },
+        },
+        {
+          name: "retrieval-shadow-retention",
+          run: async () => {
+            const deleted = await cleanupRepositoryRetrievalShadow();
+            if (deleted > 0) {
+              log.info("Removed expired retrieval shadow observations", {
+                deleted,
+              });
+            }
+          },
+        },
+        {
+          name: "content-platform-operational-metrics",
+          run: publishContentPlatformOperationalMetrics,
         },
         {
           name: "processing-dlq-reconciliation",

@@ -229,9 +229,14 @@ else
   # leaving the started server unable to reach the DB at all (every query fails
   # from boot; authed specs die on a /dashboard redirect at ~15s each). Use
   # E2E_DATABASE_URL / E2E_DB_SSL to point the suite at a non-default DB.
+  # API_RATE_LIMIT_DEFAULT_RPM: the suite funnels every /api/v1 call through ONE
+  # test user; a warm server runs it fast enough to trip the production 60-RPM
+  # sliding window (decision-* specs 429 and fail). Raise the budget for the
+  # E2E server only — production keeps the code default.
   AUTH_URL="$BASE" NEXT_DIST_DIR=.next-e2e \
   DATABASE_URL="${E2E_DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/aistudio}" \
   ATRIUM_LOCAL_STORAGE_DIR="${E2E_ATRIUM_STORAGE_DIR:-/tmp/aistudio-atrium-e2e-${E2E_PORT}}" \
+  API_RATE_LIMIT_DEFAULT_RPM="${E2E_API_RATE_LIMIT_RPM:-600}" \
   DB_SSL="${E2E_DB_SSL:-false}" PORT="$E2E_PORT" HOSTNAME=127.0.0.1 \
     bun run server.ts > "$SERVER_LOG" 2>&1 &
   STARTED_PID=$!   # the on_exit trap (set at the top) stops it and restores tsconfig.json

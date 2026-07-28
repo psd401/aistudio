@@ -329,7 +329,7 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-describe("publishService.publish", () => {
+function definePublishServicePublishSuite1Part1() {
   it("throws NotFoundError when the object does not exist", async () => {
     publishableRows = [];
     await expect(
@@ -440,7 +440,9 @@ describe("publishService.publish", () => {
     expect(lastSetLevelVisibility).toMatchObject({ level: "internal" });
   });
 
-  it("widenOnly is a NO-OP at equal breadth (already exactly at the target)", async () => {
+  }
+
+function definePublishServicePublishSuite1Part2() {it("widenOnly is a NO-OP at equal breadth (already exactly at the target)", async () => {
     txResults = [[{ id: "o1", visibilityLevel: "internal" }], [{ id: "pub1" }]];
     await publishService.publish(admin, "o1", {
       destination: "intranet",
@@ -541,7 +543,9 @@ describe("publishService.publish", () => {
     expect(adapterPublishCalls).toBe(0);
   });
 
-  it("publishes public_web LIVE for an admin, runs the adapter, and persists its external_ref (Phase 7)", async () => {
+  }
+
+function definePublishServicePublishSuite1Part3() {it("publishes public_web LIVE for an admin, runs the adapter, and persists its external_ref (Phase 7)", async () => {
     // public_web is now a live reader-backed adapter. An admin passes the gate;
     // the publish commits, the adapter returns the anonymous reader URL, and the
     // service persists it as external_ref via a follow-up UPDATE.
@@ -651,7 +655,9 @@ describe("publishService.publish", () => {
     expect(indexObjectMock).toHaveBeenCalledWith("o1", "v-reviewed");
   });
 
-  it("throws ValidationError when the pinned versionId does not belong to the object", async () => {
+  }
+
+function definePublishServicePublishSuite1Part4() {it("throws ValidationError when the pinned versionId does not belong to the object", async () => {
     // getById scopes by object and returns null for a version of another object.
     getVersionByIdMock.mockResolvedValueOnce(null);
     await expect(
@@ -689,9 +695,18 @@ describe("publishService.publish", () => {
       publishService.publish(owner, "o1", { destination: "intranet" })
     ).rejects.toThrow(ValidationError);
   });
-});
+}
 
-describe("publishService.unpublish", () => {
+const definePublishServicePublishSuite1 = () => {
+  definePublishServicePublishSuite1Part1()
+  definePublishServicePublishSuite1Part2()
+  definePublishServicePublishSuite1Part3()
+  definePublishServicePublishSuite1Part4()
+};
+
+describe("publishService.publish", definePublishServicePublishSuite1);
+
+function definePublishServiceUnpublishSuite2Part1() {
   it("throws NotFoundError when the object does not exist", async () => {
     publishableRows = [];
     await expect(
@@ -796,7 +811,9 @@ describe("publishService.unpublish", () => {
     expect(result).toEqual({ unpublished: true });
   });
 
-  it("allows unpublishing public_web when the caller has an explicit publish_public capability", async () => {
+  }
+
+function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing public_web when the caller has an explicit publish_public capability", async () => {
     txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
     const result = await publishService.unpublish(owner, "o1", "public_web", {
       hasPublishPublicCapability: true,
@@ -873,4 +890,11 @@ describe("publishService.unpublish", () => {
     expect(statuses).toContain("unpublished");
     expect(statuses).toContain("draft");
   });
-});
+}
+
+const definePublishServiceUnpublishSuite2 = () => {
+  definePublishServiceUnpublishSuite2Part1()
+  definePublishServiceUnpublishSuite2Part2()
+};
+
+describe("publishService.unpublish", definePublishServiceUnpublishSuite2);

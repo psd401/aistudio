@@ -2,12 +2,12 @@ import { getAssistantArchitectAction } from "@/actions/db/assistant-architect-ac
 import { AssistantArchitectStreaming } from "@/components/features/assistant-architect/assistant-architect-streaming"
 import { PastConversations } from "@/components/features/assistant-architect/past-conversations"
 import { Card, CardContent } from "@/components/ui/card"
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { PageBranding } from "@/components/ui/page-branding"
-import { Terminal, ArrowLeft } from "lucide-react"
+import { ArrowLeft } from "lucide-react"
 import { AssistantArchitectWithRelations } from "@/types"
 import Link from "next/link"
+import { notFound } from "next/navigation"
 
 /**
  * Public route for executing approved Assistant Architect tools.
@@ -40,17 +40,7 @@ export default async function AssistantArchitectToolPage({
     !result.data ||
     result.data.status !== "approved"
   ) {
-    return (
-      <div className="container mx-auto py-12">
-        <Alert variant="destructive">
-          <Terminal className="h-4 w-4" />
-          <AlertTitle>Access Denied</AlertTitle>
-          <AlertDescription>
-            Assistant Architect not found, not approved, or you do not have access.
-          </AlertDescription>
-        </Alert>
-      </div>
-    )
+    notFound()
   }
 
   const tool = result.data as AssistantArchitectWithRelations
@@ -88,4 +78,4 @@ export default async function AssistantArchitectToolPage({
       <PastConversations toolId={tool.id} />
     </div>
   )
-} 
+}

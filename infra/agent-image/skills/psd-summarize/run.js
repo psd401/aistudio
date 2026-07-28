@@ -125,7 +125,7 @@ async function main() {
     ? args.profiles.split(',').map((s) => s.trim()).filter(Boolean)
     : ['students', 'personnel']; // conservative default
   const unknown = profiles.filter((p) => !validProfiles.includes(p));
-  if (unknown.length) fail(`Unknown --profiles: ${unknown.join(', ')}. Valid: ${validProfiles.join(', ')}`);
+  if (unknown.length > 0) fail(`Unknown --profiles: ${unknown.join(', ')}. Valid: ${validProfiles.join(', ')}`);
 
   const output = typeof args.output === 'string' ? args.output : 'summary';
   const length = typeof args.length === 'string' ? args.length : 'standard';

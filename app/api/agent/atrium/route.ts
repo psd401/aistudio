@@ -23,12 +23,26 @@ type AtriumBody = {
 
 function isAllowedMethodPath(method: string, path: string): boolean {
   if (method === "GET") {
-    return path === "" || new RegExp(`^/${IDENTIFIER}$`).test(path)
+    return (
+      path === "" ||
+      new RegExp(`^/${IDENTIFIER}$`).test(path) ||
+      // Committed markdown source — the ONLY way an agent can read a document's
+      // body text (`GET /<id>` returns bodyLocation "proof" with no text).
+      new RegExp(`^/${IDENTIFIER}/source$`).test(path) ||
+      // Authored image assets (#1284): metadata list, plus a bounded
+      // base64 byte read so an agent can copy an image from one object to
+      // another (assets are per-object; a directive may only reference an
+      // asset owned by the object it is embedded in).
+      new RegExp(`^/${IDENTIFIER}/assets$`).test(path) ||
+      new RegExp(`^/${IDENTIFIER}/assets/${IDENTIFIER}/bytes$`).test(path)
+    )
   }
   if (method === "POST") {
     return (
       path === "" ||
-      new RegExp(`^/${IDENTIFIER}/(?:versions|publish)$`).test(path)
+      new RegExp(`^/${IDENTIFIER}/(?:versions|publish)$`).test(path) ||
+      new RegExp(`^/${IDENTIFIER}/assets$`).test(path) ||
+      new RegExp(`^/${IDENTIFIER}/assets/${IDENTIFIER}/complete$`).test(path)
     )
   }
   if (method === "PATCH") {
@@ -45,43 +59,37 @@ function isAllowedMethodPath(method: string, path: string): boolean {
   return false
 }
 
+/** A non-null, non-array object — the shape both `query` and `body` must have. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
+}
+
+/**
+ * `query` is optional, but when present every key must be on the allowlist and
+ * every value a bounded string. An unrecognized key is a rejection, not a
+ * silently dropped field.
+ */
+function isAllowedQuery(value: unknown): boolean {
+  if (value === undefined) return true
+  if (!isPlainObject(value)) return false
+  return Object.entries(value).every(
+    ([key, item]) =>
+      ALLOWED_QUERY_KEYS.has(key) &&
+      typeof item === "string" &&
+      item.length <= 512
+  )
+}
+
+const ENVELOPE_KEYS = new Set(["method", "path", "query", "body"])
+
 function parseBody(value: unknown): AtriumBody | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null
-  const raw = value as Record<string, unknown>
-  if (
-    Object.keys(raw).some(
-      (key) =>
-        key !== "method" &&
-        key !== "path" &&
-        key !== "query" &&
-        key !== "body"
-    ) ||
-    typeof raw.method !== "string" ||
-    typeof raw.path !== "string" ||
-    !isAllowedMethodPath(raw.method, raw.path)
-  ) {
-    return null
-  }
-  if (
-    raw.query !== undefined &&
-    (!raw.query ||
-      typeof raw.query !== "object" ||
-      Array.isArray(raw.query) ||
-      Object.entries(raw.query).some(
-        ([key, item]) =>
-          !ALLOWED_QUERY_KEYS.has(key) ||
-          typeof item !== "string" ||
-          item.length > 512
-      ))
-  ) {
-    return null
-  }
-  if (
-    raw.body !== undefined &&
-    (!raw.body || typeof raw.body !== "object" || Array.isArray(raw.body))
-  ) {
-    return null
-  }
+  if (!isPlainObject(value)) return null
+  const raw = value
+  if (Object.keys(raw).some((key) => !ENVELOPE_KEYS.has(key))) return null
+  if (typeof raw.method !== "string" || typeof raw.path !== "string") return null
+  if (!isAllowedMethodPath(raw.method, raw.path)) return null
+  if (!isAllowedQuery(raw.query)) return null
+  if (raw.body !== undefined && !isPlainObject(raw.body)) return null
   return raw as AtriumBody
 }
 

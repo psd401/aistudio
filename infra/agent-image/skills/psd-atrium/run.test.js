@@ -1,3 +1,4 @@
+
 /**
  * Regression tests for run.js's CLI subcommand → Atrium content REST wiring.
  *
@@ -19,6 +20,8 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
 
 // bun loads every *.test.js into ONE process and common.js reads these env vars at
 // module-load time, so this file MUST set the SAME values as common.test.js — else
@@ -296,21 +299,20 @@ test('create-artifact requires --body-format (exit 1)', async () => {
 });
 
 test('create-artifact reads code from --code-file (avoids the argv-size limit)', async () => {
-  const fs = require('node:fs');
   const os = require('node:os');
   const path = require('node:path');
   // Private, unpredictable temp dir (not os.tmpdir()+predictable name).
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atrium-test-'));
+  const dir = validatedFs.mkdtempSync(path.join(os.tmpdir(), 'atrium-test-'));
   const file = path.join(dir, 'code.html');
   const code = '<html><body><h1>From file</h1><script>x()</script></body></html>';
-  fs.writeFileSync(file, code);
+  validatedFs.writeFileSync(file, code);
   try {
     await run('create-artifact', '--title', 'Big', '--code-file', file, '--body-format', 'html');
     const body = restCalls[0].opts.body;
     expect(body).toMatchObject({ kind: 'artifact', title: 'Big', bodyFormat: 'html', codeEncoding: 'base64' });
     expect(Buffer.from(body.body, 'base64').toString('utf8')).toBe(code);
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    validatedFs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -502,4 +504,297 @@ test('an unknown subcommand fails (exit 1)', async () => {
     code = err.code;
   }
   expect(code).toBe(1);
+});
+
+// ── read-source / assets ─────────────────────────────────────────────────────
+//
+// `read` deliberately cannot return a DOCUMENT's text (it lives in the
+// collaborative store), and until #1284's assets reached this broker an agent
+// could not put a real image in a document at all. These cover both.
+
+const os = require('node:os');
+const nodePath = require('node:path');
+const crypto = require('node:crypto');
+
+const PNG_BYTES = Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+  Buffer.from('fake-png-body'),
+]);
+
+function tmpFile(name, bytes) {
+  const dir = validatedFs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-test-'));
+  const p = nodePath.join(dir, name);
+  validatedFs.writeFileSync(p, bytes);
+  return p;
+}
+
+test('read-source GETs /<id>/source and flags the live-editor gap', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: { versionId: 'v3', bodyFormat: 'markdown', body: '## Title\nA procedure' },
+  });
+
+  await run('read-source', '--id', 'obj-1');
+
+  expect(restCalls[0]).toMatchObject({ method: 'GET', path: '/obj-1/source' });
+  expect(emitted[0].body).toBe('## Title\nA procedure');
+  expect(emitted[0].note).toMatch(/ahead/i);
+});
+
+test('list-assets GETs /<id>/assets', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: [{ id: 'asset-1', state: 'ready' }],
+  });
+
+  await run('list-assets', '--id', 'obj-1');
+
+  expect(restCalls[0]).toMatchObject({ method: 'GET', path: '/obj-1/assets' });
+  expect(emitted[0]).toEqual([{ id: 'asset-1', state: 'ready' }]);
+});
+
+test('upload-asset reserves, PUTs the bytes, completes, and returns an alt-bearing directive', async () => {
+  const file = tmpFile('screenshot.png', PNG_BYTES);
+  const expectedSha = crypto.createHash('sha256').update(PNG_BYTES).digest('base64url');
+  const puts = [];
+  const originalPut = common._internals.putPresignedBytes;
+  common._internals.putPresignedBytes = async (url, headers, bytes) => {
+    puts.push({ url, headers, byteLength: bytes.length });
+  };
+
+  restResponder = (call) => {
+    if (call.path === '/obj-1/assets') {
+      return {
+        approvalRequired: false,
+        status: 201,
+        payload: {
+          id: 'asset-7',
+          embedRef: '::atrium-asset{id="asset-7" alt="screenshot.png"}',
+          upload: {
+            method: 'PUT',
+            url: 'https://s3.example/upload',
+            headers: { 'content-type': 'image/png', 'x-amz-checksum-sha256': 'CHK' },
+          },
+        },
+      };
+    }
+    return {
+      approvalRequired: false,
+      status: 200,
+      payload: {
+        id: 'asset-7',
+        state: 'ready',
+        embedRef: '::atrium-asset{id="asset-7" alt="screenshot.png"}',
+      },
+    };
+  };
+
+  try {
+    await run('upload-asset', '--id', 'obj-1', '--file', file, '--alt', 'Printer control panel');
+  } finally {
+    common._internals.putPresignedBytes = originalPut;
+  }
+
+  expect(restCalls[0]).toMatchObject({ method: 'POST', path: '/obj-1/assets' });
+  expect(restCalls[0].opts.body).toEqual({
+    filename: 'screenshot.png',
+    // Detected from MAGIC BYTES, not the .png suffix.
+    contentType: 'image/png',
+    byteLength: PNG_BYTES.length,
+    sha256: expectedSha,
+    purpose: 'document_image',
+  });
+  expect(puts).toEqual([
+    {
+      url: 'https://s3.example/upload',
+      headers: { 'content-type': 'image/png', 'x-amz-checksum-sha256': 'CHK' },
+      byteLength: PNG_BYTES.length,
+    },
+  ]);
+  // The presigned PUT does NOT go through the broker, so `complete` is the
+  // SECOND broker call, not the third.
+  expect(restCalls[1]).toMatchObject({
+    method: 'POST',
+    path: '/obj-1/assets/asset-7/complete',
+  });
+  expect(restCalls[1].opts.body).toEqual({ sha256: expectedSha });
+  // The caller's --alt wins over the server's filename-derived embedRef.
+  expect(emitted[0].directive).toBe(
+    '::atrium-asset{id="asset-7" alt="Printer control panel"}'
+  );
+});
+
+test('upload-asset sanitizes quotes and braces out of --alt so the directive stays parseable', async () => {
+  const file = tmpFile('shot.png', PNG_BYTES);
+  const originalPut = common._internals.putPresignedBytes;
+  common._internals.putPresignedBytes = async () => {};
+
+  restResponder = (call) => {
+    if (call.path === '/obj-1/assets') {
+      return {
+        approvalRequired: false,
+        status: 201,
+        payload: {
+          id: 'asset-9',
+          embedRef: '::atrium-asset{id="asset-9" alt="shot.png"}',
+          upload: {
+            method: 'PUT',
+            url: 'https://s3.example/upload',
+            headers: { 'content-type': 'image/png', 'x-amz-checksum-sha256': 'CHK' },
+          },
+        },
+      };
+    }
+    return {
+      approvalRequired: false,
+      status: 200,
+      payload: {
+        id: 'asset-9',
+        state: 'ready',
+        embedRef: '::atrium-asset{id="asset-9" alt="shot.png"}',
+      },
+    };
+  };
+
+  try {
+    // A "}" would end the {...} directive early; a quote would end alt="…".
+    await run('upload-asset', '--id', 'obj-1', '--file', file, '--alt', 'Step 1} "done"');
+  } finally {
+    common._internals.putPresignedBytes = originalPut;
+  }
+
+  expect(emitted[0].directive).toBe('::atrium-asset{id="asset-9" alt="Step 1  \'done\'"}');
+  // The whole directive still parses as a single {...} attribute block.
+  expect(emitted[0].directive).toMatch(/^::atrium-asset\{[^{}]*\}$/);
+});
+
+test('upload-asset refuses a non-image regardless of its .png filename (exit 1)', async () => {
+  const file = tmpFile('not-really.png', Buffer.from('%PDF-1.7 this is a pdf'));
+  let code;
+  try {
+    await run('upload-asset', '--id', 'obj-1', '--file', file);
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+  expect(restCalls).toHaveLength(0);
+});
+
+test('upload-asset requires --id and --file (exit 1)', async () => {
+  let code;
+  try {
+    await run('upload-asset', '--id', 'obj-1');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+  expect(restCalls).toHaveLength(0);
+});
+
+test('get-asset decodes the base64 payload to disk', async () => {
+  const out = nodePath.join(
+    validatedFs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-out-')),
+    'copied.png'
+  );
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: {
+      id: 'asset-7',
+      objectId: 'obj-1',
+      filename: 'screenshot.png',
+      contentType: 'image/png',
+      encoding: 'base64',
+      data: PNG_BYTES.toString('base64'),
+    },
+  });
+
+  await run('get-asset', '--id', 'obj-1', '--asset-id', 'asset-7', '--out', out);
+
+  expect(restCalls[0]).toMatchObject({
+    method: 'GET',
+    path: '/obj-1/assets/asset-7/bytes',
+  });
+  expect(validatedFs.readFileSync(out).equals(PNG_BYTES)).toBe(true);
+  expect(emitted[0].byteLength).toBe(PNG_BYTES.length);
+});
+
+test('get-asset refuses to write bytes that are not a real image', async () => {
+  const out = nodePath.join(
+    validatedFs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-bad-')),
+    'evil.png'
+  );
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: {
+      id: 'asset-9',
+      objectId: 'obj-1',
+      filename: 'evil.png',
+      contentType: 'image/png',
+      encoding: 'base64',
+      // Not an image. Atrium normalizes and re-encodes every asset on
+      // completion, so this cannot be a real stored asset — writing it would
+      // put arbitrary response bytes on disk at a caller-named path.
+      data: Buffer.from('<?php system($_GET[0]); ?>').toString('base64'),
+    },
+  });
+
+  let code;
+  try {
+    await run('get-asset', '--id', 'obj-1', '--asset-id', 'asset-9', '--out', out);
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(12);
+  expect(validatedFs.existsSync(out)).toBe(false);
+});
+
+test('create-document accepts a large body via --markdown-file', async () => {
+  const dir = validatedFs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-md-'));
+  const file = nodePath.join(dir, 'big.md');
+  // Comfortably past MAX_ARG_STRLEN (128 KiB), which is exactly the case that
+  // fails with E2BIG when passed as a single argv value.
+  const big = `# Big\n\n${'x'.repeat(200_000)}\n`;
+  validatedFs.writeFileSync(file, big);
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 201,
+    payload: { id: 'obj-big', slug: 'big' },
+  });
+
+  await run('create-document', '--title', 'Big', '--markdown-file', file);
+
+  const sent = restCalls[0].opts.body;
+  expect(sent.codeEncoding).toBe('base64');
+  expect(Buffer.from(sent.body, 'base64').toString('utf8')).toBe(big);
+});
+
+test('edit accepts --body-file, and refuses it combined with --body', async () => {
+  const dir = validatedFs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-edit-'));
+  const file = nodePath.join(dir, 'body.md');
+  validatedFs.writeFileSync(file, '# Replacement');
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 201,
+    payload: { id: 'v2' },
+  });
+
+  await run('edit', '--id', 'obj-1', '--body-file', file);
+  expect(restCalls[0].path).toBe('/obj-1/versions');
+  expect(Buffer.from(restCalls[0].opts.body.body, 'base64').toString('utf8')).toBe(
+    '# Replacement'
+  );
+
+  restCalls = [];
+  let code;
+  try {
+    await run('edit', '--id', 'obj-1', '--body-file', file, '--body', 'inline');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+  expect(restCalls).toHaveLength(0);
 });

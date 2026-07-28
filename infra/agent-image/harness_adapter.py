@@ -10,18 +10,34 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import sys
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from agent_failures import emit_agent_metric, record_failure
 from chat_format import markdown_to_chat
 
 logger = logging.getLogger("harness_adapter")
+
+# Session/agent ids from the gateway event stream are interpolated into a
+# transcript path, so they must be filename-safe before they touch the FS.
+_SAFE_PATH_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def _is_safe_path_component(value: str) -> bool:
+    """True when `value` is safe to interpolate as a single path segment.
+
+    The charset check alone is not enough. `.` is a legal id character, so
+    ".." passes the regex while still walking a directory upward once joined —
+    the one traversal a `/`-free component can still perform. Excluding the
+    dot-only names closes that without banning dots from ids generally.
+    """
+    return bool(_SAFE_PATH_ID.match(value or "")) and value not in {".", ".."}
 
 
 @dataclasses.dataclass
@@ -45,6 +61,12 @@ class TurnResult:
     model: Optional[str] = None
     tokens_in: int = 0
     tokens_out: int = 0
+    # Bedrock prompt-caching split (issue #1089). Sourced from the OpenClaw
+    # session transcript alongside tokens_in/tokens_out — see
+    # OpenClawAdapter._read_turn_usage. Zero when the model doesn't cache or
+    # the transcript read failed.
+    cache_read: int = 0
+    cache_write: int = 0
     latency_ms: int = 0
     messages: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
     tool_calls: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
@@ -80,6 +102,37 @@ def _format_for_chat(text: str) -> str:
     except Exception as exc:  # noqa: BLE001
         logger.warning("chat_format transform failed: %s", str(exc)[:200])
         return text
+
+
+CONTEXT_OVERFLOW_ERROR_CLASS = "ContextOverflow"
+
+
+def _classify_chat_error(error_message: str) -> str:
+    """Name the chat-error class from OpenClaw's message.
+
+    Every chat-channel error arrives as the same generic OpenClawChatError, with
+    the only distinguishing detail buried in free text. That conflates two very
+    different situations:
+
+      • Context overflow — the transcript outgrew the model's window. The work
+        itself is fine; the SESSION is the problem, and continuing it is
+        guaranteed to fail again. Recoverable, but only by starting fresh.
+      • Everything else — a genuine fault. Retrying is not obviously safe.
+
+    Downstream (agent-cron promotion, agent_failures, alarms) has to tell these
+    apart, and the classification belongs HERE, where the message is produced,
+    rather than as a regex duplicated into TypeScript. On 2026-07-27 the prod
+    Morning Dispatch hit overflow twice, burned ~7 minutes retrying, and its
+    failure was indistinguishable from a crash.
+
+    Matches on the stable part of OpenClaw's wording ("context overflow" /
+    "prompt too large"); an unrecognized message keeps the generic class, so a
+    wording change degrades to today's behaviour rather than misclassifying.
+    """
+    lowered = (error_message or "").lower()
+    if "context overflow" in lowered or "prompt too large" in lowered:
+        return CONTEXT_OVERFLOW_ERROR_CLASS
+    return "OpenClawChatError"
 
 
 def _frame_failed_partial(partial: str) -> str:
@@ -152,6 +205,14 @@ class OpenClawAdapter(HarnessAdapter):
     """
 
     DEFAULT_CONFIG_PATH = "/home/node/.openclaw/openclaw.json"
+    # Root of the OpenClaw workspace in this container. Per-session transcripts
+    # (the token-usage ground truth — see _read_turn_usage) live under
+    # <WORKSPACE_DIR>/agents/<agentId>/sessions/<sessionId>.jsonl.
+    WORKSPACE_DIR = "/home/node/.openclaw"
+    # Bounded settle for the transcript read: 6 x 200ms = 1.0s worst case, paid
+    # only when the turn-ending assistant record hasn't landed yet.
+    USAGE_SETTLE_ATTEMPTS = 6
+    USAGE_SETTLE_INTERVAL_S = 0.2
     # Gateway auth token is generated per container at startup (see __init__),
     # never hardcoded. It is passed to the gateway via the --token CLI flag and
     # reused by this adapter's connect envelope, so launcher and client always
@@ -262,6 +323,185 @@ class OpenClawAdapter(HarnessAdapter):
             f"OpenClaw gateway did not become ready within {timeout}s"
         )
 
+    def _sum_transcript_usage(
+        self, path: str, since_ms: int,
+    ) -> Tuple[Dict[str, int], bool]:
+        """Sum assistant-message usage in `path` for records at/after `since_ms`.
+
+        Returns `(totals, complete)`. `complete` is True once the newest
+        in-window assistant record carries a terminal stopReason — OpenClaw
+        writes `stopReason: "toolUse"` on every model call that hands off to a
+        tool and a terminal reason ("stop"/"end_turn") only on the call that
+        ends the turn, so that flag is an exact "no more model calls coming"
+        signal rather than a guess. Never raises.
+        """
+        totals = {"input": 0, "output": 0, "cache_read": 0,
+                  "cache_write": 0, "model_calls": 0}
+        complete = False
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        # A torn final line is expected when we read while the
+                        # runtime is mid-append. Skip it; the settle loop will
+                        # re-read once it lands whole.
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    msg = record.get("message")
+                    if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                        continue
+                    usage = msg.get("usage")
+                    if not isinstance(usage, dict):
+                        continue
+                    ts_ms = self._record_timestamp_ms(record, msg)
+                    if ts_ms is None or ts_ms < since_ms:
+                        continue
+                    totals["model_calls"] += 1
+                    for key, field in (
+                        ("input", "input"),
+                        ("output", "output"),
+                        ("cache_read", "cacheRead"),
+                        ("cache_write", "cacheWrite"),
+                    ):
+                        value = usage.get(field)
+                        if isinstance(value, int) and value > 0:
+                            totals[key] += value
+                    stop_reason = msg.get("stopReason")
+                    # Recomputed per record so the LAST in-window record wins:
+                    # an earlier terminal reason followed by more model calls
+                    # (nudge/compaction legs) must not latch `complete` True.
+                    complete = stop_reason != "toolUse"
+        except OSError as exc:
+            logger.warning(
+                "transcript usage read failed: %s", str(exc)[:200],
+            )
+        return totals, complete
+
+    @staticmethod
+    def _record_timestamp_ms(record: dict, msg: dict) -> Optional[int]:
+        """Epoch-ms timestamp of a transcript record, or None if unreadable."""
+        ts = msg.get("timestamp")
+        if isinstance(ts, (int, float)):
+            return int(ts)
+        # Top-level transcript timestamps are ISO-8601 with a trailing Z, which
+        # fromisoformat only accepts from 3.11 — normalize for older runtimes.
+        ts = record.get("timestamp")
+        if isinstance(ts, str) and ts:
+            try:
+                parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            return int(parsed.timestamp() * 1000)
+        return None
+
+    def _read_turn_usage(
+        self,
+        session_uuid: Optional[str],
+        agent_id: Optional[str],
+        since_ms: int,
+    ) -> Dict[str, int]:
+        """Read this turn's real token usage from the OpenClaw session transcript.
+
+        This is the ground-truth capture point after #1159/#1384 moved chat off
+        the Mantle proxy: the gateway's WebSocket event stream carries NO usage
+        (verified against the 2026.7.1-beta.2 protocol — neither `event:chat`
+        state=final nor any `event:agent` lifecycle payload includes a usage
+        object), so the old WS-scraping path could only ever report 0. The
+        runtime does persist per-model-call usage — input / output / cacheRead /
+        cacheWrite — onto each assistant record in
+        `<workspace>/agents/<agentId>/sessions/<sessionId>.jsonl`, which is
+        local to this container and written with plain appends (no userspace
+        buffering), so it is readable the moment the runtime writes it.
+
+        The turn window is `[since_ms, now]` — the caller passes the chat.send
+        wall clock, and every model call this turn is stamped after it. The
+        wrapper reads this BEFORE any nudge leg is sent, so the nudge's own
+        window cannot overlap and the two are summed rather than double-counted.
+
+        Known under-count: if the session rotates mid-turn (compaction), the
+        last sessionId seen on the event stream names the NEW transcript and
+        the pre-rotation model calls are not billed. Preferred over the
+        alternative failure mode — reading a stale file and billing another
+        turn's calls twice.
+
+        Returns zeros on any failure; telemetry must never break a chat turn.
+        """
+        empty = {"input": 0, "output": 0, "cache_read": 0,
+                 "cache_write": 0, "model_calls": 0}
+        if not session_uuid:
+            logger.warning(
+                "transcript usage skipped — no sessionId on the event stream",
+            )
+            return empty
+        # The session/agent ids arrive on the gateway event stream, so treat
+        # them as untrusted path input. The charset alone is NOT sufficient:
+        # `.` is a legal id character, so ".." satisfies the regex and
+        # `<workspace>/agents/../sessions/<id>.jsonl` normalizes one directory
+        # above the intended agent — enough to read and bill another
+        # transcript. Reject dot-only components explicitly.
+        if not _is_safe_path_component(session_uuid) or (
+            agent_id and not _is_safe_path_component(agent_id)
+        ):
+            logger.warning("transcript usage skipped — unsafe session/agent id")
+            return empty
+
+        sessions_dir = os.path.join(
+            self.WORKSPACE_DIR, "agents", agent_id or "main", "sessions",
+        )
+        path = os.path.join(sessions_dir, f"{session_uuid}.jsonl")
+        # Containment: the resolved file must sit directly beneath the resolved
+        # sessions directory. Mirrors the Zip-Slip containment workspace_sync.py
+        # applies to restore paths, and catches a SYMLINKED transcript.
+        #
+        # It does NOT substitute for the dot-name rejection above. `sessions_dir`
+        # is built from the same untrusted agent_id, so an agent_id of ".."
+        # moves BOTH sides of this comparison to the escaped directory and they
+        # match — the check would pass on a path that already climbed out. The
+        # component check is what stops that vector; this is defence against a
+        # different one. (test_dot_dot_agent_id_cannot_climb_out_of_the_agent_
+        # directory fails if the dot-name rejection is removed, even with this
+        # check in place — verified, not assumed.)
+        resolved = os.path.realpath(path)
+        resolved_dir = os.path.realpath(sessions_dir)
+        if os.path.dirname(resolved) != resolved_dir:
+            logger.warning(
+                "transcript usage skipped — resolved path escapes the sessions "
+                "directory",
+            )
+            return empty
+        if not os.path.exists(resolved):
+            logger.warning("transcript usage skipped — no transcript at %s", path)
+            return empty
+        path = resolved
+
+        # OpenClaw creates the transcript at session start and appends the
+        # turn-ending assistant record before it emits the chat `final` event
+        # we broke out on, so the first read almost always lands complete. The
+        # settle loop only covers the append/emit race; a turn that made no
+        # model calls at all (aborted pre-inference) never goes `complete` and
+        # pays the full bounded wait before returning its honest zeros.
+        totals = empty
+        for attempt in range(self.USAGE_SETTLE_ATTEMPTS):
+            totals, complete = self._sum_transcript_usage(path, since_ms)
+            if complete:
+                return totals
+            if attempt < self.USAGE_SETTLE_ATTEMPTS - 1:
+                time.sleep(self.USAGE_SETTLE_INTERVAL_S)
+        logger.warning(
+            "transcript usage did not settle within %.1fs — reporting partial "
+            "(model_calls=%d session=%s)",
+            (self.USAGE_SETTLE_ATTEMPTS - 1) * self.USAGE_SETTLE_INTERVAL_S,
+            totals["model_calls"],
+            session_uuid,
+        )
+        return totals
+
     def process(
         self,
         message: str,
@@ -290,8 +530,16 @@ class OpenClawAdapter(HarnessAdapter):
         # first content entry; we'll append assistant + tool entries as
         # the event stream completes.
         observed_model: Optional[str] = model_override
+        # OpenClaw's internal session UUID + agent id, learned from the
+        # gateway's lifecycle events. They name the transcript file this turn's
+        # token usage is read back from (see _read_turn_usage) — our sessionKey
+        # is NOT the filename.
+        observed_session_uuid: Optional[str] = None
+        observed_agent_id: Optional[str] = None
         tokens_in = 0
         tokens_out = 0
+        cache_read = 0
+        cache_write = 0
         tool_calls: List[Dict[str, Any]] = []
         tool_starts: Dict[str, Dict[str, Any]] = {}
         messages_log: List[Dict[str, Any]] = [
@@ -602,6 +850,16 @@ class OpenClawAdapter(HarnessAdapter):
                         agent_payload = msg.get("payload", {})
                         stream = agent_payload.get("stream")
                         data = agent_payload.get("data", {})
+                        # Lifecycle events carry sessionId/agentId at the
+                        # payload top level (streaming events don't) — capture
+                        # them wherever they appear so the post-turn transcript
+                        # read can find the right file.
+                        _sid = agent_payload.get("sessionId")
+                        if isinstance(_sid, str) and _sid:
+                            observed_session_uuid = _sid
+                        _aid = agent_payload.get("agentId")
+                        if isinstance(_aid, str) and _aid:
+                            observed_agent_id = _aid
                         if isinstance(data, dict):
                             model_hint = data.get("model") or data.get("modelId")
                             if isinstance(model_hint, str) and model_hint:
@@ -755,10 +1013,14 @@ class OpenClawAdapter(HarnessAdapter):
                             # initialization conflicted" surfaces, so recording
                             # it is what makes the session-conflict class of
                             # failure visible in agent_failures / the alarm.
+                            # Context overflow gets its own class so the caller
+                            # can recover it (fresh session) instead of
+                            # treating it as a crash. See _classify_chat_error.
+                            err_class = _classify_chat_error(str(err_msg))
                             record_failure(
                                 source="harness",
                                 severity="error",
-                                error_class="OpenClawChatError",
+                                error_class=err_class,
                                 error_message=str(err_msg),
                                 session_id=session_id,
                                 model=observed_model or model_override,
@@ -775,16 +1037,30 @@ class OpenClawAdapter(HarnessAdapter):
                                 if response_text
                                 else ""
                             )
+                            # An errored turn can still have burned tokens
+                            # before it failed — bill them rather than
+                            # reporting a free turn.
+                            err_usage = self._read_turn_usage(
+                                observed_session_uuid, observed_agent_id,
+                                int(chat_send_at * 1000),
+                            )
+                            if err_usage["model_calls"] > 0:
+                                tokens_in = err_usage["input"]
+                                tokens_out = err_usage["output"]
+                                cache_read = err_usage["cache_read"]
+                                cache_write = err_usage["cache_write"]
                             return TurnResult(
                                 text=err_text,
                                 model=observed_model,
                                 tokens_in=tokens_in,
                                 tokens_out=tokens_out,
+                                cache_read=cache_read,
+                                cache_write=cache_write,
                                 latency_ms=int((time.time() - chat_send_at) * 1000),
                                 messages=messages_log,
                                 tool_calls=tool_calls,
                                 failed=True,
-                                error_class="OpenClawChatError",
+                                error_class=err_class,
                             )
 
                         elif state == "aborted":
@@ -869,6 +1145,21 @@ class OpenClawAdapter(HarnessAdapter):
 
         latency_ms = int((time.time() - chat_send_at) * 1000)
 
+        # Real token usage for this turn (issue #1384 follow-up). Deliberately
+        # read HERE — after the event loop, before the empty-turn nudge below
+        # recurses — so the nudge leg's transcript window starts after this read
+        # and the two legs sum instead of double-counting. The WS-scraped
+        # tokens_in/tokens_out above stay as the fallback for a harness that
+        # does surface usage on its events; OpenClaw does not.
+        turn_usage = self._read_turn_usage(
+            observed_session_uuid, observed_agent_id, int(chat_send_at * 1000),
+        )
+        if turn_usage["model_calls"] > 0:
+            tokens_in = turn_usage["input"]
+            tokens_out = turn_usage["output"]
+            cache_read = turn_usage["cache_read"]
+            cache_write = turn_usage["cache_write"]
+
         def _result(
             text: str,
             *,
@@ -885,6 +1176,8 @@ class OpenClawAdapter(HarnessAdapter):
                 model=observed_model,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
+                cache_read=cache_read,
+                cache_write=cache_write,
                 latency_ms=latency_ms,
                 messages=log,
                 tool_calls=tool_calls,
@@ -960,15 +1253,23 @@ class OpenClawAdapter(HarnessAdapter):
 
         logger.info(
             "chat turn ok: resp_len=%d last_state=%s event_counts=%s "
-            "model=%s tokens_in=%d tokens_out=%d latency_ms=%d tool_calls=%d",
+            "model=%s tokens_in=%d tokens_out=%d cache_read=%d cache_write=%d "
+            "latency_ms=%d tool_calls=%d transcript_model_calls=%d",
             len(response_text),
             last_state,
             json.dumps(event_counts),
             observed_model or "unknown",
             tokens_in,
             tokens_out,
+            cache_read,
+            cache_write,
             latency_ms,
             len(tool_calls),
+            # Exact model round-trip count observed in the transcript. Logged
+            # for cross-checking the (heuristic) len(tool_calls)+1 that still
+            # feeds agent_messages.model_call_count — not wired in, so the
+            # existing metric's history stays comparable.
+            turn_usage["model_calls"],
         )
 
         if response_text.strip():
@@ -1000,8 +1301,13 @@ class OpenClawAdapter(HarnessAdapter):
                 return TurnResult(
                     text=nudged.text,
                     model=nudged.model or observed_model,
+                    # Safe to sum: this leg's transcript window was read before
+                    # the nudge was sent, so the nudge's own window starts after
+                    # it and the two never cover the same model call.
                     tokens_in=tokens_in + nudged.tokens_in,
                     tokens_out=tokens_out + nudged.tokens_out,
+                    cache_read=cache_read + nudged.cache_read,
+                    cache_write=cache_write + nudged.cache_write,
                     latency_ms=int((time.time() - chat_send_at) * 1000),
                     messages=messages_log + nudged.messages,
                     tool_calls=merged_tools,

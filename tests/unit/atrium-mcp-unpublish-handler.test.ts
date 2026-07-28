@@ -67,7 +67,7 @@ jest.mock("@/lib/content/surface-helpers", () => ({
 // The handlers import the REST-shared zod schemas at module scope; supply real
 // (minimal) zod schemas so the module loads without pulling the full REST layer.
 jest.mock("@/lib/content/rest", () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+
   const { z } = require("zod") as typeof import("zod");
   const grant = z.object({ kind: z.string(), value: z.string() });
   return {

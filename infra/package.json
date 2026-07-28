@@ -17,14 +17,14 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.18",
     "@types/jest": "^30.0.0",
-    "@types/node": "26.1.0",
+    "@types/node": "26.1.1",
     "@types/pdf-parse": "^1.1.5",
     "@types/xml2js": "^0.4.14",
     "aws-cdk": "^2.1104.0",
     "jest": "^30.2.0",
     "ts-jest": "^29.4.6",
-    "ts-node": "^10.9.2",
-    "typescript": "~6.0.3"
+    "tsx": "^4.23.1",
+    "typescript": "~7.0.2"
   },
   "dependencies": {
     "@aws-cdk/aws-amplify-alpha": "^2.209.0-alpha.0",
@@ -51,7 +51,7 @@
     "marked": "^9.0.0",
     "node-fetch": "^3.3.2",
     "pdf-parse": "^2.4.5",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.3",
     "xml2js": "^0.6.2"
   }
 }

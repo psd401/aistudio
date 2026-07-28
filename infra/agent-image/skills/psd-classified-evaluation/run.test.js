@@ -24,7 +24,7 @@ function capture(fn) {
   try {
     result = fn();
   } catch (err) {
-    if (!/^__exit_/.test(err.message)) throw err;
+    if (!err.message.startsWith('__exit_')) throw err;
   } finally {
     process.exit = origExit;
     process.stdout.write = origWrite;

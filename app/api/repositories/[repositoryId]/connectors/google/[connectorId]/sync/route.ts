@@ -7,6 +7,7 @@ import {
   requireRepositoryConnectorManager,
 } from "@/lib/repositories/google-drive/route-access";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
+import { ErrorFactories } from "@/lib/error-utils";
 
 export async function POST(
   _request: Request,
@@ -27,7 +28,10 @@ export async function POST(
     if (
       !(await connectorBelongsToRepository(params.connectorId, repositoryId))
     ) {
-      throw new Error("Connector not found");
+      throw ErrorFactories.authzResourceNotFound(
+        "Google Drive connector",
+        params.connectorId
+      );
     }
     await requestGoogleDriveSync({
       connectorId: params.connectorId,

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * render.js — psd-hyperframes.render
  *
@@ -19,8 +20,10 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
 
-const fs = require('node:fs');
+
+
 
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 
@@ -86,7 +89,7 @@ function validateEmail(email) {
   if (typeof email !== 'string' || email.length === 0 || email.length > 320) return false;
   if (email.includes('/') || /\s/.test(email)) return false;
   const at = email.indexOf('@');
-  if (at <= 0 || email.indexOf('@', at + 1) !== -1) return false;
+  if (at <= 0 || email.includes('@', at + 1)) return false;
   const domain = email.slice(at + 1);
   const dot = domain.lastIndexOf('.');
   if (dot <= 0 || dot === domain.length - 1) return false;
@@ -95,7 +98,7 @@ function validateEmail(email) {
 
 function readFileOrFail(filePath, flag) {
   try {
-    return fs.readFileSync(filePath, 'utf8');
+    return validatedFs.readFileSync(filePath, 'utf8');
   } catch (err) {
     fail(`${flag} file not found or unreadable: ${filePath} (${err.message})`, 'bad_args');
     return ''; // unreachable — fail() exits
@@ -110,115 +113,76 @@ function coerceInt(value, flag) {
   return n;
 }
 
-const COMPOSITION_ID_ATTR = 'data-composition-id';
+function isAsciiLetter(character) {
+  const code = character?.charCodeAt(0) ?? 0;
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
 
-// `\w` for the purposes of a regex word boundary: [A-Za-z0-9_].
-function isWordChar(ch) {
-  if (ch === undefined || ch === '') return false;
+function isHtmlWhitespace(character) {
   return (
-    (ch >= 'a' && ch <= 'z') ||
-    (ch >= 'A' && ch <= 'Z') ||
-    (ch >= '0' && ch <= '9') ||
-    ch === '_'
+    character === ' ' ||
+    character === '\t' ||
+    character === '\n' ||
+    character === '\r' ||
+    character === '\f'
   );
 }
 
-function isAsciiLetter(ch) {
-  return ch !== undefined && ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'));
-}
-
-// Reproduces the `\bdata-composition-id\b` word-boundary match without a regex,
-// so `data-composition-ids` / `xdata-composition-id` still do not count as hits.
-//
-// `tag` always starts at its '<'. Matches at index < 2 are rejected because the
-// old regex's mandatory `<[a-zA-Z]` consumed the first character of the element
-// name, so the literal could only ever align at '<' + 2 or later. Without this,
-// an element *named* data-composition-id (`<data-composition-id>` is a legal
-// custom-element name) would be mistaken for an element *carrying* the
-// attribute, and attacker-supplied HTML could steer the insertion point.
-function hasCompositionIdAttr(tag) {
-  for (
-    let k = tag.indexOf(COMPOSITION_ID_ATTR);
-    k !== -1;
-    k = tag.indexOf(COMPOSITION_ID_ATTR, k + 1)
-  ) {
-    if (k < 2) continue; // the element name, not an attribute
-    const before = tag[k - 1];
-    const after = tag[k + COMPOSITION_ID_ATTR.length];
-    if (!isWordChar(before) && !isWordChar(after)) return true;
+function isCompositionIdAttributeAt(html, index) {
+  if (html[index] !== 'd') return false;
+  const target = 'data-composition-id';
+  if (!html.startsWith(target, index)) return false;
+  // A closing quote is also a legal boundary: browsers (and the regex this
+  // scanner replaced) treat `class="x"data-composition-id` as carrying the
+  // attribute even without the separating space.
+  const before = html[index - 1];
+  if (!isHtmlWhitespace(before) && before !== '"' && before !== "'") {
+    return false;
   }
-  return false;
+  const after = html[index + target.length];
+  return (
+    after === '=' ||
+    after === '>' ||
+    after === '/' ||
+    isHtmlWhitespace(after)
+  );
 }
 
 /**
- * Index just past the end of the first opening tag carrying data-composition-id,
- * or -1 if there is none.
- *
- * Linear, non-backtracking scan. The regex this replaces —
- * /<[a-zA-Z][^>]*\bdata-composition-id\b[^>]*>/ — has two unbounded `[^>]*`
- * runs around the literal, so on HTML full of `<` with no `>` the engine
- * re-scans to end-of-input from every candidate start: quadratic in the input
- * size and CodeQL's js/polynomial-redos. `html` is attacker-controllable
- * (--html / --file), so that is a real denial-of-service lever, not a
- * theoretical one. Here each character is visited at most twice: the inner
- * loop stops at the tag terminator `>` OR at a stray `<` outside an attribute
- * value, and the outer loop resumes from wherever the inner one stopped, so no
- * region is ever rescanned.
- *
- * The scan tracks quoting, because `<` and `>` are both legal inside a quoted
- * attribute value. Ignoring that broke real compositions: in
- * `<div title="a < b" data-composition-id="root">` a naive scan abandons the
- * tag at the quoted `<`, finds no root, and the narration `<audio>` gets
- * appended outside the composition — where hyperframes does not mux it, so the
- * audio silently vanishes from the MP4. Being quote-aware about `>` as well
- * also fixes the same bug in the original regex, whose `[^>]*` stopped dead at
- * a quoted `>` (`title="a>b"`).
+ * Locate the end of the first opening tag with data-composition-id in one
+ * bounded pass. Tracking quotes avoids treating attribute text or `>` inside
+ * a quoted value as markup and avoids a backtracking regex on supplied HTML.
  */
-function findCompositionRootTagEnd(html) {
-  const n = html.length;
-  let i = 0;
-  while (i < n) {
-    if (html[i] !== '<') {
-      i++;
-      continue;
-    }
-    // Only an element open tag starts attribute-quote tracking. The regex this
-    // replaces could begin a match solely at `<` followed by an ASCII letter,
-    // so a comment, a doctype, a closing `</` or a stray `<` in text is just
-    // ordinary text and must be stepped over. Entering the quote state for it
-    // was a regression: in `<!-- don't inject here --><div
-    // data-composition-id="root">` the apostrophe opened a quote that never
-    // closed, so every following `>` was swallowed, the scan ran to
-    // end-of-input and returned -1 — and injectAudioElement then appended the
-    // narration outside the composition root, where hyperframes does not mux
-    // it and the audio silently vanishes from the MP4.
-    if (!isAsciiLetter(html[i + 1])) {
-      i++;
-      continue;
-    }
-    let j = i + 1;
-    let quote = ''; // the open quote character while inside an attribute value
-    while (j < n) {
-      const ch = html[j];
-      if (quote) {
-        if (ch === quote) quote = '';
-      } else if (ch === '"' || ch === "'") {
-        quote = ch;
-      } else if (ch === '>' || ch === '<') {
-        break;
+function findCompositionRootOpenTagEnd(html) {
+  let inOpeningTag = false;
+  let quote = '';
+  let hasCompositionId = false;
+
+  for (let index = 0; index < html.length; index += 1) {
+    const character = html[index];
+    if (!inOpeningTag) {
+      if (character === '<' && isAsciiLetter(html[index + 1])) {
+        inOpeningTag = true;
+        hasCompositionId = false;
       }
-      j++;
-    }
-    if (j >= n) return -1; // unterminated tag — nothing further can match
-    if (html[j] === '<') {
-      i = j; // malformed: restart at the nested '<' without rescanning
       continue;
     }
-    // `html[i + 1]` is already known to be an ASCII letter (guarded above).
-    if (hasCompositionIdAttr(html.slice(i, j + 1))) {
-      return j + 1;
+
+    if (quote) {
+      if (character === quote) quote = '';
+      continue;
     }
-    i = j + 1;
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === '>') {
+      if (hasCompositionId) return index + 1;
+      inOpeningTag = false;
+      continue;
+    }
+
+    if (isCompositionIdAttributeAt(html, index)) hasCompositionId = true;
   }
   return -1;
 }
@@ -234,13 +198,134 @@ function injectAudioElement(html, url, durationSeconds) {
   const audio =
     `<audio src="${url}" data-start="0" data-duration="${durationSeconds}" ` +
     `data-track-index="0" data-volume="1"></audio>`;
-  const at = findCompositionRootTagEnd(html);
-  if (at !== -1) {
+  const rootOpenEnd = findCompositionRootOpenTagEnd(html);
+  if (rootOpenEnd !== -1) {
+    const at = rootOpenEnd;
     return `${html.slice(0, at)}\n${audio}${html.slice(at)}`;
   }
   const bodyAt = html.toLowerCase().lastIndexOf('</body>');
   if (bodyAt !== -1) return `${html.slice(0, bodyAt)}${audio}\n${html.slice(bodyAt)}`;
   return `${html}\n${audio}`;
+}
+
+function resolveCompositionHtml(args) {
+  let html;
+  if (args.file && args.file !== true) {
+    html = readFileOrFail(String(args.file), '--file');
+  } else if (args.html && args.html !== true) {
+    html = String(args.html);
+  } else {
+    fail(
+      'Provide the composition via --file <path> or --html "<inline html>"',
+      'bad_args'
+    );
+  }
+  if (!html || html.trim().length === 0) {
+    fail('Composition HTML is empty', 'bad_args');
+  }
+  return html;
+}
+
+function resolveOptionalSource(args, inlineName, fileName) {
+  if (args[fileName] === true) {
+    fail(`--${fileName.replace(/_/g, '-')} requires a file path`, 'bad_args');
+  }
+  if (args[fileName]) {
+    return readFileOrFail(
+      String(args[fileName]),
+      `--${fileName.replace(/_/g, '-')}`
+    );
+  }
+  if (args[inlineName] === true) {
+    fail(`--${inlineName} requires a value`, 'bad_args');
+  }
+  return args[inlineName] ? String(args[inlineName]) : undefined;
+}
+
+function resolveAudioUrl(args) {
+  if (args.audio_url === true) {
+    fail('--audio-url requires a URL', 'bad_args');
+  }
+  if (!args.audio_url) return undefined;
+  const url = String(args.audio_url);
+  if (
+    !/^https:\/\/[^\s"'<>]+$/.test(url) &&
+    !/^data:audio\/[^\s"'<>]+$/i.test(url)
+  ) {
+    fail(
+      '--audio-url must be an https:// URL or a data:audio/ URI (no spaces or quotes)',
+      'bad_args'
+    );
+  }
+  return url;
+}
+
+function validateCompositionSize(html, css, js) {
+  const bytes =
+    Buffer.byteLength(html, 'utf8') +
+    (css ? Buffer.byteLength(css, 'utf8') : 0) +
+    (js ? Buffer.byteLength(js, 'utf8') : 0);
+  if (bytes > MAX_COMPOSITION_BYTES) {
+    fail(
+      `Composition (html+css+js) is ${bytes} bytes; the ${MAX_COMPOSITION_BYTES}-byte cap keeps the invoke under the Lambda payload limit. Trim the scene.`,
+      'bad_args'
+    );
+  }
+}
+
+function resolveDuration(args) {
+  if (args.duration === undefined || args.duration === true) {
+    fail('--duration <seconds> is required', 'bad_args');
+  }
+  const duration = Number(args.duration);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    fail('--duration must be a positive number of seconds', 'bad_args');
+  }
+  if (duration > MAX_DURATION_SECONDS) {
+    fail(
+      `--duration must be ${MAX_DURATION_SECONDS}s (3 min) or fewer. Split longer scenes.`,
+      'bad_args'
+    );
+  }
+  return duration;
+}
+
+function resolveFps(args, durationSeconds) {
+  if (args.fps === true) fail('--fps requires a value', 'bad_args');
+  const fps = args.fps ? coerceInt(args.fps, '--fps') : DEFAULT_FPS;
+  if (fps < MIN_FPS || fps > MAX_FPS) {
+    fail(`--fps must be between ${MIN_FPS} and ${MAX_FPS}`, 'bad_args');
+  }
+  const totalFrames = Math.ceil(fps * durationSeconds);
+  if (totalFrames > MAX_FRAMES) {
+    fail(
+      `fps × duration = ${totalFrames} frames exceeds the ${MAX_FRAMES}-frame render budget. ` +
+        `Use --fps ${Math.max(MIN_FPS, Math.floor(MAX_FRAMES / durationSeconds))} or fewer at ${durationSeconds}s.`,
+      'bad_args'
+    );
+  }
+  return fps;
+}
+
+function resolveDimensions(args) {
+  if (args.width === true) fail('--width requires a value', 'bad_args');
+  if (args.height === true) fail('--height requires a value', 'bad_args');
+  const width = args.width ? coerceInt(args.width, '--width') : DEFAULT_WIDTH;
+  const height = args.height
+    ? coerceInt(args.height, '--height')
+    : DEFAULT_HEIGHT;
+  for (const [name, dimension] of [
+    ['--width', width],
+    ['--height', height],
+  ]) {
+    if (dimension < MIN_DIMENSION || dimension > MAX_DIMENSION) {
+      fail(
+        `${name} must be between ${MIN_DIMENSION} and ${MAX_DIMENSION}`,
+        'bad_args'
+      );
+    }
+  }
+  return { width, height };
 }
 
 /**
@@ -251,106 +336,17 @@ function buildPayload(args) {
   if (!validateEmail(args.user)) {
     fail('--user is required and must be a valid email', 'bad_args');
   }
-
-  let html;
-  if (args.file && args.file !== true) {
-    html = readFileOrFail(String(args.file), '--file');
-  } else if (args.html && args.html !== true) {
-    html = String(args.html);
-  } else {
-    fail('Provide the composition via --file <path> or --html "<inline html>"', 'bad_args');
-  }
-  if (!html || html.trim().length === 0) {
-    fail('Composition HTML is empty', 'bad_args');
-  }
-
-  // A value-bearing flag given with no value (last token, or immediately
-  // followed by another --flag) parses to boolean `true`. Fail loudly instead
-  // of silently dropping the intended CSS/JS (the --file path already does).
-  let css;
-  if (args.css_file === true) fail('--css-file requires a file path', 'bad_args');
-  else if (args.css_file) css = readFileOrFail(String(args.css_file), '--css-file');
-  else if (args.css === true) fail('--css requires a value', 'bad_args');
-  else if (args.css) css = String(args.css);
-
-  let js;
-  if (args.js_file === true) fail('--js-file requires a file path', 'bad_args');
-  else if (args.js_file) js = readFileOrFail(String(args.js_file), '--js-file');
-  else if (args.js === true) fail('--js requires a value', 'bad_args');
-  else if (args.js) js = String(args.js);
-
-  // Optional audio track (narration / music). hyperframes has no separate audio
-  // input — it muxes audio from an <audio> element in the composition. --audio-url
-  // points at a hosted clip (e.g. a psd-tts MP3 URL); we inject the <audio> below.
-  // Restricted to https:// / data:audio so the value is safe to interpolate into
-  // the src attribute (no quotes/spaces/angle brackets).
-  let audioUrl;
-  if (args.audio_url === true) fail('--audio-url requires a URL', 'bad_args');
-  else if (args.audio_url) {
-    audioUrl = String(args.audio_url);
-    if (!/^https:\/\/[^\s"'<>]+$/.test(audioUrl) && !/^data:audio\/[^\s"'<>]+$/i.test(audioUrl)) {
-      fail('--audio-url must be an https:// URL or a data:audio/ URI (no spaces or quotes)', 'bad_args');
-    }
-  }
-
-  const compositionBytes =
-    Buffer.byteLength(html, 'utf8') +
-    (css ? Buffer.byteLength(css, 'utf8') : 0) +
-    (js ? Buffer.byteLength(js, 'utf8') : 0);
-  if (compositionBytes > MAX_COMPOSITION_BYTES) {
-    fail(
-      `Composition (html+css+js) is ${compositionBytes} bytes; the ${MAX_COMPOSITION_BYTES}-byte cap keeps the invoke under the Lambda payload limit. Trim the scene.`,
-      'bad_args',
-    );
-  }
-
-  if (args.duration === undefined || args.duration === true) {
-    fail('--duration <seconds> is required', 'bad_args');
-  }
-  const durationSeconds = Number(args.duration);
-  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
-    fail('--duration must be a positive number of seconds', 'bad_args');
-  }
-  if (durationSeconds > MAX_DURATION_SECONDS) {
-    fail(`--duration must be ${MAX_DURATION_SECONDS}s (3 min) or fewer. Split longer scenes.`, 'bad_args');
-  }
-
-  if (args.fps === true) fail('--fps requires a value', 'bad_args');
-  const fps = args.fps ? coerceInt(args.fps, '--fps') : DEFAULT_FPS;
-  if (fps < MIN_FPS || fps > MAX_FPS) {
-    fail(`--fps must be between ${MIN_FPS} and ${MAX_FPS}`, 'bad_args');
-  }
-  // Render time scales with total frames (fps × duration), not seconds — a longer
-  // scene must lower its fps to fit the budget. Fail fast; the Lambda re-checks.
-  const totalFrames = Math.ceil(fps * durationSeconds);
-  if (totalFrames > MAX_FRAMES) {
-    fail(
-      `fps × duration = ${totalFrames} frames exceeds the ${MAX_FRAMES}-frame render budget. ` +
-        `Use --fps ${Math.max(MIN_FPS, Math.floor(MAX_FRAMES / durationSeconds))} or fewer at ${durationSeconds}s.`,
-      'bad_args'
-    );
-  }
-
-  if (args.width === true) fail('--width requires a value', 'bad_args');
-  if (args.height === true) fail('--height requires a value', 'bad_args');
-  const width = args.width ? coerceInt(args.width, '--width') : DEFAULT_WIDTH;
-  const height = args.height ? coerceInt(args.height, '--height') : DEFAULT_HEIGHT;
-  for (const [name, dim] of [['--width', width], ['--height', height]]) {
-    if (dim < MIN_DIMENSION || dim > MAX_DIMENSION) {
-      fail(`${name} must be between ${MIN_DIMENSION} and ${MAX_DIMENSION}`, 'bad_args');
-    }
-  }
-
-  // --dry-run is a bare flag; a value after it is a mistake (e.g. `--dry-run
-  // true` would otherwise silently disable it). Reject rather than mis-parse.
+  let html = resolveCompositionHtml(args);
+  const css = resolveOptionalSource(args, 'css', 'css_file');
+  const js = resolveOptionalSource(args, 'js', 'js_file');
+  const audioUrl = resolveAudioUrl(args);
+  validateCompositionSize(html, css, js);
+  const durationSeconds = resolveDuration(args);
+  const fps = resolveFps(args, durationSeconds);
+  const { width, height } = resolveDimensions(args);
   if (args.dry_run !== undefined && args.dry_run !== true) {
     fail('--dry-run is a flag and takes no value', 'bad_args');
   }
-
-  // Bake the audio track into the composition root now that the duration is
-  // known: data-duration spans the whole video so hyperframes pads/trims the
-  // source clip to fit. Done here (not in the Lambda) so the render service
-  // needs no change — it just renders whatever composition it receives.
   if (audioUrl) html = injectAudioElement(html, audioUrl, durationSeconds);
 
   const payload = { html, durationSeconds, fps, width, height, userEmail: args.user };
@@ -446,8 +442,8 @@ module.exports = {
   main,
   parseArgs,
   buildPayload,
+  findCompositionRootOpenTagEnd,
   injectAudioElement,
-  findCompositionRootTagEnd,
   invokeRender,
   validateEmail,
   MAX_DURATION_SECONDS,

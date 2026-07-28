@@ -29,7 +29,9 @@ jest.mock(
   })
 )
 jest.mock("lucide-react", () => {
-  const Icon = (props: React.SVGProps<SVGSVGElement>) => <svg {...props} />
+  function Icon(props: React.SVGProps<SVGSVGElement>) {
+    return <svg {...props} />
+  }
   return {
     ArrowLeft: Icon,
     Edit: Icon,
@@ -44,8 +46,9 @@ jest.mock("@/components/ui/tabs", () => {
   const React = require("react")
   const pass =
     (tag: string) =>
-    ({ children }: { children?: React.ReactNode }) =>
-      React.createElement(tag, null, children)
+    function MockPassThrough({ children }: { children?: React.ReactNode }) {
+      return React.createElement(tag, null, children)
+    }
   return {
     Tabs: pass("div"),
     TabsContent: pass("div"),

@@ -14,7 +14,7 @@ import { ALL_ADMIN_PAGES, adminPageMetadata } from "@/app/(protected)/admin/_lib
 const ADMIN_DIR = path.join(process.cwd(), "app", "(protected)", "admin")
 
 function discoverAdminRoutes(): string[] {
-  // eslint-disable-next-line security/detect-non-literal-fs-filename -- constant path derived from process.cwd(), no user input
+
   const entries = readdirSync(ADMIN_DIR, { recursive: true }) as string[]
   return entries
     .filter(entry => entry.endsWith(`${path.sep}page.tsx`))

@@ -49,7 +49,6 @@ Current capability identifiers (from the manifest):
 | `decision-capture` | Nexus Decision Capture |
 | `voice-mode` | Nexus voice conversations |
 | `atrium-content` | Atrium content workspace (documents, artifacts, collections) |
-| `skill.redrover` | Owner-bound agent access to district Red Rover absence and vacancy data |
 | `internal-performance-monitoring` | Internal performance dashboards |
 | `internal-system-administration` | Internal system admin tooling |
 
@@ -60,9 +59,13 @@ Current capability identifiers (from the manifest):
 > for role-gated access.
 
 Owner-bound internal agent operations still act with a human owner's authority.
-For example, the trusted Red Rover broker checks the owner's
-`skill.redrover` capability before it may resolve the district-wide shared
-credential. This remains a human role capability; it is not an API-key scope.
+When such an operation resolves a district-wide *shared* credential rather than
+the caller's own per-user credential, the trusted broker
+(`app/api/agent/credentials/route.ts`) gates it on a `skill.*` capability held
+by the owner — for example the image-generation broker checks
+`skill.image-gen`. These remain human role capabilities; they are not API-key
+scopes. Operations backed by the caller's own credential (Freshservice) are
+deliberately ungated: the credential is the authorization.
 
 ---
 

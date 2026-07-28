@@ -5,9 +5,12 @@ import {
   EnvironmentConfig,
 } from "../../lib/constructs"
 
-describe("SharedVPC Construct", () => {
-  let app: cdk.App
-  let stack: cdk.Stack
+let app: cdk.App
+let stack: cdk.Stack
+
+function defineSharedVPCConstructSuite1Part1() {
+
+
 
   beforeEach(() => {
     app = new cdk.App()
@@ -16,7 +19,7 @@ describe("SharedVPC Construct", () => {
     })
   })
 
-  describe("Development Environment", () => {
+
     test("creates VPC with correct subnet configuration", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
@@ -88,7 +91,9 @@ describe("SharedVPC Construct", () => {
       expect(Object.keys(vpcEndpoints).length).toBe(2)
     })
 
-    test("enables VPC flow logs to S3", () => {
+    }
+
+function defineSharedVPCConstructSuite1Part2() {test("enables VPC flow logs to S3", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
 
@@ -130,9 +135,9 @@ describe("SharedVPC Construct", () => {
         MaxAggregationInterval: 600, // 10 minutes
       })
     })
-  })
 
-  describe("Production Environment", () => {
+
+
     test("uses NAT gateways for reliability", () => {
       // Arrange
       const config = EnvironmentConfig.get("prod")
@@ -195,7 +200,9 @@ describe("SharedVPC Construct", () => {
       expect(Object.keys(flowLogs).length).toBe(2)
     })
 
-    test("configures proper lifecycle for flow log storage", () => {
+    }
+
+function defineSharedVPCConstructSuite1Part3() {test("configures proper lifecycle for flow log storage", () => {
       // Arrange
       const config = EnvironmentConfig.get("prod")
 
@@ -227,9 +234,9 @@ describe("SharedVPC Construct", () => {
         },
       })
     })
-  })
 
-  describe("VPC Endpoints Configuration", () => {
+
+
     test("disables all endpoints when enableGatewayEndpoints is false", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
@@ -281,7 +288,9 @@ describe("SharedVPC Construct", () => {
       })
     })
 
-    test("production gets additional interface endpoints when enabled", () => {
+    }
+
+function defineSharedVPCConstructSuite1Part4() {test("production gets additional interface endpoints when enabled", () => {
       // Arrange
       const devConfig = EnvironmentConfig.get("dev")
       const prodConfig = EnvironmentConfig.get("prod")
@@ -337,9 +346,9 @@ describe("SharedVPC Construct", () => {
       const vpcEndpoints = template.findResources("AWS::EC2::VPCEndpoint")
       expect(Object.keys(vpcEndpoints).length).toBe(0)
     })
-  })
 
-  describe("Subnet Configuration", () => {
+
+
     test("provides helper method for workload-specific subnets", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
@@ -388,10 +397,12 @@ describe("SharedVPC Construct", () => {
         CidrBlock: Match.stringLikeRegexp(".*\\.0/22"),
       })
     })
-  })
 
-  describe("Flow Logs", () => {
-    test("can disable flow logs", () => {
+
+
+    }
+
+function defineSharedVPCConstructSuite1Part5() {test("can disable flow logs", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
 
@@ -412,9 +423,9 @@ describe("SharedVPC Construct", () => {
         0 // No flow log bucket
       )
     })
-  })
 
-  describe("Tags", () => {
+
+
     test("tags subnets appropriately", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
@@ -440,9 +451,9 @@ describe("SharedVPC Construct", () => {
         }),
       })
     })
-  })
 
-  describe("Cost Optimization (Issue #617)", () => {
+
+
     test("interface endpoints disabled by default saves ~$428/month", () => {
       // Arrange
       const devConfig = EnvironmentConfig.get("dev")
@@ -485,5 +496,15 @@ describe("SharedVPC Construct", () => {
       }).length
       expect(sgCount).toBe(0)
     })
-  })
-})
+
+}
+
+const defineSharedVPCConstructSuite1 = () => {
+  defineSharedVPCConstructSuite1Part1()
+  defineSharedVPCConstructSuite1Part2()
+  defineSharedVPCConstructSuite1Part3()
+  defineSharedVPCConstructSuite1Part4()
+  defineSharedVPCConstructSuite1Part5()
+};
+
+describe("SharedVPC Construct", defineSharedVPCConstructSuite1)

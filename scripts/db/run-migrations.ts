@@ -15,11 +15,12 @@
  *   DB_SSL - Set to 'false' for local development without SSL
  */
 
-import fs from "node:fs";
+
 import path from "node:path";
 import postgres from "postgres";
 import { scriptLogger as log } from "./script-logger";
 import { MIGRATION_FILES, SCHEMA_DIR } from "./migration-manifest";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 // Default to local PostgreSQL connection
 const DATABASE_URL =
@@ -28,6 +29,26 @@ const DATABASE_URL =
 const sslEnabled = process.env.DB_SSL !== "false";
 
 const schemaPath = path.join(process.cwd(), SCHEMA_DIR);
+
+async function executeStatements(
+  sql: ReturnType<typeof postgres>,
+  statements: string[]
+): Promise<void> {
+  for (const statement of statements) {
+    const trimmed = statement.trim();
+    if (!trimmed || trimmed === ";") continue;
+
+    try {
+      await sql.unsafe(trimmed);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const isIdempotentConflict =
+        message.includes("already exists") ||
+        message.includes("duplicate key");
+      if (!isIdempotentConflict) throw error;
+    }
+  }
+}
 
 async function main(): Promise<void> {
   log.section("AI Studio - Database Migration Runner");
@@ -81,7 +102,7 @@ async function main(): Promise<void> {
 
       const filePath = path.join(schemaPath, migrationFile);
 
-      if (!fs.existsSync(filePath)) {
+      if (!validatedFs.existsSync(filePath)) {
         log.warn(`Migration file not found: ${migrationFile}`);
         continue;
       }
@@ -90,30 +111,10 @@ async function main(): Promise<void> {
       const startTime = Date.now();
 
       try {
-        const sqlContent = fs.readFileSync(filePath, "utf8");
+        const sqlContent = validatedFs.readFileSync(filePath, "utf8");
 
         // Split and execute statements
-        const statements = splitSqlStatements(sqlContent);
-
-        for (const statement of statements) {
-          const trimmed = statement.trim();
-          if (!trimmed || trimmed === ";") continue;
-
-          try {
-            await sql.unsafe(trimmed);
-          } catch (err: unknown) {
-            const error = err as Error;
-            // Ignore "already exists" errors for idempotency
-            if (
-              error.message?.includes("already exists") ||
-              error.message?.includes("duplicate key")
-            ) {
-              // Expected for idempotent migrations
-            } else {
-              throw error;
-            }
-          }
-        }
+        await executeStatements(sql, splitSqlStatements(sqlContent));
 
         // Record success
         const duration = Date.now() - startTime;

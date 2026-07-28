@@ -46,45 +46,55 @@ const DATE_RANGE_OPTIONS: { value: StatsDateRange; label: string }[] = [
   { value: "all", label: "All time" },
 ]
 
-export function ActivityPageClient() {
+interface ActivityCollectionResult<T> {
+  data?: { items: T[]; total: number } | null
+  isSuccess: boolean
+  message: string
+}
+
+type ActivityLoader<T> = (
+  filters: ActivityFilters & { page: number; pageSize: number }
+) => Promise<ActivityCollectionResult<T>>
+
+function useActivityCollection<T>(
+  loader: ActivityLoader<T>,
+  errorTitle: string,
+  filters: ActivityFilters,
+  page: number,
+  pageSize: number
+) {
   const { toast } = useToast()
+  const [data, setData] = useState<T[]>([])
+  const [total, setTotal] = useState(0)
+  const [loading, setLoading] = useState(false)
 
-  // State management
-  const [activeTab, setActiveTab] = useState<ActivityTab>("nexus")
+  const reload = useCallback(async () => {
+    setLoading(true)
+    const result = await loader({ ...filters, page, pageSize })
+    if (result.isSuccess && result.data) {
+      setData(result.data.items)
+      setTotal(result.data.total)
+    } else {
+      toast({
+        variant: "destructive",
+        title: errorTitle,
+        description: result.message,
+      })
+    }
+    setLoading(false)
+  }, [errorTitle, filters, loader, page, pageSize, toast])
+
+  return { data, loading, reload, total }
+}
+
+function useActivityStatistics(statsDateRange: StatsDateRange) {
+  const { toast } = useToast()
   const [stats, setStats] = useState<ActivityStats | null>(null)
-  const [statsLoading, setStatsLoading] = useState(true)
-  const [statsDateRange, setStatsDateRange] = useState<StatsDateRange>("30d")
+  const [loading, setLoading] = useState(true)
 
-  // Filters and pagination state
-  const [filters, setFilters] = useState<ActivityFilters>({})
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(25)
-
-  // Tab-specific data
-  const [nexusData, setNexusData] = useState<NexusActivityItem[]>([])
-  const [nexusTotal, setNexusTotal] = useState(0)
-  const [nexusLoading, setNexusLoading] = useState(false)
-
-  const [assistantConvData, setAssistantConvData] = useState<AssistantConversationItem[]>([])
-  const [assistantConvTotal, setAssistantConvTotal] = useState(0)
-  const [assistantConvLoading, setAssistantConvLoading] = useState(false)
-
-  const [comparisonData, setComparisonData] = useState<ComparisonActivityItem[]>([])
-  const [comparisonTotal, setComparisonTotal] = useState(0)
-  const [comparisonLoading, setComparisonLoading] = useState(false)
-
-  // Detail sheet state
-  const [selectedNexus, setSelectedNexus] = useState<NexusActivityItem | null>(null)
-  const [nexusDetailOpen, setNexusDetailOpen] = useState(false)
-
-  const [selectedComparison, setSelectedComparison] = useState<ComparisonActivityItem | null>(null)
-  const [comparisonDetailOpen, setComparisonDetailOpen] = useState(false)
-
-  // Load stats
-  const loadStats = useCallback(async () => {
-    setStatsLoading(true)
+  const reload = useCallback(async () => {
+    setLoading(true)
     const result = await getActivityStats(statsDateRange)
-
     if (result.isSuccess && result.data) {
       setStats(result.data)
     } else {
@@ -94,79 +104,156 @@ export function ActivityPageClient() {
         description: result.message,
       })
     }
-    setStatsLoading(false)
+    setLoading(false)
   }, [statsDateRange, toast])
 
-  // Load Nexus data
-  const loadNexusData = useCallback(async () => {
-    setNexusLoading(true)
-    const result = await getNexusActivity({ ...filters, page, pageSize })
-
-    if (result.isSuccess && result.data) {
-      setNexusData(result.data.items)
-      setNexusTotal(result.data.total)
-    } else {
-      toast({
-        variant: "destructive",
-        title: "Error loading Nexus activity",
-        description: result.message,
-      })
-    }
-    setNexusLoading(false)
-  }, [filters, page, pageSize, toast])
-
-  // Load Assistant Architect conversation data
-  const loadAssistantConvData = useCallback(async () => {
-    setAssistantConvLoading(true)
-    const result = await getAssistantConversationActivity({ ...filters, page, pageSize })
-
-    if (result.isSuccess && result.data) {
-      setAssistantConvData(result.data.items)
-      setAssistantConvTotal(result.data.total)
-    } else {
-      toast({
-        variant: "destructive",
-        title: "Error loading assistant conversations",
-        description: result.message,
-      })
-    }
-    setAssistantConvLoading(false)
-  }, [filters, page, pageSize, toast])
-
-  // Load Comparison data
-  const loadComparisonData = useCallback(async () => {
-    setComparisonLoading(true)
-    const result = await getComparisonActivity({ ...filters, page, pageSize })
-
-    if (result.isSuccess && result.data) {
-      setComparisonData(result.data.items)
-      setComparisonTotal(result.data.total)
-    } else {
-      toast({
-        variant: "destructive",
-        title: "Error loading comparison activity",
-        description: result.message,
-      })
-    }
-    setComparisonLoading(false)
-  }, [filters, page, pageSize, toast])
-
-  // Load stats on mount
   useEffect(() => {
-    loadStats()
-  }, [loadStats])
-
-  // Load data when tab changes or filters/pagination change
-  useEffect(() => {
-    if (activeTab === "nexus") {
-      loadNexusData()
-    } else if (activeTab === "executions") {
-      loadAssistantConvData()
-    } else if (activeTab === "comparisons") {
-      loadComparisonData()
+    let cancelled = false
+    void Promise.resolve().then(() => {
+      if (!cancelled) return reload()
+    })
+    return () => {
+      cancelled = true
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, page, pageSize])
+  }, [reload])
+
+  return { loading, reload, stats }
+}
+
+function ActivityHeader({
+  handleRefresh,
+  statsDateRange,
+  setStatsDateRange,
+}: {
+  handleRefresh: () => void
+  statsDateRange: StatsDateRange
+  setStatsDateRange: (range: StatsDateRange) => void
+}) {
+  return (
+    <div className="mb-6">
+      <PageBranding />
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900">
+            Activity Dashboard
+          </h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            Monitor platform usage across Nexus, Assistant Architect, and Model
+            Compare
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">Stats range:</span>
+            <Select
+              value={statsDateRange}
+              onValueChange={(value) =>
+                setStatsDateRange(value as StatsDateRange)
+              }
+            >
+              <SelectTrigger className="w-[160px] h-8 text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {DATE_RANGE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <Button variant="outline" size="sm" onClick={handleRefresh}>
+            <IconRefresh className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function toNexusActivity(
+  item: AssistantConversationItem
+): NexusActivityItem {
+  return {
+    id: item.id,
+    userId: item.userId,
+    userEmail: item.userEmail,
+    userName: item.userName,
+    title: item.title,
+    provider: "assistant-architect",
+    modelUsed: item.modelUsed,
+    messageCount: item.messageCount,
+    totalTokens: item.totalTokens,
+    costUsd: item.costUsd,
+    lastMessageAt: item.lastMessageAt,
+    createdAt: item.createdAt,
+  }
+}
+
+interface ActivityCollectionStatus {
+  loading: boolean
+  reload: () => Promise<void>
+  total: number
+}
+
+function getActiveCollection(
+  tab: ActivityTab,
+  collections: Record<ActivityTab, ActivityCollectionStatus>
+): ActivityCollectionStatus {
+  return collections[tab]
+}
+
+export function ActivityPageClient() {
+  const [activeTab, setActiveTab] = useState<ActivityTab>("nexus")
+  const [statsDateRange, setStatsDateRange] = useState<StatsDateRange>("30d")
+  const [filters, setFilters] = useState<ActivityFilters>({})
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(25)
+  const [selectedNexus, setSelectedNexus] = useState<NexusActivityItem | null>(null)
+  const [nexusDetailOpen, setNexusDetailOpen] = useState(false)
+  const [selectedComparison, setSelectedComparison] = useState<ComparisonActivityItem | null>(null)
+  const [comparisonDetailOpen, setComparisonDetailOpen] = useState(false)
+  const statistics = useActivityStatistics(statsDateRange)
+  const nexus = useActivityCollection(
+    getNexusActivity,
+    "Error loading Nexus activity",
+    filters,
+    page,
+    pageSize
+  )
+  const assistant = useActivityCollection(
+    getAssistantConversationActivity,
+    "Error loading assistant conversations",
+    filters,
+    page,
+    pageSize
+  )
+  const comparisons = useActivityCollection(
+    getComparisonActivity,
+    "Error loading comparison activity",
+    filters,
+    page,
+    pageSize
+  )
+
+  const activeCollection = getActiveCollection(activeTab, {
+    comparisons,
+    executions: assistant,
+    nexus,
+  })
+  const activeReload = activeCollection.reload
+
+  useEffect(() => {
+    let cancelled = false
+    void Promise.resolve().then(() => {
+      if (!cancelled) return activeReload()
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [activeReload])
 
   // Handle filter changes
   const handleFiltersChange = useCallback((newFilters: ActivityFilters) => {
@@ -174,39 +261,14 @@ export function ActivityPageClient() {
     setPage(1) // Reset to first page on filter change
   }, [])
 
-  // Apply filters after they change
-  useEffect(() => {
-    if (activeTab === "nexus") {
-      loadNexusData()
-    } else if (activeTab === "executions") {
-      loadAssistantConvData()
-    } else if (activeTab === "comparisons") {
-      loadComparisonData()
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters])
-
-  // Handle refresh
   const handleRefresh = useCallback(async () => {
-    await Promise.all([
-      loadStats(),
-      activeTab === "nexus"
-        ? loadNexusData()
-        : activeTab === "executions"
-          ? loadAssistantConvData()
-          : loadComparisonData(),
-    ])
-  }, [activeTab, loadStats, loadNexusData, loadAssistantConvData, loadComparisonData])
+    await Promise.all([statistics.reload(), activeCollection.reload()])
+  }, [activeCollection, statistics])
 
   // Handle tab change
   const handleTabChange = useCallback((value: string) => {
     setActiveTab(value as ActivityTab)
     setPage(1) // Reset pagination when switching tabs
-  }, [])
-
-  // Handle page change
-  const handlePageChange = useCallback((newPage: number) => {
-    setPage(newPage)
   }, [])
 
   // Handle page size change
@@ -223,21 +285,7 @@ export function ActivityPageClient() {
 
   // View assistant conversation detail via the Nexus detail sheet (same underlying conversation)
   const handleViewAssistantConv = useCallback((item: AssistantConversationItem) => {
-    const asNexusItem: NexusActivityItem = {
-      id: item.id,
-      userId: item.userId,
-      userEmail: item.userEmail,
-      userName: item.userName,
-      title: item.title,
-      provider: "assistant-architect",
-      modelUsed: item.modelUsed,
-      messageCount: item.messageCount,
-      totalTokens: item.totalTokens,
-      costUsd: item.costUsd,
-      lastMessageAt: item.lastMessageAt,
-      createdAt: item.createdAt,
-    }
-    setSelectedNexus(asNexusItem)
+    setSelectedNexus(toNexusActivity(item))
     setNexusDetailOpen(true)
   }, [])
 
@@ -246,65 +294,18 @@ export function ActivityPageClient() {
     setComparisonDetailOpen(true)
   }, [])
 
-  // Get current loading state
-  const isLoading =
-    activeTab === "nexus"
-      ? nexusLoading
-      : activeTab === "executions"
-        ? assistantConvLoading
-        : comparisonLoading
-
-  // Get current total
-  const currentTotal =
-    activeTab === "nexus"
-      ? nexusTotal
-      : activeTab === "executions"
-        ? assistantConvTotal
-        : comparisonTotal
-
   return (
     <div className="p-6 space-y-6">
-      {/* Header */}
-      <div className="mb-6">
-        <PageBranding />
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold text-gray-900">Activity Dashboard</h1>
-            <p className="text-sm text-muted-foreground mt-1">
-              Monitor platform usage across Nexus, Assistant Architect, and Model Compare
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-muted-foreground">Stats range:</span>
-              <Select value={statsDateRange} onValueChange={(v) => setStatsDateRange(v as StatsDateRange)}>
-                <SelectTrigger className="w-[160px] h-8 text-sm">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {DATE_RANGE_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <Button variant="outline" size="sm" onClick={handleRefresh}>
-              <IconRefresh className="h-4 w-4 mr-2" />
-              Refresh
-            </Button>
-          </div>
-        </div>
-      </div>
+      <ActivityHeader
+        handleRefresh={handleRefresh}
+        setStatsDateRange={setStatsDateRange}
+        statsDateRange={statsDateRange}
+      />
 
-      {/* Stats Cards */}
-      {statsLoading ? (
+      {statistics.loading ? (
         <ActivityStatsCardsSkeleton />
-      ) : stats ? (
-        <ActivityStatsCards
-          stats={stats}
-        />
+      ) : statistics.stats ? (
+        <ActivityStatsCards stats={statistics.stats} />
       ) : null}
 
       {/* Activity Tabs */}
@@ -319,15 +320,15 @@ export function ActivityPageClient() {
         <div className="mt-4">
           <ActivityFiltersComponent
             onFiltersChange={handleFiltersChange}
-            loading={isLoading}
+            loading={activeCollection.loading}
           />
         </div>
 
         {/* Nexus Tab */}
         <TabsContent value="nexus" className="mt-4">
           <NexusActivityTable
-            data={nexusData}
-            loading={nexusLoading}
+            data={nexus.data}
+            loading={nexus.loading}
             onViewDetail={handleViewNexus}
           />
         </TabsContent>
@@ -335,8 +336,8 @@ export function ActivityPageClient() {
         {/* Assistant Architect Tab */}
         <TabsContent value="executions" className="mt-4">
           <AssistantConversationTable
-            data={assistantConvData}
-            loading={assistantConvLoading}
+            data={assistant.data}
+            loading={assistant.loading}
             onViewDetail={handleViewAssistantConv}
           />
         </TabsContent>
@@ -344,22 +345,22 @@ export function ActivityPageClient() {
         {/* Comparisons Tab */}
         <TabsContent value="comparisons" className="mt-4">
           <ComparisonActivityTable
-            data={comparisonData}
-            loading={comparisonLoading}
+            data={comparisons.data}
+            loading={comparisons.loading}
             onViewDetail={handleViewComparison}
           />
         </TabsContent>
       </Tabs>
 
       {/* Pagination */}
-      {currentTotal > 0 && (
+      {activeCollection.total > 0 && (
         <ActivityPagination
           page={page}
           pageSize={pageSize}
-          total={currentTotal}
-          onPageChange={handlePageChange}
+          total={activeCollection.total}
+          onPageChange={setPage}
           onPageSizeChange={handlePageSizeChange}
-          loading={isLoading}
+          loading={activeCollection.loading}
         />
       )}
 

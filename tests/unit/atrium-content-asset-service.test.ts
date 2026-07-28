@@ -154,7 +154,7 @@ beforeEach(() => {
   mockDeleteKey.mockResolvedValue(undefined);
 });
 
-describe("contentAssetService (#1284)", () => {
+function defineContentAssetService1284Suite1Part1() {
   it("returns a constrained presigned upload without exposing storage keys", async () => {
     mockExecuteQuery.mockImplementation(
       async (_query: unknown, operation: string) => {
@@ -253,7 +253,9 @@ describe("contentAssetService (#1284)", () => {
     );
   });
 
-  it("rejects a keyed reservation reused with different input", async () => {
+  }
+
+function defineContentAssetService1284Suite1Part2() {it("rejects a keyed reservation reused with different input", async () => {
     const keyHash = "1".repeat(64);
     mockExecuteQuery.mockImplementation(
       async (_query: unknown, operation: string) => {
@@ -341,7 +343,9 @@ describe("contentAssetService (#1284)", () => {
     );
   });
 
-  it("keeps a keyed reservation recoverable when URL signing fails", async () => {
+  }
+
+function defineContentAssetService1284Suite1Part3() {it("keeps a keyed reservation recoverable when URL signing fails", async () => {
     const keyHash = "1".repeat(64);
     const requestHash = "2".repeat(64);
     mockExecuteQuery.mockImplementation(
@@ -444,7 +448,9 @@ describe("contentAssetService (#1284)", () => {
     );
   });
 
-  it("rejects a completion checksum mismatch before reading storage", async () => {
+  }
+
+function defineContentAssetService1284Suite1Part4() {it("rejects a completion checksum mismatch before reading storage", async () => {
     const pending = {
       ...readyRow,
       state: "pending" as const,
@@ -536,4 +542,13 @@ describe("contentAssetService (#1284)", () => {
       mockDeleteKey.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER
     );
   });
-});
+}
+
+const defineContentAssetService1284Suite1 = () => {
+  defineContentAssetService1284Suite1Part1()
+  defineContentAssetService1284Suite1Part2()
+  defineContentAssetService1284Suite1Part3()
+  defineContentAssetService1284Suite1Part4()
+};
+
+describe("contentAssetService (#1284)", defineContentAssetService1284Suite1);

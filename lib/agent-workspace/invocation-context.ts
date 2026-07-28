@@ -52,30 +52,157 @@ function isInvocationMode(value: unknown): value is AgentInvocationMode {
   )
 }
 
+function isNormalizedEmail(value: unknown): value is string {
+  return (
+    typeof value === "string"
+    && SAFE_EMAIL_RE.test(value)
+    && value === value.toLowerCase()
+  )
+}
+
+function isBoundedString(
+  value: unknown,
+  maximumLength: number,
+  allowEmpty = false
+): value is string {
+  if (typeof value !== "string") return false
+  if (!allowEmpty && value.length === 0) return false
+  return value.length <= maximumLength
+}
+
 function isValidClaims(value: unknown): value is AgentInvocationContext {
   if (!value || typeof value !== "object") return false
   const claims = value as Partial<AgentInvocationContext>
   return (
-    claims.version === 1 &&
-    claims.audience === AGENT_INVOCATION_CONTEXT_AUDIENCE &&
-    typeof claims.actorEmail === "string" &&
-    SAFE_EMAIL_RE.test(claims.actorEmail) &&
-    claims.actorEmail === claims.actorEmail.toLowerCase() &&
-    typeof claims.ownerEmail === "string" &&
-    SAFE_EMAIL_RE.test(claims.ownerEmail) &&
-    claims.ownerEmail === claims.ownerEmail.toLowerCase() &&
-    isInvocationMode(claims.mode) &&
-    typeof claims.sessionId === "string" &&
-    claims.sessionId.length > 0 &&
-    claims.sessionId.length <= 512 &&
-    typeof claims.workspacePrefix === "string" &&
-    claims.workspacePrefix.length <= 512 &&
-    Number.isInteger(claims.issuedAt) &&
-    Number.isInteger(claims.expiresAt) &&
-    typeof claims.nonce === "string" &&
-    claims.nonce.length > 0 &&
-    claims.nonce.length <= 128
+    claims.version === 1
+    && claims.audience === AGENT_INVOCATION_CONTEXT_AUDIENCE
+    && isNormalizedEmail(claims.actorEmail)
+    && isNormalizedEmail(claims.ownerEmail)
+    && isInvocationMode(claims.mode)
+    && isBoundedString(claims.sessionId, 512)
+    && isBoundedString(claims.workspacePrefix, 512, true)
+    && Number.isInteger(claims.issuedAt)
+    && Number.isInteger(claims.expiresAt)
+    && isBoundedString(claims.nonce, 128)
   )
+}
+
+function decodeInvocationToken(
+  token: string,
+  secret: string
+): AgentInvocationContext | null {
+  const parts = token.split(".")
+  if (parts.length !== 3) return null
+  if (parts[0] !== "v1" || !parts[1] || !parts[2]) return null
+
+  const expected = createHmac("sha256", secret)
+    .update(`v1.${parts[1]}`)
+    .digest()
+  let provided: Buffer
+  try {
+    provided = Buffer.from(parts[2], "base64url")
+  } catch {
+    return null
+  }
+  if (provided.length !== expected.length) {
+    timingSafeEqual(expected, expected)
+    return null
+  }
+  if (!timingSafeEqual(provided, expected)) return null
+
+  let claims: unknown
+  try {
+    claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"))
+  } catch {
+    return null
+  }
+  return isValidClaims(claims) ? claims : null
+}
+
+function isCurrentInvocation(
+  claims: AgentInvocationContext,
+  nowSeconds: number,
+  allowedModes: readonly AgentInvocationMode[] | undefined
+): boolean {
+  return (
+    claims.issuedAt <= nowSeconds + MAX_CLOCK_SKEW_SECONDS
+    && claims.expiresAt >= nowSeconds - MAX_CLOCK_SKEW_SECONDS
+    && claims.expiresAt > claims.issuedAt
+    && claims.expiresAt - claims.issuedAt <= MAX_TOKEN_TTL_SECONDS
+    && (!allowedModes || allowedModes.includes(claims.mode))
+  )
+}
+
+interface RequestProofHeaders {
+  timestamp: string
+  nonce: string
+  bodySha256: string
+  signature: string
+}
+
+function getRequestProofHeaders(
+  request: NextRequest
+): RequestProofHeaders | null {
+  const version = request.headers.get(AGENT_REQUEST_PROOF_VERSION_HEADER)
+  const timestamp = request.headers.get(AGENT_REQUEST_PROOF_TIMESTAMP_HEADER)
+  const nonce = request.headers.get(AGENT_REQUEST_PROOF_NONCE_HEADER)
+  const bodySha256 = request.headers.get(
+    AGENT_REQUEST_PROOF_BODY_SHA256_HEADER
+  )
+  const signature = request.headers.get(AGENT_REQUEST_PROOF_SIGNATURE_HEADER)
+  if (version !== REQUEST_PROOF_VERSION) return null
+  if (!timestamp || !nonce || !bodySha256 || !signature) return null
+  if (!UUID_RE.test(nonce) || !SHA256_HEX_RE.test(bodySha256)) return null
+  return { timestamp, nonce, bodySha256, signature }
+}
+
+function isCurrentProofTimestamp(
+  timestampValue: string,
+  nowSeconds: number,
+  claims: AgentInvocationContext
+): boolean {
+  const timestamp = Number(timestampValue)
+  return (
+    Number.isInteger(timestamp)
+    && Math.abs(timestamp - nowSeconds) <= MAX_CLOCK_SKEW_SECONDS
+    && timestamp >= claims.issuedAt - MAX_CLOCK_SKEW_SECONDS
+    && timestamp <= claims.expiresAt + MAX_CLOCK_SKEW_SECONDS
+  )
+}
+
+function hasValidProofSignature(options: {
+  proof: RequestProofHeaders
+  secret: string
+  invocationNonce: string
+  method: string
+  route: string
+}): boolean {
+  const { proof, secret, invocationNonce, method, route } = options
+  const expectedProof = createHmac(
+    "sha256",
+    deriveRequestProofKey(secret, invocationNonce)
+  )
+    .update(
+      canonicalRequestProof({
+        timestamp: proof.timestamp,
+        nonce: proof.nonce,
+        method,
+        route,
+        bodySha256: proof.bodySha256,
+      })
+    )
+    .digest()
+  let providedProof: Buffer
+  try {
+    providedProof = Buffer.from(proof.signature, "base64url")
+  } catch {
+    return false
+  }
+  if (providedProof.length !== expectedProof.length) {
+    timingSafeEqual(expectedProof, expectedProof)
+    return false
+  }
+  return timingSafeEqual(providedProof, expectedProof)
 }
 
 async function getInvocationSigningSecret(): Promise<string | null> {
@@ -174,6 +301,14 @@ async function hashBoundedRequestBody(request: NextRequest): Promise<string | nu
   return hash.digest("hex")
 }
 
+async function hasMatchingBodyHash(
+  request: NextRequest,
+  expectedBodySha256: string
+): Promise<boolean> {
+  const actualBodySha256 = await hashBoundedRequestBody(request)
+  return actualBodySha256 === expectedBodySha256
+}
+
 /**
  * Verify the router-issued owner context. A valid token is authorization data,
  * not merely identity metadata: privileged routes must derive the owner from
@@ -190,102 +325,31 @@ export async function verifyAgentInvocationContext(
   const token = request.headers.get(AGENT_INVOCATION_CONTEXT_HEADER)
   if (!token || token.length > 4096) return null
 
-  const parts = token.split(".")
-  if (parts.length !== 3 || parts[0] !== "v1" || !parts[1] || !parts[2]) return null
-
   const secret = await getInvocationSigningSecret()
   if (!secret || Buffer.byteLength(secret, "utf8") < 32) return null
 
-  const expected = createHmac("sha256", secret)
-    .update(`v1.${parts[1]}`)
-    .digest()
-  let provided: Buffer
-  try {
-    provided = Buffer.from(parts[2], "base64url")
-  } catch {
-    return null
-  }
-  if (provided.length !== expected.length) {
-    timingSafeEqual(expected, expected)
-    return null
-  }
-  if (!timingSafeEqual(provided, expected)) return null
-
-  let claims: unknown
-  try {
-    claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"))
-  } catch {
-    return null
-  }
-  if (!isValidClaims(claims)) return null
-
+  const claims = decodeInvocationToken(token, secret)
+  if (!claims) return null
   const nowSeconds = options.nowSeconds ?? Math.floor(Date.now() / 1000)
-  if (claims.issuedAt > nowSeconds + MAX_CLOCK_SKEW_SECONDS) return null
-  if (claims.expiresAt < nowSeconds - MAX_CLOCK_SKEW_SECONDS) return null
-  if (claims.expiresAt <= claims.issuedAt) return null
-  if (claims.expiresAt - claims.issuedAt > MAX_TOKEN_TTL_SECONDS) return null
-  if (options.allowedModes && !options.allowedModes.includes(claims.mode)) return null
+  if (!isCurrentInvocation(claims, nowSeconds, options.allowedModes)) return null
 
-  const proofVersion = request.headers.get(AGENT_REQUEST_PROOF_VERSION_HEADER)
-  const proofTimestamp = request.headers.get(AGENT_REQUEST_PROOF_TIMESTAMP_HEADER)
-  const proofNonce = request.headers.get(AGENT_REQUEST_PROOF_NONCE_HEADER)
-  const proofBodySha256 = request.headers.get(
-    AGENT_REQUEST_PROOF_BODY_SHA256_HEADER
-  )
-  const proofSignature = request.headers.get(AGENT_REQUEST_PROOF_SIGNATURE_HEADER)
-  if (
-    proofVersion !== REQUEST_PROOF_VERSION ||
-    !proofTimestamp ||
-    !proofNonce ||
-    !UUID_RE.test(proofNonce) ||
-    !proofBodySha256 ||
-    !SHA256_HEX_RE.test(proofBodySha256) ||
-    !proofSignature
-  ) {
-    return null
-  }
-  const timestamp = Number(proofTimestamp)
-  if (
-    !Number.isInteger(timestamp) ||
-    Math.abs(timestamp - nowSeconds) > MAX_CLOCK_SKEW_SECONDS ||
-    timestamp < claims.issuedAt - MAX_CLOCK_SKEW_SECONDS ||
-    timestamp > claims.expiresAt + MAX_CLOCK_SKEW_SECONDS
-  ) {
-    return null
-  }
+  const proof = getRequestProofHeaders(request)
+  if (!proof) return null
+  if (!isCurrentProofTimestamp(proof.timestamp, nowSeconds, claims)) return null
+
   const method = request.method.toUpperCase()
   const route = request.nextUrl.pathname
-  const actualBodySha256 = await hashBoundedRequestBody(request)
-  if (!actualBodySha256 || actualBodySha256 !== proofBodySha256) return null
-
-  const expectedProof = createHmac(
-    "sha256",
-    deriveRequestProofKey(secret, claims.nonce)
-  )
-    .update(
-      canonicalRequestProof({
-        timestamp: proofTimestamp,
-        nonce: proofNonce,
-        method,
-        route,
-        bodySha256: proofBodySha256,
-      })
-    )
-    .digest()
-  let providedProof: Buffer
-  try {
-    providedProof = Buffer.from(proofSignature, "base64url")
-  } catch {
-    return null
-  }
-  if (providedProof.length !== expectedProof.length) {
-    timingSafeEqual(expectedProof, expectedProof)
-    return null
-  }
-  if (!timingSafeEqual(providedProof, expectedProof)) return null
+  if (!await hasMatchingBodyHash(request, proof.bodySha256)) return null
+  if (!hasValidProofSignature({
+    proof,
+    secret,
+    invocationNonce: claims.nonce,
+    method,
+    route,
+  })) return null
 
   const consumed = await (options.consumeNonce ?? consumeRequestNonce)({
-    nonce: proofNonce,
+    nonce: proof.nonce,
     invocationNonce: claims.nonce,
     ownerEmail: claims.ownerEmail,
     method,

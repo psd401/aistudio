@@ -27,6 +27,7 @@ import {
   sanitizeForFilename,
   validateNotEmpty,
 } from "./lib/migration-utils";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 // Constants
 const DRIZZLE_MIGRATIONS_DIR = "./drizzle/migrations";
@@ -154,7 +155,7 @@ function findLatestDrizzleMigration(): string | null {
   const sortedFiles = sqlFiles
     .map((f) => ({
       name: f,
-      mtime: fs.statSync(path.join(DRIZZLE_MIGRATIONS_DIR, f)).mtime,
+      mtime: validatedFs.statSync(path.join(DRIZZLE_MIGRATIONS_DIR, f)).mtime,
     }))
     .sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
 
@@ -204,7 +205,7 @@ function main(): void {
   console.log("🔍 Step 2: Validating SQL for RDS Data API compatibility...");
 
   const sourcePath = getAbsolutePath(path.join(DRIZZLE_MIGRATIONS_DIR, latestMigration));
-  const sql = fs.readFileSync(sourcePath, "utf-8");
+  const sql = validatedFs.readFileSync(sourcePath, "utf-8");
 
   // Validate SQL is not empty
   try {
@@ -265,7 +266,7 @@ function main(): void {
   console.log("📋 Step 5: Copying to Lambda schema directory...");
 
   const destPath = getAbsolutePath(path.join(LAMBDA_SCHEMA_DIR, newFilename));
-  fs.writeFileSync(destPath, preparedSQL);
+  validatedFs.writeFileSync(destPath, preparedSQL);
 
   console.log(`   ✅ Created: ${destPath}`);
 

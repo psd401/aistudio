@@ -175,12 +175,43 @@ export class EcsServiceConstruct extends Construct {
   constructor(scope: Construct, id: string, props: EcsServiceConstructProps) {
     super(scope, id);
 
-    const { vpc, environment, documentsBucketName, agentWorkspaceBucketName } = props;
+    const { vpc, environment } = props;
+    const retireLegacyContent =
+      this.node.tryGetContext('retireLegacyContent') === true ||
+      this.node.tryGetContext('retireLegacyContent') === 'true';
 
+    this.repository = this.createRepository(environment);
+    this.cluster = this.createCluster(vpc, environment, props);
+    const { albSecurityGroup, loadBalancer } =
+      this.createLoadBalancer(vpc, environment);
+    this.loadBalancer = loadBalancer;
+
+    const { logGroup, taskExecutionRole } =
+      this.createTaskExecutionResources(props);
+    this.taskRole = this.createTaskRole(props);
+    const { taskDefinition, container } = this.createTaskRuntime(
+      props,
+      taskExecutionRole,
+      logGroup,
+      retireLegacyContent,
+    );
+    const service = this.createService(
+      props,
+      taskDefinition,
+      container,
+      albSecurityGroup,
+    );
+    this.service = service;
+    this.targetGroup = this.createTrafficRouting(props);
+    this.configureAutoScaling(props);
+    this.configureOutputs(environment, albSecurityGroup);
+  }
+
+  private createRepository(environment: EcsServiceConstructProps['environment']): ecr.Repository {
     // ============================================================================
     // ECR Repository for container images
     // ============================================================================
-    this.repository = new ecr.Repository(this, 'Repository', {
+    const repository = new ecr.Repository(this, 'Repository', {
       repositoryName: `aistudio-${environment}`,
       imageScanOnPush: true,
       imageTagMutability: ecr.TagMutability.MUTABLE,
@@ -196,22 +227,18 @@ export class EcsServiceConstruct extends Construct {
       ],
     });
 
-    // ============================================================================
-    // VPC Endpoints (required because PUBLIC subnets can't reach AWS services)
-    // ============================================================================
-    // VPC Endpoints are now provided by SharedVPC construct
-    // SharedVPC creates comprehensive endpoints including:
-    // - S3 Gateway Endpoint (for ECR - ECR stores layers in S3)
-    // - Secrets Manager Interface Endpoint (for AUTH_SECRET at task startup)
-    // - ECR, CloudWatch Logs, and other AWS service endpoints
-    //
-    // This eliminates duplicate endpoint creation and ensures consistent
-    // VPC endpoint configuration across all stacks using the shared VPC.
+    return repository;
+  }
 
+  private createCluster(
+    vpc: ec2.IVpc,
+    environment: EcsServiceConstructProps['environment'],
+    props: EcsServiceConstructProps,
+  ): ecs.Cluster {
     // ============================================================================
     // ECS Cluster with Container Insights
     // ============================================================================
-    this.cluster = new ecs.Cluster(this, 'Cluster', {
+    const cluster = new ecs.Cluster(this, 'Cluster', {
       clusterName: `aistudio-${environment}`,
       vpc,
       /**
@@ -227,6 +254,16 @@ export class EcsServiceConstruct extends Construct {
         : ecs.ContainerInsights.DISABLED,
     });
 
+    return cluster;
+  }
+
+  private createLoadBalancer(
+    vpc: ec2.IVpc,
+    environment: EcsServiceConstructProps['environment'],
+  ): {
+    albSecurityGroup: ec2.SecurityGroup;
+    loadBalancer: elbv2.ApplicationLoadBalancer;
+  } {
     // ============================================================================
     // Application Load Balancer
     // ============================================================================
@@ -250,7 +287,7 @@ export class EcsServiceConstruct extends Construct {
       'Allow HTTP for redirect to HTTPS'
     );
 
-    this.loadBalancer = new elbv2.ApplicationLoadBalancer(this, 'LoadBalancer', {
+    const loadBalancer = new elbv2.ApplicationLoadBalancer(this, 'LoadBalancer', {
       vpc,
       internetFacing: true,
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
@@ -260,6 +297,14 @@ export class EcsServiceConstruct extends Construct {
       idleTimeout: cdk.Duration.seconds(300), // 5 minutes for long streaming requests
     });
 
+    return { albSecurityGroup, loadBalancer };
+  }
+
+  private createTaskExecutionResources(props: EcsServiceConstructProps): {
+    logGroup: logs.LogGroup;
+    taskExecutionRole: iam.Role;
+  } {
+    const { environment } = props;
     // ============================================================================
     // ECS Task Definition
     // ============================================================================
@@ -307,434 +352,22 @@ export class EcsServiceConstruct extends Construct {
       ],
     }));
 
+    return { logGroup, taskExecutionRole };
+  }
+
+  private createTaskRole(props: EcsServiceConstructProps): iam.Role {
+    const { environment } = props;
     // Task Role - for application permissions (same as current SSR Compute Role)
-    this.taskRole = new iam.Role(this, 'TaskRole', {
+    const taskRole = new iam.Role(this, 'TaskRole', {
       assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
       description: `ECS Task role for AI Studio ${environment}`,
       inlinePolicies: {
         'RDSDataAPIAccess': new iam.PolicyDocument({
           statements: [
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'rds-data:ExecuteStatement',
-                'rds-data:BatchExecuteStatement',
-                'rds-data:BeginTransaction',
-                'rds-data:CommitTransaction',
-                'rds-data:RollbackTransaction',
-              ],
-              resources: [
-                `arn:aws:rds:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:cluster:*`, // Wildcard to match any cluster name (CDK generates unique names)
-              ],
-            }),
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'secretsmanager:GetSecretValue',
-                'secretsmanager:DescribeSecret',
-              ],
-              resources: [
-                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:aistudio-${environment}-*`,
-                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:aistudio/${environment}/*`,
-                props.rdsSecretArn, // Include actual database secret ARN
-                props.authSecretArn, // Include auth secret
-                props.collabJwtSecretArn, // Include Atrium collab token signing secret (#1051)
-                props.guardrailHashSecretArn, // Include guardrail hash secret (#727)
-                props.oidcSigningJwksSecretArn, // Shared OIDC-only JWK set (#1285)
-              ],
-            }),
-            // Agent Workspace OAuth secrets — read+update for refresh tokens (#912).
-            // Split into two statements: a normal read+write statement that
-            // does NOT include CreateSecret, plus a tightly-conditioned
-            // CreateSecret statement that only succeeds when the request
-            // carries the correct Environment + ManagedBy tags. This blocks
-            // an attacker who compromises the ECS task from creating
-            // arbitrary tagged secrets that could subvert tag-based access
-            // controls in OTHER policies elsewhere in the account.
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'secretsmanager:GetSecretValue',
-                'secretsmanager:DescribeSecret',
-                'secretsmanager:PutSecretValue',
-                // DeleteSecret with ForceDeleteWithoutRecovery is invoked
-                // by the user-deletion path to avoid orphan refresh-token
-                // secrets when an account is removed (#912 review).
-                'secretsmanager:DeleteSecret',
-              ],
-              resources: [
-                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent-creds/${environment}/*`,
-              ],
-            }),
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'secretsmanager:CreateSecret',
-                'secretsmanager:TagResource',
-              ],
-              resources: [
-                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent-creds/${environment}/*`,
-              ],
-              conditions: {
-                // The app code in lib/agent-workspace/secrets-manager.ts
-                // sets exactly these tags on every CreateSecret call. An
-                // attacker who tries to create a secret with different
-                // tag values to influence other tag-based policies will
-                // fail closed.
-                StringEquals: {
-                  'aws:RequestTag/Environment': environment,
-                  'aws:RequestTag/ManagedBy': 'aistudio',
-                },
-                // Lock down which tag keys can be set on these secrets so
-                // the attacker can't add arbitrary tags either.
-                'ForAllValues:StringEquals': {
-                  'aws:TagKeys': ['Environment', 'ManagedBy', 'OwnerEmail'],
-                },
-              },
-            }),
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'secretsmanager:GetSecretValue',
-                'secretsmanager:DescribeSecret',
-              ],
-              resources: [
-                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent/${environment}/*`,
-                // Read only in the trusted web model broker. The model-facing
-                // AgentCore role is explicitly not granted this credential.
-                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent-bedrock-api-key-${environment}-*`,
-              ],
-            }),
-            // Write ONLY the Plaud OAuth client_id secret. The /agent-connect-plaud
-            // flow auto-registers a Plaud OAuth client via Dynamic Client
-            // Registration (using the app's own issuer URL as redirect_uri) and
-            // stores the client_id here on first use — no manual step. Scoped to
-            // just this secret so the app can't overwrite google-oauth-client etc.
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: ['secretsmanager:PutSecretValue'],
-              resources: [
-                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent/${environment}/plaud-oauth-client-*`,
-              ],
-            }),
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                's3:GetObject',
-                's3:PutObject',
-                's3:DeleteObject',
-                's3:ListBucket',
-                's3:HeadObject',
-                's3:HeadBucket',
-              ],
-              resources: [
-                `arn:aws:s3:::${documentsBucketName}`,
-                `arn:aws:s3:::${documentsBucketName}/*`,
-              ],
-            }),
-            // Permanent canonical cleanup is restricted to the unified content
-            // namespace. Keep legacy document permissions above unchanged while
-            // preventing version deletion outside repositories/*.
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                's3:PutObjectTagging',
-                's3:DeleteObjectVersion',
-                's3:AbortMultipartUpload',
-              ],
-              resources: [
-                `arn:aws:s3:::${documentsBucketName}/repositories/*`,
-              ],
-            }),
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: ['s3:ListBucketVersions'],
-              resources: [`arn:aws:s3:::${documentsBucketName}`],
-              conditions: {
-                StringLike: {
-                  's3:prefix': ['repositories/*'],
-                },
-              },
-            }),
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'sqs:SendMessage',
-                'sqs:GetQueueAttributes',
-                'sqs:GetQueueUrl',
-              ],
-              resources: [
-                `arn:aws:sqs:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:aistudio-${environment}-*`,
-                `arn:aws:sqs:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:AIStudio-*-${environment}`,
-              ],
-            }),
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: ['lambda:InvokeFunction'],
-              resources: [
-                // Issue #925: skill-builder scans/promotes published skill drafts
-                `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
-                // #1203: admin "Sync now" async-invokes the hourly group-sync Lambda
-                `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-group-sync-${environment}`,
-                // #1310: admin "Sync now" invokes the nightly OneRoster Lambda.
-                `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-oneroster-sync-${environment}`,
-                // #1232 confused-deputy isolation: trusted Workspace execution
-                // and /api/agent/account-request invoke the isolated mint
-                // Lambda instead of running WIF/signJwt in-process. INVOKE-ONLY —
-                // the frontend never holds the WIF credential; the mint Lambda's
-                // own role is the sole principal the Google WIF provider trusts.
-                // Constructed ARN (deterministic function name) to avoid a
-                // FrontendStack ↔ AgentPlatformStack circular dependency — the
-                // Lambda object is intentionally NOT imported cross-stack.
-                `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-mint-${environment}`,
-              ],
-            }),
-            // Issue #925: write SKILL.md draft folders to the agent workspace
-            // bucket so the existing scan pipeline can pick them up. Scoped to
-            // the skills/ prefix.
-            //
-            // ListBucket must target the bucket ARN (not the object-prefix ARN);
-            // ListObjectsV2 (used by listSkillObjectKeys for the detail-page
-            // SKILL.md preview and the zip export) fails with AccessDenied
-            // without it. The s3:prefix condition keeps the grant scoped to the
-            // skills/ tree.
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: ['s3:ListBucket'],
-              resources: [`arn:aws:s3:::${agentWorkspaceBucketName}`],
-              conditions: {
-                StringLike: { 's3:prefix': ['skills/*'] },
-              },
-            }),
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: ['s3:PutObject', 's3:PutObjectTagging', 's3:GetObject'],
-              resources: [
-                `arn:aws:s3:::${agentWorkspaceBucketName}/skills/*`,
-              ],
-            }),
-            // Owner-bound agent storage broker. The trusted web route derives
-            // the only usable key prefix from a router-signed invocation
-            // context before minting a short-lived per-object URL. AgentCore
-            // itself has no S3 permission.
-            new iam.PolicyStatement({
-              sid: 'AgentWorkspaceStorageBrokerList',
-              effect: iam.Effect.ALLOW,
-              actions: ['s3:ListBucket'],
-              resources: [`arn:aws:s3:::${agentWorkspaceBucketName}`],
-            }),
-            new iam.PolicyStatement({
-              sid: 'AgentWorkspaceStorageBrokerObjects',
-              effect: iam.Effect.ALLOW,
-              // Version-aware HEAD/copy/cleanup and copy-time tag replacement
-              // are all performed only after the broker has claimed an
-              // owner-bound upload reservation. AgentCore itself has no S3
-              // credential and cannot exercise these actions directly.
-              actions: [
-                's3:GetObject',
-                's3:GetObjectVersion',
-                's3:PutObject',
-                's3:PutObjectTagging',
-                's3:DeleteObjectVersion',
-              ],
-              resources: [`arn:aws:s3:::${agentWorkspaceBucketName}/*`],
-            }),
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'dynamodb:GetItem',
-                'dynamodb:PutItem',
-                'dynamodb:UpdateItem',
-                'dynamodb:Query',
-                'dynamodb:Scan',
-              ],
-              resources: [
-                `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/aistudio-${environment}-*`,
-                `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/AIStudio-*-${environment}`,
-              ],
-            }),
-            // Agent platform tables (psd-agent-*-<env>) — the admin
-            // dashboard's Triage tab scans psd-agent-triage-<env>. Other
-            // agent platform tables (users, signals, skills) are admin
-            // read-only too. Update/Put limited to triage so the admin
-            // Pause/Reset actions in /admin/agents/[userEmail]/triage
-            // can write back; everything else is read-only.
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'dynamodb:GetItem',
-                'dynamodb:Query',
-                'dynamodb:Scan',
-              ],
-              resources: [
-                `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/psd-agent-*-${environment}`,
-              ],
-            }),
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'dynamodb:UpdateItem',
-                'dynamodb:DeleteItem',
-              ],
-              resources: [
-                `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/psd-agent-triage-${environment}`,
-              ],
-            }),
-            // Owner-bound schedule broker. The web tier verifies the signed
-            // owner context, resolves the trusted Chat destination, and is the
-            // sole principal allowed to persist/synchronize schedules.
-            new iam.PolicyStatement({
-              sid: 'AgentScheduleTableWrite',
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'dynamodb:PutItem',
-                'dynamodb:UpdateItem',
-                'dynamodb:DeleteItem',
-              ],
-              resources: [
-                `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/psd-agent-schedules-${environment}`,
-              ],
-            }),
-            new iam.PolicyStatement({
-              sid: 'AgentUserIdentityLookup',
-              effect: iam.Effect.ALLOW,
-              actions: ['dynamodb:Query'],
-              resources: [
-                `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/psd-agent-users-${environment}/index/email-index`,
-              ],
-            }),
-            new iam.PolicyStatement({
-              sid: 'AgentScheduleBrokerCrud',
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'scheduler:CreateSchedule',
-                'scheduler:UpdateSchedule',
-                'scheduler:DeleteSchedule',
-              ],
-              resources: [
-                `arn:aws:scheduler:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:schedule/psd-agent-${environment}/*`,
-                `arn:aws:scheduler:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:schedule-group/psd-agent-${environment}`,
-              ],
-            }),
-            new iam.PolicyStatement({
-              sid: 'AgentScheduleBrokerPassRole',
-              effect: iam.Effect.ALLOW,
-              actions: ['iam:PassRole'],
-              resources: [
-                `arn:aws:iam::${cdk.Stack.of(this).account}:role/psd-agent-scheduler-invoke-${environment}`,
-              ],
-              conditions: {
-                StringEquals: {
-                  'iam:PassedToService': 'scheduler.amazonaws.com',
-                },
-              },
-            }),
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'bedrock:InvokeModel',
-                'bedrock:InvokeModelWithResponseStream',
-              ],
-              resources: [
-                'arn:aws:bedrock:*::foundation-model/*',
-                'arn:aws:bedrock:*:*:inference-profile/*',
-                'arn:aws:bedrock:*:*:provisioned-model/*',
-              ],
-            }),
-            // Bedrock does not support resource-level permissions for Rerank.
-            // The underlying model invocation remains scoped to the ARNs above.
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: ['bedrock:Rerank'],
-              resources: ['*'],
-            }),
-            // K-12 Content Safety: Bedrock Guardrails API access.
-            // CROSS-REGION-INFERENCE GOTCHA (2026-07-06 prod outage): ApplyGuardrail
-            // on a guardrail that uses a cross-region inference PROFILE authorizes
-            // against BOTH the guardrail ARN AND the guardrail-PROFILE ARN
-            // (e.g. .../guardrail-profile/us.guardrail.v1:0). Granting only the
-            // guardrail ARN yields 100% AccessDenied on the profile — which made
-            // ContentSafetyService fail and, worse, made Atrium §28.3 agent-write
-            // screening fail CLOSED (every workspace/agent content edit rejected).
-            // Grant the profile ARNs alongside the guardrail. (See PR #1093 for the
-            // agent-router equivalent.)
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'bedrock:ApplyGuardrail',
-                'bedrock:GetGuardrail',
-              ],
-              resources: props.guardrailArn
-                ? [
-                    props.guardrailArn,
-                    // The system-defined cross-region inference profile the
-                    // guardrail resolves to at apply time. Pinned to the exact
-                    // profile id (NOT a wildcard) but granted in every region
-                    // the profile fans out to — ApplyGuardrail authorizes
-                    // against the DESTINATION region, so a single-region grant
-                    // fails whenever routing leaves it (issue #1138 F5).
-                    ...usGuardrailProfileArns(cdk.Stack.of(this).account),
-                  ]
-                : [
-                    `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail/*`,
-                    ...usGuardrailProfileArns(cdk.Stack.of(this).account),
-                  ],
-            }),
-            // K-12 Content Safety: Amazon Comprehend for PII detection
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'comprehend:DetectPiiEntities',
-                'comprehend:ContainsPiiEntities',
-              ],
-              resources: ['*'], // Comprehend doesn't support resource-level permissions
-            }),
-            // K-12 Content Safety: DynamoDB for PII token storage
-            ...(props.piiTokenTableArn ? [new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'dynamodb:GetItem',
-                'dynamodb:PutItem',
-                'dynamodb:BatchGetItem',
-              ],
-              resources: [props.piiTokenTableArn],
-              conditions: {
-                StringEquals: {
-                  'aws:ResourceTag/Environment': environment,
-                  'aws:ResourceTag/ManagedBy': 'cdk',
-                },
-              },
-            })] : []),
-            // Cost Explorer — read-only queries for the admin agent dashboard.
-            // ce:* APIs do not support resource-level permissions; scope via
-            // AWS API-level (dev ECS can only query the dev account's cost data,
-            // cross-account isolation is enforced by account boundary).
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'ce:GetCostAndUsage',
-                'ce:GetCostAndUsageWithResources',
-                'ce:GetDimensionValues',
-                'ce:GetTags',
-              ],
-              resources: ['*'],
-            }),
-            // K-12 Content Safety: SNS for violation notifications
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: ['sns:Publish'],
-              resources: props.violationTopicArn
-                ? [props.violationTopicArn]
-                : [`arn:aws:sns:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:aistudio-${environment}-guardrail-violations`],
-              ...(props.violationTopicArn ? {
-                conditions: {
-                  StringEquals: {
-                    'aws:ResourceTag/Environment': environment,
-                    'aws:ResourceTag/ManagedBy': 'cdk',
-                  },
-                },
-              } : {}),
-            }),
+            ...this.createCredentialAccessStatements(props),
+            ...this.createStorageAndProcessingStatements(props),
+            ...this.createAgentOperationsStatements(props),
+            ...this.createAiAndSafetyStatements(props),
           ],
         }),
       },
@@ -745,7 +378,7 @@ export class EcsServiceConstruct extends Construct {
     // the environment, mirroring ServiceRoleFactory.buildSNSAccessPolicy. Only
     // added when a topic ARN is wired (back-compat with pre-events deployments).
     if (props.atriumEventsTopicArn) {
-      this.taskRole.addToPolicy(
+      taskRole.addToPolicy(
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,
           actions: ['sns:Publish'],
@@ -760,6 +393,476 @@ export class EcsServiceConstruct extends Construct {
       );
     }
 
+    return taskRole;
+  }
+
+  private createCredentialAccessStatements(
+    props: EcsServiceConstructProps,
+  ): iam.PolicyStatement[] {
+    const { environment } = props;
+
+    return [
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'rds-data:ExecuteStatement',
+          'rds-data:BatchExecuteStatement',
+          'rds-data:BeginTransaction',
+          'rds-data:CommitTransaction',
+          'rds-data:RollbackTransaction',
+        ],
+        resources: [
+          `arn:aws:rds:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:cluster:*`, // Wildcard to match any cluster name (CDK generates unique names)
+        ],
+      }),
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'secretsmanager:GetSecretValue',
+          'secretsmanager:DescribeSecret',
+        ],
+        resources: [
+          `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:aistudio-${environment}-*`,
+          `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:aistudio/${environment}/*`,
+          props.rdsSecretArn, // Include actual database secret ARN
+          props.authSecretArn, // Include auth secret
+          props.collabJwtSecretArn, // Include Atrium collab token signing secret (#1051)
+          props.guardrailHashSecretArn, // Include guardrail hash secret (#727)
+          props.oidcSigningJwksSecretArn, // Shared OIDC-only JWK set (#1285)
+        ],
+      }),
+      // Agent Workspace OAuth secrets — read+update for refresh tokens (#912).
+      // Split into two statements: a normal read+write statement that
+      // does NOT include CreateSecret, plus a tightly-conditioned
+      // CreateSecret statement that only succeeds when the request
+      // carries the correct Environment + ManagedBy tags. This blocks
+      // an attacker who compromises the ECS task from creating
+      // arbitrary tagged secrets that could subvert tag-based access
+      // controls in OTHER policies elsewhere in the account.
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'secretsmanager:GetSecretValue',
+          'secretsmanager:DescribeSecret',
+          'secretsmanager:PutSecretValue',
+          // DeleteSecret with ForceDeleteWithoutRecovery is invoked
+          // by the user-deletion path to avoid orphan refresh-token
+          // secrets when an account is removed (#912 review).
+          'secretsmanager:DeleteSecret',
+        ],
+        resources: [
+          `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent-creds/${environment}/*`,
+        ],
+      }),
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'secretsmanager:CreateSecret',
+          'secretsmanager:TagResource',
+        ],
+        resources: [
+          `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent-creds/${environment}/*`,
+        ],
+        conditions: {
+          // The app code in lib/agent-workspace/secrets-manager.ts
+          // sets exactly these tags on every CreateSecret call. An
+          // attacker who tries to create a secret with different
+          // tag values to influence other tag-based policies will
+          // fail closed.
+          StringEquals: {
+            'aws:RequestTag/Environment': environment,
+            'aws:RequestTag/ManagedBy': 'aistudio',
+          },
+          // Lock down which tag keys can be set on these secrets so
+          // the attacker can't add arbitrary tags either.
+          'ForAllValues:StringEquals': {
+            'aws:TagKeys': ['Environment', 'ManagedBy', 'OwnerEmail'],
+          },
+        },
+      }),
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'secretsmanager:GetSecretValue',
+          'secretsmanager:DescribeSecret',
+        ],
+        resources: [
+          `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent/${environment}/*`,
+          // Read only in the trusted web model broker. The model-facing
+          // AgentCore role is explicitly not granted this credential.
+          `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent-bedrock-api-key-${environment}-*`,
+        ],
+      }),
+      // Write ONLY the Plaud OAuth client_id secret. The /agent-connect-plaud
+      // flow auto-registers a Plaud OAuth client via Dynamic Client
+      // Registration (using the app's own issuer URL as redirect_uri) and
+      // stores the client_id here on first use — no manual step. Scoped to
+      // just this secret so the app can't overwrite google-oauth-client etc.
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['secretsmanager:PutSecretValue'],
+        resources: [
+          `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent/${environment}/plaud-oauth-client-*`,
+        ],
+      }),
+    ];
+  }
+
+  private createStorageAndProcessingStatements(
+    props: EcsServiceConstructProps,
+  ): iam.PolicyStatement[] {
+    const { environment, documentsBucketName, agentWorkspaceBucketName } = props;
+
+    return [
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          's3:GetObject',
+          's3:PutObject',
+          's3:DeleteObject',
+          's3:ListBucket',
+          's3:HeadObject',
+          's3:HeadBucket',
+        ],
+        resources: [
+          `arn:aws:s3:::${documentsBucketName}`,
+          `arn:aws:s3:::${documentsBucketName}/*`,
+        ],
+      }),
+      // Permanent canonical cleanup is restricted to the unified content
+      // namespace. Keep legacy document permissions above unchanged while
+      // preventing version deletion outside repositories/*.
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          's3:PutObjectTagging',
+          's3:DeleteObjectVersion',
+          's3:AbortMultipartUpload',
+        ],
+        resources: [
+          `arn:aws:s3:::${documentsBucketName}/repositories/*`,
+        ],
+      }),
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:ListBucketVersions'],
+        resources: [`arn:aws:s3:::${documentsBucketName}`],
+        conditions: {
+          StringLike: {
+            's3:prefix': ['repositories/*'],
+          },
+        },
+      }),
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'sqs:SendMessage',
+          'sqs:GetQueueAttributes',
+          'sqs:GetQueueUrl',
+        ],
+        resources: [
+          `arn:aws:sqs:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:aistudio-${environment}-*`,
+          `arn:aws:sqs:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:AIStudio-*-${environment}`,
+        ],
+      }),
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['lambda:InvokeFunction'],
+        resources: [
+          // Issue #925: skill-builder scans/promotes published skill drafts
+          `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
+          // #1203: admin "Sync now" async-invokes the hourly group-sync Lambda
+          `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-group-sync-${environment}`,
+          // #1310: admin "Sync now" invokes the nightly OneRoster Lambda.
+          `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-oneroster-sync-${environment}`,
+          // #1232 confused-deputy isolation: trusted Workspace execution
+          // and /api/agent/account-request invoke the isolated mint
+          // Lambda instead of running WIF/signJwt in-process. INVOKE-ONLY —
+          // the frontend never holds the WIF credential; the mint Lambda's
+          // own role is the sole principal the Google WIF provider trusts.
+          // Constructed ARN (deterministic function name) to avoid a
+          // FrontendStack ↔ AgentPlatformStack circular dependency — the
+          // Lambda object is intentionally NOT imported cross-stack.
+          `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-mint-${environment}`,
+        ],
+      }),
+      // Issue #925: write SKILL.md draft folders to the agent workspace
+      // bucket so the existing scan pipeline can pick them up. Scoped to
+      // the skills/ prefix.
+      //
+      // ListBucket must target the bucket ARN (not the object-prefix ARN);
+      // ListObjectsV2 (used by listSkillObjectKeys for the detail-page
+      // SKILL.md preview and the zip export) fails with AccessDenied
+      // without it. The s3:prefix condition keeps the grant scoped to the
+      // skills/ tree.
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:ListBucket'],
+        resources: [`arn:aws:s3:::${agentWorkspaceBucketName}`],
+        conditions: {
+          StringLike: { 's3:prefix': ['skills/*'] },
+        },
+      }),
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:PutObject', 's3:PutObjectTagging', 's3:GetObject'],
+        resources: [
+          `arn:aws:s3:::${agentWorkspaceBucketName}/skills/*`,
+        ],
+      }),
+      // Owner-bound agent storage broker. The trusted web route derives
+      // the only usable key prefix from a router-signed invocation
+      // context before minting a short-lived per-object URL. AgentCore
+      // itself has no S3 permission.
+      new iam.PolicyStatement({
+        sid: 'AgentWorkspaceStorageBrokerList',
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:ListBucket'],
+        resources: [`arn:aws:s3:::${agentWorkspaceBucketName}`],
+      }),
+      new iam.PolicyStatement({
+        sid: 'AgentWorkspaceStorageBrokerObjects',
+        effect: iam.Effect.ALLOW,
+        // Version-aware HEAD/copy/cleanup and copy-time tag replacement
+        // are all performed only after the broker has claimed an
+        // owner-bound upload reservation. AgentCore itself has no S3
+        // credential and cannot exercise these actions directly.
+        actions: [
+          's3:GetObject',
+          's3:GetObjectVersion',
+          's3:PutObject',
+          's3:PutObjectTagging',
+          's3:DeleteObjectVersion',
+        ],
+        resources: [`arn:aws:s3:::${agentWorkspaceBucketName}/*`],
+      }),
+    ];
+  }
+
+  private createAgentOperationsStatements(
+    props: EcsServiceConstructProps,
+  ): iam.PolicyStatement[] {
+    const { environment } = props;
+
+    return [
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'dynamodb:GetItem',
+          'dynamodb:PutItem',
+          'dynamodb:UpdateItem',
+          'dynamodb:Query',
+          'dynamodb:Scan',
+        ],
+        resources: [
+          `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/aistudio-${environment}-*`,
+          `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/AIStudio-*-${environment}`,
+        ],
+      }),
+      // Agent platform tables (psd-agent-*-<env>) — the admin
+      // dashboard's Triage tab scans psd-agent-triage-<env>. Other
+      // agent platform tables (users, signals, skills) are admin
+      // read-only too. Update/Put limited to triage so the admin
+      // Pause/Reset actions in /admin/agents/[userEmail]/triage
+      // can write back; everything else is read-only.
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'dynamodb:GetItem',
+          'dynamodb:Query',
+          'dynamodb:Scan',
+        ],
+        resources: [
+          `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/psd-agent-*-${environment}`,
+        ],
+      }),
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'dynamodb:UpdateItem',
+          'dynamodb:DeleteItem',
+        ],
+        resources: [
+          `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/psd-agent-triage-${environment}`,
+        ],
+      }),
+      // Owner-bound schedule broker. The web tier verifies the signed
+      // owner context, resolves the trusted Chat destination, and is the
+      // sole principal allowed to persist/synchronize schedules.
+      new iam.PolicyStatement({
+        sid: 'AgentScheduleTableWrite',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'dynamodb:PutItem',
+          'dynamodb:UpdateItem',
+          'dynamodb:DeleteItem',
+        ],
+        resources: [
+          `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/psd-agent-schedules-${environment}`,
+        ],
+      }),
+      new iam.PolicyStatement({
+        sid: 'AgentUserIdentityLookup',
+        effect: iam.Effect.ALLOW,
+        actions: ['dynamodb:Query'],
+        resources: [
+          `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/psd-agent-users-${environment}/index/email-index`,
+        ],
+      }),
+      new iam.PolicyStatement({
+        sid: 'AgentScheduleBrokerCrud',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'scheduler:CreateSchedule',
+          'scheduler:UpdateSchedule',
+          'scheduler:DeleteSchedule',
+        ],
+        resources: [
+          `arn:aws:scheduler:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:schedule/psd-agent-${environment}/*`,
+          `arn:aws:scheduler:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:schedule-group/psd-agent-${environment}`,
+        ],
+      }),
+      new iam.PolicyStatement({
+        sid: 'AgentScheduleBrokerPassRole',
+        effect: iam.Effect.ALLOW,
+        actions: ['iam:PassRole'],
+        resources: [
+          `arn:aws:iam::${cdk.Stack.of(this).account}:role/psd-agent-scheduler-invoke-${environment}`,
+        ],
+        conditions: {
+          StringEquals: {
+            'iam:PassedToService': 'scheduler.amazonaws.com',
+          },
+        },
+      }),
+    ];
+  }
+
+  private createAiAndSafetyStatements(
+    props: EcsServiceConstructProps,
+  ): iam.PolicyStatement[] {
+    const { environment } = props;
+
+    return [
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock:InvokeModel',
+          'bedrock:InvokeModelWithResponseStream',
+        ],
+        resources: [
+          'arn:aws:bedrock:*::foundation-model/*',
+          'arn:aws:bedrock:*:*:inference-profile/*',
+          'arn:aws:bedrock:*:*:provisioned-model/*',
+        ],
+      }),
+      // Bedrock does not support resource-level permissions for Rerank.
+      // The underlying model invocation remains scoped to the ARNs above.
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['bedrock:Rerank'],
+        resources: ['*'],
+      }),
+      // K-12 Content Safety: Bedrock Guardrails API access.
+      // CROSS-REGION-INFERENCE GOTCHA (2026-07-06 prod outage): ApplyGuardrail
+      // on a guardrail that uses a cross-region inference PROFILE authorizes
+      // against BOTH the guardrail ARN AND the guardrail-PROFILE ARN
+      // (e.g. .../guardrail-profile/us.guardrail.v1:0). Granting only the
+      // guardrail ARN yields 100% AccessDenied on the profile — which made
+      // ContentSafetyService fail and, worse, made Atrium §28.3 agent-write
+      // screening fail CLOSED (every workspace/agent content edit rejected).
+      // Grant the profile ARNs alongside the guardrail. (See PR #1093 for the
+      // agent-router equivalent.)
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock:ApplyGuardrail',
+          'bedrock:GetGuardrail',
+        ],
+        resources: props.guardrailArn
+          ? [
+              props.guardrailArn,
+              // The system-defined cross-region inference profile the
+              // guardrail resolves to at apply time. Pinned to the exact
+              // profile id (NOT a wildcard) but granted in every region
+              // the profile fans out to — ApplyGuardrail authorizes
+              // against the DESTINATION region, so a single-region grant
+              // fails whenever routing leaves it (issue #1138 F5).
+              ...usGuardrailProfileArns(cdk.Stack.of(this).account),
+            ]
+          : [
+              `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail/*`,
+              ...usGuardrailProfileArns(cdk.Stack.of(this).account),
+            ],
+      }),
+      // K-12 Content Safety: Amazon Comprehend for PII detection
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'comprehend:DetectPiiEntities',
+          'comprehend:ContainsPiiEntities',
+        ],
+        resources: ['*'], // Comprehend doesn't support resource-level permissions
+      }),
+      // K-12 Content Safety: DynamoDB for PII token storage
+      ...(props.piiTokenTableArn ? [new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'dynamodb:GetItem',
+          'dynamodb:PutItem',
+          'dynamodb:BatchGetItem',
+        ],
+        resources: [props.piiTokenTableArn],
+        conditions: {
+          StringEquals: {
+            'aws:ResourceTag/Environment': environment,
+            'aws:ResourceTag/ManagedBy': 'cdk',
+          },
+        },
+      })] : []),
+      // Cost Explorer — read-only queries for the admin agent dashboard.
+      // ce:* APIs do not support resource-level permissions; scope via
+      // AWS API-level (dev ECS can only query the dev account's cost data,
+      // cross-account isolation is enforced by account boundary).
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'ce:GetCostAndUsage',
+          'ce:GetCostAndUsageWithResources',
+          'ce:GetDimensionValues',
+          'ce:GetTags',
+        ],
+        resources: ['*'],
+      }),
+      // K-12 Content Safety: SNS for violation notifications
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['sns:Publish'],
+        resources: props.violationTopicArn
+          ? [props.violationTopicArn]
+          : [`arn:aws:sns:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:aistudio-${environment}-guardrail-violations`],
+        ...(props.violationTopicArn ? {
+          conditions: {
+            StringEquals: {
+              'aws:ResourceTag/Environment': environment,
+              'aws:ResourceTag/ManagedBy': 'cdk',
+            },
+          },
+        } : {}),
+      }),
+    ];
+  }
+
+  private createTaskRuntime(
+    props: EcsServiceConstructProps,
+    taskExecutionRole: iam.Role,
+    logGroup: logs.LogGroup,
+    retireLegacyContent: boolean,
+  ): {
+    taskDefinition: ecs.FargateTaskDefinition;
+    container: ecs.ContainerDefinition;
+  } {
+    const { environment } = props;
     // Task Definition
     const cpu = environment === 'prod' ? 1024 : 512; // 1 vCPU prod, 0.5 dev
     const memory = environment === 'prod' ? 2048 : 1024; // 2GB prod, 1GB dev
@@ -831,185 +934,9 @@ export class EcsServiceConstruct extends Construct {
         logGroup,
         streamPrefix: 'frontend',
       }),
-      environment: {
-        NODE_ENV: 'production',
-        AWS_REGION: cdk.Stack.of(this).region,
-        NEXT_PUBLIC_AWS_REGION: cdk.Stack.of(this).region,
-        PORT: '3000',
-        ENVIRONMENT: environment,
-        // Used by server actions to build Secrets Manager ARNs for the
-        // workspace token manifest (#912). Without this the manifest
-        // secrets_manager_arn column is stored as null.
-        AWS_ACCOUNT_ID: cdk.Stack.of(this).account,
-        // Secrets Manager IDs for lazy-loaded workspace config (#912).
-        // Consumed at request time — not at task start — so the ECS service
-        // deploys cleanly before IT populates real GCP OAuth values.
-        // Names not ARNs — Secrets Manager APIs accept either, but the
-        // value here is a bare secret name. Suffix is `_SECRET_ID` so the
-        // shape is honest.
-        GOOGLE_WORKSPACE_OAUTH_SECRET_ID: `psd-agent/${environment}/google-oauth-client`,
-        AGENT_INTERNAL_API_KEY_SECRET_ID: `psd-agent/${environment}/internal-api-key`,
-        AGENT_INVOCATION_SIGNING_SECRET_ID: `psd-agent/${environment}/invocation-signing-key`,
-        AGENT_SCHEDULES_TABLE: `psd-agent-schedules-${environment}`,
-        AGENT_USERS_TABLE: `psd-agent-users-${environment}`,
-        AGENT_SCHEDULE_GROUP: `psd-agent-${environment}`,
-        AGENT_CRON_LAMBDA_ARN:
-          `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-cron-${environment}`,
-        AGENT_SCHEDULER_ROLE_ARN:
-          `arn:aws:iam::${cdk.Stack.of(this).account}:role/psd-agent-scheduler-invoke-${environment}`,
-        // DWD token broker (#1232) + agnt_ auto-provisioning (#1233) config —
-        // the GCP project number, WIF pool/provider ids, DWD service-account
-        // email, and the OneSync provisioning sheet id all live in ONE JSON
-        // secret `psd-agent/{env}/gcp-dwd-config`, populated out-of-band by IT
-        // (Reese). aistudio is a PUBLIC repo, so these values must not land in
-        // cdk.json / CDK context. The app reads the secret lazily at request time
-        // (loadBrokerConfig / getProvisioningSheetId, 5-min cached) and fails
-        // CLOSED (BrokerNotConfiguredError / not-configured) until it's populated
-        // — the same deploy-cleanly-before-values pattern as the OAuth secret IDs
-        // above. The ECS task role already holds GetSecretValue on
-        // psd-agent/${environment}/* (below), so no new IAM grant is required.
-        GCP_DWD_CONFIG_SECRET_ID: `psd-agent/${environment}/gcp-dwd-config`,
-        // #1232 confused-deputy isolation: trusted Workspace execution and
-        // account-request proxy to this dedicated mint Lambda (IAM-authed
-        // InvokeFunction) instead of performing WIF/signJwt in-process. Setting
-        // this env var switches the helpers into Lambda mode; when it is UNSET
-        // (local dev) they fall back to running the broker in-process (no real
-        // WIF locally). The task role's lambda:InvokeFunction grant above is
-        // scoped to exactly this function.
-        AGENT_MINT_LAMBDA_NAME: `psd-agent-mint-${environment}`,
-        // Opaque connector credential profiles. Values contain secret IDs and
-        // approved provider origins, never secret material. Empty by default;
-        // deployments opt in with `-c mcpOauthCredentialProfiles='<json>'`.
-        MCP_OAUTH_CREDENTIAL_PROFILES: (() => {
-          const profiles = this.node.tryGetContext('mcpOauthCredentialProfiles') as unknown;
-          return typeof profiles === 'string'
-            ? profiles
-            : JSON.stringify(profiles ?? {});
-        })(),
-        // Memory optimization - 70% of container memory
-        NODE_OPTIONS: `--max-old-space-size=${Math.floor(memory * 0.7)}`,
-        // Application configuration
-        S3_BUCKET_NAME: documentsBucketName,
-        DOCUMENTS_BUCKET_NAME: documentsBucketName, // Legacy name for compatibility
-        RDS_DATABASE_NAME: 'aistudio',
-        AUTH_URL: props.authUrl,
-        AUTH_COGNITO_CLIENT_ID: props.cognitoClientId,
-        AUTH_COGNITO_ISSUER: props.cognitoIssuer,
-        // Legacy RDS Data API variables (kept for backward compatibility during migration)
-        RDS_RESOURCE_ARN: props.rdsResourceArn,
-        RDS_SECRET_ARN: props.rdsSecretArn,
-        // Issue #603: Direct PostgreSQL connection via postgres.js
-        // DB credentials are injected via secrets below
-        DB_HOST: ssm.StringParameter.valueForStringParameter(this, `/aistudio/${environment}/db-host`),
-        DB_PORT: '5432',
-        DB_NAME: 'aistudio',
-        DB_MAX_CONNECTIONS: '20',
-        DB_IDLE_TIMEOUT: '20',
-        // Queue URLs from Processing Stack exports
-        EMBEDDING_QUEUE_URL: cdk.Fn.importValue(`${environment}-EmbeddingQueueUrl`),
-        FILE_PROCESSING_QUEUE_URL: cdk.Fn.importValue(`${environment}-FileProcessingQueueUrl`),
-        CONTENT_PROCESSING_QUEUE_URL: cdk.Fn.importValue(`${environment}-ContentProcessingQueueUrl`),
-        GOOGLE_CONTENT_SYNC_QUEUE_URL: cdk.Fn.importValue(`${environment}-GoogleContentSyncQueueUrl`),
-        // Queue URLs from Document Processing Stack exports
-        PROCESSING_QUEUE_URL: cdk.Fn.importValue(`${environment}-ProcessingQueueUrl`),
-        HIGH_MEMORY_QUEUE_URL: cdk.Fn.importValue(`${environment}-HighMemoryQueueUrl`),
-        // Table names from stack exports
-        DOCUMENT_JOBS_TABLE: cdk.Fn.importValue(`${environment}-DocumentJobsTableName`),
-        JOB_STATUS_TABLE_NAME: cdk.Fn.importValue(`${environment}-JobStatusTableName`),
-        // Lambda function names from Processing Stack exports
-        EMBEDDING_GENERATOR_FUNCTION_NAME: cdk.Fn.importValue(`${environment}-EmbeddingGeneratorFunctionName`),
-        URL_PROCESSOR_FUNCTION_NAME: cdk.Fn.importValue(`${environment}-URLProcessorFunctionName`),
-        // Application settings
-        MAX_FILE_SIZE_MB: '100',
-        SQL_LOGGING: 'false',
-        // Public Cognito configuration for client-side
-        NEXT_PUBLIC_COGNITO_CLIENT_ID: props.cognitoClientId,
-        NEXT_PUBLIC_COGNITO_USER_POOL_ID: cdk.Fn.importValue(`${environment}-CognitoUserPoolId`),
-        NEXT_PUBLIC_COGNITO_DOMAIN: `aistudio-${environment}.auth.${cdk.Stack.of(this).region}.amazoncognito.com`,
-        // Cognito token configuration
-        COGNITO_ACCESS_TOKEN_LIFETIME_SECONDS: '43200', // 12 hours
-        COGNITO_JWKS_URL: `https://aistudio-${environment}.auth.${cdk.Stack.of(this).region}.amazoncognito.com/.well-known/jwks.json`,
-        // K-12 Content Safety - Bedrock Guardrails configuration
-        BEDROCK_GUARDRAIL_ID: cdk.Fn.importValue(`${environment}-GuardrailId`),
-        BEDROCK_GUARDRAIL_VERSION: 'DRAFT',
-        PII_TOKEN_TABLE_NAME: cdk.Fn.importValue(`${environment}-PIITokenTableName`),
-        GUARDRAIL_VIOLATION_TOPIC_ARN: cdk.Fn.importValue(`${environment}-ViolationTopicArn`),
-        CONTENT_SAFETY_ENABLED: 'true',
-        PII_TOKENIZATION_ENABLED: 'true',
-        // Issue #925: Skill publishing pipeline. The agent workspace bucket
-        // (published to SSM by AgentPlatformStack) holds SKILL.md folders, and
-        // the skill-builder Lambda scans/promotes drafts. Both are optional at
-        // runtime — if absent, publishing falls back to a reviewable draft row.
-        AGENT_WORKSPACE_BUCKET: agentWorkspaceBucketName,
-        AGENT_BEDROCK_API_KEY_SECRET_ID: `psd-agent-bedrock-api-key-${environment}`,
-        SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
-        // Atrium artifact sandbox origin (#1052). Server-only runtime var (NOT
-        // NEXT_PUBLIC): the reader/edit Server Components resolve the iframe src
-        // from it and pass it down as a prop, and the middleware builds the CSP
-        // frame-src from it at request time. Sourced from AtriumSandboxStack.
-        ATRIUM_SANDBOX_ORIGIN: props.atriumSandboxOrigin,
-        // Atrium content events SNS topic (#1055). The app publishes content
-        // lifecycle events here; the publisher no-ops when this is empty.
-        ATRIUM_EVENTS_TOPIC_ARN: props.atriumEventsTopicArn ?? '',
-        // Secret ARN only; the private key set is fetched through the task role
-        // and never serialized into the task definition.
-        OIDC_SIGNING_JWKS_SECRET_ARN: props.oidcSigningJwksSecretArn,
-      },
+      environment: this.createContainerEnvironment(props, memory, retireLegacyContent),
       // Secrets injected from Secrets Manager at runtime
-      secrets: {
-        AUTH_SECRET: ecs.Secret.fromSecretsManager(
-          secretsmanager.Secret.fromSecretCompleteArn(this, 'AuthSecret', props.authSecretArn),
-          'AUTH_SECRET'
-        ),
-        // Atrium collab token signing secret (#1051). Dedicated key so collab
-        // tokens (which ride in the websocket URL and land in ALB/proxy logs)
-        // don't share AUTH_SECRET; a session-key leak then can't forge them.
-        COLLAB_JWT_SECRET: ecs.Secret.fromSecretsManager(
-          secretsmanager.Secret.fromSecretCompleteArn(this, 'CollabJwtSecret', props.collabJwtSecretArn),
-          'COLLAB_JWT_SECRET'
-        ),
-        // Guardrail violation-log hash secret (#727 / 2026-07-06 chat outage):
-        // enables real per-session HMAC pseudonymization in violation logs.
-        // The app degrades to a 'redacted' placeholder if this is ever missing —
-        // it must never take chat down again.
-        GUARDRAIL_HASH_SECRET: ecs.Secret.fromSecretsManager(
-          secretsmanager.Secret.fromSecretCompleteArn(this, 'GuardrailHashSecret', props.guardrailHashSecretArn),
-          'GUARDRAIL_HASH_SECRET'
-        ),
-        // Dedicated oidc-provider cookie key. This is intentionally separate
-        // from AUTH_SECRET and is required by production readiness checks.
-        OIDC_COOKIE_SECRET: ecs.Secret.fromSecretsManager(
-          secretsmanager.Secret.fromSecretCompleteArn(this, 'OidcCookieSecret', props.oidcCookieSecretArn),
-          'OIDC_COOKIE_SECRET'
-        ),
-        // Issue #603: Database credentials for postgres.js driver
-        // The RDS secret contains a JSON object with: username, password, host, port, dbname
-        DB_USER: ecs.Secret.fromSecretsManager(
-          secretsmanager.Secret.fromSecretCompleteArn(this, 'DbSecret', props.rdsSecretArn),
-          'username'
-        ),
-        DB_PASSWORD: ecs.Secret.fromSecretsManager(
-          secretsmanager.Secret.fromSecretCompleteArn(this, 'DbSecretPassword', props.rdsSecretArn),
-          'password'
-        ),
-        // Agent Workspace OAuth secrets (#912) are NOT injected as task
-        // secrets. Injecting jsonField-resolved secrets gates task start on
-        // the Secrets Manager payload being valid JSON with specific fields
-        // — if IT hasn't yet populated the GCP OAuth client credentials (the
-        // default state on first deploy), every task fails to start and ECS
-        // hits the deployment circuit breaker.
-        //
-        // Instead, the app code in lib/agent-workspace/secrets-manager.ts
-        // reads these at request time (low-traffic paths: consent-link API
-        // and OAuth callback only). If the secret is unset or still holds a
-        // PLACEHOLDER value, the app surfaces a clean "not configured" error
-        // to the operator instead of crash-looping the entire ECS service.
-        //
-        // IAM read access to psd-agent/${environment}/* is granted above on
-        // the task role. The IDs are exposed via env vars (see envVars
-        // block — GOOGLE_WORKSPACE_OAUTH_SECRET_ID and
-        // AGENT_INTERNAL_API_KEY_SECRET_ID).
-      },
+      secrets: this.createContainerSecrets(props),
       // Security: Read-only root filesystem with tmpfs mounts for writable directories
       readonlyRootFilesystem: true,
       // Enable init process for proper signal handling (tini)
@@ -1051,6 +978,224 @@ export class EcsServiceConstruct extends Construct {
       protocol: ecs.Protocol.TCP,
     });
 
+    return { taskDefinition, container };
+  }
+
+  private createContainerEnvironment(
+    props: EcsServiceConstructProps,
+    memory: number,
+    retireLegacyContent: boolean,
+  ): Record<string, string> {
+    const { environment, documentsBucketName, agentWorkspaceBucketName } = props;
+
+    return {
+      NODE_ENV: 'production',
+      AWS_REGION: cdk.Stack.of(this).region,
+      NEXT_PUBLIC_AWS_REGION: cdk.Stack.of(this).region,
+      PORT: '3000',
+      ENVIRONMENT: environment,
+      // Used by server actions to build Secrets Manager ARNs for the
+      // workspace token manifest (#912). Without this the manifest
+      // secrets_manager_arn column is stored as null.
+      AWS_ACCOUNT_ID: cdk.Stack.of(this).account,
+      // Secrets Manager IDs for lazy-loaded workspace config (#912).
+      // Consumed at request time — not at task start — so the ECS service
+      // deploys cleanly before IT populates real GCP OAuth values.
+      // Names not ARNs — Secrets Manager APIs accept either, but the
+      // value here is a bare secret name. Suffix is `_SECRET_ID` so the
+      // shape is honest.
+      GOOGLE_WORKSPACE_OAUTH_SECRET_ID: `psd-agent/${environment}/google-oauth-client`,
+      AGENT_INTERNAL_API_KEY_SECRET_ID: `psd-agent/${environment}/internal-api-key`,
+      AGENT_INVOCATION_SIGNING_SECRET_ID: `psd-agent/${environment}/invocation-signing-key`,
+      AGENT_SCHEDULES_TABLE: `psd-agent-schedules-${environment}`,
+      AGENT_USERS_TABLE: `psd-agent-users-${environment}`,
+      AGENT_SCHEDULE_GROUP: `psd-agent-${environment}`,
+      AGENT_CRON_LAMBDA_ARN:
+        `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-cron-${environment}`,
+      AGENT_SCHEDULER_ROLE_ARN:
+        `arn:aws:iam::${cdk.Stack.of(this).account}:role/psd-agent-scheduler-invoke-${environment}`,
+      // DWD token broker (#1232) + agnt_ auto-provisioning (#1233) config —
+      // the GCP project number, WIF pool/provider ids, DWD service-account
+      // email, and the OneSync provisioning sheet id all live in ONE JSON
+      // secret `psd-agent/{env}/gcp-dwd-config`, populated out-of-band by IT
+      // (Reese). aistudio is a PUBLIC repo, so these values must not land in
+      // cdk.json / CDK context. The app reads the secret lazily at request time
+      // (loadBrokerConfig / getProvisioningSheetId, 5-min cached) and fails
+      // CLOSED (BrokerNotConfiguredError / not-configured) until it's populated
+      // — the same deploy-cleanly-before-values pattern as the OAuth secret IDs
+      // above. The ECS task role already holds GetSecretValue on
+      // psd-agent/${environment}/* (below), so no new IAM grant is required.
+      GCP_DWD_CONFIG_SECRET_ID: `psd-agent/${environment}/gcp-dwd-config`,
+      // #1232 confused-deputy isolation: trusted Workspace execution and
+      // account-request proxy to this dedicated mint Lambda (IAM-authed
+      // InvokeFunction) instead of performing WIF/signJwt in-process. Setting
+      // this env var switches the helpers into Lambda mode; when it is UNSET
+      // (local dev) they fall back to running the broker in-process (no real
+      // WIF locally). The task role's lambda:InvokeFunction grant above is
+      // scoped to exactly this function.
+      AGENT_MINT_LAMBDA_NAME: `psd-agent-mint-${environment}`,
+      // Opaque connector credential profiles. Values contain secret IDs and
+      // approved provider origins, never secret material. Empty by default;
+      // deployments opt in with `-c mcpOauthCredentialProfiles='<json>'`.
+      MCP_OAUTH_CREDENTIAL_PROFILES: (() => {
+        const profiles = this.node.tryGetContext('mcpOauthCredentialProfiles') as unknown;
+        return typeof profiles === 'string'
+          ? profiles
+          : JSON.stringify(profiles ?? {});
+      })(),
+      // Memory optimization - 70% of container memory
+      NODE_OPTIONS: `--max-old-space-size=${Math.floor(memory * 0.7)}`,
+      // Application configuration
+      S3_BUCKET_NAME: documentsBucketName,
+      DOCUMENTS_BUCKET_NAME: documentsBucketName, // Legacy name for compatibility
+      RDS_DATABASE_NAME: 'aistudio',
+      AUTH_URL: props.authUrl,
+      AUTH_COGNITO_CLIENT_ID: props.cognitoClientId,
+      AUTH_COGNITO_ISSUER: props.cognitoIssuer,
+      // Legacy RDS Data API variables (kept for backward compatibility during migration)
+      RDS_RESOURCE_ARN: props.rdsResourceArn,
+      RDS_SECRET_ARN: props.rdsSecretArn,
+      // Issue #603: Direct PostgreSQL connection via postgres.js
+      // DB credentials are injected via secrets below
+      DB_HOST: ssm.StringParameter.valueForStringParameter(this, `/aistudio/${environment}/db-host`),
+      DB_PORT: '5432',
+      DB_NAME: 'aistudio',
+      DB_MAX_CONNECTIONS: '20',
+      DB_IDLE_TIMEOUT: '20',
+      // Queue URLs from Processing Stack exports
+      EMBEDDING_QUEUE_URL: cdk.Fn.importValue(`${environment}-EmbeddingQueueUrl`),
+      CONTENT_PROCESSING_QUEUE_URL: cdk.Fn.importValue(`${environment}-ContentProcessingQueueUrl`),
+      GOOGLE_CONTENT_SYNC_QUEUE_URL: cdk.Fn.importValue(`${environment}-GoogleContentSyncQueueUrl`),
+      // Lambda function names from Processing Stack exports
+      EMBEDDING_GENERATOR_FUNCTION_NAME: cdk.Fn.importValue(`${environment}-EmbeddingGeneratorFunctionName`),
+      ...(!retireLegacyContent
+        ? {
+            FILE_PROCESSING_QUEUE_URL: cdk.Fn.importValue(
+              `${environment}-FileProcessingQueueUrl`,
+            ),
+            PROCESSING_QUEUE_URL: cdk.Fn.importValue(
+              `${environment}-ProcessingQueueUrl`,
+            ),
+            HIGH_MEMORY_QUEUE_URL: cdk.Fn.importValue(
+              `${environment}-HighMemoryQueueUrl`,
+            ),
+            DOCUMENT_JOBS_TABLE: cdk.Fn.importValue(
+              `${environment}-DocumentJobsTableName`,
+            ),
+            JOB_STATUS_TABLE_NAME: cdk.Fn.importValue(
+              `${environment}-JobStatusTableName`,
+            ),
+            URL_PROCESSOR_FUNCTION_NAME: cdk.Fn.importValue(
+              `${environment}-URLProcessorFunctionName`,
+            ),
+          }
+        : {}),
+      // Application settings
+      MAX_FILE_SIZE_MB: '100',
+      SQL_LOGGING: 'false',
+      // Public Cognito configuration for client-side
+      NEXT_PUBLIC_COGNITO_CLIENT_ID: props.cognitoClientId,
+      NEXT_PUBLIC_COGNITO_USER_POOL_ID: cdk.Fn.importValue(`${environment}-CognitoUserPoolId`),
+      NEXT_PUBLIC_COGNITO_DOMAIN: `aistudio-${environment}.auth.${cdk.Stack.of(this).region}.amazoncognito.com`,
+      // Cognito token configuration
+      COGNITO_ACCESS_TOKEN_LIFETIME_SECONDS: '43200', // 12 hours
+      COGNITO_JWKS_URL: `https://aistudio-${environment}.auth.${cdk.Stack.of(this).region}.amazoncognito.com/.well-known/jwks.json`,
+      // K-12 Content Safety - Bedrock Guardrails configuration
+      BEDROCK_GUARDRAIL_ID: cdk.Fn.importValue(`${environment}-GuardrailId`),
+      BEDROCK_GUARDRAIL_VERSION: 'DRAFT',
+      PII_TOKEN_TABLE_NAME: cdk.Fn.importValue(`${environment}-PIITokenTableName`),
+      GUARDRAIL_VIOLATION_TOPIC_ARN: cdk.Fn.importValue(`${environment}-ViolationTopicArn`),
+      CONTENT_SAFETY_ENABLED: 'true',
+      PII_TOKENIZATION_ENABLED: 'true',
+      // Issue #925: Skill publishing pipeline. The agent workspace bucket
+      // (published to SSM by AgentPlatformStack) holds SKILL.md folders, and
+      // the skill-builder Lambda scans/promotes drafts. Both are optional at
+      // runtime — if absent, publishing falls back to a reviewable draft row.
+      AGENT_WORKSPACE_BUCKET: agentWorkspaceBucketName,
+      AGENT_BEDROCK_API_KEY_SECRET_ID: `psd-agent-bedrock-api-key-${environment}`,
+      SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
+      // Atrium artifact sandbox origin (#1052). Server-only runtime var (NOT
+      // NEXT_PUBLIC): the reader/edit Server Components resolve the iframe src
+      // from it and pass it down as a prop, and the middleware builds the CSP
+      // frame-src from it at request time. Sourced from AtriumSandboxStack.
+      ATRIUM_SANDBOX_ORIGIN: props.atriumSandboxOrigin,
+      // Atrium content events SNS topic (#1055). The app publishes content
+      // lifecycle events here; the publisher no-ops when this is empty.
+      ATRIUM_EVENTS_TOPIC_ARN: props.atriumEventsTopicArn ?? '',
+      // Secret ARN only; the private key set is fetched through the task role
+      // and never serialized into the task definition.
+      OIDC_SIGNING_JWKS_SECRET_ARN: props.oidcSigningJwksSecretArn,
+
+    };
+  }
+
+  private createContainerSecrets(
+    props: EcsServiceConstructProps,
+  ): Record<string, ecs.Secret> {
+    return {
+      AUTH_SECRET: ecs.Secret.fromSecretsManager(
+        secretsmanager.Secret.fromSecretCompleteArn(this, 'AuthSecret', props.authSecretArn),
+        'AUTH_SECRET'
+      ),
+      // Atrium collab token signing secret (#1051). Dedicated key so collab
+      // tokens (which ride in the websocket URL and land in ALB/proxy logs)
+      // don't share AUTH_SECRET; a session-key leak then can't forge them.
+      COLLAB_JWT_SECRET: ecs.Secret.fromSecretsManager(
+        secretsmanager.Secret.fromSecretCompleteArn(this, 'CollabJwtSecret', props.collabJwtSecretArn),
+        'COLLAB_JWT_SECRET'
+      ),
+      // Guardrail violation-log hash secret (#727 / 2026-07-06 chat outage):
+      // enables real per-session HMAC pseudonymization in violation logs.
+      // The app degrades to a 'redacted' placeholder if this is ever missing —
+      // it must never take chat down again.
+      GUARDRAIL_HASH_SECRET: ecs.Secret.fromSecretsManager(
+        secretsmanager.Secret.fromSecretCompleteArn(this, 'GuardrailHashSecret', props.guardrailHashSecretArn),
+        'GUARDRAIL_HASH_SECRET'
+      ),
+      // Dedicated oidc-provider cookie key. This is intentionally separate
+      // from AUTH_SECRET and is required by production readiness checks.
+      OIDC_COOKIE_SECRET: ecs.Secret.fromSecretsManager(
+        secretsmanager.Secret.fromSecretCompleteArn(this, 'OidcCookieSecret', props.oidcCookieSecretArn),
+        'OIDC_COOKIE_SECRET'
+      ),
+      // Issue #603: Database credentials for postgres.js driver
+      // The RDS secret contains a JSON object with: username, password, host, port, dbname
+      DB_USER: ecs.Secret.fromSecretsManager(
+        secretsmanager.Secret.fromSecretCompleteArn(this, 'DbSecret', props.rdsSecretArn),
+        'username'
+      ),
+      DB_PASSWORD: ecs.Secret.fromSecretsManager(
+        secretsmanager.Secret.fromSecretCompleteArn(this, 'DbSecretPassword', props.rdsSecretArn),
+        'password'
+      ),
+      // Agent Workspace OAuth secrets (#912) are NOT injected as task
+      // secrets. Injecting jsonField-resolved secrets gates task start on
+      // the Secrets Manager payload being valid JSON with specific fields
+      // — if IT hasn't yet populated the GCP OAuth client credentials (the
+      // default state on first deploy), every task fails to start and ECS
+      // hits the deployment circuit breaker.
+      //
+      // Instead, the app code in lib/agent-workspace/secrets-manager.ts
+      // reads these at request time (low-traffic paths: consent-link API
+      // and OAuth callback only). If the secret is unset or still holds a
+      // PLACEHOLDER value, the app surfaces a clean "not configured" error
+      // to the operator instead of crash-looping the entire ECS service.
+      //
+      // IAM read access to psd-agent/${environment}/* is granted above on
+      // the task role. The IDs are exposed via env vars (see envVars
+      // block — GOOGLE_WORKSPACE_OAUTH_SECRET_ID and
+      // AGENT_INTERNAL_API_KEY_SECRET_ID).
+
+    };
+  }
+
+  private createService(
+    props: EcsServiceConstructProps,
+    taskDefinition: ecs.FargateTaskDefinition,
+    container: ecs.ContainerDefinition,
+    albSecurityGroup: ec2.SecurityGroup,
+  ): ecs.FargateService {
+    const { vpc, environment } = props;
     // ============================================================================
     // ECS Service with Auto Scaling
     // ============================================================================
@@ -1091,7 +1236,7 @@ export class EcsServiceConstruct extends Construct {
       ecs.Secret.fromSecretsManager(redisCache.authSecret)
     );
 
-    this.service = new ecs.FargateService(this, 'Service', {
+    const service = new ecs.FargateService(this, 'Service', {
       cluster: this.cluster,
       taskDefinition,
       serviceName: `aistudio-${environment}`,
@@ -1116,13 +1261,20 @@ export class EcsServiceConstruct extends Construct {
     // - Initial deployment: Uses value from initialDesiredCount parameter
     // - Subsequent deployments: Preserves current desired count (from auto-scaling or manual changes)
     // - No manual intervention required
-    const cfnService = this.service.node.defaultChild as ecs.CfnService;
+    const cfnService = service.node.defaultChild as ecs.CfnService;
     cfnService.addPropertyDeletionOverride('DesiredCount');
 
+    return service;
+  }
+
+  private createTrafficRouting(
+    props: EcsServiceConstructProps,
+  ): elbv2.ApplicationTargetGroup {
+    const { vpc } = props;
     // ============================================================================
     // Target Group and Listener
     // ============================================================================
-    this.targetGroup = new elbv2.ApplicationTargetGroup(this, 'TargetGroup', {
+    const targetGroup = new elbv2.ApplicationTargetGroup(this, 'TargetGroup', {
       vpc,
       port: 3000,
       protocol: elbv2.ApplicationProtocol.HTTP,
@@ -1145,10 +1297,15 @@ export class EcsServiceConstruct extends Construct {
       this.loadBalancer.addListener('HttpListener', {
         port: 80,
         protocol: elbv2.ApplicationProtocol.HTTP,
-        defaultTargetGroups: [this.targetGroup],
+        defaultTargetGroups: [targetGroup],
       });
     }
 
+    return targetGroup;
+  }
+
+  private configureAutoScaling(props: EcsServiceConstructProps): void {
+    const { environment } = props;
     // ============================================================================
     // Auto Scaling
     // ============================================================================
@@ -1173,7 +1330,12 @@ export class EcsServiceConstruct extends Construct {
     if (props.enableScheduledScaling && environment === 'prod') {
       this.addScheduledScaling(scaling);
     }
+  }
 
+  private configureOutputs(
+    environment: EcsServiceConstructProps['environment'],
+    albSecurityGroup: ec2.SecurityGroup,
+  ): void {
     // ============================================================================
     // Outputs and SSM Parameters
     // ============================================================================
@@ -1459,7 +1621,7 @@ export class EcsServiceConstruct extends Construct {
     // Add alarm actions if SNS topic provided
     if (props.alarmTopic) {
       const topic = props.alarmTopic;
-      alarms.forEach(alarm => alarm.addAlarmAction(topic));
+      for (const alarm of alarms) alarm.addAlarmAction(topic);
     }
 
     return alarms;

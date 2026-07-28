@@ -36,7 +36,11 @@
  */
 
 import { eq, and, sql, or, inArray } from "drizzle-orm";
-import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
+import {
+  executeQuery,
+  executeTransaction,
+  type DbTransaction,
+} from "@/lib/db/drizzle-client";
 import {
   aiModels,
   chainPrompts,
@@ -559,159 +563,12 @@ export async function replaceModelReferences(
   try {
     // Execute all validation and updates in a single transaction to prevent race conditions
     const result = await executeTransaction(
-      async (tx) => {
-        // Validate replacement within transaction
-        if (targetModelId === replacementModelId) {
-          throw new Error("A model cannot replace itself");
-        }
-
-        // Get both models within transaction
-        // NOTE: Sequential execution required for RDS Data API parameter binding.
-        // Concurrent queries with WHERE clauses cause malformed bindings like ":1params: 22".
-        // Even without .limit(), Promise.all() with parameterized queries confuses the driver's
-        // offset tracker. See Issue #583 and docs/database/drizzle-patterns.md.
-        const targetModelResult = await tx.select().from(aiModels).where(eq(aiModels.id, targetModelId));
-        const replacementModelResult = await tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId));
-
-        const targetModel = targetModelResult[0];
-        const replacementModel = replacementModelResult[0];
-
-        if (!targetModel) {
-          throw ErrorFactories.dbRecordNotFound("ai_models", targetModelId);
-        }
-        if (!replacementModel) {
-          throw ErrorFactories.dbRecordNotFound("ai_models", replacementModelId);
-        }
-        if (!replacementModel.active) {
-          throw new Error("Replacement model is not active");
-        }
-
-        // Get reference counts within transaction
-        // NOTE: Sequential execution required for RDS Data API parameter binding.
-        // Concurrent queries cause offset tracking issues, especially with multi-parameter
-        // queries like or(eq(...), eq(...)) which creates :1 and :2 bindings.
-        // Uses countAsInt helper (CAST syntax) instead of ::int - see Issue #583.
-        const chainPromptsResult = await tx.select({ count: countAsInt }).from(chainPrompts).where(eq(chainPrompts.modelId, targetModelId));
-        const nexusMessagesResult = await tx.select({ count: countAsInt }).from(nexusMessages).where(eq(nexusMessages.modelId, targetModelId));
-        const nexusConversationsResult = await tx.select({ count: countAsInt }).from(nexusConversations).where(sql`${nexusConversations.modelUsed} = ${targetModel.modelId}`);
-        const modelComparisonsResult = await tx.select({ count: countAsInt }).from(modelComparisons).where(or(eq(modelComparisons.model1Id, targetModelId), eq(modelComparisons.model2Id, targetModelId)));
-        const promptLibraryResult = await tx.select({ count: countAsInt }).from(promptLibrary).where(and(sql`${promptLibrary.settings}->>'modelId' = ${targetModel.modelId}`, sql`${promptLibrary.deletedAt} IS NULL`));
-
-        const counts = {
-          chainPromptsCount: chainPromptsResult[0]?.count ?? 0,
-          nexusMessagesCount: nexusMessagesResult[0]?.count ?? 0,
-          nexusConversationsCount: nexusConversationsResult[0]?.count ?? 0,
-          modelComparisonsCount: modelComparisonsResult[0]?.count ?? 0,
-          promptLibraryCount: promptLibraryResult[0]?.count ?? 0,
-        };
-        // Update chain_prompts
-        if (counts.chainPromptsCount > 0) {
-          await tx
-            .update(chainPrompts)
-            .set({ modelId: replacementModelId, updatedAt: new Date() })
-            .where(eq(chainPrompts.modelId, targetModelId));
-        }
-
-        // Update nexus_messages
-        if (counts.nexusMessagesCount > 0) {
-          await tx
-            .update(nexusMessages)
-            .set({ modelId: replacementModelId, updatedAt: new Date() })
-            .where(eq(nexusMessages.modelId, targetModelId));
-        }
-
-        // Update nexus_conversations (uses model_id string, not FK)
-        if (counts.nexusConversationsCount > 0) {
-          await tx
-            .update(nexusConversations)
-            .set({
-              modelUsed: replacementModel.modelId,
-              updatedAt: new Date(),
-            })
-            .where(eq(nexusConversations.modelUsed, targetModel.modelId));
-        }
-
-        // Update model_comparisons (both columns)
-        if (counts.modelComparisonsCount > 0) {
-          await tx
-            .update(modelComparisons)
-            .set({ model1Id: replacementModelId, updatedAt: new Date() })
-            .where(eq(modelComparisons.model1Id, targetModelId));
-
-          await tx
-            .update(modelComparisons)
-            .set({ model2Id: replacementModelId, updatedAt: new Date() })
-            .where(eq(modelComparisons.model2Id, targetModelId));
-        }
-
-        // Update prompt_library settings — raw SQL required because Drizzle ORM
-        // doesn't support jsonb_set() for partial JSONB field updates
-        if (counts.promptLibraryCount > 0) {
-          await tx.execute(sql`
-            UPDATE prompt_library
-            SET settings = jsonb_set(settings, '{modelId}', to_jsonb(${replacementModel.modelId}::text)),
-                updated_at = NOW()
-            WHERE settings->>'modelId' = ${targetModel.modelId}
-            AND deleted_at IS NULL
-          `);
-        }
-
-        // Record in audit table with generated ID
-        // FIXME: COLLISION RISK - Epoch-based ID generation is dangerous
-        //
-        // Current approach: EXTRACT(EPOCH FROM NOW()) * 1000000 (microsecond precision)
-        //
-        // PROBLEMS:
-        // 1. Rapid succession replacements can collide (microseconds don't guarantee uniqueness)
-        // 2. Database clock skew across replicas
-        // 3. Not safe in distributed/high-throughput scenarios
-        //
-        // RECOMMENDED FIX: Database migration to add BIGSERIAL or use UUID
-        //
-        // Short-term: This is acceptable because model replacements are rare manual operations
-        // (typically < 1 per hour) and not called concurrently.
-        //
-        // TODO: Create migration to change model_replacement_audit.id to BIGSERIAL
-        // See: https://github.com/psd401/aistudio/issues/TBD
-        await tx.insert(modelReplacementAudit).values({
-          id: sql`(EXTRACT(EPOCH FROM NOW()) * 1000000)::bigint`,
-          originalModelId: targetModelId,
-          originalModelName: targetModel.name,
-          replacementModelId: replacementModelId,
-          replacementModelName: replacementModel.name,
-          replacedBy: userId,
-          chainPromptsUpdated: counts.chainPromptsCount,
-          nexusMessagesUpdated: counts.nexusMessagesCount,
-          nexusConversationsUpdated: counts.nexusConversationsCount,
-          modelComparisonsUpdated: counts.modelComparisonsCount,
-          promptLibraryUpdated: counts.promptLibraryCount,
-        });
-
-        // Delete the original model
-        await tx.delete(aiModels).where(eq(aiModels.id, targetModelId));
-
-        return {
-          success: true,
-          targetModel: { id: targetModelId, name: targetModel.name },
-          replacementModel: {
-            id: replacementModelId,
-            name: replacementModel.name,
-          },
-          recordsUpdated: {
-            chainPrompts: counts.chainPromptsCount,
-            nexusMessages: counts.nexusMessagesCount,
-            nexusConversations: counts.nexusConversationsCount,
-            modelComparisons: counts.modelComparisonsCount,
-            promptLibrary: counts.promptLibraryCount,
-          },
-          totalUpdated:
-            counts.chainPromptsCount +
-            counts.nexusMessagesCount +
-            counts.nexusConversationsCount +
-            counts.modelComparisonsCount +
-            counts.promptLibraryCount,
-        };
-      },
+      (tx) => performModelReplacement(
+        tx,
+        targetModelId,
+        replacementModelId,
+        userId
+      ),
       "replaceModelReferencesTransaction"
     );
 
@@ -726,6 +583,215 @@ export async function replaceModelReferences(
     });
     throw error;
   }
+}
+
+type AIModelRow = typeof aiModels.$inferSelect;
+
+interface ModelReferenceCounts {
+  chainPromptsCount: number;
+  nexusMessagesCount: number;
+  nexusConversationsCount: number;
+  modelComparisonsCount: number;
+  promptLibraryCount: number;
+}
+
+interface ModelReplacementContext {
+  targetModelId: number;
+  replacementModelId: number;
+  userId: number;
+  targetModel: AIModelRow;
+  replacementModel: AIModelRow;
+  counts: ModelReferenceCounts;
+}
+
+async function performModelReplacement(
+  tx: DbTransaction,
+  targetModelId: number,
+  replacementModelId: number,
+  userId: number
+) {
+  if (targetModelId === replacementModelId) {
+    throw new Error("A model cannot replace itself");
+  }
+  const { targetModel, replacementModel } = await loadReplacementModels(
+    tx,
+    targetModelId,
+    replacementModelId
+  );
+  const counts = await loadModelReferenceCounts(tx, targetModelId, targetModel.modelId);
+  const context: ModelReplacementContext = {
+    targetModelId,
+    replacementModelId,
+    userId,
+    targetModel,
+    replacementModel,
+    counts,
+  };
+  await updateModelReferences(tx, context);
+  await recordModelReplacement(tx, context);
+  await tx.delete(aiModels).where(eq(aiModels.id, targetModelId));
+  return modelReplacementResult(
+    targetModelId,
+    replacementModelId,
+    targetModel,
+    replacementModel,
+    counts
+  );
+}
+
+async function loadReplacementModels(
+  tx: DbTransaction,
+  targetModelId: number,
+  replacementModelId: number
+): Promise<{ targetModel: AIModelRow; replacementModel: AIModelRow }> {
+  const targetRows = await tx.select().from(aiModels).where(eq(aiModels.id, targetModelId));
+  const replacementRows = await tx
+    .select()
+    .from(aiModels)
+    .where(eq(aiModels.id, replacementModelId));
+  const targetModel = targetRows[0];
+  const replacementModel = replacementRows[0];
+  if (!targetModel) {
+    throw ErrorFactories.dbRecordNotFound("ai_models", targetModelId);
+  }
+  if (!replacementModel) {
+    throw ErrorFactories.dbRecordNotFound("ai_models", replacementModelId);
+  }
+  if (!replacementModel.active) throw new Error("Replacement model is not active");
+  return { targetModel, replacementModel };
+}
+
+async function loadModelReferenceCounts(
+  tx: DbTransaction,
+  targetModelId: number,
+  targetModelKey: string
+): Promise<ModelReferenceCounts> {
+  const chain = await tx.select({ count: countAsInt }).from(chainPrompts)
+    .where(eq(chainPrompts.modelId, targetModelId));
+  const messages = await tx.select({ count: countAsInt }).from(nexusMessages)
+    .where(eq(nexusMessages.modelId, targetModelId));
+  const conversations = await tx.select({ count: countAsInt }).from(nexusConversations)
+    .where(sql`${nexusConversations.modelUsed} = ${targetModelKey}`);
+  const comparisons = await tx.select({ count: countAsInt }).from(modelComparisons)
+    .where(or(
+      eq(modelComparisons.model1Id, targetModelId),
+      eq(modelComparisons.model2Id, targetModelId)
+    ));
+  const library = await tx.select({ count: countAsInt }).from(promptLibrary)
+    .where(and(
+      sql`${promptLibrary.settings}->>'modelId' = ${targetModelKey}`,
+      sql`${promptLibrary.deletedAt} IS NULL`
+    ));
+  return {
+    chainPromptsCount: chain[0]?.count ?? 0,
+    nexusMessagesCount: messages[0]?.count ?? 0,
+    nexusConversationsCount: conversations[0]?.count ?? 0,
+    modelComparisonsCount: comparisons[0]?.count ?? 0,
+    promptLibraryCount: library[0]?.count ?? 0,
+  };
+}
+
+async function updateModelReferences(
+  tx: DbTransaction,
+  context: ModelReplacementContext
+): Promise<void> {
+  const {
+    targetModelId,
+    replacementModelId,
+    targetModel,
+    replacementModel,
+    counts,
+  } = context;
+  if (counts.chainPromptsCount > 0) {
+    await tx.update(chainPrompts)
+      .set({ modelId: replacementModelId, updatedAt: new Date() })
+      .where(eq(chainPrompts.modelId, targetModelId));
+  }
+  if (counts.nexusMessagesCount > 0) {
+    await tx.update(nexusMessages)
+      .set({ modelId: replacementModelId, updatedAt: new Date() })
+      .where(eq(nexusMessages.modelId, targetModelId));
+  }
+  if (counts.nexusConversationsCount > 0) {
+    await tx.update(nexusConversations)
+      .set({ modelUsed: replacementModel.modelId, updatedAt: new Date() })
+      .where(eq(nexusConversations.modelUsed, targetModel.modelId));
+  }
+  if (counts.modelComparisonsCount > 0) {
+    await updateModelComparisonReferences(tx, targetModelId, replacementModelId);
+  }
+  if (counts.promptLibraryCount > 0) {
+    await tx.execute(sql`
+      UPDATE prompt_library
+      SET settings = jsonb_set(settings, '{modelId}', to_jsonb(${replacementModel.modelId}::text)),
+          updated_at = NOW()
+      WHERE settings->>'modelId' = ${targetModel.modelId}
+      AND deleted_at IS NULL
+    `);
+  }
+}
+
+async function updateModelComparisonReferences(
+  tx: DbTransaction,
+  targetModelId: number,
+  replacementModelId: number
+): Promise<void> {
+  await tx.update(modelComparisons)
+    .set({ model1Id: replacementModelId, updatedAt: new Date() })
+    .where(eq(modelComparisons.model1Id, targetModelId));
+  await tx.update(modelComparisons)
+    .set({ model2Id: replacementModelId, updatedAt: new Date() })
+    .where(eq(modelComparisons.model2Id, targetModelId));
+}
+
+async function recordModelReplacement(
+  tx: DbTransaction,
+  context: ModelReplacementContext
+): Promise<void> {
+  const {
+    targetModelId,
+    replacementModelId,
+    userId,
+    targetModel,
+    replacementModel,
+    counts,
+  } = context;
+  await tx.insert(modelReplacementAudit).values({
+    id: sql`(EXTRACT(EPOCH FROM NOW()) * 1000000)::bigint`,
+    originalModelId: targetModelId,
+    originalModelName: targetModel.name,
+    replacementModelId,
+    replacementModelName: replacementModel.name,
+    replacedBy: userId,
+    chainPromptsUpdated: counts.chainPromptsCount,
+    nexusMessagesUpdated: counts.nexusMessagesCount,
+    nexusConversationsUpdated: counts.nexusConversationsCount,
+    modelComparisonsUpdated: counts.modelComparisonsCount,
+    promptLibraryUpdated: counts.promptLibraryCount,
+  });
+}
+
+function modelReplacementResult(
+  targetModelId: number,
+  replacementModelId: number,
+  targetModel: AIModelRow,
+  replacementModel: AIModelRow,
+  counts: ModelReferenceCounts
+) {
+  const recordsUpdated = {
+    chainPrompts: counts.chainPromptsCount,
+    nexusMessages: counts.nexusMessagesCount,
+    nexusConversations: counts.nexusConversationsCount,
+    modelComparisons: counts.modelComparisonsCount,
+    promptLibrary: counts.promptLibraryCount,
+  };
+  return {
+    success: true,
+    targetModel: { id: targetModelId, name: targetModel.name },
+    replacementModel: { id: replacementModelId, name: replacementModel.name },
+    recordsUpdated,
+    totalUpdated: Object.values(recordsUpdated).reduce((sum, count) => sum + count, 0),
+  };
 }
 
 // ============================================
@@ -779,75 +845,7 @@ export async function bulkImportAIModels(
 
   try {
     await executeTransaction(
-      async (tx) => {
-        // Get existing models for the current import batch (optimized query)
-        // Only query for models that are being imported, not the entire table
-        // NOTE: Sequential execution within transaction for RDS Data API safety
-        const modelIdsToImport = models.map((m) => m.modelId);
-        const existingModels =
-          modelIdsToImport.length > 0
-            ? await tx
-                .select()
-                .from(aiModels)
-                .where(inArray(aiModels.modelId, modelIdsToImport))
-            : [];
-        const existingByModelId = new Map(
-          existingModels.map((m) => [m.modelId, m])
-        );
-
-        for (const model of models) {
-          const existing = existingByModelId.get(model.modelId);
-
-          // Serialize capabilities to JSON string if provided as array
-          const capabilitiesJson = model.capabilities
-            ? JSON.stringify(model.capabilities)
-            : null;
-
-          if (existing) {
-            // Update existing model
-            // Note: Using 'field' in model checks if field was explicitly provided (even if null)
-            // This allows: undefined = keep existing, null = clear field, value = update field
-            await tx
-              .update(aiModels)
-              .set({
-                name: model.name,
-                provider: model.provider,
-                description: "description" in model ? model.description : existing.description,
-                capabilities: "capabilities" in model ? capabilitiesJson : existing.capabilities,
-                maxTokens: "maxTokens" in model ? model.maxTokens : existing.maxTokens,
-                active: "active" in model ? model.active : existing.active,
-                nexusEnabled: "nexusEnabled" in model ? model.nexusEnabled : existing.nexusEnabled,
-                architectEnabled: "architectEnabled" in model ? model.architectEnabled : existing.architectEnabled,
-                inputCostPer1kTokens:
-                  "inputCostPer1kTokens" in model ? model.inputCostPer1kTokens : existing.inputCostPer1kTokens,
-                outputCostPer1kTokens:
-                  "outputCostPer1kTokens" in model ? model.outputCostPer1kTokens : existing.outputCostPer1kTokens,
-                cachedInputCostPer1kTokens:
-                  "cachedInputCostPer1kTokens" in model ? model.cachedInputCostPer1kTokens : existing.cachedInputCostPer1kTokens,
-                updatedAt: new Date(),
-              })
-              .where(eq(aiModels.id, existing.id));
-            result.updated++;
-          } else {
-            // Create new model
-            await tx.insert(aiModels).values({
-              name: model.name,
-              modelId: model.modelId,
-              provider: model.provider,
-              description: model.description,
-              capabilities: capabilitiesJson,
-              maxTokens: model.maxTokens,
-              active: model.active ?? true,
-              nexusEnabled: model.nexusEnabled ?? true,
-              architectEnabled: model.architectEnabled ?? true,
-              inputCostPer1kTokens: model.inputCostPer1kTokens,
-              outputCostPer1kTokens: model.outputCostPer1kTokens,
-              cachedInputCostPer1kTokens: model.cachedInputCostPer1kTokens,
-            });
-            result.created++;
-          }
-        }
-      },
+      (tx) => importAIModels(tx, models, result),
       "bulkImportAIModelsTransaction"
     );
 
@@ -864,4 +862,104 @@ export async function bulkImportAIModels(
     });
     throw error;
   }
+}
+
+async function importAIModels(
+  tx: DbTransaction,
+  models: BulkModelImportData[],
+  result: BulkImportResult
+): Promise<void> {
+  const existingByModelId = await loadExistingImportModels(tx, models);
+  for (const model of models) {
+    const existing = existingByModelId.get(model.modelId);
+    if (existing) {
+      await updateImportedModel(tx, model, existing);
+      result.updated++;
+    } else {
+      await createImportedModel(tx, model);
+      result.created++;
+    }
+  }
+}
+
+async function loadExistingImportModels(
+  tx: DbTransaction,
+  models: BulkModelImportData[]
+): Promise<Map<string, AIModelRow>> {
+  const modelIds = models.map(model => model.modelId);
+  if (modelIds.length === 0) return new Map();
+  const existing = await tx
+    .select()
+    .from(aiModels)
+    .where(inArray(aiModels.modelId, modelIds));
+  return new Map(existing.map(model => [model.modelId, model]));
+}
+
+function importedValue<K extends keyof BulkModelImportData>(
+  model: BulkModelImportData,
+  key: K,
+  fallback: AIModelRow[K]
+): BulkModelImportData[K] | AIModelRow[K] {
+  return key in model ? model[key] : fallback;
+}
+
+async function updateImportedModel(
+  tx: DbTransaction,
+  model: BulkModelImportData,
+  existing: AIModelRow
+): Promise<void> {
+  const capabilities = model.capabilities
+    ? JSON.stringify(model.capabilities)
+    : null;
+  await tx.update(aiModels).set({
+    name: model.name,
+    provider: model.provider,
+    description: importedValue(model, "description", existing.description),
+    capabilities:
+      "capabilities" in model ? capabilities : existing.capabilities,
+    maxTokens: importedValue(model, "maxTokens", existing.maxTokens),
+    active: importedValue(model, "active", existing.active),
+    nexusEnabled: importedValue(model, "nexusEnabled", existing.nexusEnabled),
+    architectEnabled: importedValue(
+      model,
+      "architectEnabled",
+      existing.architectEnabled
+    ),
+    inputCostPer1kTokens: importedValue(
+      model,
+      "inputCostPer1kTokens",
+      existing.inputCostPer1kTokens
+    ),
+    outputCostPer1kTokens: importedValue(
+      model,
+      "outputCostPer1kTokens",
+      existing.outputCostPer1kTokens
+    ),
+    cachedInputCostPer1kTokens: importedValue(
+      model,
+      "cachedInputCostPer1kTokens",
+      existing.cachedInputCostPer1kTokens
+    ),
+    updatedAt: new Date(),
+  }).where(eq(aiModels.id, existing.id));
+}
+
+async function createImportedModel(
+  tx: DbTransaction,
+  model: BulkModelImportData
+): Promise<void> {
+  await tx.insert(aiModels).values({
+    name: model.name,
+    modelId: model.modelId,
+    provider: model.provider,
+    description: model.description,
+    capabilities: model.capabilities ? JSON.stringify(model.capabilities) : null,
+    maxTokens: model.maxTokens,
+    active: model.active ?? true,
+    nexusEnabled: model.nexusEnabled ?? true,
+    architectEnabled: model.architectEnabled ?? true,
+    inputCostPer1kTokens: model.inputCostPer1kTokens,
+    outputCostPer1kTokens: model.outputCostPer1kTokens,
+    cachedInputCostPer1kTokens: model.cachedInputCostPer1kTokens,
+  });
 }

@@ -8,7 +8,9 @@ import {
   startTimer
 } from "@/lib/logger"
 import { getServerSession } from "@/lib/auth/server-session"
+import { resolveUserId } from "@/lib/auth/resolve-user"
 import { executeQuery } from "@/lib/db/drizzle-client"
+import { filterAccessibleResourceIds } from "@/lib/db/drizzle/resource-access"
 import { eq, desc } from "drizzle-orm"
 import { assistantArchitects } from "@/lib/db/schema"
 
@@ -69,8 +71,8 @@ function deriveCategory(name: string, description: string | null): CatalogAssist
 }
 
 /**
- * Gets all approved assistant architects for the catalog
- * Shows all approved assistants - access control is handled at execution time
+ * Gets approved assistant architects the caller may execute. Server-side
+ * filtering keeps room-restricted assistants out of serialized action data.
  */
 export async function getAssistantCatalogAction(): Promise<
   ActionState<CatalogAssistant[]>
@@ -88,10 +90,11 @@ export async function getAssistantCatalogAction(): Promise<
       throw ErrorFactories.authNoSession()
     }
 
-    log.debug("User authenticated", { userId: session.sub })
+    const userId = await resolveUserId(session, requestId)
+    log.debug("User authenticated", { userId })
 
-    // Fetch all approved architects
-    // Access control is handled at execution time, not catalog browsing
+    // Fetch approved candidates, then apply the same shared resource gate used
+    // by REST, MCP, and execution.
     const approvedArchitects = await executeQuery(
       (db) =>
         db
@@ -100,23 +103,36 @@ export async function getAssistantCatalogAction(): Promise<
             name: assistantArchitects.name,
             description: assistantArchitects.description,
             imagePath: assistantArchitects.imagePath,
-            createdAt: assistantArchitects.createdAt
+            createdAt: assistantArchitects.createdAt,
+            userId: assistantArchitects.userId
           })
           .from(assistantArchitects)
           .where(eq(assistantArchitects.status, "approved"))
           .orderBy(desc(assistantArchitects.createdAt)),
       "getApprovedArchitectsForCatalog"
     )
+    const accessibleIds = await filterAccessibleResourceIds(
+      userId,
+      "assistant",
+      approvedArchitects.map((architect) => architect.id),
+      {
+        ownedResourceIds: approvedArchitects
+          .filter((architect) => architect.userId === userId)
+          .map((architect) => architect.id),
+      }
+    )
 
     // Transform to catalog format with derived categories
-    const catalogAssistants: CatalogAssistant[] = approvedArchitects.map(architect => ({
-      id: architect.id,
-      name: architect.name,
-      description: architect.description,
-      imagePath: architect.imagePath,
-      createdAt: architect.createdAt,
-      category: deriveCategory(architect.name, architect.description)
-    }))
+    const catalogAssistants: CatalogAssistant[] = approvedArchitects
+      .filter((architect) => accessibleIds.has(String(architect.id)))
+      .map(architect => ({
+        id: architect.id,
+        name: architect.name,
+        description: architect.description,
+        imagePath: architect.imagePath,
+        createdAt: architect.createdAt,
+        category: deriveCategory(architect.name, architect.description)
+      }))
 
     log.info("Assistant catalog retrieved successfully", { count: catalogAssistants.length })
     timer({ status: "success", count: catalogAssistants.length })

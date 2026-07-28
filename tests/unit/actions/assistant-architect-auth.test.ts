@@ -12,6 +12,7 @@
  */
 import { describe, it, expect, jest, beforeEach, beforeAll } from '@jest/globals'
 import type { ActionState } from '@/types'
+import { INTERNAL_ASSISTANT_LOOKUP } from '@/lib/assistant-architect/internal-access'
 
 const mockGetServerSession = jest.fn(() => Promise.resolve(null as { sub: string } | null))
 const mockGetAssistantArchitectById = jest.fn<() => Promise<unknown>>()
@@ -26,6 +27,12 @@ const mockGetAccessibleRepositoryIds = jest.fn<
 const mockGetRepositoryById = jest.fn<(repositoryId: number) => Promise<unknown>>()
 const mockApproveAssistantArchitect = jest.fn<() => Promise<unknown>>()
 const mockSubmitForApproval = jest.fn<() => Promise<unknown>>()
+const mockGetToolInputFields = jest.fn<() => Promise<unknown[]>>(
+  () => Promise.resolve([])
+)
+const mockUserCanAccessResource = jest.fn<
+  (...args: unknown[]) => Promise<boolean>
+>(() => Promise.resolve(true))
 type AudienceValidationResult = {
   isCompatible: boolean
   mismatches: Array<{ repositoryId: number; reason: string }>
@@ -57,6 +64,7 @@ jest.mock('@/lib/db/drizzle-client', () => ({
 jest.mock('@/lib/db/drizzle', () => ({
   getAssistantArchitectById: mockGetAssistantArchitectById,
   getChainPrompts: mockGetChainPrompts,
+  getToolInputFields: mockGetToolInputFields,
   createChainPrompt: mockCreateChainPrompt,
   updateChainPrompt: mockUpdateChainPrompt,
   getAccessibleRepositoryIds: mockGetAccessibleRepositoryIds,
@@ -71,6 +79,10 @@ jest.mock('@/lib/assistant-architect/repository-audience', () => ({
 }))
 jest.mock('@/utils/roles', () => ({ hasRole: mockHasRole, hasCapabilityAccess: jest.fn(() => Promise.resolve(true)) }))
 jest.mock('@/actions/db/get-current-user-action', () => ({ getCurrentUserAction: mockGetCurrentUserAction }))
+jest.mock('@/lib/db/drizzle/resource-access', () => ({
+  filterAccessibleResourceIds: jest.fn(),
+  userCanAccessResource: mockUserCanAccessResource,
+}))
 jest.mock('@/lib/logger', () => ({
   createLogger: () => ({ info: jest.fn(), debug: jest.fn(), warn: jest.fn(), error: jest.fn() }),
   generateRequestId: () => 't', startTimer: () => jest.fn(), sanitizeForLogging: (x: unknown) => x,
@@ -92,35 +104,142 @@ const promptData = {
   name: 'p', content: 'c', modelId: 1, position: 0,
 }
 
-describe('assistant-architect mutation authorization', () => {
-  let mod: typeof import('@/actions/db/assistant-architect-actions')
-  beforeAll(async () => { mod = await import('@/actions/db/assistant-architect-actions') })
-  beforeEach(() => {
-    jest.clearAllMocks()
-    mockGetServerSession.mockResolvedValue({ sub: 'user-1' })
-    mockHasRole.mockResolvedValue(false)
-    mockGetCurrentUserAction.mockResolvedValue({ isSuccess: true, data: { user: { id: 1 } } })
-    mockGetAccessibleRepositoryIds.mockImplementation((repositoryIds) =>
-      Promise.resolve(repositoryIds)
-    )
-    mockGetRepositoryById.mockImplementation((repositoryId) =>
-      Promise.resolve({
-        id: repositoryId,
-        repositoryKind: "durable",
-        lifecycleStatus: "active",
-      })
-    )
-    mockValidateAssistantRepositoryAudience.mockResolvedValue({
-      isCompatible: true,
-      mismatches: [],
+let mod: typeof import('@/actions/db/assistant-architect-actions')
+
+async function loadAssistantArchitectActions(): Promise<void> {
+  mod = await import('@/actions/db/assistant-architect-actions')
+}
+
+function resetAssistantArchitectAuthorizationMocks(): void {
+  jest.clearAllMocks()
+  mockGetServerSession.mockResolvedValue({ sub: 'user-1' })
+  mockHasRole.mockResolvedValue(false)
+  mockGetCurrentUserAction.mockResolvedValue({
+    isSuccess: true,
+    data: { user: { id: 1 } },
+  })
+  mockGetAccessibleRepositoryIds.mockImplementation((repositoryIds) =>
+    Promise.resolve(repositoryIds)
+  )
+  mockGetToolInputFields.mockResolvedValue([])
+  mockUserCanAccessResource.mockResolvedValue(true)
+  mockGetRepositoryById.mockImplementation((repositoryId) =>
+    Promise.resolve({
+      id: repositoryId,
+      repositoryKind: "durable",
+      lifecycleStatus: "active",
     })
-    mockValidateAssistantRepositoryAudienceForRepositoryIds.mockResolvedValue({
-      isCompatible: true,
-      mismatches: [],
-    })
-    mockExecuteQuery.mockImplementation((_fn: unknown, label?: string) =>
-      Promise.resolve(label === 'getExecutionOwnerForResultUpdate' ? [{ userId: 999 }] : [])
+  )
+  mockValidateAssistantRepositoryAudience.mockResolvedValue({
+    isCompatible: true,
+    mismatches: [],
+  })
+  mockValidateAssistantRepositoryAudienceForRepositoryIds.mockResolvedValue({
+    isCompatible: true,
+    mismatches: [],
+  })
+  mockExecuteQuery.mockImplementation((_fn: unknown, label?: string) =>
+    Promise.resolve(
+      label === 'getExecutionOwnerForResultUpdate' ? [{ userId: 999 }] : []
     )
+  )
+}
+
+function defineAssistantArchitectMutationAuthorizationSuite1Part1() {
+  beforeAll(loadAssistantArchitectActions)
+  beforeEach(resetAssistantArchitectAuthorizationMocks)
+
+  it('getAssistantArchitectAction rejects a direct unauthenticated RPC before loading contents', async () => {
+    mockGetServerSession.mockResolvedValue(null)
+
+    const res = await mod.getAssistantArchitectAction('5')
+
+    expect(res).toEqual({
+      isSuccess: false,
+      message: 'Assistant architect not found',
+    })
+    expect(mockGetAssistantArchitectById).not.toHaveBeenCalled()
+    expect(mockUserCanAccessResource).not.toHaveBeenCalled()
+  })
+
+  it('getAssistantArchitectAction masks an approved assistant hidden by room access', async () => {
+    mockGetAssistantArchitectById.mockResolvedValue({
+      id: 5,
+      userId: 99,
+      status: 'approved',
+    })
+    mockUserCanAccessResource.mockResolvedValue(false)
+
+    const res = await mod.getAssistantArchitectAction('5')
+
+    expect(res).toEqual({
+      isSuccess: false,
+      message: 'Assistant architect not found',
+    })
+    expect(mockUserCanAccessResource).toHaveBeenCalledWith(
+      1,
+      'assistant',
+      5,
+      { ownerUserId: 99 }
+    )
+  })
+
+  it('getAssistantArchitectAction returns an assistant allowed by the shared gate', async () => {
+    mockGetAssistantArchitectById.mockResolvedValue({
+      id: 5,
+      userId: 99,
+      status: 'approved',
+    })
+
+    const res = await mod.getAssistantArchitectAction('5')
+
+    expect(res.isSuccess).toBe(true)
+    expect(res.data).toEqual(expect.objectContaining({ id: 5 }))
+    expect(mockUserCanAccessResource).toHaveBeenCalledWith(
+      1,
+      'assistant',
+      5,
+      { ownerUserId: 99 }
+    )
+  })
+
+  it('getAssistantArchitectByIdAction applies the same gate when invoked directly', async () => {
+    mockGetAssistantArchitectById.mockResolvedValue({
+      id: 5,
+      userId: 99,
+      status: 'approved',
+    })
+    mockUserCanAccessResource.mockResolvedValue(false)
+
+    const res = await mod.getAssistantArchitectByIdAction('5')
+
+    expect(res).toEqual({
+      isSuccess: false,
+      message: 'Assistant architect not found',
+    })
+    expect(mockUserCanAccessResource).toHaveBeenCalledWith(
+      1,
+      'assistant',
+      5,
+      { ownerUserId: 99 }
+    )
+  })
+
+  it('preserves trusted API/MCP loading behind the server-only marker', async () => {
+    mockGetServerSession.mockResolvedValue(null)
+    mockGetAssistantArchitectById.mockResolvedValue({
+      id: 5,
+      userId: 99,
+      status: 'approved',
+    })
+
+    const res = await mod.getAssistantArchitectByIdAction(
+      '5',
+      INTERNAL_ASSISTANT_LOOKUP
+    )
+
+    expect(res.isSuccess).toBe(true)
+    expect(mockUserCanAccessResource).not.toHaveBeenCalled()
   })
 
   // REV-COR-031 / REV-SEC-041
@@ -177,7 +296,9 @@ describe('assistant-architect mutation authorization', () => {
     )
   })
 
-  it('blocks adding a private binding to an unrestricted approved assistant', async () => {
+  }
+
+function defineAssistantArchitectMutationAuthorizationSuite1Part2() {it('blocks adding a private binding to an unrestricted approved assistant', async () => {
     mockGetAssistantArchitectById.mockResolvedValue({
       id: 5,
       userId: 1,
@@ -280,7 +401,9 @@ describe('assistant-architect mutation authorization', () => {
     expect(mockUpdateChainPrompt).not.toHaveBeenCalled()
   })
 
-  it('blocks a wider-role repository update on an approved assistant', async () => {
+  }
+
+function defineAssistantArchitectMutationAuthorizationSuite1Part3() {it('blocks a wider-role repository update on an approved assistant', async () => {
     mockExecuteQuery.mockImplementation((_fn: unknown, label?: string) => {
       if (label === 'getChainPromptById') {
         return Promise.resolve([{
@@ -385,7 +508,9 @@ describe('assistant-architect mutation authorization', () => {
     expect(mockSubmitForApproval).not.toHaveBeenCalled()
   })
 
-  it('rechecks audience compatibility before admin approval', async () => {
+  }
+
+function defineAssistantArchitectMutationAuthorizationSuite1Part4() {it('rechecks audience compatibility before admin approval', async () => {
     mockHasRole.mockResolvedValue(true)
     mockValidateAssistantRepositoryAudience.mockResolvedValue({
       isCompatible: false,
@@ -437,4 +562,13 @@ describe('assistant-architect mutation authorization', () => {
     expect(res.isSuccess).toBe(true)
     expect(mockExecuteQuery).toHaveBeenCalledTimes(2) // ownership select + update
   })
-})
+}
+
+const defineAssistantArchitectMutationAuthorizationSuite1 = () => {
+  defineAssistantArchitectMutationAuthorizationSuite1Part1()
+  defineAssistantArchitectMutationAuthorizationSuite1Part2()
+  defineAssistantArchitectMutationAuthorizationSuite1Part3()
+  defineAssistantArchitectMutationAuthorizationSuite1Part4()
+};
+
+describe('assistant-architect mutation authorization', defineAssistantArchitectMutationAuthorizationSuite1)

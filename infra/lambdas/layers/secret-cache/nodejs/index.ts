@@ -250,7 +250,7 @@ export class SecretCache {
         }
       }
 
-      keysToDelete.forEach((key) => this.cache.delete(key))
+      for (const key of keysToDelete) this.cache.delete(key)
 
       if (this.enableDebugLogging) {
         log.info("Secret invalidated from cache", {

@@ -1020,7 +1020,14 @@ paths:
       operationId: listAssistants
       tags: [Assistants]
       summary: List accessible assistants
-      description: Returns assistants the authenticated user can access (own, admin, or approved).
+      description: |
+        Returns assistants the authenticated user can access after base
+        owner/admin/approved visibility and shared resource filtering. Active
+        room assignment grants assistant access. A caller whose only AI Studio
+        role is `student` and who belongs to at least one active room receives
+        only room-assigned assistants; administrators, callers with any
+        non-student role, and students with no active rooms keep ordinary
+        visibility. The same list service backs MCP `list_assistants`.
       security:
         - BearerAuth: []
         - SessionAuth: []
@@ -1088,7 +1095,10 @@ paths:
       operationId: getAssistant
       tags: [Assistants]
       summary: Get assistant details
-      description: Returns full assistant details including input fields.
+      description: |
+        Returns full assistant details including input fields after base and
+        shared resource/room visibility checks. An assistant hidden by the
+        caller's current room restriction returns 404, matching a missing ID.
       security:
         - BearerAuth: []
         - SessionAuth: []
@@ -1132,9 +1142,14 @@ paths:
 
         Beyond the assistant scope check, the caller must have per-resource access
         (Epic #1202 Phase 3) to BOTH the assistant and the model its last prompt
-        uses: a resource restricted to specific roles/Google groups returns 403 to
-        a caller who matches no grant (the assistant owner and administrators
-        always pass; a resource with no grants is unrestricted).
+        uses. Active room assignment grants access to the assistant, even when
+        its role/Google-group grants would deny the caller. A caller whose only
+        AI Studio role is `student` and who has an active room may execute only
+        room-assigned assistants; assistant ownership and zero-grant
+        unrestricted status do not bypass that restriction. Administrators,
+        callers with any non-student role, and students with no active rooms
+        keep ordinary ownership/grant behavior. Room assignment never bypasses
+        model or repository access.
 
         Runtime `file_upload` values may include up to 10 opaque canonical
         temporary-attachment markers returned by the authenticated staging API.
@@ -1249,9 +1264,12 @@ paths:
         stream. Beyond the assistant scope check, the caller must have
         per-resource access (Epic #1202 Phase 3) to BOTH the assistant and the
         model its last prompt uses: a resource restricted to specific
-        roles/Google groups returns 403 to a caller who matches no grant (the
-        assistant owner and administrators always pass; a resource with no
-        grants is unrestricted).
+        roles/Google groups returns 403 to a caller who matches no grant. Active
+        room assignment grants assistant access; student-only active room
+        members are restricted to assigned assistants even when they own an
+        unassigned assistant or it has no grants. Administrators, callers with
+        any non-student role, and students with no active rooms keep ordinary
+        behavior. Model and repository checks are unchanged.
 
         Runtime canonical file markers follow the same owner-bound rules as
         `/assistants/{id}/execute`. Every marker is resolved and sanitized before
@@ -1336,8 +1354,12 @@ paths:
         Beyond the assistant scope check, the caller must have per-resource
         access (Epic #1202 Phase 3) to BOTH the assistant and the model it uses:
         a resource restricted to specific roles/Google groups returns 403 to a
-        caller who matches no grant (the assistant owner and administrators
-        always pass; a resource with no grants is unrestricted).
+        caller who matches no grant. Active room assignment grants assistant
+        access; student-only active room members are restricted to assigned
+        assistants even when they own an unassigned assistant or it has no
+        grants. Administrators, callers with any non-student role, and students
+        with no active rooms keep ordinary behavior. Model and repository checks
+        are unchanged.
 
         Before the body is parsed or a message is written, the server unions
         every prompt-bound repository with the conversation's bounded runtime

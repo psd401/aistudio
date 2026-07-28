@@ -42,6 +42,88 @@ function hasAuthoritySelector(body: Record<string, unknown>): boolean {
   )
 }
 
+async function executeScheduleOperation(
+  ownerEmail: string,
+  body: Record<string, unknown>
+): Promise<NextResponse> {
+  const service = createAgentScheduleService()
+  switch (body.operation) {
+    case "list":
+      return NextResponse.json({
+        schedules: await service.list(ownerEmail),
+      })
+    case "create":
+      return NextResponse.json(
+        {
+          created: await service.create(ownerEmail, {
+            name: body.name,
+            prompt: body.prompt,
+            cron: body.cron,
+            timezone: body.timezone,
+            disabled: body.disabled,
+          }),
+        },
+        { status: 201 }
+      )
+    case "update":
+      return NextResponse.json({
+        updated: await service.update(ownerEmail, {
+          scheduleId: body.scheduleId,
+          name: body.name,
+          prompt: body.prompt,
+          cron: body.cron,
+          timezone: body.timezone,
+          enabled: body.enabled,
+        }),
+      })
+    case "delete":
+      return NextResponse.json({
+        deleted: await service.delete(ownerEmail, body.scheduleId),
+      })
+    default:
+      return NextResponse.json(
+        { error: "operation must be create, list, update, or delete" },
+        { status: 400 }
+      )
+  }
+}
+
+function scheduleErrorResponse(error: unknown, requestId: string): NextResponse {
+  if (error instanceof AgentScheduleInputError) {
+    return NextResponse.json({ error: error.message }, { status: 400 })
+  }
+  if (error instanceof AgentScheduleNotFoundError) {
+    return NextResponse.json({ error: error.message }, { status: 404 })
+  }
+  if (error instanceof AgentScheduleConflictError) {
+    return NextResponse.json({ error: error.message }, { status: 409 })
+  }
+  if (error instanceof AgentScheduleQuotaError) {
+    return NextResponse.json({ error: error.message }, { status: 429 })
+  }
+  if (
+    error instanceof AgentScheduleUserNotReadyError ||
+    error instanceof AgentScheduleNotConfiguredError
+  ) {
+    return NextResponse.json({ error: error.message }, { status: 503 })
+  }
+  if (error instanceof AgentScheduleSyncError) {
+    log.error("Schedule broker synchronization failure", {
+      requestId,
+      error: error.message,
+    })
+    return NextResponse.json({ error: error.message }, { status: 502 })
+  }
+  log.error("Schedule broker failure", {
+    requestId,
+    error: error instanceof Error ? error.message : String(error),
+  })
+  return NextResponse.json(
+    { error: "Schedule operation failed" },
+    { status: 502 }
+  )
+}
+
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId()
   const invocation = await verifyAgentInvocationContext(request, {
@@ -80,82 +162,8 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const service = createAgentScheduleService()
-    switch (rawBody.operation) {
-      case "list":
-        return NextResponse.json({
-          schedules: await service.list(invocation.ownerEmail),
-        })
-      case "create":
-        return NextResponse.json(
-          {
-            created: await service.create(invocation.ownerEmail, {
-              name: rawBody.name,
-              prompt: rawBody.prompt,
-              cron: rawBody.cron,
-              timezone: rawBody.timezone,
-              disabled: rawBody.disabled,
-            }),
-          },
-          { status: 201 }
-        )
-      case "update":
-        return NextResponse.json({
-          updated: await service.update(invocation.ownerEmail, {
-            scheduleId: rawBody.scheduleId,
-            name: rawBody.name,
-            prompt: rawBody.prompt,
-            cron: rawBody.cron,
-            timezone: rawBody.timezone,
-            enabled: rawBody.enabled,
-          }),
-        })
-      case "delete":
-        return NextResponse.json({
-          deleted: await service.delete(
-            invocation.ownerEmail,
-            rawBody.scheduleId
-          ),
-        })
-      default:
-        return NextResponse.json(
-          { error: "operation must be create, list, update, or delete" },
-          { status: 400 }
-        )
-    }
+    return await executeScheduleOperation(invocation.ownerEmail, rawBody)
   } catch (error) {
-    if (error instanceof AgentScheduleInputError) {
-      return NextResponse.json({ error: error.message }, { status: 400 })
-    }
-    if (error instanceof AgentScheduleNotFoundError) {
-      return NextResponse.json({ error: error.message }, { status: 404 })
-    }
-    if (error instanceof AgentScheduleConflictError) {
-      return NextResponse.json({ error: error.message }, { status: 409 })
-    }
-    if (error instanceof AgentScheduleQuotaError) {
-      return NextResponse.json({ error: error.message }, { status: 429 })
-    }
-    if (
-      error instanceof AgentScheduleUserNotReadyError ||
-      error instanceof AgentScheduleNotConfiguredError
-    ) {
-      return NextResponse.json({ error: error.message }, { status: 503 })
-    }
-    if (error instanceof AgentScheduleSyncError) {
-      log.error("Schedule broker synchronization failure", {
-        requestId,
-        error: error.message,
-      })
-      return NextResponse.json({ error: error.message }, { status: 502 })
-    }
-    log.error("Schedule broker failure", {
-      requestId,
-      error: error instanceof Error ? error.message : String(error),
-    })
-    return NextResponse.json(
-      { error: "Schedule operation failed" },
-      { status: 502 }
-    )
+    return scheduleErrorResponse(error, requestId)
   }
 }

@@ -710,9 +710,9 @@
       "humanDriven": true
     },
     {
-      "identifier": "skill.redrover",
-      "name": "Agent skill: Red Rover",
-      "description": "Allow owner-bound agents to read district employee absence and vacancy data from Red Rover.",
+      "identifier": "rooms-manage",
+      "name": "Room Management",
+      "description": "Compose class rooms from roster sections and assign approved assistants.",
       "defaultRoles": [
         "administrator",
         "staff"

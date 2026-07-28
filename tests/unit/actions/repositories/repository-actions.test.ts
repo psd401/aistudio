@@ -79,8 +79,10 @@ const rawRepo = {
   updatedAt: new Date(),
 }
 
-describe('repository.actions authorization (REV-SEC-082 / REV-SEC-083 / REV-COR-064)', () => {
-  let mod: typeof import('@/actions/repositories/repository.actions')
+let mod: typeof import('@/actions/repositories/repository.actions')
+
+function defineRepositoryActionsAuthorizationREVSEC082REVSECSuite1Part1() {
+
   beforeAll(async () => { mod = await import('@/actions/repositories/repository.actions') })
   beforeEach(() => {
     jest.clearAllMocks()
@@ -187,7 +189,9 @@ describe('repository.actions authorization (REV-SEC-082 / REV-SEC-083 / REV-COR-
     expect(res.isSuccess).toBe(true)
   })
 
-  it('pages user grant options without truncating the ACL search silently', async () => {
+  }
+
+function defineRepositoryActionsAuthorizationREVSEC082REVSECSuite1Part2() {it('pages user grant options without truncating the ACL search silently', async () => {
     mockExecuteQuery
       .mockResolvedValueOnce(
         Array.from({ length: 51 }, (_, index) => ({
@@ -279,4 +283,11 @@ describe('repository.actions authorization (REV-SEC-082 / REV-SEC-083 / REV-COR-
     expect(mockDeleteRepositoryStorageTree).not.toHaveBeenCalled()
     expect(mockFinalizeRepositoryDeletion).not.toHaveBeenCalled()
   })
-})
+}
+
+const defineRepositoryActionsAuthorizationREVSEC082REVSECSuite1 = () => {
+  defineRepositoryActionsAuthorizationREVSEC082REVSECSuite1Part1()
+  defineRepositoryActionsAuthorizationREVSEC082REVSECSuite1Part2()
+};
+
+describe('repository.actions authorization (REV-SEC-082 / REV-SEC-083 / REV-COR-064)', defineRepositoryActionsAuthorizationREVSEC082REVSECSuite1)

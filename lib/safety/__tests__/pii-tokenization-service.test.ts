@@ -22,20 +22,18 @@ interface MockBatchGetItemInput {
   };
 }
 
-describe('PIITokenizationService', () => {
-  let service: PIITokenizationService;
-  const TEST_REGION = 'us-west-2';
+let service: PIITokenizationService;
+const TEST_REGION = 'us-west-2';
 
-  beforeEach(() => {
+const definePIITokenizationServiceSuite1Registration1: NonNullable<Parameters<typeof beforeEach>[0]> = () => {
     service = new PIITokenizationService({
       region: TEST_REGION,
       piiTokenTableName: 'test-table',
       tokenTtlSeconds: 3600,
       enablePiiTokenization: true,
     });
-  });
-
-  describe('isEnabled', () => {
+  };
+const definePIITokenizationServiceSuite1Registration2: NonNullable<Parameters<typeof describe>[1]> = () => {
     it('should return true when configured', () => {
       expect(service.isEnabled()).toBe(true);
     });
@@ -48,9 +46,8 @@ describe('PIITokenizationService', () => {
       });
       expect(disabledService.isEnabled()).toBe(false);
     });
-  });
-
-  describe('tokenize', () => {
+  };
+const definePIITokenizationServiceSuite1Registration3: NonNullable<Parameters<typeof describe>[1]> = () => {
     it('should pass through content when disabled', async () => {
       const disabledService = new PIITokenizationService({
         region: TEST_REGION,
@@ -72,9 +69,8 @@ describe('PIITokenizationService', () => {
       expect(result.hasPII).toBe(false);
       expect(result.tokens).toEqual([]);
     });
-  });
-
-  describe('detokenize', () => {
+  };
+const definePIITokenizationServiceSuite1Registration4: NonNullable<Parameters<typeof describe>[1]> = () => {
     it('should pass through content when disabled', async () => {
       const disabledService = new PIITokenizationService({
         region: TEST_REGION,
@@ -99,9 +95,8 @@ describe('PIITokenizationService', () => {
       // Should return original text with placeholder when token not found
       expect(result).toContain('[PII:');
     });
-  });
-
-  describe('getConfig', () => {
+  };
+const definePIITokenizationServiceSuite1Registration5: NonNullable<Parameters<typeof describe>[1]> = () => {
     it('should return configuration', () => {
       const config = service.getConfig();
 
@@ -112,9 +107,8 @@ describe('PIITokenizationService', () => {
       expect(config.piiTokenTableName).toBe('test-table');
       expect(config.tokenTtlSeconds).toBe(3600);
     });
-  });
-
-  describe('edge cases', () => {
+  };
+const definePIITokenizationServiceSuite1Registration6: NonNullable<Parameters<typeof describe>[1]> = () => {
     it('should disable service when region not configured (local dev mode)', () => {
       // Save and clear env var
       const originalRegion = process.env.AWS_REGION;
@@ -166,9 +160,8 @@ describe('PIITokenizationService', () => {
       const result = await service.detokenize('[PII:invalid]', 'session-123');
       expect(result).toBe('[PII:invalid]');
     });
-  });
-
-  describe('confidence score threshold (Issue #972)', () => {
+  };
+const definePIITokenizationServiceSuite1Registration7: NonNullable<Parameters<typeof describe>[1]> = () => {
     const SESSION = 'session-threshold-test';
 
     afterEach(() => {
@@ -336,9 +329,8 @@ describe('PIITokenizationService', () => {
       expect(result.tokenizedText).toContain('AP-505');
       expect(result.tokenizedText).not.toContain('user@example.com');
     });
-  });
-
-  describe('duplicate token deduplication (Issue #836)', () => {
+  };
+const definePIITokenizationServiceSuite1Registration8: NonNullable<Parameters<typeof describe>[1]> = () => {
     const TOKEN_UUID = '12345678-1234-1234-1234-123456789012';
     const PLACEHOLDER = `[PII:${TOKEN_UUID}]`;
 
@@ -427,5 +419,27 @@ describe('PIITokenizationService', () => {
       expect(keys).toHaveLength(2);
       expect(result).toBe('Alice and Bob met Alice');
     });
-  });
-});
+  };
+
+const definePIITokenizationServiceSuite1 = () => {
+
+
+
+  beforeEach(definePIITokenizationServiceSuite1Registration1);
+
+  describe('isEnabled', definePIITokenizationServiceSuite1Registration2);
+
+  describe('tokenize', definePIITokenizationServiceSuite1Registration3);
+
+  describe('detokenize', definePIITokenizationServiceSuite1Registration4);
+
+  describe('getConfig', definePIITokenizationServiceSuite1Registration5);
+
+  describe('edge cases', definePIITokenizationServiceSuite1Registration6);
+
+  describe('confidence score threshold (Issue #972)', definePIITokenizationServiceSuite1Registration7);
+
+  describe('duplicate token deduplication (Issue #836)', definePIITokenizationServiceSuite1Registration8);
+};
+
+describe('PIITokenizationService', definePIITokenizationServiceSuite1);

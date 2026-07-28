@@ -1,19 +1,22 @@
 /**
  * Edge Runtime compatible client for token refresh operations
  *
- * This module handles token refresh by calling server actions that run in Node.js runtime
- * instead of trying to use AWS SDK directly in Edge Runtime.
+ * This module is loaded by `auth.ts`, which `middleware.ts` compiles into the
+ * Edge Runtime sandbox. Everything reachable from here must therefore be
+ * Edge-safe.
+ *
+ * It used to `await import("@/actions/auth/refresh-token-action")` on the
+ * assumption that a `"use server"` action would execute in the Node runtime.
+ * It does not: importing a server action from server/Edge code inlines the
+ * implementation into the *calling* runtime's bundle, which dragged
+ * `@/lib/logger` → `winston` into middleware and made every refresh throw
+ * `TypeError: Native module not found: winston` (#1297). The exchange now runs
+ * natively on Edge primitives — see `@/lib/auth/cognito-refresh`.
  */
 
 import type { JWT } from "next-auth/jwt"
 import { createLogger } from "@/lib/auth/edge-logger"
-
-interface RefreshedTokens {
-  accessToken: string
-  idToken: string
-  refreshToken?: string
-  expiresAt: number
-}
+import { refreshCognitoTokens, type RefreshedTokens } from "@/lib/auth/cognito-refresh"
 
 const log = createLogger({ context: "token-refresh-client" })
 
@@ -88,8 +91,16 @@ export function shouldRefreshToken(
 }
 
 /**
- * Refreshes AWS Cognito tokens by calling the server action
- * This avoids Edge Runtime compatibility issues with AWS SDK
+ * Refreshes AWS Cognito tokens by calling `refreshCognitoTokens` directly.
+ *
+ * This runs in the caller's runtime — including Edge, since `middleware.ts`
+ * pulls `auth.ts` and its callbacks into the Edge bundle. It is NOT an RPC hop:
+ * the retired `"use server"` action was only ever a boundary when imported by a
+ * *client* component, which is why it was inlined into `middleware.js` along
+ * with winston and the AWS SDK (#1297). `refreshCognitoTokens` uses `fetch` and
+ * `@/lib/auth/edge-logger` so it is safe in either runtime.
+ *
+ * See `docs/guides/edge-runtime-boundaries.md`.
  *
  * @param token - Current JWT token containing refresh token
  * @returns Promise<RefreshedTokens | null> - New tokens or null if refresh failed
@@ -114,32 +125,44 @@ export async function refreshAccessToken(token: JWT): Promise<RefreshedTokens | 
   }
 
   try {
-    log.info("Attempting token refresh via server action", {
+    log.info("Attempting token refresh", {
       tokenSub: token.sub,
       tokenExpiresAt: token.expiresAt ? new Date(token.expiresAt as number).toISOString() : 'unknown'
     })
 
-    // Call the server action for token refresh
-    const { refreshCognitoToken } = await import("@/actions/auth/refresh-token-action")
-    const result = await refreshCognitoToken({
+    // Long-running/polling requests get a larger rate-limit budget. The retired
+    // action read this same flag internally, so this preserves its behaviour
+    // rather than adding one — but be aware of two pre-existing limitations:
+    // it is a PROCESS-wide global (one user's polling widens everyone's budget
+    // in that task), and it is set on the Node global by the polling adapter,
+    // which the Edge sandbox cannot see — so on the middleware path it is always
+    // false. `auth.ts` reads it the same way for `isLongRunningOperation`.
+    // TODO: Replace with AsyncLocalStorage for request-scoped context isolation
+    const isPollingContext = !!(globalThis as { __POLLING_CONTEXT__?: boolean }).__POLLING_CONTEXT__
+
+    const result = await refreshCognitoTokens({
       refreshToken,
-      tokenSub: token.sub as string
+      tokenSub: token.sub as string,
+      isPollingContext
     })
 
-    if (result.isSuccess && result.data) {
+    if (result.ok) {
       log.info("Token refresh successful", {
         tokenSub: token.sub,
-        newExpiresAt: new Date(result.data.expiresAt).toISOString()
+        newExpiresAt: new Date(result.tokens.expiresAt).toISOString()
       })
 
-      return result.data
-    } else {
-      log.warn("Token refresh failed", {
-        tokenSub: token.sub,
-        message: result.message
-      })
-      return null
+      return result.tokens
     }
+
+    // Every failure reason fails closed — the caller forces re-authentication.
+    // The reason is logged so a revoked token is distinguishable from an outage.
+    log.warn("Token refresh failed", {
+      tokenSub: token.sub,
+      reason: result.reason,
+      message: result.message
+    })
+    return null
 
   } catch (error) {
     log.error("Token refresh threw error", {

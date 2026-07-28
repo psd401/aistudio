@@ -94,8 +94,10 @@ jest.mock("@/lib/logger", () => ({
   getLogContext: () => ({}),
 }));
 
-describe("admin repository deletion storage safety", () => {
-  let actions: typeof import("@/actions/admin/repositories.actions");
+let actions: typeof import("@/actions/admin/repositories.actions");
+
+function defineAdminRepositoryDeletionStorageSafetySuite1Part1() {
+
 
   beforeAll(async () => {
     actions = await import("@/actions/admin/repositories.actions");
@@ -203,7 +205,9 @@ describe("admin repository deletion storage safety", () => {
     );
   });
 
-  it("preserves repository manifests when storage cleanup fails", async () => {
+  }
+
+function defineAdminRepositoryDeletionStorageSafetySuite1Part2() {it("preserves repository manifests when storage cleanup fails", async () => {
     mockBeginRepositoryDeletion.mockResolvedValue([
       {
         id: 1,
@@ -277,4 +281,11 @@ describe("admin repository deletion storage safety", () => {
     expect(result.isSuccess).toBe(false);
     expect(mockFinalizeRepositoryItemDeletion).not.toHaveBeenCalled();
   });
-});
+}
+
+const defineAdminRepositoryDeletionStorageSafetySuite1 = () => {
+  defineAdminRepositoryDeletionStorageSafetySuite1Part1()
+  defineAdminRepositoryDeletionStorageSafetySuite1Part2()
+};
+
+describe("admin repository deletion storage safety", defineAdminRepositoryDeletionStorageSafetySuite1);

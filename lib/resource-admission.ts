@@ -12,7 +12,11 @@ import {
   sql,
   sum,
 } from "drizzle-orm"
-import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
+import {
+  executeQuery,
+  executeTransaction,
+  type DbTransaction,
+} from "@/lib/db/drizzle-client"
 import { resourceAdmissionLeases } from "@/lib/db/schema"
 
 const HOUR_MS = 60 * 60 * 1000
@@ -46,6 +50,27 @@ export interface ResourceAdmissionRequest {
   idempotencyKey: string
   units: number
   limits: ResourceAdmissionLimits
+}
+
+interface NormalizedAdmissionRequest {
+  kind: string
+  ownerKey: string
+  contextKey: string
+  idempotencyKey: string
+  units: number
+  limits: ResourceAdmissionLimits
+  now: Date
+  windowStart: Date
+  replayCutoff: Date
+}
+
+interface AdmissionUsage {
+  contextActive: number
+  ownerActive: number
+  globalActive: number
+  contextHourlyUnits: number
+  ownerHourlyUnits: number
+  globalHourlyUnits: number
 }
 
 export type ResourceAdmission =
@@ -109,15 +134,17 @@ function boundedKey(value: string, label: string, maximum: number): string {
 export async function acquireResourceAdmission(
   request: ResourceAdmissionRequest,
 ): Promise<ResourceAdmission> {
-  const kind = boundedKey(request.kind, "kind", 64)
-  const ownerKey = boundedKey(request.ownerKey.toLowerCase(), "ownerKey", 256)
-  const contextKey = boundedKey(request.contextKey, "contextKey", 256)
-  const idempotencyKey = boundedKey(
-    request.idempotencyKey,
-    "idempotencyKey",
-    256,
+  const normalized = normalizeAdmissionRequest(request)
+  return executeTransaction(
+    (tx) => acquireAdmissionWithinTransaction(tx, normalized),
+    `acquireResourceAdmission:${normalized.kind}`,
   )
-  const units = positiveSafeInteger(request.units, "units")
+}
+
+function normalizeAdmissionRequest(
+  request: ResourceAdmissionRequest,
+): NormalizedAdmissionRequest {
+  const now = new Date()
   const limits = {
     contextActive: positiveSafeInteger(
       request.limits.contextActive,
@@ -145,184 +172,187 @@ export async function acquireResourceAdmission(
     ),
     leaseMs: positiveSafeInteger(request.limits.leaseMs, "leaseMs"),
   }
-  const now = new Date()
-  const windowStart = new Date(now.getTime() - HOUR_MS)
-  const replayCutoff = resourceAdmissionCleanupCutoff(now)
+  return {
+    kind: boundedKey(request.kind, "kind", 64),
+    ownerKey: boundedKey(request.ownerKey.toLowerCase(), "ownerKey", 256),
+    contextKey: boundedKey(request.contextKey, "contextKey", 256),
+    idempotencyKey: boundedKey(request.idempotencyKey, "idempotencyKey", 256),
+    units: positiveSafeInteger(request.units, "units"),
+    limits,
+    now,
+    windowStart: new Date(now.getTime() - HOUR_MS),
+    replayCutoff: resourceAdmissionCleanupCutoff(now),
+  }
+}
 
-  return executeTransaction(
-    async (tx) => {
-      await tx.execute(
-        sql`SELECT pg_advisory_xact_lock(hashtextextended(${kind}, 0))`,
-      )
-      await tx
-        .update(resourceAdmissionLeases)
-        .set({ status: "expired", finishedAt: now })
-        .where(
-          and(
-            eq(resourceAdmissionLeases.kind, kind),
-            eq(resourceAdmissionLeases.status, "active"),
-            lt(resourceAdmissionLeases.expiresAt, now),
-          ),
-        )
-      await tx
-        .delete(resourceAdmissionLeases)
-        .where(
-          and(
-            eq(resourceAdmissionLeases.kind, kind),
-            inArray(resourceAdmissionLeases.status, [
-              "completed",
-              "released",
-              "expired",
-            ]),
-            lt(resourceAdmissionLeases.finishedAt, replayCutoff),
-          ),
-        )
+async function acquireAdmissionWithinTransaction(
+  tx: DbTransaction,
+  request: NormalizedAdmissionRequest,
+): Promise<ResourceAdmission> {
+  await lockAndCleanAdmissionRows(tx, request)
+  if (await hasDuplicateAdmission(tx, request)) {
+    return { allowed: false, reason: "duplicate" }
+  }
+  const usage = await loadAdmissionUsage(tx, request)
+  const denialReason = admissionDenialReason(usage, request)
+  if (denialReason) return { allowed: false, reason: denialReason }
 
-      const [existing] = await tx
-        .select({
-          id: resourceAdmissionLeases.id,
-          reservedUnits: resourceAdmissionLeases.reservedUnits,
-        })
-        .from(resourceAdmissionLeases)
-        .where(
-          and(
-            eq(resourceAdmissionLeases.kind, kind),
-            eq(resourceAdmissionLeases.ownerKey, ownerKey),
-            eq(resourceAdmissionLeases.idempotencyKey, idempotencyKey),
-          ),
-        )
-        .limit(1)
-      if (existing) {
-        return {
-          allowed: false,
-          reason: "duplicate",
-        } as const
-      }
+  const leaseId = randomUUID()
+  await tx.insert(resourceAdmissionLeases).values({
+    id: leaseId,
+    kind: request.kind,
+    ownerKey: request.ownerKey,
+    contextKey: request.contextKey,
+    idempotencyKey: request.idempotencyKey,
+    reservedUnits: request.units,
+    expiresAt: new Date(request.now.getTime() + request.limits.leaseMs),
+  })
+  return { allowed: true, leaseId, reservedUnits: request.units }
+}
 
-      const [
-        contextActiveRows,
-        ownerActiveRows,
-        globalActiveRows,
-        contextHourlyRows,
-        ownerHourlyRows,
-        globalHourlyRows,
-      ] =
-        await Promise.all([
-          tx
-            .select({ value: count() })
-            .from(resourceAdmissionLeases)
-            .where(
-              and(
-                eq(resourceAdmissionLeases.kind, kind),
-                eq(resourceAdmissionLeases.contextKey, contextKey),
-                eq(resourceAdmissionLeases.status, "active"),
-                gt(resourceAdmissionLeases.expiresAt, now),
-                isNull(resourceAdmissionLeases.finishedAt),
-              ),
-            ),
-          tx
-            .select({ value: count() })
-            .from(resourceAdmissionLeases)
-            .where(
-              and(
-                eq(resourceAdmissionLeases.kind, kind),
-                eq(resourceAdmissionLeases.ownerKey, ownerKey),
-                eq(resourceAdmissionLeases.status, "active"),
-                gt(resourceAdmissionLeases.expiresAt, now),
-                isNull(resourceAdmissionLeases.finishedAt),
-              ),
-            ),
-          tx
-            .select({ value: count() })
-            .from(resourceAdmissionLeases)
-            .where(
-              and(
-                eq(resourceAdmissionLeases.kind, kind),
-                eq(resourceAdmissionLeases.status, "active"),
-                gt(resourceAdmissionLeases.expiresAt, now),
-                isNull(resourceAdmissionLeases.finishedAt),
-              ),
-            ),
-          tx
-            .select({ value: sum(resourceAdmissionLeases.reservedUnits) })
-            .from(resourceAdmissionLeases)
-            .where(
-              and(
-                eq(resourceAdmissionLeases.kind, kind),
-                eq(resourceAdmissionLeases.contextKey, contextKey),
-                gte(resourceAdmissionLeases.admittedAt, windowStart),
-                ne(resourceAdmissionLeases.status, "released"),
-              ),
-            ),
-          tx
-            .select({ value: sum(resourceAdmissionLeases.reservedUnits) })
-            .from(resourceAdmissionLeases)
-            .where(
-              and(
-                eq(resourceAdmissionLeases.kind, kind),
-                eq(resourceAdmissionLeases.ownerKey, ownerKey),
-                gte(resourceAdmissionLeases.admittedAt, windowStart),
-                ne(resourceAdmissionLeases.status, "released"),
-              ),
-            ),
-          tx
-            .select({ value: sum(resourceAdmissionLeases.reservedUnits) })
-            .from(resourceAdmissionLeases)
-            .where(
-              and(
-                eq(resourceAdmissionLeases.kind, kind),
-                gte(resourceAdmissionLeases.admittedAt, windowStart),
-                ne(resourceAdmissionLeases.status, "released"),
-              ),
-            ),
-        ])
-
-      if ((contextActiveRows[0]?.value ?? 0) >= limits.contextActive) {
-        return { allowed: false, reason: "context_concurrency" } as const
-      }
-      if ((ownerActiveRows[0]?.value ?? 0) >= limits.ownerActive) {
-        return { allowed: false, reason: "owner_concurrency" } as const
-      }
-      if ((globalActiveRows[0]?.value ?? 0) >= limits.globalActive) {
-        return { allowed: false, reason: "global_concurrency" } as const
-      }
-      if (
-        Number(contextHourlyRows[0]?.value ?? 0) + units >
-        limits.contextHourlyUnits
-      ) {
-        return { allowed: false, reason: "context_hourly" } as const
-      }
-      if (
-        Number(ownerHourlyRows[0]?.value ?? 0) + units >
-        limits.ownerHourlyUnits
-      ) {
-        return { allowed: false, reason: "owner_hourly" } as const
-      }
-      if (
-        Number(globalHourlyRows[0]?.value ?? 0) + units >
-        limits.globalHourlyUnits
-      ) {
-        return { allowed: false, reason: "global_hourly" } as const
-      }
-
-      const leaseId = randomUUID()
-      await tx.insert(resourceAdmissionLeases).values({
-        id: leaseId,
-        kind,
-        ownerKey,
-        contextKey,
-        idempotencyKey,
-        reservedUnits: units,
-        expiresAt: new Date(now.getTime() + limits.leaseMs),
-      })
-      return {
-        allowed: true,
-        leaseId,
-        reservedUnits: units,
-      } as const
-    },
-    `acquireResourceAdmission:${kind}`,
+async function lockAndCleanAdmissionRows(
+  tx: DbTransaction,
+  request: NormalizedAdmissionRequest,
+): Promise<void> {
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock(hashtextextended(${request.kind}, 0))`,
   )
+  await tx
+    .update(resourceAdmissionLeases)
+    .set({ status: "expired", finishedAt: request.now })
+    .where(
+      and(
+        eq(resourceAdmissionLeases.kind, request.kind),
+        eq(resourceAdmissionLeases.status, "active"),
+        lt(resourceAdmissionLeases.expiresAt, request.now),
+      ),
+    )
+  await tx
+    .delete(resourceAdmissionLeases)
+    .where(
+      and(
+        eq(resourceAdmissionLeases.kind, request.kind),
+        inArray(resourceAdmissionLeases.status, [
+          "completed",
+          "released",
+          "expired",
+        ]),
+        lt(resourceAdmissionLeases.finishedAt, request.replayCutoff),
+      ),
+    )
+}
+
+async function hasDuplicateAdmission(
+  tx: DbTransaction,
+  request: NormalizedAdmissionRequest,
+): Promise<boolean> {
+  const [existing] = await tx
+    .select({ id: resourceAdmissionLeases.id })
+    .from(resourceAdmissionLeases)
+    .where(
+      and(
+        eq(resourceAdmissionLeases.kind, request.kind),
+        eq(resourceAdmissionLeases.ownerKey, request.ownerKey),
+        eq(resourceAdmissionLeases.idempotencyKey, request.idempotencyKey),
+      ),
+    )
+    .limit(1)
+  return existing !== undefined
+}
+
+async function loadAdmissionUsage(
+  tx: DbTransaction,
+  request: NormalizedAdmissionRequest,
+): Promise<AdmissionUsage> {
+  const [contextActive, ownerActive, globalActive, contextHourly, ownerHourly, globalHourly] =
+    await Promise.all([
+      activeAdmissionCount(tx, request, "context"),
+      activeAdmissionCount(tx, request, "owner"),
+      activeAdmissionCount(tx, request, "global"),
+      hourlyAdmissionUnits(tx, request, "context"),
+      hourlyAdmissionUnits(tx, request, "owner"),
+      hourlyAdmissionUnits(tx, request, "global"),
+    ])
+  return {
+    contextActive,
+    ownerActive,
+    globalActive,
+    contextHourlyUnits: contextHourly,
+    ownerHourlyUnits: ownerHourly,
+    globalHourlyUnits: globalHourly,
+  }
+}
+
+type AdmissionScope = "context" | "owner" | "global"
+
+async function activeAdmissionCount(
+  tx: DbTransaction,
+  request: NormalizedAdmissionRequest,
+  scope: AdmissionScope,
+): Promise<number> {
+  const scopeCondition =
+    scope === "context"
+      ? eq(resourceAdmissionLeases.contextKey, request.contextKey)
+      : scope === "owner"
+        ? eq(resourceAdmissionLeases.ownerKey, request.ownerKey)
+        : undefined
+  const rows = await tx
+    .select({ value: count() })
+    .from(resourceAdmissionLeases)
+    .where(
+      and(
+        eq(resourceAdmissionLeases.kind, request.kind),
+        scopeCondition,
+        eq(resourceAdmissionLeases.status, "active"),
+        gt(resourceAdmissionLeases.expiresAt, request.now),
+        isNull(resourceAdmissionLeases.finishedAt),
+      ),
+    )
+  return rows[0]?.value ?? 0
+}
+
+async function hourlyAdmissionUnits(
+  tx: DbTransaction,
+  request: NormalizedAdmissionRequest,
+  scope: AdmissionScope,
+): Promise<number> {
+  const scopeCondition =
+    scope === "context"
+      ? eq(resourceAdmissionLeases.contextKey, request.contextKey)
+      : scope === "owner"
+        ? eq(resourceAdmissionLeases.ownerKey, request.ownerKey)
+        : undefined
+  const rows = await tx
+    .select({ value: sum(resourceAdmissionLeases.reservedUnits) })
+    .from(resourceAdmissionLeases)
+    .where(
+      and(
+        eq(resourceAdmissionLeases.kind, request.kind),
+        scopeCondition,
+        gte(resourceAdmissionLeases.admittedAt, request.windowStart),
+        ne(resourceAdmissionLeases.status, "released"),
+      ),
+    )
+  return Number(rows[0]?.value ?? 0)
+}
+
+function admissionDenialReason(
+  usage: AdmissionUsage,
+  request: NormalizedAdmissionRequest,
+): Exclude<ResourceAdmission, { allowed: true }>["reason"] | null {
+  if (usage.contextActive >= request.limits.contextActive) return "context_concurrency"
+  if (usage.ownerActive >= request.limits.ownerActive) return "owner_concurrency"
+  if (usage.globalActive >= request.limits.globalActive) return "global_concurrency"
+  if (usage.contextHourlyUnits + request.units > request.limits.contextHourlyUnits) {
+    return "context_hourly"
+  }
+  if (usage.ownerHourlyUnits + request.units > request.limits.ownerHourlyUnits) {
+    return "owner_hourly"
+  }
+  if (usage.globalHourlyUnits + request.units > request.limits.globalHourlyUnits) {
+    return "global_hourly"
+  }
+  return null
 }
 
 export async function finishResourceAdmission(

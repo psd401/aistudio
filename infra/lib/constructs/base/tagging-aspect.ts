@@ -43,9 +43,9 @@ export class TaggingAspect implements cdk.IAspect {
 
       // Additional custom tags
       if (this.config.additionalTags) {
-        Object.entries(this.config.additionalTags).forEach(([key, value]) => {
+        for (const [key, value] of Object.entries(this.config.additionalTags)) {
           taggable.tags.setTag(key, value)
-        })
+        }
       }
     }
   }

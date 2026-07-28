@@ -119,7 +119,9 @@ describe("unified content processor contract", () => {
       { text: "No geometry", region: undefined },
     ]);
   });
+});
 
+describe("unified content artifact and embedding contract", () => {
   test("creates deterministic repository-scoped artifact keys", () => {
     expect(
       canonicalTextArtifactObjectKey(

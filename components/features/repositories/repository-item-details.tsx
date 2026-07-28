@@ -71,6 +71,259 @@ function StatusBadge({ value }: { value: string }) {
   )
 }
 
+function ItemSummary({
+  details,
+}: {
+  details: RepositoryItemManagementView
+}) {
+  const currentVersion = details.versions.find((version) => version.isCurrent)
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-lg">{details.itemName}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <dl className="grid gap-4 text-sm sm:grid-cols-2">
+          <div>
+            <dt className="text-muted-foreground">Source</dt>
+            <dd className="mt-1 break-all font-medium">
+              {details.sourceSummary}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">Current version</dt>
+            <dd className="mt-1 font-medium">
+              {currentVersion
+                ? `Version ${currentVersion.versionNumber}`
+                : "Legacy source pending canonical processing"}
+            </dd>
+          </div>
+          {currentVersion ? (
+            <>
+              <div>
+                <dt className="text-muted-foreground">Media type</dt>
+                <dd className="mt-1">
+                  {currentVersion.detectedContentType ||
+                    currentVersion.declaredContentType ||
+                    "Unknown"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Size</dt>
+                <dd className="mt-1">
+                  {formatBytes(currentVersion.byteSize)}
+                </dd>
+              </div>
+            </>
+          ) : null}
+        </dl>
+      </CardContent>
+    </Card>
+  )
+}
+
+function VersionsTab({
+  versions,
+}: {
+  versions: RepositoryItemManagementView["versions"]
+}) {
+  return (
+    <TabsContent value="versions" className="space-y-3">
+      {versions.length === 0 ? (
+        <p className="rounded-md border p-4 text-sm text-muted-foreground">
+          This legacy source does not have immutable version history yet.
+        </p>
+      ) : (
+        versions.map((version) => (
+          <Card key={version.id}>
+            <CardContent className="space-y-3 pt-5">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium">
+                  Version {version.versionNumber}
+                </span>
+                {version.isCurrent ? <Badge>Current</Badge> : null}
+                <StatusBadge value={version.processingStatus} />
+                <StatusBadge value={version.inspectionStatus} />
+              </div>
+              <dl className="grid gap-3 text-xs sm:grid-cols-2">
+                <div>
+                  <dt className="text-muted-foreground">Source type</dt>
+                  <dd className="mt-1 capitalize">
+                    {version.sourceKind.replaceAll("_", " ")}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Created</dt>
+                  <dd className="mt-1">
+                    {format(version.createdAt, "PPpp")}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Storage</dt>
+                  <dd className="mt-1">
+                    <StatusBadge value={version.storageStatus} />
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Checksum</dt>
+                  <dd className="mt-1 truncate font-mono">
+                    {version.sha256 || "Pending"}
+                  </dd>
+                </div>
+              </dl>
+            </CardContent>
+          </Card>
+        ))
+      )}
+    </TabsContent>
+  )
+}
+
+function ProcessingTab({
+  jobs,
+}: {
+  jobs: RepositoryItemManagementView["jobs"]
+}) {
+  return (
+    <TabsContent value="processing" className="space-y-3">
+      {jobs.length === 0 ? (
+        <p className="rounded-md border p-4 text-sm text-muted-foreground">
+          No canonical processing jobs are recorded for this source.
+        </p>
+      ) : (
+        jobs.map((job) => (
+          <Card key={job.id}>
+            <CardContent className="space-y-2 pt-5">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium capitalize">{job.stage}</span>
+                <StatusBadge value={job.status} />
+                <span className="text-xs text-muted-foreground">
+                  Attempt {job.attempt} of {job.maxAttempts}
+                </span>
+              </div>
+              {job.lastErrorMessage ? (
+                <p className="text-sm text-destructive">
+                  {job.lastErrorCode ? `${job.lastErrorCode}: ` : ""}
+                  {job.lastErrorMessage}
+                </p>
+              ) : null}
+              <p className="text-xs text-muted-foreground">
+                Updated {format(job.updatedAt, "PPpp")}
+              </p>
+            </CardContent>
+          </Card>
+        ))
+      )}
+    </TabsContent>
+  )
+}
+
+function ArtifactsTab({
+  artifacts,
+}: {
+  artifacts: RepositoryItemManagementView["artifacts"]
+}) {
+  return (
+    <TabsContent value="artifacts" className="space-y-3">
+      {artifacts.length === 0 ? (
+        <p className="rounded-md border p-4 text-sm text-muted-foreground">
+          No derived artifacts have been published yet.
+        </p>
+      ) : (
+        artifacts.map((artifact) => (
+          <div
+            key={artifact.id}
+            className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3 text-sm"
+          >
+            <div>
+              <p className="font-medium capitalize">
+                {artifact.kind.replaceAll("_", " ")}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {artifact.mediaType} · {artifact.processorName}{" "}
+                {artifact.processorVersion}
+              </p>
+            </div>
+            <span className="text-xs text-muted-foreground">
+              {format(artifact.createdAt, "PP")}
+            </span>
+          </div>
+        ))
+      )}
+    </TabsContent>
+  )
+}
+
+function CitationsTab({
+  citations,
+}: {
+  citations: RepositoryItemManagementView["citations"]
+}) {
+  return (
+    <TabsContent value="citations" className="space-y-3">
+      {citations.length === 0 ? (
+        <p className="rounded-md border p-4 text-sm text-muted-foreground">
+          Citation locators appear after this source is included in the active
+          repository index.
+        </p>
+      ) : (
+        citations.map((citation) => {
+          const label =
+            formatRepositorySourceLocator(citation.sourceLocator) ||
+            `Chunk ${citation.chunkIndex + 1}`
+          return (
+            <div
+              key={citation.chunkId}
+              className="flex items-center justify-between gap-3 rounded-md border p-3 text-sm"
+            >
+              <div className="flex items-center gap-2">
+                <MapPin className="h-4 w-4 text-muted-foreground" />
+                <span>{label}</span>
+              </div>
+              <Badge variant="outline" className="capitalize">
+                {citation.modality}
+              </Badge>
+            </div>
+          )
+        })
+      )}
+    </TabsContent>
+  )
+}
+
+function DetailsTabs({
+  details,
+}: {
+  details: RepositoryItemManagementView
+}) {
+  return (
+    <Tabs defaultValue="versions">
+      <TabsList className="grid h-auto w-full grid-cols-2 sm:grid-cols-4">
+        <TabsTrigger value="versions">
+          <FileStack className="mr-2 h-4 w-4" />
+          Versions
+        </TabsTrigger>
+        <TabsTrigger value="processing">
+          <Clock3 className="mr-2 h-4 w-4" />
+          Processing
+        </TabsTrigger>
+        <TabsTrigger value="artifacts">
+          <Box className="mr-2 h-4 w-4" />
+          Artifacts
+        </TabsTrigger>
+        <TabsTrigger value="citations">
+          <MapPin className="mr-2 h-4 w-4" />
+          Citations
+        </TabsTrigger>
+      </TabsList>
+      <VersionsTab versions={details.versions} />
+      <ProcessingTab jobs={details.jobs} />
+      <ArtifactsTab artifacts={details.artifacts} />
+      <CitationsTab citations={details.citations} />
+    </Tabs>
+  )
+}
+
 export function RepositoryItemDetails({
   itemId,
 }: RepositoryItemDetailsProps) {
@@ -141,205 +394,10 @@ export function RepositoryItemDetails({
     )
   }
 
-  const currentVersion = details.versions.find((version) => version.isCurrent)
-
   return (
     <div className="space-y-4">
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-lg">{details.itemName}</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <dl className="grid gap-4 text-sm sm:grid-cols-2">
-            <div>
-              <dt className="text-muted-foreground">Source</dt>
-              <dd className="mt-1 break-all font-medium">
-                {details.sourceSummary}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-muted-foreground">Current version</dt>
-              <dd className="mt-1 font-medium">
-                {currentVersion
-                  ? `Version ${currentVersion.versionNumber}`
-                  : "Legacy source pending canonical processing"}
-              </dd>
-            </div>
-            {currentVersion ? (
-              <>
-                <div>
-                  <dt className="text-muted-foreground">Media type</dt>
-                  <dd className="mt-1">
-                    {currentVersion.detectedContentType ||
-                      currentVersion.declaredContentType ||
-                      "Unknown"}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-muted-foreground">Size</dt>
-                  <dd className="mt-1">{formatBytes(currentVersion.byteSize)}</dd>
-                </div>
-              </>
-            ) : null}
-          </dl>
-        </CardContent>
-      </Card>
-
-      <Tabs defaultValue="versions">
-        <TabsList className="grid h-auto w-full grid-cols-2 sm:grid-cols-4">
-          <TabsTrigger value="versions">
-            <FileStack className="mr-2 h-4 w-4" />
-            Versions
-          </TabsTrigger>
-          <TabsTrigger value="processing">
-            <Clock3 className="mr-2 h-4 w-4" />
-            Processing
-          </TabsTrigger>
-          <TabsTrigger value="artifacts">
-            <Box className="mr-2 h-4 w-4" />
-            Artifacts
-          </TabsTrigger>
-          <TabsTrigger value="citations">
-            <MapPin className="mr-2 h-4 w-4" />
-            Citations
-          </TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="versions" className="space-y-3">
-          {details.versions.length === 0 ? (
-            <p className="rounded-md border p-4 text-sm text-muted-foreground">
-              This legacy source does not have immutable version history yet.
-            </p>
-          ) : (
-            details.versions.map((version) => (
-              <Card key={version.id}>
-                <CardContent className="space-y-3 pt-5">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-medium">
-                      Version {version.versionNumber}
-                    </span>
-                    {version.isCurrent ? <Badge>Current</Badge> : null}
-                    <StatusBadge value={version.processingStatus} />
-                    <StatusBadge value={version.inspectionStatus} />
-                  </div>
-                  <dl className="grid gap-3 text-xs sm:grid-cols-2">
-                    <div>
-                      <dt className="text-muted-foreground">Source type</dt>
-                      <dd className="mt-1 capitalize">
-                        {version.sourceKind.replaceAll("_", " ")}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="text-muted-foreground">Created</dt>
-                      <dd className="mt-1">{format(version.createdAt, "PPpp")}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-muted-foreground">Storage</dt>
-                      <dd className="mt-1">
-                        <StatusBadge value={version.storageStatus} />
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="text-muted-foreground">Checksum</dt>
-                      <dd className="mt-1 truncate font-mono">
-                        {version.sha256 || "Pending"}
-                      </dd>
-                    </div>
-                  </dl>
-                </CardContent>
-              </Card>
-            ))
-          )}
-        </TabsContent>
-
-        <TabsContent value="processing" className="space-y-3">
-          {details.jobs.length === 0 ? (
-            <p className="rounded-md border p-4 text-sm text-muted-foreground">
-              No canonical processing jobs are recorded for this source.
-            </p>
-          ) : (
-            details.jobs.map((job) => (
-              <Card key={job.id}>
-                <CardContent className="space-y-2 pt-5">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-medium capitalize">{job.stage}</span>
-                    <StatusBadge value={job.status} />
-                    <span className="text-xs text-muted-foreground">
-                      Attempt {job.attempt} of {job.maxAttempts}
-                    </span>
-                  </div>
-                  {job.lastErrorMessage ? (
-                    <p className="text-sm text-destructive">
-                      {job.lastErrorCode ? `${job.lastErrorCode}: ` : ""}
-                      {job.lastErrorMessage}
-                    </p>
-                  ) : null}
-                  <p className="text-xs text-muted-foreground">
-                    Updated {format(job.updatedAt, "PPpp")}
-                  </p>
-                </CardContent>
-              </Card>
-            ))
-          )}
-        </TabsContent>
-
-        <TabsContent value="artifacts" className="space-y-3">
-          {details.artifacts.length === 0 ? (
-            <p className="rounded-md border p-4 text-sm text-muted-foreground">
-              No derived artifacts have been published yet.
-            </p>
-          ) : (
-            details.artifacts.map((artifact) => (
-              <div
-                key={artifact.id}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3 text-sm"
-              >
-                <div>
-                  <p className="font-medium capitalize">
-                    {artifact.kind.replaceAll("_", " ")}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {artifact.mediaType} · {artifact.processorName}{" "}
-                    {artifact.processorVersion}
-                  </p>
-                </div>
-                <span className="text-xs text-muted-foreground">
-                  {format(artifact.createdAt, "PP")}
-                </span>
-              </div>
-            ))
-          )}
-        </TabsContent>
-
-        <TabsContent value="citations" className="space-y-3">
-          {details.citations.length === 0 ? (
-            <p className="rounded-md border p-4 text-sm text-muted-foreground">
-              Citation locators appear after this source is included in the
-              active repository index.
-            </p>
-          ) : (
-            details.citations.map((citation) => {
-              const label =
-                formatRepositorySourceLocator(citation.sourceLocator) ||
-                `Chunk ${citation.chunkIndex + 1}`
-              return (
-                <div
-                  key={citation.chunkId}
-                  className="flex items-center justify-between gap-3 rounded-md border p-3 text-sm"
-                >
-                  <div className="flex items-center gap-2">
-                    <MapPin className="h-4 w-4 text-muted-foreground" />
-                    <span>{label}</span>
-                  </div>
-                  <Badge variant="outline" className="capitalize">
-                    {citation.modality}
-                  </Badge>
-                </div>
-              )
-            })
-          )}
-        </TabsContent>
-      </Tabs>
+      <ItemSummary details={details} />
+      <DetailsTabs details={details} />
     </div>
   )
 }

@@ -15,7 +15,7 @@ function getDocumentJobsTable(): string {
   if (process.env.NODE_ENV === 'test') {
     return process.env.DOCUMENT_JOBS_TABLE || 'test-document-jobs-table';
   }
-  
+
   const tableName = process.env.DOCUMENT_JOBS_TABLE;
   if (!tableName) {
     const availableVars = Object.keys(process.env).filter(k => k.includes('TABLE')).join(', ');
@@ -26,7 +26,7 @@ function getDocumentJobsTable(): string {
       500
     );
   }
-  
+
   return tableName;
 }
 
@@ -66,15 +66,54 @@ export interface CreateJobParams {
   processingOptions: ProcessingOptions;
 }
 
+interface AwsErrorDetails {
+  Code?: string;
+  $metadata?: {
+    httpStatusCode?: number;
+    requestId?: string;
+    totalRetryDelay?: number;
+  };
+}
+
+function abbreviatedFileName(fileName: string): string {
+  return fileName.substring(0, 50) + (fileName.length > 50 ? '...' : '');
+}
+
+function documentJobErrorDetails(error: unknown) {
+  const awsError =
+    error !== null && typeof error === 'object'
+      ? (error as AwsErrorDetails)
+      : {};
+  return {
+    name: error instanceof Error ? error.name : 'Unknown',
+    message:
+      error instanceof Error ? error.message : String(error || 'No message'),
+    code: awsError.Code,
+    httpStatusCode: awsError.$metadata?.httpStatusCode,
+    requestId: awsError.$metadata?.requestId,
+    stack: error instanceof Error ? error.stack : undefined,
+    totalRetryDelay: awsError.$metadata?.totalRetryDelay
+  };
+}
+
+function isNamedAwsError(error: unknown): error is object & { name: unknown } {
+  return (
+    error !== null &&
+    typeof error === 'object' &&
+    'name' in error &&
+    Boolean(error.name)
+  );
+}
+
 export async function createDocumentJob(params: CreateJobParams): Promise<DocumentJob> {
   const requestId = generateRequestId();
   const jobLog = createLogger({ action: 'createDocumentJob', requestId });
-  
+
   try {
     // Step 1: Validate environment and configuration
     const tableName = getDocumentJobsTable();
-    jobLog.info('Creating document job', { 
-      tableName, 
+    jobLog.info('Creating document job', {
+      tableName,
       hasTableName: !!tableName,
       region: process.env.AWS_REGION || process.env.NEXT_PUBLIC_AWS_REGION,
       environment: process.env.NODE_ENV,
@@ -82,7 +121,7 @@ export async function createDocumentJob(params: CreateJobParams): Promise<Docume
       fileType: params.fileType,
       purpose: params.purpose,
       userId: params.userId.substring(0, 8) + '...', // Log only first 8 chars of user ID
-      fileName: params.fileName ? params.fileName.substring(0, 50) + (params.fileName.length > 50 ? '...' : '') : undefined,
+      fileName: abbreviatedFileName(params.fileName),
       hasProcessingOptions: !!params.processingOptions
     });
 
@@ -119,11 +158,11 @@ export async function createDocumentJob(params: CreateJobParams): Promise<Docume
       createdAt: job.createdAt,
       ttl,
     };
-    
+
     const marshalled = marshall(itemData);
-    jobLog.info('Prepared DynamoDB item', { 
+    jobLog.info('Prepared DynamoDB item', {
       itemKeys: Object.keys(marshalled),
-      itemSize: JSON.stringify(itemData).length 
+      itemSize: JSON.stringify(itemData).length
     });
 
     // Step 4: Write to DynamoDB
@@ -139,32 +178,21 @@ export async function createDocumentJob(params: CreateJobParams): Promise<Docume
     jobLog.info('Document job created successfully', { jobId, fileName: params.fileName, userId: params.userId });
     return job;
   } catch (error) {
-    // CRITICAL: Log the actual error details
-    const errorDetails = {
-      name: error instanceof Error ? error.name : 'Unknown',
-      message: error instanceof Error ? error.message : String(error || 'No message'),
-      code: 'Code' in (error as object) ? (error as { Code?: string }).Code : undefined,
-      httpStatusCode: '$metadata' in (error as object) ? (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode : undefined,
-      requestId: '$metadata' in (error as object) ? (error as { $metadata?: { requestId?: string } }).$metadata?.requestId : undefined,
-      stack: error instanceof Error ? error.stack : undefined,
-      totalRetryDelay: '$metadata' in (error as object) ? (error as { $metadata?: { totalRetryDelay?: number } }).$metadata?.totalRetryDelay : undefined
-    };
-    
-    jobLog.error('Failed to create document job', { 
-      error: errorDetails,
+    jobLog.error('Failed to create document job', {
+      error: documentJobErrorDetails(error),
       fileSize: params.fileSize,
       fileType: params.fileType,
       purpose: params.purpose,
-      fileName: params.fileName ? params.fileName.substring(0, 50) + (params.fileName.length > 50 ? '...' : '') : undefined,
+      fileName: abbreviatedFileName(params.fileName),
       requestId
     });
     // Preserve AWS error context for better debugging
-    if (error && typeof error === 'object' && 'name' in error && error.name) {
+    if (isNamedAwsError(error)) {
       // Re-throw AWS SDK errors to preserve their structure
       throw error;
     }
     // Fallback for non-AWS errors
-    throw new Error(`Failed to create document job: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to create document job: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }
 
@@ -193,7 +221,7 @@ export async function getJobStatus(jobId: string, userId?: string): Promise<Docu
     }
 
     const item = unmarshall(response.Items[0]);
-    
+
     return {
       id: item.jobId,
       userId: item.userId,
@@ -218,7 +246,7 @@ export async function getJobStatus(jobId: string, userId?: string): Promise<Docu
     if (error && typeof error === 'object' && 'name' in error && error.name) {
       throw error;
     }
-    throw new Error(`Failed to get job status: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to get job status: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }
 
@@ -251,7 +279,7 @@ export async function updateJobStatus(
 
     // Get the existing job data and preserve all fields
     const existingJob = unmarshall(existingJobResponse.Items[0]);
-    
+
     // Insert a new status entry (append-only pattern for DynamoDB) with complete job data preserved
     await dynamoClient.send(
       new PutItemCommand({
@@ -281,7 +309,7 @@ export async function updateJobStatus(
     if (error && typeof error === 'object' && 'name' in error && error.name) {
       throw error;
     }
-    throw new Error(`Failed to update job status: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to update job status: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }
 
@@ -299,7 +327,7 @@ export async function confirmDocumentUpload(jobId: string, uploadId: string): Pr
     if (error && typeof error === 'object' && 'name' in error && error.name) {
       throw error;
     }
-    throw new Error(`Failed to confirm upload: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to confirm upload: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }
 
@@ -355,7 +383,7 @@ export async function getUserJobs(
     if (error && typeof error === 'object' && 'name' in error && error.name) {
       throw error;
     }
-    throw new Error(`Failed to get user jobs: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to get user jobs: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }
 
@@ -404,7 +432,7 @@ export async function getJobsByStatus(
     if (error && typeof error === 'object' && 'name' in error && error.name) {
       throw error;
     }
-    throw new Error(`Failed to get jobs by status: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to get jobs by status: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }
 
@@ -413,7 +441,7 @@ export async function fetchResultFromS3(s3Key: string): Promise<Record<string, u
   try {
     const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
     const s3Client = new S3Client({});
-    
+
     const bucketName = process.env.DOCUMENTS_BUCKET_NAME;
     if (!bucketName) {
       throw new Error('DOCUMENTS_BUCKET_NAME environment variable not set');
@@ -438,6 +466,6 @@ export async function fetchResultFromS3(s3Key: string): Promise<Record<string, u
     if (error && typeof error === 'object' && 'name' in error && error.name) {
       throw error;
     }
-    throw new Error(`Failed to fetch result from S3: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to fetch result from S3: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }

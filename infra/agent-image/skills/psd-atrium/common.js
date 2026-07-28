@@ -96,28 +96,30 @@ function parseArgs(argv, startIndex = 2) {
  * `resp.ok` BEFORE trusting a JSON body so an infra 502/503 is never mistaken for
  * an app response (CLAUDE.md silent-failure pattern).
  */
-async function restFetch(method, path, opts = {}) {
+function normalizeQuery(queryOptions) {
   const query = {};
-  if (opts.query) {
-    for (const [k, v] of Object.entries(opts.query)) {
-      if (v !== undefined && v !== null && v !== '') query[k] = String(v);
+  for (const [key, value] of Object.entries(queryOptions || {})) {
+    if (value !== undefined && value !== null && value !== '') {
+      query[key] = String(value);
     }
   }
+  return query;
+}
 
-  let result;
+async function requestContentBroker(method, path, opts) {
+  const query = normalizeQuery(opts.query);
   try {
-    result = await _internals.requestAgentBroker(
+    return await _internals.requestAgentBroker(
       '/api/agent/atrium',
       {
         method,
         path,
-        ...(Object.keys(query).length ? { query } : {}),
+        ...(Object.keys(query).length > 0 ? { query } : {}),
         ...(opts.body !== undefined ? { body: opts.body } : {}),
       },
       { timeoutMs: REQUEST_TIMEOUT_MS + 5_000 }
     );
   } catch (err) {
-    // AbortSignal.timeout rejects with a DOMException named 'TimeoutError'.
     if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
       fail(
         `AI Studio content API request timed out after ${REQUEST_TIMEOUT_MS}ms`,
@@ -126,11 +128,26 @@ async function restFetch(method, path, opts = {}) {
     }
     fail(`Network error calling AI Studio content API: ${err.message}`, 12);
   }
+}
 
+function emitContentError(status, data, rawText) {
+  const error = data && data.error ? data.error : null;
+  emit({
+    status: 'error',
+    http_status: status,
+    code: error ? error.code : undefined,
+    message: error
+      ? error.message
+      : `AI Studio content API returned HTTP ${status}`,
+    detail: error ? undefined : rawText.slice(0, 512),
+  });
+  process.exit(12);
+}
+
+function parseContentBrokerResult(result) {
   const status = Number(result.httpStatus);
   const data = result.payload;
   const rawText = String(result.rawText || '');
-
   if (status === 401) {
     emit({
       status: 'unauthorized',
@@ -147,36 +164,21 @@ async function restFetch(method, path, opts = {}) {
     });
     process.exit(14);
   }
-
-  // §26.4: a public publish/unpublish/widen the caller may not perform directly
-  // comes back as HTTP 202 with { data: { status: 'approval_required', message } }.
-  // This is NOT an error — it is queued for a human/admin to approve.
   if (status === 202) {
     const payload = data && data.data !== undefined ? data.data : data;
     return { approvalRequired: true, status: 202, payload };
   }
-
   if (status < 200 || status >= 300) {
-    // Error envelope is { error: { code, message, details? }, requestId }. Surface
-    // it verbatim (exit 12); a non-JSON body (infra 502/503) has no envelope, so
-    // fall back to the RAW text for debug context rather than an empty "{}".
-    const err = data && data.error ? data.error : null;
-    emit({
-      status: 'error',
-      http_status: status,
-      code: err ? err.code : undefined,
-      message: err
-        ? err.message
-        : `AI Studio content API returned HTTP ${status}`,
-      detail: err ? undefined : rawText.slice(0, 512),
-    });
-    process.exit(12);
+    emitContentError(status, data, rawText);
   }
-
   if (!data) fail(`AI Studio content API returned a non-JSON body`, 12);
-
   const payload = data.data !== undefined ? data.data : data;
   return { approvalRequired: false, status, payload };
+}
+
+async function restFetch(method, path, opts = {}) {
+  const result = await requestContentBroker(method, path, opts);
+  return parseContentBrokerResult(result);
 }
 
 /**
@@ -192,7 +194,7 @@ function parseList(value, label = 'tags') {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-  return items.length ? items : undefined;
+  return items.length > 0 ? items : undefined;
 }
 
 /**
@@ -218,8 +220,100 @@ function parseGrants(value, label = 'grants') {
     if (!val) fail(`--grants entry "${entry}" has an empty value`);
     grants.push({ kind, value: val });
   }
-  return grants.length ? grants : undefined;
+  return grants.length > 0 ? grants : undefined;
 }
+
+/**
+ * The base64url SHA-256 digest the Atrium asset API expects (`sha256` on both
+ * initiate and complete). NOT base64 — the server validates
+ * /^[A-Za-z0-9_-]{43}$/ and re-derives the same digest from the uploaded bytes,
+ * so a padded/standard-alphabet digest is rejected at initiate.
+ */
+function sha256Base64Url(bytes) {
+  return require('node:crypto').createHash('sha256').update(bytes).digest('base64url');
+}
+
+/**
+ * Identify an image by its MAGIC BYTES, not its filename. The asset API accepts
+ * only PNG/JPEG/WebP and re-derives the true type server-side during
+ * normalization, so trusting a `.png` suffix on JPEG bytes would reserve an
+ * upload that then fails completion with an opaque rejection. Returns null for
+ * anything else so the caller can refuse with a clear message.
+ */
+function detectImageContentType(bytes) {
+  const b = Buffer.from(bytes);
+  if (b.length >= 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))) {
+    return 'image/png';
+  }
+  if (b.length >= 3 && b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) {
+    return 'image/jpeg';
+  }
+  if (
+    b.length >= 12 &&
+    b.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    b.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+  return null;
+}
+
+/**
+ * PUT raw bytes at a presigned S3 URL. This is the ONE call in this skill that
+ * does not go through the loopback broker: the reservation returns a
+ * short-lived, pre-signed, checksum-pinned URL, and the agent runtime has
+ * outbound HTTPS. Routing megabytes of image through the broker instead would
+ * put them through a JSON envelope for no gain.
+ *
+ * The URL is never author-supplied — it comes straight back from the Atrium
+ * initiate response — and only https is accepted, so this cannot be steered at
+ * an internal endpoint by document content.
+ */
+async function putPresignedBytes(url, headers, bytes, timeoutMs = REQUEST_TIMEOUT_MS) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    fail('asset upload URL returned by AI Studio is not a valid URL', 12);
+  }
+  if (parsed.protocol !== 'https:') {
+    fail(`asset upload URL must be https, got ${parsed.protocol}`, 12);
+  }
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method: 'PUT',
+      headers,
+      body: bytes,
+      redirect: 'error',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      fail(`asset upload timed out after ${timeoutMs}ms`, 12);
+    }
+    fail(`network error uploading asset bytes: ${err.message}`, 12);
+  }
+  if (!resp.ok) {
+    // Read the body for context BEFORE deciding — S3 returns a descriptive XML
+    // error (SignatureDoesNotMatch, EntityTooLarge, …) that is the only clue.
+    let detail = '';
+    try {
+      detail = (await resp.text()).slice(0, 512);
+    } catch {
+      /* body already consumed / not readable */
+    }
+    emit({
+      status: 'error',
+      http_status: resp.status,
+      message: `asset upload storage rejected the PUT (HTTP ${resp.status})`,
+      detail,
+    });
+    process.exit(12);
+  }
+}
+
+_internals.putPresignedBytes = putPresignedBytes;
 
 module.exports = {
   fail,
@@ -230,5 +324,8 @@ module.exports = {
   restFetch,
   encodeContentBody,
   withEncodedBody,
+  sha256Base64Url,
+  detectImageContentType,
+  putPresignedBytes,
   _internals,
 };

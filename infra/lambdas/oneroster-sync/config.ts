@@ -11,6 +11,8 @@ import { isRecord } from "./normalize";
 
 export const ONEROSTER_SETTING_KEYS = {
   enabled: "ROSTER_SYNC_ENABLED",
+  /** Opt-in authorization pass; scheduled syncs only, default disabled. */
+  roleSyncEnabled: "ROSTER_ROLE_SYNC_ENABLED",
   baseUrl: "ONEROSTER_BASE_URL",
   authMode: "ONEROSTER_AUTH_MODE",
   credentialsSecretArn: "ONEROSTER_CREDENTIALS_SECRET_ARN",
@@ -27,6 +29,7 @@ export type OneRosterApiVersion = "v1p1" | "v1p2";
 
 export interface OneRosterConfig {
   enabled: boolean;
+  roleSyncEnabled: boolean;
   baseUrl: string | null;
   authMode: OneRosterAuthMode | null;
   credentialsSecretArn: string | null;
@@ -35,9 +38,18 @@ export interface OneRosterConfig {
 }
 
 export async function resolveConfig(sql: postgres.Sql): Promise<OneRosterConfig> {
-  const [enabled, baseUrl, authMode, credentialsSecretArn, apiVersion, pageSize] =
+  const [
+    enabled,
+    roleSyncEnabled,
+    baseUrl,
+    authMode,
+    credentialsSecretArn,
+    apiVersion,
+    pageSize,
+  ] =
     await Promise.all([
       getSettingValue(sql, ONEROSTER_SETTING_KEYS.enabled),
+      getSettingValue(sql, ONEROSTER_SETTING_KEYS.roleSyncEnabled),
       getSettingValue(sql, ONEROSTER_SETTING_KEYS.baseUrl),
       getSettingValue(sql, ONEROSTER_SETTING_KEYS.authMode),
       getSettingValue(sql, ONEROSTER_SETTING_KEYS.credentialsSecretArn),
@@ -51,6 +63,7 @@ export async function resolveConfig(sql: postgres.Sql): Promise<OneRosterConfig>
 
   return {
     enabled: enabled?.toLowerCase() === "true",
+    roleSyncEnabled: roleSyncEnabled?.toLowerCase() === "true",
     baseUrl: baseUrl ? normalizeBaseUrl(baseUrl) : null,
     authMode: parsedMode,
     credentialsSecretArn: credentialsSecretArn || null,

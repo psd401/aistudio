@@ -276,6 +276,11 @@ _SKIP_RELATIVE_PREFIXES = (
     # deleted skill from being resurrected under ~/.openclaw/skills/ on sync.
     "skills/psd-html-output/",
     "skills/psd-image-gen/",
+    # psd-redrover was REMOVED from the image (#1396 — Red Rover data is now
+    # served through the warehouse via psd-data, which authenticates as the
+    # calling user), but its skip entry is intentionally retained for the same
+    # reason as psd-html-output above: stale synced copies in users' S3
+    # prefixes must not be resurrected under ~/.openclaw/skills/ on sync.
     "skills/psd-redrover/",
     "skills/psd-rules/",
     "skills/psd-schedules/",
@@ -286,6 +291,94 @@ _SKIP_RELATIVE_PREFIXES = (
 # Filename suffixes that are always runtime cruft (socket files, pid files).
 _SKIP_SUFFIXES = (".sock", ".pid")
 
+# Directory names that hold REGENERABLE build artifacts, matched at ANY depth.
+#
+# These are not memory. They are dependency trees a skill can rebuild from its
+# manifest, and round-tripping them through S3 costs real time on every cold
+# start: on 2026-07-27 one workspace held 4,989 objects of which 3,886 (77.9%)
+# were a pip virtualenv inside a single skill, and the restore took 161.7s
+# before the agent could answer its first message. Actual memory/ was 55 files.
+#
+# Matched per path SEGMENT rather than as a prefix, because they appear
+# mid-path — e.g. skills/<name>/.tts-venv/lib/python3.11/site-packages/pip/...
+# — which the prefix list above cannot express.
+_SKIP_SEGMENT_NAMES = frozenset({
+    "node_modules",
+    "site-packages",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".turbo",
+    ".next",
+})
+
+
+def _is_regenerable_segment(segment: str) -> bool:
+    """True for a directory that can be rebuilt and need not be synced."""
+    if segment in _SKIP_SEGMENT_NAMES:
+        return True
+    # Virtualenvs: exact "venv"/".venv", plus HIDDEN skill-local forms like
+    # ".tts-venv". The "-venv" suffix is deliberately not honoured on visible
+    # segments: an authored directory such as
+    # "skills/user/hagelk-python-venv/SKILL.md" would then be skipped by BOTH
+    # the pull and the push, so the agent's own scratch space would be neither
+    # restored nor uploaded. The two failure modes are not symmetric — an
+    # unmatched venv only costs sync time, an over-matched skill loses work —
+    # so keep the match narrow and let a stray visible venv ride along.
+    if segment in ("venv", ".venv"):
+        return True
+    return segment.startswith(".") and segment.endswith("-venv")
+
+
+# Session transcripts: restore only the most recent N.
+#
+# These are the single biggest cost in a cold start. On 2026-07-27 one dev
+# workspace held 812 of them totalling 202 MB — 93% of the bytes the restore
+# pulled — and the pull took 70.8s, during which the agent could not answer at
+# all. Boot itself was 10s and the model turn 15s; the transcripts WERE the
+# latency.
+#
+# Old transcripts are archive, not memory:
+#   • Interactive session keys embed the image digest, so every deploy makes
+#     every previous transcript permanently unresumable.
+#   • Scheduled session keys embed the date, so yesterday's never resumes.
+# The agent's actual continuity lives in memory/, which is 55 files and is
+# always restored in full.
+#
+# SAFE BY CONSTRUCTION: this skips a DOWNLOAD, never an upload or a delete.
+# push_workspace only walks local files and uploads them; nothing in the sync
+# path enumerates S3 to remove objects. Unrestored transcripts stay in S3 and
+# remain readable there. That asymmetry is what makes trimming the pull safe,
+# and it is why the cap is applied HERE rather than by deleting anything.
+SESSION_DIR_PREFIX = "agents/main/sessions/"
+MAX_RESTORED_SESSIONS = 20
+
+
+def _select_session_transcripts(
+    entries: list, keep: int = MAX_RESTORED_SESSIONS
+) -> set:
+    """Return the relative paths of the `keep` most recently modified transcripts.
+
+    `entries` are broker list records: {"path", "size", "lastModified"}. Ranking
+    needs mtime, which the broker only started returning alongside paths — so
+    when it is absent (older web tier during a rollout) the caller keeps ALL
+    transcripts rather than picking an arbitrary subset. Slower, never wrong.
+    """
+    sessions = [e for e in entries if str(e.get("path", "")).startswith(SESSION_DIR_PREFIX)]
+    if not sessions:
+        return set()
+    # A tie at 0 means the broker sent no usable timestamps; ranking would be
+    # arbitrary, so decline to trim.
+    if all(int(e.get("lastModified") or 0) == 0 for e in sessions):
+        return {str(e["path"]) for e in sessions}
+    ranked = sorted(
+        sessions,
+        key=lambda e: (int(e.get("lastModified") or 0), str(e.get("path", ""))),
+        reverse=True,
+    )
+    return {str(e["path"]) for e in ranked[:keep]}
+
 
 def _should_skip_relative(relative: str) -> bool:
     """True if this workspace-relative path is gateway-owned, not user memory."""
@@ -293,6 +386,8 @@ def _should_skip_relative(relative: str) -> bool:
     for prefix in _SKIP_RELATIVE_PREFIXES:
         if rel == prefix or rel.startswith(prefix):
             return True
+    if any(_is_regenerable_segment(seg) for seg in rel.split("/")):
+        return True
     return any(rel.endswith(suf) for suf in _SKIP_SUFFIXES)
 
 
@@ -582,7 +677,29 @@ def pull_workspace(prefix: str) -> int:
         paths = page.get("paths", [])
         if not isinstance(paths, list):
             raise RuntimeError("workspace broker returned invalid path list")
+        # Rank session transcripts by recency WITHIN this page. The broker
+        # paginates, so this keeps up to MAX_RESTORED_SESSIONS per page rather
+        # than globally — deliberately: holding every page in memory to rank
+        # globally would reintroduce the unbounded traversal these caps exist
+        # to prevent, and per-page is already a ~40x reduction. Falls back to
+        # keeping all transcripts when the broker sends no timestamps.
+        page_entries = page.get("entries")
+        keep_sessions = (
+            _select_session_transcripts(page_entries)
+            if isinstance(page_entries, list)
+            else None
+        )
         for relative in paths:
+            if (
+                keep_sessions is not None
+                and isinstance(relative, str)
+                and relative.startswith(SESSION_DIR_PREFIX)
+                and relative not in keep_sessions
+            ):
+                # Archived transcript: still in S3, just not worth 70s of the
+                # user's time on every cold start.
+                skipped += 1
+                continue
             if not isinstance(relative, str):
                 continue
             if not relative:

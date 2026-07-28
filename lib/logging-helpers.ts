@@ -236,76 +236,59 @@ export function withDatabaseLogging<T>(
     .catch(error => {
       const endTimer = timer
       endTimer({ status: "error" })
-      
-      // Categorize database errors with full context
-      if (error instanceof Error) {
-        const message = error.message.toLowerCase()
-        
-        if (message.includes("connection refused") || 
-            message.includes("econnrefused") || 
-            message.includes("connection") || 
-            message.includes("connect")) {
-          throw ErrorFactories.dbConnectionFailed({ 
-            technicalMessage: error.message,
-            cause: error,
-            ...context
-          })
-        }
-        
-        if (message.includes("timeout") || message.includes("timedout")) {
-          throw ErrorFactories.dbQueryFailed(
-            context.query || "", 
-            error, 
-            {
-              technicalMessage: "Database query timed out",
-              table: context.table,
-              parameters: context.parameters
-            }
-          )
-        }
-        
-        if (message.includes("duplicate") || 
-            message.includes("unique") || 
-            message.includes("already exists")) {
-          throw ErrorFactories.dbDuplicateEntry(
-            context.table || "", 
-            context.field || "", 
-            "", 
-            {
-              technicalMessage: error.message,
-              cause: error,
-              query: context.query,
-              parameters: context.parameters
-            }
-          )
-        }
-        
-        if (message.includes("constraint") || 
-            message.includes("violates") || 
-            message.includes("foreign key")) {
-          // Add constraint violation handling
-          throw ErrorFactories.dbQueryFailed(
-            context.query || "",
-            error,
-            {
-              technicalMessage: "Database constraint violation",
-              table: context.table,
-              parameters: context.parameters
-            }
-          )
-        }
-        
-        // Generic query failure with full context
-        throw ErrorFactories.dbQueryFailed(
-          context.query || "", 
-          error,
-          {
-            table: context.table,
-            parameters: context.parameters
-          }
-        )
-      }
-      
-      throw error
+      throwCategorizedDatabaseError(error, context)
     })
+}
+
+type DatabaseLoggingContext = {
+  query?: string
+  table?: string
+  parameters?: unknown[]
+  field?: string
+}
+
+function includesDatabaseError(message: string, fragments: readonly string[]): boolean {
+  return fragments.some(fragment => message.includes(fragment))
+}
+
+function throwCategorizedDatabaseError(
+  error: unknown,
+  context: DatabaseLoggingContext
+): never {
+  if (!(error instanceof Error)) throw error
+
+  const message = error.message.toLowerCase()
+  if (includesDatabaseError(message, ["connection refused", "econnrefused", "connection", "connect"])) {
+    throw ErrorFactories.dbConnectionFailed({
+      technicalMessage: error.message,
+      cause: error,
+      ...context
+    })
+  }
+  if (includesDatabaseError(message, ["timeout", "timedout"])) {
+    throw ErrorFactories.dbQueryFailed(context.query || "", error, {
+      technicalMessage: "Database query timed out",
+      table: context.table,
+      parameters: context.parameters
+    })
+  }
+  if (includesDatabaseError(message, ["duplicate", "unique", "already exists"])) {
+    throw ErrorFactories.dbDuplicateEntry(context.table || "", context.field || "", "", {
+      technicalMessage: error.message,
+      cause: error,
+      query: context.query,
+      parameters: context.parameters
+    })
+  }
+  if (includesDatabaseError(message, ["constraint", "violates", "foreign key"])) {
+    throw ErrorFactories.dbQueryFailed(context.query || "", error, {
+      technicalMessage: "Database constraint violation",
+      table: context.table,
+      parameters: context.parameters
+    })
+  }
+  throw ErrorFactories.dbQueryFailed(context.query || "", error, {
+    table: context.table,
+    parameters: context.parameters
+  })
 }

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getJobStatus, fetchResultFromS3 } from '@/lib/services/document-job-service';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+import { legacyContentRetirementResponse } from '@/lib/repositories/content-platform/legacy-retirement-response';
 
 // Map internal Lambda error messages to user-facing strings so that
 // implementation details are not exposed in the API response.
@@ -33,6 +34,12 @@ export async function GET(
     if (!session?.sub) {
       log.warn('Unauthorized request');
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const retired = await legacyContentRetirementResponse();
+    if (retired) {
+      timer({ status: 'success', reason: 'legacy_retired' });
+      return retired;
     }
     
     const resolvedParams = await params;

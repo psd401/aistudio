@@ -17,7 +17,7 @@ export function reciprocalRankFusion(
   const fused = new Map<number, RetrievalCandidate>();
   for (const list of lists) {
     const weight = list.weight ?? 1;
-    list.candidates.forEach((candidate, index) => {
+    for (const [index, candidate] of list.candidates.entries()) {
       const existing = fused.get(candidate.chunkId) ?? {
         ...candidate,
         fusedScore: 0,
@@ -31,7 +31,7 @@ export function reciprocalRankFusion(
             : candidate.visualScore;
       if (rawScore != null) existing[`${list.signal}Score`] = rawScore;
       fused.set(candidate.chunkId, existing);
-    });
+    };
   }
   return [...fused.values()].sort(
     (left, right) =>

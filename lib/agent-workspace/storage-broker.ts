@@ -663,6 +663,7 @@ export async function listWorkspaceObjects(
   continuationToken?: string
 ): Promise<{
   paths: string[]
+  entries: Array<{ path: string; size: number; lastModified: number }>
   continuationToken?: string
 }> {
   const prefix = `${validateTrustedPrefix(signedWorkspacePrefix)}/`
@@ -674,12 +675,34 @@ export async function listWorkspaceObjects(
       ContinuationToken: continuationToken,
     })
   )
+
+  const entries = (response.Contents ?? [])
+    .filter((entry): entry is typeof entry & { Key: string } =>
+      Boolean(entry.Key?.startsWith(prefix))
+    )
+    .map((entry) => ({
+      path: entry.Key.slice(prefix.length),
+      size: entry.Size ?? 0,
+      // Epoch SECONDS. The restore only ever compares these to each other to
+      // rank recency, so second resolution is ample and avoids shipping a
+      // date-string the client would have to parse.
+      lastModified: entry.LastModified
+        ? Math.floor(entry.LastModified.getTime() / 1000)
+        : 0,
+    }))
+    .filter((entry) => entry.path.length > 0)
+
   return {
-    paths: (response.Contents ?? [])
-      .map((entry) => entry.Key)
-      .filter((key): key is string => Boolean(key?.startsWith(prefix)))
-      .map((key) => key.slice(prefix.length))
-      .filter(Boolean),
+    // `paths` is RETAINED for compatibility. Containers deploy independently of
+    // this route, so an older image is always in flight during a rollout and
+    // still reads this field. Removing it would break every running agent's
+    // restore the moment the web tier deployed.
+    paths: entries.map((entry) => entry.path),
+    // Size + mtime come back on the SAME ListObjectsV2 response that already
+    // produced the paths — the metadata was being discarded, so exposing it
+    // costs no extra S3 call. The restore needs it to rank session transcripts
+    // by recency instead of pulling all of them (see workspace_sync.py).
+    entries,
     ...(response.NextContinuationToken
       ? { continuationToken: response.NextContinuationToken }
       : {}),
@@ -716,77 +739,105 @@ export async function createWorkspaceDownloadUrl(
   return { downloadUrl, contentLength, requiredHeaders: { Range: range } }
 }
 
-export async function createWorkspaceUploadUrl(
-  ownerEmail: string,
-  signedWorkspacePrefix: string,
-  relativePath: string,
-  contentLength: number,
-  contextKey: string,
-  idempotencyKey: string,
-  checksumSha256: string,
-  contentType?: string
-): Promise<UploadPreparation | {
-  unchanged: true
-  key: string
-}> {
-  const length = expectedLength(contentLength, MAX_PRIVATE_UPLOAD_BYTES)
-  const checksum = expectedChecksum(checksumSha256)
-  const normalizedContentType = expectedContentType(contentType)
-  const targetKey = ownerWorkspaceKey(signedWorkspacePrefix, relativePath)
-  const existing = await existingUploadReservation(ownerEmail, idempotencyKey)
-  if (existing) {
-    if (
-      existing.publicArtifact ||
-      existing.targetKey !== targetKey ||
-      existing.expectedBytes !== length ||
-      existing.checksumSha256 !== checksum ||
-      existing.contentType !== normalizedContentType
-    ) {
-      throw new WorkspaceStorageCompletionError(
-        "Idempotency key is bound to different upload parameters",
-      )
+type WorkspaceUploadResult =
+  | UploadPreparation
+  | {
+      unchanged: true
+      key: string
     }
-    if (existing.status === "committed") {
-      if (!existing.objectVersionId) {
-        throw new WorkspaceStorageCompletionError(
-          "Committed upload has no verified object version",
-        )
-      }
-      const metadata = await s3Client().send(
-        new HeadObjectCommand({
-          Bucket: bucketName(),
-          Key: targetKey,
-          ChecksumMode: "ENABLED",
-        }),
-      )
-      if (
-        metadata.ContentLength !== length ||
-        metadata.ChecksumSHA256 !== checksum ||
-        metadata.ContentType !== normalizedContentType ||
-        metadata.VersionId !== existing.objectVersionId
-      ) {
-        throw new WorkspaceStorageCompletionError(
-          "Committed upload no longer matches its reservation",
-        )
-      }
-      return { unchanged: true, key: targetKey }
-    }
-    if (
-      existing.status !== "reserved" ||
-      existing.expiresAt.getTime() <= Date.now()
-    ) {
-      throw new WorkspaceStorageCompletionError(
-        "Upload reservation is not reusable",
-      )
-    }
-    return signUploadReservation({
-      reservationId: existing.id,
-      stagingKey: existing.stagingKey,
-      contentLength: length,
-      checksumSha256: checksum,
-      contentType: normalizedContentType,
-    })
+
+interface PrivateUploadParameters {
+  ownerEmail: string
+  contextKey: string
+  idempotencyKey: string
+  targetKey: string
+  length: number
+  checksum: string
+  contentType: string
+}
+
+type ExistingUploadReservation = NonNullable<
+  Awaited<ReturnType<typeof existingUploadReservation>>
+>
+
+async function committedUploadMatches(
+  targetKey: string,
+  objectVersionId: string,
+  length: number,
+  checksum: string,
+  contentType: string,
+): Promise<boolean> {
+  const metadata = await s3Client().send(
+    new HeadObjectCommand({
+      Bucket: bucketName(),
+      Key: targetKey,
+      ChecksumMode: "ENABLED",
+    }),
+  )
+  return (
+    metadata.ContentLength === length &&
+    metadata.ChecksumSHA256 === checksum &&
+    metadata.ContentType === contentType &&
+    metadata.VersionId === objectVersionId
+  )
+}
+
+async function reusePrivateUploadReservation(
+  existing: ExistingUploadReservation,
+  params: PrivateUploadParameters,
+): Promise<WorkspaceUploadResult> {
+  if (
+    existing.publicArtifact ||
+    existing.targetKey !== params.targetKey ||
+    existing.expectedBytes !== params.length ||
+    existing.checksumSha256 !== params.checksum ||
+    existing.contentType !== params.contentType
+  ) {
+    throw new WorkspaceStorageCompletionError(
+      "Idempotency key is bound to different upload parameters",
+    )
   }
+  if (existing.status === "committed") {
+    if (!existing.objectVersionId) {
+      throw new WorkspaceStorageCompletionError(
+        "Committed upload has no verified object version",
+      )
+    }
+    if (
+      !(await committedUploadMatches(
+        params.targetKey,
+        existing.objectVersionId,
+        params.length,
+        params.checksum,
+        params.contentType,
+      ))
+    ) {
+      throw new WorkspaceStorageCompletionError(
+        "Committed upload no longer matches its reservation",
+      )
+    }
+    return { unchanged: true, key: params.targetKey }
+  }
+  if (
+    existing.status !== "reserved" ||
+    existing.expiresAt.getTime() <= Date.now()
+  ) {
+    throw new WorkspaceStorageCompletionError(
+      "Upload reservation is not reusable",
+    )
+  }
+  return signUploadReservation({
+    reservationId: existing.id,
+    stagingKey: existing.stagingKey,
+    contentLength: params.length,
+    checksumSha256: params.checksum,
+    contentType: params.contentType,
+  })
+}
+
+async function findMatchingCommittedUpload(
+  params: PrivateUploadParameters,
+): Promise<WorkspaceUploadResult | null> {
   const [unchanged] = await executeQuery(
     (db) =>
       db
@@ -800,68 +851,62 @@ export async function createWorkspaceUploadUrl(
           and(
             eq(
               workspaceUploadReservations.ownerKey,
-              ownerEmail.trim().toLowerCase(),
+              params.ownerEmail.trim().toLowerCase(),
             ),
-            eq(workspaceUploadReservations.targetKey, targetKey),
-            eq(workspaceUploadReservations.expectedBytes, length),
-            eq(workspaceUploadReservations.checksumSha256, checksum),
-            eq(
-              workspaceUploadReservations.contentType,
-              normalizedContentType,
-            ),
+            eq(workspaceUploadReservations.targetKey, params.targetKey),
+            eq(workspaceUploadReservations.expectedBytes, params.length),
+            eq(workspaceUploadReservations.checksumSha256, params.checksum),
+            eq(workspaceUploadReservations.contentType, params.contentType),
             eq(workspaceUploadReservations.status, "committed"),
           ),
         )
         .limit(1),
     "findUnchangedWorkspaceUpload",
   )
-  if (unchanged?.objectVersionId) {
-    try {
-      const metadata = await s3Client().send(
-        new HeadObjectCommand({
-          Bucket: bucketName(),
-          Key: unchanged.targetKey,
-          ChecksumMode: "ENABLED",
-        }),
-      )
-      if (
-        metadata.ContentLength === length &&
-        metadata.ChecksumSHA256 === checksum &&
-        metadata.ContentType === normalizedContentType &&
-        metadata.VersionId === unchanged.objectVersionId
-      ) {
-        return { unchanged: true, key: targetKey }
-      }
-    } catch {
-      // A stale ledger row is not proof the bytes still exist. Continue with a
-      // new verified upload; the retained row remains charged until cleanup.
-    }
+  if (!unchanged?.objectVersionId) return null
+  try {
+    return (await committedUploadMatches(
+      unchanged.targetKey,
+      unchanged.objectVersionId,
+      params.length,
+      params.checksum,
+      params.contentType,
+    ))
+      ? { unchanged: true, key: params.targetKey }
+      : null
+  } catch {
+    return null
   }
+}
+
+async function createAndSignPrivateUpload(
+  params: PrivateUploadParameters,
+): Promise<UploadPreparation> {
   const leaseIds = await reserveUpload({
     publicArtifact: false,
-    ownerEmail,
-    contextKey,
-    idempotencyKey,
-    contentLength: length,
+    ownerEmail: params.ownerEmail,
+    contextKey: params.contextKey,
+    idempotencyKey: params.idempotencyKey,
+    contentLength: params.length,
   })
   const reservation = await createUploadReservation({
     publicArtifact: false,
-    ownerEmail,
-    contextKey,
-    idempotencyKey,
-    targetKey,
-    expectedBytes: length,
-    checksumSha256: checksum,
-    contentType: normalizedContentType,
+    ownerEmail: params.ownerEmail,
+    contextKey: params.contextKey,
+    idempotencyKey: params.idempotencyKey,
+    targetKey: params.targetKey,
+    expectedBytes: params.length,
+    checksumSha256: params.checksum,
+    contentType: params.contentType,
     leaseIds,
   })
   try {
     return await signUploadReservation({
       reservationId: reservation.id,
       stagingKey: reservation.stagingKey,
-      contentLength: length,
-      checksumSha256: checksum,
-      contentType: normalizedContentType,
+      contentLength: params.length,
+      checksumSha256: params.checksum,
+      contentType: params.contentType,
     })
   } catch (error) {
     await executeQuery(
@@ -873,20 +918,65 @@ export async function createWorkspaceUploadUrl(
       "rejectWorkspaceUploadSigning",
     )
     await Promise.all(
-      leaseIds.filter((id): id is string => id !== null).map(releaseResourceAdmission),
+      leaseIds
+        .filter((id): id is string => id !== null)
+        .map(releaseResourceAdmission),
     )
     throw error
   }
 }
 
+export async function createWorkspaceUploadUrl(
+  options: {
+    ownerEmail: string
+    signedWorkspacePrefix: string
+    relativePath: string
+    contentLength: number
+    contextKey: string
+    idempotencyKey: string
+    checksumSha256: string
+    contentType?: string
+  }
+): Promise<WorkspaceUploadResult> {
+  const {
+    ownerEmail,
+    signedWorkspacePrefix,
+    relativePath,
+    contentLength,
+    contextKey,
+    idempotencyKey,
+    checksumSha256,
+    contentType,
+  } = options
+  const length = expectedLength(contentLength, MAX_PRIVATE_UPLOAD_BYTES)
+  const checksum = expectedChecksum(checksumSha256)
+  const normalizedContentType = expectedContentType(contentType)
+  const targetKey = ownerWorkspaceKey(signedWorkspacePrefix, relativePath)
+  const params: PrivateUploadParameters = {
+    ownerEmail,
+    contextKey,
+    idempotencyKey,
+    targetKey,
+    length,
+    checksum,
+    contentType: normalizedContentType,
+  }
+  const existing = await existingUploadReservation(ownerEmail, idempotencyKey)
+  if (existing) return reusePrivateUploadReservation(existing, params)
+  const unchanged = await findMatchingCommittedUpload(params)
+  return unchanged ?? createAndSignPrivateUpload(params)
+}
+
 export async function createPublicArtifactUpload(
-  ownerEmail: string,
-  fileName: string,
-  contentType: string,
-  contentLength: number,
-  contextKey: string,
-  idempotencyKey: string,
-  checksumSha256: string,
+  options: {
+    ownerEmail: string
+    fileName: string
+    contentType: string
+    contentLength: number
+    contextKey: string
+    idempotencyKey: string
+    checksumSha256: string
+  }
 ): Promise<{
   uploadUrl: string
   reservationId: string
@@ -896,6 +986,15 @@ export async function createPublicArtifactUpload(
     "x-amz-checksum-sha256": string
   }
 }> {
+  const {
+    ownerEmail,
+    fileName,
+    contentType,
+    contentLength,
+    contextKey,
+    idempotencyKey,
+    checksumSha256,
+  } = options
   const length = expectedLength(contentLength, MAX_PUBLIC_ARTIFACT_BYTES)
   const checksum = expectedChecksum(checksumSha256)
   const normalizedContentType = expectedContentType(contentType)
@@ -967,14 +1066,17 @@ export async function createPublicArtifactUpload(
   }
 }
 
-export async function completeWorkspaceUpload(
-  ownerEmail: string,
+type CompletedWorkspaceUpload = { key: string; publicUrl?: string }
+type WorkspaceUploadReservation =
+  typeof workspaceUploadReservations.$inferSelect
+
+async function claimUploadCompletion(
+  ownerKey: string,
   reservationId: string,
-): Promise<{ key: string; publicUrl?: string }> {
-  if (!/^[0-9a-f-]{36}$/i.test(reservationId)) {
-    throw new Error("Invalid upload reservation")
-  }
-  const ownerKey = ownerEmail.trim().toLowerCase()
+): Promise<
+  | { kind: "claimed"; reservation: WorkspaceUploadReservation }
+  | { kind: "committed"; result: CompletedWorkspaceUpload }
+> {
   const [claimed] = await executeQuery(
     (db) =>
       db
@@ -991,99 +1093,262 @@ export async function completeWorkspaceUpload(
         .returning(),
     "claimWorkspaceUploadCompletion",
   )
-  if (!claimed) {
-    const [existing] = await executeQuery(
-      (db) =>
-        db
-          .select()
-          .from(workspaceUploadReservations)
-          .where(
-            and(
-              eq(workspaceUploadReservations.id, reservationId),
-              eq(workspaceUploadReservations.ownerKey, ownerKey),
-            ),
-          )
-          .limit(1),
-      "getWorkspaceUploadCompletion",
-    )
-    if (existing?.status === "committed") {
-      await Promise.allSettled([
-        settleLease(existing.byteLeaseId, existing.expectedBytes),
-        settleLease(existing.objectLeaseId, 1),
-      ])
-      return {
-        key: existing.targetKey,
-        ...(existing.publicArtifact
-          ? { publicUrl: publicUrl(bucketName(), existing.targetKey) }
-          : {}),
-      }
-    }
+  if (claimed) return { kind: "claimed", reservation: claimed }
+  const [existing] = await executeQuery(
+    (db) =>
+      db
+        .select()
+        .from(workspaceUploadReservations)
+        .where(
+          and(
+            eq(workspaceUploadReservations.id, reservationId),
+            eq(workspaceUploadReservations.ownerKey, ownerKey),
+          ),
+        )
+        .limit(1),
+    "getWorkspaceUploadCompletion",
+  )
+  if (existing?.status !== "committed") {
     throw new WorkspaceStorageCompletionError(
       "Upload reservation is unavailable or already being verified",
     )
   }
+  await Promise.allSettled([
+    settleLease(existing.byteLeaseId, existing.expectedBytes),
+    settleLease(existing.objectLeaseId, 1),
+  ])
+  return {
+    kind: "committed",
+    result: {
+      key: existing.targetKey,
+      ...(existing.publicArtifact
+        ? { publicUrl: publicUrl(bucketName(), existing.targetKey) }
+        : {}),
+    },
+  }
+}
 
+async function inspectStagedUpload(
+  claimed: WorkspaceUploadReservation,
+  bucket: string,
+): Promise<{ versionId: string | undefined; matches: boolean }> {
+  const metadata = await s3Client().send(
+    new HeadObjectCommand({
+      Bucket: bucket,
+      Key: claimed.stagingKey,
+      ChecksumMode: "ENABLED",
+    }),
+  )
+  return {
+    versionId: metadata.VersionId,
+    matches:
+      metadata.ContentLength === claimed.expectedBytes &&
+      metadata.ChecksumSHA256 === claimed.checksumSha256 &&
+      metadata.ContentType === claimed.contentType &&
+      Boolean(metadata.VersionId),
+  }
+}
+
+async function supersededUploadVersions(
+  ownerKey: string,
+  targetKey: string,
+): Promise<Array<{ id: string; objectVersionId: string | null }>> {
+  return executeQuery(
+    (db) =>
+      db
+        .select({
+          id: workspaceUploadReservations.id,
+          objectVersionId: workspaceUploadReservations.objectVersionId,
+        })
+        .from(workspaceUploadReservations)
+        .where(
+          and(
+            eq(workspaceUploadReservations.ownerKey, ownerKey),
+            eq(workspaceUploadReservations.targetKey, targetKey),
+            eq(workspaceUploadReservations.status, "committed"),
+          ),
+        ),
+    "getSupersededWorkspaceUploadVersions",
+  )
+}
+
+async function copyStagedUpload(
+  claimed: WorkspaceUploadReservation,
+  bucket: string,
+  stagingVersion: string,
+): Promise<string> {
+  const copied = await s3Client().send(
+    new CopyObjectCommand({
+      Bucket: bucket,
+      Key: claimed.targetKey,
+      CopySource: `${bucket}/${claimed.stagingKey
+        .split("/")
+        .map(encodeURIComponent)
+        .join("/")}?versionId=${encodeURIComponent(stagingVersion)}`,
+      ChecksumAlgorithm: "SHA256",
+      ContentType: claimed.contentType,
+      MetadataDirective: "REPLACE",
+      Tagging: `Scope=${claimed.publicArtifact ? "public" : "private"}`,
+      TaggingDirective: "REPLACE",
+    }),
+  )
+  if (!copied.VersionId) {
+    throw new WorkspaceStorageCompletionError(
+      "Verified upload promotion returned no object version",
+    )
+  }
+  return copied.VersionId
+}
+
+async function settleUploadReservation(
+  reservationId: string,
+  promotedVersion: string,
+): Promise<void> {
+  const settledRow = await executeTransaction(
+    async (tx) => {
+      const [row] = await tx
+        .update(workspaceUploadReservations)
+        .set({
+          status: "committed",
+          objectVersionId: promotedVersion,
+          committedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(workspaceUploadReservations.id, reservationId),
+            eq(workspaceUploadReservations.status, "verifying"),
+          ),
+        )
+        .returning({ id: workspaceUploadReservations.id })
+      return row
+    },
+    "settleWorkspaceUploadCompletion",
+  )
+  if (!settledRow) {
+    throw new WorkspaceStorageCompletionError(
+      "Upload reservation settlement was lost",
+    )
+  }
+}
+
+async function removeSupersededVersions(
+  priorVersions: Array<{ id: string; objectVersionId: string | null }>,
+  targetKey: string,
+  bucket: string,
+): Promise<void> {
+  for (const prior of priorVersions) {
+    if (!prior.objectVersionId) continue
+    try {
+      await s3Client().send(
+        new DeleteObjectCommand({
+          Bucket: bucket,
+          Key: targetKey,
+          VersionId: prior.objectVersionId,
+        }),
+      )
+      await executeQuery(
+        (db) =>
+          db
+            .update(workspaceUploadReservations)
+            .set({ status: "superseded", updatedAt: new Date() })
+            .where(
+              and(
+                eq(workspaceUploadReservations.id, prior.id),
+                eq(workspaceUploadReservations.status, "committed"),
+              ),
+            ),
+        "settleSupersededWorkspaceUploadVersion",
+      )
+    } catch {
+      // Leave the old row committed and charged until exact-version cleanup
+      // succeeds on a later replacement/reconciliation attempt.
+    }
+  }
+}
+
+interface FailedUploadCleanup {
+  claimed: WorkspaceUploadReservation
+  reservationId: string
+  bucket: string
+  stagingVersion: string | undefined
+  promotedVersion: string | undefined
+  error: unknown
+}
+
+async function rejectFailedUpload({
+  claimed,
+  reservationId,
+  bucket,
+  stagingVersion,
+  promotedVersion,
+  error,
+}: FailedUploadCleanup): Promise<never> {
+  let cleanupFailed = false
+  for (const [key, versionId] of [
+    [claimed.targetKey, promotedVersion],
+    [claimed.stagingKey, stagingVersion],
+  ] as const) {
+    if (!versionId) continue
+    try {
+      await s3Client().send(
+        new DeleteObjectCommand({ Bucket: bucket, Key: key, VersionId: versionId }),
+      )
+    } catch {
+      cleanupFailed = true
+    }
+  }
+  if (cleanupFailed) {
+    throw new WorkspaceStorageCompletionError(
+      "Upload cleanup is pending; reserved capacity remains charged",
+    )
+  }
+  await executeQuery(
+    (db) =>
+      db
+        .update(workspaceUploadReservations)
+        .set({ status: "rejected", updatedAt: new Date() })
+        .where(
+          and(
+            eq(workspaceUploadReservations.id, reservationId),
+            eq(workspaceUploadReservations.status, "verifying"),
+          ),
+        ),
+    "rejectWorkspaceUploadCompletion",
+  )
+  await Promise.all([
+    dropLease(claimed.byteLeaseId),
+    dropLease(claimed.objectLeaseId),
+  ])
+  throw error
+}
+
+async function finishClaimedUpload(
+  claimed: WorkspaceUploadReservation,
+  ownerKey: string,
+  reservationId: string,
+): Promise<CompletedWorkspaceUpload> {
   const bucket = bucketName()
   let stagingVersion: string | undefined
   let promotedVersion: string | undefined
   let settled = false
   try {
-    const metadata = await s3Client().send(
-      new HeadObjectCommand({
-        Bucket: bucket,
-        Key: claimed.stagingKey,
-        ChecksumMode: "ENABLED",
-      }),
-    )
-    stagingVersion = metadata.VersionId
-    if (
-      metadata.ContentLength !== claimed.expectedBytes ||
-      metadata.ChecksumSHA256 !== claimed.checksumSha256 ||
-      metadata.ContentType !== claimed.contentType ||
-      !stagingVersion
-    ) {
+    const staged = await inspectStagedUpload(claimed, bucket)
+    stagingVersion = staged.versionId
+    if (!staged.matches || !stagingVersion) {
       throw new WorkspaceStorageCompletionError(
         "Uploaded object did not match its reservation",
       )
     }
-    const priorVersions = await executeQuery(
-      (db) =>
-        db
-          .select({
-            id: workspaceUploadReservations.id,
-            objectVersionId: workspaceUploadReservations.objectVersionId,
-          })
-          .from(workspaceUploadReservations)
-          .where(
-            and(
-              eq(workspaceUploadReservations.ownerKey, ownerKey),
-              eq(workspaceUploadReservations.targetKey, claimed.targetKey),
-              eq(workspaceUploadReservations.status, "committed"),
-            ),
-          ),
-      "getSupersededWorkspaceUploadVersions",
+    const priorVersions = await supersededUploadVersions(
+      ownerKey,
+      claimed.targetKey,
     )
-    const copied = await s3Client().send(
-      new CopyObjectCommand({
-        Bucket: bucket,
-        Key: claimed.targetKey,
-        CopySource: `${bucket}/${claimed.stagingKey
-          .split("/")
-          .map(encodeURIComponent)
-          .join("/")}?versionId=${encodeURIComponent(stagingVersion)}`,
-        ChecksumAlgorithm: "SHA256",
-        ContentType: claimed.contentType,
-        MetadataDirective: "REPLACE",
-        Tagging: `Scope=${claimed.publicArtifact ? "public" : "private"}`,
-        TaggingDirective: "REPLACE",
-      }),
+    promotedVersion = await copyStagedUpload(
+      claimed,
+      bucket,
+      stagingVersion,
     )
-    if (!copied.VersionId) {
-      throw new WorkspaceStorageCompletionError(
-        "Verified upload promotion returned no object version",
-      )
-    }
-    promotedVersion = copied.VersionId
     await s3Client().send(
       new DeleteObjectCommand({
         Bucket: bucket,
@@ -1091,65 +1356,13 @@ export async function completeWorkspaceUpload(
         VersionId: stagingVersion,
       }),
     )
-    const settledRow = await executeTransaction(
-      async (tx) => {
-        const [row] = await tx
-          .update(workspaceUploadReservations)
-          .set({
-            status: "committed",
-            objectVersionId: copied.VersionId,
-            committedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(workspaceUploadReservations.id, reservationId),
-              eq(workspaceUploadReservations.status, "verifying"),
-            ),
-          )
-          .returning({ id: workspaceUploadReservations.id })
-        return row
-      },
-      "settleWorkspaceUploadCompletion",
-    )
-    if (!settledRow) {
-      throw new WorkspaceStorageCompletionError(
-        "Upload reservation settlement was lost",
-      )
-    }
+    await settleUploadReservation(reservationId, promotedVersion)
     settled = true
     await Promise.allSettled([
       settleLease(claimed.byteLeaseId, claimed.expectedBytes),
       settleLease(claimed.objectLeaseId, 1),
     ])
-    for (const prior of priorVersions) {
-      if (!prior.objectVersionId) continue
-      try {
-        await s3Client().send(
-          new DeleteObjectCommand({
-            Bucket: bucket,
-            Key: claimed.targetKey,
-            VersionId: prior.objectVersionId,
-          }),
-        )
-        await executeQuery(
-          (db) =>
-            db
-              .update(workspaceUploadReservations)
-              .set({ status: "superseded", updatedAt: new Date() })
-              .where(
-                and(
-                  eq(workspaceUploadReservations.id, prior.id),
-                  eq(workspaceUploadReservations.status, "committed"),
-                ),
-              ),
-          "settleSupersededWorkspaceUploadVersion",
-        )
-      } catch {
-        // Leave the old row committed and charged until exact-version cleanup
-        // succeeds on a later replacement/reconciliation attempt.
-      }
-    }
+    await removeSupersededVersions(priorVersions, claimed.targetKey, bucket)
     return {
       key: claimed.targetKey,
       ...(claimed.publicArtifact
@@ -1158,57 +1371,29 @@ export async function completeWorkspaceUpload(
     }
   } catch (error) {
     if (settled) throw error
-    let cleanupFailed = false
-    if (promotedVersion) {
-      try {
-        await s3Client().send(
-          new DeleteObjectCommand({
-            Bucket: bucket,
-            Key: claimed.targetKey,
-            VersionId: promotedVersion,
-          }),
-        )
-      } catch {
-        cleanupFailed = true
-      }
-    }
-    if (stagingVersion) {
-      try {
-        await s3Client().send(
-          new DeleteObjectCommand({
-            Bucket: bucket,
-            Key: claimed.stagingKey,
-            VersionId: stagingVersion,
-          }),
-        )
-      } catch {
-        cleanupFailed = true
-      }
-    }
-    if (cleanupFailed) {
-      throw new WorkspaceStorageCompletionError(
-        "Upload cleanup is pending; reserved capacity remains charged",
-      )
-    }
-    await executeQuery(
-      (db) =>
-        db
-          .update(workspaceUploadReservations)
-          .set({ status: "rejected", updatedAt: new Date() })
-          .where(
-            and(
-              eq(workspaceUploadReservations.id, reservationId),
-              eq(workspaceUploadReservations.status, "verifying"),
-            ),
-          ),
-      "rejectWorkspaceUploadCompletion",
-    )
-    await Promise.all([
-      dropLease(claimed.byteLeaseId),
-      dropLease(claimed.objectLeaseId),
-    ])
-    throw error
+    return rejectFailedUpload({
+      claimed,
+      reservationId,
+      bucket,
+      stagingVersion,
+      promotedVersion,
+      error,
+    })
   }
+}
+
+export async function completeWorkspaceUpload(
+  ownerEmail: string,
+  reservationId: string,
+): Promise<{ key: string; publicUrl?: string }> {
+  if (!/^[0-9a-f-]{36}$/i.test(reservationId)) {
+    throw new Error("Invalid upload reservation")
+  }
+  const ownerKey = ownerEmail.trim().toLowerCase()
+  const claim = await claimUploadCompletion(ownerKey, reservationId)
+  return claim.kind === "committed"
+    ? claim.result
+    : finishClaimedUpload(claim.reservation, ownerKey, reservationId)
 }
 
 export async function createPublicArtifactDownloadUrl(

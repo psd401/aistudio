@@ -24,8 +24,6 @@ import {
   SecretsManagerClient,
   CreateSecretCommand,
   DescribeSecretCommand,
-  TagResourceCommand,
-  PutResourcePolicyCommand,
 } from "@aws-sdk/client-secrets-manager"
 import {
   SSMClient,
@@ -37,8 +35,9 @@ import {
   GetFunctionConfigurationCommand,
   UpdateFunctionConfigurationCommand,
 } from "@aws-sdk/client-lambda"
-import * as fs from "fs"
-import * as path from "path"
+import * as fs from "node:fs"
+import * as path from "node:path"
+import { validatedFs } from "../../lib/validated-fs";
 
 interface SecretMapping {
   source: "env-var" | "ssm-param"
@@ -164,17 +163,7 @@ class SecretsMigrator {
 
         if (config.Environment?.Variables) {
           for (const [key, value] of Object.entries(config.Environment.Variables)) {
-            if (this.isSecretEnvVar(key, value)) {
-              this.migrations.push({
-                source: "env-var",
-                sourceName: `${func.FunctionName}:${key}`,
-                sourceValue: value,
-                targetSecretName: this.generateSecretName(key),
-                secretType: this.detectSecretType(key, value),
-                enableRotation: this.shouldEnableRotation(key),
-                affectedServices: [func.FunctionName],
-              })
-            }
+            this.recordEnvironmentSecret(func.FunctionName, key, value)
           }
         }
       }
@@ -183,6 +172,24 @@ class SecretsMigrator {
     } catch (error) {
       console.error(`  ✗ Error scanning Lambda functions:`, error)
     }
+  }
+
+  private recordEnvironmentSecret(
+    functionName: string,
+    key: string,
+    value: string | undefined
+  ): void {
+    if (!value || !this.isSecretEnvVar(key, value)) return
+
+    this.migrations.push({
+      source: "env-var",
+      sourceName: `${functionName}:${key}`,
+      sourceValue: value,
+      targetSecretName: this.generateSecretName(key),
+      secretType: this.detectSecretType(key, value),
+      enableRotation: this.shouldEnableRotation(key),
+      affectedServices: [functionName],
+    })
   }
 
   /**
@@ -394,12 +401,12 @@ class SecretsMigrator {
     // Generate migration report with sanitized secrets
     const reportPath = path.join(reportDir, `migration-${timestamp}.json`)
     const sanitizedMigrations = this.sanitizeForReport(this.migrations)
-    fs.writeFileSync(reportPath, JSON.stringify(sanitizedMigrations, null, 2))
+    validatedFs.writeFileSync(reportPath, JSON.stringify(sanitizedMigrations, null, 2))
 
     // Generate rollback script
     const rollbackPath = path.join(reportDir, `rollback-${timestamp}.sh`)
     const rollbackScript = this.generateRollbackScript()
-    fs.writeFileSync(rollbackPath, rollbackScript, { mode: 0o755 })
+    validatedFs.writeFileSync(rollbackPath, rollbackScript, { mode: 0o755 })
 
     console.log(`\n📄 Reports generated:`)
     console.log(`  Migration report: ${reportPath}`)
@@ -447,7 +454,7 @@ class SecretsMigrator {
 
   private detectSecretType(
     name: string,
-    value: string
+    _value: string
   ): "database" | "api-key" | "oauth" | "custom" {
     if (name.toLowerCase().includes("database") || name.toLowerCase().includes("db")) {
       return "database"
@@ -485,7 +492,7 @@ class SecretsMigrator {
     return value
   }
 
-  private async findParameterUsage(paramName: string): Promise<string[]> {
+  private async findParameterUsage(_paramName: string): Promise<string[]> {
     // This would scan Lambda functions, ECS tasks, etc. for parameter usage
     return ["TBD"]
   }

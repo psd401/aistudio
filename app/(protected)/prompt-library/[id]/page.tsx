@@ -25,6 +25,72 @@ import type { SelectAiModel } from "@/types"
 import type { Prompt } from "@/lib/prompt-library/types"
 import type { PromptLibrarySettings } from "@/lib/db/types/jsonb"
 
+function PromptEditHeader({
+  isDeleting,
+  isUpdating,
+  onBack,
+  onDelete,
+  onSave,
+}: {
+  isDeleting: boolean
+  isUpdating: boolean
+  onBack: () => void
+  onDelete: () => void
+  onSave: () => void
+}) {
+  return (
+    <div className="mb-6">
+      <PageBranding />
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Back to prompt library"
+            onClick={onBack}
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+          <div>
+            <h1 className="text-2xl font-semibold text-gray-900">Edit Prompt</h1>
+            <p className="text-sm text-muted-foreground">
+              Modify your prompt details and settings
+            </p>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button variant="outline" disabled={isDeleting}>
+                <Trash2 className="mr-2 h-4 w-4" /> Delete
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete Prompt</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This will permanently delete this prompt. This action cannot
+                  be undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={onDelete} disabled={isDeleting}>
+                  {isDeleting ? "Deleting…" : "Delete"}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+          <Button onClick={onSave} disabled={isUpdating}>
+            <Save className="mr-2 h-4 w-4" />
+            {isUpdating ? 'Saving...' : 'Save Changes'}
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function PromptEditPage() {
   const params = useParams()
   const router = useRouter()
@@ -141,46 +207,13 @@ export default function PromptEditPage() {
 
   return (
     <div className="mx-auto max-w-4xl p-6">
-      <div className="mb-6">
-        <PageBranding />
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Button variant="ghost" size="icon" aria-label="Back to prompt library" onClick={() => router.push('/prompt-library')}>
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
-            <div>
-              <h1 className="text-2xl font-semibold text-gray-900">Edit Prompt</h1>
-              <p className="text-sm text-muted-foreground">Modify your prompt details and settings</p>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <AlertDialog>
-              <AlertDialogTrigger asChild>
-                <Button variant="outline" disabled={isDeleting}>
-                  <Trash2 className="mr-2 h-4 w-4" /> Delete
-                </Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Delete Prompt</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    This will permanently delete this prompt. This action cannot be undone.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Cancel</AlertDialogCancel>
-                  <AlertDialogAction onClick={handleDelete} disabled={isDeleting}>
-                    {isDeleting ? "Deleting…" : "Delete"}
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-            <Button onClick={handleSave} disabled={isUpdating}>
-              <Save className="mr-2 h-4 w-4" /> {isUpdating ? 'Saving...' : 'Save Changes'}
-            </Button>
-          </div>
-        </div>
-      </div>
+      <PromptEditHeader
+        isDeleting={isDeleting}
+        isUpdating={isUpdating}
+        onBack={() => router.push('/prompt-library')}
+        onDelete={handleDelete}
+        onSave={handleSave}
+      />
 
       <PromptEditForm
         formData={formData} onFormDataChange={setFormData} promptData={promptData}

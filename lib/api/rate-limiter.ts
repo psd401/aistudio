@@ -22,7 +22,7 @@ import { and, count, eq, gte, lt, sql } from "drizzle-orm";
 import { createLogger } from "@/lib/logger";
 import type { ApiAuthContext } from "./auth-middleware";
 import { createErrorResponse } from "./auth-middleware";
-import { createHash } from "node:crypto";
+import { v5 as uuidv5 } from "uuid";
 
 // ============================================
 // Types
@@ -40,8 +40,35 @@ export interface RateLimitResult {
 // Constants
 // ============================================
 
-const DEFAULT_RPM = 60;
+// Default requests-per-minute for principals without a per-key configuration
+// (session auth, OAuth clients, api keys with no rateLimitRpm row). Overridable
+// via API_RATE_LIMIT_DEFAULT_RPM for environments whose traffic shape is not
+// production-like: the local E2E harness (scripts/test/e2e-local.sh) drives one
+// shared test user far harder than any human, and a warm dev server runs the
+// suite fast enough to trip the production budget. Unset/invalid → 60.
+const DEFAULT_RPM = (() => {
+  const parsed = Number.parseInt(
+    process.env.API_RATE_LIMIT_DEFAULT_RPM ?? "",
+    10
+  );
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
+})();
 const WINDOW_MS = 60 * 1000; // 1 minute sliding window
+const PRINCIPAL_FINGERPRINT_DOMAIN = "ai-studio:rate-limit-principal:v1";
+
+/**
+ * Produce a bounded database key for a rate-limit principal.
+ *
+ * This is a name-based identifier, not password storage or credential
+ * verification. UUIDv5 preserves deterministic grouping without presenting a
+ * fast password-hash primitive to static analysis.
+ */
+export function fingerprintRateLimitPrincipal(principal: string): string {
+  return uuidv5(
+    `${PRINCIPAL_FINGERPRINT_DOMAIN}:${principal}`,
+    uuidv5.URL
+  );
+}
 
 // ============================================
 // Core Rate Limiting
@@ -77,7 +104,7 @@ export async function checkRateLimit(
       auth.authType,
       auth.apiKeyId ?? auth.oauthClientId ?? auth.userId,
     ].join(":");
-    const principalHash = createHash("sha256").update(principal).digest("hex");
+    const principalHash = fingerprintRateLimitPrincipal(principal);
     const now = Date.now();
     const windowStart = new Date(now - WINDOW_MS);
     const retentionStart = new Date(now - 24 * 60 * 60 * 1000);

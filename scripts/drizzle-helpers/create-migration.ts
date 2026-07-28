@@ -13,13 +13,14 @@
  *   bun run migration:create -- "add-user-preferences"
  */
 
-import * as fs from "node:fs";
+
 import * as path from "node:path";
 import {
   getAbsolutePath,
   getNextMigrationNumber,
   sanitizeForFilename,
 } from "./lib/migration-utils";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 // Constants
 const LAMBDA_SCHEMA_DIR = "./infra/database/schema";
@@ -136,7 +137,7 @@ function main(): void {
 
   const content = generateMigrationTemplate(nextNumber, description);
   try {
-    fs.writeFileSync(filePath, content, { flag: "wx" });
+    validatedFs.writeFileSync(filePath, content, { flag: "wx" });
   } catch (error: unknown) {
     if ((error as { code?: string } | null)?.code === "EEXIST") {
       console.error("");

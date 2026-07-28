@@ -134,7 +134,7 @@ async function upsertSkills(
 export const handler = async (
   event: CustomResourceEvent,
 ): Promise<CustomResourceResponse> => {
-  // eslint-disable-next-line no-console
+
   console.log(
     JSON.stringify({
       level: "INFO",
@@ -160,7 +160,7 @@ export const handler = async (
   const imageTag = event.ResourceProperties.imageTag ?? "unknown"
   const { upserted, skipped } = await upsertSkills(skills, imageTag)
 
-  // eslint-disable-next-line no-console
+
   console.log(
     JSON.stringify({
       level: "INFO",

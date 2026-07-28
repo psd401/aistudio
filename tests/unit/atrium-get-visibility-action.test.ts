@@ -119,7 +119,7 @@ const OBJ = { id: "uuid-1", ownerUserId: 7, visibilityLevel: "group" };
 // getVisibilityAction
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("getVisibilityAction — enforcement", () => {
+const defineGetVisibilityActionEnforcementSuite1 = () => {
   beforeEach(() => {
     loadByIdOrSlugMock.mockReset().mockResolvedValue(OBJ);
     canViewMock.mockReset().mockResolvedValue(true);
@@ -143,9 +143,11 @@ describe("getVisibilityAction — enforcement", () => {
     expect(result.isSuccess).toBe(false);
     expect(grantsForMock).not.toHaveBeenCalled();
   });
-});
+};
 
-describe("getVisibilityAction — success shape", () => {
+describe("getVisibilityAction — enforcement", defineGetVisibilityActionEnforcementSuite1);
+
+const defineGetVisibilityActionSuccessShapeSuite2 = () => {
   beforeEach(() => {
     loadByIdOrSlugMock.mockReset().mockResolvedValue(OBJ);
     canViewMock.mockReset().mockResolvedValue(true);
@@ -208,13 +210,15 @@ describe("getVisibilityAction — success shape", () => {
     // Grants returned even though level is not "group".
     expect(result.data.grants).toHaveLength(1);
   });
-});
+};
+
+describe("getVisibilityAction — success shape", defineGetVisibilityActionSuccessShapeSuite2);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // listGrantOptionsAction
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("listGrantOptionsAction — auth gates", () => {
+const defineListGrantOptionsActionAuthGatesSuite3 = () => {
   beforeEach(() => {
     getServerSessionMock.mockReset().mockResolvedValue({ sub: "cognito-sub-1" });
     hasCapabilityAccessMock.mockReset().mockResolvedValue(true);
@@ -268,4 +272,6 @@ describe("listGrantOptionsAction — auth gates", () => {
       { email: "hs-staff@psd401.net", name: "HS Staff" },
     ]);
   });
-});
+};
+
+describe("listGrantOptionsAction — auth gates", defineListGrantOptionsActionAuthGatesSuite3);

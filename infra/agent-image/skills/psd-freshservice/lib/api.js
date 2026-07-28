@@ -1,27 +1,32 @@
 /**
  * Shared helpers for the psd-freshservice OpenClaw skill.
  *
- * All commands authenticate with the caller's per-user Freshservice API
- * key, fetched on demand via the psd-credentials skill at:
- *   psd-agent-creds/{env}/user/{email}/freshservice_api_key
+ * READ/WRITE contract:
+ *   - Every Freshservice call goes through a fixed web-tier operation that
+ *     allowlists (method, path) and attaches the owner's API key server-side.
+ *   - No provider credential enters this model-launched process.
  *
- * If the credential is missing, the skill prints a structured prompt
- * asking the user to register their key. Agent then collects the value
- * from the user's next turn and stores it via psd-credentials/put.js.
+ * WHY THIS WAS REWRITTEN. The skill used to exec psd-credentials/get.js to read
+ * the key in plaintext. #1353 removed plaintext credential access and deleted
+ * that script, but this skill was never migrated — so every command has been
+ * dead since, failing before it even checked whether a key was provisioned.
+ * Worse, the failure surfaced as "your Freshservice credential is missing",
+ * which blamed the user for a broken skill.
  *
- * Domain is hardcoded to psd401.freshservice.com — the same value the
- * reference psd-claude-plugins skill uses.
+ * The owner is derived from the proxy-signed invocation context server-side;
+ * there is no --user to spoof. Mirrors the other server-side broker
+ * operations migrated when #1353 landed.
+ *
+ * Domain is fixed at psd401.freshservice.com in the BROKER, not here.
  */
 
 'use strict';
 
-const { execFileSync } = require('node:child_process');
-const path = require('node:path');
+const { requestAgentBroker } = require('../../_shared/agent-broker');
 
-const DOMAIN = 'psd401.freshservice.com';
-const BASE_URL = `https://${DOMAIN}/api/v2`;
-
-const CREDENTIALS_GET = path.resolve(__dirname, '..', '..', 'psd-credentials', 'get.js');
+// Opaque stand-in threaded through the command scripts in place of the real
+// key, which now lives only in the web tier. Never a secret.
+const BROKER_MANAGED_KEY = Object.freeze({ brokerManaged: true });
 
 // Basic email validation — intentionally simple for a CLI tool that only
 // accepts PSD domain emails. Rejects path separators (/) as defense-in-depth
@@ -76,44 +81,21 @@ function requireUser(args) {
 }
 
 /**
- * Fetch the per-user Freshservice API key from psd-credentials. Returns
- * the key string, or emits a structured registration-prompt and exits
- * non-zero if the credential is not provisioned.
+ * Credential handle for the call sites.
  *
- * Uses execFileSync (blocks the event loop) because each psd-freshservice
- * script is a short-lived CLI process that does one thing then exits — no
- * concurrent I/O to worry about. Do NOT call this from a server context;
- * use the async execFile variant if this is ever imported into a long-lived
- * process.
+ * The key no longer exists in this process — the broker holds it. Every
+ * command still calls `getApiKey(userEmail)` and passes the result to
+ * `fsFetch`, so this returns an opaque marker rather than a secret, keeping
+ * all 13 command scripts unchanged. `fsFetch` ignores it.
+ *
+ * Deliberately NOT deleted from the call sites: threading a broker client
+ * through every script would be a wide, riskier diff for no behavioural gain,
+ * and leaving the parameter in place keeps the shape ready if a future
+ * operation ever needs a per-call handle.
  */
 function getApiKey(userEmail) {
-  let stdout = '';
-  try {
-    stdout = execFileSync('node', [
-      CREDENTIALS_GET,
-      '--name', 'freshservice_api_key',
-    ], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'inherit'],
-    });
-  } catch (err) {
-    promptForKey(userEmail, err.message);
-  }
-
-  const lines = stdout.split('\n').filter((l) => l.trim().length > 0);
-  if (lines.length === 0) promptForKey(userEmail, 'no output from psd-credentials');
-
-  const last = lines[lines.length - 1];
-  let parsed;
-  try {
-    parsed = JSON.parse(last);
-  } catch (err) {
-    promptForKey(userEmail, `psd-credentials returned non-JSON: ${err.message}`);
-  }
-  if (parsed.error || !parsed.value) {
-    promptForKey(userEmail);
-  }
-  return parsed.value;
+  void userEmail;
+  return BROKER_MANAGED_KEY;
 }
 
 /**
@@ -154,39 +136,100 @@ function promptForKey(userEmail, reason) {
   process.exit(2);
 }
 
-function authHeader(apiKey) {
-  return 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
+/**
+ * Perform one Freshservice call through the owner-bound broker.
+ *
+ * Signature is unchanged so all 13 command scripts keep working; `apiKey` is
+ * now the opaque marker from getApiKey() and is ignored — the real key never
+ * reaches this process. The broker allowlists (method, path) server-side, so
+ * an endpoint this skill does not already use is rejected there rather than
+ * silently signed with the owner's credential.
+ *
+ * Returns the same `{__ok, status, data|error}` envelope as before, including
+ * the distinct 429 shape the callers already branch on.
+ */
+function parseFetchBody(body) {
+  if (body === undefined || body === null) return undefined;
+  if (typeof body !== 'string') return body;
+  try {
+    return JSON.parse(body);
+  } catch (err) {
+    fail(`fsFetch: body is not valid JSON: ${err.message}`, 'bad_args');
+  }
+}
+
+function brokerRequestFailure(err) {
+  const status = (err && err.status) || 0;
+  if (status === 403) {
+    return {
+      __ok: false,
+      status: 403,
+      error: 'Freshservice access is not granted for this account.',
+      code: 'freshservice_forbidden',
+    };
+  }
+  return {
+    __ok: false,
+    status,
+    error: `Freshservice broker request failed: ${err && err.message}`,
+    code: 'freshservice_broker_error',
+  };
+}
+
+async function requestFreshserviceBroker(urlPath, method, parsedBody) {
+  try {
+    const result = await requestAgentBroker('/api/agent/credentials', {
+      operation: 'freshservice',
+      path: urlPath,
+      method,
+      ...(parsedBody === undefined ? {} : { body: parsedBody }),
+    });
+    return { result };
+  } catch (err) {
+    return { failure: brokerRequestFailure(err) };
+  }
+}
+
+function normalizeFreshserviceResult(result) {
+  // The owner has never registered a key. NOT an error — surface the
+  // registration prompt the agent knows how to act on.
+  if (result && result.code === 'credential_missing') {
+    promptForKey(null, 'credential not provisioned');
+  }
+  if (result && result.code === 'rate_limited') {
+    return {
+      __ok: false,
+      status: 429,
+      error: `Freshservice rate limit exceeded. Retry after ${result.retryAfter}s.`,
+      code: 'freshservice_rate_limited',
+    };
+  }
+  if (!result || result.ok !== true) {
+    const status = (result && result.status) || 0;
+    return {
+      __ok: false,
+      status,
+      error: `API error ${status}: ${JSON.stringify((result && result.data) ?? {}).slice(0, 500)}`,
+    };
+  }
+  return { __ok: true, status: result.status, data: result.data ?? {} };
 }
 
 async function fsFetch(apiKey, urlPath, init = {}) {
-  // Always prepend BASE_URL — never allow callers to bypass the DOMAIN guard
-  // by passing an absolute URL. All paths must be relative to the Freshservice
-  // API v2 base (e.g. '/tickets/123', not 'https://...').
-  // Guard: urlPath must start with '/' to prevent accidental concatenation
-  // producing an invalid URL (e.g. BASE_URL + 'tickets' → '...v2tickets').
+  void apiKey;
+  // Kept from the original: a path must be relative and start with '/'. The
+  // broker re-validates, but failing here gives the caller the precise
+  // bad_args exit instead of a generic broker rejection.
   if (typeof urlPath !== 'string' || !urlPath.startsWith('/')) {
     fail(`fsFetch: urlPath must start with '/' (got: ${String(urlPath).slice(0, 50)})`, 'bad_args');
   }
-  const url = `${BASE_URL}${urlPath}`;
-  const headers = {
-    'Authorization': authHeader(apiKey),
-    'Content-Type': 'application/json',
-    ...(init.headers || {}),
-  };
-  const resp = await fetch(url, { ...init, headers });
-  if (!resp.ok) {
-    // Surface a specific error code for Freshservice rate limiting (429)
-    // so the agent can distinguish throttling from other API errors and
-    // advise the user to wait rather than retry immediately.
-    if (resp.status === 429) {
-      const retryAfter = resp.headers.get('retry-after') || 'unknown';
-      return { __ok: false, status: 429, error: `Freshservice rate limit exceeded. Retry after ${retryAfter}s.`, code: 'freshservice_rate_limited' };
-    }
-    const body = await resp.text().catch(() => '');
-    return { __ok: false, status: resp.status, error: `API error ${resp.status}: ${body.slice(0, 500)}` };
-  }
-  const json = await resp.json().catch(() => ({}));
-  return { __ok: true, status: resp.status, data: json };
+
+  const method = (init.method || 'GET').toUpperCase();
+  const parsedBody = parseFetchBody(init.body);
+  const outcome = await requestFreshserviceBroker(urlPath, method, parsedBody);
+  return 'failure' in outcome
+    ? outcome.failure
+    : normalizeFreshserviceResult(outcome.result);
 }
 
 /**
@@ -213,8 +256,9 @@ function parseJsonArg(arg, fieldName = 'JSON argument') {
 }
 
 module.exports = {
-  DOMAIN,
-  BASE_URL,
+  // DOMAIN/BASE_URL are intentionally NOT exported any more: the Freshservice
+  // host is fixed in the broker, and re-exporting it here invited a caller to
+  // build its own URL and bypass the allowlist. Nothing outside lib/ used them.
   fail,
   emit,
   parseArgs,

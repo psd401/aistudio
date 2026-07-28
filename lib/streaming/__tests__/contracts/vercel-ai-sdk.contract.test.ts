@@ -51,9 +51,12 @@ function parseSSEDataLine(line: string): string | null {
  * - Set OPENAI_API_KEY in your environment
  * - Run: npm run test:streaming-contract
  */
-describe.skip('Vercel AI SDK v5 Contract Tests', () => {
-  const adapter = new SSEEventAdapter();
-  const version = SDKVersionDetector.detect();
+const adapter = new SSEEventAdapter();
+const version = SDKVersionDetector.detect();
+
+function defineVercelAISDKV5ContractTestsSuite1Part1() {
+
+
 
   // Skip all tests if no API key is available
   beforeAll(() => {
@@ -184,7 +187,9 @@ describe.skip('Vercel AI SDK v5 Contract Tests', () => {
     });
   });
 
-  describe('streamText SSE Event Format', () => {
+  }
+
+function defineVercelAISDKV5ContractTestsSuite1Part2() {describe('streamText SSE Event Format', () => {
     it('should emit text-delta events with "delta" field (not "textDelta")', async () => {
       // Skip if no API key
       if (!process.env.OPENAI_API_KEY) {
@@ -233,7 +238,8 @@ describe.skip('Vercel AI SDK v5 Contract Tests', () => {
             try {
               const event = parseSSEEvent(data);
 
-              if (isTextDeltaEvent(event)) {
+              const handleNestedBranch1 = () => {
+                if (isTextDeltaEvent(event)) {
                 foundTextDelta = true;
                 // Verify it uses 'delta' not 'textDelta'
                 hasCorrectField = 'delta' in event && !('textDelta' in event);
@@ -245,6 +251,8 @@ describe.skip('Vercel AI SDK v5 Contract Tests', () => {
                 // @ts-expect-error - ensuring textDelta doesn't exist
                 expect(event.textDelta).toBeUndefined();
               }
+              };
+              handleNestedBranch1();
             } catch {
               // Ignore non-JSON lines or parse errors for this test
               // We're only checking text-delta events
@@ -302,7 +310,8 @@ describe.skip('Vercel AI SDK v5 Contract Tests', () => {
             try {
               const event = parseSSEEvent(data);
 
-              if (isFinishEvent(event)) {
+              const handleNestedBranch2 = () => {
+                if (isFinishEvent(event)) {
                 foundFinish = true;
 
                 // Verify finish event structure
@@ -316,6 +325,8 @@ describe.skip('Vercel AI SDK v5 Contract Tests', () => {
                   expect(typeof event.usage).toBe('object');
                 }
               }
+              };
+              handleNestedBranch2();
             } catch {
               // Ignore parse errors for non-standard events
             }
@@ -334,7 +345,9 @@ describe.skip('Vercel AI SDK v5 Contract Tests', () => {
     }, 30000);
   });
 
-  describe('toDataStreamResponse Format', () => {
+  }
+
+function defineVercelAISDKV5ContractTestsSuite1Part3() {describe('toDataStreamResponse Format', () => {
     it('should include correct headers', async () => {
       if (!process.env.OPENAI_API_KEY) {
         // eslint-disable-next-line no-console
@@ -391,7 +404,15 @@ describe.skip('Vercel AI SDK v5 Contract Tests', () => {
       }).rejects.toThrow();
     }, 30000);
   });
-});
+}
+
+const defineVercelAISDKV5ContractTestsSuite1 = () => {
+  defineVercelAISDKV5ContractTestsSuite1Part1()
+  defineVercelAISDKV5ContractTestsSuite1Part2()
+  defineVercelAISDKV5ContractTestsSuite1Part3()
+};
+
+describe.skip('Vercel AI SDK v5 Contract Tests', defineVercelAISDKV5ContractTestsSuite1);
 
 /**
  * Documentation for running contract tests

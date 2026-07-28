@@ -99,6 +99,42 @@ export class RevisionChangedError extends Error {
   }
 }
 
+function resolvePageRevision(
+  collection: CollectionName,
+  headerValue: string | null,
+  expected: string | null
+): string {
+  const revision = cleanHeader(headerValue);
+  if (!revision) {
+    throw new Error(`${collection} response is missing x-perm-rev`);
+  }
+  if (expected && revision !== expected) throw new RevisionChangedError();
+  return expected ?? revision;
+}
+
+function resolvePageTotal(
+  collection: CollectionName,
+  headerValue: string | null,
+  expected: number | null
+): number | null {
+  const pageTotal = parseCountHeader(headerValue, "x-total-count");
+  if (expected !== null && pageTotal !== null && pageTotal !== expected) {
+    throw new Error(`${collection} changed x-total-count during paging`);
+  }
+  return expected ?? pageTotal;
+}
+
+function pageIsComplete(
+  pageLength: number,
+  totalCount: number | null,
+  recordCount: number,
+  pageSize: number
+): boolean {
+  return totalCount !== null
+    ? recordCount >= totalCount
+    : pageLength < pageSize;
+}
+
 export class OneRosterClient {
   private readonly baseUrl: string;
   private readonly apiVersion: OneRosterApiVersion;
@@ -183,32 +219,22 @@ export class OneRosterClient {
     while (true) {
       const url = this.collectionUrl(name, offset);
       const response = await this.request(url);
-      const pagePermRev = cleanHeader(response.headers.get("x-perm-rev"));
-      if (!pagePermRev) {
-        throw new Error(`${name} response is missing x-perm-rev`);
-      }
-      if (permRev && pagePermRev !== permRev) {
-        throw new RevisionChangedError();
-      }
-      permRev ??= pagePermRev;
+      permRev = resolvePageRevision(
+        name,
+        response.headers.get("x-perm-rev"),
+        permRev
+      );
 
       const page = extractRecords(await response.json(), name);
       const xCount = parseCountHeader(response.headers.get("x-count"), "x-count");
       if (xCount !== null && xCount !== page.length) {
         throw new Error(`${name} returned an inconsistent x-count header`);
       }
-      const pageTotal = parseCountHeader(
+      totalCount = resolvePageTotal(
+        name,
         response.headers.get("x-total-count"),
-        "x-total-count"
+        totalCount
       );
-      if (
-        totalCount !== null &&
-        pageTotal !== null &&
-        pageTotal !== totalCount
-      ) {
-        throw new Error(`${name} changed x-total-count during paging`);
-      }
-      totalCount ??= pageTotal;
 
       if (page.length === 0) {
         if (totalCount !== null && records.length < totalCount) {
@@ -221,8 +247,9 @@ export class OneRosterClient {
       if (totalCount !== null && records.length > totalCount) {
         throw new Error(`${name} returned more records than x-total-count`);
       }
-      if (totalCount !== null && records.length >= totalCount) break;
-      if (totalCount === null && page.length < this.pageSize) break;
+      if (pageIsComplete(page.length, totalCount, records.length, this.pageSize)) {
+        break;
+      }
       offset += this.pageSize;
     }
 

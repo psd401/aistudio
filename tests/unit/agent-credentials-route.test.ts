@@ -18,7 +18,7 @@ const putMock = jest.fn()
 const requestMock = jest.fn()
 const canAccessSkillMock = jest.fn()
 const brokerConstructorMock = jest.fn()
-const executeRedRoverOperationMock = jest.fn()
+const executeOpenAiImageOperationMock = jest.fn()
 
 jest.mock("@/lib/agent-workspace/invocation-context", () => ({
   verifyAgentInvocationContext: jest.fn(
@@ -64,11 +64,11 @@ jest.mock("@/lib/logger", () => ({
   generateRequestId: () => "request-test",
 }))
 jest.mock("@/lib/agent-credentials/owner-operation-broker", () => ({
-  executeOpenAiImageOperation: jest.fn(),
+  executeOpenAiImageOperation: (...args: unknown[]) =>
+    executeOpenAiImageOperationMock(...args),
   executePlaudOperation: jest.fn(),
   executePsdDataOperation: jest.fn(),
-  executeRedRoverOperation: (...args: unknown[]) =>
-    executeRedRoverOperationMock(...args),
+  executeFreshserviceOperation: jest.fn(),
 }))
 
 import type { NextRequest } from "next/server"
@@ -101,9 +101,8 @@ beforeEach(() => {
   })
   requestMock.mockReset().mockResolvedValue(42)
   canAccessSkillMock.mockReset().mockResolvedValue(true)
-  executeRedRoverOperationMock.mockReset().mockResolvedValue({
-    data: [],
-    total: 0,
+  executeOpenAiImageOperationMock.mockReset().mockResolvedValue({
+    imageBase64: "aGVsbG8=",
   })
 })
 
@@ -199,51 +198,54 @@ describe("POST /api/agent/credentials", () => {
     )
   })
 
-  it("denies Red Rover before the shared credential operation", async () => {
+  it("denies a capability-gated operation before running it", async () => {
     canAccessSkillMock.mockResolvedValueOnce(false)
     const response = await POST(
       request({
-        operation: "redrover",
-        action: "vacancies",
-        startDate: "2026-07-01",
-        endDate: "2026-07-02",
+        operation: "openai-image",
+        prompt: "a barn",
+        size: "auto",
+        quality: "auto",
+        background: "auto",
       })
     )
     expect(response.status).toBe(403)
     expect(await response.json()).toEqual({ error: "Forbidden" })
     expect(canAccessSkillMock).toHaveBeenCalledWith(
       "owner@psd401.net",
-      "skill.redrover",
+      "skill.image-gen",
       undefined
     )
-    expect(executeRedRoverOperationMock).not.toHaveBeenCalled()
+    expect(executeOpenAiImageOperationMock).not.toHaveBeenCalled()
     expect(getMock).not.toHaveBeenCalled()
   })
 
-  it("allows a granted signed owner to run Red Rover", async () => {
+  it("allows a granted signed owner to run a capability-gated operation", async () => {
     const response = await POST(
       request({
-        operation: "redrover",
-        action: "vacancies",
-        startDate: "2026-07-01",
-        endDate: "2026-07-02",
-        filledFilter: "unfilled",
+        operation: "openai-image",
+        prompt: "a barn",
+        size: "1024x1024",
+        quality: "high",
+        background: "opaque",
+        referenceDataUrl: null,
       })
     )
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ data: [], total: 0 })
+    expect(await response.json()).toEqual({ imageBase64: "aGVsbG8=" })
     expect(canAccessSkillMock).toHaveBeenCalledWith(
       "owner@psd401.net",
-      "skill.redrover",
+      "skill.image-gen",
       undefined
     )
-    expect(executeRedRoverOperationMock).toHaveBeenCalledWith({
+    expect(executeOpenAiImageOperationMock).toHaveBeenCalledWith({
       ownerEmail: "owner@psd401.net",
       sessionId: "session-1",
-      operation: "vacancies",
-      startDate: "2026-07-01",
-      endDate: "2026-07-02",
-      filledFilter: "unfilled",
+      prompt: "a barn",
+      size: "1024x1024",
+      quality: "high",
+      background: "opaque",
+      referenceDataUrl: null,
     })
   })
 })

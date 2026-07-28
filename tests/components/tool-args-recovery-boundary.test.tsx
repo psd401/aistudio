@@ -19,8 +19,12 @@ import { ToolArgsRecoveryBoundary } from '@/components/assistant-ui/tool-args-re
 
 class ThrowOnRender extends React.Component<{ error: Error }> {
   render(): React.ReactNode {
-    throw this.props.error
+    return throwError(this.props.error)
   }
+}
+
+function throwError(error: Error): never {
+  throw error
 }
 
 class CatchAll extends React.Component<

@@ -100,7 +100,7 @@ beforeEach(() => {
   mockValidateIdempotencyKey.mockReturnValue(true);
 });
 
-describe("Atrium authored asset routes (#1284)", () => {
+function defineAtriumAuthoredAssetRoutes1284Suite1Part1() {
   it("lists metadata only after read scope and object visibility resolution", async () => {
     mockList.mockResolvedValue([{ id: assetId }]);
     await listHandler(request, auth, "req-list", { id: objectId });
@@ -201,7 +201,9 @@ describe("Atrium authored asset routes (#1284)", () => {
     );
   });
 
-  it("rejects an invalid asset initiation idempotency key", async () => {
+  }
+
+function defineAtriumAuthoredAssetRoutes1284Suite1Part2() {it("rejects an invalid asset initiation idempotency key", async () => {
     const invalidRequest = {
       headers: {
         get: (name: string) =>
@@ -273,4 +275,11 @@ describe("Atrium authored asset routes (#1284)", () => {
     expect(response).toBe(forbidden);
     expect(mockList).not.toHaveBeenCalled();
   });
-});
+}
+
+const defineAtriumAuthoredAssetRoutes1284Suite1 = () => {
+  defineAtriumAuthoredAssetRoutes1284Suite1Part1()
+  defineAtriumAuthoredAssetRoutes1284Suite1Part2()
+};
+
+describe("Atrium authored asset routes (#1284)", defineAtriumAuthoredAssetRoutes1284Suite1);

@@ -6,7 +6,7 @@ import * as iam from "aws-cdk-lib/aws-iam"
 import * as logs from "aws-cdk-lib/aws-logs"
 import { Construct } from "constructs"
 import { IEnvironmentConfig } from "../config/environment-config"
-import * as path from "path"
+import * as path from "node:path"
 
 /**
  * Supported secret types with their default configurations
@@ -288,10 +288,10 @@ export class ManagedSecret extends Construct {
       ...props.tags,
     }
 
-    Object.entries(tags).forEach(([key, value]) => {
+    for (const [key, value] of Object.entries(tags)) {
       cdk.Tags.of(this.secret).add(key, value)
       cdk.Tags.of(this.encryptionKey).add(key, value)
-    })
+    }
   }
 
   /**

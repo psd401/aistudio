@@ -1,321 +1,351 @@
-import { getServerSession } from '@/lib/auth/server-session';
-import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
-import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
-import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
-import { getModelConfig } from '@/lib/ai/model-config';
-import { filterAccessibleResourceIds } from '@/lib/db/drizzle/resource-access';
-import type { StreamRequest } from '@/lib/streaming/types';
-import { UIMessage } from 'ai';
+import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
+import { getModelConfig } from "@/lib/ai/model-config"
+import { getServerSession } from "@/lib/auth/server-session"
+import { filterAccessibleResourceIds } from "@/lib/db/drizzle/resource-access"
+import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
+import { unifiedStreamingService } from "@/lib/streaming/unified-streaming-service"
+import type { StreamRequest } from "@/lib/streaming/types"
+import type { UIMessage } from "ai"
 
-// Allow streaming responses up to 30 seconds for each model
-export const maxDuration = 30;
+export const maxDuration = 30
 
-/**
- * Compare Models API endpoint using unified streaming service
- * Handles dual-model comparisons with parallel streaming
- */
-export async function POST(req: Request) {
-  const requestId = generateRequestId();
-  const timer = startTimer('api.compare-models');
-  const log = createLogger({ requestId, route: 'api.compare-models' });
-  
-  log.info('POST /api/compare-models - Processing comparison request');
-  
+const MAX_PROMPT_LENGTH = 10_000
+const SYSTEM_PROMPT =
+  "You are a helpful AI assistant. Please provide a clear and concise response."
+
+interface ComparisonInput {
+  model1Id: string | number
+  model1Name?: string
+  model2Id: string | number
+  model2Name?: string
+  prompt: string
+}
+
+type ParseResult =
+  | { ok: true; input: ComparisonInput }
+  | { ok: false; response: Response }
+
+type ConfiguredModel = NonNullable<Awaited<ReturnType<typeof getModelConfig>>>
+type RouteLogger = ReturnType<typeof createLogger>
+type RouteTimer = ReturnType<typeof startTimer>
+type ModelKey = "model1" | "model2"
+
+interface CompletionState {
+  closed: boolean
+  model1: boolean
+  model2: boolean
+}
+
+interface StreamRequestOptions {
+  completion: CompletionState
+  controller: ReadableStreamDefaultController<Uint8Array>
+  log: RouteLogger
+  messages: UIMessage[]
+  model: ConfiguredModel
+  modelKey: ModelKey
+  sendData: (data: Record<string, unknown>) => void
+  sessionId: string
+  userId: string
+}
+
+interface RunModelStreamOptions {
+  completion: CompletionState
+  controller: ReadableStreamDefaultController<Uint8Array>
+  log: RouteLogger
+  modelKey: ModelKey
+  request: StreamRequest
+  sendData: (data: Record<string, unknown>) => void
+}
+
+function jsonError(error: string, status: number): Response {
+  return new Response(JSON.stringify({ error }), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  })
+}
+
+function isValidModelId(id: unknown): id is string | number {
+  return (
+    (typeof id === "string" && id.trim().length > 0) ||
+    (typeof id === "number" && !Number.isNaN(id) && id > 0)
+  )
+}
+
+async function parseComparisonInput(req: Request): Promise<ParseResult> {
+  const body = (await req.json()) as Record<string, unknown>
+  const { prompt, model1Id, model2Id, model1Name, model2Name } = body
+
+  if (typeof prompt !== "string" || prompt.trim().length === 0) {
+    return { ok: false, response: jsonError("Invalid prompt", 400) }
+  }
+  if (prompt.length > MAX_PROMPT_LENGTH) {
+    return { ok: false, response: jsonError("Prompt too long", 400) }
+  }
+  if (!isValidModelId(model1Id) || !isValidModelId(model2Id)) {
+    return { ok: false, response: jsonError("Invalid model ID", 400) }
+  }
+  if (model1Name !== undefined && typeof model1Name !== "string") {
+    return { ok: false, response: jsonError("Invalid model name", 400) }
+  }
+  if (model2Name !== undefined && typeof model2Name !== "string") {
+    return { ok: false, response: jsonError("Invalid model name", 400) }
+  }
+
+  return {
+    ok: true,
+    input: { prompt, model1Id, model2Id, model1Name, model2Name },
+  }
+}
+
+function markComplete(
+  modelKey: ModelKey,
+  completion: CompletionState,
+  sendData: (data: Record<string, unknown>) => void,
+  controller: ReadableStreamDefaultController<Uint8Array>
+): void {
+  completion[modelKey] = true
+  if (!completion.model1 || !completion.model2 || completion.closed) return
+
+  completion.closed = true
+  sendData({ done: true })
+  controller.close()
+}
+
+function createStreamRequest(options: StreamRequestOptions): StreamRequest {
+  const {
+    completion,
+    controller,
+    log,
+    messages,
+    model,
+    modelKey,
+    sendData,
+    sessionId,
+    userId,
+  } = options
+  const modelNumber = modelKey === "model1" ? "1" : "2"
+
+  return {
+    messages,
+    modelId: model.model_id,
+    provider: model.provider,
+    userId,
+    sessionId,
+    source: "compare",
+    systemPrompt: SYSTEM_PROMPT,
+    callbacks: {
+      onProgress: (event) => {
+        if (event.type === "token" && event.text) {
+          sendData({ [modelKey]: event.text })
+        }
+      },
+      onFinish: async ({ usage }) => {
+        log.info(`Model ${modelNumber} completed`, {
+          modelId: model.model_id,
+          tokensUsed: usage?.totalTokens,
+        })
+        sendData({ [`${modelKey}Finished`]: true })
+        markComplete(modelKey, completion, sendData, controller)
+      },
+      onError: (error) => {
+        log.error(`Model ${modelNumber} error`, { error: error.message })
+        sendData({ [`${modelKey}Error`]: error.message })
+        markComplete(modelKey, completion, sendData, controller)
+      },
+    },
+  }
+}
+
+async function runModelStream(
+  options: RunModelStreamOptions
+): Promise<void> {
   try {
-    // 1. Parse and validate request
-    const body = await req.json();
-    const { prompt, model1Id, model2Id, model1Name, model2Name } = body;
-    
-    // Validate prompt
-    if (typeof prompt !== 'string' || prompt.trim().length === 0) {
-      log.warn('Invalid prompt', { promptType: typeof prompt, promptLength: typeof prompt === 'string' ? prompt.length : 0 });
-      return new Response(JSON.stringify({ error: 'Invalid prompt' }), { 
-        status: 400,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
+    await unifiedStreamingService.stream(options.request)
+  } catch (error) {
+    options.log.error(`Failed to stream ${options.modelKey}`, { error })
+    options.sendData({
+      [`${options.modelKey}Error`]: "Failed to stream response",
+    })
+    markComplete(
+      options.modelKey,
+      options.completion,
+      options.sendData,
+      options.controller
+    )
+  }
+}
 
-    // Add prompt length limit
-    const MAX_PROMPT_LENGTH = 10000;
-    if (prompt.length > MAX_PROMPT_LENGTH) {
-      log.warn('Prompt too long', { promptLength: prompt.length, maxLength: MAX_PROMPT_LENGTH });
-      return new Response(JSON.stringify({ error: 'Prompt too long' }), { 
-        status: 400,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
+interface ComparisonStreamOptions {
+  log: RouteLogger
+  messages: UIMessage[]
+  model1: ConfiguredModel
+  model2: ConfiguredModel
+  sessionId: string
+  timer: RouteTimer
+  userId: string
+}
 
-    // Validate model IDs are valid strings/numbers
-    const isValidModelId = (id: unknown): id is string | number => {
-      return (typeof id === 'string' && id.trim().length > 0) || 
-             (typeof id === 'number' && !Number.isNaN(id) && id > 0);
-    };
+function createComparisonStream(options: ComparisonStreamOptions) {
+  const encoder = new TextEncoder()
 
-    if (!isValidModelId(model1Id) || !isValidModelId(model2Id)) {
-      log.warn('Invalid model IDs', { 
-        model1Id: typeof model1Id === 'string' ? model1Id.substring(0, 50) : model1Id,
-        model2Id: typeof model2Id === 'string' ? model2Id.substring(0, 50) : model2Id
-      });
-      return new Response(JSON.stringify({ error: 'Invalid model ID' }), { 
-        status: 400,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const completion: CompletionState = {
+        closed: false,
+        model1: false,
+        model2: false,
+      }
+      const sendData = (data: Record<string, unknown>) => {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify(data)}\n\n`)
+        )
+      }
 
-    // Validate optional model names if provided
-    if (model1Name && typeof model1Name !== 'string') {
-      log.warn('Invalid model1Name type', { type: typeof model1Name });
-      return new Response(JSON.stringify({ error: 'Invalid model name' }), { 
-        status: 400,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
+      try {
+        const shared = {
+          completion,
+          controller,
+          log: options.log,
+          messages: options.messages,
+          sendData,
+          sessionId: options.sessionId,
+          userId: options.userId,
+        }
+        const request1 = createStreamRequest({
+          ...shared,
+          model: options.model1,
+          modelKey: "model1",
+        })
+        const request2 = createStreamRequest({
+          ...shared,
+          model: options.model2,
+          modelKey: "model2",
+        })
 
-    if (model2Name && typeof model2Name !== 'string') {
-      log.warn('Invalid model2Name type', { type: typeof model2Name });
-      return new Response(JSON.stringify({ error: 'Invalid model name' }), { 
-        status: 400,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-    
-    log.debug('Request parsed', {
-      model1Id,
-      model2Id,
-      model1Name,
-      model2Name,
-      promptLength: prompt.length
-    });
-    
-    // 2. Authenticate user
-    const session = await getServerSession();
+        options.log.info("Starting parallel streams")
+        await Promise.all([
+          runModelStream({
+            completion,
+            controller,
+            log: options.log,
+            modelKey: "model1",
+            request: request1,
+            sendData,
+          }),
+          runModelStream({
+            completion,
+            controller,
+            log: options.log,
+            modelKey: "model2",
+            request: request2,
+            sendData,
+          }),
+        ])
+        options.timer({ status: "success" })
+      } catch (error) {
+        options.log.error("Stream error", { error })
+        controller.error(error)
+        options.timer({ status: "error" })
+      }
+    },
+  })
+}
+
+export async function POST(req: Request) {
+  const requestId = generateRequestId()
+  const timer = startTimer("api.compare-models")
+  const log = createLogger({ requestId, route: "api.compare-models" })
+
+  log.info("POST /api/compare-models - Processing comparison request")
+
+  try {
+    const parsed = await parseComparisonInput(req)
+    if (!parsed.ok) return parsed.response
+
+    const session = await getServerSession()
     if (!session) {
-      log.warn('Unauthorized request - no session');
-      timer({ status: 'error', reason: 'unauthorized' });
-      return new Response('Unauthorized', { status: 401 });
+      timer({ status: "error", reason: "unauthorized" })
+      return new Response("Unauthorized", { status: 401 })
     }
-    
-    // 3. Get current user
-    const currentUser = await getCurrentUserAction();
-    if (!currentUser.isSuccess) {
-      log.error('Failed to get current user');
-      return new Response('Unauthorized', { status: 401 });
-    }
-    
-    // 4. Get model configurations
-    const [model1Config, model2Config] = await Promise.all([
-      getModelConfig(model1Id),
-      getModelConfig(model2Id)
-    ]);
-    
-    if (!model1Config || !model2Config) {
-      log.error('One or both models not found', { 
-        model1Found: !!model1Config, 
-        model2Found: !!model2Config 
-      });
-      return new Response(
-        JSON.stringify({ error: 'One or both models not found' }),
-        { status: 404, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-    
-    log.info('Models configured', {
-      model1: { provider: model1Config.provider, modelId: model1Config.model_id },
-      model2: { provider: model2Config.provider, modelId: model2Config.model_id }
-    });
 
-    // 4b. Per-resource access enforcement (#1206). Model ids are client-supplied,
-    // so reject any model the user has no role/group grant for (zero grants =
-    // unrestricted; admins always pass).
-    const accessibleModelIds = await filterAccessibleResourceIds(
+    const currentUser = await getCurrentUserAction()
+    if (!currentUser.isSuccess) {
+      return new Response("Unauthorized", { status: 401 })
+    }
+
+    const [model1, model2] = await Promise.all([
+      getModelConfig(parsed.input.model1Id),
+      getModelConfig(parsed.input.model2Id),
+    ])
+    if (!model1 || !model2) {
+      return jsonError("One or both models not found", 404)
+    }
+
+    const accessibleIds = await filterAccessibleResourceIds(
       currentUser.data.user.id,
-      'model',
-      [model1Config.id, model2Config.id]
-    );
-    // Checked independently (not accessibleModelIds.size !== 2) so comparing a
-    // model against itself doesn't false-deny on the Set dedup.
-    const model1Allowed = accessibleModelIds.has(String(model1Config.id));
-    const model2Allowed = accessibleModelIds.has(String(model2Config.id));
+      "model",
+      [model1.id, model2.id]
+    )
+    const model1Allowed = accessibleIds.has(String(model1.id))
+    const model2Allowed = accessibleIds.has(String(model2.id))
     if (!model1Allowed || !model2Allowed) {
-      log.warn('Forbidden model in comparison', {
+      log.warn("Forbidden model in comparison", {
         userId: currentUser.data.user.id,
         model1Allowed,
         model2Allowed,
-      });
-      return new Response(
-        JSON.stringify({ error: 'You do not have access to one or both selected models' }),
-        { status: 403, headers: { 'Content-Type': 'application/json' } }
-      );
+      })
+      return jsonError(
+        "You do not have access to one or both selected models",
+        403
+      )
     }
 
-    // 5. Create messages for both models
     const messages: UIMessage[] = [
       {
         id: generateRequestId(),
-        role: 'user',
-        parts: [{ type: 'text', text: prompt }]
-      }
-    ];
-    
-    // 6. Create SSE response stream
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      async start(controller) {
-        try {
-          // Helper to send SSE data
-          const sendData = (data: Record<string, unknown>) => {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-          };
-          
-          // Track completion status
-          let model1Complete = false;
-          let model2Complete = false;
-          
-          // Create stream requests for both models
-          const streamRequest1: StreamRequest = {
-            messages,
-            modelId: model1Config.model_id,
-            provider: model1Config.provider,
-            userId: currentUser.data.user.id.toString(),
-            sessionId: session.sub,
-            source: 'compare',
-            systemPrompt: `You are a helpful AI assistant. Please provide a clear and concise response.`,
-            callbacks: {
-              onProgress: (event) => {
-                // Stream model1 chunks
-                if (event.type === 'token' && event.text) {
-                  sendData({ model1: event.text });
-                }
-              },
-              onFinish: async ({ usage }) => {
-                log.info('Model 1 completed', {
-                  modelId: model1Config.model_id,
-                  tokensUsed: usage?.totalTokens
-                });
-                sendData({ model1Finished: true });
-                model1Complete = true;
-                
-                // Check if both models are complete
-                if (model1Complete && model2Complete) {
-                  sendData({ done: true });
-                  controller.close();
-                }
-              },
-              onError: (error) => {
-                log.error('Model 1 error', { error: error.message });
-                sendData({ model1Error: error.message });
-                model1Complete = true;
-                
-                if (model1Complete && model2Complete) {
-                  sendData({ done: true });
-                  controller.close();
-                }
-              }
-            }
-          };
-          
-          const streamRequest2: StreamRequest = {
-            messages,
-            modelId: model2Config.model_id,
-            provider: model2Config.provider,
-            userId: currentUser.data.user.id.toString(),
-            sessionId: session.sub,
-            source: 'compare',
-            systemPrompt: `You are a helpful AI assistant. Please provide a clear and concise response.`,
-            callbacks: {
-              onProgress: (event) => {
-                // Stream model2 chunks
-                if (event.type === 'token' && event.text) {
-                  sendData({ model2: event.text });
-                }
-              },
-              onFinish: async ({ usage }) => {
-                log.info('Model 2 completed', {
-                  modelId: model2Config.model_id,
-                  tokensUsed: usage?.totalTokens
-                });
-                sendData({ model2Finished: true });
-                model2Complete = true;
-                
-                // Check if both models are complete
-                if (model1Complete && model2Complete) {
-                  sendData({ done: true });
-                  controller.close();
-                }
-              },
-              onError: (error) => {
-                log.error('Model 2 error', { error: error.message });
-                sendData({ model2Error: error.message });
-                model2Complete = true;
-                
-                if (model1Complete && model2Complete) {
-                  sendData({ done: true });
-                  controller.close();
-                }
-              }
-            }
-          };
-          
-          // 7. Execute both streams in parallel using unified service
-          log.info('Starting parallel streams');
-          
-          await Promise.all([
-            unifiedStreamingService.stream(streamRequest1).catch(error => {
-              log.error('Failed to stream model 1', { error });
-              sendData({ model1Error: 'Failed to stream response' });
-              model1Complete = true;
-            }),
-            unifiedStreamingService.stream(streamRequest2).catch(error => {
-              log.error('Failed to stream model 2', { error });
-              sendData({ model2Error: 'Failed to stream response' });
-              model2Complete = true;
-            })
-          ]);
-          
-          timer({ status: 'success' });
-          
-        } catch (error) {
-          log.error('Stream error', { error });
-          controller.error(error);
-          timer({ status: 'error' });
-        }
-      }
-    });
-    
-    // Return SSE response
+        role: "user",
+        parts: [{ type: "text", text: parsed.input.prompt }],
+      },
+    ]
+    const stream = createComparisonStream({
+      log,
+      messages,
+      model1,
+      model2,
+      sessionId: session.sub,
+      timer,
+      userId: currentUser.data.user.id.toString(),
+    })
+
     return new Response(stream, {
       headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'X-Request-Id': requestId,
-        'X-Unified-Streaming': 'true'
-      }
-    });
-    
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-Request-Id": requestId,
+        "X-Unified-Streaming": "true",
+      },
+    })
   } catch (error) {
-    log.error('Compare API error', { 
-      error: error instanceof Error ? {
-        message: error.message,
-        name: error.name,
-        stack: error.stack
-      } : String(error)
-    });
-    
-    timer({ status: 'error' });
-    
+    log.error("Compare API error", {
+      error:
+        error instanceof Error
+          ? { message: error.message, name: error.name, stack: error.stack }
+          : String(error),
+    })
+    timer({ status: "error" })
     return new Response(
       JSON.stringify({
-        error: 'Failed to process comparison request',
-        requestId
+        error: "Failed to process comparison request",
+        requestId,
       }),
       {
         status: 500,
         headers: {
-          'Content-Type': 'application/json',
-          'X-Request-Id': requestId
-        }
+          "Content-Type": "application/json",
+          "X-Request-Id": requestId,
+        },
       }
-    );
+    )
   }
 }

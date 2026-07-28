@@ -5,6 +5,36 @@ import { hasCapabilityAccess, hasRole } from "@/utils/roles"
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger'
 
+type ChainPrompt = NonNullable<Awaited<ReturnType<typeof getChainPromptById>>>
+
+async function canAccessPrompt(
+  prompt: ChainPrompt,
+  sessionSubject: string,
+): Promise<boolean> {
+  if (!(await hasCapabilityAccess("assistant-architect", sessionSubject))) {
+    return false
+  }
+  const architect = prompt.assistantArchitectId != null
+    ? await getAssistantArchitectById(prompt.assistantArchitectId)
+    : null
+  if (!architect) return false
+  if (architect.status === "approved") return true
+
+  const currentUser = await getCurrentUserAction()
+  const callerId = currentUser.isSuccess ? currentUser.data?.user?.id : undefined
+  const isOwner = architect.userId != null && architect.userId === callerId
+  return isOwner || await hasRole("administrator")
+}
+
+async function resolvePromptModelId(prompt: ChainPrompt): Promise<string | null> {
+  if (prompt.modelId) {
+    const model = await getAIModelById(prompt.modelId)
+    if (model) return model.modelId
+  }
+  const activeModels = await getActiveAIModels()
+  return activeModels[0]?.modelId || null
+}
+
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const requestId = generateRequestId();
   const timer = startTimer("api.assistant-architect.prompts.get");
@@ -50,43 +80,14 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       timer({ status: "error", reason: "forbidden" });
       return new NextResponse("Prompt not found", { status: 404, headers: { "X-Request-Id": requestId } })
     }
-    if (!(await hasCapabilityAccess("assistant-architect", session.sub))) {
-      log.warn("Prompt access denied - missing capability", { userId: session.sub });
+    if (!(await canAccessPrompt(prompt, session.sub))) {
+      log.warn("Prompt access denied", {
+        userId: session.sub,
+        promptId: promptIdInt,
+      });
       return notFound()
     }
-    const architect = prompt.assistantArchitectId != null
-      ? await getAssistantArchitectById(prompt.assistantArchitectId)
-      : null
-    if (!architect) {
-      log.warn("Prompt access denied - parent architect not found", { userId: session.sub, promptId: promptIdInt });
-      return notFound()
-    }
-    const isApproved = architect.status === "approved"
-    if (!isApproved) {
-      const currentUser = await getCurrentUserAction()
-      const callerId = currentUser.isSuccess ? currentUser.data?.user?.id : undefined
-      const isOwner = architect.userId != null && architect.userId === callerId
-      if (!isOwner && !(await hasRole("administrator"))) {
-        log.warn("Prompt access denied - no access to parent architect", { userId: session.sub, promptId: promptIdInt });
-        return notFound()
-      }
-    }
-
-    let actualModelId: string | null = null;
-
-    // If the prompt has a model ID integer reference, fetch the corresponding AI model's text model_id
-    if (prompt.modelId) {
-      const model = await getAIModelById(prompt.modelId)
-      if (model) {
-        actualModelId = model.modelId // Get the text model_id
-      }
-    }
-
-    // If no model found through the prompt, get the text model_id of the first available model
-    if (!actualModelId) {
-      const activeModels = await getActiveAIModels()
-      actualModelId = activeModels[0]?.modelId || null
-    }
+    const actualModelId = await resolvePromptModelId(prompt)
 
     // Return the prompt along with the actual text model_id
     log.info("Prompt fetched successfully", { promptId: promptIdInt });
@@ -113,4 +114,4 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       { status: 500, headers: { "X-Request-Id": requestId } }
     )
   }
-} 
+}

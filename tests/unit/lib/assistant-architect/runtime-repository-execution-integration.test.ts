@@ -36,7 +36,7 @@ describe("Assistant Architect runtime repository execution integration", () => {
     expect(routeSource).toContain("createAgenticRepositoryContext({");
     expect(routeSource).toContain("...repositoryContext.tools");
     expect(routeSource).toContain(
-      "systemPrompt: effectiveSystemPrompt"
+      "systemPrompt: args.run.effectiveSystemPrompt"
     );
   });
 

@@ -41,6 +41,92 @@ interface ApiKeyCreateDialogProps {
   userRoles: string[]
 }
 
+function ApiKeyFormFields({
+  name,
+  nameError,
+  availableScopes,
+  selectedScopes,
+  scopeError,
+  expiresIn,
+  onNameChange,
+  onToggleScope,
+  onExpirationChange,
+}: {
+  name: string
+  nameError: string | null
+  availableScopes: string[]
+  selectedScopes: string[]
+  scopeError: string | null
+  expiresIn: string
+  onNameChange: (value: string) => void
+  onToggleScope: (scope: string) => void
+  onExpirationChange: (value: string) => void
+}) {
+  return (
+    <div className="space-y-4 py-2 overflow-y-auto min-h-0">
+      <div className="space-y-2">
+        <Label htmlFor="key-name">Key Name</Label>
+        <Input
+          id="key-name"
+          placeholder="e.g., Production Integration"
+          value={name}
+          onChange={(event) => onNameChange(event.target.value)}
+          maxLength={100}
+        />
+        {nameError && <p className="text-sm text-destructive">{nameError}</p>}
+      </div>
+
+      <div className="space-y-2">
+        <Label>Scopes</Label>
+        {availableScopes.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No API scopes are available for your role.
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {availableScopes.map((scope) => (
+              <label
+                key={scope}
+                htmlFor={`scope-${scope}`}
+                className="flex items-start gap-3 rounded-md border p-3 cursor-pointer hover:bg-accent/50"
+              >
+                <Checkbox
+                  id={`scope-${scope}`}
+                  checked={selectedScopes.includes(scope)}
+                  onCheckedChange={() => onToggleScope(scope)}
+                  className="mt-0.5"
+                />
+                <div>
+                  <span className="text-sm font-medium">{scope}</span>
+                  <p className="text-xs text-muted-foreground">
+                    {API_SCOPES[scope as ApiScope]}
+                  </p>
+                </div>
+              </label>
+            ))}
+          </div>
+        )}
+        {scopeError && <p className="text-sm text-destructive">{scopeError}</p>}
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="expires-in">Expiration</Label>
+        <Select value={expiresIn} onValueChange={onExpirationChange}>
+          <SelectTrigger id="expires-in">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="30">30 days</SelectItem>
+            <SelectItem value="90">90 days (Recommended)</SelectItem>
+            <SelectItem value="365">1 year</SelectItem>
+            <SelectItem value="never">No expiration</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+  )
+}
+
 export function ApiKeyCreateDialog({
   open,
   onOpenChange,
@@ -132,77 +218,20 @@ export function ApiKeyCreateDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2 overflow-y-auto min-h-0">
-          {/* Name */}
-          <div className="space-y-2">
-            <Label htmlFor="key-name">Key Name</Label>
-            <Input
-              id="key-name"
-              placeholder="e.g., Production Integration"
-              value={name}
-              onChange={(e) => {
-                setName(e.target.value)
-                setNameError(null)
-              }}
-              maxLength={100}
-            />
-            {nameError && (
-              <p className="text-sm text-destructive">{nameError}</p>
-            )}
-          </div>
-
-          {/* Scopes */}
-          <div className="space-y-2">
-            <Label>Scopes</Label>
-            {availableScopes.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                No API scopes are available for your role.
-              </p>
-            ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {availableScopes.map((scope) => (
-                  <label
-                    key={scope}
-                    htmlFor={`scope-${scope}`}
-                    className="flex items-start gap-3 rounded-md border p-3 cursor-pointer hover:bg-accent/50"
-                  >
-                    <Checkbox
-                      id={`scope-${scope}`}
-                      checked={selectedScopes.includes(scope)}
-                      onCheckedChange={() => toggleScope(scope)}
-                      className="mt-0.5"
-                    />
-                    <div>
-                      <span className="text-sm font-medium">{scope}</span>
-                      <p className="text-xs text-muted-foreground">
-                        {API_SCOPES[scope as ApiScope]}
-                      </p>
-                    </div>
-                  </label>
-                ))}
-              </div>
-            )}
-            {scopeError && (
-              <p className="text-sm text-destructive">{scopeError}</p>
-            )}
-          </div>
-
-          {/* Expiration */}
-          <div className="space-y-2">
-            <Label htmlFor="expires-in">Expiration</Label>
-            <Select value={expiresIn} onValueChange={setExpiresIn}>
-              <SelectTrigger id="expires-in">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="30">30 days</SelectItem>
-                <SelectItem value="90">90 days (Recommended)</SelectItem>
-                <SelectItem value="365">1 year</SelectItem>
-                <SelectItem value="never">No expiration</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
+        <ApiKeyFormFields
+          name={name}
+          nameError={nameError}
+          availableScopes={availableScopes}
+          selectedScopes={selectedScopes}
+          scopeError={scopeError}
+          expiresIn={expiresIn}
+          onNameChange={(value) => {
+            setName(value)
+            setNameError(null)
+          }}
+          onToggleScope={toggleScope}
+          onExpirationChange={setExpiresIn}
+        />
 
         <DialogFooter className="shrink-0">
           <Button

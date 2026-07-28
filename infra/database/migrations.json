@@ -144,6 +144,13 @@
     "151-agentic-cost-reconciliation.sql",
     "152-agent-skill-scan-leases.sql",
     "153-workspace-upload-reservations.sql",
-    "154-workspace-upload-reservation-nullable-leases.sql"
+    "154-workspace-upload-reservation-nullable-leases.sql",
+    "155-unified-content-migration-retirement.sql",
+    "156-oneroster-user-role-source.sql",
+    "157-rooms.sql",
+    "158-student-rooms-navigation.sql",
+    "159-unified-content-concurrency-recovery.sql",
+    "160-unified-content-migration-source-eligibility.sql",
+    "161-atrium-sop-collection.sql"
   ]
 }

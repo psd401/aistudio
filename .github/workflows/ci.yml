@@ -92,6 +92,25 @@ jobs:
       env:
         CI: true
 
+    # psd-atrium. Same story again — plain CJS outside the jest roots, so its
+    # suite has never run in CI despite guarding every agent write into the
+    # content workspace. It now also covers the authored-image upload flow
+    # (reserve -> presigned PUT -> complete), where a wrong call order or a
+    # mis-derived checksum produces an asset that is reserved but never `ready`.
+    - name: Run psd-atrium skill tests (Bun)
+      run: bun run test:skill:atrium
+      env:
+        CI: true
+
+    # psd-sop-creator. The template gate is the whole point of the skill: every
+    # rule in it exists because breaking it loses content SILENTLY in Atrium
+    # (raw HTML dropped, data: URIs stripped, inline images splitting
+    # paragraphs). A regression here ships malformed SOPs with no error.
+    - name: Run psd-sop-creator skill tests (Bun)
+      run: bun run test:skill:sop-creator
+      env:
+        CI: true
+
     # Optional: Upload test coverage if you generate it
     # - name: Upload coverage reports
     #   uses: codecov/codecov-action@v3
@@ -175,6 +194,46 @@ jobs:
       env:
         CI: true
 
+    - name: Run OneRoster email-match report smoke
+      run: bun run test:smoke:roster-email-match
+      env:
+        CI: true
+
+  # Production-build regression for #1297. Source-level import tests cannot
+  # prove how Next/Webpack packages middleware, so exercise the compiled bundle
+  # with Next's real Edge sandbox and a signed expired session on every PR/push.
+  auth-edge-production:
+    name: Auth Edge Production Artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      AUTH_SECRET: artifact-test-secret-at-least-32-characters
+      AUTH_URL: https://artifact.test
+      AUTH_COGNITO_CLIENT_ID: artifact-client
+      AUTH_COGNITO_ISSUER: https://cognito-idp.us-east-1.amazonaws.com/us-east-1_artifact
+      NEXT_PUBLIC_COGNITO_CLIENT_ID: artifact-client
+      NEXT_PUBLIC_COGNITO_DOMAIN: artifact.auth.us-east-1.amazoncognito.com
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v7
+
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+      with:
+        bun-version: "1.2.x"
+
+    - name: Install dependencies
+      run: bun install --frozen-lockfile
+
+    - name: Build production standalone application
+      run: bun run build
+
+    - name: Exercise compiled auth middleware in the Edge sandbox
+      run: bun run test:smoke:auth-edge-production
+
   # CDK validation job - checks infrastructure code
   cdk-validate:
     name: Validate CDK Infrastructure
@@ -188,9 +247,14 @@ jobs:
       uses: actions/checkout@v7
 
     - name: Setup Node.js
-      uses: actions/setup-node@v6
+      uses: actions/setup-node@v7
       with:
-        node-version: 20.x
+        # 22.x, not 20.x: argon2 >= 0.45 builds via `bunx node-gyp@latest`, and
+        # node-gyp 13's undici needs webidl.util.markAsUncloneable (Node >= 22.9)
+        # — under Node 20 the install dies with "markAsUncloneable is not a
+        # function". The Lambda runtime target is set by esbuild (target:
+        # node20), which does not require the build host to run Node 20.
+        node-version: 22.x
 
     - name: Setup Bun
       uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
@@ -206,7 +270,7 @@ jobs:
       run: bun install -g aws-cdk@2
 
     - name: Enable ARM64 Lambda artifact execution
-      uses: docker/setup-qemu-action@v3
+      uses: docker/setup-qemu-action@v4
       with:
         platforms: arm64
 

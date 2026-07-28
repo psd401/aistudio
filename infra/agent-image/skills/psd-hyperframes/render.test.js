@@ -1,4 +1,7 @@
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
+
 /**
  * Unit tests for psd-hyperframes/render.js (#1175).
  *
@@ -16,8 +19,8 @@ const path = require('node:path');
 const {
   parseArgs,
   buildPayload,
+  findCompositionRootOpenTagEnd,
   injectAudioElement,
-  findCompositionRootTagEnd,
   invokeRender,
   validateEmail,
   main,
@@ -150,7 +153,7 @@ test('buildPayload rejects a --dry-run given a value', () => {
 test('buildPayload caps the combined html+css+js size', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hf-skill-big-'));
   const cssPath = path.join(dir, 'big.css');
-  fs.writeFileSync(cssPath, 'a'.repeat(5 * 1024 * 1024));
+  validatedFs.writeFileSync(cssPath, 'a'.repeat(5 * 1024 * 1024));
   try {
     expect(() => buildPayload(parseArgs(argv(
       '--user', 'p@psd401.net', '--html', HTML, '--duration', '3', '--css-file', cssPath,
@@ -164,7 +167,7 @@ test('buildPayload caps the combined html+css+js size', () => {
 test('buildPayload reads css/js from files and carries dryRun', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hf-skill-'));
   const cssPath = path.join(dir, 'a.css');
-  fs.writeFileSync(cssPath, 'body{color:red}');
+  validatedFs.writeFileSync(cssPath, 'body{color:red}');
   try {
     const p = buildPayload(parseArgs(argv(
       '--user', 'p@psd401.net', '--html', HTML, '--duration', '3',
@@ -187,6 +190,24 @@ test('buildPayload injects an <audio> track from --audio-url into the compositio
   expect(p.html).toContain('data-track-index="0"');
   // Injected as the first child of the data-composition-id root element.
   expect(p.html).toMatch(/data-composition-id="demo"[^>]*>\s*<audio /);
+});
+
+test('composition-root lookup is linear and ignores attribute-like quoted text', () => {
+  const html =
+    `<div title="data-composition-id > ${'<A'.repeat(50_000)}">decoy</div>` +
+    '<main title="1 > 0" data-composition-id="real">content</main>';
+  const end = findCompositionRootOpenTagEnd(html);
+
+  expect(end).toBe(html.indexOf('>content') + 1);
+  const injected = injectAudioElement(
+    html,
+    'https://example.com/audio.mp3',
+    3,
+  );
+  expect(injected.indexOf('<audio')).toBeGreaterThan(
+    injected.indexOf('data-composition-id="real"'),
+  );
+  expect(injected.indexOf('<audio')).toBeLessThan(injected.indexOf('content'));
 });
 
 test('buildPayload rejects an unsafe / non-https --audio-url', () => {
@@ -353,7 +374,7 @@ test('injectAudioElement is linear on the quadratic witness (many unclosed tags)
   expect(out.endsWith('</audio>')).toBe(true);
 });
 
-// ── findCompositionRootTagEnd: parity with the regex it replaced (#1298) ─────
+// ── findCompositionRootOpenTagEnd: parity with the regex it replaced (#1298) ──
 //
 // The scanner must agree with /<[a-zA-Z][^>]*\bdata-composition-id\b[^>]*>/ on
 // everything except the one case where that regex was itself wrong (a quoted
@@ -397,21 +418,21 @@ const PARITY_CASES = [
 ];
 
 for (const [name, html] of PARITY_CASES) {
-  test(`findCompositionRootTagEnd matches the old regex: ${name}`, () => {
-    expect(findCompositionRootTagEnd(html)).toBe(oldRegexFind(html));
+  test(`findCompositionRootOpenTagEnd matches the old regex: ${name}`, () => {
+    expect(findCompositionRootOpenTagEnd(html)).toBe(oldRegexFind(html));
   });
 }
 
-test('findCompositionRootTagEnd crosses a quoted > that the old regex could not', () => {
+test('findCompositionRootOpenTagEnd crosses a quoted > that the old regex could not', () => {
   // The one intentional divergence: [^>]* stopped at the quoted '>', so the old
   // regex found no root and the audio was appended outside the composition.
   const html = '<div title="a>b" data-composition-id="z">x</div>';
   expect(oldRegexFind(html)).toBe(-1);
-  expect(findCompositionRootTagEnd(html)).toBe(40 + 1);
+  expect(findCompositionRootOpenTagEnd(html)).toBe(40 + 1);
   expect(injectAudioElement(html, AUDIO_URL, 1)).toContain('">\n<audio');
 });
 
-test('findCompositionRootTagEnd stays linear on quote-heavy witnesses', () => {
+test('findCompositionRootOpenTagEnd stays linear on quote-heavy witnesses', () => {
   // Quote tracking must not reintroduce rescanning. Each shape is 400k chars;
   // measured 2-10 ms each, against a 1 s bound.
   const shapes = [
@@ -423,7 +444,7 @@ test('findCompositionRootTagEnd stays linear on quote-heavy witnesses', () => {
   ];
   for (const html of shapes) {
     const started = Date.now();
-    findCompositionRootTagEnd(html);
+    findCompositionRootOpenTagEnd(html);
     expect(Date.now() - started).toBeLessThan(1000);
   }
 });

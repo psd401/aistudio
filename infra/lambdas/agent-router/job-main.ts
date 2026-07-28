@@ -21,9 +21,9 @@
  */
 
 import {
-  buildContinuationPrompt,
   JOB_DEADLINE_S,
   parseJobPayload,
+  resolveJobInvocation,
 } from './job-promotion';
 import {
   createLogger,
@@ -78,8 +78,26 @@ async function main(): Promise<number> {
     throw error;
   }
 
+  // A context-overflow promotion must NOT resume the session it came from.
+  // AgentCore sticky-routes by session id, so resuming would hand this leg the
+  // exact transcript that outgrew the model window — it would re-overflow on
+  // the first model call, having spent a Fargate cold start to get there.
+  // Restart in a fresh session from the original request instead.
+  //
+  // The lock stays on the ORIGINAL session id: that is what the router checks
+  // to answer "still working on your earlier task", and what cron acquired
+  // before launching this task.
+  const {
+    invokeSessionId,
+    prompt,
+    restart: isRestart,
+  } = resolveJobInvocation(job);
+
   log.info('Background job started', {
     sessionId: job.sessionId,
+    invokeSessionId,
+    reason: job.reason ?? 'deadline',
+    restart: isRestart,
     userEmail: job.userEmail,
     space: job.spaceName,
     deadlineS: JOB_DEADLINE_S,
@@ -94,9 +112,9 @@ async function main(): Promise<number> {
   const startTime = Date.now();
   try {
     const agentResult = await invokeAgentCore(
-      buildContinuationPrompt(job.promptExcerpt),
+      prompt,
       job.userEmail,
-      job.sessionId,
+      invokeSessionId,
       log,
       {
         displayName: job.displayName,

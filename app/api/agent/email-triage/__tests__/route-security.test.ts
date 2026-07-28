@@ -175,3 +175,120 @@ describe("email triage route label control boundary", () => {
     expect(mockDdbSend).not.toHaveBeenCalled()
   })
 })
+
+describe("email triage route invocation boundary", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    globalThis.fetch = mockFetch
+    mockVerifyInvocation.mockResolvedValue({
+      mode: "owner",
+      ownerEmail: "owner@example.com",
+    })
+    mockGetAccessToken.mockResolvedValue({ access_token: "gmail-token" })
+    mockDdbSend.mockResolvedValue({})
+  })
+
+  it("rejects requests without a verified invocation", async () => {
+    mockVerifyInvocation.mockResolvedValue(null)
+
+    const response = await POST(request({ operation: "get-state" }))
+
+    expect(response.status).toBe(403)
+    expect(mockDdbSend).not.toHaveBeenCalled()
+    expect(mockGetAccessToken).not.toHaveBeenCalled()
+  })
+
+  it("rejects caller-supplied owner selectors before any data access", async () => {
+    const response = await POST(
+      request({
+        operation: "get-state",
+        ownerEmail: "attacker@example.com",
+      })
+    )
+
+    expect(response.status).toBe(400)
+    expect(mockDdbSend).not.toHaveBeenCalled()
+    expect(mockGetAccessToken).not.toHaveBeenCalled()
+  })
+
+  it("uses the signed owner for scheduled state reads", async () => {
+    mockVerifyInvocation.mockResolvedValue({
+      mode: "scheduled",
+      ownerEmail: "scheduled-owner@example.com",
+    })
+    mockDdbSend.mockResolvedValue({ Item: { enabled: true } })
+
+    const response = await POST(request({ operation: "get-state" }))
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ state: { enabled: true } })
+    const command = mockDdbSend.mock.calls[0][0] as {
+      input: { Key: { userEmail: string } }
+    }
+    expect(command.input.Key).toEqual({
+      userEmail: "scheduled-owner@example.com",
+    })
+    expect(mockGetAccessToken).not.toHaveBeenCalled()
+  })
+
+  it("does not allow scheduled invocations to mutate state", async () => {
+    mockVerifyInvocation.mockResolvedValue({
+      mode: "scheduled",
+      ownerEmail: "scheduled-owner@example.com",
+    })
+
+    const response = await POST(
+      request({
+        operation: "update-state",
+        attrs: { enabled: true },
+      })
+    )
+
+    expect(response.status).toBe(403)
+    expect(mockDdbSend).not.toHaveBeenCalled()
+    expect(mockGetAccessToken).not.toHaveBeenCalled()
+  })
+
+  it("limits owner state updates to safe fields", async () => {
+    const response = await POST(
+      request({
+        operation: "update-state",
+        attrs: {
+          enabled: true,
+          digestTime: "08:00",
+        },
+      })
+    )
+
+    expect(response.status).toBe(200)
+    const command = mockDdbSend.mock.calls[0][0] as {
+      input: {
+        Key: { userEmail: string }
+        ExpressionAttributeNames: Record<string, string>
+        ExpressionAttributeValues: Record<string, unknown>
+      }
+    }
+    expect(command.input).toMatchObject({
+      Key: { userEmail: "owner@example.com" },
+      ExpressionAttributeNames: {
+        "#field0": "enabled",
+        "#field1": "digestTime",
+      },
+      ExpressionAttributeValues: {
+        ":value0": true,
+        ":value1": "08:00",
+      },
+    })
+    expect(mockGetAccessToken).not.toHaveBeenCalled()
+  })
+
+  it("preserves authorization fallback before rejecting Gmail operations", async () => {
+    mockGetAccessToken.mockResolvedValue(null)
+
+    const response = await POST(request({ operation: "unsupported" }))
+
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ status: "needs-auth" })
+    expect(mockDdbSend).not.toHaveBeenCalled()
+  })
+})

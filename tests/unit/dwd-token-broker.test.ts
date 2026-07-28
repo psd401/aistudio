@@ -57,7 +57,7 @@ describe("deriveAgentEmail — the containment guard", () => {
 describe("loadBrokerConfig", () => {
   const KEYS = ["GCP_PROJECT_NUMBER", "GCP_WIF_POOL_ID", "GCP_WIF_PROVIDER_ID", "GCP_DWD_SERVICE_ACCOUNT_EMAIL"]
   beforeEach(() => {
-    KEYS.forEach((k) => delete process.env[k])
+    for (const k of KEYS) delete process.env[k]
     loadGcpDwdConfigSecretMock.mockReset()
     loadGcpDwdConfigSecretMock.mockResolvedValue(null)
   })

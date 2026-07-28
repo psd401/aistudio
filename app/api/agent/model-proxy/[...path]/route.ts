@@ -65,6 +65,230 @@ type ModelRequest = {
   max_tokens?: unknown
 }
 
+type Admission = Awaited<ReturnType<typeof acquireResourceAdmission>>
+type AgentContext = NonNullable<
+  Awaited<ReturnType<typeof verifyAgentInvocationContext>>
+>
+type ValidatedModelRequest = ModelRequest & {
+  model: string
+  max_tokens: number
+}
+
+type PreparationResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; response: NextResponse }
+
+interface BudgetAdmissionInput {
+  context: AgentContext
+  contextKey: string
+  requestId: string
+  callAdmission: Admission
+  body: Uint8Array
+  maxTokens: number
+}
+
+function releaseAdmission(admission: Admission): Promise<void> {
+  return admission.allowed
+    ? releaseResourceAdmission(admission.leaseId)
+    : Promise.resolve()
+}
+
+async function acquireCallAdmission(
+  context: AgentContext,
+  contextKey: string,
+  requestId: string,
+): Promise<PreparationResult<Admission>> {
+  const admission = await acquireResourceAdmission({
+    kind: "model-proxy-call",
+    ownerKey: context.ownerEmail,
+    contextKey,
+    idempotencyKey: `${context.nonce}:${requestId}`,
+    units: 1,
+    limits: MODEL_PROXY_CALL_LIMITS,
+  })
+  if (!admission.allowed && !isCapacityDenial(admission)) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "Duplicate model request" },
+        { status: 409 },
+      ),
+    }
+  }
+  if (!admission.allowed) {
+    log.warn(
+      "Model call rate over threshold (observe-only — request allowed)",
+      sanitizeForLogging({
+        requestId,
+        ownerEmail: context.ownerEmail,
+        reason: admission.reason,
+        limit: "MODEL_PROXY_CALL_LIMITS",
+      }),
+    )
+  }
+  return { ok: true, value: admission }
+}
+
+function isAllowedModelRequest(
+  parsed: ModelRequest,
+): parsed is ValidatedModelRequest {
+  return (
+    typeof parsed.model === "string" &&
+    ALLOWED_MODELS.has(parsed.model) &&
+    typeof parsed.max_tokens === "number" &&
+    Number.isInteger(parsed.max_tokens) &&
+    parsed.max_tokens >= 1 &&
+    parsed.max_tokens <= MAX_OUTPUT_TOKENS
+  )
+}
+
+async function prepareModelRequest(
+  request: NextRequest,
+  callAdmission: Admission,
+): Promise<
+  PreparationResult<{
+    body: Uint8Array
+    parsed: ValidatedModelRequest
+    forwardBody: Uint8Array
+  }>
+> {
+  let body: Uint8Array
+  try {
+    body = await readBoundedModelRequest(request)
+  } catch (error) {
+    await releaseAdmission(callAdmission)
+    if (error instanceof ModelRequestBodyError) {
+      return {
+        ok: false,
+        response: NextResponse.json(
+          { error: error.message },
+          { status: error.status },
+        ),
+      }
+    }
+    throw error
+  }
+  let parsed: ModelRequest
+  try {
+    parsed = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(body),
+    ) as ModelRequest
+  } catch {
+    await releaseAdmission(callAdmission)
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "Model request must be JSON" },
+        { status: 400 },
+      ),
+    }
+  }
+  if (!isAllowedModelRequest(parsed)) {
+    await releaseAdmission(callAdmission)
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "Model or output limit is not allowed" },
+        { status: 400 },
+      ),
+    }
+  }
+  if (body.byteLength > MAX_INPUT_TOKEN_UPPER_BOUND) {
+    await releaseAdmission(callAdmission)
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "Model input exceeds the supported context budget" },
+        { status: 413 },
+      ),
+    }
+  }
+  const forwardBody = new TextEncoder().encode(
+    JSON.stringify(
+      parsed.anthropic_version === undefined
+        ? { ...parsed, anthropic_version: BEDROCK_ANTHROPIC_VERSION }
+        : parsed,
+    ),
+  )
+  return { ok: true, value: { body, parsed, forwardBody } }
+}
+
+async function acquireTokenAndCostAdmissions({
+  context,
+  contextKey,
+  requestId,
+  callAdmission,
+  body,
+  maxTokens,
+}: BudgetAdmissionInput): Promise<
+  PreparationResult<{
+    leaseIds: string[]
+    reservedTokens: number
+    reservedCostMicrocents: number
+  }>
+> {
+  const bodyDigest = createHash("sha256").update(body).digest("hex")
+  const reservedTokens = body.byteLength + maxTokens
+  const reservedCostMicrocents =
+    body.byteLength * SONNET_INPUT_COST_MICROCENTS_PER_TOKEN +
+    maxTokens * SONNET_OUTPUT_COST_MICROCENTS_PER_TOKEN
+  const tokenAdmission = await acquireResourceAdmission({
+    kind: "model-proxy-total-tokens",
+    ownerKey: context.ownerEmail,
+    contextKey,
+    idempotencyKey: `${context.nonce}:${bodyDigest}:tokens`,
+    units: reservedTokens,
+    limits: MODEL_PROXY_TOKEN_LIMITS,
+  })
+  const costAdmission = await acquireResourceAdmission({
+    kind: "model-proxy-cost-microcents",
+    ownerKey: context.ownerEmail,
+    contextKey,
+    idempotencyKey: `${context.nonce}:${bodyDigest}:cost`,
+    units: reservedCostMicrocents,
+    limits: MODEL_PROXY_COST_LIMITS,
+  })
+  if (
+    (!tokenAdmission.allowed && !isCapacityDenial(tokenAdmission)) ||
+    (!costAdmission.allowed && !isCapacityDenial(costAdmission))
+  ) {
+    await Promise.all([
+      releaseAdmission(callAdmission),
+      releaseAdmission(tokenAdmission),
+    ])
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "Duplicate model request" },
+        { status: 409 },
+      ),
+    }
+  }
+  if (!tokenAdmission.allowed || !costAdmission.allowed) {
+    log.warn(
+      "Model token/cost over threshold (observe-only — request allowed)",
+      sanitizeForLogging({
+        requestId,
+        ownerEmail: context.ownerEmail,
+        reservedTokens,
+        reservedCostMicrocents,
+        tokenReason: tokenAdmission.allowed ? null : tokenAdmission.reason,
+        costReason: costAdmission.allowed ? null : costAdmission.reason,
+      }),
+    )
+  }
+  return {
+    ok: true,
+    value: {
+      leaseIds: [callAdmission, tokenAdmission, costAdmission]
+        .filter((admission) => admission.allowed)
+        .map((admission) => admission.leaseId),
+      reservedTokens,
+      reservedCostMicrocents,
+    },
+  }
+}
+
 function responseWithAdmissionLifecycle(
   upstream: Response,
   headers: Headers,
@@ -123,150 +347,23 @@ export async function POST(
     return NextResponse.json({ error: "Unsupported model endpoint" }, { status: 404 })
   }
   const contextKey = `${context.sessionId}:${context.nonce}`
-  const callAdmission = await acquireResourceAdmission({
-    kind: "model-proxy-call",
-    ownerKey: context.ownerEmail,
-    contextKey,
-    idempotencyKey: `${context.nonce}:${requestId}`,
-    units: 1,
-    limits: MODEL_PROXY_CALL_LIMITS,
-  })
-  // OBSERVE-ONLY (2026-07-27, Hagel). Admission still MEASURES every call so
-  // we accumulate real consumption data, but it must never reject a user's
-  // request. The limits added in #1353 were calibrated as if one model call
-  // per turn; an agentic turn makes many, each re-sending the whole context,
-  // so a single conversation could exhaust the hourly cap and the agent
-  // answered "I couldn't complete that" with nothing explaining why.
-  //
-  // We do not yet know what normal consumption looks like for this workload.
-  // Until we do, over-limit is a LOG LINE, not a 429 — the numbers are here
-  // to be read, and limits can be set from evidence later.
-  if (!callAdmission.allowed && !isCapacityDenial(callAdmission)) {
-    // `duplicate` = replayed idempotency key, not a budget. Still refused.
-    return NextResponse.json({ error: "Duplicate model request" }, { status: 409 })
-  }
-  if (!callAdmission.allowed) {
-    log.warn(
-      "Model call rate over threshold (observe-only — request allowed)",
-      sanitizeForLogging({
-        requestId,
-        ownerEmail: context.ownerEmail,
-        reason: callAdmission.reason,
-        limit: "MODEL_PROXY_CALL_LIMITS",
-      }),
-    )
-  }
-
-  let body: Uint8Array
-  try {
-    body = await readBoundedModelRequest(request)
-  } catch (error) {
-    if (callAdmission.allowed) await releaseResourceAdmission(callAdmission.leaseId)
-    if (error instanceof ModelRequestBodyError) {
-      return NextResponse.json({ error: error.message }, { status: error.status })
-    }
-    throw error
-  }
-  let parsed: ModelRequest
-  try {
-    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)) as ModelRequest
-  } catch {
-    if (callAdmission.allowed) await releaseResourceAdmission(callAdmission.leaseId)
-    return NextResponse.json({ error: "Model request must be JSON" }, { status: 400 })
-  }
-  if (
-    typeof parsed.model !== "string" ||
-    !ALLOWED_MODELS.has(parsed.model) ||
-    typeof parsed.max_tokens !== "number" ||
-    !Number.isInteger(parsed.max_tokens) ||
-    parsed.max_tokens < 1 ||
-    parsed.max_tokens > MAX_OUTPUT_TOKENS
-  ) {
-    if (callAdmission.allowed) await releaseResourceAdmission(callAdmission.leaseId)
-    return NextResponse.json({ error: "Model or output limit is not allowed" }, { status: 400 })
-  }
-  // UTF-8 bytes are a conservative upper bound on input tokens. Admission uses
-  // the entire trusted request body, including JSON syntax, so no model-bearing
-  // string can escape accounting by changing the request shape.
+  const callResult = await acquireCallAdmission(context, contextKey, requestId)
+  if (!callResult.ok) return callResult.response
+  const callAdmission = callResult.value
+  const prepared = await prepareModelRequest(request, callAdmission)
+  if (!prepared.ok) return prepared.response
+  const { body, parsed, forwardBody } = prepared.value
   const inputTokenUpperBound = body.byteLength
-  if (inputTokenUpperBound > MAX_INPUT_TOKEN_UPPER_BOUND) {
-    if (callAdmission.allowed) await releaseResourceAdmission(callAdmission.leaseId)
-    return NextResponse.json(
-      { error: "Model input exceeds the supported context budget" },
-      { status: 413 },
-    )
-  }
-  // Forward the RE-SERIALIZED, validated object rather than the raw bytes,
-  // with `anthropic_version` supplied when the client omitted it. An explicit
-  // client value is preserved rather than overwritten.
-  //
-  // Re-serializing also closes a validate-vs-forward gap: the checks above run
-  // on `parsed`, so forwarding the original bytes would let any parser
-  // disagreement (duplicate keys, for instance, where JSON.parse keeps the
-  // last and another parser may keep the first) send upstream something other
-  // than what was actually validated.
-  const forwardBody = new TextEncoder().encode(
-    JSON.stringify(
-      parsed.anthropic_version === undefined
-        ? { ...parsed, anthropic_version: BEDROCK_ANTHROPIC_VERSION }
-        : parsed,
-    ),
-  )
-
-  const bodyDigest = createHash("sha256").update(body).digest("hex")
-  const reservedTokens = inputTokenUpperBound + parsed.max_tokens
-  const reservedCostMicrocents =
-    inputTokenUpperBound * SONNET_INPUT_COST_MICROCENTS_PER_TOKEN +
-    parsed.max_tokens * SONNET_OUTPUT_COST_MICROCENTS_PER_TOKEN
-
-  const tokenAdmission = await acquireResourceAdmission({
-    kind: "model-proxy-total-tokens",
-    ownerKey: context.ownerEmail,
+  const budgetResult = await acquireTokenAndCostAdmissions({
+    context,
     contextKey,
-    idempotencyKey: `${context.nonce}:${bodyDigest}:tokens`,
-    units: reservedTokens,
-    limits: MODEL_PROXY_TOKEN_LIMITS,
+    requestId,
+    callAdmission,
+    body,
+    maxTokens: parsed.max_tokens,
   })
-  // Measured unconditionally — previously cost was only sampled when tokens
-  // were under limit, which blinded us to spend in exactly the situation
-  // worth observing.
-  const costAdmission = await acquireResourceAdmission({
-    kind: "model-proxy-cost-microcents",
-    ownerKey: context.ownerEmail,
-    contextKey,
-    idempotencyKey: `${context.nonce}:${bodyDigest}:cost`,
-    units: reservedCostMicrocents,
-    limits: MODEL_PROXY_COST_LIMITS,
-  })
-  if (
-    (!tokenAdmission.allowed && !isCapacityDenial(tokenAdmission)) ||
-    (!costAdmission.allowed && !isCapacityDenial(costAdmission))
-  ) {
-    if (callAdmission.allowed) await releaseResourceAdmission(callAdmission.leaseId)
-    if (tokenAdmission.allowed) await releaseResourceAdmission(tokenAdmission.leaseId)
-    return NextResponse.json({ error: "Duplicate model request" }, { status: 409 })
-  }
-  if (!tokenAdmission.allowed || !costAdmission.allowed) {
-    // OBSERVE-ONLY — see the note above. Log the numbers; serve the request.
-    log.warn(
-      "Model token/cost over threshold (observe-only — request allowed)",
-      sanitizeForLogging({
-        requestId,
-        ownerEmail: context.ownerEmail,
-        reservedTokens,
-        reservedCostMicrocents,
-        tokenReason: tokenAdmission.allowed ? null : tokenAdmission.reason,
-        costReason: costAdmission.allowed ? null : costAdmission.reason,
-      }),
-    )
-  }
-
-  // Only granted leases can be released or settled; a denied admission has no
-  // leaseId. Collecting them here keeps the lifecycle correct now that a
-  // denial no longer short-circuits the request.
-  const activeLeaseIds = [callAdmission, tokenAdmission, costAdmission]
-    .filter((a) => a.allowed)
-    .map((a) => a.leaseId)
+  if (!budgetResult.ok) return budgetResult.response
+  const { leaseIds: activeLeaseIds } = budgetResult.value
 
   const secretId =
     process.env.AGENT_BEDROCK_API_KEY_SECRET_ID ||

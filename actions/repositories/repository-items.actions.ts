@@ -44,10 +44,17 @@ import {
   getCanonicalRepositoryItemStatuses,
   isCanonicalUploadContentType,
   isRepositorySourceObjectKey,
+  registerCanonicalText,
   registerCanonicalTextIfEnabled,
+  registerCanonicalUrlSnapshot,
+  registerCanonicalUpload,
   registerCanonicalUploadIfEnabled,
   retryCanonicalRepositoryItem,
 } from "@/lib/repositories/content-platform"
+import {
+  getContentPlatformConfig,
+  isCanonicalRepositoryUploadActive,
+} from "@/lib/repositories/content-platform/config"
 import {
   beginRepositoryItemDeletion,
   finalizeRepositoryItemDeletion
@@ -137,10 +144,13 @@ async function shadowWriteCanonicalText(
     content: string
     traceId: string
   },
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
+  canonicalRequired = false
 ): Promise<void> {
   try {
-    const canonical = await registerCanonicalTextIfEnabled(input)
+    const canonical = canonicalRequired
+      ? await registerCanonicalText(input)
+      : await registerCanonicalTextIfEnabled(input)
     if (!canonical) return
 
     log.info("Canonical inline text version registered", {
@@ -192,11 +202,23 @@ async function shadowWriteCanonicalUpload(
     byteSize: number
     traceId: string
   },
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
+  canonicalRequired = false
 ): Promise<void> {
-  if (!isCanonicalUploadContentType(input.declaredContentType)) return
+  if (!isCanonicalUploadContentType(input.declaredContentType)) {
+    if (canonicalRequired) {
+      await updateRepositoryItemStatus(
+        input.itemId,
+        "failed",
+        `Canonical content processing does not support ${input.declaredContentType}`
+      )
+    }
+    return
+  }
   try {
-    const canonical = await registerCanonicalUploadIfEnabled(input)
+    const canonical = canonicalRequired
+      ? await registerCanonicalUpload(input)
+      : await registerCanonicalUploadIfEnabled(input)
     if (!canonical) return
 
     log.info("Canonical repository version registered", {
@@ -280,6 +302,47 @@ function validatePresignedUrlInput(input: AddDocumentWithPresignedUrlInput): str
   }
 
   return null
+}
+
+type DocumentObjectMetadata = Awaited<
+  ReturnType<typeof getDocumentObjectMetadata>
+>
+
+type PresignedObjectValidation =
+  | { isValid: true; metadata: DocumentObjectMetadata }
+  | { isValid: false; message: string }
+
+async function validatePresignedObject(
+  input: AddDocumentWithPresignedUrlInput,
+  log: ReturnType<typeof createLogger>
+): Promise<PresignedObjectValidation> {
+  const metadata = await getDocumentObjectMetadata(input.s3Key)
+  if (metadata.contentLength !== input.metadata.size) {
+    log.warn("Presigned upload size mismatch", {
+      repositoryId: input.repository_id,
+      expectedSize: input.metadata.size,
+      actualSize: metadata.contentLength,
+    })
+    return {
+      isValid: false,
+      message: "Uploaded file size did not match the request",
+    }
+  }
+  if (
+    metadata.contentType &&
+    metadata.contentType !== input.metadata.contentType
+  ) {
+    log.warn("Presigned upload content type mismatch", {
+      repositoryId: input.repository_id,
+      expectedContentType: input.metadata.contentType,
+      actualContentType: metadata.contentType,
+    })
+    return {
+      isValid: false,
+      message: "Uploaded file type did not match the request",
+    }
+  }
+  return { isValid: true, metadata }
 }
 
 // Validate addDocumentItem input; returns a user-facing error message or null when valid
@@ -394,6 +457,9 @@ export async function addDocumentItem(
       })
       throw ErrorFactories.authzOwnerRequired("add items to repository")
     }
+    const canonicalCutover = isCanonicalRepositoryUploadActive(
+      await getContentPlatformConfig()
+    )
 
     // Convert base64 string back to Buffer if needed
     const fileContent = toFileBuffer(input.file.content)
@@ -453,29 +519,29 @@ export async function addDocumentItem(
         byteSize: fileContent.byteLength,
         traceId: requestId,
       },
-      log
+      log,
+      canonicalCutover
     )
 
-    // Queue the document for processing
-    log.info("Queueing document for processing", {
-      itemId: item.id,
-      s3Key: key
-    })
-    
-    try {
-      await queueFileForProcessing(
-        item.id,
-        key,
-        input.name,
-        input.file.contentType
-      )
-      log.info("Document queued successfully for processing")
-    } catch (error) {
-      log.error("Failed to queue file for processing", {
+    if (!canonicalCutover) {
+      log.info("Queueing document for legacy processing", {
         itemId: item.id,
-        error: error instanceof Error ? error.message : "Unknown error"
+        s3Key: key
       })
-      // Don't fail the upload if queueing fails, just log it
+      try {
+        await queueFileForProcessing(
+          item.id,
+          key,
+          input.name,
+          input.file.contentType
+        )
+        log.info("Document queued successfully")
+      } catch (error) {
+        log.error("Failed to queue file for processing", {
+          itemId: item.id,
+          error: error instanceof Error ? error.message : "Unknown error"
+        })
+      }
     }
 
     log.info("Document uploaded successfully", {
@@ -551,6 +617,9 @@ export async function addDocumentWithPresignedUrl(
       })
       throw ErrorFactories.authzOwnerRequired("add items to repository")
     }
+    const canonicalCutover = isCanonicalRepositoryUploadActive(
+      await getContentPlatformConfig()
+    )
 
     // S3-key namespace check (REV-SEC-062): the client echoes back a key, but the
     // legitimate upload flow (generateUploadUrl) only ever mints keys under
@@ -568,26 +637,11 @@ export async function addDocumentWithPresignedUrl(
     // actually landed in S3 before persisting or queueing it. This closes the
     // gap where a caller could request a small allowed upload, PUT different
     // bytes, then register misleading metadata.
-    const objectMetadata = await getDocumentObjectMetadata(input.s3Key)
-    if (objectMetadata.contentLength !== input.metadata.size) {
-      log.warn("Presigned upload size mismatch", {
-        repositoryId: input.repository_id,
-        expectedSize: input.metadata.size,
-        actualSize: objectMetadata.contentLength,
-      })
-      return { isSuccess: false, message: "Uploaded file size did not match the request" }
+    const objectValidation = await validatePresignedObject(input, log)
+    if (!objectValidation.isValid) {
+      return { isSuccess: false, message: objectValidation.message }
     }
-    if (
-      objectMetadata.contentType &&
-      objectMetadata.contentType !== input.metadata.contentType
-    ) {
-      log.warn("Presigned upload content type mismatch", {
-        repositoryId: input.repository_id,
-        expectedContentType: input.metadata.contentType,
-        actualContentType: objectMetadata.contentType,
-      })
-      return { isSuccess: false, message: "Uploaded file type did not match the request" }
-    }
+    const objectMetadata = objectValidation.metadata
 
     // Create repository item with S3 key reference via Drizzle
     log.info("Creating repository item in database", {
@@ -626,12 +680,6 @@ export async function addDocumentWithPresignedUrl(
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
 
-    // Controlled migration path (#1265): when the platform and dual-write
-    // switches are enabled, record the immutable quarantined source version and
-    // its durable inspection job. The legacy queue remains authoritative until
-    // CONTENT_READ_V2_ENABLED is separately enabled. A shadow-write failure is
-    // observable but does not make the existing upload disappear from the user;
-    // the pending repository item can be reconciled and replayed safely.
     await shadowWriteCanonicalUpload(
       {
         itemId: item.id,
@@ -642,29 +690,29 @@ export async function addDocumentWithPresignedUrl(
         byteSize: input.metadata.size,
         traceId: requestId,
       },
-      log
+      log,
+      canonicalCutover
     )
 
-    // Queue for processing (embedding generation, etc.)
-    log.info("Queueing document for processing", {
-      itemId: item.id,
-      s3Key: input.s3Key
-    })
-    
-    try {
-      await queueFileForProcessing(
-        item.id,
-        input.s3Key,
-        input.metadata.originalFileName,
-        input.metadata.contentType
-      )
-      log.info("Document queued successfully for processing")
-    } catch (error) {
-      log.error("Failed to queue file for processing", {
+    if (!canonicalCutover) {
+      log.info("Queueing document for legacy processing", {
         itemId: item.id,
-        error: error instanceof Error ? error.message : "Unknown error"
+        s3Key: input.s3Key
       })
-      // Don't fail the upload if queueing fails, just log it
+      try {
+        await queueFileForProcessing(
+          item.id,
+          input.s3Key,
+          input.metadata.originalFileName,
+          input.metadata.contentType
+        )
+        log.info("Document queued successfully")
+      } catch (error) {
+        log.error("Failed to queue file for processing", {
+          itemId: item.id,
+          error: error instanceof Error ? error.message : "Unknown error"
+        })
+      }
     }
 
     log.info("Document added successfully via presigned URL", {
@@ -695,6 +743,59 @@ function validateUrl(url: string): boolean {
     return parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:';
   } catch {
     return false;
+  }
+}
+
+async function processRepositoryUrl(
+  item: RepositoryItem,
+  input: AddUrlInput,
+  context: {
+    userId: number
+    requestId: string
+    canonicalCutover: boolean
+    log: ReturnType<typeof createLogger>
+  }
+): Promise<void> {
+  const { userId, requestId, canonicalCutover, log } = context
+  try {
+    if (canonicalCutover) {
+      const canonical = await registerCanonicalUrlSnapshot({
+        itemId: item.id,
+        repositoryId: input.repository_id,
+        userId,
+        name: input.name,
+        url: input.url,
+        traceId: requestId,
+      })
+      await dispatchContentProcessingJob({
+        jobId: canonical.inspectJob.id,
+        itemVersionId: canonical.version.id,
+      }).catch((dispatchError) => {
+        log.warn("Canonical URL processing is pending scheduled dispatch", {
+          processingJobId: canonical.inspectJob.id,
+          error:
+            dispatchError instanceof Error
+              ? dispatchError.message
+              : "Unknown error",
+        })
+      })
+    } else {
+      await processUrl(item.id, input.url, input.name)
+    }
+    log.info("URL processing registered successfully", { canonicalCutover })
+  } catch (error) {
+    log.error("Failed to process URL", {
+      itemId: item.id,
+      canonicalCutover,
+      error: error instanceof Error ? error.message : "Unknown error"
+    })
+    await updateRepositoryItemStatus(
+      item.id,
+      "failed",
+      canonicalCutover
+        ? "Canonical URL snapshot failed. Retry this item."
+        : "Legacy URL processing failed. Retry this item."
+    )
   }
 }
 
@@ -786,27 +887,21 @@ export async function addUrlItem(
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
 
-    // Process the URL
+    const contentPlatformConfig = await getContentPlatformConfig()
+    const canonicalCutover = isCanonicalRepositoryUploadActive(
+      contentPlatformConfig
+    )
+
     log.info("Processing URL content", {
       itemId: item.id,
-      url: input.url
+      canonicalCutover,
     })
     
-    try {
-      await processUrl(
-        item.id,
-        input.url,
-        input.name
-      )
-      log.info("URL processed successfully")
-    } catch (error) {
-      log.error("Failed to process URL", {
-        itemId: item.id,
-        url: input.url,
-        error: error instanceof Error ? error.message : "Unknown error"
-      })
-      // Don't fail the creation if processing fails, just log it
-    }
+    await processRepositoryUrl(
+      item,
+      input,
+      { userId, requestId, canonicalCutover, log }
+    )
 
     log.info("URL added successfully", {
       itemId: item.id,
@@ -885,10 +980,18 @@ export async function addTextItem(
       throw ErrorFactories.authzOwnerRequired("add items to repository")
     }
 
-    // Start a transaction to add both the item and its chunk atomically
+    const contentPlatformConfig = await getContentPlatformConfig()
+    const canonicalCutover = isCanonicalRepositoryUploadActive(
+      contentPlatformConfig
+    )
+
+    // During the shadow window retain the legacy chunk for rollback. After the
+    // independent Repository Manager cutover, create only the stable item and
+    // let the canonical version/generation own searchable content.
     log.info("Creating text item with Drizzle transaction", {
       repositoryId: input.repository_id,
-      contentLength: input.content.length
+      contentLength: input.content.length,
+      canonicalCutover,
     })
 
     const itemId = await drizzleTransaction(
@@ -902,23 +1005,26 @@ export async function addTextItem(
             name: input.name,
             source: input.content,
             metadata: { length: input.content.length },
-            processingStatus: 'completed',
+            processingStatus: canonicalCutover ? 'pending' : 'completed',
           })
           .returning({ id: repositoryItems.id });
 
         log.debug("Text item created", { itemId: newItem.id });
 
-        // Step 2: Add the chunk in the same transaction
-        await tx
-          .insert(repositoryItemChunks)
-          .values({
+        if (!canonicalCutover) {
+          await tx
+            .insert(repositoryItemChunks)
+            .values({
+              itemId: newItem.id,
+              content: input.content,
+              chunkIndex: 0,
+              metadata: {},
+            });
+          log.debug("Legacy text chunk added", {
             itemId: newItem.id,
-            content: input.content,
             chunkIndex: 0,
-            metadata: {},
           });
-
-        log.debug("Text chunk added", { itemId: newItem.id, chunkIndex: 0 });
+        }
 
         return newItem.id;
       },
@@ -938,7 +1044,8 @@ export async function addTextItem(
         content: input.content,
         traceId: requestId,
       },
-      log
+      log,
+      canonicalCutover
     )
 
     // Fetch the created item via Drizzle
@@ -1229,6 +1336,21 @@ async function prepareRepositoryItemRetry(
     }
   }
 
+  if (item.type === "url") {
+    const canonical = await registerCanonicalUrlSnapshot({
+      itemId: item.id,
+      repositoryId: item.repositoryId,
+      userId,
+      name: item.name,
+      url: item.source,
+      traceId: requestId,
+    })
+    return {
+      itemVersionId: canonical.version.id,
+      processingJobId: canonical.inspectJob.id,
+    }
+  }
+
   if (
     item.currentVersionId &&
     isRepositorySourceObjectKey(item.repositoryId, item.source)
@@ -1240,7 +1362,7 @@ async function prepareRepositoryItemRetry(
     throw ErrorFactories.invalidInput(
       "item.type",
       item.type,
-      "Only stored files and inline text can be reprocessed"
+      "Only stored files, URL snapshots, and inline text can be reprocessed"
     )
   }
 

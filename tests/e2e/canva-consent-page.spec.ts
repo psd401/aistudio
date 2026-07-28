@@ -1,6 +1,7 @@
 import { test, expect } from './fixtures'
-import { mkdirSync } from 'node:fs'
+
 import { join } from 'node:path'
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 /**
  * E2E tests for the Agent Connect (Canva) consent flow (Issue #1176).
@@ -22,7 +23,7 @@ import { join } from 'node:path'
  */
 
 const SHOT_DIR = process.env.PSD_SCREENSHOT_DIR ?? '.verification'
-mkdirSync(SHOT_DIR, { recursive: true })
+validatedFs.mkdirSync(SHOT_DIR, { recursive: true })
 
 test.describe('Agent Connect (Canva) — authenticated owner gate', () => {
   test('missing token cannot bypass sign-in', async ({ page }) => {

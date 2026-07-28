@@ -34,6 +34,10 @@ jest.mock("@/lib/db/drizzle/nexus-conversations", () => ({
   getConversationById: (...a: unknown[]) => mockGetConversationById(...a),
 }))
 
+jest.mock("@/lib/repositories/content-platform/legacy-retirement-response", () => ({
+  legacyContentRetirementResponse: jest.fn(async () => null),
+}))
+
 const mockGetDocumentSignedUrl = jest.fn()
 const mockDeleteDocument = jest.fn()
 jest.mock("@/lib/aws/s3-client", () => ({

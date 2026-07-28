@@ -36,7 +36,8 @@ export interface RepositoryProcessingMetrics {
   /** Transitional deployment handoff mirrored in the durable marker column. */
   postDeployRecovery?:
     | "unified-content-runtime-v2"
-    | "unified-content-artifact-v3";
+    | "unified-content-artifact-v3"
+    | "embedding-concurrency-v1";
   /** Current managed-service wait, used to enforce or observe its deadline. */
   waitReason?:
     | "CONTENT_PLATFORM_DISABLED"
@@ -119,7 +120,9 @@ export const repositoryProcessingJobs = pgTable(
     lastErrorMessage: text("last_error_message"),
     /** Durable across stale worker writes; only the replacement runtime clears it. */
     postDeployRecovery: varchar("post_deploy_recovery", { length: 64 }).$type<
-      "unified-content-runtime-v2" | "unified-content-artifact-v3"
+      | "unified-content-runtime-v2"
+      | "unified-content-artifact-v3"
+      | "embedding-concurrency-v1"
     >(),
     metrics: jsonb("metrics")
       .$type<RepositoryProcessingMetrics>()

@@ -1,7 +1,7 @@
 "use client"
 
 import {
-  type FormEvent,
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -61,39 +61,333 @@ function accessLabel(entry: RepositoryAccessEntry): string {
   return entry.roleName || `Role ${entry.roleId ?? "unknown"}`
 }
 
-export function RepositoryAccessEditor({
-  repositoryId,
+type GrantKind = "user" | "role"
+
+interface AccessEditorReadyProps {
+  appliedUserSearch: string
+  availableRoles: RepositoryAccessOptions["roles"]
+  availableUsers: RepositoryAccessOptions["users"]
+  entries: RepositoryAccessEntry[]
+  grantKind: GrantKind
+  loadingUserOptions: boolean
+  nextUserOffset: number | null
+  onGrant: () => void
+  onGrantKindChange: (kind: GrantKind) => void
+  onLoadUserOptions: (search: string, offset: number, append: boolean) => void
+  onRevoke: (entry: RepositoryAccessEntry) => void
+  onSearch: (search: string) => void
+  onSelectedIdChange: (id: string) => void
+  onUserSearchChange: (search: string) => void
+  saving: boolean
+  selectedId: string
+  userSearch: string
+}
+
+function UserGrantSearch({
+  loading,
+  onSearch,
+  onSearchChange,
+  search,
+}: {
+  loading: boolean
+  onSearch: (search: string) => void
+  onSearchChange: (search: string) => void
+  search: string
+}) {
+  return (
+    <form
+      className="flex gap-2"
+      onSubmit={(event) => {
+        event.preventDefault()
+        onSearch(search)
+      }}
+    >
+      <div className="relative min-w-0 flex-1">
+        <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+        <Input
+          value={search}
+          onChange={(event) => onSearchChange(event.target.value)}
+          className="pl-9"
+          placeholder="Search by name or email"
+          aria-label="Search users to grant"
+          maxLength={100}
+        />
+      </div>
+      <Button type="submit" variant="outline" disabled={loading}>
+        {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+        Search users
+      </Button>
+    </form>
+  )
+}
+
+function GrantControls({
+  availableRoles,
+  availableUsers,
+  grantKind,
+  loadingUserOptions,
+  onGrant,
+  onGrantKindChange,
+  onSelectedIdChange,
+  saving,
+  selectedId,
+}: Pick<
+  AccessEditorReadyProps,
+  | "availableRoles"
+  | "availableUsers"
+  | "grantKind"
+  | "loadingUserOptions"
+  | "onGrant"
+  | "onGrantKindChange"
+  | "onSelectedIdChange"
+  | "saving"
+  | "selectedId"
+>) {
+  return (
+    <div className="grid gap-3 sm:grid-cols-[140px_1fr_auto]">
+      <Select
+        value={grantKind}
+        onValueChange={(value) => {
+          if (value === "user" || value === "role") {
+            onGrantKindChange(value)
+          }
+        }}
+      >
+        <SelectTrigger aria-label="Grant type">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="user">User</SelectItem>
+          <SelectItem value="role">Role</SelectItem>
+        </SelectContent>
+      </Select>
+      <Select value={selectedId} onValueChange={onSelectedIdChange}>
+        <SelectTrigger
+          aria-label={`Select ${grantKind}`}
+          disabled={loadingUserOptions}
+        >
+          <SelectValue placeholder={`Select a ${grantKind}`} />
+        </SelectTrigger>
+        <SelectContent>
+          {grantKind === "user"
+            ? availableUsers.map((user) => (
+                <SelectItem key={user.id} value={String(user.id)}>
+                  {user.name} ({user.email})
+                </SelectItem>
+              ))
+            : availableRoles.map((role) => (
+                <SelectItem key={role.id} value={String(role.id)}>
+                  {role.name}
+                </SelectItem>
+              ))}
+        </SelectContent>
+      </Select>
+      <Button onClick={onGrant} disabled={!selectedId || saving}>
+        {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+        Grant access
+      </Button>
+    </div>
+  )
+}
+
+function AccessEntries({
+  entries,
+  onRevoke,
+  saving,
+}: Pick<AccessEditorReadyProps, "entries" | "onRevoke" | "saving">) {
+  return (
+    <div className="divide-y rounded-md border">
+      {entries.length === 0 ? (
+        <p className="p-4 text-sm text-muted-foreground">
+          No additional user or role grants.
+        </p>
+      ) : (
+        entries.map((entry) => (
+          <div
+            key={entry.id}
+            className="flex items-center justify-between gap-3 p-3"
+          >
+            <div className="flex min-w-0 items-center gap-3">
+              {entry.userId ? (
+                <UserRound className="h-4 w-4 shrink-0" />
+              ) : (
+                <Shield className="h-4 w-4 shrink-0" />
+              )}
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium">
+                  {accessLabel(entry)}
+                </p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {entry.userId
+                    ? entry.userEmail || "Individual user"
+                    : "All users assigned this role"}
+                </p>
+              </div>
+              <Badge variant="outline">
+                {entry.userId ? "User" : "Role"}
+              </Badge>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => onRevoke(entry)}
+              disabled={saving}
+              aria-label={`Revoke access for ${accessLabel(entry)}`}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </div>
+        ))
+      )}
+    </div>
+  )
+}
+
+function AccessEditorReady(props: AccessEditorReadyProps) {
+  return (
+    <>
+      {props.grantKind === "user" ? (
+        <UserGrantSearch
+          loading={props.loadingUserOptions}
+          onSearch={props.onSearch}
+          onSearchChange={props.onUserSearchChange}
+          search={props.userSearch}
+        />
+      ) : null}
+      <GrantControls {...props} />
+      {props.grantKind === "user" && props.nextUserOffset !== null ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            props.onLoadUserOptions(
+              props.appliedUserSearch,
+              props.nextUserOffset!,
+              true
+            )
+          }
+          disabled={props.loadingUserOptions}
+        >
+          {props.loadingUserOptions ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : null}
+          Load more users
+        </Button>
+      ) : null}
+      <AccessEntries {...props} />
+    </>
+  )
+}
+
+function AccessEditorView({
+  error,
   isPublic,
-}: RepositoryAccessEditorProps) {
+  loading,
+  onRetry,
+  ...readyProps
+}: AccessEditorReadyProps & {
+  error: string | null
+  isPublic: boolean
+  loading: boolean
+  onRetry: () => void
+}) {
+  let content: ReactNode
+  if (loading) {
+    content = (
+      <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        Loading repository access…
+      </div>
+    )
+  } else if (error) {
+    content = (
+      <Alert variant="destructive">
+        <AlertCircle className="h-4 w-4" />
+        <AlertTitle>Access list unavailable</AlertTitle>
+        <AlertDescription className="flex items-center justify-between gap-3">
+          <span>{error}</span>
+          <Button variant="outline" size="sm" onClick={onRetry}>
+            Retry
+          </Button>
+        </AlertDescription>
+      </Alert>
+    )
+  } else {
+    content = <AccessEditorReady {...readyProps} />
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Access Control</CardTitle>
+        <CardDescription>
+          Grant read access to individual users or everyone assigned a role.
+          Repository owners and administrators always retain management access.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        {isPublic ? (
+          <Alert>
+            <Shield className="h-4 w-4" />
+            <AlertTitle>Public repository</AlertTitle>
+            <AlertDescription>
+              Every authenticated repository user can read this repository.
+              Grants below remain recorded if the repository becomes private.
+            </AlertDescription>
+          </Alert>
+        ) : null}
+        {content}
+      </CardContent>
+    </Card>
+  )
+}
+
+function availableAccessOptions(
+  entries: RepositoryAccessEntry[],
+  options: RepositoryAccessOptions
+) {
+  const grantedUserIds = new Set(
+    entries.flatMap((entry) => (entry.userId ? [entry.userId] : []))
+  )
+  const grantedRoleIds = new Set(
+    entries.flatMap((entry) => (entry.roleId ? [entry.roleId] : []))
+  )
+  return {
+    users: options.users.filter((user) => !grantedUserIds.has(user.id)),
+    roles: options.roles.filter((role) => !grantedRoleIds.has(role.id)),
+  }
+}
+
+function useRepositoryAccessData(repositoryId: number) {
   const { toast } = useToast()
   const [entries, setEntries] = useState<RepositoryAccessEntry[]>([])
   const [options, setOptions] =
     useState<RepositoryAccessOptions>(EMPTY_OPTIONS)
-  const [grantKind, setGrantKind] = useState<"user" | "role">("user")
-  const [selectedId, setSelectedId] = useState("")
-  const [userSearch, setUserSearch] = useState("")
-  const [appliedUserSearch, setAppliedUserSearch] = useState("")
   const [loadingUserOptions, setLoadingUserOptions] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState("")
 
-  const load = useCallback(async (search = "") => {
-    const [accessResult, optionsResult] = await Promise.all([
-      getRepositoryAccess(repositoryId),
-      getRepositoryAccessOptions(repositoryId, search, 0),
-    ])
-    if (!accessResult.isSuccess || !accessResult.data) {
-      setError(accessResult.message || "Failed to load repository access")
-    } else if (!optionsResult.isSuccess || !optionsResult.data) {
-      setError(optionsResult.message || "Failed to load access options")
-    } else {
-      setEntries(accessResult.data)
-      setOptions(optionsResult.data)
-      setError(null)
-    }
-    setLoading(false)
-  }, [repositoryId])
+  const load = useCallback(
+    async (search = "") => {
+      const [accessResult, optionsResult] = await Promise.all([
+        getRepositoryAccess(repositoryId),
+        getRepositoryAccessOptions(repositoryId, search, 0),
+      ])
+      if (!accessResult.isSuccess || !accessResult.data) {
+        setError(accessResult.message || "Failed to load repository access")
+      } else if (!optionsResult.isSuccess || !optionsResult.data) {
+        setError(optionsResult.message || "Failed to load access options")
+      } else {
+        setEntries(accessResult.data)
+        setOptions(optionsResult.data)
+        setError(null)
+      }
+      setLoading(false)
+    },
+    [repositoryId]
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -135,17 +429,13 @@ export function RepositoryAccessEditor({
       const loadedOptions = result.data
       setOptions((current) => {
         if (!append) return loadedOptions
-
         const usersById = new Map(
           current.users.map((user) => [user.id, user])
         )
         for (const user of loadedOptions.users) {
           usersById.set(user.id, user)
         }
-        return {
-          ...loadedOptions,
-          users: [...usersById.values()],
-        }
+        return { ...loadedOptions, users: [...usersById.values()] }
       })
       setSelectedId("")
     } else {
@@ -158,26 +448,57 @@ export function RepositoryAccessEditor({
     setLoadingUserOptions(false)
   }
 
-  function handleUserSearch(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    const normalizedSearch = userSearch.trim()
+  return {
+    entries,
+    error,
+    load,
+    loading,
+    loadingUserOptions,
+    loadUserOptions,
+    options,
+    selectedId,
+    setEntries,
+    setError,
+    setLoading,
+    setSelectedId,
+    toast,
+  }
+}
+
+export function RepositoryAccessEditor({
+  repositoryId,
+  isPublic,
+}: RepositoryAccessEditorProps) {
+  const {
+    entries,
+    error,
+    load,
+    loading,
+    loadingUserOptions,
+    loadUserOptions,
+    options,
+    selectedId,
+    setEntries,
+    setError,
+    setLoading,
+    setSelectedId,
+    toast,
+  } = useRepositoryAccessData(repositoryId)
+  const [grantKind, setGrantKind] = useState<GrantKind>("user")
+  const [userSearch, setUserSearch] = useState("")
+  const [appliedUserSearch, setAppliedUserSearch] = useState("")
+  const [saving, setSaving] = useState(false)
+
+  function handleUserSearch(search: string) {
+    const normalizedSearch = search.trim()
     setAppliedUserSearch(normalizedSearch)
     void loadUserOptions(normalizedSearch, 0, false)
   }
 
-  const availableUsers = useMemo(() => {
-    const granted = new Set(
-      entries.flatMap((entry) => (entry.userId ? [entry.userId] : []))
-    )
-    return options.users.filter((user) => !granted.has(user.id))
-  }, [entries, options.users])
-
-  const availableRoles = useMemo(() => {
-    const granted = new Set(
-      entries.flatMap((entry) => (entry.roleId ? [entry.roleId] : []))
-    )
-    return options.roles.filter((role) => !granted.has(role.id))
-  }, [entries, options.roles])
+  const availableOptions = useMemo(
+    () => availableAccessOptions(entries, options),
+    [entries, options]
+  )
 
   async function handleGrant() {
     const id = Number(selectedId)
@@ -227,192 +548,37 @@ export function RepositoryAccessEditor({
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Access Control</CardTitle>
-        <CardDescription>
-          Grant read access to individual users or everyone assigned a role.
-          Repository owners and administrators always retain management access.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-5">
-        {isPublic ? (
-          <Alert>
-            <Shield className="h-4 w-4" />
-            <AlertTitle>Public repository</AlertTitle>
-            <AlertDescription>
-              Every authenticated repository user can read this repository.
-              Grants below remain recorded if the repository becomes private.
-            </AlertDescription>
-          </Alert>
-        ) : null}
-
-        {loading ? (
-          <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Loading repository access…
-          </div>
-        ) : error ? (
-          <Alert variant="destructive">
-            <AlertCircle className="h-4 w-4" />
-            <AlertTitle>Access list unavailable</AlertTitle>
-            <AlertDescription className="flex items-center justify-between gap-3">
-              <span>{error}</span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setLoading(true)
-                  setError(null)
-                  void load()
-                }}
-              >
-                Retry
-              </Button>
-            </AlertDescription>
-          </Alert>
-        ) : (
-          <>
-            {grantKind === "user" ? (
-              <form className="flex gap-2" onSubmit={handleUserSearch}>
-                <div className="relative min-w-0 flex-1">
-                  <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-                  <Input
-                    value={userSearch}
-                    onChange={(event) => setUserSearch(event.target.value)}
-                    className="pl-9"
-                    placeholder="Search by name or email"
-                    aria-label="Search users to grant"
-                    maxLength={100}
-                  />
-                </div>
-                <Button
-                  type="submit"
-                  variant="outline"
-                  disabled={loadingUserOptions}
-                >
-                  {loadingUserOptions ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : null}
-                  Search users
-                </Button>
-              </form>
-            ) : null}
-            <div className="grid gap-3 sm:grid-cols-[140px_1fr_auto]">
-              <Select
-                value={grantKind}
-                onValueChange={(value) => {
-                  if (value === "user" || value === "role") {
-                    setGrantKind(value)
-                    setSelectedId("")
-                  }
-                }}
-              >
-                <SelectTrigger aria-label="Grant type">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="user">User</SelectItem>
-                  <SelectItem value="role">Role</SelectItem>
-                </SelectContent>
-              </Select>
-              <Select value={selectedId} onValueChange={setSelectedId}>
-                <SelectTrigger
-                  aria-label={`Select ${grantKind}`}
-                  disabled={loadingUserOptions}
-                >
-                  <SelectValue placeholder={`Select a ${grantKind}`} />
-                </SelectTrigger>
-                <SelectContent>
-                  {grantKind === "user"
-                    ? availableUsers.map((user) => (
-                        <SelectItem key={user.id} value={String(user.id)}>
-                          {user.name} ({user.email})
-                        </SelectItem>
-                      ))
-                    : availableRoles.map((role) => (
-                        <SelectItem key={role.id} value={String(role.id)}>
-                          {role.name}
-                        </SelectItem>
-                      ))}
-                </SelectContent>
-              </Select>
-              <Button
-                onClick={() => void handleGrant()}
-                disabled={!selectedId || saving}
-              >
-                {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                Grant access
-              </Button>
-            </div>
-            {grantKind === "user" && options.nextUserOffset !== null ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  void loadUserOptions(
-                    appliedUserSearch,
-                    options.nextUserOffset!,
-                    true
-                  )
-                }
-                disabled={loadingUserOptions}
-              >
-                {loadingUserOptions ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                ) : null}
-                Load more users
-              </Button>
-            ) : null}
-
-            <div className="divide-y rounded-md border">
-              {entries.length === 0 ? (
-                <p className="p-4 text-sm text-muted-foreground">
-                  No additional user or role grants.
-                </p>
-              ) : (
-                entries.map((entry) => (
-                  <div
-                    key={entry.id}
-                    className="flex items-center justify-between gap-3 p-3"
-                  >
-                    <div className="flex min-w-0 items-center gap-3">
-                      {entry.userId ? (
-                        <UserRound className="h-4 w-4 shrink-0" />
-                      ) : (
-                        <Shield className="h-4 w-4 shrink-0" />
-                      )}
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium">
-                          {accessLabel(entry)}
-                        </p>
-                        <p className="truncate text-xs text-muted-foreground">
-                          {entry.userId
-                            ? entry.userEmail || "Individual user"
-                            : "All users assigned this role"}
-                        </p>
-                      </div>
-                      <Badge variant="outline">
-                        {entry.userId ? "User" : "Role"}
-                      </Badge>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => void handleRevoke(entry)}
-                      disabled={saving}
-                      aria-label={`Revoke access for ${accessLabel(entry)}`}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </div>
-                ))
-              )}
-            </div>
-          </>
-        )}
-      </CardContent>
-    </Card>
+    <AccessEditorView
+      appliedUserSearch={appliedUserSearch}
+      availableRoles={availableOptions.roles}
+      availableUsers={availableOptions.users}
+      entries={entries}
+      error={error}
+      grantKind={grantKind}
+      isPublic={isPublic}
+      loading={loading}
+      loadingUserOptions={loadingUserOptions}
+      nextUserOffset={options.nextUserOffset}
+      onGrant={() => void handleGrant()}
+      onGrantKindChange={(kind) => {
+        setGrantKind(kind)
+        setSelectedId("")
+      }}
+      onLoadUserOptions={(search, offset, append) =>
+        void loadUserOptions(search, offset, append)
+      }
+      onRetry={() => {
+        setLoading(true)
+        setError(null)
+        void load()
+      }}
+      onRevoke={(entry) => void handleRevoke(entry)}
+      onSearch={handleUserSearch}
+      onSelectedIdChange={setSelectedId}
+      onUserSearchChange={setUserSearch}
+      saving={saving}
+      selectedId={selectedId}
+      userSearch={userSearch}
+    />
   )
 }

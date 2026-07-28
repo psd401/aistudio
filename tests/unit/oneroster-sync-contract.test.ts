@@ -5,11 +5,12 @@
  * its duplicated setting names and deterministic invocation ARN from drifting.
  */
 
-import fs from "node:fs";
+
 import path from "node:path";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 function source(relativePath: string): string {
-  return fs.readFileSync(path.join(process.cwd(), relativePath), "utf8");
+  return validatedFs.readFileSync(path.join(process.cwd(), relativePath), "utf8");
 }
 
 describe("OneRoster sync cross-bundle contracts", () => {
@@ -18,10 +19,13 @@ describe("OneRoster sync cross-bundle contracts", () => {
     "infra/lambdas/oneroster-sync/config.ts"
   );
   const db = source("infra/lambdas/oneroster-sync/db.ts");
+  const groupDb = source("infra/lambdas/group-sync/db.ts");
+  const appGroupReconciler = source("lib/db/drizzle/user-roles.ts");
 
   it("keeps all shared database-first setting keys synchronized", () => {
     for (const key of [
       "ROSTER_SYNC_ENABLED",
+      "ROSTER_ROLE_SYNC_ENABLED",
       "ONEROSTER_BASE_URL",
       "ONEROSTER_AUTH_MODE",
       "ONEROSTER_CREDENTIALS_SECRET_ARN",
@@ -43,10 +47,41 @@ describe("OneRoster sync cross-bundle contracts", () => {
     );
   });
 
-  it("chunks writes below 5,000 rows and limits mutation SQL to roster tables", () => {
+  it("chunks collection writes below 5,000 rows", () => {
     expect(db).toContain("const UPSERT_CHUNK_SIZE = 4_000");
-    expect(db).not.toMatch(/\b(?:INSERT INTO|UPDATE|DELETE FROM)\s+users\b/i);
-    expect(db).not.toMatch(/\b(?:INSERT INTO|UPDATE|DELETE FROM)\s+user_roles\b/i);
+  });
+
+  it("source-scopes role writes and structurally excludes administrator", () => {
+    expect(db).toContain(
+      "SELECT computed.user_id, computed.role_id, 'oneroster'"
+    );
+    expect(db).toContain("WHERE managed.source = 'oneroster'");
+    expect(db).toContain(
+      "lower(protected_role.name) = 'administrator'"
+    );
+    expect(db).not.toContain(
+      "SELECT computed.user_id, computed.role_id, 'administrator'"
+    );
+  });
+
+  it("hands overlapping unique rows to the surviving managed provider", () => {
+    expect(db).toContain("SET source = 'group-sync'");
+    expect(groupDb).toContain("SET source = 'oneroster'");
+    expect(appGroupReconciler).toContain('source: "oneroster"');
+
+    for (const roleName of [
+      "teacher",
+      "aide",
+      "proctor",
+      "administrator",
+      "districtadministrator",
+      "siteadministrator",
+      "systemadministrator",
+    ]) {
+      expect(db).toContain(roleName);
+      expect(groupDb).toContain(roleName);
+      expect(appGroupReconciler).toContain(roleName);
+    }
   });
 
   it("applies absence deactivation only inside collection transactions", () => {

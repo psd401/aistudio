@@ -134,56 +134,38 @@ export const SearchGraphNodesUI = makeAssistantToolUI<SearchGraphNodesArgs, Sear
 // Propose Decision UI
 // ============================================================================
 
-const ProposedDecisionRenderer = ({
+function buildProposedDecisionView(
+  args: ProposeDecisionArgs,
+  result?: ProposeDecisionResult
+) {
+  const data = result ?? args
+  const nodes = data?.nodes ?? []
+  const groupedNodes = nodes.reduce<Record<string, typeof nodes>>(
+    (groups, node) => {
+      const type = node.nodeType || 'unknown'
+      if (!groups[type]) groups[type] = []
+      groups[type].push(node)
+      return groups
+    },
+    Object.create(null) as Record<string, typeof nodes>
+  )
+  return {
+    completeness: result?.completeness,
+    edges: data?.edges ?? [],
+    groupedNodes,
+    summary: result?.summary ?? args?.summary ?? '',
+  }
+}
+
+function ProposedDecisionContent({
   args,
   result,
-  status,
 }: {
   args: ProposeDecisionArgs
   result?: ProposeDecisionResult
-  status: ToolCallMessagePartStatus
-}) => {
-  if (status.type === 'running' || status.type === 'requires-action') {
-    return (
-      <Card className="border-amber-200 bg-amber-50/50">
-        <CardHeader className="pb-3">
-          <div className="flex items-center gap-2">
-            <Loader2 className="h-4 w-4 text-amber-600 animate-spin" />
-            <CardTitle className="text-sm text-amber-900">Preparing decision proposal...</CardTitle>
-          </div>
-        </CardHeader>
-      </Card>
-    )
-  }
-
-  if (status.type === 'incomplete' && status.reason === 'error') {
-    return (
-      <Card className="border-red-200 bg-red-50/50">
-        <CardHeader className="pb-3">
-          <div className="flex items-center gap-2">
-            <XCircle className="h-4 w-4 text-red-600" />
-            <CardTitle className="text-sm text-red-900">Failed to create proposal</CardTitle>
-          </div>
-        </CardHeader>
-      </Card>
-    )
-  }
-
-  const data = result || args
-  const nodes = data?.nodes || []
-  const edges = data?.edges || []
-  const completeness = result?.completeness
-  const summary = result?.summary || args?.summary || ''
-
-  // Group nodes by type
-  // Use Object.create(null) to avoid prototype pollution — nodeType is AI-generated
-  // content and could be a prototype key like 'constructor' or '__proto__'.
-  const groupedNodes = nodes.reduce<Record<string, typeof nodes>>((acc, node) => {
-    const type = node.nodeType || 'unknown'
-    if (!acc[type]) acc[type] = []
-    acc[type].push(node)
-    return acc
-  }, Object.create(null) as Record<string, typeof nodes>)
+}) {
+  const { completeness, edges, groupedNodes, summary } =
+    buildProposedDecisionView(args, result)
 
   return (
     <Card className="border-amber-200 bg-amber-50/50">
@@ -268,6 +250,42 @@ const ProposedDecisionRenderer = ({
   )
 }
 
+const ProposedDecisionRenderer = ({
+  args,
+  result,
+  status,
+}: {
+  args: ProposeDecisionArgs
+  result?: ProposeDecisionResult
+  status: ToolCallMessagePartStatus
+}) => {
+  if (status.type === 'running' || status.type === 'requires-action') {
+    return (
+      <Card className="border-amber-200 bg-amber-50/50">
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <Loader2 className="h-4 w-4 text-amber-600 animate-spin" />
+            <CardTitle className="text-sm text-amber-900">Preparing decision proposal...</CardTitle>
+          </div>
+        </CardHeader>
+      </Card>
+    )
+  }
+  if (status.type === 'incomplete' && status.reason === 'error') {
+    return (
+      <Card className="border-red-200 bg-red-50/50">
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <XCircle className="h-4 w-4 text-red-600" />
+            <CardTitle className="text-sm text-red-900">Failed to create proposal</CardTitle>
+          </div>
+        </CardHeader>
+      </Card>
+    )
+  }
+  return <ProposedDecisionContent args={args} result={result} />
+}
+
 export const ProposedDecisionUI = makeAssistantToolUI<ProposeDecisionArgs, ProposeDecisionResult>({
   toolName: 'propose_decision',
   render: (props) => (
@@ -281,57 +299,32 @@ export const ProposedDecisionUI = makeAssistantToolUI<ProposeDecisionArgs, Propo
 // Commit Decision UI
 // ============================================================================
 
-const CommittedDecisionRenderer = ({
+type SuccessfulCommitDecisionResult = Extract<
+  CommitDecisionResult,
+  { success: true }
+>
+
+function CommitFailureCard({ error }: { error?: string }) {
+  return (
+    <Card className="border-red-200 bg-red-50/50">
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2">
+          <XCircle className="h-4 w-4 text-red-600" />
+          <CardTitle className="text-sm text-red-900">Commit failed</CardTitle>
+        </div>
+        {error && <p className="text-xs text-red-700 mt-1">{error}</p>}
+      </CardHeader>
+    </Card>
+  )
+}
+
+function CommittedDecisionContent({
   args,
   result,
-  status,
 }: {
   args: CommitDecisionArgs
-  result?: CommitDecisionResult
-  status: ToolCallMessagePartStatus
-}) => {
-  if (status.type === 'running' || status.type === 'requires-action') {
-    return (
-      <Card className="border-blue-200 bg-blue-50/50">
-        <CardHeader className="pb-3">
-          <div className="flex items-center gap-2">
-            <Loader2 className="h-4 w-4 text-blue-600 animate-spin" />
-            <CardTitle className="text-sm text-blue-900">Committing decision to graph...</CardTitle>
-          </div>
-        </CardHeader>
-      </Card>
-    )
-  }
-
-  if (status.type === 'incomplete' && status.reason === 'error') {
-    return (
-      <Card className="border-red-200 bg-red-50/50">
-        <CardHeader className="pb-3">
-          <div className="flex items-center gap-2">
-            <XCircle className="h-4 w-4 text-red-600" />
-            <CardTitle className="text-sm text-red-900">Failed to commit decision</CardTitle>
-          </div>
-        </CardHeader>
-      </Card>
-    )
-  }
-
-  if (result && !result.success) {
-    return (
-      <Card className="border-red-200 bg-red-50/50">
-        <CardHeader className="pb-3">
-          <div className="flex items-center gap-2">
-            <XCircle className="h-4 w-4 text-red-600" />
-            <CardTitle className="text-sm text-red-900">Commit failed</CardTitle>
-          </div>
-          {result.error && (
-            <p className="text-xs text-red-700 mt-1">{result.error}</p>
-          )}
-        </CardHeader>
-      </Card>
-    )
-  }
-
+  result?: SuccessfulCommitDecisionResult
+}) {
   const completenessScore = result?.completenessScore
   const warnings = result?.warnings ?? []
 
@@ -371,6 +364,45 @@ const CommittedDecisionRenderer = ({
       )}
     </Card>
   )
+}
+
+const CommittedDecisionRenderer = ({
+  args,
+  result,
+  status,
+}: {
+  args: CommitDecisionArgs
+  result?: CommitDecisionResult
+  status: ToolCallMessagePartStatus
+}) => {
+  if (status.type === 'running' || status.type === 'requires-action') {
+    return (
+      <Card className="border-blue-200 bg-blue-50/50">
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <Loader2 className="h-4 w-4 text-blue-600 animate-spin" />
+            <CardTitle className="text-sm text-blue-900">Committing decision to graph...</CardTitle>
+          </div>
+        </CardHeader>
+      </Card>
+    )
+  }
+  if (status.type === 'incomplete' && status.reason === 'error') {
+    return (
+      <Card className="border-red-200 bg-red-50/50">
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <XCircle className="h-4 w-4 text-red-600" />
+            <CardTitle className="text-sm text-red-900">Failed to commit decision</CardTitle>
+          </div>
+        </CardHeader>
+      </Card>
+    )
+  }
+  if (result && !result.success) {
+    return <CommitFailureCard error={result.error} />
+  }
+  return <CommittedDecisionContent args={args} result={result} />
 }
 
 export const CommittedDecisionUI = makeAssistantToolUI<CommitDecisionArgs, CommitDecisionResult>({

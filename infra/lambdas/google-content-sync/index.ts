@@ -185,7 +185,7 @@ async function ensureDatabaseCredentials(): Promise<void> {
         typeof parsed.username !== "string" ||
         typeof parsed.password !== "string"
       ) {
-        throw new Error("Database secret is missing username or password");
+        throw new TypeError("Database secret is missing username or password");
       }
       process.env.DB_HOST = databaseHost;
       process.env.DB_PORT = process.env.DATABASE_PORT ?? "5432";
@@ -408,6 +408,43 @@ async function claimSync(
   }, "googleContent.claimSync");
 }
 
+type GoogleExportFormat = NonNullable<
+  ReturnType<typeof resolveGoogleDriveExportFormat>
+>;
+
+function isGoogleDriveMissingError(
+  error: unknown,
+): error is GoogleDriveApiError {
+  return (
+    error instanceof GoogleDriveApiError &&
+    [403, 404].includes(error.status)
+  );
+}
+
+function sourceIdentityFields(
+  file: GoogleDriveFile,
+  selectedVia: string[],
+  format: GoogleExportFormat | null | undefined,
+  pendingDownloadOperation?: string,
+) {
+  return {
+    driveId: file.driveId ?? null,
+    name: file.name,
+    mimeType: file.mimeType,
+    parentIds: file.parents,
+    modifiedTime: file.modifiedTime
+      ? new Date(file.modifiedTime)
+      : null,
+    checksum: file.md5Checksum ?? null,
+    status: format ? ("active" as const) : ("unsupported" as const),
+    metadata: sourceMetadata(
+      file,
+      selectedVia,
+      pendingDownloadOperation,
+    ),
+  };
+}
+
 async function ensureSourceIdentity(input: {
   context: ConnectorContext;
   file: GoogleDriveFile;
@@ -462,23 +499,15 @@ async function ensureSourceIdentity(input: {
       await tx
         .update(repositoryConnectorSources)
         .set({
-          driveId: input.file.driveId ?? null,
-          name: input.file.name,
-          mimeType: input.file.mimeType,
-          parentIds: input.file.parents,
-          modifiedTime: input.file.modifiedTime
-            ? new Date(input.file.modifiedTime)
-            : null,
-          checksum: input.file.md5Checksum ?? null,
-          status: format ? "active" : "unsupported",
+          ...sourceIdentityFields(
+            input.file,
+            input.selectedVia,
+            format,
+            existing.metadata.pendingDownloadOperation,
+          ),
           missingSince: null,
           removedAt: null,
           lastSeenAt: now,
-          metadata: sourceMetadata(
-            input.file,
-            input.selectedVia,
-            existing.metadata.pendingDownloadOperation,
-          ),
           updatedAt: now,
         })
         .where(eq(repositoryConnectorSources.id, existing.sourceId));
@@ -523,16 +552,7 @@ async function ensureSourceIdentity(input: {
         connectorId: input.context.connector.id,
         repositoryItemId: item.id,
         externalId: input.file.id,
-        driveId: input.file.driveId ?? null,
-        name: input.file.name,
-        mimeType: input.file.mimeType,
-        parentIds: input.file.parents,
-        modifiedTime: input.file.modifiedTime
-          ? new Date(input.file.modifiedTime)
-          : null,
-        checksum: input.file.md5Checksum ?? null,
-        status: format ? "active" : "unsupported",
-        metadata: sourceMetadata(input.file, input.selectedVia),
+        ...sourceIdentityFields(input.file, input.selectedVia, format),
       })
       .returning({ id: repositoryConnectorSources.id });
     if (!source) throw new Error("Failed to create synchronized source");
@@ -546,25 +566,32 @@ async function ensureSourceIdentity(input: {
   }, "googleContent.ensureSourceIdentity");
 }
 
-async function importFile(
-  context: ConnectorContext,
-  client: GoogleDriveClient,
-  file: GoogleDriveFile,
-  selectedVia: string[],
-): Promise<ImportOutcome> {
-  const format = resolveGoogleDriveExportFormat(file.mimeType);
-  const identity = await ensureSourceIdentity({ context, file, selectedVia });
-  if (!format) return identity.created ? "created" : "unchanged";
-  assertGoogleSourceMetadataSize(file.size, context.maximumSourceBytes);
+type SourceIdentity = Awaited<ReturnType<typeof ensureSourceIdentity>>;
 
-  const revision = sourceRevision(file);
-  if (
-    identity.sourceRevision === revision &&
-    !identity.pendingDownloadOperation
-  ) {
-    return "unchanged";
-  }
+interface DownloadedGoogleSource {
+  byteSize: number;
+  fileName: string;
+  objectKey: string;
+  sha256: string;
+}
 
+interface DownloadGoogleSourceInput {
+  client: GoogleDriveClient;
+  context: ConnectorContext;
+  file: GoogleDriveFile;
+  format: GoogleExportFormat;
+  identity: SourceIdentity;
+  selectedVia: string[];
+}
+
+async function downloadGoogleSource({
+  client,
+  context,
+  file,
+  format,
+  identity,
+  selectedVia,
+}: DownloadGoogleSourceInput): Promise<DownloadedGoogleSource | null> {
   let downloaded;
   try {
     downloaded = await client.downloadFile(
@@ -579,13 +606,17 @@ async function importFile(
         db
           .update(repositoryConnectorSources)
           .set({
-            metadata: sourceMetadata(file, selectedVia, error.operationName),
+            metadata: sourceMetadata(
+              file,
+              selectedVia,
+              error.operationName,
+            ),
             updatedAt: new Date(),
           })
           .where(eq(repositoryConnectorSources.id, identity.sourceId)),
       "googleContent.deferDownload",
     );
-    return "deferred";
+    return null;
   }
 
   if (!downloaded.response.body) {
@@ -623,8 +654,46 @@ async function importFile(
     leavePartsOnError: false,
   }).done();
   const byteSize = meter.getByteSize();
-  const sha256 = meter.digestSha256();
-  if (byteSize <= 0) throw new Error("Google Drive download was empty");
+  if (byteSize <= 0) {
+    throw new Error("Google Drive download was empty");
+  }
+  return {
+    byteSize,
+    fileName,
+    objectKey,
+    sha256: meter.digestSha256(),
+  };
+}
+
+async function importFile(
+  context: ConnectorContext,
+  client: GoogleDriveClient,
+  file: GoogleDriveFile,
+  selectedVia: string[],
+): Promise<ImportOutcome> {
+  const format = resolveGoogleDriveExportFormat(file.mimeType);
+  const identity = await ensureSourceIdentity({ context, file, selectedVia });
+  if (!format) return identity.created ? "created" : "unchanged";
+  assertGoogleSourceMetadataSize(file.size, context.maximumSourceBytes);
+
+  const revision = sourceRevision(file);
+  if (
+    identity.sourceRevision === revision &&
+    !identity.pendingDownloadOperation
+  ) {
+    return "unchanged";
+  }
+
+  const downloaded = await downloadGoogleSource({
+    context,
+    client,
+    file,
+    selectedVia,
+    format,
+    identity,
+  });
+  if (!downloaded) return "deferred";
+  const { byteSize, fileName, objectKey, sha256 } = downloaded;
 
   const registered = await executeTransaction(async (tx) => {
     const [connector] = await tx
@@ -748,6 +817,80 @@ async function resolveShortcut(
   return client.getFile(targetId);
 }
 
+type AddDiscoveredFile = (
+  candidate: GoogleDriveFile,
+  selectedVia: string,
+) => Promise<void>;
+
+async function enumerateSharedDriveSelection(
+  client: GoogleDriveClient,
+  selection: RepositoryConnectorSelectionRow,
+  add: AddDiscoveredFile,
+): Promise<void> {
+  let pageToken: string | null = null;
+  do {
+    const page = await client.listSharedDriveFiles(
+      selection.externalId,
+      pageToken,
+    );
+    for (const file of page.values) {
+      await add(file, selection.externalId);
+    }
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+}
+
+async function collectFolderChildren(
+  children: GoogleDriveFile[],
+  selectionId: string,
+  pendingFolders: string[],
+  add: AddDiscoveredFile,
+): Promise<void> {
+  for (const child of children) {
+    if (child.mimeType === GOOGLE_FOLDER_MIME_TYPE) {
+      pendingFolders.push(child.id);
+    } else {
+      await add(child, selectionId);
+    }
+  }
+}
+
+async function enumerateFileSelection(
+  client: GoogleDriveClient,
+  selection: RepositoryConnectorSelectionRow,
+  budget: GoogleDriveSnapshotBudget,
+  add: AddDiscoveredFile,
+): Promise<void> {
+  const selected = await client.getFile(selection.externalId);
+  if (
+    selected.mimeType !== GOOGLE_FOLDER_MIME_TYPE ||
+    !selection.includeDescendants
+  ) {
+    await add(selected, selection.externalId);
+    return;
+  }
+
+  const pendingFolders = [selected.id];
+  const visitedFolders = new Set<string>();
+  while (pendingFolders.length > 0) {
+    const folderId = pendingFolders.shift();
+    if (!folderId || visitedFolders.has(folderId)) continue;
+    visitedFolders.add(folderId);
+    budget.recordFolderVisit();
+    let pageToken: string | null = null;
+    do {
+      const page = await client.listChildren(folderId, pageToken);
+      await collectFolderChildren(
+        page.values,
+        selection.externalId,
+        pendingFolders,
+        add,
+      );
+      pageToken = page.nextPageToken;
+    } while (pageToken);
+  }
+}
+
 async function enumerateInitialFiles(
   context: ConnectorContext,
   client: GoogleDriveClient,
@@ -779,53 +922,14 @@ async function enumerateInitialFiles(
   for (const selection of context.selections) {
     try {
       if (selection.selectionKind === "drive") {
-        let pageToken: string | null = null;
-        do {
-          const page = await client.listSharedDriveFiles(
-            selection.externalId,
-            pageToken,
-          );
-          for (const file of page.values) {
-            await add(file, selection.externalId);
-          }
-          pageToken = page.nextPageToken;
-        } while (pageToken);
+        await enumerateSharedDriveSelection(client, selection, add);
         continue;
       }
-
-      const selected = await client.getFile(selection.externalId);
-      if (
-        selected.mimeType !== GOOGLE_FOLDER_MIME_TYPE ||
-        !selection.includeDescendants
-      ) {
-        await add(selected, selection.externalId);
-        continue;
-      }
-      const pendingFolders = [selected.id];
-      const visitedFolders = new Set<string>();
-      while (pendingFolders.length > 0) {
-        const folderId = pendingFolders.shift();
-        if (!folderId || visitedFolders.has(folderId)) continue;
-        visitedFolders.add(folderId);
-        budget.recordFolderVisit();
-        let pageToken: string | null = null;
-        do {
-          const page = await client.listChildren(folderId, pageToken);
-          for (const child of page.values) {
-            if (child.mimeType === GOOGLE_FOLDER_MIME_TYPE) {
-              pendingFolders.push(child.id);
-            } else {
-              await add(child, selection.externalId);
-            }
-          }
-          pageToken = page.nextPageToken;
-        } while (pageToken);
-      }
+      await enumerateFileSelection(client, selection, budget, add);
     } catch (error) {
       if (
         selection.selectionKind !== "drive" &&
-        error instanceof GoogleDriveApiError &&
-        (error.status === 403 || error.status === 404)
+        isGoogleDriveMissingError(error)
       ) {
         inaccessibleSelectionCount += 1;
         log.error("Google Drive selection is no longer accessible", {
@@ -890,12 +994,7 @@ async function selectedViaForFile(
       const parent = await client.getFile(parentId);
       pendingParents.push(...parent.parents);
     } catch (error) {
-      if (
-        error instanceof GoogleDriveApiError &&
-        (error.status === 403 || error.status === 404)
-      ) {
-        continue;
-      }
+      if (isGoogleDriveMissingError(error)) continue;
       throw error;
     }
   }
@@ -1178,6 +1277,87 @@ async function retryDeferredDownloads(
   }
 }
 
+type GoogleDriveChange = Awaited<
+  ReturnType<GoogleDriveClient["listChanges"]>
+>["values"][number];
+
+async function processGoogleDriveChange(
+  context: ConnectorContext,
+  client: GoogleDriveClient,
+  change: GoogleDriveChange,
+  counters: SyncCounters,
+): Promise<boolean> {
+  if (change.removed || !change.file || change.file.trashed) {
+    if (await markSourceMissing(context.connector.id, change.fileId)) {
+      counters.missing += 1;
+    }
+    return false;
+  }
+  try {
+    const file = await resolveShortcut(client, change.file);
+    if (file.mimeType === GOOGLE_FOLDER_MIME_TYPE) return true;
+    const selectedVia = await selectedViaForFile(context, client, file);
+    if (selectedVia.length === 0) {
+      if (await markSourceMissing(context.connector.id, file.id)) {
+        counters.missing += 1;
+      }
+      return false;
+    }
+    await importFileIsolated(
+      context,
+      client,
+      file,
+      selectedVia,
+      counters,
+    );
+    return false;
+  } catch (error) {
+    if (
+      error instanceof ConnectorRevokedError ||
+      error instanceof ConnectorSelectionChangedError
+    ) {
+      throw error;
+    }
+    if (!isGoogleDriveMissingError(error)) throw error;
+    if (
+      await markSourceMissing(context.connector.id, change.fileId)
+    ) {
+      counters.missing += 1;
+    } else {
+      counters.failed += 1;
+    }
+    return false;
+  }
+}
+
+async function persistSyncCursor(
+  context: ConnectorContext,
+  cursor: string,
+  operation: string,
+): Promise<void> {
+  const persisted = await executeQuery(
+    (db) =>
+      db
+        .update(repositoryConnectors)
+        .set({ cursor, updatedAt: new Date() })
+        .where(
+          and(
+            eq(repositoryConnectors.id, context.connector.id),
+            eq(
+              repositoryConnectors.selectionRevision,
+              context.connector.selectionRevision,
+            ),
+            ne(repositoryConnectors.status, "revoked"),
+          ),
+        )
+        .returning({ id: repositoryConnectors.id }),
+    operation,
+  );
+  if (persisted.length === 0) {
+    throw new ConnectorSelectionChangedError();
+  }
+}
+
 async function reconcileChanges(
   context: ConnectorContext,
   client: GoogleDriveClient,
@@ -1193,99 +1373,31 @@ async function reconcileChanges(
     );
     for (const change of page.values) {
       counters.discovered += 1;
-      if (change.removed || !change.file || change.file.trashed) {
-        if (await markSourceMissing(context.connector.id, change.fileId)) {
-          counters.missing += 1;
-        }
-        continue;
-      }
-      try {
-        const file = await resolveShortcut(client, change.file);
-        if (file.mimeType === GOOGLE_FOLDER_MIME_TYPE) {
-          // A folder move may add or remove an entire subtree without emitting
-          // a child change for every descendant. Rebuild selection membership
-          // after the cursor page is durable.
-          requiresSelectionSnapshot = true;
-          continue;
-        }
-        const selectedVia = await selectedViaForFile(context, client, file);
-        if (selectedVia.length === 0) {
-          if (await markSourceMissing(context.connector.id, file.id)) {
-            counters.missing += 1;
-          }
-          continue;
-        }
-        await importFileIsolated(context, client, file, selectedVia, counters);
-      } catch (error) {
-        if (
-          error instanceof ConnectorRevokedError ||
-          error instanceof ConnectorSelectionChangedError
-        ) {
-          throw error;
-        }
-        if (
-          error instanceof GoogleDriveApiError &&
-          (error.status === 403 || error.status === 404)
-        ) {
-          if (await markSourceMissing(context.connector.id, change.fileId)) {
-            counters.missing += 1;
-          } else {
-            counters.failed += 1;
-          }
-          continue;
-        }
-        throw error;
-      }
+      requiresSelectionSnapshot =
+        (await processGoogleDriveChange(
+          context,
+          client,
+          change,
+          counters,
+        )) || requiresSelectionSnapshot;
     }
     cursor = page.nextPageToken ?? page.newStartPageToken ?? cursor;
     if (!requiresSelectionSnapshot) {
-      const persisted = await executeQuery(
-        (db) =>
-          db
-            .update(repositoryConnectors)
-            .set({ cursor, updatedAt: new Date() })
-            .where(
-              and(
-                eq(repositoryConnectors.id, context.connector.id),
-                eq(
-                  repositoryConnectors.selectionRevision,
-                  context.connector.selectionRevision,
-                ),
-                ne(repositoryConnectors.status, "revoked"),
-              ),
-            )
-            .returning({ id: repositoryConnectors.id }),
+      await persistSyncCursor(
+        context,
+        cursor,
         "googleContent.persistCursor",
       );
-      if (persisted.length === 0) {
-        throw new ConnectorSelectionChangedError();
-      }
     }
     if (!page.nextPageToken) break;
   }
   if (requiresSelectionSnapshot) {
     await reconcileSelectionSnapshot(context, client, counters);
-    const persisted = await executeQuery(
-      (db) =>
-        db
-          .update(repositoryConnectors)
-          .set({ cursor, updatedAt: new Date() })
-          .where(
-            and(
-              eq(repositoryConnectors.id, context.connector.id),
-              eq(
-                repositoryConnectors.selectionRevision,
-                context.connector.selectionRevision,
-              ),
-              ne(repositoryConnectors.status, "revoked"),
-            ),
-          )
-          .returning({ id: repositoryConnectors.id }),
+    await persistSyncCursor(
+      context,
+      cursor,
       "googleContent.persistSnapshotCursor",
     );
-    if (persisted.length === 0) {
-      throw new ConnectorSelectionChangedError();
-    }
   }
   return cursor;
 }
@@ -1517,6 +1629,94 @@ async function failSync(
   }, "googleContent.failSync");
 }
 
+function emptySyncCounters(): SyncCounters {
+  return {
+    discovered: 0,
+    created: 0,
+    updated: 0,
+    unchanged: 0,
+    missing: 0,
+    failed: 0,
+    deferred: 0,
+  };
+}
+
+async function resolveSyncCursor(
+  context: ConnectorContext,
+  client: GoogleDriveClient,
+  counters: SyncCounters,
+  runId: string,
+): Promise<string> {
+  if (!context.connector.cursor) {
+    return reconcileInitial(context, client, counters);
+  }
+  try {
+    return await reconcileChanges(
+      context,
+      client,
+      context.connector.cursor,
+      counters,
+    );
+  } catch (error) {
+    if (!(error instanceof GoogleDriveApiError) || error.status !== 410) {
+      throw error;
+    }
+    log.info(
+      "Google Drive cursor expired; rebuilding selection snapshot",
+      {
+        connectorId: context.connector.id,
+        runId,
+      },
+    );
+    return reconcileInitial(context, client, counters);
+  }
+}
+
+async function handleSyncFailure(
+  message: SyncMessage,
+  runId: string,
+  traceId: string,
+  error: unknown,
+): Promise<void> {
+  if (error instanceof ConnectorRevokedError) {
+    await abandonClaimedSync(runId, "CONNECTOR_REVOKED", error.message);
+    log.info("Google Drive synchronization stopped after revocation", {
+      connectorId: message.connectorId,
+      runId,
+      traceId,
+    });
+    return;
+  }
+  if (error instanceof ConnectorSelectionChangedError) {
+    await abandonClaimedSync(runId, "SELECTIONS_CHANGED", error.message);
+    log.info(
+      "Google Drive synchronization stopped after selection change",
+      {
+        connectorId: message.connectorId,
+        runId,
+        traceId,
+      },
+    );
+    return;
+  }
+  if (isGoogleDriveMissingError(error)) {
+    await markConnectorAccessLost(message.connectorId);
+    const config = await getContentPlatformConfig();
+    await applyDeletionGrace(
+      message.connectorId,
+      config.deletionGraceDays,
+    );
+  }
+  await failSync(message.connectorId, runId, error);
+  log.error("Google Drive synchronization failed", {
+    connectorId: message.connectorId,
+    runId,
+    traceId,
+    error: error instanceof Error ? error.message : "unknown",
+  });
+  throw error;
+}
+
 async function synchronize(
   message: SyncMessage,
   traceId: string,
@@ -1544,38 +1744,14 @@ async function synchronize(
       throw new Error("Google Drive connector has no active selections");
     }
     const client = new GoogleDriveClient(await accessTokenFor(context));
-    const counters: SyncCounters = {
-      discovered: 0,
-      created: 0,
-      updated: 0,
-      unchanged: 0,
-      missing: 0,
-      failed: 0,
-      deferred: 0,
-    };
+    const counters = emptySyncCounters();
     await retryDeferredDownloads(context, client, counters);
-    let cursor: string;
-    if (context.connector.cursor) {
-      try {
-        cursor = await reconcileChanges(
-          context,
-          client,
-          context.connector.cursor,
-          counters,
-        );
-      } catch (error) {
-        if (!(error instanceof GoogleDriveApiError) || error.status !== 410) {
-          throw error;
-        }
-        log.info("Google Drive cursor expired; rebuilding selection snapshot", {
-          connectorId: context.connector.id,
-          runId,
-        });
-        cursor = await reconcileInitial(context, client, counters);
-      }
-    } else {
-      cursor = await reconcileInitial(context, client, counters);
-    }
+    const cursor = await resolveSyncCursor(
+      context,
+      client,
+      counters,
+      runId,
+    );
     await applyDeletionGrace(context.connector.id, config.deletionGraceDays);
     await renewWatch(context, client, cursor);
     const completed = await completeSync({
@@ -1603,40 +1779,7 @@ async function synchronize(
       ...counters,
     });
   } catch (error) {
-    if (error instanceof ConnectorRevokedError) {
-      await abandonClaimedSync(runId, "CONNECTOR_REVOKED", error.message);
-      log.info("Google Drive synchronization stopped after revocation", {
-        connectorId: message.connectorId,
-        runId,
-        traceId,
-      });
-      return;
-    }
-    if (error instanceof ConnectorSelectionChangedError) {
-      await abandonClaimedSync(runId, "SELECTIONS_CHANGED", error.message);
-      log.info("Google Drive synchronization stopped after selection change", {
-        connectorId: message.connectorId,
-        runId,
-        traceId,
-      });
-      return;
-    }
-    if (
-      error instanceof GoogleDriveApiError &&
-      (error.status === 403 || error.status === 404)
-    ) {
-      await markConnectorAccessLost(message.connectorId);
-      const config = await getContentPlatformConfig();
-      await applyDeletionGrace(message.connectorId, config.deletionGraceDays);
-    }
-    await failSync(message.connectorId, runId, error);
-    log.error("Google Drive synchronization failed", {
-      connectorId: message.connectorId,
-      runId,
-      traceId,
-      error: error instanceof Error ? error.message : "unknown",
-    });
-    throw error;
+    await handleSyncFailure(message, runId, traceId, error);
   }
 }
 

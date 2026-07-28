@@ -1,6 +1,13 @@
 "use client"
 
-import { useState, useEffect, useCallback, useMemo } from "react"
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  type Dispatch,
+  type SetStateAction,
+} from "react"
 import { useToast } from "@/components/ui/use-toast"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -45,145 +52,97 @@ import type { NodeConnection, PublicGraphNode } from "@/lib/graph"
 import type { SelectGraphEdge } from "@/lib/db/types"
 
 type ActiveTab = "nodes" | "edges"
+type SetNodes = Dispatch<SetStateAction<PublicGraphNode[]>>
+type SetEdges = Dispatch<SetStateAction<SelectGraphEdge[]>>
 
-export function GraphPageClient() {
-  const { toast } = useToast()
-
-  // Data state
-  const [nodes, setNodes] = useState<PublicGraphNode[]>([])
-  const [edges, setEdges] = useState<SelectGraphEdge[]>([])
-  const [loading, setLoading] = useState(true)
-
-  // Tab state
-  const [activeTab, setActiveTab] = useState<ActiveTab>("nodes")
-
-  // Filter state
-  const [nodeFilters, setNodeFilters] = useState<NodeFiltersState>({
-    search: "",
-    nodeType: "all",
-    nodeClass: "all",
-  })
-  const [edgeFilters, setEdgeFilters] = useState<EdgeFiltersState>({
-    edgeType: "all",
-  })
-
-  // Node form sheet state
-  const [nodeFormOpen, setNodeFormOpen] = useState(false)
-  const [editingNode, setEditingNode] = useState<PublicGraphNode | null>(null)
-
-  // Edge form sheet state
-  const [edgeFormOpen, setEdgeFormOpen] = useState(false)
-
-  // Node detail sheet state
-  const [detailNode, setDetailNode] = useState<PublicGraphNode | null>(null)
-  const [detailOpen, setDetailOpen] = useState(false)
-  const [connections, setConnections] = useState<NodeConnection[]>([])
-  const [loadingConnections, setLoadingConnections] = useState(false)
-
-  // Delete dialog state
-  const [deleteNodeDialog, setDeleteNodeDialog] = useState(false)
-  const [nodeToDelete, setNodeToDelete] = useState<PublicGraphNode | null>(null)
-  const [deleteEdgeDialog, setDeleteEdgeDialog] = useState(false)
-  const [edgeToDelete, setEdgeToDelete] = useState<EdgeTableRow | null>(null)
-  const [deleting, setDeleting] = useState(false)
-
-  // Derived: unique node types and classes for filter dropdowns
-  const nodeTypes = useMemo(
-    () => [...new Set(nodes.map((n) => n.nodeType))].sort(),
-    [nodes]
-  )
-  const nodeClasses = useMemo(
-    () => [...new Set(nodes.map((n) => n.nodeClass))].sort(),
-    [nodes]
-  )
-  const edgeTypes = useMemo(
-    () => [...new Set(edges.map((e) => e.edgeType))].sort(),
-    [edges]
-  )
-
-  // Node name lookup map for edge table display
-  const nodeNameMap = useMemo(() => {
-    const map = new Map<string, string>()
-    for (const node of nodes) {
-      map.set(node.id, node.name)
+function filterNodes(
+  nodes: PublicGraphNode[],
+  filters: NodeFiltersState
+): PublicGraphNode[] {
+  return nodes.filter((node) => {
+    if (filters.search) {
+      const search = filters.search.toLowerCase()
+      if (
+        !node.name.toLowerCase().includes(search) &&
+        !(node.description || "").toLowerCase().includes(search)
+      ) {
+        return false
+      }
     }
-    return map
-  }, [nodes])
+    if (filters.nodeType !== "all" && node.nodeType !== filters.nodeType) {
+      return false
+    }
+    if (filters.nodeClass !== "all" && node.nodeClass !== filters.nodeClass) {
+      return false
+    }
+    return true
+  })
+}
 
-  // Filtered nodes
-  const filteredNodes = useMemo(() => {
-    return nodes.filter((node) => {
-      if (nodeFilters.search) {
-        const search = nodeFilters.search.toLowerCase()
-        if (
-          !node.name.toLowerCase().includes(search) &&
-          !(node.description || "").toLowerCase().includes(search)
-        ) {
-          return false
-        }
-      }
-      if (
-        nodeFilters.nodeType !== "all" &&
-        node.nodeType !== nodeFilters.nodeType
-      ) {
-        return false
-      }
-      if (
-        nodeFilters.nodeClass !== "all" &&
-        node.nodeClass !== nodeFilters.nodeClass
-      ) {
-        return false
-      }
-      return true
-    })
-  }, [nodes, nodeFilters])
-
-  // Filtered edges
-  const filteredEdges = useMemo(() => {
-    return edges.filter((edge) => {
-      if (
-        edgeFilters.edgeType !== "all" &&
-        edge.edgeType !== edgeFilters.edgeType
-      ) {
-        return false
-      }
-      return true
-    })
-  }, [edges, edgeFilters])
-
-  // Table rows
-  const nodeTableRows: NodeTableRow[] = filteredNodes.map((node) => ({
+function toNodeTableRow(node: PublicGraphNode): NodeTableRow {
+  return {
     id: node.id,
     name: node.name,
     nodeType: node.nodeType,
     nodeClass: node.nodeClass,
     description: node.description,
     createdAt: node.createdAt,
-  }))
+  }
+}
 
-  const edgeTableRows: EdgeTableRow[] = filteredEdges.map((edge) => ({
+function toEdgeTableRow(
+  edge: SelectGraphEdge,
+  nodeNames: Map<string, string>
+): EdgeTableRow {
+  return {
     id: edge.id,
     sourceNodeId: edge.sourceNodeId,
-    sourceNodeName: nodeNameMap.get(edge.sourceNodeId) || "Unknown",
+    sourceNodeName: nodeNames.get(edge.sourceNodeId) || "Unknown",
     targetNodeId: edge.targetNodeId,
-    targetNodeName: nodeNameMap.get(edge.targetNodeId) || "Unknown",
+    targetNodeName: nodeNames.get(edge.targetNodeId) || "Unknown",
     edgeType: edge.edgeType,
     createdAt: edge.createdAt,
-  }))
+  }
+}
 
-  // Stats
-  const stats = useMemo(
-    () => ({
-      totalNodes: nodes.length,
-      totalEdges: edges.length,
-      nodeTypes: nodeTypes.length,
-    }),
-    [nodes.length, edges.length, nodeTypes.length]
-  )
+function useGraphTableData(
+  nodes: PublicGraphNode[],
+  edges: SelectGraphEdge[],
+  nodeFilters: NodeFiltersState,
+  edgeFilters: EdgeFiltersState
+) {
+  return useMemo(() => {
+    const nodeTypes = [...new Set(nodes.map((node) => node.nodeType))].sort()
+    const nodeClasses = [...new Set(nodes.map((node) => node.nodeClass))].sort()
+    const edgeTypes = [...new Set(edges.map((edge) => edge.edgeType))].sort()
+    const nodeNames = new Map(nodes.map((node) => [node.id, node.name]))
+    const filteredEdges =
+      edgeFilters.edgeType === "all"
+        ? edges
+        : edges.filter((edge) => edge.edgeType === edgeFilters.edgeType)
 
-  // ============================================
-  // Data Loading
-  // ============================================
+    return {
+      nodeTypes,
+      nodeClasses,
+      edgeTypes,
+      nodeTableRows: filterNodes(nodes, nodeFilters).map(toNodeTableRow),
+      edgeTableRows: filteredEdges.map((edge) =>
+        toEdgeTableRow(edge, nodeNames)
+      ),
+      stats: {
+        totalNodes: nodes.length,
+        totalEdges: edges.length,
+        nodeTypes: nodeTypes.length,
+      },
+    }
+  }, [edgeFilters.edgeType, edges, nodeFilters, nodes])
+}
+
+function useGraphData() {
+  const { toast } = useToast()
+  const [nodes, setNodes] = useState<PublicGraphNode[]>([])
+  const [edges, setEdges] = useState<SelectGraphEdge[]>([])
+  const [loading, setLoading] = useState(true)
 
   const loadData = useCallback(async () => {
     setLoading(true)
@@ -192,7 +151,6 @@ export function GraphPageClient() {
         getGraphNodes(),
         getGraphEdges(),
       ])
-
       if (nodesResult.isSuccess && nodesResult.data) {
         setNodes(nodesResult.data)
       } else if (!nodesResult.isSuccess) {
@@ -202,7 +160,6 @@ export function GraphPageClient() {
           variant: "destructive",
         })
       }
-
       if (edgesResult.isSuccess && edgesResult.data) {
         setEdges(edgesResult.data)
       } else if (!edgesResult.isSuccess) {
@@ -228,29 +185,113 @@ export function GraphPageClient() {
     loadData()
   }, [loadData])
 
-  // ============================================
-  // Node Handlers
-  // ============================================
+  return { nodes, setNodes, edges, setEdges, loading, loadData }
+}
 
-  const handleAddNode = useCallback(() => {
-    setEditingNode(null)
+function parseMetadata(value: string): Record<string, unknown> {
+  try {
+    return JSON.parse(value) as Record<string, unknown>
+  } catch {
+    return {}
+  }
+}
+
+function useNodeEditor(nodes: PublicGraphNode[], setNodes: SetNodes) {
+  const { toast } = useToast()
+  const [nodeFormOpen, setNodeFormOpen] = useState(false)
+  const [editingNode, setEditingNode] = useState<PublicGraphNode | null>(null)
+
+  const openEditor = useCallback((node: PublicGraphNode | null) => {
+    setEditingNode(node)
     setNodeFormOpen(true)
   }, [])
+  const handleAddNode = useCallback(() => openEditor(null), [openEditor])
+  const handleEditNode = useCallback(
+    (row: NodeTableRow) => {
+      const node = nodes.find((candidate) => candidate.id === row.id)
+      if (node) openEditor(node)
+    },
+    [nodes, openEditor]
+  )
+
+  const handleSaveNode = useCallback(
+    async (data: NodeFormData) => {
+      const metadata = parseMetadata(data.metadata)
+      const input = {
+        name: data.name,
+        nodeType: data.nodeType,
+        nodeClass: data.nodeClass,
+        description: data.description || null,
+        metadata,
+      }
+      const result = editingNode
+        ? await updateGraphNode(editingNode.id, input)
+        : await createGraphNode({
+            ...input,
+            description: data.description || undefined,
+          })
+      if (!result.isSuccess) {
+        const fallback = editingNode
+          ? "Failed to update node"
+          : "Failed to create node"
+        toast({
+          title: "Error",
+          description: result.message || fallback,
+          variant: "destructive",
+        })
+        throw new Error(result.message || fallback)
+      }
+      if (result.data) {
+        const savedNode = result.data
+        setNodes((previous) =>
+          editingNode
+            ? previous.map((node) =>
+                node.id === editingNode.id ? savedNode : node
+              )
+            : [savedNode, ...previous]
+        )
+      }
+      toast({
+        title: "Success",
+        description: editingNode
+          ? "Node updated successfully"
+          : "Node created successfully",
+      })
+    },
+    [editingNode, setNodes, toast]
+  )
+
+  return {
+    nodeFormOpen,
+    setNodeFormOpen,
+    editingNode,
+    openEditor,
+    handleAddNode,
+    handleEditNode,
+    handleSaveNode,
+  }
+}
+
+function useNodeDetail(
+  nodes: PublicGraphNode[],
+  openEditor: (node: PublicGraphNode | null) => void
+) {
+  const { toast } = useToast()
+  const [detailNode, setDetailNode] = useState<PublicGraphNode | null>(null)
+  const [detailOpen, setDetailOpen] = useState(false)
+  const [connections, setConnections] = useState<NodeConnection[]>([])
+  const [loadingConnections, setLoadingConnections] = useState(false)
 
   const handleViewNode = useCallback(
     async (row: NodeTableRow) => {
-      const node = nodes.find((n) => n.id === row.id)
+      const node = nodes.find((candidate) => candidate.id === row.id)
       if (!node) return
-
       setDetailNode(node)
       setDetailOpen(true)
       setLoadingConnections(true)
-
       try {
         const result = await getNodeConnections(node.id)
-        if (result.isSuccess && result.data) {
-          setConnections(result.data)
-        }
+        if (result.isSuccess && result.data) setConnections(result.data)
       } catch {
         toast({
           title: "Error",
@@ -263,65 +304,65 @@ export function GraphPageClient() {
     },
     [nodes, toast]
   )
-
-  const handleEditNode = useCallback(
-    (row: NodeTableRow) => {
-      const node = nodes.find((n) => n.id === row.id)
-      if (node) {
-        setEditingNode(node)
-        setNodeFormOpen(true)
-      }
+  const handleEditFromDetail = useCallback(
+    (node: PublicGraphNode) => {
+      setDetailOpen(false)
+      openEditor(node)
     },
-    [nodes]
+    [openEditor]
   )
 
-  const handleEditFromDetail = useCallback((node: PublicGraphNode) => {
-    setDetailOpen(false)
-    setEditingNode(node)
-    setNodeFormOpen(true)
-  }, [])
+  return {
+    detailNode,
+    detailOpen,
+    setDetailOpen,
+    connections,
+    loadingConnections,
+    handleViewNode,
+    handleEditFromDetail,
+  }
+}
 
-  const handleDeleteNodeRequest = useCallback(
-    (row: NodeTableRow) => {
-      const node = nodes.find((n) => n.id === row.id)
-      if (node) {
-        setNodeToDelete(node)
-        setDeleteNodeDialog(true)
-      }
-    },
-    [nodes]
-  )
+function useNodeDeletion(
+  nodes: PublicGraphNode[],
+  setNodes: SetNodes,
+  setEdges: SetEdges,
+  setDeleting: Dispatch<SetStateAction<boolean>>
+) {
+  const { toast } = useToast()
+  const [deleteNodeDialog, setDeleteNodeDialog] = useState(false)
+  const [nodeToDelete, setNodeToDelete] = useState<PublicGraphNode | null>(null)
 
-  const handleDeleteFromDetail = useCallback((node: PublicGraphNode) => {
-    setDetailOpen(false)
+  const requestNodeDeletion = useCallback((node: PublicGraphNode) => {
     setNodeToDelete(node)
     setDeleteNodeDialog(true)
   }, [])
-
+  const handleDeleteNodeRequest = useCallback(
+    (row: NodeTableRow) => {
+      const node = nodes.find((candidate) => candidate.id === row.id)
+      if (node) requestNodeDeletion(node)
+    },
+    [nodes, requestNodeDeletion]
+  )
   const confirmDeleteNode = useCallback(async () => {
     if (!nodeToDelete) return
-
     setDeleting(true)
     try {
       const result = await deleteGraphNode(nodeToDelete.id)
       if (!result.isSuccess) {
         throw new Error(result.message || "Failed to delete node")
       }
-
-      setNodes((prev) => prev.filter((n) => n.id !== nodeToDelete.id))
-      // Also remove edges that referenced this node
-      setEdges((prev) =>
-        prev.filter(
-          (e) =>
-            e.sourceNodeId !== nodeToDelete.id &&
-            e.targetNodeId !== nodeToDelete.id
+      setNodes((previous) =>
+        previous.filter((node) => node.id !== nodeToDelete.id)
+      )
+      setEdges((previous) =>
+        previous.filter(
+          (edge) =>
+            edge.sourceNodeId !== nodeToDelete.id &&
+            edge.targetNodeId !== nodeToDelete.id
         )
       )
-
-      toast({
-        title: "Success",
-        description: "Node deleted successfully",
-      })
+      toast({ title: "Success", description: "Node deleted successfully" })
     } catch (error) {
       toast({
         title: "Error",
@@ -334,107 +375,44 @@ export function GraphPageClient() {
       setDeleteNodeDialog(false)
       setNodeToDelete(null)
     }
-  }, [nodeToDelete, toast])
+  }, [nodeToDelete, setDeleting, setEdges, setNodes, toast])
 
-  const handleSaveNode = useCallback(
-    async (data: NodeFormData) => {
-      let parsedMetadata = {}
-      try {
-        parsedMetadata = JSON.parse(data.metadata)
-      } catch {
-        // Default to empty
-      }
+  return {
+    deleteNodeDialog,
+    setDeleteNodeDialog,
+    nodeToDelete,
+    requestNodeDeletion,
+    handleDeleteNodeRequest,
+    confirmDeleteNode,
+  }
+}
 
-      if (editingNode) {
-        // Update existing node
-        const result = await updateGraphNode(editingNode.id, {
-          name: data.name,
-          nodeType: data.nodeType,
-          nodeClass: data.nodeClass,
-          description: data.description || null,
-          metadata: parsedMetadata,
-        })
+function useEdgeActions(
+  setEdges: SetEdges,
+  setDeleting: Dispatch<SetStateAction<boolean>>
+) {
+  const { toast } = useToast()
+  const [edgeFormOpen, setEdgeFormOpen] = useState(false)
+  const [deleteEdgeDialog, setDeleteEdgeDialog] = useState(false)
+  const [edgeToDelete, setEdgeToDelete] = useState<EdgeTableRow | null>(null)
 
-        if (!result.isSuccess) {
-          toast({
-            title: "Error",
-            description: result.message || "Failed to update node",
-            variant: "destructive",
-          })
-          throw new Error(result.message || "Failed to update node")
-        }
-
-        if (result.data) {
-          setNodes((prev) =>
-            prev.map((n) => (n.id === editingNode.id ? result.data! : n))
-          )
-        }
-
-        toast({
-          title: "Success",
-          description: "Node updated successfully",
-        })
-      } else {
-        // Create new node
-        const result = await createGraphNode({
-          name: data.name,
-          nodeType: data.nodeType,
-          nodeClass: data.nodeClass,
-          description: data.description || undefined,
-          metadata: parsedMetadata,
-        })
-
-        if (!result.isSuccess) {
-          toast({
-            title: "Error",
-            description: result.message || "Failed to create node",
-            variant: "destructive",
-          })
-          throw new Error(result.message || "Failed to create node")
-        }
-
-        if (result.data) {
-          setNodes((prev) => [result.data!, ...prev])
-        }
-
-        toast({
-          title: "Success",
-          description: "Node created successfully",
-        })
-      }
-    },
-    [editingNode, toast]
-  )
-
-  // ============================================
-  // Edge Handlers
-  // ============================================
-
-  const handleAddEdge = useCallback(() => {
-    setEdgeFormOpen(true)
-  }, [])
-
+  const handleAddEdge = useCallback(() => setEdgeFormOpen(true), [])
   const handleDeleteEdgeRequest = useCallback((edge: EdgeTableRow) => {
     setEdgeToDelete(edge)
     setDeleteEdgeDialog(true)
   }, [])
-
   const confirmDeleteEdge = useCallback(async () => {
     if (!edgeToDelete) return
-
     setDeleting(true)
     try {
       const result = await deleteGraphEdge(edgeToDelete.id)
       if (!result.isSuccess) {
         throw new Error(result.message || "Failed to delete edge")
       }
-
-      setEdges((prev) => prev.filter((e) => e.id !== edgeToDelete.id))
-
-      toast({
-        title: "Success",
-        description: "Edge deleted successfully",
-      })
+      setEdges((previous) =>
+        previous.filter((edge) => edge.id !== edgeToDelete.id)
+      )
+      toast({ title: "Success", description: "Edge deleted successfully" })
     } catch (error) {
       toast({
         title: "Error",
@@ -447,51 +425,65 @@ export function GraphPageClient() {
       setDeleteEdgeDialog(false)
       setEdgeToDelete(null)
     }
-  }, [edgeToDelete, toast])
-
+  }, [edgeToDelete, setDeleting, setEdges, toast])
   const handleSaveEdge = useCallback(
     async (data: EdgeFormData) => {
-      let parsedMetadata = {}
-      try {
-        parsedMetadata = JSON.parse(data.metadata)
-      } catch {
-        // Default to empty
-      }
-
       const result = await createGraphEdge({
         sourceNodeId: data.sourceNodeId,
         targetNodeId: data.targetNodeId,
         edgeType: data.edgeType,
-        metadata: parsedMetadata,
+        metadata: parseMetadata(data.metadata),
       })
-
       if (!result.isSuccess) {
-        toast({
-          title: "Error",
-          description: result.message || "Failed to create edge",
-          variant: "destructive",
-        })
-        throw new Error(result.message || "Failed to create edge")
+        const message = result.message || "Failed to create edge"
+        toast({ title: "Error", description: message, variant: "destructive" })
+        throw new Error(message)
       }
-
       if (result.data) {
-        setEdges((prev) => [result.data!, ...prev])
+        const savedEdge = result.data
+        setEdges((previous) => [savedEdge, ...previous])
       }
-
-      toast({
-        title: "Success",
-        description: "Edge created successfully",
-      })
+      toast({ title: "Success", description: "Edge created successfully" })
     },
-    [toast]
+    [setEdges, toast]
   )
 
-  // ============================================
-  // Render
-  // ============================================
+  return {
+    edgeFormOpen,
+    setEdgeFormOpen,
+    deleteEdgeDialog,
+    setDeleteEdgeDialog,
+    edgeToDelete,
+    handleAddEdge,
+    handleDeleteEdgeRequest,
+    confirmDeleteEdge,
+    handleSaveEdge,
+  }
+}
 
+interface GraphHeaderAndStatsProps {
+  activeTab: ActiveTab
+  loading: boolean
+  loadData: () => Promise<void>
+  handleAddNode: () => void
+  handleAddEdge: () => void
+  stats: {
+    totalNodes: number
+    totalEdges: number
+    nodeTypes: number
+  }
+}
+
+function GraphHeaderAndStats({
+  activeTab,
+  loading,
+  loadData,
+  handleAddNode,
+  handleAddEdge,
+  stats,
+}: GraphHeaderAndStatsProps) {
   return (
-    <div className="p-6 space-y-6">
+    <>
       {/* Header */}
       <div className="mb-6">
         <PageBranding />
@@ -564,6 +556,175 @@ export function GraphPageClient() {
           </div>
         </div>
       )}
+    </>
+  )
+}
+
+interface GraphDeleteDialogsProps {
+  deleteNodeDialog: boolean
+  setDeleteNodeDialog: Dispatch<SetStateAction<boolean>>
+  nodeToDelete: PublicGraphNode | null
+  deleteEdgeDialog: boolean
+  setDeleteEdgeDialog: Dispatch<SetStateAction<boolean>>
+  edgeToDelete: EdgeTableRow | null
+  deleting: boolean
+  confirmDeleteNode: () => Promise<void>
+  confirmDeleteEdge: () => Promise<void>
+}
+
+function GraphDeleteDialogs({
+  deleteNodeDialog,
+  setDeleteNodeDialog,
+  nodeToDelete,
+  deleteEdgeDialog,
+  setDeleteEdgeDialog,
+  edgeToDelete,
+  deleting,
+  confirmDeleteNode,
+  confirmDeleteEdge,
+}: GraphDeleteDialogsProps) {
+  return (
+    <>
+      {/* Delete Node Confirmation */}
+      <AlertDialog open={deleteNodeDialog} onOpenChange={setDeleteNodeDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Node</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete &ldquo;{nodeToDelete?.name}
+              &rdquo;? This will also delete all connected edges. This action
+              cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmDeleteNode}
+              disabled={deleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {deleting ? "Deleting..." : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Delete Edge Confirmation */}
+      <AlertDialog open={deleteEdgeDialog} onOpenChange={setDeleteEdgeDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Edge</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete this edge from &ldquo;
+              {edgeToDelete?.sourceNodeName}&rdquo; to &ldquo;
+              {edgeToDelete?.targetNodeName}&rdquo;? This action cannot be
+              undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmDeleteEdge}
+              disabled={deleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {deleting ? "Deleting..." : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  )
+}
+
+export function GraphPageClient() {
+
+  const { nodes, setNodes, edges, setEdges, loading, loadData } = useGraphData()
+
+  // Tab state
+  const [activeTab, setActiveTab] = useState<ActiveTab>("nodes")
+
+  // Filter state
+  const [nodeFilters, setNodeFilters] = useState<NodeFiltersState>({
+    search: "",
+    nodeType: "all",
+    nodeClass: "all",
+  })
+  const [edgeFilters, setEdgeFilters] = useState<EdgeFiltersState>({
+    edgeType: "all",
+  })
+
+  const [deleting, setDeleting] = useState(false)
+  const {
+    nodeFormOpen,
+    setNodeFormOpen,
+    editingNode,
+    openEditor,
+    handleAddNode,
+    handleEditNode,
+    handleSaveNode,
+  } = useNodeEditor(nodes, setNodes)
+  const {
+    detailNode,
+    detailOpen,
+    setDetailOpen,
+    connections,
+    loadingConnections,
+    handleViewNode,
+    handleEditFromDetail,
+  } = useNodeDetail(nodes, openEditor)
+  const {
+    deleteNodeDialog,
+    setDeleteNodeDialog,
+    nodeToDelete,
+    requestNodeDeletion,
+    handleDeleteNodeRequest,
+    confirmDeleteNode,
+  } = useNodeDeletion(nodes, setNodes, setEdges, setDeleting)
+  const {
+    edgeFormOpen,
+    setEdgeFormOpen,
+    deleteEdgeDialog,
+    setDeleteEdgeDialog,
+    edgeToDelete,
+    handleAddEdge,
+    handleDeleteEdgeRequest,
+    confirmDeleteEdge,
+    handleSaveEdge,
+  } = useEdgeActions(setEdges, setDeleting)
+  const handleDeleteFromDetail = useCallback(
+    (node: PublicGraphNode) => {
+      setDetailOpen(false)
+      requestNodeDeletion(node)
+    },
+    [requestNodeDeletion, setDetailOpen]
+  )
+
+  const {
+    nodeTypes,
+    nodeClasses,
+    edgeTypes,
+    nodeTableRows,
+    edgeTableRows,
+    stats,
+  } = useGraphTableData(nodes, edges, nodeFilters, edgeFilters)
+
+  // ============================================
+  // Render
+  // ============================================
+
+  return (
+    <div className="p-6 space-y-6">
+      <GraphHeaderAndStats
+        activeTab={activeTab}
+        loading={loading}
+        loadData={loadData}
+        handleAddNode={handleAddNode}
+        handleAddEdge={handleAddEdge}
+        stats={stats}
+      />
+
+
 
       {/* Tabs */}
       <Tabs
@@ -632,54 +793,18 @@ export function GraphPageClient() {
         onDelete={handleDeleteFromDetail}
       />
 
-      {/* Delete Node Confirmation */}
-      <AlertDialog open={deleteNodeDialog} onOpenChange={setDeleteNodeDialog}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete Node</AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to delete &ldquo;{nodeToDelete?.name}
-              &rdquo;? This will also delete all connected edges. This action
-              cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={confirmDeleteNode}
-              disabled={deleting}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              {deleting ? "Deleting..." : "Delete"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <GraphDeleteDialogs
+        deleteNodeDialog={deleteNodeDialog}
+        setDeleteNodeDialog={setDeleteNodeDialog}
+        nodeToDelete={nodeToDelete}
+        deleteEdgeDialog={deleteEdgeDialog}
+        setDeleteEdgeDialog={setDeleteEdgeDialog}
+        edgeToDelete={edgeToDelete}
+        deleting={deleting}
+        confirmDeleteNode={confirmDeleteNode}
+        confirmDeleteEdge={confirmDeleteEdge}
+      />
 
-      {/* Delete Edge Confirmation */}
-      <AlertDialog open={deleteEdgeDialog} onOpenChange={setDeleteEdgeDialog}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete Edge</AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to delete this edge from &ldquo;
-              {edgeToDelete?.sourceNodeName}&rdquo; to &ldquo;
-              {edgeToDelete?.targetNodeName}&rdquo;? This action cannot be
-              undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={confirmDeleteEdge}
-              disabled={deleting}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              {deleting ? "Deleting..." : "Delete"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   )
 }

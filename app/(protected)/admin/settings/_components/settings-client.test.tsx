@@ -10,17 +10,17 @@ jest.mock('./settings-table', () => ({
 
 // Mock the entire dropdown-menu UI component to avoid displayName issues
 jest.mock('@/components/ui/dropdown-menu', () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+
   const React = require('react');
-  
+
   const createComponent = (name: string) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const Component = ({ children, ...props }: any) => 
+    const Component = ({ children, ...props }: any) =>
       React.createElement('div', { ...props, 'data-testid': name.toLowerCase() }, children);
     Component.displayName = name;
     return Component;
   };
-  
+
   return {
     DropdownMenu: createComponent('DropdownMenu'),
     DropdownMenuTrigger: createComponent('DropdownMenuTrigger'),
@@ -42,17 +42,17 @@ jest.mock('@/components/ui/dropdown-menu', () => {
 
 // Mock the tabs UI component to avoid displayName issues
 jest.mock('@/components/ui/tabs', () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+
   const React = require('react');
-  
+
   const createComponent = (name: string) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const Component = ({ children, ...props }: any) => 
+    const Component = ({ children, ...props }: any) =>
       React.createElement('div', { ...props, 'data-testid': name.toLowerCase() }, children);
     Component.displayName = name;
     return Component;
   };
-  
+
   return {
     Tabs: createComponent('Tabs'),
     TabsList: createComponent('TabsList'),
@@ -69,7 +69,7 @@ jest.mock('@radix-ui/react-alert-dialog', () => {
     MockedComponent.displayName = name
     return MockedComponent
   }
-  
+
   return {
     __esModule: true,
     Root: mockComponent('AlertDialogRoot'),
@@ -86,39 +86,39 @@ jest.mock('@radix-ui/react-alert-dialog', () => {
 
 // Mock form components
 jest.mock('@/components/ui/form', () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+
   const React = require('react');
-  
+
   const createFormComponent = (name: string) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars
     const Component = ({ children, render, control, setValue, handleSubmit, ...props }: any) => {
       // Filter out react-hook-form specific props to avoid DOM warnings
-      const { 
-        name: fieldName, 
+      const {
+        name: fieldName,
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        rules, 
+        rules,
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        defaultValue, 
+        defaultValue,
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        onBlur, 
+        onBlur,
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        onChange, 
+        onChange,
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         value,
-        ...domProps 
+        ...domProps
       } = props;
-      
+
       // For FormField, execute the render function if provided
       if (name === 'FormField' && render) {
         return render({ field: { onChange: jest.fn(), onBlur: jest.fn(), value: '', name: fieldName || 'mock-field' } });
       }
-      
+
       return React.createElement('div', { ...domProps, 'data-testid': name.toLowerCase() }, children);
     };
     Component.displayName = name;
     return Component;
   };
-  
+
   return {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     Form: ({ children, ...props }: any) => {
@@ -145,9 +145,9 @@ jest.mock('@/components/ui/form', () => {
 
 // Mock Dialog components
 jest.mock('@/components/ui/dialog', () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+
   const React = require('react');
-  
+
   return {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     Dialog: ({ children, open }: any) => open ? React.createElement('div', { role: 'dialog', 'data-testid': 'dialog' }, children) : null,
@@ -164,9 +164,9 @@ jest.mock('@/components/ui/dialog', () => {
 
 // Mock Select components
 jest.mock('@/components/ui/select', () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+
   const React = require('react');
-  
+
   return {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     Select: ({ children }: any) => React.createElement('div', { 'data-testid': 'select' }, children),
@@ -183,10 +183,10 @@ jest.mock('@/components/ui/select', () => {
 
 // Mock Input and Textarea
 jest.mock('@/components/ui/input', () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+
   const React = require('react');
   // eslint-disable-next-line react/display-name, @typescript-eslint/no-explicit-any
-  const Input = React.forwardRef((props: any, ref: any) => 
+  const Input = React.forwardRef((props: any, ref: any) =>
     React.createElement('input', { ...props, ref, 'data-testid': 'input' })
   )
   return {
@@ -195,10 +195,10 @@ jest.mock('@/components/ui/input', () => {
 })
 
 jest.mock('@/components/ui/textarea', () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+
   const React = require('react');
   // eslint-disable-next-line react/display-name, @typescript-eslint/no-explicit-any
-  const Textarea = React.forwardRef((props: any, ref: any) => 
+  const Textarea = React.forwardRef((props: any, ref: any) =>
     React.createElement('textarea', { ...props, ref, 'data-testid': 'textarea' })
   )
   return {
@@ -208,15 +208,15 @@ jest.mock('@/components/ui/textarea', () => {
 
 // Mock Checkbox
 jest.mock('@/components/ui/checkbox', () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+
   const React = require('react');
   // eslint-disable-next-line react/display-name, @typescript-eslint/no-explicit-any
   const Checkbox = React.forwardRef((props: any, ref: any) => {
       const { onCheckedChange, checked, ...inputProps } = props;
-      return React.createElement('input', { 
-        ...inputProps, 
-        type: 'checkbox', 
-        ref, 
+      return React.createElement('input', {
+        ...inputProps,
+        type: 'checkbox',
+        ref,
         'data-testid': 'checkbox',
         onChange: onCheckedChange,
         checked
@@ -231,7 +231,7 @@ jest.mock('@/components/ui/checkbox', () => {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let globalFormData: any = {
   key: 'NEW_KEY',
-  value: 'new_value', 
+  value: 'new_value',
   description: null,
   category: null,
   isSecret: false
@@ -396,7 +396,7 @@ describe('SettingsClient', () => {
       category: null,
       isSecret: false
     };
-    
+
     // Mock failed API response
     ;(fetch as unknown as jest.Mock).mockResolvedValueOnce({
       ok: true,

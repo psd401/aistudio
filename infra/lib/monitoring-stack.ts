@@ -97,274 +97,15 @@ export class MonitoringStack extends cdk.Stack {
       };
     }
 
-    // Add comprehensive Lambda metrics for ALL processing functions
-    // Using search expressions to match function names with CDK-generated suffixes
-    consolidatedMetrics.lambda = {
-      'file-processor': {
-        invocations: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Invocations" FunctionName="AIStudio-ProcessingStack-Dev-FileProcessor*"\', \'Sum\', 300)',
-          label: 'File Processor Invocations',
-          usingMetrics: {},
-        }),
-        errors: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Errors" FunctionName="AIStudio-ProcessingStack-Dev-FileProcessor*"\', \'Sum\', 300)',
-          label: 'File Processor Errors',
-          usingMetrics: {},
-        }),
-        duration: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Duration" FunctionName="AIStudio-ProcessingStack-Dev-FileProcessor*"\', \'Average\', 300)',
-          label: 'File Processor Duration',
-          usingMetrics: {},
-        }),
-        throttles: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Throttles" FunctionName="AIStudio-ProcessingStack-Dev-FileProcessor*"\', \'Sum\', 300)',
-          label: 'File Processor Throttles',
-          usingMetrics: {},
-        }),
-        concurrentExecutions: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="ConcurrentExecutions" FunctionName="AIStudio-ProcessingStack-Dev-FileProcessor*"\', \'Maximum\', 300)',
-          label: 'File Processor Concurrent Executions',
-          usingMetrics: {},
-        }),
-      },
-      'url-processor': {
-        invocations: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Invocations" FunctionName="AIStudio-ProcessingStack-Dev-URLProcessor*"\', \'Sum\', 300)',
-          label: 'URL Processor Invocations',
-          usingMetrics: {},
-        }),
-        errors: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Errors" FunctionName="AIStudio-ProcessingStack-Dev-URLProcessor*"\', \'Sum\', 300)',
-          label: 'URL Processor Errors',
-          usingMetrics: {},
-        }),
-        duration: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Duration" FunctionName="AIStudio-ProcessingStack-Dev-URLProcessor*"\', \'Average\', 300)',
-          label: 'URL Processor Duration',
-          usingMetrics: {},
-        }),
-        throttles: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Throttles" FunctionName="AIStudio-ProcessingStack-Dev-URLProcessor*"\', \'Sum\', 300)',
-          label: 'URL Processor Throttles',
-          usingMetrics: {},
-        }),
-        concurrentExecutions: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="ConcurrentExecutions" FunctionName="AIStudio-ProcessingStack-Dev-URLProcessor*"\', \'Maximum\', 300)',
-          label: 'URL Processor Concurrent Executions',
-          usingMetrics: {},
-        }),
-      },
-      'embedding-generator': {
-        invocations: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Invocations" FunctionName="AIStudio-ProcessingStack--EmbeddingGenerator*"\', \'Sum\', 300)',
-          label: 'Embedding Generator Invocations',
-          usingMetrics: {},
-        }),
-        errors: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Errors" FunctionName="AIStudio-ProcessingStack--EmbeddingGenerator*"\', \'Sum\', 300)',
-          label: 'Embedding Generator Errors',
-          usingMetrics: {},
-        }),
-        duration: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Duration" FunctionName="AIStudio-ProcessingStack--EmbeddingGenerator*"\', \'Average\', 300)',
-          label: 'Embedding Generator Duration',
-          usingMetrics: {},
-        }),
-        throttles: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Throttles" FunctionName="AIStudio-ProcessingStack--EmbeddingGenerator*"\', \'Sum\', 300)',
-          label: 'Embedding Generator Throttles',
-          usingMetrics: {},
-        }),
-        concurrentExecutions: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="ConcurrentExecutions" FunctionName="AIStudio-ProcessingStack--EmbeddingGenerator*"\', \'Maximum\', 300)',
-          label: 'Embedding Generator Concurrent Executions',
-          usingMetrics: {},
-        }),
-      },
-      'textract-processor': {
-        invocations: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Invocations" FunctionName="AIStudio-ProcessingStack--TextractProcessor*"\', \'Sum\', 300)',
-          label: 'Textract Processor Invocations',
-          usingMetrics: {},
-        }),
-        errors: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Errors" FunctionName="AIStudio-ProcessingStack--TextractProcessor*"\', \'Sum\', 300)',
-          label: 'Textract Processor Errors',
-          usingMetrics: {},
-        }),
-        duration: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Duration" FunctionName="AIStudio-ProcessingStack--TextractProcessor*"\', \'Average\', 300)',
-          label: 'Textract Processor Duration',
-          usingMetrics: {},
-        }),
-        throttles: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Throttles" FunctionName="AIStudio-ProcessingStack--TextractProcessor*"\', \'Sum\', 300)',
-          label: 'Textract Processor Throttles',
-          usingMetrics: {},
-        }),
-        concurrentExecutions: new cloudwatch.MathExpression({
-          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="ConcurrentExecutions" FunctionName="AIStudio-ProcessingStack--TextractProcessor*"\', \'Maximum\', 300)',
-          label: 'Textract Processor Concurrent Executions',
-          usingMetrics: {},
-        }),
-      },
-    };
+    consolidatedMetrics.lambda = this.createLambdaMetrics();
 
-    // Add comprehensive ECS metrics for Next.js frontend service
-    consolidatedMetrics.ecs = {
-      'nextjs-app': {
-        // Basic ECS metrics
-        cpuUtilization: new cloudwatch.Metric({
-          namespace: 'AWS/ECS',
-          metricName: 'CPUUtilization',
-          dimensionsMap: {
-            ServiceName: `aistudio-${environment}`,
-            ClusterName: `aistudio-${environment}`,
-          },
-          statistic: 'Average',
-        }),
-        memoryUtilization: new cloudwatch.Metric({
-          namespace: 'AWS/ECS',
-          metricName: 'MemoryUtilization',
-          dimensionsMap: {
-            ServiceName: `aistudio-${environment}`,
-            ClusterName: `aistudio-${environment}`,
-          },
-          statistic: 'Average',
-        }),
-        runningTasks: new cloudwatch.Metric({
-          namespace: 'ECS/ContainerInsights',
-          metricName: 'RunningTaskCount',
-          dimensionsMap: {
-            ServiceName: `aistudio-${environment}`,
-            ClusterName: `aistudio-${environment}`,
-          },
-          statistic: 'Average',
-        }),
-        // Container Insights - Network metrics
-        requestCount: new cloudwatch.Metric({
-          namespace: 'ECS/ContainerInsights',
-          metricName: 'NetworkRxBytes',
-          dimensionsMap: {
-            ServiceName: `aistudio-${environment}`,
-            ClusterName: `aistudio-${environment}`,
-          },
-          statistic: 'Sum',
-        }),
-        // Additional ECS metrics
-        targetResponse: new cloudwatch.Metric({
-          namespace: 'ECS/ContainerInsights',
-          metricName: 'DesiredTaskCount',
-          dimensionsMap: {
-            ServiceName: `aistudio-${environment}`,
-            ClusterName: `aistudio-${environment}`,
-          },
-          statistic: 'Average',
-        }),
-      },
-    };
+    consolidatedMetrics.ecs = this.createEcsMetrics(environment);
 
-    // Add comprehensive ALB metrics for Next.js frontend
-    // Note: We'll use search expressions to find the ALB dynamically
-    consolidatedMetrics.network = {
-      // ALB request metrics
-      bytesIn: new cloudwatch.MathExpression({
-        expression: 'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="ProcessedBytes" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
-        label: 'ALB Bytes Processed',
-        usingMetrics: {},
-      }),
-      bytesOut: new cloudwatch.MathExpression({
-        expression: 'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="ActiveConnectionCount" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
-        label: 'ALB Active Connections',
-        usingMetrics: {},
-      }),
-    };
+    consolidatedMetrics.network = this.createNetworkMetrics();
 
-    // Add comprehensive S3 storage metrics with request metrics
-    consolidatedMetrics.storage = {
-      'documents-bucket': {
-        bucketSize: new cloudwatch.Metric({
-          namespace: 'AWS/S3',
-          metricName: 'BucketSizeBytes',
-          dimensionsMap: {
-            BucketName: `aistudio-storagestack-${environment}-documentsbucket`,
-            StorageType: 'StandardStorage',
-          },
-          statistic: 'Average',
-          period: cdk.Duration.days(1), // S3 storage metrics are daily
-        }),
-        objectCount: new cloudwatch.Metric({
-          namespace: 'AWS/S3',
-          metricName: 'NumberOfObjects',
-          dimensionsMap: {
-            BucketName: `aistudio-storagestack-${environment}-documentsbucket`,
-            StorageType: 'AllStorageTypes',
-          },
-          statistic: 'Average',
-          period: cdk.Duration.days(1), // S3 storage metrics are daily
-        }),
-        requestMetrics: {
-          getRequests: new cloudwatch.Metric({
-            namespace: 'AWS/S3',
-            metricName: 'GetRequests',
-            dimensionsMap: {
-              BucketName: `aistudio-storagestack-${environment}-documentsbucket`,
-            },
-            statistic: 'Sum',
-          }),
-          putRequests: new cloudwatch.Metric({
-            namespace: 'AWS/S3',
-            metricName: 'PutRequests',
-            dimensionsMap: {
-              BucketName: `aistudio-storagestack-${environment}-documentsbucket`,
-            },
-            statistic: 'Sum',
-          }),
-        },
-      },
-    };
+    consolidatedMetrics.storage = this.createStorageMetrics(environment);
 
-    // Add comprehensive ALB metrics for Next.js frontend
-    // Using search expressions to dynamically find the ALB
-    consolidatedMetrics.api = {
-      // Request metrics
-      requestCount: new cloudwatch.MathExpression({
-        expression: 'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="RequestCount" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
-        label: 'Total Requests',
-        usingMetrics: {},
-      }),
-
-      // Error tracking - 5XX errors from targets (Next.js)
-      errorCount: new cloudwatch.MathExpression({
-        expression: 'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="HTTPCode_Target_5XX_Count" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
-        label: '5XX Errors',
-        usingMetrics: {},
-      }),
-
-      // Response time percentiles
-      latencyP50: new cloudwatch.MathExpression({
-        expression: 'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="TargetResponseTime" LoadBalancer="*aistudio*"\', \'p50\', 300)',
-        label: 'p50 Latency',
-        usingMetrics: {},
-      }),
-      latencyP90: new cloudwatch.MathExpression({
-        expression: 'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="TargetResponseTime" LoadBalancer="*aistudio*"\', \'p90\', 300)',
-        label: 'p90 Latency',
-        usingMetrics: {},
-      }),
-      latencyP99: new cloudwatch.MathExpression({
-        expression: 'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="TargetResponseTime" LoadBalancer="*aistudio*"\', \'p99\', 300)',
-        label: 'p99 Latency',
-        usingMetrics: {},
-      }),
-
-      // Availability/uptime tracking
-      availability: new cloudwatch.MathExpression({
-        expression: 'SEARCH(\'{AWS/ApplicationELB,TargetGroup,LoadBalancer} MetricName="HealthyHostCount" TargetGroup="*aistudio*"\', \'Average\', 300)',
-        label: 'Healthy Targets',
-        usingMetrics: {},
-      }),
-    };
+    consolidatedMetrics.api = this.createApiMetrics();
 
     this.observabilityDashboards = new ObservabilityDashboards(this, 'ObservabilityDashboards', {
       environment,
@@ -596,9 +337,9 @@ export class MonitoringStack extends cdk.Stack {
 
     // Add alarm actions
     const alarms = [dbUtilizationAlarm, lambdaErrorsAlarm, dlqAlarm];
-    alarms.forEach((alarm) => {
+    for (const alarm of alarms) {
       alarm.addAlarmAction(new cloudwatch_actions.SnsAction(this.alarmTopic));
-    });
+    }
 
     // Add alarm status widget to dashboard
     this.dashboard.addWidgets(
@@ -685,4 +426,287 @@ fields @timestamp, xrayTraceId, @message
 [Open X-Ray Service Map](https://console.aws.amazon.com/xray/home?region=${this.region}#/service-map)
 `;
   }
+  private createLambdaMetrics(): NonNullable<ConsolidatedMetrics['lambda']> {
+    // Add comprehensive Lambda metrics for ALL processing functions
+    // Using search expressions to match function names with CDK-generated suffixes
+    return {
+      'file-processor': {
+        invocations: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Invocations" FunctionName="AIStudio-ProcessingStack-Dev-FileProcessor*"\', \'Sum\', 300)',
+          label: 'File Processor Invocations',
+          usingMetrics: {},
+        }),
+        errors: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Errors" FunctionName="AIStudio-ProcessingStack-Dev-FileProcessor*"\', \'Sum\', 300)',
+          label: 'File Processor Errors',
+          usingMetrics: {},
+        }),
+        duration: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Duration" FunctionName="AIStudio-ProcessingStack-Dev-FileProcessor*"\', \'Average\', 300)',
+          label: 'File Processor Duration',
+          usingMetrics: {},
+        }),
+        throttles: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Throttles" FunctionName="AIStudio-ProcessingStack-Dev-FileProcessor*"\', \'Sum\', 300)',
+          label: 'File Processor Throttles',
+          usingMetrics: {},
+        }),
+        concurrentExecutions: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="ConcurrentExecutions" FunctionName="AIStudio-ProcessingStack-Dev-FileProcessor*"\', \'Maximum\', 300)',
+          label: 'File Processor Concurrent Executions',
+          usingMetrics: {},
+        }),
+      },
+      'url-processor': {
+        invocations: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Invocations" FunctionName="AIStudio-ProcessingStack-Dev-URLProcessor*"\', \'Sum\', 300)',
+          label: 'URL Processor Invocations',
+          usingMetrics: {},
+        }),
+        errors: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Errors" FunctionName="AIStudio-ProcessingStack-Dev-URLProcessor*"\', \'Sum\', 300)',
+          label: 'URL Processor Errors',
+          usingMetrics: {},
+        }),
+        duration: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Duration" FunctionName="AIStudio-ProcessingStack-Dev-URLProcessor*"\', \'Average\', 300)',
+          label: 'URL Processor Duration',
+          usingMetrics: {},
+        }),
+        throttles: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Throttles" FunctionName="AIStudio-ProcessingStack-Dev-URLProcessor*"\', \'Sum\', 300)',
+          label: 'URL Processor Throttles',
+          usingMetrics: {},
+        }),
+        concurrentExecutions: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="ConcurrentExecutions" FunctionName="AIStudio-ProcessingStack-Dev-URLProcessor*"\', \'Maximum\', 300)',
+          label: 'URL Processor Concurrent Executions',
+          usingMetrics: {},
+        }),
+      },
+      'embedding-generator': {
+        invocations: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Invocations" FunctionName="AIStudio-ProcessingStack--EmbeddingGenerator*"\', \'Sum\', 300)',
+          label: 'Embedding Generator Invocations',
+          usingMetrics: {},
+        }),
+        errors: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Errors" FunctionName="AIStudio-ProcessingStack--EmbeddingGenerator*"\', \'Sum\', 300)',
+          label: 'Embedding Generator Errors',
+          usingMetrics: {},
+        }),
+        duration: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Duration" FunctionName="AIStudio-ProcessingStack--EmbeddingGenerator*"\', \'Average\', 300)',
+          label: 'Embedding Generator Duration',
+          usingMetrics: {},
+        }),
+        throttles: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Throttles" FunctionName="AIStudio-ProcessingStack--EmbeddingGenerator*"\', \'Sum\', 300)',
+          label: 'Embedding Generator Throttles',
+          usingMetrics: {},
+        }),
+        concurrentExecutions: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="ConcurrentExecutions" FunctionName="AIStudio-ProcessingStack--EmbeddingGenerator*"\', \'Maximum\', 300)',
+          label: 'Embedding Generator Concurrent Executions',
+          usingMetrics: {},
+        }),
+      },
+      'textract-processor': {
+        invocations: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Invocations" FunctionName="AIStudio-ProcessingStack--TextractProcessor*"\', \'Sum\', 300)',
+          label: 'Textract Processor Invocations',
+          usingMetrics: {},
+        }),
+        errors: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Errors" FunctionName="AIStudio-ProcessingStack--TextractProcessor*"\', \'Sum\', 300)',
+          label: 'Textract Processor Errors',
+          usingMetrics: {},
+        }),
+        duration: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Duration" FunctionName="AIStudio-ProcessingStack--TextractProcessor*"\', \'Average\', 300)',
+          label: 'Textract Processor Duration',
+          usingMetrics: {},
+        }),
+        throttles: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="Throttles" FunctionName="AIStudio-ProcessingStack--TextractProcessor*"\', \'Sum\', 300)',
+          label: 'Textract Processor Throttles',
+          usingMetrics: {},
+        }),
+        concurrentExecutions: new cloudwatch.MathExpression({
+          expression: 'SEARCH(\'{AWS/Lambda,FunctionName} MetricName="ConcurrentExecutions" FunctionName="AIStudio-ProcessingStack--TextractProcessor*"\', \'Maximum\', 300)',
+          label: 'Textract Processor Concurrent Executions',
+          usingMetrics: {},
+        }),
+      },
+    };
+  }
+
+  private createEcsMetrics(
+    environment: 'dev' | 'prod'
+  ): NonNullable<ConsolidatedMetrics['ecs']> {
+    // Add comprehensive ECS metrics for Next.js frontend service
+    return {
+      'nextjs-app': {
+        // Basic ECS metrics
+        cpuUtilization: new cloudwatch.Metric({
+          namespace: 'AWS/ECS',
+          metricName: 'CPUUtilization',
+          dimensionsMap: {
+            ServiceName: `aistudio-${environment}`,
+            ClusterName: `aistudio-${environment}`,
+          },
+          statistic: 'Average',
+        }),
+        memoryUtilization: new cloudwatch.Metric({
+          namespace: 'AWS/ECS',
+          metricName: 'MemoryUtilization',
+          dimensionsMap: {
+            ServiceName: `aistudio-${environment}`,
+            ClusterName: `aistudio-${environment}`,
+          },
+          statistic: 'Average',
+        }),
+        runningTasks: new cloudwatch.Metric({
+          namespace: 'ECS/ContainerInsights',
+          metricName: 'RunningTaskCount',
+          dimensionsMap: {
+            ServiceName: `aistudio-${environment}`,
+            ClusterName: `aistudio-${environment}`,
+          },
+          statistic: 'Average',
+        }),
+        // Container Insights - Network metrics
+        requestCount: new cloudwatch.Metric({
+          namespace: 'ECS/ContainerInsights',
+          metricName: 'NetworkRxBytes',
+          dimensionsMap: {
+            ServiceName: `aistudio-${environment}`,
+            ClusterName: `aistudio-${environment}`,
+          },
+          statistic: 'Sum',
+        }),
+        // Additional ECS metrics
+        targetResponse: new cloudwatch.Metric({
+          namespace: 'ECS/ContainerInsights',
+          metricName: 'DesiredTaskCount',
+          dimensionsMap: {
+            ServiceName: `aistudio-${environment}`,
+            ClusterName: `aistudio-${environment}`,
+          },
+          statistic: 'Average',
+        }),
+      },
+    };
+  }
+
+  private createNetworkMetrics(): NonNullable<ConsolidatedMetrics['network']> {
+    // Add comprehensive ALB metrics for Next.js frontend
+    // Note: We'll use search expressions to find the ALB dynamically
+    return {
+      // ALB request metrics
+      bytesIn: new cloudwatch.MathExpression({
+        expression: 'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="ProcessedBytes" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
+        label: 'ALB Bytes Processed',
+        usingMetrics: {},
+      }),
+      bytesOut: new cloudwatch.MathExpression({
+        expression: 'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="ActiveConnectionCount" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
+        label: 'ALB Active Connections',
+        usingMetrics: {},
+      }),
+    };
+  }
+
+  private createStorageMetrics(
+    environment: 'dev' | 'prod'
+  ): NonNullable<ConsolidatedMetrics['storage']> {
+    // Add comprehensive S3 storage metrics with request metrics
+    return {
+      'documents-bucket': {
+        bucketSize: new cloudwatch.Metric({
+          namespace: 'AWS/S3',
+          metricName: 'BucketSizeBytes',
+          dimensionsMap: {
+            BucketName: `aistudio-storagestack-${environment}-documentsbucket`,
+            StorageType: 'StandardStorage',
+          },
+          statistic: 'Average',
+          period: cdk.Duration.days(1), // S3 storage metrics are daily
+        }),
+        objectCount: new cloudwatch.Metric({
+          namespace: 'AWS/S3',
+          metricName: 'NumberOfObjects',
+          dimensionsMap: {
+            BucketName: `aistudio-storagestack-${environment}-documentsbucket`,
+            StorageType: 'AllStorageTypes',
+          },
+          statistic: 'Average',
+          period: cdk.Duration.days(1), // S3 storage metrics are daily
+        }),
+        requestMetrics: {
+          getRequests: new cloudwatch.Metric({
+            namespace: 'AWS/S3',
+            metricName: 'GetRequests',
+            dimensionsMap: {
+              BucketName: `aistudio-storagestack-${environment}-documentsbucket`,
+            },
+            statistic: 'Sum',
+          }),
+          putRequests: new cloudwatch.Metric({
+            namespace: 'AWS/S3',
+            metricName: 'PutRequests',
+            dimensionsMap: {
+              BucketName: `aistudio-storagestack-${environment}-documentsbucket`,
+            },
+            statistic: 'Sum',
+          }),
+        },
+      },
+    };
+  }
+
+  private createApiMetrics(): NonNullable<ConsolidatedMetrics['api']> {
+    // Add comprehensive ALB metrics for Next.js frontend
+    // Using search expressions to dynamically find the ALB
+    return {
+      // Request metrics
+      requestCount: new cloudwatch.MathExpression({
+        expression: 'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="RequestCount" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
+        label: 'Total Requests',
+        usingMetrics: {},
+      }),
+
+      // Error tracking - 5XX errors from targets (Next.js)
+      errorCount: new cloudwatch.MathExpression({
+        expression: 'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="HTTPCode_Target_5XX_Count" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
+        label: '5XX Errors',
+        usingMetrics: {},
+      }),
+
+      // Response time percentiles
+      latencyP50: new cloudwatch.MathExpression({
+        expression: 'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="TargetResponseTime" LoadBalancer="*aistudio*"\', \'p50\', 300)',
+        label: 'p50 Latency',
+        usingMetrics: {},
+      }),
+      latencyP90: new cloudwatch.MathExpression({
+        expression: 'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="TargetResponseTime" LoadBalancer="*aistudio*"\', \'p90\', 300)',
+        label: 'p90 Latency',
+        usingMetrics: {},
+      }),
+      latencyP99: new cloudwatch.MathExpression({
+        expression: 'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="TargetResponseTime" LoadBalancer="*aistudio*"\', \'p99\', 300)',
+        label: 'p99 Latency',
+        usingMetrics: {},
+      }),
+
+      // Availability/uptime tracking
+      availability: new cloudwatch.MathExpression({
+        expression: 'SEARCH(\'{AWS/ApplicationELB,TargetGroup,LoadBalancer} MetricName="HealthyHostCount" TargetGroup="*aistudio*"\', \'Average\', 300)',
+        label: 'Healthy Targets',
+        usingMetrics: {},
+      }),
+    };
+  }
+
 }

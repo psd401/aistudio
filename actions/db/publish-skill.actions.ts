@@ -54,6 +54,110 @@ function assertPublishableToolEntries(
   )
 }
 
+interface RegisterDraftSkillParams {
+  assistantId: string
+  ownerUserId: number
+  repositoryIds: number[]
+  draftPrefix: string
+  destinationPrefix: string
+  serialized: ReturnType<typeof serializeAssistantToSkill>
+}
+
+async function registerDraftSkill({
+  assistantId,
+  ownerUserId,
+  repositoryIds,
+  draftPrefix,
+  destinationPrefix,
+  serialized,
+}: RegisterDraftSkillParams) {
+  return executeTransaction(async (tx) => {
+    const [row] = await tx
+      .insert(psdAgentSkills)
+      .values({
+        name: serialized.slug,
+        scope: "draft",
+        ownerUserId,
+        s3Key: draftPrefix,
+        summary: serialized.summary,
+        scanStatus: "pending",
+        allowedTools: serialized.allowedTools,
+      })
+      .onConflictDoUpdate({
+        target: [psdAgentSkills.name, psdAgentSkills.ownerUserId],
+        targetWhere: eq(psdAgentSkills.scope, "draft"),
+        set: {
+          s3Key: draftPrefix,
+          summary: serialized.summary,
+          scanStatus: "pending",
+          scanLeaseId: null,
+          scanStartedAt: null,
+          allowedTools: serialized.allowedTools,
+          version: sql`${psdAgentSkills.version} + 1`,
+          updatedAt: new Date(),
+        },
+      })
+      .returning({
+        id: psdAgentSkills.id,
+        version: psdAgentSkills.version,
+      })
+
+    let resolved = row
+    if (!resolved) {
+      const [existing] = await tx
+        .select({
+          id: psdAgentSkills.id,
+          version: psdAgentSkills.version,
+        })
+        .from(psdAgentSkills)
+        .where(
+          and(
+            eq(psdAgentSkills.name, serialized.slug),
+            eq(psdAgentSkills.ownerUserId, ownerUserId),
+            eq(psdAgentSkills.scope, "draft")
+          )
+        )
+        .limit(1)
+      resolved = existing
+    }
+
+    if (!resolved) {
+      throw ErrorFactories.dbQueryFailed(
+        "register published skill",
+        new Error("No skill id returned after upsert")
+      )
+    }
+
+    await tx
+      .delete(skillRepositoryBindings)
+      .where(eq(skillRepositoryBindings.skillId, resolved.id))
+    if (repositoryIds.length > 0) {
+      await tx.insert(skillRepositoryBindings).values(
+        repositoryIds.map((repositoryId) => ({
+          skillId: resolved.id,
+          repositoryId,
+        }))
+      )
+    }
+
+    await tx.insert(psdAgentSkillAudit).values({
+      skillId: resolved.id,
+      action: "published_from_architect",
+      actorUserId: ownerUserId,
+      details: {
+        assistantId,
+        slug: serialized.slug,
+        allowedTools: serialized.allowedTools,
+        repositoryIds,
+        s3Key: draftPrefix,
+        destinationPrefix,
+      },
+    })
+
+    return resolved
+  }, "publishAssistantArchitectAsSkill")
+}
+
 /**
  * Publish an Assistant Architect as a draft SKILL.md skill (Issue #925).
  *
@@ -173,99 +277,14 @@ export async function publishAssistantArchitectAsSkillAction(
       files: [{ path: "SKILL.md", content: serialized.skillMd }],
     })
 
-    // 4. Register the draft skill row + audit entry atomically. Upsert on the
-    // (name, owner_user_id) partial unique index for draft scope so republishing
-    // the same assistant bumps the version in place (matches the infra author
-    // flow). updated_at must be set explicitly — no DB trigger.
-    const skill = await executeTransaction(async (tx) => {
-      const [row] = await tx
-        .insert(psdAgentSkills)
-        .values({
-          name: serialized.slug,
-          scope: "draft",
-          ownerUserId,
-          s3Key: draftPrefix,
-          summary: serialized.summary,
-          scanStatus: "pending",
-          allowedTools: serialized.allowedTools,
-        })
-        .onConflictDoUpdate({
-          target: [psdAgentSkills.name, psdAgentSkills.ownerUserId],
-          targetWhere: eq(psdAgentSkills.scope, "draft"),
-          set: {
-            s3Key: draftPrefix,
-            summary: serialized.summary,
-            scanStatus: "pending",
-            scanLeaseId: null,
-            scanStartedAt: null,
-            allowedTools: serialized.allowedTools,
-            version: sql`${psdAgentSkills.version} + 1`,
-            updatedAt: new Date(),
-          },
-        })
-        .returning({
-          id: psdAgentSkills.id,
-          version: psdAgentSkills.version,
-        })
-
-      // Resolve id when ON CONFLICT did not return (defensive — returning() is
-      // populated on both insert and update for postgres.js, but guard anyway).
-      let resolved = row
-      if (!resolved) {
-        const [existing] = await tx
-          .select({
-            id: psdAgentSkills.id,
-            version: psdAgentSkills.version,
-          })
-          .from(psdAgentSkills)
-          .where(
-            and(
-              eq(psdAgentSkills.name, serialized.slug),
-              eq(psdAgentSkills.ownerUserId, ownerUserId),
-              eq(psdAgentSkills.scope, "draft")
-            )
-          )
-          .limit(1)
-        resolved = existing
-      }
-
-      if (!resolved) {
-        throw ErrorFactories.dbQueryFailed(
-          "register published skill",
-          new Error("No skill id returned after upsert")
-        )
-      }
-
-      await tx
-        .delete(skillRepositoryBindings)
-        .where(eq(skillRepositoryBindings.skillId, resolved.id))
-      if (repositoryIds.length > 0) {
-        await tx.insert(skillRepositoryBindings).values(
-          repositoryIds.map((repositoryId) => ({
-            skillId: resolved.id,
-            repositoryId,
-          }))
-        )
-      }
-
-      await tx.insert(psdAgentSkillAudit).values({
-        skillId: resolved.id,
-        action: "published_from_architect",
-        actorUserId: ownerUserId,
-        details: {
-          assistantId,
-          slug: serialized.slug,
-          allowedTools: serialized.allowedTools,
-          repositoryIds,
-          s3Key: draftPrefix,
-          // Record the promotion target so an admin can re-trigger the scan
-          // Lambda without reconstructing the path from the draft prefix.
-          destinationPrefix,
-        },
-      })
-
-      return resolved
-    }, "publishAssistantArchitectAsSkill")
+    const skill = await registerDraftSkill({
+      assistantId,
+      ownerUserId,
+      repositoryIds,
+      draftPrefix,
+      destinationPrefix,
+      serialized,
+    })
 
     // 5. Best-effort scan invoke (non-fatal). Outside the transaction.
     const scanQueued = await invokeSkillScan({

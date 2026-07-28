@@ -88,7 +88,7 @@ jest.mock("@/lib/db/schema", () => ({
   },
 }))
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { DrizzleOidcAdapter } = require("@/lib/oauth/drizzle-adapter")
 
 describe("Drizzle OIDC adapter production durability (#1285)", () => {

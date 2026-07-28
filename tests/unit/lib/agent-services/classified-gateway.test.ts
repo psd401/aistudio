@@ -8,7 +8,7 @@ import {
 } from "@/lib/agent-services/classified-gateway"
 import type { safeFetch } from "@/lib/security/safe-fetch"
 
-describe("classified evaluation gateway boundary", () => {
+function defineClassifiedEvaluationGatewayBoundarySuite1Part1() {
   it("parses complete SSE frames and preserves partial input", () => {
     expect(
       parseSseFrames(
@@ -81,7 +81,9 @@ describe("classified evaluation gateway boundary", () => {
     ).toEqual({ isError: false, data: { success: true } })
   })
 
-  it("runs initialize and a tool call over pinned fetch requests", async () => {
+  }
+
+function defineClassifiedEvaluationGatewayBoundarySuite1Part2() {it("runs initialize and a tool call over pinned fetch requests", async () => {
     const encoder = new TextEncoder()
     let streamController:
       | ReadableStreamDefaultController<Uint8Array>
@@ -182,4 +184,11 @@ describe("classified evaluation gateway boundary", () => {
       "https://gateway.example/messages?session=1",
     ])
   })
-})
+}
+
+const defineClassifiedEvaluationGatewayBoundarySuite1 = () => {
+  defineClassifiedEvaluationGatewayBoundarySuite1Part1()
+  defineClassifiedEvaluationGatewayBoundarySuite1Part2()
+};
+
+describe("classified evaluation gateway boundary", defineClassifiedEvaluationGatewayBoundarySuite1)

@@ -9,7 +9,7 @@ const DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 const DRIVE_METADATA_SCOPE = "https://www.googleapis.com/auth/drive.metadata"
 const DRIVE_READ_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 
-describe("trusted Workspace command policy", () => {
+function defineTrustedWorkspaceCommandPolicySuite1Part1() {
   it("limits sender-influenced email tasks to one task-insert operation", () => {
     expect(() =>
       validateEmailTaskWorkspaceCommand({
@@ -118,7 +118,9 @@ describe("trusted Workspace command policy", () => {
     ).not.toThrow()
   })
 
-  it.each([
+  }
+
+function defineTrustedWorkspaceCommandPolicySuite1Part2() {it.each([
     {
       name: "non-folder",
       argv: [
@@ -221,7 +223,9 @@ describe("trusted Workspace command policy", () => {
     ).toThrow(/approved metadata/)
   })
 
-  it("rejects Gmail modify attempts that add TRASH", () => {
+  }
+
+function defineTrustedWorkspaceCommandPolicySuite1Part3() {it("rejects Gmail modify attempts that add TRASH", () => {
     expect(() =>
       validateWorkspaceCommand({
         scope: "user",
@@ -263,9 +267,17 @@ describe("trusted Workspace command policy", () => {
       validateWorkspaceCommand({ scope: "agent", argv })
     ).not.toThrow()
   })
-})
+}
 
-describe("Workspace user-slot scope upgrades", () => {
+const defineTrustedWorkspaceCommandPolicySuite1 = () => {
+  defineTrustedWorkspaceCommandPolicySuite1Part1()
+  defineTrustedWorkspaceCommandPolicySuite1Part2()
+  defineTrustedWorkspaceCommandPolicySuite1Part3()
+};
+
+describe("trusted Workspace command policy", defineTrustedWorkspaceCommandPolicySuite1)
+
+const defineWorkspaceUserSlotScopeUpgradesSuite2 = () => {
   const oldScopes = DRIVE_FILE_SCOPE
   const currentScopes = [
     DRIVE_FILE_SCOPE,
@@ -299,4 +311,6 @@ describe("Workspace user-slot scope upgrades", () => {
       requiredWorkspaceScopeGap(["drive", "files", "list"], undefined)
     ).toBeNull()
   })
-})
+};
+
+describe("Workspace user-slot scope upgrades", defineWorkspaceUserSlotScopeUpgradesSuite2)

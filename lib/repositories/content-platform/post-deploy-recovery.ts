@@ -13,13 +13,20 @@ export const POST_DEPLOY_RECOVERY_MARKER =
   "unified-content-runtime-v2" as const;
 export const POST_DEPLOY_ARTIFACT_RECOVERY_MARKER =
   "unified-content-artifact-v3" as const;
+export const POST_DEPLOY_EMBEDDING_CONCURRENCY_MARKER =
+  "embedding-concurrency-v1" as const;
 export const POST_DEPLOY_RECOVERY_BATCH_SIZE = 25;
+export const POST_DEPLOY_EMBEDDING_RECOVERY_BATCH_SIZE = 10;
 /** Let every invocation of the previous 15-minute Lambda runtime drain first. */
 export const POST_DEPLOY_RECOVERY_GRACE_MINUTES = 20;
 
 export interface ReleasedPostDeployRecoveryJob {
   id: string;
   itemVersionId: string;
+}
+
+export interface ReleasedPostDeployEmbeddingGeneration {
+  id: string;
 }
 
 export interface ReleasePostDeployRecoveryOptions {
@@ -61,7 +68,8 @@ export async function releasePostDeployRecoveryJobs(
             AND job.status IN ('cancelled', 'failed', 'pending', 'queued', 'running')
             AND job.post_deploy_recovery IN (
               ${POST_DEPLOY_RECOVERY_MARKER},
-              ${POST_DEPLOY_ARTIFACT_RECOVERY_MARKER}
+              ${POST_DEPLOY_ARTIFACT_RECOVERY_MARKER},
+              ${POST_DEPLOY_EMBEDDING_CONCURRENCY_MARKER}
             )
             AND job.updated_at <= ${eligibleBefore}::timestamptz
             AND item.lifecycle_status = 'active'
@@ -151,4 +159,73 @@ export async function releasePostDeployRecoveryJobs(
     },
     "contentPlatform.releasePostDeployRecoveryJobs"
   );
+}
+
+/**
+ * Rearm exhausted embedding generations only after the previous unbounded
+ * embedding worker has drained. Migration 159 fences known connection-storm
+ * failures with the maximum attempt count and a timestamp; old workers cannot
+ * claim them. The replacement scheduler clears that fence after the same
+ * 20-minute handoff used by processing jobs, then the normal bounded recovery
+ * path redispatches missing vectors or an activation-only generation.
+ */
+export async function releasePostDeployEmbeddingGenerations(
+  options: ReleasePostDeployRecoveryOptions = {}
+): Promise<ReleasedPostDeployEmbeddingGeneration[]> {
+  const graceMinutes =
+    options.graceMinutes ?? POST_DEPLOY_RECOVERY_GRACE_MINUTES;
+  const eligibleBefore = new Date(
+    (options.now ?? new Date()).getTime() - graceMinutes * 60_000
+  ).toISOString();
+  const markerPrefix = `${POST_DEPLOY_EMBEDDING_CONCURRENCY_MARKER}:`;
+  const released = await executeTransaction(
+    (tx) =>
+      tx.execute(sql`
+        WITH selected AS (
+          SELECT generation.id
+          FROM repository_index_generations generation
+          WHERE generation.status = 'failed'
+            AND generation.embedding_recovery_attempts >= 3
+            AND generation.embedding_recovery_queued_at
+              <= ${eligibleBefore}::timestamptz
+            AND generation.error_message LIKE ${`${markerPrefix}%`}
+            AND EXISTS (
+              SELECT 1
+              FROM repository_item_chunks chunk
+              WHERE chunk.index_generation_id = generation.id
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM repository_index_generations newer_generation
+              WHERE newer_generation.repository_id = generation.repository_id
+                AND newer_generation.status IN ('building', 'active', 'failed')
+                AND (
+                  newer_generation.created_at > generation.created_at
+                  OR (
+                    newer_generation.created_at = generation.created_at
+                    AND newer_generation.id > generation.id
+                  )
+                )
+            )
+          ORDER BY generation.embedding_recovery_queued_at, generation.id
+          FOR UPDATE OF generation SKIP LOCKED
+          LIMIT ${POST_DEPLOY_EMBEDDING_RECOVERY_BATCH_SIZE}
+        )
+        UPDATE repository_index_generations generation
+        SET embedding_recovery_attempts = 0,
+            embedding_recovery_queued_at = NULL,
+            error_message = concat(
+              'Released after bounded embedding worker deployment; previous error: ',
+              substring(
+                generation.error_message
+                FROM ${markerPrefix.length + 1}
+              )
+            )
+        FROM selected
+        WHERE generation.id = selected.id
+        RETURNING generation.id
+      `),
+    "contentPlatform.releasePostDeployEmbeddingGenerations"
+  );
+  return toPgRows<{ id: string }>(released);
 }

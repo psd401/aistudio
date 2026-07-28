@@ -95,10 +95,17 @@ else
   fi
   echo ""
 
-  echo "2. Config self-consistency (contextWindow + apiKey hydration)..."
+  # --verify-upstream resolves the base-image tag against ghcr and reads the
+  # plugin's published peerDependencies.openclaw from the npm registry. The
+  # offline checks compare hand-maintained copies of those facts and cannot
+  # prove either one; this is the build, it has network, so it gates on the
+  # real values. A host/plugin mismatch is invisible otherwise — `npm pack`
+  # never enforces peerDependencies.
+  echo "2. Config self-consistency (contextWindow + apiKey hydration + pins)..."
   if ! "${PYTHON}" "${SCRIPT_DIR}/check_config_consistency.py" \
         --config "${SCRIPT_DIR}/openclaw.json" \
-        --wrapper "${SCRIPT_DIR}/agentcore_wrapper.py"; then
+        --wrapper "${SCRIPT_DIR}/agentcore_wrapper.py" \
+        --verify-upstream; then
     echo "ERROR: config self-consistency gate FAILED (see above)." >&2
     exit 1
   fi
@@ -134,10 +141,17 @@ aws ecr get-login-password --region "${REGION}" | \
 # Build the image (ARM64 for AgentCore)
 echo ""
 echo "Building image (ARM64)..."
+# Stage the canonical fs validator into the build context: skill files require
+# ../../../validated-fs.cjs, which resolves to /validated-fs.cjs in-container —
+# the Dockerfile symlinks that to this staged copy inside /opt/psd-skills.
+# Staged (gitignored) rather than checked in twice, so it can never drift from
+# infra/validated-fs.cjs.
+cp "${SCRIPT_DIR}/../validated-fs.cjs" "${SCRIPT_DIR}/skills/validated-fs.cjs"
 docker build \
   --platform linux/arm64 \
   -t "${ECR_URI}:${TAG}" \
   "${SCRIPT_DIR}"
+rm -f "${SCRIPT_DIR}/skills/validated-fs.cjs"
 
 # ---------------------------------------------------------------------------
 # Build-time eval gate (issue #1161): runtime boot probe + signed canary turn.
@@ -270,14 +284,46 @@ except Exception:
     trap cleanup_probe EXIT
 
     echo "Starting probe container against the signed web broker..."
-    # Pass through host AWS creds only when present. Build an array (rather than
-    # unquoted ${VAR:+...} word-splitting) so the args are robust regardless of
-    # the credential alphabet / IFS.
+    # Pass through host AWS creds. Build an array (rather than unquoted
+    # ${VAR:+...} word-splitting) so the args are robust regardless of the
+    # credential alphabet / IFS.
     PROBE_ENV_ARGS=(-e "ENVIRONMENT=${ENVIRONMENT}" -e "AWS_REGION=${REGION}"
       -e "BUILD_MARKER=${TAG}@probe" -e "APP_BASE_URL=${PROBE_APP_BASE_URL}")
-    [ -n "${AWS_ACCESS_KEY_ID:-}" ] && PROBE_ENV_ARGS+=(-e "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}")
-    [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && PROBE_ENV_ARGS+=(-e "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}")
-    [ -n "${AWS_SESSION_TOKEN:-}" ] && PROBE_ENV_ARGS+=(-e "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}")
+
+    # The agent signs its own Bedrock calls with SigV4 from the AgentCore
+    # execution role, so the probe container needs REAL credentials or the
+    # canary turn cannot reach a model at all.
+    #
+    # Reading only AWS_ACCESS_KEY_ID/SECRET/SESSION_TOKEN from the environment
+    # is not enough and silently produced a useless gate: most developers (and
+    # this repo's own docs) authenticate with a shared credentials file or an
+    # SSO profile, where those variables are UNSET. The container then started
+    # with no credentials and the canary failed with a generic
+    # "I couldn't complete that", which looks identical to a real model bug.
+    #
+    # `aws configure export-credentials` resolves whatever the active chain is
+    # — env vars, profile, SSO, assumed role — into the three variables the
+    # container understands. Credentials are piped into the arg array and never
+    # echoed; do not add a debug print here.
+    if AWS_CREDS_ENV="$(aws configure export-credentials --format env-no-export 2>/dev/null)" \
+       && [ -n "${AWS_CREDS_ENV}" ]; then
+      while IFS= read -r cred_line; do
+        case "${cred_line}" in
+          AWS_ACCESS_KEY_ID=*|AWS_SECRET_ACCESS_KEY=*|AWS_SESSION_TOKEN=*)
+            PROBE_ENV_ARGS+=(-e "${cred_line}")
+            ;;
+        esac
+      done <<< "${AWS_CREDS_ENV}"
+      unset AWS_CREDS_ENV
+      echo "  Probe credentials: resolved from the active AWS credential chain."
+    else
+      # Fall back to the old behaviour so a CI runner that only exports the
+      # variables still works.
+      [ -n "${AWS_ACCESS_KEY_ID:-}" ] && PROBE_ENV_ARGS+=(-e "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}")
+      [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && PROBE_ENV_ARGS+=(-e "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}")
+      [ -n "${AWS_SESSION_TOKEN:-}" ] && PROBE_ENV_ARGS+=(-e "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}")
+      echo "  Probe credentials: environment variables only (no credential chain)."
+    fi
     CID=$(docker run -d --platform linux/arm64 "${PROBE_ENV_ARGS[@]}" "${ECR_URI}:${TAG}")
 
     # Boot probe: wait for BOOT_OK. BUILD_MARKER logged but no BOOT_OK within the
