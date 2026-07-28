@@ -130,15 +130,19 @@ async function requireOwnedMemory(
   return memory
 }
 
-async function requireMemoryWritesEnabled(userId: number): Promise<void> {
+async function requireGlobalMemoryEnabled(operation: string): Promise<void> {
   if (!(await isNexusMemoryGloballyEnabled())) {
     throw ErrorFactories.bizInvalidState(
-      "write Nexus memory",
+      operation,
       "disabled",
       "enabled",
       { userMessage: "Nexus memory is currently disabled" },
     )
   }
+}
+
+async function requireMemoryWritesEnabled(userId: number): Promise<void> {
+  await requireGlobalMemoryEnabled("write Nexus memory")
   if (!(await isNexusMemoryEnabledForUser(userId))) {
     throw ErrorFactories.bizInvalidState(
       "write Nexus memory",
@@ -494,6 +498,7 @@ export async function setNexusMemoryEnabled(
     if (!parsed.success) {
       throw ErrorFactories.validationFailed(validationFields(parsed.error))
     }
+    await requireGlobalMemoryEnabled("change Nexus memory preference")
     await mergeNexusUserSettings(requester.userId, {
       memoryEnabled: parsed.data.enabled,
     })

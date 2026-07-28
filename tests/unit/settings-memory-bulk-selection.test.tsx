@@ -43,7 +43,7 @@ jest.mock("@/components/ui/alert-dialog", () => {
     }: {
       children?: import("react").ReactNode
       disabled?: boolean
-      onClick?: () => void
+      onClick?: import("react").MouseEventHandler<HTMLButtonElement>
       "data-testid"?: string
     }) => (
       <button
@@ -335,5 +335,34 @@ describe("Settings memory collection resilience", () => {
     )
     expect(deleteNexusMemory).toHaveBeenCalledWith(memory(1).id)
     expect(listNexusMemories).toHaveBeenCalled()
+  })
+
+  it("keeps the confirmation open when deletion fails", async () => {
+    jest.mocked(deleteNexusMemory).mockResolvedValueOnce({
+      isSuccess: false,
+      message: "Failed to delete memory",
+    })
+    render(
+      <MemoryTab
+        initialData={{
+          memories: [memory(1)],
+          memoryEnabled: true,
+          globalMemoryEnabled: true,
+          nextCursor: null,
+        }}
+      />,
+    )
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Delete memory: Memory 1" }),
+    )
+    const confirm = screen.getByTestId("memory-delete-confirm")
+
+    expect(fireEvent.click(confirm)).toBe(false)
+    await waitFor(() =>
+      expect(deleteNexusMemory).toHaveBeenCalledWith(memory(1).id),
+    )
+    expect(screen.getByTestId("memory-delete-confirm")).toBeEnabled()
+    expect(screen.getByText("Memory 1")).toBeInTheDocument()
   })
 })

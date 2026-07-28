@@ -980,7 +980,10 @@ function MemoryDeleteDialog({
             data-testid="memory-delete-confirm"
             disabled={deletion.isDeleting}
             className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            onClick={deletion.handleDelete}
+            onClick={(event) => {
+              event.preventDefault()
+              void deletion.handleDelete()
+            }}
           >
             {deletion.isDeleting ? (
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />

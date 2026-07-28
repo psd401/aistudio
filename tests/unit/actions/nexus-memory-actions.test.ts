@@ -345,6 +345,16 @@ describe("Nexus memory settings action mutations", () => {
     })
   })
 
+  it("rejects account toggle changes while memory is globally disabled", async () => {
+    mockIsNexusMemoryGloballyEnabled.mockResolvedValue(false)
+
+    const result = await setNexusMemoryEnabled(false)
+
+    expect(result).toMatchObject({ isSuccess: false })
+    expect(mockIsNexusMemoryGloballyEnabled).toHaveBeenCalled()
+    expect(mockMergeNexusUserSettings).not.toHaveBeenCalled()
+  })
+
   it.each([
     [
       "add",
