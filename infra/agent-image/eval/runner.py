@@ -9,7 +9,6 @@ Example:
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import logging
 import os
@@ -731,12 +730,33 @@ def _parse_scalar(value: str, path: Path, line_number: int) -> object:
     stripped = value.strip()
     if not stripped:
         return ""
-    if stripped[0] in {'"', "'", "[", "{"}:
-        try:
-            return ast.literal_eval(stripped)
-        except (SyntaxError, ValueError) as error:
+    if stripped[0] == "'":
+        if len(stripped) < 2 or stripped[-1] != "'":
             raise EvalRunnerError(
-                f"{path}:{line_number}: invalid quoted/inline value"
+                f"{path}:{line_number}: invalid single-quoted YAML value"
+            )
+        content = stripped[1:-1]
+        parsed: list[str] = []
+        index = 0
+        while index < len(content):
+            character = content[index]
+            if character != "'":
+                parsed.append(character)
+                index += 1
+                continue
+            if index + 1 >= len(content) or content[index + 1] != "'":
+                raise EvalRunnerError(
+                    f"{path}:{line_number}: invalid single-quoted YAML value"
+                )
+            parsed.append("'")
+            index += 2
+        return "".join(parsed)
+    if stripped[0] in {'"', "[", "{"}:
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError as error:
+            raise EvalRunnerError(
+                f"{path}:{line_number}: invalid JSON-compatible quoted/inline value"
             ) from error
     lowered = stripped.lower()
     if lowered in {"true", "false"}:

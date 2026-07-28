@@ -59,7 +59,10 @@ container for every trial so local files and memory cannot leak.
 
 ## Task and suite files
 
-Phase-0 task files use a flat, dependency-free YAML subset:
+Phase-0 task files use a flat, dependency-free YAML subset. Double-quoted
+scalars and inline lists/maps use JSON-compatible syntax. Single-quoted scalars
+use YAML escaping, so an apostrophe is written twice (`'Don''t use tools'`).
+Trailing inline comments are not part of this subset; use their own `#` line.
 
 ```yaml
 id: arithmetic-no-tools

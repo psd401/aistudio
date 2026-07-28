@@ -155,6 +155,48 @@ class SuiteLoadingTests(unittest.TestCase):
             ):
                 runner.load_suite(task_path)
 
+    def test_yaml_single_quote_escaping_preserves_the_prompt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task_path = Path(directory) / "quoted-prompt.yaml"
+            task_path.write_text(
+                "\n".join(
+                    [
+                        "id: quoted-prompt",
+                        "skill: runner-core",
+                        "level: L0",
+                        "workspace: pure",
+                        "prompt: 'Don''t use tools'",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            [task] = runner.load_suite(task_path)
+
+        self.assertEqual(task.prompt, "Don't use tools")
+
+    def test_python_adjacent_string_syntax_is_not_accepted_as_yaml(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task_path = Path(directory) / "adjacent-strings.yaml"
+            task_path.write_text(
+                "\n".join(
+                    [
+                        "id: adjacent-strings",
+                        "skill: runner-core",
+                        "level: L0",
+                        "workspace: pure",
+                        "prompt: 'Don' 't use tools'",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                runner.EvalRunnerError,
+                "invalid single-quoted YAML value",
+            ):
+                runner.load_suite(task_path)
+
 
 class AdvancingClock:
     def __init__(self) -> None:
