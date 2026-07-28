@@ -1,0 +1,275 @@
+"""Hermetic tests for the issue #1424 deterministic eval graders.
+
+Run:
+    uv run --python 3.12 --no-project -m unittest \
+      infra/agent-image/test_graders.py
+"""
+
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+
+AGENT_IMAGE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(AGENT_IMAGE_DIR / "eval"))
+
+import graders  # noqa: E402
+
+
+def grade(
+    specs,
+    *,
+    result="done",
+    metadata=None,
+    requests=(),
+    errors=(),
+    catalog="",
+):
+    validated = graders.validate_grader_specs(specs)
+    return graders.grade_trial(
+        validated,
+        result=result,
+        metadata=metadata or {"tool_calls": []},
+        artifacts=graders.TrialArtifacts(
+            broker_requests=tuple(requests),
+            broker_errors=tuple(errors),
+            tools_catalog_log=catalog,
+        ),
+    )
+
+
+class BrokerRequestGraderTests(unittest.TestCase):
+    def test_method_and_all_body_matcher_types(self):
+        decision = grade(
+            [
+                {
+                    "type": "broker_request",
+                    "route": "/api/agent/workspace-execute",
+                    "method": "POST",
+                    "body": {
+                        "operation": {"exact": "calendar.events.create"},
+                        "attendees": {"contains_any": ["staff@example.com"]},
+                        "durationMinutes": {"numeric_equals": 30.0},
+                    },
+                }
+            ],
+            requests=[
+                {
+                    "route": "/api/agent/workspace-execute",
+                    "method": "POST",
+                    "body": {
+                        "operation": "calendar.events.create",
+                        "attendees": ["owner@example.com", "staff@example.com"],
+                        "durationMinutes": 30,
+                    },
+                }
+            ],
+        )
+
+        self.assertTrue(decision["passed"])
+        self.assertIn("matching body", decision["results"][0]["reason"])
+
+    def test_nested_field_mismatch_has_human_readable_reason(self):
+        decision = grade(
+            [
+                {
+                    "type": "broker_request",
+                    "route": "/api/agent/failures",
+                    "body": {
+                        "failure.severity": {"exact": "critical"},
+                    },
+                }
+            ],
+            requests=[
+                {
+                    "route": "/api/agent/failures",
+                    "method": "POST",
+                    "body": {"failure": {"severity": "warning"}},
+                }
+            ],
+        )
+
+        self.assertFalse(decision["passed"])
+        self.assertIn("expected exact", decision["results"][0]["reason"])
+
+    def test_no_route_called_rejects_a_forbidden_side_effect(self):
+        decision = grade(
+            [
+                {
+                    "type": "no_route_called",
+                    "route": "/api/agent/email-triage",
+                }
+            ],
+            requests=[
+                {
+                    "route": "/api/agent/email-triage",
+                    "method": "POST",
+                    "body": {},
+                }
+            ],
+        )
+
+        self.assertFalse(decision["passed"])
+        self.assertIn("forbidden", decision["results"][0]["reason"])
+
+
+class OutputAndTrajectoryGraderTests(unittest.TestCase):
+    def test_output_match_supports_case_insensitive_regex(self):
+        decision = grade(
+            [
+                {
+                    "type": "output_match",
+                    "pattern": r"ticket\s+#\d+",
+                    "ignore_case": True,
+                }
+            ],
+            result="Created Ticket #418.",
+        )
+
+        self.assertTrue(decision["passed"])
+
+    def test_trajectory_requires_relative_order_but_allows_extra_steps(self):
+        decision = grade(
+            [
+                {
+                    "type": "trajectory_in_order",
+                    "tools": ["skills.search", "skills.load", "workspace.execute"],
+                }
+            ],
+            metadata={
+                "tool_calls": [
+                    {"name": "skills.search"},
+                    {"name": "read"},
+                    {"name": "skills.load"},
+                    {"name": "think"},
+                    {"name": "workspace.execute"},
+                ]
+            },
+        )
+
+        self.assertTrue(decision["passed"])
+        self.assertEqual(
+            len(decision["results"]),
+            1,
+            "extra tools are allowed instead of enforcing an exact sequence",
+        )
+
+    def test_trajectory_rejects_expected_tools_in_the_wrong_order(self):
+        decision = grade(
+            [
+                {
+                    "type": "trajectory_in_order",
+                    "tools": ["skills.search", "skills.load"],
+                }
+            ],
+            metadata={
+                "tool_calls": [
+                    {"name": "skills.load"},
+                    {"name": "skills.search"},
+                ]
+            },
+        )
+
+        self.assertFalse(decision["passed"])
+
+    def test_tools_catalog_requires_every_expected_entry(self):
+        decision = grade(
+            [
+                {
+                    "type": "tools_catalog",
+                    "expected": ["skills.search", "workspace.execute"],
+                }
+            ],
+            catalog='tools.catalog ok: [{"name":"skills.search"},{"name":"read"}]',
+        )
+
+        self.assertFalse(decision["passed"])
+        self.assertIn("workspace.execute", decision["results"][0]["reason"])
+
+    def test_tools_catalog_matches_name_fields_not_description_text(self):
+        decision = grade(
+            [
+                {
+                    "type": "tools_catalog",
+                    "expected": ["workspace.execute"],
+                }
+            ],
+            catalog=(
+                'tools.catalog ok: [{"name":"read",'
+                '"description":"use workspace.execute when needed"}]'
+            ),
+        )
+
+        self.assertFalse(decision["passed"])
+
+    def test_tools_catalog_handles_a_truncated_catalog_line(self):
+        decision = grade(
+            [
+                {
+                    "type": "tools_catalog",
+                    "expected": ["skills.search", "workspace.execute"],
+                }
+            ],
+            catalog=(
+                'tools.catalog ok: [{"name":"skills.search"},'
+                '{"name":"workspace.execute"},{"name":"truncated'
+            ),
+        )
+
+        self.assertTrue(decision["passed"])
+
+
+class ReliabilityAggregationTests(unittest.TestCase):
+    def test_pass_k_fails_when_only_two_of_three_trials_pass(self):
+        records = [
+            {
+                "task_id": "three-trial-task",
+                "trial": trial,
+                "trials": 3,
+                "grade": {"passed": trial != 2},
+            }
+            for trial in range(1, 4)
+        ]
+
+        summary = graders.aggregate_pass_k(records)
+
+        self.assertEqual(summary[0]["passed_trials"], 2)
+        self.assertFalse(summary[0]["pass^k"])
+
+    def test_missing_fixture_is_an_automatic_named_failure(self):
+        decision = grade(
+            [],
+            errors=(
+                "EvalFixtureMissing: no fixture for POST /api/agent/aistudio",
+            ),
+        )
+
+        self.assertFalse(decision["passed"])
+        self.assertEqual(decision["results"][0]["grader"], "broker_stub")
+        self.assertIn("EvalFixtureMissing", decision["results"][0]["reason"])
+
+
+class GraderValidationTests(unittest.TestCase):
+    def test_invalid_regex_fails_when_the_suite_loads(self):
+        with self.assertRaisesRegex(
+            graders.GraderConfigurationError,
+            "pattern is invalid",
+        ):
+            graders.validate_grader_specs(
+                [{"type": "output_match", "pattern": "["}]
+            )
+
+    def test_unknown_grader_fails_closed(self):
+        with self.assertRaisesRegex(
+            graders.GraderConfigurationError,
+            "unsupported grader",
+        ):
+            graders.validate_grader_specs(
+                [{"type": "model_judge", "prompt": "be generous"}]
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

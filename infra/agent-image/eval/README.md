@@ -1,9 +1,9 @@
 # Local agent-image eval runner
 
 `runner.py` boots a candidate image locally and records repeated task results
-from the same `/invocations` endpoint AgentCore uses in production. Phase 0
-(#1422) records outcomes and telemetry; deterministic graders are added by
-#1424.
+from the same `/invocations` endpoint AgentCore uses in production. It records
+outcomes and telemetry (#1422), injects a hermetic broker for L1 tasks, and
+applies deterministic request/output/trajectory graders (#1424).
 
 ## Run the core suite
 
@@ -14,7 +14,7 @@ python3 infra/agent-image/eval/runner.py \
   --image <tag-or-digest> \
   --suite infra/agent-image/eval/suites/core.yaml \
   --trials 3 \
-  --out /tmp/issue-1422-core.jsonl
+  --out /tmp/issue-1424-core.jsonl
 ```
 
 The runner uses the active AWS credential chain and discovers the dev web
@@ -57,6 +57,15 @@ Every trial gets:
 isolation through fresh session IDs. `workspace: mutating` tasks boot a fresh
 container for every trial so local files and memory cannot leak.
 
+`level: L1` tasks replace the image's `/app/mantle_proxy.py` at runtime with a
+read-only bind mount of `eval/broker_stub.py`. The candidate image is not
+modified. A second, runner-owned `0700` bind mount carries only the active
+trial's fixtures and `0600` request capture. The stub implements the same 16
+fixed `/api/agent/*` routes as `agent-broker.js` and `mantle_proxy.py`, plus the
+health, usage, and finalization endpoints the wrapper needs. L0 and L2 tasks
+retain the image's real proxy; pure live and stubbed tasks use separate
+containers.
+
 ## Task and suite files
 
 Phase-0 task files use a flat, dependency-free YAML subset. Double-quoted
@@ -84,13 +93,76 @@ tasks:
 The committed `core.yaml` suite has three L0 tasks. Its seed/recall pair checks
 that a passphrase stated under one session is unknown under the next.
 
+## L1 fixtures and graders
+
+An L1 task names one or more relative JSON fixture files and at least one
+grader. Graders use inline JSON objects so the runner's dependency-free YAML
+subset stays unambiguous:
+
+```yaml
+id: directory-lookup
+skill: psd-directory
+level: L1
+workspace: pure
+prompt: "Find Ada in the staff directory."
+trials: 3
+fixtures:
+  - fixtures/directory-lookup.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/directory-lookup","method":"POST","body":{"query":{"exact":"Ada"}}}
+  - {"type":"no_route_called","route":"/api/agent/email-triage"}
+  - {"type":"trajectory_in_order","tools":["skills.search","directory.lookup"]}
+  - {"type":"tools_catalog","expected":["skills.search","directory.lookup"]}
+  - {"type":"output_match","pattern":"Ada","ignore_case":true}
+```
+
+A fixture file is a list (or an object containing a `fixtures` list):
+
+```json
+[
+  {
+    "route": "/api/agent/directory-lookup",
+    "method": "POST",
+    "request_body": {"query": "Ada"},
+    "response": {
+      "status": 200,
+      "body": {"people": [{"name": "Ada Lovelace"}]}
+    }
+  }
+]
+```
+
+`request_body` is an optional partial-object selector. A request to an
+allowlisted route without a matching fixture returns a named
+`EvalFixtureMissing` response and automatically fails the trial; it never
+falls through to a live service or a silent empty response.
+
+Available graders:
+
+- `broker_request` matches route/method and optional body fields. Body matchers
+  are `exact`, `contains_any`, and `numeric_equals`; dot paths address nested
+  fields.
+- `no_route_called` asserts the selected route/method received no request.
+- `output_match` applies a regular expression to the final result.
+- `trajectory_in_order` requires relative tool order while allowing extra
+  intervening steps.
+- `tools_catalog` checks the per-turn `tools.catalog` diagnostic for every
+  expected entry.
+
+Each JSONL record includes `broker_requests` plus a `grade` object containing
+the per-grader boolean and human-readable reason. Task reliability uses
+`pass^k`: all `k` trials must pass. Two successes out of three is a failed
+`pass^3`.
+
 ## Hermetic tests
 
 ```bash
-UV_CACHE_DIR=/tmp/issue-1422-uv-cache \
+UV_CACHE_DIR=/tmp/issue-1424-uv-cache \
   uv run --python 3.12 --no-project -m unittest \
+  infra/agent-image/test_broker_stub.py \
+  infra/agent-image/test_graders.py \
   infra/agent-image/test_eval_runner.py
 ```
 
-The tests use fake runtimes only: they make no network, AWS, model, or Docker
-calls.
+The tests make no AWS, model, Docker, or external-network calls. Broker HTTP
+tests bind only an ephemeral loopback port.
