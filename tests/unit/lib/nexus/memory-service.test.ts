@@ -30,6 +30,7 @@ function storedMemory(
 function createRepository(): jest.Mocked<MemoryRepository> {
   return {
     saveWithDedup: jest.fn(),
+    updateOwned: jest.fn(),
     listProfileMemories: jest.fn(),
     findRelevantMemories: jest.fn(),
     softDeleteOwned: jest.fn(),
@@ -176,6 +177,59 @@ describe("Nexus memory service", () => {
     ).rejects.toThrow("source conversation not found")
     expect(generateEmbedding).not.toHaveBeenCalled()
     expect(repository.saveWithDedup).not.toHaveBeenCalled()
+  })
+})
+
+describe("Nexus memory service edits", () => {
+  it("re-screens and re-embeds edited content before owner-scoped storage", async () => {
+    const events: string[] = []
+    const repository = createRepository()
+    repository.updateOwned.mockImplementation(
+      async (memoryId, userId, record) => {
+        events.push("storage")
+        expect(memoryId).toBe("11111111-1111-4111-8111-111111111111")
+        expect(userId).toBe(7)
+        expect(record).toEqual({
+          content: "sanitized edit",
+          category: "profile",
+          embedding: [0.3, 0.7],
+        })
+        return storedMemory({
+          content: record.content,
+          category: record.category,
+        })
+      },
+    )
+    const service = createMemoryService({
+      repository,
+      processInput: jest.fn(async () => {
+        events.push("safety")
+        return {
+          allowed: true,
+          processedContent: "sanitized edit",
+          piiScanCompleted: true,
+        }
+      }),
+      generateEmbedding: jest.fn(async () => {
+        events.push("embedding")
+        return [0.3, 0.7]
+      }),
+      getSetting: jest.fn(async () => null),
+    })
+
+    await expect(
+      service.update({
+        memoryId: "11111111-1111-4111-8111-111111111111",
+        userId: 7,
+        sessionId: "cognito-sub",
+        content: " raw edited content ",
+        category: "profile",
+      }),
+    ).resolves.toMatchObject({
+      content: "sanitized edit",
+      category: "profile",
+    })
+    expect(events).toEqual(["safety", "embedding", "storage"])
   })
 })
 

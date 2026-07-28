@@ -1,9 +1,6 @@
 import { and, eq } from "drizzle-orm"
 import { executeQuery } from "@/lib/db/drizzle-client"
-import {
-  nexusConversations,
-  nexusUserPreferences,
-} from "@/lib/db/schema"
+import { nexusConversations, nexusUserPreferences } from "@/lib/db/schema"
 import { hasCapabilityAccess } from "@/lib/db/drizzle/capabilities"
 import { createLogger } from "@/lib/logger"
 import { getSetting } from "@/lib/settings-manager"
@@ -56,7 +53,13 @@ function enabledSetting(value: string | null): boolean {
   return !["false", "0", "off", "no"].includes(value.trim().toLowerCase())
 }
 
-async function loadUserMemoryEnabled(userId: number): Promise<boolean> {
+export async function isNexusMemoryGloballyEnabled(): Promise<boolean> {
+  return enabledSetting(await getSetting("NEXUS_MEMORY_ENABLED"))
+}
+
+export async function isNexusMemoryEnabledForUser(
+  userId: number,
+): Promise<boolean> {
   const [preference] = await executeQuery(
     (db) =>
       db
@@ -105,13 +108,13 @@ export async function resolveMemoryAvailability(input: {
   try {
     const [globalSetting, capabilityGranted, userEnabled, conversation] =
       await Promise.all([
-        getSetting("NEXUS_MEMORY_ENABLED"),
+        isNexusMemoryGloballyEnabled(),
         hasCapabilityAccess(input.cognitoSub, "nexus-memory"),
-        loadUserMemoryEnabled(input.userId),
+        isNexusMemoryEnabledForUser(input.userId),
         loadConversationGate(input.conversationId, input.userId),
       ])
     return evaluateMemoryGates({
-      globalEnabled: enabledSetting(globalSetting),
+      globalEnabled: globalSetting,
       capabilityGranted,
       userEnabled,
       conversationOwned: conversation.owned,
@@ -133,10 +136,10 @@ export async function resolveMemoryControlAvailability(input: {
 }): Promise<boolean> {
   try {
     const [globalSetting, capabilityGranted] = await Promise.all([
-      getSetting("NEXUS_MEMORY_ENABLED"),
+      isNexusMemoryGloballyEnabled(),
       hasCapabilityAccess(input.cognitoSub, "nexus-memory"),
     ])
-    return enabledSetting(globalSetting) && capabilityGranted
+    return globalSetting && capabilityGranted
   } catch {
     return false
   }

@@ -16,6 +16,7 @@ function executeTool(tool: unknown, args: unknown): Promise<unknown> {
 function createService(): jest.Mocked<NexusMemoryService> {
   return {
     save: jest.fn(),
+    update: jest.fn(),
     retrieve: jest.fn(),
     forget: jest.fn(),
   }
