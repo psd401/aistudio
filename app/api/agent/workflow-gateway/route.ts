@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import {
   CALLER_BOUND_MARKER,
   getCallerBoundArgumentNames,
+  isMutatingWorkflowToolName,
   WorkflowGatewayError,
   workflowGatewayDependencies,
   type WorkflowGatewayConfig,
@@ -253,9 +254,9 @@ function bindCallerArguments(
   return result
 }
 
-function unmarkedSubmitError(toolName: string): WorkflowGatewayError {
+function unmarkedMutatingToolError(toolName: string): WorkflowGatewayError {
   return new WorkflowGatewayError(
-    `Gateway submit tool "${toolName}" is missing a ${CALLER_BOUND_MARKER} ` +
+    `Gateway mutating tool "${toolName}" is missing a ${CALLER_BOUND_MARKER} ` +
       "argument marker; ask the workflow owner to mark the verified caller field.",
     "request"
   )
@@ -276,10 +277,10 @@ async function executeCall(options: {
     (tool) => {
       callerArgumentNames = getCallerBoundArgumentNames(tool.inputSchema)
       if (
-        gatewayRequest.toolName.startsWith("submit_") &&
+        isMutatingWorkflowToolName(gatewayRequest.toolName) &&
         callerArgumentNames.length === 0
       ) {
-        throw unmarkedSubmitError(gatewayRequest.toolName)
+        throw unmarkedMutatingToolError(gatewayRequest.toolName)
       }
       return bindCallerArguments(
         gatewayRequest.arguments,

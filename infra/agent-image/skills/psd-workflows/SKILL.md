@@ -85,9 +85,11 @@ node /opt/psd-skills/psd-workflows/run.js call \
 ```
 
 The broker derives the verified caller from the signed invocation context and
-overrides every `[caller-bound]` argument. Any `submit_*` tool missing that
-marker is rejected; do not work around this failure. Relay actionable gateway
-validation errors and correct the input rather than retrying blindly.
+overrides every `[caller-bound]` argument. Any mutating tool (`approve_*`,
+`cancel_*`, `create_*`, `delete_*`, `reject_*`, `submit_*`, or `update_*`)
+missing that marker is rejected; do not work around this failure. Relay
+actionable gateway validation errors and correct the input rather than retrying
+blindly.
 
 If the result includes a signing or completion URL, return it verbatim on its
 own line and explain the next step using the workflow's returned instructions.

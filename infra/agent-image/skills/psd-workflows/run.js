@@ -19,6 +19,15 @@ const { validatedFs } = require('../../../validated-fs.cjs');
 const gateway = require('./gateway');
 
 const CALLER_BOUND_MARKER = '[caller-bound]';
+const MUTATING_TOOL_PREFIXES = [
+  'approve_',
+  'cancel_',
+  'create_',
+  'delete_',
+  'reject_',
+  'submit_',
+  'update_',
+];
 const USAGE = `Usage:
   node run.js list
   node run.js describe --tool <name>
@@ -164,6 +173,10 @@ function familyForTool(name) {
   return family || 'other';
 }
 
+function isMutatingToolName(name) {
+  return MUTATING_TOOL_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
 function groupTools(tools) {
   const groups = new Map();
   for (const tool of tools) {
@@ -220,9 +233,9 @@ async function runCall(args, dependencies) {
   const tool = findTool(await dependencies.listGatewayTools(), toolName);
   if (!tool) throw new CliError(`Tool "${toolName}" is not in the live roster.`, 13);
   const callerArguments = callerBoundArgumentNames(tool.inputSchema);
-  if (toolName.startsWith('submit_') && callerArguments.length === 0) {
+  if (isMutatingToolName(toolName) && callerArguments.length === 0) {
     throw new CliError(
-      `Gateway submit tool "${toolName}" is missing a ${CALLER_BOUND_MARKER} argument marker.`,
+      `Gateway mutating tool "${toolName}" is missing a ${CALLER_BOUND_MARKER} argument marker.`,
       13
     );
   }
@@ -291,6 +304,7 @@ module.exports = {
   callerBoundArgumentNames,
   familyForTool,
   groupTools,
+  isMutatingToolName,
   loadCallArgs,
   main,
   parseArgs,

@@ -83,6 +83,34 @@ test('call loads inline JSON and overwrites every caller-bound field from --user
   });
 });
 
+test('call rejects every unmarked mutating workflow verb', async () => {
+  for (const verb of [
+    'approve',
+    'cancel',
+    'create',
+    'delete',
+    'reject',
+    'submit',
+    'update',
+  ]) {
+    const tool = {
+      name: `${verb}_example_request`,
+      description: 'Mutates an example request',
+      inputSchema: { type: 'object', properties: {} },
+    };
+    await assert.rejects(
+      () => run(
+        ['call', '--tool', tool.name, '--user', 'owner@psd401.net'],
+        {
+          listGatewayTools: async () => [tool],
+          callGatewayTool: async () => ({ isError: false, data: {} }),
+        }
+      ),
+      (error) => error.code === 13 && error.message.includes('[caller-bound]')
+    );
+  }
+});
+
 test('call accepts --json-file payloads through the validated reader', async () => {
   let seen;
   await run(

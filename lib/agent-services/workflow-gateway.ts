@@ -1,6 +1,15 @@
 import { safeFetch } from "@/lib/security/safe-fetch"
 
 export const CALLER_BOUND_MARKER = "[caller-bound]"
+const MUTATING_WORKFLOW_TOOL_PREFIXES = [
+  "approve_",
+  "cancel_",
+  "create_",
+  "delete_",
+  "reject_",
+  "submit_",
+  "update_",
+] as const
 export const WORKFLOW_SSE_LIMITS = {
   rawBytes: 4 * 1024 * 1024,
   chunkBytes: 256 * 1024,
@@ -595,6 +604,12 @@ export function getCallerBoundArgumentNames(
       ? [name]
       : []
   })
+}
+
+export function isMutatingWorkflowToolName(toolName: string): boolean {
+  return MUTATING_WORKFLOW_TOOL_PREFIXES.some((prefix) =>
+    toolName.startsWith(prefix)
+  )
 }
 
 async function listGatewayToolsWithClient(

@@ -159,7 +159,8 @@ paste it verbatim into Chat and stop the turn. Exit 14 carries **no** URL.
    `not-configured`. Every gateway parameter that represents the verified
    caller must include `[caller-bound]` in that parameter's `inputSchema`
    description. The broker replaces all marked values with the signed owner and
-   rejects any unmarked `submit_*` tool.
+   rejects any unmarked mutating tool (`approve_*`, `cancel_*`, `create_*`,
+   `delete_*`, `reject_*`, `submit_*`, or `update_*`).
 7. Deploy infra (AgentPlatformStack + FrontendStack) and the new agent image. No
    `-c` context flags are needed for the gateway or DWD config.
 8. **Remediation (one-off, run manually):**

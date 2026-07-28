@@ -224,33 +224,35 @@ describe("POST /api/agent/workflow-gateway", () => {
 })
 
 describe("POST /api/agent/workflow-gateway safety", () => {
-  it("rejects an unmarked submit tool with an actionable error", async () => {
-    const unsafeSubmitName = ["submit", "future", "packet"].join("_")
-    executingTool = {
-      name: unsafeSubmitName,
-      description: "Submits a workflow packet",
-      inputSchema: {
-        type: "object",
-        properties: {
-          employee_email: {
-            type: "string",
-            description: "The employee who owns the packet",
+  it.each(["submit_future_packet", "create_future_packet"])(
+    "rejects unmarked mutating tool %s with an actionable error",
+    async (unsafeToolName) => {
+      executingTool = {
+        name: unsafeToolName,
+        description: "Mutates a workflow packet",
+        inputSchema: {
+          type: "object",
+          properties: {
+            employee_email: {
+              type: "string",
+              description: "The employee who owns the packet",
+            },
           },
         },
-      },
-    }
-    const response = await POST(
-      request({
-        toolName: unsafeSubmitName,
-        arguments: { employee_email: "victim@psd401.net" },
+      }
+      const response = await POST(
+        request({
+          toolName: unsafeToolName,
+          arguments: { employee_email: "victim@psd401.net" },
+        })
+      )
+      expect(response.status).toBe(400)
+      expect(await response.json()).toEqual({
+        error: expect.stringContaining("[caller-bound]"),
       })
-    )
-    expect(response.status).toBe(400)
-    expect(await response.json()).toEqual({
-      error: expect.stringContaining("[caller-bound]"),
-    })
-    expect(executeToolMock).toHaveBeenCalledTimes(1)
-  })
+      expect(executeToolMock).toHaveBeenCalledTimes(1)
+    }
+  )
 
   it("rejects tools absent from the live roster", async () => {
     executeToolMock.mockRejectedValueOnce(

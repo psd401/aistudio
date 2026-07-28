@@ -2,6 +2,7 @@ import {
   clearGatewayToolsCache,
   executeWorkflowGatewayTool,
   getCallerBoundArgumentNames,
+  isMutatingWorkflowToolName,
   listGatewayTools,
   parseGatewayToolsList,
   parseSseFrames,
@@ -235,6 +236,22 @@ describe("workflow gateway roster parsing", () => {
         },
       })
     ).toEqual(["requester_email", "approver_email"])
+  })
+
+  it("classifies every state-changing workflow verb as mutating", () => {
+    for (const verb of [
+      "approve",
+      "cancel",
+      "create",
+      "delete",
+      "reject",
+      "submit",
+      "update",
+    ]) {
+      expect(isMutatingWorkflowToolName(`${verb}_example_request`)).toBe(true)
+    }
+    expect(isMutatingWorkflowToolName("get_example_request")).toBe(false)
+    expect(isMutatingWorkflowToolName("list_example_requests")).toBe(false)
   })
 })
 
