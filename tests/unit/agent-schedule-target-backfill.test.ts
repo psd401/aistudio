@@ -253,16 +253,41 @@ describe("agent schedule target backfill infrastructure", () => {
       "utf8",
     ),
   )
+  const frontendSource = stripComments(
+    fs.readFileSync(
+      path.join(process.cwd(), "infra/lib/frontend-stack-ecs.ts"),
+      "utf8",
+    ),
+  )
+  const appSource = stripComments(
+    fs.readFileSync(
+      path.join(process.cwd(), "infra/bin/infra.ts"),
+      "utf8",
+    ),
+  )
 
-  it("runs the versioned migration automatically during deployment", () => {
+  it("creates the migration worker without triggering it before the frontend", () => {
     expect(stackSource).toContain(
       "this.createScheduleTargetBackfill(props, resources)",
     )
-    expect(stackSource).toContain(
+    expect(stackSource).not.toContain(
       "ScheduleTargetBackfillCustomResource",
     )
-    expect(stackSource).toContain(
-      "migrationVersion: 'scheduled-time-delivery-policy-v2'",
+    expect(stackSource).toContain("return backfill")
+  })
+
+  it("runs the versioned migration only after lock-aware ECS is steady", () => {
+    expect(frontendSource).toContain(
+      "ScheduleTargetBackfillAfterFrontend",
+    )
+    expect(frontendSource).toContain(
+      "migrationVersion: 'scheduled-time-delivery-policy-v3'",
+    )
+    expect(frontendSource).toContain(
+      "trigger.node.addDependency(this.ecsService.service)",
+    )
+    expect(appSource).toContain(
+      "scheduleTargetBackfillFunction:",
     )
   })
 

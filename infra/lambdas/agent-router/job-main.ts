@@ -14,7 +14,7 @@
  *   - AGENTCORE_TIMEOUT_MS_OVERRIDE is set on the task definition so the
  *     undici dispatcher in index.ts outlives the 2h invocation.
  *   - The router pre-acquired the kind='job' session lock; this process
- *     renews it every 10 minutes and releases it on exit.
+ *     renews it every 5 minutes and releases it on exit.
  *   - ALWAYS posts something to the originating space: the final answer,
  *     the harness's failure frame, or a runner-error message. No silent
  *     deaths.
@@ -42,7 +42,10 @@ import {
   sanitizeEmailForLog,
 } from './log-sanitization';
 
-const RENEW_INTERVAL_MS = 10 * 60 * 1000;
+// The renewed lease is 14 minutes. A five-minute cadence leaves enough margin
+// for one complete transient renewal failure: the next attempt occurs around
+// minute ten, before the existing lease can expire.
+const RENEW_INTERVAL_MS = 5 * 60 * 1000;
 type JobPayload = ReturnType<typeof parseJobPayload>;
 type AgentResult = Awaited<ReturnType<typeof invokeAgentCore>>;
 type JobLogger = ReturnType<typeof createLogger>;

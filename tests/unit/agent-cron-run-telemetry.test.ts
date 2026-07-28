@@ -354,6 +354,57 @@ describe("agent-cron ordinary run telemetry", () => {
   })
 })
 
+describe("agent-cron fire-idempotent telemetry", () => {
+  it("upserts run and failure telemetry by immutable fire identity", async () => {
+    const { telemetry, execute, log } = harness()
+    const fireKey =
+      "schedule-fire#schedule-id#2026-07-28T15:00:00.000Z"
+
+    await telemetry.recordRunStrict(
+      {
+        fireKey,
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        sessionId: "schedule-session",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 3,
+        status: "skipped",
+        errorMessage: "Session lock contended",
+        failure: {
+          severity: "warn",
+          context: { phase: "lock-contention" },
+        },
+      },
+      log,
+    )
+
+    expect(execute).toHaveBeenCalledTimes(2)
+    expect(execute.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        sql: expect.stringMatching(
+          /ON CONFLICT \(fire_key\)[\s\S]+DO UPDATE SET/,
+        ),
+        parameters: expect.arrayContaining([{
+          name: "fire_key",
+          value: { stringValue: fireKey },
+        }]),
+      }),
+    )
+    expect(execute.mock.calls[1][0]).toEqual(
+      expect.objectContaining({
+        sql: expect.stringMatching(
+          /ON CONFLICT \(source, fire_key\)[\s\S]+DO UPDATE SET/,
+        ),
+        parameters: expect.arrayContaining([{
+          name: "fire_key",
+          value: { stringValue: fireKey },
+        }]),
+      }),
+    )
+  })
+})
+
 describe("agent-cron failure telemetry", () => {
   it("mirrors a lookup error into the cron failure stream", async () => {
     const { telemetry, execute, error, log } = harness()

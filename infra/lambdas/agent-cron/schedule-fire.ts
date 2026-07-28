@@ -468,8 +468,16 @@ export async function releaseScheduleFire(
     await dynamoClient.delete({
       TableName: tableName,
       Key: { sessionId: claim.identity.key },
-      ConditionExpression: 'lockToken = :token',
-      ExpressionAttributeValues: { ':token': claim.claimToken },
+      // Cleanup is valid only before the execution boundary. Even if a future
+      // caller accidentally attempts to release an executing/completed fire,
+      // this condition retains the replay-blocking marker.
+      ConditionExpression:
+        'lockToken = :token AND #status = :claimed',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: {
+        ':token': claim.claimToken,
+        ':claimed': 'claimed',
+      },
     });
   } catch (error) {
     if (errorName(error) === 'ConditionalCheckFailedException') return;
@@ -485,12 +493,14 @@ export async function releaseScheduleFire(
         Key: { sessionId: claim.identity.key },
         UpdateExpression:
           'SET #status = :failed, expiresAt = :expiredAt',
-        ConditionExpression: 'lockToken = :token',
+        ConditionExpression:
+          'lockToken = :token AND #status = :claimed',
         ExpressionAttributeNames: { '#status': 'status' },
         ExpressionAttributeValues: {
           ':failed': 'failed',
           ':expiredAt': Math.floor(Date.now() / 1000) - 1,
           ':token': claim.claimToken,
+          ':claimed': 'claimed',
         },
       });
     } catch (expireError) {

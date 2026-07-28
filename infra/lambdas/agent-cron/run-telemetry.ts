@@ -15,11 +15,15 @@ export interface CronFailureRecord {
   errorMessage: string | null;
   severity?: 'error' | 'warn';
   context?: Record<string, unknown>;
+  /** Immutable Scheduler occurrence identity for retry-safe failure upserts. */
+  fireKey?: string;
 }
 
 export interface ScheduledRunRecord {
   /** Primary-key correlation for a promoted run; absent on ordinary cron rows. */
   scheduledRunId?: string;
+  /** Immutable Scheduler occurrence identity for retry-safe run upserts. */
+  fireKey?: string;
   userEmail: string;
   scheduleId: string;
   scheduleName?: string;
@@ -82,6 +86,7 @@ function scheduledRunParameters(
     { name: 'latency_ms', value: { longValue: params.latencyMs } },
     { name: 'status', value: { stringValue: params.status } },
     nullableStringParameter('error_message', errorMessage),
+    nullableStringParameter('fire_key', params.fireKey),
   ];
 }
 
@@ -155,10 +160,22 @@ export async function writeScheduledRun(
       database: config.databaseName,
       sql: `INSERT INTO agent_scheduled_runs
               (user_id, schedule_id, schedule_name, session_id,
-               input_tokens, output_tokens, latency_ms, status, error_message)
+               input_tokens, output_tokens, latency_ms, status, error_message,
+               fire_key)
             VALUES
               (:user_id, :schedule_id, :schedule_name, :session_id,
-               :input_tokens, :output_tokens, :latency_ms, :status, :error_message)`,
+               :input_tokens, :output_tokens, :latency_ms, :status,
+               :error_message, :fire_key)
+            ON CONFLICT (fire_key)
+              WHERE fire_key IS NOT NULL
+            DO UPDATE SET
+              schedule_name = EXCLUDED.schedule_name,
+              session_id = EXCLUDED.session_id,
+              input_tokens = EXCLUDED.input_tokens,
+              output_tokens = EXCLUDED.output_tokens,
+              latency_ms = EXCLUDED.latency_ms,
+              status = EXCLUDED.status,
+              error_message = EXCLUDED.error_message`,
       parameters: scheduledRunParameters(params),
     },
   );
@@ -218,19 +235,22 @@ export async function createPromotedRun(
       sql: usesReservedId
         ? `INSERT INTO agent_scheduled_runs
               (id, user_id, schedule_id, schedule_name, session_id,
-               input_tokens, output_tokens, latency_ms, status, error_message)
+               input_tokens, output_tokens, latency_ms, status, error_message,
+               fire_key)
             OVERRIDING SYSTEM VALUE
             VALUES
               (CAST(:scheduled_run_id AS bigint), :user_id, :schedule_id,
                :schedule_name, :session_id, :input_tokens, :output_tokens,
-               :latency_ms, :status, :error_message)
+               :latency_ms, :status, :error_message, :fire_key)
             RETURNING CAST(id AS TEXT)`
         : `INSERT INTO agent_scheduled_runs
               (user_id, schedule_id, schedule_name, session_id,
-               input_tokens, output_tokens, latency_ms, status, error_message)
+               input_tokens, output_tokens, latency_ms, status, error_message,
+               fire_key)
             VALUES
               (:user_id, :schedule_id, :schedule_name, :session_id,
-               :input_tokens, :output_tokens, :latency_ms, :status, :error_message)
+               :input_tokens, :output_tokens, :latency_ms, :status,
+               :error_message, :fire_key)
             RETURNING CAST(id AS TEXT)`,
       parameters: usesReservedId
         ? promotedRunParameters(params)
@@ -336,6 +356,7 @@ export async function updatePromotedRunTerminal(
       database: config.databaseName,
       sql: `UPDATE agent_scheduled_runs
             SET schedule_name = :schedule_name,
+                fire_key = COALESCE(fire_key, :fire_key),
                 input_tokens = input_tokens + :input_tokens,
                 output_tokens = output_tokens + :output_tokens,
                 latency_ms = latency_ms + :latency_ms,
@@ -408,10 +429,19 @@ export function createRunTelemetry(
           database: config.databaseName,
           sql: `INSERT INTO agent_failures
                   (source, severity, user_id, session_id, schedule_name,
-                   error_message, context, occurred_at)
+                   error_message, context, occurred_at, fire_key)
                 VALUES
                   ('cron', :severity, :user_id, :session_id, :schedule_name,
-                   :error_message, CAST(:context AS jsonb), NOW())`,
+                   :error_message, CAST(:context AS jsonb), NOW(), :fire_key)
+                ON CONFLICT (source, fire_key)
+                  WHERE fire_key IS NOT NULL
+                DO UPDATE SET
+                  severity = EXCLUDED.severity,
+                  user_id = EXCLUDED.user_id,
+                  session_id = EXCLUDED.session_id,
+                  schedule_name = EXCLUDED.schedule_name,
+                  error_message = EXCLUDED.error_message,
+                  context = EXCLUDED.context`,
           parameters: [
             { name: 'severity', value: { stringValue: severity } },
             { name: 'user_id', value: { stringValue: params.userEmail } },
@@ -419,6 +449,7 @@ export function createRunTelemetry(
             nullableStringParameter('schedule_name', params.scheduleName),
             nullableStringParameter('error_message', truncatedError),
             { name: 'context', value: { stringValue: context } },
+            nullableStringParameter('fire_key', params.fireKey),
           ],
         },
       );
@@ -463,6 +494,7 @@ export function createRunTelemetry(
           errorMessage: params.errorMessage ?? null,
           severity: params.failure?.severity,
           context: params.failure?.context ?? { phase: 'scheduled-run' },
+          fireKey: params.fireKey,
         },
         log,
       );
@@ -484,6 +516,7 @@ export function createRunTelemetry(
           errorMessage: params.errorMessage ?? null,
           severity: params.failure?.severity,
           context: params.failure?.context ?? { phase: 'scheduled-run' },
+          fireKey: params.fireKey,
         },
         log,
       );

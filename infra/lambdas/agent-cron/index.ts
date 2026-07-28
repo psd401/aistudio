@@ -1242,6 +1242,7 @@ async function recordPromotedRun(
     runTelemetryRdsClient,
     {
       scheduledRunId,
+      fireKey: context.fireIdentity?.key,
       userEmail: schedule.ownerEmail,
       scheduleId: schedule.scheduleId,
       scheduleName,
@@ -1288,6 +1289,7 @@ async function recordPromotionLaunchFailure(
     runTelemetryRdsClient,
     {
       scheduledRunId,
+      fireKey: context.fireIdentity?.key,
       userEmail: schedule.ownerEmail,
       scheduleId: schedule.scheduleId,
       scheduleName,
@@ -1368,6 +1370,7 @@ async function tryPromoteScheduledResult(
       {
         userEmail: schedule.ownerEmail,
         scheduleId: schedule.scheduleId,
+        fireKey: context.fireIdentity?.key,
         scheduleName,
         sessionId,
         errorMessage: 'AgentCore Runtime ID is unavailable for job promotion',
@@ -1413,6 +1416,7 @@ async function tryPromoteScheduledResult(
       {
         userEmail: schedule.ownerEmail,
         scheduleId: schedule.scheduleId,
+        fireKey: context.fireIdentity?.key,
         scheduleName,
         sessionId,
         errorMessage: promotion.ambiguity,
@@ -1432,6 +1436,7 @@ async function tryPromoteScheduledResult(
       {
         userEmail: schedule.ownerEmail,
         scheduleId: schedule.scheduleId,
+        fireKey: context.fireIdentity?.key,
         scheduleName,
         sessionId,
         errorMessage: promotion.errorMessage,
@@ -1466,6 +1471,7 @@ async function deliverScheduledResult(
     });
     await runTelemetry.recordRun(
       {
+        fireKey: context.fireIdentity?.key,
         userEmail: schedule.ownerEmail,
         scheduleId: schedule.scheduleId,
         scheduleName,
@@ -1483,6 +1489,7 @@ async function deliverScheduledResult(
   const status: 'success' | 'error' = result.ok ? 'success' : 'error';
   await runTelemetry.recordRun(
     {
+      fireKey: context.fireIdentity?.key,
       userEmail: schedule.ownerEmail,
       scheduleId: schedule.scheduleId,
       scheduleName,
@@ -1580,6 +1587,7 @@ async function recordScheduleGuardFailure(
     durability === 'strict' ? 'recordRunStrict' : 'recordRun'
   ](
     {
+      fireKey: context.fireIdentity?.key,
       userEmail: schedule.ownerEmail,
       scheduleId: schedule.scheduleId,
       scheduleName,
@@ -1662,6 +1670,7 @@ function isHandlerResult(
 async function runLockedScheduleTurn(
   context: LockedScheduleContext,
   fireClaim: OwnedScheduleFireClaim | null,
+  onFireExecutionStarted: () => void,
 ): Promise<LockedJobResult<HandlerResult>> {
   try {
     return await runWithJobLock(
@@ -1678,6 +1687,7 @@ async function runLockedScheduleTurn(
               scheduleFireDynamoClient,
               context.log,
             );
+            onFireExecutionStarted();
           }
           return executeLockedScheduledTurn(context, lockToken);
         },
@@ -1783,10 +1793,17 @@ async function runGuardedScheduleTurn(
   fireClaim: OwnedScheduleFireClaim | null,
 ): Promise<HandlerResult> {
   let locked: LockedJobResult<HandlerResult>;
+  let fireExecutionStarted = false;
   try {
-    locked = await runLockedScheduleTurn(context, fireClaim);
+    locked = await runLockedScheduleTurn(
+      context,
+      fireClaim,
+      () => {
+        fireExecutionStarted = true;
+      },
+    );
   } catch (error) {
-    if (fireClaim) {
+    if (fireClaim && !fireExecutionStarted) {
       await releaseScheduleFire(
         fireClaim,
         SESSION_LOCKS_TABLE,
@@ -1794,6 +1811,10 @@ async function runGuardedScheduleTurn(
         context.log,
       );
     }
+    // Once beginScheduleFireExecution succeeds, AgentCore tools or Chat
+    // delivery may already have produced external effects. Retain the
+    // replay-blocking fire marker on every later exception; Lambda retries
+    // observe it as executing instead of replaying the same occurrence.
     throw error;
   }
   if (!locked.executed) {

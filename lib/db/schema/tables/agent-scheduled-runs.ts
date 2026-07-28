@@ -3,10 +3,10 @@
  *
  * Records each EventBridge Scheduler fire and its terminal status so schedule
  * owners can see whether their automation last succeeded, failed, or was
- * skipped before invocation. Migrations 066 and 067.
+ * skipped before invocation. Migrations 066, 067, and 164.
  */
 
-import { desc } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import {
   bigint,
   index,
@@ -14,6 +14,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
   varchar,
 } from "drizzle-orm/pg-core";
 
@@ -36,6 +37,7 @@ export const agentScheduledRuns = pgTable(
       .defaultNow(),
     scheduleId: varchar("schedule_id", { length: 64 }),
     scheduleName: varchar("schedule_name", { length: 256 }),
+    fireKey: varchar("fire_key", { length: 192 }),
   },
   (table) => [
     index("idx_agent_scheduled_runs_user").on(
@@ -50,6 +52,9 @@ export const agentScheduledRuns = pgTable(
       table.scheduleId,
       desc(table.createdAt),
     ),
+    uniqueIndex("uq_agent_scheduled_runs_fire")
+      .on(table.fireKey)
+      .where(sql`fire_key IS NOT NULL`),
   ],
 );
 

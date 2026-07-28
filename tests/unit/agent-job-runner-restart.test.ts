@@ -67,6 +67,10 @@ describe("job runner restart handling", () => {
     expect(source).not.toContain("releaseSessionLock(invokeSessionId")
   })
 
+  it("renews before half the lease so one transient failure cannot expose it", () => {
+    expect(source).toContain("const RENEW_INTERVAL_MS = 5 * 60 * 1000")
+  })
+
   it("still delivers to Chat on the restart path", () => {
     // A restart that finishes silently is indistinguishable from one that
     // died. The runner's "always post something" contract must survive.

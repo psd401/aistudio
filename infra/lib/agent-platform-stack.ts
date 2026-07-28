@@ -149,6 +149,7 @@ class AgentPlatformBuildResources {
   cronReconciliationQueue!: sqs.Queue;
   cronLogGroup!: logs.LogGroup;
   cronLambda!: lambda.Function;
+  scheduleTargetBackfillLambda!: lambda.Function;
   scheduleGroup!: scheduler.CfnScheduleGroup;
   schedulerInvokeRole!: iam.Role;
   routerDlq!: sqs.Queue;
@@ -197,6 +198,11 @@ export class AgentPlatformStack extends cdk.Stack {
   /** Router Lambda function */
   public readonly routerLambda: lambda.Function;
   /**
+   * Deployment migration function. The frontend stack invokes it only after
+   * the lock-aware ECS service has reached steady state.
+   */
+  public readonly scheduleTargetBackfillFunction: lambda.Function;
+  /**
    * Isolated mint Lambda (#1232) — the SOLE AWS principal the GCP WIF provider
    * trusts. Houses the DWD token broker + provisioning-sheet writer so a frontend
    * compromise can never reach the WIF credential / signJwt an arbitrary sub.
@@ -237,7 +243,8 @@ export class AgentPlatformStack extends cdk.Stack {
     this.createAgentRuntimeAndPolicies(props, resources);
     this.createSkillBuilder(props, resources);
     this.createCronAndScheduler(props, resources);
-    this.createScheduleTargetBackfill(props, resources);
+    resources.scheduleTargetBackfillLambda =
+      this.createScheduleTargetBackfill(props, resources);
     this.createTriageFoundation(props, resources);
     this.createTriageWorker(props, resources);
     this.createTriageDispatcher(props, resources);
@@ -273,6 +280,8 @@ export class AgentPlatformStack extends cdk.Stack {
     this.routerLambdaRole = resources.routerLambdaRole;
     this.cronLambdaRole = resources.cronLambdaRole;
     this.routerLambda = resources.routerLambda;
+    this.scheduleTargetBackfillFunction =
+      resources.scheduleTargetBackfillLambda;
     this.mintLambda = resources.mintLambda;
     this.mintLambdaRole = resources.mintLambdaRole;
     this.routerQueue = resources.routerQueue;
@@ -2109,6 +2118,11 @@ export class AgentPlatformStack extends cdk.Stack {
 
     resources.cronLambda = new lambda.Function(this, 'CronLambda', {
       deadLetterQueue: resources.agentAsyncDlq, // async-invoke failures → DLQ + alarm (REV-INFRA-128)
+      // Scheduler's delivery horizon is one hour. Bound Lambda's separate
+      // accepted-async-event queue to the same horizon so the 65-minute fire
+      // marker always outlives every possible redelivery.
+      maxEventAge: cdk.Duration.hours(1),
+      retryAttempts: 2,
       // Fleet-level capacity. Per-schedule overlap is guarded by the
       // conditional session-lock put in lambdas/agent-cron/job-lock.ts.
       reservedConcurrentExecutions: 10,
@@ -2256,7 +2270,7 @@ export class AgentPlatformStack extends cdk.Stack {
   private createScheduleTargetBackfill(
     props: AgentPlatformStackProps,
     resources: AgentPlatformBuildResources,
-  ): void {
+  ): lambda.Function {
     const { environment } = props;
     const functionName = `psd-agent-schedule-target-backfill-${environment}`;
     const groupName = `psd-agent-${environment}`;
@@ -2370,35 +2384,12 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: [backfill.functionArn],
     }));
 
-    const trigger = new customResources.AwsCustomResource(
-      this,
-      'ScheduleTargetBackfillCustomResource',
-      {
-        onCreate: {
-          service: 'Lambda',
-          action: 'invoke',
-          parameters: {
-            FunctionName: backfill.functionName,
-            Payload: JSON.stringify({
-              RequestType: 'Create',
-              migrationVersion: 'scheduled-time-delivery-policy-v2',
-            }),
-          },
-          physicalResourceId: customResources.PhysicalResourceId.of(
-            'agent-schedule-target-backfill-scheduled-time-delivery-policy-v2',
-          ),
-        },
-        policy: customResources.AwsCustomResourcePolicy.fromStatements([
-          new iam.PolicyStatement({
-            actions: ['lambda:InvokeFunction'],
-            resources: [backfill.functionArn],
-          }),
-        ]),
-        installLatestAwsSdk: false,
-      },
-    );
-    trigger.node.addDependency(resources.scheduleGroup);
-    trigger.node.addDependency(resources.schedulerInvokeRole);
+    // The invocation deliberately lives in FrontendStackEcs. That stack
+    // deploys after AgentPlatformStack and makes the trigger depend on the ECS
+    // service update, guaranteeing every live owner-mutation path understands
+    // the shared DynamoDB lock before this full Scheduler-target replacement
+    // can start.
+    return backfill;
   }
 
   private scheduleTargetBackfillCode(): lambda.Code {

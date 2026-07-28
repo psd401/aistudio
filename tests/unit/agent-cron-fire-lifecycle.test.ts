@@ -24,6 +24,9 @@ describe("agent-cron fire lifecycle", () => {
     expect(lifecycle.slice(0, finalize)).not.toContain(
       "await completeScheduleFire(",
     )
+    expect(lifecycle).toContain("let fireExecutionStarted = false")
+    expect(lifecycle).toContain("fireExecutionStarted = true")
+    expect(lifecycle).toContain("fireClaim && !fireExecutionStarted")
   })
 
   it("advances a recoverable fire claim immediately before job execution", () => {

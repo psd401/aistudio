@@ -246,8 +246,13 @@ describe("agent-cron scheduled fire lifecycle", () => {
     expect(dynamo.delete).toHaveBeenCalledWith({
       TableName: TABLE,
       Key: { sessionId: identity.key },
-      ConditionExpression: "lockToken = :token",
-      ExpressionAttributeValues: { ":token": "owned-token" },
+      ConditionExpression:
+        "lockToken = :token AND #status = :claimed",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: {
+        ":token": "owned-token",
+        ":claimed": "claimed",
+      },
     })
   })
 })
@@ -332,10 +337,12 @@ describe("agent-cron scheduled fire release durability", () => {
       expect.objectContaining({
         Key: { sessionId: identity.key },
         UpdateExpression: "SET #status = :failed, expiresAt = :expiredAt",
-        ConditionExpression: "lockToken = :token",
+        ConditionExpression:
+          "lockToken = :token AND #status = :claimed",
         ExpressionAttributeValues: expect.objectContaining({
           ":failed": "failed",
           ":token": "owned-token",
+          ":claimed": "claimed",
         }),
       })
     )

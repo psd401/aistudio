@@ -297,6 +297,16 @@ describe('Agent schedule reliability infrastructure', () => {
     });
   });
 
+  it('bounds accepted async retries inside the schedule-fire lease', () => {
+    template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', {
+      FunctionName: {
+        Ref: Match.stringLikeRegexp('CronLambda'),
+      },
+      MaximumEventAgeInSeconds: 3600,
+      MaximumRetryAttempts: 2,
+    });
+  });
+
   it('lets EventBridge Scheduler send failed targets to the agent DLQ', () => {
     const sendToDlq = allStatements(template).find((statement) => {
       const actions = Array.isArray(statement.Action)

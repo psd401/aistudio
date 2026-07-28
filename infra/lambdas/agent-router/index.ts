@@ -611,7 +611,8 @@ async function tryAcquireSessionLock(
         // `kind: 'job'` marks a lock held by the async job-runner (#1138) —
         // the router replies "still working on your earlier task" instantly
         // instead of making the user wait out the 13-min lock poll. The
-        // runner renews expiresAt every ~10 min (renewSessionLock).
+        // runner renews expiresAt every ~5 min (renewSessionLock), leaving
+        // enough lease margin for a full missed renewal.
         Item: { sessionId, expiresAt, lockToken, kind, claimedAt: new Date().toISOString() },
         ConditionExpression: 'attribute_not_exists(sessionId) OR expiresAt < :now',
         ExpressionAttributeValues: { ':now': Math.floor(Date.now() / 1000) },
@@ -669,7 +670,7 @@ async function releaseSessionLock(
 /**
  * Renew a held session lock by extending expiresAt another 14 minutes,
  * conditioned on still owning it (lockToken match). The async job-runner
- * (#1138) calls this every ~10 min for up to the 2h job ceiling so the
+ * (#1138) calls this every ~5 min for up to the 2h job ceiling so the
  * `kind='job'` marker stays live while the job runs. Returns false when the
  * lock was lost (expired + re-acquired by someone else) — the runner keeps
  * going regardless (losing the lock affects messaging UX, not correctness;

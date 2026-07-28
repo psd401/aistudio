@@ -9,6 +9,7 @@ import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as targets from 'aws-cdk-lib/aws-route53-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as customResources from 'aws-cdk-lib/custom-resources';
 import { EcsServiceConstruct } from './constructs/ecs-service';
 import { VPCProvider, EnvironmentConfig } from './constructs';
 import { ServiceRoleFactory } from './constructs/security';
@@ -26,6 +27,11 @@ export interface FrontendStackEcsProps extends cdk.StackProps {
   agentWorkspaceBucketName?: string; // Optional for backward compatibility (#925)
   atriumSandboxOrigin?: string; // Optional; falls back to SSM (#1052)
   atriumEventsTopicArn?: string; // Optional; SNS topic for content events (#1055)
+  /**
+   * Agent-platform migration Lambda. When supplied, this stack invokes it only
+   * after the lock-aware frontend ECS service has completed its deployment.
+   */
+  scheduleTargetBackfillFunction?: lambda.IFunction;
   /**
    * If true, will look up existing VPC from database stack.
    * If false, will create a new VPC for ECS (not recommended - prefer VPC sharing)
@@ -155,6 +161,11 @@ export class FrontendStackEcs extends cdk.Stack {
       violationTopicArn: cdk.Fn.importValue(`${environment}-ViolationTopicArn`),
     });
     this.ecsService.node.addDependency(oidcKeyBootstrapResource);
+    if (props.scheduleTargetBackfillFunction) {
+      this.createScheduleTargetBackfillTrigger(
+        props.scheduleTargetBackfillFunction,
+      );
+    }
 
     this.configureDns(props, baseDomain, subdomain);
 
@@ -418,6 +429,44 @@ export class FrontendStackEcs extends cdk.Stack {
         defaultTargetGroups: [this.ecsService.targetGroup],
       });
     }
+  }
+
+  /**
+   * Phase two of the schedule-target rollout. AgentPlatformStack deploys the
+   * migration Lambda first; this trigger is created only after CloudFormation
+   * has brought the new lock-aware frontend service to steady state.
+   */
+  private createScheduleTargetBackfillTrigger(
+    backfill: lambda.IFunction,
+  ): void {
+    const trigger = new customResources.AwsCustomResource(
+      this,
+      'ScheduleTargetBackfillAfterFrontend',
+      {
+        onCreate: {
+          service: 'Lambda',
+          action: 'invoke',
+          parameters: {
+            FunctionName: backfill.functionName,
+            Payload: JSON.stringify({
+              RequestType: 'Create',
+              migrationVersion: 'scheduled-time-delivery-policy-v3',
+            }),
+          },
+          physicalResourceId: customResources.PhysicalResourceId.of(
+            'agent-schedule-target-backfill-scheduled-time-delivery-policy-v3',
+          ),
+        },
+        policy: customResources.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ['lambda:InvokeFunction'],
+            resources: [backfill.functionArn],
+          }),
+        ]),
+        installLatestAwsSdk: false,
+      },
+    );
+    trigger.node.addDependency(this.ecsService.service);
   }
 
   private configureWebApplicationFirewall(
