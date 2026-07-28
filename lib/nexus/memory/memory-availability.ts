@@ -1,9 +1,6 @@
 import { and, eq } from "drizzle-orm"
 import { executeQuery } from "@/lib/db/drizzle-client"
-import {
-  nexusConversations,
-  nexusUserPreferences,
-} from "@/lib/db/schema"
+import { nexusConversations, nexusUserPreferences } from "@/lib/db/schema"
 import { hasCapabilityAccess } from "@/lib/db/drizzle/capabilities"
 import { createLogger } from "@/lib/logger"
 import { getSetting } from "@/lib/settings-manager"
@@ -60,7 +57,9 @@ export async function isNexusMemoryGloballyEnabled(): Promise<boolean> {
   return enabledSetting(await getSetting("NEXUS_MEMORY_ENABLED"))
 }
 
-async function loadUserMemoryEnabled(userId: number): Promise<boolean> {
+export async function isNexusMemoryEnabledForUser(
+  userId: number,
+): Promise<boolean> {
   const [preference] = await executeQuery(
     (db) =>
       db
@@ -111,7 +110,7 @@ export async function resolveMemoryAvailability(input: {
       await Promise.all([
         isNexusMemoryGloballyEnabled(),
         hasCapabilityAccess(input.cognitoSub, "nexus-memory"),
-        loadUserMemoryEnabled(input.userId),
+        isNexusMemoryEnabledForUser(input.userId),
         loadConversationGate(input.conversationId, input.userId),
       ])
     return evaluateMemoryGates({

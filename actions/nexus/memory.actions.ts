@@ -1,25 +1,23 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
-import { and, desc, eq, inArray, isNull } from "drizzle-orm"
+import {
+  and,
+  desc,
+  eq,
+  inArray,
+  isNull,
+  lt,
+  or,
+  sql,
+} from "drizzle-orm"
 import type { z } from "zod"
 import type { ActionState } from "@/types"
-import {
-  createLogger,
-  generateRequestId,
-  startTimer,
-} from "@/lib/logger"
-import {
-  createSuccess,
-  ErrorFactories,
-  handleError,
-} from "@/lib/error-utils"
+import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
+import { createSuccess, ErrorFactories, handleError } from "@/lib/error-utils"
 import { getServerSession } from "@/lib/auth/server-session"
 import { getUserIdByCognitoSubAsNumber } from "@/lib/db/drizzle"
-import {
-  executeQuery,
-  executeTransaction,
-} from "@/lib/db/drizzle-client"
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
 import {
   nexusUserMemories,
   nexusUserPreferences,
@@ -27,15 +25,21 @@ import {
   type NexusMemorySource,
 } from "@/lib/db/schema"
 import { memoryService } from "@/lib/nexus/memory/memory-service"
-import { isNexusMemoryGloballyEnabled } from "@/lib/nexus/memory/memory-availability"
+import {
+  isNexusMemoryEnabledForUser,
+  isNexusMemoryGloballyEnabled,
+} from "@/lib/nexus/memory/memory-availability"
+import { NEXUS_MEMORY_SETTINGS_PAGE_SIZE } from "@/lib/nexus/memory/memory-constants"
 import { mergeNexusUserSettings } from "@/lib/nexus/user-settings"
 import {
   AddNexusMemorySchema,
   BulkDeleteNexusMemoriesSchema,
   DeleteNexusMemorySchema,
+  ListNexusMemoriesSchema,
   SetNexusMemoryEnabledSchema,
   UpdateNexusMemorySchema,
   type AddNexusMemoryInput,
+  type ListNexusMemoriesInput,
   type UpdateNexusMemoryInput,
 } from "@/lib/nexus/memory/memory-schemas"
 import { hasCapabilityAccess } from "@/utils/roles"
@@ -49,9 +53,16 @@ export interface NexusMemoryListItem {
   updatedAt: string
 }
 
+export interface NexusMemoryCursor {
+  updatedAtMicros: string
+  id: string
+}
+
 export interface NexusMemoryTabData {
   memories: NexusMemoryListItem[]
   memoryEnabled: boolean
+  globalMemoryEnabled: boolean
+  nextCursor: NexusMemoryCursor | null
 }
 
 interface MemoryRequester {
@@ -77,11 +88,9 @@ async function requireMemoryRequester(): Promise<MemoryRequester> {
     throw ErrorFactories.authNoSession()
   }
   if (!(await hasCapabilityAccess("nexus-memory", session.sub))) {
-    throw ErrorFactories.authzInsufficientPermissions(
-      undefined,
-      undefined,
-      { requiredPermission: "nexus-memory" },
-    )
+    throw ErrorFactories.authzInsufficientPermissions(undefined, undefined, {
+      requiredPermission: "nexus-memory",
+    })
   }
   const userId = await getUserIdByCognitoSubAsNumber(session.sub)
   if (!userId) {
@@ -121,13 +130,24 @@ async function requireOwnedMemory(
   return memory
 }
 
-async function requireMemoryWritesEnabled(): Promise<void> {
+async function requireMemoryWritesEnabled(userId: number): Promise<void> {
   if (!(await isNexusMemoryGloballyEnabled())) {
     throw ErrorFactories.bizInvalidState(
       "write Nexus memory",
       "disabled",
       "enabled",
       { userMessage: "Nexus memory is currently disabled" },
+    )
+  }
+  if (!(await isNexusMemoryEnabledForUser(userId))) {
+    throw ErrorFactories.bizInvalidState(
+      "write Nexus memory",
+      "disabled for this account",
+      "enabled for this account",
+      {
+        userMessage:
+          "Enable memory for your account before adding or editing memories",
+      },
     )
   }
 }
@@ -150,16 +170,32 @@ function memoryListItem(memory: {
   }
 }
 
-export async function listNexusMemories(): Promise<
-  ActionState<NexusMemoryTabData>
-> {
+export async function listNexusMemories(
+  input: ListNexusMemoriesInput = {},
+): Promise<ActionState<NexusMemoryTabData>> {
   const requestId = generateRequestId()
   const timer = startTimer("listNexusMemories")
   const log = createLogger({ requestId, action: "listNexusMemories" })
 
   try {
     const { userId } = await requireMemoryRequester()
-    const [memories, preferences] = await Promise.all([
+    const parsed = ListNexusMemoriesSchema.safeParse(input)
+    if (!parsed.success) {
+      throw ErrorFactories.validationFailed(validationFields(parsed.error))
+    }
+    const updatedAtMicros = sql`
+      (extract(epoch from ${nexusUserMemories.updatedAt}) * 1000000)::bigint
+    `
+    const cursorCondition = parsed.data.cursor
+      ? or(
+          sql`${updatedAtMicros} < ${parsed.data.cursor.updatedAtMicros}::bigint`,
+          and(
+            sql`${updatedAtMicros} = ${parsed.data.cursor.updatedAtMicros}::bigint`,
+            lt(nexusUserMemories.id, parsed.data.cursor.id),
+          ),
+        )
+      : undefined
+    const [memoryRows, preferences, globalMemoryEnabled] = await Promise.all([
       executeQuery(
         (db) =>
           db
@@ -170,15 +206,23 @@ export async function listNexusMemories(): Promise<
               source: nexusUserMemories.source,
               createdAt: nexusUserMemories.createdAt,
               updatedAt: nexusUserMemories.updatedAt,
+              cursorUpdatedAtMicros: sql<string>`
+                ${updatedAtMicros}::text
+              `,
             })
             .from(nexusUserMemories)
             .where(
               and(
                 eq(nexusUserMemories.userId, userId),
                 isNull(nexusUserMemories.deletedAt),
+                cursorCondition,
               ),
             )
-            .orderBy(desc(nexusUserMemories.updatedAt)),
+            .orderBy(
+              desc(nexusUserMemories.updatedAt),
+              desc(nexusUserMemories.id),
+            )
+            .limit(NEXUS_MEMORY_SETTINGS_PAGE_SIZE + 1),
         "listOwnedNexusMemories",
       ),
       executeQuery(
@@ -190,15 +234,28 @@ export async function listNexusMemories(): Promise<
             .limit(1),
         "getNexusMemoryPreference",
       ),
+      isNexusMemoryGloballyEnabled(),
     ])
+    const hasMore = memoryRows.length > NEXUS_MEMORY_SETTINGS_PAGE_SIZE
+    const memories = memoryRows.slice(0, NEXUS_MEMORY_SETTINGS_PAGE_SIZE)
+    const finalMemory = memories[memories.length - 1]
     const data = {
       memories: memories.map(memoryListItem),
       memoryEnabled: preferences[0]?.settings?.memoryEnabled !== false,
+      globalMemoryEnabled,
+      nextCursor:
+        hasMore && finalMemory
+          ? {
+              updatedAtMicros: finalMemory.cursorUpdatedAtMicros,
+              id: finalMemory.id,
+            }
+          : null,
     }
     timer({ status: "success" })
     log.info("Nexus memories listed", {
       userId,
       count: data.memories.length,
+      hasMore,
     })
     return createSuccess(data)
   } catch (error) {
@@ -220,7 +277,7 @@ export async function addNexusMemory(
 
   try {
     const requester = await requireMemoryRequester()
-    await requireMemoryWritesEnabled()
+    await requireMemoryWritesEnabled(requester.userId)
     const parsed = AddNexusMemorySchema.safeParse(input)
     if (!parsed.success) {
       throw ErrorFactories.validationFailed(validationFields(parsed.error))
@@ -264,7 +321,7 @@ export async function updateNexusMemory(
 
   try {
     const requester = await requireMemoryRequester()
-    await requireMemoryWritesEnabled()
+    await requireMemoryWritesEnabled(requester.userId)
     const parsed = UpdateNexusMemorySchema.safeParse(input)
     if (!parsed.success) {
       throw ErrorFactories.validationFailed(validationFields(parsed.error))
@@ -322,12 +379,7 @@ export async function deleteNexusMemory(
       requester.userId,
       "delete this memory",
     )
-    if (
-      !(await memoryService.forget(
-        parsed.data.memoryId,
-        requester.userId,
-      ))
-    ) {
+    if (!(await memoryService.forget(parsed.data.memoryId, requester.userId))) {
       throw ErrorFactories.dbRecordNotFound(
         "nexus_user_memories",
         parsed.data.memoryId,
@@ -339,10 +391,7 @@ export async function deleteNexusMemory(
       memoryId: parsed.data.memoryId,
     })
     revalidatePath("/settings")
-    return createSuccess(
-      { memoryId: parsed.data.memoryId },
-      "Memory deleted",
-    )
+    return createSuccess({ memoryId: parsed.data.memoryId }, "Memory deleted")
   } catch (error) {
     timer({ status: "error" })
     return handleError(error, "Failed to delete memory", {
@@ -369,67 +418,56 @@ export async function bulkDeleteNexusMemories(
     if (!parsed.success) {
       throw ErrorFactories.validationFailed(validationFields(parsed.error))
     }
-    const deletedCount = await executeTransaction(
-      async (tx) => {
-        const rows = await tx
-          .select({
-            id: nexusUserMemories.id,
-            userId: nexusUserMemories.userId,
-          })
-          .from(nexusUserMemories)
-          .where(
-            and(
-              inArray(nexusUserMemories.id, parsed.data.memoryIds),
-              isNull(nexusUserMemories.deletedAt),
-            ),
-          )
-          .for("update")
-        const byId = new Map(rows.map((row) => [row.id, row]))
-        for (const memoryId of parsed.data.memoryIds) {
-          const row = byId.get(memoryId)
-          if (!row) {
-            throw ErrorFactories.dbRecordNotFound(
-              "nexus_user_memories",
-              memoryId,
-            )
-          }
-          if (row.userId !== requester.userId) {
-            throw ErrorFactories.authzOwnerRequired(
-              "delete these memories",
-            )
-          }
+    const deletedCount = await executeTransaction(async (tx) => {
+      const rows = await tx
+        .select({
+          id: nexusUserMemories.id,
+          userId: nexusUserMemories.userId,
+        })
+        .from(nexusUserMemories)
+        .where(
+          and(
+            inArray(nexusUserMemories.id, parsed.data.memoryIds),
+            isNull(nexusUserMemories.deletedAt),
+          ),
+        )
+        .for("update")
+      const byId = new Map(rows.map((row) => [row.id, row]))
+      for (const memoryId of parsed.data.memoryIds) {
+        const row = byId.get(memoryId)
+        if (!row) {
+          throw ErrorFactories.dbRecordNotFound("nexus_user_memories", memoryId)
         }
-        const now = new Date()
-        const deleted = await tx
-          .update(nexusUserMemories)
-          .set({ deletedAt: now, updatedAt: now })
-          .where(
-            and(
-              inArray(nexusUserMemories.id, parsed.data.memoryIds),
-              eq(nexusUserMemories.userId, requester.userId),
-              isNull(nexusUserMemories.deletedAt),
-            ),
-          )
-          .returning({ id: nexusUserMemories.id })
-        if (deleted.length !== parsed.data.memoryIds.length) {
-          throw ErrorFactories.dbQueryFailed(
-            "Some Nexus memories changed before they could be deleted",
-          )
+        if (row.userId !== requester.userId) {
+          throw ErrorFactories.authzOwnerRequired("delete these memories")
         }
-        return deleted.length
-      },
-      "bulkSoftDeleteOwnedNexusMemories",
-    )
+      }
+      const now = new Date()
+      const deleted = await tx
+        .update(nexusUserMemories)
+        .set({ deletedAt: now, updatedAt: now })
+        .where(
+          and(
+            inArray(nexusUserMemories.id, parsed.data.memoryIds),
+            eq(nexusUserMemories.userId, requester.userId),
+            isNull(nexusUserMemories.deletedAt),
+          ),
+        )
+        .returning({ id: nexusUserMemories.id })
+      if (deleted.length !== parsed.data.memoryIds.length) {
+        throw ErrorFactories.dbQueryFailed(
+          "Some Nexus memories changed before they could be deleted",
+        )
+      }
+      return deleted.length
+    }, "bulkSoftDeleteOwnedNexusMemories")
     timer({ status: "success" })
     log.info("Nexus memories bulk deleted", {
       userId: requester.userId,
       count: deletedCount,
     })
     revalidatePath("/settings")
-    return createSuccess(
-      { deletedCount },
-      `${deletedCount} memories deleted`,
-    )
+    return createSuccess({ deletedCount }, `${deletedCount} memories deleted`)
   } catch (error) {
     timer({ status: "error" })
     return handleError(error, "Failed to delete selected memories", {

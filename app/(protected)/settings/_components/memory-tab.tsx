@@ -2,15 +2,7 @@
 
 import { useState } from "react"
 import { formatDistanceToNow } from "date-fns"
-import {
-  Brain,
-  Loader2,
-  Pencil,
-  Plus,
-  Trash2,
-  Upload,
-  X,
-} from "lucide-react"
+import { Brain, Loader2, Pencil, Plus, Trash2, Upload, X } from "lucide-react"
 import { toast } from "sonner"
 import {
   addNexusMemory,
@@ -22,10 +14,7 @@ import {
   type NexusMemoryListItem,
   type NexusMemoryTabData,
 } from "@/actions/nexus/memory.actions"
-import type {
-  NexusMemoryCategory,
-  NexusMemorySource,
-} from "@/lib/db/schema"
+import type { NexusMemoryCategory, NexusMemorySource } from "@/lib/db/schema"
 import {
   MAX_BULK_MEMORY_DELETE_COUNT,
   MAX_NEXUS_MEMORY_CONTENT_CHARS,
@@ -116,9 +105,7 @@ function MemoryCategorySelect({
   return (
     <Select
       value={value}
-      onValueChange={(next) =>
-        onValueChange(next as NexusMemoryCategory)
-      }
+      onValueChange={(next) => onValueChange(next as NexusMemoryCategory)}
       disabled={disabled}
     >
       <SelectTrigger
@@ -180,10 +167,7 @@ function AddMemoryDialog({
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-2">
-            <label
-              htmlFor="new-memory-content"
-              className="text-sm font-medium"
-            >
+            <label htmlFor="new-memory-content" className="text-sm font-medium">
               What should Nexus remember?
             </label>
             <Textarea
@@ -231,9 +215,7 @@ function AddMemoryDialog({
             disabled={!draft.content.trim() || isSaving}
             onClick={handleSave}
           >
-            {isSaving && (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            )}
+            {isSaving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             Save memory
           </Button>
         </DialogFooter>
@@ -272,6 +254,7 @@ function MemoryRow({
   memory,
   selected,
   selectionDisabled,
+  writeDisabled,
   editing,
   isSaving,
   onSelectedChange,
@@ -284,6 +267,7 @@ function MemoryRow({
   memory: NexusMemoryListItem
   selected: boolean
   selectionDisabled: boolean
+  writeDisabled: boolean
   editing: EditingMemory | null
   isSaving: boolean
   onSelectedChange: (selected: boolean) => void
@@ -307,9 +291,7 @@ function MemoryRow({
           disabled={selectionDisabled}
           aria-label={`Select memory: ${memory.content}`}
           className="mt-1"
-          onCheckedChange={(checked) =>
-            onSelectedChange(checked === true)
-          }
+          onCheckedChange={(checked) => onSelectedChange(checked === true)}
         />
         <div className="min-w-0 flex-1 space-y-3">
           {isEditing && editing ? (
@@ -317,7 +299,7 @@ function MemoryRow({
               <Textarea
                 value={editing.content}
                 maxLength={MAX_NEXUS_MEMORY_CONTENT_CHARS}
-                disabled={isSaving}
+                disabled={isSaving || writeDisabled}
                 data-testid="memory-edit-content"
                 aria-label="Edit memory content"
                 onChange={(event) =>
@@ -330,7 +312,7 @@ function MemoryRow({
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <MemoryCategorySelect
                   value={editing.category}
-                  disabled={isSaving}
+                  disabled={isSaving || writeDisabled}
                   triggerTestId="memory-edit-category"
                   onValueChange={(category) =>
                     onEditingChange({ ...editing, category })
@@ -351,7 +333,9 @@ function MemoryRow({
                     type="button"
                     size="sm"
                     data-testid="memory-edit-save"
-                    disabled={!editing.content.trim() || isSaving}
+                    disabled={
+                      !editing.content.trim() || isSaving || writeDisabled
+                    }
                     onClick={onSave}
                   >
                     {isSaving && (
@@ -383,6 +367,7 @@ function MemoryRow({
                     variant="outline"
                     size="sm"
                     aria-label={`Edit memory: ${memory.content}`}
+                    disabled={writeDisabled}
                     onClick={onStartEditing}
                   >
                     <Pencil className="mr-2 h-4 w-4" />
@@ -410,24 +395,56 @@ function MemoryRow({
 
 function useMemoryCollection(initialData: NexusMemoryTabData) {
   const [memories, setMemories] = useState(initialData.memories)
-  const [memoryEnabled, setMemoryEnabled] = useState(
-    initialData.memoryEnabled,
+  const [memoryEnabled, setMemoryEnabled] = useState(initialData.memoryEnabled)
+  const [globalMemoryEnabled, setGlobalMemoryEnabled] = useState(
+    initialData.globalMemoryEnabled,
   )
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(
-    () => new Set(),
-  )
+  const [nextCursor, setNextCursor] = useState(initialData.nextCursor)
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
 
   const refreshMemories = async () => {
     const result = await listNexusMemories()
     if (!result.isSuccess) throw new Error(result.message)
     setMemories(result.data.memories)
     setMemoryEnabled(result.data.memoryEnabled)
+    setGlobalMemoryEnabled(result.data.globalMemoryEnabled)
+    setNextCursor(result.data.nextCursor)
     setSelectedIds((current) => {
-      const liveIds = new Set(
-        result.data.memories.map((memory) => memory.id),
-      )
+      const liveIds = new Set(result.data.memories.map((memory) => memory.id))
       return new Set([...current].filter((id) => liveIds.has(id)))
     })
+  }
+
+  const loadMore = async () => {
+    if (!nextCursor || isLoadingMore) return
+    setIsLoadingMore(true)
+    try {
+      const result = await listNexusMemories({ cursor: nextCursor })
+      if (!result.isSuccess) {
+        toast.error(result.message)
+        return
+      }
+      setMemories((current) => {
+        const existingIds = new Set(current.map((memory) => memory.id))
+        return [
+          ...current,
+          ...result.data.memories.filter(
+            (memory) => !existingIds.has(memory.id),
+          ),
+        ]
+      })
+      setMemoryEnabled(result.data.memoryEnabled)
+      setGlobalMemoryEnabled(result.data.globalMemoryEnabled)
+      setNextCursor(result.data.nextCursor)
+    } catch (error) {
+      log.error("Loading more Nexus memories failed", {
+        error: error instanceof Error ? error.message : String(error),
+      })
+      toast.error("Failed to load more memories")
+    } finally {
+      setIsLoadingMore(false)
+    }
   }
 
   const setSelected = (memoryId: string, selected: boolean) => {
@@ -458,39 +475,33 @@ function useMemoryCollection(initialData: NexusMemoryTabData) {
     )
   }
 
-  const selectableMemories = memories.slice(
-    0,
-    MAX_BULK_MEMORY_DELETE_COUNT,
-  )
+  const selectableMemories = memories.slice(0, MAX_BULK_MEMORY_DELETE_COUNT)
 
   return {
     memories,
     memoryEnabled,
+    globalMemoryEnabled,
+    nextCursor,
+    isLoadingMore,
     selectedIds,
     allSelected:
       selectableMemories.length > 0 &&
-      selectableMemories.every((memory) =>
-        selectedIds.has(memory.id),
-      ),
-    selectionLimitReached:
-      selectedIds.size >= MAX_BULK_MEMORY_DELETE_COUNT,
+      selectableMemories.every((memory) => selectedIds.has(memory.id)),
+    selectionLimitReached: selectedIds.size >= MAX_BULK_MEMORY_DELETE_COUNT,
     setMemoryEnabled,
     setSelectedIds,
     setSelected,
     selectAll,
     refreshMemories,
+    loadMore,
   }
 }
 
-function useMemoryEditing(
-  refreshMemories: () => Promise<void>,
-) {
+function useMemoryEditing(refreshMemories: () => Promise<void>) {
   const [addOpen, setAddOpen] = useState(false)
   const [editing, setEditing] = useState<EditingMemory | null>(null)
   const [isAdding, setIsAdding] = useState(false)
-  const [savingMemoryId, setSavingMemoryId] = useState<string | null>(
-    null,
-  )
+  const [savingMemoryId, setSavingMemoryId] = useState<string | null>(null)
 
   const handleAdd = async (draft: MemoryDraft): Promise<boolean> => {
     setIsAdding(true)
@@ -558,9 +569,7 @@ function useMemoryDeletion(
   refreshMemories: () => Promise<void>,
   clearSelection: () => void,
 ) {
-  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(
-    null,
-  )
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
 
   const handleDelete = async () => {
@@ -630,7 +639,13 @@ function useMemoryToggle(
   return { isToggling, handleEnabledChange }
 }
 
-function MemoryCardHeader({ onAdd }: { onAdd: () => void }) {
+function MemoryCardHeader({
+  writeDisabled,
+  onAdd,
+}: {
+  writeDisabled: boolean
+  onAdd: () => void
+}) {
   return (
     <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
       <div>
@@ -656,6 +671,12 @@ function MemoryCardHeader({ onAdd }: { onAdd: () => void }) {
         <Button
           type="button"
           data-testid="memory-add-open"
+          disabled={writeDisabled}
+          title={
+            writeDisabled
+              ? "Enable Nexus memory before adding a memory"
+              : undefined
+          }
           onClick={onAdd}
         >
           <Plus className="mr-2 h-4 w-4" />
@@ -668,10 +689,12 @@ function MemoryCardHeader({ onAdd }: { onAdd: () => void }) {
 
 function MemoryToggle({
   enabled,
+  globallyEnabled,
   disabled,
   onChange,
 }: {
   enabled: boolean
+  globallyEnabled: boolean
   disabled: boolean
   onChange: (enabled: boolean) => void
 }) {
@@ -680,8 +703,9 @@ function MemoryToggle({
       <div className="pr-4">
         <p className="text-sm font-medium">Enable memory</p>
         <p className="text-sm text-muted-foreground">
-          When off, Nexus neither recalls nor saves memories for your
-          account. Existing memories remain available here.
+          {globallyEnabled
+            ? "When off, Nexus neither recalls nor saves memories for your account. Existing memories remain available here."
+            : "An administrator has disabled Nexus memory globally. Existing memories remain available to review or delete."}
         </p>
       </div>
       <Switch
@@ -708,9 +732,7 @@ function MemorySelectionBar({
     selectionLabel = `${collection.selectedIds.size} selected${
       collection.selectionLimitReached ? " (maximum)" : ""
     }`
-  } else if (
-    collection.memories.length > MAX_BULK_MEMORY_DELETE_COUNT
-  ) {
+  } else if (collection.memories.length > MAX_BULK_MEMORY_DELETE_COUNT) {
     selectionLabel = `Select first ${MAX_BULK_MEMORY_DELETE_COUNT}`
   }
 
@@ -720,9 +742,7 @@ function MemorySelectionBar({
         <Checkbox
           checked={collection.allSelected}
           aria-label="Select memories for bulk deletion"
-          onCheckedChange={(checked) =>
-            collection.selectAll(checked === true)
-          }
+          onCheckedChange={(checked) => collection.selectAll(checked === true)}
         />
         {selectionLabel}
       </label>
@@ -757,10 +777,12 @@ function MemoryList({
   collection,
   editor,
   deletion,
+  writeDisabled,
 }: {
   collection: ReturnType<typeof useMemoryCollection>
   editor: ReturnType<typeof useMemoryEditing>
   deletion: ReturnType<typeof useMemoryDeletion>
+  writeDisabled: boolean
 }) {
   if (collection.memories.length === 0) return <MemoryEmptyState />
   return (
@@ -774,6 +796,7 @@ function MemoryList({
             collection.selectionLimitReached &&
             !collection.selectedIds.has(memory.id)
           }
+          writeDisabled={writeDisabled}
           editing={editor.editing}
           isSaving={editor.savingMemoryId === memory.id}
           onSelectedChange={(selected) =>
@@ -789,9 +812,7 @@ function MemoryList({
           onEditingChange={editor.setEditing}
           onCancelEditing={() => editor.setEditing(null)}
           onSave={editor.handleUpdate}
-          onDelete={() =>
-            deletion.setDeleteTarget({ kind: "single", memory })
-          }
+          onDelete={() => deletion.setDeleteTarget({ kind: "single", memory })}
         />
       ))}
     </div>
@@ -809,6 +830,8 @@ function MemorySettingsCard({
   deletion: ReturnType<typeof useMemoryDeletion>
   toggle: ReturnType<typeof useMemoryToggle>
 }) {
+  const writeDisabled =
+    !collection.globalMemoryEnabled || !collection.memoryEnabled
   const selectForBulkDelete = () =>
     deletion.setDeleteTarget({
       kind: "bulk",
@@ -818,10 +841,25 @@ function MemorySettingsCard({
   return (
     <Card>
       <CardHeader className="space-y-4">
-        <MemoryCardHeader onAdd={() => editor.setAddOpen(true)} />
+        <MemoryCardHeader
+          writeDisabled={writeDisabled}
+          onAdd={() => editor.setAddOpen(true)}
+        />
+        {!collection.globalMemoryEnabled && (
+          <div
+            role="status"
+            data-testid="memory-global-disabled"
+            className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950"
+          >
+            Nexus memory is disabled by an administrator. Adding, editing,
+            recalling, and changing the account toggle are unavailable; you can
+            still review or delete existing memories.
+          </div>
+        )}
         <MemoryToggle
           enabled={collection.memoryEnabled}
-          disabled={toggle.isToggling}
+          globallyEnabled={collection.globalMemoryEnabled}
+          disabled={toggle.isToggling || !collection.globalMemoryEnabled}
           onChange={toggle.handleEnabledChange}
         />
       </CardHeader>
@@ -834,7 +872,24 @@ function MemorySettingsCard({
           collection={collection}
           editor={editor}
           deletion={deletion}
+          writeDisabled={writeDisabled}
         />
+        {collection.nextCursor && (
+          <div className="flex justify-center">
+            <Button
+              type="button"
+              variant="outline"
+              data-testid="memory-load-more"
+              disabled={collection.isLoadingMore}
+              onClick={() => void collection.loadMore()}
+            >
+              {collection.isLoadingMore && (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              )}
+              Load more memories
+            </Button>
+          </div>
+        )}
       </CardContent>
     </Card>
   )
@@ -847,44 +902,44 @@ function MemoryDeleteDialog({
 }) {
   return (
     <AlertDialog
-        open={deletion.deleteTarget !== null}
-        onOpenChange={(open) => {
-          if (!open && !deletion.isDeleting) {
-            deletion.setDeleteTarget(null)
-          }
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              {deletion.deleteTarget?.kind === "bulk"
-                ? "Delete selected memories?"
-                : "Delete this memory?"}
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              {deletion.deleteTarget?.kind === "bulk"
-                ? `${deletion.deleteTarget.memoryIds.length} memories will be removed from Nexus recall.`
-                : "This memory will be removed from Nexus recall."}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deletion.isDeleting}>
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              data-testid="memory-delete-confirm"
-              disabled={deletion.isDeleting}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={deletion.handleDelete}
-            >
-              {deletion.isDeleting ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : null}
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      open={deletion.deleteTarget !== null}
+      onOpenChange={(open) => {
+        if (!open && !deletion.isDeleting) {
+          deletion.setDeleteTarget(null)
+        }
+      }}
+    >
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            {deletion.deleteTarget?.kind === "bulk"
+              ? "Delete selected memories?"
+              : "Delete this memory?"}
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            {deletion.deleteTarget?.kind === "bulk"
+              ? `${deletion.deleteTarget.memoryIds.length} memories will be removed from Nexus recall.`
+              : "This memory will be removed from Nexus recall."}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={deletion.isDeleting}>
+            Cancel
+          </AlertDialogCancel>
+          <AlertDialogAction
+            data-testid="memory-delete-confirm"
+            disabled={deletion.isDeleting}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            onClick={deletion.handleDelete}
+          >
+            {deletion.isDeleting ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : null}
+            Delete
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   )
 }
 
@@ -895,9 +950,8 @@ export function MemoryTab({
 }) {
   const collection = useMemoryCollection(initialData)
   const editor = useMemoryEditing(collection.refreshMemories)
-  const deletion = useMemoryDeletion(
-    collection.refreshMemories,
-    () => collection.setSelectedIds(new Set()),
+  const deletion = useMemoryDeletion(collection.refreshMemories, () =>
+    collection.setSelectedIds(new Set()),
   )
   const toggle = useMemoryToggle(
     collection.memoryEnabled,

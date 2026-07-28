@@ -1,4 +1,8 @@
-import { getNexusChatPreferences, getUserProfile, listUserApiKeys } from "@/actions/settings/user-settings.actions"
+import {
+  getNexusChatPreferences,
+  getUserProfile,
+  listUserApiKeys,
+} from "@/actions/settings/user-settings.actions"
 import { listNexusMemories } from "@/actions/nexus/memory.actions"
 import { PageBranding } from "@/components/ui/page-branding"
 import { hasCapabilityAccess } from "@/utils/roles"
@@ -10,12 +14,13 @@ export const metadata = {
 
 export default async function SettingsPage() {
   const hasMemoryCapability = await hasCapabilityAccess("nexus-memory")
-  const [profileResult, keysResult, preferencesResult, memoryResult] = await Promise.all([
-    getUserProfile(),
-    listUserApiKeys(),
-    getNexusChatPreferences(),
-    hasMemoryCapability ? listNexusMemories() : Promise.resolve(null),
-  ])
+  const [profileResult, keysResult, preferencesResult, memoryResult] =
+    await Promise.all([
+      getUserProfile(),
+      listUserApiKeys(),
+      getNexusChatPreferences(),
+      hasMemoryCapability ? listNexusMemories() : Promise.resolve(null),
+    ])
 
   return (
     <div className="max-w-4xl">
@@ -30,12 +35,21 @@ export default async function SettingsPage() {
       <SettingsClient
         profileData={profileResult.isSuccess ? profileResult.data : null}
         apiKeys={keysResult.isSuccess ? keysResult.data : []}
-        nexusPreferences={preferencesResult.isSuccess ? preferencesResult.data : { mode: "standard", family: "auto" }}
+        nexusPreferences={
+          preferencesResult.isSuccess
+            ? preferencesResult.data
+            : { mode: "standard", family: "auto" }
+        }
         hasMemoryCapability={hasMemoryCapability}
         memoryData={
           memoryResult?.isSuccess
             ? memoryResult.data
-            : { memories: [], memoryEnabled: true }
+            : {
+                memories: [],
+                memoryEnabled: true,
+                globalMemoryEnabled: false,
+                nextCursor: null,
+              }
         }
       />
     </div>

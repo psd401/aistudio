@@ -20,6 +20,17 @@ export const AddNexusMemorySchema = z.object({
   category: z.enum(NEXUS_MEMORY_CATEGORIES),
 })
 
+export const ListNexusMemoriesSchema = z.object({
+  cursor: z
+    .object({
+      updatedAtMicros: z
+        .string()
+        .regex(/^\d{1,20}$/, "Memory cursor timestamp is invalid"),
+      id: memoryId,
+    })
+    .optional(),
+})
+
 export const UpdateNexusMemorySchema = AddNexusMemorySchema.extend({
   memoryId,
 })
@@ -47,6 +58,5 @@ export const SetNexusMemoryEnabledSchema = z.object({
 })
 
 export type AddNexusMemoryInput = z.infer<typeof AddNexusMemorySchema>
-export type UpdateNexusMemoryInput = z.infer<
-  typeof UpdateNexusMemorySchema
->
+export type ListNexusMemoriesInput = z.infer<typeof ListNexusMemoriesSchema>
+export type UpdateNexusMemoryInput = z.infer<typeof UpdateNexusMemorySchema>

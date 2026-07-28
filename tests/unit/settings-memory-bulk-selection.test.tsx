@@ -91,12 +91,25 @@ jest.mock("@/components/ui/checkbox", () => ({
 }))
 
 jest.mock("@/components/ui/switch", () => ({
-  Switch: () => <button type="button">Memory toggle</button>,
+  Switch: ({
+    disabled,
+    "aria-label": ariaLabel,
+  }: {
+    disabled?: boolean
+    "aria-label"?: string
+  }) => (
+    <button type="button" disabled={disabled} aria-label={ariaLabel}>
+      Memory toggle
+    </button>
+  ),
 }))
 
-import { fireEvent, render, screen } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryTab } from "@/app/(protected)/settings/_components/memory-tab"
-import type { NexusMemoryListItem } from "@/actions/nexus/memory.actions"
+import {
+  listNexusMemories,
+  type NexusMemoryListItem,
+} from "@/actions/nexus/memory.actions"
 
 function memory(index: number): NexusMemoryListItem {
   const timestamp = "2026-07-28T12:00:00.000Z"
@@ -119,6 +132,8 @@ describe("Settings memory bulk selection", () => {
             memory(index + 1),
           ),
           memoryEnabled: true,
+          globalMemoryEnabled: true,
+          nextCursor: null,
         }}
       />,
     )
@@ -140,5 +155,89 @@ describe("Settings memory bulk selection", () => {
         name: "Select memory: Memory 101",
       }),
     ).toBeDisabled()
+  })
+
+  it("disables write controls and the account toggle under the global kill switch", () => {
+    render(
+      <MemoryTab
+        initialData={{
+          memories: [memory(1)],
+          memoryEnabled: true,
+          globalMemoryEnabled: false,
+          nextCursor: null,
+        }}
+      />,
+    )
+
+    expect(screen.getByTestId("memory-global-disabled")).toHaveTextContent(
+      "disabled by an administrator",
+    )
+    expect(screen.getByTestId("memory-add-open")).toBeDisabled()
+    expect(
+      screen.getByRole("button", { name: "Edit memory: Memory 1" }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole("button", { name: "Delete memory: Memory 1" }),
+    ).toBeEnabled()
+    expect(
+      screen.getByRole("button", { name: "Enable Nexus memory" }),
+    ).toBeDisabled()
+  })
+
+  it("disables add and edit while the account memory toggle is off", () => {
+    render(
+      <MemoryTab
+        initialData={{
+          memories: [memory(1)],
+          memoryEnabled: false,
+          globalMemoryEnabled: true,
+          nextCursor: null,
+        }}
+      />,
+    )
+
+    expect(screen.getByTestId("memory-add-open")).toBeDisabled()
+    expect(
+      screen.getByRole("button", { name: "Edit memory: Memory 1" }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole("button", { name: "Enable Nexus memory" }),
+    ).toBeEnabled()
+  })
+
+  it("loads the next bounded page without duplicating existing rows", async () => {
+    const cursor = {
+      updatedAtMicros: "1785254400000000",
+      id: memory(1).id,
+    }
+    jest.mocked(listNexusMemories).mockResolvedValueOnce({
+      isSuccess: true,
+      message: "Loaded",
+      data: {
+        memories: [memory(1), memory(2)],
+        memoryEnabled: true,
+        globalMemoryEnabled: true,
+        nextCursor: null,
+      },
+    })
+    render(
+      <MemoryTab
+        initialData={{
+          memories: [memory(1)],
+          memoryEnabled: true,
+          globalMemoryEnabled: true,
+          nextCursor: cursor,
+        }}
+      />,
+    )
+
+    fireEvent.click(screen.getByTestId("memory-load-more"))
+
+    await waitFor(() =>
+      expect(screen.getByText("Memory 2")).toBeInTheDocument(),
+    )
+    expect(listNexusMemories).toHaveBeenCalledWith({ cursor })
+    expect(screen.getAllByTestId("memory-row")).toHaveLength(2)
+    expect(screen.queryByTestId("memory-load-more")).not.toBeInTheDocument()
   })
 })
