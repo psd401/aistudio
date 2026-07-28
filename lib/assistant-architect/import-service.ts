@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, lt } from "drizzle-orm";
 import {
   createExportFile,
   getAssistantDataForExport,
@@ -544,6 +544,7 @@ export async function updateAssistantFromImport(
       .select({
         userId: assistantArchitects.userId,
         mode: assistantArchitects.mode,
+        timeoutSeconds: assistantArchitects.timeoutSeconds,
       })
       .from(assistantArchitects)
       .where(eq(assistantArchitects.id, assistantId))
@@ -571,6 +572,24 @@ export async function updateAssistantFromImport(
         "Cannot convert an agentic assistant back to prompt-chain mode",
       );
     }
+
+    const staleBefore = new Date(
+      Date.now() - ((existing.timeoutSeconds ?? 300) + 60) * 1000,
+    );
+    await tx
+      .update(toolExecutions)
+      .set({
+        status: "failed",
+        completedAt: new Date(),
+        errorMessage: "Execution expired before assistant update",
+      })
+      .where(
+        and(
+          eq(toolExecutions.assistantArchitectId, assistantId),
+          inArray(toolExecutions.status, ["pending", "running"]),
+          lt(toolExecutions.startedAt, staleBefore),
+        ),
+      );
 
     const activeExecutions = await tx
       .select({ id: toolExecutions.id })

@@ -13,7 +13,7 @@ import { z } from "zod"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
 import { INTERNAL_ASSISTANT_LOOKUP } from "@/lib/assistant-architect/internal-access"
 import { createLogger, startTimer, sanitizeForLogging } from "@/lib/logger"
-import { getUserById } from "@/lib/db/drizzle"
+import { checkUserRole, getUserById } from "@/lib/db/drizzle"
 import {
   executeQuery,
   executeTransaction,
@@ -399,7 +399,11 @@ async function createAssistantExecutionRecord(
   return executeTransaction(
     async (tx) => {
       const [assistant] = await tx
-        .select({ id: assistantArchitects.id })
+        .select({
+          id: assistantArchitects.id,
+          userId: assistantArchitects.userId,
+          status: assistantArchitects.status,
+        })
         .from(assistantArchitects)
         .where(eq(assistantArchitects.id, assistantId))
         .limit(1)
@@ -409,6 +413,18 @@ async function createAssistantExecutionRecord(
           "assistant_architects",
           assistantId
         )
+      }
+      const isAdmin = await checkUserRole(userId, "administrator", tx)
+      if (
+        assistant.userId !== userId &&
+        !isAdmin &&
+        assistant.status !== "approved"
+      ) {
+        throw ErrorFactories.authzToolAccessDenied("assistant execution", {
+          userMessage: "You do not have permission to access this assistant",
+          technicalMessage:
+            "Assistant access changed before the execution lock was acquired",
+        })
       }
 
       const [execution] = await tx

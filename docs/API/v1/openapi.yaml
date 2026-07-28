@@ -1242,8 +1242,9 @@ paths:
         Staff callers may update only assistants they own; administrators may
         update any assistant. Missing assistants and assistants owned by another
         user both return a masked `404 NOT_FOUND`. An update returns
-        `409 CONFLICT` while a pending or running execution can still reference
-        the live prompt rows. Every successful update resets status to
+        `409 CONFLICT` while a non-stale pending or running execution can still
+        reference the live prompt rows; abandoned rows expire after the
+        assistant timeout plus a one-minute grace. Every successful update resets status to
         `pending_approval` and atomically deactivates its linked UI capability
         until re-approval. Reapproval reuses the capability's stable identifier
         even when the replacement renamed the assistant. Agent tools, connectors,

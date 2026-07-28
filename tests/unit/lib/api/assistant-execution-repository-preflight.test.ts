@@ -33,6 +33,7 @@ jest.mock("@/lib/db/drizzle-client", () => ({
 }))
 
 jest.mock("@/lib/db/drizzle", () => ({
+  checkUserRole: jest.fn(() => Promise.resolve(false)),
   getUserById: jest.fn(),
 }))
 
@@ -118,7 +119,11 @@ function defineAssistantExecutionServiceRepositoryPreflightSuite1Part1() {
             from: () => ({
               where: () => ({
                 limit: () => ({
-                  for: async () => [{ id: 5 }],
+                  for: async () => [{
+                    id: 5,
+                    userId: 7,
+                    status: "approved",
+                  }],
                 }),
               }),
             }),

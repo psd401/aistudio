@@ -317,11 +317,11 @@ export async function filterAccessibleResourceIds(
 /** List a resource's grants (role grants first, then group, each by value). */
 export async function listResourceGrants(
   resourceType: ResourceGrantType,
-  resourceId: number | string
+  resourceId: number | string,
+  transaction?: DbTransaction
 ): Promise<ResourceGrant[]> {
   const idText = resourceIdText(resourceId);
-  const rows = await executeQuery(
-    (db) =>
+  const query = (db: Pick<DbTransaction, "select">) =>
       db
         .select({
           grantKind: resourceAccessGrants.grantKind,
@@ -334,9 +334,10 @@ export async function listResourceGrants(
             eq(resourceAccessGrants.resourceId, idText)
           )
         )
-        .orderBy(resourceAccessGrants.grantKind, resourceAccessGrants.grantValue),
-    "listResourceGrants"
-  );
+        .orderBy(resourceAccessGrants.grantKind, resourceAccessGrants.grantValue);
+  const rows = transaction
+    ? await query(transaction)
+    : await executeQuery(query, "listResourceGrants");
   return rows;
 }
 

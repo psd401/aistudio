@@ -2343,9 +2343,9 @@ export async function approveAssistantArchitectAction(
     // so the graph that is approved is exactly the graph that was validated.
     const updatedTool = await drizzleApproveAssistantArchitect(
       idInt,
-      async () => {
+      async (transaction) => {
         const audienceCompatibility =
-          await validateAssistantRepositoryAudience(idInt)
+          await validateAssistantRepositoryAudience(idInt, transaction)
         if (!audienceCompatibility.isCompatible) {
           log.warn("Assistant repository audience mismatch blocked approval", {
             assistantId: idInt,

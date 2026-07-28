@@ -821,18 +821,22 @@ Every write preserves the existing human approval gate:
   `pending_approval`. The assistant row is
   locked for replacement, and a pending or running execution returns
   `409 CONFLICT` before any graph mutation so its in-memory prompt ids remain
-  valid. Execution startup acquires the same assistant-row lock and creates its
-  active execution row before loading prompts, closing the load-before-record
-  race. Prompts referenced
+  valid. Abandoned pending/running rows older than the assistant timeout plus a
+  one-minute grace are marked failed before this conflict check, so a crashed
+  worker cannot block replacement forever. Execution startup acquires the same
+  assistant-row lock, rechecks owner/admin/approved access on the locked row,
+  and creates its active execution row before loading prompts, closing both the
+  load-before-record and authorization-snapshot races. Prompts referenced
   by earlier execution results are detached from the live graph rather than
   deleted, preserving their outputs, errors, timings, feedback, and original
   prompt configuration in execution history. Any linked UI capability is
   deactivated atomically until the assistant is approved again. Reapproval
   reuses that capability's stable identifier even when the import renamed the
   assistant, and re-syncs the existing navigation item to it. Final repository
-  audience validation holds the same assistant-row lock through the approval
-  transition, so a concurrent replacement cannot publish a graph that was not
-  reviewed; and
+  audience validation uses the approval transaction's existing connection and
+  holds the same assistant-row lock through the approval transition, so a
+  concurrent replacement cannot publish a graph that was not reviewed or
+  exhaust the connection pool with nested approval reads; and
 - fork: any assistant visible under the same owner/admin/approved plus
   resource/room rules as the v1 detail endpoint may be copied. The source is
   never modified, and the caller owns the new `pending_approval` copy. The

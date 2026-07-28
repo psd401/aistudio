@@ -30,6 +30,7 @@ jest.mock("drizzle-orm", () => ({
   and: (...conditions: unknown[]) => ({ conditions }),
   eq: (left: unknown, right: unknown) => ({ left, right }),
   inArray: (left: unknown, right: unknown) => ({ left, right }),
+  lt: (left: unknown, right: unknown) => ({ left, right }),
 }));
 
 jest.mock("@/lib/db/schema", () => ({
