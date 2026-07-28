@@ -1106,8 +1106,9 @@ paths:
         capabilities before any assistant transaction starts.
         Model names are resolved by exact model id, then provider-family
         fallback, then the first active model; the applied mappings are returned.
-        Import envelopes are limited to 10 MB, 100 assistants, 50 input fields
-        per assistant, and 500 prompt repository bindings on every surface. The
+        Import envelopes must contain at least one assistant and are limited to
+        10 MB, 100 assistants, 50 input fields per assistant, and 500 prompt
+        repository bindings on every surface. The
         REST transport enforces the byte limit while reading the request stream, including when
         `Content-Length` is missing or understated.
         A cataloged but administratively disabled create operation returns a
@@ -3698,6 +3699,7 @@ components:
           type: string
         assistants:
           type: array
+          minItems: 1
           maxItems: 100
           items:
             $ref: "#/components/schemas/AssistantImportDefinition"

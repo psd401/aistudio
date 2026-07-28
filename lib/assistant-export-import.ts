@@ -232,6 +232,9 @@ export const ASSISTANT_IMPORT_MAX_BYTES = 10 * 1024 * 1024
 function validateImportCollectionLimits(
   assistants: unknown[]
 ): string | undefined {
+  if (assistants.length === 0) {
+    return "Import envelope must contain at least one assistant"
+  }
   if (assistants.length > ASSISTANT_IMPORT_MAX_ASSISTANTS) {
     return `Too many assistants (maximum ${ASSISTANT_IMPORT_MAX_ASSISTANTS})`
   }

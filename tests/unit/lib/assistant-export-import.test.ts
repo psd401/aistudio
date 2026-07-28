@@ -154,6 +154,15 @@ describe('validateImportFile', () => {
     expect(validateImportFile({ version: '2.0', assistants: [] })).toMatchObject({ valid: false })
   })
 
+  it('rejects an empty assistant batch', () => {
+    expect(
+      validateImportFile({ version: '1.0', assistants: [] })
+    ).toEqual({
+      valid: false,
+      error: 'Import envelope must contain at least one assistant',
+    })
+  })
+
   it('rejects assistant name longer than 255 characters', () => {
     const longName = 'a'.repeat(256)
     const data = { ...validImport, assistants: [{ ...validAssistant, name: longName }] }

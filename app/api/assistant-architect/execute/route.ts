@@ -72,6 +72,7 @@ import {
   AGENT_LIMIT_CEILINGS,
 } from '@/lib/agents/types';
 import {
+  ASSISTANT_EXECUTION_MAX_PROMPTS,
   createCoordinatedAssistantExecution,
   remainingAssistantExecutionTimeoutMs,
 } from '@/lib/assistant-architect/execution-coordinator';
@@ -82,7 +83,7 @@ export const maxDuration = 900;
 // Constants for resource limits
 const MAX_INPUT_SIZE_BYTES = 100000; // 100KB max input size
 const MAX_INPUT_FIELDS = 50; // Max 50 input fields
-const MAX_PROMPT_CHAIN_LENGTH = 20; // Max 20 prompts per execution
+const MAX_PROMPT_CHAIN_LENGTH = ASSISTANT_EXECUTION_MAX_PROMPTS;
 const MAX_PROMPT_CONTENT_SIZE = 10000000; // 10MB max prompt content size (allows large context)
 const MAX_VARIABLE_REPLACEMENTS = 50; // Max 50 variable placeholders per prompt (realistic upper bound)
 
@@ -478,12 +479,60 @@ async function authorizeArchitectResource(params: {
 }
 
 /**
- * Reject stable repository-access failures before the assistant-wide agentic
- * rate cap is counted. This graph is authorization-only and is deliberately
- * discarded: the executable graph is still reloaded and revalidated after the
- * coordinated execution row protects it from import replacement.
+ * Reject stable graph-shape failures before the assistant-wide agentic rate
+ * cap is counted. The executable graph is still reloaded and revalidated after
+ * the coordinated execution row protects it from import replacement.
  */
-async function preflightExecutionRepositoriesBeforeRateCap(params: {
+function validatePromptChainCardinality(params: {
+  promptCount: number;
+  toolId: number;
+  requestId: string;
+  log: RouteLogger;
+}): PhaseResult<void> {
+  if (params.promptCount === 0) {
+    params.log.error('No prompts configured for assistant architect', {
+      toolId: params.toolId,
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'No prompts configured for this assistant architect',
+          requestId: params.requestId,
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      ),
+    };
+  }
+  if (params.promptCount > MAX_PROMPT_CHAIN_LENGTH) {
+    params.log.warn('Prompt chain too long', {
+      promptCount: params.promptCount,
+      toolId: params.toolId,
+      maxAllowed: MAX_PROMPT_CHAIN_LENGTH,
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Prompt chain too long',
+          message: `Maximum ${MAX_PROMPT_CHAIN_LENGTH} prompts allowed per execution`,
+          requestId: params.requestId,
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      ),
+    };
+  }
+  return { ok: true, value: undefined };
+}
+
+/**
+ * Reject stable graph and repository-access failures before the
+ * assistant-wide agentic rate cap is counted. This graph is authorization-only
+ * and is deliberately discarded: the executable graph is still reloaded and
+ * revalidated after the coordinated execution row protects it from import
+ * replacement.
+ */
+async function preflightExecutionGraphBeforeRateCap(params: {
   assistantId: number;
   executorCognitoSub: string;
   userId: number;
@@ -496,8 +545,16 @@ async function preflightExecutionRepositoriesBeforeRateCap(params: {
         .select({ repositoryIds: chainPrompts.repositoryIds })
         .from(chainPrompts)
         .where(eq(chainPrompts.assistantArchitectId, params.assistantId)),
-    'getAssistantRepositoryBindingsBeforeRateCap'
+    'getAssistantGraphBeforeRateCap'
   );
+  const cardinality = validatePromptChainCardinality({
+    promptCount: repositoryBindings.length,
+    toolId: params.assistantId,
+    requestId: params.requestId,
+    log: params.log,
+  });
+  if (!cardinality.ok) return cardinality;
+
   const repositoryAccess = await preflightAssistantRepositoryAccess(
     repositoryBindings,
     params.executorCognitoSub
@@ -538,39 +595,14 @@ async function validateArchitectPrompts(params: {
   const prompts = (params.architect.prompts || []).sort(
     (left, right) => left.position - right.position
   );
-  if (prompts.length === 0) {
-    params.log.error('No prompts configured for assistant architect', {
-      toolId: params.toolId,
-    });
-    return {
-      ok: false,
-      response: new Response(
-        JSON.stringify({
-          error: 'No prompts configured for this assistant architect',
-          requestId: params.requestId,
-        }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      ),
-    };
-  }
-  if (prompts.length > MAX_PROMPT_CHAIN_LENGTH) {
-    params.log.warn('Prompt chain too long', {
-      promptCount: prompts.length,
-      toolId: params.toolId,
-      maxAllowed: MAX_PROMPT_CHAIN_LENGTH,
-    });
-    return {
-      ok: false,
-      response: new Response(
-        JSON.stringify({
-          error: 'Prompt chain too long',
-          message: `Maximum ${MAX_PROMPT_CHAIN_LENGTH} prompts allowed per execution`,
-          requestId: params.requestId,
-        }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      ),
-    };
-  }
+  const cardinality = validatePromptChainCardinality({
+    promptCount: prompts.length,
+    toolId: params.toolId,
+    requestId: params.requestId,
+    log: params.log,
+  });
+  if (!cardinality.ok) return cardinality;
+
   const repositoryAccess = await preflightAssistantRepositoryAccess(
     prompts,
     params.sessionSub
@@ -670,7 +702,7 @@ async function authorizeAndLoadArchitect(
   });
   if (!access.ok) return access;
   const repositoryAccess =
-    await preflightExecutionRepositoriesBeforeRateCap({
+    await preflightExecutionGraphBeforeRateCap({
       assistantId: architect.id,
       executorCognitoSub: session.sub,
       userId,
@@ -720,6 +752,18 @@ async function createToolExecutionRecord(args: {
     enforceAgentRateCap: true,
   });
   if (!coordinated.created) {
+    if (coordinated.reason === 'invalid_graph') {
+      const invalidGraph = validatePromptChainCardinality({
+        promptCount: coordinated.promptCount,
+        toolId,
+        requestId,
+        log,
+      });
+      if (!invalidGraph.ok) return invalidGraph;
+      throw ErrorFactories.sysInternalError(
+        'Execution coordinator returned a valid graph as invalid'
+      );
+    }
     const { rateCap } = coordinated;
     log.warn('Assistant rate limit exceeded', { toolId, rateCap });
     timer({ status: 'rate_limited' });

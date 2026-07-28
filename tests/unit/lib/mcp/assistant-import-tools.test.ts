@@ -58,6 +58,7 @@ import { buildCapabilityCatalog } from "@/lib/capabilities/capability-catalog"
 import { ROLE_SCOPES } from "@/lib/api-keys/scopes"
 import { AssistantImportServiceError } from "@/lib/assistant-architect/import-service"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
+import { MCP_TOOLS } from "@/lib/mcp/tool-registry"
 
 const context: McpToolContext = {
   userId: 7,
@@ -85,6 +86,81 @@ const importEnvelope = {
       input_fields: [],
     },
   ],
+}
+
+function expectCompleteAssistantImportSchemas(): void {
+  const createTool = MCP_TOOLS.find(
+    (tool) => tool.name === "create_assistant",
+  )
+  const updateTool = MCP_TOOLS.find(
+    (tool) => tool.name === "update_assistant",
+  )
+
+  expect(createTool?.inputSchema).toMatchObject({
+    required: ["version", "assistants"],
+    properties: {
+      assistants: {
+        minItems: 1,
+        maxItems: 100,
+        items: {
+          required: ["name", "prompts", "input_fields"],
+          properties: {
+            mode: { enum: ["prompt_chain", "agentic"] },
+            model_routing_mode: {
+              enum: ["legacy", "standard", "advanced"],
+            },
+            agent_max_steps: { minimum: 1, maximum: 50 },
+            retrieval_scope: {
+              properties: {
+                collectionId: { type: ["string", "null"] },
+                tags: { items: { type: "string" } },
+                maxVisibilityLevel: {
+                  enum: ["private", "group", "internal", "public"],
+                },
+              },
+            },
+            prompts: {
+              maxItems: 20,
+              items: {
+                required: ["name", "content", "model_name", "position"],
+                properties: {
+                  model_name: { type: "string" },
+                  repository_ids: {
+                    items: { type: "integer", minimum: 1 },
+                  },
+                  enabled_tools: { items: { type: "string" } },
+                },
+              },
+            },
+            input_fields: {
+              maxItems: 50,
+              items: {
+                required: ["name", "label", "field_type", "position"],
+                properties: {
+                  field_type: {
+                    enum: [
+                      "short_text",
+                      "long_text",
+                      "select",
+                      "multi_select",
+                      "file_upload",
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  })
+  expect(updateTool?.inputSchema).toMatchObject({
+    required: ["assistantId", "version", "assistants"],
+    properties: {
+      assistantId: { type: "integer", minimum: 1 },
+      assistants: { minItems: 1, maxItems: 1 },
+    },
+  })
 }
 
 describe("MCP assistant import tools", () => {
@@ -129,6 +205,10 @@ describe("MCP assistant import tools", () => {
     expect(typeof TOOL_HANDLERS.create_assistant).toBe("function")
     expect(typeof TOOL_HANDLERS.update_assistant).toBe("function")
     expect(typeof TOOL_HANDLERS.fork_assistant).toBe("function")
+  })
+
+  it("publishes the complete reusable import schema for create and update", () => {
+    expectCompleteAssistantImportSchemas()
   })
 
   it("delegates create to the shared import service as the caller", async () => {

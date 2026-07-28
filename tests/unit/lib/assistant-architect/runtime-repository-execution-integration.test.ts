@@ -25,7 +25,7 @@ describe("Assistant Architect runtime repository execution integration", () => {
 
   it("reloads the executable graph only after coordinated execution creation", () => {
     const authorizationPreflightIndex = routeSource.indexOf(
-      "await preflightExecutionRepositoriesBeforeRateCap({"
+      "await preflightExecutionGraphBeforeRateCap({"
     );
     const createIndex = routeSource.indexOf(
       "const created = await createToolExecutionRecord({"
@@ -43,6 +43,29 @@ describe("Assistant Architect runtime repository execution integration", () => {
     expect(routeSource).toContain(
       "executionDeadlineAt: deadlineAt"
     );
+  });
+
+  it("rejects a stable non-executable graph before rate accounting", () => {
+    const preflightStart = routeSource.indexOf(
+      "async function preflightExecutionGraphBeforeRateCap("
+    );
+    const cardinalityIndex = routeSource.indexOf(
+      "validatePromptChainCardinality({",
+      preflightStart
+    );
+    const repositoryIndex = routeSource.indexOf(
+      "preflightAssistantRepositoryAccess(",
+      cardinalityIndex
+    );
+    const coordinatorIndex = routeSource.indexOf(
+      "createCoordinatedAssistantExecution({"
+    );
+
+    expect(preflightStart).toBeGreaterThan(-1);
+    expect(cardinalityIndex).toBeGreaterThan(preflightStart);
+    expect(repositoryIndex).toBeGreaterThan(cardinalityIndex);
+    expect(coordinatorIndex).toBeGreaterThan(repositoryIndex);
+    expect(routeSource).toContain("promptCount: repositoryBindings.length");
   });
 
   it("existence-masks private assistants before feature authorization", () => {

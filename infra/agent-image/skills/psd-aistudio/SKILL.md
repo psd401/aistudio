@@ -162,8 +162,9 @@ node /opt/psd-skills/psd-aistudio/run.js create-assistant --user <email> \
 ```
 
 For a small envelope, `--json '<ExportFormat JSON>'` may be used instead of
-`--file`. The response reports every assistant result plus each
-`modelName` → `mappedToId` choice.
+`--file`. Local files must be regular files no larger than 10 MB; the CLI checks
+the bound before reading them. The response reports every assistant result plus
+each `modelName` → `mappedToId` choice.
 
 ### `update-assistant`
 

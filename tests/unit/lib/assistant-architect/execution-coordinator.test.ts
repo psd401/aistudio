@@ -200,6 +200,43 @@ describe("createCoordinatedAssistantExecution", () => {
     })
     expect(insert).not.toHaveBeenCalled()
   })
+
+  it.each([
+    { modelIds: [], promptCount: 0 },
+    {
+      modelIds: Array.from({ length: 21 }, () => 3),
+      promptCount: 21,
+    },
+  ])(
+    "rejects a $promptCount-prompt graph before web rate accounting",
+    async ({ modelIds, promptCount }) => {
+      const agenticAssistant: AssistantRow = {
+        ...approvedAssistant,
+        mode: "agentic",
+        agentMaxRequestsPerHour: 2,
+      }
+      const { tx, insert } = createTransaction(
+        agenticAssistant,
+        modelIds,
+      )
+
+      const result = await createCoordinatedAssistantExecution({
+        assistantId: 5,
+        userId: 7,
+        inputs: {},
+        enforceAgentRateCap: true,
+      }, coordinatorDependencies(tx))
+
+      expect(result).toEqual({
+        created: false,
+        reason: "invalid_graph",
+        promptCount,
+        maxPromptCount: 20,
+      })
+      expect(tx.select).toHaveBeenCalledTimes(2)
+      expect(insert).not.toHaveBeenCalled()
+    },
+  )
 })
 
 describe("coordinated execution deadlines", () => {

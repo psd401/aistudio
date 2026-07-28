@@ -15,6 +15,7 @@ import { ErrorFactories } from "@/lib/error-utils"
 
 const PROMPT_CHAIN_DEFAULT_TIMEOUT_SECONDS =
   AGENT_LIMIT_CEILINGS.timeoutSeconds
+export const ASSISTANT_EXECUTION_MAX_PROMPTS = 20
 
 /**
  * Grace after an enforced execution deadline before an abandoned active row is
@@ -122,6 +123,12 @@ export type CoordinatedAssistantExecutionResult =
       reason: "rate_limited"
       rateCap: number
     }
+  | {
+      created: false
+      reason: "invalid_graph"
+      promptCount: number
+      maxPromptCount: number
+    }
 
 export interface AssistantExecutionCoordinatorDependencies {
   executeTransaction: <T>(
@@ -158,7 +165,7 @@ async function requireCurrentExecutionAccess(
   assistant: LockedAssistant,
   userId: number,
   dependencies: AssistantExecutionCoordinatorDependencies
-): Promise<void> {
+): Promise<number> {
   if (assistant.userId !== userId && assistant.status !== "approved") {
     const isAdmin = await dependencies.checkUserRole(
       userId,
@@ -217,6 +224,7 @@ async function requireCurrentExecutionAccess(
       })
     }
   }
+  return promptModels.length
 }
 
 async function isAgentRateLimited(
@@ -296,12 +304,24 @@ export async function createCoordinatedAssistantExecution(
         )
       }
 
-      await requireCurrentExecutionAccess(
+      const promptCount = await requireCurrentExecutionAccess(
         tx,
         assistant,
         args.userId,
         dependencies
       )
+      if (
+        args.enforceAgentRateCap === true &&
+        (promptCount === 0 ||
+          promptCount > ASSISTANT_EXECUTION_MAX_PROMPTS)
+      ) {
+        return {
+          created: false,
+          reason: "invalid_graph",
+          promptCount,
+          maxPromptCount: ASSISTANT_EXECUTION_MAX_PROMPTS,
+        }
+      }
       const startedAt = new Date()
       const deadlineAt = assistantExecutionDeadline(startedAt, assistant)
       if (

@@ -24,6 +24,9 @@ process.env.AISTUDIO_MCP_API_KEY = '';
 process.env.AISTUDIO_MCP_API_KEY_SECRET_ID = 'psd-agent/dev/aistudio-mcp-api-key';
 
 const { test, expect, beforeEach, afterEach } = require('bun:test');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const common = require('./common');
 
@@ -311,6 +314,42 @@ test('create-assistant requires exactly one envelope source', async () => {
     code = err.code;
   }
   expect(code).toBe(1);
+});
+
+test('create-assistant rejects an oversized local file before reading it', async () => {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'psd-aistudio-import-'),
+  );
+  const file = path.join(directory, 'oversized.json');
+  try {
+    // Test-owned path created immediately above.
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    fs.writeFileSync(file, Buffer.alloc(10 * 1024 * 1024 + 1));
+
+    let code;
+    try {
+      await run('create-assistant', '--file', file);
+    } catch (err) {
+      code = err.code;
+    }
+
+    expect(code).toBe(1);
+    expect(toolCalls).toHaveLength(0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('create-assistant rejects non-regular import paths', async () => {
+  let code;
+  try {
+    await run('create-assistant', '--file', os.tmpdir());
+  } catch (err) {
+    code = err.code;
+  }
+
+  expect(code).toBe(1);
+  expect(toolCalls).toHaveLength(0);
 });
 
 // ── insufficient-scope hint (never retried / key-swapped) ──────────────────────

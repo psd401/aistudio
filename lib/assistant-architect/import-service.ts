@@ -542,7 +542,6 @@ export async function updateAssistantFromImport(
     callerUserId,
   );
   await validateImportedPromptTools([assistant], modelMap, callerUserId);
-  const isAdmin = await checkUserRole(callerUserId, "administrator");
   const result = await executeTransaction(async (tx) => {
     const [existing] = await tx
       .select({
@@ -560,6 +559,11 @@ export async function updateAssistantFromImport(
         `Assistant not found: ${assistantId}`,
       );
     }
+    const isAdmin = await checkUserRole(
+      callerUserId,
+      "administrator",
+      tx,
+    );
     if (!isAdmin && existing.userId !== callerUserId) {
       throw new AssistantImportServiceError(
         "NOT_FOUND",

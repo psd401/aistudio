@@ -798,17 +798,18 @@ fallback only when the catalog entry is unavailable. When an administrator
 disables a cataloged create, update, or fork operation, both MCP and REST reject
 it; REST uses a masked `404` before body parsing or mutation.
 
-Import envelopes are limited to 10 MB, 100 assistants, 50 input fields per
-assistant (matching the execution-time input cap), and 500 prompt
-repository bindings across the admin, REST, and MCP surfaces. REST create/update
-count bytes while reading the request stream and cancel before buffering more
-than the limit, so a missing or understated `Content-Length` cannot bypass the
-pre-parse bound. An advertised oversized length is rejected immediately. The
-shared MCP transport has a separate 64 MiB ceiling so existing multi-file tools
-such as `import_okf` retain their larger request contract; shared import
-validation still rejects an Assistant Architect envelope above 10 MB before
-any write. The optional REST fork body is independently stream-bounded to 4 KiB
-before JSON decoding.
+Import envelopes must contain at least one assistant and are limited to 10 MB,
+100 assistants, 50 input fields per assistant (matching the execution-time
+input cap), and 500 prompt repository bindings across the admin, REST, and MCP
+surfaces. An empty batch is a `400 VALIDATION_ERROR`, not a retryable import
+failure. REST create/update count bytes while reading the request stream and
+cancel before buffering more than the limit, so a missing or understated
+`Content-Length` cannot bypass the pre-parse bound. An advertised oversized
+length is rejected immediately. The shared MCP transport has a separate 64 MiB
+ceiling so existing multi-file tools such as `import_okf` retain their larger
+request contract; shared import validation still rejects an Assistant Architect
+envelope above 10 MB before any write. The optional REST fork body is
+independently stream-bounded to 4 KiB before JSON decoding.
 
 Every write preserves the existing human approval gate:
 

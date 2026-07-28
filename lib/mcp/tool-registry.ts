@@ -12,12 +12,271 @@
  * the catalog manifest projects.
  */
 
-import type { McpToolDefinition } from "./types"
+import type { McpToolDefinition, McpToolProperty } from "./types"
 import { CONTENT_MCP_TOOLS } from "./content-tools"
 
 // ============================================
 // Tool Definitions
 // ============================================
+
+const ASSISTANT_IMPORT_PROMPT_SCHEMA: McpToolProperty = {
+  type: "object",
+  description: "One ordered prompt in the Assistant Architect graph.",
+  required: ["name", "content", "model_name", "position"],
+  properties: {
+    name: {
+      type: "string",
+      description: "Prompt display name.",
+    },
+    content: {
+      type: "string",
+      description: "Prompt template content.",
+      maxLength: 10_000_000,
+    },
+    system_context: {
+      type: ["string", "null"],
+      description: "Optional system context prepended to the prompt.",
+      maxLength: 10_000_000,
+    },
+    model_name: {
+      type: "string",
+      description: "Portable active model id/name to resolve during import.",
+    },
+    position: {
+      type: "integer",
+      description: "Zero-based prompt ordering position.",
+    },
+    parallel_group: {
+      type: ["integer", "null"],
+      description: "Optional parallel execution group.",
+    },
+    input_mapping: {
+      type: ["object", "null"],
+      description: "Optional mapping whose values are input variable names.",
+      additionalProperties: {
+        type: "string",
+        description: "Input variable name.",
+      },
+    },
+    timeout_seconds: {
+      type: ["integer", "null"],
+      description: "Optional positive per-prompt timeout in seconds.",
+      minimum: 1,
+    },
+    repository_ids: {
+      type: "array",
+      description:
+        "Positive durable repository ids; at most 500 bindings per envelope in aggregate.",
+      maxItems: 500,
+      items: {
+        type: "integer",
+        description: "Durable repository id.",
+        minimum: 1,
+      },
+    },
+    enabled_tools: {
+      type: "array",
+      description: "Tool identifiers enabled for this prompt.",
+      items: {
+        type: "string",
+        description: "Tool identifier.",
+      },
+    },
+  },
+}
+
+const ASSISTANT_IMPORT_FIELD_SCHEMA: McpToolProperty = {
+  type: "object",
+  description: "One caller-supplied assistant input field.",
+  required: ["name", "label", "field_type", "position"],
+  properties: {
+    name: {
+      type: "string",
+      description: "Input variable name.",
+    },
+    label: {
+      type: "string",
+      description: "Human-readable input label.",
+    },
+    field_type: {
+      type: "string",
+      description: "Supported input control type.",
+      enum: [
+        "short_text",
+        "long_text",
+        "select",
+        "multi_select",
+        "file_upload",
+      ],
+    },
+    position: {
+      type: "integer",
+      description: "Zero-based field ordering position.",
+    },
+    options: {
+      type: ["object", "null"],
+      description: "Optional field-specific configuration.",
+      additionalProperties: true,
+    },
+  },
+}
+
+const ASSISTANT_IMPORT_DEFINITION_SCHEMA: McpToolProperty = {
+  type: "object",
+  description: "Complete portable ExportFormat v1.0 assistant definition.",
+  required: ["name", "prompts", "input_fields"],
+  properties: {
+    name: {
+      type: "string",
+      description: "Assistant name.",
+      minLength: 1,
+      maxLength: 255,
+    },
+    description: {
+      type: "string",
+      description: "Assistant description.",
+    },
+    status: {
+      type: "string",
+      description:
+        "Portable status value; ignored because every mutation writes pending_approval.",
+    },
+    image_path: {
+      type: ["string", "null"],
+      description: "Optional assistant image path.",
+    },
+    is_parallel: {
+      type: "boolean",
+      description: "Whether prompt groups may execute in parallel.",
+    },
+    timeout_seconds: {
+      type: ["integer", "null"],
+      description: "Optional positive prompt-chain timeout in seconds.",
+      minimum: 1,
+    },
+    mode: {
+      type: "string",
+      description: "Assistant execution mode.",
+      enum: ["prompt_chain", "agentic"],
+      default: "prompt_chain",
+    },
+    model_routing_mode: {
+      type: "string",
+      description: "Model-routing strategy.",
+      enum: ["legacy", "standard", "advanced"],
+      default: "legacy",
+    },
+    model_routing_family: {
+      type: ["string", "null"],
+      description:
+        "Required for advanced routing and otherwise omitted or null.",
+      enum: ["openai", "anthropic", "google", null],
+    },
+    agent_enabled_tools: {
+      type: "array",
+      description: "Agent tool identifiers available to the importing author.",
+      items: {
+        type: "string",
+        description: "Agent tool identifier.",
+      },
+    },
+    agent_enabled_connectors: {
+      type: "array",
+      description: "Connector identifiers visible to the importing author.",
+      items: {
+        type: "string",
+        description: "Connector identifier.",
+      },
+    },
+    agent_max_steps: {
+      type: "integer",
+      description: "Maximum agentic reasoning steps.",
+      minimum: 1,
+      maximum: 50,
+      default: 10,
+    },
+    agent_timeout_seconds: {
+      type: "integer",
+      description: "Agentic wall-clock timeout in seconds.",
+      minimum: 1,
+      maximum: 900,
+      default: 300,
+    },
+    agent_cost_cap_cents: {
+      type: ["integer", "null"],
+      description: "Optional positive per-run cost cap in cents.",
+      minimum: 1,
+    },
+    agent_max_requests_per_hour: {
+      type: ["integer", "null"],
+      description: "Optional positive assistant-wide hourly request cap.",
+      minimum: 1,
+    },
+    retrieval_scope: {
+      type: ["object", "null"],
+      description: "Optional Atrium retrieval scope.",
+      properties: {
+        collectionId: {
+          type: ["string", "null"],
+          description: "Optional collection identifier.",
+        },
+        tags: {
+          type: "array",
+          description: "Required content tags.",
+          items: {
+            type: "string",
+            description: "Content tag.",
+          },
+        },
+        maxVisibilityLevel: {
+          type: "string",
+          description: "Maximum admitted content visibility.",
+          enum: ["private", "group", "internal", "public"],
+        },
+      },
+    },
+    prompts: {
+      type: "array",
+      description: "Ordered prompt graph, capped at 20 prompts.",
+      maxItems: 20,
+      items: ASSISTANT_IMPORT_PROMPT_SCHEMA,
+    },
+    input_fields: {
+      type: "array",
+      description: "Caller input fields, capped at 50.",
+      maxItems: 50,
+      items: ASSISTANT_IMPORT_FIELD_SCHEMA,
+    },
+  },
+}
+
+const ASSISTANT_IMPORT_ENVELOPE_PROPERTIES: Record<
+  string,
+  McpToolProperty
+> = {
+  version: {
+    type: "string",
+    description: "Export format version. Must be 1.0.",
+    enum: ["1.0"],
+    const: "1.0",
+  },
+  exported_at: {
+    type: "string",
+    description: "ISO timestamp from the portable export envelope.",
+  },
+  export_source: {
+    type: "string",
+    description: "Optional source label from the export envelope.",
+  },
+  assistants: {
+    type: "array",
+    description:
+      "One to 100 complete portable Assistant Architect definitions.",
+    minItems: 1,
+    maxItems: 100,
+    items: ASSISTANT_IMPORT_DEFINITION_SCHEMA,
+  },
+}
 
 export const MCP_TOOLS: McpToolDefinition[] = [
   {
@@ -165,27 +424,7 @@ Example:
       "Create one or more Assistant Architects from an ExportFormat v1.0 envelope. Created assistants are owned by the caller and always enter pending_approval.",
     inputSchema: {
       type: "object",
-      properties: {
-        version: {
-          type: "string",
-          description: "Export format version. Must be 1.0.",
-          enum: ["1.0"],
-        },
-        exported_at: {
-          type: "string",
-          description: "ISO timestamp from the portable export envelope.",
-        },
-        export_source: {
-          type: "string",
-          description: "Optional source label from the export envelope.",
-        },
-        assistants: {
-          type: "array",
-          items: { type: "object" },
-          description:
-            "Assistant definitions from ExportFormat v1.0, including prompts, model_name values, and input_fields.",
-        },
-      },
+      properties: ASSISTANT_IMPORT_ENVELOPE_PROPERTIES,
       required: ["version", "assistants"],
     },
   },
@@ -197,27 +436,16 @@ Example:
       type: "object",
       properties: {
         assistantId: {
-          type: "number",
+          type: "integer",
           description: "Numeric ID of the assistant to replace.",
+          minimum: 1,
         },
-        version: {
-          type: "string",
-          description: "Export format version. Must be 1.0.",
-          enum: ["1.0"],
-        },
-        exported_at: {
-          type: "string",
-          description: "ISO timestamp from the portable export envelope.",
-        },
-        export_source: {
-          type: "string",
-          description: "Optional source label from the export envelope.",
-        },
+        ...ASSISTANT_IMPORT_ENVELOPE_PROPERTIES,
         assistants: {
-          type: "array",
-          items: { type: "object" },
+          ...ASSISTANT_IMPORT_ENVELOPE_PROPERTIES.assistants,
           description:
-            "Exactly one Assistant definition from ExportFormat v1.0.",
+            "Exactly one complete portable Assistant Architect definition.",
+          maxItems: 1,
         },
       },
       required: ["assistantId", "version", "assistants"],

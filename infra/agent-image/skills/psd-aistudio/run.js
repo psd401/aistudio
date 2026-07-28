@@ -60,6 +60,7 @@ const {
 
 const SECTIONS = ["actions", "features", "scopes", "all"];
 const SURFACES = ["mcp", "ai_sdk", "rest", "internal"];
+const ASSISTANT_IMPORT_MAX_BYTES = 10 * 1024 * 1024;
 
 function usage() {
   process.stdout.write(
@@ -167,6 +168,41 @@ function parseIntegerList(value, label) {
   return numbers;
 }
 
+function readBoundedImportFile(file) {
+  // Open once, inspect that exact descriptor, and read no more than its
+  // inspected size. A concurrently growing file is therefore still bounded.
+  // The CLI rejects devices/FIFOs so a pseudo-file cannot block indefinitely.
+  // The caller-selected path is an intentional part of the CLI contract.
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  const descriptor = fs.openSync(file, "r");
+  try {
+    const fileStats = fs.fstatSync(descriptor);
+    if (!fileStats.isFile()) {
+      throw new Error("--file must refer to a regular file");
+    }
+    if (fileStats.size > ASSISTANT_IMPORT_MAX_BYTES) {
+      throw new Error("assistant import file exceeds the 10 MB limit");
+    }
+
+    const buffer = Buffer.alloc(fileStats.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const bytesRead = fs.readSync(
+        descriptor,
+        buffer,
+        offset,
+        buffer.length - offset,
+        offset,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return buffer.subarray(0, offset).toString("utf8");
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
 function parseImportEnvelope(args) {
   const json = optStr(args, "json", "json");
   const file = optStr(args, "file", "file");
@@ -179,9 +215,7 @@ function parseImportEnvelope(args) {
   let raw;
   if (file !== undefined) {
     try {
-      // The CLI contract intentionally accepts a caller-selected local export.
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
-      raw = fs.readFileSync(file, "utf8");
+      raw = readBoundedImportFile(file);
     } catch (error) {
       fail(`Unable to read --file: ${error.message}`);
     }

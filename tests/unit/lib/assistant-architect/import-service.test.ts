@@ -972,6 +972,11 @@ it("lets an administrator update any assistant", async () => {
 
   await updateAssistantFromImport(12, envelope(), 7);
 
+  expect(mockCheckUserRole).toHaveBeenCalledWith(
+    7,
+    "administrator",
+    expect.anything(),
+  );
   expect(database.assistants[0]).toMatchObject({
     status: "pending_approval",
     userId: 99,
