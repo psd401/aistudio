@@ -139,8 +139,8 @@ class ContextMinter(Protocol):
 
 
 class Runtime(Protocol):
-    def prepare(self) -> None:
-        """Ensure the candidate is running with credentials valid for a trial."""
+    def prepare(self) -> bool:
+        """Ensure credentials are valid; return whether the runtime was restarted."""
 
     def invoke(
         self,
@@ -297,7 +297,8 @@ class DockerRuntime:
                 )
         return credentials
 
-    def prepare(self) -> None:
+    def prepare(self) -> bool:
+        restarted = False
         try:
             credentials = self._resolve_credentials_for_invocation()
             # A boot can consume a meaningful part of a temporary credential's
@@ -310,7 +311,7 @@ class DockerRuntime:
                     and credentials.identity == self._active_credentials.identity
                 ):
                     self._active_credentials = credentials
-                    return
+                    return restarted
                 if self._container_id is not None:
                     LOGGER.info(
                         "AWS credentials rotated; recycling candidate container"
@@ -319,10 +320,11 @@ class DockerRuntime:
                     self._name = self._new_name()
                 self._active_credentials = credentials
                 self._start()
+                restarted = True
                 credentials = self._resolve_credentials_for_invocation()
                 if credentials.identity == self._active_credentials.identity:
                     self._active_credentials = credentials
-                    return
+                    return restarted
             self.stop()
             raise EvalRunnerError(
                 "AWS credentials kept rotating while the candidate container booted"
@@ -577,11 +579,19 @@ class EvaluationRunner:
                         # Mint immediately before every trial. This is stronger
                         # than a timer-based refresh: even a multi-hour suite can
                         # never begin a turn with a context from an earlier trial.
-                        authority = self._context_minter.mint(session_id)
-                        # Context minting can take up to 90 seconds. Revalidate
-                        # after it completes so the invocation cannot inherit a
-                        # credential that became unsafe during that wait.
-                        runtime.prepare()
+                        for _ in range(3):
+                            authority = self._context_minter.mint(session_id)
+                            # Context minting can take up to 90 seconds.
+                            # Revalidate afterward. If that check rebooted the
+                            # container, discard the aged authority and remint
+                            # for the now-ready runtime.
+                            if not runtime.prepare():
+                                break
+                        else:
+                            raise EvalRunnerError(
+                                "runtime kept restarting while invocation "
+                                "authority was minted"
+                            )
                         event = runtime.invoke(task, session_id, authority)
                         record = self._make_record(
                             task,

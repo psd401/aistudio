@@ -26,6 +26,8 @@ trial, after any container boot, and after context minting immediately before
 invocation. If temporary credentials rotate, a shared pure-task container is
 recycled with the new values; credentials that cannot outlive the configured
 invocation timeout fail closed before the trial starts.
+When a post-mint credential check recycles the runtime, the runner discards
+that authority and remints it for the ready container before invoking.
 
 JSONL output is created with owner-only (`0600`) permissions because complete
 metadata can contain prompts, messages, and tool details. Keep it in an

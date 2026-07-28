@@ -148,8 +148,10 @@ class FakeRuntime:
         self.invocations: list[tuple[str, str]] = []
         self.memory: dict[str, str] = {}
 
-    def prepare(self) -> None:
+    def prepare(self) -> bool:
+        restarted = not self.started
         self.started = True
+        return restarted
 
     def invoke(
         self,
@@ -273,7 +275,7 @@ class EvaluationRunnerTests(unittest.TestCase):
         class OrderedRuntime(FakeRuntime):
             def prepare(self):
                 events.append("prepare")
-                super().prepare()
+                return super().prepare()
 
             def invoke(self, task, session_id, authority):
                 events.append("invoke")
@@ -295,6 +297,47 @@ class EvaluationRunnerTests(unittest.TestCase):
         ).run(self.tasks[:1], io.StringIO(), trials_override=1)
 
         self.assertEqual(events, ["prepare", "mint", "prepare", "invoke"])
+
+    def test_authority_is_reminted_when_post_mint_prepare_restarts_runtime(self):
+        clock = AdvancingClock()
+        events: list[str] = []
+
+        class RestartingRuntime(FakeRuntime):
+            def __init__(self):
+                super().__init__(clock)
+                self.prepare_results = iter([True, True, False])
+
+            def prepare(self):
+                events.append("prepare")
+                self.started = True
+                return next(self.prepare_results)
+
+            def invoke(self, task, session_id, authority):
+                events.append("invoke")
+                return super().invoke(task, session_id, authority)
+
+        class RestartingFactory:
+            def create(self):
+                return RestartingRuntime()
+
+        class RecordingMinter(FakeMinter):
+            def mint(self, session_id):
+                events.append("mint")
+                return super().mint(session_id)
+
+        minter = RecordingMinter(clock)
+        runner.EvaluationRunner(
+            RestartingFactory(),
+            minter,
+            now=clock.now,
+        ).run(self.tasks[:1], io.StringIO(), trials_override=1)
+
+        self.assertEqual(
+            events,
+            ["prepare", "mint", "prepare", "mint", "prepare", "invoke"],
+        )
+        self.assertEqual(len(minter.sessions), 2)
+        self.assertEqual(len(set(minter.sessions)), 1)
 
     def test_mutating_task_gets_a_fresh_container_per_trial(self):
         task = runner.Task(
