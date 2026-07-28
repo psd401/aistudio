@@ -48,7 +48,11 @@ jest.mock("@/lib/resource-admission", () => ({
 import type { NextRequest } from "next/server"
 import { POST as legacyPOST } from "@/app/api/agent/classified-evaluation/route"
 import { POST } from "@/app/api/agent/workflow-gateway/route"
-import { workflowGatewayDependencies } from "@/lib/agent-services/workflow-gateway"
+import {
+  WorkflowGatewayError,
+  workflowGatewayDependencies,
+  type WorkflowGatewayTool,
+} from "@/lib/agent-services/workflow-gateway"
 
 function request(body: unknown): NextRequest {
   return {
@@ -60,6 +64,8 @@ function request(body: unknown): NextRequest {
 
 const originalExecute = workflowGatewayDependencies.execute
 const originalListTools = workflowGatewayDependencies.listTools
+let executingTool: WorkflowGatewayTool
+let preparedArguments: Record<string, unknown> | null
 
 beforeEach(() => {
   context = {
@@ -74,10 +80,26 @@ beforeEach(() => {
     url: "https://gateway.example/sse",
     token: "service-token",
   })
-  executeToolMock.mockReset().mockResolvedValue({
-    isError: false,
-    data: { ok: true },
-  })
+  executingTool = {
+    name: "get_example_schema",
+    description: "Example schema",
+    inputSchema: { type: "object", properties: {} },
+  }
+  preparedArguments = null
+  executeToolMock
+    .mockReset()
+    .mockImplementation(
+      async (
+        _config: unknown,
+        _toolName: string,
+        prepareArguments: (
+          tool: WorkflowGatewayTool
+        ) => Record<string, unknown>
+      ) => {
+        preparedArguments = prepareArguments(executingTool)
+        return { isError: false, data: { ok: true } }
+      }
+    )
   listToolsMock.mockReset().mockResolvedValue([
     {
       name: "get_example_schema",
@@ -149,26 +171,25 @@ describe("POST /api/agent/workflow-gateway", () => {
 
   it("flows an unseen roster tool from list to call and binds its caller marker", async () => {
     const dynamicToolName = ["process", "future", "packet"].join("_")
-    listToolsMock.mockResolvedValue([
-      {
-        name: dynamicToolName,
-        description: "Processes a future workflow packet",
-        inputSchema: {
-          type: "object",
-          properties: {
-            requester_email: {
-              type: "string",
-              description: "Verified requester [caller-bound]",
-            },
-            approver_email: {
-              type: "string",
-              description: "[caller-bound] verified approver",
-            },
-            packet: { type: "string" },
+    executingTool = {
+      name: dynamicToolName,
+      description: "Processes a future workflow packet",
+      inputSchema: {
+        type: "object",
+        properties: {
+          requester_email: {
+            type: "string",
+            description: "Verified requester [caller-bound]",
           },
+          approver_email: {
+            type: "string",
+            description: "[caller-bound] verified approver",
+          },
+          packet: { type: "string" },
         },
       },
-    ])
+    }
+    listToolsMock.mockResolvedValue([executingTool])
 
     const listed = await POST(request({ action: "list-tools" }))
     expect((await listed.json()).tools[0].name).toBe(dynamicToolName)
@@ -190,33 +211,34 @@ describe("POST /api/agent/workflow-gateway", () => {
         token: "service-token",
       },
       dynamicToolName,
-      {
-        requester_email: "owner@psd401.net",
-        approver_email: "owner@psd401.net",
-        packet: "ready",
-      },
+      expect.any(Function),
       undefined,
       expect.any(AbortSignal)
     )
+    expect(preparedArguments).toEqual({
+      requester_email: "owner@psd401.net",
+      approver_email: "owner@psd401.net",
+      packet: "ready",
+    })
   })
+})
 
+describe("POST /api/agent/workflow-gateway safety", () => {
   it("rejects an unmarked submit tool with an actionable error", async () => {
     const unsafeSubmitName = ["submit", "future", "packet"].join("_")
-    listToolsMock.mockResolvedValue([
-      {
-        name: unsafeSubmitName,
-        description: "Submits a workflow packet",
-        inputSchema: {
-          type: "object",
-          properties: {
-            employee_email: {
-              type: "string",
-              description: "The employee who owns the packet",
-            },
+    executingTool = {
+      name: unsafeSubmitName,
+      description: "Submits a workflow packet",
+      inputSchema: {
+        type: "object",
+        properties: {
+          employee_email: {
+            type: "string",
+            description: "The employee who owns the packet",
           },
         },
       },
-    ])
+    }
     const response = await POST(
       request({
         toolName: unsafeSubmitName,
@@ -227,15 +249,75 @@ describe("POST /api/agent/workflow-gateway", () => {
     expect(await response.json()).toEqual({
       error: expect.stringContaining("[caller-bound]"),
     })
-    expect(executeToolMock).not.toHaveBeenCalled()
+    expect(executeToolMock).toHaveBeenCalledTimes(1)
   })
 
   it("rejects tools absent from the live roster", async () => {
+    executeToolMock.mockRejectedValueOnce(
+      new WorkflowGatewayError(
+        "Gateway tool is not available in the live roster",
+        "request"
+      )
+    )
     const response = await POST(
       request({ toolName: "not_in_roster", arguments: {} })
     )
     expect(response.status).toBe(400)
-    expect(executeToolMock).not.toHaveBeenCalled()
+    expect(await response.json()).toEqual({
+      error: "Gateway tool is not available in the live roster",
+    })
+    expect(executeToolMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("binds from the executing schema instead of a stale listed schema", async () => {
+    const toolName = "process_rotated_packet"
+    listToolsMock.mockResolvedValueOnce([
+      {
+        name: toolName,
+        description: "Cached schema",
+        inputSchema: {
+          type: "object",
+          properties: {
+            old_requester: {
+              type: "string",
+              description: "Old requester [caller-bound]",
+            },
+          },
+        },
+      },
+    ])
+    const listed = await POST(request({ action: "list-tools" }))
+    expect(listed.status).toBe(200)
+
+    executingTool = {
+      name: toolName,
+      description: "Executing schema",
+      inputSchema: {
+        type: "object",
+        properties: {
+          current_requester: {
+            type: "string",
+            description: "Current requester [caller-bound]",
+          },
+        },
+      },
+    }
+    const response = await POST(
+      request({
+        toolName,
+        arguments: {
+          old_requester: "attacker@psd401.net",
+          current_requester: "other-attacker@psd401.net",
+        },
+      })
+    )
+
+    expect(response.status).toBe(200)
+    expect(preparedArguments).toEqual({
+      old_requester: "attacker@psd401.net",
+      current_requester: "owner@psd401.net",
+    })
+    expect(listToolsMock).toHaveBeenCalledTimes(1)
   })
 
   it("retains the generic argument string-length guard", async () => {

@@ -5,7 +5,6 @@ import {
   WorkflowGatewayError,
   workflowGatewayDependencies,
   type WorkflowGatewayConfig,
-  type WorkflowGatewayTool,
 } from "@/lib/agent-services/workflow-gateway"
 import { verifyAgentInvocationContext } from "@/lib/agent-workspace/invocation-context"
 import { getSecretJson } from "@/lib/agent-workspace/secrets-manager"
@@ -241,13 +240,6 @@ async function settleGatewayLease(
   }
 }
 
-function findTool(
-  tools: WorkflowGatewayTool[],
-  toolName: string
-): WorkflowGatewayTool | null {
-  return tools.find((tool) => tool.name === toolName) ?? null
-}
-
 function bindCallerArguments(
   args: Record<string, unknown>,
   callerArgumentNames: string[],
@@ -261,14 +253,11 @@ function bindCallerArguments(
   return result
 }
 
-function unmarkedSubmitResponse(toolName: string): NextResponse {
-  return NextResponse.json(
-    {
-      error:
-        `Gateway submit tool "${toolName}" is missing a ${CALLER_BOUND_MARKER} ` +
-        "argument marker; ask the workflow owner to mark the verified caller field.",
-    },
-    { status: 400 }
+function unmarkedSubmitError(toolName: string): WorkflowGatewayError {
+  return new WorkflowGatewayError(
+    `Gateway submit tool "${toolName}" is missing a ${CALLER_BOUND_MARKER} ` +
+      "argument marker; ask the workflow owner to mark the verified caller field.",
+    "request"
   )
 }
 
@@ -280,34 +269,24 @@ async function executeCall(options: {
   signal: AbortSignal
 }): Promise<NextResponse> {
   const { config, gatewayRequest, ownerEmail, requestId, signal } = options
-  const tools = await workflowGatewayDependencies.listTools(
-    config,
-    undefined,
-    signal
-  )
-  const tool = findTool(tools, gatewayRequest.toolName)
-  if (!tool) {
-    return NextResponse.json(
-      { error: "Gateway tool is not available in the live roster" },
-      { status: 400 }
-    )
-  }
-  const callerArgumentNames = getCallerBoundArgumentNames(tool.inputSchema)
-  if (
-    gatewayRequest.toolName.startsWith("submit_") &&
-    callerArgumentNames.length === 0
-  ) {
-    return unmarkedSubmitResponse(gatewayRequest.toolName)
-  }
-  const args = bindCallerArguments(
-    gatewayRequest.arguments,
-    callerArgumentNames,
-    ownerEmail
-  )
+  let callerArgumentNames: string[] = []
   const result = await workflowGatewayDependencies.execute(
     config,
     gatewayRequest.toolName,
-    args,
+    (tool) => {
+      callerArgumentNames = getCallerBoundArgumentNames(tool.inputSchema)
+      if (
+        gatewayRequest.toolName.startsWith("submit_") &&
+        callerArgumentNames.length === 0
+      ) {
+        throw unmarkedSubmitError(gatewayRequest.toolName)
+      }
+      return bindCallerArguments(
+        gatewayRequest.arguments,
+        callerArgumentNames,
+        ownerEmail
+      )
+    },
     undefined,
     signal
   )
@@ -362,6 +341,9 @@ async function executeGatewayRequest(options: {
         error: error instanceof Error ? error.message : String(error),
       })
     )
+    if (error instanceof WorkflowGatewayError && error.code === "request") {
+      return NextResponse.json({ error: error.message }, { status: 400 })
+    }
     if (error instanceof WorkflowGatewayError && error.code === "tool") {
       return NextResponse.json(
         { error: "Gateway tool rejected the operation", detail: error.detail },

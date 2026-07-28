@@ -41,7 +41,7 @@ export interface WorkflowGatewayTool {
 export class WorkflowGatewayError extends Error {
   constructor(
     message: string,
-    readonly code: "configuration" | "transport" | "tool",
+    readonly code: "configuration" | "request" | "transport" | "tool",
     readonly detail?: unknown
   ) {
     super(message)
@@ -474,7 +474,13 @@ export interface WorkflowGatewayConfig {
 }
 
 interface GatewayToolsResult {
+  nextCursor?: unknown
   tools?: unknown
+}
+
+interface GatewayToolsPage {
+  nextCursor?: string
+  tools: WorkflowGatewayTool[]
 }
 
 interface GatewayToolsCache {
@@ -484,13 +490,9 @@ interface GatewayToolsCache {
 }
 
 const GATEWAY_TOOLS_CACHE_TTL_MS = 30_000
+const MAX_GATEWAY_TOOLS_LIST_PAGES = 100
+const MAX_GATEWAY_TOOLS_CURSOR_LENGTH = 4_096
 let gatewayToolsCache: GatewayToolsCache | null = null
-let gatewayToolsRequest:
-  | {
-      config: WorkflowGatewayConfig
-      promise: Promise<WorkflowGatewayTool[]>
-    }
-  | null = null
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value)
@@ -503,11 +505,22 @@ function sameConfig(
   return left.url === right.url && left.token === right.token
 }
 
-export function parseGatewayToolsList(result: unknown): WorkflowGatewayTool[] {
-  const encoded = JSON.stringify(result)
+function encodedByteLength(value: unknown): number | null {
+  try {
+    const encoded = JSON.stringify(value)
+    return typeof encoded === "string"
+      ? Buffer.byteLength(encoded, "utf8")
+      : null
+  } catch {
+    return null
+  }
+}
+
+function parseGatewayToolsPage(result: unknown): GatewayToolsPage {
+  const encodedBytes = encodedByteLength(result)
   if (
-    typeof encoded !== "string" ||
-    Buffer.byteLength(encoded, "utf8") > WORKFLOW_SSE_LIMITS.resultBytes
+    encodedBytes === null ||
+    encodedBytes > WORKFLOW_SSE_LIMITS.resultBytes
   ) {
     throw new WorkflowGatewayError("Gateway tool roster is too large", "transport")
   }
@@ -519,8 +532,21 @@ export function parseGatewayToolsList(result: unknown): WorkflowGatewayTool[] {
     )
   }
 
+  const nextCursor = value.nextCursor
+  if (
+    nextCursor !== undefined &&
+    (typeof nextCursor !== "string" ||
+      nextCursor.length === 0 ||
+      nextCursor.length > MAX_GATEWAY_TOOLS_CURSOR_LENGTH)
+  ) {
+    throw new WorkflowGatewayError(
+      "Gateway returned an invalid tools/list cursor",
+      "transport"
+    )
+  }
+
   const names = new Set<string>()
-  return value.tools.map((candidate) => {
+  const tools = value.tools.map((candidate) => {
     if (!isRecord(candidate)) {
       throw new WorkflowGatewayError(
         "Gateway returned an invalid tool definition",
@@ -548,6 +574,11 @@ export function parseGatewayToolsList(result: unknown): WorkflowGatewayTool[] {
       : (Object.create(null) as Record<string, unknown>)
     return { name, description, inputSchema }
   })
+  return { tools, nextCursor }
+}
+
+export function parseGatewayToolsList(result: unknown): WorkflowGatewayTool[] {
+  return parseGatewayToolsPage(result).tools
 }
 
 export function getCallerBoundArgumentNames(
@@ -566,6 +597,59 @@ export function getCallerBoundArgumentNames(
   })
 }
 
+async function listGatewayToolsWithClient(
+  client: WorkflowGatewayClient
+): Promise<WorkflowGatewayTool[]> {
+  const tools: WorkflowGatewayTool[] = []
+  const names = new Set<string>()
+  const cursors = new Set<string>()
+  let cursor: string | undefined
+
+  for (let pageNumber = 1; ; pageNumber += 1) {
+    if (pageNumber > MAX_GATEWAY_TOOLS_LIST_PAGES) {
+      throw new WorkflowGatewayError(
+        "Gateway tools/list pagination exceeded its page limit",
+        "transport"
+      )
+    }
+    const page = parseGatewayToolsPage(
+      await client.request(
+        "tools/list",
+        cursor === undefined ? {} : { cursor }
+      )
+    )
+    for (const tool of page.tools) {
+      if (names.has(tool.name)) {
+        throw new WorkflowGatewayError(
+          "Gateway returned an invalid or duplicate tool name",
+          "transport"
+        )
+      }
+      names.add(tool.name)
+      tools.push(tool)
+    }
+    const rosterBytes = encodedByteLength({ tools })
+    if (
+      rosterBytes === null ||
+      rosterBytes > WORKFLOW_SSE_LIMITS.resultBytes
+    ) {
+      throw new WorkflowGatewayError(
+        "Gateway tool roster is too large",
+        "transport"
+      )
+    }
+    if (page.nextCursor === undefined) return tools
+    if (cursors.has(page.nextCursor)) {
+      throw new WorkflowGatewayError(
+        "Gateway tools/list pagination repeated a cursor",
+        "transport"
+      )
+    }
+    cursors.add(page.nextCursor)
+    cursor = page.nextCursor
+  }
+}
+
 async function fetchGatewayTools(
   config: WorkflowGatewayConfig,
   fetchImpl?: typeof safeFetch,
@@ -580,7 +664,7 @@ async function fetchGatewayTools(
   try {
     await client.connect()
     await client.initialize()
-    return parseGatewayToolsList(await client.request("tools/list", {}))
+    return await listGatewayToolsWithClient(client)
   } finally {
     client.close()
   }
@@ -599,37 +683,29 @@ export async function listGatewayTools(
   ) {
     return gatewayToolsCache.tools
   }
-  if (gatewayToolsRequest && sameConfig(gatewayToolsRequest.config, config)) {
-    return gatewayToolsRequest.promise
+  // Do not share a cold-cache promise: its abort signal belongs to one request.
+  const tools = await fetchGatewayTools(config, fetchImpl, abortSignal)
+  gatewayToolsCache = {
+    config: { ...config },
+    expiresAt: Date.now() + GATEWAY_TOOLS_CACHE_TTL_MS,
+    tools,
   }
-
-  const pending = fetchGatewayTools(config, fetchImpl, abortSignal).then(
-    (tools) => {
-      gatewayToolsCache = {
-        config: { ...config },
-        expiresAt: Date.now() + GATEWAY_TOOLS_CACHE_TTL_MS,
-        tools,
-      }
-      return tools
-    }
-  )
-  gatewayToolsRequest = { config: { ...config }, promise: pending }
-  try {
-    return await pending
-  } finally {
-    if (gatewayToolsRequest?.promise === pending) gatewayToolsRequest = null
-  }
+  return tools
 }
 
 export function clearGatewayToolsCache(): void {
   gatewayToolsCache = null
-  gatewayToolsRequest = null
 }
 
+/**
+ * Discovers the tool and prepares its arguments immediately before invocation
+ * on one MCP session. Security-sensitive argument binding therefore uses the
+ * schema associated with the execution, never the read-only discovery cache.
+ */
 export async function executeWorkflowGatewayTool(
   config: WorkflowGatewayConfig,
   toolName: string,
-  args: Record<string, unknown>,
+  prepareArguments: (tool: WorkflowGatewayTool) => Record<string, unknown>,
   fetchImpl?: typeof safeFetch,
   abortSignal?: AbortSignal,
 ): Promise<{ isError: boolean; data: unknown }> {
@@ -642,6 +718,15 @@ export async function executeWorkflowGatewayTool(
   try {
     await client.connect()
     await client.initialize()
+    const tools = await listGatewayToolsWithClient(client)
+    const tool = tools.find((candidate) => candidate.name === toolName)
+    if (!tool) {
+      throw new WorkflowGatewayError(
+        "Gateway tool is not available in the live roster",
+        "request"
+      )
+    }
+    const args = prepareArguments(tool)
     const result = await client.request("tools/call", {
       name: toolName,
       arguments: args,

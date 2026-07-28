@@ -21,6 +21,7 @@ interface RecordedRequest {
 
 function createGatewayFetch(options: {
   toolData?: unknown
+  toolPages?: Array<{ nextCursor?: string; tools: WorkflowGatewayTool[] }>
   tools?: WorkflowGatewayTool[]
 }) {
   const encoder = new TextEncoder()
@@ -28,6 +29,7 @@ function createGatewayFetch(options: {
     | ReadableStreamDefaultController<Uint8Array>
     | undefined
   const requests: RecordedRequest[] = []
+  let toolsListPageIndex = 0
   const fetchMock = jest.fn(
     async (
       input: string | URL,
@@ -69,7 +71,10 @@ function createGatewayFetch(options: {
       if (typeof body?.id === "number") {
         let result: unknown = { protocolVersion: "2024-11-05" }
         if (body.method === "tools/list") {
-          result = { tools: options.tools ?? [] }
+          result = options.toolPages?.[toolsListPageIndex] ?? {
+            tools: options.tools ?? [],
+          }
+          toolsListPageIndex += 1
         } else if (body.method === "tools/call") {
           result = {
             content: [
@@ -192,15 +197,15 @@ describe("workflow gateway SSE boundary", () => {
   })
 })
 
-describe("workflow gateway discovery", () => {
-  const roster = [
-    {
-      name: "get_example_schema",
-      description: "Returns the example schema",
-      inputSchema: { type: "object", properties: {} },
-    },
-  ]
+const roster = [
+  {
+    name: "get_example_schema",
+    description: "Returns the example schema",
+    inputSchema: { type: "object", properties: {} },
+  },
+]
 
+describe("workflow gateway roster parsing", () => {
   it("parses tools/list definitions without a static tool map", () => {
     expect(parseGatewayToolsList({ tools: roster })).toEqual(roster)
     expect(() =>
@@ -231,7 +236,9 @@ describe("workflow gateway discovery", () => {
       })
     ).toEqual(["requester_email", "approver_email"])
   })
+})
 
+describe("workflow gateway discovery requests", () => {
   it("caches a tools/list roster for repeated discovery", async () => {
     const gateway = createGatewayFetch({ tools: roster })
     const config = {
@@ -255,10 +262,121 @@ describe("workflow gateway discovery", () => {
     ).toHaveLength(1)
   })
 
-  it("calls a dynamically named roster tool without an AI Studio allowlist", async () => {
+  it("keeps simultaneous request-scoped discoveries independent", async () => {
+    const config = {
+      url: "https://gateway.example/sse",
+      token: "service-token",
+    }
+    const firstGateway = createGatewayFetch({ tools: roster })
+    const secondRoster = [
+      {
+        name: "get_second_schema",
+        description: "Returns a second schema",
+        inputSchema: { type: "object", properties: {} },
+      },
+    ]
+    const secondGateway = createGatewayFetch({ tools: secondRoster })
+
+    const [first, second] = await Promise.all([
+      listGatewayTools(
+        config,
+        firstGateway.fetchMock,
+        new AbortController().signal
+      ),
+      listGatewayTools(
+        config,
+        secondGateway.fetchMock,
+        new AbortController().signal
+      ),
+    ])
+
+    expect(first).toEqual(roster)
+    expect(second).toEqual(secondRoster)
+    expect(
+      firstGateway.requests.filter((request) => request.method === "GET")
+    ).toHaveLength(1)
+    expect(
+      secondGateway.requests.filter((request) => request.method === "GET")
+    ).toHaveLength(1)
+  })
+
+  it("follows every tools/list cursor and merges the bounded roster", async () => {
+    const secondTool = {
+      name: "process_future_packet",
+      description: "Processes a future workflow packet",
+      inputSchema: { type: "object", properties: {} },
+    }
+    const gateway = createGatewayFetch({
+      toolPages: [
+        { tools: roster, nextCursor: "page-2" },
+        { tools: [secondTool] },
+      ],
+    })
+
+    await expect(
+      listGatewayTools(
+        {
+          url: "https://gateway.example/sse",
+          token: "service-token",
+        },
+        gateway.fetchMock
+      )
+    ).resolves.toEqual([...roster, secondTool])
+    expect(
+      gateway.requests
+        .filter((request) => request.body?.method === "tools/list")
+        .map((request) => request.body?.params)
+    ).toEqual([{}, { cursor: "page-2" }])
+  })
+
+  it("rejects duplicate tools and repeated cursors across pages", async () => {
+    const config = {
+      url: "https://gateway.example/sse",
+      token: "service-token",
+    }
+    const duplicateGateway = createGatewayFetch({
+      toolPages: [
+        { tools: roster, nextCursor: "page-2" },
+        { tools: roster },
+      ],
+    })
+    await expect(
+      listGatewayTools(config, duplicateGateway.fetchMock)
+    ).rejects.toThrow(/duplicate/)
+
+    const cursorGateway = createGatewayFetch({
+      toolPages: [
+        { tools: roster, nextCursor: "page-2" },
+        { tools: [], nextCursor: "page-2" },
+      ],
+    })
+    await expect(
+      listGatewayTools(config, cursorGateway.fetchMock)
+    ).rejects.toThrow(/repeated a cursor/)
+  })
+})
+
+describe("workflow gateway execution", () => {
+  it("discovers and calls a dynamic tool in the same MCP session", async () => {
     const dynamicToolName = ["new", "family", "action"].join("_")
     const gateway = createGatewayFetch({
       toolData: { success: true, family: "new" },
+      tools: [
+        {
+          name: dynamicToolName,
+          description: "A newly deployed workflow",
+          inputSchema: {
+            type: "object",
+            properties: {
+              requester_email: {
+                type: "string",
+                description: "Verified requester [caller-bound]",
+              },
+              value: { type: "string" },
+            },
+          },
+        },
+      ],
     })
     await expect(
       executeWorkflowGatewayTool(
@@ -267,7 +385,13 @@ describe("workflow gateway discovery", () => {
           token: "service-token",
         },
         dynamicToolName,
-        { value: "input" },
+        (tool) => {
+          const args: Record<string, unknown> = { value: "input" }
+          for (const name of getCallerBoundArgumentNames(tool.inputSchema)) {
+            args[name] = "owner@psd401.net"
+          }
+          return args
+        },
         gateway.fetchMock
       )
     ).resolves.toEqual({
@@ -282,7 +406,93 @@ describe("workflow gateway discovery", () => {
       expect.objectContaining({
         params: {
           name: dynamicToolName,
-          arguments: { value: "input" },
+          arguments: {
+            value: "input",
+            requester_email: "owner@psd401.net",
+          },
+        },
+      })
+    )
+    expect(
+      gateway.requests.filter((request) => request.method === "GET")
+    ).toHaveLength(1)
+    expect(
+      gateway.requests
+        .filter((request) =>
+          ["tools/list", "tools/call"].includes(
+            String(request.body?.method)
+          )
+        )
+        .map((request) => request.body?.method)
+    ).toEqual(["tools/list", "tools/call"])
+  })
+
+  it("ignores a stale discovery cache when binding an executing tool", async () => {
+    const toolName = "process_rotated_packet"
+    const config = {
+      url: "https://gateway.example/sse",
+      token: "service-token",
+    }
+    const cachedGateway = createGatewayFetch({
+      tools: [
+        {
+          name: toolName,
+          description: "Old schema",
+          inputSchema: {
+            type: "object",
+            properties: {
+              old_requester: {
+                type: "string",
+                description: "Old caller [caller-bound]",
+              },
+            },
+          },
+        },
+      ],
+    })
+    await listGatewayTools(config, cachedGateway.fetchMock)
+
+    const liveGateway = createGatewayFetch({
+      tools: [
+        {
+          name: toolName,
+          description: "Current schema",
+          inputSchema: {
+            type: "object",
+            properties: {
+              current_requester: {
+                type: "string",
+                description: "Current caller [caller-bound]",
+              },
+            },
+          },
+        },
+      ],
+    })
+    await executeWorkflowGatewayTool(
+      config,
+      toolName,
+      (tool) => {
+        const args: Record<string, unknown> = {
+          current_requester: "attacker@psd401.net",
+        }
+        for (const name of getCallerBoundArgumentNames(tool.inputSchema)) {
+          args[name] = "owner@psd401.net"
+        }
+        return args
+      },
+      liveGateway.fetchMock
+    )
+
+    expect(
+      liveGateway.requests.find(
+        (request) => request.body?.method === "tools/call"
+      )?.body
+    ).toEqual(
+      expect.objectContaining({
+        params: {
+          name: toolName,
+          arguments: { current_requester: "owner@psd401.net" },
         },
       })
     )
