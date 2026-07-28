@@ -3658,6 +3658,7 @@ components:
             $ref: "#/components/schemas/AssistantImportPrompt"
         input_fields:
           type: array
+          maxItems: 50
           items:
             $ref: "#/components/schemas/AssistantImportField"
 

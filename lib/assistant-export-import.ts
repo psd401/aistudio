@@ -205,6 +205,10 @@ export function createExportFile(assistants: ExportedAssistant[]): ExportFormat 
 const IMPORT_MAX_ASSISTANT_NAME_LENGTH = 255
 const IMPORT_MAX_PROMPT_CONTENT_LENGTH = 10_000_000
 const IMPORT_MAX_PROMPTS_PER_ASSISTANT = 20
+// Mirrors MAX_INPUT_FIELDS in assistant-execution-service.ts: an assistant above
+// this bound could never execute, and insertImportedFields issues one awaited
+// insert per field inside the import transaction.
+const IMPORT_MAX_INPUT_FIELDS_PER_ASSISTANT = 50
 export const ASSISTANT_IMPORT_MAX_ASSISTANTS = 100
 export const ASSISTANT_IMPORT_MAX_REPOSITORY_BINDINGS = 500
 const IMPORTED_FIELD_TYPES = new Set([
@@ -372,6 +376,9 @@ function validateImportedInputFields(
 ): string | undefined {
   if (!Array.isArray(fields)) {
     return `Invalid assistant ${assistantName}: missing input_fields array`
+  }
+  if (fields.length > IMPORT_MAX_INPUT_FIELDS_PER_ASSISTANT) {
+    return `Assistant ${assistantName}: too many input fields (max ${IMPORT_MAX_INPUT_FIELDS_PER_ASSISTANT})`
   }
   for (const field of fields) {
     if (!field || typeof field !== "object" || Array.isArray(field)) {

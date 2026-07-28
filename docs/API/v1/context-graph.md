@@ -796,7 +796,8 @@ scopes are available to staff and administrators. Catalog metadata is the scope
 source of truth on both surfaces; the REST routes use `assistants:write` as a
 fallback only when the catalog entry is unavailable.
 
-Import envelopes are limited to 10 MB, 100 assistants, and 500 prompt
+Import envelopes are limited to 10 MB, 100 assistants, 50 input fields per
+assistant (matching the execution-time input cap), and 500 prompt
 repository bindings across the admin, REST, and MCP surfaces. REST create/update
 and the MCP transport count bytes while reading the request stream and cancel
 before buffering more than the limit, so a missing or understated

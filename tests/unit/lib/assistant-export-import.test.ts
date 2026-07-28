@@ -48,6 +48,36 @@ function defineImportCollectionLimitTests() {
     expect(validateImportFile(data)).toEqual({ valid: true })
   })
 
+  it('rejects more than 50 input fields per assistant', () => {
+    const input_fields = Array.from({ length: 51 }, (_, index) => ({
+      name: `f${index}`,
+      label: `F${index}`,
+      field_type: 'short_text',
+      position: index,
+    }))
+    const data = {
+      ...validImport,
+      assistants: [{ ...validAssistant, input_fields }],
+    }
+    const result = validateImportFile(data)
+    expect(result.valid).toBe(false)
+    expect(result.error).toMatch(/too many input fields.*50/)
+  })
+
+  it('accepts exactly 50 input fields per assistant', () => {
+    const input_fields = Array.from({ length: 50 }, (_, index) => ({
+      name: `f${index}`,
+      label: `F${index}`,
+      field_type: 'short_text',
+      position: index,
+    }))
+    const data = {
+      ...validImport,
+      assistants: [{ ...validAssistant, input_fields }],
+    }
+    expect(validateImportFile(data)).toEqual({ valid: true })
+  })
+
   it('rejects more than 500 repository bindings per envelope', () => {
     const data = {
       ...validImport,
