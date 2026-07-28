@@ -7,6 +7,7 @@ import type {
 import * as crypto from 'node:crypto';
 import type { JobLockFailure } from './job-lock';
 import type { ScheduleReferenceEvent } from './schedule-record';
+import { sanitizeDiagnostic } from './diagnostic-sanitization';
 
 // EventBridge Scheduler retries this target for at most 60 minutes. Keeping an
 // in-progress fire claimed beyond that horizon prevents a Lambda crash after
@@ -201,7 +202,9 @@ export async function claimScheduleFire(
     return { claimed: true, identity, claimToken };
   } catch (error) {
     if (errorName(error) !== 'ConditionalCheckFailedException') {
-      const detail = error instanceof Error ? error.message : String(error);
+      const detail = sanitizeDiagnostic(
+        error instanceof Error ? error.message : String(error),
+      );
       log.warn('Schedule fire claim failed', { error: detail });
       return {
         claimed: false,
@@ -242,7 +245,9 @@ export async function claimScheduleFire(
       },
     };
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = sanitizeDiagnostic(
+      error instanceof Error ? error.message : String(error),
+    );
     log.warn('Schedule fire state lookup failed', { error: detail });
     return {
       claimed: false,
@@ -283,7 +288,9 @@ export async function completeScheduleFire(
       await dynamoClient.update(updateInput);
       return { persisted: true };
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
+      const detail = sanitizeDiagnostic(
+        error instanceof Error ? error.message : String(error),
+      );
       failures.push(`update ${attempt}: ${detail}`);
       log.warn('Schedule fire completion marker write failed', {
         attempt,
@@ -304,7 +311,9 @@ export async function completeScheduleFire(
         return { persisted: true };
       }
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
+      const detail = sanitizeDiagnostic(
+        error instanceof Error ? error.message : String(error),
+      );
       failures.push(`verify ${attempt}: ${detail}`);
       log.warn('Schedule fire completion verification failed', {
         attempt,
@@ -335,8 +344,9 @@ export async function releaseScheduleFire(
     });
   } catch (error) {
     if (errorName(error) === 'ConditionalCheckFailedException') return;
-    const deleteDetail =
-      error instanceof Error ? error.message : String(error);
+    const deleteDetail = sanitizeDiagnostic(
+      error instanceof Error ? error.message : String(error),
+    );
     log.warn('Schedule fire claim delete failed; expiring the claim', {
       error: deleteDetail,
     });
@@ -356,10 +366,11 @@ export async function releaseScheduleFire(
       });
     } catch (expireError) {
       if (errorName(expireError) === 'ConditionalCheckFailedException') return;
-      const expireDetail =
+      const expireDetail = sanitizeDiagnostic(
         expireError instanceof Error
           ? expireError.message
-          : String(expireError);
+          : String(expireError),
+      );
       log.warn('Schedule fire claim expiration failed', {
         error: expireDetail,
       });

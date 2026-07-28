@@ -3298,9 +3298,15 @@ export class AgentPlatformStack extends cdk.Stack {
       effect: iam.Effect.ALLOW,
       actions: ['ecs:DescribeTasks', 'ecs:ListTasks'],
       // Neither DescribeTasks nor ListTasks supports resource-level IAM
-      // permissions. Runtime filters still bind them to the corresponding
-      // cluster/task identifiers and the per-fire startedBy value.
+      // permissions. Scope the wildcard grant to the one job cluster with
+      // ECS's request condition; runtime lookups additionally bind the exact
+      // per-fire startedBy value.
       resources: ['*'],
+      conditions: {
+        ArnEquals: {
+          'ecs:cluster': jobCluster.clusterArn,
+        },
+      },
     }));
 
     // RunTask acceptance is not a terminal guarantee: image pulls,

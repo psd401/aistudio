@@ -299,6 +299,35 @@ describe("agent-cron ordinary run telemetry", () => {
       ]),
     )
   })
+
+  it("sanitizes scheduled-run errors before database persistence", async () => {
+    const { telemetry, execute, log } = harness()
+
+    await telemetry.recordRun(
+      {
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        sessionId: "reference-session",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 20,
+        status: "error",
+        errorMessage:
+          "Chat failed for student@psd401.net token=top-secret " +
+          "https://login.example.test/callback?code=secret-code",
+      },
+      log,
+    )
+
+    const scheduledRunInput = execute.mock.calls[0][0]
+    const errorParameter = scheduledRunInput.parameters.find(
+      (parameter: { name: string }) => parameter.name === "error_message",
+    )
+    expect(errorParameter.value.stringValue).toContain("[REDACTED_EMAIL]")
+    expect(errorParameter.value.stringValue).toContain("[REDACTED_URL]")
+    expect(errorParameter.value.stringValue).not.toContain("top-secret")
+    expect(errorParameter.value.stringValue).not.toContain("secret-code")
+  })
 })
 
 describe("agent-cron failure telemetry", () => {

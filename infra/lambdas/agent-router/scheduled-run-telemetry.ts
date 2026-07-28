@@ -1,3 +1,5 @@
+import { sanitizeDiagnostic } from './log-sanitization';
+
 export interface ScheduledJobContext {
   scheduleId?: string;
   scheduleName?: string;
@@ -55,14 +57,16 @@ export async function recordScheduledJobTerminal(
       sessionId: job.sessionId,
       ...outcome,
       ...(outcome.errorMessage
-        ? { errorMessage: outcome.errorMessage.slice(0, 4000) }
+        ? { errorMessage: sanitizeDiagnostic(outcome.errorMessage, 4000) }
         : {}),
     });
   } catch (error) {
     log.error('Failed to record terminal scheduled job run', {
       scheduleId: job.scheduleId,
       status: outcome.status,
-      error: error instanceof Error ? error.message : String(error),
+      error: sanitizeDiagnostic(
+        error instanceof Error ? error.message : String(error),
+      ),
     });
   }
 }

@@ -37,6 +37,10 @@ import {
   writeScheduledRun,
 } from './index';
 import { recordScheduledJobTerminal } from './scheduled-run-telemetry';
+import {
+  sanitizeDiagnostic,
+  sanitizeEmailForLog,
+} from './log-sanitization';
 
 const RENEW_INTERVAL_MS = 10 * 60 * 1000;
 type JobPayload = ReturnType<typeof parseJobPayload>;
@@ -167,8 +171,11 @@ async function handleJobRunnerError(
     );
   } catch (sendError) {
     log.error('Failed to post job-error message to Chat', {
-      error:
-        sendError instanceof Error ? sendError.message : String(sendError),
+      error: sanitizeDiagnostic(
+        sendError instanceof Error
+          ? sendError.message
+          : String(sendError),
+      ),
     });
   }
   await recordFailure(
@@ -233,7 +240,7 @@ async function main(): Promise<number> {
     invokeSessionId,
     reason: job.reason ?? 'deadline',
     restart: isRestart,
-    userEmail: job.userEmail,
+    userEmail: sanitizeEmailForLog(job.userEmail),
     space: job.spaceName,
     deadlineS: JOB_DEADLINE_S,
   });
@@ -289,8 +296,12 @@ async function main(): Promise<number> {
 main()
   .then((code) => process.exit(code))
   .catch((error) => {
+    const detail = sanitizeDiagnostic(
+      error instanceof Error ? error.stack ?? error.message : String(error),
+      4000,
+    );
     process.stderr.write(
-      `job-runner fatal: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`
+      `job-runner fatal: ${detail}\n`
     );
     process.exit(1);
   });

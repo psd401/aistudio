@@ -55,7 +55,9 @@ describe("agent-cron pre-invocation telemetry", () => {
 
   it("records and rethrows DynamoDB lookup failures for retry and alarms", async () => {
     const { telemetry, recordRun, log } = harness()
-    const lookupError = new Error("DynamoDB unavailable")
+    const lookupError = new Error(
+      "DynamoDB unavailable for owner@psd401.net token=top-secret",
+    )
 
     await expect(
       runSchedulePreflight(event, {
@@ -74,9 +76,17 @@ describe("agent-cron pre-invocation telemetry", () => {
         scheduleId: event.scheduleId,
         status: "error",
         errorMessage:
-          "Authoritative schedule lookup failed: DynamoDB unavailable",
+          "Authoritative schedule lookup failed: DynamoDB unavailable for " +
+          "[REDACTED_EMAIL] token=[REDACTED]",
       }),
       log,
+    )
+    expect(log.error).toHaveBeenCalledWith(
+      "Authoritative schedule lookup failed",
+      {
+        error:
+          "DynamoDB unavailable for [REDACTED_EMAIL] token=[REDACTED]",
+      },
     )
   })
 })

@@ -551,6 +551,9 @@ const baseInput = {
         "actions: ['ecs:DescribeTasks', 'ecs:ListTasks']",
       )
       expect(stackSource).toContain(
+        "'ecs:cluster': jobCluster.clusterArn",
+      )
+      expect(stackSource).toContain(
         "new eventsTargets.LambdaFunction(resources.cronLambda",
       )
       expect(stackSource).toContain(

@@ -84,6 +84,10 @@ import {
 } from './invocation-context';
 import { buildAccountRequestBody } from './account-request-payload';
 import { canInvokeOwnerAgent } from './delegation-policy';
+import {
+  sanitizeDiagnostic,
+  sanitizeEmailForLog,
+} from './log-sanitization';
 
 // ---------------------------------------------------------------------------
 // Structured logging (Lambda-compatible, no console.* per CLAUDE.md exception)
@@ -2446,7 +2450,9 @@ async function writeDeepTelemetry(
     await Promise.all(writes);
   } catch (error) {
     log.error('Failed to write deep telemetry rows', {
-      error: error instanceof Error ? error.message : String(error),
+      error: sanitizeDiagnostic(
+        error instanceof Error ? error.message : String(error),
+      ),
       messageId,
       contentCount: params.messages?.length ?? 0,
       toolCount: params.toolCalls?.length ?? 0,
@@ -2471,7 +2477,9 @@ async function logTelemetry(
   } catch (error) {
     // Telemetry failure should not affect user experience
     log.error('Failed to write telemetry', {
-      error: error instanceof Error ? error.message : String(error),
+      error: sanitizeDiagnostic(
+        error instanceof Error ? error.message : String(error),
+      ),
     });
   }
 }
@@ -2481,6 +2489,9 @@ async function writeScheduledRun(params: ScheduledRunWrite): Promise<void> {
     throw new Error('Database not configured for scheduled run telemetry');
   }
   const sql = await getDbClient();
+  const errorMessage = params.errorMessage
+    ? sanitizeDiagnostic(params.errorMessage, 4000)
+    : null;
   if (params.scheduledRunId) {
     const updated = await sql`UPDATE agent_scheduled_runs
       SET schedule_name = ${params.scheduleName ?? null},
@@ -2488,7 +2499,7 @@ async function writeScheduledRun(params: ScheduledRunWrite): Promise<void> {
           output_tokens = output_tokens + ${params.outputTokens},
           latency_ms = latency_ms + ${params.latencyMs},
           status = ${params.status},
-          error_message = ${params.errorMessage ?? null}
+          error_message = ${errorMessage}
       WHERE id = CAST(${params.scheduledRunId} AS bigint)
         AND user_id = ${params.userEmail}
         AND schedule_id = ${params.scheduleId}
@@ -2509,7 +2520,7 @@ async function writeScheduledRun(params: ScheduledRunWrite): Promise<void> {
             ${params.scheduleName ?? null}, ${params.sessionId},
             ${params.inputTokens}, ${params.outputTokens},
             ${params.latencyMs}, ${params.status},
-            ${params.errorMessage ?? null})`;
+            ${errorMessage})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2542,7 +2553,7 @@ async function recordFailure(
   log.error('AGENT_FAILURE_RECORD', {
     source: params.source,
     severity: params.severity,
-    userId: params.userId ?? null,
+    userId: params.userId ? sanitizeEmailForLog(params.userId) : null,
     sessionId: params.sessionId ?? null,
     errorClass: params.errorClass ?? null,
   });
@@ -2567,7 +2578,9 @@ async function recordFailure(
                 ${ctx}::jsonb, NOW())`;
   } catch (error) {
     log.error('Failed to record agent failure', {
-      error: error instanceof Error ? error.message : String(error),
+      error: sanitizeDiagnostic(
+        error instanceof Error ? error.message : String(error),
+      ),
       originalSource: params.source,
       originalSeverity: params.severity,
     });

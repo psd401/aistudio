@@ -4,6 +4,9 @@ import {
   recordScheduledJobTerminal,
   type ScheduledJobContext,
 } from "../../infra/lambdas/agent-router/scheduled-run-telemetry"
+import {
+  sanitizeEmailForLog,
+} from "../../infra/lambdas/agent-router/log-sanitization"
 
 const routerSource = fs.readFileSync(
   path.join(process.cwd(), "infra/lambdas/agent-router/index.ts"),
@@ -55,6 +58,9 @@ describe("promoted scheduled-run terminal telemetry", () => {
     expect(routerSource).toContain(
       "input_tokens = input_tokens + ${params.inputTokens}",
     )
+    expect(routerSource).toContain(
+      "sanitizeDiagnostic(params.errorMessage, 4000)",
+    )
   })
 
   it("does not create scheduled telemetry for an interactive job", async () => {
@@ -104,6 +110,46 @@ describe("promoted scheduled-run terminal telemetry", () => {
         status: "error",
         error: "Aurora unavailable",
       }),
+    )
+  })
+
+  it("sanitizes a scheduled failure before the terminal writer", async () => {
+    const writer = jest.fn().mockResolvedValue(undefined)
+
+    await recordScheduledJobTerminal(
+      scheduledJob,
+      {
+        status: "error",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 789,
+        errorMessage:
+          "Failed for student@psd401.net Authorization: Bearer abc.def " +
+          "token=top-secret https://auth.example.test/callback?code=secret",
+      },
+      writer,
+      logger(),
+    )
+
+    const errorMessage = writer.mock.calls[0][0].errorMessage
+    expect(errorMessage).toContain("[REDACTED_EMAIL]")
+    expect(errorMessage).toContain("[REDACTED_URL]")
+    expect(errorMessage).not.toContain("student@psd401.net")
+    expect(errorMessage).not.toContain("abc.def")
+    expect(errorMessage).not.toContain("top-secret")
+  })
+
+  it("masks owner identity in router CloudWatch fields", () => {
+    expect(sanitizeEmailForLog("owner@psd401.net")).toBe("o***@psd401.net")
+    expect(routerSource).toContain(
+      "userId: params.userId ? sanitizeEmailForLog(params.userId) : null",
+    )
+    const jobSource = fs.readFileSync(
+      path.join(process.cwd(), "infra/lambdas/agent-router/job-main.ts"),
+      "utf8",
+    )
+    expect(jobSource).toContain(
+      "userEmail: sanitizeEmailForLog(job.userEmail)",
     )
   })
 })

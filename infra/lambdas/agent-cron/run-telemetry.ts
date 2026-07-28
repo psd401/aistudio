@@ -65,6 +65,9 @@ function nullableStringParameter(name: string, value?: string | null) {
 function scheduledRunParameters(
   params: ScheduledRunRecord,
 ): NonNullable<ExecuteStatementCommandInput['parameters']> {
+  const errorMessage = params.errorMessage
+    ? sanitizeDiagnostic(params.errorMessage, 4000)
+    : params.errorMessage;
   return [
     { name: 'user_id', value: { stringValue: params.userEmail } },
     { name: 'schedule_id', value: { stringValue: params.scheduleId } },
@@ -74,7 +77,7 @@ function scheduledRunParameters(
     { name: 'output_tokens', value: { longValue: params.outputTokens } },
     { name: 'latency_ms', value: { longValue: params.latencyMs } },
     { name: 'status', value: { stringValue: params.status } },
-    nullableStringParameter('error_message', params.errorMessage),
+    nullableStringParameter('error_message', errorMessage),
   ];
 }
 
@@ -439,7 +442,9 @@ export function createRunTelemetry(
       } catch (error) {
         log.error('Failed to record scheduled run', {
           scheduleId: params.scheduleId,
-          error: error instanceof Error ? error.message : String(error),
+          error: sanitizeDiagnostic(
+            error instanceof Error ? error.message : String(error),
+          ),
         });
       }
     }

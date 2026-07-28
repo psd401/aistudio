@@ -1197,7 +1197,7 @@ async function sendPromotionAcknowledgement(
   } catch (error) {
     // The job is already running, so acknowledgement delivery is best-effort.
     log.warn('Promotion ack delivery failed; job still running', {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorDetail(error),
     });
   }
 }
@@ -1218,7 +1218,7 @@ async function sendPromotionAmbiguityAcknowledgement(
     );
   } catch (error) {
     log.warn('Promotion ambiguity acknowledgement failed', {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorDetail(error),
     });
   }
 }
@@ -1455,8 +1455,9 @@ async function deliverScheduledResult(
       log,
     );
   } catch (error) {
+    const detail = errorDetail(error);
     log.error('Failed to deliver scheduled response', {
-      error: error instanceof Error ? error.message : String(error),
+      error: detail,
     });
     await runTelemetry.recordRun(
       {
@@ -1468,7 +1469,7 @@ async function deliverScheduledResult(
         outputTokens: result.outputTokens,
         latencyMs: Date.now() - startTime,
         status: 'error',
-        errorMessage: `Chat delivery failed: ${error instanceof Error ? error.message : String(error)}`,
+        errorMessage: `Chat delivery failed: ${detail}`,
       },
       log,
     );

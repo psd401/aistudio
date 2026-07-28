@@ -3,6 +3,7 @@ import type {
   ScheduleReferenceEvent,
 } from './schedule-record';
 import type { RunTelemetry } from './run-telemetry';
+import { sanitizeDiagnostic } from './diagnostic-sanitization';
 
 interface PreflightLogger {
   warn: (message: string, metadata?: Record<string, unknown>) => void;
@@ -46,12 +47,12 @@ export async function runSchedulePreflight(
   try {
     loaded = await options.load();
   } catch (error) {
-    const errorMessage =
-      `Authoritative schedule lookup failed: ${
-        error instanceof Error ? error.message : String(error)
-      }`;
+    const detail = sanitizeDiagnostic(
+      error instanceof Error ? error.message : String(error),
+    );
+    const errorMessage = `Authoritative schedule lookup failed: ${detail}`;
     options.log.error('Authoritative schedule lookup failed', {
-      error: error instanceof Error ? error.message : String(error),
+      error: detail,
     });
     await options.telemetry.recordRun(
       {

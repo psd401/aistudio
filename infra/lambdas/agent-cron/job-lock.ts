@@ -4,6 +4,7 @@ import type {
   UpdateCommandInput,
 } from '@aws-sdk/lib-dynamodb';
 import * as crypto from 'node:crypto';
+import { sanitizeDiagnostic } from './diagnostic-sanitization';
 
 interface JobLockLogger {
   warn: (message: string, metadata?: Record<string, unknown>) => void;
@@ -102,12 +103,12 @@ export async function tryAcquireJobLock(
         errorMessage,
       };
     }
-    const errorMessage =
-      `Session lock acquire failed: ${
-        error instanceof Error ? error.message : String(error)
-      }`;
+    const detail = sanitizeDiagnostic(
+      error instanceof Error ? error.message : String(error),
+    );
+    const errorMessage = `Session lock acquire failed: ${detail}`;
     log.warn('Scheduled run aborted — session lock acquire failed', {
-      error: error instanceof Error ? error.message : String(error),
+      error: detail,
     });
     return {
       acquired: false,
@@ -139,7 +140,9 @@ export async function releaseJobLock(
     const errorName = (error as { name?: string } | null)?.name;
     if (errorName === 'ConditionalCheckFailedException') return;
     log.warn('Job lock release failed; relying on TTL backstop', {
-      error: error instanceof Error ? error.message : String(error),
+      error: sanitizeDiagnostic(
+        error instanceof Error ? error.message : String(error),
+      ),
     });
   }
 }
@@ -172,7 +175,9 @@ export async function renewJobLock(
     });
     return { acquired: true, lockToken };
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = sanitizeDiagnostic(
+      error instanceof Error ? error.message : String(error),
+    );
     log.warn('Scheduled job lock renewal failed', { error: detail });
     return {
       acquired: false,
