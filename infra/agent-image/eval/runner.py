@@ -46,6 +46,7 @@ REQUIRED_METADATA_FIELDS = frozenset(
         "tool_calls",
         "failed",
         "error_class",
+        "session_id",
     }
 )
 
@@ -632,7 +633,7 @@ class EvaluationRunner:
                 + ", ".join(missing)
             )
         metadata_session = metadata.get("session_id")
-        if metadata_session is not None and metadata_session != session_id:
+        if metadata_session != session_id:
             raise EvalRunnerError(
                 f"task {task.id} trial {trial_number} returned a mismatched session"
             )

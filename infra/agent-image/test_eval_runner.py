@@ -384,6 +384,26 @@ class EvaluationRunnerTests(unittest.TestCase):
                 now=clock.now,
             ).run(self.tasks[:1], io.StringIO(), trials_override=1)
 
+    def test_missing_metadata_session_is_never_synthesized(self):
+        clock = AdvancingClock()
+
+        class MissingSessionRuntime(FakeRuntime):
+            def invoke(self, task, session_id, authority):
+                incomplete = metadata(session_id)
+                del incomplete["session_id"]
+                return {"result": "answer", "metadata": incomplete}
+
+        class MissingSessionFactory:
+            def create(self):
+                return MissingSessionRuntime(clock)
+
+        with self.assertRaisesRegex(runner.EvalRunnerError, "session_id"):
+            runner.EvaluationRunner(
+                MissingSessionFactory(),
+                FakeMinter(clock),
+                now=clock.now,
+            ).run(self.tasks[:1], io.StringIO(), trials_override=1)
+
     def test_workspace_authority_change_is_a_runner_failure(self):
         clock = AdvancingClock()
 
