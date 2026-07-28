@@ -768,6 +768,7 @@ async function launchScheduledJob(
     },
   } satisfies RunTaskCommandInput;
   const launch = await reconcileRunTaskLaunch({
+    startedBy,
     runTask: async (): Promise<RunTaskAttempt> => {
       const result = await ecsClient.send(new RunTaskCommand(runTaskInput));
       return {
@@ -780,15 +781,44 @@ async function launchScheduledJob(
         })) ?? [],
       };
     },
-    listTasks: async (desiredStatus) => {
+    // ECS requires startedBy to be the only ListTasks filter. With no status
+    // filter this returns live tasks for the exact schedule fire.
+    listRunningTasks: async () => {
       const result = await ecsClient.send(
         new ListTasksCommand({
           cluster: config.clusterArn,
           startedBy,
-          desiredStatus,
         }),
       );
       return result.taskArns ?? [];
+    },
+    // Stopped tasks cannot be queried with startedBy. Page through the bounded
+    // recent STOPPED set, then DescribeTasks and filter the exact startedBy.
+    listStoppedTasks: async (nextToken) => {
+      const result = await ecsClient.send(
+        new ListTasksCommand({
+          cluster: config.clusterArn,
+          desiredStatus: 'STOPPED',
+          maxResults: 100,
+          ...(nextToken ? { nextToken } : {}),
+        }),
+      );
+      return {
+        taskArns: result.taskArns ?? [],
+        ...(result.nextToken ? { nextToken: result.nextToken } : {}),
+      };
+    },
+    describeTasks: async (taskArns) => {
+      const result = await ecsClient.send(
+        new DescribeTasksCommand({
+          cluster: config.clusterArn,
+          tasks: taskArns,
+        }),
+      );
+      return result.tasks?.map((task) => ({
+        ...(task.taskArn ? { taskArn: task.taskArn } : {}),
+        ...(task.startedBy ? { startedBy: task.startedBy } : {}),
+      })) ?? [];
     },
     wait: (delayMs) =>
       new Promise((resolve) => {

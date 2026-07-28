@@ -8,11 +8,24 @@ export interface RunTaskAttempt {
   failures: RunTaskFailure[];
 }
 
+export interface TaskLookupPage {
+  taskArns: string[];
+  nextToken?: string;
+}
+
+export interface ReconciledTaskDescription {
+  taskArn?: string;
+  startedBy?: string;
+}
+
 export interface RunTaskReconciliationDependencies {
+  startedBy: string;
   runTask: () => Promise<RunTaskAttempt>;
-  listTasks: (
-    desiredStatus: 'RUNNING' | 'STOPPED',
-  ) => Promise<string[]>;
+  listRunningTasks: () => Promise<string[]>;
+  listStoppedTasks: (nextToken?: string) => Promise<TaskLookupPage>;
+  describeTasks: (
+    taskArns: string[],
+  ) => Promise<ReconciledTaskDescription[]>;
   wait: (delayMs: number) => Promise<void>;
 }
 
@@ -31,7 +44,28 @@ export type RunTaskReconciliationResult =
       errorMessage: string;
     };
 
-const RECONCILIATION_DELAYS_MS = [0, 250, 750, 1_500, 2_500] as const;
+type ThrownRunTaskResult = {
+  status: 'rejected' | 'ambiguous';
+  errorMessage: string;
+};
+
+// These lookups are discovery only. An empty result is never proof that ECS
+// rejected the launch because ECS is eventually consistent.
+const RECONCILIATION_DELAYS_MS = [0, 1_000, 2_000, 4_000, 8_000] as const;
+const MAX_STOPPED_TASK_PAGES = 10;
+const MAX_DIAGNOSTIC_LENGTH = 500;
+const MAX_FORMATTED_ERROR_LENGTH = 200;
+
+const DEFINITIVE_RUN_TASK_ERRORS = new Set([
+  'AccessDeniedException',
+  'BlockedException',
+  'ClientException',
+  'ClusterNotFoundException',
+  'InvalidParameterException',
+  'PlatformTaskDefinitionIncompatibilityException',
+  'PlatformUnknownException',
+  'UnsupportedFeatureException',
+]);
 
 function failureMessage(failures: RunTaskFailure[]): string {
   return failures
@@ -45,36 +79,175 @@ function failureMessage(failures: RunTaskFailure[]): string {
 function classifyResponse(
   response: RunTaskAttempt,
   reconciled: boolean,
+  priorAttemptError?: string,
 ): RunTaskReconciliationResult {
-  if (response.failures.length > 0) {
-    return {
-      status: 'rejected',
-      errorMessage: `RunTask failures: ${failureMessage(response.failures)}`,
-    };
-  }
   const taskArn = response.taskArns[0];
-  return taskArn
-    ? { status: 'accepted', taskArn, reconciled }
-    : {
-        status: 'rejected',
-        errorMessage: 'RunTask returned no task ARN',
-      };
+  if (taskArn) {
+    return { status: 'accepted', taskArn, reconciled };
+  }
+  const rejection = response.failures.length > 0
+    ? `RunTask failures: ${failureMessage(response.failures)}`
+    : 'RunTask returned no task ARN';
+  return {
+    status: 'rejected',
+    errorMessage: priorAttemptError
+      ? `Initial RunTask attempt was ambiguous (${priorAttemptError}); ` +
+        `idempotent retry was definitive: ${rejection}`
+      : rejection,
+  };
 }
 
-function errorDetail(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function boundedDiagnostic(value: string): string {
+  const withoutControls = Array.from(value, (character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint < 32 || codePoint === 127 ? ' ' : character;
+  }).join('');
+  return withoutControls
+    .replace(
+      /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi,
+      'Bearer [REDACTED]',
+    )
+    .replace(
+      /((?:authorization|password|secret|token|api[-_]?key)\s*[:=]\s*)[^\s,;]+/gi,
+      '$1[REDACTED]',
+    )
+    .replace(
+      /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
+      '[REDACTED_EMAIL]',
+    )
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, MAX_DIAGNOSTIC_LENGTH);
+}
+
+function stringProperty(
+  record: Record<string, unknown> | null,
+  property: string,
+): string | undefined {
+  const value = record?.[property];
+  return typeof value === 'string' && value.length > 0
+    ? boundedDiagnostic(value)
+    : undefined;
+}
+
+function numberProperty(
+  record: Record<string, unknown> | null,
+  property: string,
+): number | undefined {
+  const value = record?.[property];
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function formatRunTaskError(error: unknown): string {
+  const record = asRecord(error);
+  const metadata = asRecord(record?.$metadata);
+  const name =
+    stringProperty(record, 'name') ??
+    (error instanceof Error ? boundedDiagnostic(error.name) : 'UnknownError');
+  const message =
+    stringProperty(record, 'message') ??
+    (error instanceof Error
+      ? boundedDiagnostic(error.message)
+      : boundedDiagnostic(String(error)));
+  const attributes = [
+    numberProperty(metadata, 'httpStatusCode') !== undefined
+      ? `HTTP ${numberProperty(metadata, 'httpStatusCode')}`
+      : undefined,
+    stringProperty(metadata, 'requestId')
+      ? `request ${stringProperty(metadata, 'requestId')}`
+      : undefined,
+    numberProperty(metadata, 'attempts') !== undefined
+      ? `SDK attempts ${numberProperty(metadata, 'attempts')}`
+      : undefined,
+    numberProperty(metadata, 'totalRetryDelay') !== undefined
+      ? `SDK retry delay ${numberProperty(metadata, 'totalRetryDelay')}ms`
+      : undefined,
+  ].filter((attribute): attribute is string => !!attribute);
+  const heading = attributes.length > 0
+    ? `${name} [${attributes.join(', ')}]`
+    : name;
+  return (message && message !== name ? `${heading}: ${message}` : heading)
+    .slice(0, MAX_FORMATTED_ERROR_LENGTH);
+}
+
+function classifyThrownRunTask(error: unknown): ThrownRunTaskResult {
+  const record = asRecord(error);
+  const metadata = asRecord(record?.$metadata);
+  const name =
+    stringProperty(record, 'name') ??
+    (error instanceof Error ? error.name : 'UnknownError');
+  const errorMessage = formatRunTaskError(error);
+
+  const httpStatusCode = numberProperty(metadata, 'httpStatusCode');
+  if (
+    DEFINITIVE_RUN_TASK_ERRORS.has(name) ||
+    (httpStatusCode !== undefined &&
+      httpStatusCode >= 400 &&
+      httpStatusCode < 500)
+  ) {
+    return {
+      status: 'rejected',
+      errorMessage: `RunTask request rejected: ${errorMessage}`,
+    };
+  }
+
+  return {
+    status: 'ambiguous',
+    errorMessage,
+  };
+}
+
+async function findStoppedTask(
+  dependencies: RunTaskReconciliationDependencies,
+): Promise<string | undefined> {
+  let nextToken: string | undefined;
+  const seenTokens = new Set<string>();
+
+  for (let pageNumber = 0; pageNumber < MAX_STOPPED_TASK_PAGES; pageNumber += 1) {
+    const page = await dependencies.listStoppedTasks(nextToken);
+    if (page.taskArns.length > 0) {
+      const descriptions = await dependencies.describeTasks(page.taskArns);
+      const match = descriptions.find(
+        (task) =>
+          task.startedBy === dependencies.startedBy &&
+          typeof task.taskArn === 'string' &&
+          task.taskArn.length > 0,
+      );
+      if (match?.taskArn) return match.taskArn;
+    }
+
+    if (!page.nextToken) return undefined;
+    if (seenTokens.has(page.nextToken)) {
+      throw new Error('ListTasks returned a repeated pagination token');
+    }
+    seenTokens.add(page.nextToken);
+    nextToken = page.nextToken;
+  }
+
+  throw new Error(
+    `Stopped-task lookup exceeded ${MAX_STOPPED_TASK_PAGES} pages`,
+  );
 }
 
 async function findAcceptedTask(
   dependencies: RunTaskReconciliationDependencies,
+  attemptErrors: readonly [string, string],
 ): Promise<RunTaskReconciliationResult> {
-  let finalRoundSucceeded = false;
-  let lastError = 'unknown reconciliation error';
+  let lookupSucceeded = false;
+  let lastLookupError: string | undefined;
 
   for (const delayMs of RECONCILIATION_DELAYS_MS) {
     if (delayMs > 0) await dependencies.wait(delayMs);
     try {
-      const running = await dependencies.listTasks('RUNNING');
+      const running = await dependencies.listRunningTasks();
       if (running[0]) {
         return {
           status: 'accepted',
@@ -82,50 +255,75 @@ async function findAcceptedTask(
           reconciled: true,
         };
       }
-      const stopped = await dependencies.listTasks('STOPPED');
-      if (stopped[0]) {
+      const stopped = await findStoppedTask(dependencies);
+      if (stopped) {
         return {
           status: 'accepted',
-          taskArn: stopped[0],
+          taskArn: stopped,
           reconciled: true,
         };
       }
-      finalRoundSucceeded = true;
+      lookupSucceeded = true;
+      lastLookupError = undefined;
     } catch (error) {
-      finalRoundSucceeded = false;
-      lastError = errorDetail(error);
+      lastLookupError = formatRunTaskError(error);
     }
   }
 
-  return finalRoundSucceeded
-    ? {
-        status: 'rejected',
-        errorMessage:
-          'RunTask failed after an idempotent retry and no task was found',
-      }
-    : {
-        status: 'ambiguous',
-        errorMessage:
-          `RunTask outcome remained ambiguous: ${lastError}`,
-      };
+  const lookupOutcome = lastLookupError
+    ? `Last ECS lookup error: ${lastLookupError}.`
+    : lookupSucceeded
+      ? 'No task became visible during the bounded ECS lookup; an empty ' +
+        'eventually consistent lookup is not proof of rejection.'
+      : 'No ECS lookup completed successfully.';
+  return {
+    status: 'ambiguous',
+    errorMessage:
+      `RunTask outcome remained ambiguous. ` +
+      `Attempt 1: ${attemptErrors[0]}. ` +
+      `Attempt 2: ${attemptErrors[1]}. ` +
+      lookupOutcome,
+  };
 }
 
 /**
- * Resolve the only unsafe RunTask failure mode: ECS may accept a request even
- * when its HTTP response is lost. Retry the identical client-token request,
- * then reconcile both running and recently stopped tasks before deciding that
- * a launch was rejected.
+ * Resolve the unsafe RunTask failure mode where ECS may accept a request even
+ * though its HTTP response is lost. AWS documents 4xx responses as definitive
+ * client rejections and same-token 5xx/transport retries as idempotent. When
+ * both attempts remain uncertain, lookup can prove acceptance but—because ECS
+ * is eventually consistent—an empty lookup can never prove rejection.
  */
 export async function reconcileRunTaskLaunch(
   dependencies: RunTaskReconciliationDependencies,
 ): Promise<RunTaskReconciliationResult> {
+  let firstAttemptError: string;
   try {
     return classifyResponse(await dependencies.runTask(), false);
-  } catch {
-    try {
-      return classifyResponse(await dependencies.runTask(), true);
-    } catch {
-      return findAcceptedTask(dependencies);
+  } catch (error) {
+    const classified = classifyThrownRunTask(error);
+    if (classified.status === 'rejected') return classified;
+    firstAttemptError = classified.errorMessage;
+  }
+
+  try {
+    return classifyResponse(
+      await dependencies.runTask(),
+      true,
+      firstAttemptError,
+    );
+  } catch (error) {
+    const classified = classifyThrownRunTask(error);
+    if (classified.status === 'rejected') {
+      return {
+        status: 'rejected',
+        errorMessage:
+          `Initial RunTask attempt was ambiguous (${firstAttemptError}); ` +
+          `idempotent retry was definitive: ${classified.errorMessage}`,
+      };
     }
+    return findAcceptedTask(dependencies, [
+      firstAttemptError,
+      classified.errorMessage,
+    ]);
   }
 }

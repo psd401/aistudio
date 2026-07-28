@@ -398,6 +398,27 @@ const baseInput = {
       expect(cronSource).toContain(
         "reconcileRunTaskLaunch({",
       )
+      expect(cronSource).toContain(
+        "listRunningTasks: async () =>",
+      )
+      expect(cronSource).toContain(
+        "listStoppedTasks: async (nextToken) =>",
+      )
+      expect(cronSource).toContain(
+        "describeTasks: async (taskArns) =>",
+      )
+      const runningLookup = cronSource.slice(
+        cronSource.indexOf("listRunningTasks: async () =>"),
+        cronSource.indexOf("listStoppedTasks: async (nextToken) =>"),
+      )
+      expect(runningLookup).toContain("startedBy,")
+      expect(runningLookup).not.toContain("desiredStatus")
+      const stoppedLookup = cronSource.slice(
+        cronSource.indexOf("listStoppedTasks: async (nextToken) =>"),
+        cronSource.indexOf("describeTasks: async (taskArns) =>"),
+      )
+      expect(stoppedLookup).toContain("desiredStatus: 'STOPPED'")
+      expect(stoppedLookup).not.toContain("startedBy")
       expect(launch).toContain(
         "if (error instanceof AmbiguousRunTaskError)",
       )
