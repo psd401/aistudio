@@ -10,6 +10,7 @@
 
 import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
+import { isValidationError } from "@/types/error-types"
 import {
   withApiAuth,
   requireScope,
@@ -52,14 +53,14 @@ const executeBodySchema = z.object({
   inputs: z.record(z.string(), z.unknown()).default({}),
 })
 
-function isForbiddenExecutionError(
+function isExecutionHttpError(
   error: unknown
-): error is { statusCode: 403; userMessage?: string } {
+): error is { statusCode: 403 | 404; userMessage?: string } {
   return (
     error !== null &&
     typeof error === "object" &&
     "statusCode" in error &&
-    error.statusCode === 403
+    (error.statusCode === 403 || error.statusCode === 404)
   )
 }
 
@@ -140,7 +141,13 @@ async function authorizeExecution(
 
   const scopeError = await requireExecuteScope(auth, assistantId, requestId)
   if (scopeError) return { ok: false, response: scopeError }
-  const accessError = await verifyAssistantAccess(assistantId, auth, requestId)
+  const requireApproved = auth.authType !== "session"
+  const accessError = await verifyAssistantAccess(
+    assistantId,
+    auth,
+    requestId,
+    { requireApproved }
+  )
   if (accessError) return { ok: false, response: accessError }
 
   const architectResult = await getAssistantArchitectByIdAction(
@@ -178,11 +185,14 @@ async function authorizeExecution(
     auth,
     architectUserId: architect.userId,
     architectId: architect.id,
-    modelDbIds: prompts
-      .map((prompt) => prompt.modelId)
-      .filter((modelId): modelId is number =>
-        typeof modelId === "number" && modelId > 0
-      ),
+    modelDbIds:
+      (architect.modelRoutingMode ?? "legacy") === "legacy"
+        ? prompts
+            .map((prompt) => prompt.modelId)
+            .filter((modelId): modelId is number =>
+              typeof modelId === "number" && modelId > 0
+            )
+        : [],
     assistantId,
     requestId,
     log,
@@ -230,13 +240,25 @@ function assistantExecutionErrorResponse(
       { categories: error.blockedCategories, source: error.source }
     )
   }
-  if (isForbiddenExecutionError(error)) {
+  if (isValidationError(error)) {
     return createErrorResponse(
       requestId,
-      403,
-      "FORBIDDEN",
+      400,
+      "CONFIGURATION_ERROR",
+      error.fields?.map(({ message }) => message).join("; ") ||
+        "Assistant configuration is invalid"
+    )
+  }
+  if (isExecutionHttpError(error)) {
+    const isNotFound = error.statusCode === 404
+    return createErrorResponse(
+      requestId,
+      error.statusCode,
+      isNotFound ? "NOT_FOUND" : "FORBIDDEN",
       error.userMessage ||
-        "You do not have access to repository content used by this assistant"
+        (isNotFound
+          ? `Assistant not found: ${assistantId}`
+          : "You do not have access to repository content used by this assistant")
     )
   }
   log.error("Assistant execution failed", {
@@ -262,7 +284,12 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   const { assistantId } = authorization
 
   // 4. Parse and validate request body
-  const result = await parseRequestBody(request, executeBodySchema, requestId)
+  const result = await parseRequestBody(
+    request,
+    executeBodySchema,
+    requestId,
+    { maximumBytes: 128 * 1024 }
+  )
   if (isErrorResponse(result)) return result
   const { inputs } = result.data
 
@@ -313,6 +340,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       cognitoSub: auth.cognitoSub,
       requestId,
       preparedInputs,
+      requireApproved: auth.authType !== "session",
     })
 
     // Cast to NextResponse — streaming Response is compatible at runtime
@@ -337,7 +365,11 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
 async function handleAsyncExecution(
   assistantId: number,
   preparedInputs: PreparedAssistantExecutionInputs,
-  auth: { userId: number; cognitoSub: string },
+  auth: {
+    userId: number
+    cognitoSub: string
+    authType: "session" | "api_key" | "jwt"
+  },
   requestId: string,
   log: ReturnType<typeof createLogger>
 ) {
@@ -374,6 +406,7 @@ async function handleAsyncExecution(
         cognitoSub: auth.cognitoSub,
         requestId,
         preparedInputs,
+        requireApproved: auth.authType !== "session",
       })
 
       await jobManagementService.completeJob(jobId, {

@@ -23,6 +23,85 @@ describe("Assistant Architect runtime repository execution integration", () => {
     );
   });
 
+  it("reloads the executable graph only after coordinated execution creation", () => {
+    const authorizationPreflightIndex = routeSource.indexOf(
+      "await preflightExecutionGraphBeforeRateCap({"
+    );
+    const createIndex = routeSource.indexOf(
+      "const created = await createToolExecutionRecord({"
+    );
+    const protectedReloadIndex = routeSource.indexOf(
+      "const protectedGraph = await loadProtectedExecutionGraph({"
+    );
+
+    expect(routeSource).toContain(
+      "createCoordinatedAssistantExecution({"
+    );
+    expect(authorizationPreflightIndex).toBeGreaterThan(-1);
+    expect(createIndex).toBeGreaterThan(authorizationPreflightIndex);
+    expect(protectedReloadIndex).toBeGreaterThan(createIndex);
+    expect(routeSource).toContain(
+      "executionDeadlineAt: deadlineAt"
+    );
+  });
+
+  it("rejects a stable non-executable graph before rate accounting", () => {
+    const preflightStart = routeSource.indexOf(
+      "async function preflightExecutionGraphBeforeRateCap("
+    );
+    const cardinalityIndex = routeSource.indexOf(
+      "validatePromptChainCardinality({",
+      preflightStart
+    );
+    const repositoryIndex = routeSource.indexOf(
+      "preflightAssistantRepositoryAccess(",
+      cardinalityIndex
+    );
+    const coordinatorIndex = routeSource.indexOf(
+      "createCoordinatedAssistantExecution({"
+    );
+
+    expect(preflightStart).toBeGreaterThan(-1);
+    expect(cardinalityIndex).toBeGreaterThan(preflightStart);
+    expect(repositoryIndex).toBeGreaterThan(cardinalityIndex);
+    expect(coordinatorIndex).toBeGreaterThan(repositoryIndex);
+    expect(routeSource).toContain("promptCount: repositoryBindings.length");
+  });
+
+  it("existence-masks private assistants before feature authorization", () => {
+    const missingResponseCalls = routeSource.match(
+      /assistantArchitectNotFoundResponse\(/g
+    );
+
+    expect(missingResponseCalls).toHaveLength(3);
+    expect(routeSource).not.toContain(
+      "You do not have permission to execute this assistant architect"
+    );
+  });
+
+  it("cleans up agentic resources when setup consumes the deadline", () => {
+    const cleanupCreationIndex = routeSource.indexOf(
+      "const cleanup = createAgenticCleanup({"
+    );
+    const timeoutGuardIndex = routeSource.indexOf(
+      "let timeout: number;",
+      cleanupCreationIndex
+    );
+    const timeoutCleanupIndex = routeSource.indexOf(
+      "await cleanup();",
+      timeoutGuardIndex
+    );
+    const streamPromiseIndex = routeSource.indexOf(
+      "return new Promise<",
+      timeoutCleanupIndex
+    );
+
+    expect(cleanupCreationIndex).toBeGreaterThan(-1);
+    expect(timeoutGuardIndex).toBeGreaterThan(cleanupCreationIndex);
+    expect(timeoutCleanupIndex).toBeGreaterThan(timeoutGuardIndex);
+    expect(streamPromiseIndex).toBeGreaterThan(timeoutCleanupIndex);
+  });
+
   it("merges runtime repositories into retrieval and repository tools", () => {
     expect(routeSource).toContain("...context.runtimeRepositoryIds");
     expect(routeSource).toContain(
@@ -49,6 +128,28 @@ describe("Assistant Architect runtime repository execution integration", () => {
     );
     expect(routeSource).toContain(
       "references: runtimeRepositoryInputs.references"
+    );
+  });
+
+  it("finalizes a parallel last position only after every sibling settles", () => {
+    const parallelStart = routeSource.indexOf(
+      "async function executeParallelPositionGroup("
+    );
+    const allSettledIndex = routeSource.indexOf(
+      "await Promise.allSettled(parallelPromises)",
+      parallelStart
+    );
+    const finalizeIndex = routeSource.indexOf(
+      "await finalizeExecutionOnLastPrompt(",
+      allSettledIndex
+    );
+
+    expect(parallelStart).toBeGreaterThan(-1);
+    expect(routeSource).toContain("completeExecution: false");
+    expect(allSettledIndex).toBeGreaterThan(parallelStart);
+    expect(finalizeIndex).toBeGreaterThan(allSettledIndex);
+    expect(routeSource).toContain(
+      "aggregatePromptUsage(completedUsages)"
     );
   });
 });

@@ -10,6 +10,7 @@
 
 import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
+import { isValidationError } from "@/types/error-types"
 import {
   withApiAuth,
   requireAssistantScope,
@@ -44,6 +45,7 @@ import {
   NexusAttachmentBindingRejectedError,
   rollbackNewNexusAttachmentConversation,
 } from "@/lib/nexus/request-attachment-binding"
+import { compareAssistantPromptExecutionOrder } from "@/lib/assistant-architect/execution-coordinator"
 
 export const maxDuration = 900
 
@@ -56,14 +58,14 @@ const startConversationSchema = z.object({
   title: z.string().max(500).optional(),
 })
 
-function isForbiddenExecutionError(
+function isExecutionHttpError(
   error: unknown
-): error is { statusCode: 403; userMessage?: string } {
+): error is { statusCode: 403 | 404; userMessage?: string } {
   return (
     error !== null &&
     typeof error === "object" &&
     "statusCode" in error &&
-    error.statusCode === 403
+    (error.statusCode === 403 || error.statusCode === 404)
   )
 }
 
@@ -93,7 +95,12 @@ async function verifyStartAuthorization(
   const scopeError = requireAssistantScope(auth, assistantId, requestId)
   if (scopeError) return scopeError
 
-  const accessError = await verifyAssistantAccess(assistantId, auth, requestId)
+  const accessError = await verifyAssistantAccess(
+    assistantId,
+    auth,
+    requestId,
+    { requireApproved: auth.authType !== "session" }
+  )
   if (accessError) return accessError
 
   const architectResult = await getAssistantArchitectByIdAction(
@@ -110,9 +117,10 @@ async function verifyStartAuthorization(
   }
   const architect = architectResult.data
   const prompts = (architect.prompts || []).sort(
-    (left, right) => left.position - right.position
+    compareAssistantPromptExecutionOrder
   )
-  if (!prompts.at(-1)?.modelId) {
+  const lastPromptModelId = prompts.at(-1)?.modelId
+  if (!lastPromptModelId) {
     return createErrorResponse(
       requestId,
       400,
@@ -124,9 +132,15 @@ async function verifyStartAuthorization(
     auth,
     architectUserId: architect.userId,
     architectId: architect.id,
-    modelDbIds: prompts
-      .map((prompt) => prompt.modelId)
-      .filter((modelId): modelId is number => typeof modelId === "number" && modelId > 0),
+    modelDbIds:
+      (architect.modelRoutingMode ?? "legacy") === "legacy"
+        ? prompts
+            .map((prompt) => prompt.modelId)
+            .filter(
+              (modelId): modelId is number =>
+                typeof modelId === "number" && modelId > 0
+            )
+        : [lastPromptModelId],
     assistantId,
     requestId,
     log,
@@ -153,7 +167,8 @@ async function parseStartRequest(
   const result = await parseRequestBody(
     request,
     startConversationSchema,
-    requestId
+    requestId,
+    { maximumBytes: 128 * 1024 }
   )
   if (isErrorResponse(result)) return { response: result }
 
@@ -263,13 +278,25 @@ function mapStartConversationError(
       source: error.source,
     })
   }
-  if (isForbiddenExecutionError(error)) {
+  if (isValidationError(error)) {
     return createErrorResponse(
       requestId,
-      403,
-      "FORBIDDEN",
+      400,
+      "CONFIGURATION_ERROR",
+      error.fields?.map(({ message }) => message).join("; ") ||
+        "Assistant configuration is invalid"
+    )
+  }
+  if (isExecutionHttpError(error)) {
+    const isNotFound = error.statusCode === 404
+    return createErrorResponse(
+      requestId,
+      error.statusCode,
+      isNotFound ? "NOT_FOUND" : "FORBIDDEN",
       error.userMessage ||
-        "You do not have access to repository content used by this assistant"
+        (isNotFound
+          ? `Assistant not found: ${assistantId}`
+          : "You do not have access to repository content used by this assistant")
     )
   }
   log.error("Failed to start conversation", {
@@ -352,6 +379,7 @@ async function startConversation(
       cognitoSub: auth.cognitoSub,
       requestId,
       preparedInputs,
+      requireApproved: auth.authType !== "session",
     })
     return new NextResponse(execution.streamResponse.body, {
       status: execution.streamResponse.status,

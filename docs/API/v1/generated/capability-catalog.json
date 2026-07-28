@@ -1,11 +1,37 @@
 {
   "summary": {
-    "actions": 29,
+    "actions": 32,
     "features": 10,
-    "scopes": 29,
-    "agentInvocableActions": 22
+    "scopes": 32,
+    "agentInvocableActions": 25
   },
   "actions": [
+    {
+      "identifier": "assistants.create",
+      "name": "create_assistant",
+      "description": "Create one or more Assistant Architects from an ExportFormat v1.0 envelope. Created assistants are owned by the caller and always enter pending_approval.",
+      "surfaces": [
+        "mcp",
+        "internal",
+        "rest"
+      ],
+      "requiredScopes": [
+        "mcp:create_assistant"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "mcp:create_assistant"
+        ],
+        "internal": [
+          "mcp:create_assistant"
+        ],
+        "rest": [
+          "assistants:write"
+        ]
+      },
+      "destructive": true,
+      "agentInvocable": true
+    },
     {
       "identifier": "assistants.execute",
       "name": "execute_assistant",
@@ -33,6 +59,32 @@
       "agentInvocable": true
     },
     {
+      "identifier": "assistants.fork",
+      "name": "fork_assistant",
+      "description": "Fork a visible Assistant Architect into a new caller-owned pending_approval assistant. The source is not modified.",
+      "surfaces": [
+        "mcp",
+        "internal",
+        "rest"
+      ],
+      "requiredScopes": [
+        "mcp:fork_assistant"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "mcp:fork_assistant"
+        ],
+        "internal": [
+          "mcp:fork_assistant"
+        ],
+        "rest": [
+          "assistants:write"
+        ]
+      },
+      "destructive": true,
+      "agentInvocable": true
+    },
+    {
       "identifier": "assistants.list",
       "name": "list_assistants",
       "description": "List AI assistants the authenticated user has access to execute.",
@@ -56,6 +108,32 @@
         ]
       },
       "destructive": false,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "assistants.update",
+      "name": "update_assistant",
+      "description": "Replace an Assistant Architect from a single-assistant ExportFormat v1.0 envelope. Owners may update their own assistants; administrators may update any. Status always resets to pending_approval.",
+      "surfaces": [
+        "mcp",
+        "internal",
+        "rest"
+      ],
+      "requiredScopes": [
+        "mcp:update_assistant"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "mcp:update_assistant"
+        ],
+        "internal": [
+          "mcp:update_assistant"
+        ],
+        "rest": [
+          "assistants:write"
+        ]
+      },
+      "destructive": true,
       "agentInvocable": true
     },
     {
@@ -769,6 +847,7 @@
       "scope": "assistants:write",
       "description": "Create and modify assistant architects",
       "roles": [
+        "staff",
         "administrator"
       ]
     },
@@ -882,8 +961,24 @@
       ]
     },
     {
+      "scope": "mcp:create_assistant",
+      "description": "Create assistant architects via MCP",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
       "scope": "mcp:execute_assistant",
       "description": "Execute an assistant via MCP",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "mcp:fork_assistant",
+      "description": "Fork visible assistant architects via MCP",
       "roles": [
         "staff",
         "administrator"
@@ -908,6 +1003,14 @@
     {
       "scope": "mcp:search_decisions",
       "description": "Search decision graph nodes via MCP",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "mcp:update_assistant",
+      "description": "Update owned assistant architects via MCP",
       "roles": [
         "staff",
         "administrator"

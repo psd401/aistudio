@@ -18,7 +18,7 @@ describe("migration 162 Nexus user memory", () => {
   ) as { migrationFiles: string[] }
 
   it("registers the additive owner-scoped table and required live indexes", () => {
-    expect(manifest.migrationFiles.at(-1)).toBe(migrationName)
+    expect(manifest.migrationFiles).toContain(migrationName)
     expect(migration).toContain("CREATE TABLE IF NOT EXISTS nexus_user_memories")
     expect(migration).toContain(
       "REFERENCES users(id) ON DELETE CASCADE",

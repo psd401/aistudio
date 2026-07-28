@@ -1090,6 +1090,109 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /assistants/import:
+    post:
+      operationId: createAssistants
+      tags: [Assistants]
+      summary: Create Assistant Architects from an export envelope
+      description: |
+        Imports one or more Assistant Architects from the portable ExportFormat
+        v1.0 JSON envelope. Each assistant (row + prompts + input fields) is
+        created atomically and owned by the authenticated caller. Caller-supplied
+        `status` is ignored: every created assistant enters `pending_approval`.
+        Agent tools, connectors, mapped prompt models, durable prompt
+        repositories, and per-prompt enabled tools are validated against the
+        importing author's permissions and the mapped/routed model's
+        capabilities before any assistant transaction starts.
+        Model names are resolved by exact model id, then provider-family
+        fallback, then the first active model; the applied mappings are returned.
+        Import envelopes must contain at least one assistant and are limited to
+        10 MB, 100 assistants, 50 input fields per assistant, and 500 prompt
+        repository bindings on every surface. The
+        REST transport enforces the byte limit while reading the request stream, including when
+        `Content-Length` is missing or understated.
+        A cataloged but administratively disabled create operation returns a
+        masked 404 and does not parse or persist the envelope.
+        Requires `assistants:write`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssistantImportEnvelope"
+            example:
+              version: "1.0"
+              exported_at: "2026-07-28T12:00:00.000Z"
+              export_source: District agent
+              assistants:
+                - name: Family newsletter helper
+                  description: Drafts a family-facing newsletter
+                  status: approved
+                  prompts:
+                    - name: Draft
+                      content: "Draft a newsletter about {{topic}}"
+                      model_name: gpt-5
+                      position: 0
+                  input_fields:
+                    - name: topic
+                      label: Topic
+                      field_type: short_text
+                      position: 0
+      responses:
+        "201":
+          description: At least one assistant was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantImportBatchResponse"
+              example:
+                data:
+                  total: 1
+                  successful: 1
+                  failed: 0
+                  results:
+                    - name: Family newsletter helper
+                      id: 41
+                      status: pending_approval
+                  modelMappings:
+                    - modelName: gpt-5
+                      mappedToId: 7
+                meta:
+                  requestId: req_abc123
+        "400":
+          description: Invalid JSON, ExportFormat/collection-limit validation failure, an agent tool/connector, mapped model, or durable repository unavailable to the author, or a prompt tool unsupported by its mapped/routed model.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The caller lacks `assistants:write`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: The cataloged create operation is administratively disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Import payload exceeds the 10 MB limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /assistants/{id}:
     get:
       operationId: getAssistant
@@ -1130,6 +1233,222 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+    put:
+      operationId: updateAssistant
+      tags: [Assistants]
+      summary: Replace an Assistant Architect from an export envelope
+      description: |
+        Atomically replaces the assistant's import-controlled fields, prompts,
+        and input fields from a single-assistant ExportFormat v1.0 envelope.
+        Staff callers may update only assistants they own; administrators may
+        update any assistant. Missing assistants and assistants owned by another
+        user both return a masked `404 NOT_FOUND`. An update returns
+        `409 CONFLICT` while a non-stale pending or running execution can still
+        reference the live prompt rows. Abandoned rows expire only after the
+        same immutable, per-execution wall-clock deadline persisted and
+        enforced by execution
+        (`agent_timeout_seconds` for agentic runs; `timeout_seconds`, or the
+        900-second platform ceiling when unset, for prompt chains) plus a
+        one-minute grace. Every successful update resets status to
+        `pending_approval` and atomically deactivates its linked UI capability
+        until re-approval. Reapproval reuses the capability's stable identifier
+        even when the replacement renamed the assistant. Agent tools, connectors,
+        mapped prompt models, durable prompt repositories, and per-prompt enabled
+        tools are validated against the caller's authoring permissions and the
+        mapped/routed model's capabilities before writes.
+        A cataloged but administratively disabled update operation returns a
+        masked 404 before parsing or mutation.
+        Requires `assistants:write`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssistantImportEnvelope"
+            example:
+              version: "1.0"
+              exported_at: "2026-07-28T12:00:00.000Z"
+              assistants:
+                - name: Updated family newsletter helper
+                  description: Updated by an agent
+                  status: approved
+                  prompts:
+                    - name: Draft
+                      content: "Draft three newsletter sections about {{topic}}"
+                      model_name: gpt-5
+                      position: 0
+                  input_fields:
+                    - name: topic
+                      label: Topic
+                      field_type: short_text
+                      position: 0
+      responses:
+        "200":
+          description: Assistant replaced and returned to pending approval.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantMutationResponse"
+              example:
+                data:
+                  result:
+                    name: Updated family newsletter helper
+                    id: 41
+                    status: pending_approval
+                  modelMappings:
+                    - modelName: gpt-5
+                      mappedToId: 7
+                meta:
+                  requestId: req_abc123
+        "400":
+          description: Invalid ID, JSON, or envelope (including an envelope containing other than one assistant).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The caller lacks `assistants:write`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A pending or running execution is still using the assistant's prompt graph.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Assistant import envelope exceeds the 10 MB limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /assistants/{id}/fork:
+    post:
+      operationId: forkAssistant
+      tags: [Assistants]
+      summary: Fork a visible Assistant Architect
+      description: |
+        Copies an assistant visible to the caller through the same
+        owner/admin/approved and resource/room rules as assistant detail. The
+        source is unchanged. The fork is owned by the caller and enters
+        `pending_approval`; an optional `name` overrides the copied name.
+        The visibility/resource authorization decision and exported source graph
+        are read in one repeatable-read transaction. After authoring validation,
+        current source visibility is rechecked under the source row lock in the
+        destination create transaction immediately before the copied assistant
+        is inserted, so a grant or room revocation committed during validation
+        fails with the same masked 404 without persisting a fork.
+        The optional JSON body is stream-bounded to 4 KB before decoding.
+        Copied agent tools and connectors must be available to the caller as an
+        author, and copied prompt tools must be supported by their mapped/routed
+        models, before the fork is persisted.
+        A cataloged but administratively disabled fork operation returns a
+        masked 404 before parsing or mutation.
+        Invisible and missing sources both return 404. Requires
+        `assistants:write`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+            example:
+              name: My family newsletter helper
+      responses:
+        "201":
+          description: Caller-owned fork created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/AssistantMutationResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          sourceAssistantId:
+                            type: integer
+              example:
+                data:
+                  sourceAssistantId: 41
+                  result:
+                    name: My family newsletter helper
+                    id: 52
+                    status: pending_approval
+                  modelMappings:
+                    - modelName: gpt-5
+                      mappedToId: 7
+                meta:
+                  requestId: req_abc123
+        "400":
+          description: Invalid ID, JSON, or name override.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The caller lacks `assistants:write`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Source assistant is missing or not visible to the caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Fork request body exceeds the 4 KB limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /assistants/{id}/execute:
     post:
       operationId: executeAssistant
@@ -1139,10 +1458,20 @@ paths:
         Execute an assistant with the given inputs.
         - `Accept: text/event-stream` (default) returns an SSE stream
         - `Accept: application/json` returns 202 with a jobId for async polling
+        - API-key and JWT callers may execute only `approved` assistants;
+          authenticated browser sessions retain owner/administrator draft preview
 
-        Beyond the assistant scope check, the caller must have per-resource access
-        (Epic #1202 Phase 3) to BOTH the assistant and the model its last prompt
-        uses. Active room assignment grants access to the assistant, even when
+        Beyond the assistant scope check, the caller must have per-resource
+        access (Epic #1202 Phase 3) to the assistant and the model selected for
+        each prompt. For legacy routing, execution creation rechecks every
+        pinned prompt-model grant in the assistant-row lock transaction. For
+        standard and advanced routing, the router authorizes its current
+        selected model rather than the stored fallback. Execution creation takes
+        the same assistant-row lock as import replacement, rechecks the
+        applicable current grants, creates the active execution row, and only
+        then loads the executable prompt graph. The row remains active until
+        every prompt in a final parallel position has settled and persisted.
+        Active room assignment grants access to the assistant, even when
         its role/Google-group grants would deny the caller. A caller whose only
         AI Studio role is `student` and who has an active room may execute only
         room-assigned assistants; assistant ownership and zero-grant
@@ -1158,7 +1487,9 @@ paths:
         executing user, rejects missing/foreign/expired sources, replaces
         caller-carried names with authoritative item names, and adds the resolved
         repositories to retrieval and repository tools for every prompt. Current
-        repository ACLs are rechecked at execution and retrieval time.
+        repository ACLs are rechecked at execution and retrieval time. The
+        coordinated execution deadline is persisted with the execution and
+        enforced as the streaming abort timeout on every prompt or agent run.
 
         Required scope: `assistants:execute` (or the narrower
         `assistant:{id}:execute`; administrators may hold `*`).
@@ -1253,6 +1584,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "413":
+          description: Execution request body exceeds the 128 KiB transport limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /assistants/{id}/conversations:
     post:
@@ -1342,6 +1679,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "413":
+          description: Conversation request body exceeds the 128 KiB transport limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /assistants/{id}/conversations/{cid}/messages:
     post:
@@ -1361,7 +1704,10 @@ paths:
         with no active rooms keep ordinary behavior. Model and repository checks
         are unchanged.
 
-        Before the body is parsed or a message is written, the server unions
+        After bounded body parsing, the server creates an active execution while
+        holding the assistant-row lock and repeats approved-status and current
+        grant checks before loading the graph. That row blocks import
+        replacement until streaming finishes or fails. The server then unions
         every prompt-bound repository with the conversation's bounded runtime
         repository IDs and rechecks the executing principal's current ACL. The
         model receives bounded hybrid retrieval context and vector, keyword, and
@@ -1405,6 +1751,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Conversation not found or not bound to this assistant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Follow-up request body exceeds the 128 KiB transport limit.
           content:
             application/json:
               schema:
@@ -3258,6 +3610,219 @@ components:
         updatedAt: { type: [string, "null"], format: date-time }
 
     # -- Assistants --
+    AssistantImportPrompt:
+      type: object
+      required: [name, content, model_name, position]
+      properties:
+        name: { type: string }
+        content:
+          type: string
+          maxLength: 10000000
+        system_context:
+          type: [string, "null"]
+          maxLength: 10000000
+        model_name:
+          type: string
+          description: Portable model id/name resolved against active models.
+        position: { type: integer }
+        parallel_group: { type: [integer, "null"] }
+        input_mapping:
+          type: [object, "null"]
+          additionalProperties: { type: string }
+        timeout_seconds:
+          type: [integer, "null"]
+          minimum: 1
+        repository_ids:
+          type: array
+          maxItems: 500
+          items: { type: integer, minimum: 1 }
+          description: Durable repository ids configured for this prompt. An import envelope may contain at most 500 repository bindings in aggregate.
+        enabled_tools:
+          type: array
+          items: { type: string }
+          description: Tool identifiers configured for this prompt.
+
+    AssistantImportField:
+      type: object
+      required: [name, label, field_type, position]
+      properties:
+        name: { type: string }
+        label: { type: string }
+        field_type:
+          type: string
+          enum: [short_text, long_text, select, multi_select, file_upload]
+        position: { type: integer }
+        options:
+          type: [object, "null"]
+          additionalProperties: true
+
+    AssistantImportDefinition:
+      type: object
+      required: [name, prompts, input_fields]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description: { type: string }
+        status:
+          type: string
+          description: Accepted for format compatibility but ignored; writes always use pending_approval.
+        image_path: { type: [string, "null"] }
+        is_parallel: { type: boolean }
+        timeout_seconds:
+          type: [integer, "null"]
+          minimum: 1
+        mode:
+          type: string
+          enum: [prompt_chain, agentic]
+          default: prompt_chain
+        model_routing_mode:
+          type: string
+          enum: [legacy, standard, advanced]
+          default: legacy
+          description: Advanced routing requires model_routing_family; other modes reject a non-null family.
+        model_routing_family:
+          type: [string, "null"]
+          enum: [openai, anthropic, google, null]
+          description: Required when model_routing_mode is advanced and otherwise must be null or omitted.
+        agent_enabled_tools:
+          type: array
+          description: Internal agent-callable tool identifiers available under the author's role-derived scopes.
+          items: { type: string }
+        agent_enabled_connectors:
+          type: array
+          description: Connector identifiers visible to the author at import time.
+          items: { type: string }
+        agent_max_steps:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+        agent_timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 900
+          default: 300
+        agent_cost_cap_cents:
+          type: [integer, "null"]
+          minimum: 1
+        agent_max_requests_per_hour:
+          type: [integer, "null"]
+          minimum: 1
+        retrieval_scope:
+          type: [object, "null"]
+          properties:
+            collectionId: { type: [string, "null"] }
+            tags:
+              type: array
+              items: { type: string }
+            maxVisibilityLevel:
+              type: string
+              enum: [private, group, internal, public]
+        prompts:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/AssistantImportPrompt"
+        input_fields:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/AssistantImportField"
+
+    AssistantImportEnvelope:
+      type: object
+      required: [version, assistants]
+      properties:
+        version:
+          type: string
+          const: "1.0"
+        exported_at:
+          type: string
+          format: date-time
+        export_source:
+          type: string
+        assistants:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/AssistantImportDefinition"
+
+    AssistantModelMapping:
+      type: object
+      required: [modelName, mappedToId]
+      properties:
+        modelName: { type: string }
+        mappedToId:
+          type: integer
+          minimum: 1
+
+    AssistantImportResult:
+      oneOf:
+        - type: object
+          required: [name, id, status]
+          properties:
+            name: { type: string }
+            id:
+              type: integer
+              minimum: 1
+            status:
+              type: string
+              const: pending_approval
+        - type: object
+          required: [name, status, error]
+          properties:
+            name: { type: string }
+            status:
+              type: string
+              const: error
+            error: { type: string }
+
+    AssistantImportBatchResult:
+      type: object
+      required: [total, successful, failed, results, modelMappings]
+      properties:
+        total: { type: integer, minimum: 0 }
+        successful: { type: integer, minimum: 0 }
+        failed: { type: integer, minimum: 0 }
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssistantImportResult"
+        modelMappings:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssistantModelMapping"
+
+    AssistantImportBatchResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/AssistantImportBatchResult"
+        meta:
+          type: object
+          properties:
+            requestId: { type: string }
+
+    AssistantMutationResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            result:
+              $ref: "#/components/schemas/AssistantImportResult"
+            modelMappings:
+              type: array
+              items:
+                $ref: "#/components/schemas/AssistantModelMapping"
+        meta:
+          type: object
+          properties:
+            requestId: { type: string }
+
     AssistantListItem:
       type: object
       properties:

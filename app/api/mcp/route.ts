@@ -10,14 +10,18 @@
 
 import { NextRequest, NextResponse } from "next/server"
 import { authenticateRequest } from "@/lib/api/auth-middleware"
+import {
+  BoundedJsonRequestError,
+  parseBoundedJsonRequest,
+} from "@/lib/api/bounded-json-request"
 import { checkRateLimit, createRateLimitResponse, addRateLimitHeaders, recordUsage } from "@/lib/api/rate-limiter"
 import { parseJsonRpcRequest, handleJsonRpcRequest } from "@/lib/mcp/jsonrpc-handler"
+import { MCP_REQUEST_MAX_BYTES } from "@/lib/mcp/request-limits"
 import { JSONRPC_ERRORS } from "@/lib/mcp/types"
 import type { McpToolContext, JsonRpcResponse } from "@/lib/mcp/types"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 
 export const maxDuration = 900
-
 // ============================================
 // POST /api/mcp
 // ============================================
@@ -47,18 +51,26 @@ export async function POST(request: NextRequest): Promise<NextResponse | Respons
   // --- Parse body ---
   let body: unknown
   try {
-    body = await request.json()
-  } catch {
-    timer({ status: "parse_error" })
-    recordUsage(auth, request, 400, Date.now() - startMs)
+    body = await parseBoundedJsonRequest(request, MCP_REQUEST_MAX_BYTES)
+  } catch (error) {
+    const isTooLarge =
+      error instanceof BoundedJsonRequestError && error.status === 413
+    const status = isTooLarge ? 413 : 400
+    timer({ status: isTooLarge ? "payload_too_large" : "parse_error" })
+    recordUsage(auth, request, status, Date.now() - startMs)
     return NextResponse.json(
       {
         jsonrpc: "2.0",
         id: null,
-        error: JSONRPC_ERRORS.PARSE_ERROR,
+        error: isTooLarge
+          ? {
+              code: JSONRPC_ERRORS.INVALID_REQUEST.code,
+              message: "Request payload too large",
+            }
+          : JSONRPC_ERRORS.PARSE_ERROR,
       },
       {
-        status: 400,
+        status,
         headers: { "X-Request-Id": requestId },
       }
     )

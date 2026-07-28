@@ -5,7 +5,6 @@ import {
   type SelectAssistantArchitect,
   type InsertToolInputField,
   type InsertChainPrompt,
-  type InsertToolExecution,
   type SelectToolInputField,
   type SelectChainPrompt,
   type SelectAiModel,
@@ -13,7 +12,7 @@ import {
 } from "@/types/db-types"
 // CoreMessage import removed - AI completion now handled by Lambda workers
 import { parseRepositoryIds } from "@/lib/utils/repository-utils"
-import { getAvailableToolsForModel, getAllTools } from "@/lib/tools/tool-registry"
+import { getAvailableToolsForModel } from "@/lib/tools/tool-registry"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 import { getScopesForRoles } from "@/lib/api-keys/scopes"
 
@@ -37,12 +36,18 @@ import {
   validateAssistantRepositoryAudienceForRepositoryIds,
 } from "@/lib/assistant-architect/repository-audience";
 import {
+  validateAgentConnectorsForAuthor,
+  validateAgentToolsForAuthor,
+} from "@/lib/assistant-architect/agent-config-validation";
+import { validatePromptToolsForRouting } from "@/lib/assistant-architect/prompt-tool-validation";
+import {
   getAssistantArchitects as drizzleGetAssistantArchitects,
   getAssistantArchitectById as drizzleGetAssistantArchitectById,
   createAssistantArchitect as drizzleCreateAssistantArchitect,
   updateAssistantArchitect as drizzleUpdateAssistantArchitect,
   deleteAssistantArchitect as drizzleDeleteAssistantArchitect,
   approveAssistantArchitect as drizzleApproveAssistantArchitect,
+  AssistantApprovalValidationError,
   rejectAssistantArchitect as drizzleRejectAssistantArchitect,
   submitForApproval as drizzleSubmitForApproval,
   getPendingAssistantArchitects as drizzleGetPendingAssistantArchitects,
@@ -55,7 +60,6 @@ import {
   updateChainPrompt,
   deleteChainPrompt,
   getAIModels,
-  getAIModelById,
   getArchitectEnabledModels,
   getAssistantArchitectsByStatus,
   getRoleByName,
@@ -63,7 +67,7 @@ import {
   getRepositoryById,
 } from "@/lib/db/drizzle";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
-import { eq, and, inArray, desc, sql } from "drizzle-orm";
+import { eq, and, inArray, desc } from "drizzle-orm";
 import { navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities, type AssistantRetrievalScope } from "@/lib/db/schema";
 import type { AssistantModelFamily, AssistantModelRoutingMode } from "@/lib/db/schema/tables/assistant-architects";
 import {
@@ -184,67 +188,6 @@ function mapFieldTypeToDb(uiType: string): "short_text" | "long_text" | "select"
   }
 }
 
-// Helper function to validate enabled tools against model capabilities
-async function validateEnabledTools(
-  enabledTools: string[],
-  modelId: number
-): Promise<{ isValid: boolean; invalidTools: string[]; message?: string }> {
-  if (!enabledTools || enabledTools.length === 0) {
-    return { isValid: true, invalidTools: [] };
-  }
-
-  try {
-    // Get model ID string from database
-    const model = await getAIModelById(modelId)
-
-    if (!model || !model.active) {
-      return {
-        isValid: false,
-        invalidTools: enabledTools,
-        message: "Model not found or inactive"
-      }
-    }
-
-    const modelIdString = model.modelId
-
-    // Get all available tools for the model
-    const availableTools = await getAvailableToolsForModel(modelIdString);
-    const availableToolNames = availableTools.map(tool => tool.name);
-
-    // Get all registered tools to validate tool names exist
-    const allTools = getAllTools();
-    const allToolNames = allTools.map(tool => tool.name);
-
-    // Check for unknown tools
-    const unknownTools = enabledTools.filter(toolName => !allToolNames.includes(toolName));
-    if (unknownTools.length > 0) {
-      return {
-        isValid: false,
-        invalidTools: unknownTools,
-        message: `Unknown tools: ${unknownTools.join(', ')}`
-      };
-    }
-
-    // Check for tools not available for this model
-    const unavailableTools = enabledTools.filter(toolName => !availableToolNames.includes(toolName));
-    if (unavailableTools.length > 0) {
-      return {
-        isValid: false,
-        invalidTools: unavailableTools,
-        message: `Tools not supported by this model: ${unavailableTools.join(', ')}`
-      };
-    }
-
-    return { isValid: true, invalidTools: [] };
-  } catch (error) {
-    return {
-      isValid: false,
-      invalidTools: enabledTools,
-      message: `Error validating tools: ${error instanceof Error ? error.message : 'Unknown error'}`
-    };
-  }
-}
-
 function resolveModelRoutingFields(data: Partial<InsertAssistantArchitect>):
   | { fields: { modelRoutingMode?: AssistantModelRoutingMode; modelRoutingFamily?: AssistantModelFamily | null } }
   | { error: string } {
@@ -268,51 +211,6 @@ function resolveModelRoutingFields(data: Partial<InsertAssistantArchitect>):
     return { error: "Choose Advanced routing before selecting a model family" };
   }
   return { fields: {} };
-}
-
-async function validateEnabledToolsForRouting(
-  enabledTools: string[],
-  architect: Pick<SelectAssistantArchitect, "modelRoutingMode" | "modelRoutingFamily">,
-  userId: number,
-  fallbackModelId: number | null | undefined
-): Promise<{ isValid: boolean; invalidTools: string[]; message?: string }> {
-  const routingMode = architect.modelRoutingMode ?? "legacy";
-  if (routingMode === "legacy") {
-    if (!fallbackModelId) {
-      return { isValid: false, invalidTools: enabledTools, message: "Choose a model before enabling tools" };
-    }
-    return validateEnabledTools(enabledTools, fallbackModelId);
-  }
-  if (enabledTools.length === 0) return { isValid: true, invalidTools: [] };
-
-  const knownTools = new Set(getAllTools().map(tool => tool.name));
-  const unknownTools = enabledTools.filter(tool => !knownTools.has(tool));
-  if (unknownTools.length > 0) {
-    return { isValid: false, invalidTools: unknownTools, message: `Unknown tools: ${unknownTools.join(", ")}` };
-  }
-
-  const models = (await getArchitectEnabledModels()).filter(model =>
-    isExecutableTextModel(model)
-    && (routingMode !== "advanced"
-      || inferModelFamily(model) === architect.modelRoutingFamily)
-  );
-  const accessibleIds = await filterAccessibleResourceIds(userId, "model", models.map(model => model.id));
-  const accessible = models.filter(model => accessibleIds.has(String(model.id)));
-  const availableByModel = await Promise.all(
-    accessible.map(async model => new Set(
-      (await getAvailableToolsForModel(model.modelId))
-        .filter(tool => modelSupportsProviderNativeTool(model, tool.name))
-        .map(tool => tool.name)
-    ))
-  );
-  if (availableByModel.some(tools => enabledTools.every(tool => tools.has(tool)))) {
-    return { isValid: true, invalidTools: [] };
-  }
-  return {
-    isValid: false,
-    invalidTools: enabledTools,
-    message: "No accessible model in this routing mode supports all selected tools",
-  };
 }
 
 async function resolveAutomaticPromptFallbackModelId(
@@ -349,51 +247,6 @@ async function resolveAutomaticPromptFallbackModelId(
     ? compatible.find(model => model.id === requestedModelId)
     : undefined;
   return requested?.id ?? compatible[0]?.id ?? null;
-}
-
-/**
- * Validate an agentic assistant's `agentEnabledTools` (catalog `domain.action`
- * identifiers) against the unified catalog (#924). A tool is valid only if it is
- * exposed on the `internal` surface, is `agentCallable`, and the AUTHOR's
- * role-derived scopes permit it — so an author cannot enable a tool they could
- * not themselves invoke. The caller's scopes are re-checked at execution time
- * (resolveAgentTools), giving the required dual scope intersection (#926).
- */
-async function validateAgentTools(
-  agentEnabledTools: string[],
-  authorRoleNames: string[]
-): Promise<{ isValid: boolean; invalidTools: string[]; message?: string }> {
-  if (!agentEnabledTools || agentEnabledTools.length === 0) {
-    return { isValid: true, invalidTools: [] };
-  }
-  try {
-    const authorScopes = getScopesForRoles(authorRoleNames);
-    const allowed = await toolCatalogInstance.list({
-      surface: "internal",
-      scopes: authorScopes,
-      agentOnly: true,
-    });
-    const allowedIdentifiers = new Set(allowed.map((e) => e.identifier));
-    const invalidTools = agentEnabledTools.filter(
-      (id) => !allowedIdentifiers.has(id)
-    );
-    if (invalidTools.length > 0) {
-      return {
-        isValid: false,
-        invalidTools,
-        // Report a count rather than echoing the caller-supplied identifiers back
-        // in the message (avoids reflecting arbitrary input into the response).
-        message: `Tools not available for agentic use with your permissions: ${invalidTools.length} not accessible`,
-      };
-    }
-    return { isValid: true, invalidTools: [] };
-  } catch (error) {
-    return {
-      isValid: false,
-      invalidTools: agentEnabledTools,
-      message: `Error validating agent tools: ${error instanceof Error ? error.message : "Unknown error"}`,
-    };
-  }
 }
 
 /** Agentic-mode columns an update may set (Issue #926). */
@@ -437,14 +290,17 @@ async function resolveAgenticUpdateFields(
     fields.mode = nextMode;
   }
   if (data.agentEnabledTools !== undefined) {
-    const toolValidation = await validateAgentTools(data.agentEnabledTools, authorRoleNames);
+    const toolValidation = await validateAgentToolsForAuthor(
+      data.agentEnabledTools,
+      authorRoleNames,
+    );
     if (!toolValidation.isValid) {
       return { error: toolValidation.message || "Invalid agent tools" };
     }
     fields.agentEnabledTools = data.agentEnabledTools;
   }
   if (data.agentEnabledConnectors !== undefined) {
-    const connectorError = await validateAgentConnectors(
+    const connectorError = await validateAgentConnectorsForAuthor(
       data.agentEnabledConnectors,
       authorUserId,
       authorRoleNames
@@ -468,31 +324,6 @@ async function resolveAgenticUpdateFields(
   }
 
   return { fields };
-}
-
-/**
- * Validate that every connector ID is one the author can access (parity with
- * agentEnabledTools). Returns a user-facing error string when one or more IDs are
- * not accessible, or null when all are valid (or none were supplied).
- *
- * Execution-time resolution already filters connectors by the CALLER's access, so
- * an unowned connector can't be invoked regardless — this is defense in depth plus
- * a clear authoring-time error. Reports a count rather than echoing the raw IDs.
- */
-async function validateAgentConnectors(
-  connectorIds: string[],
-  authorUserId: number,
-  authorRoleNames: string[]
-): Promise<string | null> {
-  if (connectorIds.length === 0) return null;
-  const { getAvailableConnectors } = await import("@/lib/mcp/connector-service");
-  const accessible = await getAvailableConnectors(authorUserId, authorRoleNames);
-  const accessibleIds = new Set(accessible.map(c => c.id));
-  const invalidCount = connectorIds.filter(id => !accessibleIds.has(id)).length;
-  if (invalidCount > 0) {
-    return `Connectors not available with your permissions: ${invalidCount} not accessible`;
-  }
-  return null;
 }
 
 /** Normalize a nullable numeric limit to a positive integer, or null for no cap. */
@@ -1604,7 +1435,7 @@ async function validateNewChainPrompt(
   log: ReturnType<typeof createLogger>
 ): Promise<string | null> {
   if (data.enabledTools?.length) {
-    const toolValidation = await validateEnabledToolsForRouting(
+    const toolValidation = await validatePromptToolsForRouting(
       data.enabledTools,
       architect,
       currentUserId,
@@ -1825,7 +1656,7 @@ async function validatePromptEnabledToolsUpdate(
     };
   }
 
-  const toolValidation = await validateEnabledToolsForRouting(
+  const toolValidation = await validatePromptToolsForRouting(
     enabledTools,
     architect,
     userId,
@@ -2297,77 +2128,6 @@ export async function updatePromptPositionAction(
   }
 }
 
-// Tool Execution Actions
-
-export async function createToolExecutionAction(
-  execution: InsertToolExecution
-): Promise<ActionState<string>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("createToolExecution")
-  const log = createLogger({ requestId, action: "createToolExecution" })
-  
-  try {
-    log.info("Action started: Creating tool execution", {
-      toolId: execution.assistantArchitectId
-    })
-
-    const session = await getServerSession();
-    if (!session || !session.sub) {
-      log.warn("Unauthorized tool execution attempt")
-      return { isSuccess: false, message: "Unauthorized" }
-    }
-
-    log.debug("User authenticated", { userId: session.sub })
-
-    const currentUserResult = await getCurrentUserAction()
-    if (!currentUserResult.isSuccess || !currentUserResult.data) {
-      return { isSuccess: false, message: "User not found" }
-    }
-    const userId = currentUserResult.data.user.id
-
-    execution.userId = userId
-
-    // CRITICAL: Drizzle's AWS Data API driver doesn't properly serialize JSONB.
-    // The driver bypasses customType.toDriver() and passes objects directly,
-    // causing RDS Data API to fail. We must use raw SQL to work around this.
-    // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
-    const inputData = execution.inputData && Object.keys(execution.inputData).length > 0
-      ? execution.inputData
-      : { __no_inputs: true };
-    const inputDataJson = JSON.stringify(inputData);
-
-    const executionResult = await executeQuery(
-      (db) => db.execute(sql`
-        INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
-        VALUES (${execution.userId}, ${inputDataJson}::jsonb, 'pending', ${new Date().toISOString()}::timestamp, ${execution.assistantArchitectId})
-        RETURNING id
-      `),
-      "createToolExecution"
-    );
-
-    // postgres.js returns result directly as array-like object (no .rows property - Issue #603)
-    const rows = executionResult as unknown as Array<{ id: number }>;
-    if (!rows || rows.length === 0 || !rows[0]?.id) {
-      throw ErrorFactories.dbQueryFailed("INSERT INTO tool_executions", new Error("No rows returned"))
-    }
-
-    const executionId = rows[0].id
-
-    log.info("Tool execution created successfully", { executionId })
-    timer({ status: "success", executionId })
-
-    return {
-      isSuccess: true,
-      message: "Tool execution created successfully",
-      data: executionId.toString()
-    }
-  } catch (error) {
-    timer({ status: "error" })
-    log.error("Error creating tool execution:", error)
-    return { isSuccess: false, message: "Failed to create tool execution" }
-  }
-}
-
 type PromptResultUpdates = Partial<{
   outputData: string;
   errorMessage: string;
@@ -2506,25 +2266,23 @@ export async function approveAssistantArchitectAction(
       return { isSuccess: false, message: "Invalid ID format" }
     }
 
-    // Re-check at the final approval boundary. Submission-time validation alone
-    // is insufficient because assistant or repository grants may change while
-    // the request is pending.
-    const audienceCompatibility =
-      await validateAssistantRepositoryAudience(idInt)
-    if (!audienceCompatibility.isCompatible) {
-      log.warn("Assistant repository audience mismatch blocked approval", {
-        assistantId: idInt,
-        mismatches: audienceCompatibility.mismatches,
-      })
-      return {
-        isSuccess: false,
-        message:
-          "Repository permissions do not cover this assistant's audience. Update repository permissions or restrict assistant access before approval.",
-      }
-    }
-
-    // Approve the assistant architect and create its capability entry (transaction)
-    const updatedTool = await drizzleApproveAssistantArchitect(idInt)
+    // Lock the assistant before the final audience validation and hold that lock
+    // through the approval transition. Import replacement takes the same lock,
+    // so the graph that is approved is exactly the graph that was validated.
+    const updatedTool = await drizzleApproveAssistantArchitect(
+      idInt,
+      async (transaction) => {
+        const audienceCompatibility =
+          await validateAssistantRepositoryAudience(idInt, transaction)
+        if (!audienceCompatibility.isCompatible) {
+          log.warn("Assistant repository audience mismatch blocked approval", {
+            assistantId: idInt,
+            mismatches: audienceCompatibility.mismatches,
+          })
+        }
+        return audienceCompatibility.isCompatible
+      },
+    )
 
     // Fetch the capability row created in the same approval transaction. Its id
     // backs both the navigation item (navigation_items.capability_id) and the
@@ -2534,7 +2292,12 @@ export async function approveAssistantArchitectAction(
         db
           .select({ id: capabilities.id })
           .from(capabilities)
-          .where(eq(capabilities.promptChainToolId, idInt))
+          .where(
+            and(
+              eq(capabilities.promptChainToolId, idInt),
+              eq(capabilities.isActive, true)
+            )
+          )
           .limit(1),
       "getCapabilityByPromptChainToolId"
     )
@@ -2559,9 +2322,10 @@ export async function approveAssistantArchitectAction(
     // BOTH role grants either all commit or all roll back, so a failure part-way
     // never leaves the tool approved-with-capability but half-wired (a nav item
     // no role can reach, or only one role granted). Idempotent — re-running after
-    // a partial failure converges: the nav item is guarded by an existence check
-    // and the grants use onConflictDoNothing on the unique (role_id, capability_id)
-    // constraint. Replaces the previous non-transactional await-in-loop.
+    // a partial failure converges: the existing nav item is re-synced to the
+    // stable capability identity and the grants use onConflictDoNothing on the
+    // unique (role_id, capability_id) constraint. Replaces the previous
+    // non-transactional await-in-loop.
     await executeTransaction(async (tx) => {
       const existingNavTx = await tx
         .select({ id: navigationItems.id })
@@ -2578,6 +2342,15 @@ export async function approveAssistantArchitectAction(
           capabilityId: finalCapabilityId,
           isActive: true
         })
+      } else {
+        await tx
+          .update(navigationItems)
+          .set({
+            label: updatedTool.name,
+            capabilityId: finalCapabilityId,
+            isActive: true
+          })
+          .where(eq(navigationItems.id, existingNavTx[0].id))
       }
       if (roleIdsToGrant.length > 0) {
         await tx
@@ -2598,6 +2371,13 @@ export async function approveAssistantArchitectAction(
   } catch (error) {
     timer({ status: "error" })
     log.error("Error approving tool:", error)
+    if (error instanceof AssistantApprovalValidationError) {
+      return {
+        isSuccess: false,
+        message:
+          "Repository permissions do not cover this assistant's audience. Update repository permissions or restrict assistant access before approval.",
+      }
+    }
     return { isSuccess: false, message: "Failed to approve tool" }
   }
 }

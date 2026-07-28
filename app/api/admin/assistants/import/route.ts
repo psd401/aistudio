@@ -1,21 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/admin-check";
 import { getServerSession } from "@/lib/auth/server-session";
-import {
-  createAssistantArchitect,
-  createChainPrompt,
-  createToolInputField,
-} from "@/lib/db/drizzle";
 import { resolveUserId } from "@/lib/auth/resolve-user";
 import {
-  validateImportFile,
-  mapModelsForImport,
-  type ExportFormat,
-} from "@/lib/assistant-export-import";
+  AssistantImportServiceError,
+  createAssistantsFromImport,
+  IMPORTED_ASSISTANT_STATUS,
+} from "@/lib/assistant-architect/import-service";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
-import { decodeMdxEditorEscapes } from "@/lib/utils/text-sanitizer";
-
-type AssistantImport = ExportFormat["assistants"][number];
 
 interface AssistantImportResult {
   name: string;
@@ -28,84 +20,6 @@ function isSupportedImportFile(file: File): boolean {
   return (
     !file.type || file.type === "application/json" || file.type === "text/json"
   );
-}
-
-async function importAssistant(
-  assistant: AssistantImport,
-  modelMap: Map<string, number>,
-  userId: number,
-  log: ReturnType<typeof createLogger>,
-): Promise<AssistantImportResult> {
-  try {
-    const createdAssistant = await createAssistantArchitect({
-      name: assistant.name,
-      description: assistant.description || "",
-      status: "pending_approval",
-      imagePath: assistant.image_path,
-      isParallel: assistant.is_parallel || false,
-      timeoutSeconds: assistant.timeout_seconds,
-      userId,
-    });
-
-    await importAssistantPrompts(assistant, createdAssistant.id, modelMap, log);
-    await importAssistantFields(assistant, createdAssistant.id);
-    return { name: assistant.name, id: createdAssistant.id, status: "success" };
-  } catch (error) {
-    log.error(`Error importing assistant ${assistant.name}:`, error);
-    return {
-      name: assistant.name,
-      status: "error",
-      error: error instanceof Error ? error.message : "Unknown error",
-    };
-  }
-}
-
-async function importAssistantPrompts(
-  assistant: AssistantImport,
-  assistantId: number,
-  modelMap: Map<string, number>,
-  log: ReturnType<typeof createLogger>,
-): Promise<void> {
-  for (const prompt of assistant.prompts) {
-    const modelId = modelMap.get(prompt.model_name);
-    if (!modelId) {
-      log.warn(
-        `No model mapping found for ${prompt.model_name}, skipping prompt`,
-      );
-      continue;
-    }
-
-    await createChainPrompt({
-      assistantArchitectId: assistantId,
-      name: prompt.name,
-      content: decodeMdxEditorEscapes(prompt.content),
-      systemContext: prompt.system_context
-        ? decodeMdxEditorEscapes(prompt.system_context)
-        : prompt.system_context,
-      modelId,
-      position: prompt.position,
-      parallelGroup: prompt.parallel_group,
-      inputMapping: null,
-      timeoutSeconds: prompt.timeout_seconds,
-    });
-  }
-}
-
-async function importAssistantFields(
-  assistant: AssistantImport,
-  assistantId: number,
-): Promise<void> {
-  for (const field of assistant.input_fields) {
-    await createToolInputField({
-      assistantArchitectId: assistantId,
-      name: field.name,
-      label: field.label,
-      fieldType: field.field_type as
-        "short_text" | "long_text" | "select" | "multi_select" | "file_upload",
-      position: field.position,
-      options: field.options || undefined,
-    });
-  }
 }
 
 export async function POST(request: NextRequest) {
@@ -165,7 +79,7 @@ export async function POST(request: NextRequest) {
 
     // Read and parse file
     const fileContent = await file.text();
-    let importData: ExportFormat;
+    let importData: unknown;
 
     try {
       importData = JSON.parse(fileContent);
@@ -176,46 +90,20 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate file structure
-    const validation = validateImportFile(importData);
-    if (!validation.valid) {
-      return NextResponse.json(
-        { isSuccess: false, message: validation.error },
-        { status: 400 },
-      );
-    }
-
-    log.info("Starting import", {
-      assistantCount: importData.assistants.length,
-    });
-
     // Get user ID (provisions if missing)
     const userId = await resolveUserId(session, requestId);
 
-    // Collect all unique model names for mapping
-    const modelNames = new Set<string>();
-    for (const assistant of importData.assistants) {
-      for (const prompt of assistant.prompts) {
-        modelNames.add(prompt.model_name);
-      }
-    }
-
-    // Map models
-    const modelMap = await mapModelsForImport(Array.from(modelNames));
-
-    const importResults: AssistantImportResult[] = [];
-
-    // Import each assistant
-    for (const assistant of importData.assistants) {
-      importResults.push(
-        await importAssistant(assistant, modelMap, userId, log),
-      );
-    }
-
-    // Check if any imports succeeded
-    const successCount = importResults.filter(
-      (r) => r.status === "success",
-    ).length;
+    const serviceResult = await createAssistantsFromImport(importData, userId);
+    log.info("Import service completed", {
+      assistantCount: serviceResult.total,
+    });
+    const importResults: AssistantImportResult[] = serviceResult.results.map(
+      (result) =>
+        result.status === IMPORTED_ASSISTANT_STATUS
+          ? { name: result.name, id: result.id, status: "success" }
+          : result,
+    );
+    const successCount = serviceResult.successful;
 
     if (successCount === 0) {
       return NextResponse.json(
@@ -229,30 +117,39 @@ export async function POST(request: NextRequest) {
     }
 
     log.info(
-      `Successfully imported ${successCount} out of ${importData.assistants.length} assistants`,
+      `Successfully imported ${successCount} out of ${serviceResult.total} assistants`,
     );
     timer({
       status: "success",
       successCount,
-      totalCount: importData.assistants.length,
+      totalCount: serviceResult.total,
     });
 
     return NextResponse.json({
       isSuccess: true,
       message: `Successfully imported ${successCount} assistant(s)`,
       data: {
-        total: importData.assistants.length,
+        total: serviceResult.total,
         successful: successCount,
-        failed: importData.assistants.length - successCount,
+        failed: serviceResult.failed,
         results: importResults,
-        modelMappings: Array.from(modelMap.entries()).map(([name, id]) => ({
-          modelName: name,
-          mappedToId: id,
-        })),
+        modelMappings: serviceResult.modelMappings,
       },
     });
   } catch (error) {
     timer({ status: "error" });
+    if (
+      error instanceof AssistantImportServiceError &&
+      error.code === "VALIDATION_ERROR"
+    ) {
+      log.warn("Assistant import validation failed", {
+        error: error.message,
+      });
+      return NextResponse.json(
+        { isSuccess: false, message: error.message },
+        { status: 400 },
+      );
+    }
     log.error("Error importing assistants:", error);
 
     return NextResponse.json(

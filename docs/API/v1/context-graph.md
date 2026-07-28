@@ -780,6 +780,238 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 
 ---
 
+## Assistant Architect create, update, and fork
+
+Programmatic callers can create, replace, and fork Assistant Architects through
+the same portable ExportFormat v1.0 used by the admin export/import UI:
+
+- `POST /api/v1/assistants/import`
+- `PUT /api/v1/assistants/{id}`
+- `POST /api/v1/assistants/{id}/fork`
+
+All three require `assistants:write` on REST. Their MCP equivalents are
+`create_assistant` (`mcp:create_assistant`), `update_assistant`
+(`mcp:update_assistant`), and `fork_assistant` (`mcp:fork_assistant`). These
+scopes are available to staff and administrators. Catalog metadata is the scope
+source of truth on both surfaces; the REST routes use `assistants:write` as a
+fallback only when the catalog entry is unavailable. When an administrator
+disables a cataloged create, update, or fork operation, both MCP and REST reject
+it; REST uses a masked `404` before body parsing or mutation.
+
+The create and update catalog contracts are published as `v2` so existing
+deployments can install the complete recursive ExportFormat schema without
+mutating an already-published `v1` contract. Unpinned callers resolve to `v2`.
+
+Import envelopes must contain at least one assistant and are limited to 10 MB,
+100 assistants, 50 input fields per assistant (matching the execution-time
+input cap), and 500 prompt repository bindings across the admin, REST, and MCP
+surfaces. An empty batch is a `400 VALIDATION_ERROR`, not a retryable import
+failure. REST create/update count bytes while reading the request stream and
+cancel before buffering more than the limit, so a missing or understated
+`Content-Length` cannot bypass the pre-parse bound. An advertised oversized
+length is rejected immediately. The shared MCP transport has a separate 64 MiB
+ceiling so existing multi-file tools such as `import_okf` retain their larger
+request contract; shared import validation still rejects an Assistant Architect
+envelope above 10 MB before any write. The optional REST fork body is
+independently stream-bounded to 4 KiB before JSON decoding. Oversized REST
+create and update envelopes return `413 PAYLOAD_TOO_LARGE`.
+
+Every write preserves the existing human approval gate:
+
+- create: every assistant is owned by the authenticated caller and enters
+  `pending_approval`, regardless of the envelope's `status`;
+- update: staff may replace only their own assistants; administrators may
+  replace any assistant. Missing ids and assistants owned by another user both
+  return a masked `404 NOT_FOUND`. Prompts and input fields are
+  wholesale-replaced in the same transaction and status resets to
+  `pending_approval`. The assistant row is
+  locked for replacement, and a pending or running execution returns
+  `409 CONFLICT` before any graph mutation so its in-memory prompt ids remain
+  valid. Abandoned pending/running rows are marked failed only after the same
+  immutable per-execution wall-clock deadline the executor persists and enforces
+  (`agent_timeout_seconds` for agentic runs; `timeout_seconds`, or the
+  900-second platform ceiling when unset, for prompt chains) plus a one-minute
+  grace, so a crashed worker cannot block replacement forever without expiring
+  a legitimate long-running agent. Execution startup acquires the same
+  assistant-row lock, rechecks owner/admin/approved visibility plus the current
+  assistant and every prompt-model resource grant in that transaction, and
+  creates its active execution row before loading prompts, closing the
+  load-before-record and authorization-snapshot races. Prompts referenced
+  by earlier execution results are detached from the live graph rather than
+  deleted, preserving their outputs, errors, timings, feedback, and original
+  prompt configuration in execution history. Any linked UI capability is
+  deactivated atomically until the assistant is approved again. Reapproval
+  reuses that capability's stable identifier even when the import renamed the
+  assistant, and re-syncs the existing navigation item to it. Final repository
+  audience validation uses the approval transaction's existing connection and
+  holds the same assistant-row lock through the approval transition, so a
+  concurrent replacement cannot publish a graph that was not reviewed or
+  exhaust the connection pool with nested approval reads; and
+- fork: any assistant visible under the same owner/admin/approved plus
+  resource/room rules as the v1 detail endpoint may be copied. The source is
+  never modified, and the caller owns the new `pending_approval` copy. The
+  visibility/resource decision and source export are read in one
+  repeatable-read transaction. After authoring validation, current source
+  visibility is checked again under the source row lock in the destination
+  create transaction immediately before insert, so a grant or room revocation
+  committed during validation returns the same masked `404` without persisting
+  a fork. Missing and invisible sources both return `404`.
+
+ExportFormat v1.0 carries the complete executable configuration needed for a
+behavior-preserving fork: assistant mode, model routing, agent tools and
+connectors, agent limits, retrieval scope, prompt input mappings, repository
+ids, and prompt tools. These properties are optional for compatibility with
+older v1.0 files; missing values use the existing database defaults. Unsupported
+input field types and invalid configuration values fail envelope validation
+before any assistant transaction begins. Explicit `null` is also portable for
+nullable image, prompt context/group/mapping, prompt/assistant timeout, and
+input-field option properties; every non-null timeout must be a positive
+integer.
+Advanced model routing requires an OpenAI, Anthropic, or Google routing family,
+while legacy and standard routing reject a non-null family. Agent cost caps,
+when present, must be positive. An update cannot reverse an agentic assistant
+to prompt-chain mode; because omitted legacy fields use their v1.0 defaults, an
+agentic update must explicitly retain `mode: "agentic"`.
+
+Agent tool and connector identifiers are also checked against the importing
+author's role-derived scopes and connector visibility before any write starts.
+Every mapped prompt fallback model must be author-accessible, even when the
+prompt enables no tools. Every prompt repository must be author-accessible,
+active, and durable; ephemeral/system repositories cannot be persisted through
+an import. This is the author-side half of the existing dual authorization
+boundary; execution still rechecks the executing caller. An inaccessible
+tool, connector, model, or repository returns `400` without creating,
+replacing, or forking an assistant. Per-prompt enabled tools are validated at
+the same boundary using the editor's normal routing rules: legacy prompts must
+use tools supported by their mapped active model, while automatic routing must
+have an author-accessible eligible model that supports the complete selected
+tool set.
+
+Each assistant create runs in its own transaction, so a failed prompt or input
+field leaves no partial rows for that assistant while successful siblings in a
+multi-assistant import remain committed. Model names use the existing importer
+resolution order: exact active `modelId`, provider-family fallback
+(OpenAI/Anthropic/Google), then the first active model. Responses report every
+`modelName` → `mappedToId` choice. If no active model can be mapped for any
+prompt, validation fails before a create or replacement transaction starts.
+
+**Create example**
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "version": "1.0",
+    "exported_at": "2026-07-28T12:00:00.000Z",
+    "assistants": [{
+      "name": "Family newsletter helper",
+      "description": "Drafts a family-facing newsletter",
+      "status": "approved",
+      "prompts": [{
+        "name": "Draft",
+        "content": "Draft a newsletter about {{topic}}",
+        "model_name": "gpt-5",
+        "position": 0
+      }],
+      "input_fields": [{
+        "name": "topic",
+        "label": "Topic",
+        "field_type": "short_text",
+        "position": 0
+      }]
+    }]
+  }' \
+  "https://your-domain/api/v1/assistants/import"
+```
+
+**Create response `201`**
+
+```json
+{
+  "data": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0,
+    "results": [{
+      "name": "Family newsletter helper",
+      "id": 41,
+      "status": "pending_approval"
+    }],
+    "modelMappings": [{
+      "modelName": "gpt-5",
+      "mappedToId": 7
+    }]
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+**Update example**
+
+```bash
+curl -X PUT \
+  -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "version": "1.0",
+    "exported_at": "2026-07-28T12:30:00.000Z",
+    "assistants": [{
+      "name": "Updated family newsletter helper",
+      "description": "Updated by an agent",
+      "status": "approved",
+      "prompts": [{
+        "name": "Draft",
+        "content": "Draft three newsletter sections about {{topic}}",
+        "model_name": "gpt-5",
+        "position": 0
+      }],
+      "input_fields": [{
+        "name": "topic",
+        "label": "Topic",
+        "field_type": "short_text",
+        "position": 0
+      }]
+    }]
+  }' \
+  "https://your-domain/api/v1/assistants/41"
+```
+
+The update envelope must contain exactly one assistant. A successful response is
+`200` with `data.result` (`name`, `id`, `status`) plus `modelMappings`.
+
+**Fork example**
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"My family newsletter helper"}' \
+  "https://your-domain/api/v1/assistants/41/fork"
+```
+
+The optional body may be omitted. A successful `201` response contains
+`data.sourceAssistantId`, the new `data.result`, and `modelMappings`.
+
+**Errors**
+
+- `400` — Invalid JSON, unsupported export version/shape or collection limit, an
+  inaccessible agent tool/connector, mapped model, or durable repository, a
+  prompt with no active model mapping, an invalid routing/agent limit
+  combination, an unsupported agentic-to-prompt-chain update,
+  non-positive or partially numeric path ID, an update envelope containing
+  other than one assistant, or an invalid fork name.
+- `401` — Missing or invalid authentication.
+- `403` — Missing `assistants:write`.
+- `404` — A cataloged mutation is disabled, an update target is missing/owned
+  by another user, or a fork source is missing/not visible.
+- `409` — The assistant has an active execution and cannot be replaced.
+- `413` — The create or update import envelope exceeds 10 MiB.
+- `429` — API-key rate limit exceeded.
+- `500` — Import persistence or another internal failure.
+
+---
+
 ## Assistant execution runtime files
 
 `POST /api/v1/assistants/{id}/execute` and
@@ -815,8 +1047,26 @@ conversation message, the server:
    inside retrieval, and inside each repository tool.
 
 Assistant ownership never lends repository access. The synchronous REST path,
-the `Accept: application/json` async-job path, and MCP
-`execute_assistant` all use the same execution service and authorization rules.
+the `Accept: application/json` async-job path, MCP `execute_assistant`, and the
+browser Assistant Architect route all use the same assistant-lock execution
+coordinator. Its mode-specific deadline is also the enforced streaming timeout,
+so update reconciliation and live runtimes agree on when a row can be stale.
+Legacy routing rechecks every pinned prompt-model grant under that lock.
+Standard and advanced routing instead authorize the router's current selected
+model, not a stored fallback that may never be used. The coordinated execution
+row remains active until every prompt in a final parallel position has settled
+and persisted, so an import replacement cannot delete a sibling's prompt while
+it is still completing.
+API-key, JWT, and MCP execution accepts only `approved` assistants and repeats
+that status check under the assistant-row lock; authenticated browser sessions
+retain the owner/administrator draft-preview path.
+The browser route existence-masks private draft/pending assistants as `404`,
+preflights durable repository bindings before counting its optional
+assistant-wide agentic rate cap, then repeats repository validation after the
+coordinated row protects the executable graph. If connector/cost setup consumes
+the coordinated deadline before an agentic stream starts, or any post-resolution
+agent setup step fails, those acquired resources are released on that pre-stream
+failure path.
 The conversation endpoint reuses the exact server-prepared input for execution,
 so it does not persist raw marker data or resolve the source twice. It binds
 temporary references to the new owned conversation before the first message
@@ -827,11 +1077,14 @@ conversation is removed and the attachment remains retryable.
 `POST /api/v1/assistants/{id}/conversations/{cid}/messages` and the matching
 history route require the conversation's server-owned assistant ID to match
 `{id}`; a mismatched path returns the same `404` as a missing conversation.
-Before parsing or persisting a follow-up, the server unions all prompt-bound
-repositories with the conversation's runtime repositories and rechecks the
-executing principal's current ACL. The model receives tokenizer-bounded hybrid
-retrieval context and repository tools; durable history retains only the
-caller's original message text, not injected source content.
+After bounded body parsing, follow-up execution acquires the assistant-row lock,
+repeats programmatic approval and current grant checks, and creates an active
+execution row before loading the graph. Import replacement remains blocked until
+that row settles. The server then unions all prompt-bound repositories with the
+conversation's runtime repositories and rechecks the executing principal's
+current ACL. The model receives tokenizer-bounded hybrid retrieval context and
+repository tools; durable history retains only the caller's original message
+text, not injected source content.
 
 Assistant room access is evaluated in the shared resource gate before any
 provider call:
@@ -857,8 +1110,9 @@ resource gate before returning assistant prompts or input definitions.
 the existing assistant existence/status visibility check, then return `403` if
 the current shared assistant/model/resource decision denies the run.
 
-**Authentication and scopes:** Bearer API key or authenticated session.
-Requires `assistants:execute`, `assistants:*`,
+**Authentication and scopes:** Bearer API key/JWT or authenticated session.
+API-key/JWT callers can execute only `approved` assistants; session callers keep
+the owner/administrator draft-preview behavior. Requires `assistants:execute`, `assistants:*`,
 `assistant:{id}:execute`, or `*`, plus per-resource access to the assistant and
 every model/repository used by the run.
 
@@ -907,6 +1161,9 @@ the caller's active room.
 
 **Response `404`** — Assistant not found, assistant execution is disabled, or a
 conversation does not belong to the assistant ID in the path.
+
+**Response `413`** — Execute, conversation-start, or follow-up body exceeds the
+128 KiB transport limit.
 
 **Response `500`** — Provider, persistence, or other internal execution failure.
 

@@ -14,6 +14,7 @@ import {
   resolveRoomMembershipEmails,
   roomsForUser,
 } from "@/lib/rooms/membership";
+import type { DbTransaction } from "@/lib/db/drizzle-client";
 
 describe("room membership", () => {
   beforeEach(() => {
@@ -136,5 +137,24 @@ describe("room membership", () => {
       hasActiveRoomMembership: true,
       assignedAssistantIds: new Set(["7", "8"]),
     });
+  });
+
+  it("reads room authorization from a caller-owned transaction", async () => {
+    const execute = jest.fn().mockResolvedValue([{
+      isAdministrator: false,
+      isStudentOnly: false,
+      hasActiveRoomMembership: false,
+      assignedAssistantIds: [],
+    }]);
+    const transaction = { execute } as unknown as DbTransaction;
+
+    await expect(
+      getRoomAssistantAccessContext(42, [7], transaction)
+    ).resolves.toMatchObject({
+      isAdministrator: false,
+      assignedAssistantIds: new Set(),
+    });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(mockExecuteQuery).not.toHaveBeenCalled();
   });
 });

@@ -68,16 +68,23 @@ key is minted). The relevant scopes:
 |---|---|---|
 | `list-assistants` | `mcp:list_assistants` | staff + admin |
 | `execute-assistant` | `mcp:execute_assistant` | **staff + admin** |
+| `create-assistant` | `mcp:create_assistant` | **staff + admin** |
+| `update-assistant` | `mcp:update_assistant` | **staff + admin** |
+| `fork-assistant` | `mcp:fork_assistant` | **staff + admin** |
 | `search-decisions` | `mcp:search_decisions` | staff + admin |
 | `get-decision-graph` | `mcp:get_decision_graph` | staff + admin |
 | `capture-decision` | `mcp:capture_decision` | **admin only** |
 
 - `execute_assistant` is **staff + admin** — MCP now matches REST for execution
   (a staff member can execute assistants with their own key).
+- Assistant create/update/fork are **staff + admin**. Updates are owner-or-admin;
+  forks may copy any assistant the caller can currently see. Every mutation
+  resets the resulting assistant to `pending_approval`.
 - `capture_decision` is **admin-only** over MCP (consistent with `graph:write`).
-- **A key minted before this scope change won't carry the new staff
-  `mcp:execute_assistant`** — the owner must mint a **new** key (the create dialog
-  offers it automatically once their role allows it) and re-store it.
+- **A key minted before these scope changes won't automatically gain
+  `mcp:execute_assistant`, `mcp:create_assistant`, `mcp:update_assistant`, or
+  `mcp:fork_assistant`** — the owner must mint a **new** key (the create dialog
+  offers allowed scopes automatically) and re-store it.
 
 ## Discovery subcommands
 
@@ -142,6 +149,44 @@ Executes an **approved** assistant and returns `{ executionId, text, usage }`.
   a clean `{ "status": "not_executable", "assistantId", "message" }` and
   **exits 0** — it is **not** an error. Steer to
   `list-assistants --status approved`.
+
+### `create-assistant`
+
+Create one or more assistants from the portable ExportFormat v1.0 JSON used by
+the admin export/import UI. `status` values in the file are ignored; every
+created assistant is owned by the caller and starts in `pending_approval`.
+
+```bash
+node /opt/psd-skills/psd-aistudio/run.js create-assistant --user <email> \
+  --file /tmp/assistant-export.json
+```
+
+For a small envelope, `--json '<ExportFormat JSON>'` may be used instead of
+`--file`. Local files must be regular files no larger than 10 MB; the CLI checks
+the bound before reading them. The response reports every assistant result plus
+each `modelName` → `mappedToId` choice.
+
+### `update-assistant`
+
+Replace one assistant's import-controlled fields, prompts, and input fields.
+The envelope must contain exactly one assistant. A staff caller may update only
+their own assistant; an administrator may update any assistant. The update is
+atomic and resets status to `pending_approval`.
+
+```bash
+node /opt/psd-skills/psd-aistudio/run.js update-assistant --user <email> \
+  --id 17 --file /tmp/edited-assistant-export.json
+```
+
+### `fork-assistant`
+
+Fork a visible assistant into a new caller-owned `pending_approval` copy. The
+source is unchanged; `--name` optionally overrides the copied name.
+
+```bash
+node /opt/psd-skills/psd-aistudio/run.js fork-assistant --user <email> \
+  --id 17 --name "My assistant copy"
+```
 
 ### `search-decisions`
 

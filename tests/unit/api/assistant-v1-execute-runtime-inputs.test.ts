@@ -41,6 +41,7 @@ jest.mock("next/server", () => {
 })
 
 const mockPrepareAssistantExecutionInputs = jest.fn()
+const mockExecuteAssistant = jest.fn()
 const mockExecuteAssistantForJobCompletion = jest.fn()
 const mockCreateJob = jest.fn()
 const mockCompleteJob = jest.fn()
@@ -56,6 +57,7 @@ jest.mock("@/lib/api", () => ({
         auth: {
           userId: number
           cognitoSub: string
+          authType: "session" | "api_key" | "jwt"
           scopes: string[]
         },
         requestId: string
@@ -67,6 +69,7 @@ jest.mock("@/lib/api", () => ({
         {
           userId: 7,
           cognitoSub: "executor-sub",
+          authType: "api_key",
           scopes: ["assistants:execute"],
         },
         "request-1"
@@ -109,7 +112,7 @@ jest.mock("@/lib/assistant-architect/repository-access-preflight", () => ({
 }))
 
 jest.mock("@/lib/api/assistant-execution-service", () => ({
-  executeAssistant: jest.fn(),
+  executeAssistant: (...args: unknown[]) => mockExecuteAssistant(...args),
   executeAssistantForJobCompletion: (...args: unknown[]) =>
     mockExecuteAssistantForJobCompletion(...args),
   validateExecutionInputs: jest.fn(() => null),
@@ -150,29 +153,48 @@ jest.mock("@/lib/logger", () => ({
 }))
 
 import { POST } from "@/app/api/v1/assistants/[id]/execute/route"
+import { verifyAssistantResourceGrants } from "@/lib/api"
+import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
+
+const mockVerifyAssistantResourceGrants =
+  verifyAssistantResourceGrants as jest.MockedFunction<
+    typeof verifyAssistantResourceGrants
+  >
+const mockGetAssistantArchitect =
+  getAssistantArchitectByIdAction as jest.MockedFunction<
+    typeof getAssistantArchitectByIdAction
+  >
 
 const bindingId = "123e4567-e89b-42d3-a456-426614174000"
 const rawMarker =
   `[[repository-attachment:v1:${bindingId}:44:caller-forged-name.pdf]]`
 
-describe("v1 async assistant runtime repository inputs", () => {
-  beforeEach(() => {
-    jest.clearAllMocks()
-    mockParseRequestBody.mockResolvedValue({
-      data: { inputs: { file: rawMarker } },
-    })
-    mockCreateJob.mockResolvedValue("job-1")
-    mockCompleteJob.mockResolvedValue(undefined)
-    mockFailJob.mockResolvedValue(undefined)
-    mockExecuteAssistantForJobCompletion.mockResolvedValue({
-      executionId: 55,
-      text: "done",
-    })
-    mockPreflightAssistantRepositoryAccess.mockResolvedValue({
-      isAllowed: true,
-      repositoryIds: [],
-    })
+function setupExecutionRouteMocks() {
+  jest.clearAllMocks()
+  mockParseRequestBody.mockResolvedValue({
+    data: { inputs: { file: rawMarker } },
   })
+  mockCreateJob.mockResolvedValue("job-1")
+  mockCompleteJob.mockResolvedValue(undefined)
+  mockFailJob.mockResolvedValue(undefined)
+  mockExecuteAssistantForJobCompletion.mockResolvedValue({
+    executionId: 55,
+    text: "done",
+  })
+  mockExecuteAssistant.mockResolvedValue({
+    streamResponse: new Response("stream", {
+      headers: { "content-type": "text/event-stream" },
+    }),
+    executionId: 55,
+  })
+  mockPreflightAssistantRepositoryAccess.mockResolvedValue({
+    isAllowed: true,
+    repositoryIds: [],
+  })
+}
+
+describe("v1 async assistant runtime repository inputs", () => {
+  beforeEach(setupExecutionRouteMocks)
 
   it("prepares before job creation and reuses the exact preparation in the job", async () => {
     const preparedInputs = {
@@ -208,10 +230,44 @@ describe("v1 async assistant runtime repository inputs", () => {
       cognitoSub: "executor-sub",
       requestId: "request-1",
       preparedInputs,
+      requireApproved: true,
     })
     expect(JSON.stringify(mockCreateJob.mock.calls)).not.toContain(bindingId)
     expect(JSON.stringify(mockCreateJob.mock.calls)).not.toContain(
       "caller-forged-name.pdf"
+    )
+  })
+
+  it("defers automatic-routing model authorization to the selected model", async () => {
+    mockGetAssistantArchitect.mockResolvedValueOnce({
+      isSuccess: true,
+      message: "ok",
+      data: {
+        id: 5,
+        userId: 9,
+        modelRoutingMode: "standard",
+        prompts: [{ id: 10, position: 0, modelId: 3 }],
+      },
+    } as never)
+    mockPrepareAssistantExecutionInputs.mockResolvedValue({
+      ownerId: 7,
+      inputs: {},
+      runtimeRepositoryIds: [],
+      runtimeRepositoryQuery: "",
+      references: [],
+    })
+
+    const response = await POST(
+      new NextRequest("http://localhost/api/v1/assistants/5/execute", {
+        method: "POST",
+        headers: { accept: "application/json" },
+      }),
+      { params: Promise.resolve({ id: "5" }) }
+    )
+
+    expect(response.status).toBe(202)
+    expect(mockVerifyAssistantResourceGrants).toHaveBeenCalledWith(
+      expect.objectContaining({ architectId: 5, modelDbIds: [] })
     )
   })
 
@@ -250,5 +306,41 @@ describe("v1 async assistant runtime repository inputs", () => {
     expect(response.status).toBe(403)
     expect(mockPrepareAssistantExecutionInputs).not.toHaveBeenCalled()
     expect(mockCreateJob).not.toHaveBeenCalled()
+  })
+
+})
+
+describe("v1 streaming assistant execution coordination", () => {
+  beforeEach(setupExecutionRouteMocks)
+
+  it("preserves a coordinator 404 when approval changes under the execution lock", async () => {
+    const preparedInputs = {
+      ownerId: 7,
+      inputs: {},
+      runtimeRepositoryIds: [],
+      runtimeRepositoryQuery: "",
+      references: [],
+    }
+    mockPrepareAssistantExecutionInputs.mockResolvedValue(preparedInputs)
+    mockExecuteAssistant.mockRejectedValue({
+      statusCode: 404,
+      userMessage: "Assistant not found: 5",
+    })
+
+    const response = await POST(
+      new NextRequest("http://localhost/api/v1/assistants/5/execute", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ id: "5" }) }
+    )
+
+    expect(response.status).toBe(404)
+    expect(JSON.parse(String(response.body))).toEqual({
+      requestId: "request-1",
+      error: {
+        code: "NOT_FOUND",
+        message: "Assistant not found: 5",
+      },
+    })
   })
 })

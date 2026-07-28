@@ -24,6 +24,10 @@ process.env.AISTUDIO_MCP_API_KEY = '';
 process.env.AISTUDIO_MCP_API_KEY_SECRET_ID = 'psd-agent/dev/aistudio-mcp-api-key';
 
 const { test, expect, beforeEach, afterEach } = require('bun:test');
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const common = require('./common');
 
@@ -239,6 +243,149 @@ test('execute-assistant on a genuine tool error → tool-error, exit 12', async 
   }
   expect(code).toBe(12);
   expect(emitted[0].status).toBe('tool-error');
+});
+
+// ── create/update/fork assistant ─────────────────────────────────────────────
+
+test('create-assistant sends the ExportFormat envelope from --json', async () => {
+  const envelope = {
+    version: '1.0',
+    exported_at: '2026-07-28T00:00:00.000Z',
+    assistants: [],
+  };
+  await run('create-assistant', '--json', JSON.stringify(envelope));
+  expect(toolCalls[0]).toMatchObject({
+    toolName: 'create_assistant',
+    toolArgs: envelope,
+  });
+});
+
+test('update-assistant adds numeric assistantId to the envelope', async () => {
+  const envelope = {
+    version: '1.0',
+    exported_at: '2026-07-28T00:00:00.000Z',
+    assistants: [],
+  };
+  await run(
+    'update-assistant',
+    '--id',
+    '17',
+    '--json',
+    JSON.stringify(envelope),
+  );
+  expect(toolCalls[0]).toMatchObject({
+    toolName: 'update_assistant',
+    toolArgs: { assistantId: 17, ...envelope },
+  });
+});
+
+test('update-assistant keeps --id authoritative over an envelope assistantId', async () => {
+  const envelope = {
+    version: '1.0',
+    exported_at: '2026-07-28T00:00:00.000Z',
+    assistants: [],
+    assistantId: 999,
+  };
+  await run(
+    'update-assistant',
+    '--id',
+    '17',
+    '--json',
+    JSON.stringify(envelope),
+  );
+  expect(toolCalls[0]).toMatchObject({
+    toolName: 'update_assistant',
+    toolArgs: { ...envelope, assistantId: 17 },
+  });
+});
+
+test('fork-assistant sends assistantId and optional name', async () => {
+  await run('fork-assistant', '--id', '17', '--name', 'My copy');
+  expect(toolCalls[0]).toMatchObject({
+    toolName: 'fork_assistant',
+    toolArgs: { assistantId: 17, name: 'My copy' },
+  });
+});
+
+test('create-assistant requires exactly one envelope source', async () => {
+  let code;
+  try {
+    await run('create-assistant');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+});
+
+test('create-assistant rejects an oversized local file before reading it', async () => {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'psd-aistudio-import-'),
+  );
+  const file = path.join(directory, 'oversized.json');
+  try {
+    // Test-owned path created immediately above.
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    fs.writeFileSync(file, Buffer.alloc(10 * 1024 * 1024 + 1));
+
+    let code;
+    try {
+      await run('create-assistant', '--file', file);
+    } catch (err) {
+      code = err.code;
+    }
+
+    expect(code).toBe(1);
+    expect(toolCalls).toHaveLength(0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('create-assistant rejects non-regular import paths', async () => {
+  let code;
+  try {
+    await run('create-assistant', '--file', os.tmpdir());
+  } catch (err) {
+    code = err.code;
+  }
+
+  expect(code).toBe(1);
+  expect(toolCalls).toHaveLength(0);
+});
+
+test('create-assistant rejects a FIFO without blocking in open', () => {
+  if (process.platform === 'win32') return;
+
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'psd-aistudio-import-fifo-'),
+  );
+  const fifo = path.join(directory, 'import.json');
+  try {
+    const mkfifo = spawnSync('mkfifo', [fifo], { encoding: 'utf8' });
+    expect(mkfifo.status).toBe(0);
+
+    const child = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run.js'), 'create-assistant', '--file', fifo],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          AISTUDIO_MCP_URL: 'https://app.test/api/mcp',
+          AISTUDIO_MCP_API_KEY_SECRET_ID:
+            'psd-agent/dev/aistudio-mcp-api-key',
+        },
+        timeout: 1_000,
+      },
+    );
+
+    expect(child.error).toBeUndefined();
+    expect(child.signal).toBeNull();
+    expect(child.status).toBe(1);
+    expect(child.stderr).toContain('--file must refer to a regular file');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 // ── insufficient-scope hint (never retried / key-swapped) ──────────────────────

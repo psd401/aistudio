@@ -212,6 +212,67 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
       },
     },
   },
+  create_assistant: {
+    identifier: "assistants.create",
+    requiredScope: "mcp:create_assistant",
+    internalScopes: ["mcp:create_assistant"],
+    destructive: true,
+    // v2 publishes the complete recursive ExportFormat assistant schema.
+    version: "v2",
+    rest: {
+      scopes: ["assistants:write"],
+      binding: {
+        method: "post",
+        path: "/api/v1/assistants/import",
+        summary: "Create assistants from an ExportFormat envelope",
+        operationId: "createAssistants",
+        successResponses: {
+          "201": "Assistants created; individual results include pending-approval ids.",
+        },
+        errorResponses: ["400", "404", "413", "429"],
+      },
+    },
+  },
+  update_assistant: {
+    identifier: "assistants.update",
+    requiredScope: "mcp:update_assistant",
+    internalScopes: ["mcp:update_assistant"],
+    destructive: true,
+    // v2 publishes the complete recursive single-assistant schema.
+    version: "v2",
+    rest: {
+      scopes: ["assistants:write"],
+      binding: {
+        method: "put",
+        path: "/api/v1/assistants/{id}",
+        summary: "Replace an assistant from an ExportFormat envelope",
+        operationId: "updateAssistant",
+        successResponses: {
+          "200": "Assistant replaced and returned in pending-approval state.",
+        },
+        errorResponses: ["400", "404", "409", "413", "429"],
+      },
+    },
+  },
+  fork_assistant: {
+    identifier: "assistants.fork",
+    requiredScope: "mcp:fork_assistant",
+    internalScopes: ["mcp:fork_assistant"],
+    destructive: true,
+    rest: {
+      scopes: ["assistants:write"],
+      binding: {
+        method: "post",
+        path: "/api/v1/assistants/{id}/fork",
+        summary: "Fork a visible assistant",
+        operationId: "forkAssistant",
+        successResponses: {
+          "201": "Assistant fork created in pending-approval state.",
+        },
+        errorResponses: ["400", "404", "413", "429"],
+      },
+    },
+  },
   list_assistants: {
     identifier: "assistants.list",
     requiredScope: "mcp:list_assistants",
@@ -322,7 +383,7 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
 };
 
 /**
- * The 5 MCP tools, projected into catalog manifest entries. Schemas/descriptions
+ * MCP tools projected into catalog manifest entries. Schemas/descriptions
  * come straight from `MCP_TOOLS`. The in-process handler is deliberately NOT bound
  * here: `ToolCatalog` resolves it lazily at dispatch time (via a dynamic import of
  * `lib/mcp/tool-handlers`), keyed by the MCP wire `name`. Binding the handler in

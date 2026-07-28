@@ -15,6 +15,10 @@ import {
 import { checkUserRole } from "@/lib/db/drizzle"
 import { userCanAccessResource, filterAccessibleResourceIds } from "@/lib/db/drizzle/resource-access"
 import type { createLogger } from "@/lib/logger"
+import {
+  BoundedJsonRequestError,
+  parseBoundedJsonRequest,
+} from "@/lib/api/bounded-json-request"
 
 // ============================================
 // URL Parameter Extraction
@@ -28,9 +32,9 @@ export function extractNumericParam(url: string, segmentName: string): number | 
   const segments = new URL(url).pathname.split("/")
   const idx = segments.indexOf(segmentName)
   const idStr = segments[idx + 1]
-  if (!idStr) return null
-  const id = Number.parseInt(idStr, 10)
-  return Number.isNaN(id) || id <= 0 ? null : id
+  if (!idStr || !/^[1-9]\d*$/.test(idStr)) return null
+  const id = Number(idStr)
+  return Number.isSafeInteger(id) ? id : null
 }
 
 /**
@@ -80,15 +84,19 @@ export async function isAdminByUserId(userId: number): Promise<boolean> {
 
 /**
  * Verify a user has access to an assistant.
- * Returns null if access is granted, or a 403/404 error response if denied.
+ * Returns null if access is granted, or a masked 404 response if denied.
  */
 export async function verifyAssistantAccess(
   assistantId: number,
   auth: ApiAuthContext,
-  requestId: string
+  requestId: string,
+  options: { requireApproved?: boolean } = {}
 ): Promise<NextResponse | null> {
   const accessRow = await getAssistantForAccessCheck(assistantId)
   if (!accessRow) {
+    return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
+  }
+  if (options.requireApproved && accessRow.status !== "approved") {
     return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
   }
 
@@ -97,10 +105,9 @@ export async function verifyAssistantAccess(
   if (!access.allowed) {
     return createErrorResponse(
       requestId,
-      403,
-      "FORBIDDEN",
-      `You do not have permission to access this assistant`,
-      { requiredConditions: ["owner", "admin", "approved status"] }
+      404,
+      "NOT_FOUND",
+      `Assistant not found: ${assistantId}`
     )
   }
 
@@ -202,12 +209,27 @@ export async function verifyAssistantResourceGrants(args: {
 export async function parseRequestBody<T extends z.ZodType>(
   request: NextRequest,
   schema: T,
-  requestId: string
+  requestId: string,
+  options: { maximumBytes?: number } = {}
 ): Promise<{ data: z.infer<T> } | NextResponse> {
   let body: unknown
   try {
-    body = await request.json()
-  } catch {
+    body =
+      options.maximumBytes === undefined
+        ? await request.json()
+        : await parseBoundedJsonRequest(request, options.maximumBytes)
+  } catch (error) {
+    if (
+      error instanceof BoundedJsonRequestError &&
+      error.code === "PAYLOAD_TOO_LARGE"
+    ) {
+      return createErrorResponse(
+        requestId,
+        413,
+        "PAYLOAD_TOO_LARGE",
+        error.message
+      )
+    }
     return createErrorResponse(requestId, 400, "INVALID_JSON", "Request body must be valid JSON")
   }
 
