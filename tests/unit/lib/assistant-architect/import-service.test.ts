@@ -9,6 +9,7 @@ var mockUserCanAccessResource: jest.Mock;
 var mockLogWarn: jest.Mock;
 var mockValidateAgentToolsForAuthor: jest.Mock;
 var mockValidateAgentConnectorsForAuthor: jest.Mock;
+var mockValidatePromptToolsForRouting: jest.Mock;
 /* eslint-enable no-var */
 
 mockCheckUserRole = jest.fn();
@@ -17,6 +18,7 @@ mockUserCanAccessResource = jest.fn();
 mockLogWarn = jest.fn();
 mockValidateAgentToolsForAuthor = jest.fn();
 mockValidateAgentConnectorsForAuthor = jest.fn();
+mockValidatePromptToolsForRouting = jest.fn();
 
 jest.mock("drizzle-orm", () => ({
   eq: (left: unknown, right: unknown) => ({ left, right }),
@@ -61,6 +63,11 @@ jest.mock("@/lib/assistant-architect/agent-config-validation", () => ({
     mockValidateAgentToolsForAuthor(...args),
   validateAgentConnectorsForAuthor: (...args: unknown[]) =>
     mockValidateAgentConnectorsForAuthor(...args),
+}));
+
+jest.mock("@/lib/assistant-architect/prompt-tool-validation", () => ({
+  validatePromptToolsForRouting: (...args: unknown[]) =>
+    mockValidatePromptToolsForRouting(...args),
 }));
 
 jest.mock("@/lib/db/drizzle/resource-access", () => ({
@@ -391,6 +398,7 @@ beforeEach(() => {
   mockLogWarn.mockReset();
   mockValidateAgentToolsForAuthor.mockReset();
   mockValidateAgentConnectorsForAuthor.mockReset();
+  mockValidatePromptToolsForRouting.mockReset();
 
   mockExecuteQuery.mockImplementation((_query: unknown, operation: unknown) =>
     operation === "getActiveModelsForImport"
@@ -412,6 +420,10 @@ beforeEach(() => {
     invalidTools: [],
   });
   mockValidateAgentConnectorsForAuthor.mockResolvedValue(null);
+  mockValidatePromptToolsForRouting.mockResolvedValue({
+    isValid: true,
+    invalidTools: [],
+  });
   mockExecuteTransaction.mockImplementation(async (callback: unknown) => {
     const staged = cloneState(database);
     const run = callback as (
@@ -498,6 +510,42 @@ it("rejects inaccessible agent connectors before starting a transaction", async 
     ["connector-private"],
     7,
     ["staff"],
+  );
+  expect(mockExecuteTransaction).not.toHaveBeenCalled();
+});
+
+it("rejects unknown or model-incompatible prompt tools before starting a transaction", async () => {
+  mockValidatePromptToolsForRouting.mockResolvedValue({
+    isValid: false,
+    invalidTools: ["unknown_prompt_tool"],
+    message: "Unknown tools: unknown_prompt_tool",
+  });
+
+  await expect(
+    createAssistantsFromImport(
+      envelope({
+        ...baseAssistant,
+        prompts: [
+          {
+            ...baseAssistant.prompts[0],
+            enabled_tools: ["unknown_prompt_tool"],
+          },
+        ],
+      }),
+      7,
+    ),
+  ).rejects.toMatchObject({
+    code: "VALIDATION_ERROR",
+  } satisfies Partial<AssistantImportServiceError>);
+
+  expect(mockValidatePromptToolsForRouting).toHaveBeenCalledWith(
+    ["unknown_prompt_tool"],
+    {
+      modelRoutingMode: undefined,
+      modelRoutingFamily: undefined,
+    },
+    7,
+    91,
   );
   expect(mockExecuteTransaction).not.toHaveBeenCalled();
 });

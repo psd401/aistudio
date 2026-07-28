@@ -814,7 +814,9 @@ Every write preserves the existing human approval gate:
   by earlier execution results are detached from the live graph rather than
   deleted, preserving their outputs, errors, timings, feedback, and original
   prompt configuration in execution history. Any linked UI capability is
-  deactivated atomically until the assistant is approved again; and
+  deactivated atomically until the assistant is approved again. Reapproval
+  reuses that capability's stable identifier even when the import renamed the
+  assistant, and re-syncs the existing navigation item to it; and
 - fork: any assistant visible under the same owner/admin/approved plus
   resource/room rules as the v1 detail endpoint may be copied. The source is
   never modified, and the caller owns the new `pending_approval` copy. Missing
@@ -832,7 +834,11 @@ Agent tool and connector identifiers are also checked against the importing
 author's role-derived scopes and connector visibility before any write starts.
 This is the author-side half of the existing dual authorization boundary;
 execution still rechecks the executing caller. An inaccessible tool or connector
-returns `400` without creating, replacing, or forking an assistant.
+returns `400` without creating, replacing, or forking an assistant. Per-prompt
+enabled tools are validated at the same boundary using the editor's normal
+routing rules: legacy prompts must use tools supported by their mapped active
+model, while automatic routing must have an author-accessible eligible model
+that supports the complete selected tool set.
 
 Each assistant create runs in its own transaction, so a failed prompt or input
 field leaves no partial rows for that assistant while successful siblings in a

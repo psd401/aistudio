@@ -13,7 +13,7 @@ import {
 } from "@/types/db-types"
 // CoreMessage import removed - AI completion now handled by Lambda workers
 import { parseRepositoryIds } from "@/lib/utils/repository-utils"
-import { getAvailableToolsForModel, getAllTools } from "@/lib/tools/tool-registry"
+import { getAvailableToolsForModel } from "@/lib/tools/tool-registry"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 import { getScopesForRoles } from "@/lib/api-keys/scopes"
 
@@ -40,6 +40,7 @@ import {
   validateAgentConnectorsForAuthor,
   validateAgentToolsForAuthor,
 } from "@/lib/assistant-architect/agent-config-validation";
+import { validatePromptToolsForRouting } from "@/lib/assistant-architect/prompt-tool-validation";
 import {
   getAssistantArchitects as drizzleGetAssistantArchitects,
   getAssistantArchitectById as drizzleGetAssistantArchitectById,
@@ -59,7 +60,6 @@ import {
   updateChainPrompt,
   deleteChainPrompt,
   getAIModels,
-  getAIModelById,
   getArchitectEnabledModels,
   getAssistantArchitectsByStatus,
   getRoleByName,
@@ -188,67 +188,6 @@ function mapFieldTypeToDb(uiType: string): "short_text" | "long_text" | "select"
   }
 }
 
-// Helper function to validate enabled tools against model capabilities
-async function validateEnabledTools(
-  enabledTools: string[],
-  modelId: number
-): Promise<{ isValid: boolean; invalidTools: string[]; message?: string }> {
-  if (!enabledTools || enabledTools.length === 0) {
-    return { isValid: true, invalidTools: [] };
-  }
-
-  try {
-    // Get model ID string from database
-    const model = await getAIModelById(modelId)
-
-    if (!model || !model.active) {
-      return {
-        isValid: false,
-        invalidTools: enabledTools,
-        message: "Model not found or inactive"
-      }
-    }
-
-    const modelIdString = model.modelId
-
-    // Get all available tools for the model
-    const availableTools = await getAvailableToolsForModel(modelIdString);
-    const availableToolNames = availableTools.map(tool => tool.name);
-
-    // Get all registered tools to validate tool names exist
-    const allTools = getAllTools();
-    const allToolNames = allTools.map(tool => tool.name);
-
-    // Check for unknown tools
-    const unknownTools = enabledTools.filter(toolName => !allToolNames.includes(toolName));
-    if (unknownTools.length > 0) {
-      return {
-        isValid: false,
-        invalidTools: unknownTools,
-        message: `Unknown tools: ${unknownTools.join(', ')}`
-      };
-    }
-
-    // Check for tools not available for this model
-    const unavailableTools = enabledTools.filter(toolName => !availableToolNames.includes(toolName));
-    if (unavailableTools.length > 0) {
-      return {
-        isValid: false,
-        invalidTools: unavailableTools,
-        message: `Tools not supported by this model: ${unavailableTools.join(', ')}`
-      };
-    }
-
-    return { isValid: true, invalidTools: [] };
-  } catch (error) {
-    return {
-      isValid: false,
-      invalidTools: enabledTools,
-      message: `Error validating tools: ${error instanceof Error ? error.message : 'Unknown error'}`
-    };
-  }
-}
-
 function resolveModelRoutingFields(data: Partial<InsertAssistantArchitect>):
   | { fields: { modelRoutingMode?: AssistantModelRoutingMode; modelRoutingFamily?: AssistantModelFamily | null } }
   | { error: string } {
@@ -272,51 +211,6 @@ function resolveModelRoutingFields(data: Partial<InsertAssistantArchitect>):
     return { error: "Choose Advanced routing before selecting a model family" };
   }
   return { fields: {} };
-}
-
-async function validateEnabledToolsForRouting(
-  enabledTools: string[],
-  architect: Pick<SelectAssistantArchitect, "modelRoutingMode" | "modelRoutingFamily">,
-  userId: number,
-  fallbackModelId: number | null | undefined
-): Promise<{ isValid: boolean; invalidTools: string[]; message?: string }> {
-  const routingMode = architect.modelRoutingMode ?? "legacy";
-  if (routingMode === "legacy") {
-    if (!fallbackModelId) {
-      return { isValid: false, invalidTools: enabledTools, message: "Choose a model before enabling tools" };
-    }
-    return validateEnabledTools(enabledTools, fallbackModelId);
-  }
-  if (enabledTools.length === 0) return { isValid: true, invalidTools: [] };
-
-  const knownTools = new Set(getAllTools().map(tool => tool.name));
-  const unknownTools = enabledTools.filter(tool => !knownTools.has(tool));
-  if (unknownTools.length > 0) {
-    return { isValid: false, invalidTools: unknownTools, message: `Unknown tools: ${unknownTools.join(", ")}` };
-  }
-
-  const models = (await getArchitectEnabledModels()).filter(model =>
-    isExecutableTextModel(model)
-    && (routingMode !== "advanced"
-      || inferModelFamily(model) === architect.modelRoutingFamily)
-  );
-  const accessibleIds = await filterAccessibleResourceIds(userId, "model", models.map(model => model.id));
-  const accessible = models.filter(model => accessibleIds.has(String(model.id)));
-  const availableByModel = await Promise.all(
-    accessible.map(async model => new Set(
-      (await getAvailableToolsForModel(model.modelId))
-        .filter(tool => modelSupportsProviderNativeTool(model, tool.name))
-        .map(tool => tool.name)
-    ))
-  );
-  if (availableByModel.some(tools => enabledTools.every(tool => tools.has(tool)))) {
-    return { isValid: true, invalidTools: [] };
-  }
-  return {
-    isValid: false,
-    invalidTools: enabledTools,
-    message: "No accessible model in this routing mode supports all selected tools",
-  };
 }
 
 async function resolveAutomaticPromptFallbackModelId(
@@ -1541,7 +1435,7 @@ async function validateNewChainPrompt(
   log: ReturnType<typeof createLogger>
 ): Promise<string | null> {
   if (data.enabledTools?.length) {
-    const toolValidation = await validateEnabledToolsForRouting(
+    const toolValidation = await validatePromptToolsForRouting(
       data.enabledTools,
       architect,
       currentUserId,
@@ -1762,7 +1656,7 @@ async function validatePromptEnabledToolsUpdate(
     };
   }
 
-  const toolValidation = await validateEnabledToolsForRouting(
+  const toolValidation = await validatePromptToolsForRouting(
     enabledTools,
     architect,
     userId,
@@ -2471,7 +2365,12 @@ export async function approveAssistantArchitectAction(
         db
           .select({ id: capabilities.id })
           .from(capabilities)
-          .where(eq(capabilities.promptChainToolId, idInt))
+          .where(
+            and(
+              eq(capabilities.promptChainToolId, idInt),
+              eq(capabilities.isActive, true)
+            )
+          )
           .limit(1),
       "getCapabilityByPromptChainToolId"
     )
@@ -2496,9 +2395,10 @@ export async function approveAssistantArchitectAction(
     // BOTH role grants either all commit or all roll back, so a failure part-way
     // never leaves the tool approved-with-capability but half-wired (a nav item
     // no role can reach, or only one role granted). Idempotent — re-running after
-    // a partial failure converges: the nav item is guarded by an existence check
-    // and the grants use onConflictDoNothing on the unique (role_id, capability_id)
-    // constraint. Replaces the previous non-transactional await-in-loop.
+    // a partial failure converges: the existing nav item is re-synced to the
+    // stable capability identity and the grants use onConflictDoNothing on the
+    // unique (role_id, capability_id) constraint. Replaces the previous
+    // non-transactional await-in-loop.
     await executeTransaction(async (tx) => {
       const existingNavTx = await tx
         .select({ id: navigationItems.id })
@@ -2515,6 +2415,15 @@ export async function approveAssistantArchitectAction(
           capabilityId: finalCapabilityId,
           isActive: true
         })
+      } else {
+        await tx
+          .update(navigationItems)
+          .set({
+            label: updatedTool.name,
+            capabilityId: finalCapabilityId,
+            isActive: true
+          })
+          .where(eq(navigationItems.id, existingNavTx[0].id))
       }
       if (roleIdsToGrant.length > 0) {
         await tx

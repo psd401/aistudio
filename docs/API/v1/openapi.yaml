@@ -1100,8 +1100,9 @@ paths:
         v1.0 JSON envelope. Each assistant (row + prompts + input fields) is
         created atomically and owned by the authenticated caller. Caller-supplied
         `status` is ignored: every created assistant enters `pending_approval`.
-        Agent tools and connectors are validated against the importing author's
-        permissions before any assistant transaction starts.
+        Agent tools, connectors, and per-prompt enabled tools are validated
+        against the importing author's permissions and the mapped/routed model's
+        capabilities before any assistant transaction starts.
         Model names are resolved by exact model id, then provider-family
         fallback, then the first active model; the applied mappings are returned.
         Import envelopes are limited to 10 MB on every surface. The REST
@@ -1157,7 +1158,7 @@ paths:
                 meta:
                   requestId: req_abc123
         "400":
-          description: Invalid JSON, ExportFormat validation failure, or an agent tool/connector unavailable to the author.
+          description: Invalid JSON, ExportFormat validation failure, an agent tool/connector unavailable to the author, or a prompt tool unsupported by its mapped/routed model.
           content:
             application/json:
               schema:
@@ -1231,9 +1232,11 @@ paths:
         Staff callers may update only assistants they own; administrators may
         update any assistant. Every successful update resets status to
         `pending_approval` and atomically deactivates its linked UI capability
-        until re-approval. Agent tools and connectors are validated against the
-        caller's authoring permissions before writes. Requires
-        `assistants:write`.
+        until re-approval. Reapproval reuses the capability's stable identifier
+        even when the replacement renamed the assistant. Agent tools, connectors,
+        and per-prompt enabled tools are validated against the caller's authoring
+        permissions and the mapped/routed model's capabilities before writes.
+        Requires `assistants:write`.
       security:
         - BearerAuth: []
         - SessionAuth: []
@@ -1317,7 +1320,8 @@ paths:
         source is unchanged. The fork is owned by the caller and enters
         `pending_approval`; an optional `name` overrides the copied name.
         Copied agent tools and connectors must be available to the caller as an
-        author before the fork is persisted.
+        author, and copied prompt tools must be supported by their mapped/routed
+        models, before the fork is persisted.
         Invisible and missing sources both return 404. Requires
         `assistants:write`.
       security:

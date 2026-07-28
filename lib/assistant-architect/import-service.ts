@@ -11,6 +11,7 @@ import {
   validateAgentConnectorsForAuthor,
   validateAgentToolsForAuthor,
 } from "@/lib/assistant-architect/agent-config-validation";
+import { validatePromptToolsForRouting } from "@/lib/assistant-architect/prompt-tool-validation";
 import { checkUserRole, getUserRoles } from "@/lib/db/drizzle";
 import {
   executeQuery,
@@ -109,6 +110,37 @@ async function mapImportModels(
     }
   }
   return mapModelsForImport(Array.from(modelNames));
+}
+
+async function validateImportedPromptTools(
+  assistants: ExportedAssistant[],
+  modelMap: Map<string, number>,
+  authorUserId: number,
+): Promise<void> {
+  for (const assistant of assistants) {
+    for (const prompt of assistant.prompts) {
+      const enabledTools = prompt.enabled_tools ?? [];
+      if (enabledTools.length === 0) continue;
+      const mappedModelId = modelMap.get(prompt.model_name);
+      if (!mappedModelId) continue;
+
+      const validation = await validatePromptToolsForRouting(
+        enabledTools,
+        {
+          modelRoutingMode: assistant.model_routing_mode,
+          modelRoutingFamily: assistant.model_routing_family,
+        },
+        authorUserId,
+        mappedModelId,
+      );
+      if (!validation.isValid) {
+        throw new AssistantImportServiceError(
+          "VALIDATION_ERROR",
+          validation.message ?? "Invalid prompt tools",
+        );
+      }
+    }
+  }
 }
 
 async function validateAgentAuthoringPermissions(
@@ -283,6 +315,7 @@ export async function createAssistantsFromImport(
   const importData = asValidatedImport(data);
   await validateAgentAuthoringPermissions(importData.assistants, userId);
   const modelMap = await mapImportModels(importData.assistants);
+  await validateImportedPromptTools(importData.assistants, modelMap, userId);
   const log = createLogger({ action: "createAssistantsFromImport" });
   const results: AssistantImportResult[] = [];
 
@@ -409,6 +442,7 @@ export async function updateAssistantFromImport(
   const assistant = importData.assistants[0];
   await validateAgentAuthoringPermissions([assistant], callerUserId);
   const modelMap = await mapImportModels([assistant]);
+  await validateImportedPromptTools([assistant], modelMap, callerUserId);
   const isAdmin = await checkUserRole(callerUserId, "administrator");
   const log = createLogger({
     action: "updateAssistantFromImport",

@@ -42,7 +42,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, desc, sql, inArray, isNull } from "drizzle-orm";
+import { eq, and, desc, sql, inArray, isNull, ne } from "drizzle-orm";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import {
   assistantArchitects,
@@ -655,12 +655,54 @@ export async function approveAssistantArchitect(id: number) {
         throw new Error(`Assistant architect ${id} has no name`);
       }
 
-      // Create tool entry if it doesn't already exist
-      // Use INSERT ... ON CONFLICT DO NOTHING to handle race conditions
-      // If another transaction creates the tool first, this silently succeeds.
-      // A name that slugifies to a code-manifest identifier is disambiguated with
-      // an id suffix so the approval upsert can never hijack a manifest-owned
-      // capability row (which would overwrite its source/promptChainToolId).
+      // Capability identity follows the assistant, not its mutable name. Reuse
+      // the row already linked by prompt_chain_tool_id on reapproval (including
+      // after an import rename) so approval cannot create a second capability
+      // and wire navigation/role grants to a stale inactive row.
+      const linkedCapabilities = await tx
+        .select({
+          id: capabilities.id,
+          identifier: capabilities.identifier,
+        })
+        .from(capabilities)
+        .where(eq(capabilities.promptChainToolId, assistant.id))
+        .orderBy(capabilities.id);
+      const existingCapability = linkedCapabilities[0];
+      if (existingCapability) {
+        await tx
+          .update(capabilities)
+          .set({
+            name: assistant.name,
+            description: assistant.description,
+            isActive: true,
+            source: "manual",
+            updatedAt: new Date(),
+          })
+          .where(eq(capabilities.id, existingCapability.id));
+
+        // Repair legacy duplicate rows left by older rename/reapproval behavior.
+        // Only the reused identity remains linked to this assistant.
+        if (linkedCapabilities.length > 1) {
+          await tx
+            .update(capabilities)
+            .set({
+              promptChainToolId: null,
+              isActive: false,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(capabilities.promptChainToolId, assistant.id),
+                ne(capabilities.id, existingCapability.id)
+              )
+            );
+        }
+        return assistant;
+      }
+
+      // First approval creates the stable capability identity. A name that
+      // slugifies to a code-manifest identifier is disambiguated with an id
+      // suffix so it cannot hijack a manifest-owned row.
       let toolIdentifier = buildAssistantToolIdentifier(
         assistant.name,
         assistant.id
