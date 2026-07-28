@@ -8,6 +8,9 @@ Run:
 from __future__ import annotations
 
 import ast
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -18,6 +21,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
@@ -61,7 +65,11 @@ def _javascript_allowlist(path: Path) -> set[str]:
 
 
 class RunningStub:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        model_upstream_base_url: str = "http://127.0.0.1:9",
+    ) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory(
             prefix="issue-1424-broker-test-"
         )
@@ -70,10 +78,29 @@ class RunningStub:
         self.flush_token_path = self.control_directory / "workspace-flush-token"
         self.flush_token_path.write_text(self.flush_token, encoding="ascii")
         os.chmod(self.flush_token_path, 0o600)
+        self.invocation_context = "signed-invocation-context"
+        self.invocation_context_path = (
+            self.control_directory / "invocation-context"
+        )
+        self.invocation_context_path.write_text(
+            self.invocation_context,
+            encoding="ascii",
+        )
+        self.request_proof_key = b"r" * 32
+        encoded_proof_key = base64.urlsafe_b64encode(
+            self.request_proof_key
+        ).rstrip(b"=")
+        self.request_proof_key_path = (
+            self.control_directory / "request-proof-key"
+        )
+        self.request_proof_key_path.write_bytes(encoded_proof_key)
         self.server = broker_stub.create_server(
             self.control_directory,
             port=0,
             workspace_flush_token_path=self.flush_token_path,
+            invocation_context_path=self.invocation_context_path,
+            request_proof_key_path=self.request_proof_key_path,
+            model_upstream_base_url=model_upstream_base_url,
         )
         self.thread = threading.Thread(
             target=self.server.serve_forever,
@@ -332,6 +359,133 @@ class BrokerStubHttpTests(unittest.TestCase):
             self.stub.control_directory / broker_stub.CAPTURE_FILENAME
         ).st_mode & 0o777
         self.assertEqual(mode, 0o600)
+
+    def test_summarization_endpoint_relays_with_root_authority(self):
+        received: dict[str, object] = {}
+
+        class ModelBrokerHandler(BaseHTTPRequestHandler):
+            def log_message(
+                self,
+                format_string: str,
+                *arguments: object,
+            ) -> None:
+                return
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                raw_body = self.rfile.read(length)
+                received.update(
+                    {
+                        "path": self.path,
+                        "body": raw_body,
+                        "headers": dict(self.headers.items()),
+                    }
+                )
+                response = json.dumps(
+                    {
+                        "content": [
+                            {"type": "text", "text": "Safe summary"}
+                        ]
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), ModelBrokerHandler)
+        upstream_thread = threading.Thread(
+            target=upstream.serve_forever,
+            daemon=True,
+        )
+        upstream_thread.start()
+        self.stub.close()
+        self.stub = RunningStub(
+            model_upstream_base_url=(
+                f"http://127.0.0.1:{upstream.server_address[1]}"
+            )
+        )
+        try:
+            self.stub.configure([])
+            status, response = self.stub.request(
+                broker_stub.MODEL_MESSAGES_PATH,
+                method="POST",
+                body={
+                    "model": "anthropic.claude-haiku-4-5",
+                    "messages": [{"role": "user", "content": "Summarize"}],
+                },
+            )
+        finally:
+            upstream.shutdown()
+            upstream.server_close()
+            upstream_thread.join(timeout=2)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            response,
+            {
+                "content": [
+                    {"type": "text", "text": "Safe summary"}
+                ]
+            },
+        )
+        self.assertEqual(received["path"], broker_stub.MODEL_PROXY_ROUTE)
+        raw_body = received["body"]
+        self.assertIsInstance(raw_body, bytes)
+        headers = {
+            key.lower(): value
+            for key, value in received["headers"].items()
+        }
+        self.assertEqual(
+            headers["x-agent-invocation-context"],
+            self.stub.invocation_context,
+        )
+        self.assertEqual(
+            headers["x-agent-request-proof-body-sha256"],
+            hashlib.sha256(raw_body).hexdigest(),
+        )
+        canonical = "\n".join(
+            [
+                "v1",
+                headers["x-agent-request-proof-timestamp"],
+                headers["x-agent-request-proof-nonce"],
+                "POST",
+                broker_stub.MODEL_PROXY_ROUTE,
+                headers["x-agent-request-proof-body-sha256"],
+            ]
+        ).encode("utf-8")
+        expected_signature = base64.urlsafe_b64encode(
+            hmac.new(
+                self.stub.request_proof_key,
+                canonical,
+                hashlib.sha256,
+            ).digest()
+        ).rstrip(b"=").decode("ascii")
+        self.assertEqual(
+            headers["x-agent-request-proof-signature"],
+            expected_signature,
+        )
+        self.assertEqual(self.stub.captures(), [])
+
+    def test_informational_fixture_status_is_rejected(self):
+        self.stub.configure(
+            [
+                {
+                    "route": "/api/agent/directory-lookup",
+                    "response": {"status": 199, "body": {}},
+                }
+            ]
+        )
+
+        status, response = self.stub.request(
+            "/agent-broker/api/agent/directory-lookup",
+            method="POST",
+            body={"query": "Ada"},
+        )
+
+        self.assertEqual(status, 500)
+        self.assertIn("status", response["message"])
 
     def test_missing_fixture_is_loud_and_named_in_response_and_capture(self):
         self.stub.configure([])

@@ -9,6 +9,9 @@ through a root-owned in-container tmpfs.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import hmac
 import json
 import logging
@@ -34,9 +37,16 @@ DEFAULT_CONTROL_DIRECTORY = "/run/psd-agent-eval-broker"
 DEFAULT_WORKSPACE_FLUSH_TOKEN_PATH = (
     "/run/psd-agent-authority/workspace-flush-token"
 )
+DEFAULT_INVOCATION_CONTEXT_PATH = (
+    "/run/psd-agent-authority/invocation-context"
+)
+DEFAULT_REQUEST_PROOF_KEY_PATH = (
+    "/run/psd-agent-authority/request-proof-key"
+)
 TRIAL_CONFIG_FILENAME = "trial.json"
 CAPTURE_FILENAME = "capture.jsonl"
 MAX_REQUEST_BYTES = 50 * 1024 * 1024
+MAX_MODEL_RESPONSE_BYTES = 50 * 1024 * 1024
 FINALIZATION_DRAIN_TIMEOUT_SECONDS = 120
 MISSING_FIXTURE_ERROR = "EvalFixtureMissing"
 UNSUPPORTED_METHOD_ERROR = "EvalUnsupportedAgentMethod"
@@ -47,6 +57,8 @@ RUNNER_READ_CAPTURES_COMMAND = "--runner-read-captures"
 RUNNER_CONTROL_TOKEN_FILENAME = "runner-control-token"
 RUNNER_CONTROL_HEADER = "X-Agent-Eval-Runner-Control"
 RUNNER_OPEN_TRIAL_PATH = "/internal/eval-trial/open"
+MODEL_MESSAGES_PATH = "/anthropic/v1/messages"
+MODEL_PROXY_ROUTE = "/api/agent/model-proxy/anthropic/v1/messages"
 
 ALLOWED_AGENT_BROKER_ROUTES = frozenset(
     {
@@ -72,6 +84,83 @@ ALLOWED_AGENT_BROKER_ROUTES = frozenset(
 
 class BrokerStubConfigurationError(RuntimeError):
     """The runner supplied an invalid or unreadable trial fixture."""
+
+
+def _trusted_app_base_url(value: str) -> bool:
+    return value.startswith(
+        ("https://", "http://127.0.0.1", "http://localhost")
+    )
+
+
+def _read_invocation_authority(
+    invocation_context_path: Path,
+    request_proof_key_path: Path,
+) -> tuple[str, bytes]:
+    context = invocation_context_path.read_text(encoding="ascii").strip()
+    encoded_key = request_proof_key_path.read_text(encoding="ascii").strip()
+    padded_key = encoded_key + ("=" * (-len(encoded_key) % 4))
+    try:
+        proof_key = base64.urlsafe_b64decode(padded_key)
+    except (ValueError, binascii.Error) as error:
+        raise BrokerStubConfigurationError(
+            "invocation request proof key is malformed"
+        ) from error
+    if not context or len(proof_key) != 32:
+        raise BrokerStubConfigurationError(
+            "invocation authority is malformed"
+        )
+    return context, proof_key
+
+
+def _authority_headers(
+    method: str,
+    route: str,
+    body: bytes,
+    *,
+    invocation_context_path: Path,
+    request_proof_key_path: Path,
+) -> dict[str, str]:
+    context, proof_key = _read_invocation_authority(
+        invocation_context_path,
+        request_proof_key_path,
+    )
+    timestamp = str(int(time.time()))
+    nonce = str(uuid.uuid4())
+    body_sha256 = hashlib.sha256(body).hexdigest()
+    canonical = "\n".join(
+        [
+            "v1",
+            timestamp,
+            nonce,
+            method.upper(),
+            route,
+            body_sha256,
+        ]
+    ).encode("utf-8")
+    signature = base64.urlsafe_b64encode(
+        hmac.new(proof_key, canonical, hashlib.sha256).digest()
+    ).rstrip(b"=").decode("ascii")
+    return {
+        "X-Agent-Invocation-Context": context,
+        "X-Agent-Request-Proof-Version": "v1",
+        "X-Agent-Request-Proof-Timestamp": timestamp,
+        "X-Agent-Request-Proof-Nonce": nonce,
+        "X-Agent-Request-Proof-Body-Sha256": body_sha256,
+        "X-Agent-Request-Proof-Signature": signature,
+    }
+
+
+class _NoRedirectHandler(urllib_request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        request: urllib_request.Request,
+        file_pointer: object,
+        code: int,
+        message: str,
+        headers: object,
+        new_url: str,
+    ) -> None:
+        return None
 
 
 def _ensure_runner_control_token(control_directory: Path) -> str:
@@ -258,12 +347,33 @@ class BrokerStubState:
         control_directory: Path,
         *,
         workspace_flush_token_path: Path | None = None,
+        invocation_context_path: Path | None = None,
+        request_proof_key_path: Path | None = None,
+        model_upstream_base_url: str | None = None,
     ) -> None:
         self.control_directory = control_directory
         self.workspace_flush_token_path = (
             workspace_flush_token_path
             or Path(DEFAULT_WORKSPACE_FLUSH_TOKEN_PATH)
         )
+        self.invocation_context_path = (
+            invocation_context_path
+            or Path(DEFAULT_INVOCATION_CONTEXT_PATH)
+        )
+        self.request_proof_key_path = (
+            request_proof_key_path
+            or Path(DEFAULT_REQUEST_PROOF_KEY_PATH)
+        )
+        configured_upstream = (
+            os.environ.get("APP_BASE_URL", "")
+            if model_upstream_base_url is None
+            else model_upstream_base_url
+        ).rstrip("/")
+        if not _trusted_app_base_url(configured_upstream):
+            raise BrokerStubConfigurationError(
+                "APP_BASE_URL is not a trusted model broker URL"
+            )
+        self.model_upstream_base_url = configured_upstream
         self._runner_control_token = _ensure_runner_control_token(
             control_directory
         )
@@ -363,6 +473,54 @@ class BrokerStubState:
             )
         )
 
+    def forward_model_request(
+        self,
+        body: bytes,
+        *,
+        content_type: str,
+        accept: str,
+    ) -> tuple[int, str, bytes]:
+        """Relay the one loopback model endpoint used by psd-summarize."""
+
+        headers = {
+            "Content-Type": content_type,
+            "Accept": accept,
+            **_authority_headers(
+                "POST",
+                MODEL_PROXY_ROUTE,
+                body,
+                invocation_context_path=self.invocation_context_path,
+                request_proof_key_path=self.request_proof_key_path,
+            ),
+        }
+        request = urllib_request.Request(
+            f"{self.model_upstream_base_url}{MODEL_PROXY_ROUTE}",
+            data=body,
+            method="POST",
+            headers=headers,
+        )
+        opener = urllib_request.build_opener(_NoRedirectHandler())
+        try:
+            response = opener.open(request, timeout=300)
+        except urllib_error.HTTPError as error:
+            response = error
+        try:
+            response_body = response.read(MAX_MODEL_RESPONSE_BYTES + 1)
+            if len(response_body) > MAX_MODEL_RESPONSE_BYTES:
+                raise BrokerStubConfigurationError(
+                    "model broker response exceeds eval stub limit"
+                )
+            return (
+                response.status,
+                response.headers.get(
+                    "Content-Type",
+                    "application/octet-stream",
+                ),
+                response_body,
+            )
+        finally:
+            response.close()
+
     def enter_request(
         self,
         *,
@@ -457,13 +615,21 @@ class BrokerStubRequestHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, status: int, body: object) -> None:
         serialized = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        self._send_body(status, serialized, "application/json")
+
+    def _send_body(
+        self,
+        status: int,
+        body: bytes,
+        content_type: str,
+    ) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(serialized)))
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(serialized)
+        self.wfile.write(body)
 
     def _read_body(self) -> tuple[bytes, object]:
         raw_length = self.headers.get("Content-Length", "0")
@@ -640,7 +806,7 @@ class BrokerStubRequestHandler(BaseHTTPRequestHandler):
             if (
                 isinstance(status, bool)
                 or not isinstance(status, int)
-                or status < 100
+                or status < 200
                 or status > 599
             ):
                 raise BrokerStubConfigurationError(
@@ -669,6 +835,37 @@ class BrokerStubRequestHandler(BaseHTTPRequestHandler):
             self._send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {"error": MISSING_FIXTURE_ERROR, "message": message},
+            )
+
+    def _handle_model_proxy(self) -> None:
+        try:
+            body, _ = self._read_body()
+            status, content_type, response_body = (
+                self.server.state.forward_model_request(
+                    body,
+                    content_type=self.headers.get(
+                        "Content-Type",
+                        "application/json",
+                    ),
+                    accept=self.headers.get("Accept", "application/json"),
+                )
+            )
+            self._send_body(status, response_body, content_type)
+        except BrokerStubConfigurationError as error:
+            self._send_json(
+                HTTPStatus.BAD_GATEWAY,
+                {
+                    "error": "EvalModelProxyUnavailable",
+                    "message": str(error),
+                },
+            )
+        except (OSError, urllib_error.URLError) as error:
+            self._send_json(
+                HTTPStatus.BAD_GATEWAY,
+                {
+                    "error": "EvalModelProxyUnavailable",
+                    "message": str(error),
+                },
             )
 
     def _capture_finalization_rejection(self, route: str) -> None:
@@ -721,6 +918,25 @@ class BrokerStubRequestHandler(BaseHTTPRequestHandler):
             finally:
                 self.server.state.leave_request()
             return
+        if path == MODEL_MESSAGES_PATH:
+            if self.command != "POST":
+                self._send_json(
+                    HTTPStatus.METHOD_NOT_ALLOWED,
+                    {"error": "EvalModelMethodNotAllowed"},
+                )
+                return
+            entered, _ = self.server.state.enter_request()
+            if not entered:
+                self._send_json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": FINALIZING_ERROR},
+                )
+                return
+            try:
+                self._handle_model_proxy()
+            finally:
+                self.server.state.leave_request()
+            return
         self._send_json(
             HTTPStatus.NOT_FOUND,
             {"error": "EvalUnsupportedPath"},
@@ -739,6 +955,9 @@ def create_server(
     host: str = "127.0.0.1",
     port: int = 18791,
     workspace_flush_token_path: Path | None = None,
+    invocation_context_path: Path | None = None,
+    request_proof_key_path: Path | None = None,
+    model_upstream_base_url: str | None = None,
 ) -> BrokerStubServer:
     control_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(control_directory, 0o700)
@@ -747,6 +966,9 @@ def create_server(
         BrokerStubState(
             control_directory,
             workspace_flush_token_path=workspace_flush_token_path,
+            invocation_context_path=invocation_context_path,
+            request_proof_key_path=request_proof_key_path,
+            model_upstream_base_url=model_upstream_base_url,
         ),
     )
 

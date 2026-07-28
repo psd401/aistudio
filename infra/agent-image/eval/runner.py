@@ -400,11 +400,11 @@ def _load_fixture_files(paths: Sequence[Path]) -> list[dict[str, object]]:
             if (
                 isinstance(status, bool)
                 or not isinstance(status, int)
-                or status < 100
+                or status < 200
                 or status > 599
             ):
                 raise EvalRunnerError(
-                    f"{path}: fixture {index} response status must be 100-599"
+                    f"{path}: fixture {index} response status must be 200-599"
                 )
             normalized = dict(entry)
             normalized["method"] = "POST"
@@ -972,7 +972,16 @@ class EvaluationRunner:
                         runtime.begin_trial(task, trial_number, session_id)
                         try:
                             event = runtime.invoke(task, session_id, authority)
-                        finally:
+                        except BaseException as invocation_error:
+                            try:
+                                runtime.end_trial()
+                            except Exception as cleanup_error:
+                                invocation_error.add_note(
+                                    "trial artifact collection also failed: "
+                                    f"{cleanup_error}"
+                                )
+                            raise
+                        else:
                             artifacts = runtime.end_trial()
                         record = self._make_record(
                             task,

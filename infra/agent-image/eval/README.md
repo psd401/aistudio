@@ -65,12 +65,15 @@ through root-only Docker execs, so the image's `node` user cannot read fixtures
 or forge grader inputs even when its numeric UID matches the host runner. The
 stub implements the same 16 fixed `/api/agent/*` routes as `agent-broker.js` and
 `mantle_proxy.py`, plus the health, usage, and finalization endpoints the wrapper
-needs. Finalization drains already-active broker requests and rejects new work
-before acknowledging the boundary. The wrapper's end transition leaves the
-stub closed through runner capture collection; installing the next trial uses
-a separate root-only token to reopen it, so delayed work cannot spill across
-trials. L0 and L2 tasks retain the image's real proxy; pure live and stubbed
-tasks use separate containers.
+needs. It also preserves the fixed `/anthropic/v1/messages` loopback endpoint
+used by `psd-summarize`, relaying only that model path to the trusted web tier
+with root-held invocation authority. Finalization drains already-active broker
+and summarization requests and rejects new work before acknowledging the
+boundary. The wrapper's end transition leaves the stub closed through runner
+capture collection; installing the next trial uses a separate root-only token
+to reopen it, so delayed work cannot spill across trials. L0 and L2 tasks
+retain the image's real proxy; pure live and stubbed tasks use separate
+containers.
 
 ## Task and suite files
 
@@ -143,7 +146,8 @@ allowlisted route without a matching fixture returns a named
 `EvalFixtureMissing` response and automatically fails the trial; it never
 falls through to a live service or a silent empty response.
 Broker operations mirror production: fixtures and requests must use `POST`,
-and request bodies must be JSON objects. Fixture files plus the
+request bodies must be JSON objects, and fixture responses must use a final
+HTTP status in the range 200-599. Fixture files plus the
 `broker_request` and `no_route_called` graders require `level: L1`; live L0/L2
 tasks reject them instead of grading an empty capture.
 

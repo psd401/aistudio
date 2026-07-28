@@ -342,6 +342,27 @@ class SuiteLoadingTests(unittest.TestCase):
                     with self.assertRaises(runner.EvalRunnerError):
                         runner._load_fixture_files((path,))
 
+    def test_fixture_loading_rejects_informational_response_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "informational.json"
+            path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "route": "/api/agent/directory-lookup",
+                            "response": {"status": 199, "body": {}},
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                runner.EvalRunnerError,
+                "status must be 200-599",
+            ):
+                runner._load_fixture_files((path,))
+
     def test_python_adjacent_string_syntax_is_not_accepted_as_yaml(self):
         with tempfile.TemporaryDirectory() as directory:
             task_path = Path(directory) / "adjacent-strings.yaml"
@@ -648,6 +669,39 @@ class EvaluationRunnerTests(unittest.TestCase):
                 FakeMinter(clock),
                 now=clock.now,
             ).run(self.tasks[:1], io.StringIO(), trials_override=1)
+
+    def test_artifact_failure_does_not_mask_invocation_failure(self):
+        clock = AdvancingClock()
+
+        class DoubleFailureRuntime(FakeRuntime):
+            def invoke(self, task, session_id, authority):
+                raise runner.EvalRunnerError("primary invocation failure")
+
+            def end_trial(self):
+                super().end_trial()
+                raise runner.EvalRunnerError("secondary artifact failure")
+
+        class DoubleFailureFactory:
+            def create(self, task):
+                return DoubleFailureRuntime(clock)
+
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "primary invocation failure",
+        ) as raised:
+            runner.EvaluationRunner(
+                DoubleFailureFactory(),
+                FakeMinter(clock),
+                now=clock.now,
+            ).run(self.tasks[:1], io.StringIO(), trials_override=1)
+
+        self.assertEqual(
+            raised.exception.__notes__,
+            [
+                "trial artifact collection also failed: "
+                "secondary artifact failure"
+            ],
+        )
 
     def test_missing_metadata_session_is_never_synthesized(self):
         clock = AdvancingClock()
