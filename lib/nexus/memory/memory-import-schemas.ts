@@ -3,6 +3,7 @@ import { NEXUS_MEMORY_CATEGORIES } from "@/lib/db/schema"
 import {
   MAX_MEMORY_IMPORT_CANDIDATES,
   MAX_MEMORY_IMPORT_CHARS,
+  MAX_MEMORY_IMPORT_SAVE_BATCH_CANDIDATES,
   MAX_NEXUS_MEMORY_CONTENT_CHARS,
 } from "./memory-constants"
 
@@ -53,8 +54,8 @@ export const SaveImportedMemoriesSchema = z.object({
     .array(MemoryImportCandidateSchema)
     .min(1, "Select at least one memory to import")
     .max(
-      MAX_MEMORY_IMPORT_CANDIDATES,
-      `You can import at most ${MAX_MEMORY_IMPORT_CANDIDATES} memories at once`,
+      MAX_MEMORY_IMPORT_SAVE_BATCH_CANDIDATES,
+      `Each save batch can contain at most ${MAX_MEMORY_IMPORT_SAVE_BATCH_CANDIDATES} memories`,
     ),
 })
 

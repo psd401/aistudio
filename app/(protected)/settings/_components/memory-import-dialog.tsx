@@ -32,6 +32,7 @@ import {
 } from "@/lib/nexus/memory/import-prompts"
 import {
   MAX_MEMORY_IMPORT_CHARS,
+  MAX_MEMORY_IMPORT_SAVE_BATCH_CANDIDATES,
   MAX_NEXUS_MEMORY_CONTENT_CHARS,
 } from "@/lib/nexus/memory/memory-constants"
 import {
@@ -56,6 +57,22 @@ interface CandidateDraft extends MemoryImportCandidate {
   selected: boolean
 }
 
+interface SaveProgress {
+  completed: number
+  total: number
+}
+
+interface SelectedCandidate {
+  candidate: CandidateDraft
+  draftIndex: number
+}
+
+interface BatchedSaveOutcome {
+  successful: number
+  failedDraftIndexes: Set<number>
+  requestFailureMessage: string | null
+}
+
 function candidateDrafts(
   candidates: readonly MemoryImportCandidate[],
 ): CandidateDraft[] {
@@ -64,6 +81,60 @@ function candidateDrafts(
     id: `memory-import-candidate-${index}`,
     selected: true,
   }))
+}
+
+async function saveCandidateBatches(
+  vendor: MemoryImportVendor,
+  selected: SelectedCandidate[],
+  onProgress: (progress: SaveProgress) => void,
+): Promise<BatchedSaveOutcome> {
+  let successful = 0
+  let requestFailureMessage: string | null = null
+  const failedDraftIndexes = new Set<number>()
+
+  for (
+    let offset = 0;
+    offset < selected.length;
+    offset += MAX_MEMORY_IMPORT_SAVE_BATCH_CANDIDATES
+  ) {
+    const batch = selected.slice(
+      offset,
+      offset + MAX_MEMORY_IMPORT_SAVE_BATCH_CANDIDATES,
+    )
+    const result = await saveImportedMemories({
+      vendor,
+      candidates: batch.map(({ candidate }) => ({
+        content: candidate.content,
+        category: candidate.category,
+      })),
+    })
+    if (!result.isSuccess) {
+      requestFailureMessage = result.message
+      for (const { draftIndex } of selected.slice(offset)) {
+        failedDraftIndexes.add(draftIndex)
+      }
+      break
+    }
+
+    successful += result.data.successful
+    for (const item of result.data.results) {
+      if (item.status !== "failed") continue
+      const draftIndex = batch[item.index]?.draftIndex
+      if (draftIndex !== undefined) {
+        failedDraftIndexes.add(draftIndex)
+      }
+    }
+    onProgress({
+      completed: Math.min(offset + batch.length, selected.length),
+      total: selected.length,
+    })
+  }
+
+  return {
+    successful,
+    failedDraftIndexes,
+    requestFailureMessage,
+  }
 }
 
 function ImportSourceStep({
@@ -206,12 +277,14 @@ function ImportSourceStep({
 function ImportReviewStep({
   candidates,
   isSaving,
+  saveProgress,
   onCandidatesChange,
   onBack,
   onSave,
 }: {
   candidates: CandidateDraft[]
   isSaving: boolean
+  saveProgress: SaveProgress | null
   onCandidatesChange: (candidates: CandidateDraft[]) => void
   onBack: () => void
   onSave: () => void
@@ -335,8 +408,11 @@ function ImportReviewStep({
           {isSaving && (
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
           )}
-          Import {selectedCount}{" "}
-          {selectedCount === 1 ? "memory" : "memories"}
+          {saveProgress
+            ? `Importing ${saveProgress.completed}/${saveProgress.total}`
+            : `Import ${selectedCount} ${
+                selectedCount === 1 ? "memory" : "memories"
+              }`}
         </Button>
       </DialogFooter>
     </>
@@ -358,6 +434,8 @@ function useMemoryImportDialog({
   const [error, setError] = useState<string | null>(null)
   const [isExtracting, setIsExtracting] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
+  const [saveProgress, setSaveProgress] =
+    useState<SaveProgress | null>(null)
   const isBusy = isExtracting || isSaving
 
   const reset = () => {
@@ -366,6 +444,7 @@ function useMemoryImportDialog({
     setCandidates([])
     setStep("source")
     setError(null)
+    setSaveProgress(null)
   }
 
   const handleOpenChange = (nextOpen: boolean) => {
@@ -416,20 +495,15 @@ function useMemoryImportDialog({
     if (selected.length === 0) return
 
     setIsSaving(true)
+    setSaveProgress({ completed: 0, total: selected.length })
     try {
-      const result = await saveImportedMemories({
-        vendor,
-        candidates: selected.map(({ candidate }) => ({
-          content: candidate.content,
-          category: candidate.category,
-        })),
-      })
-      if (!result.isSuccess) {
-        toast.error(result.message)
-        return
-      }
+      const {
+        successful,
+        failedDraftIndexes,
+        requestFailureMessage,
+      } = await saveCandidateBatches(vendor, selected, setSaveProgress)
 
-      if (result.data.successful > 0) {
+      if (successful > 0) {
         try {
           await onImported()
         } catch (refreshError) {
@@ -445,27 +519,29 @@ function useMemoryImportDialog({
         }
       }
 
-      if (result.data.failed === 0) {
-        toast.success(result.message)
+      if (failedDraftIndexes.size === 0) {
+        toast.success(
+          `${successful} ${
+            successful === 1 ? "memory" : "memories"
+          } imported`,
+        )
         reset()
         onOpenChange(false)
         return
       }
 
-      const failedDraftIndexes = new Set(
-        result.data.results
-          .filter((item) => item.status === "failed")
-          .map((item) => selected[item.index]?.draftIndex)
-          .filter((index): index is number => index !== undefined),
-      )
       setCandidates((current) =>
         current
           .filter((_candidate, index) => failedDraftIndexes.has(index))
           .map((candidate) => ({ ...candidate, selected: true })),
       )
-      toast.warning(
-        `${result.data.successful} imported; ${result.data.failed} need attention`,
-      )
+      if (successful === 0 && requestFailureMessage) {
+        toast.error(requestFailureMessage)
+      } else {
+        toast.warning(
+          `${successful} imported; ${failedDraftIndexes.size} need attention`,
+        )
+      }
     } catch (saveError) {
       log.error("Saving imported Nexus memories failed", {
         vendor,
@@ -476,6 +552,7 @@ function useMemoryImportDialog({
       })
       toast.error("Failed to import memories")
     } finally {
+      setSaveProgress(null)
       setIsSaving(false)
     }
   }
@@ -488,6 +565,7 @@ function useMemoryImportDialog({
     error,
     isExtracting,
     isSaving,
+    saveProgress,
     setPastedText,
     setCandidates,
     setStep,
@@ -534,6 +612,7 @@ export function MemoryImportDialog({
             <ImportReviewStep
               candidates={dialog.candidates}
               isSaving={dialog.isSaving}
+              saveProgress={dialog.saveProgress}
               onCandidatesChange={dialog.setCandidates}
               onBack={() => dialog.setStep("source")}
               onSave={() => void dialog.handleSave()}

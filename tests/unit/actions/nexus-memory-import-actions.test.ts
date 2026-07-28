@@ -61,7 +61,10 @@ import {
   extractImportCandidates,
   saveImportedMemories,
 } from "@/actions/nexus/memory-import.actions"
-import { MAX_MEMORY_IMPORT_CHARS } from "@/lib/nexus/memory/memory-constants"
+import {
+  MAX_MEMORY_IMPORT_CHARS,
+  MAX_MEMORY_IMPORT_SAVE_BATCH_CANDIDATES,
+} from "@/lib/nexus/memory/memory-constants"
 
 function resetMocks() {
   jest.clearAllMocks()
@@ -134,6 +137,25 @@ describe("Nexus memory import extraction actions", () => {
       message: `Pasted text cannot exceed ${MAX_MEMORY_IMPORT_CHARS.toLocaleString()} characters`,
     })
     expect(mockExtractCandidates).not.toHaveBeenCalled()
+    expect(mockSave).not.toHaveBeenCalled()
+  })
+
+  it("rejects a save batch that could exceed the request deadline", async () => {
+    const result = await saveImportedMemories({
+      vendor: "chatgpt",
+      candidates: Array.from(
+        { length: MAX_MEMORY_IMPORT_SAVE_BATCH_CANDIDATES + 1 },
+        (_value, index) => ({
+          content: `Candidate ${index + 1}`,
+          category: "context" as const,
+        }),
+      ),
+    })
+
+    expect(result).toMatchObject({
+      isSuccess: false,
+      message: `Each save batch can contain at most ${MAX_MEMORY_IMPORT_SAVE_BATCH_CANDIDATES} memories`,
+    })
     expect(mockSave).not.toHaveBeenCalled()
   })
 
