@@ -9,8 +9,6 @@ import type { ScheduleReferenceEvent } from './schedule-record';
 
 const RUNNING_LEASE_SECONDS = 16 * 60;
 const COMPLETED_MARKER_SECONDS = 65 * 60;
-const SCHEDULER_TIME_RE =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 
 interface ScheduleFireLogger {
   warn: (message: string, metadata?: Record<string, unknown>) => void;
@@ -55,9 +53,14 @@ function errorName(error: unknown): string | undefined {
 function validScheduledTime(value: unknown): value is string {
   return (
     typeof value === 'string'
-    && value.length > 0
+    && value.length >= 20
     && value.length <= 40
-    && SCHEDULER_TIME_RE.test(value)
+    && value.endsWith('Z')
+    && value[4] === '-'
+    && value[7] === '-'
+    && value[10] === 'T'
+    && value[13] === ':'
+    && value[16] === ':'
     && Number.isFinite(Date.parse(value))
   );
 }
