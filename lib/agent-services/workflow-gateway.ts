@@ -1,11 +1,7 @@
 import { safeFetch } from "@/lib/security/safe-fetch"
 
-export const CLASSIFIED_EVALUATION_TOOLS = new Set([
-  "get_classified_evaluation_schema",
-  "list_supervised_employees",
-  "submit_classified_evaluation",
-])
-export const CLASSIFIED_SSE_LIMITS = {
+export const CALLER_BOUND_MARKER = "[caller-bound]"
+export const WORKFLOW_SSE_LIMITS = {
   rawBytes: 4 * 1024 * 1024,
   chunkBytes: 256 * 1024,
   bufferBytes: 256 * 1024,
@@ -36,14 +32,20 @@ interface PendingRequest {
   reject: (error: Error) => void
 }
 
-export class ClassifiedGatewayError extends Error {
+export interface WorkflowGatewayTool {
+  name: string
+  description: string
+  inputSchema: Record<string, unknown>
+}
+
+export class WorkflowGatewayError extends Error {
   constructor(
     message: string,
     readonly code: "configuration" | "transport" | "tool",
     readonly detail?: unknown
   ) {
     super(message)
-    this.name = "ClassifiedGatewayError"
+    this.name = "WorkflowGatewayError"
   }
 }
 
@@ -51,22 +53,22 @@ export function parseSseFrames(buffer: string): {
   frames: SseFrame[]
   rest: string
 } {
-  if (Buffer.byteLength(buffer, "utf8") > CLASSIFIED_SSE_LIMITS.bufferBytes) {
-    throw new ClassifiedGatewayError("Gateway SSE buffer is too large", "transport")
+  if (Buffer.byteLength(buffer, "utf8") > WORKFLOW_SSE_LIMITS.bufferBytes) {
+    throw new WorkflowGatewayError("Gateway SSE buffer is too large", "transport")
   }
   const parts = buffer.replace(/\r\n/g, "\n").split("\n\n")
   const rest = parts.pop() ?? ""
   const frames: SseFrame[] = []
   for (const part of parts) {
     if (!part.trim()) continue
-    if (Buffer.byteLength(part, "utf8") > CLASSIFIED_SSE_LIMITS.frameBytes) {
-      throw new ClassifiedGatewayError("Gateway SSE frame is too large", "transport")
+    if (Buffer.byteLength(part, "utf8") > WORKFLOW_SSE_LIMITS.frameBytes) {
+      throw new WorkflowGatewayError("Gateway SSE frame is too large", "transport")
     }
     let event = "message"
     const data: string[] = []
     for (const line of part.split("\n")) {
-      if (Buffer.byteLength(line, "utf8") > CLASSIFIED_SSE_LIMITS.lineBytes) {
-        throw new ClassifiedGatewayError("Gateway SSE line is too large", "transport")
+      if (Buffer.byteLength(line, "utf8") > WORKFLOW_SSE_LIMITS.lineBytes) {
+        throw new WorkflowGatewayError("Gateway SSE line is too large", "transport")
       }
       if (line.startsWith(":")) continue
       if (line.startsWith("event:")) {
@@ -76,12 +78,12 @@ export function parseSseFrames(buffer: string): {
       }
     }
     const joinedData = data.join("\n")
-    if (Buffer.byteLength(joinedData, "utf8") > CLASSIFIED_SSE_LIMITS.dataBytes) {
-      throw new ClassifiedGatewayError("Gateway SSE data is too large", "transport")
+    if (Buffer.byteLength(joinedData, "utf8") > WORKFLOW_SSE_LIMITS.dataBytes) {
+      throw new WorkflowGatewayError("Gateway SSE data is too large", "transport")
     }
     frames.push({ event, data: joinedData })
-    if (frames.length > CLASSIFIED_SSE_LIMITS.frames) {
-      throw new ClassifiedGatewayError("Gateway sent too many SSE frames", "transport")
+    if (frames.length > WORKFLOW_SSE_LIMITS.frames) {
+      throw new WorkflowGatewayError("Gateway sent too many SSE frames", "transport")
     }
   }
   return { frames, rest }
@@ -99,7 +101,7 @@ export function resolveGatewayEndpoint(
     endpoint.username ||
     endpoint.password
   ) {
-    throw new ClassifiedGatewayError(
+    throw new WorkflowGatewayError(
       "Gateway announced an endpoint outside its configured HTTPS origin",
       "transport"
     )
@@ -107,7 +109,7 @@ export function resolveGatewayEndpoint(
   return endpoint
 }
 
-export function unwrapClassifiedToolResult(result: unknown): {
+export function unwrapWorkflowToolResult(result: unknown): {
   isError: boolean
   data: unknown
 } {
@@ -127,14 +129,14 @@ export function unwrapClassifiedToolResult(result: unknown): {
   if (typeof first?.text !== "string") {
     if (
       Buffer.byteLength(JSON.stringify(result), "utf8") >
-      CLASSIFIED_SSE_LIMITS.resultBytes
+      WORKFLOW_SSE_LIMITS.resultBytes
     ) {
-      throw new ClassifiedGatewayError("Gateway result is too large", "transport")
+      throw new WorkflowGatewayError("Gateway result is too large", "transport")
     }
     return { isError: Boolean(value.isError), data: result }
   }
-  if (Buffer.byteLength(first.text, "utf8") > CLASSIFIED_SSE_LIMITS.resultBytes) {
-    throw new ClassifiedGatewayError("Gateway result is too large", "transport")
+  if (Buffer.byteLength(first.text, "utf8") > WORKFLOW_SSE_LIMITS.resultBytes) {
+    throw new WorkflowGatewayError("Gateway result is too large", "transport")
   }
   try {
     return {
@@ -146,7 +148,7 @@ export function unwrapClassifiedToolResult(result: unknown): {
   }
 }
 
-export class ClassifiedGatewayClient {
+export class WorkflowGatewayClient {
   private readonly controller = new AbortController()
   private readonly pending = new Map<number, PendingRequest>()
   private endpoint: URL | null = null
@@ -167,7 +169,7 @@ export class ClassifiedGatewayClient {
     this.externalSignal = externalSignal
     this.totalTimer = setTimeout(
       () => {
-        const error = new ClassifiedGatewayError(
+        const error = new WorkflowGatewayError(
           "Gateway request exceeded its total timeout",
           "transport",
         )
@@ -175,7 +177,7 @@ export class ClassifiedGatewayClient {
         void this.streamReader?.cancel(error)
         this.failAll(error)
       },
-      CLASSIFIED_SSE_LIMITS.totalTimeoutMs,
+      WORKFLOW_SSE_LIMITS.totalTimeoutMs,
     )
     this.externalAbort = externalSignal
       ? () => this.controller.abort(externalSignal.reason)
@@ -190,8 +192,8 @@ export class ClassifiedGatewayClient {
   async connect(): Promise<void> {
     let response: Response
     const headerTimer = setTimeout(
-      () => this.controller.abort("classified gateway header timeout"),
-      CLASSIFIED_SSE_LIMITS.headerTimeoutMs,
+      () => this.controller.abort("workflow gateway header timeout"),
+      WORKFLOW_SSE_LIMITS.headerTimeoutMs,
     )
     try {
       response = await this.fetchImpl(this.url, {
@@ -203,7 +205,7 @@ export class ClassifiedGatewayClient {
         signal: this.controller.signal,
       })
     } catch (error) {
-      throw new ClassifiedGatewayError(
+      throw new WorkflowGatewayError(
         `Failed to open gateway stream: ${
           error instanceof Error ? error.message : String(error)
         }`,
@@ -213,7 +215,7 @@ export class ClassifiedGatewayClient {
       clearTimeout(headerTimer)
     }
     if (!response.ok || !response.body) {
-      throw new ClassifiedGatewayError(
+      throw new WorkflowGatewayError(
         `Gateway stream returned HTTP ${response.status}`,
         "transport"
       )
@@ -225,9 +227,9 @@ export class ClassifiedGatewayClient {
         "text/event-stream" ||
       (declaredLength !== null &&
         (!/^\d+$/.test(declaredLength) ||
-          Number(declaredLength) > CLASSIFIED_SSE_LIMITS.rawBytes))
+          Number(declaredLength) > WORKFLOW_SSE_LIMITS.rawBytes))
     ) {
-      throw new ClassifiedGatewayError(
+      throw new WorkflowGatewayError(
         "Gateway returned an invalid or oversized SSE stream",
         "transport",
       )
@@ -237,7 +239,7 @@ export class ClassifiedGatewayClient {
       this.failAll(
         error instanceof Error
           ? error
-          : new ClassifiedGatewayError(String(error), "transport")
+          : new WorkflowGatewayError(String(error), "transport")
       )
     })
     await this.waitForEndpoint()
@@ -255,37 +257,37 @@ export class ClassifiedGatewayClient {
       const read = reader.read()
       const timeout = new Promise<never>((_, reject) => {
         idleTimer = setTimeout(() => {
-          this.controller.abort("classified gateway idle timeout")
-          void reader.cancel("classified gateway idle timeout")
+          this.controller.abort("workflow gateway idle timeout")
+          void reader.cancel("workflow gateway idle timeout")
           reject(
-            new ClassifiedGatewayError("Gateway SSE stream timed out", "transport"),
+            new WorkflowGatewayError("Gateway SSE stream timed out", "transport"),
           )
-        }, CLASSIFIED_SSE_LIMITS.idleTimeoutMs)
+        }, WORKFLOW_SSE_LIMITS.idleTimeoutMs)
       })
       const { value, done } = await Promise.race([read, timeout]).finally(() => {
         if (idleTimer) clearTimeout(idleTimer)
       })
       if (done) {
-        throw new ClassifiedGatewayError(
+        throw new WorkflowGatewayError(
           "Gateway stream closed unexpectedly",
           "transport"
         )
       }
       if (
-        value.byteLength > CLASSIFIED_SSE_LIMITS.chunkBytes ||
-        rawBytes + value.byteLength > CLASSIFIED_SSE_LIMITS.rawBytes
+        value.byteLength > WORKFLOW_SSE_LIMITS.chunkBytes ||
+        rawBytes + value.byteLength > WORKFLOW_SSE_LIMITS.rawBytes
       ) {
-        await reader.cancel("classified gateway SSE limit exceeded")
-        throw new ClassifiedGatewayError("Gateway SSE stream is too large", "transport")
+        await reader.cancel("workflow gateway SSE limit exceeded")
+        throw new WorkflowGatewayError("Gateway SSE stream is too large", "transport")
       }
       rawBytes += value.byteLength
       buffer += decoder.decode(value, { stream: true })
       const parsed = parseSseFrames(buffer)
       buffer = parsed.rest
       frameCount += parsed.frames.length
-      if (frameCount > CLASSIFIED_SSE_LIMITS.frames) {
-        await reader.cancel("classified gateway frame limit exceeded")
-        throw new ClassifiedGatewayError("Gateway sent too many SSE frames", "transport")
+      if (frameCount > WORKFLOW_SSE_LIMITS.frames) {
+        await reader.cancel("workflow gateway frame limit exceeded")
+        throw new WorkflowGatewayError("Gateway sent too many SSE frames", "transport")
       }
       for (const frame of parsed.frames) this.handleFrame(frame)
     }
@@ -326,7 +328,7 @@ export class ClassifiedGatewayClient {
         this.endpointResolve = null
         this.endpointReject = null
         reject(
-          new ClassifiedGatewayError(
+          new WorkflowGatewayError(
             "Gateway did not announce its endpoint within 30 seconds",
             "transport"
           )
@@ -355,7 +357,7 @@ export class ClassifiedGatewayClient {
     if (!this.endpoint) await this.waitForEndpoint()
     const endpoint = this.endpoint
     if (!endpoint) {
-      throw new ClassifiedGatewayError(
+      throw new WorkflowGatewayError(
         "Gateway endpoint is unavailable",
         "transport"
       )
@@ -365,12 +367,12 @@ export class ClassifiedGatewayClient {
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(
-          new ClassifiedGatewayError(
+          new WorkflowGatewayError(
             `Gateway did not respond to ${method} within 60 seconds`,
             "transport"
           )
         )
-      }, CLASSIFIED_SSE_LIMITS.requestTimeoutMs)
+      }, WORKFLOW_SSE_LIMITS.requestTimeoutMs)
       this.pending.set(id, {
         resolve: (response) => {
           clearTimeout(timer)
@@ -395,7 +397,7 @@ export class ClassifiedGatewayClient {
       })
     } catch (error) {
       this.pending.get(id)?.reject(
-        new ClassifiedGatewayError(
+        new WorkflowGatewayError(
           `Failed to send ${method}: ${
             error instanceof Error ? error.message : String(error)
           }`,
@@ -407,7 +409,7 @@ export class ClassifiedGatewayClient {
     }
     if (!post.ok) {
       this.pending.get(id)?.reject(
-        new ClassifiedGatewayError(
+        new WorkflowGatewayError(
           `Gateway rejected ${method} with HTTP ${post.status}`,
           "transport"
         )
@@ -417,7 +419,7 @@ export class ClassifiedGatewayClient {
     }
     const response = await responsePromise
     if (response.error) {
-      throw new ClassifiedGatewayError(
+      throw new WorkflowGatewayError(
         response.error.message ?? `Gateway rejected ${method}`,
         "tool",
         response.error
@@ -445,7 +447,7 @@ export class ClassifiedGatewayClient {
       protocolVersion: "2024-11-05",
       capabilities: {},
       clientInfo: {
-        name: "psd-classified-evaluation-broker",
+        name: "psd-workflow-gateway-broker",
         version: "1.0.0",
       },
     })
@@ -458,25 +460,180 @@ export class ClassifiedGatewayClient {
       this.externalSignal.removeEventListener("abort", this.externalAbort)
     }
     this.controller.abort()
-    void this.streamReader?.cancel("classified gateway client closed")
+    void this.streamReader?.cancel("workflow gateway client closed")
     this.streamReader = null
     this.failAll(
-      new ClassifiedGatewayError("Gateway client closed", "transport")
+      new WorkflowGatewayError("Gateway client closed", "transport")
     )
   }
 }
 
-export async function executeClassifiedGatewayTool(
-  config: { url: string; token: string },
+export interface WorkflowGatewayConfig {
+  url: string
+  token: string
+}
+
+interface GatewayToolsResult {
+  tools?: unknown
+}
+
+interface GatewayToolsCache {
+  config: WorkflowGatewayConfig
+  expiresAt: number
+  tools: WorkflowGatewayTool[]
+}
+
+const GATEWAY_TOOLS_CACHE_TTL_MS = 30_000
+let gatewayToolsCache: GatewayToolsCache | null = null
+let gatewayToolsRequest:
+  | {
+      config: WorkflowGatewayConfig
+      promise: Promise<WorkflowGatewayTool[]>
+    }
+  | null = null
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
+}
+
+function sameConfig(
+  left: WorkflowGatewayConfig,
+  right: WorkflowGatewayConfig
+): boolean {
+  return left.url === right.url && left.token === right.token
+}
+
+export function parseGatewayToolsList(result: unknown): WorkflowGatewayTool[] {
+  const encoded = JSON.stringify(result)
+  if (
+    typeof encoded !== "string" ||
+    Buffer.byteLength(encoded, "utf8") > WORKFLOW_SSE_LIMITS.resultBytes
+  ) {
+    throw new WorkflowGatewayError("Gateway tool roster is too large", "transport")
+  }
+  const value = isRecord(result) ? (result as GatewayToolsResult) : null
+  if (!value || !Array.isArray(value.tools)) {
+    throw new WorkflowGatewayError(
+      "Gateway returned an invalid tools/list result",
+      "transport"
+    )
+  }
+
+  const names = new Set<string>()
+  return value.tools.map((candidate) => {
+    if (!isRecord(candidate)) {
+      throw new WorkflowGatewayError(
+        "Gateway returned an invalid tool definition",
+        "transport"
+      )
+    }
+    const name = candidate.name
+    if (
+      typeof name !== "string" ||
+      name.length === 0 ||
+      name.length > 256 ||
+      name.trim() !== name ||
+      names.has(name)
+    ) {
+      throw new WorkflowGatewayError(
+        "Gateway returned an invalid or duplicate tool name",
+        "transport"
+      )
+    }
+    names.add(name)
+    const description =
+      typeof candidate.description === "string" ? candidate.description : ""
+    const inputSchema = isRecord(candidate.inputSchema)
+      ? candidate.inputSchema
+      : (Object.create(null) as Record<string, unknown>)
+    return { name, description, inputSchema }
+  })
+}
+
+export function getCallerBoundArgumentNames(
+  inputSchema: Record<string, unknown>
+): string[] {
+  const properties = isRecord(inputSchema.properties)
+    ? inputSchema.properties
+    : null
+  if (!properties) return []
+  return Object.entries(properties).flatMap(([name, schema]) => {
+    if (!isRecord(schema)) return []
+    return typeof schema.description === "string" &&
+      schema.description.includes(CALLER_BOUND_MARKER)
+      ? [name]
+      : []
+  })
+}
+
+async function fetchGatewayTools(
+  config: WorkflowGatewayConfig,
+  fetchImpl?: typeof safeFetch,
+  abortSignal?: AbortSignal
+): Promise<WorkflowGatewayTool[]> {
+  const client = new WorkflowGatewayClient(
+    config.url,
+    config.token,
+    fetchImpl,
+    abortSignal
+  )
+  try {
+    await client.connect()
+    await client.initialize()
+    return parseGatewayToolsList(await client.request("tools/list", {}))
+  } finally {
+    client.close()
+  }
+}
+
+export async function listGatewayTools(
+  config: WorkflowGatewayConfig,
+  fetchImpl?: typeof safeFetch,
+  abortSignal?: AbortSignal
+): Promise<WorkflowGatewayTool[]> {
+  const now = Date.now()
+  if (
+    gatewayToolsCache &&
+    gatewayToolsCache.expiresAt > now &&
+    sameConfig(gatewayToolsCache.config, config)
+  ) {
+    return gatewayToolsCache.tools
+  }
+  if (gatewayToolsRequest && sameConfig(gatewayToolsRequest.config, config)) {
+    return gatewayToolsRequest.promise
+  }
+
+  const pending = fetchGatewayTools(config, fetchImpl, abortSignal).then(
+    (tools) => {
+      gatewayToolsCache = {
+        config: { ...config },
+        expiresAt: Date.now() + GATEWAY_TOOLS_CACHE_TTL_MS,
+        tools,
+      }
+      return tools
+    }
+  )
+  gatewayToolsRequest = { config: { ...config }, promise: pending }
+  try {
+    return await pending
+  } finally {
+    if (gatewayToolsRequest?.promise === pending) gatewayToolsRequest = null
+  }
+}
+
+export function clearGatewayToolsCache(): void {
+  gatewayToolsCache = null
+  gatewayToolsRequest = null
+}
+
+export async function executeWorkflowGatewayTool(
+  config: WorkflowGatewayConfig,
   toolName: string,
   args: Record<string, unknown>,
   fetchImpl?: typeof safeFetch,
   abortSignal?: AbortSignal,
 ): Promise<{ isError: boolean; data: unknown }> {
-  if (!CLASSIFIED_EVALUATION_TOOLS.has(toolName)) {
-    throw new ClassifiedGatewayError("Unsupported gateway tool", "tool")
-  }
-  const client = new ClassifiedGatewayClient(
+  const client = new WorkflowGatewayClient(
     config.url,
     config.token,
     fetchImpl,
@@ -489,12 +646,12 @@ export async function executeClassifiedGatewayTool(
       name: toolName,
       arguments: args,
     })
-    const unwrapped = unwrapClassifiedToolResult(result)
+    const unwrapped = unwrapWorkflowToolResult(result)
     if (
       Buffer.byteLength(JSON.stringify(unwrapped), "utf8") >
-      CLASSIFIED_SSE_LIMITS.resultBytes
+      WORKFLOW_SSE_LIMITS.resultBytes
     ) {
-      throw new ClassifiedGatewayError("Gateway result is too large", "transport")
+      throw new WorkflowGatewayError("Gateway result is too large", "transport")
     }
     return unwrapped
   } finally {
@@ -503,6 +660,7 @@ export async function executeClassifiedGatewayTool(
 }
 
 /** Test seam for the route without replacing this module process-wide. */
-export const classifiedGatewayDependencies = {
-  execute: executeClassifiedGatewayTool,
+export const workflowGatewayDependencies = {
+  execute: executeWorkflowGatewayTool,
+  listTools: listGatewayTools,
 }

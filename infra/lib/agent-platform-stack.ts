@@ -877,8 +877,9 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(resources.agentInvocationSigningSecret).add('Environment', environment);
     cdk.Tags.of(resources.agentInvocationSigningSecret).add('ManagedBy', 'cdk');
 
-    // 4f-b. PSD Agent Gateway config (#1230). The psd-classified-evaluation skill
-    // reads ONE JSON secret `psd-agent/{env}/agent-gateway` shaped
+    // 4f-b. PSD Agent Gateway config (#1230/#1403). The psd-workflows skill
+    // discovers the live MCP roster and reads ONE JSON secret
+    // `psd-agent/{env}/agent-gateway` shaped
     // {"url":"…","token":"…"} — the n8n MCP Server Trigger /sse endpoint AND its
     // Bearer token. Both are owned by the n8n side and must NOT live in this
     // PUBLIC repo, so there is deliberately NO CDK Secret resource and NO CDK
