@@ -1,6 +1,7 @@
 const mockRepositoryAccessPreflight = jest.fn()
 const mockGetAssistantArchitectByIdAction = jest.fn()
 const mockExecuteQuery = jest.fn()
+const mockExecuteTransaction = jest.fn()
 const mockUnifiedStream = jest.fn()
 const mockResolveRuntimeRepositoryInputs = jest.fn()
 const mockRetrieveKnowledgeForPrompt = jest.fn()
@@ -28,6 +29,7 @@ jest.mock("@/actions/db/assistant-architect-actions", () => ({
 
 jest.mock("@/lib/db/drizzle-client", () => ({
   executeQuery: (...args: unknown[]) => mockExecuteQuery(...args),
+  executeTransaction: (...args: unknown[]) => mockExecuteTransaction(...args),
 }))
 
 jest.mock("@/lib/db/drizzle", () => ({
@@ -109,6 +111,25 @@ function defineAssistantExecutionServiceRepositoryPreflightSuite1Part1() {
       isAllowed: true,
       repositoryIds: [42],
     })
+    mockExecuteTransaction.mockImplementation(
+      async (callback: (tx: unknown) => Promise<unknown>) =>
+        callback({
+          select: () => ({
+            from: () => ({
+              where: () => ({
+                limit: () => ({
+                  for: async () => [{ id: 5 }],
+                }),
+              }),
+            }),
+          }),
+          insert: () => ({
+            values: () => ({
+              returning: async () => [{ id: 123 }],
+            }),
+          }),
+        }),
+    )
     mockExecuteQuery.mockResolvedValue([{ id: 123 }])
     mockRetrieveKnowledgeForPrompt.mockResolvedValue([])
     mockRetrieveAtriumKnowledgeForPrompt.mockResolvedValue([])
@@ -157,7 +178,7 @@ function defineAssistantExecutionServiceRepositoryPreflightSuite1Part1() {
     })
   })
 
-  it("blocks a revoked executor before any execution record or model call", async () => {
+  it("marks a coordinated execution record failed before any model call when repository access is revoked", async () => {
     mockRepositoryAccessPreflight.mockResolvedValue({
       isAllowed: false,
       repositoryIds: [42],
@@ -178,7 +199,11 @@ function defineAssistantExecutionServiceRepositoryPreflightSuite1Part1() {
       expect.any(Array),
       "executor-sub"
     )
-    expect(mockExecuteQuery).not.toHaveBeenCalled()
+    expect(mockExecuteTransaction).toHaveBeenCalledTimes(1)
+    expect(mockExecuteTransaction.mock.invocationCallOrder[0]).toBeLessThan(
+      mockGetAssistantArchitectByIdAction.mock.invocationCallOrder[0]
+    )
+    expect(mockExecuteQuery).toHaveBeenCalled()
     expect(mockUnifiedStream).not.toHaveBeenCalled()
   })
 

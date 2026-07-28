@@ -23,6 +23,48 @@ const validImport = {
   assistants: [validAssistant]
 }
 
+function defineImportCollectionLimitTests() {
+  it('rejects more than 100 assistants before import transactions begin', () => {
+    const data = {
+      ...validImport,
+      assistants: Array.from({ length: 101 }, (_, index) => ({
+        ...validAssistant,
+        name: `Assistant ${index}`,
+      })),
+    }
+    const result = validateImportFile(data)
+    expect(result.valid).toBe(false)
+    expect(result.error).toMatch(/Too many assistants.*100/)
+  })
+
+  it('accepts exactly 100 assistants', () => {
+    const data = {
+      ...validImport,
+      assistants: Array.from({ length: 100 }, (_, index) => ({
+        ...validAssistant,
+        name: `Assistant ${index}`,
+      })),
+    }
+    expect(validateImportFile(data)).toEqual({ valid: true })
+  })
+
+  it('rejects more than 500 repository bindings per envelope', () => {
+    const data = {
+      ...validImport,
+      assistants: [{
+        ...validAssistant,
+        prompts: [{
+          ...validAssistant.prompts[0],
+          repository_ids: Array.from({ length: 501 }, (_, index) => index + 1),
+        }],
+      }],
+    }
+    const result = validateImportFile(data)
+    expect(result.valid).toBe(false)
+    expect(result.error).toMatch(/Too many repository bindings.*500/)
+  })
+}
+
 describe('validateImportFile', () => {
   it('accepts a valid import file', () => {
     expect(validateImportFile(validImport)).toEqual({ valid: true })
@@ -71,6 +113,8 @@ describe('validateImportFile', () => {
     const data = { ...validImport, assistants: [{ ...validAssistant, prompts }] }
     expect(validateImportFile(data)).toEqual({ valid: true })
   })
+
+  defineImportCollectionLimitTests()
 
   it('rejects unsupported input field types before import writes begin', () => {
     const data = {

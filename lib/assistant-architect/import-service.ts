@@ -12,9 +12,13 @@ import {
   validateAgentToolsForAuthor,
 } from "@/lib/assistant-architect/agent-config-validation";
 import { validatePromptToolsForRouting } from "@/lib/assistant-architect/prompt-tool-validation";
-import { checkUserRole, getUserRoles } from "@/lib/db/drizzle";
 import {
-  executeQuery,
+  checkUserRole,
+  getAccessibleRepositoryIds,
+  getRepositoriesByIds,
+  getUserRoles,
+} from "@/lib/db/drizzle";
+import {
   executeTransaction,
   type DbTransaction,
 } from "@/lib/db/drizzle-client";
@@ -26,7 +30,10 @@ import {
   toolExecutions,
   toolInputFields,
 } from "@/lib/db/schema";
-import { userCanAccessResource } from "@/lib/db/drizzle/resource-access";
+import {
+  filterAccessibleResourceIds,
+  userCanAccessResource,
+} from "@/lib/db/drizzle/resource-access";
 import type { ToolInputFieldOptions } from "@/lib/db/types/jsonb";
 import { createLogger } from "@/lib/logger";
 import { decodeMdxEditorEscapes } from "@/lib/utils/text-sanitizer";
@@ -111,6 +118,82 @@ async function mapImportModels(
     }
   }
   return mapModelsForImport(Array.from(modelNames));
+}
+
+async function validateImportedPromptResourceAccess(
+  assistants: ExportedAssistant[],
+  modelMap: Map<string, number>,
+  authorUserId: number,
+): Promise<void> {
+  const modelIds = new Set<number>();
+  const repositoryIds = new Set<number>();
+  for (const assistant of assistants) {
+    for (const prompt of assistant.prompts) {
+      const modelId = modelMap.get(prompt.model_name);
+      if (modelId) modelIds.add(modelId);
+      for (const repositoryId of prompt.repository_ids ?? []) {
+        repositoryIds.add(repositoryId);
+      }
+    }
+  }
+
+  try {
+    const accessibleModelIds = await filterAccessibleResourceIds(
+      authorUserId,
+      "model",
+      [...modelIds],
+    );
+    if (
+      accessibleModelIds.size !== modelIds.size ||
+      [...modelIds].some(
+        (modelId) => !accessibleModelIds.has(String(modelId)),
+      )
+    ) {
+      throw new AssistantImportServiceError(
+        "VALIDATION_ERROR",
+        "One or more prompt models are unavailable",
+      );
+    }
+
+    if (repositoryIds.size === 0) return;
+    const accessibleRepositoryIds = await getAccessibleRepositoryIds(
+      [...repositoryIds],
+      authorUserId,
+    );
+    const accessibleRepositoryIdSet = new Set(accessibleRepositoryIds);
+    if (
+      accessibleRepositoryIdSet.size !== repositoryIds.size ||
+      [...repositoryIds].some(
+        (repositoryId) => !accessibleRepositoryIdSet.has(repositoryId),
+      )
+    ) {
+      throw new AssistantImportServiceError(
+        "VALIDATION_ERROR",
+        "One or more prompt repositories are unavailable",
+      );
+    }
+
+    const repositories = await getRepositoriesByIds([...repositoryIds]);
+    if (
+      repositories.length !== repositoryIds.size ||
+      repositories.some(
+        (repository) =>
+          repository.repositoryKind !== "durable" ||
+          repository.lifecycleStatus !== "active",
+      )
+    ) {
+      throw new AssistantImportServiceError(
+        "VALIDATION_ERROR",
+        "One or more prompt repositories are unavailable",
+      );
+    }
+  } catch (error) {
+    if (error instanceof AssistantImportServiceError) throw error;
+    throw new AssistantImportServiceError(
+      "VALIDATION_ERROR",
+      "Unable to validate prompt resource access",
+    );
+  }
 }
 
 async function validateImportedPromptTools(
@@ -316,6 +399,11 @@ export async function createAssistantsFromImport(
   const importData = asValidatedImport(data);
   await validateAgentAuthoringPermissions(importData.assistants, userId);
   const modelMap = await mapImportModels(importData.assistants);
+  await validateImportedPromptResourceAccess(
+    importData.assistants,
+    modelMap,
+    userId,
+  );
   await validateImportedPromptTools(importData.assistants, modelMap, userId);
   const log = createLogger({ action: "createAssistantsFromImport" });
   const results: AssistantImportResult[] = [];
@@ -443,6 +531,11 @@ export async function updateAssistantFromImport(
   const assistant = importData.assistants[0];
   await validateAgentAuthoringPermissions([assistant], callerUserId);
   const modelMap = await mapImportModels([assistant]);
+  await validateImportedPromptResourceAccess(
+    [assistant],
+    modelMap,
+    callerUserId,
+  );
   await validateImportedPromptTools([assistant], modelMap, callerUserId);
   const isAdmin = await checkUserRole(callerUserId, "administrator");
   const log = createLogger({
@@ -504,43 +597,53 @@ export async function forkAssistant(
   callerUserId: number,
   nameOverride?: string,
 ): Promise<AssistantMutationResult> {
-  const rows = await executeQuery(
-    (db) =>
-      db
+  const notFound = () =>
+    new AssistantImportServiceError(
+      "NOT_FOUND",
+      `Assistant not found: ${assistantId}`,
+    );
+  const exportedSource = await executeTransaction(
+    async (tx) => {
+      const [source] = await tx
         .select({
           userId: assistantArchitects.userId,
           status: assistantArchitects.status,
         })
         .from(assistantArchitects)
         .where(eq(assistantArchitects.id, assistantId))
-        .limit(1),
-    "getAssistantForFork",
+        .limit(1)
+        .for("update");
+
+      if (!source) throw notFound();
+
+      const isAdmin = await checkUserRole(
+        callerUserId,
+        "administrator",
+        tx,
+      );
+      const hasBaseVisibility =
+        source.userId === callerUserId ||
+        isAdmin ||
+        source.status === "approved";
+      if (!hasBaseVisibility) throw notFound();
+
+      const hasResourceVisibility = await userCanAccessResource(
+        callerUserId,
+        "assistant",
+        assistantId,
+        { ownerUserId: source.userId },
+        tx,
+      );
+      if (!hasResourceVisibility) throw notFound();
+
+      const exported = await getAssistantDataForExport([assistantId], tx);
+      const snapshot = exported[0];
+      if (!snapshot) throw notFound();
+      return snapshot;
+    },
+    "getAssistantForForkSnapshot",
+    { isolationLevel: "repeatable read" },
   );
-  const source = rows[0];
-  const notFound = () =>
-    new AssistantImportServiceError(
-      "NOT_FOUND",
-      `Assistant not found: ${assistantId}`,
-    );
-
-  if (!source) throw notFound();
-
-  const isAdmin = await checkUserRole(callerUserId, "administrator");
-  const hasBaseVisibility =
-    source.userId === callerUserId || isAdmin || source.status === "approved";
-  if (!hasBaseVisibility) throw notFound();
-
-  const hasResourceVisibility = await userCanAccessResource(
-    callerUserId,
-    "assistant",
-    assistantId,
-    { ownerUserId: source.userId },
-  );
-  if (!hasResourceVisibility) throw notFound();
-
-  const exported = await getAssistantDataForExport([assistantId]);
-  const exportedSource = exported[0];
-  if (!exportedSource) throw notFound();
 
   const forkData = createExportFile([
     {

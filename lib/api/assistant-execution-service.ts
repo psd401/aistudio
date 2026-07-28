@@ -14,8 +14,15 @@ import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architec
 import { INTERNAL_ASSISTANT_LOOKUP } from "@/lib/assistant-architect/internal-access"
 import { createLogger, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { getUserById } from "@/lib/db/drizzle"
-import { executeQuery } from "@/lib/db/drizzle-client"
-import { sql } from "drizzle-orm"
+import {
+  executeQuery,
+  executeTransaction,
+} from "@/lib/db/drizzle-client"
+import { eq, sql } from "drizzle-orm"
+import {
+  assistantArchitects,
+  toolExecutions,
+} from "@/lib/db/schema"
 import { unifiedStreamingService } from "@/lib/streaming/unified-streaming-service"
 import {
   retrieveKnowledgeForPrompt,
@@ -232,38 +239,15 @@ async function prepareAssistantExecution(
 
   log.info("Starting assistant execution", { assistantId, userId })
 
-  // 1. Load assistant configuration
-  const architectResult = await getAssistantArchitectByIdAction(
-    assistantId.toString(),
-    INTERNAL_ASSISTANT_LOOKUP
-  )
-  if (!architectResult.isSuccess || !architectResult.data) {
-    throw ErrorFactories.dbRecordNotFound("assistant_architects", assistantId)
-  }
-
-  const architect = architectResult.data
-  const prompts = requirePromptChainArchitect(architect)
-
   // Runtime markers are owner-bound and must be resolved before the execution
-  // row/event writes below. Their repository IDs then join the normal
-  // executor-ACL preflight; ownership of an assistant never lends access.
+  // row below. Their repository IDs later join the normal executor-ACL
+  // preflight; ownership of an assistant never lends access.
   const preparedInputs = await resolvePreparedAssistantInputs(params)
-  await requireAssistantRepositoryAccess(
-    prompts,
-    preparedInputs,
-    cognitoSub,
-    { assistantId, userId, log }
-  )
 
-  log.info("Assistant loaded", sanitizeForLogging({
-    assistantId,
-    modelRoutingMode: architect.modelRoutingMode ?? "legacy",
-    modelRoutingFamily: architect.modelRoutingFamily ?? null,
-    name: architect.name,
-    promptCount: prompts.length,
-  }))
-
-  // 2. Create tool_execution record
+  // 1. Lock the assistant row and create the active execution record in one
+  // transaction. Updates use the same row lock before checking active records:
+  // whichever operation wins the lock establishes a safe ordering, so an
+  // execution can never load prompt ids that a concurrent update then deletes.
   const executionId = await createAssistantExecutionRecord(
     userId,
     assistantId,
@@ -271,47 +255,79 @@ async function prepareAssistantExecution(
   )
   log.info("Execution record created", { executionId, assistantId })
 
-  // 3. Emit execution-start event
-  await storeExecutionEvent(executionId, "execution-start", {
-    executionId,
-    totalPrompts: prompts.length,
-    toolName: architect.name,
-  })
+  try {
+    // 2. Load the configuration only after the execution record is visible.
+    // A concurrent updater must now observe this record and return 409.
+    const architectResult = await getAssistantArchitectByIdAction(
+      assistantId.toString(),
+      INTERNAL_ASSISTANT_LOOKUP
+    )
+    if (!architectResult.isSuccess || !architectResult.data) {
+      throw ErrorFactories.dbRecordNotFound("assistant_architects", assistantId)
+    }
 
-  // 4. Build execution context. The Atrium requester resolves the key owner's
-  // roles/org for canView-bounded content retrieval (Phase 6, #1056);
-  // requesterForUserId never throws — a failed resolve yields null, which
-  // skips Atrium retrieval without failing the execution.
-  // Resolve the assistant creator's cognito_sub so owner-based repository access
-  // resolves for non-owner runs. This was String(architect.userId) — a numeric
-  // users.id, which never equals the users.cognito_sub the knowledge/repository
-  // access predicates compare against, so owner-shared private repos silently
-  // returned zero chunks (REV-COR-511).
-  const assistantOwnerSub = await resolveAssistantOwnerSub(architect.userId, log)
+    const architect = architectResult.data
+    const prompts = requirePromptChainArchitect(architect)
+    await requireAssistantRepositoryAccess(
+      prompts,
+      preparedInputs,
+      cognitoSub,
+      { assistantId, userId, log }
+    )
 
-  const context: PromptExecutionContext = {
-    previousOutputs: new Map(),
-    accumulatedMessages: [],
-    executionId,
-    userCognitoSub: cognitoSub,
-    assistantOwnerSub,
-    userId,
-    executionStartTime: Date.now(),
-    assistantId,
-    modelRoutingMode: architect.modelRoutingMode ?? "legacy",
-    modelRoutingFamily: architect.modelRoutingFamily ?? null,
-    modelRoutes: new Map(),
-    atriumRequester: await requesterForUserId(userId),
-    runtimeRepositoryIds: preparedInputs.runtimeRepositoryIds,
-    runtimeRepositoryQuery: preparedInputs.runtimeRepositoryQuery,
-  }
+    log.info("Assistant loaded", sanitizeForLogging({
+      assistantId,
+      modelRoutingMode: architect.modelRoutingMode ?? "legacy",
+      modelRoutingFamily: architect.modelRoutingFamily ?? null,
+      name: architect.name,
+      promptCount: prompts.length,
+    }))
 
-  return {
-    prompts: prompts as ChainPrompt[],
-    context,
-    executionId,
-    inputs: preparedInputs.inputs,
-    log,
+    // 3. Emit execution-start event
+    await storeExecutionEvent(executionId, "execution-start", {
+      executionId,
+      totalPrompts: prompts.length,
+      toolName: architect.name,
+    })
+
+    // 4. Build execution context. The Atrium requester resolves the key owner's
+    // roles/org for canView-bounded content retrieval (Phase 6, #1056);
+    // requesterForUserId never throws — a failed resolve yields null, which
+    // skips Atrium retrieval without failing the execution.
+    // Resolve the assistant creator's cognito_sub so owner-based repository access
+    // resolves for non-owner runs. This was String(architect.userId) — a numeric
+    // users.id, which never equals the users.cognito_sub the knowledge/repository
+    // access predicates compare against, so owner-shared private repos silently
+    // returned zero chunks (REV-COR-511).
+    const assistantOwnerSub = await resolveAssistantOwnerSub(architect.userId, log)
+
+    const context: PromptExecutionContext = {
+      previousOutputs: new Map(),
+      accumulatedMessages: [],
+      executionId,
+      userCognitoSub: cognitoSub,
+      assistantOwnerSub,
+      userId,
+      executionStartTime: Date.now(),
+      assistantId,
+      modelRoutingMode: architect.modelRoutingMode ?? "legacy",
+      modelRoutingFamily: architect.modelRoutingFamily ?? null,
+      modelRoutes: new Map(),
+      atriumRequester: await requesterForUserId(userId),
+      runtimeRepositoryIds: preparedInputs.runtimeRepositoryIds,
+      runtimeRepositoryQuery: preparedInputs.runtimeRepositoryQuery,
+    }
+
+    return {
+      prompts: prompts as ChainPrompt[],
+      context,
+      executionId,
+      inputs: preparedInputs.inputs,
+      log,
+    }
+  } catch (setupError) {
+    await handleExecutionFailure(executionId, setupError, log)
+    throw setupError
   }
 }
 
@@ -380,20 +396,40 @@ async function createAssistantExecutionRecord(
   inputs: Record<string, unknown>
 ): Promise<number> {
   const inputData = Object.keys(inputs).length > 0 ? inputs : { __no_inputs: true }
-  const inputDataJson = JSON.stringify(inputData)
-  const result = await executeQuery(
-    (db) => db.execute(sql`
-      INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
-      VALUES (${userId}, ${inputDataJson}::jsonb, 'running', ${new Date().toISOString()}::timestamp, ${assistantId})
-      RETURNING id
-    `),
-    "createToolExecution"
+  return executeTransaction(
+    async (tx) => {
+      const [assistant] = await tx
+        .select({ id: assistantArchitects.id })
+        .from(assistantArchitects)
+        .where(eq(assistantArchitects.id, assistantId))
+        .limit(1)
+        .for("update")
+      if (!assistant) {
+        throw ErrorFactories.dbRecordNotFound(
+          "assistant_architects",
+          assistantId
+        )
+      }
+
+      const [execution] = await tx
+        .insert(toolExecutions)
+        .values({
+          userId,
+          inputData,
+          status: "running",
+          startedAt: new Date(),
+          assistantArchitectId: assistantId,
+        })
+        .returning({ id: toolExecutions.id })
+      if (!execution?.id) {
+        throw ErrorFactories.sysInternalError(
+          "Failed to create execution record"
+        )
+      }
+      return execution.id
+    },
+    "createToolExecutionWithAssistantLock"
   )
-  const rows = result as unknown as Array<{ id: number }>
-  if (!rows[0]?.id) {
-    throw ErrorFactories.sysInternalError("Failed to create execution record")
-  }
-  return Number(rows[0].id)
 }
 
 async function resolveAssistantOwnerSub(

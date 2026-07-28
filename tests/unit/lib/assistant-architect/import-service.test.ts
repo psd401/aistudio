@@ -4,6 +4,9 @@ import { beforeEach, expect, it } from "@jest/globals";
 var mockExecuteQuery: jest.Mock;
 var mockExecuteTransaction: jest.Mock;
 var mockCheckUserRole: jest.Mock;
+var mockFilterAccessibleResourceIds: jest.Mock;
+var mockGetAccessibleRepositoryIds: jest.Mock;
+var mockGetRepositoriesByIds: jest.Mock;
 var mockGetUserRoles: jest.Mock;
 var mockUserCanAccessResource: jest.Mock;
 var mockLogWarn: jest.Mock;
@@ -13,6 +16,9 @@ var mockValidatePromptToolsForRouting: jest.Mock;
 /* eslint-enable no-var */
 
 mockCheckUserRole = jest.fn();
+mockFilterAccessibleResourceIds = jest.fn();
+mockGetAccessibleRepositoryIds = jest.fn();
+mockGetRepositoriesByIds = jest.fn();
 mockGetUserRoles = jest.fn();
 mockUserCanAccessResource = jest.fn();
 mockLogWarn = jest.fn();
@@ -62,6 +68,10 @@ jest.mock("@/lib/db/schema", () => ({
 
 jest.mock("@/lib/db/drizzle", () => ({
   checkUserRole: (...args: unknown[]) => mockCheckUserRole(...args),
+  getAccessibleRepositoryIds: (...args: unknown[]) =>
+    mockGetAccessibleRepositoryIds(...args),
+  getRepositoriesByIds: (...args: unknown[]) =>
+    mockGetRepositoriesByIds(...args),
   getUserRoles: (...args: unknown[]) => mockGetUserRoles(...args),
 }));
 
@@ -78,6 +88,8 @@ jest.mock("@/lib/assistant-architect/prompt-tool-validation", () => ({
 }));
 
 jest.mock("@/lib/db/drizzle/resource-access", () => ({
+  filterAccessibleResourceIds: (...args: unknown[]) =>
+    mockFilterAccessibleResourceIds(...args),
   userCanAccessResource: (...args: unknown[]) =>
     mockUserCanAccessResource(...args),
 }));
@@ -114,7 +126,6 @@ import {
   toolExecutions,
   toolInputFields,
 } from "@/lib/db/schema";
-import { getAssistantDataForExport } from "@/lib/assistant-export-import";
 
 const drizzleClientMock = jest.requireMock<{
   executeQuery: jest.Mock;
@@ -275,6 +286,38 @@ function selectFromState(state: DatabaseState, table: unknown) {
           },
         };
       },
+      leftJoin() {
+        return {
+          where(condition: EqualityCondition) {
+            const assistantId = Number(condition.right);
+            return {
+              orderBy: async () =>
+                state.prompts
+                  .filter(
+                    (row) => row.assistantArchitectId === assistantId,
+                  )
+                  .map((row, index) => ({
+                    name: row.name,
+                    content: String(row.content ?? ""),
+                    systemContext: (row.systemContext as string | null) ?? null,
+                    position: Number(row.position ?? index),
+                    parallelGroup:
+                      (row.parallelGroup as number | null) ?? null,
+                    inputMapping:
+                      (row.inputMapping as Record<string, string> | null) ??
+                      null,
+                    timeoutSeconds:
+                      (row.timeoutSeconds as number | null) ?? null,
+                    repositoryIds:
+                      (row.repositoryIds as number[] | null) ?? [],
+                    enabledTools:
+                      (row.enabledTools as string[] | null) ?? [],
+                    modelName: String(row.modelName ?? "gpt-source"),
+                  })),
+            };
+          },
+        };
+      },
     };
   }
   if (table === toolExecutions) {
@@ -303,20 +346,37 @@ function selectFromState(state: DatabaseState, table: unknown) {
       },
     };
   }
+  if (table === toolInputFields) {
+    return {
+      where(condition: EqualityCondition) {
+        const assistantId = Number(condition.right);
+        return {
+          orderBy: async () =>
+            state.fields
+              .filter((row) => row.assistantArchitectId === assistantId)
+              .map((row, index) => ({
+                name: row.name,
+                label: String(row.label ?? row.name),
+                fieldType: String(row.fieldType ?? "short_text"),
+                position: Number(row.position ?? index),
+                options:
+                  (row.options as Record<string, unknown> | null) ?? null,
+              })),
+        };
+      },
+    };
+  }
   return {
     where(condition: EqualityCondition) {
-      return {
+      const ids = Array.isArray(condition.right)
+        ? condition.right
+        : [condition.right];
+      const rows = state.assistants.filter((row) => ids.includes(row.id));
+      return Object.assign(Promise.resolve(rows), {
         limit: () => ({
-          for: async () => {
-            const id =
-              typeof condition.right === "number"
-                ? condition.right
-                : state.assistants[0]?.id;
-            const found = state.assistants.find((row) => row.id === id);
-            return found ? [{ userId: found.userId }] : [];
-          },
+          for: async () => rows.slice(0, 1),
         }),
-      };
+      });
     },
   };
 }
@@ -442,6 +502,9 @@ beforeEach(() => {
   mockExecuteQuery.mockReset();
   mockExecuteTransaction.mockReset();
   mockCheckUserRole.mockReset();
+  mockFilterAccessibleResourceIds.mockReset();
+  mockGetAccessibleRepositoryIds.mockReset();
+  mockGetRepositoriesByIds.mockReset();
   mockGetUserRoles.mockReset();
   mockUserCanAccessResource.mockReset();
   mockLogWarn.mockReset();
@@ -462,6 +525,20 @@ beforeEach(() => {
       : Promise.resolve([]),
   );
   mockCheckUserRole.mockResolvedValue(false);
+  mockFilterAccessibleResourceIds.mockImplementation(
+    (_userId: number, _resourceType: string, resourceIds: number[]) =>
+      Promise.resolve(new Set(resourceIds.map(String))),
+  );
+  mockGetAccessibleRepositoryIds.mockImplementation(
+    (repositoryIds: number[]) => Promise.resolve(repositoryIds),
+  );
+  mockGetRepositoriesByIds.mockImplementation((repositoryIds: number[]) =>
+    Promise.resolve(repositoryIds.map((id) => ({
+      id,
+      repositoryKind: "durable",
+      lifecycleStatus: "active",
+    }))),
+  );
   mockGetUserRoles.mockResolvedValue(["staff"]);
   mockUserCanAccessResource.mockResolvedValue(true);
   mockValidateAgentToolsForAuthor.mockResolvedValue({
@@ -596,6 +673,75 @@ it("rejects unknown or model-incompatible prompt tools before starting a transac
     7,
     91,
   );
+  expect(mockExecuteTransaction).not.toHaveBeenCalled();
+});
+
+it("rejects a mapped prompt model the author cannot access even without tools", async () => {
+  mockFilterAccessibleResourceIds.mockResolvedValue(new Set());
+
+  await expect(
+    createAssistantsFromImport(envelope(), 7),
+  ).rejects.toMatchObject({
+    code: "VALIDATION_ERROR",
+    message: "One or more prompt models are unavailable",
+  } satisfies Partial<AssistantImportServiceError>);
+
+  expect(mockFilterAccessibleResourceIds).toHaveBeenCalledWith(
+    7,
+    "model",
+    [91],
+  );
+  expect(mockValidatePromptToolsForRouting).not.toHaveBeenCalled();
+  expect(mockExecuteTransaction).not.toHaveBeenCalled();
+});
+
+it("rejects prompt repositories the author cannot access before writes", async () => {
+  mockGetAccessibleRepositoryIds.mockResolvedValue([]);
+
+  await expect(
+    createAssistantsFromImport(
+      envelope({
+        ...baseAssistant,
+        prompts: [{
+          ...baseAssistant.prompts[0],
+          repository_ids: [17],
+        }],
+      }),
+      7,
+    ),
+  ).rejects.toMatchObject({
+    code: "VALIDATION_ERROR",
+    message: "One or more prompt repositories are unavailable",
+  } satisfies Partial<AssistantImportServiceError>);
+
+  expect(mockGetAccessibleRepositoryIds).toHaveBeenCalledWith([17], 7);
+  expect(mockGetRepositoriesByIds).not.toHaveBeenCalled();
+  expect(mockExecuteTransaction).not.toHaveBeenCalled();
+});
+
+it("rejects non-durable prompt repositories before writes", async () => {
+  mockGetRepositoriesByIds.mockResolvedValue([{
+    id: 17,
+    repositoryKind: "ephemeral",
+    lifecycleStatus: "active",
+  }]);
+
+  await expect(
+    createAssistantsFromImport(
+      envelope({
+        ...baseAssistant,
+        prompts: [{
+          ...baseAssistant.prompts[0],
+          repository_ids: [17],
+        }],
+      }),
+      7,
+    ),
+  ).rejects.toMatchObject({
+    code: "VALIDATION_ERROR",
+    message: "One or more prompt repositories are unavailable",
+  } satisfies Partial<AssistantImportServiceError>);
+
   expect(mockExecuteTransaction).not.toHaveBeenCalled();
 });
 
@@ -798,11 +944,13 @@ it("rolls back the whole replacement on a mid-update failure", async () => {
 });
 
 it("masks a resource-invisible fork source as not found", async () => {
-  mockExecuteQuery.mockImplementation((_query: unknown, operation: unknown) =>
-    operation === "getAssistantForFork"
-      ? Promise.resolve([{ userId: 99, status: "approved" }])
-      : Promise.resolve([]),
-  );
+  database.assistants.push({
+    id: 12,
+    name: "Shared source",
+    description: "",
+    status: "approved",
+    userId: 99,
+  });
   mockUserCanAccessResource.mockResolvedValue(false);
 
   await expect(forkAssistant(12, 7)).rejects.toMatchObject({
@@ -811,11 +959,13 @@ it("masks a resource-invisible fork source as not found", async () => {
 });
 
 it("masks a non-owner pending fork source before resource lookup", async () => {
-  mockExecuteQuery.mockImplementation((_query: unknown, operation: unknown) =>
-    operation === "getAssistantForFork"
-      ? Promise.resolve([{ userId: 99, status: "pending_approval" }])
-      : Promise.resolve([]),
-  );
+  database.assistants.push({
+    id: 12,
+    name: "Private source",
+    description: "",
+    status: "pending_approval",
+    userId: 99,
+  });
 
   await expect(forkAssistant(12, 7)).rejects.toMatchObject({
     code: "NOT_FOUND",
@@ -833,78 +983,53 @@ it("forks into a caller-owned pending copy without changing the source", async (
         description: "Source description",
         status: "approved",
         userId: 7,
+        mode: "agentic",
+        modelRoutingMode: "advanced",
+        modelRoutingFamily: "anthropic",
+        agentEnabledTools: ["repositories.search"],
+        agentEnabledConnectors: ["connector-1"],
+        agentMaxSteps: 12,
+        agentTimeoutSeconds: 240,
+        agentCostCapCents: 75,
+        agentMaxRequestsPerHour: 20,
+        retrievalScope: {
+          collectionId: "collection-1",
+          tags: ["family"],
+          maxVisibilityLevel: "internal",
+        },
       },
     ],
     capabilities: [],
-    prompts: [{ assistantArchitectId: 12, name: "Source prompt" }],
+    prompts: [{
+      assistantArchitectId: 12,
+      name: "Source prompt",
+      content: "Hello",
+      systemContext: null,
+      position: 0,
+      parallelGroup: null,
+      inputMapping: null,
+      timeoutSeconds: null,
+      repositoryIds: [17],
+      enabledTools: ["repositories.search"],
+      modelName: "gpt-source",
+    }],
     fields: [],
     promptResults: [],
     executions: [],
   };
-  mockExecuteQuery.mockImplementation((_query: unknown, operation: unknown) => {
-    switch (operation) {
-      case "getAssistantForFork":
-        return Promise.resolve([{ userId: 7, status: "approved" }]);
-      case "getAssistantsForExport":
-        return Promise.resolve([
-          {
-            id: 12,
-            name: "Source",
-            description: "Source description",
-            status: "approved",
-            imagePath: null,
-            isParallel: false,
-            timeoutSeconds: null,
-            mode: "agentic",
-            modelRoutingMode: "advanced",
-            modelRoutingFamily: "anthropic",
-            agentEnabledTools: ["repositories.search"],
-            agentEnabledConnectors: ["connector-1"],
-            agentMaxSteps: 12,
-            agentTimeoutSeconds: 240,
-            agentCostCapCents: 75,
-            agentMaxRequestsPerHour: 20,
-            retrievalScope: {
-              collectionId: "collection-1",
-              tags: ["family"],
-              maxVisibilityLevel: "internal",
-            },
-          },
-        ]);
-      case "getPromptsForExport":
-        return Promise.resolve([
-          {
-            name: "Prompt one",
-            content: "Hello",
-            systemContext: null,
-            position: 0,
-            parallelGroup: null,
-            inputMapping: null,
-            timeoutSeconds: null,
-            repositoryIds: [17],
-            enabledTools: ["repositories.search"],
-            modelName: "gpt-source",
-          },
-        ]);
-      case "getInputFieldsForExport":
-        return Promise.resolve([]);
-      case "getActiveModelsForImport":
-        return Promise.resolve([
-          {
-            id: 91,
-            modelId: "gpt-source",
-            provider: "openai",
-            capabilities: {},
-          },
-        ]);
-      default:
-        return Promise.resolve([]);
-    }
-  });
-
-  expect(await getAssistantDataForExport([12])).toHaveLength(1);
   const result = await forkAssistant(12, 7, "Caller copy");
 
+  expect(mockExecuteTransaction.mock.calls[0]?.[1]).toBe(
+    "getAssistantForForkSnapshot",
+  );
+  expect(mockExecuteTransaction.mock.calls[0]?.[2]).toEqual({
+    isolationLevel: "repeatable read",
+  });
+  const snapshotTransaction = mockCheckUserRole.mock.calls[0]?.[2];
+  expect(snapshotTransaction).toBeDefined();
+  expect(mockUserCanAccessResource.mock.calls[0]?.[4]).toBe(
+    snapshotTransaction,
+  );
   expect(result.result).toMatchObject({
     name: "Caller copy",
     status: "pending_approval",

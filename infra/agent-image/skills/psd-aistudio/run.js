@@ -394,7 +394,7 @@ async function updateAssistantCommand(args, email) {
   if (assistantId === undefined) fail("--id <assistant-id> is required");
   await runToolAndEmit(
     "update_assistant",
-    { assistantId, ...parseImportEnvelope(args) },
+    { ...parseImportEnvelope(args), assistantId },
     email,
   );
 }

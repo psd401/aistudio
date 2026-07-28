@@ -1,4 +1,7 @@
-import { executeQuery } from "@/lib/db/drizzle-client"
+import {
+  executeQuery,
+  type DbTransaction,
+} from "@/lib/db/drizzle-client"
 import { inArray, eq } from "drizzle-orm"
 import {
   assistantArchitects,
@@ -61,11 +64,25 @@ export const CURRENT_EXPORT_VERSION = "1.0"
 /**
  * Fetches complete assistant data including prompts and input fields
  */
-export async function getAssistantDataForExport(assistantIds: number[]): Promise<ExportedAssistant[]> {
+async function runExportQuery<T>(
+  transaction: DbTransaction | undefined,
+  query: (db: Pick<DbTransaction, "select">) => Promise<T>,
+  context: string
+): Promise<T> {
+  return transaction
+    ? query(transaction)
+    : executeQuery((db) => query(db), context)
+}
+
+export async function getAssistantDataForExport(
+  assistantIds: number[],
+  transaction?: DbTransaction
+): Promise<ExportedAssistant[]> {
   if (assistantIds.length === 0) return []
 
   // Fetch assistants
-  const assistants = await executeQuery(
+  const assistants = await runExportQuery(
+    transaction,
     (db) => db.select({
       id: assistantArchitects.id,
       name: assistantArchitects.name,
@@ -93,7 +110,8 @@ export async function getAssistantDataForExport(assistantIds: number[]): Promise
   // For each assistant, fetch related data
   const exportedAssistants = await Promise.all(assistants.map(async (assistant) => {
     // Fetch prompts with model information
-    const prompts = await executeQuery(
+    const prompts = await runExportQuery(
+      transaction,
       (db) => db.select({
         name: chainPrompts.name,
         content: chainPrompts.content,
@@ -114,7 +132,8 @@ export async function getAssistantDataForExport(assistantIds: number[]): Promise
     )
 
     // Fetch input fields
-    const inputFields = await executeQuery(
+    const inputFields = await runExportQuery(
+      transaction,
       (db) => db.select({
         name: toolInputFields.name,
         label: toolInputFields.label,
@@ -186,6 +205,8 @@ export function createExportFile(assistants: ExportedAssistant[]): ExportFormat 
 const IMPORT_MAX_ASSISTANT_NAME_LENGTH = 255
 const IMPORT_MAX_PROMPT_CONTENT_LENGTH = 10_000_000
 const IMPORT_MAX_PROMPTS_PER_ASSISTANT = 20
+export const ASSISTANT_IMPORT_MAX_ASSISTANTS = 100
+export const ASSISTANT_IMPORT_MAX_REPOSITORY_BINDINGS = 500
 const IMPORTED_FIELD_TYPES = new Set([
   "short_text",
   "long_text",
@@ -203,6 +224,38 @@ const RETRIEVAL_VISIBILITY_LEVELS = new Set([
   "public",
 ])
 export const ASSISTANT_IMPORT_MAX_BYTES = 10 * 1024 * 1024
+
+function validateImportCollectionLimits(
+  assistants: unknown[]
+): string | undefined {
+  if (assistants.length > ASSISTANT_IMPORT_MAX_ASSISTANTS) {
+    return `Too many assistants (maximum ${ASSISTANT_IMPORT_MAX_ASSISTANTS})`
+  }
+
+  let repositoryBindingCount = 0
+  for (const assistant of assistants) {
+    if (!assistant || typeof assistant !== "object" || Array.isArray(assistant)) {
+      continue
+    }
+    const prompts = (assistant as Record<string, unknown>).prompts
+    if (!Array.isArray(prompts)) continue
+    for (const prompt of prompts) {
+      if (!prompt || typeof prompt !== "object" || Array.isArray(prompt)) {
+        continue
+      }
+      const repositoryIds = (prompt as Record<string, unknown>).repository_ids
+      if (!Array.isArray(repositoryIds)) continue
+      repositoryBindingCount += repositoryIds.length
+      if (repositoryBindingCount > ASSISTANT_IMPORT_MAX_REPOSITORY_BINDINGS) {
+        return (
+          "Too many repository bindings " +
+          `(maximum ${ASSISTANT_IMPORT_MAX_REPOSITORY_BINDINGS})`
+        )
+      }
+    }
+  }
+  return undefined
+}
 
 function validateSerializedImportSize(data: unknown): string | undefined {
   try {
@@ -498,6 +551,13 @@ export function validateImportFile(data: unknown): { valid: boolean; error?: str
 
   if (!Array.isArray(importData.assistants)) {
     return { valid: false, error: "Missing or invalid assistants array" }
+  }
+
+  const collectionLimitError = validateImportCollectionLimits(
+    importData.assistants
+  )
+  if (collectionLimitError) {
+    return { valid: false, error: collectionLimitError }
   }
 
   for (const assistant of importData.assistants) {

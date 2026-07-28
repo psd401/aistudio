@@ -275,6 +275,26 @@ test('update-assistant adds numeric assistantId to the envelope', async () => {
   });
 });
 
+test('update-assistant keeps --id authoritative over an envelope assistantId', async () => {
+  const envelope = {
+    version: '1.0',
+    exported_at: '2026-07-28T00:00:00.000Z',
+    assistants: [],
+    assistantId: 999,
+  };
+  await run(
+    'update-assistant',
+    '--id',
+    '17',
+    '--json',
+    JSON.stringify(envelope),
+  );
+  expect(toolCalls[0]).toMatchObject({
+    toolName: 'update_assistant',
+    toolArgs: { ...envelope, assistantId: 17 },
+  });
+});
+
 test('fork-assistant sends assistantId and optional name', async () => {
   await run('fork-assistant', '--id', '17', '--name', 'My copy');
   expect(toolCalls[0]).toMatchObject({

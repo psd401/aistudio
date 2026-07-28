@@ -1100,14 +1100,16 @@ paths:
         v1.0 JSON envelope. Each assistant (row + prompts + input fields) is
         created atomically and owned by the authenticated caller. Caller-supplied
         `status` is ignored: every created assistant enters `pending_approval`.
-        Agent tools, connectors, and per-prompt enabled tools are validated
-        against the importing author's permissions and the mapped/routed model's
+        Agent tools, connectors, mapped prompt models, durable prompt
+        repositories, and per-prompt enabled tools are validated against the
+        importing author's permissions and the mapped/routed model's
         capabilities before any assistant transaction starts.
         Model names are resolved by exact model id, then provider-family
         fallback, then the first active model; the applied mappings are returned.
-        Import envelopes are limited to 10 MB on every surface. The REST
-        transport enforces the limit while reading the request stream, including
-        when `Content-Length` is missing or understated.
+        Import envelopes are limited to 10 MB, 100 assistants, and 500 prompt
+        repository bindings on every surface. The REST transport enforces the
+        byte limit while reading the request stream, including when
+        `Content-Length` is missing or understated.
         Requires `assistants:write`.
       security:
         - BearerAuth: []
@@ -1158,7 +1160,7 @@ paths:
                 meta:
                   requestId: req_abc123
         "400":
-          description: Invalid JSON, ExportFormat validation failure, an agent tool/connector unavailable to the author, or a prompt tool unsupported by its mapped/routed model.
+          description: Invalid JSON, ExportFormat/collection-limit validation failure, an agent tool/connector, mapped model, or durable repository unavailable to the author, or a prompt tool unsupported by its mapped/routed model.
           content:
             application/json:
               schema:
@@ -1237,8 +1239,9 @@ paths:
         `pending_approval` and atomically deactivates its linked UI capability
         until re-approval. Reapproval reuses the capability's stable identifier
         even when the replacement renamed the assistant. Agent tools, connectors,
-        and per-prompt enabled tools are validated against the caller's authoring
-        permissions and the mapped/routed model's capabilities before writes.
+        mapped prompt models, durable prompt repositories, and per-prompt enabled
+        tools are validated against the caller's authoring permissions and the
+        mapped/routed model's capabilities before writes.
         Requires `assistants:write`.
       security:
         - BearerAuth: []
@@ -1328,6 +1331,9 @@ paths:
         owner/admin/approved and resource/room rules as assistant detail. The
         source is unchanged. The fork is owned by the caller and enters
         `pending_approval`; an optional `name` overrides the copied name.
+        The visibility/resource authorization decision and exported source graph
+        are read in one repeatable-read transaction, preventing a concurrent
+        deapproval or grant change from producing a stale authorized snapshot.
         The optional JSON body is stream-bounded to 4 KB before decoding.
         Copied agent tools and connectors must be available to the caller as an
         author, and copied prompt tools must be supported by their mapped/routed
@@ -3559,8 +3565,9 @@ components:
           minimum: 1
         repository_ids:
           type: array
+          maxItems: 500
           items: { type: integer, minimum: 1 }
-          description: Repository ids configured for this prompt.
+          description: Durable repository ids configured for this prompt. An import envelope may contain at most 500 repository bindings in aggregate.
         enabled_tools:
           type: array
           items: { type: string }
@@ -3666,6 +3673,7 @@ components:
           type: string
         assistants:
           type: array
+          maxItems: 100
           items:
             $ref: "#/components/schemas/AssistantImportDefinition"
 

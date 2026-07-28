@@ -796,12 +796,13 @@ scopes are available to staff and administrators. Catalog metadata is the scope
 source of truth on both surfaces; the REST routes use `assistants:write` as a
 fallback only when the catalog entry is unavailable.
 
-Import envelopes are limited to 10 MB across the admin, REST, and MCP surfaces.
-REST create/update and the MCP transport count bytes while reading the request
-stream and cancel before buffering more than the limit, so a missing or
-understated `Content-Length` cannot bypass the pre-parse bound. An advertised
-oversized length is rejected immediately. The MCP transport reserves 64 KiB for
-the JSON-RPC envelope while shared import validation keeps the assistant payload
+Import envelopes are limited to 10 MB, 100 assistants, and 500 prompt
+repository bindings across the admin, REST, and MCP surfaces. REST create/update
+and the MCP transport count bytes while reading the request stream and cancel
+before buffering more than the limit, so a missing or understated
+`Content-Length` cannot bypass the pre-parse bound. An advertised oversized
+length is rejected immediately. The MCP transport reserves 64 KiB for the
+JSON-RPC envelope while shared import validation keeps the assistant payload
 itself at 10 MB. The optional REST fork body is independently stream-bounded to
 4 KiB before JSON decoding.
 
@@ -816,7 +817,9 @@ Every write preserves the existing human approval gate:
   `pending_approval`. The assistant row is
   locked for replacement, and a pending or running execution returns
   `409 CONFLICT` before any graph mutation so its in-memory prompt ids remain
-  valid. Prompts referenced
+  valid. Execution startup acquires the same assistant-row lock and creates its
+  active execution row before loading prompts, closing the load-before-record
+  race. Prompts referenced
   by earlier execution results are detached from the live graph rather than
   deleted, preserving their outputs, errors, timings, feedback, and original
   prompt configuration in execution history. Any linked UI capability is
@@ -825,8 +828,11 @@ Every write preserves the existing human approval gate:
   assistant, and re-syncs the existing navigation item to it; and
 - fork: any assistant visible under the same owner/admin/approved plus
   resource/room rules as the v1 detail endpoint may be copied. The source is
-  never modified, and the caller owns the new `pending_approval` copy. Missing
-  and invisible sources both return `404`.
+  never modified, and the caller owns the new `pending_approval` copy. The
+  visibility/resource decision and source export are read in one
+  repeatable-read transaction so concurrent deapproval or grant changes cannot
+  yield a stale authorized graph. Missing and invisible sources both return
+  `404`.
 
 ExportFormat v1.0 carries the complete executable configuration needed for a
 behavior-preserving fork: assistant mode, model routing, agent tools and
@@ -838,13 +844,17 @@ before any assistant transaction begins.
 
 Agent tool and connector identifiers are also checked against the importing
 author's role-derived scopes and connector visibility before any write starts.
-This is the author-side half of the existing dual authorization boundary;
-execution still rechecks the executing caller. An inaccessible tool or connector
-returns `400` without creating, replacing, or forking an assistant. Per-prompt
-enabled tools are validated at the same boundary using the editor's normal
-routing rules: legacy prompts must use tools supported by their mapped active
-model, while automatic routing must have an author-accessible eligible model
-that supports the complete selected tool set.
+Every mapped prompt fallback model must be author-accessible, even when the
+prompt enables no tools. Every prompt repository must be author-accessible,
+active, and durable; ephemeral/system repositories cannot be persisted through
+an import. This is the author-side half of the existing dual authorization
+boundary; execution still rechecks the executing caller. An inaccessible
+tool, connector, model, or repository returns `400` without creating,
+replacing, or forking an assistant. Per-prompt enabled tools are validated at
+the same boundary using the editor's normal routing rules: legacy prompts must
+use tools supported by their mapped active model, while automatic routing must
+have an author-accessible eligible model that supports the complete selected
+tool set.
 
 Each assistant create runs in its own transaction, so a failed prompt or input
 field leaves no partial rows for that assistant while successful siblings in a
@@ -953,13 +963,14 @@ The optional body may be omitted. A successful `201` response contains
 
 **Errors**
 
-- `400` — Invalid JSON, unsupported export version/shape, an inaccessible agent
-  tool/connector, a non-positive or partially numeric path ID, an update
-  envelope containing other than one assistant, or an invalid fork name.
+- `400` — Invalid JSON, unsupported export version/shape or collection limit, an
+  inaccessible agent tool/connector, mapped model, or durable repository, a
+  non-positive or partially numeric path ID, an update envelope containing
+  other than one assistant, or an invalid fork name.
 - `401` — Missing or invalid authentication.
-- `403` — Missing `assistants:write`; update also returns 403 when a non-admin
-  caller does not own the assistant.
-- `404` — Update target is missing, or a fork source is missing/not visible.
+- `403` — Missing `assistants:write`.
+- `404` — Update target is missing/owned by another user, or a fork source is
+  missing/not visible.
 - `429` — API-key rate limit exceeded.
 - `500` — Import persistence or another internal failure.
 
