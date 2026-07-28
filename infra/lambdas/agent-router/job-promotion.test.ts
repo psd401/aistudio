@@ -9,6 +9,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   buildContinuationPrompt,
   buildJobPayload,
+  formatJobChatResponse,
   JOB_DEADLINE_S,
   parseJobPayload,
   shouldPromoteToJob,
@@ -93,6 +94,36 @@ describe('buildContinuationPrompt', () => {
 
   test('no excerpt → no dangling excerpt block', () => {
     expect(buildContinuationPrompt('')).not.toContain('original request excerpt');
+  });
+});
+
+describe('formatJobChatResponse', () => {
+  test('uses the persisted aside marker on the final background reply', () => {
+    expect(
+      formatJobChatResponse(
+        {
+          isDM: true,
+          displayName: BASE.displayName,
+          responsePrefix: '[aside] ',
+        },
+        'background result'
+      )
+    ).toBe('[aside] background result');
+  });
+
+  test('retains the existing DM and shared-space defaults', () => {
+    expect(
+      formatJobChatResponse(
+        { isDM: true, displayName: BASE.displayName },
+        'DM result'
+      )
+    ).toBe('DM result');
+    expect(
+      formatJobChatResponse(
+        { isDM: false, displayName: BASE.displayName },
+        'room result'
+      )
+    ).toBe(`[${BASE.displayName}'s Agent] room result`);
   });
 });
 

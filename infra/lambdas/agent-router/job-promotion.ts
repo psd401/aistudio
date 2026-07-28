@@ -79,6 +79,33 @@ export interface JobInvocation {
   restart: boolean;
 }
 
+const JOB_RESPONSE_MAX_LENGTH = 4096;
+const JOB_TRUNCATION_SUFFIX =
+  '\n\n_(Response truncated — ask me to continue)_';
+
+/**
+ * Format the final background-job reply exactly once, independently of the
+ * runner's AWS/Chat side effects. A router-selected prefix (such as
+ * "[aside]") takes precedence over the normal shared-space attribution.
+ */
+export function formatJobChatResponse(
+  job: Pick<JobPayload, 'isDM' | 'displayName' | 'responsePrefix'>,
+  response: string
+): string {
+  const prefix =
+    job.responsePrefix ||
+    (job.isDM ? '' : `[${job.displayName}'s Agent] `);
+  const availableLength = JOB_RESPONSE_MAX_LENGTH - prefix.length;
+  const truncatedResponse =
+    response.length > availableLength
+      ? response.substring(
+          0,
+          availableLength - JOB_TRUNCATION_SUFFIX.length
+        ) + JOB_TRUNCATION_SUFFIX
+      : response;
+  return `${prefix}${truncatedResponse}`;
+}
+
 /**
  * Select the runner's session and prompt together. A deadline resumes the
  * existing session, while context overflow must discard that transcript and
