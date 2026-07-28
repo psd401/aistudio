@@ -1,6 +1,9 @@
 import { ContentSafetyBlockedError } from "@/lib/streaming/types"
 import { buildMemoryChatTools } from "@/lib/nexus/memory/memory-tools"
-import type { NexusMemoryService } from "@/lib/nexus/memory/memory-service"
+import type {
+  NexusMemoryService,
+  StoredNexusMemory,
+} from "@/lib/nexus/memory/memory-service"
 
 type ExecutableTool = {
   execute: (args: unknown, options?: unknown) => Promise<unknown>
@@ -25,28 +28,29 @@ const INPUT = {
   requestId: "request-1",
 }
 
+const OWNED_MEMORY: StoredNexusMemory = {
+  id: "11111111-1111-4111-8111-111111111111",
+  userId: 7,
+  content: "Prefers concise answers",
+  category: "preference",
+  source: "tool",
+  sourceConversationId: INPUT.conversationId,
+  createdAt: new Date(),
+  updatedAt: new Date(),
+}
+
 describe("Nexus memory tools", () => {
   it("builds the prompt fragment only from memories owned by the bound user", () => {
     const service = createService()
-    const owned = {
-      id: "11111111-1111-4111-8111-111111111111",
-      userId: 7,
-      content: "Prefers concise answers",
-      category: "preference" as const,
-      source: "tool" as const,
-      sourceConversationId: INPUT.conversationId,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    }
     const foreign = {
-      ...owned,
+      ...OWNED_MEMORY,
       id: "44444444-4444-4444-8444-444444444444",
       userId: 8,
       content: "Foreign secret",
     }
 
     const result = buildMemoryChatTools(
-      { ...INPUT, memories: [owned, foreign] },
+      { ...INPUT, memories: [OWNED_MEMORY, foreign] },
       {
         service,
         resolveAvailability: jest.fn(),
@@ -82,16 +86,7 @@ describe("Nexus memory tools", () => {
     const service = createService()
     service.save.mockResolvedValue({
       action: "inserted",
-      memory: {
-        id: "11111111-1111-4111-8111-111111111111",
-        userId: 7,
-        content: "Prefers concise answers",
-        category: "preference",
-        source: "tool",
-        sourceConversationId: INPUT.conversationId,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      },
+      memory: OWNED_MEMORY,
     })
     const { tools } = buildMemoryChatTools(INPUT, {
       service,
@@ -141,22 +136,48 @@ describe("Nexus memory tools", () => {
       }),
     ).resolves.toEqual({ error: "Memory blocked" })
   })
+})
 
-  it("binds forget to the authenticated owner so foreign ids are not deleted", async () => {
+describe("Nexus forgetMemory tool", () => {
+  it("rejects a memory id that was not surfaced to the bound owner", async () => {
     const service = createService()
-    service.forget.mockResolvedValue(false)
-    const { tools } = buildMemoryChatTools(INPUT, {
-      service,
-      resolveAvailability: jest.fn(async () => ({
-        enabled: true,
-        reason: "enabled" as const,
-      })),
-    })
+    const { tools } = buildMemoryChatTools(
+      { ...INPUT, memories: [OWNED_MEMORY] },
+      {
+        service,
+        resolveAvailability: jest.fn(async () => ({
+          enabled: true,
+          reason: "enabled" as const,
+        })),
+      },
+    )
 
     const memoryId = "33333333-3333-4333-8333-333333333333"
     await expect(
       executeTool(tools.forgetMemory, { memoryId }),
-    ).resolves.toEqual({ error: "Memory not found." })
-    expect(service.forget).toHaveBeenCalledWith(memoryId, 7)
+    ).resolves.toEqual({
+      error: "Memory is not available in this turn.",
+    })
+    expect(service.forget).not.toHaveBeenCalled()
+  })
+
+  it("binds a surfaced forget operation to the authenticated owner", async () => {
+    const service = createService()
+    service.forget.mockResolvedValue(true)
+    const { tools } = buildMemoryChatTools(
+      { ...INPUT, memories: [OWNED_MEMORY] },
+      {
+        service,
+        resolveAvailability: jest.fn(async () => ({
+          enabled: true,
+          reason: "enabled" as const,
+        })),
+      },
+    )
+
+    await expect(
+      executeTool(tools.forgetMemory, { memoryId: OWNED_MEMORY.id }),
+    ).resolves.toEqual({ ok: true, memoryId: OWNED_MEMORY.id })
+    expect(service.forget).toHaveBeenCalledWith(OWNED_MEMORY.id, 7)
   })
 })

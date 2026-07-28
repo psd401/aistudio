@@ -46,14 +46,14 @@ describe("Nexus memory service", () => {
     })
     repository.saveWithDedup.mockImplementation(async (record, threshold) => {
       events.push("storage")
-      expect(record.content).toBe("tokenized [PII:1234]")
+      expect(record.content).toBe("sanitized content")
       expect(record.userId).toBe(7)
       expect(threshold).toBe(MEMORY_DEDUP_THRESHOLD)
       return { memory: storedMemory({ content: record.content }), action: "inserted" }
     })
     const processInput = jest.fn(async () => {
       events.push("safety")
-      return { allowed: true, processedContent: "tokenized [PII:1234]" }
+      return { allowed: true, processedContent: "sanitized content" }
     })
     const generateEmbedding = jest.fn(async () => {
       events.push("embedding")
@@ -80,6 +80,38 @@ describe("Nexus memory service", () => {
       "raw private content",
       "cognito-sub",
     )
+  })
+
+  it("rejects tokenized PII instead of persisting an expiring placeholder", async () => {
+    const repository = createRepository()
+    const generateEmbedding = jest.fn()
+    const service = createMemoryService({
+      repository,
+      processInput: jest.fn(async () => ({
+        allowed: true,
+        processedContent:
+          "Email [PII:11111111-1111-4111-8111-111111111111]",
+        hasPII: true,
+      })),
+      generateEmbedding,
+      getSetting: jest.fn(async () => null),
+    })
+
+    await expect(
+      service.save({
+        userId: 7,
+        sessionId: "cognito-sub",
+        content: "Email student@example.com",
+        category: "profile",
+        source: "tool",
+      }),
+    ).rejects.toMatchObject({
+      blockedMessage:
+        "For privacy, personal information cannot be saved to memory.",
+      blockedCategories: ["pii"],
+    })
+    expect(generateEmbedding).not.toHaveBeenCalled()
+    expect(repository.saveWithDedup).not.toHaveBeenCalled()
   })
 
   it("does not perform database or embedding work when safety blocks a write", async () => {

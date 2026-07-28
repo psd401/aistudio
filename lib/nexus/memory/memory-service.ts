@@ -19,10 +19,12 @@ const DEFAULT_RETRIEVAL_THRESHOLD = 0.3
 const DEFAULT_RETRIEVAL_TOP_K = 6
 const MAX_RETRIEVAL_TOP_K = 20
 const MAX_MEMORY_CONTENT_CHARS = 8_000
+const PII_PLACEHOLDER_PATTERN = /\[PII:[^\]\r\n]+\]/i
 
 interface SafetyResult {
   allowed: boolean
   processedContent: string
+  hasPII?: boolean
   blockedMessage?: string
   blockedCategories?: string[]
 }
@@ -108,6 +110,20 @@ export function createMemoryService(
         )
       }
       const sanitized = safety.processedContent.trim()
+      if (
+        safety.hasPII === true ||
+        PII_PLACEHOLDER_PATTERN.test(sanitized)
+      ) {
+        // PII token mappings intentionally expire after one hour. Persisting
+        // their placeholders would corrupt durable memory once the mapping
+        // expires, while detokenizing here would store raw PII. Reject the
+        // write after the mandatory safety pass instead.
+        throw new ContentSafetyBlockedError(
+          "For privacy, personal information cannot be saved to memory.",
+          ["pii"],
+          "input",
+        )
+      }
       if (!sanitized) {
         throw new Error("Memory content is empty after safety processing")
       }

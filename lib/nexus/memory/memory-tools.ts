@@ -50,6 +50,12 @@ export function buildMemoryChatTools(
     requestId: input.requestId,
     module: "nexus-memory-tools",
   })
+  const ownedMemories = (input.memories ?? []).filter(
+    (memory) => memory.userId === input.userId,
+  )
+  const surfacedMemoryIds = new Set(
+    ownedMemories.map((memory) => memory.id),
+  )
 
   async function writeStillEnabled(): Promise<boolean> {
     const availability = await dependencies.resolveAvailability({
@@ -64,7 +70,7 @@ export function buildMemoryChatTools(
     tools: {
       saveMemory: tool({
         description:
-          "Save a durable fact the user explicitly asks you to remember, such as their role, preference, or ongoing working context. Do not save transient requests or infer sensitive facts.",
+          "Save a durable non-personal fact the user explicitly asks you to remember, such as a non-identifying role, preference, or ongoing working context. Do not save personal information, transient requests, or inferred sensitive facts.",
         inputSchema: z.object({
           content: z.string().trim().min(1).max(8_000),
           category: z.enum(NEXUS_MEMORY_CATEGORIES).default("context"),
@@ -119,6 +125,9 @@ export function buildMemoryChatTools(
           if (!(await writeStillEnabled())) {
             return { error: "Memory is disabled for this conversation." }
           }
+          if (!surfacedMemoryIds.has(memoryId)) {
+            return { error: "Memory is not available in this turn." }
+          }
           try {
             const deleted = await dependencies.service.forget(
               memoryId,
@@ -137,10 +146,6 @@ export function buildMemoryChatTools(
         },
       }),
     },
-    systemPromptFragment: buildUserMemoryFragment(
-      (input.memories ?? []).filter(
-        (memory) => memory.userId === input.userId,
-      ),
-    ),
+    systemPromptFragment: buildUserMemoryFragment(ownedMemories),
   }
 }
