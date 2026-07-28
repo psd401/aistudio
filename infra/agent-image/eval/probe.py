@@ -13,7 +13,7 @@ import base64
 import binascii
 import json
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 DEFAULT_OWNER_EMAIL = "canary@build-gate.invalid"
 
@@ -31,6 +31,8 @@ def decode_owner_email(
         segment = invocation_context.strip().split(".")[1]
         padding = "=" * (-len(segment) % 4)
         claims = json.loads(base64.urlsafe_b64decode(segment + padding))
+        if not isinstance(claims, Mapping):
+            return fallback
         owner_email = claims.get("ownerEmail")
         return owner_email if isinstance(owner_email, str) and owner_email else fallback
     except (

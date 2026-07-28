@@ -104,6 +104,12 @@ class ProbeTests(unittest.TestCase):
             "-leading-dash",
         )
 
+    def test_owner_email_falls_back_for_non_object_context_claims(self):
+        self.assertEqual(
+            probe.decode_owner_email("v1.W10.sig"),
+            probe.DEFAULT_OWNER_EMAIL,
+        )
+
 
 class SuiteLoadingTests(unittest.TestCase):
     def test_committed_core_suite_has_three_l0_tasks(self):
@@ -151,6 +157,13 @@ class SuiteLoadingTests(unittest.TestCase):
         self.assertEqual(runner._context_ttl_seconds(900), 965)
         with self.assertRaisesRegex(runner.EvalRunnerError, "7135"):
             runner._context_ttl_seconds(7136)
+
+    def test_poll_interval_must_be_finite(self):
+        for invalid_interval in ("nan", "inf", "-inf"):
+            with self.subTest(interval=invalid_interval), self.assertRaises(
+                runner.argparse.ArgumentTypeError
+            ):
+                runner._positive_float(invalid_interval)
 
     def test_blank_yaml_prompt_is_rejected_instead_of_coerced(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -584,6 +597,22 @@ class FailedRemoveExecutor(RecordingExecutor):
         return result
 
 
+class NeverBootExecutor(RecordingExecutor):
+    def run(self, arguments, **options):
+        result = super().run(arguments, **options)
+        if tuple(arguments)[:2] == ("docker", "logs"):
+            return runner.CommandResult(0, "still starting", "")
+        return result
+
+
+class NeverListenExecutor(RecordingExecutor):
+    def run(self, arguments, **options):
+        result = super().run(arguments, **options)
+        if "http://127.0.0.1:8080/ping" in tuple(arguments):
+            return runner.CommandResult(7, "", "connection refused")
+        return result
+
+
 class MissingResultExecutor(RecordingExecutor):
     def run(self, arguments, **options):
         result = super().run(arguments, **options)
@@ -601,6 +630,19 @@ class SequenceCredentialProvider:
         index = min(self.calls, len(self.credentials) - 1)
         self.calls += 1
         return self.credentials[index]
+
+
+class MonotonicClock:
+    def __init__(self) -> None:
+        self.value = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.value
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.value += seconds
 
 
 def aws_credentials(
@@ -955,6 +997,48 @@ class DockerRuntimeTests(unittest.TestCase):
             runtime.stop()
 
         self.assertIn("daemon unavailable", "\n".join(captured.output))
+
+    def test_boot_polling_never_sleeps_past_its_deadline(self):
+        clock = MonotonicClock()
+        runtime = runner.DockerRuntime(
+            NeverBootExecutor(),
+            "candidate@sha256:digest",
+            "linux/arm64",
+            {"APP_BASE_URL": "https://dev.example.invalid"},
+            SequenceCredentialProvider([aws_credentials()]),
+            boot_timeout_seconds=5,
+            invocation_timeout_seconds=900,
+            poll_interval_seconds=3600,
+            name_prefix="psd-agent-eval-issue-1422-test",
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+
+        with self.assertRaisesRegex(runner.EvalRunnerError, "within 5s"):
+            runtime.prepare()
+
+        self.assertEqual(clock.sleeps, [5.0])
+
+    def test_listener_polling_never_sleeps_past_its_deadline(self):
+        clock = MonotonicClock()
+        runtime = runner.DockerRuntime(
+            NeverListenExecutor(),
+            "candidate@sha256:digest",
+            "linux/arm64",
+            {"APP_BASE_URL": "https://dev.example.invalid"},
+            SequenceCredentialProvider([aws_credentials()]),
+            boot_timeout_seconds=120,
+            invocation_timeout_seconds=900,
+            poll_interval_seconds=3600,
+            name_prefix="psd-agent-eval-issue-1422-test",
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+
+        with self.assertRaisesRegex(runner.EvalRunnerError, "listener never"):
+            runtime.prepare()
+
+        self.assertEqual(clock.sleeps, [30.0])
 
 
 class MainWiringTests(unittest.TestCase):

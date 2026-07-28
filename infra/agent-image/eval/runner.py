@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -445,14 +446,23 @@ class DockerRuntime:
             )
             if state.returncode != 0 or state.stdout.strip() != "true":
                 raise EvalRunnerError("container exited before logging BOOT_OK")
-            self._sleep(self._poll_interval_seconds)
+            remaining_seconds = deadline - self._monotonic()
+            if remaining_seconds <= 0:
+                break
+            self._sleep(
+                min(
+                    max(self._poll_interval_seconds, 0.1),
+                    remaining_seconds,
+                )
+            )
         raise EvalRunnerError(
             f"container did not log BOOT_OK within {self._boot_timeout_seconds}s"
         )
 
     def _wait_for_listener(self) -> None:
-        attempts = max(1, int(30 / max(self._poll_interval_seconds, 0.1)))
-        for _ in range(attempts):
+        listener_timeout_seconds = 30
+        deadline = self._monotonic() + listener_timeout_seconds
+        while self._monotonic() < deadline:
             response = self._executor.run(
                 [
                     "docker",
@@ -471,7 +481,15 @@ class DockerRuntime:
             )
             if response.returncode == 0:
                 return
-            self._sleep(self._poll_interval_seconds)
+            remaining_seconds = deadline - self._monotonic()
+            if remaining_seconds <= 0:
+                break
+            self._sleep(
+                min(
+                    max(self._poll_interval_seconds, 0.1),
+                    remaining_seconds,
+                )
+            )
         raise EvalRunnerError("container logged BOOT_OK but listener never became ready")
 
     def invoke(
@@ -993,8 +1011,8 @@ def _trial_count(value: str) -> int:
 
 def _positive_float(value: str) -> float:
     parsed = float(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a finite number greater than zero")
     return parsed
 
 
