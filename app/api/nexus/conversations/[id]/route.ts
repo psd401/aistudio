@@ -3,8 +3,8 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action'
 import { NextRequest } from 'next/server'
 import {
-  getConversationById,
   updateConversation,
+  updateConversationMemoryDisabled,
   type UpdateConversationData,
 } from '@/lib/db/drizzle/nexus-conversations'
 import { hasCapabilityAccess } from '@/lib/db/drizzle/capabilities'
@@ -180,19 +180,6 @@ export async function PATCH(
         timer({ status: 'error', reason: 'memory_capability_denied' })
         return new Response('Forbidden', { status: 403 })
       }
-      const existing = await getConversationById(conversationId, userId)
-      if (!existing) {
-        log.warn('Conversation not found for memory toggle', {
-          conversationId,
-          userId,
-        })
-        timer({ status: 'error', reason: 'not_found' })
-        return new Response('Conversation not found', { status: 404 })
-      }
-      updates.metadata = {
-        ...(existing.metadata ?? {}),
-        memoryDisabled,
-      }
     }
 
     if (fieldCount === 0) {
@@ -200,12 +187,17 @@ export async function PATCH(
       return Response.json({ message: 'No fields to update' })
     }
 
-    // Update using Drizzle ORM (ownership is verified in updateConversation)
-    const updatedConversation = await updateConversation(
-      conversationId,
-      userId,
-      updates
-    )
+    // Update using an owner-scoped Drizzle accessor. The memory-specific path
+    // merges one JSONB key atomically so concurrent stream metadata survives.
+    const updatedConversation =
+      memoryDisabled === undefined
+        ? await updateConversation(conversationId, userId, updates)
+        : await updateConversationMemoryDisabled(
+            conversationId,
+            userId,
+            memoryDisabled,
+            updates
+          )
 
     if (!updatedConversation) {
       log.warn('Conversation not found or access denied', { conversationId, userId })
