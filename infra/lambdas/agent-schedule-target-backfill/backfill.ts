@@ -10,6 +10,7 @@ const SCHEDULED_TIME_PLACEHOLDER = '<aws.scheduler.scheduled-time>';
 const UPDATE_CONCURRENCY = 5;
 const MAXIMUM_EVENT_AGE_SECONDS = 60 * 60;
 const MAXIMUM_RETRY_ATTEMPTS = 5;
+const SAFE_EMAIL_RE = /^[\w%+.-]+@[\d.A-Za-z-]+\.[A-Za-z]{2,}$/;
 
 export interface ScheduleTargetBackfillDependencies {
   scheduleDlqArn: string;
@@ -72,20 +73,30 @@ export function scheduleTargetReference(
     );
   }
   const input = objectValue(parsed);
+  const ownerEmail =
+    typeof input?.ownerEmail === 'string'
+      ? input.ownerEmail.trim().toLowerCase()
+      : '';
+  const scheduleId =
+    typeof input?.scheduleId === 'string'
+      ? input.scheduleId.trim().toLowerCase()
+      : '';
   if (
     !input
-    || typeof input.ownerEmail !== 'string'
-    || typeof input.scheduleId !== 'string'
-    || typeof input.version !== 'number'
+    || !SAFE_EMAIL_RE.test(ownerEmail)
+    || scheduleId.length === 0
+    || scheduleId.length > 128
+    || !Number.isInteger(input.version)
+    || Number(input.version) < 1
   ) {
     throw new InvalidScheduleTargetError(
       'Schedule target Input has no owner-bound reference',
     );
   }
   return {
-    ownerEmail: input.ownerEmail.trim().toLowerCase(),
-    scheduleId: input.scheduleId,
-    version: input.version,
+    ownerEmail,
+    scheduleId,
+    version: Number(input.version),
   };
 }
 

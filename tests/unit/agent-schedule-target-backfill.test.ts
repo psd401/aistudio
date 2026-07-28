@@ -106,6 +106,10 @@ describe("agent schedule target deployment backfill", () => {
     expect(() => backfilledTargetInput("not-json")).toThrow(/valid JSON/)
     expect(() => backfilledTargetInput(JSON.stringify({ scheduleId: "id" })))
       .toThrow(/owner-bound/)
+    expect(() => backfilledTargetInput(JSON.stringify({
+      ...JSON.parse(LEGACY_INPUT),
+      ownerEmail: " ",
+    }))).toThrow(/owner-bound/)
   })
 
   it("preserves every mutable Scheduler setting while changing Input", () => {
@@ -166,27 +170,38 @@ describe("agent schedule target deployment backfill", () => {
     const malformed = schedule()
     malformed.Name = `${valid.Name}-malformed`
     malformed.Target.Input = "not-json"
+    const blankOwner = schedule(JSON.stringify({
+      ...JSON.parse(LEGACY_INPUT),
+      ownerEmail: " ",
+    }))
+    blankOwner.Name = `${valid.Name}-blank-owner`
     const deps = dependencies({
       list: jest.fn().mockResolvedValue({
-        names: [malformed.Name, valid.Name],
+        names: [malformed.Name, blankOwner.Name, valid.Name],
         nextToken: "next-page",
       }),
-      get: jest.fn(async (name: string) =>
-        name === malformed.Name ? malformed : valid
-      ),
+      get: jest.fn(async (name: string) => {
+        if (name === malformed.Name) return malformed
+        if (name === blankOwner.Name) return blankOwner
+        return valid
+      }),
     })
 
     await expect(
       backfillScheduleTargetPage(undefined, deps),
     ).resolves.toEqual({
-      scanned: 2,
+      scanned: 3,
       updated: 1,
-      invalid: 1,
+      invalid: 2,
       continuationQueued: true,
     })
     expect(deps.recordInvalidTarget).toHaveBeenCalledWith(
       malformed.Name,
       expect.stringMatching(/valid JSON/),
+    )
+    expect(deps.recordInvalidTarget).toHaveBeenCalledWith(
+      blankOwner.Name,
+      expect.stringMatching(/owner-bound/),
     )
     expect(deps.update).toHaveBeenCalledTimes(1)
     expect(deps.queueContinuation).toHaveBeenCalledWith("next-page")
