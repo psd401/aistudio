@@ -217,6 +217,8 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     requiredScope: "mcp:create_assistant",
     internalScopes: ["mcp:create_assistant"],
     destructive: true,
+    // v2 publishes the complete recursive ExportFormat assistant schema.
+    version: "v2",
     rest: {
       scopes: ["assistants:write"],
       binding: {
@@ -232,6 +234,8 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     requiredScope: "mcp:update_assistant",
     internalScopes: ["mcp:update_assistant"],
     destructive: true,
+    // v2 publishes the complete recursive single-assistant schema.
+    version: "v2",
     rest: {
       scopes: ["assistants:write"],
       binding: {

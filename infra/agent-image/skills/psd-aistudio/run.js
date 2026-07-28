@@ -171,10 +171,14 @@ function parseIntegerList(value, label) {
 function readBoundedImportFile(file) {
   // Open once, inspect that exact descriptor, and read no more than its
   // inspected size. A concurrently growing file is therefore still bounded.
-  // The CLI rejects devices/FIFOs so a pseudo-file cannot block indefinitely.
+  // O_NONBLOCK lets the CLI reject devices/FIFOs after fstat without hanging
+  // in open() while, for example, a FIFO waits for a writer.
   // The caller-selected path is an intentional part of the CLI contract.
   // eslint-disable-next-line security/detect-non-literal-fs-filename
-  const descriptor = fs.openSync(file, "r");
+  const descriptor = fs.openSync(
+    file,
+    fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+  );
   try {
     const fileStats = fs.fstatSync(descriptor);
     if (!fileStats.isFile()) {

@@ -48,7 +48,7 @@
         "operationId": "updateAssistant",
         "summary": "Replace an assistant from an ExportFormat envelope",
         "x-tool-identifier": "assistants.update",
-        "x-tool-version": "v1",
+        "x-tool-version": "v2",
         "parameters": [
           {
             "name": "id",
@@ -196,7 +196,7 @@
         "operationId": "createAssistants",
         "summary": "Create assistants from an ExportFormat envelope",
         "x-tool-identifier": "assistants.create",
-        "x-tool-version": "v1",
+        "x-tool-version": "v2",
         "security": [
           {
             "ApiKeyAuth": [

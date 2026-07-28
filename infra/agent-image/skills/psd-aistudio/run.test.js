@@ -24,6 +24,7 @@ process.env.AISTUDIO_MCP_API_KEY = '';
 process.env.AISTUDIO_MCP_API_KEY_SECRET_ID = 'psd-agent/dev/aistudio-mcp-api-key';
 
 const { test, expect, beforeEach, afterEach } = require('bun:test');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -350,6 +351,41 @@ test('create-assistant rejects non-regular import paths', async () => {
 
   expect(code).toBe(1);
   expect(toolCalls).toHaveLength(0);
+});
+
+test('create-assistant rejects a FIFO without blocking in open', () => {
+  if (process.platform === 'win32') return;
+
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'psd-aistudio-import-fifo-'),
+  );
+  const fifo = path.join(directory, 'import.json');
+  try {
+    const mkfifo = spawnSync('mkfifo', [fifo], { encoding: 'utf8' });
+    expect(mkfifo.status).toBe(0);
+
+    const child = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run.js'), 'create-assistant', '--file', fifo],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          AISTUDIO_MCP_URL: 'https://app.test/api/mcp',
+          AISTUDIO_MCP_API_KEY_SECRET_ID:
+            'psd-agent/dev/aistudio-mcp-api-key',
+        },
+        timeout: 1_000,
+      },
+    );
+
+    expect(child.error).toBeUndefined();
+    expect(child.signal).toBeNull();
+    expect(child.status).toBe(1);
+    expect(child.stderr).toContain('--file must refer to a regular file');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 // ── insufficient-scope hint (never retried / key-swapped) ──────────────────────

@@ -798,6 +798,10 @@ fallback only when the catalog entry is unavailable. When an administrator
 disables a cataloged create, update, or fork operation, both MCP and REST reject
 it; REST uses a masked `404` before body parsing or mutation.
 
+The create and update catalog contracts are published as `v2` so existing
+deployments can install the complete recursive ExportFormat schema without
+mutating an already-published `v1` contract. Unpinned callers resolve to `v2`.
+
 Import envelopes must contain at least one assistant and are limited to 10 MB,
 100 assistants, 50 input fields per assistant (matching the execution-time
 input cap), and 500 prompt repository bindings across the admin, REST, and MCP
