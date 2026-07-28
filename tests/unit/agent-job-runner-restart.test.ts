@@ -80,4 +80,8 @@ describe("job runner restart handling", () => {
       "status: agentResult.failed ? 'error' : 'success'",
     )
   })
+
+  it("exits nonzero after delivering an agent failure for ECS supervision", () => {
+    expect(source).toContain("return agentResult.failed ? 2 : 0")
+  })
 })

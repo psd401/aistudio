@@ -3216,10 +3216,18 @@ export class AgentPlatformStack extends cdk.Stack {
       },
     }));
 
+    const jobRunnerStoppedRule = this.createJobRunnerStoppedRule(
+      resources,
+      jobCluster,
+      jobTaskDef,
+    );
+
     cdk.Tags.of(jobCluster).add('Environment', environment);
     cdk.Tags.of(jobCluster).add('ManagedBy', 'cdk');
     cdk.Tags.of(resources.jobLogGroup).add('Environment', environment);
     cdk.Tags.of(resources.jobLogGroup).add('ManagedBy', 'cdk');
+    cdk.Tags.of(jobRunnerStoppedRule).add('Environment', environment);
+    cdk.Tags.of(jobRunnerStoppedRule).add('ManagedBy', 'cdk');
 
     // Wire SQS → Lambda trigger
     // NOTE on duplicate processing: With batchSize=1 and 18-min visibility timeout
@@ -3238,6 +3246,47 @@ export class AgentPlatformStack extends cdk.Stack {
         reportBatchItemFailures: true,
       }),
     );
+  }
+
+  private createJobRunnerStoppedRule(
+    resources: AgentPlatformBuildResources,
+    jobCluster: ecs.Cluster,
+    jobTaskDef: ecs.FargateTaskDefinition,
+  ): events.Rule {
+    resources.cronLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'JobRunnerStoppedDescribe',
+      effect: iam.Effect.ALLOW,
+      actions: ['ecs:DescribeTasks'],
+      // DescribeTasks does not support resource-level IAM permissions.
+      resources: ['*'],
+    }));
+
+    // RunTask acceptance is not a terminal guarantee: image pulls,
+    // provisioning, OOM, and hard process exits can stop the task before the
+    // runner writes telemetry. Feed every STOPPED task in this one family back
+    // to the cron handler, which recovers JOB_PAYLOAD via DescribeTasks and
+    // appends an authoritative terminal schedule row. Its strict DB write
+    // rejects on failure so Lambda's async retry policy runs, then uses the
+    // existing agent DLQ instead of leaving the schedule "promoted".
+    return new events.Rule(this, 'JobRunnerStoppedRule', {
+      description: 'Persist terminal scheduled-run state for stopped agent jobs',
+      eventPattern: {
+        source: ['aws.ecs'],
+        detailType: ['ECS Task State Change'],
+        detail: {
+          clusterArn: [jobCluster.clusterArn],
+          group: [`family:${jobTaskDef.family}`],
+          lastStatus: ['STOPPED'],
+        },
+      },
+      targets: [
+        new eventsTargets.LambdaFunction(resources.cronLambda, {
+          deadLetterQueue: resources.agentAsyncDlq,
+          maxEventAge: cdk.Duration.hours(1),
+          retryAttempts: 12,
+        }),
+      ],
+    });
   }
 
   private createChatIngress(

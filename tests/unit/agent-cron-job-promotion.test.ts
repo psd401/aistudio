@@ -39,6 +39,12 @@ const stackSource = stripComments(
     "utf8",
   ),
 )
+const cronSource = stripComments(
+  fs.readFileSync(
+    path.join(process.cwd(), "infra/lambdas/agent-cron/index.ts"),
+    "utf8",
+  ),
+)
 
 const baseInput = {
   sessionId: "hagelk-db0f32b5-sched-5123b45b-2026-07-27",
@@ -365,6 +371,23 @@ const baseInput = {
       expect(payload).not.toContain("threadName")
       expect(parseJobPayload(payload).threadName).toBeUndefined()
     })
+
+    it("persists promoted state before task launch and acknowledgement", () => {
+      const promotion = cronSource.slice(
+        cronSource.indexOf("async function tryPromoteScheduledResult("),
+        cronSource.indexOf("async function deliverScheduledResult("),
+      )
+      expect(promotion.indexOf("() => recordPromotedRun(context)")).toBeLessThan(
+        promotion.indexOf("await sendPromotionAcknowledgement(context, reason)"),
+      )
+      const launch = cronSource.slice(
+        cronSource.indexOf("async function promoteScheduledTurnToJob("),
+        cronSource.indexOf("async function sendChatMessage("),
+      )
+      expect(launch.indexOf("await beforeLaunch()")).toBeLessThan(
+        launch.indexOf("await launchScheduledJob("),
+      )
+    })
   })
 
   describe("CDK wiring", () => {
@@ -430,6 +453,19 @@ const baseInput = {
       )
       expect(stackSource).toContain(
         "resources.routerLambda.addEnvironment('JOB_TASK_DEF_ARN'",
+      )
+    })
+
+    it("supervises every stopped job through the cron telemetry handler", () => {
+      expect(stackSource).toContain("'JobRunnerStoppedRule'")
+      expect(stackSource).toContain("'ECS Task State Change'")
+      expect(stackSource).toContain("lastStatus: ['STOPPED']")
+      expect(stackSource).toContain("actions: ['ecs:DescribeTasks']")
+      expect(stackSource).toContain(
+        "new eventsTargets.LambdaFunction(resources.cronLambda",
+      )
+      expect(stackSource).toContain(
+        "deadLetterQueue: resources.agentAsyncDlq",
       )
     })
   })

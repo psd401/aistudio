@@ -272,7 +272,10 @@ async function main(): Promise<number> {
     const latencyMs =
       agentResult.latencyMs > 0 ? agentResult.latencyMs : Date.now() - startTime;
     await recordDeliveredJobResult(job, agentResult, latencyMs, log);
-    return 0;
+    // The ECS STOPPED-state supervisor uses the process exit code as its
+    // authoritative terminal signal. A delivered agent failure is not a clean
+    // job even though Chat delivery itself succeeded.
+    return agentResult.failed ? 2 : 0;
   } catch (error) {
     const exitCode = await handleJobRunnerError(job, error, startTime, log);
     return exitCode;

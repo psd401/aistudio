@@ -25,7 +25,11 @@ import {
   PutCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { ECSClient, RunTaskCommand } from '@aws-sdk/client-ecs';
+import {
+  DescribeTasksCommand,
+  ECSClient,
+  RunTaskCommand,
+} from '@aws-sdk/client-ecs';
 import {
   SecretsManagerClient,
   GetSecretValueCommand,
@@ -66,7 +70,10 @@ import {
   type LockedJobExecution,
   type LockedJobResult,
 } from './job-lock';
-import { createRunTelemetry } from './run-telemetry';
+import {
+  createRunTelemetry,
+  writeTerminalRunIfMissing,
+} from './run-telemetry';
 import { runSchedulePreflight } from './schedule-preflight';
 import {
   claimScheduleFire,
@@ -77,17 +84,12 @@ import {
   type ScheduleFireClaim,
   type ScheduleFireFailure,
 } from './schedule-fire';
-
-// ---------------------------------------------------------------------------
-// PII sanitization — mask email addresses in logs (FERPA compliance)
-// ---------------------------------------------------------------------------
-
-function sanitizeEmail(email: string): string {
-  if (!email) return '';
-  const [local, domain] = email.split('@');
-  if (!domain) return `${email.charAt(0)}***`;
-  return `${local.charAt(0)}***@${domain}`;
-}
+import { sanitizeEmailForLog } from './log-sanitization';
+import {
+  isJobRunnerStoppedEvent,
+  monitorStoppedJob,
+  type JobRunnerStoppedEvent,
+} from './job-monitor';
 
 // ---------------------------------------------------------------------------
 // Structured logging
@@ -180,6 +182,7 @@ const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
 const AGENT_INVOCATION_SIGNING_SECRET_ID =
   process.env.AGENT_INVOCATION_SIGNING_SECRET_ID || '';
 const SESSION_LOCKS_TABLE = process.env.SESSION_LOCKS_TABLE || '';
+const JOB_CONTAINER_NAME = process.env.JOB_CONTAINER_NAME || 'job-runner';
 
 const runTelemetry = createRunTelemetry(
   {
@@ -684,7 +687,7 @@ function readJobRunnerConfig(log: Logger): JobRunnerConfig | null {
     taskDefArn: process.env.JOB_TASK_DEF_ARN || '',
     subnets: (process.env.JOB_SUBNETS || '').split(',').filter(Boolean),
     securityGroup: process.env.JOB_SECURITY_GROUP || '',
-    containerName: process.env.JOB_CONTAINER_NAME || 'job-runner',
+    containerName: JOB_CONTAINER_NAME,
   };
   if (
     !config.clusterArn
@@ -767,6 +770,7 @@ async function promoteScheduledTurnToJob(
   input: ScheduledJobInput,
   lockToken: string,
   log: Logger,
+  beforeLaunch: () => Promise<void>,
 ): Promise<PromotionResult> {
   const config = readJobRunnerConfig(log);
   if (!config) {
@@ -793,6 +797,10 @@ async function promoteScheduledTurnToJob(
     };
   }
   try {
+    // Persist the intermediate state before RunTask. A task can fail and emit
+    // STOPPED immediately after acceptance; writing promoted afterward could
+    // otherwise overtake the supervisor's terminal row.
+    await beforeLaunch();
     await launchScheduledJob(input, lockToken, config, log);
     return { promoted: true };
   } catch (error) {
@@ -910,11 +918,11 @@ async function recordPromotedRun(
     },
     log,
   );
-  log.info('Scheduled task handed to background job', {
+  log.info('Scheduled task promotion state persisted', {
     scheduleId: schedule.scheduleId,
     scheduleName,
     sessionId,
-    email: sanitizeEmail(schedule.ownerEmail),
+    email: sanitizeEmailForLog(schedule.ownerEmail),
     latencyMs: Date.now() - startTime,
   });
 }
@@ -959,6 +967,7 @@ async function tryPromoteScheduledResult(
     },
     lockToken,
     log,
+    () => recordPromotedRun(context),
   );
   if (!promotion.promoted) {
     await runTelemetry.recordCronFailure(
@@ -979,7 +988,6 @@ async function tryPromoteScheduledResult(
     return false;
   }
   await sendPromotionAcknowledgement(context, reason);
-  await recordPromotedRun(context);
   return true;
 }
 
@@ -1032,7 +1040,7 @@ async function deliverScheduledResult(
     scheduleId: schedule.scheduleId,
     scheduleName,
     status,
-    email: sanitizeEmail(schedule.ownerEmail),
+    email: sanitizeEmailForLog(schedule.ownerEmail),
     inputTokens: result.inputTokens,
     outputTokens: result.outputTokens,
     latencyMs: Date.now() - startTime,
@@ -1062,7 +1070,7 @@ async function executeLockedScheduledTurn(
     log,
   } = context;
   log.info('Invoking agent for scheduled task', {
-    email: sanitizeEmail(schedule.ownerEmail),
+    email: sanitizeEmailForLog(schedule.ownerEmail),
     scheduleName,
     sessionId,
   });
@@ -1284,12 +1292,65 @@ async function runGuardedScheduleTurn(
 // Main handler
 // ---------------------------------------------------------------------------
 
+async function handleJobRunnerStopped(
+  event: JobRunnerStoppedEvent,
+  log: Logger,
+): Promise<HandlerResult> {
+  return monitorStoppedJob(
+    event,
+    JOB_CONTAINER_NAME,
+    {
+      describeTask: async (clusterArn, taskArn) => {
+        const result = await ecsClient.send(
+          new DescribeTasksCommand({
+            cluster: clusterArn,
+            tasks: [taskArn],
+          }),
+        );
+        if (result.failures && result.failures.length > 0) {
+          throw new Error(
+            `DescribeTasks failures: ${result.failures
+              .map((failure) => failure.reason ?? failure.arn ?? 'unknown')
+              .join('; ')}`,
+          );
+        }
+        const task = result.tasks?.[0];
+        if (!task) {
+          throw new Error(`Stopped ECS task not found: ${taskArn}`);
+        }
+        return task;
+      },
+      writeRun: (record) =>
+        writeTerminalRunIfMissing(
+          {
+            databaseResourceArn: DATABASE_RESOURCE_ARN,
+            databaseSecretArn: DATABASE_SECRET_ARN,
+            databaseName: DATABASE_NAME,
+          },
+          runTelemetryRdsClient,
+          record,
+        ),
+      recordFailure: (record) =>
+        runTelemetry.recordCronFailure(record, log),
+    },
+    log,
+  );
+}
+
 export async function handler(
-  event: ScheduleReferenceEvent,
+  event: ScheduleReferenceEvent | JobRunnerStoppedEvent,
   context: LambdaContext,
 ): Promise<HandlerResult> {
   const handlerStartedAt = Date.now();
   const requestId = generateRequestId();
+  if (isJobRunnerStoppedEvent(event)) {
+    const log = createLogger({
+      requestId,
+      environment: ENVIRONMENT,
+      taskArn: event.detail.taskArn,
+    });
+    return handleJobRunnerStopped(event, log);
+  }
   const log = createLogger({
     requestId,
     environment: ENVIRONMENT,
@@ -1315,7 +1376,7 @@ export async function handler(
     scheduleId: schedule.scheduleId,
     version: schedule.version,
     scheduleName,
-    email: sanitizeEmail(schedule.ownerEmail),
+    email: sanitizeEmailForLog(schedule.ownerEmail),
   });
 
   const fireIdentity = scheduleFireIdentity(event);

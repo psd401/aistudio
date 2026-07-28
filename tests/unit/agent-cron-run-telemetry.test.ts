@@ -1,5 +1,6 @@
 import {
   createRunTelemetry,
+  writeTerminalRunIfMissing,
   type CronTelemetryLogger,
 } from "../../infra/lambdas/agent-cron/run-telemetry"
 
@@ -22,6 +23,35 @@ function harness(overrides: Partial<typeof config> = {}) {
 }
 
 describe("agent-cron run telemetry", () => {
+  it("makes the STOPPED fallback conditional on a missing terminal session", async () => {
+    const execute = jest.fn().mockResolvedValue({ numberOfRecordsUpdated: 1 })
+
+    await expect(
+      writeTerminalRunIfMissing(
+        config,
+        { execute },
+        {
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          scheduleName: "Morning brief",
+          sessionId: "scheduled-session",
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 10_000,
+          status: "success",
+        },
+      ),
+    ).resolves.toBe(true)
+
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sql: expect.stringMatching(
+          /WHERE NOT EXISTS[\s\S]+status IN \('success', 'error'\)/,
+        ),
+      }),
+    )
+  })
+
   it("records a rejected reference as a skipped scheduled run", async () => {
     const { telemetry, execute, log } = harness()
 
@@ -58,7 +88,7 @@ describe("agent-cron run telemetry", () => {
   })
 
   it("mirrors a contended pre-invocation lock with its phase", async () => {
-    const { telemetry, execute, log } = harness()
+    const { telemetry, execute, error, log } = harness()
 
     await telemetry.recordRun(
       {
@@ -80,9 +110,19 @@ describe("agent-cron run telemetry", () => {
     )
 
     expect(execute).toHaveBeenCalledTimes(2)
+    expect(error).toHaveBeenCalledWith(
+      "AGENT_FAILURE_RECORD",
+      expect.objectContaining({
+        userId: "o***@psd401.net",
+      }),
+    )
     expect(execute.mock.calls[1][0].parameters).toEqual(
       expect.arrayContaining([
         { name: "severity", value: { stringValue: "warn" } },
+        {
+          name: "user_id",
+          value: { stringValue: "owner@psd401.net" },
+        },
         {
           name: "context",
           value: {

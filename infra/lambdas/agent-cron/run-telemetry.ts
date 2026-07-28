@@ -1,4 +1,5 @@
 import type { ExecuteStatementCommandInput } from '@aws-sdk/client-rds-data';
+import { sanitizeEmailForLog } from './log-sanitization';
 
 export interface CronTelemetryLogger {
   warn: (message: string, metadata?: Record<string, unknown>) => void;
@@ -58,6 +59,97 @@ function nullableStringParameter(name: string, value?: string | null) {
     : { name, value: { isNull: true } };
 }
 
+function scheduledRunParameters(
+  params: ScheduledRunRecord,
+): NonNullable<ExecuteStatementCommandInput['parameters']> {
+  return [
+    { name: 'user_id', value: { stringValue: params.userEmail } },
+    { name: 'schedule_id', value: { stringValue: params.scheduleId } },
+    nullableStringParameter('schedule_name', params.scheduleName),
+    { name: 'session_id', value: { stringValue: params.sessionId } },
+    { name: 'input_tokens', value: { longValue: params.inputTokens } },
+    { name: 'output_tokens', value: { longValue: params.outputTokens } },
+    { name: 'latency_ms', value: { longValue: params.latencyMs } },
+    { name: 'status', value: { stringValue: params.status } },
+    nullableStringParameter('error_message', params.errorMessage),
+  ];
+}
+
+/**
+ * Strict scheduled-run writer for durability boundaries such as the ECS task
+ * supervisor. The ordinary cron path wraps this best-effort so observability
+ * does not replace the scheduled work; supervisors let failures propagate to
+ * Lambda's async retry/DLQ path instead of leaving a run stuck as promoted.
+ */
+export async function writeScheduledRun(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  params: ScheduledRunRecord,
+): Promise<void> {
+  if (!config.databaseResourceArn || !config.databaseSecretArn) {
+    throw new Error('Scheduled-run telemetry database is not configured');
+  }
+  await rdsDataClient.execute(
+    {
+      resourceArn: config.databaseResourceArn,
+      secretArn: config.databaseSecretArn,
+      database: config.databaseName,
+      sql: `INSERT INTO agent_scheduled_runs
+              (user_id, schedule_id, schedule_name, session_id,
+               input_tokens, output_tokens, latency_ms, status, error_message)
+            VALUES
+              (:user_id, :schedule_id, :schedule_name, :session_id,
+               :input_tokens, :output_tokens, :latency_ms, :status, :error_message)`,
+      parameters: scheduledRunParameters(params),
+    },
+  );
+}
+
+/**
+ * Strict, idempotent fallback for the ECS STOPPED supervisor. The job runner
+ * normally writes the richer terminal row before exiting. Insert only when
+ * that exact scheduled session has no terminal row so a supervisor retry (or
+ * a clean job) cannot replace accurate token/error telemetry with its fallback.
+ */
+export async function writeTerminalRunIfMissing(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  params: ScheduledRunRecord,
+): Promise<boolean> {
+  if (!config.databaseResourceArn || !config.databaseSecretArn) {
+    throw new Error('Scheduled-run telemetry database is not configured');
+  }
+  const result = await rdsDataClient.execute(
+    {
+      resourceArn: config.databaseResourceArn,
+      secretArn: config.databaseSecretArn,
+      database: config.databaseName,
+      sql: `INSERT INTO agent_scheduled_runs
+              (user_id, schedule_id, schedule_name, session_id,
+               input_tokens, output_tokens, latency_ms, status, error_message)
+            SELECT
+              :user_id, :schedule_id, :schedule_name, :session_id,
+              :input_tokens, :output_tokens, :latency_ms, :status, :error_message
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM agent_scheduled_runs
+              WHERE user_id = :user_id
+                AND schedule_id = :schedule_id
+                AND session_id = :session_id
+                AND status IN ('success', 'error')
+            )`,
+      parameters: scheduledRunParameters(params),
+    },
+  );
+  const updated = result && typeof result === 'object'
+    ? (result as { numberOfRecordsUpdated?: unknown }).numberOfRecordsUpdated
+    : undefined;
+  if (updated !== 0 && updated !== 1) {
+    throw new Error('Scheduled-run fallback returned no update count');
+  }
+  return updated === 1;
+}
+
 export function createRunTelemetry(
   config: RunTelemetryConfig,
   rdsDataClient: RunTelemetryRdsClient,
@@ -80,7 +172,7 @@ export function createRunTelemetry(
     log.error('AGENT_FAILURE_RECORD', {
       source: 'cron',
       severity,
-      userId: params.userEmail,
+      userId: sanitizeEmailForLog(params.userEmail),
       sessionId: params.sessionId,
       scheduleId: params.scheduleId,
       scheduleName: params.scheduleName ?? null,
@@ -129,30 +221,7 @@ export function createRunTelemetry(
       });
     } else {
       try {
-        await rdsDataClient.execute(
-          {
-            resourceArn: config.databaseResourceArn,
-            secretArn: config.databaseSecretArn,
-            database: config.databaseName,
-            sql: `INSERT INTO agent_scheduled_runs
-                    (user_id, schedule_id, schedule_name, session_id,
-                     input_tokens, output_tokens, latency_ms, status, error_message)
-                  VALUES
-                    (:user_id, :schedule_id, :schedule_name, :session_id,
-                     :input_tokens, :output_tokens, :latency_ms, :status, :error_message)`,
-            parameters: [
-              { name: 'user_id', value: { stringValue: params.userEmail } },
-              { name: 'schedule_id', value: { stringValue: params.scheduleId } },
-              nullableStringParameter('schedule_name', params.scheduleName),
-              { name: 'session_id', value: { stringValue: params.sessionId } },
-              { name: 'input_tokens', value: { longValue: params.inputTokens } },
-              { name: 'output_tokens', value: { longValue: params.outputTokens } },
-              { name: 'latency_ms', value: { longValue: params.latencyMs } },
-              { name: 'status', value: { stringValue: params.status } },
-              nullableStringParameter('error_message', params.errorMessage),
-            ],
-          },
-        );
+        await writeScheduledRun(config, rdsDataClient, params);
       } catch (error) {
         log.error('Failed to record scheduled run', {
           scheduleId: params.scheduleId,
