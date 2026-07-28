@@ -103,7 +103,31 @@ async function run(...argv) {
 }
 
 test('find issues GET / with the filter query', async () => {
-  await run('find', '--kind', 'document', '--status', 'published', '--query', 'trip', '--tag', 'science');
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: [
+      {
+        id: 'obj-1',
+        slug: 'field-trip',
+        url: 'https://app.example/c/field-trip',
+      },
+    ],
+  });
+
+  await run(
+    'find',
+    '--kind',
+    'document',
+    '--status',
+    'published',
+    '--query',
+    'trip',
+    '--tag',
+    'science',
+    '--since',
+    '2026-07-27T00:00:00Z'
+  );
 
   expect(restCalls).toHaveLength(1);
   expect(restCalls[0].method).toBe('GET');
@@ -114,7 +138,9 @@ test('find issues GET / with the filter query', async () => {
     collection: undefined,
     tag: 'science',
     query: 'trip',
+    since: '2026-07-27T00:00:00Z',
   });
+  expect(emitted[0][0].url).toBe('https://app.example/c/field-trip');
 });
 
 test('find rejects an invalid --kind (exit 1)', async () => {
@@ -463,6 +489,25 @@ test('publish POSTs /<id>/publish with the destination (default intranet)', asyn
   await run('publish', '--id', 'obj-1');
   expect(restCalls[0]).toMatchObject({ method: 'POST', path: '/obj-1/publish' });
   expect(restCalls[0].opts.body).toEqual({ destination: 'intranet' });
+});
+
+test('publish emits readerUrl when the broker returns it', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: {
+      id: 'obj-1',
+      destination: 'intranet',
+      publishedVersionId: 'v7',
+      readerUrl: 'https://app.example/c/field-trip',
+    },
+  });
+
+  await run('publish', '--id', 'obj-1');
+
+  expect(emitted[0].readerUrl).toBe(
+    'https://app.example/c/field-trip'
+  );
 });
 
 test('publish relays an approval_required outcome', async () => {

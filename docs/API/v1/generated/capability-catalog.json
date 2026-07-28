@@ -339,7 +339,7 @@
     {
       "identifier": "content.list",
       "name": "list_content",
-      "description": "List content the caller may view. Filterable by kind, collection, tag, status, and title text.",
+      "description": "List content the caller may view. Filterable by kind, collection, tag, status, title text, and updated-at timestamp.",
       "surfaces": [
         "mcp",
         "internal"

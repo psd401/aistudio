@@ -217,7 +217,9 @@ describe("createCoordinatedAssistantExecution", () => {
     ).resolves.toMatchObject({ created: true, executionId: 123 })
     expect(insert).toHaveBeenCalledTimes(1)
   })
+})
 
+describe("coordinated assistant rate and graph limits", () => {
   it("applies the web agentic rate cap while still holding the assistant lock", async () => {
     const agenticAssistant: AssistantRow = {
       ...approvedAssistant,

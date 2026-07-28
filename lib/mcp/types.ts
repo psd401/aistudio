@@ -84,6 +84,7 @@ export interface McpToolDefinition {
 export interface McpToolProperty {
   type: string | string[]
   description?: string
+  format?: string
   enum?: Array<string | number | boolean | null>
   items?: McpToolProperty
   properties?: Record<string, McpToolProperty>

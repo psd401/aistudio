@@ -11,23 +11,33 @@ afterEach(() => {
   gateway._internals.requestAgentBroker = originalBroker;
 });
 
-test('forwards only a named tool and arguments to the owner-bound broker', async () => {
+test('discovers the live roster through the generic broker route', async () => {
+  let seen;
+  gateway._internals.requestAgentBroker = async (...args) => {
+    seen = args;
+    return { tools: [{ name: 'get_example_schema', inputSchema: {} }] };
+  };
+  const tools = await gateway.listGatewayTools();
+  assert.equal(tools[0].name, 'get_example_schema');
+  assert.deepEqual(seen, [
+    '/api/agent/workflow-gateway',
+    { action: 'list-tools' },
+    { timeoutMs: 155_000 },
+  ]);
+});
+
+test('forwards any roster-selected tool and arguments', async () => {
   let seen;
   gateway._internals.requestAgentBroker = async (...args) => {
     seen = args;
     return { isError: false, data: { ok: true } };
   };
-  const result = await gateway.callGatewayTool(
-    'list_supervised_employees',
-    { evaluator_email: 'attacker-selected@psd401.net' }
-  );
+  const toolName = ['future', 'workflow', 'action'].join('_');
+  const result = await gateway.callGatewayTool(toolName, { value: 'ready' });
   assert.deepEqual(result, { isError: false, data: { ok: true } });
   assert.deepEqual(seen, [
-    '/api/agent/classified-evaluation',
-    {
-      toolName: 'list_supervised_employees',
-      arguments: { evaluator_email: 'attacker-selected@psd401.net' },
-    },
+    '/api/agent/workflow-gateway',
+    { toolName, arguments: { value: 'ready' } },
     { timeoutMs: 155_000 },
   ]);
 });
@@ -36,35 +46,33 @@ test('maps configuration, tool, and transport failures to stable error classes',
   gateway._internals.requestAgentBroker = async () => {
     throw Object.assign(new Error('missing'), { status: 503 });
   };
-  await assert.rejects(
-    () => gateway.callGatewayTool('get_classified_evaluation_schema', {}),
-    gateway.GatewayConfigError
-  );
+  await assert.rejects(() => gateway.listGatewayTools(), gateway.GatewayConfigError);
 
   gateway._internals.requestAgentBroker = async () => {
     throw Object.assign(new Error('rejected'), {
-      status: 422,
-      responseBody: { detail: { code: -1 } },
+      status: 400,
+      responseBody: { error: 'Missing [caller-bound] marker' },
     });
   };
   await assert.rejects(
-    () => gateway.callGatewayTool('submit_classified_evaluation', {}),
+    () => gateway.callGatewayTool('submit_example', {}),
     (error) =>
       error instanceof gateway.GatewayToolError &&
-      error.rpcError.code === -1
+      error.responseBody.error.includes('[caller-bound]')
   );
 
   gateway._internals.requestAgentBroker = async () => {
     throw new Error('offline');
   };
   await assert.rejects(
-    () => gateway.callGatewayTool('get_classified_evaluation_schema', {}),
+    () => gateway.listGatewayTools(),
     gateway.GatewayTransportError
   );
 });
 
-test('model-facing gateway contains no service secret, bearer, or direct network path', () => {
+test('model-facing gateway contains no service secret, bearer, or direct gateway path', () => {
   const source = fs.readFileSync(path.resolve(__dirname, 'gateway.js'), 'utf8');
-  assert.doesNotMatch(source, /SecretsManager|GetSecretValue|Authorization|fetch\(/);
+  assert.doesNotMatch(source, /SecretsManager|GetSecretValue|Authorization/);
   assert.doesNotMatch(source, /AGENT_GATEWAY_(?:TOKEN|SSE_URL|CONFIG_SECRET_ID)/);
+  assert.doesNotMatch(source, /n8n|\/mcp\//);
 });

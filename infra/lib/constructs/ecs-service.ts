@@ -1050,6 +1050,10 @@ export class EcsServiceConstruct extends Construct {
       DOCUMENTS_BUCKET_NAME: documentsBucketName, // Legacy name for compatibility
       RDS_DATABASE_NAME: 'aistudio',
       AUTH_URL: props.authUrl,
+      // Canonical absolute origin for Atrium /c and /p reader links. Reuse the
+      // ECS service's authoritative auth origin so deployed links are never
+      // relative or dependent on a separately hand-managed value.
+      ATRIUM_PUBLIC_BASE_URL: props.authUrl,
       AUTH_COGNITO_CLIENT_ID: props.cognitoClientId,
       AUTH_COGNITO_ISSUER: props.cognitoIssuer,
       // Legacy RDS Data API variables (kept for backward compatibility during migration)

@@ -77,6 +77,14 @@ jobs:
       env:
         CI: true
 
+    # psd-workflows (#1403). This CJS skill is outside Jest's roots; its Node
+    # suite proves dynamic roster discovery, generic list/describe/call parsing,
+    # caller-marker binding, payload handling, and the legacy-subcommand break.
+    - name: Run psd-workflows skill tests (Node)
+      run: bun run test:skill:workflows
+      env:
+        CI: true
+
     # psd-schedules (Bun). Same reason as above: plain CJS outside the jest
     # roots. Runs the whole directory, which covers two suites:
     #   - skill-frontmatter: DISCOVERABILITY. agent-platform-stack.ts

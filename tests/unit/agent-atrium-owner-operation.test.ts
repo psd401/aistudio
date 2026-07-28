@@ -123,19 +123,31 @@ beforeEach(() => {
 
 describe("signed-owner Atrium operations", () => {
   it("resolves the signed email to the owner requester for reads", async () => {
-    contentListMock.mockResolvedValue([{ id: "content-1" }])
+    contentListMock.mockResolvedValue([
+      { id: "content-1", slug: "staff-handbook" },
+    ])
     await expect(
       executeOwnerAtriumOperation({
         ownerEmail: "owner@psd401.net",
         requestId: "request-1",
         method: "GET",
         path: "",
-        query: { collection: "handbook", status: "draft" },
+        query: {
+          collection: "handbook",
+          status: "draft",
+          since: "2026-07-27T00:00:00Z",
+        },
       })
     ).resolves.toEqual({
       httpStatus: 200,
       payload: {
-        data: [{ id: "content-1" }],
+        data: [
+          {
+            id: "content-1",
+            slug: "staff-handbook",
+            url: "/c/staff-handbook",
+          },
+        ],
         meta: { requestId: "request-1" },
       },
     })
@@ -147,10 +159,31 @@ describe("signed-owner Atrium operations", () => {
       tag: undefined,
       status: "draft",
       query: undefined,
+      since: "2026-07-27T00:00:00Z",
     })
     expect(assertContentAuthoringCapabilityMock).not.toHaveBeenCalled()
   })
 
+  it("returns a 400 validation result for an invalid since value", async () => {
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "request-invalid-since",
+      method: "GET",
+      path: "",
+      query: { since: "yesterday-ish" },
+    })
+
+    expect(result.httpStatus).toBe(400)
+    expect(result.payload).toEqual(
+      expect.objectContaining({
+        error: expect.objectContaining({ code: "VALIDATION_ERROR" }),
+      })
+    )
+    expect(contentListMock).not.toHaveBeenCalled()
+  })
+})
+
+describe("signed-owner Atrium mutations", () => {
   it("attributes writes to the signed owner requester", async () => {
     contentCreateMock.mockResolvedValue({
       id: "content-1",
@@ -263,6 +296,34 @@ describe("signed-owner Atrium operations", () => {
     expect(auditMock).toHaveBeenCalledWith(
       expect.objectContaining({ outcome: "approval_required" })
     )
+  })
+
+  it("passes the publish readerUrl through to the broker response", async () => {
+    publishMock.mockResolvedValue({
+      publishedVersionId: "version-7",
+      readerUrl: "https://app.example/c/staff-handbook",
+    })
+
+    await expect(
+      executeOwnerAtriumOperation({
+        ownerEmail: "owner@psd401.net",
+        requestId: "request-publish-reader",
+        method: "POST",
+        path: "/content-1/publish",
+        body: { destination: "intranet" },
+      })
+    ).resolves.toEqual({
+      httpStatus: 200,
+      payload: {
+        data: {
+          id: "content-1",
+          destination: "intranet",
+          publishedVersionId: "version-7",
+          readerUrl: "https://app.example/c/staff-handbook",
+        },
+        meta: { requestId: "request-publish-reader" },
+      },
+    })
   })
 })
 

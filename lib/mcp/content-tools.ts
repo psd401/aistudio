@@ -109,7 +109,7 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
   {
     name: "list_content",
     description:
-      "List content the caller may view. Filterable by kind, collection, tag, status, and title text.",
+      "List content the caller may view. Filterable by kind, collection, tag, status, title text, and updated-at timestamp.",
     inputSchema: {
       type: "object",
       properties: {
@@ -124,6 +124,12 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
         query: {
           type: "string",
           description: "Case-insensitive title search (max 200 characters)",
+        },
+        since: {
+          type: "string",
+          format: "date-time",
+          description:
+            "Return content updated at or after this ISO 8601 timestamp",
         },
       },
     },

@@ -1351,13 +1351,17 @@ List content objects the caller may view (permission-filtered server-side). Requ
 | `tag` | string | Filter by a single tag (whole-tag match, case-insensitive) |
 | `status` | `draft` \| `published` \| `archived` | Filter by lifecycle status |
 | `query` | string (1–200 chars) | Case-insensitive substring search over the title **or any tag**. Unlike `tag` (whole-tag equality), this matches partial text anywhere in a tag; supplying both ANDs them |
+| `since` | ISO 8601 date-time | Return objects whose `updatedAt` is greater than or equal to this instant (inclusive) |
 
 **Example request:**
 
 ```bash
 curl -H "Authorization: Bearer sk-your-key" \
-  "https://your-domain/api/v1/content?kind=document&status=published&tag=policy&query=acceptable%20use"
+  "https://your-domain/api/v1/content?kind=document&status=published&tag=policy&query=acceptable%20use&since=2026-07-27T00%3A00%3A00Z"
 ```
+
+An invalid `since` value returns `400 VALIDATION_ERROR`; it is never ignored or
+interpreted client-side.
 
 **Response `200`** — `meta.count` is the number of items returned.
 
@@ -1878,11 +1882,16 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
   "data": {
     "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     "destination": "intranet",
-    "publishedVersionId": "11111111-2222-4333-8444-555555555555"
+    "publishedVersionId": "11111111-2222-4333-8444-555555555555",
+    "readerUrl": "https://your-domain/c/ai-acceptable-use-policy"
   },
   "meta": { "requestId": "req_abc123" }
 }
 ```
+
+`readerUrl` is the publish service's canonical link. It is an absolute `/c/{slug}`
+or `/p/{slug}` URL for deployed Atrium readers and `null` for destinations that
+do not provide a reader URL.
 
 **Response `202`** (approval required — public publish without `content:publish_public`)
 

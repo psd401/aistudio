@@ -55,10 +55,10 @@ permit(
 )
 when { resource.url like "https://api.psd401.net/*" };
 
-// PSD Agent Gateway — psd-classified-evaluation skill (#1230). The n8n MCP
-// Server Trigger that runs the classified-evaluation pipeline server-side. Only
-// the hostname + generic /mcp prefix are named here; the full gateway path lives
-// solely in the psd-agent/{env}/agent-gateway secret (this is a public repo).
+// PSD Agent Gateway — dynamic psd-workflows skill (#1403). The n8n MCP Server
+// Trigger runs the discovered workflow roster server-side. Only the hostname +
+// generic /mcp prefix are named here; the full gateway path lives solely in the
+// psd-agent/{env}/agent-gateway secret (this is a public repo).
 permit(
   principal,
   action == Action::"http.request",
@@ -262,6 +262,8 @@ unless {
   resource.url like "https://psd401.ai/api/agent/canva" ||
   resource.url like "https://*.psd401.ai/api/agent/classified-evaluation" ||
   resource.url like "https://psd401.ai/api/agent/classified-evaluation" ||
+  resource.url like "https://*.psd401.ai/api/agent/workflow-gateway" ||
+  resource.url like "https://psd401.ai/api/agent/workflow-gateway" ||
   resource.url like "https://*.psd401.ai/api/agent/credentials" ||
   resource.url like "https://psd401.ai/api/agent/credentials" ||
   resource.url like "https://*.psd401.ai/api/agent/directory-lookup" ||
@@ -280,7 +282,7 @@ unless {
   resource.url like "https://psd401.ai/api/agent/workspace-execute" ||
   resource.url like "https://*.psd401.ai/api/agent/workspace-storage" ||
   resource.url like "https://psd401.ai/api/agent/workspace-storage" ||
-  // PSD Agent Gateway (#1230): n8n MCP Server Trigger for psd-classified-evaluation.
+  // PSD Agent Gateway (#1403): n8n MCP Server Trigger for psd-workflows.
   // Hostname + generic /mcp prefix only — the full gateway path stays out of this
   // public repo and lives only in the psd-agent/{env}/agent-gateway secret.
   resource.url like "https://n8n.psd401.net/mcp/*"

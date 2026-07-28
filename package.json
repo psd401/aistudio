@@ -43,6 +43,7 @@
     "agent:probe-context": "bun run scripts/agent-workspace/mint-agent-probe-context.ts",
     "test:skill:workspace": "cd infra/agent-image/skills/psd-workspace && bun test common.test.js",
     "test:skill:directory": "cd infra/agent-image/skills/psd-directory && bun test run.test.js",
+    "test:skill:workflows": "cd infra/agent-image/skills/psd-workflows && node --test",
     "test:skill:schedules": "cd infra/agent-image/skills/psd-schedules && bun test",
     "test:skill:hyperframes": "cd infra/agent-image/skills/psd-hyperframes && bun test",
     "test:skill:atrium": "cd infra/agent-image/skills/psd-atrium && bun test",

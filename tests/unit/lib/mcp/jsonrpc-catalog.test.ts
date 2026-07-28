@@ -58,12 +58,14 @@ import type { McpToolContext } from "@/lib/mcp/types"
 import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 
-// Derive the expected MCP tool count from the manifest so this test self-updates
-// when an MCP tool is added/removed, rather than asserting a hardcoded length.
-// (PR #1032 review finding #10.)
-const MCP_TOOL_COUNT = TOOL_MANIFEST.filter((t) =>
-  t.surfaces.includes("mcp")
-).length
+// Default tools/list collapses multiple versions to the latest entry for each
+// identifier. Count unique identifiers rather than raw manifest rows so a frozen
+// legacy version remains pinned-callable without being double-advertised.
+const MCP_TOOL_COUNT = new Set(
+  TOOL_MANIFEST.filter((tool) => tool.surfaces.includes("mcp")).map(
+    (tool) => tool.identifier
+  )
+).size
 
 function ctx(scopes: string[]): McpToolContext {
   return { userId: 1, cognitoSub: "sub", scopes, requestId: "req" }

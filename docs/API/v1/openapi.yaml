@@ -2008,6 +2008,15 @@ paths:
             type: string
             minLength: 1
             maxLength: 200
+        - name: since
+          in: query
+          description: >-
+            Return objects whose updatedAt is greater than or equal to this
+            ISO 8601 timestamp. Invalid timestamps return 400 VALIDATION_ERROR.
+          schema:
+            type: string
+            format: date-time
+          example: "2026-07-27T00:00:00Z"
       responses:
         "200":
           description: List of visible content objects
@@ -5133,7 +5142,7 @@ components:
       properties:
         data:
           type: object
-          required: [id, destination, publishedVersionId]
+          required: [id, destination, publishedVersionId, readerUrl]
           properties:
             id:
               type: string
@@ -5144,6 +5153,15 @@ components:
             publishedVersionId:
               type: string
               format: uuid
+            readerUrl:
+              type: string
+              format: uri-reference
+              nullable: true
+              description: >-
+                Canonical reader URL returned by the publish service. Deployed
+                intranet/public readers are absolute; destinations without a
+                reader URL return null.
+              example: "https://aistudio.example.edu/c/ai-acceptable-use-policy"
         meta:
           type: object
           required: [requestId]

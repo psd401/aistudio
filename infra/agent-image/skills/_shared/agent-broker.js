@@ -6,6 +6,7 @@ const ALLOWED_ROUTES = new Set([
   '/api/agent/atrium',
   '/api/agent/canva',
   '/api/agent/classified-evaluation',
+  '/api/agent/workflow-gateway',
   '/api/agent/consent-link',
   '/api/agent/credentials',
   '/api/agent/directory-lookup',

@@ -327,6 +327,8 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     identifier: "content.list",
     requiredScope: "content:read",
     internalScopes: ["content:read"],
+    // v2: #1414 added the optional ISO 8601 `since` lower-bound filter.
+    version: "v2",
   },
   update_content: {
     identifier: "content.update",
@@ -433,6 +435,53 @@ const MCP_MANIFEST_ENTRIES: ToolManifestEntry[] = MCP_TOOLS.map(
 );
 
 /**
+ * Frozen MCP contracts that must remain addressable after a newer version ships.
+ *
+ * Keep these as explicit snapshots instead of deriving them from `MCP_TOOLS`:
+ * deriving a legacy entry from the live registry would silently mutate the old
+ * contract the next time its current schema changes. The boot sync owns every
+ * `(identifier, version)` listed here, so retaining the row also prevents
+ * `deactivateOrphans()` from breaking callers pinned to the earlier version.
+ */
+const LEGACY_MCP_MANIFEST_ENTRIES: readonly ToolManifestEntry[] = [
+  {
+    identifier: "content.list",
+    version: "v1",
+    name: "list_content",
+    description:
+      "List content the caller may view. Filterable by kind, collection, tag, status, and title text.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: {
+          type: "string",
+          enum: ["document", "artifact"],
+          description: "Filter by kind",
+        },
+        collection: {
+          type: "string",
+          description: "Collection slug or id",
+        },
+        tag: { type: "string", description: "Filter by tag" },
+        status: {
+          type: "string",
+          enum: ["draft", "published", "archived"],
+          description: "Filter by status",
+        },
+        query: {
+          type: "string",
+          description: "Case-insensitive title search (max 200 characters)",
+        },
+      },
+    },
+    surfaces: ["mcp", "internal"],
+    requiredScopes: ["content:read"],
+    surfaceScopes: { internal: ["content:read"] },
+    agentCallable: true,
+  },
+];
+
+/**
  * AI SDK tools exposed in chat / Nexus, projected from the single browser-safe
  * source of truth (`lib/tools/catalog/ai-sdk-tools.ts`). These are descriptor-only
  * catalog entries (no in-process MCP `handler`): the concrete tool implementations
@@ -494,6 +543,7 @@ const AGENT_TOOL_MANIFEST_ENTRIES: ToolManifestEntry[] = AGENT_TOOL_DESCRIPTORS.
  */
 export const TOOL_MANIFEST: readonly ToolManifestEntry[] = [
   ...MCP_MANIFEST_ENTRIES,
+  ...LEGACY_MCP_MANIFEST_ENTRIES,
   ...AI_SDK_MANIFEST_ENTRIES,
   ...AGENT_TOOL_MANIFEST_ENTRIES,
 ];
