@@ -183,6 +183,8 @@ const runTelemetryRdsClient = {
 const jobLockDynamoClient = {
   put: (input: ConstructorParameters<typeof PutCommand>[0]) =>
     dynamoClient.send(new PutCommand(input)),
+  get: (input: ConstructorParameters<typeof GetCommand>[0]) =>
+    dynamoClient.send(new GetCommand(input)),
   delete: (input: ConstructorParameters<typeof DeleteCommand>[0]) =>
     dynamoClient.send(new DeleteCommand(input)),
   update: (input: ConstructorParameters<typeof UpdateCommand>[0]) =>
@@ -1571,9 +1573,12 @@ async function recordScheduleGuardFailure(
   context: Omit<LockedScheduleContext, 'lambdaContext'>,
   failure: ScheduleGuardFailure,
   status: HandlerResult['status'],
+  durability: 'best-effort' | 'strict' = 'best-effort',
 ): Promise<HandlerResult> {
   const { schedule, scheduleName, sessionId, startTime, log } = context;
-  await runTelemetry.recordRun(
+  await runTelemetry[
+    durability === 'strict' ? 'recordRunStrict' : 'recordRun'
+  ](
     {
       userEmail: schedule.ownerEmail,
       scheduleId: schedule.scheduleId,
@@ -1659,20 +1664,25 @@ async function runLockedScheduleTurn(
   fireClaim: OwnedScheduleFireClaim | null,
 ): Promise<LockedJobResult<HandlerResult>> {
   try {
-    if (fireClaim) {
-      await beginScheduleFireExecution(
-        fireClaim,
-        SESSION_LOCKS_TABLE,
-        scheduleFireDynamoClient,
-        context.log,
-      );
-    }
     return await runWithJobLock(
       context.sessionId,
       SESSION_LOCKS_TABLE,
       jobLockDynamoClient,
       context.log,
-      (lockToken) => executeLockedScheduledTurn(context, lockToken),
+      {
+        execute: async (lockToken) => {
+          if (fireClaim) {
+            await beginScheduleFireExecution(
+              fireClaim,
+              SESSION_LOCKS_TABLE,
+              scheduleFireDynamoClient,
+              context.log,
+            );
+          }
+          return executeLockedScheduledTurn(context, lockToken);
+        },
+        fireKey: fireClaim?.identity.key,
+      },
     );
   } catch (error) {
     if (error instanceof JobLockAcquisitionError) {
@@ -1734,14 +1744,34 @@ async function handleScheduleLockContention(
     fireClaim,
   );
   if (resolution.action === 'retry') {
+    if (resolution.fireClaim) {
+      await releaseScheduleFire(
+        resolution.fireClaim,
+        SESSION_LOCKS_TABLE,
+        scheduleFireDynamoClient,
+        context.log,
+      );
+    }
     await recordScheduleGuardFailure(context, resolution.failure, 'error');
     throw new JobLockAcquisitionError(resolution.failure);
   }
-  const result = await recordScheduleGuardFailure(
-    context,
-    resolution.failure,
-    'skipped',
-  );
+  let result: HandlerResult;
+  try {
+    result = await recordScheduleGuardFailure(
+      context,
+      resolution.failure,
+      'skipped',
+      'strict',
+    );
+  } catch (error) {
+    await releaseScheduleFire(
+      resolution.fireClaim,
+      SESSION_LOCKS_TABLE,
+      scheduleFireDynamoClient,
+      context.log,
+    );
+    throw error;
+  }
   // This is an intentional coalesce, not an unobserved success: the skipped
   // run/failure is durable before the distinct fire is marked complete.
   await finalizeScheduleFire(context, resolution.fireClaim);

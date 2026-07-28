@@ -36,6 +36,60 @@ describe("agent-cron per-schedule promotion lock", () => {
     })
   })
 
+  it("correlates a session lock with the immutable schedule fire", async () => {
+    const put = jest.fn().mockResolvedValue({})
+    const fireKey = "schedule-fire#schedule-id#2026-07-28T15:00:00Z"
+
+    await expect(
+      tryAcquireJobLock(
+        SESSION_ID,
+        TABLE,
+        { put, delete: jest.fn() },
+        logger(),
+        fireKey,
+      ),
+    ).resolves.toMatchObject({ acquired: true })
+
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Item: expect.objectContaining({ fireKey }),
+      }),
+    )
+  })
+
+  it("reports the immutable fire that owns a contended session lock", async () => {
+    const contention = Object.assign(new Error("already held"), {
+      name: "ConditionalCheckFailedException",
+    })
+    const fireKey = "schedule-fire#schedule-id#2026-07-28T15:00:00Z"
+    const put = jest.fn().mockRejectedValue(contention)
+    const get = jest.fn().mockResolvedValue({
+      Item: { fireKey },
+    })
+
+    await expect(
+      tryAcquireJobLock(
+        SESSION_ID,
+        TABLE,
+        { put, get, delete: jest.fn() },
+        logger(),
+        fireKey,
+      ),
+    ).resolves.toEqual({
+      acquired: false,
+      phase: "lock-contention",
+      severity: "warn",
+      errorMessage:
+        "Session lock contended; another invocation owns this schedule session",
+      ownerFireKey: fireKey,
+    })
+    expect(get).toHaveBeenCalledWith({
+      TableName: TABLE,
+      Key: { sessionId: SESSION_ID },
+      ConsistentRead: true,
+    })
+  })
+
   it("rejects an overlapping invocation before its callback can launch a job", async () => {
     const contention = Object.assign(new Error("already held"), {
       name: "ConditionalCheckFailedException",
@@ -50,7 +104,7 @@ describe("agent-cron per-schedule promotion lock", () => {
         TABLE,
         { put, delete: deleteItem },
         logger(),
-        execute,
+        { execute },
       ),
     ).resolves.toEqual({
       executed: false,
@@ -76,7 +130,7 @@ describe("agent-cron per-schedule promotion lock", () => {
         TABLE,
         { put, delete: jest.fn() },
         logger(),
-        execute,
+        { execute },
       ),
     ).rejects.toMatchObject({
       name: "JobLockAcquisitionError",
@@ -88,7 +142,45 @@ describe("agent-cron per-schedule promotion lock", () => {
     })
     expect(execute).not.toHaveBeenCalled()
   })
+})
 
+describe("agent-cron same-fire lock recovery", () => {
+  it("reclaims a stale session lock correlated to the same owned fire", async () => {
+    const contention = Object.assign(new Error("already held"), {
+      name: "ConditionalCheckFailedException",
+    })
+    const fireKey = "schedule-fire#schedule-id#2026-07-28T15:00:00Z"
+    const put = jest.fn()
+      .mockRejectedValueOnce(contention)
+      .mockResolvedValueOnce({})
+    const get = jest.fn().mockResolvedValue({ Item: { fireKey } })
+    const deleteItem = jest.fn().mockResolvedValue({})
+    const execute = jest.fn().mockResolvedValue({
+      value: "delivered",
+      retainLock: false,
+    })
+
+    await expect(
+      runWithJobLock(
+        SESSION_ID,
+        TABLE,
+        { put, get, delete: deleteItem },
+        logger(),
+        { execute, fireKey },
+      ),
+    ).resolves.toEqual({ executed: true, value: "delivered" })
+
+    expect(deleteItem.mock.calls[0][0]).toMatchObject({
+      Key: { sessionId: SESSION_ID },
+      ConditionExpression: "fireKey = :fireKey",
+      ExpressionAttributeValues: { ":fireKey": fireKey },
+    })
+    expect(put).toHaveBeenCalledTimes(2)
+    expect(execute).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("agent-cron session-lock lifecycle", () => {
   it("releases only the lock token owned by the failed promotion", async () => {
     const put = jest.fn().mockResolvedValue({})
     const deleteItem = jest.fn().mockResolvedValue({})
@@ -148,7 +240,7 @@ describe("agent-cron per-schedule promotion lock", () => {
         TABLE,
         { put, delete: deleteItem },
         logger(),
-        execute,
+        { execute },
       ),
     ).resolves.toEqual({ executed: true, value: "delivered" })
 
@@ -170,7 +262,7 @@ describe("agent-cron per-schedule promotion lock", () => {
         TABLE,
         { put, delete: deleteItem },
         logger(),
-        execute,
+        { execute },
       ),
     ).resolves.toEqual({ executed: true, value: "promoted" })
 

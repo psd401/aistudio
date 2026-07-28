@@ -34,7 +34,7 @@ import {
   UpdateScheduleCommand,
 } from "@aws-sdk/client-scheduler"
 import {
-
+  DeleteCommand,
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
@@ -173,6 +173,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
     dynamoSend
       .mockResolvedValueOnce({ Items: [scheduleRecord()] })
       .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ Item: scheduleRecord() })
       .mockResolvedValueOnce({
         Items: [
@@ -184,6 +185,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
           },
         ],
       })
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
     schedulerSend.mockResolvedValueOnce({})
 
@@ -211,12 +213,19 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
         MaximumRetryAttempts: 5,
       },
     })
-    const putCommand = dynamoSend.mock.calls[4][0] as PutCommand
+    const putCommand = dynamoSend.mock.calls[5][0] as PutCommand
     expect(putCommand.input.Item).toMatchObject({
       dmSpaceName: "spaces/new-trusted-dm",
       googleIdentity: "users/67890",
       version: 2,
     })
+    const lockPut = dynamoSend.mock.calls[2][0] as PutCommand
+    expect(lockPut.input.Item).toMatchObject({
+      userId: OWNER,
+      scheduleId: `__mutation__${SCHEDULE_ID}`,
+      kind: "schedule-mutation-lock",
+    })
+    expect(dynamoSend.mock.calls[6][0]).toBeInstanceOf(DeleteCommand)
   })
 
   }
@@ -385,10 +394,12 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
     dynamoSend
       .mockResolvedValueOnce({ Items: [scheduleRecord(), quota] })
       .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ Item: scheduleRecord() })
       .mockResolvedValueOnce({
         Items: [{ email: OWNER, dmSpaceName: "spaces/trusted-owner-dm" }],
       })
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
     schedulerSend.mockResolvedValueOnce({})
 
@@ -413,7 +424,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
       const index = events.filter((event) => event === "dynamo").length
       if (index === 1) return { Items: [scheduleRecord()] }
       if (index === 2) return {}
-      if (index === 3) return { Item: scheduleRecord() }
+      if (index === 4) return { Item: scheduleRecord() }
       return {}
     })
     const schedulerSend = jest.fn(async () => {
@@ -433,7 +444,9 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
       "dynamo",
       "dynamo",
       "dynamo",
+      "dynamo",
       "scheduler",
+      "dynamo",
       "dynamo",
     ])
   })
@@ -443,13 +456,34 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
     dynamoSend
       .mockResolvedValueOnce({ Items: [scheduleRecord()] })
       .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ Item: scheduleRecord() })
+      .mockResolvedValueOnce({})
     schedulerSend.mockRejectedValueOnce(new Error("scheduler unavailable"))
 
     await expect(service.delete(OWNER, SCHEDULE_ID)).rejects.toThrow(
       "retry the delete",
     )
-    expect(dynamoSend).toHaveBeenCalledTimes(3)
+    expect(dynamoSend).toHaveBeenCalledTimes(5)
+  })
+
+  it("rejects a user mutation while the deployment backfill owns its lock", async () => {
+    const { service, dynamoSend, schedulerSend } = harness()
+    const contention = Object.assign(new Error("locked"), {
+      name: "ConditionalCheckFailedException",
+    })
+    dynamoSend
+      .mockResolvedValueOnce({ Items: [scheduleRecord()] })
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(contention)
+
+    await expect(
+      service.update(OWNER, {
+        scheduleId: SCHEDULE_ID,
+        prompt: "Concurrent edit",
+      }),
+    ).rejects.toThrow("being updated")
+    expect(schedulerSend).not.toHaveBeenCalled()
   })
 
   it("uses deterministic DynamoDB idempotency tokens within the 36-char limit", () => {

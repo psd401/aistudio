@@ -50,6 +50,10 @@ export interface RunTelemetry {
     params: ScheduledRunRecord,
     log: CronTelemetryLogger,
   ): Promise<void>;
+  recordRunStrict(
+    params: ScheduledRunRecord,
+    log: CronTelemetryLogger,
+  ): Promise<void>;
   recordCronFailure(
     params: CronFailureRecord,
     log: CronTelemetryLogger,
@@ -465,5 +469,26 @@ export function createRunTelemetry(
     }
   }
 
-  return { recordRun, recordCronFailure };
+  async function recordRunStrict(
+    params: ScheduledRunRecord,
+    log: CronTelemetryLogger,
+  ): Promise<void> {
+    await writeScheduledRun(config, rdsDataClient, params);
+    if (params.status === 'error' || params.failure) {
+      await recordCronFailure(
+        {
+          userEmail: params.userEmail,
+          sessionId: params.sessionId,
+          scheduleId: params.scheduleId,
+          scheduleName: params.scheduleName,
+          errorMessage: params.errorMessage ?? null,
+          severity: params.failure?.severity,
+          context: params.failure?.context ?? { phase: 'scheduled-run' },
+        },
+        log,
+      );
+    }
+  }
+
+  return { recordRun, recordRunStrict, recordCronFailure };
 }

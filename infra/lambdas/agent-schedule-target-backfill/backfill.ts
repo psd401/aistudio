@@ -2,11 +2,17 @@ import type {
   GetScheduleCommandOutput,
   UpdateScheduleCommandInput,
 } from '@aws-sdk/client-scheduler';
+import type {
+  ScheduleMutationIdentity,
+} from './mutation-lock';
 
 const SCHEDULED_TIME_PLACEHOLDER = '<aws.scheduler.scheduled-time>';
 const UPDATE_CONCURRENCY = 5;
+const MAXIMUM_EVENT_AGE_SECONDS = 60 * 60;
+const MAXIMUM_RETRY_ATTEMPTS = 5;
 
 export interface ScheduleTargetBackfillDependencies {
+  scheduleDlqArn: string;
   list(nextToken?: string): Promise<{
     names: string[];
     nextToken?: string;
@@ -14,6 +20,10 @@ export interface ScheduleTargetBackfillDependencies {
   get(name: string): Promise<GetScheduleCommandOutput>;
   update(input: UpdateScheduleCommandInput): Promise<void>;
   queueContinuation(nextToken: string): Promise<void>;
+  withMutationLock<T>(
+    identity: ScheduleMutationIdentity,
+    execute: () => Promise<T>,
+  ): Promise<T>;
 }
 
 export interface ScheduleTargetBackfillResult {
@@ -32,13 +42,13 @@ function objectValue(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-/**
- * EventBridge Scheduler stores Target.Input verbatim. Add the context token to
- * legacy records without changing their owner/version correlation fields.
- */
-export function backfilledTargetInput(
+export interface ScheduleTargetReference extends ScheduleMutationIdentity {
+  version: number;
+}
+
+export function scheduleTargetReference(
   rawInput: string | undefined,
-): string | null {
+): ScheduleTargetReference {
   if (!rawInput) throw new Error('Schedule target is missing Input');
   let parsed: unknown;
   try {
@@ -55,6 +65,30 @@ export function backfilledTargetInput(
   ) {
     throw new Error('Schedule target Input has no owner-bound reference');
   }
+  return {
+    ownerEmail: input.ownerEmail.trim().toLowerCase(),
+    scheduleId: input.scheduleId,
+    version: input.version,
+  };
+}
+
+/**
+ * EventBridge Scheduler stores Target.Input verbatim. Add the context token to
+ * legacy records without changing their owner/version correlation fields.
+ */
+export function backfilledTargetInput(
+  rawInput: string | undefined,
+): string | null {
+  if (!rawInput) throw new Error('Schedule target is missing Input');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawInput);
+  } catch {
+    throw new Error('Schedule target Input is not valid JSON');
+  }
+  const input = objectValue(parsed);
+  scheduleTargetReference(rawInput);
+  if (!input) throw new Error('Schedule target Input is not an object');
   if (input.scheduledTime === SCHEDULED_TIME_PLACEHOLDER) return null;
   return JSON.stringify({
     ...input,
@@ -83,6 +117,7 @@ function requiredScheduleFields(
 export function backfillUpdateRequest(
   schedule: GetScheduleCommandOutput,
   input: string,
+  scheduleDlqArn: string,
 ): UpdateScheduleCommandInput {
   requiredScheduleFields(schedule);
   return {
@@ -90,7 +125,15 @@ export function backfillUpdateRequest(
     ...(schedule.GroupName ? { GroupName: schedule.GroupName } : {}),
     ScheduleExpression: schedule.ScheduleExpression,
     FlexibleTimeWindow: schedule.FlexibleTimeWindow,
-    Target: { ...schedule.Target, Input: input },
+    Target: {
+      ...schedule.Target,
+      Input: input,
+      DeadLetterConfig: { Arn: scheduleDlqArn },
+      RetryPolicy: {
+        MaximumEventAgeInSeconds: MAXIMUM_EVENT_AGE_SECONDS,
+        MaximumRetryAttempts: MAXIMUM_RETRY_ATTEMPTS,
+      },
+    },
     ...(schedule.ActionAfterCompletion
       ? { ActionAfterCompletion: schedule.ActionAfterCompletion }
       : {}),
@@ -105,15 +148,70 @@ export function backfillUpdateRequest(
   };
 }
 
+function hasCurrentDeliveryPolicy(
+  schedule: GetScheduleCommandOutput,
+  scheduleDlqArn: string,
+): boolean {
+  return (
+    schedule.Target?.DeadLetterConfig?.Arn === scheduleDlqArn
+    && schedule.Target?.RetryPolicy?.MaximumEventAgeInSeconds
+      === MAXIMUM_EVENT_AGE_SECONDS
+    && schedule.Target?.RetryPolicy?.MaximumRetryAttempts
+      === MAXIMUM_RETRY_ATTEMPTS
+  );
+}
+
+function isResourceNotFound(error: unknown): boolean {
+  return (
+    error instanceof Error
+    && error.name === 'ResourceNotFoundException'
+  );
+}
+
 async function updateOne(
   name: string,
   dependencies: ScheduleTargetBackfillDependencies,
 ): Promise<boolean> {
-  const schedule = await dependencies.get(name);
-  const input = backfilledTargetInput(schedule.Target?.Input);
-  if (input === null) return false;
-  await dependencies.update(backfillUpdateRequest(schedule, input));
-  return true;
+  let initial: GetScheduleCommandOutput;
+  try {
+    initial = await dependencies.get(name);
+  } catch (error) {
+    if (isResourceNotFound(error)) return false;
+    throw error;
+  }
+  const initialReference = scheduleTargetReference(initial.Target?.Input);
+  return dependencies.withMutationLock(initialReference, async () => {
+    let schedule: GetScheduleCommandOutput;
+    try {
+      // Re-read only after acquiring the lock shared with user mutations.
+      schedule = await dependencies.get(name);
+    } catch (error) {
+      if (isResourceNotFound(error)) return false;
+      throw error;
+    }
+    const currentReference = scheduleTargetReference(schedule.Target?.Input);
+    if (
+      currentReference.ownerEmail !== initialReference.ownerEmail
+      || currentReference.scheduleId !== initialReference.scheduleId
+    ) {
+      throw new Error('Schedule target ownership changed during backfill');
+    }
+    const input = backfilledTargetInput(schedule.Target?.Input);
+    if (
+      input === null
+      && hasCurrentDeliveryPolicy(schedule, dependencies.scheduleDlqArn)
+    ) {
+      return false;
+    }
+    await dependencies.update(
+      backfillUpdateRequest(
+        schedule,
+        input ?? schedule.Target?.Input ?? '',
+        dependencies.scheduleDlqArn,
+      ),
+    );
+    return true;
+  });
 }
 
 export async function backfillScheduleTargetPage(

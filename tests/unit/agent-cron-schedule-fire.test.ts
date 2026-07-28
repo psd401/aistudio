@@ -88,9 +88,8 @@ describe("agent-cron scheduled fire idempotency", () => {
           expiresAt: expect.any(Number),
         }),
         ConditionExpression:
-          "attribute_not_exists(sessionId) OR #status = :claimed OR expiresAt < :now",
+          "attribute_not_exists(sessionId) OR expiresAt < :now",
         ExpressionAttributeValues: {
-          ":claimed": "claimed",
           ":now": expect.any(Number),
         },
       })
@@ -367,6 +366,7 @@ describe("agent-cron daily-session contention policy", () => {
     phase: "lock-contention" as const,
     severity: "warn" as const,
     errorMessage: "Scheduled turn lock is already held",
+    ownerFireKey: `${identity.key}-prior-fire`,
   }
   const fireClaim = {
     claimed: true as const,
@@ -382,6 +382,25 @@ describe("agent-cron daily-session contention policy", () => {
         ...contention,
         errorMessage:
           "Scheduled fire was coalesced because its daily session is still active",
+      },
+    })
+  })
+
+  it("retries when the contended session lock belongs to the same fire", () => {
+    expect(
+      resolveScheduleLockContention(
+        { ...contention, ownerFireKey: identity.key },
+        fireClaim,
+      ),
+    ).toEqual({
+      action: "retry",
+      fireClaim,
+      failure: {
+        ...contention,
+        ownerFireKey: identity.key,
+        severity: "error",
+        errorMessage:
+          "Scheduled fire session lock is owned by the same fire; retrying",
       },
     })
   })

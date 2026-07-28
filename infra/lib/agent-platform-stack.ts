@@ -612,6 +612,7 @@ export class AgentPlatformStack extends cdk.Stack {
       sortKey: { name: 'scheduleId', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      timeToLiveAttribute: 'expiresAt',
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: environment === 'prod'
         ? cdk.RemovalPolicy.RETAIN
@@ -2246,11 +2247,11 @@ export class AgentPlatformStack extends cdk.Stack {
   }
 
   /**
-   * Existing EventBridge Scheduler targets retain their original Input across
-   * deployments. Backfill the immutable scheduled-time context once during
-   * rollout so pre-feature targets receive the same fire-stable identity as
-   * newly created schedules. Pages continue through self-invocation and use the
-   * existing alarmed async DLQ for failures.
+   * Existing EventBridge Scheduler targets retain their original Input and
+   * delivery policy across deployments. Backfill the immutable scheduled-time
+   * context, alarmed DLQ, and bounded retry policy during rollout. A shared
+   * DynamoDB mutation lock prevents the full Scheduler replacement request
+   * from overwriting a concurrent owner update.
    */
   private createScheduleTargetBackfill(
     props: AgentPlatformStackProps,
@@ -2291,6 +2292,22 @@ export class AgentPlatformStack extends cdk.Stack {
                 conditions: {
                   StringEquals: {
                     'iam:PassedToService': 'scheduler.amazonaws.com',
+                  },
+                },
+              }),
+              new iam.PolicyStatement({
+                sid: 'ScheduleTargetBackfillMutationLock',
+                effect: iam.Effect.ALLOW,
+                actions: [
+                  'dynamodb:PutItem',
+                  'dynamodb:DeleteItem',
+                  'dynamodb:UpdateItem',
+                ],
+                resources: [resources.schedulesTable.tableArn],
+                conditions: {
+                  StringEquals: {
+                    'aws:ResourceTag/Environment': environment,
+                    'aws:ResourceTag/ManagedBy': 'cdk',
                   },
                 },
               }),
@@ -2339,6 +2356,8 @@ export class AgentPlatformStack extends cdk.Stack {
         retryAttempts: 2,
         environment: {
           SCHEDULE_GROUP: groupName,
+          SCHEDULES_TABLE: resources.schedulesTable.tableName,
+          SCHEDULE_DLQ_ARN: resources.agentAsyncDlq.queueArn,
         },
       },
     );
@@ -2362,11 +2381,11 @@ export class AgentPlatformStack extends cdk.Stack {
             FunctionName: backfill.functionName,
             Payload: JSON.stringify({
               RequestType: 'Create',
-              migrationVersion: 'scheduled-time-v1',
+              migrationVersion: 'scheduled-time-delivery-policy-v2',
             }),
           },
           physicalResourceId: customResources.PhysicalResourceId.of(
-            'agent-schedule-target-backfill-scheduled-time-v1',
+            'agent-schedule-target-backfill-scheduled-time-delivery-policy-v2',
           ),
         },
         policy: customResources.AwsCustomResourcePolicy.fromStatements([

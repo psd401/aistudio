@@ -31,10 +31,10 @@ describe("agent-cron fire lifecycle", () => {
     const end = source.indexOf("async function finalizeScheduleFire(", start)
     const lifecycle = source.slice(start, end)
 
-    expect(lifecycle.indexOf("await beginScheduleFireExecution(")).toBeLessThan(
-      lifecycle.indexOf("runWithJobLock("),
-    )
     expect(lifecycle.indexOf("runWithJobLock(")).toBeLessThan(
+      lifecycle.indexOf("await beginScheduleFireExecution("),
+    )
+    expect(lifecycle.indexOf("await beginScheduleFireExecution(")).toBeLessThan(
       lifecycle.indexOf("executeLockedScheduledTurn("),
     )
   })

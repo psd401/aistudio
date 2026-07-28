@@ -97,19 +97,39 @@ export type ScheduleLockContentionResolution =
   | {
       action: 'retry';
       failure: JobLockFailure;
+      fireClaim?: Extract<ScheduleFireClaim, { claimed: true }>;
     };
 
 /**
  * Distinct fires share a daily AgentCore session. If its prior background turn
  * is still active, queueing every high-frequency fire would deliver stale
- * prompts in a burst after the lock clears. Coalesce that distinct fire and
- * preserve the skip in telemetry. Legacy targets have no fire identity, so
- * contention may be a retry of the same fire and must remain retryable.
+ * prompts in a burst after the lock clears. Coalesce only when the lock names
+ * a different fire. Legacy or uncorrelated locks may represent the same fire
+ * and must remain retryable.
  */
 export function resolveScheduleLockContention(
   failure: JobLockFailure,
   fireClaim: Extract<ScheduleFireClaim, { claimed: true }> | null,
 ): ScheduleLockContentionResolution {
+  if (
+    fireClaim
+    && (
+      failure.ownerFireKey === fireClaim.identity.key
+      || failure.ownerFireKey === null
+      || failure.ownerFireKey === undefined
+    )
+  ) {
+    return {
+      action: 'retry',
+      fireClaim,
+      failure: {
+        ...failure,
+        severity: 'error',
+        errorMessage:
+          'Scheduled fire session lock is owned by the same fire; retrying',
+      },
+    };
+  }
   if (fireClaim) {
     return {
       action: 'coalesce',
@@ -228,13 +248,12 @@ export async function claimScheduleFire(
         expiresAt: nowS + ACQUIRED_LEASE_SECONDS,
       },
       // A claimed marker has not crossed the execution boundary, so a
-      // redelivery may safely replace it immediately. The predecessor's
-      // conditional begin then fails before external work.
+      // redelivery may safely replace it after this short lease. Keeping the
+      // token stable during normal job-lock acquisition avoids a replacement
+      // racing the predecessor's conditional execution transition.
       ConditionExpression:
-        'attribute_not_exists(sessionId) OR #status = :claimed OR expiresAt < :now',
-      ExpressionAttributeNames: { '#status': 'status' },
+        'attribute_not_exists(sessionId) OR expiresAt < :now',
       ExpressionAttributeValues: {
-        ':claimed': 'claimed',
         ':now': nowS,
       },
     });

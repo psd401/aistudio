@@ -34,6 +34,10 @@ import {
   type AgentScheduleLastRun,
   type AgentScheduleRunReader,
 } from "@/lib/agent-schedules/run-reader";
+import {
+  SCHEDULE_MUTATION_LOCK_LEASE_SECONDS,
+  scheduleMutationLockKey,
+} from "./mutation-lock";
 import { createLogger } from "@/lib/logger";
 
 const DEFAULT_TIMEZONE = "America/Los_Angeles";
@@ -543,6 +547,67 @@ export class AgentScheduleService {
     return items;
   }
 
+  private async withScheduleMutationLock<T>(
+    ownerEmail: string,
+    scheduleId: string,
+    execute: () => Promise<T>,
+  ): Promise<T> {
+    const lockToken = randomUUID();
+    const key = scheduleMutationLockKey({ ownerEmail, scheduleId });
+    const nowS = Math.floor(Date.now() / 1000);
+    try {
+      await this.dynamo.send(
+        new PutCommand({
+          TableName: this.config.schedulesTable,
+          Item: {
+            ...key,
+            kind: "schedule-mutation-lock",
+            lockToken,
+            expiresAt: nowS + SCHEDULE_MUTATION_LOCK_LEASE_SECONDS,
+          },
+          ConditionExpression:
+            "attribute_not_exists(userId) OR expiresAt < :now",
+          ExpressionAttributeValues: { ":now": nowS },
+        }),
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.name === "ConditionalCheckFailedException"
+      ) {
+        throw new AgentScheduleConflictError(
+          "Schedule is being updated; retry the request",
+        );
+      }
+      throw error;
+    }
+
+    try {
+      return await execute();
+    } finally {
+      try {
+        await this.dynamo.send(
+          new DeleteCommand({
+            TableName: this.config.schedulesTable,
+            Key: key,
+            ConditionExpression: "lockToken = :lockToken",
+            ExpressionAttributeValues: { ":lockToken": lockToken },
+          }),
+        );
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          error.name !== "ConditionalCheckFailedException"
+        ) {
+          log.warn("Schedule mutation lock release failed", {
+            scheduleId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+  }
+
   /**
    * Backfill quota/name metadata for owners whose schedules predate the
    * transactional admission scheme. New mutations require the reconciled
@@ -841,6 +906,18 @@ export class AgentScheduleService {
     const ownerEmail = normalizeOwnerEmail(owner);
     const scheduleId = validateScheduleId(input.scheduleId);
     await this.ensureOwnerMetadata(ownerEmail);
+    return this.withScheduleMutationLock(
+      ownerEmail,
+      scheduleId,
+      () => this.updateWhileLocked(ownerEmail, scheduleId, input),
+    );
+  }
+
+  private async updateWhileLocked(
+    ownerEmail: string,
+    scheduleId: string,
+    input: UpdateAgentScheduleInput,
+  ): Promise<PublicAgentSchedule> {
     const current = await this.getRecord(ownerEmail, scheduleId);
     const fields = resolvedScheduleFields(current, input);
     const profile = await this.trustedOwnerProfile(ownerEmail);
@@ -941,6 +1018,17 @@ export class AgentScheduleService {
     const ownerEmail = normalizeOwnerEmail(owner);
     const scheduleId = validateScheduleId(rawScheduleId);
     await this.ensureOwnerMetadata(ownerEmail);
+    return this.withScheduleMutationLock(
+      ownerEmail,
+      scheduleId,
+      () => this.deleteWhileLocked(ownerEmail, scheduleId),
+    );
+  }
+
+  private async deleteWhileLocked(
+    ownerEmail: string,
+    scheduleId: string,
+  ): Promise<string> {
     const current = await this.getRecord(ownerEmail, scheduleId);
     try {
       await this.scheduler.send(

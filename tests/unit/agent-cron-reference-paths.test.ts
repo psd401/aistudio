@@ -9,9 +9,11 @@ const event = {
 
 function harness() {
   const recordRun = jest.fn().mockResolvedValue(undefined)
+  const recordRunStrict = jest.fn().mockResolvedValue(undefined)
   const recordCronFailure = jest.fn().mockResolvedValue(undefined)
   const telemetry = {
     recordRun,
+    recordRunStrict,
     recordCronFailure,
   } satisfies RunTelemetry
   const log = {

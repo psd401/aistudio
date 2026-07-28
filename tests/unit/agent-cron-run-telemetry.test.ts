@@ -216,6 +216,30 @@ describe("agent-cron promoted run terminal repair", () => {
 })
 
 describe("agent-cron ordinary run telemetry", () => {
+  it("propagates a strict run write failure at acknowledgement boundaries", async () => {
+    const execute = jest.fn().mockRejectedValue(new Error("RDS unavailable"))
+    const telemetry = createRunTelemetry(config, { execute })
+    const log = {
+      warn: jest.fn(),
+      error: jest.fn(),
+    } satisfies CronTelemetryLogger
+
+    await expect(
+      telemetry.recordRunStrict(
+        {
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          sessionId: "schedule-session",
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 1,
+          status: "skipped",
+        },
+        log,
+      ),
+    ).rejects.toThrow("RDS unavailable")
+  })
+
   it("records a rejected reference as a skipped scheduled run", async () => {
     const { telemetry, execute, log } = harness()
 
