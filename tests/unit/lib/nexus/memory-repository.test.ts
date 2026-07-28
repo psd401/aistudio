@@ -1,0 +1,106 @@
+/* eslint-disable no-var */
+var mockExecuteTransaction = jest.fn()
+var mockExecuteQuery = jest.fn()
+var mockToPgRows = jest.fn()
+/* eslint-enable no-var */
+
+jest.mock("@/lib/db/drizzle-client", () => ({
+  executeTransaction: (...args: unknown[]) => mockExecuteTransaction(...args),
+  executeQuery: (...args: unknown[]) => mockExecuteQuery(...args),
+  toPgRows: (...args: unknown[]) => mockToPgRows(...args),
+}))
+
+import {
+  drizzleMemoryRepository,
+  shouldUpdateSimilarMemory,
+  type StoredNexusMemory,
+} from "@/lib/nexus/memory/memory-repository"
+
+const MEMORY: StoredNexusMemory = {
+  id: "11111111-1111-4111-8111-111111111111",
+  userId: 7,
+  content: "Prefers short answers",
+  category: "preference",
+  source: "tool",
+  sourceConversationId: null,
+  createdAt: new Date("2026-07-27T12:00:00.000Z"),
+  updatedAt: new Date("2026-07-27T12:00:00.000Z"),
+}
+
+function transactionDouble() {
+  const updateReturning = jest.fn().mockResolvedValue([MEMORY])
+  const updateWhere = jest.fn(() => ({ returning: updateReturning }))
+  const updateSet = jest.fn(() => ({ where: updateWhere }))
+  const insertReturning = jest.fn().mockResolvedValue([MEMORY])
+  const insertValues = jest.fn(() => ({ returning: insertReturning }))
+  return {
+    execute: jest.fn().mockResolvedValue({}),
+    update: jest.fn(() => ({ set: updateSet })),
+    insert: jest.fn(() => ({ values: insertValues })),
+  }
+}
+
+describe("Nexus memory repository deduplication", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it("treats similarity >= 0.90 as an update and lower similarity as an insert", () => {
+    expect(shouldUpdateSimilarMemory(0.9, 0.9)).toBe(true)
+    expect(shouldUpdateSimilarMemory("0.9501", 0.9)).toBe(true)
+    expect(shouldUpdateSimilarMemory(0.8999, 0.9)).toBe(false)
+    expect(shouldUpdateSimilarMemory(undefined, 0.9)).toBe(false)
+  })
+
+  it("updates the nearest live memory at the threshold", async () => {
+    const tx = transactionDouble()
+    mockToPgRows.mockReturnValue([
+      { id: MEMORY.id, similarity: "0.9000" },
+    ])
+    mockExecuteTransaction.mockImplementation(
+      async (operation: (value: typeof tx) => Promise<unknown>) =>
+        operation(tx),
+    )
+
+    await expect(
+      drizzleMemoryRepository.saveWithDedup(
+        {
+          userId: 7,
+          content: "Prefers concise answers",
+          category: "preference",
+          source: "tool",
+          embedding: [0.1, 0.2],
+        },
+        0.9,
+      ),
+    ).resolves.toEqual({ memory: MEMORY, action: "updated" })
+    expect(tx.update).toHaveBeenCalledTimes(1)
+    expect(tx.insert).not.toHaveBeenCalled()
+  })
+
+  it("inserts when the nearest live memory is below the threshold", async () => {
+    const tx = transactionDouble()
+    mockToPgRows.mockReturnValue([
+      { id: MEMORY.id, similarity: 0.8999 },
+    ])
+    mockExecuteTransaction.mockImplementation(
+      async (operation: (value: typeof tx) => Promise<unknown>) =>
+        operation(tx),
+    )
+
+    await expect(
+      drizzleMemoryRepository.saveWithDedup(
+        {
+          userId: 7,
+          content: "Works on a new project",
+          category: "context",
+          source: "tool",
+          embedding: [0.4, 0.6],
+        },
+        0.9,
+      ),
+    ).resolves.toEqual({ memory: MEMORY, action: "inserted" })
+    expect(tx.insert).toHaveBeenCalledTimes(1)
+    expect(tx.update).not.toHaveBeenCalled()
+  })
+})

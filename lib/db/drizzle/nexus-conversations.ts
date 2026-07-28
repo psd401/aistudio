@@ -402,6 +402,7 @@ export async function updateConversation(
           isArchived: nexusConversations.isArchived,
           isPinned: nexusConversations.isPinned,
           isSaved: nexusConversations.isSaved,
+          metadata: nexusConversations.metadata,
           updatedAt: nexusConversations.updatedAt,
         }),
     "updateConversation"
