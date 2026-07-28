@@ -51,6 +51,7 @@ import {
   nexusShares,
   nexusTemplates,
   nexusUserPreferences,
+  nexusUserMemories,
   nexusProviderMetrics,
   nexusRepositoryBindings,
   // Nexus MCP
@@ -205,6 +206,9 @@ export type SelectNexusTemplate = InferSelectModel<typeof nexusTemplates>;
 export type SelectNexusUserPreferences = InferSelectModel<
   typeof nexusUserPreferences
 >;
+export type SelectNexusUserMemory = InferSelectModel<
+  typeof nexusUserMemories
+>;
 export type SelectNexusProviderMetrics = InferSelectModel<
   typeof nexusProviderMetrics
 >;
@@ -231,6 +235,9 @@ export type InsertNexusShare = InferInsertModel<typeof nexusShares>;
 export type InsertNexusTemplate = InferInsertModel<typeof nexusTemplates>;
 export type InsertNexusUserPreferences = InferInsertModel<
   typeof nexusUserPreferences
+>;
+export type InsertNexusUserMemory = InferInsertModel<
+  typeof nexusUserMemories
 >;
 export type InsertNexusProviderMetrics = InferInsertModel<
   typeof nexusProviderMetrics

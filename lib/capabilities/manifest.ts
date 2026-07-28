@@ -94,6 +94,13 @@ export const CAPABILITY_MANIFEST: readonly CapabilityManifestEntry[] = [
     defaultRoles: ["administrator"],
   },
   {
+    identifier: "nexus-memory",
+    name: "Nexus Memory",
+    description:
+      "Remember user-owned profile, preference, and working-context facts across Nexus conversations.",
+    defaultRoles: ["administrator", "staff", "student"],
+  },
+  {
     identifier: "internal-performance-monitoring",
     name: "Internal Performance Monitoring",
     description: "Access internal performance monitoring dashboards and metrics.",
