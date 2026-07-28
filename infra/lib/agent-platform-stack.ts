@@ -3254,10 +3254,12 @@ export class AgentPlatformStack extends cdk.Stack {
     jobTaskDef: ecs.FargateTaskDefinition,
   ): events.Rule {
     resources.cronLambdaRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'JobRunnerStoppedDescribe',
+      sid: 'JobRunnerTaskRead',
       effect: iam.Effect.ALLOW,
-      actions: ['ecs:DescribeTasks'],
-      // DescribeTasks does not support resource-level IAM permissions.
+      actions: ['ecs:DescribeTasks', 'ecs:ListTasks'],
+      // Neither DescribeTasks nor ListTasks supports resource-level IAM
+      // permissions. Runtime filters still bind them to the corresponding
+      // cluster/task identifiers and the per-fire startedBy value.
       resources: ['*'],
     }));
 

@@ -28,7 +28,9 @@ import {
 import {
   DescribeTasksCommand,
   ECSClient,
+  ListTasksCommand,
   RunTaskCommand,
+  type RunTaskCommandInput,
 } from '@aws-sdk/client-ecs';
 import {
   SecretsManagerClient,
@@ -91,6 +93,10 @@ import {
   monitorStoppedJob,
   type JobRunnerStoppedEvent,
 } from './job-monitor';
+import {
+  reconcileRunTaskLaunch,
+  type RunTaskAttempt,
+} from './run-task-reconciliation';
 
 // ---------------------------------------------------------------------------
 // Structured logging
@@ -670,7 +676,11 @@ interface JobRunnerConfig {
 }
 
 type PromotionResult =
-  | { promoted: true }
+  | {
+      promoted: true;
+      /** Present when ECS accepted state could not be resolved safely. */
+      ambiguity?: string;
+    }
   | {
       promoted: false;
       phase:
@@ -682,6 +692,13 @@ type PromotionResult =
       severity: 'error' | 'warn';
       errorMessage: string;
     };
+
+class AmbiguousRunTaskError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AmbiguousRunTaskError';
+  }
+}
 
 function readJobRunnerConfig(log: Logger): JobRunnerConfig | null {
   const config = {
@@ -726,44 +743,63 @@ async function launchScheduledJob(
     isDM: true,
     originalPrompt: input.originalPrompt,
   });
-  const result = await ecsClient.send(
-    new RunTaskCommand({
-      cluster: config.clusterArn,
-      taskDefinition: config.taskDefArn,
-      launchType: 'FARGATE',
-      count: 1,
-      clientToken: lockToken,
-      startedBy: 'agent-cron-promotion',
-      networkConfiguration: {
-        awsvpcConfiguration: {
-          subnets: config.subnets,
-          securityGroups: [config.securityGroup],
-          assignPublicIp: 'DISABLED',
+  const startedBy = `scheduled-${scheduledRunId}`;
+  const runTaskInput = {
+    cluster: config.clusterArn,
+    taskDefinition: config.taskDefArn,
+    launchType: 'FARGATE',
+    count: 1,
+    clientToken: lockToken,
+    startedBy,
+    networkConfiguration: {
+      awsvpcConfiguration: {
+        subnets: config.subnets,
+        securityGroups: [config.securityGroup],
+        assignPublicIp: 'DISABLED',
+      },
+    },
+    overrides: {
+      containerOverrides: [
+        {
+          name: config.containerName,
+          environment: [{ name: 'JOB_PAYLOAD', value: payload }],
         },
-      },
-      overrides: {
-        containerOverrides: [
-          {
-            name: config.containerName,
-            environment: [{ name: 'JOB_PAYLOAD', value: payload }],
-          },
-        ],
-      },
-    }),
-  );
-  if (result.failures && result.failures.length > 0) {
-    throw new Error(
-      `RunTask failures: ${result.failures
-        .map((failure) => {
-          const detail = failure.detail ? ` (${failure.detail})` : '';
-          return `${failure.reason ?? 'unknown'}${detail}`;
-        })
-        .join('; ')}`,
-    );
+      ],
+    },
+  } satisfies RunTaskCommandInput;
+  const launch = await reconcileRunTaskLaunch({
+    runTask: async (): Promise<RunTaskAttempt> => {
+      const result = await ecsClient.send(new RunTaskCommand(runTaskInput));
+      return {
+        taskArns: result.tasks
+          ?.map((task) => task.taskArn)
+          .filter((taskArn): taskArn is string => !!taskArn) ?? [],
+        failures: result.failures?.map((failure) => ({
+          ...(failure.reason ? { reason: failure.reason } : {}),
+          ...(failure.detail ? { detail: failure.detail } : {}),
+        })) ?? [],
+      };
+    },
+    listTasks: async (desiredStatus) => {
+      const result = await ecsClient.send(
+        new ListTasksCommand({
+          cluster: config.clusterArn,
+          startedBy,
+          desiredStatus,
+        }),
+      );
+      return result.taskArns ?? [];
+    },
+    wait: (delayMs) =>
+      new Promise((resolve) => {
+        setTimeout(resolve, delayMs);
+      }),
+  });
+  if (launch.status === 'ambiguous') {
+    throw new AmbiguousRunTaskError(launch.errorMessage);
   }
-  const taskArn = result.tasks?.[0]?.taskArn;
-  if (!taskArn) {
-    throw new Error('RunTask returned no task ARN');
+  if (launch.status === 'rejected') {
+    throw new Error(launch.errorMessage);
   }
   log.info('Scheduled turn promoted to background job', {
     marker: 'BACKGROUND_PROMOTION',
@@ -771,7 +807,8 @@ async function launchScheduledJob(
     reason: input.reason,
     scheduleName: input.scheduleName,
     sessionId: input.sessionId,
-    taskArn,
+    taskArn: launch.taskArn,
+    reconciled: launch.reconciled,
   });
 }
 
@@ -840,6 +877,15 @@ async function promoteScheduledTurnToJob(
       `RunTask failed: ${
         error instanceof Error ? error.message : String(error)
       }`;
+    if (error instanceof AmbiguousRunTaskError) {
+      // An accepted task may already own this payload. Do not terminalize its
+      // row or post the partial: either action can conflict with the eventual
+      // full result. Retain the lock and expose the uncertainty to monitoring.
+      log.error('Job promotion outcome is ambiguous — retaining the job state', {
+        error: error.message,
+      });
+      return { promoted: true, ambiguity: error.message };
+    }
     log.error('Job promotion failed — posting the partial instead', {
       error: error instanceof Error ? error.message : String(error),
     });
@@ -943,6 +989,27 @@ async function sendPromotionAcknowledgement(
   } catch (error) {
     // The job is already running, so acknowledgement delivery is best-effort.
     log.warn('Promotion ack delivery failed; job still running', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function sendPromotionAmbiguityAcknowledgement(
+  context: ScheduledResultContext,
+): Promise<void> {
+  const { schedule, scheduleName, log } = context;
+  try {
+    await sendChatMessage(
+      schedule.dmSpaceName,
+      `📋 **${scheduleName}**\n\n` +
+        "⚠️ The background launch response was interrupted, so I couldn't " +
+        "safely confirm whether it started. I won't launch it again and risk " +
+        'duplicating work. If it did start, I will post the result here; ' +
+        'the uncertainty has been recorded for monitoring.',
+      log,
+    );
+  } catch (error) {
+    log.warn('Promotion ambiguity acknowledgement failed', {
       error: error instanceof Error ? error.message : String(error),
     });
   }
@@ -1059,6 +1126,25 @@ async function tryPromoteScheduledResult(
     (scheduledRunId, errorMessage) =>
       recordPromotionLaunchFailure(context, scheduledRunId, errorMessage),
   );
+  if (promotion.promoted && promotion.ambiguity) {
+    await runTelemetry.recordCronFailure(
+      {
+        userEmail: schedule.ownerEmail,
+        scheduleId: schedule.scheduleId,
+        scheduleName,
+        sessionId,
+        errorMessage: promotion.ambiguity,
+        severity: 'error',
+        context: {
+          phase: 'run-task-ambiguous',
+          promotionReason: reason,
+        },
+      },
+      log,
+    );
+    await sendPromotionAmbiguityAcknowledgement(context);
+    return true;
+  }
   if (!promotion.promoted) {
     await runTelemetry.recordCronFailure(
       {

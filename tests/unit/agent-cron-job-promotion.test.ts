@@ -393,7 +393,16 @@ const baseInput = {
         launch.indexOf("phase: 'run-task'"),
       )
       expect(cronSource).toContain(
-        "throw new Error('RunTask returned no task ARN')",
+        "const startedBy = `scheduled-${scheduledRunId}`",
+      )
+      expect(cronSource).toContain(
+        "reconcileRunTaskLaunch({",
+      )
+      expect(launch).toContain(
+        "if (error instanceof AmbiguousRunTaskError)",
+      )
+      expect(launch).toContain(
+        "return { promoted: true, ambiguity: error.message }",
       )
     })
   })
@@ -468,7 +477,9 @@ const baseInput = {
       expect(stackSource).toContain("'JobRunnerStoppedRule'")
       expect(stackSource).toContain("'ECS Task State Change'")
       expect(stackSource).toContain("lastStatus: ['STOPPED']")
-      expect(stackSource).toContain("actions: ['ecs:DescribeTasks']")
+      expect(stackSource).toContain(
+        "actions: ['ecs:DescribeTasks', 'ecs:ListTasks']",
+      )
       expect(stackSource).toContain(
         "new eventsTargets.LambdaFunction(resources.cronLambda",
       )
