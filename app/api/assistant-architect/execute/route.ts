@@ -9,7 +9,7 @@ import { getUserById } from '@/lib/db/drizzle';
 import { userCanAccessResource, filterAccessibleResourceIds } from '@/lib/db/drizzle/resource-access';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { eq, sql } from 'drizzle-orm';
-import { assistantArchitects } from '@/lib/db/schema';
+import { assistantArchitects, chainPrompts } from '@/lib/db/schema';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import {
   retrieveKnowledgeForPrompt,
@@ -238,6 +238,13 @@ type CurrentUserData = NonNullable<
   Awaited<ReturnType<typeof getCurrentUserAction>>['data']
 >;
 
+function assistantArchitectNotFoundResponse(requestId: string): Response {
+  return new Response(
+    JSON.stringify({ error: 'Assistant architect not found', requestId }),
+    { status: 404, headers: { 'Content-Type': 'application/json' } }
+  );
+}
+
 /**
  * Phase (a): parse + validate the request body. Returns a 400 Response for an
  * empty/malformed body or a schema-validation failure; otherwise the parsed
@@ -350,10 +357,7 @@ async function loadArchitectPrincipal(
     log.error('Assistant architect not found', { toolId });
     return {
       ok: false,
-      response: new Response(
-        JSON.stringify({ error: 'Assistant architect not found', requestId }),
-        { status: 404, headers: { 'Content-Type': 'application/json' } }
-      ),
+      response: assistantArchitectNotFoundResponse(requestId),
     };
   }
   return {
@@ -402,15 +406,10 @@ async function authorizeArchitectResource(params: {
     });
     return {
       ok: false,
-      response: new Response(
-        JSON.stringify({
-          error: 'Access denied',
-          message:
-            'You do not have permission to execute this assistant architect',
-          requestId: params.requestId,
-        }),
-        { status: 403, headers: { 'Content-Type': 'application/json' } }
-      ),
+      // Preserve the ordinary private-assistant existence mask. Returning 403
+      // here while a missing id returns 404 lets any authenticated user
+      // enumerate another author's draft/pending assistants.
+      response: assistantArchitectNotFoundResponse(params.requestId),
     };
   }
 
@@ -475,6 +474,56 @@ async function authorizeArchitectResource(params: {
       accessReason,
       featureAccessReason: hasCapability ? 'capability' : 'room-assignment',
     },
+  };
+}
+
+/**
+ * Reject stable repository-access failures before the assistant-wide agentic
+ * rate cap is counted. This graph is authorization-only and is deliberately
+ * discarded: the executable graph is still reloaded and revalidated after the
+ * coordinated execution row protects it from import replacement.
+ */
+async function preflightExecutionRepositoriesBeforeRateCap(params: {
+  assistantId: number;
+  executorCognitoSub: string;
+  userId: number;
+  requestId: string;
+  log: RouteLogger;
+}): Promise<PhaseResult<void>> {
+  const repositoryBindings = await executeQuery(
+    (db) =>
+      db
+        .select({ repositoryIds: chainPrompts.repositoryIds })
+        .from(chainPrompts)
+        .where(eq(chainPrompts.assistantArchitectId, params.assistantId)),
+    'getAssistantRepositoryBindingsBeforeRateCap'
+  );
+  const repositoryAccess = await preflightAssistantRepositoryAccess(
+    repositoryBindings,
+    params.executorCognitoSub
+  );
+  if (repositoryAccess.isAllowed) {
+    return { ok: true, value: undefined };
+  }
+
+  params.log.warn(
+    'Assistant execution blocked before rate accounting because repository access changed',
+    {
+      userId: params.userId,
+      toolId: params.assistantId,
+      repositoryCount: repositoryAccess.repositoryIds.length,
+    }
+  );
+  return {
+    ok: false,
+    response: new Response(
+      JSON.stringify({
+        error: 'Access denied',
+        message: REPOSITORY_ACCESS_CHANGED_MESSAGE,
+        requestId: params.requestId,
+      }),
+      { status: 403, headers: { 'Content-Type': 'application/json' } }
+    ),
   };
 }
 
@@ -620,6 +669,15 @@ async function authorizeAndLoadArchitect(
     sessionSub: session.sub,
   });
   if (!access.ok) return access;
+  const repositoryAccess =
+    await preflightExecutionRepositoriesBeforeRateCap({
+      assistantId: architect.id,
+      executorCognitoSub: session.sub,
+      userId,
+      requestId,
+      log,
+    });
+  if (!repositoryAccess.ok) return repositoryAccess;
   log.info('Authorization granted for assistant architect execution', {
     userId,
     toolId,
@@ -1899,7 +1957,7 @@ function createAgenticCleanup(args: {
   };
 }
 
-function startAgenticStream(args: {
+async function startAgenticStream(args: {
   run: PreparedAgenticRun;
   cost: AgenticCostReservation;
   context: PromptExecutionContext;
@@ -1915,6 +1973,21 @@ function startAgenticStream(args: {
     log: args.log,
   });
   const modelData = args.run.modelRoute.model;
+  let timeout: number;
+  try {
+    timeout = Math.min(
+      args.run.config.timeoutSeconds * 1000,
+      remainingAssistantExecutionTimeoutMs(
+        args.context.executionDeadlineAt
+      )
+    );
+  } catch (error) {
+    // Connector discovery and cost admission happen before this remaining-time
+    // check. If setup consumed the coordinated deadline, the stream callbacks
+    // will never be installed, so release both resources here.
+    await cleanup();
+    throw error;
+  }
   return new Promise<
     Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined
   >((resolve, reject) => {
@@ -1934,12 +2007,7 @@ function startAgenticStream(args: {
       maxTokens: args.cost.maxOutputTokens,
       costCapCents: args.run.config.costCapCents,
       costRates: args.cost.costRates,
-      timeout: Math.min(
-        args.run.config.timeoutSeconds * 1000,
-        remainingAssistantExecutionTimeoutMs(
-          args.context.executionDeadlineAt
-        )
-      ),
+      timeout,
       callbacks: {
         onFinish: async ({ text, usage, finishReason, steps }) => {
           try {

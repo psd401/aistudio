@@ -24,6 +24,9 @@ describe("Assistant Architect runtime repository execution integration", () => {
   });
 
   it("reloads the executable graph only after coordinated execution creation", () => {
+    const authorizationPreflightIndex = routeSource.indexOf(
+      "await preflightExecutionRepositoriesBeforeRateCap({"
+    );
     const createIndex = routeSource.indexOf(
       "const created = await createToolExecutionRecord({"
     );
@@ -34,10 +37,46 @@ describe("Assistant Architect runtime repository execution integration", () => {
     expect(routeSource).toContain(
       "createCoordinatedAssistantExecution({"
     );
+    expect(authorizationPreflightIndex).toBeGreaterThan(-1);
+    expect(createIndex).toBeGreaterThan(authorizationPreflightIndex);
     expect(protectedReloadIndex).toBeGreaterThan(createIndex);
     expect(routeSource).toContain(
       "executionDeadlineAt: deadlineAt"
     );
+  });
+
+  it("existence-masks private assistants before feature authorization", () => {
+    const missingResponseCalls = routeSource.match(
+      /assistantArchitectNotFoundResponse\(/g
+    );
+
+    expect(missingResponseCalls).toHaveLength(3);
+    expect(routeSource).not.toContain(
+      "You do not have permission to execute this assistant architect"
+    );
+  });
+
+  it("cleans up agentic resources when setup consumes the deadline", () => {
+    const cleanupCreationIndex = routeSource.indexOf(
+      "const cleanup = createAgenticCleanup({"
+    );
+    const timeoutGuardIndex = routeSource.indexOf(
+      "let timeout: number;",
+      cleanupCreationIndex
+    );
+    const timeoutCleanupIndex = routeSource.indexOf(
+      "await cleanup();",
+      timeoutGuardIndex
+    );
+    const streamPromiseIndex = routeSource.indexOf(
+      "return new Promise<",
+      timeoutCleanupIndex
+    );
+
+    expect(cleanupCreationIndex).toBeGreaterThan(-1);
+    expect(timeoutGuardIndex).toBeGreaterThan(cleanupCreationIndex);
+    expect(timeoutCleanupIndex).toBeGreaterThan(timeoutGuardIndex);
+    expect(streamPromiseIndex).toBeGreaterThan(timeoutCleanupIndex);
   });
 
   it("merges runtime repositories into retrieval and repository tools", () => {
