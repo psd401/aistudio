@@ -69,17 +69,18 @@ describe('buildJobPayload / parseJobPayload round-trip', () => {
   });
 
   test('round-trips optional scheduled-run context', () => {
+    const longestValidScheduleName = 'n'.repeat(120);
     const parsed = parseJobPayload(
       buildJobPayload({
         ...BASE,
         scheduleId: '36bb0456-1c51-4fb8-97d1-4e87d02765ce',
-        scheduleName: 'Morning brief',
+        scheduleName: longestValidScheduleName,
       })
     );
     expect(parsed.scheduleId).toBe(
       '36bb0456-1c51-4fb8-97d1-4e87d02765ce'
     );
-    expect(parsed.scheduleName).toBe('Morning brief');
+    expect(parsed.scheduleName).toBe(longestValidScheduleName);
   });
 
   test('prompt excerpt truncates to keep the payload under the RunTask 8KiB cap', () => {

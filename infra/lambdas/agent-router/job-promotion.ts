@@ -133,6 +133,9 @@ export function resolveJobInvocation(
 }
 
 const PROMPT_EXCERPT_MAX = 2000;
+// Mirrors lib/agent-schedules/validation.ts; the router bundle cannot import
+// application code at runtime.
+const SCHEDULE_NAME_MAX_LENGTH = 120;
 
 /**
  * RunTask caps the ENTIRE container-override payload at 8 KiB. Enforced here so
@@ -231,7 +234,11 @@ export function parseJobPayload(raw: string | undefined): JobPayload {
     return v;
   };
   const scheduleId = boundedOptionalString(obj, 'scheduleId', 64);
-  const scheduleName = boundedOptionalString(obj, 'scheduleName', 100);
+  const scheduleName = boundedOptionalString(
+    obj,
+    'scheduleName',
+    SCHEDULE_NAME_MAX_LENGTH
+  );
   return {
     sessionId: requireString('sessionId'),
     // Unknown/absent -> 'deadline'. A payload from an older cron build must
