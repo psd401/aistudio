@@ -613,6 +613,11 @@ class BrokerStubRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format_string: str, *arguments: object) -> None:
         LOGGER.debug(format_string, *arguments)
 
+    def __getattr__(self, name: str) -> object:
+        if name.startswith("do_"):
+            return self._handle
+        raise AttributeError(name)
+
     def _send_json(self, status: int, body: object) -> None:
         serialized = json.dumps(body, separators=(",", ":")).encode("utf-8")
         self._send_body(status, serialized, "application/json")

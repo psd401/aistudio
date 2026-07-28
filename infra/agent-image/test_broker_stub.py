@@ -547,6 +547,28 @@ class BrokerStubHttpTests(unittest.TestCase):
             capture["stub_error"],
         )
 
+    def test_standard_and_custom_http_methods_are_rejected_and_captured(self):
+        for method in ("OPTIONS", "BREW"):
+            with self.subTest(method=method):
+                self.stub.configure([])
+
+                status, response = self.stub.request(
+                    "/agent-broker/api/agent/directory-lookup",
+                    method=method,
+                )
+
+                self.assertEqual(status, 404)
+                self.assertEqual(
+                    response["error"],
+                    broker_stub.UNSUPPORTED_METHOD_ERROR,
+                )
+                [capture] = self.stub.captures()
+                self.assertEqual(capture["method"], method)
+                self.assertIn(
+                    broker_stub.UNSUPPORTED_METHOD_ERROR,
+                    capture["stub_error"],
+                )
+
     def test_non_object_json_bodies_are_rejected_and_captured(self):
         for body in ("not-an-object", ["Ada"]):
             with self.subTest(body=body):
