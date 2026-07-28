@@ -142,7 +142,9 @@ describe("unified content migration reconciliation", () => {
       deterministicMigrationSourceId("assistant_pdf_job", 42),
     );
   });
+});
 
+describe("unified content migration evidence reconciliation", () => {
   it("requires completed processing plus matching object and extraction evidence", () => {
     const decision = reconcileMigrationEvidence({
       sourceObjectSha256: "a".repeat(64),
