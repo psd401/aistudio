@@ -84,6 +84,26 @@ class ProbeTests(unittest.TestCase):
             "quotes ' and \" plus\nnewline",
         )
 
+    def test_payload_cli_accepts_a_leading_dash_proof_key(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            status = probe.main(
+                [
+                    "make-payload",
+                    "--",
+                    "prompt",
+                    "owner@example.com",
+                    "v1.context.signature",
+                    "-leading-dash",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            json.loads(output.getvalue())["invocation_request_proof_key"],
+            "-leading-dash",
+        )
+
 
 class SuiteLoadingTests(unittest.TestCase):
     def test_committed_core_suite_has_three_l0_tasks(self):
@@ -113,6 +133,27 @@ class SuiteLoadingTests(unittest.TestCase):
         self.assertEqual(runner._context_ttl_seconds(900), 965)
         with self.assertRaisesRegex(runner.EvalRunnerError, "7135"):
             runner._context_ttl_seconds(7136)
+
+    def test_blank_yaml_prompt_is_rejected_instead_of_coerced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task_path = Path(directory) / "blank-prompt.yaml"
+            task_path.write_text(
+                "\n".join(
+                    [
+                        "id: blank-prompt",
+                        "skill: runner-core",
+                        "level: L0",
+                        "workspace: pure",
+                        "prompt:",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                runner.EvalRunnerError,
+                "prompt must be a string",
+            ):
+                runner.load_suite(task_path)
 
 
 class AdvancingClock:
@@ -590,6 +631,28 @@ class DockerRuntimeTests(unittest.TestCase):
             timeout=30,
         )
 
+    def test_timeout_error_never_echoes_secret_arguments(self):
+        executor = runner.CommandExecutor()
+        secret = "secret-session-token"
+        timeout_error = runner.subprocess.TimeoutExpired(
+            ["docker", "run", "-e", f"AWS_SESSION_TOKEN={secret}"],
+            60,
+        )
+        with mock.patch.object(
+            runner.subprocess,
+            "run",
+            side_effect=timeout_error,
+        ), self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "docker timed out after 60s",
+        ) as raised:
+            executor.run(
+                ["docker", "run", "-e", f"AWS_SESSION_TOKEN={secret}"],
+                timeout=60,
+            )
+
+        self.assertNotIn(secret, str(raised.exception))
+
     def test_invocation_sends_agentcore_session_header(self):
         executor = RecordingExecutor()
         runtime = runner.DockerRuntime(
@@ -812,6 +875,7 @@ class BuildGateCompatibilityTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('eval/probe.py" last-result', build_script)
+        self.assertIn('eval/probe.py" make-payload --', build_script)
         self.assertIn(
             '\'{"tag":"%s","boot_ok":false,"boot_elapsed_s":%s,'
             '"canary_ok":false}\\n\'',

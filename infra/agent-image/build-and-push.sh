@@ -380,7 +380,7 @@ except Exception:
     # _install_invocation_authority() rejects the turn outright when either the
     # signed context or its derived request-proof key is missing or malformed,
     # and the web broker verifies a per-request signature made with that key.
-    CANARY_PAYLOAD=$("${PYTHON}" "${SCRIPT_DIR}/eval/probe.py" make-payload \
+    CANARY_PAYLOAD=$("${PYTHON}" "${SCRIPT_DIR}/eval/probe.py" make-payload -- \
       "${CANARY_MESSAGE}" "${CANARY_OWNER_EMAIL}" \
       "${PROBE_INVOCATION_CONTEXT}" "${PROBE_REQUEST_PROOF_KEY}")
     CANARY_START=$(date +%s)

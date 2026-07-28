@@ -128,7 +128,14 @@ class CommandExecutor:
                 env=dict(env) if env is not None else None,
                 check=False,
             )
-        except (OSError, subprocess.TimeoutExpired) as error:
+        except subprocess.TimeoutExpired:
+            timeout_detail = (
+                f" after {timeout:g}s" if timeout is not None else ""
+            )
+            raise EvalRunnerError(
+                f"{arguments[0]} timed out{timeout_detail}"
+            ) from None
+        except OSError as error:
             raise EvalRunnerError(
                 f"command failed to execute: {arguments[0]}: {error}"
             ) from error
@@ -767,16 +774,22 @@ def _load_document(path: Path) -> object:
 
 
 def _task_from_mapping(value: Mapping[str, object], source: Path) -> Task:
+    text_fields: dict[str, str] = {}
+    for field in ("id", "skill", "level", "workspace", "prompt"):
+        raw_value = value.get(field)
+        if not isinstance(raw_value, str):
+            raise EvalRunnerError(f"{source}: task {field} must be a string")
+        text_fields[field] = raw_value
     try:
         task = Task(
-            id=str(value["id"]),
-            skill=str(value["skill"]),
-            level=str(value["level"]),
-            workspace=str(value["workspace"]),
-            prompt=str(value["prompt"]),
+            id=text_fields["id"],
+            skill=text_fields["skill"],
+            level=text_fields["level"],
+            workspace=text_fields["workspace"],
+            prompt=text_fields["prompt"],
             trials=int(value.get("trials", 3)),
         )
-    except (KeyError, TypeError, ValueError) as error:
+    except (TypeError, ValueError) as error:
         raise EvalRunnerError(f"{source}: malformed task definition") from error
     if not task.id or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", task.id):
         raise EvalRunnerError(f"{source}: task id must be lowercase kebab-case")
