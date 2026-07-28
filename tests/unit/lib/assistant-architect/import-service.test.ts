@@ -4,13 +4,19 @@ import { beforeEach, expect, it } from "@jest/globals";
 var mockExecuteQuery: jest.Mock;
 var mockExecuteTransaction: jest.Mock;
 var mockCheckUserRole: jest.Mock;
+var mockGetUserRoles: jest.Mock;
 var mockUserCanAccessResource: jest.Mock;
 var mockLogWarn: jest.Mock;
+var mockValidateAgentToolsForAuthor: jest.Mock;
+var mockValidateAgentConnectorsForAuthor: jest.Mock;
 /* eslint-enable no-var */
 
 mockCheckUserRole = jest.fn();
+mockGetUserRoles = jest.fn();
 mockUserCanAccessResource = jest.fn();
 mockLogWarn = jest.fn();
+mockValidateAgentToolsForAuthor = jest.fn();
+mockValidateAgentConnectorsForAuthor = jest.fn();
 
 jest.mock("drizzle-orm", () => ({
   eq: (left: unknown, right: unknown) => ({ left, right }),
@@ -23,6 +29,11 @@ jest.mock("@/lib/db/schema", () => ({
     id: "assistants.id",
     userId: "assistants.user_id",
     status: "assistants.status",
+  },
+  capabilities: {
+    table: "capabilities",
+    isActive: "capabilities.is_active",
+    promptChainToolId: "capabilities.prompt_chain_tool_id",
   },
   chainPrompts: {
     table: "prompts",
@@ -42,6 +53,14 @@ jest.mock("@/lib/db/schema", () => ({
 
 jest.mock("@/lib/db/drizzle", () => ({
   checkUserRole: (...args: unknown[]) => mockCheckUserRole(...args),
+  getUserRoles: (...args: unknown[]) => mockGetUserRoles(...args),
+}));
+
+jest.mock("@/lib/assistant-architect/agent-config-validation", () => ({
+  validateAgentToolsForAuthor: (...args: unknown[]) =>
+    mockValidateAgentToolsForAuthor(...args),
+  validateAgentConnectorsForAuthor: (...args: unknown[]) =>
+    mockValidateAgentConnectorsForAuthor(...args),
 }));
 
 jest.mock("@/lib/db/drizzle/resource-access", () => ({
@@ -75,6 +94,7 @@ import {
 } from "@/lib/assistant-architect/import-service";
 import {
   assistantArchitects,
+  capabilities,
   chainPrompts,
   promptResults,
   toolInputFields,
@@ -118,6 +138,10 @@ interface ChildState {
 
 interface DatabaseState {
   assistants: AssistantState[];
+  capabilities: Array<{
+    promptChainToolId: number;
+    isActive: boolean;
+  }>;
   prompts: ChildState[];
   fields: ChildState[];
   promptResults: Array<{ promptId: number; outputData: string }>;
@@ -165,6 +189,7 @@ function envelope(
 function cloneState(state: DatabaseState): DatabaseState {
   return {
     assistants: state.assistants.map((row) => ({ ...row })),
+    capabilities: state.capabilities.map((row) => ({ ...row })),
     prompts: state.prompts.map((row) => ({ ...row })),
     fields: state.fields.map((row) => ({ ...row })),
     promptResults: state.promptResults.map((row) => ({ ...row })),
@@ -284,6 +309,14 @@ function createTransaction(state: DatabaseState) {
           return {
             where(condition: EqualityCondition) {
               const operation = thenable(() => {
+                if (table === capabilities) {
+                  for (const row of state.capabilities) {
+                    if (row.promptChainToolId === condition.right) {
+                      Object.assign(row, values);
+                    }
+                  }
+                  return undefined;
+                }
                 if (table === chainPrompts) {
                   const ids = Array.isArray(condition.right)
                     ? condition.right
@@ -342,13 +375,22 @@ function createTransaction(state: DatabaseState) {
 }
 
 beforeEach(() => {
-  database = { assistants: [], prompts: [], fields: [], promptResults: [] };
+  database = {
+    assistants: [],
+    capabilities: [],
+    prompts: [],
+    fields: [],
+    promptResults: [],
+  };
   failPromptName = null;
   mockExecuteQuery.mockReset();
   mockExecuteTransaction.mockReset();
   mockCheckUserRole.mockReset();
+  mockGetUserRoles.mockReset();
   mockUserCanAccessResource.mockReset();
   mockLogWarn.mockReset();
+  mockValidateAgentToolsForAuthor.mockReset();
+  mockValidateAgentConnectorsForAuthor.mockReset();
 
   mockExecuteQuery.mockImplementation((_query: unknown, operation: unknown) =>
     operation === "getActiveModelsForImport"
@@ -363,7 +405,13 @@ beforeEach(() => {
       : Promise.resolve([]),
   );
   mockCheckUserRole.mockResolvedValue(false);
+  mockGetUserRoles.mockResolvedValue(["staff"]);
   mockUserCanAccessResource.mockResolvedValue(true);
+  mockValidateAgentToolsForAuthor.mockResolvedValue({
+    isValid: true,
+    invalidTools: [],
+  });
+  mockValidateAgentConnectorsForAuthor.mockResolvedValue(null);
   mockExecuteTransaction.mockImplementation(async (callback: unknown) => {
     const staged = cloneState(database);
     const run = callback as (
@@ -399,6 +447,61 @@ it("creates caller-owned pending assistants and ignores imported approved status
   expect(database.fields).toHaveLength(1);
 });
 
+it("rejects agent tools unavailable to the author before starting a transaction", async () => {
+  mockValidateAgentToolsForAuthor.mockResolvedValue({
+    isValid: false,
+    invalidTools: ["admin.secret-tool"],
+    message:
+      "Tools not available for agentic use with your permissions: 1 not accessible",
+  });
+
+  await expect(
+    createAssistantsFromImport(
+      envelope({
+        ...baseAssistant,
+        mode: "agentic",
+        agent_enabled_tools: ["admin.secret-tool"],
+      }),
+      7,
+    ),
+  ).rejects.toMatchObject({
+    code: "VALIDATION_ERROR",
+  } satisfies Partial<AssistantImportServiceError>);
+
+  expect(mockGetUserRoles).toHaveBeenCalledWith(7);
+  expect(mockValidateAgentToolsForAuthor).toHaveBeenCalledWith(
+    ["admin.secret-tool"],
+    ["staff"],
+  );
+  expect(mockExecuteTransaction).not.toHaveBeenCalled();
+});
+
+it("rejects inaccessible agent connectors before starting a transaction", async () => {
+  mockValidateAgentConnectorsForAuthor.mockResolvedValue(
+    "Connectors not available with your permissions: 1 not accessible",
+  );
+
+  await expect(
+    createAssistantsFromImport(
+      envelope({
+        ...baseAssistant,
+        mode: "agentic",
+        agent_enabled_connectors: ["connector-private"],
+      }),
+      7,
+    ),
+  ).rejects.toMatchObject({
+    code: "VALIDATION_ERROR",
+  } satisfies Partial<AssistantImportServiceError>);
+
+  expect(mockValidateAgentConnectorsForAuthor).toHaveBeenCalledWith(
+    ["connector-private"],
+    7,
+    ["staff"],
+  );
+  expect(mockExecuteTransaction).not.toHaveBeenCalled();
+});
+
 it("rolls back every row for an assistant when a prompt insert fails", async () => {
   failPromptName = "Prompt one";
 
@@ -425,6 +528,7 @@ it("lets an owner replace prompts and fields and resets approval", async () => {
         userId: 7,
       },
     ],
+    capabilities: [{ promptChainToolId: 12, isActive: true }],
     prompts: [{ assistantArchitectId: 12, name: "Old prompt" }],
     fields: [{ assistantArchitectId: 12, name: "old_field" }],
     promptResults: [],
@@ -443,6 +547,10 @@ it("lets an owner replace prompts and fields and resets approval", async () => {
     status: "pending_approval",
     userId: 7,
   });
+  expect(database.capabilities[0]).toMatchObject({
+    promptChainToolId: 12,
+    isActive: false,
+  });
   expect(database.prompts.map((row) => row.name)).toEqual(["Prompt one"]);
   expect(database.fields.map((row) => row.name)).toEqual(["topic"]);
 });
@@ -458,6 +566,7 @@ it("retains historical prompt results when replacing an executed graph", async (
         userId: 7,
       },
     ],
+    capabilities: [],
     prompts: [
       { id: 41, assistantArchitectId: 12, name: "Executed prompt" },
       { id: 42, assistantArchitectId: 12, name: "Never executed" },
@@ -536,6 +645,7 @@ it("rolls back the whole replacement on a mid-update failure", async () => {
         userId: 7,
       },
     ],
+    capabilities: [],
     prompts: [{ assistantArchitectId: 12, name: "Original prompt" }],
     fields: [{ assistantArchitectId: 12, name: "original_field" }],
     promptResults: [],
@@ -573,6 +683,7 @@ it("forks into a caller-owned pending copy without changing the source", async (
         userId: 7,
       },
     ],
+    capabilities: [],
     prompts: [{ assistantArchitectId: 12, name: "Source prompt" }],
     fields: [],
     promptResults: [],

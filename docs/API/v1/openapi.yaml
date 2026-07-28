@@ -1100,6 +1100,8 @@ paths:
         v1.0 JSON envelope. Each assistant (row + prompts + input fields) is
         created atomically and owned by the authenticated caller. Caller-supplied
         `status` is ignored: every created assistant enters `pending_approval`.
+        Agent tools and connectors are validated against the importing author's
+        permissions before any assistant transaction starts.
         Model names are resolved by exact model id, then provider-family
         fallback, then the first active model; the applied mappings are returned.
         Import envelopes are limited to 10 MB on every surface.
@@ -1153,7 +1155,7 @@ paths:
                 meta:
                   requestId: req_abc123
         "400":
-          description: Invalid JSON or ExportFormat validation failure.
+          description: Invalid JSON, ExportFormat validation failure, or an agent tool/connector unavailable to the author.
           content:
             application/json:
               schema:
@@ -1226,7 +1228,10 @@ paths:
         and input fields from a single-assistant ExportFormat v1.0 envelope.
         Staff callers may update only assistants they own; administrators may
         update any assistant. Every successful update resets status to
-        `pending_approval`. Requires `assistants:write`.
+        `pending_approval` and atomically deactivates its linked UI capability
+        until re-approval. Agent tools and connectors are validated against the
+        caller's authoring permissions before writes. Requires
+        `assistants:write`.
       security:
         - BearerAuth: []
         - SessionAuth: []
@@ -1309,6 +1314,8 @@ paths:
         owner/admin/approved and resource/room rules as assistant detail. The
         source is unchanged. The fork is owned by the caller and enters
         `pending_approval`; an optional `name` overrides the copied name.
+        Copied agent tools and connectors must be available to the caller as an
+        author before the fork is persisted.
         Invisible and missing sources both return 404. Requires
         `assistants:write`.
       security:
@@ -3581,9 +3588,11 @@ components:
           enum: [openai, anthropic, google, null]
         agent_enabled_tools:
           type: array
+          description: Internal agent-callable tool identifiers available under the author's role-derived scopes.
           items: { type: string }
         agent_enabled_connectors:
           type: array
+          description: Connector identifiers visible to the author at import time.
           items: { type: string }
         agent_max_steps:
           type: integer

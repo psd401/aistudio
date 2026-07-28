@@ -28,9 +28,9 @@ export function extractNumericParam(url: string, segmentName: string): number | 
   const segments = new URL(url).pathname.split("/")
   const idx = segments.indexOf(segmentName)
   const idStr = segments[idx + 1]
-  if (!idStr) return null
-  const id = Number.parseInt(idStr, 10)
-  return Number.isNaN(id) || id <= 0 ? null : id
+  if (!idStr || !/^[1-9]\d*$/.test(idStr)) return null
+  const id = Number(idStr)
+  return Number.isSafeInteger(id) ? id : null
 }
 
 /**

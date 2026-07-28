@@ -42,7 +42,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, desc, sql, inArray } from "drizzle-orm";
+import { eq, and, desc, sql, inArray, isNull } from "drizzle-orm";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import {
   assistantArchitects,
@@ -545,34 +545,61 @@ export async function deleteAssistantArchitect(id: number) {
         .delete(navigationItems)
         .where(eq(navigationItems.link, navLink));
 
-      // 1. Delete prompt_results (references chain_prompts via prompt_id)
+      // 1. Capture historical prompts detached by an assistant graph update.
+      // Their prompt_results still link them to this assistant's executions even
+      // though assistant_architect_id is null.
+      const detachedHistoryPromptRows = await tx
+        .select({ id: chainPrompts.id })
+        .from(chainPrompts)
+        .innerJoin(promptResults, eq(promptResults.promptId, chainPrompts.id))
+        .innerJoin(
+          toolExecutions,
+          eq(promptResults.executionId, toolExecutions.id)
+        )
+        .where(
+          and(
+            eq(toolExecutions.assistantArchitectId, id),
+            isNull(chainPrompts.assistantArchitectId)
+          )
+        );
+      const detachedHistoryPromptIds = Array.from(
+        new Set(detachedHistoryPromptRows.map((row) => row.id))
+      );
+
+      // 2. Delete prompt_results for both the current graph and every execution
+      // owned by this assistant. This releases detached historical prompt rows.
       await tx
         .delete(promptResults)
         .where(
-          sql`${promptResults.promptId} IN (SELECT id FROM chain_prompts WHERE assistant_architect_id = ${id})`
+          sql`${promptResults.promptId} IN (SELECT id FROM chain_prompts WHERE assistant_architect_id = ${id}) OR ${promptResults.executionId} IN (SELECT id FROM tool_executions WHERE assistant_architect_id = ${id})`
         );
 
-      // 2. Delete chain_prompts
+      // 3. Delete the current graph and any now-unreferenced detached history.
       await tx
         .delete(chainPrompts)
         .where(eq(chainPrompts.assistantArchitectId, id));
+      if (detachedHistoryPromptIds.length > 0) {
+        await tx
+          .delete(chainPrompts)
+          .where(inArray(chainPrompts.id, detachedHistoryPromptIds));
+      }
 
-      // 3. Delete tool_input_fields
+      // 4. Delete tool_input_fields
       await tx
         .delete(toolInputFields)
         .where(eq(toolInputFields.assistantArchitectId, id));
 
-      // 4. Delete tool_executions
+      // 5. Delete tool_executions
       await tx
         .delete(toolExecutions)
         .where(eq(toolExecutions.assistantArchitectId, id));
 
-      // 5. Delete tool_edits (audit log rows — FK with no onDelete cascade)
+      // 6. Delete tool_edits (audit log rows — FK with no onDelete cascade)
       await tx
         .delete(toolEdits)
         .where(eq(toolEdits.assistantArchitectId, id));
 
-      // 6b. Delete per-resource access grants for this assistant (#1206) so no
+      // 7. Delete per-resource access grants for this assistant (#1206) so no
       // orphan grant lingers and matches a recycled serial id.
       await tx
         .delete(resourceAccessGrants)
@@ -583,7 +610,7 @@ export async function deleteAssistantArchitect(id: number) {
           )
         );
 
-      // 7. Finally delete the assistant architect itself
+      // 8. Finally delete the assistant architect itself
       const result = await tx
         .delete(assistantArchitects)
         .where(eq(assistantArchitects.id, id))

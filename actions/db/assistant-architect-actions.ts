@@ -37,6 +37,10 @@ import {
   validateAssistantRepositoryAudienceForRepositoryIds,
 } from "@/lib/assistant-architect/repository-audience";
 import {
+  validateAgentConnectorsForAuthor,
+  validateAgentToolsForAuthor,
+} from "@/lib/assistant-architect/agent-config-validation";
+import {
   getAssistantArchitects as drizzleGetAssistantArchitects,
   getAssistantArchitectById as drizzleGetAssistantArchitectById,
   createAssistantArchitect as drizzleCreateAssistantArchitect,
@@ -351,51 +355,6 @@ async function resolveAutomaticPromptFallbackModelId(
   return requested?.id ?? compatible[0]?.id ?? null;
 }
 
-/**
- * Validate an agentic assistant's `agentEnabledTools` (catalog `domain.action`
- * identifiers) against the unified catalog (#924). A tool is valid only if it is
- * exposed on the `internal` surface, is `agentCallable`, and the AUTHOR's
- * role-derived scopes permit it — so an author cannot enable a tool they could
- * not themselves invoke. The caller's scopes are re-checked at execution time
- * (resolveAgentTools), giving the required dual scope intersection (#926).
- */
-async function validateAgentTools(
-  agentEnabledTools: string[],
-  authorRoleNames: string[]
-): Promise<{ isValid: boolean; invalidTools: string[]; message?: string }> {
-  if (!agentEnabledTools || agentEnabledTools.length === 0) {
-    return { isValid: true, invalidTools: [] };
-  }
-  try {
-    const authorScopes = getScopesForRoles(authorRoleNames);
-    const allowed = await toolCatalogInstance.list({
-      surface: "internal",
-      scopes: authorScopes,
-      agentOnly: true,
-    });
-    const allowedIdentifiers = new Set(allowed.map((e) => e.identifier));
-    const invalidTools = agentEnabledTools.filter(
-      (id) => !allowedIdentifiers.has(id)
-    );
-    if (invalidTools.length > 0) {
-      return {
-        isValid: false,
-        invalidTools,
-        // Report a count rather than echoing the caller-supplied identifiers back
-        // in the message (avoids reflecting arbitrary input into the response).
-        message: `Tools not available for agentic use with your permissions: ${invalidTools.length} not accessible`,
-      };
-    }
-    return { isValid: true, invalidTools: [] };
-  } catch (error) {
-    return {
-      isValid: false,
-      invalidTools: agentEnabledTools,
-      message: `Error validating agent tools: ${error instanceof Error ? error.message : "Unknown error"}`,
-    };
-  }
-}
-
 /** Agentic-mode columns an update may set (Issue #926). */
 type AgenticUpdateFields = Partial<{
   mode: "prompt_chain" | "agentic";
@@ -437,14 +396,17 @@ async function resolveAgenticUpdateFields(
     fields.mode = nextMode;
   }
   if (data.agentEnabledTools !== undefined) {
-    const toolValidation = await validateAgentTools(data.agentEnabledTools, authorRoleNames);
+    const toolValidation = await validateAgentToolsForAuthor(
+      data.agentEnabledTools,
+      authorRoleNames,
+    );
     if (!toolValidation.isValid) {
       return { error: toolValidation.message || "Invalid agent tools" };
     }
     fields.agentEnabledTools = data.agentEnabledTools;
   }
   if (data.agentEnabledConnectors !== undefined) {
-    const connectorError = await validateAgentConnectors(
+    const connectorError = await validateAgentConnectorsForAuthor(
       data.agentEnabledConnectors,
       authorUserId,
       authorRoleNames
@@ -468,31 +430,6 @@ async function resolveAgenticUpdateFields(
   }
 
   return { fields };
-}
-
-/**
- * Validate that every connector ID is one the author can access (parity with
- * agentEnabledTools). Returns a user-facing error string when one or more IDs are
- * not accessible, or null when all are valid (or none were supplied).
- *
- * Execution-time resolution already filters connectors by the CALLER's access, so
- * an unowned connector can't be invoked regardless — this is defense in depth plus
- * a clear authoring-time error. Reports a count rather than echoing the raw IDs.
- */
-async function validateAgentConnectors(
-  connectorIds: string[],
-  authorUserId: number,
-  authorRoleNames: string[]
-): Promise<string | null> {
-  if (connectorIds.length === 0) return null;
-  const { getAvailableConnectors } = await import("@/lib/mcp/connector-service");
-  const accessible = await getAvailableConnectors(authorUserId, authorRoleNames);
-  const accessibleIds = new Set(accessible.map(c => c.id));
-  const invalidCount = connectorIds.filter(id => !accessibleIds.has(id)).length;
-  if (invalidCount > 0) {
-    return `Connectors not available with your permissions: ${invalidCount} not accessible`;
-  }
-  return null;
 }
 
 /** Normalize a nullable numeric limit to a positive integer, or null for no cap. */

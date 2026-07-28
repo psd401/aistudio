@@ -7,7 +7,11 @@ import {
   type ExportFormat,
   type ExportedAssistant,
 } from "@/lib/assistant-export-import";
-import { checkUserRole } from "@/lib/db/drizzle";
+import {
+  validateAgentConnectorsForAuthor,
+  validateAgentToolsForAuthor,
+} from "@/lib/assistant-architect/agent-config-validation";
+import { checkUserRole, getUserRoles } from "@/lib/db/drizzle";
 import {
   executeQuery,
   executeTransaction,
@@ -15,6 +19,7 @@ import {
 } from "@/lib/db/drizzle-client";
 import {
   assistantArchitects,
+  capabilities,
   chainPrompts,
   promptResults,
   toolInputFields,
@@ -104,6 +109,45 @@ async function mapImportModels(
     }
   }
   return mapModelsForImport(Array.from(modelNames));
+}
+
+async function validateAgentAuthoringPermissions(
+  assistants: ExportedAssistant[],
+  authorUserId: number,
+): Promise<void> {
+  const hasAgentResources = assistants.some(
+    (assistant) =>
+      (assistant.agent_enabled_tools?.length ?? 0) > 0 ||
+      (assistant.agent_enabled_connectors?.length ?? 0) > 0,
+  );
+  if (!hasAgentResources) return;
+
+  const authorRoleNames = await getUserRoles(authorUserId);
+
+  for (const assistant of assistants) {
+    const toolValidation = await validateAgentToolsForAuthor(
+      assistant.agent_enabled_tools ?? [],
+      authorRoleNames,
+    );
+    if (!toolValidation.isValid) {
+      throw new AssistantImportServiceError(
+        "VALIDATION_ERROR",
+        toolValidation.message ?? "Invalid agent tools",
+      );
+    }
+
+    const connectorError = await validateAgentConnectorsForAuthor(
+      assistant.agent_enabled_connectors ?? [],
+      authorUserId,
+      authorRoleNames,
+    );
+    if (connectorError) {
+      throw new AssistantImportServiceError(
+        "VALIDATION_ERROR",
+        connectorError,
+      );
+    }
+  }
 }
 
 function importedFieldType(value: string): ImportedFieldType {
@@ -237,6 +281,7 @@ export async function createAssistantsFromImport(
   userId: number,
 ): Promise<AssistantImportBatchResult> {
   const importData = asValidatedImport(data);
+  await validateAgentAuthoringPermissions(importData.assistants, userId);
   const modelMap = await mapImportModels(importData.assistants);
   const log = createLogger({ action: "createAssistantsFromImport" });
   const results: AssistantImportResult[] = [];
@@ -285,6 +330,11 @@ async function replaceAssistantGraph(
   modelMap: Map<string, number>,
   log: ReturnType<typeof createLogger>,
 ): Promise<AssistantImportSuccess> {
+  await tx
+    .update(capabilities)
+    .set({ isActive: false, updatedAt: new Date() })
+    .where(eq(capabilities.promptChainToolId, assistantId));
+
   const [updated] = await tx
     .update(assistantArchitects)
     .set({
@@ -357,6 +407,7 @@ export async function updateAssistantFromImport(
   }
 
   const assistant = importData.assistants[0];
+  await validateAgentAuthoringPermissions([assistant], callerUserId);
   const modelMap = await mapImportModels([assistant]);
   const isAdmin = await checkUserRole(callerUserId, "administrator");
   const log = createLogger({

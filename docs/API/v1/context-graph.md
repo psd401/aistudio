@@ -810,7 +810,8 @@ Every write preserves the existing human approval gate:
   same transaction and status resets to `pending_approval`. Prompts referenced
   by earlier execution results are detached from the live graph rather than
   deleted, preserving their outputs, errors, timings, feedback, and original
-  prompt configuration in execution history; and
+  prompt configuration in execution history. Any linked UI capability is
+  deactivated atomically until the assistant is approved again; and
 - fork: any assistant visible under the same owner/admin/approved plus
   resource/room rules as the v1 detail endpoint may be copied. The source is
   never modified, and the caller owns the new `pending_approval` copy. Missing
@@ -823,6 +824,12 @@ ids, and prompt tools. These properties are optional for compatibility with
 older v1.0 files; missing values use the existing database defaults. Unsupported
 input field types and invalid configuration values fail envelope validation
 before any assistant transaction begins.
+
+Agent tool and connector identifiers are also checked against the importing
+author's role-derived scopes and connector visibility before any write starts.
+This is the author-side half of the existing dual authorization boundary;
+execution still rechecks the executing caller. An inaccessible tool or connector
+returns `400` without creating, replacing, or forking an assistant.
 
 Each assistant create runs in its own transaction, so a failed prompt or input
 field leaves no partial rows for that assistant while successful siblings in a
@@ -931,8 +938,9 @@ The optional body may be omitted. A successful `201` response contains
 
 **Errors**
 
-- `400` — Invalid JSON, unsupported export version/shape, an update envelope
-  containing other than one assistant, or an invalid fork name.
+- `400` — Invalid JSON, unsupported export version/shape, an inaccessible agent
+  tool/connector, a non-positive or partially numeric path ID, an update
+  envelope containing other than one assistant, or an invalid fork name.
 - `401` — Missing or invalid authentication.
 - `403` — Missing `assistants:write`; update also returns 403 when a non-admin
   caller does not own the assistant.

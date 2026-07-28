@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/admin-check";
 import { getServerSession } from "@/lib/auth/server-session";
 import { resolveUserId } from "@/lib/auth/resolve-user";
-import type { ExportFormat } from "@/lib/assistant-export-import";
 import {
   AssistantImportServiceError,
   createAssistantsFromImport,
@@ -80,7 +79,7 @@ export async function POST(request: NextRequest) {
 
     // Read and parse file
     const fileContent = await file.text();
-    let importData: ExportFormat;
+    let importData: unknown;
 
     try {
       importData = JSON.parse(fileContent);
@@ -91,14 +90,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    log.info("Starting import", {
-      assistantCount: importData.assistants.length,
-    });
-
     // Get user ID (provisions if missing)
     const userId = await resolveUserId(session, requestId);
 
     const serviceResult = await createAssistantsFromImport(importData, userId);
+    log.info("Import service completed", {
+      assistantCount: serviceResult.total,
+    });
     const importResults: AssistantImportResult[] = serviceResult.results.map(
       (result) =>
         result.status === IMPORTED_ASSISTANT_STATUS
@@ -119,21 +117,21 @@ export async function POST(request: NextRequest) {
     }
 
     log.info(
-      `Successfully imported ${successCount} out of ${importData.assistants.length} assistants`,
+      `Successfully imported ${successCount} out of ${serviceResult.total} assistants`,
     );
     timer({
       status: "success",
       successCount,
-      totalCount: importData.assistants.length,
+      totalCount: serviceResult.total,
     });
 
     return NextResponse.json({
       isSuccess: true,
       message: `Successfully imported ${successCount} assistant(s)`,
       data: {
-        total: importData.assistants.length,
+        total: serviceResult.total,
         successful: successCount,
-        failed: importData.assistants.length - successCount,
+        failed: serviceResult.failed,
         results: importResults,
         modelMappings: serviceResult.modelMappings,
       },

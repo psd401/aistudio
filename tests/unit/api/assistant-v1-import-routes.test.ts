@@ -66,9 +66,13 @@ jest.mock("@/lib/api", () => ({
       },
       { status },
     ),
-  extractNumericParam: (url: string) => {
-    const match = new URL(url).pathname.match(/\/assistants\/(\d+)/)
-    return match ? Number(match[1]) : null
+  extractNumericParam: (url: string, segmentName: string) => {
+    const segments = new URL(url).pathname.split("/")
+    const index = segments.indexOf(segmentName)
+    const value = segments[index + 1]
+    if (!value || !/^[1-9]\d*$/.test(value)) return null
+    const parsed = Number(value)
+    return Number.isSafeInteger(parsed) ? parsed : null
   },
   verifyAssistantAccess: jest.fn(() => null),
   isAdminByUserId: jest.fn(() => false),
@@ -288,6 +292,24 @@ describe("Assistant import REST v1 routes", () => {
       importEnvelope,
       7,
     )
+  })
+
+  it("rejects a partially numeric update path without calling the service", async () => {
+    const response = await updateRoute(
+      jsonRequest(
+        "http://localhost/api/v1/assistants/12junk",
+        "PUT",
+        JSON.stringify(importEnvelope),
+      ),
+      { userId: 7, scopes: ["assistants:write"] },
+      "req-update-malformed-id",
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({
+      error: { code: "VALIDATION_ERROR" },
+    })
+    expect(mockUpdateAssistantFromImport).not.toHaveBeenCalled()
   })
 
   it("forks through the catalog-resolved write scope", async () => {
