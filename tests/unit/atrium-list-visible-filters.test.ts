@@ -1,5 +1,5 @@
 /**
- * Unit tests for the listVisible tag + query filters (Epic #1059 completion).
+ * Unit tests for the listVisible tag + query + since filters.
  *
  *  - Tag filter: CASE-INSENSITIVE whole-tag equality via `lower() = lower()`
  *    over `unnest(tags)` (#1336 review) — tags are stored case-preserved, so
@@ -60,11 +60,16 @@ interface CapturedEq {
   op: "eq";
   a: unknown[];
 }
+interface CapturedGte {
+  op: "gte";
+  a: unknown[];
+}
 
 jest.mock("drizzle-orm", () => ({
   and: (...a: unknown[]) => a,
   desc: (a: unknown) => a,
   eq: (...a: unknown[]) => ({ op: "eq", a }),
+  gte: (...a: unknown[]) => ({ op: "gte", a }),
   ne: (...a: unknown[]) => ({ op: "ne", a }),
   ilike: (column: unknown, pattern: unknown) => ({ op: "ilike", column, pattern }),
   sql: Object.assign(
@@ -120,6 +125,8 @@ const isIlike = (f: unknown): f is CapturedIlike =>
   typeof f === "object" && f !== null && (f as { op?: string }).op === "ilike";
 const isEq = (f: unknown): f is CapturedEq =>
   typeof f === "object" && f !== null && (f as { op?: string }).op === "eq";
+const isGte = (f: unknown): f is CapturedGte =>
+  typeof f === "object" && f !== null && (f as { op?: string }).op === "gte";
 
 /** Find the `<status> <> 'archived'` default-exclusion guard, if present. */
 const archivedGuard = (filters: unknown[]): CapturedSql | undefined =>
@@ -222,6 +229,23 @@ describe("listVisible query filter (title OR tag ILIKE — #1336)", () => {
   it("adds no query filter when query is absent or empty", async () => {
     expect(queryFilter(await captureFilters({}))).toBeUndefined();
     expect(queryFilter(await captureFilters({ query: "" }))).toBeUndefined();
+  });
+});
+
+describe("listVisible since filter (#1414)", () => {
+  it("uses an inclusive updated_at >= timestamp predicate", async () => {
+    const since = "2026-07-27T12:34:56.789Z";
+    const filters = await captureFilters({ since });
+    const predicate = filters.find(isGte);
+
+    expect(predicate).toBeDefined();
+    expect(predicate!.a[0]).toBe("COL_updated_at");
+    expect(predicate!.a[1]).toBeInstanceOf(Date);
+    expect((predicate!.a[1] as Date).toISOString()).toBe(since);
+  });
+
+  it("adds no updated_at predicate when since is omitted", async () => {
+    expect((await captureFilters({})).find(isGte)).toBeUndefined();
   });
 });
 

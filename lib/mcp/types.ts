@@ -84,6 +84,7 @@ export interface McpToolDefinition {
 export interface McpToolProperty {
   type: string
   description: string
+  format?: string
   enum?: string[]
   items?: { type: string }
   default?: unknown

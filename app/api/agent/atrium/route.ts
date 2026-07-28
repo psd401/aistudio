@@ -11,6 +11,7 @@ const ALLOWED_QUERY_KEYS = new Set([
   "collection",
   "tag",
   "query",
+  "since",
 ])
 const IDENTIFIER = "[A-Za-z0-9%._~-]{1,384}"
 

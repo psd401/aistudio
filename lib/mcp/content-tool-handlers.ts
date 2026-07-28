@@ -344,6 +344,7 @@ const listContentSchema = z.object({
   // Case-insensitive title search; the 200-char bound mirrors the REST
   // listQuerySchema so both surfaces reject oversized input at the boundary.
   query: z.string().min(1).max(200).optional(),
+  since: z.string().datetime({ offset: true }).optional(),
 });
 
 async function handleListContent(
@@ -363,6 +364,7 @@ async function handleListContent(
       tag: parsed.data.tag,
       status: parsed.data.status,
       query: parsed.data.query,
+      since: parsed.data.since,
     });
     return ok({
       items: items.map((o) => ({

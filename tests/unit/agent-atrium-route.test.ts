@@ -145,4 +145,21 @@ describe("POST /api/agent/atrium", () => {
     expect(response.status).toBe(400)
     expect(executeOwnerAtriumOperationMock).not.toHaveBeenCalled()
   })
+
+  it("admits the since query field for owner-operation validation", async () => {
+    const response = await POST(
+      request({
+        method: "GET",
+        path: "",
+        query: { since: "2026-07-27T00:00:00Z" },
+      })
+    )
+
+    expect(response.status).toBe(200)
+    expect(executeOwnerAtriumOperationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: { since: "2026-07-27T00:00:00Z" },
+      })
+    )
+  })
 })

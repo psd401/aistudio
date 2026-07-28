@@ -145,6 +145,8 @@ export interface ListFilter {
   collectionId?: string;
   kind?: ContentKind;
   tag?: string;
+  /** Return objects updated at or after this ISO 8601 timestamp. */
+  since?: string;
   /**
    * Case-insensitive substring search over the title OR any tag (#1336). The
    * service clamps it to 200 chars and LIKE-escapes `\`/`%`/`_`, so callers pass
