@@ -152,6 +152,17 @@ jest.mock("@/lib/logger", () => ({
 }))
 
 import { POST } from "@/app/api/v1/assistants/[id]/execute/route"
+import { verifyAssistantResourceGrants } from "@/lib/api"
+import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
+
+const mockVerifyAssistantResourceGrants =
+  verifyAssistantResourceGrants as jest.MockedFunction<
+    typeof verifyAssistantResourceGrants
+  >
+const mockGetAssistantArchitect =
+  getAssistantArchitectByIdAction as jest.MockedFunction<
+    typeof getAssistantArchitectByIdAction
+  >
 
 const bindingId = "123e4567-e89b-42d3-a456-426614174000"
 const rawMarker =
@@ -215,6 +226,39 @@ describe("v1 async assistant runtime repository inputs", () => {
     expect(JSON.stringify(mockCreateJob.mock.calls)).not.toContain(bindingId)
     expect(JSON.stringify(mockCreateJob.mock.calls)).not.toContain(
       "caller-forged-name.pdf"
+    )
+  })
+
+  it("defers automatic-routing model authorization to the selected model", async () => {
+    mockGetAssistantArchitect.mockResolvedValueOnce({
+      isSuccess: true,
+      message: "ok",
+      data: {
+        id: 5,
+        userId: 9,
+        modelRoutingMode: "standard",
+        prompts: [{ id: 10, position: 0, modelId: 3 }],
+      },
+    } as never)
+    mockPrepareAssistantExecutionInputs.mockResolvedValue({
+      ownerId: 7,
+      inputs: {},
+      runtimeRepositoryIds: [],
+      runtimeRepositoryQuery: "",
+      references: [],
+    })
+
+    const response = await POST(
+      new NextRequest("http://localhost/api/v1/assistants/5/execute", {
+        method: "POST",
+        headers: { accept: "application/json" },
+      }),
+      { params: Promise.resolve({ id: "5" }) }
+    )
+
+    expect(response.status).toBe(202)
+    expect(mockVerifyAssistantResourceGrants).toHaveBeenCalledWith(
+      expect.objectContaining({ architectId: 5, modelDbIds: [] })
     )
   })
 

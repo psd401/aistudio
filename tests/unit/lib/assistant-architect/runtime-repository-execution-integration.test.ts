@@ -148,5 +148,8 @@ describe("Assistant Architect runtime repository execution integration", () => {
     expect(routeSource).toContain("completeExecution: false");
     expect(allSettledIndex).toBeGreaterThan(parallelStart);
     expect(finalizeIndex).toBeGreaterThan(allSettledIndex);
+    expect(routeSource).toContain(
+      "aggregatePromptUsage(completedUsages)"
+    );
   });
 });

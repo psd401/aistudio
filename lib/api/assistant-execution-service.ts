@@ -575,18 +575,29 @@ async function executePromptChain(
         )
       }
       if (isLastPosition) {
-        await recordAssistantExecutionCompletion(context, log)
+        const completedUsages = results
+          .filter((result) => result.status === "fulfilled")
+          .map((result) => result.value.usage)
+        await recordAssistantExecutionCompletion(
+          context,
+          log,
+          aggregatePromptUsage(completedUsages)
+        )
       }
 
-      const successResults = results.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<typeof lastStreamResponse>[]
-      const uiStreamResult = successResults.find((r) => r.value !== undefined)
-      if (uiStreamResult?.value) {
-        lastStreamResponse = uiStreamResult.value
+      const successResults = results.filter(
+        (r) => r.status === "fulfilled"
+      ) as PromiseFulfilledResult<CompletedPromptStream>[]
+      const uiStreamResult = successResults.find(
+        (r) => r.value.streamResponse !== undefined
+      )
+      if (uiStreamResult?.value.streamResponse) {
+        lastStreamResponse = uiStreamResult.value.streamResponse
       }
     } else {
       const prompt = promptsAtPosition[0]
       const isLastPrompt = isLastPosition
-      const streamResponse = await executeSinglePromptWithCompletion({
+      const promptResult = await executeSinglePromptWithCompletion({
         prompt,
         inputs,
         context,
@@ -597,8 +608,8 @@ async function executePromptChain(
         prompts,
       })
 
-      if (streamResponse) {
-        lastStreamResponse = streamResponse
+      if (promptResult.streamResponse) {
+        lastStreamResponse = promptResult.streamResponse
       }
     }
   }
@@ -636,6 +647,7 @@ async function executePromptChainForText(
   for (const position of sortedPositions) {
     const promptsAtPosition = positionGroups.get(position)!
     const isLastPosition = position === sortedPositions[sortedPositions.length - 1]
+    const positionUsages: Array<CollectedPromptText["usage"]> = []
 
     for (const prompt of promptsAtPosition) {
       const isLast = isLastPosition && prompt === promptsAtPosition[0]
@@ -650,11 +662,14 @@ async function executePromptChainForText(
         completeExecution: false,
         prompts,
       })
+      positionUsages.push(result.usage)
 
       if (isLast) {
         lastText = result.text
-        lastUsage = result.usage
       }
+    }
+    if (isLastPosition) {
+      lastUsage = aggregatePromptUsage(positionUsages)
     }
   }
 
@@ -995,11 +1010,16 @@ async function executeSinglePromptWithCompletion(
 
 type StreamResult = Awaited<ReturnType<typeof unifiedStreamingService.stream>>
 
+interface CompletedPromptStream {
+  streamResponse?: StreamResult
+  usage?: PromptUsage
+}
+
 function streamPromptWithCompletion(
   run: PreparedPromptRun,
   promptStartTime: number,
   promptTimer: ReturnType<typeof startTimer>
-): Promise<StreamResult | undefined> {
+): Promise<CompletedPromptStream> {
   return new Promise((resolve, reject) => {
     let resolveStream!: (value: StreamResult) => void
     let rejectStream!: (error: Error) => void
@@ -1017,7 +1037,12 @@ function streamPromptWithCompletion(
             promptStartTime,
             promptTimer
           )
-          resolve(run.isLastPrompt ? await streamResponse : undefined)
+          resolve({
+            streamResponse: run.isLastPrompt
+              ? await streamResponse
+              : undefined,
+            usage,
+          })
         } catch (error) {
           run.log.error("Failed to save prompt result", {
             error,
@@ -1161,6 +1186,37 @@ function publicPromptUsage(
         totalTokens: usage.totalTokens,
       }
     : undefined
+}
+
+function aggregatePromptUsage(
+  usages: Array<
+    | {
+        promptTokens: number
+        completionTokens: number
+        totalTokens: number
+      }
+    | undefined
+  >
+): CollectedPromptText["usage"] {
+  const reported = usages.filter(
+    (
+      usage
+    ): usage is {
+      promptTokens: number
+      completionTokens: number
+      totalTokens: number
+    } => usage !== undefined
+  )
+  if (reported.length === 0) return undefined
+  return reported.reduce(
+    (total, usage) => ({
+      promptTokens: total.promptTokens + usage.promptTokens,
+      completionTokens:
+        total.completionTokens + usage.completionTokens,
+      totalTokens: total.totalTokens + usage.totalTokens,
+    }),
+    { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+  )
 }
 
 // ============================================

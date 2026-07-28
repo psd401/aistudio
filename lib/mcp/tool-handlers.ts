@@ -478,6 +478,19 @@ function assistantMutationError(
 // execute_assistant
 // ============================================
 
+function storedPromptModelGrantIds(architect: {
+  modelRoutingMode?: string | null
+  prompts?: Array<{ modelId?: number | null }> | null
+}): number[] {
+  if ((architect.modelRoutingMode ?? "legacy") !== "legacy") return []
+  return (architect.prompts ?? [])
+    .map((prompt) => prompt.modelId)
+    .filter(
+      (modelId): modelId is number =>
+        typeof modelId === "number" && modelId > 0
+    )
+}
+
 async function handleExecuteAssistant(
   args: Record<string, unknown>,
   context: { userId: number; cognitoSub: string; scopes: string[]; requestId: string }
@@ -533,9 +546,7 @@ async function handleExecuteAssistant(
       userId: context.userId,
       architectUserId: architect.userId,
       architectId: architect.id,
-      modelDbIds: (architect.prompts || [])
-        .map((p) => p.modelId)
-        .filter((m): m is number => typeof m === "number" && m > 0),
+      modelDbIds: storedPromptModelGrantIds(architect),
     })
     if (!check.granted) {
       log.warn("execute_assistant denied by per-resource grant", {

@@ -458,6 +458,11 @@ function defineAssistantExecutionCompletionBarrierSuite() {
     await callbacks[1].onFinish(finishResult)
     await execution
     expect(completedExecutionCallCount()).toBe(1)
+    expect(mockStoreExecutionEvent).toHaveBeenCalledWith(
+      123,
+      "execution-complete",
+      expect.objectContaining({ totalTokens: 4 })
+    )
   })
 
   it("keeps a job execution active until every final sibling persists", async () => {
@@ -496,6 +501,11 @@ function defineAssistantExecutionCompletionBarrierSuite() {
     await callbacks[1].onFinish(finishResult)
     await execution
     expect(completedExecutionCallCount()).toBe(1)
+    expect(mockStoreExecutionEvent).toHaveBeenCalledWith(
+      123,
+      "execution-complete",
+      expect.objectContaining({ totalTokens: 4 })
+    )
   })
 }
 

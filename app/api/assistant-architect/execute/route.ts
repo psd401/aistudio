@@ -1265,8 +1265,13 @@ export async function POST(req: Request) {
   }
 }
 
-/** Resolved value of executeSinglePromptWithCompletion (UI stream or undefined). */
-type SinglePromptResult = Awaited<ReturnType<typeof executeSinglePromptWithCompletion>>;
+type PromptStreamResponse = Awaited<ReturnType<typeof unifiedStreamingService.stream>>;
+
+/** Persistence result for one prompt, including its optional UI stream. */
+interface SinglePromptResult {
+  streamResponse?: PromptStreamResponse;
+  usage?: PromptFinishUsage;
+}
 
 /**
  * Execute every prompt at one position IN PARALLEL. On any rejection, logs the
@@ -1285,7 +1290,7 @@ async function executeParallelPositionGroup(args: {
   requestId: string;
   log: ReturnType<typeof createLogger>;
   totalPrompts: number;
-}): Promise<SinglePromptResult> {
+}): Promise<PromptStreamResponse | undefined> {
   const { promptsAtPosition, position, isLastPosition, inputs, context, requestId, log, totalPrompts } = args;
 
   // Validate parallelGroup field usage
@@ -1355,9 +1360,12 @@ async function executeParallelPositionGroup(args: {
     );
   }
   if (isLastPosition) {
+    const completedUsages = results
+      .filter((result) => result.status === 'fulfilled')
+      .map((result) => result.value.usage);
     await finalizeExecutionOnLastPrompt(
       context,
-      undefined,
+      aggregatePromptUsage(completedUsages),
       totalPrompts,
       log
     );
@@ -1366,9 +1374,12 @@ async function executeParallelPositionGroup(args: {
   // Extract successful stream responses
   const successResults = results.filter(r => r.status === 'fulfilled') as PromiseFulfilledResult<SinglePromptResult>[];
   // Find the result explicitly marked for UI streaming (isLastPosition && idx === 0)
-  // Only one parallel prompt gets isLastPrompt=true, so only one result has value !== undefined
-  const uiStreamResult = successResults.find(r => r.value !== undefined);
-  const lastStreamResponse: SinglePromptResult = uiStreamResult?.value;
+  // Only one parallel prompt gets isLastPrompt=true, so only one result carries
+  // a streamResponse; every result carries its own usage when reported.
+  const uiStreamResult = successResults.find(
+    result => result.value.streamResponse !== undefined
+  );
+  const lastStreamResponse = uiStreamResult?.value.streamResponse;
 
   // Verify UI stream was assigned for last position
   if (isLastPosition && !lastStreamResponse) {
@@ -1465,7 +1476,7 @@ async function executePromptChain(
       const prompt = promptsAtPosition[0];
       const isLastPrompt = position === sortedPositions[sortedPositions.length - 1] && promptsAtPosition.length === 1;
 
-      const streamResponse = await executeSinglePromptWithCompletion({
+      const promptResult = await executeSinglePromptWithCompletion({
         prompt,
         inputs,
         context,
@@ -1475,8 +1486,8 @@ async function executePromptChain(
         isLastPrompt
       });
 
-      if (streamResponse) {
-        lastStreamResponse = streamResponse;
+      if (promptResult.streamResponse) {
+        lastStreamResponse = promptResult.streamResponse;
       }
     }
   }
@@ -2450,6 +2461,24 @@ interface PromptFinishUsage {
   totalTokens: number;
 }
 
+function aggregatePromptUsage(
+  usages: Array<PromptFinishUsage | undefined>
+): PromptFinishUsage | undefined {
+  const reported = usages.filter(
+    (usage): usage is PromptFinishUsage => usage !== undefined
+  );
+  if (reported.length === 0) return undefined;
+  return reported.reduce(
+    (total, usage) => ({
+      promptTokens: total.promptTokens + usage.promptTokens,
+      completionTokens:
+        total.completionTokens + usage.completionTokens,
+      totalTokens: total.totalTokens + usage.totalTokens,
+    }),
+    { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+  );
+}
+
 /**
  * onFinish sub-step: persist this prompt's output as a Nexus conversation
  * message (#699). Non-fatal — logs and continues on failure. Only runs when a
@@ -2593,19 +2622,28 @@ async function finalizeExecutionOnLastPrompt(
 async function resolveOnFinish(args: {
   isLastPrompt: boolean;
   streamResponsePromise: Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>>>;
-  resolve: (value: Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined) => void;
+  resolve: (value: SinglePromptResult) => void;
   reject: (reason?: unknown) => void;
   prompt: ChainPrompt;
+  usage: PromptFinishUsage | undefined;
   log: ReturnType<typeof createLogger>;
 }): Promise<void> {
-  const { isLastPrompt, streamResponsePromise, resolve, reject, prompt, log } = args;
+  const {
+    isLastPrompt,
+    streamResponsePromise,
+    resolve,
+    reject,
+    prompt,
+    usage,
+    log,
+  } = args;
   if (!isLastPrompt) {
-    resolve(undefined);
+    resolve({ usage });
     return;
   }
   try {
     const streamResponse = await streamResponsePromise;
-    resolve(streamResponse);
+    resolve({ streamResponse, usage });
   } catch (streamError) {
     // Stream creation failed, propagate error
     log.error('Stream response promise rejected', {
@@ -2633,7 +2671,7 @@ async function runPromptOnFinish(args: {
   repositoryContext: string;
   userMessage: UIMessage;
   streamResponsePromise: Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>>>;
-  resolve: (value: Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined) => void;
+  resolve: (value: SinglePromptResult) => void;
   reject: (reason?: unknown) => void;
 }): Promise<void> {
   const {
@@ -2722,7 +2760,15 @@ async function runPromptOnFinish(args: {
     // CRITICAL: Wait for stream response to be ready, then resolve. This ensures
     // no race condition between stream assignment and onFinish (extracted to keep
     // this callback under the complexity limit; control flow is identical).
-    await resolveOnFinish({ isLastPrompt, streamResponsePromise, resolve, reject, prompt, log });
+    await resolveOnFinish({
+      isLastPrompt,
+      streamResponsePromise,
+      resolve,
+      reject,
+      prompt,
+      usage,
+      log,
+    });
 
   } catch (saveError) {
     log.error('Failed to save prompt result', {
@@ -2835,7 +2881,7 @@ async function handlePromptFailure(
  */
 async function executeSinglePromptWithCompletion(
   options: SinglePromptOptions
-) {
+): Promise<SinglePromptResult> {
   const { prompt, inputs, context, requestId, log, totalPrompts, isLastPrompt } = options;
   const promptStartTime = Date.now();
   const promptTimer = startTimer(`prompt.${prompt.id}.execution`);
@@ -2909,7 +2955,7 @@ async function executeSinglePromptWithCompletion(
 
     // 6. Wrap streaming in Promise that resolves on completion
     // Use Promise-based pattern to avoid race condition between stream creation and onFinish
-    return new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined>((resolve, reject) => {
+    return new Promise<SinglePromptResult>((resolve, reject) => {
       // Promise to track when stream response is ready
       // Must handle both resolve AND reject to prevent hanging if IIFE fails
       let resolveStreamResponse!: (value: Awaited<ReturnType<typeof unifiedStreamingService.stream>>) => void;
@@ -2999,7 +3045,7 @@ async function executeSinglePromptWithCompletion(
   } catch (promptError) {
     // Failure side-effects (events, failed prompt_result, failure message) and
     // the wrapped throw are extracted; order/behavior is identical.
-    await handlePromptFailure(options, promptTimer, promptError);
+    return handlePromptFailure(options, promptTimer, promptError);
   }
 }
 

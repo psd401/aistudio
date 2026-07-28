@@ -184,11 +184,14 @@ async function authorizeExecution(
     auth,
     architectUserId: architect.userId,
     architectId: architect.id,
-    modelDbIds: prompts
-      .map((prompt) => prompt.modelId)
-      .filter((modelId): modelId is number =>
-        typeof modelId === "number" && modelId > 0
-      ),
+    modelDbIds:
+      (architect.modelRoutingMode ?? "legacy") === "legacy"
+        ? prompts
+            .map((prompt) => prompt.modelId)
+            .filter((modelId): modelId is number =>
+              typeof modelId === "number" && modelId > 0
+            )
+        : [],
     assistantId,
     requestId,
     log,
