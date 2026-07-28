@@ -761,13 +761,17 @@ async function launchScheduledJob(
         .join('; ')}`,
     );
   }
+  const taskArn = result.tasks?.[0]?.taskArn;
+  if (!taskArn) {
+    throw new Error('RunTask returned no task ARN');
+  }
   log.info('Scheduled turn promoted to background job', {
     marker: 'BACKGROUND_PROMOTION',
     source: 'cron',
     reason: input.reason,
     scheduleName: input.scheduleName,
     sessionId: input.sessionId,
-    taskArn: result.tasks?.[0]?.taskArn ?? 'unknown',
+    taskArn,
   });
 }
 
@@ -776,6 +780,10 @@ async function promoteScheduledTurnToJob(
   lockToken: string,
   log: Logger,
   beforeLaunch: () => Promise<string>,
+  afterLaunchFailure: (
+    scheduledRunId: string,
+    errorMessage: string,
+  ) => Promise<void>,
 ): Promise<PromotionResult> {
   const config = readJobRunnerConfig(log);
   if (!config) {
@@ -828,13 +836,28 @@ async function promoteScheduledTurnToJob(
     );
     return { promoted: true };
   } catch (error) {
-    const errorMessage =
+    let errorMessage =
       `RunTask failed: ${
         error instanceof Error ? error.message : String(error)
       }`;
     log.error('Job promotion failed — posting the partial instead', {
       error: error instanceof Error ? error.message : String(error),
     });
+    try {
+      // No task exists to emit STOPPED, so close the exact promoted row before
+      // falling back to the partial response. The later ordinary terminal row
+      // remains the latest per-fire result shown to users.
+      await afterLaunchFailure(scheduledRunId, errorMessage);
+    } catch (terminalError) {
+      const detail = terminalError instanceof Error
+        ? terminalError.message
+        : String(terminalError);
+      log.error('Failed to terminalize rejected job promotion', {
+        scheduledRunId,
+        error: detail,
+      });
+      errorMessage += `; terminal telemetry failed: ${detail}`;
+    }
     return {
       promoted: false,
       phase: 'run-task',
@@ -958,6 +981,40 @@ async function recordPromotedRun(
   return scheduledRunId;
 }
 
+async function recordPromotionLaunchFailure(
+  context: ScheduledResultContext,
+  scheduledRunId: string,
+  errorMessage: string,
+): Promise<void> {
+  const { schedule, scheduleName, sessionId, log } = context;
+  await updatePromotedRunTerminal(
+    {
+      databaseResourceArn: DATABASE_RESOURCE_ARN,
+      databaseSecretArn: DATABASE_SECRET_ARN,
+      databaseName: DATABASE_NAME,
+    },
+    runTelemetryRdsClient,
+    {
+      scheduledRunId,
+      userEmail: schedule.ownerEmail,
+      scheduleId: schedule.scheduleId,
+      scheduleName,
+      sessionId,
+      inputTokens: 0,
+      outputTokens: 0,
+      latencyMs: 0,
+      status: 'error',
+      errorMessage,
+    },
+  );
+  log.info('Rejected job promotion terminalized', {
+    scheduledRunId,
+    scheduleId: schedule.scheduleId,
+    sessionId,
+    email: sanitizeEmailForLog(schedule.ownerEmail),
+  });
+}
+
 async function tryPromoteScheduledResult(
   context: ScheduledResultContext,
   lockToken: string,
@@ -999,6 +1056,8 @@ async function tryPromoteScheduledResult(
     lockToken,
     log,
     () => recordPromotedRun(context),
+    (scheduledRunId, errorMessage) =>
+      recordPromotionLaunchFailure(context, scheduledRunId, errorMessage),
   );
   if (!promotion.promoted) {
     await runTelemetry.recordCronFailure(

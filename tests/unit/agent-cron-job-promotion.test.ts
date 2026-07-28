@@ -389,6 +389,12 @@ const baseInput = {
       expect(launch.indexOf("await beforeLaunch()")).toBeLessThan(
         launch.indexOf("await launchScheduledJob("),
       )
+      expect(launch.indexOf("await afterLaunchFailure(")).toBeLessThan(
+        launch.indexOf("phase: 'run-task'"),
+      )
+      expect(cronSource).toContain(
+        "throw new Error('RunTask returned no task ARN')",
+      )
     })
   })
 
