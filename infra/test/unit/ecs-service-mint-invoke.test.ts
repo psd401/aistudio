@@ -79,8 +79,10 @@ function allStatements(template: Template): Statement[] {
   return statements;
 }
 
-describe('ECS task role — mint Lambda invoke-only grant (#1232)', () => {
-  let template: Template;
+let template: Template;
+
+function defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1Part1() {
+
   beforeAll(() => {
     template = synthTemplate();
   });
@@ -191,7 +193,9 @@ describe('ECS task role — mint Lambda invoke-only grant (#1232)', () => {
     });
   });
 
-  it('injects only server-side schedule broker coordinates', () => {
+  }
+
+function defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1Part2() {it('injects only server-side schedule broker coordinates', () => {
     const taskDefs = template.findResources('AWS::ECS::TaskDefinition');
     const environment: Array<{ Name?: string; Value?: unknown }> = [];
     for (const taskDefinition of Object.values(taskDefs)) {
@@ -288,7 +292,9 @@ describe('ECS task role — mint Lambda invoke-only grant (#1232)', () => {
     );
   });
 
-  it('scopes permanent object-version deletion to repositories/*', () => {
+  }
+
+function defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1Part3() {it('scopes permanent object-version deletion to repositories/*', () => {
     const statements = allStatements(template);
     const versionDeletionStatements = statements.filter((statement) => {
       const actions = Array.isArray(statement.Action)
@@ -398,4 +404,12 @@ describe('ECS task role — mint Lambda invoke-only grant (#1232)', () => {
     expect(invokeStatement).toBeDefined();
     expect(invokeStatement!.Resource).not.toBe('*');
   });
-});
+}
+
+const defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1 = () => {
+  defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1Part1()
+  defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1Part2()
+  defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1Part3()
+};
+
+describe('ECS task role — mint Lambda invoke-only grant (#1232)', defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1);

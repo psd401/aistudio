@@ -32,6 +32,111 @@ interface AssistantArchitectApprovalProps {
   isApproved?: boolean
 }
 
+function AssistantDetailsDialog({
+  request,
+  open,
+  onOpenChange,
+}: {
+  request: AssistantArchitectApprovalProps["request"]
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogTrigger asChild>
+        <Button variant="outline" onClick={() => onOpenChange(true)}>
+          View Details
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="w-full max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>Assistant Preview: {request.name}</DialogTitle>
+        </DialogHeader>
+        <div className="max-h-[70vh] overflow-y-auto">
+          <Tabs defaultValue="preview">
+            <TabsList className="mb-4">
+              <TabsTrigger value="preview">Preview</TabsTrigger>
+              <TabsTrigger value="prompts">Prompts & Context</TabsTrigger>
+            </TabsList>
+            <TabsContent value="preview">
+              <AssistantPreview tool={request} />
+            </TabsContent>
+            <TabsContent value="prompts">
+              <div className="space-y-6">
+                {request.prompts.length === 0 ? (
+                  <div className="text-muted-foreground">
+                    No prompts defined.
+                  </div>
+                ) : (
+                  request.prompts.map((prompt) => (
+                    <div
+                      key={prompt.id}
+                      className="rounded-md border bg-muted/10 p-4"
+                    >
+                      <div className="mb-1 text-lg font-semibold">
+                        {prompt.name}
+                      </div>
+                      <div className="mb-2">
+                        <span className="font-medium">Content:</span>
+                        <pre className="mt-1 whitespace-pre-wrap break-words rounded border bg-background p-2 text-sm">
+                          {prompt.content}
+                        </pre>
+                      </div>
+                      {prompt.systemContext && (
+                        <div className="mt-2">
+                          <span className="font-medium">System Context:</span>
+                          <pre className="mt-1 whitespace-pre-wrap break-words rounded border bg-background p-2 text-xs">
+                            {prompt.systemContext}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </TabsContent>
+          </Tabs>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function AssistantRequestSummary({
+  request,
+}: Pick<AssistantArchitectApprovalProps, "request">) {
+  return (
+    <>
+      <CardHeader>
+        <CardTitle className="text-lg">{request.name}</CardTitle>
+        <CardDescription className="text-sm">
+          {request.description}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-4">
+          <div>
+            <h4 className="mb-2 text-sm font-medium">Input Fields</h4>
+            <ul className="list-inside list-disc text-sm">
+              {request.inputFields.map((field) => (
+                <li key={field.id}>{field.name}</li>
+              ))}
+            </ul>
+          </div>
+          <div>
+            <h4 className="mb-2 text-sm font-medium">Prompts</h4>
+            <ul className="list-inside list-disc text-sm">
+              {request.prompts.map((prompt) => (
+                <li key={prompt.id}>{prompt.name}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
 export function AssistantArchitectApproval({
   request,
   isApproved = false
@@ -114,32 +219,7 @@ export function AssistantArchitectApproval({
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle className="text-lg">{request.name}</CardTitle>
-        <CardDescription className="text-sm">{request.description}</CardDescription>
-      </CardHeader>
-
-      <CardContent>
-        <div className="space-y-4">
-          <div>
-            <h4 className="text-sm font-medium mb-2">Input Fields</h4>
-            <ul className="list-disc list-inside text-sm">
-              {request.inputFields.map((field) => (
-                <li key={field.id}>{field.name}</li>
-              ))}
-            </ul>
-          </div>
-
-          <div>
-            <h4 className="text-sm font-medium mb-2">Prompts</h4>
-            <ul className="list-disc list-inside text-sm">
-              {request.prompts.map((prompt) => (
-                <li key={prompt.id}>{prompt.name}</li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      </CardContent>
+      <AssistantRequestSummary request={request} />
 
       <CardFooter className="flex justify-end gap-2">
         {isApproved ? (
@@ -151,56 +231,11 @@ export function AssistantArchitectApproval({
           </Button>
         ) : (
           <>
-            <Dialog open={showDetails} onOpenChange={setShowDetails}>
-              <DialogTrigger asChild>
-                <Button variant="outline" onClick={() => setShowDetails(true)}>
-                  View Details
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="max-w-3xl w-full">
-                <DialogHeader>
-                  <DialogTitle>Assistant Preview: {request.name}</DialogTitle>
-                </DialogHeader>
-                <div className="max-h-[70vh] overflow-y-auto">
-                  <Tabs defaultValue="preview">
-                    <TabsList className="mb-4">
-                      <TabsTrigger value="preview">Preview</TabsTrigger>
-                      <TabsTrigger value="prompts">Prompts & Context</TabsTrigger>
-                    </TabsList>
-                    <TabsContent value="preview">
-                      <AssistantPreview tool={request} />
-                    </TabsContent>
-                    <TabsContent value="prompts">
-                      <div className="space-y-6">
-                        {request.prompts.length === 0 ? (
-                          <div className="text-muted-foreground">No prompts defined.</div>
-                        ) : (
-                          request.prompts.map((prompt) => (
-                            <div key={prompt.id} className="border rounded-md p-4 bg-muted/10">
-                              <div className="font-semibold text-lg mb-1">{prompt.name}</div>
-                              <div className="mb-2">
-                                <span className="font-medium">Content:</span>
-                                <pre className="whitespace-pre-wrap break-words bg-background p-2 rounded mt-1 text-sm border">
-                                  {prompt.content}
-                                </pre>
-                              </div>
-                              {prompt.systemContext && (
-                                <div className="mt-2">
-                                  <span className="font-medium">System Context:</span>
-                                  <pre className="whitespace-pre-wrap break-words bg-background p-2 rounded mt-1 text-xs border">
-                                    {prompt.systemContext}
-                                  </pre>
-                                </div>
-                              )}
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    </TabsContent>
-                  </Tabs>
-                </div>
-              </DialogContent>
-            </Dialog>
+            <AssistantDetailsDialog
+              request={request}
+              open={showDetails}
+              onOpenChange={setShowDetails}
+            />
             {showRejectionForm ? (
               <div className="space-y-4 w-full">
                 <Textarea
@@ -246,4 +281,4 @@ export function AssistantArchitectApproval({
       </CardFooter>
     </Card>
   )
-} 
+}

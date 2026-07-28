@@ -37,6 +37,111 @@ interface JsonImportDialogProps {
   onImportComplete: () => void
 }
 
+const JSON_IMPORT_PLACEHOLDER = `Paste JSON here. Supports single object or array:
+
+{
+  "name": "GPT-4 Turbo",
+  "modelId": "gpt-4-turbo",
+  "provider": "openai",
+  "description": "Latest GPT-4 model",
+  "maxTokens": 128000,
+  "active": true,
+  "nexusEnabled": true,
+  "architectEnabled": true,
+  "inputCostPer1kTokens": "0.01",
+  "outputCostPer1kTokens": "0.03"
+}
+
+Or array: [{ ... }, { ... }]`
+
+function JsonImportContent({
+  jsonInput,
+  errors,
+  importing,
+  onInputChange,
+  onCancel,
+  onImport,
+}: {
+  jsonInput: string
+  errors: string[]
+  importing: boolean
+  onInputChange: (value: string) => void
+  onCancel: () => void
+  onImport: () => void
+}) {
+  return (
+    <Dialog.Portal>
+      <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+      <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-2xl -translate-x-1/2 -translate-y-1/2 rounded-lg border bg-background p-0 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95">
+        <Dialog.Close className="absolute right-4 top-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2">
+          <XIcon className="h-4 w-4" />
+          <span className="sr-only">Close</span>
+        </Dialog.Close>
+        <div className="px-6 pb-4 pt-6">
+          <Dialog.Title className="text-lg font-semibold leading-none">
+            Import AI Models from JSON
+          </Dialog.Title>
+          <Dialog.Description className="mt-2 text-sm text-muted-foreground">
+            Paste JSON to create or update models. Existing models (by modelId)
+            will be updated; new models will be created.
+          </Dialog.Description>
+        </div>
+        <div className="space-y-4 px-6">
+          <Textarea
+            rows={15}
+            className="font-mono text-sm"
+            placeholder={JSON_IMPORT_PLACEHOLDER}
+            value={jsonInput}
+            onChange={(event) => onInputChange(event.target.value)}
+            disabled={importing}
+          />
+          {errors.length > 0 && (
+            <Alert variant="destructive">
+              <AlertTriangle className="h-4 w-4" />
+              <AlertDescription>
+                <ul className="list-disc space-y-1 pl-4">
+                  {errors.slice(0, 10).map((error, index) => (
+                    <li key={index} className="text-sm">
+                      {error}
+                    </li>
+                  ))}
+                  {errors.length > 10 && (
+                    <li className="text-sm text-muted-foreground">
+                      ...and {errors.length - 10} more errors
+                    </li>
+                  )}
+                </ul>
+              </AlertDescription>
+            </Alert>
+          )}
+          <div className="text-xs text-muted-foreground">
+            <strong>Required fields:</strong> name, modelId, provider (openai,
+            azure, amazon-bedrock, google, google-vertex)
+          </div>
+        </div>
+        <div className="mt-4 flex justify-end gap-2 border-t px-6 py-4">
+          <Button variant="outline" onClick={onCancel} disabled={importing}>
+            Cancel
+          </Button>
+          <Button onClick={onImport} disabled={importing || !jsonInput.trim()}>
+            {importing ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Importing...
+              </>
+            ) : (
+              <>
+                <Upload className="mr-2 h-4 w-4" />
+                Import
+              </>
+            )}
+          </Button>
+        </div>
+      </Dialog.Content>
+    </Dialog.Portal>
+  )
+}
+
 export function JsonImportDialog({
   open,
   onOpenChange,
@@ -161,111 +266,17 @@ export function JsonImportDialog({
 
   return (
     <Dialog.Root open={open} onOpenChange={handleOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-        <Dialog.Content
-          className="fixed left-1/2 top-1/2 z-50 w-full max-w-2xl -translate-x-1/2 -translate-y-1/2 rounded-lg border bg-background p-0 shadow-lg data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 duration-200"
-        >
-          {/* Close button */}
-          <Dialog.Close className="absolute top-4 right-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2">
-            <XIcon className="h-4 w-4" />
-            <span className="sr-only">Close</span>
-          </Dialog.Close>
-
-          {/* Header */}
-          <div className="px-6 pt-6 pb-4">
-            <Dialog.Title className="text-lg font-semibold leading-none">
-              Import AI Models from JSON
-            </Dialog.Title>
-            <Dialog.Description className="mt-2 text-sm text-muted-foreground">
-              Paste JSON to create or update models. Existing models (by modelId) will be
-              updated; new models will be created.
-            </Dialog.Description>
-          </div>
-
-          {/* Content */}
-          <div className="px-6 space-y-4">
-            <Textarea
-              rows={15}
-              className="font-mono text-sm"
-              placeholder={`Paste JSON here. Supports single object or array:
-
-{
-  "name": "GPT-4 Turbo",
-  "modelId": "gpt-4-turbo",
-  "provider": "openai",
-  "description": "Latest GPT-4 model",
-  "maxTokens": 128000,
-  "active": true,
-  "nexusEnabled": true,
-  "architectEnabled": true,
-  "inputCostPer1kTokens": "0.01",
-  "outputCostPer1kTokens": "0.03"
-}
-
-Or array: [{ ... }, { ... }]`}
-              value={jsonInput}
-              onChange={(e) => {
-                setJsonInput(e.target.value)
-                setErrors([]) // Clear errors on input change
-              }}
-              disabled={importing}
-            />
-
-            {errors.length > 0 && (
-              <Alert variant="destructive">
-                <AlertTriangle className="h-4 w-4" />
-                <AlertDescription>
-                  <ul className="list-disc pl-4 space-y-1">
-                    {errors.slice(0, 10).map((error, i) => (
-                      <li key={i} className="text-sm">
-                        {error}
-                      </li>
-                    ))}
-                    {errors.length > 10 && (
-                      <li className="text-sm text-muted-foreground">
-                        ...and {errors.length - 10} more errors
-                      </li>
-                    )}
-                  </ul>
-                </AlertDescription>
-              </Alert>
-            )}
-
-            <div className="text-xs text-muted-foreground">
-              <strong>Required fields:</strong> name, modelId, provider (openai, azure,
-              amazon-bedrock, google, google-vertex)
-            </div>
-          </div>
-
-          {/* Footer */}
-          <div className="flex justify-end gap-2 border-t mt-4 px-6 py-4">
-            <Button
-              variant="outline"
-              onClick={() => handleOpenChange(false)}
-              disabled={importing}
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={handleImport}
-              disabled={importing || !jsonInput.trim()}
-            >
-              {importing ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Importing...
-                </>
-              ) : (
-                <>
-                  <Upload className="mr-2 h-4 w-4" />
-                  Import
-                </>
-              )}
-            </Button>
-          </div>
-        </Dialog.Content>
-      </Dialog.Portal>
+      <JsonImportContent
+        jsonInput={jsonInput}
+        errors={errors}
+        importing={importing}
+        onInputChange={(value) => {
+          setJsonInput(value)
+          setErrors([])
+        }}
+        onCancel={() => handleOpenChange(false)}
+        onImport={handleImport}
+      />
     </Dialog.Root>
   )
 }

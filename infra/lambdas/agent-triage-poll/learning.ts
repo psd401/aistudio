@@ -118,8 +118,10 @@ function alreadyRuled(sender: string, kind: PatternKind, rules: TriageRules): bo
   );
 }
 
-export function computeLearning(ctx: LearningContext): LearningResult {
-  const now = ctx.now ?? Date.now();
+function accumulateCorrections(
+  ctx: LearningContext,
+  now: number,
+): Map<string, Accum> {
   const decisionsById = new Map<string, DecisionRecord>();
   for (const d of ctx.decisions ?? []) decisionsById.set(d.messageId, d);
 
@@ -140,22 +142,69 @@ export function computeLearning(ctx: LearningContext): LearningResult {
     }
     bySender.set(mapped.sender, acc);
   }
+  return bySender;
+}
 
+function candidateFromAccum(acc: Accum): {
+  kind: PatternKind;
+  weight: number;
+  count: number;
+} | null {
+  const net = acc.vipWeight - acc.muteWeight;
+  const kind: PatternKind = net >= 0 ? "vip" : "mute";
+  const weight = Math.abs(net);
+  if (weight < LEARN_MIN_WEIGHT) return null;
+  return {
+    kind,
+    weight,
+    count: kind === "vip" ? acc.vipCount : acc.muteCount,
+  };
+}
+
+function suggestionForCandidate(
+  acc: Accum,
+  candidate: { kind: PatternKind; weight: number; count: number },
+  ctx: LearningContext,
+  nowIso: string,
+  excluded: { dismissed: Set<string>; applied: Set<string> },
+): Suggestion | null {
+  const { kind, weight, count } = candidate;
+  const id = `${kind}:${acc.sender}`;
+  if (
+    weight < SUGGESTION_MIN_WEIGHT ||
+    count < SUGGESTION_MIN_COUNT ||
+    excluded.dismissed.has(id) ||
+    excluded.applied.has(id) ||
+    alreadyRuled(acc.sender, kind, ctx.rules)
+  ) {
+    return null;
+  }
+  return {
+    id,
+    kind,
+    target: acc.sender,
+    reason:
+      kind === "mute"
+        ? `You archived ${count} "important" emails from ${acc.sender} — mute (auto-archive) future mail from them?`
+        : `You rescued ${count} emails from ${acc.sender} — mark them VIP (always Important)?`,
+    count,
+    weight: round2(weight),
+    createdAt: nowIso,
+  };
+}
+
+export function computeLearning(ctx: LearningContext): LearningResult {
+  const now = ctx.now ?? Date.now();
   const dismissed = new Set(ctx.dismissedSuggestionIds ?? []);
   const applied = new Set(ctx.appliedSuggestionIds ?? []);
-
   const learnedPatterns: LearnedPattern[] = [];
   const suggestions: Suggestion[] = [];
   const nowIso = new Date(now).toISOString();
 
-  for (const acc of bySender.values()) {
-    // Net signal: the dominant direction wins; conflicting equal signals
-    // cancel to ~0 (ambiguous) and are dropped.
-    const net = acc.vipWeight - acc.muteWeight;
-    const kind: PatternKind = net >= 0 ? "vip" : "mute";
-    const weight = Math.abs(net);
-    if (weight < LEARN_MIN_WEIGHT) continue;
-    const count = kind === "vip" ? acc.vipCount : acc.muteCount;
+  for (const acc of accumulateCorrections(ctx, now).values()) {
+    const candidate = candidateFromAccum(acc);
+    if (!candidate) continue;
+    const { kind, weight, count } = candidate;
 
     learnedPatterns.push({
       pattern: acc.sender,
@@ -164,31 +213,14 @@ export function computeLearning(ctx: LearningContext): LearningResult {
       kind,
       count,
     });
-
-    // Promote to a suggestion when the signal is strong + repeated, the
-    // rule isn't already configured, and the user hasn't dismissed/applied
-    // it before.
-    const id = `${kind}:${acc.sender}`;
-    if (
-      weight >= SUGGESTION_MIN_WEIGHT &&
-      count >= SUGGESTION_MIN_COUNT &&
-      !dismissed.has(id) &&
-      !applied.has(id) &&
-      !alreadyRuled(acc.sender, kind, ctx.rules)
-    ) {
-      suggestions.push({
-        id,
-        kind,
-        target: acc.sender,
-        reason:
-          kind === "mute"
-            ? `You archived ${count} "important" emails from ${acc.sender} — mute (auto-archive) future mail from them?`
-            : `You rescued ${count} emails from ${acc.sender} — mark them VIP (always Important)?`,
-        count,
-        weight: round2(weight),
-        createdAt: nowIso,
-      });
-    }
+    const suggestion = suggestionForCandidate(
+      acc,
+      candidate,
+      ctx,
+      nowIso,
+      { dismissed, applied },
+    );
+    if (suggestion) suggestions.push(suggestion);
   }
 
   // Strongest signal first; cap the stored list.

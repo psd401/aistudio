@@ -146,6 +146,70 @@ export async function userCanAccessResource(
   return row?.allowed === true;
 }
 
+type BatchAccessSeed = {
+  accessible: Set<string>;
+  complete: boolean;
+};
+
+async function resolveAssistantBatchAccess(
+  userId: number,
+  resourceType: ResourceGrantType,
+  idTexts: string[],
+  validUser: boolean,
+  options: ResourceBatchAccessOptions
+): Promise<BatchAccessSeed> {
+  const accessible = new Set<string>();
+  if (resourceType !== "assistant") {
+    return { accessible, complete: false };
+  }
+
+  const roomAccess = await getRoomAssistantAccessContext(userId, idTexts);
+  if (roomAccess.isAdministrator) {
+    return { accessible: new Set(idTexts), complete: true };
+  }
+  if (roomAccess.isStudentOnly && roomAccess.hasActiveRoomMembership) {
+    return {
+      accessible: new Set(
+        idTexts.filter((id) => roomAccess.assignedAssistantIds.has(id))
+      ),
+      complete: true,
+    };
+  }
+
+  for (const id of idTexts) {
+    if (roomAccess.assignedAssistantIds.has(id)) accessible.add(id);
+  }
+  const candidateIds = new Set(idTexts);
+  for (const ownedId of options.ownedResourceIds ?? []) {
+    const id = resourceIdText(ownedId);
+    if (validUser && candidateIds.has(id)) accessible.add(id);
+  }
+  return { accessible, complete: false };
+}
+
+async function isBatchAdministrator(
+  userId: number,
+  resourceType: ResourceGrantType,
+  validUser: boolean
+): Promise<boolean> {
+  if (!validUser || resourceType === "assistant") return false;
+
+  const adminResult = await executeQuery(
+    (db) =>
+      db.execute(sql`
+        SELECT EXISTS (
+          SELECT 1 FROM user_roles ur
+            JOIN roles r ON r.id = ur.role_id
+           WHERE ur.user_id = ${userId}
+             AND lower(r.name) = 'administrator'
+        ) AS is_admin
+      `),
+    "filterAccessibleResourceIds.admin"
+  );
+  const [adminRow] = toPgRows<{ is_admin: boolean }>(adminResult);
+  return adminRow?.is_admin === true;
+}
+
 /**
  * Filter a set of candidate resource ids to those the user may access — the
  * batch gate for list surfaces (e.g. GET /api/models), avoiding the N+1 of
@@ -164,57 +228,30 @@ export async function filterAccessibleResourceIds(
   options: ResourceBatchAccessOptions = {}
 ): Promise<Set<string>> {
   const idTexts = resourceIds.map(resourceIdText);
-  const accessible = new Set<string>();
-  if (idTexts.length === 0) return accessible;
+  if (idTexts.length === 0) return new Set<string>();
 
   const validUser = Number.isInteger(userId) && userId > 0;
-  if (resourceType === "assistant") {
-    const roomAccess = await getRoomAssistantAccessContext(userId, idTexts);
-    if (roomAccess.isAdministrator) {
-      return new Set(idTexts);
-    }
-    if (roomAccess.isStudentOnly && roomAccess.hasActiveRoomMembership) {
-      return new Set(
-        idTexts.filter((id) => roomAccess.assignedAssistantIds.has(id))
-      );
-    }
-    for (const id of idTexts) {
-      if (roomAccess.assignedAssistantIds.has(id)) accessible.add(id);
-    }
-    const candidateIds = new Set(idTexts);
-    for (const ownedId of options.ownedResourceIds ?? []) {
-      const id = resourceIdText(ownedId);
-      if (validUser && candidateIds.has(id)) accessible.add(id);
-    }
+  const assistantAccess = await resolveAssistantBatchAccess(
+    userId,
+    resourceType,
+    idTexts,
+    validUser,
+    options
+  );
+  if (assistantAccess.complete) return assistantAccess.accessible;
+  const { accessible } = assistantAccess;
+
+  // Administrators see everything — short-circuit before any grant lookup.
+  // Assistant administrator status was already loaded with room context above.
+  if (await isBatchAdministrator(userId, resourceType, validUser)) {
+    return new Set(idTexts);
   }
 
   // Parameterized IN-list (drizzle does NOT expand a raw array into an IN list).
   const idList = sql.join(
-    idTexts.map((t) => sql`${t}`),
+    idTexts.map((id) => sql`${id}`),
     sql`, `
   );
-
-  // Administrators see everything — short-circuit before any grant lookup.
-  // Assistant administrator status was already loaded with room context above.
-  if (validUser && resourceType !== "assistant") {
-    const adminResult = await executeQuery(
-      (db) =>
-        db.execute(sql`
-          SELECT EXISTS (
-            SELECT 1 FROM user_roles ur
-              JOIN roles r ON r.id = ur.role_id
-             WHERE ur.user_id = ${userId}
-               AND lower(r.name) = 'administrator'
-          ) AS is_admin
-        `),
-      "filterAccessibleResourceIds.admin"
-    );
-    const [adminRow] = toPgRows<{ is_admin: boolean }>(adminResult);
-    if (adminRow?.is_admin === true) {
-      for (const id of idTexts) accessible.add(id);
-      return accessible;
-    }
-  }
 
   // For each CANDIDATE that has grants, decide whether the user matches any.
   // Candidates absent from this result have no grants → unrestricted.

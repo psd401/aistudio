@@ -4,7 +4,6 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
 import * as eventsources from 'aws-cdk-lib/aws-lambda-event-sources';
 import { Construct } from 'constructs';
 
@@ -79,7 +78,7 @@ export class DocumentProcessingStack extends cdk.Stack {
 
     // Import existing documents bucket from StorageStack
     this.documentsBucket = s3.Bucket.fromBucketName(
-      this, 
+      this,
       'ExistingDocumentsBucket',
       documentsBucketName
     );
@@ -118,8 +117,133 @@ export class DocumentProcessingStack extends cdk.Stack {
       removalPolicy: environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
+    const processorRole = this.createProcessorRole(props);
+
+    const processors = this.createProcessors(props, processorRole);
+    this.standardProcessor = processors.standard;
+    this.highMemoryProcessor = processors.highMemory;
+
+    // Event sources for Lambda triggers
+    this.standardProcessor.addEventSource(
+      new eventsources.SqsEventSource(this.processingQueue, {
+        batchSize: 5, // Process up to 5 documents at once
+        maxConcurrency: 10, // Limit concurrent executions
+        reportBatchItemFailures: true,
+      })
+    );
+
+    this.highMemoryProcessor.addEventSource(
+      new eventsources.SqsEventSource(this.highMemoryQueue, {
+        batchSize: 1, // Process one large file at a time
+        maxConcurrency: 2, // Limit concurrent high-memory processing
+        reportBatchItemFailures: true,
+      })
+    );
+
+    // Note: S3 event notifications removed - Documents v2 uses direct job processing
+    // via sendToProcessingQueue() instead of S3-triggered processing
+
+    // CloudWatch Dashboard removed - metrics now exported to consolidated dashboards via MonitoringStack
+
+    // Stack outputs
+    const legacyOutputs = [
+      new cdk.CfnOutput(this, 'DocumentJobsTableName', {
+        value: this.documentJobsTable.tableName,
+        description: 'DynamoDB table for document job tracking',
+        exportName: `${props.environment}-DocumentJobsTableName`,
+      }),
+    ];
+
+    // Note: DocumentsBucketName is already exported by StorageStack, don't duplicate it here
+
+    legacyOutputs.push(
+      new cdk.CfnOutput(this, 'ProcessingQueueUrl', {
+        value: this.processingQueue.queueUrl,
+        description: 'SQS queue for standard document processing',
+        exportName: `${props.environment}-ProcessingQueueUrl`,
+      })
+    );
+
+    legacyOutputs.push(
+      new cdk.CfnOutput(this, 'HighMemoryQueueUrl', {
+        value: this.highMemoryQueue.queueUrl,
+        description: 'SQS queue for high-memory document processing',
+        exportName: `${props.environment}-HighMemoryQueueUrl`,
+      })
+    );
+
+    this.retireLegacyResourcesIfRequested(
+      retireLegacyContent,
+      processorRole,
+      legacyOutputs
+    );
+  }
+
+  private retireLegacyResourcesIfRequested(
+    retireLegacyContent: boolean,
+    processorRole: iam.Role,
+    legacyOutputs: cdk.CfnOutput[]
+  ): void {
+    if (!retireLegacyContent) return;
+
+    // Keep the stack in the CDK assembly so `cdk deploy --all` can actually
+    // remove its resources. Omitting an already-deployed stack from an
+    // assembly leaves that CloudFormation stack running indefinitely.
+    const retainLegacyCondition = new cdk.CfnCondition(
+      this,
+      'RetainLegacyDocumentProcessing',
+      {
+        expression: cdk.Fn.conditionEquals('retired', 'retained'),
+      }
+    );
+    this.documentJobsTable.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+    this.processingDLQ.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+    this.processingQueue.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+    this.highMemoryQueue.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+
+    const legacyRoots: Construct[] = [
+      this.documentJobsTable,
+      this.processingDLQ,
+      this.processingQueue,
+      this.highMemoryQueue,
+      processorRole,
+      this.standardProcessor,
+      this.highMemoryProcessor,
+      ...legacyOutputs,
+    ];
+    const conditioned = new Set<cdk.CfnElement>();
+    for (const root of legacyRoots) {
+      this.conditionLegacyConstructs(
+        root,
+        conditioned,
+        retainLegacyCondition
+      );
+    }
+  }
+
+  private conditionLegacyConstructs(
+    root: Construct,
+    conditioned: Set<cdk.CfnElement>,
+    retainLegacyCondition: cdk.CfnCondition
+  ): void {
+    for (const construct of root.node.findAll()) {
+      const element = construct as cdk.CfnElement;
+      if (element instanceof cdk.CfnResource && !conditioned.has(element)) {
+        element.cfnOptions.condition = retainLegacyCondition;
+        conditioned.add(element);
+      } else if (
+        element instanceof cdk.CfnOutput &&
+        !conditioned.has(element)
+      ) {
+        element.condition = retainLegacyCondition;
+        conditioned.add(element);
+      }
+    }
+  }
+
+  private createProcessorRole(props: DocumentProcessingStackProps): iam.Role {
     // IAM role for Lambda processors
-    const processorRole = new iam.Role(this, 'ProcessorRole', {
+    return new iam.Role(this, 'ProcessorRole', {
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
       managedPolicies: [
         iam.ManagedPolicy.fromManagedPolicyArn(
@@ -216,9 +340,16 @@ export class DocumentProcessingStack extends cdk.Stack {
         }),
       },
     });
+  }
+
+  private createProcessors(
+    props: DocumentProcessingStackProps,
+    processorRole: iam.Role
+  ): { standard: lambda.Function; highMemory: lambda.Function } {
+    const { environment } = props;
 
     // Standard Lambda processor (3GB memory, 15 min timeout)
-    this.standardProcessor = new lambda.Function(this, 'StandardProcessor', {
+    const standardProcessor = new lambda.Function(this, 'StandardProcessor', {
       functionName: `AIStudio-DocumentProcessor-Standard-${environment}`,
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'dist/index.handler',
@@ -241,7 +372,7 @@ export class DocumentProcessingStack extends cdk.Stack {
 
     // High-memory Lambda processor
     // PowerTuning Result (2025-10-24): 10240MB → 1536MB (85% reduction)
-    this.highMemoryProcessor = new lambda.Function(this, 'HighMemoryProcessor', {
+    const highMemoryProcessor = new lambda.Function(this, 'HighMemoryProcessor', {
       functionName: `AIStudio-DocumentProcessor-HighMemory-${environment}`,
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'dist/index.handler',
@@ -262,91 +393,6 @@ export class DocumentProcessingStack extends cdk.Stack {
       retryAttempts: 1, // Fewer retries for expensive operations
     });
 
-    // Event sources for Lambda triggers
-    this.standardProcessor.addEventSource(
-      new eventsources.SqsEventSource(this.processingQueue, {
-        batchSize: 5, // Process up to 5 documents at once
-        maxConcurrency: 10, // Limit concurrent executions
-        reportBatchItemFailures: true,
-      })
-    );
-
-    this.highMemoryProcessor.addEventSource(
-      new eventsources.SqsEventSource(this.highMemoryQueue, {
-        batchSize: 1, // Process one large file at a time
-        maxConcurrency: 2, // Limit concurrent high-memory processing
-        reportBatchItemFailures: true,
-      })
-    );
-
-    // Note: S3 event notifications removed - Documents v2 uses direct job processing
-    // via sendToProcessingQueue() instead of S3-triggered processing
-
-    // CloudWatch Dashboard removed - metrics now exported to consolidated dashboards via MonitoringStack
-
-    // Stack outputs
-    const legacyOutputs = [new cdk.CfnOutput(this, 'DocumentJobsTableName', {
-      value: this.documentJobsTable.tableName,
-      description: 'DynamoDB table for document job tracking',
-      exportName: `${props.environment}-DocumentJobsTableName`,
-    })];
-
-    // Note: DocumentsBucketName is already exported by StorageStack, don't duplicate it here
-
-    legacyOutputs.push(new cdk.CfnOutput(this, 'ProcessingQueueUrl', {
-      value: this.processingQueue.queueUrl,
-      description: 'SQS queue for standard document processing',
-      exportName: `${props.environment}-ProcessingQueueUrl`,
-    }));
-
-    legacyOutputs.push(new cdk.CfnOutput(this, 'HighMemoryQueueUrl', {
-      value: this.highMemoryQueue.queueUrl,
-      description: 'SQS queue for high-memory document processing',
-      exportName: `${props.environment}-HighMemoryQueueUrl`,
-    }));
-
-    if (retireLegacyContent) {
-      // Keep the stack in the CDK assembly so `cdk deploy --all` can actually
-      // remove its resources. Omitting an already-deployed stack from an
-      // assembly leaves that CloudFormation stack running indefinitely.
-      const retainLegacyCondition = new cdk.CfnCondition(
-        this,
-        'RetainLegacyDocumentProcessing',
-        {
-          expression: cdk.Fn.conditionEquals('retired', 'retained'),
-        },
-      );
-      this.documentJobsTable.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
-      this.processingDLQ.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
-      this.processingQueue.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
-      this.highMemoryQueue.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
-
-      const legacyRoots: Construct[] = [
-        this.documentJobsTable,
-        this.processingDLQ,
-        this.processingQueue,
-        this.highMemoryQueue,
-        processorRole,
-        this.standardProcessor,
-        this.highMemoryProcessor,
-        ...legacyOutputs,
-      ];
-      const conditioned = new Set<cdk.CfnElement>();
-      for (const root of legacyRoots) {
-        for (const construct of root.node.findAll()) {
-          const element = construct as cdk.CfnElement;
-          if (element instanceof cdk.CfnResource && !conditioned.has(element)) {
-            element.cfnOptions.condition = retainLegacyCondition;
-            conditioned.add(element);
-          } else if (
-            element instanceof cdk.CfnOutput &&
-            !conditioned.has(element)
-          ) {
-            element.condition = retainLegacyCondition;
-            conditioned.add(element);
-          }
-        }
-      }
-    }
+    return { standard: standardProcessor, highMemory: highMemoryProcessor };
   }
 }

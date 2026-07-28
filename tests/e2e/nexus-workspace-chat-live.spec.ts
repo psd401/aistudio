@@ -1,6 +1,7 @@
 import { test, expect } from "./fixtures";
 import { authenticateContext } from "./helpers/session-auth";
-import { mkdirSync } from "node:fs";
+
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 /**
  * E2E (gated): Nexus workspace chat reads + edits the LIVE Atrium document (§1087).
@@ -32,7 +33,7 @@ const TITLE_ONLY_ID =
   process.env.ATRIUM_TITLEONLY_E2E_ID ?? "a7100000-0000-4000-8000-000000008080";
 
 const SHOT_DIR = process.env.E2E_SHOT_DIR ?? ".verification";
-mkdirSync(SHOT_DIR, { recursive: true });
+validatedFs.mkdirSync(SHOT_DIR, { recursive: true });
 
 /** Send a chat message and wait for the assistant to finish its reply. */
 async function sendChat(page: import("@playwright/test").Page, text: string): Promise<void> {

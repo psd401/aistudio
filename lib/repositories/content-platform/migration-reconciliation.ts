@@ -136,11 +136,10 @@ export interface RetirementReadiness {
   blockers: string[];
 }
 
-export function assessContentRetirementReadiness(
+function appendConfigurationBlockers(
   input: RetirementReadinessInput,
-): RetirementReadiness {
-  const blockers: string[] = [];
-  const metrics = input.migrationMetrics;
+  blockers: string[],
+): void {
   if (!input.cutoversEnabled) {
     blockers.push("all product cutovers are not enabled");
   }
@@ -156,6 +155,12 @@ export function assessContentRetirementReadiness(
   if (input.activeRunCount > 0) {
     blockers.push("a migration control run is still active");
   }
+}
+
+function appendMigrationBlockers(
+  metrics: RepositoryMigrationMetrics,
+  blockers: string[],
+): void {
   if ((metrics.failed ?? 0) > 0) blockers.push("failed migrations remain");
   if ((metrics.unrecoverable ?? 0) > 0) {
     blockers.push("unrecoverable sources remain");
@@ -169,6 +174,12 @@ export function assessContentRetirementReadiness(
   if ((metrics.discovered ?? 0) !== (metrics.verified ?? 0)) {
     blockers.push("not every tracked source is verified");
   }
+}
+
+function appendRecoveryBlockers(
+  input: RetirementReadinessInput,
+  blockers: string[],
+): void {
   if (!input.rollbackDrillCompleted) {
     blockers.push("a rollback drill has not been recorded");
   }
@@ -177,5 +188,14 @@ export function assessContentRetirementReadiness(
   } else if (input.recoveryWindowEndsAt > (input.now ?? new Date())) {
     blockers.push("the recovery window has not elapsed");
   }
+}
+
+export function assessContentRetirementReadiness(
+  input: RetirementReadinessInput,
+): RetirementReadiness {
+  const blockers: string[] = [];
+  appendConfigurationBlockers(input, blockers);
+  appendMigrationBlockers(input.migrationMetrics, blockers);
+  appendRecoveryBlockers(input, blockers);
   return { ready: blockers.length === 0, blockers };
 }

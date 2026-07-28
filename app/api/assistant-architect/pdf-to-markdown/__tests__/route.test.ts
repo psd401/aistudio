@@ -37,12 +37,12 @@ jest.mock("@/actions/db/get-current-user-action", () => ({
 }))
 
 const mockGetContentPlatformConfig = jest.fn()
-const mockIsCanonicalAssistantArchitectActive = jest.fn()
+const mockIsCanonicalRepositoryUploadActive = jest.fn()
 jest.mock("@/lib/repositories/content-platform/config", () => ({
   getContentPlatformConfig: (...a: unknown[]) =>
     mockGetContentPlatformConfig(...a),
-  isCanonicalAssistantArchitectActive: (...a: unknown[]) =>
-    mockIsCanonicalAssistantArchitectActive(...a),
+  isCanonicalRepositoryUploadActive: (...a: unknown[]) =>
+    mockIsCanonicalRepositoryUploadActive(...a),
 }))
 
 jest.mock("@/lib/logger", () => ({
@@ -112,11 +112,11 @@ describe("POST pdf-to-markdown early size guard (REV-COR-201)", () => {
       data: { user: { id: 1 } },
     })
     mockGetContentPlatformConfig.mockResolvedValue({})
-    mockIsCanonicalAssistantArchitectActive.mockReturnValue(false)
+    mockIsCanonicalRepositoryUploadActive.mockReturnValue(false)
   })
 
   it("rejects new legacy jobs after canonical repository upload cutover", async () => {
-    mockIsCanonicalAssistantArchitectActive.mockReturnValue(true)
+    mockIsCanonicalRepositoryUploadActive.mockReturnValue(true)
     const request = makeReq({
       contentLength: String(5 * MB),
       formData: undefined,

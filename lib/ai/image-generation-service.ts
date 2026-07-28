@@ -28,11 +28,26 @@ type OpenAIImageSize = '256x256' | '512x512' | '1024x1024' | '1792x1024' | '1024
 // This is a simplified interface that doesn't extend GenerateTextResult to avoid complex type issues
 interface GeminiGenerateTextResult {
   text: string;
-  files?: Array<Uint8Array | { data?: Uint8Array; uint8Array?: Uint8Array; mimeType?: string; mediaType?: string }>;
+  files?: GeminiImageFile[];
   experimental_output?: {
-    files?: Array<Uint8Array | { data?: Uint8Array; uint8Array?: Uint8Array; mimeType?: string; mediaType?: string }>;
+    files?: GeminiImageFile[];
   };
 }
+
+type GeminiImageFile =
+  | Uint8Array
+  | {
+      data?: Uint8Array;
+      uint8Array?: Uint8Array;
+      mimeType?: string;
+      mediaType?: string;
+    };
+
+type GeminiContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; image: string; mimeType?: string };
+
+type ImagePrompt = string | { text: string; images: string[] };
 
 const log = createLogger({ module: 'image-generation-service' });
 
@@ -399,6 +414,129 @@ async function readOpenAIImageResponse(res: Response): Promise<Buffer> {
   return Buffer.from(b64, 'base64');
 }
 
+function resolveOpenAIModelId(modelId: string): string {
+  return modelId.includes('image') || modelId.includes('dall-e')
+    ? modelId
+    : 'gpt-image-1';
+}
+
+function resolveRequestedImageSize(size: string | undefined): string {
+  return size ? size : '1024x1024';
+}
+
+function resolveOpenAIImageSize(
+  imageModelId: string,
+  requestedSize: string
+): string {
+  const gptSizeMap: Record<string, string> = {
+    '1024x1024': '1024x1024',
+    '1536x1024': '1536x1024',
+    '1024x1536': '1024x1536'
+  };
+  const dalleSizeMap: Record<string, OpenAIImageSize> = {
+    '256x256': '256x256',
+    '512x512': '512x512',
+    '1024x1024': '1024x1024',
+    '1792x1024': '1792x1024',
+    '1024x1792': '1024x1792'
+  };
+  return imageModelId.includes('gpt-image')
+    ? (gptSizeMap[requestedSize] || '1024x1024')
+    : (dalleSizeMap[requestedSize] || '1024x1024');
+}
+
+function createOpenAIProviderOptions(
+  imageModelId: string,
+  request: ImageGenerationRequest
+): Record<string, string | string[] | undefined> {
+  if (imageModelId.includes('gpt-image')) {
+    return {
+      output_format: 'png',
+      quality: request.quality === 'hd' ? 'high' : 'medium'
+    };
+  }
+  return {
+    ...(request.quality && { quality: request.quality }),
+    ...(request.style && { style: request.style })
+  };
+}
+
+async function createOpenAIImagePrompt(
+  request: ImageGenerationRequest,
+  requestId: string
+): Promise<ImagePrompt> {
+  if (!request.referenceImages || request.referenceImages.length === 0) {
+    return request.prompt;
+  }
+
+  const imageInputs: string[] = [];
+  for (const refImage of request.referenceImages) {
+    if (refImage.base64) {
+      imageInputs.push(refImage.base64);
+    } else if (refImage.url) {
+      const { data, mimeType } = await fetchReferenceImageSafely(refImage.url);
+      imageInputs.push(
+        `data:${mimeType};base64,${Buffer.from(data).toString('base64')}`
+      );
+    }
+  }
+
+  if (imageInputs.length === 0) return request.prompt;
+  log.info('Using OpenAI image editing with reference images', {
+    requestId,
+    imageCount: imageInputs.length
+  });
+  return { text: request.prompt, images: imageInputs };
+}
+
+function extractOpenAIImageBuffer(
+  generatedImage:
+    | { base64?: string; uint8Array?: Uint8Array }
+    | undefined
+): Buffer {
+  if (!generatedImage) {
+    throw createImageError('NO_IMAGE', 'OpenAI returned no image');
+  }
+  if (generatedImage.base64) {
+    return Buffer.from(generatedImage.base64, 'base64');
+  }
+  if (generatedImage.uint8Array) {
+    return Buffer.from(generatedImage.uint8Array);
+  }
+  throw createImageError('NO_IMAGE', 'No image data in OpenAI response');
+}
+
+function throwOpenAIImageError(error: unknown): never {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  if (errorMessage.includes('content_policy') || errorMessage.includes('safety')) {
+    throw createImageError(
+      'CONTENT_POLICY',
+      'Your image prompt was rejected by content policy'
+    );
+  }
+  if (errorMessage.includes('rate_limit') || errorMessage.includes('429')) {
+    const retryMatch = errorMessage.match(/retry after (\d+)/i);
+    throw createImageError(
+      'RATE_LIMIT',
+      'Rate limit exceeded',
+      retryMatch ? Number.parseInt(retryMatch[1]) : 60
+    );
+  }
+  if (
+    errorMessage.includes('invalid_api_key') ||
+    errorMessage.includes('authentication')
+  ) {
+    throw createImageError('AUTHENTICATION', 'OpenAI authentication failed');
+  }
+  if (errorMessage.includes('invalid_image_size')) {
+    throw createImageError(
+      'INVALID_SIZE',
+      'Invalid image size. Use 1024x1024, 1792x1024, or 1024x1792'
+    );
+  }
+  throw error;
+}
+
 /**
  * Generate image using OpenAI's gpt-image-1.5 or similar models
  * Uses AI SDK's experimental_generateImage function
@@ -422,10 +560,7 @@ async function generateWithOpenAI(
 
     const openai = createOpenAI({ apiKey });
 
-    // Determine if this is a valid image model
-    const imageModelId = request.modelId.includes('image') || request.modelId.includes('dall-e')
-      ? request.modelId
-      : 'gpt-image-1'; // Default to gpt-image-1 if modelId doesn't specify
+    const imageModelId = resolveOpenAIModelId(request.modelId);
 
     // SDK incompatibility shim: @ai-sdk/openai 3.0.30 (and as of 4.0.0-beta.38)
     // hardcodes the list of models that don't accept `response_format` to:
@@ -443,82 +578,10 @@ async function generateWithOpenAI(
 
     const imageModel = openai.image(imageModelId);
 
-    // Check if this is a GPT image model (gpt-image-1, gpt-image-1.5) vs DALL-E
-    const isGptImageModel = imageModelId.includes('gpt-image');
-
-    // Map size string to valid size for the model type
-    // GPT image models: 1024x1024, 1536x1024, 1024x1536
-    // DALL-E models: 256x256, 512x512, 1024x1024, 1792x1024, 1024x1792
-    const gptSizeMap: Record<string, string> = {
-      '1024x1024': '1024x1024',
-      '1536x1024': '1536x1024',
-      '1024x1536': '1024x1536'
-    };
-    const dalleSizeMap: Record<string, OpenAIImageSize> = {
-      '256x256': '256x256',
-      '512x512': '512x512',
-      '1024x1024': '1024x1024',
-      '1792x1024': '1792x1024',
-      '1024x1792': '1024x1792'
-    };
-
-    // eslint-disable-next-line unicorn/explicit-length-check -- false positive: request.size is a string, not a Map/Set
-    const requestedSize = request.size && request.size.length > 0 ? request.size : '1024x1024';
-    const imageSize = isGptImageModel
-      ? (gptSizeMap[requestedSize] || '1024x1024')
-      : (dalleSizeMap[requestedSize] || '1024x1024');
-
-    // Build provider options based on model type
-    // GPT image models use output_format, quality (low/medium/high)
-    // DALL-E models use response_format, quality (standard/hd), style
-    const providerOpts: Record<string, string | string[] | undefined> = isGptImageModel
-      ? {
-          output_format: 'png',
-          quality: request.quality === 'hd' ? 'high' : 'medium'
-        }
-      : {
-          ...(request.quality && { quality: request.quality }),
-          ...(request.style && { style: request.style })
-        };
-
-    // Build prompt - use object format with images array when we have reference images
-    // The AI SDK automatically routes to /images/edits endpoint when images are provided
-    // See: https://ai-sdk.dev/docs/reference/ai-sdk-core/generate-image
-    type ImagePrompt = string | { text: string; images: string[] };
-    let imagePrompt: ImagePrompt;
-
-    if (request.referenceImages && request.referenceImages.length > 0) {
-      // Convert reference images to format expected by AI SDK
-      const imageInputs: string[] = [];
-      for (const refImage of request.referenceImages) {
-        if (refImage.base64) {
-          // AI SDK accepts base64 strings (with or without data URL prefix)
-          imageInputs.push(refImage.base64);
-        } else if (refImage.url) {
-          // Pre-download user-controlled URLs through the SSRF guard and pass base64,
-          // so the AI SDK never fetches an unguarded URL server-side (REV-COR-497).
-          // base64 is the same shape the SDK accepts on the branch above.
-          const { data, mimeType } = await fetchReferenceImageSafely(refImage.url);
-          imageInputs.push(`data:${mimeType};base64,${Buffer.from(data).toString('base64')}`);
-        }
-      }
-
-      if (imageInputs.length > 0) {
-        imagePrompt = {
-          text: request.prompt,
-          images: imageInputs
-        };
-
-        log.info('Using OpenAI image editing with reference images', {
-          requestId,
-          imageCount: imageInputs.length
-        });
-      } else {
-        imagePrompt = request.prompt;
-      }
-    } else {
-      imagePrompt = request.prompt;
-    }
+    const requestedSize = resolveRequestedImageSize(request.size);
+    const imageSize = resolveOpenAIImageSize(imageModelId, requestedSize);
+    const providerOpts = createOpenAIProviderOptions(imageModelId, request);
+    const imagePrompt = await createOpenAIImagePrompt(request, requestId);
 
     // Generate the image
     // When prompt has images, AI SDK automatically uses /images/edits endpoint
@@ -532,21 +595,7 @@ async function generateWithOpenAI(
       }
     });
 
-    // Extract the generated image
-    const generatedImage = result.images?.[0];
-    if (!generatedImage) {
-      throw createImageError('NO_IMAGE', 'OpenAI returned no image');
-    }
-
-    // Get image data (prefer base64, fallback to uint8Array)
-    let imageBuffer: Buffer;
-    if (generatedImage.base64) {
-      imageBuffer = Buffer.from(generatedImage.base64, 'base64');
-    } else if (generatedImage.uint8Array) {
-      imageBuffer = Buffer.from(generatedImage.uint8Array);
-    } else {
-      throw createImageError('NO_IMAGE', 'No image data in OpenAI response');
-    }
+    const imageBuffer = extractOpenAIImageBuffer(result.images?.[0]);
 
     // Store in S3
     const s3Result = await storeImageInS3({
@@ -566,34 +615,146 @@ async function generateWithOpenAI(
       s3Key: s3Result.s3Key,
       provider: 'openai',
       model: request.modelId,
-      // eslint-disable-next-line unicorn/explicit-length-check -- false positive: request.size is a string, not a Map/Set
-      dimensions: parseDimensions(request.size && request.size.length > 0 ? request.size : '1024x1024'),
+      dimensions: parseDimensions(requestedSize),
       estimatedCost
     };
 
   } catch (error) {
-    // Handle OpenAI-specific errors
-    const errorMessage = error instanceof Error ? error.message : String(error);
-
-    if (errorMessage.includes('content_policy') || errorMessage.includes('safety')) {
-      throw createImageError('CONTENT_POLICY', 'Your image prompt was rejected by content policy');
-    }
-
-    if (errorMessage.includes('rate_limit') || errorMessage.includes('429')) {
-      const retryMatch = errorMessage.match(/retry after (\d+)/i);
-      throw createImageError('RATE_LIMIT', 'Rate limit exceeded', retryMatch ? Number.parseInt(retryMatch[1]) : 60);
-    }
-
-    if (errorMessage.includes('invalid_api_key') || errorMessage.includes('authentication')) {
-      throw createImageError('AUTHENTICATION', 'OpenAI authentication failed');
-    }
-
-    if (errorMessage.includes('invalid_image_size')) {
-      throw createImageError('INVALID_SIZE', 'Invalid image size. Use 1024x1024, 1792x1024, or 1024x1792');
-    }
-
-    throw error;
+    throwOpenAIImageError(error);
   }
+}
+
+function parseGeminiBase64Reference(
+  refImage: ReferenceImage
+): { image: string; mimeType: string } | null {
+  if (!refImage.base64) return null;
+  const matches = refImage.base64.match(/^data:([^;]+);base64,(.+)$/);
+  return {
+    image: matches?.[2] ?? refImage.base64,
+    mimeType: matches?.[1] ?? refImage.mimeType ?? 'image/png'
+  };
+}
+
+async function createGeminiContentParts(
+  request: ImageGenerationRequest,
+  requestId: string
+): Promise<GeminiContentPart[]> {
+  const contentParts: GeminiContentPart[] = [];
+  for (const refImage of request.referenceImages ?? []) {
+    const base64Reference = parseGeminiBase64Reference(refImage);
+    if (base64Reference) {
+      contentParts.push({ type: 'image', ...base64Reference });
+    } else if (refImage.url) {
+      const { data, mimeType } = await fetchReferenceImageSafely(refImage.url);
+      contentParts.push({
+        type: 'image',
+        image: Buffer.from(data).toString('base64'),
+        mimeType: refImage.mimeType || mimeType
+      });
+    }
+  }
+  if (contentParts.length > 0) {
+    log.debug('Added reference images to Gemini request', {
+      requestId,
+      imageCount: contentParts.length
+    });
+  }
+  contentParts.push({ type: 'text', text: request.prompt });
+  return contentParts;
+}
+
+async function requestGeminiImage(
+  model: LanguageModel,
+  request: ImageGenerationRequest,
+  contentParts: GeminiContentPart[]
+): Promise<GeminiGenerateTextResult> {
+  const providerOptions = {
+    google: {
+      responseModalities: ['TEXT', 'IMAGE']
+    }
+  };
+  const textResult =
+    (request.referenceImages?.length ?? 0) > 0
+      ? await generateText({
+          model,
+          messages: [{ role: 'user', content: contentParts }],
+          providerOptions
+        })
+      : await generateText({
+          model,
+          prompt: request.prompt,
+          providerOptions
+        });
+  return textResult as unknown as GeminiGenerateTextResult;
+}
+
+function imageBytesFromGeminiFile(
+  file: GeminiImageFile
+): { imageData: Uint8Array; contentType: string } | null {
+  if (file instanceof Uint8Array) {
+    return { imageData: file, contentType: 'image/png' };
+  }
+  const imageData = file.data ?? file.uint8Array;
+  if (!imageData) return null;
+  return {
+    imageData,
+    contentType: file.mimeType ?? file.mediaType ?? 'image/png'
+  };
+}
+
+function extractGeminiImage(
+  result: GeminiGenerateTextResult,
+  requestId: string
+): { imageData: Uint8Array; contentType: string } {
+  const files = result.files ?? result.experimental_output?.files ?? [];
+  if (files.length === 0) {
+    log.warn('Gemini returned no image files', {
+      requestId,
+      hasText: Boolean(result.text),
+      textLength: result.text?.length ?? 0
+    });
+    throw createImageError(
+      'NO_IMAGE',
+      'Gemini did not generate an image. Try a different prompt.'
+    );
+  }
+  for (const file of files) {
+    const image = imageBytesFromGeminiFile(file);
+    if (image) return image;
+  }
+  throw createImageError(
+    'NO_IMAGE',
+    'Could not extract image data from Gemini response'
+  );
+}
+
+function throwGeminiImageError(error: unknown): never {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  if (errorMessage.includes('SAFETY') || errorMessage.includes('safety')) {
+    throw createImageError(
+      'CONTENT_POLICY',
+      'Gemini safety filter rejected the prompt'
+    );
+  }
+  if (
+    errorMessage.includes('QUOTA_EXCEEDED') ||
+    errorMessage.includes('quota')
+  ) {
+    throw createImageError('RATE_LIMIT', 'Google AI quota exceeded');
+  }
+  if (errorMessage.includes('RECITATION')) {
+    throw createImageError(
+      'CONTENT_POLICY',
+      'Prompt too similar to existing content'
+    );
+  }
+  if (errorMessage.includes('responseModalities')) {
+    throw createImageError(
+      'INVALID_SIZE',
+      'Model not configured for image generation'
+    );
+  }
+  throw error;
 }
 
 /**
@@ -628,125 +789,13 @@ async function generateWithGemini(
 
     // CRITICAL: Gemini image models use generateText with responseModalities
     const model = google(imageModelId);
-
-    // Build content parts for the prompt
-    // If we have reference images, include them along with the text prompt
-    type ContentPart = { type: 'text'; text: string } | { type: 'image'; image: string; mimeType?: string };
-    const contentParts: ContentPart[] = [];
-
-    // Add reference images first (Gemini processes images in order)
-    if (request.referenceImages && request.referenceImages.length > 0) {
-      for (const refImage of request.referenceImages) {
-        if (refImage.base64) {
-          // Extract base64 data if it's a data URL
-          let imageData = refImage.base64;
-          let mimeType = refImage.mimeType || 'image/png';
-
-          if (refImage.base64.startsWith('data:')) {
-            // Parse data URL: data:image/png;base64,XXXX
-            const matches = refImage.base64.match(/^data:([^;]+);base64,(.+)$/);
-            if (matches) {
-              mimeType = matches[1];
-              imageData = matches[2];
-            }
-          }
-
-          contentParts.push({
-            type: 'image',
-            image: imageData,
-            mimeType
-          });
-        } else if (refImage.url) {
-          // Pre-download user-controlled URLs through the SSRF guard and pass base64,
-          // so the SDK never fetches an unguarded URL server-side (REV-COR-497). This
-          // matches the base64 branch shape above.
-          const { data, mimeType } = await fetchReferenceImageSafely(refImage.url);
-          contentParts.push({
-            type: 'image',
-            image: Buffer.from(data).toString('base64'),
-            mimeType: refImage.mimeType || mimeType
-          });
-        }
-      }
-
-      log.debug('Added reference images to Gemini request', {
-        requestId,
-        imageCount: contentParts.length
-      });
-    }
-
-    // Add the text prompt
-    contentParts.push({
-      type: 'text',
-      text: request.prompt
-    });
-
-    // Generate using generateText (NOT generateImage)
-    // Use messages format when we have reference images, simple prompt otherwise
-    const textResult = request.referenceImages && request.referenceImages.length > 0
-      ? await generateText({
-          model: model as LanguageModel,
-          messages: [{
-            role: 'user',
-            content: contentParts
-          }],
-          providerOptions: {
-            google: {
-              responseModalities: ['TEXT', 'IMAGE'] // REQUIRED for image output
-            }
-          }
-        })
-      : await generateText({
-          model: model as LanguageModel,
-          prompt: request.prompt,
-          providerOptions: {
-            google: {
-              responseModalities: ['TEXT', 'IMAGE'] // REQUIRED for image output
-            }
-          }
-        });
-
-    // Cast to extended result type that includes files
-    const result = textResult as unknown as GeminiGenerateTextResult;
-
-    // Extract image from result.files
-    const files = result.files || result.experimental_output?.files || [];
-
-    if (!files || files.length === 0) {
-      log.warn('Gemini returned no image files', {
-        requestId,
-        hasText: !!result.text,
-        textLength: result.text?.length || 0
-      });
-      throw createImageError('NO_IMAGE', 'Gemini did not generate an image. Try a different prompt.');
-    }
-
-    // Find the first image file
-    let imageData: Uint8Array | undefined;
-    let contentType = 'image/png';
-
-    for (const file of files) {
-      // Files can be Uint8Array directly or objects with data
-      if (file instanceof Uint8Array) {
-        imageData = file;
-        break;
-      } else if (typeof file === 'object' && file !== null) {
-        const fileObj = file as { data?: Uint8Array; uint8Array?: Uint8Array; mimeType?: string; mediaType?: string };
-        if (fileObj.data) {
-          imageData = fileObj.data;
-          contentType = fileObj.mimeType || fileObj.mediaType || 'image/png';
-          break;
-        } else if (fileObj.uint8Array) {
-          imageData = fileObj.uint8Array;
-          contentType = fileObj.mimeType || fileObj.mediaType || 'image/png';
-          break;
-        }
-      }
-    }
-
-    if (!imageData) {
-      throw createImageError('NO_IMAGE', 'Could not extract image data from Gemini response');
-    }
+    const contentParts = await createGeminiContentParts(request, requestId);
+    const result = await requestGeminiImage(
+      model as LanguageModel,
+      request,
+      contentParts
+    );
+    const { imageData, contentType } = extractGeminiImage(result, requestId);
 
     const imageBuffer = Buffer.from(imageData);
 
@@ -770,26 +819,7 @@ async function generateWithGemini(
     };
 
   } catch (error) {
-    // Handle Gemini-specific errors
-    const errorMessage = error instanceof Error ? error.message : String(error);
-
-    if (errorMessage.includes('SAFETY') || errorMessage.includes('safety')) {
-      throw createImageError('CONTENT_POLICY', 'Gemini safety filter rejected the prompt');
-    }
-
-    if (errorMessage.includes('QUOTA_EXCEEDED') || errorMessage.includes('quota')) {
-      throw createImageError('RATE_LIMIT', 'Google AI quota exceeded');
-    }
-
-    if (errorMessage.includes('RECITATION')) {
-      throw createImageError('CONTENT_POLICY', 'Prompt too similar to existing content');
-    }
-
-    if (errorMessage.includes('responseModalities')) {
-      throw createImageError('INVALID_SIZE', 'Model not configured for image generation');
-    }
-
-    throw error;
+    throwGeminiImageError(error);
   }
 }
 

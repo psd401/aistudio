@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * psd-classified-evaluation — conversational PSD Classified Performance
  * Evaluation over the PSD Agent Gateway (n8n MCP Server Trigger, SSE).
@@ -28,8 +29,10 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
 
-const fs = require('node:fs');
+
+
 const {
   RATING_VALUES,
   callGatewayTool,
@@ -97,7 +100,7 @@ function loadSubmitArgs(args) {
   let raw;
   if (typeof args.json_file === 'string') {
     try {
-      raw = fs.readFileSync(args.json_file, 'utf8');
+      raw = validatedFs.readFileSync(args.json_file, 'utf8');
     } catch (err) {
       fail(`Could not read --json-file ${args.json_file}: ${err.message}`);
     }

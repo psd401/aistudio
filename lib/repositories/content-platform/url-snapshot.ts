@@ -90,37 +90,41 @@ export async function fetchRepositoryUrlText(rawUrl: string): Promise<string> {
         current = new URL(location, current);
         continue;
       }
-      if (!response.ok) {
-        throw new Error(`URL source returned HTTP ${response.status}`);
-      }
-      const contentType = (
-        response.headers.get("content-type") ?? "text/plain"
-      ).toLowerCase();
-      const contentEncoding = (
-        response.headers.get("content-encoding") ?? "identity"
-      ).toLowerCase();
-      if (contentEncoding !== "identity") {
-        await response.body?.cancel();
-        throw new Error("URL source returned unsupported content encoding");
-      }
-      if (
-        !contentType.startsWith("text/html") &&
-        !contentType.startsWith("text/plain")
-      ) {
-        await response.body?.cancel();
-        throw new Error("URL source did not return HTML or plain text");
-      }
-      const body = await readBoundedText(response);
-      const text = contentType.startsWith("text/html")
-        ? htmlToText(body).replace(/\s+/g, " ").trim()
-        : body.trim();
-      if (!text) throw new Error("URL source did not contain searchable text");
-      return text;
+      return await readRepositoryUrlResponse(response);
     }
     throw new Error("URL source exceeded the redirect limit");
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function readRepositoryUrlResponse(response: Response): Promise<string> {
+  if (!response.ok) {
+    throw new Error(`URL source returned HTTP ${response.status}`);
+  }
+  const contentType = (
+    response.headers.get("content-type") ?? "text/plain"
+  ).toLowerCase();
+  const contentEncoding = (
+    response.headers.get("content-encoding") ?? "identity"
+  ).toLowerCase();
+  if (contentEncoding !== "identity") {
+    await response.body?.cancel();
+    throw new Error("URL source returned unsupported content encoding");
+  }
+  if (
+    !contentType.startsWith("text/html") &&
+    !contentType.startsWith("text/plain")
+  ) {
+    await response.body?.cancel();
+    throw new Error("URL source did not return HTML or plain text");
+  }
+  const body = await readBoundedText(response);
+  const text = contentType.startsWith("text/html")
+    ? htmlToText(body).replace(/\s+/g, " ").trim()
+    : body.trim();
+  if (!text) throw new Error("URL source did not contain searchable text");
+  return text;
 }
 
 export async function registerCanonicalUrlSnapshot(input: {
@@ -166,6 +170,7 @@ export async function registerCanonicalUrlSnapshot(input: {
       throw new AggregateError(
         [registrationError, cleanupError],
         "Canonical URL registration and source cleanup both failed",
+        { cause: cleanupError },
       );
     }
     throw registrationError;

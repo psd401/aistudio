@@ -38,7 +38,7 @@ describe('pool-guard', () => {
     resetPoolGuardState()
   })
 
-  describe('withPoolDeadline', () => {
+
     it('returns the work result when it settles before the deadline', async () => {
       const onWedged = jest.fn()
       const result = await withPoolDeadline(Promise.resolve(42), {
@@ -140,7 +140,7 @@ describe('pool-guard', () => {
       ).rejects.toBeInstanceOf(DbPoolDeadlineError)
       expect(subscriptions).toBe(1)
     })
-  })
+
 
   describe('resolvePoolDeadlineMs', () => {
     const savedQuery = process.env.DB_QUERY_DEADLINE_MS

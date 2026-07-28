@@ -44,7 +44,7 @@ describe('sanitizeTextForDatabase', () => {
 
   it('should normalize Unicode characters', () => {
     // é can be represented as single char or combining chars
-    const composed = '\u00e9'; // é as single character
+    const composed = '\u00E9'; // é as single character
     const decomposed = 'e\u0301'; // e + combining acute accent
 
     const result1 = sanitizeTextForDatabase(composed);

@@ -14,7 +14,7 @@ function rpc(method: string, params?: Record<string, unknown>, id = 1) {
   return { jsonrpc: "2.0", method, id, ...(params ? { params } : {}) };
 }
 
-test.describe("Nexus Projects (authenticated)", () => {
+function defineNexusProjectsAuthenticatedSuite1Part1() {
   test.skip(
     process.env.PLAYWRIGHT_AUTH_ENABLED !== "true",
     "Requires the authenticated local E2E server and seeded users"
@@ -74,11 +74,10 @@ test.describe("Nexus Projects (authenticated)", () => {
 
     await page.getByRole("button", { name: "New project chat" }).click();
     await expect(page).toHaveURL(
-      new RegExp(
-        `/nexus\\?conversationId=[0-9a-f-]+&projectId=${projectId}$`
-      ),
+      /\/nexus\?conversationId=[0-9a-f-]+&projectId=[0-9a-f-]+$/,
       { timeout: 30_000 }
     );
+    expect(new URL(page.url()).searchParams.get("projectId")).toBe(String(projectId));
 
     await authenticateContext(
       page.context(),
@@ -99,7 +98,9 @@ test.describe("Nexus Projects (authenticated)", () => {
     expect(removedMemberResponse?.status()).toBe(404);
   });
 
-  test("queries only live authorized repositories over REST and MCP with a revocable scoped key", async ({
+  }
+
+function defineNexusProjectsAuthenticatedSuite1Part2() {test("queries only live authorized repositories over REST and MCP with a revocable scoped key", async ({
     page,
   }) => {
     test.setTimeout(120_000);
@@ -127,7 +128,7 @@ test.describe("Nexus Projects (authenticated)", () => {
         "repositories:changes",
       ]) {
         await createDialog
-          .getByRole("checkbox", { name: new RegExp(`^${scope}`) })
+          .getByRole("checkbox", { name: scope, exact: false })
           .click();
       }
       await createDialog.getByRole("button", { name: "Create Key" }).click();
@@ -213,9 +214,16 @@ test.describe("Nexus Projects (authenticated)", () => {
       }
     }
   });
-});
+}
 
-test.describe("Repository catalog API guards", () => {
+const defineNexusProjectsAuthenticatedSuite1 = () => {
+  defineNexusProjectsAuthenticatedSuite1Part1()
+  defineNexusProjectsAuthenticatedSuite1Part2()
+};
+
+test.describe("Nexus Projects (authenticated)", defineNexusProjectsAuthenticatedSuite1);
+
+const defineRepositoryCatalogAPIGuardsSuite2 = () => {
   test("rejects catalog requests without an API credential", async ({
     request,
   }) => {
@@ -227,4 +235,6 @@ test.describe("Repository catalog API guards", () => {
     });
     expect(search.status()).toBe(401);
   });
-});
+};
+
+test.describe("Repository catalog API guards", defineRepositoryCatalogAPIGuardsSuite2);

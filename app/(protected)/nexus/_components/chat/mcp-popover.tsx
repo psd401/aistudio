@@ -127,6 +127,112 @@ const ConnectorItem = memo(function ConnectorItem({
   )
 })
 
+function MCPPopoverView({
+  open,
+  disabled,
+  enabledConnectors,
+  connectors,
+  authenticatingIds,
+  isLoading,
+  loadError,
+  onOpenChange,
+  onRetry,
+  onToggle,
+  onReconnect,
+}: {
+  open: boolean
+  disabled: boolean
+  enabledConnectors: string[]
+  connectors: ConnectorWithStatus[]
+  authenticatingIds: Set<string>
+  isLoading: boolean
+  loadError: boolean
+  onOpenChange: (open: boolean) => void
+  onRetry: () => void
+  onToggle: (connectorId: string) => void
+  onReconnect: (connectorId: string) => void
+}) {
+  const enabledCount = enabledConnectors.length
+  let content: React.ReactNode
+  if (isLoading) {
+    content = (
+      <div className="flex items-center justify-center p-4 gap-2 text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        <span className="text-xs">Loading connectors...</span>
+      </div>
+    )
+  } else if (loadError) {
+    content = (
+      <div className="p-2 text-center">
+        <p className="text-xs text-destructive">Failed to load connectors</p>
+        <button
+          type="button"
+          onClick={onRetry}
+          className="text-xs text-primary hover:underline mt-1"
+        >
+          Retry
+        </button>
+      </div>
+    )
+  } else if (connectors.length === 0) {
+    content = (
+      <p className="text-xs text-muted-foreground p-2 text-center">
+        No connectors available
+      </p>
+    )
+  } else {
+    content = (
+      <div className="space-y-1">
+        {connectors.map((connector) => (
+          <ConnectorItem
+            key={connector.id}
+            connector={connector}
+            isEnabled={enabledConnectors.includes(connector.id)}
+            isAuthenticating={authenticatingIds.has(connector.id)}
+            onToggle={onToggle}
+            onReconnect={onReconnect}
+          />
+        ))}
+      </div>
+    )
+  }
+
+  return (
+    <Popover open={open} onOpenChange={onOpenChange}>
+      <PopoverTrigger asChild>
+        <Button
+          data-testid="nexus-mcp-control"
+          variant="ghost"
+          size="sm"
+          className={cn(
+            'h-8 gap-1.5 text-xs',
+            enabledCount > 0 && 'text-primary'
+          )}
+          disabled={disabled}
+          title={disabled ? 'Select a model first' : 'Configure connections'}
+        >
+          <Plug className="h-3.5 w-3.5" />
+          <span className="hidden sm:inline">Connect</span>
+          {enabledCount > 0 && (
+            <Badge variant="secondary" className="h-5 px-1.5 text-xs">
+              {enabledCount}
+            </Badge>
+          )}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-72 p-0" align="start">
+        <div className="p-3 border-b">
+          <h4 className="font-medium text-sm">Connections</h4>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Connect to external services via MCP
+          </p>
+        </div>
+        <div className="p-2">{content}</div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
 export function MCPPopover({
   enabledConnectors,
   onConnectorsChange,
@@ -255,76 +361,19 @@ export function MCPPopover({
     await performOAuth(connectorId, 'Reconnection')
   }, [performOAuth])
 
-  const enabledCount = enabledConnectors.length
-  const hasConnectors = connectors.length > 0
-
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button
-          data-testid="nexus-mcp-control"
-          variant="ghost"
-          size="sm"
-          className={cn(
-            'h-8 gap-1.5 text-xs',
-            enabledCount > 0 && 'text-primary'
-          )}
-          disabled={disabled}
-          title={disabled ? 'Select a model first' : 'Configure connections'}
-        >
-          <Plug className="h-3.5 w-3.5" />
-          <span className="hidden sm:inline">Connect</span>
-          {enabledCount > 0 && (
-            <Badge variant="secondary" className="h-5 px-1.5 text-xs">
-              {enabledCount}
-            </Badge>
-          )}
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent className="w-72 p-0" align="start">
-        <div className="p-3 border-b">
-          <h4 className="font-medium text-sm">Connections</h4>
-          <p className="text-xs text-muted-foreground mt-0.5">
-            Connect to external services via MCP
-          </p>
-        </div>
-        <div className="p-2">
-          {isLoading ? (
-            <div className="flex items-center justify-center p-4 gap-2 text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              <span className="text-xs">Loading connectors...</span>
-            </div>
-          ) : loadError ? (
-            <div className="p-2 text-center">
-              <p className="text-xs text-destructive">Failed to load connectors</p>
-              <button
-                type="button"
-                onClick={() => setRetryCount((c) => c + 1)}
-                className="text-xs text-primary hover:underline mt-1"
-              >
-                Retry
-              </button>
-            </div>
-          ) : !hasConnectors ? (
-            <p className="text-xs text-muted-foreground p-2 text-center">
-              No connectors available
-            </p>
-          ) : (
-            <div className="space-y-1">
-              {connectors.map((connector) => (
-                <ConnectorItem
-                  key={connector.id}
-                  connector={connector}
-                  isEnabled={enabledConnectors.includes(connector.id)}
-                  isAuthenticating={authenticatingIds.has(connector.id)}
-                  onToggle={handleToggle}
-                  onReconnect={handleReconnect}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-      </PopoverContent>
-    </Popover>
+    <MCPPopoverView
+      open={open}
+      disabled={disabled}
+      enabledConnectors={enabledConnectors}
+      connectors={connectors}
+      authenticatingIds={authenticatingIds}
+      isLoading={isLoading}
+      loadError={loadError}
+      onOpenChange={setOpen}
+      onRetry={() => setRetryCount((count) => count + 1)}
+      onToggle={handleToggle}
+      onReconnect={handleReconnect}
+    />
   )
 }

@@ -16,7 +16,7 @@ test.describe('Model Compare Polling Migration', () => {
   test.beforeEach(async ({ page }) => {
     // Go to compare page
     await page.goto('/compare')
-    
+
     // Wait for page load
     await page.waitForSelector('h1:has-text("Model Comparison")', { timeout: 10000 })
   })
@@ -55,40 +55,20 @@ test.describe('Model Compare Polling Migration', () => {
     await expect(submit).toBeEnabled()
   })
 
-  test.skip('should prevent comparing same model', async ({ page }) => {
-    // TODO: Verify that selecting the same model in both dropdowns is prevented
-  })
-
-  test.skip('should start comparison with valid inputs', async ({ page }) => {
-    // TODO: Full comparison flow with mocked SSE responses
-  })
-
-  test.skip('should handle polling updates correctly', async ({ page }) => {
-    // TODO: Mock API responses, verify partial content updates and final results
-  })
-
-  test.skip('should handle job failures gracefully', async ({ page }) => {
-    // TODO: Simulate job failures and verify error handling
-  })
-
-  test.skip('should save results to comparison history', async ({ page }) => {
-    // TODO: Verify completed comparisons persist to comparison history
-  })
-
   test('should allow starting new comparison', async ({ page }) => {
     // This test would verify the "New Comparison" functionality
     // that clears results and allows starting fresh
     const newComparisonButton = page.locator('button:has-text("New Comparison")')
-    
+
     if (await newComparisonButton.isVisible()) {
       await newComparisonButton.click()
-      
+
       // Verify that responses are cleared
       const responseAreas = page.locator('[data-testid="model-response"]')
       for (let i = 0; i < await responseAreas.count(); i++) {
         await expect(responseAreas.nth(i)).toBeEmpty()
       }
-      
+
       // Verify that prompt is cleared
       await expect(page.locator('textarea')).toHaveValue('')
     }
@@ -96,14 +76,6 @@ test.describe('Model Compare Polling Migration', () => {
 })
 
 test.describe('Compare API Integration', () => {
-  test.skip('should handle API errors gracefully', async ({ page }) => {
-    // TODO: Mock network errors, trigger comparison, verify error toast
-  })
-
-  test.skip('should handle polling timeout gracefully', async ({ page }) => {
-    // TODO: Simulate polling timeout and verify graceful degradation
-  })
-
   // FIXME: the warning-TOAST bug this caught is now FIXED in product (model-compare
   // switched to the mounted sonner toaster — the shadcn `useToast` it used has no
   // mounted <Toaster>, so its toasts never rendered). But the mocked-SSE flow itself

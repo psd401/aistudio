@@ -294,13 +294,16 @@ function extractTextFromUIMessage(
         segments.push(raw);
       } else if (Array.isArray(raw)) {
         for (const cp of raw) {
-          if (
+          const handleNestedBranch1 = () => {
+            if (
             typeof cp === 'object' && cp !== null &&
             (cp as Record<string, unknown>).type === 'text' &&
             typeof (cp as Record<string, unknown>).text === 'string'
           ) {
             segments.push((cp as { text: string }).text);
           }
+          }
+          handleNestedBranch1()
         }
       }
     }
@@ -612,7 +615,7 @@ async function convertMessages(
       messageCount: normalizedMessages.length,
       messageRoles: normalizedMessages.map(m => m.role),
     });
-    throw new Error(`Message conversion failed: ${error.message}`);
+    throw new Error(`Message conversion failed: ${error.message}`, { cause: conversionError });
   }
 }
 
@@ -795,6 +798,44 @@ function buildStreamResponse(options: BuildStreamResponseOptions): StreamRespons
   return { result, requestId, capabilities, telemetryConfig };
 }
 
+async function prepareStreamInput(options: {
+  request: StreamRequest;
+  contentSafetyService: ReturnType<typeof getContentSafetyService>;
+  log: ReturnType<typeof createLogger>;
+  requestId: string;
+}) {
+  const { request, contentSafetyService, log, requestId } = options;
+  let messages = validateAndCopyMessages(request, log);
+  let inputSafetyResult: ContentSafetyResult | undefined;
+  if (shouldCheckInputSafety(request, contentSafetyService)) {
+    const safetyCheck = await checkInputContentSafety({
+      messages,
+      request,
+      contentSafetyService,
+      log,
+      requestId,
+    });
+    inputSafetyResult = safetyCheck.safetyResult;
+    messages = safetyCheck.updatedMessages;
+  }
+  return { messages, inputSafetyResult };
+}
+
+function logStreamStart(
+  request: StreamRequest,
+  log: ReturnType<typeof createLogger>
+): void {
+  log.info('Starting unified stream', {
+    provider: request.provider,
+    modelId: request.modelId,
+    source: request.source,
+    userId: request.userId,
+    messageCount: request.messages?.length || 0,
+    hasMessages: !!request.messages,
+    messagesType: typeof request.messages
+  });
+}
+
 /**
  * Unified streaming service that handles all AI streaming operations
  * across chat, compare, and assistant execution tools.
@@ -808,7 +849,7 @@ function buildStreamResponse(options: BuildStreamResponseOptions): StreamRespons
  */
 export class UnifiedStreamingService {
   private circuitBreakers = new Map<string, CircuitBreaker>();
-  
+
   /**
    * Main streaming method that handles all AI operations
    */
@@ -816,22 +857,14 @@ export class UnifiedStreamingService {
     const requestId = generateRequestId();
     const timer = startTimer('unified-streaming-service.stream');
     const log = createLogger({ requestId, module: 'unified-streaming-service' });
-    
-    log.info('Starting unified stream', {
-      provider: request.provider,
-      modelId: request.modelId,
-      source: request.source,
-      userId: request.userId,
-      messageCount: request.messages?.length || 0,
-      hasMessages: !!request.messages,
-      messagesType: typeof request.messages
-    });
-    
+
+    logStreamStart(request, log);
+
     try {
       // 1. Get provider adapter and capabilities
       const adapter = await getProviderAdapter(request.provider);
       const capabilities = adapter.getCapabilities(request.modelId);
-      
+
       // 2. Configure telemetry
       const telemetryConfig = await getTelemetryConfig({
         functionId: `${request.source}.stream`,
@@ -844,25 +877,20 @@ export class UnifiedStreamingService {
         recordInputs: request.telemetry?.recordInputs,
         recordOutputs: request.telemetry?.recordOutputs
       });
-      
+
       // 3. Check circuit breaker
       const circuitBreaker = this.getCircuitBreaker(request.provider);
       checkCircuitBreaker(circuitBreaker, request.provider, log);
 
       // 4. Validate and copy messages
-      let messages = validateAndCopyMessages(request, log);
-
-      // 5. K-12 Content Safety: Check user input before sending to AI
       const contentSafetyService = getContentSafetyService();
-      let inputSafetyResult: ContentSafetyResult | undefined;
-
-      if (shouldCheckInputSafety(request, contentSafetyService)) {
-        const safetyCheck = await checkInputContentSafety({
-          messages, request, contentSafetyService, log, requestId
-        });
-        inputSafetyResult = safetyCheck.safetyResult;
-        messages = safetyCheck.updatedMessages;
-      }
+      const preparedInput = await prepareStreamInput({
+        request,
+        contentSafetyService,
+        log,
+        requestId,
+      });
+      const { messages, inputSafetyResult } = preparedInput;
 
       // 6. Convert messages and build config
       const convertedMessages = await convertMessages(messages, log);
@@ -879,10 +907,10 @@ export class UnifiedStreamingService {
         providerOptions: adapter.getProviderOptions(request.modelId, request.options),
         telemetryConfig
       });
-      
+
       // 5. Start telemetry span
       const span = createStreamingTelemetrySpan(telemetryConfig, request, capabilities, config.timeout || timeout);
-      
+
       try {
         // 6. Execute streaming with provider-specific handling
         const result = await adapter.streamWithEnhancements(config, {
@@ -917,7 +945,7 @@ export class UnifiedStreamingService {
             request.callbacks?.onError?.(error);
           }
         });
-        
+
         // 7. Mark circuit breaker as successful and build response
         circuitBreaker.recordSuccess();
         log.info('Stream completed successfully', {
@@ -942,7 +970,7 @@ export class UnifiedStreamingService {
           hasDynamicTokenMappings: request.inputTokenMappingSink !== undefined,
           log
         });
-        
+
       } catch (error) {
         span?.recordException(error as Error);
         span?.setStatus({ code: 2 }); // ERROR
@@ -951,7 +979,7 @@ export class UnifiedStreamingService {
       } finally {
         span?.end();
       }
-      
+
     } catch (error) {
       timer({ status: 'error' });
       log.error('Stream failed', {
@@ -963,7 +991,7 @@ export class UnifiedStreamingService {
       throw error;
     }
   }
-  
+
   /**
    * Get or create circuit breaker for provider
    */
@@ -977,7 +1005,7 @@ export class UnifiedStreamingService {
     }
     return this.circuitBreakers.get(provider)!;
   }
-  
+
   /**
    * Calculate adaptive timeout based on model capabilities and request
    */
@@ -1005,11 +1033,11 @@ export class UnifiedStreamingService {
       // Other reasoning models get 1 minute
       return 60000;
     }
-    
+
     // Standard models use base timeout
     return request.timeout || baseTimeout;
   }
-  
+
   /**
    * Handle streaming progress events using typed SSE events and type guards
    */
@@ -1141,7 +1169,7 @@ export class UnifiedStreamingService {
     }
     return false;
   }
-  
+
   /**
    * Handle reasoning content for advanced models
    */
@@ -1153,7 +1181,7 @@ export class UnifiedStreamingService {
       });
     }
   }
-  
+
   /**
    * Handle thinking content for Claude models
    */
@@ -1165,7 +1193,7 @@ export class UnifiedStreamingService {
       });
     }
   }
-  
+
   /**
    * Handle stream completion
    */
@@ -1196,14 +1224,14 @@ export class UnifiedStreamingService {
       });
       span.setStatus({ code: 1 }); // OK
     }
-    
-    timer({ 
+
+    timer({
       status: 'success',
       tokensUsed: data.usage?.totalTokens || 0,
       finishReason: data.finishReason
     });
   }
-  
+
   /**
    * Handle stream errors
    */

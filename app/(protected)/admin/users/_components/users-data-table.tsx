@@ -9,9 +9,9 @@ import {
   getSortedRowModel,
   getFilteredRowModel,
   SortingState,
-  useReactTable,
   ColumnFiltersState,
 } from "@tanstack/react-table"
+import { useUncompiledReactTable } from "@/components/ui/use-uncompiled-react-table"
 import {
   Table,
   TableBody,
@@ -94,24 +94,17 @@ function SortableHeader({
   )
 }
 
-export function UsersDataTable({
-  users,
-  onViewUser,
-  onEditUser,
+function useUserColumns({
   onDeleteUser,
+  onEditUser,
   onSendInvite,
-  loading = false,
-  className,
-}: UsersDataTableProps) {
-  const { toast } = useToast()
-  const [sorting, setSorting] = useState<SortingState>([])
-  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
-  const [rowSelection, setRowSelection] = useState({})
-
-  // Create columns with actions
-  const columns = useMemo<ColumnDef<UserTableRow>[]>(
+  onViewUser,
+}: Pick<
+  UsersDataTableProps,
+  "onDeleteUser" | "onEditUser" | "onSendInvite" | "onViewUser"
+>) {
+  return useMemo<ColumnDef<UserTableRow>[]>(
     () => [
-      // Selection checkbox
       {
         id: "select",
         header: ({ table }) => (
@@ -120,14 +113,16 @@ export function UsersDataTable({
               table.getIsAllPageRowsSelected() ||
               (table.getIsSomePageRowsSelected() && "indeterminate")
             }
-            onCheckedChange={(value) => table.toggleAllPageRowsSelected(!!value)}
+            onCheckedChange={value =>
+              table.toggleAllPageRowsSelected(!!value)
+            }
             aria-label="Select all"
           />
         ),
         cell: ({ row }) => (
           <Checkbox
             checked={row.getIsSelected()}
-            onCheckedChange={(value) => row.toggleSelected(!!value)}
+            onCheckedChange={value => row.toggleSelected(!!value)}
             aria-label="Select row"
           />
         ),
@@ -135,15 +130,17 @@ export function UsersDataTable({
         enableHiding: false,
         size: 40,
       },
-      // User column (avatar + name + email)
       {
         id: "user",
-        accessorFn: (row) => `${row.firstName} ${row.lastName}`,
-        header: ({ column }) => <SortableHeader column={column} title="User" />,
+        accessorFn: row => `${row.firstName} ${row.lastName}`,
+        header: ({ column }) => (
+          <SortableHeader column={column} title="User" />
+        ),
         cell: ({ row }) => {
           const user = row.original
-          const fullName = `${user.firstName || ""} ${user.lastName || ""}`.trim() || "(No name)"
-
+          const fullName =
+            `${user.firstName || ""} ${user.lastName || ""}`.trim() ||
+            "(No name)"
           return (
             <div className="flex items-center gap-3">
               <UserAvatar
@@ -157,33 +154,38 @@ export function UsersDataTable({
               />
               <div className="min-w-0">
                 <p className="font-medium text-sm truncate">{fullName}</p>
-                <p className="text-xs text-muted-foreground truncate">{user.email}</p>
+                <p className="text-xs text-muted-foreground truncate">
+                  {user.email}
+                </p>
               </div>
             </div>
           )
         },
         size: 280,
       },
-      // Roles column
       {
         accessorKey: "roles",
         header: "Role",
-        cell: ({ row }) => <RoleBadgeList roles={row.original.roles} maxDisplay={2} />,
+        cell: ({ row }) => (
+          <RoleBadgeList roles={row.original.roles} maxDisplay={2} />
+        ),
         size: 160,
       },
-      // Status column
       {
         accessorKey: "status",
-        header: ({ column }) => <SortableHeader column={column} title="Status" />,
+        header: ({ column }) => (
+          <SortableHeader column={column} title="Status" />
+        ),
         cell: ({ row }) => (
           <StatusIndicator status={row.original.status} size="sm" />
         ),
         size: 120,
       },
-      // Last Active column
       {
         accessorKey: "lastSignInAt",
-        header: ({ column }) => <SortableHeader column={column} title="Last Active" />,
+        header: ({ column }) => (
+          <SortableHeader column={column} title="Last Active" />
+        ),
         cell: ({ row }) => (
           <span className="text-sm text-muted-foreground">
             {formatDate(row.original.lastSignInAt)}
@@ -191,17 +193,20 @@ export function UsersDataTable({
         ),
         size: 120,
       },
-      // Actions column
       {
         id: "actions",
         header: () => <span className="sr-only">Actions</span>,
         cell: ({ row }) => {
           const user = row.original
-
           return (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-8 w-8" data-testid="user-row-actions">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  data-testid="user-row-actions"
+                >
                   <IconDotsVertical className="h-4 w-4" />
                   <span className="sr-only">Open menu</span>
                 </Button>
@@ -238,8 +243,32 @@ export function UsersDataTable({
     ],
     [onViewUser, onEditUser, onDeleteUser, onSendInvite]
   )
+}
 
-  const table = useReactTable({
+export function UsersDataTable({
+  users,
+  onViewUser,
+  onEditUser,
+  onDeleteUser,
+  onSendInvite,
+  loading = false,
+  className,
+}: UsersDataTableProps) {
+  "use no memo"
+
+  const { toast } = useToast()
+  const [sorting, setSorting] = useState<SortingState>([])
+  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
+  const [rowSelection, setRowSelection] = useState({})
+
+  const columns = useUserColumns({
+    onDeleteUser,
+    onEditUser,
+    onSendInvite,
+    onViewUser,
+  })
+
+  const table = useUncompiledReactTable({
     data: users,
     columns,
     state: {

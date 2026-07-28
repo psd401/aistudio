@@ -40,7 +40,7 @@ import {
   type PromotionReason,
 } from './job-promotion';
 import * as chatPkg from '@googleapis/chat';
-import * as crypto from 'crypto';
+import * as crypto from 'node:crypto';
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
 import { extractRichEnvelope } from './rich-envelope';
 import {
@@ -49,6 +49,7 @@ import {
 } from './invocation-context';
 import {
   loadAuthorizedSchedule,
+  type AuthorizedSchedule,
   type ScheduleReferenceEvent,
 } from './schedule-record';
 
@@ -346,59 +347,74 @@ async function consumeAgentCoreStream(
   return lastResultEvent;
 }
 
-async function invokeAgentCore(
-  prompt: string,
-  userEmail: string,
-  sessionId: string,
+function invokeFailure(response: string): InvokeResult {
+  return { response, inputTokens: 0, outputTokens: 0, ok: false };
+}
+
+function resolveAgentCoreRuntimeArn(
+  runtimeId: string,
   log: Logger,
-  userContext: { displayName?: string; workspacePrefix?: string },
-  remainingMs: () => number,
-): Promise<InvokeResult> {
-  const runtimeId = await getRuntimeId(log);
-  if (!runtimeId) {
-    return { response: 'Agent is not yet deployed.', inputTokens: 0, outputTokens: 0, ok: false };
+): { runtimeArn: string } | { failure: InvokeResult } {
+  if (runtimeId.startsWith('arn:')) return { runtimeArn: runtimeId };
+
+  const region = process.env.AWS_REGION || 'us-east-1';
+  const account = process.env.AWS_ACCOUNT_ID || '';
+  if (!account) {
+    log.error('AWS_ACCOUNT_ID env var not set — cannot construct AgentCore ARN', {
+      runtimeId,
+    });
+    return {
+      failure: invokeFailure(
+        'Agent configuration error — missing AWS account ID.',
+      ),
+    };
   }
+  return {
+    runtimeArn: `arn:aws:bedrock-agentcore:${region}:${account}:runtime/${runtimeId}`,
+  };
+}
 
-  // Declared outside the try so the catch can report how long we waited before
-  // giving up — the single most useful number when diagnosing a timeout, and
-  // the one missing from the 2026-07-27 failure.
-  const invokeStart = Date.now();
-
-  try {
-    const region = process.env.AWS_REGION || 'us-east-1';
-    const account = process.env.AWS_ACCOUNT_ID || '';
-    let runtimeArn: string;
-    if (runtimeId.startsWith('arn:')) {
-      runtimeArn = runtimeId;
-    } else {
-      if (!account) {
-        log.error('AWS_ACCOUNT_ID env var not set — cannot construct AgentCore ARN', {
-          runtimeId,
-        });
-        return {
-          response: 'Agent configuration error — missing AWS account ID.',
-          inputTokens: 0,
-          outputTokens: 0,
-          ok: false,
-        };
-      }
-      runtimeArn = `arn:aws:bedrock-agentcore:${region}:${account}:runtime/${runtimeId}`;
-    }
-
-    const invocationSecret = await getInvocationSigningSecret();
-    const invocationContext = createScheduledInvocationContextToken(
-      invocationSecret,
-      {
-        ownerEmail: userEmail,
-        sessionId,
-        workspacePrefix: userContext.workspacePrefix ?? '',
-      },
-    );
-    // Read the clock HERE, not at handler entry: fetching the runtime id and
-    // the signing secret above can take seconds, and the deadline we promise
-    // the agent has to reflect the time actually left.
-    const turnDeadlineS = resolveTurnDeadlineS(remainingMs());
-    const body = JSON.stringify({
+async function createAgentCoreRequest(options: {
+  runtimeArn: string;
+  prompt: string;
+  userEmail: string;
+  sessionId: string;
+  userContext: { displayName?: string; workspacePrefix?: string };
+  remainingMs: () => number;
+}): Promise<HttpRequest> {
+  const {
+    runtimeArn,
+    prompt,
+    userEmail,
+    sessionId,
+    userContext,
+    remainingMs,
+  } = options;
+  const region = process.env.AWS_REGION || 'us-east-1';
+  const invocationSecret = await getInvocationSigningSecret();
+  const invocationContext = createScheduledInvocationContextToken(
+    invocationSecret,
+    {
+      ownerEmail: userEmail,
+      sessionId,
+      workspacePrefix: userContext.workspacePrefix ?? '',
+    },
+  );
+  // Read the clock after fetching the signing secret: the deadline must reflect
+  // the time actually left when the request is ready to leave this Lambda.
+  const turnDeadlineS = resolveTurnDeadlineS(remainingMs());
+  return new HttpRequest({
+    method: 'POST',
+    protocol: 'https:',
+    hostname: `bedrock-agentcore.${region}.amazonaws.com`,
+    path: `/runtimes/${encodeURIComponent(runtimeArn)}/invocations`,
+    headers: {
+      'Content-Type': 'application/json',
+      host: `bedrock-agentcore.${region}.amazonaws.com`,
+      'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': sessionId,
+      'X-Amzn-Bedrock-AgentCore-Runtime-User-Id': userEmail,
+    },
+    body: JSON.stringify({
       prompt,
       user_email: userEmail,
       user_display_name: userContext.displayName ?? '',
@@ -412,22 +428,116 @@ async function invokeAgentCore(
       // measured from a later start than our abort and so can never fire first.
       deadline_s: turnDeadlineS,
       source: 'scheduled',
-    });
+    }),
+  });
+}
 
-    const request = new HttpRequest({
-      method: 'POST',
-      protocol: 'https:',
-      hostname: `bedrock-agentcore.${region}.amazonaws.com`,
-      path: `/runtimes/${encodeURIComponent(runtimeArn)}/invocations`,
-      headers: {
-        'Content-Type': 'application/json',
-        host: `bedrock-agentcore.${region}.amazonaws.com`,
-        'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': sessionId,
-        'X-Amzn-Bedrock-AgentCore-Runtime-User-Id': userEmail,
-      },
-      body,
-    });
+type AgentCoreResponseRead =
+  | { responseBody: Record<string, unknown> }
+  | { failure: InvokeResult };
 
+async function readAgentCoreResponse(
+  response: Response,
+  log: Logger,
+  fetchStart: number,
+): Promise<AgentCoreResponseRead> {
+  if (!response.ok) {
+    const errBody = await response.text();
+    log.error('AgentCore invocation failed', {
+      status: response.status,
+      body: errBody.substring(0, 500),
+    });
+    return {
+      failure: invokeFailure(
+        'Agent encountered an error processing scheduled task.',
+      ),
+    };
+  }
+
+  const contentType = response.headers.get('content-type') ?? '';
+  if (contentType.includes('text/event-stream')) {
+    const finalEvent = await consumeAgentCoreStream(response, log, fetchStart);
+    return finalEvent
+      ? { responseBody: finalEvent }
+      : { failure: invokeFailure('No response from agent.') };
+  }
+
+  const parsed: unknown = await response.json();
+  log.info('AgentCore response body parsed', {
+    totalElapsedMs: Date.now() - fetchStart,
+    mode: 'buffered',
+  });
+  if (!parsed || typeof parsed !== 'object') {
+    log.error('AgentCore returned non-object body', { kind: typeof parsed });
+    return {
+      failure: invokeFailure('Agent returned an unexpected response shape.'),
+    };
+  }
+  return { responseBody: parsed as Record<string, unknown> };
+}
+
+function toInvokeResult(responseBody: Record<string, unknown>): InvokeResult {
+  const rawResult = responseBody.result;
+  const result = typeof rawResult === 'string' && rawResult.length > 0
+    ? rawResult
+    : 'No response from agent.';
+  const ok = typeof rawResult === 'string' && rawResult.length > 0;
+  const metadata =
+    responseBody.metadata && typeof responseBody.metadata === 'object'
+      ? (responseBody.metadata as Record<string, unknown>)
+      : {};
+  const errorClass =
+    typeof metadata.error_class === 'string' && metadata.error_class
+      ? metadata.error_class
+      : undefined;
+  return {
+    response: result,
+    inputTokens:
+      typeof metadata.input_tokens === 'number' ? metadata.input_tokens : 0,
+    outputTokens:
+      typeof metadata.output_tokens === 'number' ? metadata.output_tokens : 0,
+    ok,
+    errorClass,
+  };
+}
+
+interface AgentCoreInvocation {
+  prompt: string;
+  userEmail: string;
+  sessionId: string;
+  log: Logger;
+  userContext: { displayName?: string; workspacePrefix?: string };
+  remainingMs: () => number;
+}
+
+async function invokeAgentCore(
+  invocation: AgentCoreInvocation,
+): Promise<InvokeResult> {
+  const {
+    prompt,
+    userEmail,
+    sessionId,
+    log,
+    userContext,
+    remainingMs,
+  } = invocation;
+  const runtimeId = await getRuntimeId(log);
+  if (!runtimeId) {
+    return invokeFailure('Agent is not yet deployed.');
+  }
+
+  const invokeStart = Date.now();
+  try {
+    const runtime = resolveAgentCoreRuntimeArn(runtimeId, log);
+    if ('failure' in runtime) return runtime.failure;
+    const request = await createAgentCoreRequest({
+      runtimeArn: runtime.runtimeArn,
+      prompt,
+      userEmail,
+      sessionId,
+      userContext,
+      remainingMs,
+    });
     const signed = await agentCoreSigner.sign(request);
     const fetchStart = Date.now();
     const response = await fetch(`https://${signed.hostname}${signed.path}`, {
@@ -447,90 +557,23 @@ async function invokeAgentCore(
       timeToHeadersMs: Date.now() - fetchStart,
     });
 
-    if (!response.ok) {
-      const errBody = await response.text();
-      log.error('AgentCore invocation failed', {
-        status: response.status,
-        body: errBody.substring(0, 500),
-      });
-      return {
-        response: 'Agent encountered an error processing scheduled task.',
-        inputTokens: 0,
-        outputTokens: 0,
-        ok: false,
-      };
-    }
-
-    const contentType = response.headers.get('content-type') ?? '';
-    let responseBody: Record<string, unknown>;
-    if (contentType.includes('text/event-stream')) {
-      // Streaming entrypoint (see infra/agent-image/agentcore_wrapper.py).
-      // Drains the SSE stream, discards heartbeat events, and keeps the last
-      // event that carries a `result` field.
-      const finalEvent = await consumeAgentCoreStream(response, log, fetchStart);
-      if (!finalEvent) {
-        return { response: 'No response from agent.', inputTokens: 0, outputTokens: 0, ok: false };
-      }
-      responseBody = finalEvent;
-    } else {
-      const parsed: unknown = await response.json();
-      log.info('AgentCore response body parsed', {
-        totalElapsedMs: Date.now() - fetchStart,
-        mode: 'buffered',
-      });
-      if (!parsed || typeof parsed !== 'object') {
-        log.error('AgentCore returned non-object body', { kind: typeof parsed });
-        return { response: 'Agent returned an unexpected response shape.', inputTokens: 0, outputTokens: 0, ok: false };
-      }
-      responseBody = parsed as Record<string, unknown>;
-    }
-    const rawResult = responseBody.result;
-    const result = typeof rawResult === 'string' && rawResult.length > 0
-      ? rawResult
-      : 'No response from agent.';
-    const ok = typeof rawResult === 'string' && rawResult.length > 0;
-    const metadata =
-      responseBody.metadata && typeof responseBody.metadata === 'object'
-        ? (responseBody.metadata as Record<string, unknown>)
-        : {};
-    const inputTokens = typeof metadata.input_tokens === 'number' ? metadata.input_tokens : 0;
-    const outputTokens = typeof metadata.output_tokens === 'number' ? metadata.output_tokens : 0;
-    // `ok` above is "did we get any text back", which a deadline-expired turn
-    // ALSO satisfies — the harness returns a failure frame as its result. The
-    // error class is the only reliable signal of why a turn ended, so carry it
-    // through rather than inferring intent from the response text.
-    const errorClass =
-      typeof metadata.error_class === 'string' && metadata.error_class
-        ? metadata.error_class
-        : undefined;
-    return { response: result, inputTokens, outputTokens, ok, errorClass };
+    const readResult = await readAgentCoreResponse(response, log, fetchStart);
+    return 'failure' in readResult
+      ? readResult.failure
+      : toInvokeResult(readResult.responseBody);
   } catch (error) {
     const errName = error instanceof Error ? error.name : 'Unknown';
     const errMsg = error instanceof Error ? error.message : String(error);
-    const elapsedMs = Date.now() - invokeStart;
     log.error('AgentCore invocation error', {
       errorName: errName,
       error: errMsg,
-      elapsedMs,
+      elapsedMs: Date.now() - invokeStart,
     });
-    return {
-      // Sanitized user-facing message — full error details are in CloudWatch
-      // logs above.
-      //
-      // A timeout gets its OWN message. "Temporarily unavailable, try again
-      // later" is not merely unhelpful here, it is false: the agent was
-      // available and working the entire time, and on 2026-07-27 it finished
-      // its work 5.6 seconds after we hung up on it. Telling the owner to
-      // retry invites an identical 14-minute failure, and the wording sent the
-      // on-call investigation looking for an outage that never happened.
-      response:
-        errName === 'TimeoutError'
-          ? 'This scheduled task ran out of time before it could finish. It was still working when the deadline was reached — consider narrowing what it does, or splitting it into smaller scheduled tasks.'
-          : 'Agent temporarily unavailable for scheduled task. Please try again later.',
-      inputTokens: 0,
-      outputTokens: 0,
-      ok: false,
-    };
+    return invokeFailure(
+      errName === 'TimeoutError'
+        ? 'This scheduled task ran out of time before it could finish. It was still working when the deadline was reached — consider narrowing what it does, or splitting it into smaller scheduled tasks.'
+        : 'Agent temporarily unavailable for scheduled task. Please try again later.',
+    );
   }
 }
 
@@ -624,13 +667,12 @@ async function releaseJobLock(
 }
 
 /**
- * Promote a deadline-expired SCHEDULED turn to the background job-runner.
+ * Promote a recoverable scheduled turn to the background job-runner.
  *
- * Launches the same ECS task the router uses for interactive turns
- * (agent-router/job-main.ts): it resumes the SAME AgentCore session with a
- * continuation prompt and a 2-hour deadline, then posts the finished answer to
- * the owner's Chat space. Lambda's 15-minute ceiling is an AWS hard limit, so
- * this is the only way a longer scheduled task can ever complete.
+ * A deadline resumes the same AgentCore session. Context overflow restarts in
+ * a derived fresh session because resuming the overflowing transcript would
+ * fail again. Both paths use the same ECS runner and post the finished answer
+ * to the owner's Chat space.
  *
  * Returns true when the job launched — the caller must then NOT post the
  * partial, or the owner gets two messages for one task.
@@ -640,87 +682,119 @@ async function releaseJobLock(
  * agent managed to produce. Promotion must never make things worse than the
  * status quo.
  */
+interface ScheduledJobInput {
+  sessionId: string;
+  runtimeId: string;
+  userEmail: string;
+  displayName: string;
+  workspacePrefix: string;
+  spaceName: string;
+  originalPrompt: string;
+  scheduleName: string;
+  reason: PromotionReason;
+}
+
+interface JobRunnerConfig {
+  clusterArn: string;
+  taskDefArn: string;
+  subnets: string[];
+  securityGroup: string;
+  containerName: string;
+}
+
+function readJobRunnerConfig(log: Logger): JobRunnerConfig | null {
+  const config = {
+    clusterArn: process.env.JOB_CLUSTER_ARN || '',
+    taskDefArn: process.env.JOB_TASK_DEF_ARN || '',
+    subnets: (process.env.JOB_SUBNETS || '').split(',').filter(Boolean),
+    securityGroup: process.env.JOB_SECURITY_GROUP || '',
+    containerName: process.env.JOB_CONTAINER_NAME || 'job-runner',
+  };
+  if (
+    !config.clusterArn
+    || !config.taskDefArn
+    || config.subnets.length === 0
+    || !config.securityGroup
+  ) {
+    log.warn('Job promotion not configured — posting the partial instead');
+    return null;
+  }
+  return config;
+}
+
+async function launchScheduledJob(
+  input: ScheduledJobInput,
+  lockToken: string,
+  config: JobRunnerConfig,
+  log: Logger,
+): Promise<void> {
+  const payload = buildJobPayload({
+    sessionId: input.sessionId,
+    reason: input.reason,
+    lockToken,
+    runtimeId: input.runtimeId,
+    userEmail: input.userEmail,
+    displayName: input.displayName,
+    workspacePrefix: input.workspacePrefix,
+    spaceName: input.spaceName,
+    // Scheduled tasks always deliver to the owner's DM, never a shared space.
+    isDM: true,
+    originalPrompt: input.originalPrompt,
+  });
+  const result = await ecsClient.send(
+    new RunTaskCommand({
+      cluster: config.clusterArn,
+      taskDefinition: config.taskDefArn,
+      launchType: 'FARGATE',
+      count: 1,
+      startedBy: 'agent-cron-promotion',
+      networkConfiguration: {
+        awsvpcConfiguration: {
+          subnets: config.subnets,
+          securityGroups: [config.securityGroup],
+          assignPublicIp: 'DISABLED',
+        },
+      },
+      overrides: {
+        containerOverrides: [
+          {
+            name: config.containerName,
+            environment: [{ name: 'JOB_PAYLOAD', value: payload }],
+          },
+        ],
+      },
+    }),
+  );
+  if (result.failures && result.failures.length > 0) {
+    throw new Error(
+      `RunTask failures: ${result.failures
+        .map((failure) => {
+          const detail = failure.detail ? ` (${failure.detail})` : '';
+          return `${failure.reason ?? 'unknown'}${detail}`;
+        })
+        .join('; ')}`,
+    );
+  }
+  log.info('Scheduled turn promoted to background job', {
+    marker: 'BACKGROUND_PROMOTION',
+    source: 'cron',
+    reason: input.reason,
+    scheduleName: input.scheduleName,
+    sessionId: input.sessionId,
+    taskArn: result.tasks?.[0]?.taskArn ?? 'unknown',
+  });
+}
+
 async function promoteScheduledTurnToJob(
-  input: {
-    sessionId: string;
-    runtimeId: string;
-    userEmail: string;
-    displayName: string;
-    workspacePrefix: string;
-    spaceName: string;
-    originalPrompt: string;
-    scheduleName: string;
-    reason: PromotionReason;
-  },
+  input: ScheduledJobInput,
   log: Logger,
 ): Promise<boolean> {
-  const clusterArn = process.env.JOB_CLUSTER_ARN || '';
-  const taskDefArn = process.env.JOB_TASK_DEF_ARN || '';
-  const subnets = (process.env.JOB_SUBNETS || '').split(',').filter(Boolean);
-  const securityGroup = process.env.JOB_SECURITY_GROUP || '';
-  const containerName = process.env.JOB_CONTAINER_NAME || 'job-runner';
-  if (!clusterArn || !taskDefArn || subnets.length === 0 || !securityGroup) {
-    log.warn('Job promotion not configured — posting the partial instead');
-    return false;
-  }
-
+  const config = readJobRunnerConfig(log);
+  if (!config) return false;
   const lockToken = await tryAcquireJobLock(input.sessionId, log);
   if (lockToken === null) return false;
-
   try {
-    const payload = buildJobPayload({
-      sessionId: input.sessionId,
-      reason: input.reason,
-      lockToken,
-      runtimeId: input.runtimeId,
-      userEmail: input.userEmail,
-      displayName: input.displayName,
-      workspacePrefix: input.workspacePrefix,
-      spaceName: input.spaceName,
-      // Scheduled tasks always deliver to the owner's DM, never a shared
-      // space, so the runner must not prefix the reply with "[Name's Agent]".
-      isDM: true,
-      originalPrompt: input.originalPrompt,
-    });
-
-    const result = await ecsClient.send(
-      new RunTaskCommand({
-        cluster: clusterArn,
-        taskDefinition: taskDefArn,
-        launchType: 'FARGATE',
-        count: 1,
-        startedBy: 'agent-cron-promotion',
-        networkConfiguration: {
-          awsvpcConfiguration: {
-            subnets,
-            securityGroups: [securityGroup],
-            assignPublicIp: 'DISABLED',
-          },
-        },
-        overrides: {
-          containerOverrides: [
-            { name: containerName, environment: [{ name: 'JOB_PAYLOAD', value: payload }] },
-          ],
-        },
-      }),
-    );
-    if (result.failures && result.failures.length > 0) {
-      throw new Error(
-        `RunTask failures: ${result.failures
-          .map((f) => `${f.reason ?? 'unknown'}${f.detail ? ` (${f.detail})` : ''}`)
-          .join('; ')}`,
-      );
-    }
-
-    log.info('Scheduled turn promoted to background job', {
-      // Stable marker for the BackgroundPromotion metric filter (#1161).
-      marker: 'BACKGROUND_PROMOTION',
-      source: 'cron',
-      reason: input.reason,
-      scheduleName: input.scheduleName,
-      sessionId: input.sessionId,
-      taskArn: result.tasks?.[0]?.taskArn ?? 'unknown',
-    });
+    await launchScheduledJob(input, lockToken, config, log);
     return true;
   } catch (error) {
     // Roll the lock back, or the owner's next message sits behind a job that
@@ -920,6 +994,154 @@ async function recordCronFailure(
   }
 }
 
+type HandlerResult = {
+  status: 'success' | 'error' | 'skipped';
+  scheduleId: string;
+};
+
+interface ScheduledResultContext {
+  schedule: AuthorizedSchedule;
+  scheduleName: string;
+  startTime: number;
+  sessionId: string;
+  result: InvokeResult;
+  log: Logger;
+}
+
+async function sendPromotionAcknowledgement(
+  context: ScheduledResultContext,
+  reason: PromotionReason,
+): Promise<void> {
+  const { schedule, scheduleName, log } = context;
+  const acknowledgement =
+    reason === 'context-overflow'
+      ? "⏳ This run grew too large to finish in one pass, so I'm starting it over in the background with a longer budget. I'll post the result here when it's done."
+      : "⏳ This is taking longer than one pass allows — I've moved it to a background job and will post the result here when it's done.";
+  try {
+    await sendChatMessage(
+      schedule.dmSpaceName,
+      `📋 **${scheduleName}**\n\n${acknowledgement}`,
+      log,
+    );
+  } catch (error) {
+    // The job is already running, so acknowledgement delivery is best-effort.
+    log.warn('Promotion ack delivery failed; job still running', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function recordPromotedRun(
+  context: ScheduledResultContext,
+): Promise<void> {
+  const { schedule, scheduleName, sessionId, result, startTime, log } = context;
+  await recordRun(
+    {
+      userEmail: schedule.ownerEmail,
+      scheduleId: schedule.scheduleId,
+      scheduleName,
+      sessionId,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      latencyMs: Date.now() - startTime,
+      status: 'promoted',
+    },
+    log,
+  );
+  log.info('Scheduled task handed to background job', {
+    scheduleId: schedule.scheduleId,
+    scheduleName,
+    sessionId,
+    email: sanitizeEmail(schedule.ownerEmail),
+    latencyMs: Date.now() - startTime,
+  });
+}
+
+async function tryPromoteScheduledResult(
+  context: ScheduledResultContext,
+): Promise<boolean> {
+  const { schedule, scheduleName, sessionId, result, log } = context;
+  const reason = promotionReason(result.errorClass);
+  if (reason === null) return false;
+  const runtimeId = await getRuntimeId(log);
+  if (!runtimeId) return false;
+  const promoted = await promoteScheduledTurnToJob(
+    {
+      sessionId,
+      runtimeId,
+      userEmail: schedule.ownerEmail,
+      displayName: schedule.displayName ?? '',
+      workspacePrefix: schedule.workspacePrefix,
+      spaceName: schedule.dmSpaceName,
+      originalPrompt: schedule.prompt,
+      scheduleName,
+      reason,
+    },
+    log,
+  );
+  if (!promoted) return false;
+  await sendPromotionAcknowledgement(context, reason);
+  await recordPromotedRun(context);
+  return true;
+}
+
+async function deliverScheduledResult(
+  context: ScheduledResultContext,
+): Promise<HandlerResult> {
+  const { schedule, scheduleName, sessionId, result, startTime, log } = context;
+  try {
+    await sendChatMessage(
+      schedule.dmSpaceName,
+      `📋 **${scheduleName}**\n\n${result.response}`,
+      log,
+    );
+  } catch (error) {
+    log.error('Failed to deliver scheduled response', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    await recordRun(
+      {
+        userEmail: schedule.ownerEmail,
+        scheduleId: schedule.scheduleId,
+        scheduleName,
+        sessionId,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        latencyMs: Date.now() - startTime,
+        status: 'error',
+        errorMessage: `Chat delivery failed: ${error instanceof Error ? error.message : String(error)}`,
+      },
+      log,
+    );
+    return { status: 'error', scheduleId: schedule.scheduleId };
+  }
+  const status: 'success' | 'error' = result.ok ? 'success' : 'error';
+  await recordRun(
+    {
+      userEmail: schedule.ownerEmail,
+      scheduleId: schedule.scheduleId,
+      scheduleName,
+      sessionId,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      latencyMs: Date.now() - startTime,
+      status,
+      errorMessage: result.ok ? undefined : result.response.substring(0, 500),
+    },
+    log,
+  );
+  log.info('Scheduled task completed', {
+    scheduleId: schedule.scheduleId,
+    scheduleName,
+    status,
+    email: sanitizeEmail(schedule.ownerEmail),
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    latencyMs: Date.now() - startTime,
+  });
+  return { status, scheduleId: schedule.scheduleId };
+}
+
 // ---------------------------------------------------------------------------
 // Main handler
 // ---------------------------------------------------------------------------
@@ -927,7 +1149,7 @@ async function recordCronFailure(
 export async function handler(
   event: ScheduleReferenceEvent,
   context: LambdaContext,
-): Promise<{ status: 'success' | 'error' | 'skipped'; scheduleId: string }> {
+): Promise<HandlerResult> {
   const referencedScheduleId =
     typeof event?.scheduleId === 'string' ? event.scheduleId : 'unknown';
   const requestId = generateRequestId();
@@ -977,153 +1199,28 @@ export async function handler(
     sessionId,
   });
 
-  const result = await invokeAgentCore(
-    schedule.prompt,
-    schedule.ownerEmail,
+  const result = await invokeAgentCore({
+    prompt: schedule.prompt,
+    userEmail: schedule.ownerEmail,
     sessionId,
     log,
-    {
+    userContext: {
       displayName: schedule.displayName,
       workspacePrefix: schedule.workspacePrefix,
     },
-    () => context.getRemainingTimeInMillis(),
-  );
-
-  // The turn failed in a RECOVERABLE way. Hand it to the background job-runner
-  // instead of delivering a partial: Lambda's 15-minute ceiling is an AWS hard
-  // limit, so this is the only path by which a longer scheduled task can ever
-  // finish.
-  //
-  // Two recoverable shapes, handled differently by the runner:
-  //   deadline         — ran out of clock. Resume the same session.
-  //   context-overflow — the transcript outgrew the model window. Restart in a
-  //                      fresh session; resuming would re-overflow immediately.
-  //
-  // The deadline case is only reachable because the Lambda now sends an
-  // explicit deadline_s (turn-deadline.ts). Before that its own abort always
-  // fired first, so the harness never reported a deadline at all.
-  const promoteReason = promotionReason(result.errorClass);
-  if (promoteReason !== null) {
-    const runtimeId = await getRuntimeId(log);
-    const promoted = runtimeId
-      ? await promoteScheduledTurnToJob(
-          {
-            sessionId,
-            runtimeId,
-            userEmail: schedule.ownerEmail,
-            displayName: schedule.displayName ?? '',
-            workspacePrefix: schedule.workspacePrefix,
-            spaceName: schedule.dmSpaceName,
-            originalPrompt: schedule.prompt,
-            scheduleName,
-            reason: promoteReason,
-          },
-          log,
-        )
-      : false;
-
-    if (promoted) {
-      // Acknowledge so the owner is not left wondering. Delivery failure here
-      // is NOT fatal — the job is already running and will post the real
-      // answer; failing the invocation would misreport a healthy handoff.
-      try {
-        // Distinct wording per reason. A restart is NOT the same promise as a
-        // continuation: it discards the previous attempt's work, so telling
-        // the owner "I've moved it to a background job" would overstate what
-        // is being carried over.
-        const ack =
-          promoteReason === 'context-overflow'
-            ? "⏳ This run grew too large to finish in one pass, so I'm starting it over in the background with a longer budget. I'll post the result here when it's done."
-            : "⏳ This is taking longer than one pass allows — I've moved it to a background job and will post the result here when it's done.";
-        await sendChatMessage(
-          schedule.dmSpaceName,
-          `📋 **${scheduleName}**\n\n${ack}`,
-          log,
-        );
-      } catch (error) {
-        log.warn('Promotion ack delivery failed; job still running', {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-      await recordRun(
-        {
-          userEmail: schedule.ownerEmail,
-          scheduleId: schedule.scheduleId,
-          scheduleName,
-          sessionId,
-          inputTokens: result.inputTokens,
-          outputTokens: result.outputTokens,
-          latencyMs: Date.now() - startTime,
-          status: 'promoted',
-        },
-        log,
-      );
-      log.info('Scheduled task handed to background job', {
-        scheduleId: schedule.scheduleId,
-        scheduleName,
-        sessionId,
-        email: sanitizeEmail(schedule.ownerEmail),
-        latencyMs: Date.now() - startTime,
-      });
-      return { status: 'success', scheduleId: schedule.scheduleId };
-    }
-    // Promotion declined or failed — fall through and post the partial, which
-    // is strictly better than nothing and matches the previous behaviour.
-  }
-
-  // Deliver response to DM regardless of success (so user sees errors).
-  try {
-    await sendChatMessage(
-      schedule.dmSpaceName,
-      `📋 **${scheduleName}**\n\n${result.response}`,
-      log,
-    );
-  } catch (error) {
-    log.error('Failed to deliver scheduled response', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    await recordRun(
-      {
-        userEmail: schedule.ownerEmail,
-        scheduleId: schedule.scheduleId,
-        scheduleName,
-        sessionId,
-        inputTokens: result.inputTokens,
-        outputTokens: result.outputTokens,
-        latencyMs: Date.now() - startTime,
-        status: 'error',
-        errorMessage: `Chat delivery failed: ${error instanceof Error ? error.message : String(error)}`,
-      },
-      log,
-    );
-    return { status: 'error', scheduleId: schedule.scheduleId };
-  }
-
-  const status: 'success' | 'error' = result.ok ? 'success' : 'error';
-  await recordRun(
-    {
-      userEmail: schedule.ownerEmail,
-      scheduleId: schedule.scheduleId,
-      scheduleName,
-      sessionId,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-      latencyMs: Date.now() - startTime,
-      status,
-      errorMessage: result.ok ? undefined : result.response.substring(0, 500),
-    },
-    log,
-  );
-
-  log.info('Scheduled task completed', {
-    scheduleId: schedule.scheduleId,
-    scheduleName,
-    status,
-    email: sanitizeEmail(schedule.ownerEmail),
-    inputTokens: result.inputTokens,
-    outputTokens: result.outputTokens,
-    latencyMs: Date.now() - startTime,
+    remainingMs: () => context.getRemainingTimeInMillis(),
   });
 
-  return { status, scheduleId: schedule.scheduleId };
+  const scheduledResult = {
+    schedule,
+    scheduleName,
+    startTime,
+    sessionId,
+    result,
+    log,
+  };
+  if (await tryPromoteScheduledResult(scheduledResult)) {
+    return { status: 'success', scheduleId: schedule.scheduleId };
+  }
+  return deliverScheduledResult(scheduledResult);
 }

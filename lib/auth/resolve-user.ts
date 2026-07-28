@@ -25,6 +25,73 @@ import { ErrorCode } from "@/types/error-types"
 import { defaultRoleForNewUser } from "./default-role"
 import type { CognitoSession } from "./server-session"
 
+function isRecordNotFound(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { code: unknown }).code === ErrorCode.DB_RECORD_NOT_FOUND
+  )
+}
+
+async function linkExistingUserByEmail(
+  session: CognitoSession,
+  log: ReturnType<typeof createLogger>
+): Promise<number | null> {
+  if (!session.email) return null
+  try {
+    const byEmail = await getUserByEmail(session.email)
+    if (!byEmail) return null
+    log.info("User found by email, linking Cognito sub", {
+      userId: byEmail.id,
+    })
+    await updateUser(byEmail.id, { cognitoSub: session.sub })
+    await reconcileManagedRolesNonFatal(byEmail.id, session.email, log)
+    return byEmail.id
+  } catch (error) {
+    if (!isRecordNotFound(error)) throw error
+    return null
+  }
+}
+
+async function assignDefaultRoleNonFatal(
+  userId: number,
+  email: string,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const defaultRole = defaultRoleForNewUser(email)
+  if (!defaultRole) {
+    log.info(
+      "No default role assigned (heuristic retired) — relying on group-sync",
+      { userId }
+    )
+    return
+  }
+  try {
+    await addUserRole(userId, defaultRole)
+    log.info("User provisioned with default role", {
+      userId,
+      role: defaultRole,
+    })
+  } catch (error) {
+    const metadata = { userId, attemptedRole: defaultRole }
+    if (isRecordNotFound(error)) {
+      log.warn(
+        "Default role not found in database — user provisioned without role",
+        metadata
+      )
+      return
+    }
+    log.error(
+      "Role assignment failed — infrastructure error; user provisioned without role",
+      {
+        ...metadata,
+        error: error instanceof Error ? error.message : "Unknown error",
+      }
+    )
+  }
+}
+
 /**
  * Resolve a Cognito session to a numeric database user ID.
  *
@@ -63,37 +130,8 @@ export async function resolveUserId(
     hasEmail: !!session.email,
   })
 
-  // Check by email (migration from old auth — link the new cognitoSub to
-  // the existing record rather than creating a duplicate row)
-  if (session.email) {
-    try {
-      const byEmail = await getUserByEmail(session.email)
-      if (byEmail) {
-        log.info("User found by email, linking Cognito sub", {
-          userId: byEmail.id,
-        })
-        // MUST explicitly update cognitoSub — createUser UPSERT conflicts on
-        // cognitoSub, not email. Without this call a duplicate row is inserted.
-        // Mirrors getCurrentUserAction.ts:100
-        await updateUser(byEmail.id, { cognitoSub: session.sub })
-        await reconcileManagedRolesNonFatal(byEmail.id, session.email, log)
-        return byEmail.id
-      }
-    } catch (error) {
-      // getUserByEmail throws ErrorFactories.dbRecordNotFound when not found.
-      // Check the typed error code — string-match is too broad and risks swallowing
-      // real DB errors whose message happens to contain "not found".
-      const isNotFound =
-        error !== null &&
-        typeof error === "object" &&
-        "code" in error &&
-        (error as { code: unknown }).code === ErrorCode.DB_RECORD_NOT_FOUND
-      if (!isNotFound) {
-        throw error
-      }
-      // User not found by email — fall through to create
-    }
-  }
+  const linkedUserId = await linkExistingUserByEmail(session, log)
+  if (linkedUserId !== null) return linkedUserId
 
   // Require a real email for new users — synthetic addresses create permanent
   // bad data in the users table and break downstream notification delivery.
@@ -126,47 +164,7 @@ export async function resolveUserId(
     )
   }
 
-  // Assign the default role (legacy username heuristic — the single source of
-  // truth is lib/auth/default-role.ts; group-sync reconciliation below is the
-  // authoritative role source and runs immediately after). `null` means "assign no
-  // default role" once the heuristic is retired; today it never returns null.
-  const defaultRole = defaultRoleForNewUser(session.email)
-
-  if (defaultRole) {
-    try {
-      await addUserRole(userId, defaultRole)
-      log.info("User provisioned with default role", {
-        userId,
-        role: defaultRole,
-      })
-    } catch (error) {
-      // Role assignment failure is non-fatal — user can still access the app,
-      // and getCurrentUserAction will handle role assignment on next full login.
-      // Distinguish a missing role record (expected in misconfigured envs) from
-      // infrastructure failures (DB connectivity, deadlock) which warrant error-level.
-      const isRoleNotFound =
-        error !== null &&
-        typeof error === "object" &&
-        "code" in error &&
-        (error as { code: unknown }).code === ErrorCode.DB_RECORD_NOT_FOUND
-      if (isRoleNotFound) {
-        log.warn("Default role not found in database — user provisioned without role", {
-          userId,
-          attemptedRole: defaultRole,
-        })
-      } else {
-        log.error("Role assignment failed — infrastructure error; user provisioned without role", {
-          userId,
-          attemptedRole: defaultRole,
-          error: error instanceof Error ? error.message : "Unknown error",
-        })
-      }
-    }
-  } else {
-    log.info("No default role assigned (heuristic retired) — relying on group-sync", {
-      userId,
-    })
-  }
+  await assignDefaultRoleNonFatal(userId, session.email, log)
 
   // New user just provisioned with the default (manual) role — reconcile any
   // group-sync roles on top from their current memberships (#1204). Non-fatal.

@@ -9,7 +9,7 @@ import * as cloudwatch_actions from "aws-cdk-lib/aws-cloudwatch-actions"
 import * as sns from "aws-cdk-lib/aws-sns"
 import { Construct } from "constructs"
 import { IEnvironmentConfig } from "../config/environment-config"
-import * as path from "path"
+import * as path from "node:path"
 
 /**
  * Configuration for the Compliance Auditor
@@ -94,7 +94,7 @@ export class ComplianceAuditor extends Construct {
     this.createScheduledScan(props)
 
     // Create EventBridge rule for rotation events
-    this.createRotationMonitor(props)
+    this.createRotationMonitor()
 
     // Create compliance metrics
     this.createMetrics(props)
@@ -209,7 +209,7 @@ export class ComplianceAuditor extends Construct {
   /**
    * Creates EventBridge rule to monitor rotation events
    */
-  private createRotationMonitor(props: ComplianceAuditorProps): void {
+  private createRotationMonitor(): void {
     const rule = new events.Rule(this, "RotationMonitorRule", {
       eventPattern: {
         source: ["aws.secretsmanager"],

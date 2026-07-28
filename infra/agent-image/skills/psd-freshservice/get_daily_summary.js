@@ -81,7 +81,7 @@ function parseDate(arg) {
   // Pacific timezone (UTC-7/8) yields the *previous* calendar day for
   // d.getFullYear()/getMonth()/getDate() — an off-by-one bug.
   const d = new Date(`${arg}T00:00:00`);
-  if (isNaN(d.getTime())) fail(`Could not parse --date: ${arg}`, 'bad_args');
+  if (Number.isNaN(d.getTime())) fail(`Could not parse --date: ${arg}`, 'bad_args');
   return {
     start: new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0),
     end: new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59),
@@ -89,30 +89,7 @@ function parseDate(arg) {
   };
 }
 
-async function main() {
-  const args = parseArgs(process.argv);
-  if (args.help) {
-    console.log('Usage: get_daily_summary.js --user <email> [--date <today|yesterday|YYYY-MM-DD>] [--workspace-id 2]');
-    process.exit(0);
-  }
-  const userEmail = requireUser(args);
-  const dateArg = args.date && args.date !== true ? String(args.date) : 'today';
-  const workspaceId = args.workspace_id ? Number(args.workspace_id) : 2;
-  if (isNaN(workspaceId)) fail('--workspace-id must be a number', 'bad_args');
-  const range = parseDate(dateArg);
-
-  const apiKey = getApiKey(userEmail);
-  const ticketRes = await searchClosedTickets(apiKey, range.start, range.end, workspaceId);
-  if (ticketRes.error) fail(ticketRes.error, 'upstream_error');
-
-  // Fetch only agents that appear in ticket results — avoids paginating
-  // through the full agent roster (up to 50 API calls) on every summary.
-  const responderIds = (ticketRes.tickets || [])
-    .map((t) => t.responder_id)
-    .filter(Boolean);
-  const agentMap = await fetchAgentMap(apiKey, responderIds);
-
-  const tickets = ticketRes.tickets || [];
+function summarizeTickets(tickets, agentMap) {
   const byAgent = Object.create(null);
   const byCategory = Object.create(null);
   const automated = [];
@@ -161,6 +138,35 @@ async function main() {
       tickets: data.tickets.sort((a, b) => new Date(a.updated_at) - new Date(b.updated_at)),
     }))
     .sort((a, b) => b.count - a.count);
+
+  return { byCategory, automated, sortedAgents };
+}
+
+async function main() {
+  const args = parseArgs(process.argv);
+  if (args.help) {
+    console.log('Usage: get_daily_summary.js --user <email> [--date <today|yesterday|YYYY-MM-DD>] [--workspace-id 2]');
+    process.exit(0);
+  }
+  const userEmail = requireUser(args);
+  const dateArg = args.date && args.date !== true ? String(args.date) : 'today';
+  const workspaceId = args.workspace_id ? Number(args.workspace_id) : 2;
+  if (Number.isNaN(workspaceId)) fail('--workspace-id must be a number', 'bad_args');
+  const range = parseDate(dateArg);
+
+  const apiKey = getApiKey(userEmail);
+  const ticketRes = await searchClosedTickets(apiKey, range.start, range.end, workspaceId);
+  if (ticketRes.error) fail(ticketRes.error, 'upstream_error');
+
+  // Fetch only agents that appear in ticket results — avoids paginating
+  // through the full agent roster (up to 50 API calls) on every summary.
+  const responderIds = (ticketRes.tickets || [])
+    .map((t) => t.responder_id)
+    .filter(Boolean);
+  const agentMap = await fetchAgentMap(apiKey, responderIds);
+
+  const tickets = ticketRes.tickets || [];
+  const { byCategory, automated, sortedAgents } = summarizeTickets(tickets, agentMap);
 
   const output = {
     date: range.label,

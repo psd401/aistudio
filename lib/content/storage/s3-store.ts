@@ -26,11 +26,13 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+
 import type { Dirent } from "node:fs";
-import { mkdir, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import { Settings } from "@/lib/settings-manager";
 import { ErrorFactories } from "@/lib/error-utils";
+import { validatedFsPromises } from "@/lib/filesystem/validated-fs";
 
 /** The S3 key prefix all Atrium objects live under. */
 export const ATRIUM_PREFIX = "atrium";
@@ -66,7 +68,7 @@ function resolveLocalKey(root: string, key: string): string {
 async function countLocalFiles(directory: string): Promise<number> {
   let entries: Dirent<string>[];
   try {
-    entries = await readdir(directory, { withFileTypes: true });
+    entries = await validatedFsPromises.readdir(directory, { withFileTypes: true });
   } catch (error) {
     if (
       typeof error === "object" &&
@@ -172,7 +174,7 @@ async function readLocalFileBounded(
   field: "body" | "asset",
   message: string
 ): Promise<Uint8Array> {
-  const handle = await open(target, "r");
+  const handle = await validatedFsPromises.open(target, "r");
   try {
     const metadata = await handle.stat();
     if (metadata.size > maxBytes) {
@@ -260,8 +262,8 @@ export const s3Store = {
     const localRoot = getLocalStorageRoot();
     if (localRoot) {
       const target = resolveLocalKey(localRoot, key);
-      await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, body, "utf8");
+      await validatedFsPromises.mkdir(dirname(target), { recursive: true });
+      await validatedFsPromises.writeFile(target, body, "utf8");
       return;
     }
     const client = await getClient();
@@ -282,7 +284,7 @@ export const s3Store = {
   async getText(key: string): Promise<string> {
     const localRoot = getLocalStorageRoot();
     if (localRoot) {
-      return readFile(resolveLocalKey(localRoot, key), "utf8");
+      return validatedFsPromises.readFile(resolveLocalKey(localRoot, key), "utf8");
     }
     const client = await getClient();
     const { bucket } = await getConfig();
@@ -392,8 +394,8 @@ export const s3Store = {
     const localRoot = getLocalStorageRoot();
     if (localRoot) {
       const target = resolveLocalKey(localRoot, key);
-      await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, body);
+      await validatedFsPromises.mkdir(dirname(target), { recursive: true });
+      await validatedFsPromises.writeFile(target, body);
       return;
     }
     const client = await getClient();

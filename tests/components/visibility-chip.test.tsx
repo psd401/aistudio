@@ -24,8 +24,10 @@ import { screen, fireEvent, waitFor } from "@testing-library/dom";
 // lucide icons used by the component are not in the global lucide mock; stub them.
 jest.mock("lucide-react", () => {
   const React = require("react");
-  const icon = (name: string) => () =>
-    React.createElement("span", { "data-testid": `icon-${name}` });
+  const icon = (name: string) =>
+    function MockIcon() {
+      return React.createElement("span", { "data-testid": `icon-${name}` });
+    };
   return {
     Globe: icon("globe"),
     Lock: icon("lock"),
@@ -52,8 +54,9 @@ jest.mock("@/components/ui/dialog", () => {
   const Ctx = React.createContext(undefined);
   const pass =
     (tag: string) =>
-    ({ children }: { children?: React.ReactNode }) =>
-      React.createElement(tag, null, children);
+    function MockPassThrough({ children }: { children?: React.ReactNode }) {
+      return React.createElement(tag, null, children);
+    };
   const Dialog = ({
     children,
     onOpenChange,
@@ -256,7 +259,7 @@ beforeEach(() => {
   } as Awaited<ReturnType<typeof listGrantOptionsAction>>);
 });
 
-describe("VisibilityChip", () => {
+function defineVisibilityChipSuite1Part1() {
   it("renders the loaded level on the badge (no Private flash for a public object)", async () => {
     mockGet.mockResolvedValue(
       getState({ visibilityLevel: "public" }) as Awaited<
@@ -350,7 +353,9 @@ describe("VisibilityChip", () => {
     expect(screen.queryByText("Save")).toBeNull();
   });
 
-  it("surfaces a role-options load failure, and clears it on level change", async () => {
+  }
+
+function defineVisibilityChipSuite1Part2() {it("surfaces a role-options load failure, and clears it on level change", async () => {
     mockGet.mockResolvedValue(
       getState({
         visibilityLevel: "group",
@@ -460,7 +465,9 @@ describe("VisibilityChip", () => {
     expect(saveButton.disabled).toBe(false);
   });
 
-  it("surfaces an error when listGrantOptionsAction THROWS (not just ActionState failure)", async () => {
+  }
+
+function defineVisibilityChipSuite1Part3() {it("surfaces an error when listGrantOptionsAction THROWS (not just ActionState failure)", async () => {
     // A thrown role-options fetch must surface a retry hint rather than leaving the
     // role dropdown silently empty with no explanation.
     mockGet.mockResolvedValue(
@@ -550,4 +557,12 @@ describe("VisibilityChip", () => {
     // The retry succeeded: no error banner lingers.
     expect(screen.queryByText("Could not load roles")).toBeNull();
   });
-});
+}
+
+const defineVisibilityChipSuite1 = () => {
+  defineVisibilityChipSuite1Part1()
+  defineVisibilityChipSuite1Part2()
+  defineVisibilityChipSuite1Part3()
+};
+
+describe("VisibilityChip", defineVisibilityChipSuite1);

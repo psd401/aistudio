@@ -82,7 +82,7 @@ async function getChatClient(): Promise<ReturnType<typeof chatPkg.chat>> {
 }
 
 function log(level: "INFO" | "WARN" | "ERROR", evt: string, fields: Record<string, unknown>) {
-  // eslint-disable-next-line no-console
+
   console.log(
     JSON.stringify({
       level,

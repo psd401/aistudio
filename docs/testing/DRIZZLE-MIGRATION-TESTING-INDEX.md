@@ -157,7 +157,7 @@ TEST_DB_PASSWORD=password
 ## References to Existing Code
 
 ### Existing Patterns to Follow
-- Unit test example: `/tests/unit/actions/user-creation-upsert.test.ts`
+- Unit test example: `/tests/unit/actions/get-current-user-action.test.ts`
 - Integration test example: `/tests/integration/s3-upload-api.test.ts`
 - Logger usage: `/lib/logger.ts`
 - Drizzle client: `/lib/db/drizzle-client.ts`

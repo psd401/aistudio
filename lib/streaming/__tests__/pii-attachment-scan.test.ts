@@ -35,7 +35,7 @@ function allowedResult(processedContent: string) {
   }
 }
 
-describe("Nexus inline attachment boundary", () => {
+function defineNexusInlineAttachmentBoundarySuite1Part1() {
   it("rejects dual content/data fields instead of choosing one", () => {
     expect(() =>
       canonicalizeInlineAttachmentMessages([
@@ -139,7 +139,9 @@ describe("Nexus inline attachment boundary", () => {
     expect(result.messages[0].parts?.[0]).not.toHaveProperty("content")
   })
 
-  it("rejects aggregate raw attachment text over 25 MiB", () => {
+  }
+
+function defineNexusInlineAttachmentBoundarySuite1Part2() {it("rejects aggregate raw attachment text over 25 MiB", () => {
     const half = "x".repeat(Math.floor(MAX_INLINE_ATTACHMENT_BYTES / 2) + 1)
     expect(() =>
       canonicalizeInlineAttachmentMessages([
@@ -220,7 +222,9 @@ describe("Nexus inline attachment boundary", () => {
     })
   })
 
-  it("removes raw legacy content before and after the processed rewrite", async () => {
+  }
+
+function defineNexusInlineAttachmentBoundarySuite1Part3() {it("removes raw legacy content before and after the processed rewrite", async () => {
     const canonical = canonicalizeInlineAttachmentMessages([
       legacyMessage([
         { type: "text", text: "question" },
@@ -322,4 +326,12 @@ describe("Nexus inline attachment boundary", () => {
       )
     ).toThrow("representations do not match")
   })
-})
+}
+
+const defineNexusInlineAttachmentBoundarySuite1 = () => {
+  defineNexusInlineAttachmentBoundarySuite1Part1()
+  defineNexusInlineAttachmentBoundarySuite1Part2()
+  defineNexusInlineAttachmentBoundarySuite1Part3()
+};
+
+describe("Nexus inline attachment boundary", defineNexusInlineAttachmentBoundarySuite1)

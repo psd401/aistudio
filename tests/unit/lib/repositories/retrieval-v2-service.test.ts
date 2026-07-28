@@ -69,7 +69,7 @@ const defaultConfig = {
   retrievalMaxPerSource: 3,
 };
 
-describe("shared repository retrieval v2 service", () => {
+function defineSharedRepositoryRetrievalV2ServiceSuite1Part1() {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetConfig.mockResolvedValue(defaultConfig);
@@ -153,7 +153,9 @@ describe("shared repository retrieval v2 service", () => {
     expect(mockGetUser).not.toHaveBeenCalled();
   });
 
-  it("fails open to fused ranking when the managed reranker is unavailable", async () => {
+  }
+
+function defineSharedRepositoryRetrievalV2ServiceSuite1Part2() {it("fails open to fused ranking when the managed reranker is unavailable", async () => {
     const reranker: RepositoryReranker = {
       rerank: jest.fn().mockRejectedValue(new Error("Bedrock throttled")),
     };
@@ -199,7 +201,9 @@ describe("shared repository retrieval v2 service", () => {
     );
   });
 
-  it("does not disclose candidates to the reranker after access is revoked", async () => {
+  }
+
+function defineSharedRepositoryRetrievalV2ServiceSuite1Part3() {it("does not disclose candidates to the reranker after access is revoked", async () => {
     const reranker: RepositoryReranker = {
       rerank: jest.fn(),
     };
@@ -307,7 +311,9 @@ describe("shared repository retrieval v2 service", () => {
     );
   });
 
-  it("fits the selected hit before neighbors when the context budget is tight", async () => {
+  }
+
+function defineSharedRepositoryRetrievalV2ServiceSuite1Part4() {it("fits the selected hit before neighbors when the context budget is tight", async () => {
     const selected = {
       ...row(50, 0.9, 5),
       content: "PRIMARY-ANSWER ".repeat(80),
@@ -360,7 +366,9 @@ describe("shared repository retrieval v2 service", () => {
     expect(response.diagnostics.returnedTokens).toBeLessThanOrEqual(100);
   });
 
-  it.each([
+  }
+
+function defineSharedRepositoryRetrievalV2ServiceSuite1Part5() {it.each([
     "repository ACL is revoked",
     "repository expires",
   ])(
@@ -429,7 +437,9 @@ describe("shared repository retrieval v2 service", () => {
     }
   );
 
-  it("serves the active generation without consulting the mutable current-version pointer", async () => {
+  }
+
+function defineSharedRepositoryRetrievalV2ServiceSuite1Part6() {it("serves the active generation without consulting the mutable current-version pointer", async () => {
     const servingQueries: string[] = [];
     const selected = row(70, 0.9, 0);
     type RawQueryCallback = (db: {
@@ -536,7 +546,9 @@ describe("shared repository retrieval v2 service", () => {
     expect(response.diagnostics.visualCandidates).toBe(1);
   });
 
-  it("keeps legacy-only chunks visible until their canonical item is published", async () => {
+  }
+
+function defineSharedRepositoryRetrievalV2ServiceSuite1Part7() {it("keeps legacy-only chunks visible until their canonical item is published", async () => {
     const legacyCandidate = {
       chunk_id: 91,
       repository_id: 7,
@@ -586,4 +598,16 @@ describe("shared repository retrieval v2 service", () => {
       returnedResults: 1,
     });
   });
-});
+}
+
+const defineSharedRepositoryRetrievalV2ServiceSuite1 = () => {
+  defineSharedRepositoryRetrievalV2ServiceSuite1Part1()
+  defineSharedRepositoryRetrievalV2ServiceSuite1Part2()
+  defineSharedRepositoryRetrievalV2ServiceSuite1Part3()
+  defineSharedRepositoryRetrievalV2ServiceSuite1Part4()
+  defineSharedRepositoryRetrievalV2ServiceSuite1Part5()
+  defineSharedRepositoryRetrievalV2ServiceSuite1Part6()
+  defineSharedRepositoryRetrievalV2ServiceSuite1Part7()
+};
+
+describe("shared repository retrieval v2 service", defineSharedRepositoryRetrievalV2ServiceSuite1);

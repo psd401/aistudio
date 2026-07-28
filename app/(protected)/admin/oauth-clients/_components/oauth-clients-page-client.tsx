@@ -49,6 +49,83 @@ interface Props {
   initialClients: OAuthClientRow[]
 }
 
+function applicationTypeLabel(client: OAuthClientRow): string {
+  if (client.applicationType === "browser_extension") {
+    return "Browser extension"
+  }
+  return client.applicationType === "native" ? "Native" : "Web"
+}
+
+function OAuthClientTableRow({
+  client,
+  onRevoke,
+}: {
+  client: OAuthClientRow
+  onRevoke: (clientId: string) => void
+}) {
+  return (
+    <TableRow>
+      <TableCell className="font-medium">{client.clientName}</TableCell>
+      <TableCell>
+        <code className="text-xs bg-muted px-1 py-0.5 rounded">
+          {client.clientId.slice(0, 8)}...
+        </code>
+      </TableCell>
+      <TableCell>
+        <Badge variant="secondary">{applicationTypeLabel(client)}</Badge>
+      </TableCell>
+      <TableCell>
+        <Badge variant="outline">
+          {client.tokenEndpointAuthMethod === "none"
+            ? "Public (PKCE)"
+            : "Confidential"}
+        </Badge>
+      </TableCell>
+      <TableCell>
+        <Badge variant={client.isFirstParty ? "default" : "outline"}>
+          {client.isFirstParty ? "First-party" : "Standard"}
+        </Badge>
+      </TableCell>
+      <TableCell>
+        <Badge variant={client.isActive ? "default" : "destructive"}>
+          {client.isActive ? "Active" : "Revoked"}
+        </Badge>
+      </TableCell>
+      <TableCell>
+        <span className="text-xs text-muted-foreground">
+          {client.allowedScopes.length} scope(s)
+        </span>
+      </TableCell>
+      <TableCell>
+        {client.isActive && (
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button variant="ghost" size="sm">
+                <Ban className="h-4 w-4 text-destructive" />
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Revoke Client</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This will deactivate the OAuth client &quot;{client.clientName}
+                  &quot;. Existing tokens will no longer be valid.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={() => onRevoke(client.clientId)}>
+                  Revoke
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        )}
+      </TableCell>
+    </TableRow>
+  )
+}
+
 export function OAuthClientsPageClient({ initialClients }: Props) {
   const [clients, setClients] = useState(initialClients)
   const [sheetOpen, setSheetOpen] = useState(false)
@@ -131,82 +208,11 @@ export function OAuthClientsPageClient({ initialClients }: Props) {
             </TableHeader>
             <TableBody>
               {clients.map((client) => (
-                <TableRow key={client.id}>
-                  <TableCell className="font-medium">
-                    {client.clientName}
-                  </TableCell>
-                  <TableCell>
-                    <code className="text-xs bg-muted px-1 py-0.5 rounded">
-                      {client.clientId.slice(0, 8)}...
-                    </code>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="secondary">
-                      {client.applicationType === "browser_extension"
-                        ? "Browser extension"
-                        : client.applicationType === "native"
-                          ? "Native"
-                          : "Web"}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="outline">
-                      {client.tokenEndpointAuthMethod === "none"
-                        ? "Public (PKCE)"
-                        : "Confidential"}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={client.isFirstParty ? "default" : "outline"}
-                    >
-                      {client.isFirstParty ? "First-party" : "Standard"}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={client.isActive ? "default" : "destructive"}
-                    >
-                      {client.isActive ? "Active" : "Revoked"}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <span className="text-xs text-muted-foreground">
-                      {client.allowedScopes.length} scope(s)
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    {client.isActive && (
-                      <AlertDialog>
-                        <AlertDialogTrigger asChild>
-                          <Button variant="ghost" size="sm">
-                            <Ban className="h-4 w-4 text-destructive" />
-                          </Button>
-                        </AlertDialogTrigger>
-                        <AlertDialogContent>
-                          <AlertDialogHeader>
-                            <AlertDialogTitle>
-                              Revoke Client
-                            </AlertDialogTitle>
-                            <AlertDialogDescription>
-                              This will deactivate the OAuth client &quot;
-                              {client.clientName}&quot;. Existing tokens will no
-                              longer be valid.
-                            </AlertDialogDescription>
-                          </AlertDialogHeader>
-                          <AlertDialogFooter>
-                            <AlertDialogCancel>Cancel</AlertDialogCancel>
-                            <AlertDialogAction
-                              onClick={() => handleRevoke(client.clientId)}
-                            >
-                              Revoke
-                            </AlertDialogAction>
-                          </AlertDialogFooter>
-                        </AlertDialogContent>
-                      </AlertDialog>
-                    )}
-                  </TableCell>
-                </TableRow>
+                <OAuthClientTableRow
+                  key={client.id}
+                  client={client}
+                  onRevoke={handleRevoke}
+                />
               ))}
             </TableBody>
           </Table>

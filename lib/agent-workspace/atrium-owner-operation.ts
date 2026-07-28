@@ -203,6 +203,212 @@ function recordAudit(
   })
 }
 
+interface AtriumOperationContext {
+  input: AgentAtriumOperationInput
+  segments: string[]
+  req: Requester
+  audit?: MutationAudit
+}
+
+async function executeReadOperation({
+  input,
+  segments,
+  req,
+}: AtriumOperationContext): Promise<AgentAtriumOperationResult | null> {
+  if (input.method === "GET" && segments.length === 0) {
+    const query = listQuerySchema.parse(input.query ?? {})
+    const collectionId = await resolveCollectionId(query.collection)
+    const items = await contentService.list(req, {
+      kind: query.kind,
+      collectionId,
+      tag: query.tag,
+      status: query.status,
+      query: query.query,
+    })
+    return success(items, input.requestId)
+  }
+  if (input.method === "GET" && segments.length === 1) {
+    const object = await contentService.get(req, segments[0])
+    return success(
+      { ...object, url: contentDeepLink(object.slug) },
+      input.requestId
+    )
+  }
+  return null
+}
+
+async function createContent(
+  context: AtriumOperationContext
+): Promise<AgentAtriumOperationResult> {
+  const { input, req } = context
+  context.audit = { action: "create" }
+  const body = createSchema.parse(input.body ?? {})
+  const created = await contentService.create(
+    req,
+    {
+      kind: body.kind,
+      title: body.title,
+      collectionId: await resolveCollectionId(body.collectionId),
+      body: decodeContentBody(body.body, body.codeEncoding),
+      bodyFormat: body.bodyFormat,
+      visibility: body.visibility,
+      tags: body.tags,
+      sourceRef: body.sourceRef,
+    },
+    { hasPublishPublicCapability: false }
+  )
+  context.audit.objectId = created.id
+  recordAudit(req, context.audit, input.requestId, "ok")
+  return success(
+    { ...created, url: contentDeepLink(created.slug) },
+    input.requestId,
+    201
+  )
+}
+
+async function createContentVersion(
+  context: AtriumOperationContext
+): Promise<AgentAtriumOperationResult> {
+  const { input, req, segments } = context
+  context.audit = { action: "create_version", objectId: segments[0] }
+  const body = versionSchema.parse(input.body ?? {})
+  const created = await contentService.createVersion(req, segments[0], {
+    body: decodeContentBody(body.body, body.codeEncoding) ?? body.body,
+    bodyFormat: body.bodyFormat,
+    summary: body.summary,
+  })
+  recordAudit(req, context.audit, input.requestId, "ok")
+  return success(created, input.requestId, 201)
+}
+
+async function updateContent(
+  context: AtriumOperationContext
+): Promise<AgentAtriumOperationResult> {
+  const { input, req, segments } = context
+  context.audit = { action: "update", objectId: segments[0] }
+  const body = updateSchema.parse(input.body ?? {})
+  const collectionId =
+    body.collectionId === undefined
+      ? undefined
+      : body.collectionId === null
+        ? null
+        : await resolveCollectionId(body.collectionId)
+  const updated = await contentService.update(req, segments[0], {
+    title: body.title,
+    tags: body.tags,
+    collectionId,
+    status: body.status,
+  })
+  recordAudit(req, context.audit, input.requestId, "ok")
+  return success(updated, input.requestId)
+}
+
+async function updateVisibility(
+  context: AtriumOperationContext
+): Promise<AgentAtriumOperationResult> {
+  const { input, req, segments } = context
+  context.audit = { action: "set_visibility", objectId: segments[0] }
+  const body = visibilitySchema.parse(input.body ?? {})
+  const object = await contentService.loadForEdit(req, segments[0])
+  context.audit.objectId = object.id
+  const visibility = await visibilityService.setLevel(req, object.id, body, {
+    hasPublishPublicCapability: false,
+  })
+  recordAudit(req, context.audit, input.requestId, "ok")
+  return success({ id: object.id, visibility }, input.requestId)
+}
+
+async function deleteContent(
+  context: AtriumOperationContext
+): Promise<AgentAtriumOperationResult> {
+  const { input, req, segments } = context
+  context.audit = { action: "delete", objectId: segments[0] }
+  const deleted = await contentService.delete(req, segments[0], {
+    surface: "rest",
+  })
+  return success(deleted, input.requestId)
+}
+
+async function publishContent(
+  context: AtriumOperationContext
+): Promise<AgentAtriumOperationResult> {
+  const { input, req, segments } = context
+  const body = publishSchema.parse(input.body ?? {})
+  context.audit = {
+    action: "publish",
+    objectId: segments[0],
+    destination: body.destination,
+  }
+  const published = await publishService.publish(
+    req,
+    segments[0],
+    {
+      destination: body.destination,
+      visibility: body.visibility,
+    },
+    { hasPublishPublicCapability: false }
+  )
+  recordAudit(req, context.audit, input.requestId, "ok")
+  return success(
+    {
+      id: segments[0],
+      destination: body.destination,
+      publishedVersionId: published.publishedVersionId,
+    },
+    input.requestId
+  )
+}
+
+async function unpublishContent(
+  context: AtriumOperationContext
+): Promise<AgentAtriumOperationResult> {
+  const { input, req, segments } = context
+  const destination = z
+    .enum(["intranet", "public_web", "schoology", "google"])
+    .parse(segments[2])
+  context.audit = {
+    action: "unpublish",
+    objectId: segments[0],
+    destination,
+  }
+  const unpublished = await publishService.unpublish(
+    req,
+    segments[0],
+    destination,
+    { hasPublishPublicCapability: false }
+  )
+  recordAudit(req, context.audit, input.requestId, "ok")
+  return success(
+    { id: segments[0], destination, ...unpublished },
+    input.requestId
+  )
+}
+
+async function executeMutationOperation(
+  context: AtriumOperationContext
+): Promise<AgentAtriumOperationResult> {
+  const { input, segments } = context
+  const route = `${input.method}:${segments.length}:${segments[1] ?? ""}`
+  switch (route) {
+    case "POST:0:":
+      return createContent(context)
+    case "POST:2:versions":
+      return createContentVersion(context)
+    case "PATCH:1:":
+      return updateContent(context)
+    case "PATCH:2:visibility":
+      return updateVisibility(context)
+    case "DELETE:1:":
+      return deleteContent(context)
+    case "POST:2:publish":
+      return publishContent(context)
+    case "DELETE:3:publish":
+      return unpublishContent(context)
+    default:
+      throw new ForbiddenError("Atrium operation is outside the fixed surface")
+  }
+}
+
 /**
  * Execute the fixed Atrium agent surface as the human named by the signed
  * invocation proof. No reusable service credential crosses into the workspace.
@@ -212,194 +418,35 @@ export async function executeOwnerAtriumOperation(
 ): Promise<AgentAtriumOperationResult> {
   const segments = parsePath(input.path)
   const { req, cognitoSub } = await ownerRequester(input.ownerEmail)
-  let audit: MutationAudit | undefined
+  const context: AtriumOperationContext = { input, segments, req }
 
   try {
-    if (input.method === "GET" && segments.length === 0) {
-      const query = listQuerySchema.parse(input.query ?? {})
-      const collectionId = await resolveCollectionId(query.collection)
-      const items = await contentService.list(req, {
-        kind: query.kind,
-        collectionId,
-        tag: query.tag,
-        status: query.status,
-        query: query.query,
-      })
-      return success(items, input.requestId)
-    }
-
-    if (input.method === "GET" && segments.length === 1) {
-      const object = await contentService.get(req, segments[0])
-      return success(
-        { ...object, url: contentDeepLink(object.slug) },
-        input.requestId
-      )
-    }
+    const readResult = await executeReadOperation(context)
+    if (readResult) return readResult
 
     await assertContentAuthoringCapability({
       authType: "session",
       cognitoSub,
     })
-
-    if (input.method === "POST" && segments.length === 0) {
-      audit = { action: "create" }
-      const body = createSchema.parse(input.body ?? {})
-      const created = await contentService.create(
-        req,
-        {
-          kind: body.kind,
-          title: body.title,
-          collectionId: await resolveCollectionId(body.collectionId),
-          body: decodeContentBody(body.body, body.codeEncoding),
-          bodyFormat: body.bodyFormat,
-          visibility: body.visibility,
-          tags: body.tags,
-          sourceRef: body.sourceRef,
-        },
-        { hasPublishPublicCapability: false }
-      )
-      audit.objectId = created.id
-      recordAudit(req, audit, input.requestId, "ok")
-      return success(
-        { ...created, url: contentDeepLink(created.slug) },
-        input.requestId,
-        201
-      )
-    }
-
-    if (
-      input.method === "POST" &&
-      segments.length === 2 &&
-      segments[1] === "versions"
-    ) {
-      audit = { action: "create_version", objectId: segments[0] }
-      const body = versionSchema.parse(input.body ?? {})
-      const created = await contentService.createVersion(req, segments[0], {
-        body: decodeContentBody(body.body, body.codeEncoding) ?? body.body,
-        bodyFormat: body.bodyFormat,
-        summary: body.summary,
-      })
-      recordAudit(req, audit, input.requestId, "ok")
-      return success(created, input.requestId, 201)
-    }
-
-    if (input.method === "PATCH" && segments.length === 1) {
-      audit = { action: "update", objectId: segments[0] }
-      const body = updateSchema.parse(input.body ?? {})
-      const collectionId =
-        body.collectionId === undefined
-          ? undefined
-          : body.collectionId === null
-            ? null
-            : await resolveCollectionId(body.collectionId)
-      const updated = await contentService.update(req, segments[0], {
-        title: body.title,
-        tags: body.tags,
-        collectionId,
-        status: body.status,
-      })
-      recordAudit(req, audit, input.requestId, "ok")
-      return success(updated, input.requestId)
-    }
-
-    if (
-      input.method === "PATCH" &&
-      segments.length === 2 &&
-      segments[1] === "visibility"
-    ) {
-      audit = { action: "set_visibility", objectId: segments[0] }
-      const body = visibilitySchema.parse(input.body ?? {})
-      const object = await contentService.loadForEdit(req, segments[0])
-      audit.objectId = object.id
-      const visibility = await visibilityService.setLevel(
-        req,
-        object.id,
-        body,
-        { hasPublishPublicCapability: false }
-      )
-      recordAudit(req, audit, input.requestId, "ok")
-      return success(
-        { id: object.id, visibility },
-        input.requestId
-      )
-    }
-
-    if (input.method === "DELETE" && segments.length === 1) {
-      audit = { action: "delete", objectId: segments[0] }
-      const deleted = await contentService.delete(req, segments[0], {
-        surface: "rest",
-      })
-      return success(deleted, input.requestId)
-    }
-
-    if (
-      input.method === "POST" &&
-      segments.length === 2 &&
-      segments[1] === "publish"
-    ) {
-      const body = publishSchema.parse(input.body ?? {})
-      audit = {
-        action: "publish",
-        objectId: segments[0],
-        destination: body.destination,
-      }
-      const published = await publishService.publish(
-        req,
-        segments[0],
-        {
-          destination: body.destination,
-          visibility: body.visibility,
-        },
-        { hasPublishPublicCapability: false }
-      )
-      recordAudit(req, audit, input.requestId, "ok")
-      return success(
-        {
-          id: segments[0],
-          destination: body.destination,
-          publishedVersionId: published.publishedVersionId,
-        },
-        input.requestId
-      )
-    }
-
-    if (
-      input.method === "DELETE" &&
-      segments.length === 3 &&
-      segments[1] === "publish"
-    ) {
-      const destination = z
-        .enum(["intranet", "public_web", "schoology", "google"])
-        .parse(segments[2])
-      audit = {
-        action: "unpublish",
-        objectId: segments[0],
-        destination,
-      }
-      const unpublished = await publishService.unpublish(
-        req,
-        segments[0],
-        destination,
-        { hasPublishPublicCapability: false }
-      )
-      recordAudit(req, audit, input.requestId, "ok")
-      return success(
-        { id: segments[0], destination, ...unpublished },
-        input.requestId
-      )
-    }
-
-    throw new ForbiddenError("Atrium operation is outside the fixed surface")
+    return await executeMutationOperation(context)
   } catch (error) {
-    if (error instanceof ApprovalRequiredError && audit) {
-      recordAudit(req, audit, input.requestId, "approval_required", error)
+    if (error instanceof ApprovalRequiredError && context.audit) {
+      recordAudit(
+        req,
+        context.audit,
+        input.requestId,
+        "approval_required",
+        error
+      )
       return success(
         { status: "approval_required", message: error.message },
         input.requestId,
         202
       )
     }
-    if (audit) recordAudit(req, audit, input.requestId, "error", error)
+    if (context.audit) {
+      recordAudit(req, context.audit, input.requestId, "error", error)
+    }
     if (error instanceof z.ZodError) {
       return {
         httpStatus: 400,

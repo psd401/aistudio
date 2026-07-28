@@ -14,6 +14,6 @@
     "inlineSourceMap": true,
     "inlineSources": true
   },
-  "include": ["index.ts", "storage-key.ts", "textract-usage.ts"],
+  "include": ["index.ts", "storage-key.ts", "textract-usage.ts", "html-to-text.ts"],
   "exclude": ["node_modules", "dist", "__tests__"]
 }

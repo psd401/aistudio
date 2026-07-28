@@ -34,7 +34,7 @@ jest.mock("@/actions/db/atrium/snapshot-document", () => ({
     mockSnapshot(...args),
 }));
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { useEditorActions } = require("@/components/atrium/use-editor-actions");
 
 // A resolved-UUID ref (the buttons only render once this is set); `editor` is not

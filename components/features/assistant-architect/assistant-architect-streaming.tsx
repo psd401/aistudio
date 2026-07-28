@@ -1,7 +1,13 @@
 "use client"
 
 import { zodResolver } from "@hookform/resolvers/zod"
-import { useForm } from "react-hook-form"
+import {
+  useForm,
+  type FieldValues,
+  type Path,
+  type SubmitHandler,
+  type UseFormReturn
+} from "react-hook-form"
 import * as z from "zod"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -55,7 +61,8 @@ import {
   isMessageEvent,
   isAssistantMessageEvent,
   isFinishEvent,
-  isSourceUrlEvent
+  isSourceUrlEvent,
+  type SSEEvent
 } from '@/lib/streaming/sse-event-types'
 import { createSSEMonitor } from '@/lib/streaming/sse-monitoring'
 import { validateSSEEvent } from '@/lib/streaming/sse-event-schemas'
@@ -67,6 +74,53 @@ const log = createLogger({ moduleName: 'assistant-architect-streaming' })
 
 // Define base schema outside component to prevent re-creation on each render
 const stringSchema = z.string()
+type SelectOption = { label: string; value: string }
+
+function normalizeSelectOptions(rawOptions: unknown): SelectOption[] {
+  let options: SelectOption[] = []
+  if (typeof rawOptions === "string") {
+    try {
+      const parsed: unknown = JSON.parse(rawOptions)
+      if (Array.isArray(parsed)) options = parsed as SelectOption[]
+    } catch {
+      for (const value of rawOptions.split(",")) {
+        options.push({ value: value.trim(), label: value.trim() })
+      }
+    }
+  } else if (Array.isArray(rawOptions)) {
+    options = rawOptions as SelectOption[]
+  } else if (
+    rawOptions &&
+    typeof rawOptions === "object" &&
+    "values" in rawOptions
+  ) {
+    const values = (rawOptions as { values?: string[] }).values
+    if (Array.isArray(values)) {
+      for (const value of values) options.push({ label: value, value })
+    }
+  }
+
+  const sanitized: SelectOption[] = []
+  for (const option of options) {
+    const normalized = {
+      ...option,
+      label: sanitizeOptionLabel(option.label),
+      value: sanitizeOptionLabel(option.value ?? option.label),
+    }
+    if (normalized.label !== "" && normalized.value !== "") {
+      sanitized.push(normalized)
+    }
+  }
+  return sanitized
+}
+
+function renderSelectOptions(rawOptions: unknown) {
+  return normalizeSelectOptions(rawOptions).map((option) => (
+    <SelectItem key={option.value} value={option.value}>
+      {option.label}
+    </SelectItem>
+  ))
+}
 
 /**
  * Sanitize image path to prevent path traversal attacks
@@ -171,452 +225,536 @@ function toolOutputTimelineEvent(
   }
 }
 
-// Factory function to create a stable ChatModelAdapter
-function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptions) {
-  const {
-    toolId,
-    inputsRef,
-    hasCompletedExecutionRef,
-    executionIdRef,
-    conversationIdRef,
-    executionModelRef,
-    onExecutionIdChangeRef,
-    onPromptCountChangeRef,
-    onToolEventRef,
-    approveDestructiveRef
-  } = options
+interface ArchitectStreamContext {
+  accumulatedText: string
+  sources: Array<{ id: string; url: string; title?: string }>
+  monitor: ReturnType<typeof createSSEMonitor>
+  onToolEvent: (event: ToolTimelineEvent) => void
+}
 
+interface EventHandlingResult {
+  handled: boolean
+  output?: ChatModelRunResult
+}
+
+interface LineHandlingResult {
+  done: boolean
+  output?: ChatModelRunResult
+}
+
+function textStreamOutput(text: string): ChatModelRunResult {
   return {
-    async *run(options: ChatModelRunOptions): AsyncGenerator<ChatModelRunResult> {
-      const { messages, abortSignal } = options
+    content: [{ type: 'text' as const, text }]
+  }
+}
 
-      log.info('🚀 LocalRuntime run() CALLED', {
-        messageCount: messages.length,
-        hasAbortSignal: !!abortSignal
+function recordEventValidation(
+  event: SSEEvent,
+  monitor: ReturnType<typeof createSSEMonitor>
+): void {
+  const validation = validateSSEEvent(event)
+  if (validation.success || !validation.error) return
+
+  log.warn('SSE event validation failed', {
+    type: event.type,
+    error: validation.error.message,
+    hint: validation.error.hint
+  })
+  if (validation.error.hint?.includes('Field name mismatch')) {
+    monitor.recordFieldMismatch('delta', Object.keys(event), event.type)
+  }
+}
+
+function handleNarrativeEvent(
+  event: SSEEvent,
+  context: ArchitectStreamContext
+): EventHandlingResult {
+  if (isTextDeltaEvent(event)) {
+    context.monitor.validateEventFields(event, ['delta'])
+    context.accumulatedText += event.delta
+    log.debug('✅ YIELDED text-delta', {
+      deltaLength: event.delta.length,
+      totalLength: context.accumulatedText.length
+    })
+    return { handled: true, output: textStreamOutput(context.accumulatedText) }
+  }
+  if (isTextStartEvent(event)) {
+    log.debug('Text stream started', { id: event.id })
+    return { handled: true }
+  }
+  if (isTextEndEvent(event)) {
+    log.debug('Text stream ended', { id: event.id })
+    return { handled: true }
+  }
+  if (isReasoningStartEvent(event)) {
+    log.debug('Reasoning started', { id: event.id })
+    return { handled: true }
+  }
+  if (isReasoningDeltaEvent(event)) {
+    log.debug('Reasoning delta received', { delta: event.delta?.slice(0, 50) })
+    return { handled: true }
+  }
+  if (isReasoningEndEvent(event)) {
+    log.debug('Reasoning completed', { id: event.id })
+    return { handled: true }
+  }
+  if (isStartStepEvent(event) || isStartEvent(event)) {
+    log.debug('Step started')
+    return { handled: true }
+  }
+  if (isFinishStepEvent(event)) {
+    log.debug('Step finished')
+    return { handled: true }
+  }
+  return { handled: false }
+}
+
+function handleToolInputEvent(
+  event: SSEEvent,
+  context: ArchitectStreamContext
+): EventHandlingResult {
+  if (isToolCallEvent(event) || isToolCallDeltaEvent(event)) {
+    log.debug('Tool call received', {
+      toolName: event.toolName,
+      type: event.type
+    })
+    context.onToolEvent({
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      phase: 'call',
+    })
+    return { handled: true }
+  }
+  if (isToolInputStartEvent(event)) {
+    log.debug('Tool input started', {
+      toolCallId: event.toolCallId,
+      toolName: event.toolName
+    })
+    context.onToolEvent({
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      phase: 'call',
+    })
+    return { handled: true }
+  }
+  if (isToolInputDeltaEvent(event)) {
+    log.debug('Tool input delta', { toolCallId: event.toolCallId })
+    return { handled: true }
+  }
+  if (isToolInputAvailableEvent(event)) {
+    log.debug('Tool input available', { toolCallId: event.toolCallId })
+    return { handled: true }
+  }
+  if (isToolInputErrorEvent(event)) {
+    log.debug('Tool input error', {
+      toolCallId: event.toolCallId,
+      toolName: event.toolName
+    })
+    context.onToolEvent({
+      toolCallId: event.toolCallId,
+      toolName: event.toolName ?? 'tool',
+      phase: 'error',
+      detail: 'Tool input error',
+    })
+    return { handled: true }
+  }
+  return { handled: false }
+}
+
+function handleToolOutputEvent(
+  event: SSEEvent,
+  context: ArchitectStreamContext
+): EventHandlingResult {
+  if (isToolOutputErrorEvent(event)) {
+    log.debug('Tool output error', {
+      toolCallId: event.toolCallId,
+      errorText: event.errorText
+    })
+    context.onToolEvent({
+      toolCallId: event.toolCallId,
+      toolName: 'tool',
+      phase: 'error',
+      detail: event.errorText ?? 'Tool output error',
+    })
+    return { handled: true }
+  }
+  if (isToolOutputAvailableEvent(event)) {
+    log.debug('Tool output available', { toolCallId: event.toolCallId })
+    context.onToolEvent(toolOutputTimelineEvent(event.toolCallId, event.output))
+    return { handled: true }
+  }
+  if (isErrorEvent(event)) {
+    log.error('Stream error received', { error: event.error })
+    throw new Error(event.error || 'Stream error')
+  }
+  return { handled: false }
+}
+
+function handleTerminalEvent(
+  event: SSEEvent,
+  context: ArchitectStreamContext
+): EventHandlingResult {
+  if (isMessageEvent(event) || isAssistantMessageEvent(event)) {
+    log.info('Received message event', { type: event.type })
+    return handleCompleteMessageText(
+      event.parts?.find(part => part.type === 'text')?.text,
+      context,
+      'message event'
+    )
+  }
+  if (isFinishEvent(event)) {
+    log.info('Received finish event')
+    return handleCompleteMessageText(
+      event.message?.parts?.find(part => part.type === 'text')?.text,
+      context,
+      'finish event'
+    )
+  }
+  if (isSourceUrlEvent(event)) {
+    context.sources.push({
+      id: event.sourceId,
+      url: event.url,
+      title: event.title
+    })
+    log.debug('Source URL collected', { sourceId: event.sourceId })
+    return { handled: true }
+  }
+  return { handled: false }
+}
+
+function handleCompleteMessageText(
+  text: string | undefined,
+  context: ArchitectStreamContext,
+  eventLabel: string
+): EventHandlingResult {
+  if (!text) return { handled: true }
+
+  context.accumulatedText = text
+  log.debug(`✅ YIELDED content from ${eventLabel}`, {
+    textLength: context.accumulatedText.length
+  })
+  return { handled: true, output: textStreamOutput(context.accumulatedText) }
+}
+
+function handleUnknownArchitectEvent(
+  event: SSEEvent,
+  context: ArchitectStreamContext
+): EventHandlingResult {
+  const unknownEvent = event as unknown as Record<string, unknown>
+  log.warn('⚠️ UNHANDLED SSE EVENT TYPE', {
+    type: unknownEvent['type'],
+    keys: Object.keys(unknownEvent),
+    sample: JSON.stringify(unknownEvent).substring(0, 200)
+  })
+  const unknownContext = {
+    accumulatedText: context.accumulatedText,
+    monitor: context.monitor,
+    verbose: process.env.NODE_ENV === 'development'
+  }
+  if (!processUnknownEvent(unknownEvent, unknownContext)) {
+    return { handled: true }
+  }
+
+  context.accumulatedText = unknownContext.accumulatedText
+  log.debug('✅ YIELDED content from unknown event', {
+    type: unknownEvent['type'],
+    textLength: context.accumulatedText.length
+  })
+  return { handled: true, output: textStreamOutput(context.accumulatedText) }
+}
+
+function handleArchitectEvent(
+  event: SSEEvent,
+  context: ArchitectStreamContext
+): ChatModelRunResult | undefined {
+  context.monitor.recordEvent(event.type)
+  recordEventValidation(event, context.monitor)
+
+  const narrative = handleNarrativeEvent(event, context)
+  if (narrative.handled) return narrative.output
+  const toolInput = handleToolInputEvent(event, context)
+  if (toolInput.handled) return toolInput.output
+  const toolOutput = handleToolOutputEvent(event, context)
+  if (toolOutput.handled) return toolOutput.output
+  const terminal = handleTerminalEvent(event, context)
+  if (terminal.handled) return terminal.output
+  return handleUnknownArchitectEvent(event, context).output
+}
+
+function processArchitectSseLine(
+  line: string,
+  context: ArchitectStreamContext
+): LineHandlingResult {
+  if (!line.trim() || line.startsWith(':') || !line.startsWith('data: ')) {
+    return { done: false }
+  }
+
+  const data = line.slice(6)
+  if (data === '[DONE]') return { done: true }
+
+  try {
+    return {
+      done: false,
+      output: handleArchitectEvent(parseSSEEvent(data), context)
+    }
+  } catch (error) {
+    context.monitor.recordParseError(
+      error instanceof Error ? error : new Error(String(error)),
+      data
+    )
+    log.warn('Failed to parse SSE data', {
+      data: data.substring(0, 100),
+      error: error instanceof Error ? error.message : String(error)
+    })
+    return { done: false }
+  }
+}
+
+function* processArchitectSseLines(
+  lines: string[],
+  context: ArchitectStreamContext
+): Generator<ChatModelRunResult> {
+  for (const line of lines) {
+    const result = processArchitectSseLine(line, context)
+    if (result.output) yield result.output
+    if (result.done) return
+  }
+}
+
+function prepareAdapterMessages(
+  messages: ChatModelRunOptions['messages']
+) {
+  return Array.from(messages).map(message => {
+    const parts = []
+    if (Array.isArray(message.content)) {
+      for (const contentPart of message.content) {
+        parts.push(
+          contentPart.type === 'text'
+            ? { type: 'text', text: contentPart.text }
+            : contentPart
+        )
+      }
+    } else if (typeof message.content === 'string') {
+      parts.push({ type: 'text', text: message.content })
+    }
+    return {
+      id: message.id || `msg-${Date.now()}`,
+      role: message.role,
+      parts: parts.length > 0 ? parts : [{ type: 'text', text: '' }]
+    }
+  })
+}
+
+function buildAdapterRequest(
+  options: AssistantArchitectAdapterOptions,
+  messages: ChatModelRunOptions['messages']
+): { endpoint: string; mode: string; body: unknown } {
+  if (!options.hasCompletedExecutionRef.current) {
+    return {
+      endpoint: '/api/assistant-architect/execute',
+      mode: 'EXECUTION',
+      body: {
+        toolId: options.toolId,
+        inputs: options.inputsRef.current,
+        approveDestructiveTools:
+          options.approveDestructiveRef.current === true
+      }
+    }
+  }
+  const modelConfig = options.executionModelRef.current || {
+    modelId: '3',
+    provider: 'openai'
+  }
+  return {
+    endpoint: '/api/nexus/chat',
+    mode: 'CONVERSATION',
+    body: {
+      messages: prepareAdapterMessages(messages),
+      modelId: modelConfig.modelId,
+      provider: modelConfig.provider,
+      conversationId: options.conversationIdRef.current || undefined,
+      enabledTools: []
+    }
+  }
+}
+
+function captureAdapterResponseMetadata(
+  response: Response,
+  options: AssistantArchitectAdapterOptions,
+  mode: string
+): boolean {
+  const executionId = response.headers.get('X-Execution-Id')
+  const promptCount = response.headers.get('X-Prompt-Count')
+  const conversationId = response.headers.get('X-Conversation-Id')
+  if (executionId) {
+    options.executionIdRef.current = Number(executionId)
+    options.onExecutionIdChangeRef.current(Number(executionId))
+    log.info('Execution started', { executionId, promptCount })
+  }
+  if (promptCount) {
+    options.onPromptCountChangeRef.current(Number(promptCount))
+  }
+  if (!conversationId || conversationId === options.conversationIdRef.current) {
+    return true
+  }
+  const validation = z.string().uuid().safeParse(conversationId)
+  if (!validation.success) {
+    log.error('Invalid conversation ID format from server', {
+      conversationId,
+      mode,
+      error: validation.error.message
+    })
+    return false
+  }
+  log.info('Conversation ID captured', {
+    conversationId,
+    mode,
+    wasNull: options.conversationIdRef.current === null
+  })
+  options.conversationIdRef.current = conversationId
+  return true
+}
+
+async function* consumeAdapterStream(
+  response: Response,
+  options: AssistantArchitectAdapterOptions,
+  mode: string
+): AsyncGenerator<ChatModelRunResult> {
+  if (!response.body) throw new Error('Response body is null')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  const context: ArchitectStreamContext = {
+    accumulatedText: '',
+    sources: [],
+    monitor: createSSEMonitor({
+      executionId: options.executionIdRef.current || undefined,
+      toolId: options.toolId
+    }),
+    onToolEvent: options.onToolEventRef.current
+  }
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      yield* processArchitectSseLines(lines, context)
+    }
+    if (context.accumulatedText || context.sources.length > 0) {
+      yield {
+        content: [
+          ...(context.accumulatedText
+            ? [{ type: 'text' as const, text: context.accumulatedText }]
+            : []),
+          ...context.sources.map(source => ({
+            type: 'source' as const,
+            sourceType: 'url' as const,
+            id: source.id,
+            url: source.url,
+            title: source.title
+          }))
+        ]
+      }
+    }
+    const metrics = context.monitor.complete()
+    log.info('Streaming completed successfully', {
+      totalLength: context.accumulatedText.length,
+      mode,
+      metrics: {
+        totalEvents: metrics.totalEvents,
+        unknownTypes: metrics.unknownTypes.length,
+        parseErrors: metrics.parseErrors,
+        fieldMismatches: metrics.fieldMismatches.length
+      }
+    })
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch (error) {
+      log.warn('Failed to release reader lock', {
+        error: error instanceof Error ? error.message : String(error)
       })
+    }
+  }
+}
 
+// Factory function to create a stable ChatModelAdapter
+function createAssistantArchitectAdapter(
+  adapterOptions: AssistantArchitectAdapterOptions
+) {
+  return {
+    async *run(
+      runOptions: ChatModelRunOptions
+    ): AsyncGenerator<ChatModelRunResult> {
+      log.info('🚀 LocalRuntime run() CALLED', {
+        messageCount: runOptions.messages.length,
+        hasAbortSignal: !!runOptions.abortSignal
+      })
       try {
-        // DYNAMIC ENDPOINT ROUTING based on execution state
-        const endpoint = hasCompletedExecutionRef.current
-          ? '/api/nexus/chat'
-          : '/api/assistant-architect/execute'
-
-        const mode = hasCompletedExecutionRef.current ? 'CONVERSATION' : 'EXECUTION'
-
+        const request = buildAdapterRequest(
+          adapterOptions,
+          runOptions.messages
+        )
         log.info('Assistant Architect stream request', {
-          mode,
-          messageCount: messages.length
+          mode: request.mode,
+          messageCount: runOptions.messages.length
         })
-
-        // Convert messages to proper format
-        const processedMessages = Array.from(messages).map(message => {
-          const parts = []
-
-          if (Array.isArray(message.content)) {
-            for (const contentPart of message.content) {
-              if (contentPart.type === 'text') {
-                parts.push({ type: 'text', text: contentPart.text })
-              } else {
-                parts.push(contentPart)
-              }
-            }
-          } else if (typeof message.content === 'string') {
-            parts.push({ type: 'text', text: message.content })
-          }
-
-          return {
-            id: message.id || `msg-${Date.now()}`,
-            role: message.role,
-            parts: parts.length > 0 ? parts : [{ type: 'text', text: '' }]
-          }
-        })
-
-        // Build request body based on mode
-        let body: unknown
-        if (hasCompletedExecutionRef.current) {
-          // CONVERSATION MODE: After execution completes
-          const modelConfig = executionModelRef.current || {
-            modelId: '3',
-            provider: 'openai'
-          }
-
-          body = {
-            messages: processedMessages,
-            modelId: modelConfig.modelId,
-            provider: modelConfig.provider,
-            conversationId: conversationIdRef.current || undefined,
-            enabledTools: []
-          }
-        } else {
-          // EXECUTION MODE: Initial assistant execution
-          body = {
-            toolId,
-            inputs: inputsRef.current,
-            // Per-run approval for destructive agent tools (#926); ignored in
-            // prompt-chain mode by the route.
-            approveDestructiveTools: approveDestructiveRef.current === true
-          }
-        }
-
-        // Make the fetch request
-        const response = await fetch(endpoint, {
+        const response = await fetch(request.endpoint, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(body),
-          signal: abortSignal
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(request.body),
+          signal: runOptions.abortSignal
         })
-
         if (!response.ok) {
-          log.error('Stream request failed', { status: response.status, mode })
+          log.error('Stream request failed', {
+            status: response.status,
+            mode: request.mode
+          })
           throw new Error(`Stream request failed: ${response.status}`)
         }
-
-        // Extract execution metadata from headers
-        const executionId = response.headers.get('X-Execution-Id')
-        const promptCount = response.headers.get('X-Prompt-Count')
-        const newConversationId = response.headers.get('X-Conversation-Id')
-
-        if (executionId) {
-          executionIdRef.current = Number(executionId)
-          onExecutionIdChangeRef.current(Number(executionId))
-          log.info('Execution started', { executionId, promptCount })
+        if (
+          !captureAdapterResponseMetadata(
+            response,
+            adapterOptions,
+            request.mode
+          )
+        ) {
+          return
         }
-
-        if (promptCount) {
-          onPromptCountChangeRef.current(Number(promptCount))
-        }
-
-        if (newConversationId && newConversationId !== conversationIdRef.current) {
-          // Validate UUID format before storing (defense-in-depth)
-          const validation = z.string().uuid().safeParse(newConversationId)
-          if (!validation.success) {
-            log.error('Invalid conversation ID format from server', {
-              conversationId: newConversationId,
-              mode,
-              error: validation.error.message
-            })
-            return
-          }
-
-          log.info('Conversation ID captured', {
-            conversationId: newConversationId,
-            mode,
-            wasNull: conversationIdRef.current === null
-          })
-          conversationIdRef.current = newConversationId
-        }
-
-        // Process and yield the response stream
-        if (!response.body) {
-          throw new Error('Response body is null')
-        }
-
-        const reader = response.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-        let accumulatedText = ''
-        const sources: Array<{ id: string; url: string; title?: string }> = []
-
-        // Create SSE monitor for this stream
-        const monitor = createSSEMonitor({
-          executionId: executionIdRef.current || undefined,
-          toolId
-        })
-
-        try {
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) break
-
-            buffer += decoder.decode(value, { stream: true })
-            const lines = buffer.split('\n')
-            buffer = lines.pop() || ''
-
-            for (const line of lines) {
-              if (!line.trim() || line.startsWith(':')) continue
-
-              if (line.startsWith('data: ')) {
-                const data = line.slice(6)
-                if (data === '[DONE]') break
-
-                try {
-                  // Parse and validate the SSE event
-                  const event = parseSSEEvent(data)
-
-                  // Record the event in the monitor
-                  monitor.recordEvent(event.type)
-
-                  // Validate the event structure (catches field mismatches)
-                  const validationResult = validateSSEEvent(event)
-                  if (!validationResult.success && validationResult.error) {
-                    // Log validation errors but continue processing (graceful degradation)
-                    log.warn('SSE event validation failed', {
-                      type: event.type,
-                      error: validationResult.error.message,
-                      hint: validationResult.error.hint
-                    })
-
-                    // Record field mismatches if detected
-                    if (validationResult.error.hint?.includes('Field name mismatch')) {
-                      const eventFields = Object.keys(event)
-                      monitor.recordFieldMismatch('delta', eventFields, event.type)
-                    }
-                  }
-
-                  // Handle text deltas from Vercel AI SDK native stream format
-                  if (isTextDeltaEvent(event)) {
-                    // Validate critical field exists
-                    monitor.validateEventFields(event, ['delta'])
-                    accumulatedText += event.delta
-                    yield {
-                      content: [{
-                        type: 'text' as const,
-                        text: accumulatedText
-                      }]
-                    }
-                    log.debug('✅ YIELDED text-delta', {
-                      deltaLength: event.delta.length,
-                      totalLength: accumulatedText.length
-                    })
-                  }
-                  // Handle text stream lifecycle events
-                  else if (isTextStartEvent(event)) {
-                    log.debug('Text stream started', { id: event.id })
-                  }
-                  else if (isTextEndEvent(event)) {
-                    log.debug('Text stream ended', { id: event.id })
-                  }
-                  // Handle O1/reasoning model events
-                  else if (isReasoningStartEvent(event)) {
-                    log.debug('Reasoning started', { id: event.id })
-                  }
-                  else if (isReasoningDeltaEvent(event)) {
-                    log.debug('Reasoning delta received', { delta: event.delta?.slice(0, 50) })
-                  }
-                  else if (isReasoningEndEvent(event)) {
-                    log.debug('Reasoning completed', { id: event.id })
-                  }
-                  // Handle step lifecycle events
-                  else if (isStartStepEvent(event) || isStartEvent(event)) {
-                    log.debug('Step started')
-                  }
-                  else if (isFinishStepEvent(event)) {
-                    log.debug('Step finished')
-                  }
-                  // Handle tool calls
-                  else if (isToolCallEvent(event) || isToolCallDeltaEvent(event)) {
-                    log.debug('Tool call received', {
-                      toolName: event.toolName,
-                      type: event.type
-                    })
-                    // Feed the agentic tool-call timeline (#926).
-                    onToolEventRef.current({
-                      toolCallId: event.toolCallId,
-                      toolName: event.toolName,
-                      phase: 'call',
-                    })
-                  }
-                  // Handle tool input events (from web_search_preview, etc.)
-                  else if (isToolInputStartEvent(event)) {
-                    log.debug('Tool input started', { toolCallId: event.toolCallId, toolName: event.toolName })
-                    onToolEventRef.current({
-                      toolCallId: event.toolCallId,
-                      toolName: event.toolName,
-                      phase: 'call',
-                    })
-                  }
-                  else if (isToolInputDeltaEvent(event)) {
-                    log.debug('Tool input delta', { toolCallId: event.toolCallId })
-                  }
-                  else if (isToolInputAvailableEvent(event)) {
-                    log.debug('Tool input available', { toolCallId: event.toolCallId })
-                  }
-                  else if (isToolInputErrorEvent(event)) {
-                    log.debug('Tool input error', { toolCallId: event.toolCallId, toolName: event.toolName })
-                    onToolEventRef.current({
-                      toolCallId: event.toolCallId,
-                      toolName: event.toolName ?? 'tool',
-                      phase: 'error',
-                      detail: 'Tool input error',
-                    })
-                  }
-                  else if (isToolOutputErrorEvent(event)) {
-                    log.debug('Tool output error', { toolCallId: event.toolCallId, errorText: event.errorText })
-                    onToolEventRef.current({
-                      toolCallId: event.toolCallId,
-                      toolName: 'tool',
-                      phase: 'error',
-                      detail: event.errorText ?? 'Tool output error',
-                    })
-                  }
-                  else if (isToolOutputAvailableEvent(event)) {
-                    log.debug('Tool output available', { toolCallId: event.toolCallId })
-                    onToolEventRef.current(toolOutputTimelineEvent(event.toolCallId, event.output))
-                  }
-                  // Handle errors
-                  else if (isErrorEvent(event)) {
-                    log.error('Stream error received', {
-                      error: event.error
-                    })
-                    throw new Error(event.error || 'Stream error')
-                  }
-                  // Handle message or assistant-message events (complete messages)
-                  else if (isMessageEvent(event) || isAssistantMessageEvent(event)) {
-                    log.info('Received message event', { type: event.type })
-                    const text = event.parts?.find(p => p.type === 'text')?.text
-                    if (text) {
-                      accumulatedText = text
-                      yield {
-                        content: [{
-                          type: 'text' as const,
-                          text: accumulatedText
-                        }]
-                      }
-                      log.debug('✅ YIELDED content from message event', {
-                        textLength: accumulatedText.length
-                      })
-                    }
-                  }
-                  // Handle finish events (stream completion)
-                  else if (isFinishEvent(event)) {
-                    log.info('Received finish event')
-                    const text = event.message?.parts?.find(p => p.type === 'text')?.text
-                    if (text) {
-                      accumulatedText = text
-                      yield {
-                        content: [{
-                          type: 'text' as const,
-                          text: accumulatedText
-                        }]
-                      }
-                      log.debug('✅ YIELDED content from finish event', {
-                        textLength: accumulatedText.length
-                      })
-                    }
-                  }
-                  // Handle source URL events (web search citations from Gemini, etc.)
-                  else if (isSourceUrlEvent(event)) {
-                    sources.push({ id: event.sourceId, url: event.url, title: event.title })
-                    log.debug('Source URL collected', { sourceId: event.sourceId })
-                  }
-                  // Graceful degradation for unknown event types
-                  // event is `never` here (all SSEEvent union members handled above)
-                  else {
-                    const unknownEvent = event as unknown as Record<string, unknown>
-                    log.warn('⚠️ UNHANDLED SSE EVENT TYPE', {
-                      type: unknownEvent['type'],
-                      keys: Object.keys(unknownEvent),
-                      sample: JSON.stringify(unknownEvent).substring(0, 200)
-                    })
-
-                    // Attempt to extract text content from unknown event
-                    const unknownContext = {
-                      accumulatedText,
-                      monitor,
-                      verbose: process.env.NODE_ENV === 'development'
-                    }
-
-                    if (processUnknownEvent(event as unknown as Record<string, unknown>, unknownContext)) {
-                      accumulatedText = unknownContext.accumulatedText
-                      yield {
-                        content: [{
-                          type: 'text' as const,
-                          text: accumulatedText
-                        }]
-                      }
-                      log.debug('✅ YIELDED content from unknown event', {
-                        type: unknownEvent['type'],
-                        textLength: accumulatedText.length
-                      })
-                    }
-                  }
-                } catch (parseError) {
-                  // Record parse error in monitor
-                  monitor.recordParseError(
-                    parseError instanceof Error ? parseError : new Error(String(parseError)),
-                    data
-                  )
-
-                  log.warn('Failed to parse SSE data', {
-                    data: data.substring(0, 100),
-                    error: parseError instanceof Error ? parseError.message : String(parseError)
-                  })
-                }
-              }
-            }
-          }
-
-          // Final yield with complete accumulated text and any collected sources
-          if (accumulatedText || sources.length > 0) {
-            yield {
-              content: [
-                ...(accumulatedText
-                  ? [{ type: 'text' as const, text: accumulatedText }]
-                  : []),
-                ...sources.map(source => ({
-                  type: 'source' as const,
-                  sourceType: 'url' as const,
-                  id: source.id,
-                  url: source.url,
-                  title: source.title
-                }))
-              ]
-            }
-          }
-
-          // Complete monitoring and log metrics locally
-          const metrics = monitor.complete()
-
-          log.info('Streaming completed successfully', {
-            totalLength: accumulatedText.length,
-            mode,
-            metrics: {
-              totalEvents: metrics.totalEvents,
-              unknownTypes: metrics.unknownTypes.length,
-              parseErrors: metrics.parseErrors,
-              fieldMismatches: metrics.fieldMismatches.length
-            }
-          })
-
-        } finally {
-          try {
-            reader.releaseLock()
-          } catch (releaseError) {
-            log.warn('Failed to release reader lock', {
-              error: releaseError instanceof Error ? releaseError.message : String(releaseError)
-            })
-          }
-        }
-
+        yield* consumeAdapterStream(
+          response,
+          adapterOptions,
+          request.mode
+        )
       } catch (error) {
-        // Handle AbortError gracefully - this occurs during React StrictMode unmount/remount
-        // or when the user navigates away. We should silently exit without showing an error.
+        const mode = adapterOptions.hasCompletedExecutionRef.current
+          ? 'CONVERSATION'
+          : 'EXECUTION'
         if (error instanceof Error && error.name === 'AbortError') {
           log.debug('Stream aborted (likely StrictMode or navigation)', {
-            mode: hasCompletedExecutionRef.current ? 'CONVERSATION' : 'EXECUTION'
+            mode
           })
-          return // Silently exit - the runtime will restart if needed
+          return
         }
-
-        const errorMode = hasCompletedExecutionRef.current ? 'CONVERSATION' : 'EXECUTION'
         log.error('Streaming adapter error', {
-          error: error instanceof Error ? {
-            message: error.message,
-            name: error.name
-          } : String(error),
-          mode: errorMode
+          error:
+            error instanceof Error
+              ? { message: error.message, name: error.name }
+              : String(error),
+          mode
         })
-
-        // Yield error message to user
         yield {
           content: [{
             type: 'text' as const,
-            text: `Error: ${error instanceof Error ? error.message : 'An unknown error occurred'}`
+            text: `Error: ${
+              error instanceof Error
+                ? error.message
+                : 'An unknown error occurred'
+            }`
           }]
         }
-
         throw error
       }
     }
@@ -956,6 +1094,206 @@ const DestructiveApprovalToggle = memo(function DestructiveApprovalToggle({
 })
 DestructiveApprovalToggle.displayName = "DestructiveApprovalToggle"
 
+function AssistantInputForm<TValues extends FieldValues>(props: {
+  tool: AssistantArchitectWithRelations
+  form: UseFormReturn<TValues>
+  onSubmit: SubmitHandler<TValues>
+  isExecuting: boolean
+  isAgentic: boolean
+  approveDestructive: boolean
+  onApproveDestructiveChange: (approved: boolean) => void
+}) {
+  const { toast } = useToast()
+  return (
+    <Form {...props.form}>
+      <form
+        onSubmit={props.form.handleSubmit(props.onSubmit)}
+        className="space-y-4"
+      >
+        {props.tool.inputFields.map((field: SelectToolInputField) => (
+          <FormField
+            key={field.id}
+            control={props.form.control}
+            name={field.name as Path<TValues>}
+            render={({ field: formField }) => (
+              <FormItem>
+                <FormLabel>{field.label || field.name}</FormLabel>
+                <FormControl>
+                  {field.fieldType === "long_text" ? (
+                    <Textarea
+                      placeholder="Enter your answer..."
+                      {...formField}
+                      value={
+                        typeof formField.value === 'string'
+                          ? formField.value
+                          : ''
+                      }
+                      className="bg-muted"
+                      disabled={props.isExecuting}
+                    />
+                  ) : field.fieldType === "select" ||
+                    field.fieldType === "multi_select" ? (
+                    <Select
+                      onValueChange={formField.onChange}
+                      defaultValue={
+                        typeof formField.value === 'string'
+                          ? formField.value
+                          : undefined
+                      }
+                      disabled={props.isExecuting}
+                    >
+                      <SelectTrigger className="bg-muted">
+                        <SelectValue
+                          placeholder={`Select ${
+                            field.label || field.name
+                          }...`}
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {renderSelectOptions(field.options)}
+                      </SelectContent>
+                    </Select>
+                  ) : field.fieldType === "file_upload" ? (
+                    <DocumentUploadButton
+                      label="Add Document for Knowledge"
+                      onContent={document => formField.onChange(document)}
+                      repositoryBacked
+                      disabled={props.isExecuting}
+                      className="w-full"
+                      onError={error => {
+                        toast({
+                          title:
+                            error?.status === 413
+                              ? "File Too Large"
+                              : "Upload Failed",
+                          description:
+                            error?.status === 413
+                              ? "Please upload a file smaller than 50MB."
+                              : error?.message || "Unknown error",
+                          variant: "destructive"
+                        })
+                      }}
+                    />
+                  ) : (
+                    <Input
+                      placeholder="Enter your answer..."
+                      {...formField}
+                      value={
+                        typeof formField.value === 'string'
+                          ? formField.value
+                          : ''
+                      }
+                      className="bg-muted"
+                      disabled={props.isExecuting}
+                    />
+                  )}
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        ))}
+        <DestructiveApprovalToggle
+          tool={props.tool}
+          isAgentic={props.isAgentic}
+          checked={props.approveDestructive}
+          onChange={props.onApproveDestructiveChange}
+          disabled={props.isExecuting}
+        />
+        <Button type="submit" disabled={props.isExecuting}>
+          {props.isExecuting ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Running...
+            </>
+          ) : (
+            <>
+              <Sparkles className="mr-2 h-4 w-4" /> Generate
+            </>
+          )}
+        </Button>
+      </form>
+    </Form>
+  )
+}
+
+function AvailableTools({ enabledTools }: { enabledTools: string[] }) {
+  if (enabledTools.length === 0) return null
+  return (
+    <div className="tool-execution-status space-y-2">
+      <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+        <Settings className="h-4 w-4" />
+        <span>Tools Available ({enabledTools.length})</span>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {enabledTools.map(toolName => (
+          <Badge key={toolName} variant="outline" className="text-xs">
+            {getToolDisplayName(toolName)}
+          </Badge>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function AssistantExecutionPane(props: {
+  tool: AssistantArchitectWithRelations
+  inputs: Record<string, unknown>
+  promptCount: number
+  isExecuting: boolean
+  hasResults: boolean
+  isAgentic: boolean
+  toolTimeline: ToolTimelineEvent[]
+  approveDestructive: boolean
+  onExecutionIdChange: (id: number) => void
+  onPromptCountChange: (count: number) => void
+  onExecutionComplete: () => void
+  onExecutionError: (error: string) => void
+  onToolEvent: (event: ToolTimelineEvent) => void
+}) {
+  if (!props.isExecuting && !props.hasResults) return null
+  return (
+    <ErrorBoundary>
+      <AssistantArchitectRuntimeProvider
+        tool={props.tool}
+        inputs={props.inputs}
+        onExecutionIdChange={props.onExecutionIdChange}
+        onPromptCountChange={props.onPromptCountChange}
+        onExecutionComplete={props.onExecutionComplete}
+        onExecutionError={props.onExecutionError}
+        hasCompletedExecution={props.hasResults}
+        onToolEvent={props.onToolEvent}
+        approveDestructive={props.approveDestructive}
+      >
+        <div className="space-y-6">
+          {props.promptCount > 1 && props.isExecuting && (
+            <ExecutionProgress
+              totalPrompts={props.promptCount}
+              prompts={props.tool.prompts || []}
+            />
+          )}
+          {props.isAgentic && (
+            <ToolCallTimeline events={props.toolTimeline} />
+          )}
+          {props.isExecuting && !props.hasResults && (
+            <div
+              role="status"
+              className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 rounded-md px-3 py-2"
+            >
+              <Loader2 className="h-4 w-4 animate-spin" />
+              <span>
+                Execution in progress — follow-up available when complete
+              </span>
+            </div>
+          )}
+          <div className="border rounded-lg p-4 space-y-4 max-w-full">
+            <Thread />
+          </div>
+        </div>
+      </AssistantArchitectRuntimeProvider>
+    </ErrorBoundary>
+  )
+}
+
 export const AssistantArchitectStreaming = memo(function AssistantArchitectStreaming({
   tool
 }: AssistantArchitectStreamingProps) {
@@ -1109,203 +1447,32 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
   return (
     <div className="space-y-6">
       <ToolHeader tool={tool} />
-
-      {error && (
-        <ErrorAlert errorMessage={error} />
-      )}
-
-      <div className="space-y-4">
-        <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-            {tool.inputFields.map((field: SelectToolInputField) => (
-              <FormField
-                key={field.id}
-                control={form.control}
-                name={field.name}
-                render={({ field: formField }) => (
-                  <FormItem>
-                    <FormLabel>{field.label || field.name}</FormLabel>
-                    <FormControl>
-                      {field.fieldType === "long_text" ? (
-                        <Textarea
-                          placeholder="Enter your answer..."
-                          {...formField}
-                          value={typeof formField.value === 'string' ? formField.value : ''}
-                          className="bg-muted"
-                          disabled={isExecuting}
-                        />
-                      ) : field.fieldType === "select" || field.fieldType === "multi_select" ? (
-                        <Select
-                          onValueChange={formField.onChange}
-                          defaultValue={typeof formField.value === 'string' ? formField.value : undefined}
-                          disabled={isExecuting}
-                        >
-                          <SelectTrigger className="bg-muted">
-                            <SelectValue placeholder={`Select ${field.label || field.name}...`} />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {(() => {
-                              let options: Array<{ label: string, value: string }> = []
-                              if (typeof field.options === "string") {
-                                try {
-                                  const parsed = JSON.parse(field.options)
-                                  if (Array.isArray(parsed)) {
-                                    options = parsed
-                                  }
-                                } catch {
-                                  const optionsStr = field.options as string
-                                  options = optionsStr.split(",").map(s => ({
-                                    value: s.trim(),
-                                    label: s.trim()
-                                  }))
-                                }
-                              } else if (Array.isArray(field.options)) {
-                                options = field.options
-                              } else if (field.options && typeof field.options === 'object' && 'values' in field.options) {
-                                const optionsObj = field.options as { values?: string[] }
-                                if (Array.isArray(optionsObj.values)) {
-                                  options = optionsObj.values.map(val => ({
-                                    label: val,
-                                    value: val
-                                  }))
-                                }
-                              }
-                              // Sanitize both label and value to block XSS and prompt injection
-                              const sanitizedOptions = options
-                                .map(opt => ({
-                                  ...opt,
-                                  label: sanitizeOptionLabel(opt.label),
-                                  value: sanitizeOptionLabel(opt.value ?? opt.label)
-                                }))
-                                .filter(opt => opt.label !== '' && opt.value !== '')
-
-                              return sanitizedOptions.map(option => (
-                                <SelectItem key={option.value} value={option.value}>
-                                  {option.label}
-                                </SelectItem>
-                              ))
-                            })()}
-                          </SelectContent>
-                        </Select>
-                      ) : field.fieldType === "file_upload" ? (
-                        <DocumentUploadButton
-                          label="Add Document for Knowledge"
-                          onContent={doc => formField.onChange(doc)}
-                          repositoryBacked
-                          disabled={isExecuting}
-                          className="w-full"
-                          onError={err => {
-                            if (err?.status === 413) {
-                              toast({
-                                title: "File Too Large",
-                                description: "Please upload a file smaller than 50MB.",
-                                variant: "destructive"
-                              })
-                            } else {
-                              toast({
-                                title: "Upload Failed",
-                                description: err?.message || "Unknown error",
-                                variant: "destructive"
-                              })
-                            }
-                          }}
-                        />
-                      ) : (
-                        <Input
-                          placeholder="Enter your answer..."
-                          {...formField}
-                          value={typeof formField.value === 'string' ? formField.value : ''}
-                          className="bg-muted"
-                          disabled={isExecuting}
-                        />
-                      )}
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            ))}
-            <DestructiveApprovalToggle
-              tool={tool}
-              isAgentic={isAgentic}
-              checked={approveDestructive}
-              onChange={setApproveDestructive}
-              disabled={isExecuting}
-            />
-            <div className="flex gap-2">
-              <Button type="submit" disabled={isExecuting}>
-                {isExecuting ? (
-                  <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Running...</>
-                ) : (
-                  <><Sparkles className="mr-2 h-4 w-4" /> Generate</>
-                )}
-              </Button>
-            </div>
-          </form>
-        </Form>
-      </div>
-
-      {/* Tool Usage Indicators */}
-      {enabledTools.length > 0 && (
-        <div className="tool-execution-status space-y-2">
-          <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-            <Settings className="h-4 w-4" />
-            <span>Tools Available ({enabledTools.length})</span>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {enabledTools.map(toolName => (
-              <Badge key={toolName} variant="outline" className="text-xs">
-                {getToolDisplayName(toolName)}
-              </Badge>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Streaming execution section - Thread remains visible after completion */}
-      {(isExecuting || hasResults) && (
-        <ErrorBoundary>
-          <AssistantArchitectRuntimeProvider
-            tool={tool}
-            inputs={inputs}
-            onExecutionIdChange={handleExecutionIdChange}
-            onPromptCountChange={handlePromptCountChange}
-            onExecutionComplete={handleExecutionComplete}
-            onExecutionError={handleExecutionError}
-            hasCompletedExecution={hasResults}
-            onToolEvent={handleToolEvent}
-            approveDestructive={approveDestructive}
-          >
-            <div className="space-y-6">
-              {/* Progress indicator for multi-prompt execution */}
-              {promptCount > 1 && isExecuting && (
-                <ExecutionProgress
-                  totalPrompts={promptCount}
-                  prompts={tool.prompts || []}
-                />
-              )}
-
-              {/* Agentic tool-call timeline (Issue #926) */}
-              {isAgentic && (
-                <ToolCallTimeline events={toolTimeline} />
-              )}
-
-              {/* Execution in-progress status banner */}
-              {isExecuting && !hasResults && (
-                <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 rounded-md px-3 py-2">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  <span>Execution in progress — follow-up available when complete</span>
-                </div>
-              )}
-
-              {/* Thread component for streaming output and follow-up conversations */}
-              <div className="border rounded-lg p-4 space-y-4 max-w-full">
-                <Thread />
-              </div>
-            </div>
-          </AssistantArchitectRuntimeProvider>
-        </ErrorBoundary>
-      )}
+      {error && <ErrorAlert errorMessage={error} />}
+      <AssistantInputForm
+        tool={tool}
+        form={form}
+        onSubmit={onSubmit}
+        isExecuting={isExecuting}
+        isAgentic={isAgentic}
+        approveDestructive={approveDestructive}
+        onApproveDestructiveChange={setApproveDestructive}
+      />
+      <AvailableTools enabledTools={enabledTools} />
+      <AssistantExecutionPane
+        tool={tool}
+        inputs={inputs}
+        promptCount={promptCount}
+        isExecuting={isExecuting}
+        hasResults={hasResults}
+        isAgentic={isAgentic}
+        toolTimeline={toolTimeline}
+        approveDestructive={approveDestructive}
+        onExecutionIdChange={handleExecutionIdChange}
+        onPromptCountChange={handlePromptCountChange}
+        onExecutionComplete={handleExecutionComplete}
+        onExecutionError={handleExecutionError}
+        onToolEvent={handleToolEvent}
+      />
     </div>
   )
 })

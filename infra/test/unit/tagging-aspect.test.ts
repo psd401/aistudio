@@ -2,16 +2,28 @@ import * as cdk from "aws-cdk-lib"
 import { Template, Match } from "aws-cdk-lib/assertions"
 import { TaggingAspect, TaggingConfig } from "../../lib/constructs/base/tagging-aspect"
 
-describe("TaggingAspect", () => {
-  let app: cdk.App
-  let stack: cdk.Stack
+interface SynthesizedTag {
+  Key: string
+  Value: string
+}
+
+interface TaggedResource {
+  Properties: { Tags: SynthesizedTag[] }
+}
+
+let app: cdk.App
+let stack: cdk.Stack
+
+function defineTaggingAspectSuite1Part1() {
+
+
 
   beforeEach(() => {
     app = new cdk.App()
     stack = new cdk.Stack(app, "TestStack")
   })
 
-  describe("Core Tag Application", () => {
+
     test("should apply all core tags to taggable resources", () => {
       const config: TaggingConfig = {
         environment: "dev",
@@ -44,10 +56,12 @@ describe("TaggingAspect", () => {
 
       // Also verify DeployedAt exists (value is dynamic)
       const resources = template.findResources("AWS::S3::Bucket")
-      const bucket = Object.values(resources)[0]
-      const deployedAtTag = bucket.Properties.Tags.find((t: any) => t.Key === "DeployedAt")
+      const bucket = Object.values(resources)[0] as TaggedResource
+      const deployedAtTag = bucket.Properties.Tags.find(
+        (tag) => tag.Key === "DeployedAt"
+      )
       expect(deployedAtTag).toBeDefined()
-      expect(deployedAtTag.Value).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+      expect(deployedAtTag?.Value).toMatch(/^\d{4}-\d{2}-\d{2}T/)
     })
 
     test("should capitalize environment name", () => {
@@ -93,10 +107,12 @@ describe("TaggingAspect", () => {
         ]),
       })
     })
-  })
 
-  describe("Cost Allocation Tags", () => {
-    test("should set cost center to PROD-001 for production", () => {
+
+
+    }
+
+function defineTaggingAspectSuite1Part2() {test("should set cost center to PROD-001 for production", () => {
       const config: TaggingConfig = {
         environment: "prod",
         projectName: "AIStudio",
@@ -161,9 +177,9 @@ describe("TaggingAspect", () => {
         ]),
       })
     })
-  })
 
-  describe("Compliance Tags", () => {
+
+
     test("should set compliance to Required for production", () => {
       const config: TaggingConfig = {
         environment: "prod",
@@ -186,7 +202,9 @@ describe("TaggingAspect", () => {
       })
     })
 
-    test("should set compliance to None for non-production", () => {
+    }
+
+function defineTaggingAspectSuite1Part3() {test("should set compliance to None for non-production", () => {
       const config: TaggingConfig = {
         environment: "dev",
         projectName: "AIStudio",
@@ -207,9 +225,9 @@ describe("TaggingAspect", () => {
         ]),
       })
     })
-  })
 
-  describe("Data Classification", () => {
+
+
     test("should classify database resources as Sensitive", () => {
       const config: TaggingConfig = {
         environment: "prod",
@@ -283,7 +301,9 @@ describe("TaggingAspect", () => {
       })
     })
 
-    test("should classify S3 buckets as Public by default", () => {
+    }
+
+function defineTaggingAspectSuite1Part4() {test("should classify S3 buckets as Public by default", () => {
       const config: TaggingConfig = {
         environment: "prod",
         projectName: "AIStudio",
@@ -304,9 +324,9 @@ describe("TaggingAspect", () => {
         ]),
       })
     })
-  })
 
-  describe("Additional Custom Tags", () => {
+
+
     test("should apply additional custom tags", () => {
       const config: TaggingConfig = {
         environment: "prod",
@@ -357,9 +377,9 @@ describe("TaggingAspect", () => {
         ]),
       })
     })
-  })
 
-  describe("Non-Taggable Resources", () => {
+
+
     test("should not fail on non-taggable resources", () => {
       const config: TaggingConfig = {
         environment: "prod",
@@ -379,10 +399,12 @@ describe("TaggingAspect", () => {
       // Should not throw an error
       expect(() => Template.fromStack(stack)).not.toThrow()
     })
-  })
 
-  describe("ManagedBy Tag", () => {
-    test("should always set ManagedBy to CDK", () => {
+
+
+    }
+
+function defineTaggingAspectSuite1Part5() {test("should always set ManagedBy to CDK", () => {
       const config: TaggingConfig = {
         environment: "dev",
         projectName: "AIStudio",
@@ -403,9 +425,9 @@ describe("TaggingAspect", () => {
         ]),
       })
     })
-  })
 
-  describe("DeployedAt Tag", () => {
+
+
     test("should set DeployedAt to valid ISO timestamp", () => {
       const config: TaggingConfig = {
         environment: "dev",
@@ -421,13 +443,23 @@ describe("TaggingAspect", () => {
 
       const template = Template.fromStack(stack)
       const bucketResource = template.findResources("AWS::S3::Bucket")
-      const bucket = Object.values(bucketResource)[0]
+      const bucket = Object.values(bucketResource)[0] as TaggedResource
       const deployedAtTag = bucket.Properties.Tags.find(
-        (tag: any) => tag.Key === "DeployedAt"
+        (tag) => tag.Key === "DeployedAt"
       )
 
       expect(deployedAtTag).toBeDefined()
-      expect(deployedAtTag.Value).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+      expect(deployedAtTag?.Value).toMatch(/^\d{4}-\d{2}-\d{2}T/)
     })
-  })
-})
+
+}
+
+const defineTaggingAspectSuite1 = () => {
+  defineTaggingAspectSuite1Part1()
+  defineTaggingAspectSuite1Part2()
+  defineTaggingAspectSuite1Part3()
+  defineTaggingAspectSuite1Part4()
+  defineTaggingAspectSuite1Part5()
+};
+
+describe("TaggingAspect", defineTaggingAspectSuite1)

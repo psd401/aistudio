@@ -17,7 +17,7 @@ test.describe('Voice Availability API', () => {
     expect(body.error).toBe('Unauthorized')
   })
 
-  test('GET /api/nexus/voice/availability returns JSON with expected shape when authenticated', async ({ page, request }) => {
+  test('GET /api/nexus/voice/availability returns JSON with expected shape when authenticated', async ({ page }) => {
     // Navigate to trigger auth session
     await page.goto('/nexus')
 

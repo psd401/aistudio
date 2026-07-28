@@ -16,10 +16,11 @@
  *     call for these inserts (the Done-when "grep returns zero matches").
  */
 
-import { readFileSync } from "fs"
-import { join } from "path"
+
+import { join } from "node:path"
 import { sql } from "drizzle-orm"
 import { PgDialect } from "drizzle-orm/pg-core"
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 const dialect = new PgDialect()
 
@@ -67,7 +68,7 @@ describe("prompt_results insert parameterization (REV-DB-023 / REV-SEC-105 / REV
   it.each(Object.entries(ROUTE_FILES))(
     "leaves no real sql.raw(...) call for prompt_results inserts in %s route",
     (_name, file) => {
-      const src = readFileSync(file, "utf8")
+      const src = validatedFs.readFileSync(file, "utf8")
       // A *call* embeds a string/template literal: `sql.raw(` immediately followed
       // by a quote or backtick. Comment mentions use empty `sql.raw()` and are ignored.
       const realCall = /sql\.raw\(\s*[`'"]/
@@ -78,7 +79,7 @@ describe("prompt_results insert parameterization (REV-DB-023 / REV-SEC-105 / REV
   it.each(Object.entries(ROUTE_FILES))(
     "uses bound ::jsonb / ::execution_status casts in %s route",
     (_name, file) => {
-      const src = readFileSync(file, "utf8")
+      const src = validatedFs.readFileSync(file, "utf8")
       expect(src).toContain("::jsonb")
       expect(src).toContain("::execution_status")
     }

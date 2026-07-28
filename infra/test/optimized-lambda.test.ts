@@ -6,10 +6,14 @@ import {
   EnvironmentConfig,
 } from "../lib/constructs"
 
-describe("OptimizedLambda", () => {
-  let app: cdk.App
-  let stack: cdk.Stack
-  let config: ReturnType<typeof EnvironmentConfig.get>
+let app: cdk.App
+let stack: cdk.Stack
+let config: ReturnType<typeof EnvironmentConfig.get>
+
+function defineOptimizedLambdaSuite1Part1() {
+
+
+
 
   beforeAll(() => {
     // These are synthesis tests, not Docker bundling tests. Returning inline
@@ -82,7 +86,9 @@ describe("OptimizedLambda", () => {
     })
   })
 
-  describe("Performance Profiles", () => {
+  }
+
+function defineOptimizedLambdaSuite1Part2() {describe("Performance Profiles", () => {
     test("applies critical profile correctly", () => {
       new OptimizedLambda(stack, "TestLambda", {
         functionName: "test-function",
@@ -181,7 +187,9 @@ describe("OptimizedLambda", () => {
     })
   })
 
-  describe("Concurrency Configuration", () => {
+  }
+
+function defineOptimizedLambdaSuite1Part3() {describe("Concurrency Configuration", () => {
     test("sets reserved concurrency", () => {
       new OptimizedLambda(stack, "TestLambda", {
         functionName: "test-function",
@@ -237,7 +245,9 @@ describe("OptimizedLambda", () => {
     })
   })
 
-  describe("Observability", () => {
+  }
+
+function defineOptimizedLambdaSuite1Part4() {describe("Observability", () => {
     test("enables X-Ray tracing when configured", () => {
       new OptimizedLambda(stack, "TestLambda", {
         functionName: "test-function",
@@ -333,7 +343,9 @@ describe("OptimizedLambda", () => {
     })
   })
 
-  describe("Environment Variables", () => {
+  }
+
+function defineOptimizedLambdaSuite1Part5() {describe("Environment Variables", () => {
     test("sets performance environment variables for ARM64", () => {
       new OptimizedLambda(stack, "TestLambda", {
         functionName: "test-function",
@@ -410,7 +422,9 @@ describe("OptimizedLambda", () => {
     })
   })
 
-  describe("Integration", () => {
+  }
+
+function defineOptimizedLambdaSuite1Part6() {describe("Integration", () => {
     test("exposes underlying Lambda function", () => {
       const optimizedLambda = new OptimizedLambda(stack, "TestLambda", {
         functionName: "test-function",
@@ -520,7 +534,9 @@ describe("OptimizedLambda", () => {
     })
   })
 
-  describe("Log Retention", () => {
+  }
+
+function defineOptimizedLambdaSuite1Part7() {describe("Log Retention", () => {
     test("uses custom log retention when provided", () => {
       new OptimizedLambda(stack, "TestLambda", {
         functionName: "test-function",
@@ -566,4 +582,16 @@ describe("OptimizedLambda", () => {
       })
     })
   })
-})
+}
+
+const defineOptimizedLambdaSuite1 = () => {
+  defineOptimizedLambdaSuite1Part1()
+  defineOptimizedLambdaSuite1Part2()
+  defineOptimizedLambdaSuite1Part3()
+  defineOptimizedLambdaSuite1Part4()
+  defineOptimizedLambdaSuite1Part5()
+  defineOptimizedLambdaSuite1Part6()
+  defineOptimizedLambdaSuite1Part7()
+};
+
+describe("OptimizedLambda", defineOptimizedLambdaSuite1)

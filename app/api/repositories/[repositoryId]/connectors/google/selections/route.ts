@@ -18,6 +18,7 @@ import {
 } from "@/lib/repositories/google-drive/route-access";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import { apiRateLimit } from "@/lib/rate-limit";
+import { ErrorFactories } from "@/lib/error-utils";
 
 const requestSchema = z.object({
   connectorId: z.string().uuid(),
@@ -43,7 +44,10 @@ async function replaceSelections(
     if (
       !(await connectorBelongsToRepository(input.connectorId, repositoryId))
     ) {
-      throw new Error("Connector not found");
+      throw ErrorFactories.authzResourceNotFound(
+        "Google Drive connector",
+        input.connectorId
+      );
     }
     const credential = await getGoogleDriveConnectorCredential({
       connectorId: input.connectorId,
@@ -60,7 +64,9 @@ async function replaceSelections(
         let file = await drive.getFile(fileId);
         if (file.mimeType === GOOGLE_SHORTCUT_MIME_TYPE) {
           if (!file.shortcutDetails?.targetId) {
-            throw new Error("Selected shortcut has no accessible target");
+            throw ErrorFactories.authzInsufficientPermissions(
+              "access Google Drive shortcut target"
+            );
           }
           file = await drive.getFile(
             file.shortcutDetails.targetId,

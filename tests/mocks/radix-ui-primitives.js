@@ -3,7 +3,7 @@ const React = require('react');
 
 // Generic primitive component factory
 const createPrimitive = (displayName) => {
-  const Component = React.forwardRef(({ children, ...props }, ref) => 
+  const Component = React.forwardRef(({ children, ...props }, ref) =>
     React.createElement('div', { ...props, ref, 'data-testid': displayName.toLowerCase() }, children)
   );
   Component.displayName = displayName;
@@ -14,7 +14,7 @@ const createPrimitive = (displayName) => {
 const mockExports = {
   // Dropdown Menu primitives
   Root: createPrimitive('DropdownMenuRoot'),
-  Trigger: createPrimitive('DropdownMenuTrigger'), 
+  Trigger: createPrimitive('DropdownMenuTrigger'),
   Content: createPrimitive('DropdownMenuContent'),
   Item: createPrimitive('DropdownMenuItem'),
   Separator: createPrimitive('DropdownMenuSeparator'),
@@ -29,7 +29,7 @@ const mockExports = {
   RadioItem: createPrimitive('DropdownMenuRadioItem'),
   ItemIndicator: createPrimitive('DropdownMenuItemIndicator'),
   Arrow: createPrimitive('DropdownMenuArrow'),
-  
+
   // Scroll Area primitives
   Viewport: createPrimitive('ScrollAreaViewport'),
   Scrollbar: createPrimitive('ScrollAreaScrollbar'),
@@ -37,17 +37,17 @@ const mockExports = {
   ScrollAreaThumb: createPrimitive('ScrollAreaThumb'),
   Thumb: createPrimitive('ScrollAreaThumb'),
   Corner: createPrimitive('ScrollAreaCorner'),
-  
+
   // Dialog primitives
   Close: createPrimitive('DialogClose'),
   Overlay: createPrimitive('DialogOverlay'),
   Title: createPrimitive('DialogTitle'),
   Description: createPrimitive('DialogDescription'),
-  
+
   // Select primitives
   Value: createPrimitive('SelectValue'),
   Icon: createPrimitive('SelectIcon'),
-  
+
   // Generic properties that might be accessed
   displayName: 'MockedPrimitive',
   __docgenInfo: {}
@@ -58,6 +58,6 @@ module.exports = mockExports;
 module.exports.default = mockExports;
 
 // Also export individual named exports
-Object.keys(mockExports).forEach(key => {
+for (const key of Object.keys(mockExports)) {
   module.exports[key] = mockExports[key];
-});
+};

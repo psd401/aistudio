@@ -5,8 +5,7 @@ import { getUserIdFromSession } from "@/actions/repositories/repository-permissi
 import {
   getContentPlatformConfig,
   initiateRepositoryUpload,
-  isCanonicalAssistantArchitectActive,
-  isCanonicalNexusAttachmentActive,
+  isCanonicalRepositoryUploadActive,
   isCanonicalUploadContentType,
   RepositoryUploadQuotaExceededError,
   validateRepositoryUploadFile,
@@ -33,8 +32,16 @@ const initiateSchema = z.object({
   byteSize: z.number().int().positive(),
 });
 
+async function ownsTemporaryAttachmentConversation(
+  ownerId: number,
+  conversationId: string | undefined,
+): Promise<boolean> {
+  if (!conversationId) return true;
+  return nexusConversationBelongsToOwner({ ownerId, conversationId });
+}
+
 async function initiateTemporaryAttachment(
-  request: Request
+  request: Request,
 ): Promise<Response> {
   const requestId = generateRequestId();
   const timer = startTimer("api.repositories.temporary-attachments.create");
@@ -43,15 +50,14 @@ async function initiateTemporaryAttachment(
     route: "api.repositories.temporary-attachments.create",
   });
   let compensation:
-    | { ownerId: number; bindingId: string; repositoryId: number }
-    | undefined;
+    { ownerId: number; bindingId: string; repositoryId: number } | undefined;
 
   try {
     const session = await getServerSession();
     if (!session?.sub) {
       return NextResponse.json(
         { error: "Unauthorized", requestId },
-        { status: 401 }
+        { status: 401 },
       );
     }
 
@@ -59,20 +65,20 @@ async function initiateTemporaryAttachment(
     if (!parsed.success) {
       return NextResponse.json(
         { error: "Invalid temporary attachment request", requestId },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
     const config = await getContentPlatformConfig();
-    const canonicalProductActive =
-      parsed.data.purpose === "nexus"
-        ? isCanonicalNexusAttachmentActive(config)
-        : isCanonicalAssistantArchitectActive(config);
     if (
-      !canonicalProductActive ||
+      !isCanonicalRepositoryUploadActive(config) ||
       !isCanonicalUploadContentType(parsed.data.contentType)
     ) {
-      timer({ status: "success", mode: "legacy", purpose: parsed.data.purpose });
+      timer({
+        status: "success",
+        mode: "legacy",
+        purpose: parsed.data.purpose,
+      });
       return NextResponse.json({ mode: "legacy", requestId });
     }
 
@@ -84,19 +90,18 @@ async function initiateTemporaryAttachment(
         contentType: parsed.data.contentType,
         byteSize: parsed.data.byteSize,
       },
-      config
+      config,
     );
     if (
-      parsed.data.conversationId &&
-      !(await nexusConversationBelongsToOwner({
+      !(await ownsTemporaryAttachmentConversation(
         ownerId,
-        conversationId: parsed.data.conversationId,
-      }))
+        parsed.data.conversationId,
+      ))
     ) {
       timer({ status: "error" });
       return NextResponse.json(
         { error: "Temporary attachment upload failed", requestId },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -132,7 +137,7 @@ async function initiateTemporaryAttachment(
         contentType: parsed.data.contentType,
         byteSize: parsed.data.byteSize,
       },
-      config
+      config,
     );
 
     timer({
@@ -173,7 +178,7 @@ async function initiateTemporaryAttachment(
           code: error.code,
           requestId,
         },
-        { status: error.httpStatus }
+        { status: error.httpStatus },
       );
     }
     return NextResponse.json(
@@ -181,7 +186,7 @@ async function initiateTemporaryAttachment(
         error: "Temporary attachment upload failed",
         requestId,
       },
-      { status: 400 }
+      { status: 400 },
     );
   }
 }

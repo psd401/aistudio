@@ -660,6 +660,173 @@ function migrationMetricsFromRows(
   };
 }
 
+async function loadDashboardOperationalRows() {
+  return executeQuery(
+    (db) =>
+      db.execute(sql`
+        SELECT
+          (
+            SELECT COUNT(*)::integer
+            FROM knowledge_repositories repository
+            WHERE repository.lifecycle_status = 'active'
+              AND EXISTS (
+                SELECT 1
+                FROM repository_items item
+                WHERE item.repository_id = repository.id
+                  AND item.current_version_id IS NOT NULL
+                  AND item.lifecycle_status = 'active'
+              )
+              AND (
+                repository.active_index_generation_id IS NULL
+                OR NOT EXISTS (
+                  SELECT 1
+                  FROM repository_index_generations generation
+                  WHERE generation.id = repository.active_index_generation_id
+                    AND generation.status = 'active'
+                )
+              )
+          ) AS stale_repositories,
+          (
+            SELECT COUNT(*)::integer
+            FROM repository_migration_runs
+            WHERE status IN ('queued', 'running')
+          ) AS active_runs,
+          (
+            SELECT COUNT(*)::integer
+            FROM repository_migration_runs
+            WHERE mode = 'rollback'
+              AND status = 'completed'
+              AND snapshot->>'rollbackDrill' = 'true'
+          ) AS rollback_drills,
+          (
+            SELECT COUNT(*)::integer
+            FROM repository_migration_runs
+            WHERE mode = 'dry_run'
+              AND status = 'completed'
+              AND source_kinds @> '[
+                "repository_item",
+                "nexus_document",
+                "assistant_pdf_job"
+              ]'::jsonb
+          ) AS dry_runs,
+          (
+            to_regclass('public.documents') IS NULL
+            AND to_regclass('public.document_chunks') IS NULL
+            AND EXISTS (
+              SELECT 1
+              FROM repository_legacy_retirement_events
+            )
+          ) AS retirement_finalized,
+          GREATEST(
+            (
+              SELECT MAX(recovery_window_ends_at)
+              FROM repository_migration_runs
+              WHERE mode = 'backfill'
+                AND status IN ('completed', 'completed_with_errors')
+            ),
+            (
+              SELECT MAX(verified_at) + make_interval(
+                days => COALESCE((
+                  SELECT CASE
+                    WHEN value ~ '^[0-9]+$'
+                      AND value::integer BETWEEN 1 AND 90
+                    THEN value::integer
+                    ELSE 7
+                  END
+                  FROM settings
+                  WHERE key = 'CONTENT_MIGRATION_RECOVERY_DAYS'
+                ), 7)
+              )
+              FROM repository_migration_items
+              WHERE status = 'verified'
+            ),
+            (
+              SELECT (MAX(updated_at) AT TIME ZONE 'UTC') + make_interval(
+                days => COALESCE((
+                  SELECT CASE
+                    WHEN value ~ '^[0-9]+$'
+                      AND value::integer BETWEEN 1 AND 90
+                    THEN value::integer
+                    ELSE 7
+                  END
+                  FROM settings
+                  WHERE key = 'CONTENT_MIGRATION_RECOVERY_DAYS'
+                ), 7)
+              )
+              FROM settings
+              WHERE key IN (
+                'CONTENT_REPOSITORY_CUTOVER_ENABLED',
+                'CONTENT_NEXUS_CUTOVER_ENABLED',
+                'CONTENT_ASSISTANT_ARCHITECT_CUTOVER_ENABLED'
+              )
+                AND value = 'true'
+            )
+          ) AS recovery_window_ends_at,
+          (
+            SELECT COALESCE(jsonb_object_agg(status, count), '{}'::jsonb)
+            FROM (
+              SELECT status, COUNT(*)::integer AS count
+              FROM repository_processing_jobs
+              GROUP BY status
+            ) processing_counts
+          ) AS processing,
+          (
+            SELECT jsonb_build_object(
+              'observations', COUNT(*)::integer,
+              'legacyResults', COALESCE(SUM(legacy_result_count), 0)::integer,
+              'canonicalResults', COALESCE(SUM(canonical_result_count), 0)::integer,
+              'overlappingItems', COALESCE(SUM(overlapping_item_count), 0)::integer
+            )
+            FROM repository_retrieval_shadow_observations
+            WHERE created_at >= NOW() - INTERVAL '24 hours'
+          ) AS retrieval_shadow
+      `),
+    "contentMigration.dashboardOperational",
+  );
+}
+
+interface DashboardOperationalRow {
+  stale_repositories: number;
+  active_runs: number;
+  rollback_drills: number;
+  dry_runs: number;
+  retirement_finalized: boolean;
+  recovery_window_ends_at: Date | string | null;
+  processing: Record<string, number> | string;
+  retrieval_shadow:
+    | {
+        observations: number;
+        legacyResults: number;
+        canonicalResults: number;
+        overlappingItems: number;
+      }
+    | string;
+}
+
+const EMPTY_DASHBOARD_OPERATIONAL: DashboardOperationalRow = {
+  stale_repositories: 0,
+  active_runs: 0,
+  rollback_drills: 0,
+  dry_runs: 0,
+  retirement_finalized: false,
+  recovery_window_ends_at: null,
+  processing: {},
+  retrieval_shadow: {
+    observations: 0,
+    legacyResults: 0,
+    canonicalResults: 0,
+    overlappingItems: 0,
+  },
+};
+
+function parseDashboardRecord<T extends Record<string, unknown>>(
+  value: T | string,
+  fallback: T,
+): T {
+  if (typeof value !== "string") return value;
+  return (JSON.parse(value) as T) ?? fallback;
+}
+
 export async function getRepositoryMigrationDashboard(): Promise<RepositoryMigrationDashboard> {
   const [inventory, runs, statusRows, operationalRows, config] =
     await Promise.all([
@@ -684,175 +851,34 @@ export async function getRepositoryMigrationDashboard(): Promise<RepositoryMigra
             .groupBy(repositoryMigrationItems.status),
         "contentMigration.dashboardStatuses",
       ),
-      executeQuery(
-        (db) =>
-          db.execute(sql`
-            SELECT
-              (
-                SELECT COUNT(*)::integer
-                FROM knowledge_repositories repository
-                WHERE repository.lifecycle_status = 'active'
-                  AND EXISTS (
-                    SELECT 1
-                    FROM repository_items item
-                    WHERE item.repository_id = repository.id
-                      AND item.current_version_id IS NOT NULL
-                      AND item.lifecycle_status = 'active'
-                  )
-                  AND (
-                    repository.active_index_generation_id IS NULL
-                    OR NOT EXISTS (
-                      SELECT 1
-                      FROM repository_index_generations generation
-                      WHERE generation.id = repository.active_index_generation_id
-                        AND generation.status = 'active'
-                    )
-                  )
-              ) AS stale_repositories,
-              (
-                SELECT COUNT(*)::integer
-                FROM repository_migration_runs
-                WHERE status IN ('queued', 'running')
-              ) AS active_runs,
-              (
-                SELECT COUNT(*)::integer
-                FROM repository_migration_runs
-                WHERE mode = 'rollback'
-                  AND status = 'completed'
-                  AND snapshot->>'rollbackDrill' = 'true'
-              ) AS rollback_drills,
-              (
-                SELECT COUNT(*)::integer
-                FROM repository_migration_runs
-                WHERE mode = 'dry_run'
-                  AND status = 'completed'
-                  AND source_kinds @> '[
-                    "repository_item",
-                    "nexus_document",
-                    "assistant_pdf_job"
-                  ]'::jsonb
-              ) AS dry_runs,
-              (
-                to_regclass('public.documents') IS NULL
-                AND to_regclass('public.document_chunks') IS NULL
-                AND EXISTS (
-                  SELECT 1
-                  FROM repository_legacy_retirement_events
-                )
-              ) AS retirement_finalized,
-              GREATEST(
-                (
-                  SELECT MAX(recovery_window_ends_at)
-                  FROM repository_migration_runs
-                  WHERE mode = 'backfill'
-                    AND status IN ('completed', 'completed_with_errors')
-                ),
-                (
-                  SELECT MAX(verified_at) + make_interval(
-                    days => COALESCE((
-                      SELECT CASE
-                        WHEN value ~ '^[0-9]+$'
-                          AND value::integer BETWEEN 1 AND 90
-                        THEN value::integer
-                        ELSE 7
-                      END
-                      FROM settings
-                      WHERE key = 'CONTENT_MIGRATION_RECOVERY_DAYS'
-                    ), 7)
-                  )
-                  FROM repository_migration_items
-                  WHERE status = 'verified'
-                ),
-                (
-                  SELECT (MAX(updated_at) AT TIME ZONE 'UTC') + make_interval(
-                    days => COALESCE((
-                      SELECT CASE
-                        WHEN value ~ '^[0-9]+$'
-                          AND value::integer BETWEEN 1 AND 90
-                        THEN value::integer
-                        ELSE 7
-                      END
-                      FROM settings
-                      WHERE key = 'CONTENT_MIGRATION_RECOVERY_DAYS'
-                    ), 7)
-                  )
-                  FROM settings
-                  WHERE key IN (
-                    'CONTENT_REPOSITORY_CUTOVER_ENABLED',
-                    'CONTENT_NEXUS_CUTOVER_ENABLED',
-                    'CONTENT_ASSISTANT_ARCHITECT_CUTOVER_ENABLED'
-                  )
-                    AND value = 'true'
-                )
-              ) AS recovery_window_ends_at,
-              (
-                SELECT COALESCE(jsonb_object_agg(status, count), '{}'::jsonb)
-                FROM (
-                  SELECT status, COUNT(*)::integer AS count
-                  FROM repository_processing_jobs
-                  GROUP BY status
-                ) processing_counts
-              ) AS processing,
-              (
-                SELECT jsonb_build_object(
-                  'observations', COUNT(*)::integer,
-                  'legacyResults', COALESCE(SUM(legacy_result_count), 0)::integer,
-                  'canonicalResults', COALESCE(SUM(canonical_result_count), 0)::integer,
-                  'overlappingItems', COALESCE(SUM(overlapping_item_count), 0)::integer
-                )
-                FROM repository_retrieval_shadow_observations
-                WHERE created_at >= NOW() - INTERVAL '24 hours'
-              ) AS retrieval_shadow
-          `),
-        "contentMigration.dashboardOperational",
-      ),
+      loadDashboardOperationalRows(),
       getContentPlatformConfig(),
     ]);
 
   const migrationMetrics = migrationMetricsFromRows(statusRows);
-  const operational = toPgRows<{
-    stale_repositories: number;
-    active_runs: number;
-    rollback_drills: number;
-    dry_runs: number;
-    retirement_finalized: boolean;
-    recovery_window_ends_at: Date | string | null;
-    processing: Record<string, number> | string;
-    retrieval_shadow:
-      | {
-          observations: number;
-          legacyResults: number;
-          canonicalResults: number;
-          overlappingItems: number;
-        }
-      | string;
-  }>(operationalRows)[0];
-  const parseRecord = <T extends Record<string, unknown>>(
-    value: T | string | undefined,
-    fallback: T,
-  ): T => {
-    if (typeof value !== "string") return value ?? fallback;
-    return JSON.parse(value) as T;
-  };
-  const activeRunCount = numberFromDatabase(operational?.active_runs);
+  const operational =
+    toPgRows<DashboardOperationalRow>(operationalRows)[0] ??
+    EMPTY_DASHBOARD_OPERATIONAL;
+  const activeRunCount = numberFromDatabase(operational.active_runs);
   const rollbackDrillCompleted =
-    numberFromDatabase(operational?.rollback_drills) > 0;
-  const dryRunCompleted = numberFromDatabase(operational?.dry_runs) > 0;
-  const recoveryWindowEndsAt = operational?.recovery_window_ends_at
+    numberFromDatabase(operational.rollback_drills) > 0;
+  const dryRunCompleted = numberFromDatabase(operational.dry_runs) > 0;
+  const recoveryWindowEndsAt = operational.recovery_window_ends_at
     ? new Date(operational.recovery_window_ends_at)
     : null;
-  const cutoversEnabled =
-    config.enabled &&
-    config.readV2Enabled &&
-    config.repositoryCutoverEnabled &&
-    config.nexusCutoverEnabled &&
-    config.assistantArchitectCutoverEnabled;
+  const cutoversEnabled = [
+    config.enabled,
+    config.readV2Enabled,
+    config.repositoryCutoverEnabled,
+    config.nexusCutoverEnabled,
+    config.assistantArchitectCutoverEnabled,
+  ].every(Boolean);
   const retirement = assessContentRetirementReadiness({
     cutoversEnabled,
     retirementConfigured: config.legacyRetirementEnabled,
     dryRunCompleted,
     inventoryComplete:
-      operational?.retirement_finalized === true ||
+      operational.retirement_finalized ||
       inventory.every((entry) => entry.uncovered === 0),
     activeRunCount,
     migrationMetrics,
@@ -864,12 +890,12 @@ export async function getRepositoryMigrationDashboard(): Promise<RepositoryMigra
     runs,
     migrationMetrics,
     activeRunCount,
-    staleRepositoryCount: numberFromDatabase(operational?.stale_repositories),
-    processing: parseRecord<Record<string, number>>(
-      operational?.processing,
+    staleRepositoryCount: numberFromDatabase(operational.stale_repositories),
+    processing: parseDashboardRecord<Record<string, number>>(
+      operational.processing,
       {},
     ),
-    retrievalShadow: parseRecord(operational?.retrieval_shadow, {
+    retrievalShadow: parseDashboardRecord(operational.retrieval_shadow, {
       observations: 0,
       legacyResults: 0,
       canonicalResults: 0,
@@ -878,7 +904,7 @@ export async function getRepositoryMigrationDashboard(): Promise<RepositoryMigra
     recoveryWindowEndsAt,
     rollbackDrillCompleted,
     dryRunCompleted,
-    retirementFinalized: operational?.retirement_finalized === true,
+    retirementFinalized: operational.retirement_finalized,
     retirement,
   };
 }

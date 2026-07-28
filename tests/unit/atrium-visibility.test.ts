@@ -551,7 +551,7 @@ describe("listVisible — limit/offset clamping", () => {
   async function captureLimitOffset(
     filter: Record<string, unknown>
   ): Promise<{ limit: unknown; offset: unknown }> {
-    let captured: { limit: unknown; offset: unknown } = {
+    const captured: { limit: unknown; offset: unknown } = {
       limit: undefined,
       offset: undefined,
     };

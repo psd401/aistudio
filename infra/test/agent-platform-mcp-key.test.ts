@@ -21,8 +21,8 @@
  * `bun install`/`tsc`; Docker image assets are only fingerprinted at synth, not
  * built. Lives in the `infra` jest project (roots: infra/test).
  */
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { AgentPlatformStack } from '../lib/agent-platform-stack';
@@ -81,8 +81,10 @@ function buildTemplate(): Template {
   return Template.fromStack(stack);
 }
 
-describe('AgentPlatformStack — AI Studio MCP key provisioning (#1100)', () => {
-  let template: Template;
+let template: Template;
+
+function defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1Part1() {
+
 
   beforeAll(() => {
     template = buildTemplate();
@@ -186,7 +188,9 @@ describe('AgentPlatformStack — AI Studio MCP key provisioning (#1100)', () => 
     expect(resourceJson).not.toContain('AtriumContentApiKeySecret');
   });
 
-  it('does not expose service credentials or data-plane selectors to the runtime', () => {
+  }
+
+function defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1Part2() {it('does not expose service credentials or data-plane selectors to the runtime', () => {
     const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
     expect(Object.keys(runtimes).length).toBe(1);
     const runtime = Object.values(runtimes)[0] as {
@@ -283,7 +287,9 @@ describe('AgentPlatformStack — AI Studio MCP key provisioning (#1100)', () => 
       .toContain('amazon.titan-embed-text-v2:0');
   });
 
-  it('keeps the signing-secret deny as defense in depth', () => {
+  }
+
+function defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1Part3() {it('keeps the signing-secret deny as defense in depth', () => {
     interface Statement {
       Action?: string | string[];
       Effect?: string;
@@ -304,4 +310,12 @@ describe('AgentPlatformStack — AI Studio MCP key provisioning (#1100)', () => 
       }),
     ]));
   });
-});
+}
+
+const defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1 = () => {
+  defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1Part1()
+  defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1Part2()
+  defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1Part3()
+};
+
+describe('AgentPlatformStack — AI Studio MCP key provisioning (#1100)', defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1);

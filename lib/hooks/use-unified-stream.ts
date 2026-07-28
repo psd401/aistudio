@@ -12,6 +12,171 @@ import type {
 } from '@/lib/streaming/types';
 
 const log = createLogger({ module: 'use-unified-stream' });
+type Toast = ReturnType<typeof useToast>["toast"];
+
+function handleStreamFinish(
+  event: unknown,
+  source: UseUnifiedStreamConfig["source"],
+  toast: Toast,
+  setReasoning: (value: string | null) => void,
+  setThinking: (value: string | null) => void
+): void {
+  log.debug('Stream finished', { source, messageLength: 0 });
+  const reasoning = stringProperty(event, 'reasoning');
+  const thinking = stringProperty(event, 'thinking');
+  if (reasoning) setReasoning(reasoning);
+  if (thinking) setThinking(thinking);
+  toast({
+    title: 'Response Complete',
+    description: 'AI response generated successfully'
+  });
+}
+
+function stringProperty(value: unknown, key: string): string | null {
+  if (!value || typeof value !== 'object') return null;
+  const property = (value as Record<string, unknown>)[key];
+  return typeof property === 'string' ? property : null;
+}
+
+function streamErrorMessage(error: Error): {
+  title: string;
+  description: string;
+} {
+  if (error.message.includes('timeout')) {
+    return {
+      title: 'Request Timeout',
+      description: 'The AI model took too long to respond. Please try again.'
+    };
+  }
+  if (error.message.includes('quota') || error.message.includes('rate limit')) {
+    return {
+      title: 'Rate Limit Exceeded',
+      description: 'Too many requests. Please wait a moment before trying again.'
+    };
+  }
+  if (error.message.includes('content')) {
+    return {
+      title: 'Content Policy',
+      description: 'The request was blocked by content policy filters.'
+    };
+  }
+  return { title: 'AI Error', description: error.message };
+}
+
+function handleStreamError(
+  error: Error,
+  source: UseUnifiedStreamConfig["source"],
+  toast: Toast
+): void {
+  log.error('Stream error', { source, error: error.message });
+  toast({ ...streamErrorMessage(error), variant: 'destructive' });
+}
+
+function buildUnifiedStreamBody(
+  config: UseUnifiedStreamConfig,
+  requestConfig?: Partial<StreamRequest>
+) {
+  return {
+    ...streamTarget(config, requestConfig),
+    ...streamModelOptions(config, requestConfig),
+    ...streamRequestContext(config, requestConfig),
+    ...requestConfig
+  };
+}
+
+function streamTarget(
+  config: UseUnifiedStreamConfig,
+  requestConfig?: Partial<StreamRequest>
+) {
+  return {
+    source: config.source,
+    modelId: config.modelId || requestConfig?.modelId,
+    provider: config.provider || requestConfig?.provider,
+  };
+}
+
+function streamModelOptions(
+  config: UseUnifiedStreamConfig,
+  requestConfig?: Partial<StreamRequest>
+) {
+  return {
+    systemPrompt: config.systemPrompt || requestConfig?.systemPrompt,
+    maxTokens: requestConfig?.maxTokens,
+    temperature: requestConfig?.temperature,
+    timeout: requestConfig?.timeout,
+    ...streamAdvancedOptions(config.options),
+  };
+}
+
+function streamAdvancedOptions(options: UseUnifiedStreamConfig["options"]) {
+  return {
+    reasoningEffort: options?.reasoningEffort || 'medium',
+    responseMode: options?.responseMode || 'standard',
+    backgroundMode: options?.backgroundMode || false,
+    thinkingBudget: options?.thinkingBudget,
+    enableWebSearch: options?.enableWebSearch || false,
+    enableCodeInterpreter: options?.enableCodeInterpreter || false,
+    enableImageGeneration: options?.enableImageGeneration || false,
+  };
+}
+
+function streamRequestContext(
+  config: UseUnifiedStreamConfig,
+  requestConfig?: Partial<StreamRequest>
+) {
+  return {
+    conversationId: requestConfig?.conversationId,
+    executionId: requestConfig?.executionId,
+    documentId: requestConfig?.documentId,
+    recordInputs: config.telemetry?.recordInputs,
+    recordOutputs: config.telemetry?.recordOutputs,
+  };
+}
+
+function requireUnifiedStreamTarget(body: {
+  modelId?: string;
+  provider?: string;
+}): void {
+  if (!body.modelId) throw new Error('Model ID is required for unified streaming');
+  if (!body.provider) throw new Error('Provider is required for unified streaming');
+}
+
+function useModelCapabilities(config: UseUnifiedStreamConfig) {
+  const [capabilities, setCapabilities] = useState<ProviderCapabilities | null>(null);
+  useEffect(() => {
+    if (!config.modelId || !config.provider) return;
+    let cancelled = false;
+    async function fetchCapabilities() {
+      try {
+        const response = await fetch('/api/models/capabilities', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider: config.provider, modelId: config.modelId })
+        });
+        if (!response.ok || cancelled) return;
+        const result = await response.json() as ProviderCapabilities;
+        setCapabilities(result);
+        log.debug('Model capabilities loaded', {
+          modelId: config.modelId,
+          provider: config.provider,
+          supportsReasoning: result.supportsReasoning,
+          supportsThinking: result.supportsThinking
+        });
+      } catch (error) {
+        if (!cancelled) {
+          log.warn('Failed to fetch model capabilities', {
+            modelId: config.modelId,
+            provider: config.provider,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+    }
+    void fetchCapabilities();
+    return () => { cancelled = true; };
+  }, [config.modelId, config.provider]);
+  return [capabilities, setCapabilities] as const;
+}
 
 /**
  * Unified streaming hook that provides a consistent interface
@@ -28,7 +193,7 @@ export function useUnifiedStream(config: UseUnifiedStreamConfig): UseUnifiedStre
   const { toast } = useToast();
   const [reasoning, setReasoning] = useState<string | null>(null);
   const [thinking, setThinking] = useState<string | null>(null);
-  const [capabilities, setCapabilities] = useState<ProviderCapabilities | null>(null);
+  const [capabilities, setCapabilities] = useModelCapabilities(config);
   
   // Use AI SDK's useChat with unified streaming endpoint
   const {
@@ -39,54 +204,9 @@ export function useUnifiedStream(config: UseUnifiedStreamConfig): UseUnifiedStre
     sendMessage: baseSendMessage,
     stop
   } = useChat({
-    onFinish: (message) => {
-      log.debug('Stream finished', {
-        source: config.source,
-        messageLength: 0
-      });
-      
-      // Extract reasoning content if available
-      if ('reasoning' in message && typeof message.reasoning === 'string') {
-        setReasoning(message.reasoning);
-      }
-      
-      // Extract thinking content if available
-      if ('thinking' in message && typeof message.thinking === 'string') {
-        setThinking(message.thinking);
-      }
-      
-      toast({
-        title: 'Response Complete',
-        description: 'AI response generated successfully'
-      });
-    },
-    onError: (error) => {
-      log.error('Stream error', {
-        source: config.source,
-        error: error.message
-      });
-      
-      // Show user-friendly error messages
-      let errorTitle = 'AI Error';
-      let errorDescription = error.message;
-      
-      if (error.message.includes('timeout')) {
-        errorTitle = 'Request Timeout';
-        errorDescription = 'The AI model took too long to respond. Please try again.';
-      } else if (error.message.includes('quota') || error.message.includes('rate limit')) {
-        errorTitle = 'Rate Limit Exceeded';
-        errorDescription = 'Too many requests. Please wait a moment before trying again.';
-      } else if (error.message.includes('content')) {
-        errorTitle = 'Content Policy';
-        errorDescription = 'The request was blocked by content policy filters.';
-      }
-      
-      toast({
-        title: errorTitle,
-        description: errorDescription,
-        variant: 'destructive'
-      });
-    }
+    onFinish: (message) =>
+      handleStreamFinish(message, config.source, toast, setReasoning, setThinking),
+    onError: (error) => handleStreamError(error, config.source, toast)
   });
   
   /**
@@ -108,50 +228,8 @@ export function useUnifiedStream(config: UseUnifiedStreamConfig): UseUnifiedStre
       setReasoning(null);
       setThinking(null);
       
-      // Build request body with unified streaming configuration
-      const body = {
-        // Core configuration
-        source: config.source,
-        modelId: config.modelId || requestConfig?.modelId,
-        provider: config.provider || requestConfig?.provider,
-        
-        // System prompt and model configuration
-        systemPrompt: config.systemPrompt || requestConfig?.systemPrompt,
-        maxTokens: requestConfig?.maxTokens,
-        temperature: requestConfig?.temperature,
-        timeout: requestConfig?.timeout,
-        
-        // Advanced model options
-        reasoningEffort: config.options?.reasoningEffort || 'medium',
-        responseMode: config.options?.responseMode || 'standard',
-        backgroundMode: config.options?.backgroundMode || false,
-        thinkingBudget: config.options?.thinkingBudget,
-        enableWebSearch: config.options?.enableWebSearch || false,
-        enableCodeInterpreter: config.options?.enableCodeInterpreter || false,
-        enableImageGeneration: config.options?.enableImageGeneration || false,
-        
-        // Context from request config
-        conversationId: requestConfig?.conversationId,
-        executionId: requestConfig?.executionId,
-        documentId: requestConfig?.documentId,
-        
-        // Telemetry configuration
-        recordInputs: config.telemetry?.recordInputs,
-        recordOutputs: config.telemetry?.recordOutputs,
-        
-        // Add any additional fields from request config
-        ...requestConfig
-      };
-      
-      // Validate required fields
-      if (!body.modelId) {
-        throw new Error('Model ID is required for unified streaming');
-      }
-      
-      if (!body.provider) {
-        throw new Error('Provider is required for unified streaming');
-      }
-      
+      const body = buildUnifiedStreamBody(config, requestConfig);
+      requireUnifiedStreamTarget(body);
       await baseSendMessage(message, { body });
       
     } catch (error) {
@@ -172,48 +250,6 @@ export function useUnifiedStream(config: UseUnifiedStreamConfig): UseUnifiedStre
     setThinking(null);
     setCapabilities(null);
   }, [setMessages]);
-  
-  /**
-   * Fetch model capabilities when config changes
-   */
-  useEffect(() => {
-    async function fetchCapabilities() {
-      if (!config.modelId || !config.provider) {
-        return;
-      }
-      
-      try {
-        const response = await fetch('/api/models/capabilities', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            provider: config.provider,
-            modelId: config.modelId
-          })
-        });
-        
-        if (response.ok) {
-          const caps = await response.json();
-          setCapabilities(caps);
-          
-          log.debug('Model capabilities loaded', {
-            modelId: config.modelId,
-            provider: config.provider,
-            supportsReasoning: caps.supportsReasoning,
-            supportsThinking: caps.supportsThinking
-          });
-        }
-      } catch (error) {
-        log.warn('Failed to fetch model capabilities', {
-          modelId: config.modelId,
-          provider: config.provider,
-          error: error instanceof Error ? error.message : String(error)
-        });
-      }
-    }
-    
-    fetchCapabilities();
-  }, [config.modelId, config.provider]);
   
   return {
     messages,

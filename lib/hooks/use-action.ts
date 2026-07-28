@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { ActionState } from "@/types/actions-types";
 import { toast } from "@/components/ui/use-toast";
 import { createLogger } from "@/lib/client-logger";
@@ -36,7 +36,7 @@ export function useAction<TInput, TOutput>(
     successMessage,
   } = options;
 
-  const execute = async (input: TInput): Promise<ActionState<TOutput>> => {
+  const execute = useCallback(async (input: TInput): Promise<ActionState<TOutput>> => {
     setIsPending(true);
     setError(null);
 
@@ -118,16 +118,26 @@ export function useAction<TInput, TOutput>(
       setIsPending(false);
       onSettled?.();
     }
-  };
+  }, [
+    action,
+    onError,
+    onSettled,
+    onSuccess,
+    showErrorToast,
+    showSuccessToast,
+    successMessage,
+  ]);
+
+  const reset = useCallback(() => {
+    setError(null);
+    setData(null);
+  }, []);
 
   return {
     execute,
     isPending,
     error,
     data,
-    reset: () => {
-      setError(null);
-      setData(null);
-    },
+    reset,
   };
 }

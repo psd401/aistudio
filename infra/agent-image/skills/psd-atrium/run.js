@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * run.js — psd-atrium skill entrypoint (Issue #1055, Atrium agent access Path 2).
  *
@@ -46,8 +47,10 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
 
-const fs = require('node:fs');
+
+
 
 const {
   fail,
@@ -170,239 +173,250 @@ function emitCreated(payload, requestedVisibility) {
   emit(payload);
 }
 
+async function findObjects(args) {
+  const query = {
+    kind: optEnum(args, 'kind', 'kind', KINDS),
+    status: optEnum(args, 'status', 'status', STATUSES),
+    collection: optStr(args, 'collection', 'collection'),
+    tag: optStr(args, 'tag', 'tag'),
+    query: optStr(args, 'query', 'query'),
+  };
+  const { payload } = await restFetch('GET', '', { query });
+  emit(payload);
+}
+
+async function readObject(args) {
+  const id = requireStr(args, 'id', 'id');
+  const { payload } = await restFetch('GET', `/${encodeURIComponent(id)}`);
+  const version = payload && payload.version;
+  const body =
+    version && typeof version.bodyInline === 'string'
+      ? version.bodyInline
+      : null;
+  let note;
+  if (!version) {
+    note =
+      'This object has no saved version yet (it was created without a body). There is nothing to read back.';
+  } else if (body === null) {
+    note =
+      'Body not returned inline: documents keep their text in the collaborative store (version.bodyLocation "proof"), and large artifacts are offloaded to object storage. This read shows the last SAVED version metadata only; the live editor state is not reachable here.';
+  } else {
+    note =
+      'Shows the last SAVED version body (not the live collaborative editor state).';
+  }
+  emit({ ...payload, body, bodyAvailableInline: body !== null, note });
+}
+
+async function createDocument(args) {
+  const markdown = optStr(args, 'markdown', 'markdown');
+  const visibility = buildVisibility(args);
+  const body = {
+    kind: 'document',
+    title: requireStr(args, 'title', 'title'),
+    collectionId: optStr(args, 'collection', 'collection'),
+    body: markdown,
+    bodyFormat: markdown !== undefined ? 'markdown' : undefined,
+    visibility,
+    tags: parseList(args.tags, 'tags'),
+  };
+  const { payload } = await restFetch('POST', '', {
+    body: withEncodedBody(body),
+  });
+  emitCreated(payload, visibility);
+}
+
+function readArtifactCode(args) {
+  const codeFile = optStr(args, 'code_file', 'code-file');
+  if (codeFile === undefined) return requireStr(args, 'code', 'code');
+  if (args.code !== undefined) {
+    fail('pass either --code or --code-file, not both');
+  }
+  let code;
+  try {
+    code = validatedFs.readFileSync(codeFile, 'utf8');
+  } catch (err) {
+    fail(`--code-file not readable: ${err.message}`);
+    return undefined;
+  }
+  if (!code) fail('--code-file is empty');
+  return code;
+}
+
+async function createArtifact(args) {
+  const title = requireStr(args, 'title', 'title');
+  const code = readArtifactCode(args);
+  const bodyFormat = optEnum(
+    args,
+    'body_format',
+    'body-format',
+    ARTIFACT_FORMATS
+  );
+  if (!bodyFormat) {
+    fail('--body-format html|jsx is required for create-artifact');
+  }
+  const visibility = buildVisibility(args);
+  const body = {
+    kind: 'artifact',
+    title,
+    collectionId: optStr(args, 'collection', 'collection'),
+    body: code,
+    bodyFormat,
+    visibility,
+    tags: parseList(args.tags, 'tags'),
+  };
+  const { payload } = await restFetch('POST', '', {
+    body: withEncodedBody(body),
+  });
+  emitCreated(payload, visibility);
+}
+
+async function appendToBody(id, text, bodyFormat) {
+  const { payload: current } = await restFetch(
+    'GET',
+    `/${encodeURIComponent(id)}`
+  );
+  const version = current && current.version;
+  if (!version) {
+    fail(
+      'append: object has no current version to append to — use edit ' +
+        '--mode replace or create-document instead.'
+    );
+  }
+  if (typeof version.bodyInline !== 'string') {
+    fail(
+      'append: the current body is stored externally (version.bodyLocation) ' +
+        'and cannot be read inline — use edit --mode replace --body <full text>.'
+    );
+  }
+  return {
+    body: `${version.bodyInline}\n\n${text}`,
+    bodyFormat: bodyFormat || version.bodyFormat,
+  };
+}
+
+async function editObject(args) {
+  const id = requireStr(args, 'id', 'id');
+  const text = requireStr(args, 'body', 'body');
+  const mode = optEnum(args, 'mode', 'mode', ['replace', 'append']) || 'replace';
+  const requestedFormat = optEnum(
+    args,
+    'body_format',
+    'body-format',
+    BODY_FORMATS
+  );
+  const edit =
+    mode === 'append'
+      ? await appendToBody(id, text, requestedFormat)
+      : { body: text, bodyFormat: requestedFormat };
+  const { payload } = await restFetch(
+    'POST',
+    `/${encodeURIComponent(id)}/versions`,
+    {
+      body: withEncodedBody({
+        ...edit,
+        summary: optStr(args, 'summary', 'summary'),
+      }),
+    }
+  );
+  emit({ ...payload, mode });
+}
+
+async function archiveObject(args) {
+  const id = requireStr(args, 'id', 'id');
+  const { payload } = await restFetch('PATCH', `/${encodeURIComponent(id)}`, {
+    body: { status: 'archived' },
+  });
+  emit({ ...payload, archived: true });
+}
+
+async function deleteObject(args) {
+  const id = requireStr(args, 'id', 'id');
+  const { payload } = await restFetch('DELETE', `/${encodeURIComponent(id)}`);
+  emit({ ...payload, deleted: true });
+}
+
+async function setVisibility(args) {
+  const id = requireStr(args, 'id', 'id');
+  const level = optEnum(args, 'level', 'level', LEVELS);
+  if (!level) fail('--level private|group|internal|public is required');
+  const grants = parseGrants(args.grants, 'grants');
+  const { approvalRequired, payload } = await restFetch(
+    'PATCH',
+    `/${encodeURIComponent(id)}/visibility`,
+    { body: grants ? { level, grants } : { level } }
+  );
+  emit(approvalRequired ? { ...payload, approvalRequired: true } : payload);
+}
+
+async function publishObject(args) {
+  const id = requireStr(args, 'id', 'id');
+  const destination =
+    optEnum(args, 'destination', 'destination', PUBLISH_DESTINATIONS) ||
+    'intranet';
+  const { approvalRequired, payload } = await restFetch(
+    'POST',
+    `/${encodeURIComponent(id)}/publish`,
+    { body: { destination } }
+  );
+  emit(
+    approvalRequired
+      ? { ...payload, approvalRequired: true, destination }
+      : payload
+  );
+}
+
+async function unpublishObject(args) {
+  const id = requireStr(args, 'id', 'id');
+  const destination = optEnum(
+    args,
+    'destination',
+    'destination',
+    UNPUBLISH_DESTINATIONS
+  );
+  if (!destination) {
+    fail('--destination intranet|public_web|schoology|google is required');
+  }
+  const { approvalRequired, payload } = await restFetch(
+    'DELETE',
+    `/${encodeURIComponent(id)}/publish/${encodeURIComponent(destination)}`
+  );
+  emit(
+    approvalRequired
+      ? { ...payload, approvalRequired: true, destination }
+      : payload
+  );
+}
+
+const COMMANDS = {
+  find: findObjects,
+  list: findObjects,
+  read: readObject,
+  'create-document': createDocument,
+  'create-artifact': createArtifact,
+  edit: editObject,
+  archive: archiveObject,
+  delete: deleteObject,
+  'set-visibility': setVisibility,
+  publish: publishObject,
+  unpublish: unpublishObject,
+};
+
 async function main() {
   const subcommand = process.argv[2];
   if (!subcommand || subcommand === '--help' || subcommand === '-h') {
     usage();
     process.exit(0);
   }
-
-  // Flags start after `node run.js <subcommand>` — i.e. process.argv index 3.
   const args = parseArgs(process.argv, 3);
   if (args.help) {
     usage();
     process.exit(0);
   }
-
-  switch (subcommand) {
-    case 'find':
-    case 'list': {
-      const kind = optEnum(args, 'kind', 'kind', KINDS);
-      const status = optEnum(args, 'status', 'status', STATUSES);
-      const query = {
-        kind,
-        status,
-        collection: optStr(args, 'collection', 'collection'),
-        tag: optStr(args, 'tag', 'tag'),
-        query: optStr(args, 'query', 'query'),
-      };
-      const { payload } = await restFetch('GET', '', { query });
-      emit(payload);
-      return;
-    }
-
-    case 'read': {
-      const id = requireStr(args, 'id', 'id');
-      const { payload } = await restFetch('GET', `/${encodeURIComponent(id)}`);
-      // Surface the saved body inline when available. Only small ARTIFACTS carry
-      // an inline body; DOCUMENT text lives in the collaborative store
-      // (bodyLocation "proof") and large artifacts are offloaded to object storage
-      // — neither is returned here. Say so plainly rather than implying the object
-      // is empty.
-      const version = payload && payload.version;
-      const body = version && typeof version.bodyInline === 'string' ? version.bodyInline : null;
-      let note;
-      if (!version) {
-        // A bodyless object (e.g. create-document with no --markdown) has no saved
-        // version — don't claim "here is the saved body" for something empty.
-        note =
-          'This object has no saved version yet (it was created without a body). There is nothing to read back.';
-      } else if (body === null) {
-        note =
-          'Body not returned inline: documents keep their text in the collaborative store (version.bodyLocation "proof"), and large artifacts are offloaded to object storage. This read shows the last SAVED version metadata only; the live editor state is not reachable here.';
-      } else {
-        note = 'Shows the last SAVED version body (not the live collaborative editor state).';
-      }
-      emit({ ...payload, body, bodyAvailableInline: body !== null, note });
-      return;
-    }
-
-    case 'create-document': {
-      const title = requireStr(args, 'title', 'title');
-      const markdown = optStr(args, 'markdown', 'markdown');
-      const visibility = buildVisibility(args);
-      const body = {
-        kind: 'document',
-        title,
-        collectionId: optStr(args, 'collection', 'collection'),
-        body: markdown,
-        bodyFormat: markdown !== undefined ? 'markdown' : undefined,
-        visibility,
-        tags: parseList(args.tags, 'tags'),
-      };
-      // base64-encode the body so <script>/<style> in a fenced block survives the
-      // edge WAF; the server decodes before screening (no-op when bodyless).
-      const { payload } = await restFetch('POST', '', { body: withEncodedBody(body) });
-      emitCreated(payload, visibility);
-      return;
-    }
-
-    case 'create-artifact': {
-      const title = requireStr(args, 'title', 'title');
-      // Accept the artifact code either inline (--code) or from a file
-      // (--code-file). A large artifact (e.g. a full document rendered into an
-      // HTML page) can exceed the OS per-argument limit (Linux MAX_ARG_STRLEN,
-      // 128 KB) when passed as a single --code argv, failing spawn with E2BIG;
-      // --code-file sidesteps that entirely.
-      const codeFile = optStr(args, 'code_file', 'code-file');
-      // Reject the ambiguous combination rather than silently preferring one.
-      if (codeFile !== undefined && args.code !== undefined) {
-        fail('pass either --code or --code-file, not both');
-      }
-      let code;
-      if (codeFile !== undefined) {
-        try {
-          code = fs.readFileSync(codeFile, 'utf8');
-        } catch (err) {
-          fail(`--code-file not readable: ${err.message}`);
-        }
-        if (!code) fail('--code-file is empty');
-      } else {
-        code = requireStr(args, 'code', 'code');
-      }
-      const bodyFormat = optEnum(args, 'body_format', 'body-format', ARTIFACT_FORMATS);
-      if (!bodyFormat) fail('--body-format html|jsx is required for create-artifact');
-      const visibility = buildVisibility(args);
-      const body = {
-        kind: 'artifact',
-        title,
-        collectionId: optStr(args, 'collection', 'collection'),
-        body: code,
-        bodyFormat,
-        visibility,
-        tags: parseList(args.tags, 'tags'),
-      };
-      // Artifact code is HTML/JS/CSS — ALWAYS base64-encode it so <script>/<style>
-      // is opaque to the edge WAF; the server decodes it before screening.
-      const { payload } = await restFetch('POST', '', { body: withEncodedBody(body) });
-      emitCreated(payload, visibility);
-      return;
-    }
-
-    case 'edit': {
-      const id = requireStr(args, 'id', 'id');
-      const text = requireStr(args, 'body', 'body');
-      const mode = optEnum(args, 'mode', 'mode', ['replace', 'append']) || 'replace';
-      let bodyFormat = optEnum(args, 'body_format', 'body-format', BODY_FORMATS);
-      const summary = optStr(args, 'summary', 'summary');
-
-      let finalBody = text;
-      if (mode === 'append') {
-        // Version-based append = read the last saved body, concatenate, snapshot a
-        // new version. Only possible when the current body is returned INLINE.
-        const { payload: current } = await restFetch('GET', `/${encodeURIComponent(id)}`);
-        const version = current && current.version;
-        if (!version) {
-          fail(
-            'append: object has no current version to append to — use edit ' +
-              '--mode replace or create-document instead.'
-          );
-        }
-        if (typeof version.bodyInline !== 'string') {
-          fail(
-            'append: the current body is stored externally (version.bodyLocation) ' +
-              'and cannot be read inline — use edit --mode replace --body <full text>.'
-          );
-        }
-        finalBody = `${version.bodyInline}\n\n${text}`;
-        if (!bodyFormat) bodyFormat = version.bodyFormat;
-      }
-
-      // base64-encode the new body so <script>/<style> content survives the edge
-      // WAF; the server decodes it before screening.
-      const { payload } = await restFetch('POST', `/${encodeURIComponent(id)}/versions`, {
-        body: withEncodedBody({ body: finalBody, bodyFormat, summary }),
-      });
-      emit({ ...payload, mode });
-      return;
-    }
-
-    case 'archive': {
-      // Soft-remove: flip status to "archived" via the metadata PATCH (needs
-      // owner-authorized content update). Reversible and still findable
-      // under `find --status archived`. Archiving also takes any live publication
-      // offline (server-side). Use `delete` for permanent removal.
-      const id = requireStr(args, 'id', 'id');
-      const { payload } = await restFetch('PATCH', `/${encodeURIComponent(id)}`, {
-        body: { status: 'archived' },
-      });
-      emit({ ...payload, archived: true });
-      return;
-    }
-
-    case 'delete': {
-      // HARD delete: permanently removes the object and every version/body. Needs
-      // content delete authority AND you must own it (the signed owner
-      // deletes as its owner) — a non-owner object comes back as an error you
-      // relay verbatim. Refused with a clear message while the object is published
-      // anywhere: delete NEVER auto-unpublishes — run `unpublish` first, then
-      // `delete`. Irreversible: there is no undo and `find` will no longer show it.
-      const id = requireStr(args, 'id', 'id');
-      const { payload } = await restFetch('DELETE', `/${encodeURIComponent(id)}`);
-      emit({ ...payload, deleted: true });
-      return;
-    }
-
-    case 'set-visibility': {
-      const id = requireStr(args, 'id', 'id');
-      const level = optEnum(args, 'level', 'level', LEVELS);
-      if (!level) fail('--level private|group|internal|public is required');
-      const grants = parseGrants(args.grants, 'grants');
-      const { approvalRequired, payload } = await restFetch(
-        'PATCH',
-        `/${encodeURIComponent(id)}/visibility`,
-        { body: grants ? { level, grants } : { level } }
-      );
-      emit(approvalRequired ? { ...payload, approvalRequired: true } : payload);
-      return;
-    }
-
-    case 'publish': {
-      const id = requireStr(args, 'id', 'id');
-      const destination =
-        optEnum(args, 'destination', 'destination', PUBLISH_DESTINATIONS) || 'intranet';
-      const { approvalRequired, payload } = await restFetch(
-        'POST',
-        `/${encodeURIComponent(id)}/publish`,
-        { body: { destination } }
-      );
-      // approval_required is a SUCCESS outcome (exit 0). Surface message verbatim.
-      emit(approvalRequired ? { ...payload, approvalRequired: true, destination } : payload);
-      return;
-    }
-
-    case 'unpublish': {
-      const id = requireStr(args, 'id', 'id');
-      const destination = optEnum(
-        args,
-        'destination',
-        'destination',
-        UNPUBLISH_DESTINATIONS
-      );
-      if (!destination) {
-        fail('--destination intranet|public_web|schoology|google is required');
-      }
-      const { approvalRequired, payload } = await restFetch(
-        'DELETE',
-        `/${encodeURIComponent(id)}/publish/${encodeURIComponent(destination)}`
-      );
-      emit(approvalRequired ? { ...payload, approvalRequired: true, destination } : payload);
-      return;
-    }
-
-    default:
-      fail(`Unknown subcommand: ${subcommand}. Run with --help to see options.`);
+  const command = COMMANDS[subcommand];
+  if (!command) {
+    fail(`Unknown subcommand: ${subcommand}. Run with --help to see options.`);
   }
+  await command(args);
 }
 
 if (require.main === module) {

@@ -1,6 +1,7 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
+import type { Dispatch, ReactNode, SetStateAction } from "react"
 import {
   type RepositoryItem,
   listRepositoryItems,
@@ -70,6 +71,340 @@ interface RepositoryItemListProps {
   onAddItem?: () => void
 }
 
+function ItemType({ type }: { type: string }) {
+  const icons: Record<string, ReactNode> = {
+    document: <FileText className="h-4 w-4" />,
+    image: <ImageIcon className="h-4 w-4" />,
+    audio: <Music className="h-4 w-4" />,
+    video: <Video className="h-4 w-4" />,
+    url: <Link className="h-4 w-4" />,
+    text: <Type className="h-4 w-4" />,
+  }
+  return (
+    <div className="flex items-center gap-2">
+      {icons[type] ?? null}
+      <span className="capitalize">{type}</span>
+    </div>
+  )
+}
+
+function ItemStatusBadge({ status }: { status: string }) {
+  const statusContent: Record<
+    string,
+    {
+      icon: ReactNode
+      label: string
+      variant: "default" | "secondary" | "destructive"
+    }
+  > = {
+    completed: {
+      icon: <CheckCircle className="h-3 w-3" />,
+      label: "Processed",
+      variant: "default",
+    },
+    embedded: {
+      icon: <CheckCircle className="h-3 w-3" />,
+      label: "Embedded",
+      variant: "default",
+    },
+    processing: {
+      icon: <Clock className="h-3 w-3" />,
+      label: "Processing",
+      variant: "secondary",
+    },
+    retrying: {
+      icon: <RefreshCw className="h-3 w-3" />,
+      label: "Retrying",
+      variant: "secondary",
+    },
+    processing_embeddings: {
+      icon: <Clock className="h-3 w-3" />,
+      label: "Generating Embeddings",
+      variant: "secondary",
+    },
+    processing_ocr: {
+      icon: <Clock className="h-3 w-3" />,
+      label: "Processing OCR",
+      variant: "secondary",
+    },
+    failed: {
+      icon: <AlertCircle className="h-3 w-3" />,
+      label: "Failed",
+      variant: "destructive",
+    },
+    embedding_failed: {
+      icon: <AlertCircle className="h-3 w-3" />,
+      label: "Embedding Failed",
+      variant: "destructive",
+    },
+  }
+  const content = statusContent[status]
+  if (!content) {
+    return (
+      <Badge variant="outline" className="gap-1">
+        <Clock className="h-3 w-3" />
+        Pending
+      </Badge>
+    )
+  }
+  return (
+    <Badge variant={content.variant} className="gap-1">
+      {content.icon}
+      {content.label}
+    </Badge>
+  )
+}
+
+function RepositoryItemActions({
+  canManage,
+  isRetrying,
+  item,
+  retryingItemId,
+  onDelete,
+  onDetail,
+  onDownload,
+  onRetry,
+}: {
+  canManage: boolean
+  isRetrying: boolean
+  item: RepositoryItem
+  retryingItemId: number | null
+  onDelete: (item: RepositoryItem) => void
+  onDetail: (item: RepositoryItem) => void
+  onDownload: (item: RepositoryItem) => void
+  onRetry: (item: RepositoryItem) => void
+}) {
+  const downloadable = ["document", "image", "audio", "video"].includes(
+    item.type
+  )
+  return (
+    <div className="flex justify-end gap-2">
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => onDetail(item)}
+        aria-label={`View details for ${item.name}`}
+      >
+        <Eye className="h-4 w-4" />
+      </Button>
+      {downloadable && (
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => onDownload(item)}
+          aria-label={`Download ${item.name}`}
+        >
+          <Download className="h-4 w-4" />
+        </Button>
+      )}
+      {canManage && item.canRetry && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => onRetry(item)}
+          disabled={isRetrying && retryingItemId === item.id}
+          aria-label={`Retry processing ${item.name}`}
+        >
+          {isRetrying && retryingItemId === item.id ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <RefreshCw className="h-4 w-4" />
+          )}
+        </Button>
+      )}
+      {item.type === "url" && (
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => window.open(item.source, "_blank")}
+        >
+          <ExternalLink className="h-4 w-4" />
+        </Button>
+      )}
+      {canManage && (
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => onDelete(item)}
+          aria-label={`Remove ${item.name}`}
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      )}
+    </div>
+  )
+}
+
+function RepositoryItemsTable({
+  canManage,
+  isRetrying,
+  items,
+  retryingItemId,
+  onDelete,
+  onDetail,
+  onDownload,
+  onRetry,
+}: {
+  canManage: boolean
+  isRetrying: boolean
+  items: RepositoryItem[]
+  retryingItemId: number | null
+  onDelete: (item: RepositoryItem) => void
+  onDetail: (item: RepositoryItem) => void
+  onDownload: (item: RepositoryItem) => void
+  onRetry: (item: RepositoryItem) => void
+}) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Type</TableHead>
+          <TableHead>Name</TableHead>
+          <TableHead>Status</TableHead>
+          <TableHead>Added</TableHead>
+          <TableHead className="text-right">Actions</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {items.map(item => (
+          <TableRow key={item.id}>
+            <TableCell>
+              <ItemType type={item.type} />
+            </TableCell>
+            <TableCell>
+              <div>
+                <div className="font-medium">{item.name}</div>
+                {item.type === "url" && (
+                  <div className="text-sm text-muted-foreground">
+                    {item.source}
+                  </div>
+                )}
+                {canManage && item.processingError && (
+                  <div className="text-sm text-destructive mt-1">
+                    {item.processingError}
+                  </div>
+                )}
+              </div>
+            </TableCell>
+            <TableCell>
+              <ItemStatusBadge status={item.processingStatus} />
+            </TableCell>
+            <TableCell>
+              {item.createdAt
+                ? format(new Date(item.createdAt), "MMM d, yyyy")
+                : "-"}
+            </TableCell>
+            <TableCell className="text-right">
+              <RepositoryItemActions
+                canManage={canManage}
+                isRetrying={isRetrying}
+                item={item}
+                retryingItemId={retryingItemId}
+                onDelete={onDelete}
+                onDetail={onDetail}
+                onDownload={onDownload}
+                onRetry={onRetry}
+              />
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  )
+}
+
+function RepositoryItemDialogs({
+  canManage,
+  deleteTarget,
+  detailTarget,
+  isRemoving,
+  onCloseDelete,
+  onCloseDetail,
+  onConfirmDelete,
+}: {
+  canManage: boolean
+  deleteTarget: RepositoryItem | null
+  detailTarget: RepositoryItem | null
+  isRemoving: boolean
+  onCloseDelete: () => void
+  onCloseDetail: () => void
+  onConfirmDelete: () => void
+}) {
+  return (
+    <>
+      {canManage && (
+        <AlertDialog
+          open={deleteTarget !== null}
+          onOpenChange={open => !open && onCloseDelete()}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Remove Item</AlertDialogTitle>
+              <AlertDialogDescription>
+                Are you sure you want to remove &quot;{deleteTarget?.name}&quot;
+                from this repository? This action cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={onConfirmDelete}
+                disabled={isRemoving}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                {isRemoving ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Removing...
+                  </>
+                ) : (
+                  "Remove"
+                )}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
+      <Dialog
+        open={detailTarget !== null}
+        onOpenChange={open => !open && onCloseDetail()}
+      >
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Repository item details</DialogTitle>
+            <DialogDescription>
+              Source versions, processing, derived artifacts, and active
+              citation locators.
+            </DialogDescription>
+          </DialogHeader>
+          {detailTarget && <RepositoryItemDetails itemId={detailTarget.id} />}
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
+
+function usePendingItemRefresh(
+  items: RepositoryItem[],
+  setRefreshTrigger: Dispatch<SetStateAction<number>>
+) {
+  useEffect(() => {
+    const pendingStatuses = new Set([
+      "pending",
+      "processing",
+      "retrying",
+      "processing_embeddings",
+      "processing_ocr",
+    ])
+    if (!items.some(item => pendingStatuses.has(item.processingStatus))) return
+
+    const interval = setInterval(() => {
+      setRefreshTrigger(previous => previous + 1)
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [items, setRefreshTrigger])
+}
+
 export function RepositoryItemList({
   repositoryId,
   canManage,
@@ -82,6 +417,10 @@ export function RepositoryItemList({
   const [detailTarget, setDetailTarget] = useState<RepositoryItem | null>(null)
 
   const { execute: executeList } = useAction(listRepositoryItems)
+  const executeListRef = useRef(executeList)
+  useEffect(() => {
+    executeListRef.current = executeList
+  }, [executeList])
   const { execute: executeRemove, isPending: isRemoving } = useAction(
     removeRepositoryItem
   )
@@ -94,33 +433,16 @@ export function RepositoryItemList({
   useEffect(() => {
     async function loadItems() {
       setLoading(true)
-      const result = await executeList(repositoryId)
+      const result = await executeListRef.current(repositoryId)
       if (result.isSuccess && result.data) {
         setItems(result.data as RepositoryItem[])
       }
       setLoading(false)
     }
     loadItems()
-  }, [repositoryId, refreshTrigger]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [repositoryId, refreshTrigger])
 
-  // Auto-refresh every 5 seconds if there are pending items
-  useEffect(() => {
-    const hasPendingItems = items.some(item => 
-      item.processingStatus === 'pending' || 
-      item.processingStatus === 'processing' ||
-      item.processingStatus === 'retrying' ||
-      item.processingStatus === 'processing_embeddings' ||
-      item.processingStatus === 'processing_ocr'
-    )
-    
-    if (hasPendingItems) {
-      const interval = setInterval(() => {
-        setRefreshTrigger(prev => prev + 1)
-      }, 5000)
-      
-      return () => clearInterval(interval)
-    }
-  }, [items])
+  usePendingItemRefresh(items, setRefreshTrigger)
 
   async function handleDelete() {
     if (!canManage || !deleteTarget) return
@@ -178,93 +500,6 @@ export function RepositoryItemList({
     setRetryingItemId(null)
   }
 
-  function getItemIcon(type: string) {
-    switch (type) {
-      case "document":
-        return <FileText className="h-4 w-4" />
-      case "image":
-        return <ImageIcon className="h-4 w-4" />
-      case "audio":
-        return <Music className="h-4 w-4" />
-      case "video":
-        return <Video className="h-4 w-4" />
-      case "url":
-        return <Link className="h-4 w-4" />
-      case "text":
-        return <Type className="h-4 w-4" />
-      default:
-        return null
-    }
-  }
-
-  function getStatusBadge(status: string) {
-    switch (status) {
-      case "completed":
-        return (
-          <Badge variant="default" className="gap-1">
-            <CheckCircle className="h-3 w-3" />
-            Processed
-          </Badge>
-        )
-      case "embedded":
-        return (
-          <Badge variant="default" className="gap-1">
-            <CheckCircle className="h-3 w-3" />
-            Embedded
-          </Badge>
-        )
-      case "processing":
-        return (
-          <Badge variant="secondary" className="gap-1">
-            <Clock className="h-3 w-3" />
-            Processing
-          </Badge>
-        )
-      case "retrying":
-        return (
-          <Badge variant="secondary" className="gap-1">
-            <RefreshCw className="h-3 w-3" />
-            Retrying
-          </Badge>
-        )
-      case "processing_embeddings":
-        return (
-          <Badge variant="secondary" className="gap-1">
-            <Clock className="h-3 w-3" />
-            Generating Embeddings
-          </Badge>
-        )
-      case "processing_ocr":
-        return (
-          <Badge variant="secondary" className="gap-1">
-            <Clock className="h-3 w-3" />
-            Processing OCR
-          </Badge>
-        )
-      case "failed":
-        return (
-          <Badge variant="destructive" className="gap-1">
-            <AlertCircle className="h-3 w-3" />
-            Failed
-          </Badge>
-        )
-      case "embedding_failed":
-        return (
-          <Badge variant="destructive" className="gap-1">
-            <AlertCircle className="h-3 w-3" />
-            Embedding Failed
-          </Badge>
-        )
-      default:
-        return (
-          <Badge variant="outline" className="gap-1">
-            <Clock className="h-3 w-3" />
-            Pending
-          </Badge>
-        )
-    }
-  }
-
   return (
     <>
       <Card>
@@ -300,161 +535,28 @@ export function RepositoryItemList({
               ) : null}
             </div>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Type</TableHead>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Added</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {items.map((item) => (
-                  <TableRow key={item.id}>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        {getItemIcon(item.type)}
-                        <span className="capitalize">{item.type}</span>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <div>
-                        <div className="font-medium">{item.name}</div>
-                        {item.type === "url" && (
-                          <div className="text-sm text-muted-foreground">
-                            {item.source}
-                          </div>
-                        )}
-                        {canManage && item.processingError && (
-                          <div className="text-sm text-destructive mt-1">
-                            {item.processingError}
-                          </div>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell>{getStatusBadge(item.processingStatus)}</TableCell>
-                    <TableCell>
-                      {item.createdAt ? format(new Date(item.createdAt), "MMM d, yyyy") : "-"}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex justify-end gap-2">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setDetailTarget(item)}
-                          aria-label={`View details for ${item.name}`}
-                        >
-                          <Eye className="h-4 w-4" />
-                        </Button>
-                        {["document", "image", "audio", "video"].includes(item.type) && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleDownload(item)}
-                            aria-label={`Download ${item.name}`}
-                          >
-                            <Download className="h-4 w-4" />
-                          </Button>
-                        )}
-                        {canManage && item.canRetry && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => handleRetry(item)}
-                            disabled={isRetrying && retryingItemId === item.id}
-                            aria-label={`Retry processing ${item.name}`}
-                          >
-                            {isRetrying && retryingItemId === item.id ? (
-                              <Loader2 className="h-4 w-4 animate-spin" />
-                            ) : (
-                              <RefreshCw className="h-4 w-4" />
-                            )}
-                          </Button>
-                        )}
-                        {item.type === "url" && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => window.open(item.source, "_blank")}
-                          >
-                            <ExternalLink className="h-4 w-4" />
-                          </Button>
-                        )}
-                        {canManage ? (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setDeleteTarget(item)}
-                            aria-label={`Remove ${item.name}`}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        ) : null}
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <RepositoryItemsTable
+              canManage={canManage}
+              isRetrying={isRetrying}
+              items={items}
+              retryingItemId={retryingItemId}
+              onDelete={setDeleteTarget}
+              onDetail={setDetailTarget}
+              onDownload={handleDownload}
+              onRetry={handleRetry}
+            />
           )}
         </CardContent>
       </Card>
-
-      {canManage ? (
-        <AlertDialog
-          open={!!deleteTarget}
-          onOpenChange={(open) => !open && setDeleteTarget(null)}
-        >
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Remove Item</AlertDialogTitle>
-              <AlertDialogDescription>
-                Are you sure you want to remove &quot;{deleteTarget?.name}&quot;
-                from this repository? This action cannot be undone.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction
-                onClick={handleDelete}
-                disabled={isRemoving}
-                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              >
-                {isRemoving ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Removing...
-                  </>
-                ) : (
-                  "Remove"
-                )}
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-      ) : null}
-
-      <Dialog
-        open={detailTarget !== null}
-        onOpenChange={(open) => {
-          if (!open) setDetailTarget(null)
-        }}
-      >
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
-          <DialogHeader>
-            <DialogTitle>Repository item details</DialogTitle>
-            <DialogDescription>
-              Source versions, processing, derived artifacts, and active
-              citation locators.
-            </DialogDescription>
-          </DialogHeader>
-          {detailTarget ? (
-            <RepositoryItemDetails itemId={detailTarget.id} />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+      <RepositoryItemDialogs
+        canManage={canManage}
+        deleteTarget={deleteTarget}
+        detailTarget={detailTarget}
+        isRemoving={isRemoving}
+        onCloseDelete={() => setDeleteTarget(null)}
+        onCloseDetail={() => setDetailTarget(null)}
+        onConfirmDelete={handleDelete}
+      />
     </>
   )
 }

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * psd-canva — act on the caller's OWN Canva account via Canva's Connect REST
  * API, authenticated per-user with an OAuth refresh token.
@@ -28,6 +29,8 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
 
 const {
   fail, validateUserEmail, parseArgs, authorizeUser,
@@ -66,6 +69,134 @@ function ok(result) {
   process.stdout.write(JSON.stringify(result) + '\n');
 }
 
+async function whoami(userEmail) {
+  return withAuth(userEmail, 'whoami', async (token) => {
+    const me = await canvaFetch(token, 'GET', '/v1/users/me');
+    try {
+      const profile = await canvaFetch(token, 'GET', '/v1/users/me/profile');
+      return { ...me, ...profile };
+    } catch {
+      return me;
+    }
+  });
+}
+
+function designListQuery(args) {
+  const query = {};
+  for (const name of ['query', 'ownership', 'sort_by', 'continuation']) {
+    const value = flagValue(args, name);
+    if (value) query[name] = value;
+  }
+  return query;
+}
+
+function createDesignBody(args) {
+  const body = { type: 'type_and_asset' };
+  const title = flagValue(args, 'title');
+  if (title) body.title = title;
+  const assetId = flagValue(args, 'asset_id');
+  if (assetId) body.asset_id = String(assetId);
+  const preset = flagValue(args, 'design_type');
+  const width = Number(flagValue(args, 'width')) || null;
+  const height = Number(flagValue(args, 'height')) || null;
+  if (preset) {
+    body.design_type = { type: 'preset', name: preset };
+  } else if (width && height) {
+    body.design_type = { type: 'custom', width, height };
+  } else if (!body.asset_id) {
+    fail(
+      'create-design requires --design-type <doc|whiteboard|presentation>, --width N --height N, or --asset-id <id>'
+    );
+  }
+  return body;
+}
+
+function exportBody(args) {
+  const designId = flagValue(args, 'design_id');
+  if (!designId) fail('export requires --design-id <id>');
+  const format = String(flagValue(args, 'format') || '').toLowerCase();
+  if (format !== 'pdf' && format !== 'png') {
+    fail('export requires --format pdf|png');
+  }
+  const body = { design_id: designId, format: { type: format } };
+  const pagesRaw = flagValue(args, 'pages');
+  if (!pagesRaw) return body;
+  const pages = String(pagesRaw)
+    .split(',')
+    .map((page) => Number(page.trim()))
+    .filter((page) => Number.isInteger(page) && page > 0);
+  if (pages.length === 0) {
+    fail(
+      'export --pages must be a comma-separated list of positive page numbers (e.g. 1,2,3)'
+    );
+  }
+  body.format.pages = pages;
+  return body;
+}
+
+function readAsset(args) {
+  const file = flagValue(args, 'file');
+  if (!file) fail('upload-asset requires --file <local-path>');
+  try {
+    return { file, bytes: validatedFs.readFileSync(file) };
+  } catch (err) {
+    fail(`cannot read --file "${file}": ${err.message}`);
+  }
+}
+
+async function uploadAsset(userEmail, args) {
+  const path = require('node:path');
+  const asset = readAsset(args);
+  const name = flagValue(args, 'name') || path.basename(String(asset.file));
+  const metadata = JSON.stringify({
+    name_base64: Buffer.from(name, 'utf8').toString('base64'),
+  });
+  return withAuth(userEmail, 'upload-asset', async (token) => {
+    const start = await canvaFetch(token, 'POST', '/v1/asset-uploads', {
+      rawBody: asset.bytes,
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Asset-Upload-Metadata': metadata,
+      },
+    });
+    const job = start && start.job;
+    if (!job || !job.id) {
+      throw Object.assign(
+        new Error('Canva asset-upload response missing job.id'),
+        { code: 'bad_job', status: 502 }
+      );
+    }
+    if (job.status === 'success') return job;
+    return pollJob(token, '/v1/asset-uploads', job.id);
+  });
+}
+
+async function runCommand(subcommand, userEmail, args) {
+  if (subcommand === 'whoami') return whoami(userEmail);
+  if (subcommand === 'list-designs') {
+    const query = designListQuery(args);
+    return withAuth(userEmail, subcommand, (token) =>
+      canvaFetch(token, 'GET', '/v1/designs', { query })
+    );
+  }
+  if (subcommand === 'create-design') {
+    const body = createDesignBody(args);
+    return withAuth(userEmail, subcommand, (token) =>
+      canvaFetch(token, 'POST', '/v1/designs', { body })
+    );
+  }
+  if (subcommand === 'export') {
+    const body = exportBody(args);
+    return withAuth(userEmail, subcommand, (token) =>
+      startAndPollJob(token, '/v1/exports', '/v1/exports', body)
+    );
+  }
+  if (subcommand === 'upload-asset') return uploadAsset(userEmail, args);
+  fail(
+    `Unknown subcommand "${subcommand}". Try: whoami, list-designs, create-design, export, upload-asset.`
+  );
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   const sub = args._[0];
@@ -79,119 +210,7 @@ async function main() {
 
   const userEmail = args.user;
   validateUserEmail(userEmail);
-
-  switch (sub) {
-    case 'whoami': {
-      const result = await withAuth(userEmail, 'whoami', async (token) => {
-        // /v1/users/me needs no scope; /v1/users/me/profile (display_name)
-        // needs profile:read — enrich when available, never fail whoami on
-        // the profile call alone (scope may have been narrowed on refresh).
-        const me = await canvaFetch(token, 'GET', '/v1/users/me');
-        try {
-          const profile = await canvaFetch(token, 'GET', '/v1/users/me/profile');
-          return { ...me, ...profile };
-        } catch {
-          return me;
-        }
-      });
-      ok(result);
-      break;
-    }
-
-    case 'list-designs': {
-      const query = {};
-      const q = flagValue(args, 'query');
-      if (q) query.query = q;
-      const ownership = flagValue(args, 'ownership');
-      if (ownership) query.ownership = ownership;
-      const sortBy = flagValue(args, 'sort_by');
-      if (sortBy) query.sort_by = sortBy;
-      const continuation = flagValue(args, 'continuation');
-      if (continuation) query.continuation = continuation;
-      const result = await withAuth(userEmail, 'list-designs', (token) =>
-        canvaFetch(token, 'GET', '/v1/designs', { query }));
-      ok(result);
-      break;
-    }
-
-    case 'create-design': {
-      // POST /v1/designs requires the top-level "type" discriminator alongside
-      // design_type/asset_id; at least one of the two must be set.
-      const body = { type: 'type_and_asset' };
-      const title = flagValue(args, 'title');
-      if (title) body.title = title;
-      const assetId = flagValue(args, 'asset_id');
-      if (assetId) body.asset_id = String(assetId);
-      const preset = flagValue(args, 'design_type');
-      const widthRaw = flagValue(args, 'width');
-      const heightRaw = flagValue(args, 'height');
-      const width = widthRaw ? Number(widthRaw) : null;
-      const height = heightRaw ? Number(heightRaw) : null;
-      if (preset) {
-        body.design_type = { type: 'preset', name: preset };
-      } else if (width && height && !Number.isNaN(width) && !Number.isNaN(height)) {
-        body.design_type = { type: 'custom', width, height };
-      } else if (!body.asset_id) {
-        fail('create-design requires --design-type <doc|whiteboard|presentation>, --width N --height N, or --asset-id <id>');
-      }
-      const result = await withAuth(userEmail, 'create-design', (token) =>
-        canvaFetch(token, 'POST', '/v1/designs', { body }));
-      ok(result);
-      break;
-    }
-
-    case 'export': {
-      const designId = flagValue(args, 'design_id');
-      if (!designId) fail('export requires --design-id <id>');
-      const format = String(flagValue(args, 'format') || '').toLowerCase();
-      if (format !== 'pdf' && format !== 'png') fail('export requires --format pdf|png');
-      const body = { design_id: designId, format: { type: format } };
-      const pagesRaw = flagValue(args, 'pages');
-      if (pagesRaw) {
-        const pages = String(pagesRaw).split(',').map((p) => Number(p.trim())).filter((n) => Number.isInteger(n) && n > 0);
-        // A supplied-but-unusable page list must fail loudly — silently
-        // dropping it would export ALL pages against the caller's intent.
-        if (!pages.length) fail('export --pages must be a comma-separated list of positive page numbers (e.g. 1,2,3)');
-        // "pages" lives INSIDE the format object, not at the body top level.
-        body.format.pages = pages;
-      }
-      const job = await withAuth(userEmail, 'export', (token) =>
-        startAndPollJob(token, '/v1/exports', '/v1/exports', body));
-      ok(job);
-      break;
-    }
-
-    case 'upload-asset': {
-      const file = flagValue(args, 'file');
-      if (!file) fail('upload-asset requires --file <local-path>');
-      const fs = require('node:fs');
-      const path = require('node:path');
-      let bytes;
-      try { bytes = fs.readFileSync(file); }
-      catch (err) { fail(`cannot read --file "${file}": ${err.message}`); }
-      const name = flagValue(args, 'name') || path.basename(String(file));
-      // Canva asset upload: RAW BINARY body + Asset-Upload-Metadata header
-      // (name_base64), NOT a JSON url-based upload. Returns an async job.
-      const meta = JSON.stringify({ name_base64: Buffer.from(name, 'utf8').toString('base64') });
-      const job = await withAuth(userEmail, 'upload-asset', async (token) => {
-        const start = await canvaFetch(token, 'POST', '/v1/asset-uploads', {
-          rawBody: bytes,
-          headers: { 'Content-Type': 'application/octet-stream', 'Asset-Upload-Metadata': meta },
-        });
-        const j = start && start.job;
-        if (!j || !j.id) {
-          throw Object.assign(new Error('Canva asset-upload response missing job.id'), { code: 'bad_job', status: 502 });
-        }
-        if (j.status === 'success') return j;
-        return pollJob(token, '/v1/asset-uploads', j.id);
-      });
-      ok(job);
-      break;
-    }
-
-    default:
-      fail(`Unknown subcommand "${sub}". Try: whoami, list-designs, create-design, export, upload-asset.`);
-  }
+  ok(await runCommand(sub, userEmail, args));
 }
 
 if (require.main === module) {

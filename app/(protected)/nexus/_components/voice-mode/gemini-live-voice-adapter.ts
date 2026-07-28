@@ -415,7 +415,7 @@ class VoiceSession {
           ? 'Microphone is in use by another application. Please close it and try again.'
           : isNotFound
           ? 'No microphone found. Please connect a microphone and try again.'
-          : 'Microphone setup failed. Please check your device and try again.'
+          : 'Microphone setup failed. Please check your device and try again.', { cause: error }
       )
     }
 

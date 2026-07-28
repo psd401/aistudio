@@ -103,256 +103,254 @@ afterEach(() => {
   mockGetSignedUrl.mockReset();
 });
 
-describe('Documents v2 API Routes', () => {
-  const mockSession = {
-    sub: 'user-123',
-    userId: 'user-123',
-    user: { id: 'user-123', email: 'test@example.com' },
-  };
+const mockSession = {
+  sub: 'user-123',
+  userId: 'user-123',
+  user: { id: 'user-123', email: 'test@example.com' },
+};
 
-  describe('POST /api/documents/v2/initiate-upload', () => {
-    it('should successfully initiate upload for valid request', async () => {
-      const { getServerSession } = require('@/lib/auth/server-session');
-      const { createDocumentJob } = require('@/lib/services/document-job-service');
-      const { generatePresignedUrl } = require('@/lib/aws/document-upload');
+describe('POST /api/documents/v2/initiate-upload', () => {
+  it('should successfully initiate upload for valid request', async () => {
+    const { getServerSession } = require('@/lib/auth/server-session');
+    const { createDocumentJob } = require('@/lib/services/document-job-service');
+    const { generatePresignedUrl } = require('@/lib/aws/document-upload');
 
-      getServerSession.mockResolvedValue(mockSession);
-      createDocumentJob.mockResolvedValue({ id: 'job-123' });
-      generatePresignedUrl.mockResolvedValue({
-        uploadId: 'job-123',
-        url: 'https://presigned-url.com',
-        method: 'single',
-      });
-
-      const request = {
-        json: async () => ({
-          fileName: 'test.pdf',
-          fileSize: 1024 * 1024,
-          fileType: 'application/pdf',
-          purpose: 'chat',
-          processingOptions: {
-            extractText: true,
-            convertToMarkdown: false,
-            extractImages: false,
-            generateEmbeddings: false,
-            ocrEnabled: true,
-          },
-        }),
-      } as unknown as NextRequest;
-
-      const response = await initiateUpload(request);
-      const data = await response.json();
-
-      expect(response.status).toBe(200);
-      expect(data.jobId).toBe('job-123');
-      expect(data.uploadUrl).toBe('https://presigned-url.com');
-      expect(data.uploadMethod).toBe('single');
+    getServerSession.mockResolvedValue(mockSession);
+    createDocumentJob.mockResolvedValue({ id: 'job-123' });
+    generatePresignedUrl.mockResolvedValue({
+      uploadId: 'job-123',
+      url: 'https://presigned-url.com',
+      method: 'single',
     });
 
-    it('should return 401 for unauthenticated request', async () => {
-      const { getServerSession } = require('@/lib/auth/server-session');
-      getServerSession.mockResolvedValue(null);
-
-      const request = {
-        json: async () => ({
-          fileName: 'test.pdf',
-          fileSize: 1024 * 1024,
-          fileType: 'application/pdf',
-          purpose: 'chat',
-        }),
-      } as unknown as NextRequest;
-
-      const response = await initiateUpload(request);
-      expect(response.status).toBe(401);
-    });
-
-    it('should return 400 for invalid file size', async () => {
-      const { getServerSession } = require('@/lib/auth/server-session');
-      getServerSession.mockResolvedValue(mockSession);
-
-      const request = {
-        json: async () => ({
-          fileName: 'huge-file.pdf',
-          fileSize: 600 * 1024 * 1024,
-          fileType: 'application/pdf',
-          purpose: 'chat',
-        }),
-      } as unknown as NextRequest;
-
-      const response = await initiateUpload(request);
-      expect(response.status).toBe(400);
-    });
-
-    it('should return 400 for unsupported file type', async () => {
-      const { getServerSession } = require('@/lib/auth/server-session');
-      getServerSession.mockResolvedValue(mockSession);
-
-      const request = {
-        json: async () => ({
-          fileName: 'malicious.exe',
-          fileSize: 1024,
-          fileType: 'application/x-msdownload',
-          purpose: 'chat',
-        }),
-      } as unknown as NextRequest;
-
-      const response = await initiateUpload(request);
-      expect(response.status).toBe(400);
-    });
-
-    it('should use multipart upload for large files', async () => {
-      const { getServerSession } = require('@/lib/auth/server-session');
-      const { createDocumentJob } = require('@/lib/services/document-job-service');
-      const { generateMultipartUrls } = require('@/lib/aws/document-upload');
-
-      getServerSession.mockResolvedValue(mockSession);
-      createDocumentJob.mockResolvedValue({ id: 'job-123' });
-      generateMultipartUrls.mockResolvedValue({
-        uploadId: 'multipart-123',
-        method: 'multipart',
-        partUrls: [
-          { partNumber: 1, uploadUrl: 'https://part-1-url.com' },
-          { partNumber: 2, uploadUrl: 'https://part-2-url.com' },
-        ],
-      });
-
-      const request = {
-        json: async () => ({
-          fileName: 'large-document.pdf',
-          fileSize: 50 * 1024 * 1024,
-          fileType: 'application/pdf',
-          purpose: 'repository',
-        }),
-      } as unknown as NextRequest;
-
-      const response = await initiateUpload(request);
-      const data = await response.json();
-
-      expect(response.status).toBe(200);
-      expect(data.uploadMethod).toBe('multipart');
-      expect(data.partUrls).toHaveLength(2);
-    });
-  });
-
-  describe('GET /api/documents/v2/jobs/[jobId]', () => {
-    it('should return job status for existing job', async () => {
-      const { getServerSession } = require('@/lib/auth/server-session');
-      const { getJobStatus: getJobStatusService } = require('@/lib/services/document-job-service');
-
-      getServerSession.mockResolvedValue(mockSession);
-      getJobStatusService.mockResolvedValue({
-        id: 'job-123',
-        status: 'completed',
-        progress: 100,
-        result: { text: 'Extracted text content' },
+    const request = {
+      json: async () => ({
         fileName: 'test.pdf',
         fileSize: 1024 * 1024,
         fileType: 'application/pdf',
         purpose: 'chat',
-        processingOptions: { extractText: true },
-        createdAt: '2023-01-01T00:00:00Z',
-        completedAt: '2023-01-01T00:01:00Z',
-      });
+        processingOptions: {
+          extractText: true,
+          convertToMarkdown: false,
+          extractImages: false,
+          generateEmbeddings: false,
+          ocrEnabled: true,
+        },
+      }),
+    } as unknown as NextRequest;
 
-      const request = {} as unknown as NextRequest;
-      const response = await getJobStatusRoute(request, { params: Promise.resolve({ jobId: 'job-123' }) });
-      const data = await response.json();
+    const response = await initiateUpload(request);
+    const data = await response.json();
 
-      expect(response.status).toBe(200);
-      expect(data.jobId).toBe('job-123');
-      expect(data.status).toBe('completed');
-      expect(data.result).toEqual({ text: 'Extracted text content' });
-    });
-
-    it('should return 404 for non-existent job', async () => {
-      const { getServerSession } = require('@/lib/auth/server-session');
-      const { getJobStatus: getJobStatusService } = require('@/lib/services/document-job-service');
-
-      getServerSession.mockResolvedValue(mockSession);
-      getJobStatusService.mockResolvedValue(null);
-
-      const request = {} as unknown as NextRequest;
-      const response = await getJobStatusRoute(request, { params: Promise.resolve({ jobId: 'non-existent' }) });
-
-      expect(response.status).toBe(404);
-    });
-
-    it('should return 401 for unauthenticated request', async () => {
-      const { getServerSession } = require('@/lib/auth/server-session');
-      getServerSession.mockResolvedValue(null);
-
-      const request = {} as unknown as NextRequest;
-      const response = await getJobStatusRoute(request, { params: Promise.resolve({ jobId: 'job-123' }) });
-
-      expect(response.status).toBe(401);
-    });
+    expect(response.status).toBe(200);
+    expect(data.jobId).toBe('job-123');
+    expect(data.uploadUrl).toBe('https://presigned-url.com');
+    expect(data.uploadMethod).toBe('single');
   });
 
-  describe('POST /api/documents/v2/confirm-upload', () => {
-    it('should successfully confirm upload and trigger processing', async () => {
-      const { getServerSession } = require('@/lib/auth/server-session');
-      const { getJobStatus: getJobStatusService, confirmDocumentUpload } = require('@/lib/services/document-job-service');
-      const { sendToProcessingQueue } = require('@/lib/aws/lambda-trigger');
+  it('should return 401 for unauthenticated request', async () => {
+    const { getServerSession } = require('@/lib/auth/server-session');
+    getServerSession.mockResolvedValue(null);
 
-      getServerSession.mockResolvedValue(mockSession);
-      getJobStatusService.mockResolvedValue({
-        id: 'job-123',
+    const request = {
+      json: async () => ({
         fileName: 'test.pdf',
         fileSize: 1024 * 1024,
         fileType: 'application/pdf',
-        processingOptions: { extractText: true },
-      });
-      confirmDocumentUpload.mockResolvedValue(undefined);
-      sendToProcessingQueue.mockResolvedValue(undefined);
+        purpose: 'chat',
+      }),
+    } as unknown as NextRequest;
 
-      const request = {
-        json: async () => ({
-          uploadId: 'job-123',
-          jobId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-        }),
-      } as unknown as NextRequest;
+    const response = await initiateUpload(request);
+    expect(response.status).toBe(401);
+  });
 
-      const response = await confirmUpload(request);
-      const data = await response.json();
+  it('should return 400 for invalid file size', async () => {
+    const { getServerSession } = require('@/lib/auth/server-session');
+    getServerSession.mockResolvedValue(mockSession);
 
-      expect(response.status).toBe(200);
-      expect(data.success).toBe(true);
-      expect(data.status).toBe('processing');
-      expect(confirmDocumentUpload).toHaveBeenCalledWith('f47ac10b-58cc-4372-a567-0e02b2c3d479', 'job-123');
-      expect(sendToProcessingQueue).toHaveBeenCalled();
+    const request = {
+      json: async () => ({
+        fileName: 'huge-file.pdf',
+        fileSize: 600 * 1024 * 1024,
+        fileType: 'application/pdf',
+        purpose: 'chat',
+      }),
+    } as unknown as NextRequest;
+
+    const response = await initiateUpload(request);
+    expect(response.status).toBe(400);
+  });
+
+  it('should return 400 for unsupported file type', async () => {
+    const { getServerSession } = require('@/lib/auth/server-session');
+    getServerSession.mockResolvedValue(mockSession);
+
+    const request = {
+      json: async () => ({
+        fileName: 'malicious.exe',
+        fileSize: 1024,
+        fileType: 'application/x-msdownload',
+        purpose: 'chat',
+      }),
+    } as unknown as NextRequest;
+
+    const response = await initiateUpload(request);
+    expect(response.status).toBe(400);
+  });
+
+  it('should use multipart upload for large files', async () => {
+    const { getServerSession } = require('@/lib/auth/server-session');
+    const { createDocumentJob } = require('@/lib/services/document-job-service');
+    const { generateMultipartUrls } = require('@/lib/aws/document-upload');
+
+    getServerSession.mockResolvedValue(mockSession);
+    createDocumentJob.mockResolvedValue({ id: 'job-123' });
+    generateMultipartUrls.mockResolvedValue({
+      uploadId: 'multipart-123',
+      method: 'multipart',
+      partUrls: [
+        { partNumber: 1, uploadUrl: 'https://part-1-url.com' },
+        { partNumber: 2, uploadUrl: 'https://part-2-url.com' },
+      ],
     });
 
-    it('should return 400 for invalid UUID format', async () => {
-      const { getServerSession } = require('@/lib/auth/server-session');
-      getServerSession.mockResolvedValue(mockSession);
+    const request = {
+      json: async () => ({
+        fileName: 'large-document.pdf',
+        fileSize: 50 * 1024 * 1024,
+        fileType: 'application/pdf',
+        purpose: 'repository',
+      }),
+    } as unknown as NextRequest;
 
-      const request = {
-        json: async () => ({
-          uploadId: 'upload-123',
-          jobId: 'invalid-uuid',
-        }),
-      } as unknown as NextRequest;
+    const response = await initiateUpload(request);
+    const data = await response.json();
 
-      const response = await confirmUpload(request);
-      expect(response.status).toBe(400);
+    expect(response.status).toBe(200);
+    expect(data.uploadMethod).toBe('multipart');
+    expect(data.partUrls).toHaveLength(2);
+  });
+});
+
+describe('GET /api/documents/v2/jobs/[jobId]', () => {
+  it('should return job status for existing job', async () => {
+    const { getServerSession } = require('@/lib/auth/server-session');
+    const { getJobStatus: getJobStatusService } = require('@/lib/services/document-job-service');
+
+    getServerSession.mockResolvedValue(mockSession);
+    getJobStatusService.mockResolvedValue({
+      id: 'job-123',
+      status: 'completed',
+      progress: 100,
+      result: { text: 'Extracted text content' },
+      fileName: 'test.pdf',
+      fileSize: 1024 * 1024,
+      fileType: 'application/pdf',
+      purpose: 'chat',
+      processingOptions: { extractText: true },
+      createdAt: '2023-01-01T00:00:00Z',
+      completedAt: '2023-01-01T00:01:00Z',
     });
 
-    it('should return 404 for non-existent job', async () => {
-      const { getServerSession } = require('@/lib/auth/server-session');
-      const { getJobStatus: getJobStatusService } = require('@/lib/services/document-job-service');
+    const request = {} as unknown as NextRequest;
+    const response = await getJobStatusRoute(request, { params: Promise.resolve({ jobId: 'job-123' }) });
+    const data = await response.json();
 
-      getServerSession.mockResolvedValue(mockSession);
-      getJobStatusService.mockResolvedValue(null);
+    expect(response.status).toBe(200);
+    expect(data.jobId).toBe('job-123');
+    expect(data.status).toBe('completed');
+    expect(data.result).toEqual({ text: 'Extracted text content' });
+  });
 
-      const request = {
-        json: async () => ({
-          uploadId: 'upload-123',
-          jobId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-        }),
-      } as unknown as NextRequest;
+  it('should return 404 for non-existent job', async () => {
+    const { getServerSession } = require('@/lib/auth/server-session');
+    const { getJobStatus: getJobStatusService } = require('@/lib/services/document-job-service');
 
-      const response = await confirmUpload(request);
-      expect(response.status).toBe(404);
+    getServerSession.mockResolvedValue(mockSession);
+    getJobStatusService.mockResolvedValue(null);
+
+    const request = {} as unknown as NextRequest;
+    const response = await getJobStatusRoute(request, { params: Promise.resolve({ jobId: 'non-existent' }) });
+
+    expect(response.status).toBe(404);
+  });
+
+  it('should return 401 for unauthenticated request', async () => {
+    const { getServerSession } = require('@/lib/auth/server-session');
+    getServerSession.mockResolvedValue(null);
+
+    const request = {} as unknown as NextRequest;
+    const response = await getJobStatusRoute(request, { params: Promise.resolve({ jobId: 'job-123' }) });
+
+    expect(response.status).toBe(401);
+  });
+});
+
+describe('POST /api/documents/v2/confirm-upload', () => {
+  it('should successfully confirm upload and trigger processing', async () => {
+    const { getServerSession } = require('@/lib/auth/server-session');
+    const { getJobStatus: getJobStatusService, confirmDocumentUpload } = require('@/lib/services/document-job-service');
+    const { sendToProcessingQueue } = require('@/lib/aws/lambda-trigger');
+
+    getServerSession.mockResolvedValue(mockSession);
+    getJobStatusService.mockResolvedValue({
+      id: 'job-123',
+      fileName: 'test.pdf',
+      fileSize: 1024 * 1024,
+      fileType: 'application/pdf',
+      processingOptions: { extractText: true },
     });
+    confirmDocumentUpload.mockResolvedValue(undefined);
+    sendToProcessingQueue.mockResolvedValue(undefined);
+
+    const request = {
+      json: async () => ({
+        uploadId: 'job-123',
+        jobId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+      }),
+    } as unknown as NextRequest;
+
+    const response = await confirmUpload(request);
+    const data = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(data.success).toBe(true);
+    expect(data.status).toBe('processing');
+    expect(confirmDocumentUpload).toHaveBeenCalledWith('f47ac10b-58cc-4372-a567-0e02b2c3d479', 'job-123');
+    expect(sendToProcessingQueue).toHaveBeenCalled();
+  });
+
+  it('should return 400 for invalid UUID format', async () => {
+    const { getServerSession } = require('@/lib/auth/server-session');
+    getServerSession.mockResolvedValue(mockSession);
+
+    const request = {
+      json: async () => ({
+        uploadId: 'upload-123',
+        jobId: 'invalid-uuid',
+      }),
+    } as unknown as NextRequest;
+
+    const response = await confirmUpload(request);
+    expect(response.status).toBe(400);
+  });
+
+  it('should return 404 for non-existent job', async () => {
+    const { getServerSession } = require('@/lib/auth/server-session');
+    const { getJobStatus: getJobStatusService } = require('@/lib/services/document-job-service');
+
+    getServerSession.mockResolvedValue(mockSession);
+    getJobStatusService.mockResolvedValue(null);
+
+    const request = {
+      json: async () => ({
+        uploadId: 'upload-123',
+        jobId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+      }),
+    } as unknown as NextRequest;
+
+    const response = await confirmUpload(request);
+    expect(response.status).toBe(404);
   });
 });

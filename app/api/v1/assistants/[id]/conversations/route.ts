@@ -19,6 +19,7 @@ import {
   verifyAssistantResourceGrants,
   parseRequestBody,
   isErrorResponse,
+  type ApiAuthContext,
 } from "@/lib/api"
 import { getAssistantById } from "@/lib/api/assistant-service"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
@@ -66,102 +67,252 @@ function isForbiddenExecutionError(
   )
 }
 
-// ============================================
-// POST — Start Conversation
-// ============================================
+type RouteLogger = ReturnType<typeof createLogger>
 
-export const POST = withApiAuth(async (request: NextRequest, auth, requestId) => {
-  const log = createLogger({ requestId, route: "api.v1.assistants.conversations.start" })
-  let rollbackConversationId: string | null = null
-  let hasBoundReferences = false
-  let firstMessagePersisted = false
+type StartRequest = {
+  inputs: Record<string, unknown>
+  title?: string
+}
 
-  // 1. Extract assistant ID
-  const assistantId = extractNumericParam(request.url, "assistants")
-  if (!assistantId) {
-    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid assistant ID")
-  }
+type StartRequestResult =
+  | { request: StartRequest; response?: never }
+  | { request?: never; response: NextResponse }
 
-  // 2. Check scope
+type ConversationRollbackState = {
+  conversationId: string | null
+  hasBoundReferences: boolean
+  firstMessagePersisted: boolean
+}
+
+async function verifyStartAuthorization(
+  assistantId: number,
+  auth: ApiAuthContext,
+  requestId: string,
+  log: RouteLogger
+): Promise<NextResponse | null> {
   const scopeError = requireAssistantScope(auth, assistantId, requestId)
   if (scopeError) return scopeError
 
-  // 3. Verify access
   const accessError = await verifyAssistantAccess(assistantId, auth, requestId)
   if (accessError) return accessError
 
-  // 3b. Per-resource grant enforcement (#1206) — beneath ownership/approval,
-  // covers the assistant AND every model in its prompt chain (starting a
-  // conversation runs ALL prompts, so a restricted model anywhere in the chain
-  // blocks the run). Shared with the execute and follow-up-message v1 entry
-  // points so a caller can't bypass a resource grant by picking a different
-  // entry point into the same assistant.
   const architectResult = await getAssistantArchitectByIdAction(
     assistantId.toString(),
     INTERNAL_ASSISTANT_LOOKUP
   )
   if (!architectResult.isSuccess || !architectResult.data) {
-    return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
+    return createErrorResponse(
+      requestId,
+      404,
+      "NOT_FOUND",
+      `Assistant not found: ${assistantId}`
+    )
   }
   const architect = architectResult.data
-  const architectPrompts = (architect.prompts || []).sort((a, b) => a.position - b.position)
-  const lastArchitectPrompt = architectPrompts[architectPrompts.length - 1]
-  if (!lastArchitectPrompt?.modelId) {
-    return createErrorResponse(requestId, 400, "CONFIGURATION_ERROR", "Assistant has no model configured")
+  const prompts = (architect.prompts || []).sort(
+    (left, right) => left.position - right.position
+  )
+  if (!prompts.at(-1)?.modelId) {
+    return createErrorResponse(
+      requestId,
+      400,
+      "CONFIGURATION_ERROR",
+      "Assistant has no model configured"
+    )
   }
   const grantsError = await verifyAssistantResourceGrants({
     auth,
     architectUserId: architect.userId,
     architectId: architect.id,
-    modelDbIds: architectPrompts.map((p) => p.modelId).filter((m): m is number => typeof m === "number" && m > 0),
+    modelDbIds: prompts
+      .map((prompt) => prompt.modelId)
+      .filter((modelId): modelId is number => typeof modelId === "number" && modelId > 0),
     assistantId,
     requestId,
     log,
   })
   if (grantsError) return grantsError
+
   const repositoryAccess = await preflightAssistantRepositoryAccess(
-    architectPrompts,
+    prompts,
     auth.cognitoSub
   )
-  if (!repositoryAccess.isAllowed) {
+  if (repositoryAccess.isAllowed) return null
+  return createErrorResponse(
+    requestId,
+    403,
+    "FORBIDDEN",
+    REPOSITORY_ACCESS_CHANGED_MESSAGE
+  )
+}
+
+async function parseStartRequest(
+  request: NextRequest,
+  requestId: string
+): Promise<StartRequestResult> {
+  const result = await parseRequestBody(
+    request,
+    startConversationSchema,
+    requestId
+  )
+  if (isErrorResponse(result)) return { response: result }
+
+  const inputErrors = validateExecutionInputs(result.data.inputs)
+  if (inputErrors) {
+    return {
+      response: createErrorResponse(
+        requestId,
+        400,
+        "VALIDATION_ERROR",
+        "Invalid inputs",
+        inputErrors
+      ),
+    }
+  }
+  return { request: result.data }
+}
+
+function formatInitialUserContent(inputs: Record<string, unknown>): string {
+  const entries = Object.entries(inputs)
+  if (entries.length === 0) return "(Assistant executed with default inputs)"
+  return entries.map(([key, value]) => `${key}: ${String(value)}`).join("\n")
+}
+
+function shouldRollbackConversation(
+  state: ConversationRollbackState,
+  error: unknown
+): state is ConversationRollbackState & { conversationId: string } {
+  return Boolean(
+    state.conversationId &&
+      state.hasBoundReferences &&
+      !state.firstMessagePersisted &&
+      !(error instanceof NexusAttachmentBindingRejectedError) &&
+      !(error instanceof NexusAttachmentBindingCleanupError)
+  )
+}
+
+async function compensateEmptyConversation(
+  state: ConversationRollbackState,
+  error: unknown,
+  auth: ApiAuthContext,
+  requestId: string,
+  log: RouteLogger
+): Promise<NextResponse | null> {
+  if (!shouldRollbackConversation(state, error)) return null
+  try {
+    await rollbackNewNexusAttachmentConversation({
+      ownerId: auth.userId,
+      conversationId: state.conversationId,
+    })
+    return null
+  } catch (cleanupError) {
+    log.error("Failed to compensate an empty assistant conversation", {
+      conversationId: state.conversationId,
+      error:
+        cleanupError instanceof Error
+          ? cleanupError.message
+          : "Unknown cleanup error",
+    })
+    return createErrorResponse(
+      requestId,
+      500,
+      "EXECUTION_ERROR",
+      "Failed to start conversation"
+    )
+  }
+}
+
+function mapStartConversationError(
+  error: unknown,
+  state: ConversationRollbackState,
+  assistantId: number,
+  requestId: string,
+  log: RouteLogger
+): NextResponse {
+  if (error instanceof NexusAttachmentBindingRejectedError) {
+    return createErrorResponse(
+      requestId,
+      400,
+      "VALIDATION_ERROR",
+      "Temporary repository input is unavailable"
+    )
+  }
+  if (error instanceof NexusAttachmentBindingCleanupError) {
+    log.error("Failed to remove a rejected empty assistant conversation", {
+      conversationId: state.conversationId,
+      error: error.message,
+    })
+    return createErrorResponse(
+      requestId,
+      500,
+      "EXECUTION_ERROR",
+      "Failed to start conversation"
+    )
+  }
+  if (isAssistantRuntimeRepositoryInputError(error)) {
+    return createErrorResponse(
+      requestId,
+      400,
+      "VALIDATION_ERROR",
+      error.message
+    )
+  }
+  if (isContentSafetyBlocked(error)) {
+    return createErrorResponse(requestId, 400, "CONTENT_BLOCKED", error.message, {
+      categories: error.blockedCategories,
+      source: error.source,
+    })
+  }
+  if (isForbiddenExecutionError(error)) {
     return createErrorResponse(
       requestId,
       403,
       "FORBIDDEN",
-      REPOSITORY_ACCESS_CHANGED_MESSAGE
+      error.userMessage ||
+        "You do not have access to repository content used by this assistant"
     )
   }
+  log.error("Failed to start conversation", {
+    error: error instanceof Error ? error.message : String(error),
+    assistantId,
+  })
+  return createErrorResponse(
+    requestId,
+    500,
+    "EXECUTION_ERROR",
+    "Failed to start conversation"
+  )
+}
 
-  // 4. Parse body
-  const result = await parseRequestBody(request, startConversationSchema, requestId)
-  if (isErrorResponse(result)) return result
-  const { inputs, title } = result.data
-
-  const inputErrors = validateExecutionInputs(inputs)
-  if (inputErrors) {
-    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid inputs", inputErrors)
+async function startConversation(
+  assistantId: number,
+  request: StartRequest,
+  auth: ApiAuthContext,
+  requestId: string,
+  log: RouteLogger
+): Promise<NextResponse> {
+  const state: ConversationRollbackState = {
+    conversationId: null,
+    hasBoundReferences: false,
+    firstMessagePersisted: false,
   }
-
   try {
-    // Validate opaque repository references and replace their caller-supplied
-    // marker names before the conversation or first message is persisted.
-    // The same preparation is handed to execution to avoid a second,
-    // potentially divergent resolution.
     const preparedInputs = await prepareAssistantExecutionInputs(
-      inputs,
+      request.inputs,
       auth.userId
     )
-
-    // 5. Get assistant details for the conversation title
     const assistant = await getAssistantById(assistantId)
     if (!assistant) {
-      return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
+      return createErrorResponse(
+        requestId,
+        404,
+        "NOT_FOUND",
+        `Assistant not found: ${assistantId}`
+      )
     }
-
-    // 6. Create the conversation
     const conversation = await createConversation({
       userId: auth.userId,
-      title: title || `${assistant.name} Conversation`,
+      title: request.title || `${assistant.name} Conversation`,
       provider: "assistant-architect",
       metadata: {
         source: "api",
@@ -170,29 +321,21 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
         runtimeRepositoryIds: preparedInputs.runtimeRepositoryIds,
       },
     })
-    rollbackConversationId = conversation.id
-    hasBoundReferences = preparedInputs.references.length > 0
-
+    state.conversationId = conversation.id
+    state.hasBoundReferences = preparedInputs.references.length > 0
     await bindNexusRequestAttachmentReferences({
       ownerId: auth.userId,
       conversationId: conversation.id,
       references: preparedInputs.references,
       conversationCreated: true,
     })
-
     log.info("Conversation created", {
       conversationId: conversation.id,
       assistantId,
       userId: auth.userId,
     })
 
-    // 7. Save the user message (the inputs as initial context)
-    const userContent = Object.entries(preparedInputs.inputs).length > 0
-      ? Object.entries(preparedInputs.inputs)
-          .map(([key, value]) => `${key}: ${String(value)}`)
-          .join("\n")
-      : "(Assistant executed with default inputs)"
-
+    const userContent = formatInitialUserContent(preparedInputs.inputs)
     await createMessageWithStats({
       conversationId: conversation.id,
       role: "user",
@@ -200,10 +343,9 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       parts: [{ type: "text", text: userContent }],
       metadata: { inputs: preparedInputs.inputs, source: "api" },
     })
-    firstMessagePersisted = true
+    state.firstMessagePersisted = true
 
-    // 8. Execute the assistant
-    const execResult = await executeAssistant({
+    const execution = await executeAssistant({
       assistantId,
       inputs: preparedInputs.inputs,
       userId: auth.userId,
@@ -211,92 +353,49 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       requestId,
       preparedInputs,
     })
-
-    // Return SSE stream with conversation ID in headers
-    return new NextResponse(execResult.streamResponse.body, {
-      status: execResult.streamResponse.status,
+    return new NextResponse(execution.streamResponse.body, {
+      status: execution.streamResponse.status,
       headers: {
-        ...Object.fromEntries(execResult.streamResponse.headers.entries()),
+        ...Object.fromEntries(execution.streamResponse.headers.entries()),
         "X-Conversation-Id": conversation.id,
         "X-Request-Id": requestId,
       },
     })
   } catch (error) {
-    if (
-      rollbackConversationId &&
-      hasBoundReferences &&
-      !firstMessagePersisted &&
-      !(error instanceof NexusAttachmentBindingRejectedError) &&
-      !(error instanceof NexusAttachmentBindingCleanupError)
-    ) {
-      try {
-        await rollbackNewNexusAttachmentConversation({
-          ownerId: auth.userId,
-          conversationId: rollbackConversationId,
-        })
-      } catch (cleanupError) {
-        log.error("Failed to compensate an empty assistant conversation", {
-          conversationId: rollbackConversationId,
-          error:
-            cleanupError instanceof Error
-              ? cleanupError.message
-              : "Unknown cleanup error",
-        })
-        return createErrorResponse(
-          requestId,
-          500,
-          "EXECUTION_ERROR",
-          "Failed to start conversation"
-        )
-      }
-    }
-    if (error instanceof NexusAttachmentBindingRejectedError) {
-      return createErrorResponse(
-        requestId,
-        400,
-        "VALIDATION_ERROR",
-        "Temporary repository input is unavailable"
-      )
-    }
-    if (error instanceof NexusAttachmentBindingCleanupError) {
-      log.error("Failed to remove a rejected empty assistant conversation", {
-        conversationId: rollbackConversationId,
-        error: error.message,
-      })
-      return createErrorResponse(
-        requestId,
-        500,
-        "EXECUTION_ERROR",
-        "Failed to start conversation"
-      )
-    }
-    if (isAssistantRuntimeRepositoryInputError(error)) {
-      return createErrorResponse(
-        requestId,
-        400,
-        "VALIDATION_ERROR",
-        error.message
-      )
-    }
-    if (isContentSafetyBlocked(error)) {
-      return createErrorResponse(requestId, 400, "CONTENT_BLOCKED", error.message, {
-        categories: error.blockedCategories,
-        source: error.source,
-      })
-    }
-    if (isForbiddenExecutionError(error)) {
-      return createErrorResponse(
-        requestId,
-        403,
-        "FORBIDDEN",
-        error.userMessage || "You do not have access to repository content used by this assistant"
-      )
-    }
-
-    log.error("Failed to start conversation", {
-      error: error instanceof Error ? error.message : String(error),
-      assistantId,
-    })
-    return createErrorResponse(requestId, 500, "EXECUTION_ERROR", "Failed to start conversation")
+    const compensationError = await compensateEmptyConversation(
+      state,
+      error,
+      auth,
+      requestId,
+      log
+    )
+    return (
+      compensationError ??
+      mapStartConversationError(error, state, assistantId, requestId, log)
+    )
   }
+}
+
+// ============================================
+// POST — Start Conversation
+// ============================================
+
+export const POST = withApiAuth(async (request: NextRequest, auth, requestId) => {
+  const log = createLogger({ requestId, route: "api.v1.assistants.conversations.start" })
+  const assistantId = extractNumericParam(request.url, "assistants")
+  if (!assistantId) {
+    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid assistant ID")
+  }
+
+  const authorizationError = await verifyStartAuthorization(
+    assistantId,
+    auth,
+    requestId,
+    log
+  )
+  if (authorizationError) return authorizationError
+
+  const parsed = await parseStartRequest(request, requestId)
+  if (parsed.response) return parsed.response
+  return startConversation(assistantId, parsed.request, auth, requestId, log)
 })

@@ -4,6 +4,7 @@ import {
   executeQuery,
   executeTransaction,
   toPgRows,
+  type DbTransaction,
 } from "@/lib/db/drizzle-client";
 import {
   knowledgeRepositories,
@@ -168,8 +169,8 @@ export function deterministicMigrationSourceId(
     .update(`aistudio-content-migration:${sourceKind}:${sourceId}`)
     .digest()
     .subarray(0, 16);
-  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
-  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  bytes[6] = (bytes[6]! & 0x0F) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3F) | 0x80;
   const hex = bytes.toString("hex");
   return [
     hex.slice(0, 8),
@@ -235,6 +236,111 @@ function assistantPdfInput(
   };
 }
 
+async function loadNextRepositoryCandidate(
+  run: RepositoryMigrationRunRow,
+  cursor: number,
+  maximumId: number,
+): Promise<RepositoryCandidate | null> {
+  const row = toPgRows<{
+    id: number;
+    owner_id: number;
+    repository_id: number;
+    type: string;
+    name: string;
+    source: string;
+    metadata: Record<string, unknown> | string | null;
+    legacy_segments: string[];
+    current_version_id: string | null;
+  }>(
+    await executeQuery(
+      (db) =>
+        db.execute(sql`
+          SELECT
+            item.id,
+            repository.owner_id,
+            item.repository_id,
+            item.current_version_id,
+            item.type,
+            item.name,
+            item.source,
+            item.metadata,
+            ARRAY(
+              SELECT chunk.content
+              FROM repository_item_chunks chunk
+              WHERE chunk.item_id = item.id
+                AND chunk.item_version_id IS NULL
+              ORDER BY chunk.chunk_index, chunk.id
+            ) AS legacy_segments
+          FROM repository_items item
+          JOIN knowledge_repositories repository
+            ON repository.id = item.repository_id
+          WHERE item.id > ${cursor}
+            AND item.id <= ${maximumId}
+            AND item.lifecycle_status = 'active'
+            AND repository.lifecycle_status = 'active'
+            AND item.type IN ('document', 'text', 'url')
+            AND NOT (
+              COALESCE(item.metadata, '{}'::jsonb) ? 'migrationSourceKind'
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM repository_connector_sources connector_source
+              WHERE connector_source.repository_item_id = item.id
+                AND connector_source.status = 'unsupported'
+            )
+            AND (
+              item.current_version_id IS NULL
+              OR EXISTS (
+                SELECT 1
+                FROM repository_item_chunks legacy_chunk
+                WHERE legacy_chunk.item_id = item.id
+                  AND legacy_chunk.item_version_id IS NULL
+              )
+            )
+            AND (
+              NOT EXISTS (
+                SELECT 1
+                FROM repository_migration_items migration
+                WHERE migration.source_kind = 'repository_item'
+                  AND migration.source_id = item.id
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM repository_migration_items migration
+                WHERE migration.source_kind = 'repository_item'
+                  AND migration.source_id = item.id
+                  AND migration.run_id = ${run.id}::uuid
+                  AND migration.status IN (
+                    'pending',
+                    'migrating',
+                    'failed',
+                    'unrecoverable'
+                  )
+              )
+            )
+          ORDER BY item.id
+          LIMIT 1
+        `),
+      "contentMigration.nextRepositoryItem",
+    ),
+  )[0];
+  return row
+    ? {
+        sourceKind: "repository_item",
+        sourceId: row.id,
+        ownerId: row.owner_id,
+        repositoryId: row.repository_id,
+        itemId: row.id,
+        currentVersionId: row.current_version_id,
+        itemType: row.type,
+        name: row.name,
+        source: row.source,
+        metadata: asRecord(row.metadata),
+        legacySegments: row.legacy_segments ?? [],
+      }
+    : null;
+}
+
 async function loadNextCandidate(
   run: RepositoryMigrationRunRow,
   sourceKind: RepositoryMigrationSourceKind,
@@ -244,104 +350,7 @@ async function loadNextCandidate(
   if (cursor >= maximumId) return null;
 
   if (sourceKind === "repository_item") {
-    const row = toPgRows<{
-      id: number;
-      owner_id: number;
-      repository_id: number;
-      type: string;
-      name: string;
-      source: string;
-      metadata: Record<string, unknown> | string | null;
-      legacy_segments: string[];
-      current_version_id: string | null;
-    }>(
-      await executeQuery(
-        (db) =>
-          db.execute(sql`
-            SELECT
-              item.id,
-              repository.owner_id,
-              item.repository_id,
-              item.current_version_id,
-              item.type,
-              item.name,
-              item.source,
-              item.metadata,
-              ARRAY(
-                SELECT chunk.content
-                FROM repository_item_chunks chunk
-                WHERE chunk.item_id = item.id
-                  AND chunk.item_version_id IS NULL
-                ORDER BY chunk.chunk_index, chunk.id
-              ) AS legacy_segments
-            FROM repository_items item
-            JOIN knowledge_repositories repository
-              ON repository.id = item.repository_id
-            WHERE item.id > ${cursor}
-              AND item.id <= ${maximumId}
-              AND item.lifecycle_status = 'active'
-              AND repository.lifecycle_status = 'active'
-              AND item.type IN ('document', 'text', 'url')
-              AND NOT (
-                COALESCE(item.metadata, '{}'::jsonb) ? 'migrationSourceKind'
-              )
-              AND NOT EXISTS (
-                SELECT 1
-                FROM repository_connector_sources connector_source
-                WHERE connector_source.repository_item_id = item.id
-                  AND connector_source.status = 'unsupported'
-              )
-              AND (
-                item.current_version_id IS NULL
-                OR EXISTS (
-                  SELECT 1
-                  FROM repository_item_chunks legacy_chunk
-                  WHERE legacy_chunk.item_id = item.id
-                    AND legacy_chunk.item_version_id IS NULL
-                )
-              )
-              AND (
-                NOT EXISTS (
-                  SELECT 1
-                  FROM repository_migration_items migration
-                  WHERE migration.source_kind = 'repository_item'
-                    AND migration.source_id = item.id
-                )
-                OR EXISTS (
-                  SELECT 1
-                  FROM repository_migration_items migration
-                  WHERE migration.source_kind = 'repository_item'
-                    AND migration.source_id = item.id
-                    AND migration.run_id = ${run.id}::uuid
-                    AND migration.status IN (
-                      'pending',
-                      'migrating',
-                      'failed',
-                      'unrecoverable'
-                    )
-                )
-              )
-            ORDER BY item.id
-            LIMIT 1
-          `),
-        "contentMigration.nextRepositoryItem",
-      ),
-    )[0];
-    return row
-      ? {
-          sourceKind,
-          sourceId: row.id,
-          ownerId: row.owner_id,
-          repositoryId: row.repository_id,
-          itemId: row.id,
-          currentVersionId: row.current_version_id,
-          itemType: row.type,
-          name: row.name,
-          source: row.source,
-          metadata: asRecord(row.metadata),
-          legacySegments: row.legacy_segments ?? [],
-        }
-      : null;
+    return loadNextRepositoryCandidate(run, cursor, maximumId);
   }
 
   if (sourceKind === "nexus_document") {
@@ -447,7 +456,7 @@ function targetFileName(candidate: MigrationCandidate): string {
 }
 
 async function getOrCreateMigrationRepository(
-  tx: Parameters<Parameters<typeof executeTransaction>[0]>[0],
+  tx: DbTransaction,
   candidate: NexusDocumentCandidate | AssistantPdfCandidate,
 ): Promise<{ repositoryId: number; created: boolean }> {
   const source =
@@ -528,6 +537,93 @@ async function getOrCreateMigrationRepository(
   return { repositoryId: repository.id, created: true };
 }
 
+async function reuseMigrationReservation(
+  tx: DbTransaction,
+  existing: RepositoryMigrationItemRow | undefined,
+  run: RepositoryMigrationRunRow,
+): Promise<ReservedMigration | null | undefined> {
+  if (!existing) return undefined;
+  if (existing.status === "rolled_back") {
+    await tx
+      .delete(repositoryMigrationItems)
+      .where(eq(repositoryMigrationItems.id, existing.id));
+    return undefined;
+  }
+  if (
+    !["pending", "migrating", "failed", "unrecoverable"].includes(
+      existing.status,
+    )
+  ) {
+    return null;
+  }
+  await tx
+    .update(repositoryMigrationItems)
+    .set({
+      runId: run.id,
+      status: "migrating",
+      attempts: existing.attempts + 1,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(repositoryMigrationItems.id, existing.id));
+  if (!existing.canonicalRepositoryId || !existing.canonicalItemId) {
+    throw new Error("Migration retry is missing its canonical target");
+  }
+  return {
+    migration: {
+      ...existing,
+      runId: run.id,
+      status: "migrating",
+      attempts: existing.attempts + 1,
+    },
+    repositoryId: existing.canonicalRepositoryId,
+    itemId: existing.canonicalItemId,
+    createdRepository: existing.metadata.createdRepository === true,
+  };
+}
+
+async function createMigrationTarget(
+  tx: DbTransaction,
+  candidate: MigrationCandidate,
+): Promise<{
+  repositoryId: number;
+  itemId: number;
+  createdRepository: boolean;
+}> {
+  if (candidate.sourceKind === "repository_item") {
+    return {
+      repositoryId: candidate.repositoryId,
+      itemId: candidate.itemId,
+      createdRepository: false,
+    };
+  }
+  const repository = await getOrCreateMigrationRepository(tx, candidate);
+  const [item] = await tx
+    .insert(repositoryItems)
+    .values({
+      repositoryId: repository.repositoryId,
+      type: "document",
+      name: candidate.name,
+      source:
+        candidate.sourceKind === "nexus_document"
+          ? candidate.source
+          : `legacy-assistant-pdf-job:${candidate.sourceId}`,
+      metadata: {
+        migrationSourceKind: candidate.sourceKind,
+        migrationSourceId: candidate.sourceId,
+      },
+      processingStatus: "pending",
+    })
+    .returning({ id: repositoryItems.id });
+  if (!item) throw new Error("Failed to create migration repository item");
+  return {
+    repositoryId: repository.repositoryId,
+    itemId: item.id,
+    createdRepository: repository.created,
+  };
+}
+
 async function reserveMigrationCandidate(
   run: RepositoryMigrationRunRow,
   candidate: MigrationCandidate,
@@ -544,78 +640,10 @@ async function reserveMigrationCandidate(
       )
       .limit(1)
       .for("update");
-    if (existing?.status === "rolled_back") {
-      await tx
-        .delete(repositoryMigrationItems)
-        .where(eq(repositoryMigrationItems.id, existing.id));
-    }
-    if (
-      existing &&
-      existing.status !== "rolled_back" &&
-      !["pending", "migrating", "failed", "unrecoverable"].includes(
-        existing.status,
-      )
-    ) {
-      return null;
-    }
-    if (existing && existing.status !== "rolled_back") {
-      await tx
-        .update(repositoryMigrationItems)
-        .set({
-          runId: run.id,
-          status: "migrating",
-          attempts: existing.attempts + 1,
-          lastErrorCode: null,
-          lastErrorMessage: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(repositoryMigrationItems.id, existing.id));
-      if (!existing.canonicalRepositoryId || !existing.canonicalItemId) {
-        throw new Error("Migration retry is missing its canonical target");
-      }
-      return {
-        migration: {
-          ...existing,
-          runId: run.id,
-          status: "migrating",
-          attempts: existing.attempts + 1,
-        },
-        repositoryId: existing.canonicalRepositoryId,
-        itemId: existing.canonicalItemId,
-        createdRepository: existing.metadata.createdRepository === true,
-      };
-    }
-
-    let repositoryId: number;
-    let itemId: number;
-    let createdRepository = false;
-    if (candidate.sourceKind === "repository_item") {
-      repositoryId = candidate.repositoryId;
-      itemId = candidate.itemId;
-    } else {
-      const repository = await getOrCreateMigrationRepository(tx, candidate);
-      repositoryId = repository.repositoryId;
-      createdRepository = repository.created;
-      const [item] = await tx
-        .insert(repositoryItems)
-        .values({
-          repositoryId,
-          type: "document",
-          name: candidate.name,
-          source:
-            candidate.sourceKind === "nexus_document"
-              ? candidate.source
-              : `legacy-assistant-pdf-job:${candidate.sourceId}`,
-          metadata: {
-            migrationSourceKind: candidate.sourceKind,
-            migrationSourceId: candidate.sourceId,
-          },
-          processingStatus: "pending",
-        })
-        .returning({ id: repositoryItems.id });
-      if (!item) throw new Error("Failed to create migration repository item");
-      itemId = item.id;
-    }
+    const reused = await reuseMigrationReservation(tx, existing, run);
+    if (reused !== undefined) return reused;
+    const { repositoryId, itemId, createdRepository } =
+      await createMigrationTarget(tx, candidate);
 
     const [migration] = await tx
       .insert(repositoryMigrationItems)
@@ -680,7 +708,7 @@ export function isMissingMigrationSourceObject(error: unknown): boolean {
     $metadata?: { httpStatusCode?: unknown };
   };
   const errorCode = [candidate.name, candidate.Code, candidate.code].find(
-    (value): value is string => typeof value === "string"
+    (value): value is string => typeof value === "string",
   );
   return (
     ["NoSuchKey", "NotFound", "NoSuchBucket"].includes(errorCode ?? "") ||
@@ -689,7 +717,7 @@ export function isMissingMigrationSourceObject(error: unknown): boolean {
 }
 
 export function buildLegacyMigrationFallbackBody(
-  legacySegments: string[]
+  legacySegments: string[],
 ): Uint8Array | null {
   const content = legacySegments
     .map((segment) => segment.trim())
@@ -792,6 +820,244 @@ async function loadVerifiedDuplicateNexusRecovery(
   );
 }
 
+async function registerExistingCanonicalVersion(
+  candidate: MigrationCandidate,
+  reserved: ReservedMigration,
+  targetKey: string,
+): Promise<boolean> {
+  if (
+    candidate.sourceKind !== "repository_item" ||
+    !candidate.currentVersionId
+  ) {
+    return false;
+  }
+  const currentVersionId = candidate.currentVersionId;
+  const [version] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: repositoryItemVersions.id,
+          metadata: repositoryItemVersions.metadata,
+          objectKey: repositoryItemVersions.objectKey,
+          sha256: repositoryItemVersions.sha256,
+          sourceKind: repositoryItemVersions.sourceKind,
+        })
+        .from(repositoryItemVersions)
+        .where(
+          and(
+            eq(repositoryItemVersions.id, currentVersionId),
+            eq(repositoryItemVersions.itemId, candidate.itemId),
+          ),
+        )
+        .limit(1),
+    "contentMigration.existingCanonicalVersion",
+  );
+  if (!version) {
+    throw new UnrecoverableMigrationSourceError(
+      "Repository item references a missing canonical version",
+    );
+  }
+  const migrationOwnedVersion = isMigrationOwnedCanonicalVersion({
+    sourceKind: version.sourceKind,
+    objectKey: version.objectKey,
+    metadata: version.metadata,
+    expectedObjectKey: targetKey,
+    expectedSourceKind: candidate.sourceKind,
+    expectedSourceId: candidate.sourceId,
+  });
+  const sourceContent = buildMigrationContentEvidence(candidate.legacySegments);
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryMigrationItems)
+        .set({
+          canonicalVersionId: version.id,
+          canonicalObjectKey: version.objectKey,
+          sourceRecordCount: sourceContent.recordCount,
+          sourceContentSha256: sourceContent.sha256,
+          sourceObjectSha256: version.sha256,
+          canonicalObjectSha256: version.sha256,
+          status: "migrated",
+          metadata: {
+            ...reserved.migration.metadata,
+            preexistingCanonicalVersion: !migrationOwnedVersion,
+          },
+          migratedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(repositoryMigrationItems.id, reserved.migration.id)),
+    "contentMigration.registerExistingCanonicalVersion",
+  );
+  return true;
+}
+
+type StoredMigrationCandidate = {
+  stored: MigrationStoredObject;
+  declaredContentType: string;
+  sourceObjectBytesAvailable: boolean;
+  /**
+   * Set only on the legacy-segment fallback path, where the stored body is
+   * normalized through the canonical `text/plain` contract. Target evidence
+   * must then be rebound to these exact stored bytes rather than the raw
+   * legacy segments, or reconciliation reports a false mismatch.
+   */
+  comparisonSegments?: string[];
+  /** Set only when the fallback body came from a verified duplicate source. */
+  verifiedDuplicateSourceId?: number | null;
+};
+
+async function copyOrRecoverMigrationCandidate(
+  candidate: Exclude<MigrationCandidate, AssistantPdfCandidate>,
+  targetKey: string,
+  storage: RepositoryMigrationStorage,
+  metadata: Record<string, string>,
+): Promise<StoredMigrationCandidate> {
+  const fallbackContentType =
+    candidate.sourceKind === "repository_item"
+      ? (stringValue(candidate.metadata, "contentType") ??
+        "application/octet-stream")
+      : candidate.contentType || "application/octet-stream";
+  try {
+    const stored = await storage.inspectAndCopyObject({
+      sourceKey: candidate.source,
+      targetKey,
+    });
+    return {
+      stored,
+      declaredContentType: stored.contentType ?? fallbackContentType,
+      sourceObjectBytesAvailable: true,
+    };
+  } catch (error) {
+    if (!isMissingMigrationSourceObject(error)) throw error;
+    let fallbackSegments = candidate.legacySegments;
+    let verifiedDuplicateSourceId: number | null = null;
+    if (
+      candidate.sourceKind === "nexus_document" &&
+      fallbackSegments.length === 0
+    ) {
+      const duplicate = await loadVerifiedDuplicateNexusRecovery(candidate);
+      if (duplicate) {
+        fallbackSegments = duplicate.legacySegments;
+        verifiedDuplicateSourceId = duplicate.sourceId;
+      }
+    }
+    const fallbackBody = buildLegacyMigrationFallbackBody(fallbackSegments);
+    if (!fallbackBody) {
+      throw new UnrecoverableMigrationSourceError(
+        "Legacy source object and extracted content are unavailable",
+      );
+    }
+    const declaredContentType = "text/plain";
+    const stored = await storage.putObject({
+      targetKey,
+      body: fallbackBody,
+      contentType: declaredContentType,
+      metadata: {
+        ...metadata,
+        recoveredFromLegacySegments: "true",
+        ...(verifiedDuplicateSourceId === null
+          ? {}
+          : {
+              recoveredFromVerifiedDuplicateSourceId:
+                verifiedDuplicateSourceId.toString(),
+            }),
+      },
+    });
+    return {
+      stored,
+      declaredContentType,
+      sourceObjectBytesAvailable: false,
+      comparisonSegments: [Buffer.from(fallbackBody).toString("utf8")],
+      verifiedDuplicateSourceId,
+    };
+  }
+}
+
+async function storeMigrationCandidate(
+  candidate: MigrationCandidate,
+  targetKey: string,
+  storage: RepositoryMigrationStorage,
+): Promise<{
+  stored: MigrationStoredObject;
+  declaredContentType: string;
+  sourceContent: ReturnType<typeof buildMigrationContentEvidence>;
+  sourceObjectBytesAvailable: boolean;
+  verifiedDuplicateSourceId: number | null;
+}> {
+  let comparisonSegments = candidate.legacySegments;
+  let textBody =
+    candidate.sourceKind === "repository_item"
+      ? textCandidateBody(candidate)
+      : null;
+  if (
+    candidate.sourceKind === "repository_item" &&
+    candidate.itemType === "url" &&
+    !textBody
+  ) {
+    const snapshot = await fetchRepositoryUrlText(candidate.source);
+    comparisonSegments = [snapshot];
+    textBody = Buffer.from(snapshot, "utf8");
+  }
+  const sourceContent = buildMigrationContentEvidence(comparisonSegments);
+  const metadata = {
+    migrationSourceKind: candidate.sourceKind,
+    migrationSourceId: candidate.sourceId.toString(),
+  };
+  if (textBody) {
+    const declaredContentType = "text/plain";
+    const stored = await storage.putObject({
+      targetKey,
+      body: textBody,
+      contentType: declaredContentType,
+      metadata,
+    });
+    return {
+      stored,
+      declaredContentType,
+      sourceContent,
+      sourceObjectBytesAvailable: true,
+      verifiedDuplicateSourceId: null,
+    };
+  }
+  if (candidate.sourceKind === "assistant_pdf_job") {
+    const declaredContentType = candidate.contentType;
+    const stored = await storage.putObject({
+      targetKey,
+      body: candidate.bytes,
+      contentType: declaredContentType,
+      metadata,
+    });
+    return {
+      stored,
+      declaredContentType,
+      sourceContent,
+      sourceObjectBytesAvailable: true,
+      verifiedDuplicateSourceId: null,
+    };
+  }
+  if (!candidate.source.trim() || candidate.source.includes("..")) {
+    throw new UnrecoverableMigrationSourceError(
+      "Legacy source object key is invalid",
+    );
+  }
+  const { comparisonSegments: recoveredSegments, ...recovered } =
+    await copyOrRecoverMigrationCandidate(
+      candidate,
+      targetKey,
+      storage,
+      metadata,
+    );
+  return {
+    ...recovered,
+    // On the fallback path the stored body is the canonically normalized text,
+    // so bind evidence to those exact bytes instead of the raw segments.
+    sourceContent: recoveredSegments
+      ? buildMigrationContentEvidence(recoveredSegments)
+      : sourceContent,
+    verifiedDuplicateSourceId: recovered.verifiedDuplicateSourceId ?? null,
+  };
+}
+
 async function migrateCandidate(
   run: RepositoryMigrationRunRow,
   candidate: MigrationCandidate,
@@ -807,178 +1073,19 @@ async function migrateCandidate(
   );
 
   try {
-    const repositoryItemCandidate =
-      candidate.sourceKind === "repository_item" ? candidate : null;
-    const currentVersionId = repositoryItemCandidate?.currentVersionId;
-    if (currentVersionId) {
-      const [version] = await executeQuery(
-        (db) =>
-          db
-            .select({
-              id: repositoryItemVersions.id,
-              metadata: repositoryItemVersions.metadata,
-              objectKey: repositoryItemVersions.objectKey,
-              sha256: repositoryItemVersions.sha256,
-              sourceKind: repositoryItemVersions.sourceKind,
-            })
-            .from(repositoryItemVersions)
-            .where(
-              and(
-                eq(repositoryItemVersions.id, currentVersionId),
-                eq(
-                  repositoryItemVersions.itemId,
-                  repositoryItemCandidate.itemId,
-                ),
-              ),
-            )
-            .limit(1),
-        "contentMigration.existingCanonicalVersion",
-      );
-      if (!version) {
-        throw new UnrecoverableMigrationSourceError(
-          "Repository item references a missing canonical version",
-        );
-      }
-      const migrationOwnedVersion = isMigrationOwnedCanonicalVersion({
-        sourceKind: version.sourceKind,
-        objectKey: version.objectKey,
-        metadata: version.metadata,
-        expectedObjectKey: targetKey,
-        expectedSourceKind: candidate.sourceKind,
-        expectedSourceId: candidate.sourceId,
-      });
-      const sourceContent = buildMigrationContentEvidence(
-        candidate.legacySegments,
-      );
-      await executeQuery(
-        (db) =>
-          db
-            .update(repositoryMigrationItems)
-            .set({
-              canonicalVersionId: version.id,
-              canonicalObjectKey: version.objectKey,
-              sourceRecordCount: sourceContent.recordCount,
-              sourceContentSha256: sourceContent.sha256,
-              sourceObjectSha256: version.sha256,
-              canonicalObjectSha256: version.sha256,
-              status: "migrated",
-              metadata: {
-                ...reserved.migration.metadata,
-                preexistingCanonicalVersion: !migrationOwnedVersion,
-              },
-              migratedAt: new Date(),
-              updatedAt: new Date(),
-            })
-            .where(eq(repositoryMigrationItems.id, reserved.migration.id)),
-        "contentMigration.registerExistingCanonicalVersion",
-      );
+    if (
+      await registerExistingCanonicalVersion(candidate, reserved, targetKey)
+    ) {
       return;
     }
+    const {
+      stored,
+      declaredContentType,
+      sourceContent,
+      sourceObjectBytesAvailable,
+      verifiedDuplicateSourceId,
+    } = await storeMigrationCandidate(candidate, targetKey, storage);
 
-    let stored: MigrationStoredObject;
-    let declaredContentType: string;
-    let sourceObjectBytesAvailable = true;
-    let comparisonSegments = candidate.legacySegments;
-    let verifiedDuplicateSourceId: number | null = null;
-    let textBody =
-      candidate.sourceKind === "repository_item"
-        ? textCandidateBody(candidate)
-        : null;
-    if (
-      candidate.sourceKind === "repository_item" &&
-      candidate.itemType === "url" &&
-      !textBody
-    ) {
-      const snapshot = await fetchRepositoryUrlText(candidate.source);
-      comparisonSegments = [snapshot];
-      textBody = Buffer.from(snapshot, "utf8");
-    }
-    if (textBody) {
-      declaredContentType = "text/plain";
-      stored = await storage.putObject({
-        targetKey,
-        body: textBody,
-        contentType: declaredContentType,
-        metadata: {
-          migrationSourceKind: candidate.sourceKind,
-          migrationSourceId: candidate.sourceId.toString(),
-        },
-      });
-    } else if (candidate.sourceKind === "assistant_pdf_job") {
-      declaredContentType = candidate.contentType;
-      stored = await storage.putObject({
-        targetKey,
-        body: candidate.bytes,
-        contentType: declaredContentType,
-        metadata: {
-          migrationSourceKind: candidate.sourceKind,
-          migrationSourceId: candidate.sourceId.toString(),
-        },
-      });
-    } else {
-      if (!candidate.source.trim() || candidate.source.includes("..")) {
-        throw new UnrecoverableMigrationSourceError(
-          "Legacy source object key is invalid",
-        );
-      }
-      const metadata =
-        candidate.sourceKind === "repository_item"
-          ? candidate.metadata
-          : candidate.metadata;
-      declaredContentType =
-        candidate.sourceKind === "repository_item"
-          ? (stringValue(metadata, "contentType") ?? "application/octet-stream")
-          : candidate.contentType || "application/octet-stream";
-      try {
-        stored = await storage.inspectAndCopyObject({
-          sourceKey: candidate.source,
-          targetKey,
-        });
-        declaredContentType = stored.contentType ?? declaredContentType;
-      } catch (error) {
-        if (!isMissingMigrationSourceObject(error)) throw error;
-        let fallbackSegments = candidate.legacySegments;
-        if (
-          candidate.sourceKind === "nexus_document" &&
-          fallbackSegments.length === 0
-        ) {
-          const duplicate =
-            await loadVerifiedDuplicateNexusRecovery(candidate);
-          if (duplicate) {
-            fallbackSegments = duplicate.legacySegments;
-            verifiedDuplicateSourceId = duplicate.sourceId;
-          }
-        }
-        const fallbackBody =
-          buildLegacyMigrationFallbackBody(fallbackSegments);
-        if (!fallbackBody) {
-          throw new UnrecoverableMigrationSourceError(
-            "Legacy source object and extracted content are unavailable"
-          );
-        }
-        comparisonSegments = [Buffer.from(fallbackBody).toString("utf8")];
-        sourceObjectBytesAvailable = false;
-        declaredContentType = "text/plain";
-        stored = await storage.putObject({
-          targetKey,
-          body: fallbackBody,
-          contentType: declaredContentType,
-          metadata: {
-            migrationSourceKind: candidate.sourceKind,
-            migrationSourceId: candidate.sourceId.toString(),
-            recoveredFromLegacySegments: "true",
-            ...(verifiedDuplicateSourceId === null
-              ? {}
-              : {
-                  recoveredFromVerifiedDuplicateSourceId:
-                    verifiedDuplicateSourceId.toString(),
-                }),
-          },
-        });
-      }
-    }
-
-    const sourceContent = buildMigrationContentEvidence(comparisonSegments);
     const registration = await registerCanonicalUpload({
       itemId: reserved.itemId,
       userId: candidate.ownerId,
@@ -1159,10 +1266,8 @@ export async function getRepositoryMigrationRunMetrics(
 async function finishBackfillRun(
   run: RepositoryMigrationRunRow,
 ): Promise<void> {
-  // A retry preserves origin_run_id so rollback still belongs to the original
-  // backfill, but its operational result belongs to the retry run that
-  // currently owns the item. Count run_id here so one-source retries retain
-  // accurate discovered/migrated/error evidence.
+  // A retry preserves origin_run_id for rollback ownership, but its result
+  // belongs to the retry run that currently owns the item.
   const metrics = await getRepositoryMigrationRunMetrics(run.id);
   const recoveryDaysRow = toPgRows<{ value: string | null }>(
     await executeQuery(
@@ -1228,7 +1333,7 @@ async function processBackfillBatch(
       run = await updateRepositoryMigrationRunCursor(
         run.id,
         sourceKind,
-        candidate.sourceId
+        candidate.sourceId,
       );
       processed += 1;
     }
@@ -1240,6 +1345,112 @@ async function processBackfillBatch(
       (run.snapshot.maximumIds?.[sourceKind] ?? 0),
   );
   if (complete) await finishBackfillRun(run);
+}
+
+async function reconcileMigrationCandidate(
+  tx: DbTransaction,
+  candidate: RepositoryMigrationItemRow,
+  runId: string,
+): Promise<"skipped" | "pending" | "verified" | "mismatch"> {
+  // Serialize reconciliation with administrator approval/reprocess actions.
+  // A stale worker observation must never overwrite a freshly approved
+  // mismatch or mark a version verified after reprocessing reset it.
+  const [migration] = await tx
+    .select()
+    .from(repositoryMigrationItems)
+    .where(eq(repositoryMigrationItems.id, candidate.id))
+    .limit(1)
+    .for("update");
+  if (
+    !migration?.canonicalVersionId ||
+    !["migrated", "mismatch"].includes(migration.status)
+  ) {
+    return "skipped";
+  }
+  const evidence = toPgRows<{
+    processing_status: string | null;
+    object_sha256: string | null;
+    canonical_record_count: number;
+    canonical_text_sha256: string | null;
+  }>(
+    await tx.execute(sql`
+      SELECT
+        version.processing_status,
+        version.sha256 AS object_sha256,
+        (
+          SELECT COUNT(*)::integer
+          FROM repository_item_chunks chunk
+          WHERE chunk.item_version_id = version.id
+        ) AS canonical_record_count,
+        (
+          SELECT COALESCE(
+            artifact.sha256,
+            CASE
+              WHEN artifact.text_inline IS NOT NULL
+              THEN encode(
+                sha256(convert_to(artifact.text_inline, 'UTF8')),
+                'hex'
+              )
+            END
+          )
+          FROM repository_artifacts artifact
+          WHERE artifact.item_version_id = version.id
+            AND artifact.kind = 'canonical_text'
+          ORDER BY artifact.created_at DESC
+          LIMIT 1
+        ) AS canonical_text_sha256
+      FROM repository_item_versions version
+      WHERE version.id = ${migration.canonicalVersionId}::uuid
+      LIMIT 1
+    `),
+  )[0] ?? {
+    processing_status: null,
+    object_sha256: null,
+    canonical_record_count: 0,
+    canonical_text_sha256: null,
+  };
+  if (["pending", "processing"].includes(evidence.processing_status ?? "")) {
+    return "pending";
+  }
+  const canonicalContent = {
+    recordCount: evidence.canonical_record_count,
+    sha256: evidence.canonical_text_sha256,
+  };
+  const decision = reconcileMigrationEvidence({
+    sourceObjectSha256: migration.sourceObjectSha256,
+    canonicalObjectSha256: evidence.object_sha256,
+    sourceContent: {
+      recordCount: migration.sourceRecordCount ?? 0,
+      sha256: migration.sourceContentSha256,
+    },
+    canonicalContent,
+    processingStatus: evidence.processing_status,
+    approvedMismatch:
+      typeof migration.metadata.approvedMismatchAt === "string",
+  });
+  const mismatch = decision.status === "mismatch";
+  await tx
+    .update(repositoryMigrationItems)
+    .set({
+      status: decision.status,
+      canonicalRecordCount: canonicalContent.recordCount,
+      canonicalContentSha256: canonicalContent.sha256,
+      canonicalObjectSha256: evidence.object_sha256,
+      lastErrorCode: mismatch
+        ? "MIGRATION_RECONCILIATION_MISMATCH"
+        : null,
+      lastErrorMessage: mismatch
+        ? decision.reasons.join("; ").slice(0, 4_000)
+        : null,
+      verifiedAt: decision.status === "verified" ? new Date() : null,
+      metadata: {
+        ...migration.metadata,
+        lastReconciledRunId: runId,
+      },
+      updatedAt: new Date(),
+    })
+    .where(eq(repositoryMigrationItems.id, migration.id));
+  return decision.status;
 }
 
 async function reconcileNextBatch(
@@ -1266,107 +1477,10 @@ async function reconcileNextBatch(
   );
   let pending = 0;
   for (const candidate of migrations) {
-    const disposition = await executeTransaction(async (tx) => {
-      // Serialize reconciliation with administrator approval/reprocess actions.
-      // A stale worker observation must never overwrite a freshly approved
-      // mismatch or mark a version verified after reprocessing reset it.
-      const [migration] = await tx
-        .select()
-        .from(repositoryMigrationItems)
-        .where(eq(repositoryMigrationItems.id, candidate.id))
-        .limit(1)
-        .for("update");
-      if (
-        !migration?.canonicalVersionId ||
-        !["migrated", "mismatch"].includes(migration.status)
-      ) {
-        return "skipped" as const;
-      }
-      const evidence = toPgRows<{
-        processing_status: string | null;
-        object_sha256: string | null;
-        canonical_record_count: number;
-        canonical_text_sha256: string | null;
-      }>(
-        await tx.execute(sql`
-          SELECT
-            version.processing_status,
-            version.sha256 AS object_sha256,
-            (
-              SELECT COUNT(*)::integer
-              FROM repository_item_chunks chunk
-              WHERE chunk.item_version_id = version.id
-            ) AS canonical_record_count,
-            (
-              SELECT COALESCE(
-                artifact.sha256,
-                CASE
-                  WHEN artifact.text_inline IS NOT NULL
-                  THEN encode(
-                    sha256(convert_to(artifact.text_inline, 'UTF8')),
-                    'hex'
-                  )
-                END
-              )
-              FROM repository_artifacts artifact
-              WHERE artifact.item_version_id = version.id
-                AND artifact.kind = 'canonical_text'
-              ORDER BY artifact.created_at DESC
-              LIMIT 1
-            ) AS canonical_text_sha256
-          FROM repository_item_versions version
-          WHERE version.id = ${migration.canonicalVersionId}::uuid
-          LIMIT 1
-        `),
-      )[0];
-      if (
-        evidence?.processing_status === "pending" ||
-        evidence?.processing_status === "processing"
-      ) {
-        return "pending" as const;
-      }
-      const canonicalContent = {
-        recordCount: evidence?.canonical_record_count ?? 0,
-        sha256: evidence?.canonical_text_sha256 ?? null,
-      };
-      const approvedMismatch =
-        typeof migration.metadata.approvedMismatchAt === "string";
-      const decision = reconcileMigrationEvidence({
-        sourceObjectSha256: migration.sourceObjectSha256,
-        canonicalObjectSha256: evidence?.object_sha256 ?? null,
-        sourceContent: {
-          recordCount: migration.sourceRecordCount ?? 0,
-          sha256: migration.sourceContentSha256,
-        },
-        canonicalContent,
-        processingStatus: evidence?.processing_status ?? null,
-        approvedMismatch,
-      });
-      await tx
-        .update(repositoryMigrationItems)
-        .set({
-          status: decision.status,
-          canonicalRecordCount: canonicalContent.recordCount,
-          canonicalContentSha256: canonicalContent.sha256,
-          canonicalObjectSha256: evidence?.object_sha256 ?? null,
-          lastErrorCode:
-            decision.status === "mismatch"
-              ? "MIGRATION_RECONCILIATION_MISMATCH"
-              : null,
-          lastErrorMessage:
-            decision.status === "mismatch"
-              ? decision.reasons.join("; ").slice(0, 4_000)
-              : null,
-          verifiedAt: decision.status === "verified" ? new Date() : null,
-          metadata: {
-            ...migration.metadata,
-            lastReconciledRunId: run.id,
-          },
-          updatedAt: new Date(),
-        })
-        .where(eq(repositoryMigrationItems.id, migration.id));
-      return decision.status;
-    }, "contentMigration.reconcileCandidate");
+    const disposition = await executeTransaction(
+      (tx) => reconcileMigrationCandidate(tx, candidate, run.id),
+      "contentMigration.reconcileCandidate",
+    );
     if (disposition === "pending") pending += 1;
   }
   const remaining =
@@ -1404,10 +1518,10 @@ async function reconcileNextBatch(
   }
 }
 
-async function rollbackMigrationItem(
+async function finishPreviouslyPreparedRollback(
   migration: RepositoryMigrationItemRow,
   storage: RepositoryMigrationStorage,
-): Promise<"rolled_back" | "deferred"> {
+): Promise<boolean> {
   if (migration.metadata.preexistingCanonicalVersion === true) {
     await executeQuery(
       (db) =>
@@ -1421,9 +1535,9 @@ async function rollbackMigrationItem(
           .where(eq(repositoryMigrationItems.id, migration.id)),
       "contentMigration.rollbackPreexistingVersion",
     );
-    return "rolled_back";
+    return true;
   }
-
+  if (migration.metadata.rollbackPrepared !== true) return false;
   const preparedObjectKeys = Array.isArray(
     migration.metadata.rollbackObjectKeys,
   )
@@ -1432,93 +1546,52 @@ async function rollbackMigrationItem(
           typeof objectKey === "string" && objectKey.length > 0,
       )
     : [];
-  if (migration.metadata.rollbackPrepared === true) {
-    if (preparedObjectKeys.length === 0) {
-      throw new Error("Prepared rollback is missing its object cleanup plan");
+  if (preparedObjectKeys.length === 0) {
+    throw new Error("Prepared rollback is missing its object cleanup plan");
+  }
+  try {
+    for (const objectKey of preparedObjectKeys) {
+      await storage.deleteObject(objectKey);
     }
-    try {
-      for (const objectKey of preparedObjectKeys) {
-        await storage.deleteObject(objectKey);
-      }
-    } catch (error) {
-      await executeQuery(
-        (db) =>
-          db
-            .update(repositoryMigrationItems)
-            .set({
-              lastErrorCode: "MIGRATION_ROLLBACK_OBJECT_DELETE_FAILED",
-              lastErrorMessage: (error instanceof Error
-                ? error.message
-                : String(error)
-              ).slice(0, 4_000),
-              updatedAt: new Date(),
-            })
-            .where(eq(repositoryMigrationItems.id, migration.id)),
-        "contentMigration.failPreparedRollbackCleanup",
-      );
-      throw error;
-    }
+  } catch (error) {
     await executeQuery(
       (db) =>
         db
           .update(repositoryMigrationItems)
           .set({
-            status: "rolled_back",
-            rolledBackAt: new Date(),
-            lastErrorCode: null,
-            lastErrorMessage: null,
+            lastErrorCode: "MIGRATION_ROLLBACK_OBJECT_DELETE_FAILED",
+            lastErrorMessage: (error instanceof Error
+              ? error.message
+              : String(error)
+            ).slice(0, 4_000),
             updatedAt: new Date(),
           })
           .where(eq(repositoryMigrationItems.id, migration.id)),
-      "contentMigration.finishPreparedRollback",
+      "contentMigration.failPreparedRollbackCleanup",
     );
-    return "rolled_back";
+    throw error;
   }
-
-  const activeJob =
-    toPgRows<{ count: number }>(
-      await executeQuery(
-        (db) =>
-          db.execute(sql`
-          SELECT COUNT(*)::integer AS count
-          FROM repository_processing_jobs
-          WHERE item_version_id = ${migration.canonicalVersionId}::uuid
-            AND (
-              status = 'running'
-              OR (
-                metrics ? 'bdaInvocationArn'
-                AND COALESCE(metrics->>'bdaInvocationState', 'active') = 'active'
-              )
-              OR (
-                metrics ? 'textractJobId'
-                AND status IN ('queued', 'running')
-              )
-            )
-        `),
-        "contentMigration.rollbackActiveJobs",
-      ),
-    )[0]?.count ?? 0;
-  if (activeJob > 0) return "deferred";
-
-  const artifactKeys = migration.canonicalVersionId
-    ? toPgRows<{ object_key: string }>(
-        await executeQuery(
-          (db) =>
-            db.execute(sql`
-              SELECT object_key
-              FROM repository_artifacts
-              WHERE item_version_id = ${migration.canonicalVersionId}::uuid
-                AND object_key IS NOT NULL
-            `),
-          "contentMigration.rollbackArtifacts",
-        ),
-      ).map((row) => row.object_key)
-    : [];
-  const rollbackObjectKeys = buildMigrationRollbackObjectKeys(
-    artifactKeys,
-    migration.canonicalObjectKey,
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryMigrationItems)
+        .set({
+          status: "rolled_back",
+          rolledBackAt: new Date(),
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(repositoryMigrationItems.id, migration.id)),
+    "contentMigration.finishPreparedRollback",
   );
+  return true;
+}
 
+async function prepareRollbackDatabaseState(
+  migration: RepositoryMigrationItemRow,
+  rollbackObjectKeys: string[],
+): Promise<void> {
   // Restore the database read path before deleting external objects. If an S3
   // deletion fails, the migration row retains the exact cleanup list and the
   // next rollback can finish it; a failed external side effect can therefore
@@ -1600,6 +1673,61 @@ async function rollbackMigrationItem(
       })
       .where(eq(repositoryMigrationItems.id, migration.id));
   }, "contentMigration.rollbackItem");
+}
+
+async function rollbackMigrationItem(
+  migration: RepositoryMigrationItemRow,
+  storage: RepositoryMigrationStorage,
+): Promise<"rolled_back" | "deferred"> {
+  if (await finishPreviouslyPreparedRollback(migration, storage)) {
+    return "rolled_back";
+  }
+
+  const activeJob =
+    toPgRows<{ count: number }>(
+      await executeQuery(
+        (db) =>
+          db.execute(sql`
+          SELECT COUNT(*)::integer AS count
+          FROM repository_processing_jobs
+          WHERE item_version_id = ${migration.canonicalVersionId}::uuid
+            AND (
+              status = 'running'
+              OR (
+                metrics ? 'bdaInvocationArn'
+                AND COALESCE(metrics->>'bdaInvocationState', 'active') = 'active'
+              )
+              OR (
+                metrics ? 'textractJobId'
+                AND status IN ('queued', 'running')
+              )
+            )
+        `),
+        "contentMigration.rollbackActiveJobs",
+      ),
+    )[0]?.count ?? 0;
+  if (activeJob > 0) return "deferred";
+
+  const artifactKeys = migration.canonicalVersionId
+    ? toPgRows<{ object_key: string }>(
+        await executeQuery(
+          (db) =>
+            db.execute(sql`
+              SELECT object_key
+              FROM repository_artifacts
+              WHERE item_version_id = ${migration.canonicalVersionId}::uuid
+                AND object_key IS NOT NULL
+            `),
+          "contentMigration.rollbackArtifacts",
+        ),
+      ).map((row) => row.object_key)
+    : [];
+  const rollbackObjectKeys = buildMigrationRollbackObjectKeys(
+    artifactKeys,
+    migration.canonicalObjectKey,
+  );
+
+  await prepareRollbackDatabaseState(migration, rollbackObjectKeys);
 
   try {
     for (const objectKey of rollbackObjectKeys) {

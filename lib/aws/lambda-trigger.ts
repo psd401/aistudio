@@ -9,11 +9,11 @@ function getProcessingQueueUrl(): string {
   if (process.env.NODE_ENV === 'test') {
     return process.env.PROCESSING_QUEUE_URL || 'test-processing-queue-url';
   }
-  
+
   if (!process.env.PROCESSING_QUEUE_URL) {
     throw new Error('PROCESSING_QUEUE_URL environment variable not configured');
   }
-  
+
   return process.env.PROCESSING_QUEUE_URL;
 }
 
@@ -21,11 +21,11 @@ function getHighMemoryQueueUrl(): string {
   if (process.env.NODE_ENV === 'test') {
     return process.env.HIGH_MEMORY_QUEUE_URL || 'test-high-memory-queue-url';
   }
-  
+
   if (!process.env.HIGH_MEMORY_QUEUE_URL) {
     throw new Error('HIGH_MEMORY_QUEUE_URL environment variable not configured');
   }
-  
+
   return process.env.HIGH_MEMORY_QUEUE_URL;
 }
 
@@ -78,7 +78,7 @@ export async function triggerLambdaProcessing(jobId: string, options?: { priorit
     log.info('Triggered Lambda processing', { jobId, priority: options?.priority });
   } catch (error) {
     log.error('Failed to trigger Lambda processing', { error, jobId });
-    throw new Error(`Failed to trigger processing: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to trigger processing: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }
 
@@ -118,15 +118,15 @@ export async function sendToProcessingQueue(message: ProcessingJobMessage): Prom
       })
     );
 
-    log.info('Sent message to processing queue', { 
-      jobId: message.jobId, 
+    log.info('Sent message to processing queue', {
+      jobId: message.jobId,
       fileName: message.fileName,
       fileSize: message.fileSize,
       queueType: message.fileSize > 50 * 1024 * 1024 ? 'high-memory' : 'standard'
     });
   } catch (error) {
     log.error('Failed to send message to processing queue', { error, jobId: message.jobId });
-    throw new Error(`Failed to queue processing: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to queue processing: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }
 
@@ -143,11 +143,11 @@ export async function sendBatchToProcessingQueue(messages: ProcessingJobMessage[
       totalMessages: messages.length,
     });
   } catch (error) {
-    log.error('Failed to send batch messages to processing queue', { 
-      error, 
-      messageCount: messages.length 
+    log.error('Failed to send batch messages to processing queue', {
+      error,
+      messageCount: messages.length
     });
-    throw new Error(`Failed to queue batch processing: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to queue batch processing: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }
 
@@ -189,6 +189,6 @@ export async function retryFailedJob(jobId: string, attempt: number = 1): Promis
     log.info('Queued job retry', { jobId, attempt, delaySeconds });
   } catch (error) {
     log.error('Failed to queue job retry', { error, jobId, attempt });
-    throw new Error(`Failed to queue retry: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to queue retry: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }

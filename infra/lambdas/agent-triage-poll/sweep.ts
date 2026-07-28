@@ -76,6 +76,94 @@ export function newSweepState(now = new Date().toISOString()): SweepState {
   };
 }
 
+interface ProcessSweepMessagesOptions {
+  row: TriageRow;
+  accessToken: string;
+  messages: { id: string; threadId: string }[];
+  processed: number;
+  labeled: number;
+  deps: SweepDeps;
+}
+
+async function processSweepMessages(
+  options: ProcessSweepMessagesOptions
+): Promise<{
+  processed: number;
+  labeled: number;
+  decisions: DecisionRecord[];
+}> {
+  const { row, accessToken, messages, deps } = options;
+  let { processed, labeled } = options;
+  const decisions: DecisionRecord[] = [];
+  for (const message of messages) {
+    processed++;
+    try {
+      const result = await deps.classifyAndLabel(
+        row,
+        accessToken,
+        { id: message.id, threadId: message.threadId },
+        { suppressEscalation: true }
+      );
+      if (result) {
+        labeled++;
+        decisions.push(result.decision);
+      }
+    } catch (err) {
+      log("ERROR", "sweep_classify_failed", {
+        user: row.userEmail,
+        messageId: message.id,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return { processed, labeled, decisions };
+}
+
+async function recordMissingTokenSweep(
+  row: TriageRow,
+  prior: SweepState,
+  deps: SweepDeps
+): Promise<SweepSliceOutcome> {
+  const sweep: SweepState = {
+    ...prior,
+    status: "error",
+    error: "no-access-token",
+    updatedAt: new Date().toISOString(),
+  };
+  await deps.recordSweepSlice(row.userEmail, [], sweep);
+  log("WARN", "sweep_no_token", { user: row.userEmail });
+  return { sweep, shouldContinue: false };
+}
+
+function sweepContinuation(
+  processed: number,
+  cap: number,
+  nextPageToken: string | null | undefined
+): {
+  status: SweepState["status"];
+  nextPageToken: string | null;
+  shouldContinue: boolean;
+} {
+  if (processed >= cap || !nextPageToken) {
+    return {
+      status: "complete",
+      nextPageToken: null,
+      shouldContinue: false,
+    };
+  }
+  return { status: "running", nextPageToken, shouldContinue: true };
+}
+
+function sweepDefaults(prior: SweepState) {
+  return {
+    cap: prior.cap ?? SWEEP_CAP,
+    windowDays: prior.windowDays ?? SWEEP_WINDOW_DAYS,
+    processed: prior.processed ?? 0,
+    labeled: prior.labeled ?? 0,
+    startedAt: prior.startedAt ?? new Date().toISOString(),
+  };
+}
+
 /**
  * Run ONE page of a user's initial-inbox sweep. Reads the current sweep
  * state off `row`, processes the next page, persists the updated state +
@@ -87,8 +175,8 @@ export async function runSweepSlice(
 ): Promise<SweepSliceOutcome> {
   const t0 = Date.now();
   const prior: SweepState = row.sweep ?? newSweepState();
-  const cap = prior.cap ?? SWEEP_CAP;
-  const windowDays = prior.windowDays ?? SWEEP_WINDOW_DAYS;
+  const defaults = sweepDefaults(prior);
+  const { cap, windowDays } = defaults;
 
   // Already finished — idempotent no-op (a late/duplicate SQS message).
   if (prior.status === "complete" || prior.status === "error") {
@@ -97,28 +185,17 @@ export async function runSweepSlice(
 
   const accessToken = await deps.acquireAccessToken(row.userEmail);
   if (!accessToken) {
-    // No token (revoked / not consented). Stop the sweep rather than
-    // re-enqueue forever; the user can re-run `sweep` after re-consenting.
-    const sweep: SweepState = {
-      ...prior,
-      status: "error",
-      error: "no-access-token",
-      updatedAt: new Date().toISOString(),
-    };
-    await deps.recordSweepSlice(row.userEmail, [], sweep);
-    log("WARN", "sweep_no_token", { user: row.userEmail });
-    return { sweep, shouldContinue: false };
+    return recordMissingTokenSweep(row, prior, deps);
   }
 
-  let processed = prior.processed ?? 0;
-  let labeled = prior.labeled ?? 0;
+  let { processed, labeled } = defaults;
   const decisions: DecisionRecord[] = [];
 
   // status + nextPageToken are assigned in every try branch AND the catch,
   // so no initializer is needed (and a dead one trips CodeQL).
   let status: SweepState["status"];
   let nextPageToken: string | null | undefined;
-  let shouldContinue = false;
+  let shouldContinue: boolean;
   let errorMsg: string | undefined;
 
   try {
@@ -132,38 +209,21 @@ export async function runSweepSlice(
     const remaining = Math.max(0, cap - processed);
     const toProcess = messages.slice(0, remaining);
 
-    for (const m of toProcess) {
-      processed++;
-      try {
-        const r = await deps.classifyAndLabel(
-          row,
-          accessToken,
-          { id: m.id, threadId: m.threadId },
-          { suppressEscalation: true },
-        );
-        if (r) labeled++;
-        if (r) decisions.push(r.decision);
-      } catch (err) {
-        log("ERROR", "sweep_classify_failed", {
-          user: row.userEmail,
-          messageId: m.id,
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    if (processed >= cap) {
-      status = "complete";
-      nextPageToken = null;
-    } else if (!np) {
-      // No more pages — the inbox window is exhausted.
-      status = "complete";
-      nextPageToken = null;
-    } else {
-      status = "running";
-      nextPageToken = np;
-      shouldContinue = true;
-    }
+    const processedPage = await processSweepMessages({
+      row,
+      accessToken,
+      messages: toProcess,
+      processed,
+      labeled,
+      deps,
+    });
+    processed = processedPage.processed;
+    labeled = processedPage.labeled;
+    decisions.push(...processedPage.decisions);
+    const continuation = sweepContinuation(processed, cap, np);
+    status = continuation.status;
+    nextPageToken = continuation.nextPageToken;
+    shouldContinue = continuation.shouldContinue;
   } catch (err) {
     status = "error";
     errorMsg = err instanceof Error ? err.message : String(err);
@@ -182,7 +242,7 @@ export async function runSweepSlice(
     labeled,
     windowDays,
     cap,
-    startedAt: prior.startedAt ?? new Date().toISOString(),
+    startedAt: defaults.startedAt,
     updatedAt: new Date().toISOString(),
     ...(errorMsg ? { error: errorMsg } : {}),
   };

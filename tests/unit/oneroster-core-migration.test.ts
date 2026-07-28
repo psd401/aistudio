@@ -29,17 +29,15 @@ const tableNames = [
 ] as const;
 
 function tableBody(tableName: (typeof tableNames)[number]): string {
-  const match = migration.match(
-    new RegExp(
-      `CREATE TABLE IF NOT EXISTS ${tableName} \\(([\\s\\S]*?)\\n\\);`
-    )
-  );
+  const marker = `CREATE TABLE IF NOT EXISTS ${tableName} (`;
+  const bodyStart = migration.indexOf(marker);
+  const bodyEnd = migration.indexOf("\n);", bodyStart + marker.length);
 
-  if (!match?.[1]) {
+  if (bodyStart === -1 || bodyEnd === -1) {
     throw new Error(`Missing CREATE TABLE for ${tableName}`);
   }
 
-  return match[1].replace(/\s+/g, " ");
+  return migration.slice(bodyStart + marker.length, bodyEnd).replace(/\s+/g, " ");
 }
 
 describe("OneRoster core migration", () => {

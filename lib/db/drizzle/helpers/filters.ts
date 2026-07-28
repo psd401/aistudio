@@ -103,46 +103,47 @@ export type FilterValue<T> =
  * db.select().from(users).where(condition);
  * ```
  */
-export function buildFilter<T>(condition: FilterCondition<T>): SQL | undefined {
+function buildComparisonFilter<T>(
+  condition: FilterCondition<T>
+): SQL | undefined {
   const { column, operator, value } = condition;
-
+  if (value === undefined) return undefined;
   switch (operator) {
     case "eq":
-      return value !== undefined ? eq(column, value) : undefined;
-
+      return eq(column, value);
     case "ne":
-      return value !== undefined ? ne(column, value) : undefined;
-
+      return ne(column, value);
     case "gt":
-      return value !== undefined ? gt(column, value) : undefined;
-
+      return gt(column, value);
     case "gte":
-      return value !== undefined ? gte(column, value) : undefined;
-
+      return gte(column, value);
     case "lt":
-      return value !== undefined ? lt(column, value) : undefined;
-
+      return lt(column, value);
     case "lte":
-      return value !== undefined ? lte(column, value) : undefined;
+      return lte(column, value);
+    default:
+      return undefined;
+  }
+}
 
+export function buildFilter<T>(condition: FilterCondition<T>): SQL | undefined {
+  const { column, operator, value } = condition;
+  if (["eq", "ne", "gt", "gte", "lt", "lte"].includes(operator)) {
+    return buildComparisonFilter(condition);
+  }
+  switch (operator) {
     case "like":
       return typeof value === "string" ? like(column, value) : undefined;
-
     case "ilike":
       return typeof value === "string" ? ilike(column, value) : undefined;
-
     case "in":
       return Array.isArray(value) && value.length > 0 ? inArray(column, value) : undefined;
-
     case "notIn":
       return Array.isArray(value) && value.length > 0 ? notInArray(column, value) : undefined;
-
     case "isNull":
       return isNull(column);
-
     case "isNotNull":
       return isNotNull(column);
-
     default:
       return undefined;
   }

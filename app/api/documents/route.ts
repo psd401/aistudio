@@ -22,6 +22,156 @@ const GetDocumentsByConversationSchema = z.object({
   conversationId: z.string().uuid({ message: 'Invalid conversation ID format (expected UUID)' })
 });
 
+type DocumentRouteLogger = ReturnType<typeof createLogger>;
+type DocumentRouteTimer = ReturnType<typeof startTimer>;
+
+interface DocumentRouteContext {
+  log: DocumentRouteLogger;
+  timer: DocumentRouteTimer;
+  requestId: string;
+  userId: number;
+}
+
+function documentJson(
+  body: object,
+  status: number,
+  requestId: string,
+): NextResponse {
+  return NextResponse.json(body, {
+    status,
+    headers: { "X-Request-Id": requestId },
+  });
+}
+
+async function getDocumentResponse(
+  documentId: string,
+  context: DocumentRouteContext,
+): Promise<NextResponse> {
+  const validation = GetDocumentByIdSchema.safeParse({ id: documentId });
+  if (!validation.success) {
+    const firstError = validation.error.issues[0];
+    context.log.warn("Invalid document ID format", { documentId, error: firstError });
+    context.timer({ status: "error", reason: "invalid_id" });
+    return documentJson(
+      { success: false, error: firstError.message },
+      400,
+      context.requestId,
+    );
+  }
+
+  const document = await getDocumentById({ id: validation.data.id });
+  if (!document) {
+    context.log.warn("Document not found", { documentId });
+    context.timer({ status: "error", reason: "not_found" });
+    return documentJson(
+      { success: false, error: "Document not found" },
+      404,
+      context.requestId,
+    );
+  }
+  if (document.userId !== context.userId) {
+    context.log.warn("Unauthorized document access attempt", {
+      documentId,
+      userId: context.userId,
+    });
+    context.timer({ status: "error", reason: "access_denied" });
+    return documentJson(
+      { success: false, error: "Unauthorized access to document" },
+      403,
+      context.requestId,
+    );
+  }
+
+  try {
+    const signedUrl = await getDocumentSignedUrl({
+      key: document.url,
+      expiresIn: 3600,
+    });
+    context.log.info("Document retrieved successfully", { documentId });
+    context.timer({ status: "success" });
+    return documentJson(
+      { success: true, document: { ...document, url: signedUrl } },
+      200,
+      context.requestId,
+    );
+  } catch (error) {
+    context.log.error("Failed to generate signed URL", { error, documentId });
+    context.timer({ status: "error", reason: "url_generation_failed" });
+    return documentJson(
+      { success: false, error: "Failed to generate document access URL" },
+      500,
+      context.requestId,
+    );
+  }
+}
+
+async function getConversationDocumentsResponse(
+  conversationId: string,
+  context: DocumentRouteContext,
+): Promise<NextResponse> {
+  const validation = GetDocumentsByConversationSchema.safeParse({ conversationId });
+  if (!validation.success) {
+    const firstError = validation.error.issues[0];
+    context.log.warn("Invalid conversation ID format", {
+      conversationId,
+      error: firstError,
+    });
+    context.timer({ status: "error", reason: "invalid_id" });
+    return documentJson(
+      { success: false, error: firstError.message },
+      400,
+      context.requestId,
+    );
+  }
+
+  const validatedConversationId = validation.data.conversationId;
+  const conversation = await getConversationById(
+    validatedConversationId,
+    context.userId,
+  );
+  if (!conversation) {
+    context.log.warn("Unauthorized conversation documents access attempt", {
+      conversationId,
+      userId: context.userId,
+    });
+    context.timer({ status: "error", reason: "conversation_not_found" });
+    return documentJson(
+      { success: false, error: "Conversation not found" },
+      404,
+      context.requestId,
+    );
+  }
+
+  const documents = await getDocumentsByConversationId({
+    conversationId: validatedConversationId,
+  });
+  const documentsWithSignedUrls = await Promise.all(
+    documents.map(async (document) => {
+      try {
+        return {
+          ...document,
+          url: await getDocumentSignedUrl({
+            key: document.url,
+            expiresIn: 3600,
+          }),
+        };
+      } catch {
+        return document;
+      }
+    }),
+  );
+  context.log.info("Documents retrieved successfully", {
+    conversationId,
+    count: documentsWithSignedUrls.length,
+  });
+  context.timer({ status: "success" });
+  return documentJson(
+    { success: true, documents: documentsWithSignedUrls },
+    200,
+    context.requestId,
+  );
+}
+
 export async function GET(request: NextRequest) {
   const requestId = generateRequestId();
   const timer = startTimer("api.documents.get");
@@ -62,173 +212,24 @@ export async function GET(request: NextRequest) {
   
   const userId = currentUser.data.user.id;
   
+  const context = { log, timer, requestId, userId };
   try {
-    // If documentId is provided, fetch single document
     if (documentId) {
-      // Validate document ID format
-      const validationResult = GetDocumentByIdSchema.safeParse({ id: documentId });
-      if (!validationResult.success) {
-        const firstError = validationResult.error.issues[0];
-        log.warn("Invalid document ID format", { documentId, error: firstError });
-        timer({ status: "error", reason: "invalid_id" });
-        return NextResponse.json(
-          {
-            success: false,
-            error: firstError.message
-          },
-          { status: 400, headers: { "X-Request-Id": requestId } }
-        );
-      }
-
-      const document = await getDocumentById({ id: validationResult.data.id });
-      
-      if (!document) {
-        log.warn("Document not found", { documentId });
-        timer({ status: "error", reason: "not_found" });
-        return NextResponse.json(
-          { 
-            success: false, 
-            error: 'Document not found' 
-          }, 
-          { status: 404, headers: { "X-Request-Id": requestId } }
-        );
-      }
-      
-      // Check if the document belongs to the authenticated user
-      if (document.userId !== userId) {
-        log.warn("Unauthorized document access attempt", { documentId, userId });
-        timer({ status: "error", reason: "access_denied" });
-        return NextResponse.json(
-          { 
-            success: false, 
-            error: 'Unauthorized access to document' 
-          }, 
-          { status: 403, headers: { "X-Request-Id": requestId } }
-        );
-      }
-
-      // Get a fresh signed URL for the document
-      // document.url now contains the S3 key
-      let signedUrl;
-      try {
-        signedUrl = await getDocumentSignedUrl({
-          key: document.url,
-          expiresIn: 3600 // 1 hour
-        });
-      } catch (error) {
-        log.error("Failed to generate signed URL", { error, documentId });
-        timer({ status: "error", reason: "url_generation_failed" });
-        return NextResponse.json(
-          {
-            success: false,
-            error: 'Failed to generate document access URL'
-          }, 
-          { status: 500, headers: { "X-Request-Id": requestId } }
-        );
-      }
-
-      // Return document with fresh signed URL
-      log.info("Document retrieved successfully", { documentId });
-      timer({ status: "success" });
-      return NextResponse.json(
-        {
-          success: true,
-          document: {
-            ...document,
-            url: signedUrl
-          }
-        },
-        { headers: { "X-Request-Id": requestId } }
-      );
+      return await getDocumentResponse(documentId, context);
     }
-    
-    // If conversationId is provided, fetch documents for conversation
-    // Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
     if (conversationId) {
-      // Validate UUID format using schema
-      const validationResult = GetDocumentsByConversationSchema.safeParse({ conversationId });
-      if (!validationResult.success) {
-        const firstError = validationResult.error.issues[0];
-        log.warn("Invalid conversation ID format", { conversationId, error: firstError });
-        timer({ status: "error", reason: "invalid_id" });
-        return NextResponse.json(
-          {
-            success: false,
-            error: firstError.message
-          },
-          { status: 400, headers: { "X-Request-Id": requestId } }
-        );
-      }
-
-      // Authorization (REV-SEC-122 / REV-COR-211): verify the caller owns the
-      // conversation before returning its documents and freshly-minted signed S3
-      // URLs. Without this, any authenticated user could enumerate a conversation
-      // UUID and download another user's uploaded files. Mirrors the ownership gate
-      // used by the link/process routes. Return 404 (not 403) to avoid confirming
-      // existence of conversations the caller cannot see.
-      const conversation = await getConversationById(
-        validationResult.data.conversationId,
-        userId
-      );
-      if (!conversation) {
-        log.warn("Unauthorized conversation documents access attempt", {
-          conversationId, userId
-        });
-        timer({ status: "error", reason: "conversation_not_found" });
-        return NextResponse.json(
-          { success: false, error: 'Conversation not found' },
-          { status: 404, headers: { "X-Request-Id": requestId } }
-        );
-      }
-
-      const documents = await getDocumentsByConversationId({
-        conversationId: validationResult.data.conversationId
-      });
-
-      // Get fresh signed URLs for all documents
-      const documentsWithSignedUrls = await Promise.all(
-        documents.map(async (doc) => {
-          try {
-            const signedUrl = await getDocumentSignedUrl({
-              key: doc.url,
-              expiresIn: 3600 // 1 hour
-            });
-            return {
-              ...doc,
-              url: signedUrl
-            };
-          } catch {
-            // If we can't generate a signed URL, return the document without it
-            return doc;
-          }
-        })
-      );
-      
-      log.info("Documents retrieved successfully", { 
-        conversationId,
-        count: documentsWithSignedUrls.length 
-      });
-      timer({ status: "success" });
-      return NextResponse.json(
-        {
-          success: true,
-          documents: documentsWithSignedUrls
-        },
-        { headers: { "X-Request-Id": requestId } }
-      );
+      return await getConversationDocumentsResponse(conversationId, context);
     }
-    
-    // If no parameters provided, return error
     log.warn("Missing required parameters");
     timer({ status: "error", reason: "missing_params" });
-    return NextResponse.json(
-      { 
-        success: false, 
-        error: 'Missing parameters. Please provide conversationId or id.' 
-      }, 
-      { status: 400, headers: { "X-Request-Id": requestId } }
+    return documentJson(
+      {
+        success: false,
+        error: "Missing parameters. Please provide conversationId or id.",
+      },
+      400,
+      requestId,
     );
-    
   } catch (error) {
     timer({ status: "error" });
     log.error("Error fetching documents", error);

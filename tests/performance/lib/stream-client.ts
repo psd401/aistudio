@@ -54,6 +54,27 @@ export interface StreamClientOptions {
   verbose?: boolean;
 }
 
+interface StreamReadState {
+  firstTokenTime: number | null;
+  tokenCount: number;
+  success: boolean;
+  error?: string;
+  connectionDropped: boolean;
+  usage?: StreamMetrics['usage'];
+}
+
+interface StreamEvent {
+  type?: string;
+  content?: unknown;
+  error?: string;
+  message?: string;
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
+}
+
 export class StreamClient {
   private options: StreamClientOptions;
   private abortController?: AbortController;
@@ -123,9 +144,7 @@ export class StreamClient {
         });
       }
 
-      // Read the stream
-      const reader = response.body?.getReader();
-      if (!reader) {
+      if (!response.body) {
         error = 'No response body reader available';
         return this.buildMetrics({
           requestId,
@@ -141,85 +160,13 @@ export class StreamClient {
         });
       }
 
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-
-          if (done) {
-            success = true;
-            break;
-          }
-
-          buffer += decoder.decode(value, { stream: true });
-
-          // Process complete SSE messages
-          const lines = buffer.split('\n\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            if (!line.trim() || !line.startsWith('data: ')) {
-              continue;
-            }
-
-            const data = line.replace('data: ', '').trim();
-
-            // Skip non-JSON data
-            if (!data.startsWith('{')) {
-              continue;
-            }
-
-            try {
-              const parsed = JSON.parse(data);
-
-              // AI SDK v5 format - look for text deltas or content
-              if (parsed.type === '0' || parsed.type === 'text-delta' || parsed.content) {
-                if (firstTokenTime === null) {
-                  firstTokenTime = Date.now();
-                  if (this.options.verbose) {
-                    console.log(`First token received at ${firstTokenTime - startTime}ms`);
-                  }
-                }
-                tokenCount++;
-              }
-
-              // Check for usage data
-              if (parsed.usage || (parsed.type === 'finish' && parsed.usage)) {
-                const usageData = parsed.usage;
-                if (usageData) {
-                  usage = {
-                    promptTokens: usageData.promptTokens || 0,
-                    completionTokens: usageData.completionTokens || 0,
-                    totalTokens: usageData.totalTokens || 0,
-                  };
-                }
-              }
-
-              // Check for errors
-              if (parsed.type === 'error' || parsed.error) {
-                error = parsed.error || parsed.message || 'Unknown stream error';
-                connectionDropped = true;
-                break;
-              }
-            } catch {
-              // Skip unparseable chunks
-              if (this.options.verbose) {
-                console.warn('Failed to parse SSE data:', data.substring(0, 100));
-              }
-            }
-          }
-        }
-      } catch (streamError) {
-        connectionDropped = true;
-        error = streamError instanceof Error ? streamError.message : 'Stream read error';
-        if (this.options.verbose) {
-          console.error('Stream reading error:', streamError);
-        }
-      } finally {
-        reader.releaseLock();
-      }
+      const streamState = await this.readStream(response.body, startTime);
+      firstTokenTime = streamState.firstTokenTime;
+      tokenCount = streamState.tokenCount;
+      success = streamState.success;
+      error = streamState.error;
+      connectionDropped = streamState.connectionDropped;
+      usage = streamState.usage;
 
     } catch (fetchError) {
       error = fetchError instanceof Error ? fetchError.message : 'Fetch error';
@@ -244,6 +191,106 @@ export class StreamClient {
       memoryStart,
       usage,
     });
+  }
+
+  private async readStream(
+    body: ReadableStream<Uint8Array>,
+    startTime: number
+  ): Promise<StreamReadState> {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    const state: StreamReadState = {
+      firstTokenTime: null,
+      tokenCount: 0,
+      success: false,
+      connectionDropped: false,
+    };
+    let buffer = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          state.success = true;
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const messages = buffer.split('\n\n');
+        buffer = messages.pop() || '';
+
+        for (const message of messages) {
+          if (this.processStreamMessage(message, state, startTime)) break;
+        }
+      }
+    } catch (streamError) {
+      state.connectionDropped = true;
+      state.error = streamError instanceof Error ? streamError.message : 'Stream read error';
+      if (this.options.verbose) {
+        console.error('Stream reading error:', streamError);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    return state;
+  }
+
+  private processStreamMessage(
+    message: string,
+    state: StreamReadState,
+    startTime: number
+  ): boolean {
+    if (!message.trim() || !message.startsWith('data: ')) return false;
+
+    const data = message.replace('data: ', '').trim();
+    if (!data.startsWith('{')) return false;
+
+    try {
+      const event = JSON.parse(data) as StreamEvent;
+      this.recordTextEvent(event, state, startTime);
+      this.recordUsage(event, state);
+      return this.recordError(event, state);
+    } catch {
+      if (this.options.verbose) {
+        console.warn('Failed to parse SSE data:', data.substring(0, 100));
+      }
+      return false;
+    }
+  }
+
+  private recordTextEvent(
+    event: StreamEvent,
+    state: StreamReadState,
+    startTime: number
+  ): void {
+    if (event.type !== '0' && event.type !== 'text-delta' && !event.content) return;
+
+    if (state.firstTokenTime === null) {
+      state.firstTokenTime = Date.now();
+      if (this.options.verbose) {
+        console.log(`First token received at ${state.firstTokenTime - startTime}ms`);
+      }
+    }
+    state.tokenCount++;
+  }
+
+  private recordUsage(event: StreamEvent, state: StreamReadState): void {
+    if (!event.usage) return;
+
+    state.usage = {
+      promptTokens: event.usage.promptTokens || 0,
+      completionTokens: event.usage.completionTokens || 0,
+      totalTokens: event.usage.totalTokens || 0,
+    };
+  }
+
+  private recordError(event: StreamEvent, state: StreamReadState): boolean {
+    if (event.type !== 'error' && !event.error) return false;
+
+    state.error = event.error || event.message || 'Unknown stream error';
+    state.connectionDropped = true;
+    return true;
   }
 
   /**

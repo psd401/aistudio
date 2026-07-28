@@ -1,11 +1,12 @@
 /** @jest-environment node */
 
-import fs from "node:fs";
+
 import { describe, expect, it } from "@jest/globals";
 import {
   getAbsolutePath,
   getNextMigrationNumber,
 } from "@/scripts/drizzle-helpers/lib/migration-utils";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 interface MigrationManifest {
   migrationFiles: string[];
@@ -14,7 +15,7 @@ interface MigrationManifest {
 describe("migration utilities", () => {
   it("derives the next number from the shared migrations manifest", () => {
     const manifest = JSON.parse(
-      fs.readFileSync(
+      validatedFs.readFileSync(
         getAbsolutePath("infra/database/migrations.json"),
         "utf8"
       )

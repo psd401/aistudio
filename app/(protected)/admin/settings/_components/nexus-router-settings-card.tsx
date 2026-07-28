@@ -1,6 +1,12 @@
 "use client"
 
-import { useMemo, useRef, useState } from "react"
+import {
+  type Dispatch,
+  type SetStateAction,
+  useMemo,
+  useRef,
+  useState,
+} from "react"
 import { useRouter } from "next/navigation"
 import { Activity, Save } from "lucide-react"
 import { updateNexusRouterSettings } from "@/actions/settings/nexus-router-settings.actions"
@@ -143,6 +149,303 @@ function RouterModelSelect({
   )
 }
 
+type SetRouterConfig = Dispatch<SetStateAction<NexusRouterConfig>>
+
+function RoutingModeControls({
+  architectMode,
+  mode,
+  setArchitectMode,
+  setMode,
+}: {
+  architectMode: NexusRouterRuntimeMode
+  mode: NexusRouterRuntimeMode
+  setArchitectMode: (mode: NexusRouterRuntimeMode) => void
+  setMode: (mode: NexusRouterRuntimeMode) => void
+}) {
+  const controls = [
+    {
+      description:
+        "Observe-only mode is why every executed request appears as the fallback model in activity reports.",
+      id: "nexus-router-mode",
+      label: "Nexus routing mode",
+      onChange: setMode,
+      testId: "nexus-router-admin-mode",
+      value: mode,
+    },
+    {
+      description:
+        "Applies to Standard and Advanced assistants; legacy assistants stay pinned.",
+      id: "assistant-architect-router-mode",
+      label: "Assistant Architect routing mode",
+      onChange: setArchitectMode,
+      testId: "assistant-architect-router-admin-mode",
+      value: architectMode,
+    },
+  ]
+
+  return (
+    <div className="grid gap-5 md:grid-cols-2">
+      {controls.map(control => (
+        <div className="grid gap-2" key={control.id}>
+          <Label htmlFor={control.id}>{control.label}</Label>
+          <Select
+            value={control.value}
+            onValueChange={value =>
+              control.onChange(nexusRouterRuntimeModeSchema.parse(value))
+            }
+          >
+            <SelectTrigger id={control.id} data-testid={control.testId}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="active">Active — route live requests</SelectItem>
+              <SelectItem value="shadow">
+                Observe only — record proposals, use fallback
+              </SelectItem>
+              <SelectItem value="off">Off — always use fallback</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            {control.description}
+          </p>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function ModelTierGrid({
+  config,
+  setConfig,
+  textModels,
+}: {
+  config: NexusRouterConfig
+  setConfig: SetRouterConfig
+  textModels: NexusRouterModelOption[]
+}) {
+  return (
+    <div className="space-y-3">
+      <div>
+        <h3 className="font-medium">Model tiers</h3>
+        <p className="text-sm text-muted-foreground">
+          Choose a preferred model or leave a slot automatic to use capability
+          and tier inference.
+        </p>
+      </div>
+      <div className="overflow-x-auto">
+        <div className="grid min-w-[760px] grid-cols-[150px_repeat(3,minmax(180px,1fr))] gap-3">
+          <div />
+          {TIER_OPTIONS.map(tier => (
+            <Label key={tier.value}>{tier.label}</Label>
+          ))}
+          {FAMILY_ROWS.flatMap(row => {
+            const eligibleModels =
+              row.value === "auto"
+                ? textModels
+                : textModels.filter(model => model.family === row.value)
+            return [
+              <div key={`${row.value}-label`} className="py-2">
+                <div className="text-sm font-medium">{row.label}</div>
+                <div className="text-xs text-muted-foreground">
+                  {row.description}
+                </div>
+              </div>,
+              ...TIER_OPTIONS.map(tier => (
+                <RouterModelSelect
+                  key={`${row.value}-${tier.value}`}
+                  value={getTierCandidates(config, row.value, tier.value)[0]}
+                  models={eligibleModels}
+                  automaticLabel="Automatic"
+                  testId={`nexus-router-${row.value}-${tier.value}`}
+                  onChange={modelId =>
+                    setConfig(current =>
+                      replaceTierCandidate(
+                        current,
+                        row.value,
+                        tier.value,
+                        modelId
+                      )
+                    )
+                  }
+                />
+              )),
+            ]
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+interface SpecialistGridProps {
+  config: NexusRouterConfig
+  connectors: NexusRouterConnectorOption[]
+  googleTextModels: NexusRouterModelOption[]
+  googleWebSearchModels: NexusRouterModelOption[]
+  imageModels: NexusRouterModelOption[]
+  setConfig: SetRouterConfig
+}
+
+function SpecialistGrid(props: SpecialistGridProps) {
+  const updateModels = (
+    field: "instructionModels" | "webSearchModels" | "imageModels",
+    modelId: string
+  ) => {
+    props.setConfig(current => ({
+      ...current,
+      specialists: {
+        ...current.specialists,
+        [field]: modelId === AUTOMATIC ? [] : [modelId],
+      },
+    }))
+  }
+
+  return (
+    <div className="grid gap-5 lg:grid-cols-2 xl:grid-cols-4">
+      <div className="space-y-2">
+        <Label>Instructional questions</Label>
+        <RouterModelSelect
+          value={firstAvailableCandidate(
+            props.config.specialists.instructionModels,
+            props.googleTextModels
+          )}
+          models={props.googleTextModels}
+          automaticLabel="Automatic Gemini"
+          testId="nexus-router-instruction-model"
+          onChange={modelId => updateModels("instructionModels", modelId)}
+        />
+        <p className="text-xs text-muted-foreground">
+          Lesson plans, rubrics, curriculum, and pedagogy.
+        </p>
+      </div>
+      <div className="space-y-2">
+        <Label>Web search</Label>
+        <RouterModelSelect
+          value={firstAvailableCandidate(
+            props.config.specialists.webSearchModels,
+            props.googleWebSearchModels
+          )}
+          models={props.googleWebSearchModels}
+          automaticLabel="Automatic Gemini"
+          testId="nexus-router-web-search-model"
+          onChange={modelId => updateModels("webSearchModels", modelId)}
+        />
+        <p className="text-xs text-muted-foreground">
+          Current information, news, prices, schedules, and explicit web lookups.
+        </p>
+      </div>
+      <div className="space-y-2">
+        <Label>Image generation</Label>
+        <RouterModelSelect
+          value={firstAvailableCandidate(
+            props.config.specialists.imageModels,
+            props.imageModels
+          )}
+          models={props.imageModels}
+          automaticLabel="Automatic image model"
+          testId="nexus-router-image-model"
+          onChange={modelId => updateModels("imageModels", modelId)}
+        />
+        <p className="text-xs text-muted-foreground">
+          Used automatically for image creation and edits.
+        </p>
+      </div>
+      <div className="space-y-2">
+        <Label>PSD-data connection</Label>
+        <Select
+          value={props.config.specialists.psdDataConnectorId ?? AUTOMATIC}
+          onValueChange={connectorId =>
+            props.setConfig(current => ({
+              ...current,
+              specialists: {
+                ...current.specialists,
+                psdDataConnectorId:
+                  connectorId === AUTOMATIC ? undefined : connectorId,
+              },
+            }))
+          }
+        >
+          <SelectTrigger data-testid="nexus-router-psd-connector">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={AUTOMATIC}>
+              Match “{props.config.specialists.psdDataConnectorName}” by name
+            </SelectItem>
+            {props.connectors.map(connector => (
+              <SelectItem key={connector.id} value={connector.id}>
+                {connector.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          Automatically attached only for authorized district-data requests.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function ClassifierControls({
+  config,
+  setConfig,
+}: {
+  config: NexusRouterConfig
+  setConfig: SetRouterConfig
+}) {
+  const updateClassifier = (
+    field: "provider" | "modelId",
+    value: string
+  ) => {
+    setConfig(current => ({
+      ...current,
+      classifier: { ...current.classifier, [field]: value },
+    }))
+  }
+
+  return (
+    <div className="grid gap-4 md:grid-cols-3">
+      <div className="space-y-2">
+        <Label htmlFor="nexus-classifier-provider">Classifier provider</Label>
+        <Input
+          id="nexus-classifier-provider"
+          value={config.classifier.provider}
+          onChange={event =>
+            updateClassifier("provider", event.target.value)
+          }
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="nexus-classifier-model">Classifier model</Label>
+        <Input
+          id="nexus-classifier-model"
+          data-testid="nexus-router-classifier-model"
+          value={config.classifier.modelId}
+          onChange={event => updateClassifier("modelId", event.target.value)}
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="nexus-confidence-floor">Confidence floor</Label>
+        <Input
+          id="nexus-confidence-floor"
+          type="number"
+          min={0}
+          max={1}
+          step={0.05}
+          value={config.confidenceFloor}
+          onChange={event =>
+            setConfig(current => ({
+              ...current,
+              confidenceFloor: Number(event.target.value),
+            }))
+          }
+        />
+      </div>
+    </div>
+  )
+}
+
 export function NexusRouterSettingsCard({
   settings,
   models,
@@ -218,200 +521,29 @@ export function NexusRouterSettingsCard({
         </div>
       </CardHeader>
       <CardContent className="space-y-6">
-        <div className="grid gap-5 md:grid-cols-2">
-          <div className="grid gap-2">
-            <Label htmlFor="nexus-router-mode">Nexus routing mode</Label>
-            <Select value={mode} onValueChange={value => setMode(nexusRouterRuntimeModeSchema.parse(value))}>
-              <SelectTrigger id="nexus-router-mode" data-testid="nexus-router-admin-mode">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="active">Active — route live requests</SelectItem>
-                <SelectItem value="shadow">Observe only — record proposals, use fallback</SelectItem>
-                <SelectItem value="off">Off — always use fallback</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              Observe-only mode is why every executed request appears as the fallback model in activity reports.
-            </p>
-          </div>
-          <div className="grid gap-2">
-            <Label htmlFor="assistant-architect-router-mode">Assistant Architect routing mode</Label>
-            <Select value={architectMode} onValueChange={value => setArchitectMode(nexusRouterRuntimeModeSchema.parse(value))}>
-              <SelectTrigger id="assistant-architect-router-mode" data-testid="assistant-architect-router-admin-mode">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="active">Active — route live executions</SelectItem>
-                <SelectItem value="shadow">Observe only — record proposals, use fallback</SelectItem>
-                <SelectItem value="off">Off — always use fallback</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              Applies to Standard and Advanced assistants; legacy assistants stay pinned.
-            </p>
-          </div>
-        </div>
-
+        <RoutingModeControls
+          architectMode={architectMode}
+          mode={mode}
+          setArchitectMode={setArchitectMode}
+          setMode={setMode}
+        />
         <Separator />
-
-        <div className="space-y-3">
-          <div>
-            <h3 className="font-medium">Model tiers</h3>
-            <p className="text-sm text-muted-foreground">
-              Choose a preferred model or leave a slot automatic to use capability and tier inference.
-            </p>
-          </div>
-          <div className="overflow-x-auto">
-            <div className="grid min-w-[760px] grid-cols-[150px_repeat(3,minmax(180px,1fr))] gap-3">
-              <div />
-              {TIER_OPTIONS.map(tier => <Label key={tier.value}>{tier.label}</Label>)}
-              {FAMILY_ROWS.flatMap(row => {
-                const eligibleModels = row.value === "auto"
-                  ? textModels
-                  : textModels.filter(model => model.family === row.value)
-                return [
-                  <div key={`${row.value}-label`} className="py-2">
-                    <div className="text-sm font-medium">{row.label}</div>
-                    <div className="text-xs text-muted-foreground">{row.description}</div>
-                  </div>,
-                  ...TIER_OPTIONS.map(tier => (
-                    <RouterModelSelect
-                      key={`${row.value}-${tier.value}`}
-                      value={getTierCandidates(config, row.value, tier.value)[0]}
-                      models={eligibleModels}
-                      automaticLabel="Automatic"
-                      testId={`nexus-router-${row.value}-${tier.value}`}
-                      onChange={modelId => setConfig(current => replaceTierCandidate(current, row.value, tier.value, modelId))}
-                    />
-                  )),
-                ]
-              })}
-            </div>
-          </div>
-        </div>
-
+        <ModelTierGrid
+          config={config}
+          setConfig={setConfig}
+          textModels={textModels}
+        />
         <Separator />
-
-        <div className="grid gap-5 lg:grid-cols-2 xl:grid-cols-4">
-          <div className="space-y-2">
-            <Label>Instructional questions</Label>
-            <RouterModelSelect
-              value={firstAvailableCandidate(config.specialists.instructionModels, googleTextModels)}
-              models={googleTextModels}
-              automaticLabel="Automatic Gemini"
-              testId="nexus-router-instruction-model"
-              onChange={modelId => setConfig(current => ({
-                ...current,
-                specialists: {
-                  ...current.specialists,
-                  instructionModels: modelId === AUTOMATIC ? [] : [modelId],
-                },
-              }))}
-            />
-            <p className="text-xs text-muted-foreground">Lesson plans, rubrics, curriculum, and pedagogy.</p>
-          </div>
-          <div className="space-y-2">
-            <Label>Web search</Label>
-            <RouterModelSelect
-              value={firstAvailableCandidate(config.specialists.webSearchModels, googleWebSearchModels)}
-              models={googleWebSearchModels}
-              automaticLabel="Automatic Gemini"
-              testId="nexus-router-web-search-model"
-              onChange={modelId => setConfig(current => ({
-                ...current,
-                specialists: {
-                  ...current.specialists,
-                  webSearchModels: modelId === AUTOMATIC ? [] : [modelId],
-                },
-              }))}
-            />
-            <p className="text-xs text-muted-foreground">Current information, news, prices, schedules, and explicit web lookups.</p>
-          </div>
-          <div className="space-y-2">
-            <Label>Image generation</Label>
-            <RouterModelSelect
-              value={firstAvailableCandidate(config.specialists.imageModels, imageModels)}
-              models={imageModels}
-              automaticLabel="Automatic image model"
-              testId="nexus-router-image-model"
-              onChange={modelId => setConfig(current => ({
-                ...current,
-                specialists: {
-                  ...current.specialists,
-                  imageModels: modelId === AUTOMATIC ? [] : [modelId],
-                },
-              }))}
-            />
-            <p className="text-xs text-muted-foreground">Used automatically for image creation and edits.</p>
-          </div>
-          <div className="space-y-2">
-            <Label>PSD-data connection</Label>
-            <Select
-              value={config.specialists.psdDataConnectorId ?? AUTOMATIC}
-              onValueChange={connectorId => setConfig(current => ({
-                ...current,
-                specialists: {
-                  ...current.specialists,
-                  psdDataConnectorId: connectorId === AUTOMATIC ? undefined : connectorId,
-                },
-              }))}
-            >
-              <SelectTrigger data-testid="nexus-router-psd-connector"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value={AUTOMATIC}>Match “{config.specialists.psdDataConnectorName}” by name</SelectItem>
-                {connectors.map(connector => (
-                  <SelectItem key={connector.id} value={connector.id}>{connector.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">Automatically attached only for authorized district-data requests.</p>
-          </div>
-        </div>
-
+        <SpecialistGrid
+          config={config}
+          connectors={connectors}
+          googleTextModels={googleTextModels}
+          googleWebSearchModels={googleWebSearchModels}
+          imageModels={imageModels}
+          setConfig={setConfig}
+        />
         <Separator />
-
-        <div className="grid gap-4 md:grid-cols-3">
-          <div className="space-y-2">
-            <Label htmlFor="nexus-classifier-provider">Classifier provider</Label>
-            <Input
-              id="nexus-classifier-provider"
-              value={config.classifier.provider}
-              onChange={event => setConfig(current => ({
-                ...current,
-                classifier: { ...current.classifier, provider: event.target.value },
-              }))}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="nexus-classifier-model">Classifier model</Label>
-            <Input
-              id="nexus-classifier-model"
-              data-testid="nexus-router-classifier-model"
-              value={config.classifier.modelId}
-              onChange={event => setConfig(current => ({
-                ...current,
-                classifier: { ...current.classifier, modelId: event.target.value },
-              }))}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="nexus-confidence-floor">Confidence floor</Label>
-            <Input
-              id="nexus-confidence-floor"
-              type="number"
-              min={0}
-              max={1}
-              step={0.05}
-              value={config.confidenceFloor}
-              onChange={event => setConfig(current => ({
-                ...current,
-                confidenceFloor: Number(event.target.value),
-              }))}
-            />
-          </div>
-        </div>
-
+        <ClassifierControls config={config} setConfig={setConfig} />
         <div className="flex justify-end">
           <Button data-testid="nexus-router-admin-save" onClick={save} disabled={saving}>
             <Save className="mr-2 h-4 w-4" />

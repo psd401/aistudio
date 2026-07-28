@@ -255,8 +255,18 @@ function wildcardMatch(pattern, value) {
   const p = String(pattern).toLowerCase();
   const v = String(value).toLowerCase();
   if (!p.includes('*')) return p === v;
-  const escaped = p.replace(/[-/\\^$+?.()|[\]{}]/g, '\\$&').replace(/\*/g, '.*');
-  return new RegExp('^' + escaped + '$').test(v);
+  const parts = p.split('*');
+  let position = 0;
+  for (const [index, part] of parts.entries()) {
+    if (part.length === 0) continue;
+    if (index === parts.length - 1 && !p.endsWith('*')) {
+      return v.endsWith(part) && v.length - part.length >= position;
+    }
+    const matchAt = v.indexOf(part, position);
+    if (matchAt < 0 || (index === 0 && matchAt !== 0)) return false;
+    position = matchAt + part.length;
+  }
+  return true;
 }
 
 function matchesKeywordRule(rule, features) {

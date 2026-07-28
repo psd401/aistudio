@@ -48,6 +48,153 @@ function flattenOrganizedItems(items: OrganizedItem[]): OrganizedItem[] {
   }, [])
 }
 
+function NavigationLoading() {
+  return (
+    <div className="space-y-6">
+      <div className="mb-6">
+        <PageBranding />
+        <Skeleton className="h-8 w-48" />
+        <Skeleton className="mt-2 h-4 w-64" />
+      </div>
+      <Card>
+        <CardContent className="space-y-2 pt-6">
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-full" />
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+function NavigationHeader({ onAdd }: { onAdd: () => void }) {
+  return (
+    <div className="mb-6">
+      <PageBranding />
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="flex items-center gap-2 text-2xl font-semibold text-gray-900">
+            <Navigation className="h-5 w-5" />
+            Navigation Structure
+          </h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Drag and drop items to reorder them within their parent groups
+          </p>
+        </div>
+        <Button onClick={onAdd}>
+          <Plus className="mr-2 h-4 w-4" />
+          Add Navigation Item
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function NavigationTree({
+  items,
+  organizedItems,
+  flattenedItems,
+  collapsedSections,
+  activeId,
+  sensors,
+  onAdd,
+  onDragStart,
+  onDragEnd,
+  onUpdate,
+  onToggleSection,
+}: {
+  items: SelectNavigationItem[]
+  organizedItems: OrganizedItem[]
+  flattenedItems: OrganizedItem[]
+  collapsedSections: Set<number>
+  activeId: number | null
+  sensors: ReturnType<typeof useSensors>
+  onAdd: () => void
+  onDragStart: (event: DragStartEvent) => void
+  onDragEnd: (event: DragEndEvent) => void
+  onUpdate: () => void
+  onToggleSection: (id: number) => void
+}) {
+  if (items.length === 0) {
+    return (
+      <Card>
+        <CardContent className="py-12 text-center">
+          <Navigation className="mx-auto mb-4 h-12 w-12 text-muted-foreground" />
+          <p className="mb-4 text-muted-foreground">No navigation items yet</p>
+          <Button onClick={onAdd} variant="secondary">
+            <Plus className="mr-2 h-4 w-4" />
+            Create your first navigation item
+          </Button>
+        </CardContent>
+      </Card>
+    )
+  }
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+        >
+          <SortableContext
+            items={flattenedItems.map((item) => String(item.id))}
+            strategy={verticalListSortingStrategy}
+          >
+            <div className="space-y-2">
+              {flattenedItems.map((item) => {
+                const parentCollapsed = Boolean(
+                  item.parentId && collapsedSections.has(item.parentId)
+                )
+                return (
+                  <div
+                    key={item.id}
+                    className="transition-all duration-200"
+                    style={{
+                      paddingLeft: `${item.level * 2}rem`,
+                      opacity: parentCollapsed ? 0 : 1,
+                      height: parentCollapsed ? 0 : "auto",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <NavigationItem
+                      item={item}
+                      onUpdate={onUpdate}
+                      isCollapsed={
+                        item.type === "section" &&
+                        collapsedSections.has(item.id)
+                      }
+                      onToggleCollapse={() =>
+                        item.type === "section" && onToggleSection(item.id)
+                      }
+                      hasChildren={organizedItems.some(
+                        (organized) =>
+                          organized.id === item.id &&
+                          organized.children.length > 0
+                      )}
+                    />
+                  </div>
+                )
+              })}
+            </div>
+          </SortableContext>
+          <DragOverlay>
+            {activeId ? (
+              <div className="rounded-lg border-2 border-primary bg-background p-4 opacity-90 shadow-xl">
+                <div className="flex items-center gap-2">
+                  <Navigation className="h-4 w-4" />
+                  {items.find((item) => item.id === activeId)?.label}
+                </div>
+              </div>
+            ) : null}
+          </DragOverlay>
+        </DndContext>
+      </CardContent>
+    </Card>
+  )
+}
+
 /**
  * Navigation Manager Component
  * 
@@ -204,22 +351,7 @@ export function NavigationManager() {
   }
 
   if (isLoading) {
-    return (
-      <div className="space-y-6">
-        <div className="mb-6">
-          <PageBranding />
-          <Skeleton className="h-8 w-48" />
-          <Skeleton className="h-4 w-64 mt-2" />
-        </div>
-        <Card>
-          <CardContent className="pt-6 space-y-2">
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-full" />
-          </CardContent>
-        </Card>
-      </div>
-    )
+    return <NavigationLoading />
   }
 
   // Organize items hierarchically for admin display (do not filter out any items)
@@ -228,24 +360,7 @@ export function NavigationManager() {
 
   return (
     <div className="space-y-6">
-      <div className="mb-6">
-        <PageBranding />
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold text-gray-900 flex items-center gap-2">
-              <Navigation className="h-5 w-5" />
-              Navigation Structure
-            </h1>
-            <p className="text-sm text-muted-foreground mt-1">
-              Drag and drop items to reorder them within their parent groups
-            </p>
-          </div>
-          <Button onClick={() => setIsFormOpen(true)}>
-            <Plus className="h-4 w-4 mr-2" />
-            Add Navigation Item
-          </Button>
-        </div>
-      </div>
+      <NavigationHeader onAdd={() => setIsFormOpen(true)} />
 
       {error && (
         <Alert variant="destructive">
@@ -254,63 +369,19 @@ export function NavigationManager() {
         </Alert>
       )}
 
-      <Card>
-        <CardContent className="pt-6">
-          {items.length === 0 ? (
-            <div className="text-center py-12">
-              <Navigation className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-              <p className="text-muted-foreground mb-4">No navigation items yet</p>
-              <Button onClick={() => setIsFormOpen(true)} variant="secondary">
-                <Plus className="h-4 w-4 mr-2" />
-                Create your first navigation item
-              </Button>
-            </div>
-          ) : (
-            <DndContext
-              sensors={sensors}
-              collisionDetection={closestCenter}
-              onDragStart={handleDragStart}
-              onDragEnd={handleDragEnd}
-            >
-              <SortableContext items={flattenedItems.map(item => String(item.id))} strategy={verticalListSortingStrategy}>
-                <div className="space-y-2">
-                  {flattenedItems.map((item) => (
-                    <div
-                      key={item.id}
-                      className="transition-all duration-200"
-                      style={{ 
-                        paddingLeft: `${item.level * 2}rem`,
-                        opacity: item.parentId && collapsedSections.has(item.parentId) ? 0 : 1,
-                        height: item.parentId && collapsedSections.has(item.parentId) ? 0 : 'auto',
-                        overflow: 'hidden'
-                      }}
-                    >
-                      <NavigationItem
-                        item={item}
-                        onUpdate={handleFormSubmit}
-                        isCollapsed={item.type === 'section' && collapsedSections.has(item.id)}
-                        onToggleCollapse={() => item.type === 'section' && toggleSection(item.id)}
-                        hasChildren={organizedItems.some(org => org.id === item.id && org.children.length > 0)}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </SortableContext>
-
-              <DragOverlay>
-                {activeId ? (
-                  <div className="bg-background border-2 border-primary rounded-lg p-4 shadow-xl opacity-90">
-                    <div className="flex items-center gap-2">
-                      <Navigation className="h-4 w-4" />
-                      {items.find(item => item.id === activeId)?.label}
-                    </div>
-                  </div>
-                ) : null}
-              </DragOverlay>
-            </DndContext>
-          )}
-        </CardContent>
-      </Card>
+      <NavigationTree
+        items={items}
+        organizedItems={organizedItems}
+        flattenedItems={flattenedItems}
+        collapsedSections={collapsedSections}
+        activeId={activeId}
+        sensors={sensors}
+        onAdd={() => setIsFormOpen(true)}
+        onDragStart={handleDragStart}
+        onDragEnd={handleDragEnd}
+        onUpdate={handleFormSubmit}
+        onToggleSection={toggleSection}
+      />
 
       <NavigationItemForm 
         open={isFormOpen}
@@ -320,4 +391,4 @@ export function NavigationManager() {
       />
     </div>
   )
-} 
+}

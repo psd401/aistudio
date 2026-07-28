@@ -8,8 +8,9 @@
  * Issue #539 - Integrate Drizzle-Kit with existing Lambda migration system
  */
 
-import * as fs from "node:fs";
+
 import * as path from "node:path";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 // Constants
 const MIGRATIONS_MANIFEST_PATH = "./infra/database/migrations.json";
@@ -22,7 +23,7 @@ export function getProjectRoot(): string {
   // Walk up from current directory to find package.json
   let currentDir = process.cwd();
   while (currentDir !== "/") {
-    if (fs.existsSync(path.join(currentDir, "package.json"))) {
+    if (validatedFs.existsSync(path.join(currentDir, "package.json"))) {
       return currentDir;
     }
     currentDir = path.dirname(currentDir);
@@ -43,7 +44,7 @@ export function getAbsolutePath(relativePath: string): string {
  */
 export function getNextMigrationNumber(): number {
   const manifestPath = getAbsolutePath(MIGRATIONS_MANIFEST_PATH);
-  const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as unknown;
+  const parsed = JSON.parse(validatedFs.readFileSync(manifestPath, "utf-8")) as unknown;
   if (
     typeof parsed !== "object" ||
     parsed === null ||

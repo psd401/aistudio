@@ -1,12 +1,15 @@
 import * as cdk from "aws-cdk-lib"
 import { Template, Match } from "aws-cdk-lib/assertions"
-import { Construct } from "constructs"
 import { BaseStack, BaseStackProps } from "../../lib/constructs/base/base-stack"
 import { EnvironmentConfig } from "../../lib/constructs/config/environment-config"
 
 // Test implementation of BaseStack
 class TestStack extends BaseStack {
-  protected defineResources(props: BaseStackProps): void {
+  public envValueForTest<T>(devValue: T, prodValue: T): T {
+    return this.getEnvValue(devValue, prodValue)
+  }
+
+  protected defineResources(_props: BaseStackProps): void {
     // Create a simple S3 bucket for testing
     new cdk.aws_s3.Bucket(this, "TestBucket", {
       removalPolicy: this.getRemovalPolicy(),
@@ -17,14 +20,17 @@ class TestStack extends BaseStack {
   }
 }
 
-describe("BaseStack", () => {
-  let app: cdk.App
-
-  // Standard test environment for CDK stacks
-  const testEnv = {
+let app: cdk.App
+const testEnv = {
     account: "123456789012",
     region: "us-east-1",
   }
+
+function defineBaseStackSuite1Part1() {
+
+
+  // Standard test environment for CDK stacks
+
 
   beforeEach(() => {
     app = new cdk.App()
@@ -102,7 +108,9 @@ describe("BaseStack", () => {
     })
   })
 
-  describe("Automatic Tagging", () => {
+  }
+
+function defineBaseStackSuite1Part2() {describe("Automatic Tagging", () => {
     test("should apply all standard tags to resources", () => {
       const stack = new TestStack(app, "TestStack-Dev", {
         deploymentEnvironment: "dev",
@@ -212,7 +220,9 @@ describe("BaseStack", () => {
     })
   })
 
-  describe("Helper Methods", () => {
+  }
+
+function defineBaseStackSuite1Part3() {describe("Helper Methods", () => {
     test("getRemovalPolicy should return RETAIN for prod", () => {
       const stack = new TestStack(app, "TestStack-Prod", {
         deploymentEnvironment: "prod",
@@ -257,7 +267,7 @@ describe("BaseStack", () => {
       })
 
       // Access the protected method through a type assertion
-      const result = (stack as any).getEnvValue("dev-value", "prod-value")
+      const result = stack.envValueForTest("dev-value", "prod-value")
       expect(result).toBe("dev-value")
     })
 
@@ -268,7 +278,7 @@ describe("BaseStack", () => {
         env: testEnv,
       })
 
-      const result = (stack as any).getEnvValue("dev-value", "prod-value")
+      const result = stack.envValueForTest("dev-value", "prod-value")
       expect(result).toBe("prod-value")
     })
 
@@ -312,7 +322,9 @@ describe("BaseStack", () => {
     })
   })
 
-  describe("Configuration Access", () => {
+  }
+
+function defineBaseStackSuite1Part4() {describe("Configuration Access", () => {
     test("should provide access to environment configuration", () => {
       const stack = new TestStack(app, "TestStack-Dev", {
         deploymentEnvironment: "dev",
@@ -335,4 +347,13 @@ describe("BaseStack", () => {
       expect(stack.deploymentEnvironment).toBe("prod")
     })
   })
-})
+}
+
+const defineBaseStackSuite1 = () => {
+  defineBaseStackSuite1Part1()
+  defineBaseStackSuite1Part2()
+  defineBaseStackSuite1Part3()
+  defineBaseStackSuite1Part4()
+};
+
+describe("BaseStack", defineBaseStackSuite1)

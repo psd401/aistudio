@@ -6,6 +6,24 @@ import {
   PolicyValidationError,
 } from "./types"
 
+interface PolicyStatementJson {
+  Action?: string | string[]
+  Resource?: string | string[]
+  Condition?: unknown
+}
+
+function policyStatements(policy: iam.PolicyDocument): PolicyStatementJson[] {
+  const statements = policy.toJSON().Statement
+  return Array.isArray(statements)
+    ? (statements as PolicyStatementJson[])
+    : []
+}
+
+function stringList(value: string | string[] | undefined): string[] {
+  if (Array.isArray(value)) return value
+  return value === undefined ? [] : [value]
+}
+
 /**
  * Validates IAM policies against security best practices
  */
@@ -96,15 +114,14 @@ export class NoWildcardResourcesRule implements ValidationRule {
   ]
 
   public validate(policy: iam.PolicyDocument): ValidationResult {
-    const statements = policy.toJSON().Statement
     const violations: PolicyViolation[] = []
 
-    statements?.forEach((stmt: any, index: number) => {
+    for (const [index, statement] of policyStatements(policy).entries()) {
       // Skip if no resources defined (for identity-based policies)
-      if (!stmt.Resource) return
+      if (!statement.Resource) continue
 
-      const resources = Array.isArray(stmt.Resource) ? stmt.Resource : [stmt.Resource]
-      const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action]
+      const resources = stringList(statement.Resource)
+      const actions = stringList(statement.Action)
 
       // Check if resources contain wildcards
       const hasWildcard = resources.some((r: string) => r === "*" || r.endsWith(":*/*"))
@@ -125,7 +142,7 @@ export class NoWildcardResourcesRule implements ValidationRule {
           })
         }
       }
-    })
+    }
 
     return {
       isValid: violations.length === 0,
@@ -153,13 +170,12 @@ export class MinimalActionsRule implements ValidationRule {
   ]
 
   public validate(policy: iam.PolicyDocument): ValidationResult {
-    const statements = policy.toJSON().Statement
     const violations: PolicyViolation[] = []
 
-    statements?.forEach((stmt: any, index: number) => {
-      const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action]
+    for (const [index, statement] of policyStatements(policy).entries()) {
+      const actions = stringList(statement.Action)
 
-      actions.forEach((action: string) => {
+      for (const action of actions) {
         if (this.OVERLY_BROAD_ACTIONS.includes(action)) {
           violations.push({
             rule: this.name,
@@ -169,8 +185,8 @@ export class MinimalActionsRule implements ValidationRule {
             fix: `Replace "${action}" with specific actions (e.g., "s3:GetObject", "s3:PutObject")`,
           })
         }
-      })
-    })
+      }
+    }
 
     return {
       isValid: violations.length === 0,
@@ -201,16 +217,15 @@ export class RequireConditionsRule implements ValidationRule {
   ]
 
   public validate(policy: iam.PolicyDocument): ValidationResult {
-    const statements = policy.toJSON().Statement
     const violations: PolicyViolation[] = []
 
-    statements?.forEach((stmt: any, index: number) => {
-      const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action]
+    for (const [index, statement] of policyStatements(policy).entries()) {
+      const actions = stringList(statement.Action)
       const hasSensitiveAction = actions.some((action: string) =>
         this.SENSITIVE_ACTIONS.includes(action)
       )
 
-      if (hasSensitiveAction && !stmt.Condition) {
+      if (hasSensitiveAction && !statement.Condition) {
         violations.push({
           rule: this.name,
           severity: this.severity,
@@ -219,7 +234,7 @@ export class RequireConditionsRule implements ValidationRule {
           fix: 'Add conditions like {"StringEquals": {"aws:RequestedRegion": "us-west-2"}}',
         })
       }
-    })
+    }
 
     return {
       isValid: violations.length === 0,
@@ -237,12 +252,11 @@ export class NoAdminAccessRule implements ValidationRule {
   public readonly severity = "critical" as const
 
   public validate(policy: iam.PolicyDocument): ValidationResult {
-    const statements = policy.toJSON().Statement
     const violations: PolicyViolation[] = []
 
-    statements?.forEach((stmt: any, index: number) => {
-      const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action]
-      const resources = Array.isArray(stmt.Resource) ? stmt.Resource : [stmt.Resource]
+    for (const [index, statement] of policyStatements(policy).entries()) {
+      const actions = stringList(statement.Action)
+      const resources = stringList(statement.Resource)
 
       // Check for admin-like permissions
       const hasAdminActions = actions.includes("*:*") || actions.includes("*")
@@ -257,7 +271,7 @@ export class NoAdminAccessRule implements ValidationRule {
           fix: "Remove this statement and grant specific permissions instead",
         })
       }
-    })
+    }
 
     return {
       isValid: violations.length === 0,
@@ -284,11 +298,10 @@ export class ResourceTagRequirementRule implements ValidationRule {
   ]
 
   public validate(policy: iam.PolicyDocument): ValidationResult {
-    const statements = policy.toJSON().Statement
     const violations: PolicyViolation[] = []
 
-    statements?.forEach((stmt: any, index: number) => {
-      const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action]
+    for (const [index, statement] of policyStatements(policy).entries()) {
+      const actions = stringList(statement.Action)
 
       // Check if policy affects tag-sensitive services
       const affectsTagSensitiveService = actions.some((action: string) => {
@@ -296,7 +309,7 @@ export class ResourceTagRequirementRule implements ValidationRule {
         return this.TAG_SENSITIVE_SERVICES.includes(service)
       })
 
-      if (affectsTagSensitiveService && !stmt.Condition) {
+      if (affectsTagSensitiveService && !statement.Condition) {
         violations.push({
           rule: this.name,
           severity: this.severity,
@@ -305,7 +318,7 @@ export class ResourceTagRequirementRule implements ValidationRule {
           fix: 'Consider adding tag conditions like {"StringEquals": {"aws:ResourceTag/Environment": "production"}}',
         })
       }
-    })
+    }
 
     return {
       isValid: violations.length === 0,

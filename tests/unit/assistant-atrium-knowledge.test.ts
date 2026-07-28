@@ -73,7 +73,7 @@ jest.mock("@/lib/repositories/search-service", () => ({
 // Deterministic ~4-chars-per-token tokenizer (mirrors countTokens' fallback).
 jest.mock("js-tiktoken", () => ({
   encodingForModel: () => ({
-    encode: (text: string) => new Array(Math.ceil(text.length / 4)).fill(0),
+    encode: (text: string) => Array.from({length: Math.ceil(text.length / 4)}).fill(0),
   }),
 }));
 
@@ -160,7 +160,6 @@ describe("retrieveKnowledgeForPrompt — shared repository retrieval", () => {
       "what is the policy?",
       [10],
       "executing-user",
-      "assistant-owner",
       { maxChunks: 4, maxTokens: 1200, vectorWeight: 0.65 },
     );
 
@@ -199,7 +198,6 @@ describe("retrieveKnowledgeForPrompt — shared repository retrieval", () => {
       "what is the policy?",
       [10, 11],
       "executing-user",
-      "assistant-owner",
       { maxChunks: 4, maxTokens: 1200, vectorWeight: 0.65 },
     );
 

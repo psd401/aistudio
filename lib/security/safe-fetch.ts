@@ -10,10 +10,10 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import type { RequestOptions as HttpsRequestOptions } from "node:https";
 import {
   BlockList,
   isIP,
-  type LookupFunction,
 } from "node:net";
 import { Readable } from "node:stream";
 
@@ -124,29 +124,57 @@ export async function resolvePublicAddresses(
   return addresses;
 }
 
-/** Build the socket lookup callback that can return only pre-approved addresses. */
-export function createPinnedLookup(
-  approved: readonly ResolvedAddress[]
-): LookupFunction {
-  return (_hostname, options, callback) => {
-    const requestedFamily =
-      typeof options === "number" ? options : options.family;
-    const match =
-      approved.find(
-        ({ family }) => requestedFamily === 0 || family === requestedFamily
-      ) ?? approved[0];
-    callback(null, match.address, match.family);
+/**
+ * Build an origin-form request that connects to the already-approved address.
+ *
+ * The untrusted hostname is retained only for the HTTP Host header and TLS
+ * certificate/SNI checks. The socket destination itself is the validated IP,
+ * so neither a second DNS lookup nor DNS rebinding can redirect the connection.
+ */
+export function createPinnedRequestOptions(
+  url: URL,
+  approved: readonly ResolvedAddress[],
+  init: SafeFetchInit = {}
+): HttpsRequestOptions {
+  const destination = approved[0];
+  if (!destination) {
+    throw new Error("Outbound target did not resolve");
+  }
+
+  const headers = new Headers(init.headers);
+  headers.set("host", url.host);
+  const hasCredentials = url.username.length > 0 || url.password.length > 0;
+
+  return {
+    protocol: url.protocol,
+    hostname: destination.address,
+    family: destination.family,
+    port: url.port ? Number.parseInt(url.port, 10) : undefined,
+    path: `${url.pathname}${url.search}`,
+    method: init.method ?? "GET",
+    headers: Object.fromEntries(headers.entries()),
+    signal: init.signal,
+    // Preserve the original hostname for TLS SNI/certificate verification.
+    servername: url.hostname.replace(/^\[|\]$/g, ""),
+    auth: hasCredentials
+      ? `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`
+      : undefined,
   };
 }
 
-let testTransport: typeof fetch | undefined;
+type SafeFetchTestTransport = (
+  input: URL,
+  init: RequestInit
+) => Promise<Response>;
+
+let testTransport: SafeFetchTestTransport | undefined;
 
 /**
  * Inject a transport only in tests. Production callers always use the pinned
  * Node socket path below.
  */
 export function setSafeFetchTransportForTests(
-  transport: typeof fetch | undefined
+  transport: SafeFetchTestTransport | undefined
 ): void {
   if (process.env.NODE_ENV !== "test") {
     throw new Error("Safe-fetch test transport can only be changed in tests");
@@ -177,20 +205,12 @@ export async function safeFetch(
   }
 
   const approved = await resolvePublicAddresses(url.hostname);
-  const headers = Object.fromEntries(new Headers(init.headers).entries());
   const request = url.protocol === "https:" ? httpsRequest : httpRequest;
+  const requestOptions = createPinnedRequestOptions(url, approved, init);
 
   return new Promise<Response>((resolve, reject) => {
     const req = request(
-      url,
-      {
-        method: init.method ?? "GET",
-        headers,
-        signal: init.signal,
-        lookup: createPinnedLookup(approved),
-        // Preserve the original hostname for TLS SNI/certificate verification.
-        servername: url.hostname.replace(/^\[|\]$/g, ""),
-      },
+      requestOptions,
       (res) => {
         const responseHeaders = new Headers();
         for (const [name, value] of Object.entries(res.headers)) {
@@ -218,6 +238,37 @@ export async function safeFetch(
   });
 }
 
+function bodyFromDirectInit(
+  candidate: RequestInit["body"],
+): string | Uint8Array | undefined {
+  if (typeof candidate === "string") return candidate;
+  if (candidate instanceof URLSearchParams) return candidate.toString();
+  if (candidate instanceof Uint8Array) return candidate;
+  if (candidate instanceof ArrayBuffer) return new Uint8Array(candidate);
+  if (candidate === undefined || candidate === null) return undefined;
+  throw new Error("Safe MCP transport accepts only bounded byte request bodies");
+}
+
+async function getSafeRequestBody(options: {
+  method: string;
+  directUrl: URL | undefined;
+  request: Request | undefined;
+  body: RequestInit["body"];
+}): Promise<string | Uint8Array | undefined> {
+  const { method, directUrl, request, body } = options;
+  if (method === "GET" || method === "HEAD") return undefined;
+  if (directUrl) return bodyFromDirectInit(body);
+  if (!request) return undefined;
+  return new Uint8Array(await request.arrayBuffer());
+}
+
+function directInputUrl(input: RequestInfo | URL): URL | undefined {
+  if (typeof input === "string" || input instanceof URL) {
+    return new URL(input.toString());
+  }
+  return undefined;
+}
+
 /**
  * Fetch-compatible adapter for libraries such as @ai-sdk/mcp.
  *
@@ -230,30 +281,15 @@ export async function safeFetchAdapter(
   input: RequestInfo | URL,
   init?: RequestInit
 ): Promise<Response> {
-  const directUrl =
-    typeof input === "string" || input instanceof URL
-      ? new URL(input.toString())
-      : undefined
+  const directUrl = directInputUrl(input)
   const request = directUrl ? undefined : new Request(input, init)
   const method = (init?.method ?? request?.method ?? "GET").toUpperCase()
-  const hasBody = method !== "GET" && method !== "HEAD"
-  let body: string | Uint8Array | undefined
-  if (hasBody && directUrl) {
-    const candidate = init?.body
-    if (typeof candidate === "string") {
-      body = candidate
-    } else if (candidate instanceof URLSearchParams) {
-      body = candidate.toString()
-    } else if (candidate instanceof Uint8Array) {
-      body = candidate
-    } else if (candidate instanceof ArrayBuffer) {
-      body = new Uint8Array(candidate)
-    } else if (candidate !== undefined && candidate !== null) {
-      throw new Error("Safe MCP transport accepts only bounded byte request bodies")
-    }
-  } else if (hasBody && request) {
-    body = new Uint8Array(await request.arrayBuffer())
-  }
+  const body = await getSafeRequestBody({
+    method,
+    directUrl,
+    request,
+    body: init?.body,
+  })
   return safeFetch(directUrl ?? request!.url, {
     method,
     headers: init?.headers ?? request?.headers,

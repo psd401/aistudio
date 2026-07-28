@@ -93,6 +93,7 @@ export async function registerCanonicalText(
       throw new AggregateError(
         [registrationError, cleanupError],
         "Canonical text registration and source cleanup both failed",
+        { cause: cleanupError },
       );
     }
     throw registrationError;

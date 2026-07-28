@@ -83,9 +83,42 @@ function validUploadMetadata(value: string): boolean {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+function isValidCanvaQuery(value: unknown): boolean {
+  if (value === undefined) return true
+  if (!isRecord(value)) return false
+  return Object.entries(value).every(
+    ([key, item]) =>
+      ALLOWED_QUERY_KEYS.has(key) &&
+      typeof item === "string" &&
+      item.length <= 2048
+  )
+}
+
+function isValidCanvaJsonBody(value: unknown): boolean {
+  return value === undefined || isRecord(value)
+}
+
+function isValidRawUpload(raw: Record<string, unknown>): boolean {
+  if (raw.rawBodyBase64 === undefined) {
+    return raw.uploadMetadata === undefined
+  }
+  return (
+    typeof raw.rawBodyBase64 === "string" &&
+    raw.path === "/v1/asset-uploads" &&
+    raw.method === "POST" &&
+    typeof raw.uploadMetadata === "string" &&
+    validUploadMetadata(raw.uploadMetadata) &&
+    raw.body === undefined
+  )
+}
+
 function parseBody(value: unknown): CanvaBody | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null
-  const raw = value as Record<string, unknown>
+  if (!isRecord(value)) return null
+  const raw = value
   if (raw.operation === "status") {
     return Object.keys(raw).length === 1 ? { operation: "status" } : null
   }
@@ -103,44 +136,10 @@ function parseBody(value: unknown): CanvaBody | null {
     ) ||
     typeof raw.method !== "string" ||
     typeof raw.path !== "string" ||
-    !isAllowedMethodPath(raw.method, raw.path)
-  ) {
-    return null
-  }
-  if (
-    raw.query !== undefined &&
-    (!raw.query ||
-      typeof raw.query !== "object" ||
-      Array.isArray(raw.query) ||
-      Object.entries(raw.query).some(
-        ([key, item]) =>
-          !ALLOWED_QUERY_KEYS.has(key) ||
-          typeof item !== "string" ||
-          item.length > 2048
-      ))
-  ) {
-    return null
-  }
-  if (
-    raw.body !== undefined &&
-    (!raw.body || typeof raw.body !== "object" || Array.isArray(raw.body))
-  ) {
-    return null
-  }
-  if (
-    raw.rawBodyBase64 !== undefined &&
-    (typeof raw.rawBodyBase64 !== "string" ||
-      raw.path !== "/v1/asset-uploads" ||
-      raw.method !== "POST" ||
-      typeof raw.uploadMetadata !== "string" ||
-      !validUploadMetadata(raw.uploadMetadata) ||
-      raw.body !== undefined)
-  ) {
-    return null
-  }
-  if (
-    raw.uploadMetadata !== undefined &&
-    raw.rawBodyBase64 === undefined
+    !isAllowedMethodPath(raw.method, raw.path) ||
+    !isValidCanvaQuery(raw.query) ||
+    !isValidCanvaJsonBody(raw.body) ||
+    !isValidRawUpload(raw)
   ) {
     return null
   }
@@ -212,50 +211,48 @@ async function refreshAccessToken(
   return { accessToken: (payload as { access_token: string }).access_token }
 }
 
-export async function POST(request: NextRequest) {
-  const requestId = generateRequestId()
-  const context = await verifyAgentInvocationContext(request, {
-    allowedModes: ["owner", "scheduled"],
-  })
-  if (!context) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+function decodeUploadBody(
+  body: CanvaRequestBody
+): { valid: boolean; bytes?: Uint8Array<ArrayBuffer> } {
+  if (body.rawBodyBase64 === undefined) return { valid: true }
+  const decoded = Buffer.from(body.rawBodyBase64, "base64")
+  const bytes = Uint8Array.from(decoded)
+  return {
+    valid:
+      bytes.byteLength > 0 &&
+      bytes.byteLength <= MAX_BINARY_BYTES &&
+      decoded.toString("base64") === body.rawBodyBase64,
+    bytes,
+  }
+}
 
-  let raw: unknown
-  try {
-    raw = await request.json()
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
+function upstreamHeaders(
+  accessToken: string,
+  body: CanvaRequestBody,
+  rawBytes: Uint8Array<ArrayBuffer> | undefined
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+    Accept: "application/json",
   }
-  const body = parseBody(raw)
-  if (!body) {
-    return NextResponse.json({ error: "Invalid Canva operation" }, { status: 400 })
+  if (rawBytes) {
+    headers["Content-Type"] = "application/octet-stream"
+    headers["Asset-Upload-Metadata"] = body.uploadMetadata ?? ""
+  } else if (body.body) {
+    headers["Content-Type"] = "application/json"
   }
-  if (Buffer.byteLength(JSON.stringify(body), "utf8") > MAX_REQUEST_BYTES) {
-    return NextResponse.json({ error: "Request is too large" }, { status: 413 })
-  }
+  return headers
+}
 
-  const tokenRecord = await getSecretJson<CanvaTokenData>(
-    canvaSecretId(context.ownerEmail)
-  )
-  if (body.operation === "status") {
-    return NextResponse.json({ connected: Boolean(tokenRecord?.refresh_token) })
-  }
-  if (!tokenRecord?.refresh_token) {
-    return NextResponse.json({ error: "Canva is not connected" }, { status: 401 })
-  }
-
-  let rawBytes: Uint8Array<ArrayBuffer> | undefined
-  if (body.rawBodyBase64 !== undefined) {
-    const decoded = Buffer.from(body.rawBodyBase64, "base64")
-    rawBytes = Uint8Array.from(decoded)
-    if (
-      rawBytes.byteLength === 0 ||
-      rawBytes.byteLength > MAX_BINARY_BYTES ||
-      decoded.toString("base64") !== body.rawBodyBase64
-    ) {
-      return NextResponse.json({ error: "Invalid upload body" }, { status: 400 })
-    }
-  }
-
+async function forwardCanvaOperation(
+  context: NonNullable<
+    Awaited<ReturnType<typeof verifyAgentInvocationContext>>
+  >,
+  body: CanvaRequestBody,
+  tokenRecord: CanvaTokenData,
+  rawBytes: Uint8Array<ArrayBuffer> | undefined,
+  requestId: string
+): Promise<NextResponse> {
   try {
     const auth = await refreshAccessToken(context.ownerEmail, tokenRecord)
     if (!auth) {
@@ -270,18 +267,7 @@ export async function POST(request: NextRequest) {
     }
     const upstream = await fetch(url, {
       method: body.method,
-      headers: {
-        Authorization: `Bearer ${auth.accessToken}`,
-        Accept: "application/json",
-        ...(rawBytes
-          ? {
-              "Content-Type": "application/octet-stream",
-              "Asset-Upload-Metadata": body.uploadMetadata ?? "",
-            }
-          : body.body
-            ? { "Content-Type": "application/json" }
-            : {}),
-      },
+      headers: upstreamHeaders(auth.accessToken, body, rawBytes),
       body: rawBytes ?? (body.body ? JSON.stringify(body.body) : undefined),
       redirect: "error",
       signal: AbortSignal.timeout(30_000),
@@ -320,4 +306,48 @@ export async function POST(request: NextRequest) {
     )
     return NextResponse.json({ error: "Canva operation failed" }, { status: 502 })
   }
+}
+
+export async function POST(request: NextRequest) {
+  const requestId = generateRequestId()
+  const context = await verifyAgentInvocationContext(request, {
+    allowedModes: ["owner", "scheduled"],
+  })
+  if (!context) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+
+  let raw: unknown
+  try {
+    raw = await request.json()
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
+  }
+  const body = parseBody(raw)
+  if (!body) {
+    return NextResponse.json({ error: "Invalid Canva operation" }, { status: 400 })
+  }
+  if (Buffer.byteLength(JSON.stringify(body), "utf8") > MAX_REQUEST_BYTES) {
+    return NextResponse.json({ error: "Request is too large" }, { status: 413 })
+  }
+
+  const tokenRecord = await getSecretJson<CanvaTokenData>(
+    canvaSecretId(context.ownerEmail)
+  )
+  if (body.operation === "status") {
+    return NextResponse.json({ connected: Boolean(tokenRecord?.refresh_token) })
+  }
+  if (!tokenRecord?.refresh_token) {
+    return NextResponse.json({ error: "Canva is not connected" }, { status: 401 })
+  }
+
+  const decoded = decodeUploadBody(body)
+  if (!decoded.valid) {
+    return NextResponse.json({ error: "Invalid upload body" }, { status: 400 })
+  }
+  return forwardCanvaOperation(
+    context,
+    body,
+    tokenRecord,
+    decoded.bytes,
+    requestId
+  )
 }

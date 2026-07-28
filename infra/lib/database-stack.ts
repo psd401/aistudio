@@ -7,13 +7,12 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as cr from 'aws-cdk-lib/custom-resources';
-import * as path from 'path';
-import * as crypto from 'crypto';
-import * as fs from 'fs';
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
-import { execSync } from 'child_process';
+import { execSync } from 'node:child_process';
 import {
   AuroraCostOptimizer,
   AuroraCostDashboard,
@@ -21,6 +20,7 @@ import {
   EnvironmentConfig,
   ServiceRoleFactory,
 } from './constructs';
+import { validatedFs } from "./validated-fs";
 
 export interface DatabaseStackProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
@@ -37,7 +37,7 @@ export interface DatabaseStackProps extends cdk.StackProps {
  */
 function collectLambdaSourceFiles(dir: string, prefix = ''): { rel: string; abs: string }[] {
   const out: { rel: string; abs: string }[] = [];
-  const entries = fs.readdirSync(dir, { withFileTypes: true })
+  const entries = validatedFs.readdirSync(dir, { withFileTypes: true })
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const entry of entries) {
     const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
@@ -77,16 +77,16 @@ export function computeDbInitAssetHash(databaseDir: string): string {
   const hash = crypto.createHash('sha256');
   for (const f of collectLambdaSourceFiles(path.join(databaseDir, 'lambda'))) {
     hash.update(`${f.rel}\0`);
-    hash.update(fs.readFileSync(f.abs, 'utf8'));
+    hash.update(validatedFs.readFileSync(f.abs, 'utf8'));
   }
-  hash.update(fs.readFileSync(path.join(databaseDir, 'migrations.json'), 'utf8'));
+  hash.update(validatedFs.readFileSync(path.join(databaseDir, 'migrations.json'), 'utf8'));
   const schemaDir = path.join(databaseDir, 'schema');
-  const schemaEntries = fs.readdirSync(schemaDir, { withFileTypes: true })
+  const schemaEntries = validatedFs.readdirSync(schemaDir, { withFileTypes: true })
     .filter(e => e.isFile())
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const e of schemaEntries) {
     hash.update(`${e.name}\0`);
-    hash.update(fs.readFileSync(path.join(schemaDir, e.name), 'utf8'));
+    hash.update(validatedFs.readFileSync(path.join(schemaDir, e.name), 'utf8'));
   }
   return hash.digest('hex').substring(0, 16);
 }
@@ -259,6 +259,19 @@ export class DatabaseStack extends cdk.Stack {
     // connection pooling (max 20 connections, idle timeout 20s), making
     // RDS Proxy redundant. Saves ~$81/month. See issue #832.
 
+    this.costDashboard = this.configureCostOptimization(props, restoreFromSnapshot);
+
+    this.configureDatabaseInitialization(props, restoreFromSnapshot, dbSecret);
+
+    this.configureConversationRetention(props, restoreFromSnapshot, dbSecret, vpc);
+
+    this.configureOutputs(props, restoreFromSnapshot);
+  }
+
+  private configureCostOptimization(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean
+  ): AuroraCostDashboard | undefined {
     // Add cost optimization features (skip for snapshot restoration as AuroraCostOptimizer requires DatabaseCluster)
     if (!restoreFromSnapshot && this.cluster instanceof rds.DatabaseCluster) {
       new AuroraCostOptimizer(this, 'CostOptimizer', {
@@ -294,12 +307,20 @@ export class DatabaseStack extends cdk.Stack {
       });
 
       // Export Aurora metrics for consolidated monitoring dashboard
-      this.costDashboard = new AuroraCostDashboard(this, 'CostDashboard', {
+      return new AuroraCostDashboard(this, 'CostDashboard', {
         cluster: this.cluster,
         environment: props.environment,
       });
     }
 
+    return undefined;
+  }
+
+  private configureDatabaseInitialization(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean,
+    dbSecret: secretsmanager.ISecret
+  ): void {
     // Database initialization Lambda (SKIP when restoring from snapshot)
     // Note: Snapshot already contains schema and data, so no initialization needed
     if (!restoreFromSnapshot) {
@@ -349,7 +370,6 @@ export class DatabaseStack extends cdk.Stack {
             local: {
               tryBundle(outputDir: string) {
                 try {
-                  const execSync = require('child_process').execSync;
                   const lambdaDir = path.join(__dirname, '../database/lambda');
 
                   // Run npm install and build
@@ -429,6 +449,16 @@ export class DatabaseStack extends cdk.Stack {
         dbInit.node.addDependency(this.cluster);
       }
     }
+
+  }
+
+  private configureConversationRetention(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean,
+    dbSecret: secretsmanager.ISecret,
+    vpc: ec2.IVpc
+  ): void {
+    const config = EnvironmentConfig.get(props.environment);
 
     // =====================================================================
     // Nexus conversation retention sweep (Issue #1330)
@@ -557,7 +587,7 @@ export class DatabaseStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
+
                   console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }
@@ -610,6 +640,12 @@ export class DatabaseStack extends cdk.Stack {
       });
     }
 
+  }
+
+  private configureOutputs(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean
+  ): void {
     // Outputs
     if (!restoreFromSnapshot) {
       new cdk.CfnOutput(this, 'ClusterEndpoint', {

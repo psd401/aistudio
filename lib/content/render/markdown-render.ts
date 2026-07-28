@@ -102,57 +102,64 @@ type DirectiveNode = {
  * derived from the directive name. Split out of the visitor so `remarkAtriumDirectives`
  * stays a thin walker (keeps that closure's cyclomatic complexity low).
  */
+function applyContentAssetDirective(node: DirectiveNode): void {
+  const attrs = Object.entries(node.attributes ?? {})
+    .map(([name, value]) => `${name}="${value ?? ""}"`)
+    .join(" ");
+  const asset = parseContentAssetDirectiveAttrs(attrs);
+  const src = asset ? contentAssetBytesPath(asset.assetId) : null;
+  if (!asset || !src) return;
+  const data = (node.data ??= {});
+  data.hName = "img";
+  data.hProperties = {
+    src,
+    alt: asset.alt,
+    "data-atrium-asset-id": asset.assetId,
+  };
+}
+
+function applyCalloutDirective(node: DirectiveNode): void {
+  const data = (node.data ??= {});
+  data.hName = node.type === "textDirective" ? "span" : "div";
+  data.hProperties = {
+    className:
+      node.name === "warn"
+        ? [CALLOUT_CLASS, CALLOUT_WARN_CLASS]
+        : [CALLOUT_CLASS],
+  };
+}
+
+function applyGridDirective(node: DirectiveNode): void {
+  const data = (node.data ??= {});
+  data.hName = "div";
+  data.hProperties = { className: [IMAGE_GRID_CLASS] };
+}
+
+function applyVideoDirective(node: DirectiveNode): void {
+  const src = node.attributes?.src;
+  if (typeof src !== "string" || !isSafeMediaUrl(src)) return;
+  const data = (node.data ??= {});
+  data.hName = "video";
+  data.hProperties = {
+    className: [VIDEO_CLASS],
+    controls: true,
+    preload: "metadata",
+    playsInline: true,
+    src,
+  };
+}
+
+const ATRIUM_DIRECTIVE_HANDLERS: Record<string, (node: DirectiveNode) => void> = {
+  [CONTENT_ASSET_DIRECTIVE_NAME]: applyContentAssetDirective,
+  callout: applyCalloutDirective,
+  warn: applyCalloutDirective,
+  grid: applyGridDirective,
+  video: applyVideoDirective,
+};
+
 function applyAtriumDirective(node: DirectiveNode): void {
-  if (node.name === CONTENT_ASSET_DIRECTIVE_NAME) {
-    const attrs = Object.entries(node.attributes ?? {})
-      .map(([name, value]) => `${name}="${value ?? ""}"`)
-      .join(" ");
-    const asset = parseContentAssetDirectiveAttrs(attrs);
-    const src = asset ? contentAssetBytesPath(asset.assetId) : null;
-    if (!asset || !src) return;
-    const data = (node.data ??= {});
-    data.hName = "img";
-    data.hProperties = {
-      src,
-      alt: asset.alt,
-      "data-atrium-asset-id": asset.assetId,
-    };
-    return;
-  }
-  if (node.name === "callout" || node.name === "warn") {
-    const data = (node.data ??= {});
-    data.hName = node.type === "textDirective" ? "span" : "div";
-    data.hProperties = {
-      className:
-        node.name === "warn"
-          ? [CALLOUT_CLASS, CALLOUT_WARN_CLASS]
-          : [CALLOUT_CLASS],
-    };
-    return;
-  }
-  if (node.name === "grid") {
-    const data = (node.data ??= {});
-    data.hName = "div";
-    data.hProperties = { className: [IMAGE_GRID_CLASS] };
-    return;
-  }
-  if (node.name === "video") {
-    // The leaf directive carries the src as a remark-directive attribute. Only an
-    // http/https src is rendered; otherwise leave the node inert (no hName), so
-    // mdast-util-to-hast emits its (empty) children rather than a <video> pointing
-    // at an unsafe URL.
-    const src = node.attributes?.src;
-    if (typeof src !== "string" || !isSafeMediaUrl(src)) return;
-    const data = (node.data ??= {});
-    data.hName = "video";
-    data.hProperties = {
-      className: [VIDEO_CLASS],
-      controls: true,
-      preload: "metadata",
-      playsInline: true,
-      src,
-    };
-  }
+  if (!node.name) return;
+  ATRIUM_DIRECTIVE_HANDLERS[node.name]?.(node);
 }
 
 function remarkAtriumDirectives() {
