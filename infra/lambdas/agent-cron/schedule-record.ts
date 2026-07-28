@@ -1,7 +1,4 @@
-import {
-  DynamoDBDocumentClient,
-  GetCommand,
-} from '@aws-sdk/lib-dynamodb';
+import type { GetCommandInput } from '@aws-sdk/lib-dynamodb';
 
 const SAFE_EMAIL_RE = /^[\w%+.-]+@[\d.A-Za-z-]+\.[A-Za-z]{2,}$/;
 const SCHEDULE_ID_RE =
@@ -12,6 +9,12 @@ export interface ScheduleReferenceEvent {
   ownerEmail?: unknown;
   scheduleId?: unknown;
   version?: unknown;
+}
+
+export interface ScheduleRecordDynamoClient {
+  get(input: GetCommandInput): Promise<{
+    Item?: Record<string, unknown>;
+  }>;
 }
 
 export interface AuthorizedSchedule {
@@ -126,23 +129,21 @@ function hasValidScheduleContent(
  */
 export async function loadAuthorizedSchedule(
   event: ScheduleReferenceEvent,
-  dynamo: DynamoDBDocumentClient,
+  dynamo: ScheduleRecordDynamoClient,
   schedulesTable: string,
 ): Promise<ScheduleLoadResult> {
   if (!isValidScheduleReference(event, schedulesTable)) {
     return { authorized: false, reason: 'invalid-reference' };
   }
 
-  const response = await dynamo.send(
-    new GetCommand({
-      TableName: schedulesTable,
-      Key: {
-        userId: event.ownerEmail,
-        scheduleId: event.scheduleId,
-      },
-      ConsistentRead: true,
-    }),
-  );
+  const response = await dynamo.get({
+    TableName: schedulesTable,
+    Key: {
+      userId: event.ownerEmail,
+      scheduleId: event.scheduleId,
+    },
+    ConsistentRead: true,
+  });
   if (!response.Item) {
     return { authorized: false, reason: 'not-found' };
   }

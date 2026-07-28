@@ -20,6 +20,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DeleteCommand,
   DynamoDBDocumentClient,
+  GetCommand,
   PutCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { ECSClient, RunTaskCommand } from '@aws-sdk/client-ecs';
@@ -131,6 +132,10 @@ const jobLockDynamoClient = {
     dynamoClient.send(new PutCommand(input)),
   delete: (input: ConstructorParameters<typeof DeleteCommand>[0]) =>
     dynamoClient.send(new DeleteCommand(input)),
+};
+const scheduleRecordDynamoClient = {
+  get: (input: ConstructorParameters<typeof GetCommand>[0]) =>
+    dynamoClient.send(new GetCommand(input)),
 };
 
 const agentCoreCredentials = defaultProvider();
@@ -1034,7 +1039,7 @@ export async function handler(
     requestId,
     startedAt: handlerStartedAt,
     load: () =>
-      loadAuthorizedSchedule(event, dynamoClient, SCHEDULES_TABLE),
+      loadAuthorizedSchedule(event, scheduleRecordDynamoClient, SCHEDULES_TABLE),
     telemetry: runTelemetry,
     log,
   });
