@@ -2,7 +2,11 @@ import { test, expect } from "./fixtures"
 
 function isSignInUrl(href: string): boolean {
   const pathname = new URL(href).pathname
-  return pathname === "/sign-in" || pathname.startsWith("/auth/")
+  return (
+    pathname === "/sign-in" ||
+    pathname === "/api/auth/signin" ||
+    pathname.startsWith("/auth/")
+  )
 }
 
 test.describe("Settings memory authentication guard", () => {
