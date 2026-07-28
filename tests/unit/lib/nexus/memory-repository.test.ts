@@ -15,6 +15,8 @@ import {
   shouldUpdateSimilarMemory,
   type StoredNexusMemory,
 } from "@/lib/nexus/memory/memory-repository"
+import { SQL } from "drizzle-orm"
+import { PgDialect } from "drizzle-orm/pg-core"
 
 const MEMORY: StoredNexusMemory = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -102,5 +104,41 @@ describe("Nexus memory repository deduplication", () => {
     ).resolves.toEqual({ memory: MEMORY, action: "inserted" })
     expect(tx.insert).toHaveBeenCalledTimes(1)
     expect(tx.update).not.toHaveBeenCalled()
+  })
+
+  it("serializes the dedup decision per user before querying for a match", async () => {
+    const tx = transactionDouble()
+    mockToPgRows.mockReturnValue([])
+    mockExecuteTransaction.mockImplementation(
+      async (operation: (value: typeof tx) => Promise<unknown>) =>
+        operation(tx),
+    )
+
+    await drizzleMemoryRepository.saveWithDedup(
+      {
+        userId: 7,
+        content: "Prefers concise answers",
+        category: "preference",
+        source: "tool",
+        embedding: [0.1, 0.2],
+      },
+      0.9,
+    )
+
+    expect(tx.execute).toHaveBeenCalledTimes(2)
+    const lockStatement = tx.execute.mock.calls[0]?.[0]
+    if (!(lockStatement instanceof SQL)) {
+      throw new TypeError("Expected the first transaction statement to be SQL")
+    }
+    const renderedLock = new PgDialect().sqlToQuery(lockStatement)
+    expect(renderedLock.sql).toContain("pg_advisory_xact_lock")
+    expect(renderedLock.params).toContain(7)
+
+    const nearestStatement = tx.execute.mock.calls[1]?.[0]
+    if (!(nearestStatement instanceof SQL)) {
+      throw new TypeError("Expected the second transaction statement to be SQL")
+    }
+    const renderedNearest = new PgDialect().sqlToQuery(nearestStatement)
+    expect(renderedNearest.sql).toContain("FOR UPDATE")
   })
 })

@@ -74,6 +74,8 @@ interface RelevantMemoryRow {
   updated_at: Date
 }
 
+const NEXUS_MEMORY_DEDUP_LOCK_NAMESPACE = 1314210707
+
 export function shouldUpdateSimilarMemory(
   similarity: number | string | undefined,
   threshold: number,
@@ -120,6 +122,14 @@ export const drizzleMemoryRepository: MemoryRepository = {
     // external Bedrock call.
     return executeTransaction(
       async (tx) => {
+        // FOR UPDATE cannot lock a missing nearest row, so serialize the
+        // check-then-insert decision per user even when the memory set is empty.
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(
+            ${NEXUS_MEMORY_DEDUP_LOCK_NAMESPACE},
+            ${record.userId}
+          )`,
+        )
         const literal = vectorLiteral(record.embedding)
         const nearestResult = await tx.execute(sql`
           SELECT id, 1 - (embedding <=> ${literal}::vector) AS similarity
