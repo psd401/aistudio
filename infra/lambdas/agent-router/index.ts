@@ -472,6 +472,13 @@ interface CrossUserInvocation {
   commandName?: string;
 }
 
+interface AsideInvocation {
+  /** The question with the /btw command token stripped. */
+  messageText: string;
+  /** Whether Google supplied a registered command id or text fallback matched. */
+  source: 'slash-command' | 'text-prefix';
+}
+
 // ---------------------------------------------------------------------------
 // Slash command configuration
 // ---------------------------------------------------------------------------
@@ -489,11 +496,53 @@ interface CrossUserInvocation {
  */
 const CROSS_USER_SLASH_COMMAND_IDS = new Set(['1', '2']);
 
+/**
+ * Persistent owner-DM sidecar session command (issue #1405).
+ *
+ * Manual deploy-time registration in Google Cloud Console:
+ *   /btw -> commandId "3" -> "Ask a concurrent question while your agent works"
+ */
+const BTW_SLASH_COMMAND_ID = '3';
+
+const RECOGNIZED_SLASH_COMMAND_IDS = new Set([
+  ...CROSS_USER_SLASH_COMMAND_IDS,
+  BTW_SLASH_COMMAND_ID,
+]);
+
 /** Maps commandId to the human-readable command name for usage help text. */
 const SLASH_COMMAND_NAMES: Record<string, string> = {
   '1': '/ask',
   '2': '/consult',
+  [BTW_SLASH_COMMAND_ID]: '/btw',
 };
+
+const ASIDE_RESPONSE_PREFIX = '[aside] ';
+const AUTO_ASIDE_RESPONSE_PREFIX =
+  '[aside] _Your main task is still running._ ';
+const OWNER_BUSY_RESPONSE =
+  "I'm currently busy processing another request. Please try again in a moment.";
+
+function isSlashCommandAvailable(
+  commandId: string | undefined,
+  spaceType: GoogleChatEvent['space']['type']
+): boolean {
+  if (!commandId || !RECOGNIZED_SLASH_COMMAND_IDS.has(commandId)) return false;
+  return commandId !== BTW_SLASH_COMMAND_ID || spaceType === 'DM';
+}
+
+function logUnavailableSlashCommand(
+  commandId: string,
+  spaceType: GoogleChatEvent['space']['type'],
+  log: ReturnType<typeof createLogger>
+): void {
+  const recognized = RECOGNIZED_SLASH_COMMAND_IDS.has(commandId);
+  log.warn(
+    recognized
+      ? 'Ignoring slash command outside its allowed scope'
+      : 'Ignoring unrecognized slash command',
+    { commandId, spaceType }
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Cached secrets
@@ -1209,6 +1258,44 @@ function parseCrossUserInvocation(text: string): CrossUserInvocation | null {
   };
 }
 
+function slashCommandArgumentText(
+  message: NonNullable<GoogleChatEvent['message']>
+): string {
+  const argumentText = (message.argumentText ?? '').trim();
+  if (argumentText) return argumentText;
+
+  const text = (message.text ?? '').trim();
+  const firstSpace = text.search(/\s/);
+  return firstSpace === -1 ? '' : text.substring(firstSpace).trim();
+}
+
+/**
+ * Parse the owner-DM /btw sidecar command.
+ *
+ * Google Chat's registered command id is authoritative. The text-prefix path
+ * remains for clients/events that do not populate message.slashCommand.
+ */
+function parseAsideInvocation(
+  message: NonNullable<GoogleChatEvent['message']>
+): AsideInvocation | null {
+  if (message.slashCommand?.commandId === BTW_SLASH_COMMAND_ID) {
+    return {
+      messageText: slashCommandArgumentText(message),
+      source: 'slash-command',
+    };
+  }
+
+  if (message.slashCommand) return null;
+  const text = (message.argumentText ?? message.text ?? '').trim();
+  if (!text.startsWith('/btw')) return null;
+  const remainder = text.slice('/btw'.length);
+  if (remainder && remainder[0].trim()) return null;
+  return {
+    messageText: remainder.trim(),
+    source: 'text-prefix',
+  };
+}
+
 /**
  * Parse a /ask (or /consult) slash command invocation from a Google Chat message.
  *
@@ -1242,14 +1329,7 @@ function parseSlashCommandInvocation(
   // Fallback: when argumentText is absent (older API versions or edge cases
   // where only message.text is populated), derive arguments from message.text
   // by stripping the leading slash command token.
-  let argText = (message.argumentText ?? '').trim();
-  if (!argText && message.text) {
-    // message.text includes the slash command: "/ask reese question"
-    // Strip the first whitespace-delimited token (the command itself).
-    const textTrimmed = message.text.trim();
-    const firstSpace = textTrimmed.search(/\s/);
-    argText = firstSpace === -1 ? '' : textTrimmed.substring(firstSpace).trim();
-  }
+  const argText = slashCommandArgumentText(message);
 
   if (!argText) {
     // No arguments — caller should prompt with usage help or a dialog
@@ -1971,6 +2051,8 @@ interface JobPromotionInput {
   threadName?: string;
   isDM: boolean;
   originalPrompt: string;
+  acknowledgementPrefix?: string;
+  responsePrefix?: string;
 }
 
 interface JobPromotionConfig {
@@ -2078,6 +2160,7 @@ async function promoteToJob(
       threadName: input.threadName,
       isDM: input.isDM,
       originalPrompt: input.originalPrompt,
+      responsePrefix: input.responsePrefix,
     });
 
     const taskArn = await runPromotedJob(config, payload);
@@ -2085,7 +2168,8 @@ async function promoteToJob(
     await sendGoogleChatResponse(
       input.spaceName,
       input.threadName,
-      '⏳ This is taking longer than one pass allows — I\'ve moved it to a ' +
+      (input.acknowledgementPrefix ?? input.responsePrefix ?? '') +
+        '⏳ This is taking longer than one pass allows — I\'ve moved it to a ' +
         'background job and will post the result here when it\'s done.',
       log
     );
@@ -2931,14 +3015,16 @@ function extractIncomingMessage(
   const rawText = (message.argumentText ?? message.text ?? '').trim();
   const attachments = extractAttachments(message);
   const slashCommandId = message.slashCommand?.commandId;
-  const hasRecognizedSlashCommand =
-    slashCommandId === undefined
-      ? false
-      : CROSS_USER_SLASH_COMMAND_IDS.has(slashCommandId);
+  const hasRecognizedSlashCommand = isSlashCommandAvailable(
+    slashCommandId,
+    chatEvent.space.type
+  );
   if (slashCommandId && !hasRecognizedSlashCommand) {
-    log.warn('Ignoring unrecognized slash command', {
-      commandId: slashCommandId,
-    });
+    logUnavailableSlashCommand(
+      slashCommandId,
+      chatEvent.space.type,
+      log
+    );
     return null;
   }
   const hasProcessableContent =
@@ -3482,37 +3568,130 @@ function ownerSessionId(human: HumanMessage, user: AgentUser): string {
   return `${user.workspacePrefix}-${spaceHash}-${buildTag}`;
 }
 
-async function invokeOwnerAgent(
+function asideSessionId(human: HumanMessage, user: AgentUser): string {
+  const spaceHash = crypto
+    .createHash('sha256')
+    .update(human.spaceName)
+    .digest('hex');
+  const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
+  return `${user.workspacePrefix}-${spaceHash}-aside-${buildTag}`;
+}
+
+interface OwnerAgentTurn {
+  result: AgentCoreResult;
+  sessionId: string;
+  prompt: string;
+  responsePrefix: string;
+  isAside: boolean;
+  autoRouted: boolean;
+}
+
+interface OwnerInvocationDependencies {
+  fetchChatUploads: typeof fetchChatUploads;
+  isJobLockActive: typeof isJobLockActive;
+  tryAcquireSessionLock: typeof tryAcquireSessionLock;
+  waitForSessionLock: typeof waitForSessionLock;
+  releaseSessionLock: typeof releaseSessionLock;
+  invokeAgentCore: typeof invokeAgentCore;
+  sendGoogleChatResponse: typeof sendGoogleChatResponse;
+}
+
+const ownerInvocationDependencies: OwnerInvocationDependencies = {
+  fetchChatUploads,
+  isJobLockActive,
+  tryAcquireSessionLock,
+  waitForSessionLock,
+  releaseSessionLock,
+  invokeAgentCore,
+  sendGoogleChatResponse,
+};
+
+async function invokeOwnerAgentWithDependencies(
   human: HumanMessage,
   user: AgentUser,
   messageText: string,
-  log: ReturnType<typeof createLogger>
-): Promise<{ result: AgentCoreResult; sessionId: string } | null> {
-  const sessionId = ownerSessionId(human, user);
-  await fetchChatUploads(human.attachments, user.workspacePrefix, log);
-  if (await isJobLockActive(sessionId, log)) {
-    await sendGoogleChatResponse(
+  log: ReturnType<typeof createLogger>,
+  dependencies: OwnerInvocationDependencies
+): Promise<OwnerAgentTurn | null> {
+  const mainSessionId = ownerSessionId(human, user);
+  const ownerDm = human.chatEvent.space.type === 'DM' && !human.isSharedSpace;
+  const asideInvocation = ownerDm
+    ? parseAsideInvocation(human.message)
+    : null;
+
+  if (asideInvocation && !asideInvocation.messageText) {
+    await dependencies.sendGoogleChatResponse(
       human.spaceName,
       human.threadName,
-      "I'm still working on your earlier task in the background — I'll post " +
-        'the result here when it\'s done.',
+      'Usage: `/btw <question>`',
       log
     );
     return null;
   }
 
-  const lockToken = await waitForSessionLock(sessionId, log);
+  // Preserve the existing owner-turn contract: uploaded files are persisted
+  // even when a busy main job means a shared-space turn cannot run yet.
+  await dependencies.fetchChatUploads(
+    human.attachments,
+    user.workspacePrefix,
+    log
+  );
+
+  let sessionId = mainSessionId;
+  let prompt = messageText;
+  let responsePrefix = '';
+  let isAside = false;
+  let autoRouted = false;
+
+  if (asideInvocation) {
+    sessionId = asideSessionId(human, user);
+    prompt = asideInvocation.messageText;
+    responsePrefix = ASIDE_RESPONSE_PREFIX;
+    isAside = true;
+    log.info('Explicit aside invocation detected', {
+      source: asideInvocation.source,
+      sessionId,
+    });
+  } else {
+    const mainJobActive = await dependencies.isJobLockActive(
+      mainSessionId,
+      log
+    );
+    if (mainJobActive && ownerDm) {
+      sessionId = asideSessionId(human, user);
+      responsePrefix = AUTO_ASIDE_RESPONSE_PREFIX;
+      isAside = true;
+      autoRouted = true;
+      log.info('Main job active; auto-routing owner DM to aside session', {
+        mainSessionId,
+        asideSessionId: sessionId,
+      });
+    } else if (mainJobActive) {
+      await dependencies.sendGoogleChatResponse(
+        human.spaceName,
+        human.threadName,
+        "I'm still working on your earlier task in the background — I'll post " +
+          "the result here when it's done.",
+        log
+      );
+      return null;
+    }
+  }
+
+  const lockToken = isAside
+    ? await dependencies.tryAcquireSessionLock(sessionId, log)
+    : await dependencies.waitForSessionLock(sessionId, log);
   if (!lockToken) {
-    await sendGoogleChatResponse(
+    await dependencies.sendGoogleChatResponse(
       human.spaceName,
       human.threadName,
-      "I'm currently busy processing another request. Please try again in a moment.",
+      OWNER_BUSY_RESPONSE,
       log
     );
     return null;
   }
-  const result = await invokeAgentCore(
-    messageText,
+  const result = await dependencies.invokeAgentCore(
+    prompt,
     human.senderEmail,
     sessionId,
     log,
@@ -3523,35 +3702,74 @@ async function invokeOwnerAgent(
         ? { attachments: human.attachments }
         : {}),
     }
-  ).finally(() => releaseSessionLock(sessionId, lockToken, log));
-  return { result, sessionId };
+  ).finally(() =>
+    dependencies.releaseSessionLock(sessionId, lockToken, log)
+  );
+  return {
+    result,
+    sessionId,
+    prompt,
+    responsePrefix,
+    isAside,
+    autoRouted,
+  };
+}
+
+async function invokeOwnerAgent(
+  human: HumanMessage,
+  user: AgentUser,
+  messageText: string,
+  log: ReturnType<typeof createLogger>
+): Promise<OwnerAgentTurn | null> {
+  return invokeOwnerAgentWithDependencies(
+    human,
+    user,
+    messageText,
+    log,
+    ownerInvocationDependencies
+  );
 }
 
 interface OwnerTurnContext {
   human: HumanMessage,
   prepared: PreparedHumanTurn,
-  messageText: string,
-  turn: { result: AgentCoreResult; sessionId: string },
+  turn: OwnerAgentTurn,
   startTime: number;
+}
+
+function buildOwnerJobPromotionInput(
+  human: HumanMessage,
+  user: AgentUser,
+  turn: OwnerAgentTurn
+): JobPromotionInput {
+  return {
+    sessionId: turn.sessionId,
+    userEmail: human.senderEmail,
+    displayName: human.senderDisplayName,
+    workspacePrefix: user.workspacePrefix,
+    spaceName: human.spaceName,
+    threadName: human.threadName,
+    isDM: human.chatEvent.space.type === 'DM',
+    originalPrompt: turn.prompt,
+    acknowledgementPrefix: turn.responsePrefix,
+    responsePrefix: turn.isAside
+      ? ASIDE_RESPONSE_PREFIX
+      : turn.responsePrefix,
+  };
 }
 
 async function promoteOwnerTurn(
   context: OwnerTurnContext,
   log: ReturnType<typeof createLogger>
 ): Promise<boolean> {
-  const { human, prepared, messageText, turn, startTime } = context;
+  const { human, prepared, turn, startTime } = context;
   if (!shouldPromoteToJob(turn.result.errorClass)) return false;
   const promoted = await promoteToJob(
-    {
-      sessionId: turn.sessionId,
-      userEmail: human.senderEmail,
-      displayName: human.senderDisplayName,
-      workspacePrefix: prepared.user.workspacePrefix,
-      spaceName: human.spaceName,
-      threadName: human.threadName,
-      isDM: human.chatEvent.space.type === 'DM',
-      originalPrompt: messageText,
-    },
+    buildOwnerJobPromotionInput(
+      human,
+      prepared.user,
+      turn
+    ),
     log
   );
   if (!promoted) return false;
@@ -3577,15 +3795,17 @@ async function promoteOwnerTurn(
 
 function buildOwnerResponse(
   human: HumanMessage,
-  result: AgentCoreResult
+  result: AgentCoreResult,
+  responsePrefix = ''
 ): string {
   const maxLength = 4096;
   const truncationSuffix =
     '\n\n_(Response truncated — ask me to continue)_';
   const prefix =
-    human.chatEvent.space.type === 'DM'
+    responsePrefix ||
+    (human.chatEvent.space.type === 'DM'
       ? ''
-      : `[${human.senderDisplayName}'s Agent] `;
+      : `[${human.senderDisplayName}'s Agent] `);
   const availableLength = maxLength - prefix.length;
   const response =
     result.response.length > availableLength
@@ -3600,7 +3820,7 @@ function buildOwnerResponse(
 async function recordOwnerResult(
   human: HumanMessage,
   prepared: PreparedHumanTurn,
-  turn: { result: AgentCoreResult; sessionId: string },
+  turn: OwnerAgentTurn,
   startTime: number,
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
@@ -3666,7 +3886,7 @@ async function handleOwnerTurn(
   }
   if (
     await promoteOwnerTurn(
-      { human, prepared, messageText, turn, startTime },
+      { human, prepared, turn, startTime },
       log
     )
   ) {
@@ -3675,7 +3895,7 @@ async function handleOwnerTurn(
   await sendGoogleChatResponse(
     human.spaceName,
     human.threadName,
-    buildOwnerResponse(human, turn.result),
+    buildOwnerResponse(human, turn.result, turn.responsePrefix),
     log
   );
   await recordOwnerResult(human, prepared, turn, startTime, log);
@@ -3716,6 +3936,14 @@ export const agentRouterTestHelpers = {
   cardClickMessageText,
   parseAgentCoreResult,
   totalAgentTokens,
+  parseAsideInvocation,
+  ownerSessionId,
+  asideSessionId,
+  invokeOwnerAgentWithDependencies,
+  buildOwnerResponse,
+  buildOwnerJobPromotionInput,
+  extractIncomingMessage,
+  btwSlashCommandId: BTW_SLASH_COMMAND_ID,
 };
 
 // ---------------------------------------------------------------------------

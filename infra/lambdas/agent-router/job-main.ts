@@ -21,6 +21,7 @@
  */
 
 import {
+  formatJobChatResponse,
   JOB_DEADLINE_S,
   parseJobPayload,
   resolveJobInvocation,
@@ -127,19 +128,10 @@ async function main(): Promise<number> {
     // Deliver exactly like the router's Step 6: truncate the raw response,
     // then prefix in shared spaces. A failed turn's response is already the
     // harness's failure frame — posting it satisfies "always post something".
-    const maxLength = 4096;
-    const truncationSuffix = '\n\n_(Response truncated — ask me to continue)_';
-    const prefix = job.isDM ? '' : `[${job.displayName}'s Agent] `;
-    const availableLength = maxLength - prefix.length;
-    const truncatedResponse =
-      agentResult.response.length > availableLength
-        ? agentResult.response.substring(0, availableLength - truncationSuffix.length) +
-          truncationSuffix
-        : agentResult.response;
     await sendGoogleChatResponse(
       job.spaceName,
       job.threadName,
-      `${prefix}${truncatedResponse}`,
+      formatJobChatResponse(job, agentResult.response),
       log
     );
 

@@ -67,6 +67,8 @@ export interface JobPayload {
   threadName?: string;
   /** In shared spaces the reply is prefixed [Name's Agent]; DMs are not. */
   isDM: boolean;
+  /** Optional router-selected marker retained on acknowledgement/final replies. */
+  responsePrefix?: string;
   /** Truncated excerpt of the original request (context only, see above). */
   promptExcerpt: string;
 }
@@ -75,6 +77,33 @@ export interface JobInvocation {
   invokeSessionId: string;
   prompt: string;
   restart: boolean;
+}
+
+const JOB_RESPONSE_MAX_LENGTH = 4096;
+const JOB_TRUNCATION_SUFFIX =
+  '\n\n_(Response truncated — ask me to continue)_';
+
+/**
+ * Format the final background-job reply exactly once, independently of the
+ * runner's AWS/Chat side effects. A router-selected prefix (such as
+ * "[aside]") takes precedence over the normal shared-space attribution.
+ */
+export function formatJobChatResponse(
+  job: Pick<JobPayload, 'isDM' | 'displayName' | 'responsePrefix'>,
+  response: string
+): string {
+  const prefix =
+    job.responsePrefix ||
+    (job.isDM ? '' : `[${job.displayName}'s Agent] `);
+  const availableLength = JOB_RESPONSE_MAX_LENGTH - prefix.length;
+  const truncatedResponse =
+    response.length > availableLength
+      ? response.substring(
+          0,
+          availableLength - JOB_TRUNCATION_SUFFIX.length
+        ) + JOB_TRUNCATION_SUFFIX
+      : response;
+  return `${prefix}${truncatedResponse}`;
 }
 
 /**
@@ -121,6 +150,7 @@ export function buildJobPayload(input: {
   threadName?: string;
   isDM: boolean;
   originalPrompt: string;
+  responsePrefix?: string;
 }): string {
   const payload: JobPayload = {
     sessionId: input.sessionId,
@@ -133,6 +163,9 @@ export function buildJobPayload(input: {
     spaceName: input.spaceName,
     ...(input.threadName ? { threadName: input.threadName } : {}),
     isDM: input.isDM,
+    ...(input.responsePrefix
+      ? { responsePrefix: input.responsePrefix }
+      : {}),
     // A CONTINUATION resumes a session whose transcript already holds the full
     // request, so an excerpt is context garnish. A RESTART has no transcript —
     // a truncated prompt there means the agent silently executes an incomplete
@@ -194,6 +227,9 @@ export function parseJobPayload(raw: string | undefined): JobPayload {
       ? { threadName: obj.threadName }
       : {}),
     isDM: obj.isDM === true,
+    ...(typeof obj.responsePrefix === 'string' && obj.responsePrefix
+      ? { responsePrefix: obj.responsePrefix }
+      : {}),
     promptExcerpt:
       typeof obj.promptExcerpt === 'string' ? obj.promptExcerpt : '',
   };
