@@ -171,8 +171,12 @@ export function createMemoryService(
             input.userId,
             MAX_PROFILE_MEMORIES_PER_TURN,
           )
-        const relevantPromise = input.query.trim()
-          ? (async (): Promise<StoredNexusMemory[]> => {
+        const relevantInputPromise = input.query.trim()
+          ? (async (): Promise<{
+              embedding: number[]
+              threshold: number
+              limit: number
+            } | null> => {
               try {
                 const [thresholdSetting, topKSetting, embedding] =
                   await Promise.all([
@@ -180,12 +184,11 @@ export function createMemoryService(
                     dependencies.getSetting("MEMORY_RETRIEVAL_TOP_K"),
                     dependencies.generateEmbedding(input.query),
                   ])
-                return dependencies.repository.findRelevantMemories(
-                  input.userId,
+                return {
                   embedding,
-                  boundedThreshold(thresholdSetting),
-                  boundedTopK(topKSetting),
-                )
+                  threshold: boundedThreshold(thresholdSetting),
+                  limit: boundedTopK(topKSetting),
+                }
               } catch (error) {
                 // Profile facts are always injected. A relevance failure must
                 // not discard profile rows that do not need query embedding.
@@ -197,14 +200,40 @@ export function createMemoryService(
                       error instanceof Error ? error.message : String(error),
                   },
                 )
-                return []
+                return null
               }
             })()
-          : Promise.resolve([])
-        const [profile, relevant] = await Promise.all([
+          : Promise.resolve(null)
+        const [profile, relevantInput] = await Promise.all([
           profilePromise,
-          relevantPromise,
+          relevantInputPromise,
         ])
+        if (!relevantInput) return profile
+
+        let relevant: StoredNexusMemory[]
+        try {
+          // Exclude profiles already loaded for unconditional injection before
+          // semantic LIMIT is applied. Otherwise they can consume the entire
+          // top-K and hide older relevant profile/preference/context memories.
+          relevant =
+            await dependencies.repository.findRelevantMemories(
+              input.userId,
+              relevantInput.embedding,
+              relevantInput.threshold,
+              relevantInput.limit,
+              profile.map((memory) => memory.id),
+            )
+        } catch (error) {
+          log.warn(
+            "Nexus relevant-memory retrieval failed; using profile only",
+            {
+              userId: input.userId,
+              error:
+                error instanceof Error ? error.message : String(error),
+            },
+          )
+          return profile
+        }
         const seen = new Set(profile.map((memory) => memory.id))
         return [
           ...profile,

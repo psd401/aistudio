@@ -71,14 +71,14 @@ VALUES
   (
     'MEMORY_RETRIEVAL_THRESHOLD',
     '0.3',
-    'Minimum cosine similarity for preference and context memory retrieval.',
+    'Minimum cosine similarity for profile, preference, and context memory retrieval.',
     'nexus-memory',
     false
   ),
   (
     'MEMORY_RETRIEVAL_TOP_K',
     '6',
-    'Maximum preference and context memories retrieved for one Nexus turn.',
+    'Maximum semantically relevant profile, preference, and context memories retrieved for one Nexus turn.',
     'nexus-memory',
     false
   )

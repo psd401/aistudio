@@ -218,7 +218,7 @@ describe("Nexus memory privacy scan availability", () => {
 })
 
 describe("Nexus memory service retrieval and deletion", () => {
-  it("adds relevant older profiles without duplicating the newest profile set", async () => {
+  it("excludes newest profiles before ranking older relevant memories", async () => {
     const repository = createRepository()
     const profile = storedMemory({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", category: "profile" })
     const olderProfile = storedMemory({
@@ -254,6 +254,7 @@ describe("Nexus memory service retrieval and deletion", () => {
       [0.5, 0.5],
       0.42,
       9,
+      [profile.id],
     )
   })
 

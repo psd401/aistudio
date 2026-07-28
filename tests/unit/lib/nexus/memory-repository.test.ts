@@ -148,7 +148,7 @@ describe("Nexus memory repository deduplication", () => {
     )
   })
 
-  it("materializes the complete owner subset before relevant-memory ranking", async () => {
+  it("excludes loaded profiles from the exact owner subset before ranking", async () => {
     const execute = jest.fn().mockResolvedValue({})
     mockExecuteQuery.mockImplementation(
       async (operation: (value: { execute: typeof execute }) => unknown) =>
@@ -161,6 +161,10 @@ describe("Nexus memory repository deduplication", () => {
       [0.1, 0.2],
       0.3,
       6,
+      [
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      ],
     )
 
     const statement = execute.mock.calls[0]?.[0]
@@ -171,6 +175,16 @@ describe("Nexus memory repository deduplication", () => {
     expect(rendered.sql).toContain("AS MATERIALIZED")
     expect(rendered.sql).toContain("FROM owner_memories")
     expect(rendered.sql).toContain("'profile', 'preference', 'context'")
+    expect(rendered.sql).toContain("id NOT IN")
+    expect(rendered.sql.indexOf("id NOT IN")).toBeLessThan(
+      rendered.sql.indexOf("LIMIT"),
+    )
     expect(rendered.params).toContain(7)
+    expect(rendered.params).toContain(
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
+    expect(rendered.params).toContain(
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    )
   })
 })

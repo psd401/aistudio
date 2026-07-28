@@ -50,6 +50,7 @@ export interface MemoryRepository {
     embedding: number[],
     threshold: number,
     limit: number,
+    excludedMemoryIds: readonly string[],
   ): Promise<StoredNexusMemory[]>
   softDeleteOwned(memoryId: string, userId: number): Promise<boolean>
   conversationIsOwned(
@@ -223,8 +224,16 @@ export const drizzleMemoryRepository: MemoryRepository = {
     embedding,
     threshold,
     limit,
+    excludedMemoryIds,
   ) {
     const literal = vectorLiteral(embedding)
+    const exclusion =
+      excludedMemoryIds.length === 0
+        ? sql``
+        : sql`AND id NOT IN (${sql.join(
+            excludedMemoryIds.map((id) => sql`${id}::uuid`),
+            sql`, `,
+          )})`
     const result = await executeQuery(
       (db) =>
         db.execute(sql`
@@ -244,6 +253,7 @@ export const drizzleMemoryRepository: MemoryRepository = {
               AND category IN ('profile', 'preference', 'context')
               AND deleted_at IS NULL
               AND embedding IS NOT NULL
+              ${exclusion}
           )
           SELECT
             id,
