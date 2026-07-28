@@ -660,8 +660,10 @@ Verification evidence:
   Next.js build, complete infrastructure build, and all-stack synthesis of 29
   dev/prod templates passed.
 
-The remaining rollout check is a dev deployment followed by real Bedrock Cohere
-rerank/visual-embedding validation before visual indexing is enabled broadly.
+At this checkpoint, the remaining rollout check was a dev deployment followed
+by real Bedrock Cohere rerank/visual-embedding validation before visual indexing
+could be enabled broadly. The live provider gate is closed in the later
+retrieval-provider checkpoint.
 
 ### Retrieval v2 live-hardening checkpoint (2026-07-22)
 
@@ -957,6 +959,29 @@ Visual indexing was returned to its independent disabled flag after Cohere Embed
 v4 reported missing Marketplace entitlement. The previously active generation
 remained serving throughout, and this provider-enablement item does not affect
 the text-embedding or BDA media exit gate.
+
+### Retrieval v2 live-provider checkpoint (2026-07-27)
+
+The apparent manual Marketplace-approval blocker was incorrect. Bedrock
+automatically established the third-party model access on authorized first use,
+and both exact production model paths now pass in `us-east-1`:
+
+- `cohere.embed-v4:0` returned valid 1,536-dimensional text-query and
+  multimodal image-plus-text document vectors. The live visual check ranked the
+  relevant district-logo query above an unrelated cafeteria query with cosine
+  similarities `0.7028` and `0.0955`, respectively.
+- `cohere.rerank-v3-5:0` returned the expected top result for all three bounded
+  emergency-procedure, logo-identification, and video-timestamp cases
+  (`recall@1 = 1.0`, `MRR = 1.0`).
+- The checked-in Retrieval v2 quality/security gate and focused provider,
+  ranking, citation, ACL/service, and repository-tool coverage pass as seven
+  suites and 26 tests. The golden corpus continues to meet recall, MRR, nDCG,
+  citation-validity, authorization-leakage, latency, and estimated-cost
+  thresholds.
+
+This closes Retrieval v2 workstream #1263. Visual indexing remains independently
+flagged so operators can stage generation construction and rollback without
+coupling it to the text-retrieval cutover.
 
 The deployment also exposed a notification-ownership defect: ProcessingStack
 created a second group-sync SNS topic and email subscription even though each
@@ -1395,7 +1420,7 @@ successful recovery cannot manufacture a later reconciliation mismatch.
 The epic is not ready for retirement. The verified-duplicate recovery must be
 deployed and the live row retried/reconciled; retrieval shadowing and the three
 independent product cutovers still require authenticated observation; the full
-quiet/recovery window must then elapse; and Cohere Embed v4/Rerank 3.5 remain
-blocked on an AWS Marketplace subscription that the current principal is not
-authorized to accept. #1263 and #1267 must remain open until those external and
-time-based gates have durable evidence.
+quiet/recovery window must then elapse. The Cohere Embed v4/Rerank 3.5 live
+provider gate is complete, so #1263 can close. #1267's implementation is also
+complete; the epic remains open for its deployment-owned, external, and
+time-based rollout gates until they have durable evidence.
