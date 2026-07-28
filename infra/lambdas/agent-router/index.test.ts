@@ -10,10 +10,10 @@ const {
   parseAsideInvocation,
   ownerSessionId,
   asideSessionId,
-  isValidAgentCoreSessionId,
   invokeOwnerAgentWithDependencies,
   buildOwnerResponse,
   buildOwnerJobPromotionInput,
+  extractIncomingMessage,
   btwSlashCommandId,
 } = agentRouterTestHelpers
 
@@ -285,7 +285,9 @@ describe("/btw parsing and aside session identity", () => {
       expect(firstAsideId).toBe(secondAsideId)
       expect(firstAsideId).not.toBe(mainId)
       expect(firstAsideId).toContain("-aside-")
-      expect(isValidAgentCoreSessionId(firstAsideId)).toBe(true)
+      expect(firstAsideId.length).toBeGreaterThanOrEqual(33)
+      expect(firstAsideId.length).toBeLessThanOrEqual(256)
+      expect(firstAsideId).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/)
     } finally {
       if (previousBuildTag === undefined) {
         delete process.env.AGENT_BUILD_TAG
@@ -293,6 +295,23 @@ describe("/btw parsing and aside session identity", () => {
         process.env.AGENT_BUILD_TAG = previousBuildTag
       }
     }
+  })
+
+  test("accepts command ID 3 in DMs and drops it at shared-space ingress", () => {
+    const dm = ownerHuman({
+      argumentText: "DM side question",
+      slashCommandId: btwSlashCommandId,
+    })
+    const room = ownerHuman({
+      spaceType: "ROOM",
+      argumentText: "Shared-space side question",
+      slashCommandId: btwSlashCommandId,
+    })
+
+    expect(extractIncomingMessage(dm.chatEvent, TEST_LOG)?.rawText).toBe(
+      "DM side question"
+    )
+    expect(extractIncomingMessage(room.chatEvent, TEST_LOG)).toBeNull()
   })
 })
 
@@ -367,6 +386,15 @@ describe("owner-DM aside routing and locks", () => {
     )
     expect(response).toStartWith("[aside]")
     expect(response).toContain("main task is still running")
+    const promotion = buildOwnerJobPromotionInput(
+      human,
+      OWNER_USER,
+      turn!
+    )
+    expect(promotion.acknowledgementPrefix).toContain(
+      "main task is still running"
+    )
+    expect(promotion.responsePrefix).toBe("[aside] ")
   })
 
   test("plain messages still wait on the main turn lock when no job is active", async () => {
@@ -486,6 +514,7 @@ describe("owner-DM aside fallback, scope, and responses", () => {
       promotableTurn
     )
     expect(promotion.sessionId).toBe(asideSessionId(human, OWNER_USER))
+    expect(promotion.acknowledgementPrefix).toBe("[aside] ")
     expect(promotion.responsePrefix).toBe("[aside] ")
     expect(
       buildOwnerResponse(human, turn!.result, turn!.responsePrefix)

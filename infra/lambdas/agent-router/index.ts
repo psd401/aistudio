@@ -530,6 +530,20 @@ function isSlashCommandAvailable(
   return commandId !== BTW_SLASH_COMMAND_ID || spaceType === 'DM';
 }
 
+function logUnavailableSlashCommand(
+  commandId: string,
+  spaceType: GoogleChatEvent['space']['type'],
+  log: ReturnType<typeof createLogger>
+): void {
+  const recognized = RECOGNIZED_SLASH_COMMAND_IDS.has(commandId);
+  log.warn(
+    recognized
+      ? 'Ignoring slash command outside its allowed scope'
+      : 'Ignoring unrecognized slash command',
+    { commandId, spaceType }
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Cached secrets
 // ---------------------------------------------------------------------------
@@ -2037,6 +2051,7 @@ interface JobPromotionInput {
   threadName?: string;
   isDM: boolean;
   originalPrompt: string;
+  acknowledgementPrefix?: string;
   responsePrefix?: string;
 }
 
@@ -2153,7 +2168,7 @@ async function promoteToJob(
     await sendGoogleChatResponse(
       input.spaceName,
       input.threadName,
-      (input.responsePrefix ?? '') +
+      (input.acknowledgementPrefix ?? input.responsePrefix ?? '') +
         '⏳ This is taking longer than one pass allows — I\'ve moved it to a ' +
         'background job and will post the result here when it\'s done.',
       log
@@ -3005,9 +3020,11 @@ function extractIncomingMessage(
     chatEvent.space.type
   );
   if (slashCommandId && !hasRecognizedSlashCommand) {
-    log.warn('Ignoring unrecognized slash command', {
-      commandId: slashCommandId,
-    });
+    logUnavailableSlashCommand(
+      slashCommandId,
+      chatEvent.space.type,
+      log
+    );
     return null;
   }
   const hasProcessableContent =
@@ -3560,14 +3577,6 @@ function asideSessionId(human: HumanMessage, user: AgentUser): string {
   return `${user.workspacePrefix}-${spaceHash}-aside-${buildTag}`;
 }
 
-function isValidAgentCoreSessionId(sessionId: string): boolean {
-  return (
-    sessionId.length >= 33 &&
-    sessionId.length <= 256 &&
-    /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(sessionId)
-  );
-}
-
 interface OwnerAgentTurn {
   result: AgentCoreResult;
   sessionId: string;
@@ -3739,7 +3748,10 @@ function buildOwnerJobPromotionInput(
     threadName: human.threadName,
     isDM: human.chatEvent.space.type === 'DM',
     originalPrompt: turn.prompt,
-    responsePrefix: turn.responsePrefix,
+    acknowledgementPrefix: turn.responsePrefix,
+    responsePrefix: turn.isAside
+      ? ASIDE_RESPONSE_PREFIX
+      : turn.responsePrefix,
   };
 }
 
@@ -3924,10 +3936,10 @@ export const agentRouterTestHelpers = {
   parseAsideInvocation,
   ownerSessionId,
   asideSessionId,
-  isValidAgentCoreSessionId,
   invokeOwnerAgentWithDependencies,
   buildOwnerResponse,
   buildOwnerJobPromotionInput,
+  extractIncomingMessage,
   btwSlashCommandId: BTW_SLASH_COMMAND_ID,
 };
 
