@@ -76,8 +76,8 @@ export function parseScheduledRunReconciliationMessage(
   if (!/^\d{1,20}$/.test(scheduledRunId)) {
     throw new Error('Invalid scheduled-run reconciliation scheduledRunId');
   }
-  const startedBy = requiredString(record, 'startedBy', 128);
-  if (!/^scheduled-[a-f0-9]{64}$/.test(startedBy)) {
+  const startedBy = requiredString(record, 'startedBy', 36);
+  if (!/^scheduled-[a-f0-9]{26}$/.test(startedBy)) {
     throw new Error('Invalid scheduled-run reconciliation startedBy');
   }
   return {

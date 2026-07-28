@@ -410,6 +410,9 @@ const baseInput = {
         "startedBy: launchIdentity.startedBy",
       )
       expect(cronSource).toContain(
+        "startedBy: scheduledRunStartedBy(digest)",
+      )
+      expect(cronSource).toContain(
         "reconcileRunTaskLaunch({",
       )
       expect(cronSource).toContain(
@@ -441,6 +444,18 @@ const baseInput = {
       )
       expect(cronSource).toContain(
         "return sanitizeDiagnostic(",
+      )
+      const fireClaimAcquisition = cronSource.slice(
+        cronSource.indexOf("async function acquireScheduleFireClaim("),
+        cronSource.indexOf("function isHandlerResult("),
+      )
+      expect(fireClaimAcquisition).toContain(
+        "if (!claim.failure.recordRun)",
+      )
+      expect(
+        fireClaimAcquisition.indexOf("if (!claim.failure.recordRun)"),
+      ).toBeLessThan(
+        fireClaimAcquisition.indexOf("recordScheduleGuardFailure("),
       )
     })
   })

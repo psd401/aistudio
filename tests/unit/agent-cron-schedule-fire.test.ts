@@ -58,17 +58,18 @@ describe("agent-cron scheduled fire idempotency", () => {
       ...identity,
       key: `${identity.key}-other`,
     })
-
     expect(first).toEqual(second)
     expect(first).not.toEqual(other)
     expect(first.clientToken).toMatch(/^[a-f0-9]{64}$/)
-    expect(first.startedBy).toBe(`scheduled-${first.clientToken}`)
+    expect(first.startedBy).toBe(
+      `scheduled-${first.clientToken.slice(0, 26)}`
+    )
+    expect(first.startedBy).toHaveLength(36)
   })
 
   it("claims a fire past Scheduler's one-hour retry horizon", async () => {
     const dynamo = client()
     const beforeClaim = Math.floor(Date.now() / 1000)
-
     await expect(
       claimScheduleFire(identity, TABLE, dynamo, logger())
     ).resolves.toMatchObject({
@@ -76,7 +77,6 @@ describe("agent-cron scheduled fire idempotency", () => {
       identity,
       claimToken: expect.any(String),
     })
-
     expect(dynamo.put).toHaveBeenCalledWith(
       expect.objectContaining({
         TableName: TABLE,
@@ -106,7 +106,6 @@ describe("agent-cron scheduled fire idempotency", () => {
         Item: { status: "completed" },
       }),
     })
-
     await expect(
       claimScheduleFire(identity, TABLE, dynamo, logger())
     ).resolves.toEqual({
@@ -116,6 +115,7 @@ describe("agent-cron scheduled fire idempotency", () => {
         severity: "warn",
         errorMessage: "Scheduled fire was already completed",
         retryable: false,
+        recordRun: false,
       },
     })
   })
@@ -130,7 +130,6 @@ describe("agent-cron scheduled fire idempotency", () => {
         Item: { status: "running" },
       }),
     })
-
     await expect(
       claimScheduleFire(identity, TABLE, dynamo, logger())
     ).resolves.toEqual({
@@ -140,6 +139,7 @@ describe("agent-cron scheduled fire idempotency", () => {
         severity: "error",
         errorMessage: "Scheduled fire is still in progress",
         retryable: true,
+        recordRun: false,
       },
     })
   })
@@ -148,7 +148,6 @@ describe("agent-cron scheduled fire idempotency", () => {
     const dynamo = client({
       put: jest.fn().mockRejectedValue(new Error("throttled")),
     })
-
     await expect(
       claimScheduleFire(identity, TABLE, dynamo, logger())
     ).resolves.toEqual({
@@ -158,10 +157,14 @@ describe("agent-cron scheduled fire idempotency", () => {
         severity: "error",
         errorMessage: "Schedule fire claim failed: throttled",
         retryable: true,
+        recordRun: true,
       },
     })
   })
 
+})
+
+describe("agent-cron scheduled fire lifecycle", () => {
   it("marks success idempotently and conditionally releases failures", async () => {
     const dynamo = client()
     const claim = {
@@ -169,12 +172,10 @@ describe("agent-cron scheduled fire idempotency", () => {
       identity,
       claimToken: "owned-token",
     }
-
     await expect(
       completeScheduleFire(claim, TABLE, dynamo, logger())
     ).resolves.toEqual({ persisted: true })
     await releaseScheduleFire(claim, TABLE, dynamo, logger())
-
     expect(dynamo.update).toHaveBeenCalledWith(
       expect.objectContaining({
         Key: { sessionId: identity.key },

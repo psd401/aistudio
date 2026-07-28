@@ -11,7 +11,7 @@ const valid = {
   scheduleId: "schedule-id",
   scheduleName: "Morning brief",
   sessionId: "scheduled-session",
-  startedBy: `scheduled-${"a".repeat(64)}`,
+  startedBy: `scheduled-${"a".repeat(26)}`,
 } as const
 
 describe("agent-cron delayed scheduled-run reconciliation", () => {
@@ -29,6 +29,7 @@ describe("agent-cron delayed scheduled-run reconciliation", () => {
     { ...valid, type: "other" },
     { ...valid, scheduledRunId: "not-a-row" },
     { ...valid, startedBy: "scheduled-not-a-digest" },
+    { ...valid, startedBy: `scheduled-${"a".repeat(64)}` },
     { ...valid, userEmail: "" },
   ])("rejects malformed resolver messages", (message) => {
     expect(() =>

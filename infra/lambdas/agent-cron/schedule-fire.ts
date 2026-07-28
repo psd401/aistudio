@@ -14,6 +14,10 @@ import { sanitizeDiagnostic } from './diagnostic-sanitization';
 // ECS acceptance from reacquiring a fresh job lock and issuing a second task.
 const RUNNING_LEASE_SECONDS = 65 * 60;
 const COMPLETED_MARKER_SECONDS = 65 * 60;
+const ECS_STARTED_BY_MAX_LENGTH = 36;
+const SCHEDULED_STARTED_BY_PREFIX = 'scheduled-';
+const SCHEDULED_STARTED_BY_DIGEST_LENGTH =
+  ECS_STARTED_BY_MAX_LENGTH - SCHEDULED_STARTED_BY_PREFIX.length;
 
 interface ScheduleFireLogger {
   warn: (message: string, metadata?: Record<string, unknown>) => void;
@@ -48,6 +52,7 @@ export interface ScheduleFireFailure {
   severity: 'error' | 'warn';
   errorMessage: string;
   retryable: boolean;
+  recordRun: boolean;
 }
 
 export type ScheduleFireClaim =
@@ -159,8 +164,19 @@ export function scheduleFireLaunchIdentity(
     .digest('hex');
   return {
     clientToken: digest,
-    startedBy: `scheduled-${digest}`,
+    startedBy: scheduledRunStartedBy(digest),
   };
+}
+
+/**
+ * ECS limits startedBy to 36 characters. Retain the full SHA-256 digest in the
+ * client token and use a 104-bit prefix for task discovery/correlation.
+ */
+export function scheduledRunStartedBy(digest: string): string {
+  return (
+    SCHEDULED_STARTED_BY_PREFIX
+    + digest.slice(0, SCHEDULED_STARTED_BY_DIGEST_LENGTH)
+  );
 }
 
 export async function claimScheduleFire(
@@ -177,6 +193,7 @@ export async function claimScheduleFire(
         severity: 'error',
         errorMessage: 'SESSION_LOCKS_TABLE is not configured',
         retryable: true,
+        recordRun: true,
       },
     };
   }
@@ -213,6 +230,7 @@ export async function claimScheduleFire(
           severity: 'error',
           errorMessage: `Schedule fire claim failed: ${detail}`,
           retryable: true,
+          recordRun: true,
         },
       };
     }
@@ -232,6 +250,7 @@ export async function claimScheduleFire(
           severity: 'warn',
           errorMessage: 'Scheduled fire was already completed',
           retryable: false,
+          recordRun: false,
         },
       };
     }
@@ -242,6 +261,7 @@ export async function claimScheduleFire(
         severity: 'error',
         errorMessage: 'Scheduled fire is still in progress',
         retryable: true,
+        recordRun: false,
       },
     };
   } catch (error) {
@@ -256,6 +276,7 @@ export async function claimScheduleFire(
         severity: 'error',
         errorMessage: `Schedule fire state lookup failed: ${detail}`,
         retryable: true,
+        recordRun: true,
       },
     };
   }

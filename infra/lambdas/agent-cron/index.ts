@@ -94,6 +94,7 @@ import {
   resolveScheduleLockContention,
   scheduleFireIdentity,
   scheduleFireLaunchIdentity,
+  scheduledRunStartedBy,
   type ScheduleFireClaim,
   type ScheduleFireFailure,
   type ScheduleFireIdentity,
@@ -888,7 +889,7 @@ function legacyScheduledJobLaunchIdentity(
     .digest('hex');
   return {
     clientToken: lockToken,
-    startedBy: `scheduled-${digest}`,
+    startedBy: scheduledRunStartedBy(digest),
   };
 }
 
@@ -1623,6 +1624,16 @@ async function acquireScheduleFireClaim(
       scheduleId: context.schedule.scheduleId,
     };
   }
+  if (!claim.failure.recordRun) {
+    context.log.warn(
+      'In-progress duplicate schedule fire will retry without run telemetry',
+      {
+        scheduleId: context.schedule.scheduleId,
+        phase: claim.failure.phase,
+      },
+    );
+    throw new Error(claim.failure.errorMessage);
+  }
   const status = claim.failure.retryable ? 'error' : 'skipped';
   const result = await recordScheduleGuardFailure(
     context,
@@ -1686,6 +1697,7 @@ async function finalizeScheduleFire(
       severity: 'error',
       errorMessage: completion.errorMessage,
       retryable: false,
+      recordRun: true,
     },
     'error',
   );
