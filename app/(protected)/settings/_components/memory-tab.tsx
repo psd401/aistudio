@@ -26,7 +26,10 @@ import type {
   NexusMemoryCategory,
   NexusMemorySource,
 } from "@/lib/db/schema"
-import { MAX_NEXUS_MEMORY_CONTENT_CHARS } from "@/lib/nexus/memory/memory-constants"
+import {
+  MAX_BULK_MEMORY_DELETE_COUNT,
+  MAX_NEXUS_MEMORY_CONTENT_CHARS,
+} from "@/lib/nexus/memory/memory-constants"
 import { createLogger } from "@/lib/client-logger"
 import {
   AlertDialog,
@@ -268,6 +271,7 @@ function MemoryBadges({ memory }: { memory: NexusMemoryListItem }) {
 function MemoryRow({
   memory,
   selected,
+  selectionDisabled,
   editing,
   isSaving,
   onSelectedChange,
@@ -279,6 +283,7 @@ function MemoryRow({
 }: {
   memory: NexusMemoryListItem
   selected: boolean
+  selectionDisabled: boolean
   editing: EditingMemory | null
   isSaving: boolean
   onSelectedChange: (selected: boolean) => void
@@ -299,6 +304,7 @@ function MemoryRow({
       <div className="flex items-start gap-3">
         <Checkbox
           checked={selected}
+          disabled={selectionDisabled}
           aria-label={`Select memory: ${memory.content}`}
           className="mt-1"
           onCheckedChange={(checked) =>
@@ -427,6 +433,13 @@ function useMemoryCollection(initialData: NexusMemoryTabData) {
   const setSelected = (memoryId: string, selected: boolean) => {
     setSelectedIds((current) => {
       const next = new Set(current)
+      if (
+        selected &&
+        !next.has(memoryId) &&
+        next.size >= MAX_BULK_MEMORY_DELETE_COUNT
+      ) {
+        return current
+      }
       if (selected) next.add(memoryId)
       else next.delete(memoryId)
       return next
@@ -436,17 +449,31 @@ function useMemoryCollection(initialData: NexusMemoryTabData) {
   const selectAll = (selected: boolean) => {
     setSelectedIds(
       selected
-        ? new Set(memories.map((memory) => memory.id))
+        ? new Set(
+            memories
+              .slice(0, MAX_BULK_MEMORY_DELETE_COUNT)
+              .map((memory) => memory.id),
+          )
         : new Set(),
     )
   }
+
+  const selectableMemories = memories.slice(
+    0,
+    MAX_BULK_MEMORY_DELETE_COUNT,
+  )
 
   return {
     memories,
     memoryEnabled,
     selectedIds,
     allSelected:
-      memories.length > 0 && selectedIds.size === memories.length,
+      selectableMemories.length > 0 &&
+      selectableMemories.every((memory) =>
+        selectedIds.has(memory.id),
+      ),
+    selectionLimitReached:
+      selectedIds.size >= MAX_BULK_MEMORY_DELETE_COUNT,
     setMemoryEnabled,
     setSelectedIds,
     setSelected,
@@ -676,19 +703,28 @@ function MemorySelectionBar({
   onBulkDelete: () => void
 }) {
   if (collection.memories.length === 0) return null
+  let selectionLabel = "Select all"
+  if (collection.selectedIds.size > 0) {
+    selectionLabel = `${collection.selectedIds.size} selected${
+      collection.selectionLimitReached ? " (maximum)" : ""
+    }`
+  } else if (
+    collection.memories.length > MAX_BULK_MEMORY_DELETE_COUNT
+  ) {
+    selectionLabel = `Select first ${MAX_BULK_MEMORY_DELETE_COUNT}`
+  }
+
   return (
     <div className="flex flex-col gap-3 rounded-lg bg-muted/50 p-3 sm:flex-row sm:items-center sm:justify-between">
       <label className="flex items-center gap-2 text-sm font-medium">
         <Checkbox
           checked={collection.allSelected}
-          aria-label="Select all memories"
+          aria-label="Select memories for bulk deletion"
           onCheckedChange={(checked) =>
             collection.selectAll(checked === true)
           }
         />
-        {collection.selectedIds.size > 0
-          ? `${collection.selectedIds.size} selected`
-          : "Select all"}
+        {selectionLabel}
       </label>
       {collection.selectedIds.size > 0 && (
         <div className="flex gap-2">
@@ -734,6 +770,10 @@ function MemoryList({
           key={memory.id}
           memory={memory}
           selected={collection.selectedIds.has(memory.id)}
+          selectionDisabled={
+            collection.selectionLimitReached &&
+            !collection.selectedIds.has(memory.id)
+          }
           editing={editor.editing}
           isSaving={editor.savingMemoryId === memory.id}
           onSelectedChange={(selected) =>

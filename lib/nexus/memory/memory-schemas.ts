@@ -1,8 +1,9 @@
 import { z } from "zod"
 import { NEXUS_MEMORY_CATEGORIES } from "@/lib/db/schema"
-import { MAX_NEXUS_MEMORY_CONTENT_CHARS } from "./memory-constants"
-
-export const MAX_BULK_MEMORY_DELETE_COUNT = 100
+import {
+  MAX_BULK_MEMORY_DELETE_COUNT,
+  MAX_NEXUS_MEMORY_CONTENT_CHARS,
+} from "./memory-constants"
 
 const memoryId = z.string().uuid("Memory id must be a valid UUID")
 const memoryContent = z
