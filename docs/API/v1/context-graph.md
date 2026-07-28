@@ -1005,6 +1005,8 @@ The optional body may be omitted. A successful `201` response contains
 - `403` — Missing `assistants:write`.
 - `404` — A cataloged mutation is disabled, an update target is missing/owned
   by another user, or a fork source is missing/not visible.
+- `409` — The assistant has an active execution and cannot be replaced.
+- `413` — The create or update import envelope exceeds 10 MiB.
 - `429` — API-key rate limit exceeded.
 - `500` — Import persistence or another internal failure.
 
@@ -1075,11 +1077,14 @@ conversation is removed and the attachment remains retryable.
 `POST /api/v1/assistants/{id}/conversations/{cid}/messages` and the matching
 history route require the conversation's server-owned assistant ID to match
 `{id}`; a mismatched path returns the same `404` as a missing conversation.
-Before parsing or persisting a follow-up, the server unions all prompt-bound
-repositories with the conversation's runtime repositories and rechecks the
-executing principal's current ACL. The model receives tokenizer-bounded hybrid
-retrieval context and repository tools; durable history retains only the
-caller's original message text, not injected source content.
+After bounded body parsing, follow-up execution acquires the assistant-row lock,
+repeats programmatic approval and current grant checks, and creates an active
+execution row before loading the graph. Import replacement remains blocked until
+that row settles. The server then unions all prompt-bound repositories with the
+conversation's runtime repositories and rechecks the executing principal's
+current ACL. The model receives tokenizer-bounded hybrid retrieval context and
+repository tools; durable history retains only the caller's original message
+text, not injected source content.
 
 Assistant room access is evaluated in the shared resource gate before any
 provider call:
@@ -1156,6 +1161,9 @@ the caller's active room.
 
 **Response `404`** — Assistant not found, assistant execution is disabled, or a
 conversation does not belong to the assistant ID in the path.
+
+**Response `413`** — Execute, conversation-start, or follow-up body exceeds the
+128 KiB transport limit.
 
 **Response `500`** — Provider, persistence, or other internal execution failure.
 

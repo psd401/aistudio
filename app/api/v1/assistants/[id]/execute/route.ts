@@ -274,7 +274,12 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   const { assistantId } = authorization
 
   // 4. Parse and validate request body
-  const result = await parseRequestBody(request, executeBodySchema, requestId)
+  const result = await parseRequestBody(
+    request,
+    executeBodySchema,
+    requestId,
+    { maximumBytes: 128 * 1024 }
+  )
   if (isErrorResponse(result)) return result
   const { inputs } = result.data
 

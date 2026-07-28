@@ -276,6 +276,36 @@ async function validateAgentAuthoringPermissions(
   }
 }
 
+async function revalidateAssistantAuthoringBeforeWrite(
+  assistant: ExportedAssistant,
+  expectedModelMap: Map<string, number>,
+  authorUserId: number,
+): Promise<void> {
+  await validateAgentAuthoringPermissions([assistant], authorUserId);
+  const currentModelMap = await mapImportModels([assistant]);
+  for (const prompt of assistant.prompts) {
+    if (
+      currentModelMap.get(prompt.model_name) !==
+      expectedModelMap.get(prompt.model_name)
+    ) {
+      throw new AssistantImportServiceError(
+        "VALIDATION_ERROR",
+        "One or more prompt models are unavailable",
+      );
+    }
+  }
+  await validateImportedPromptResourceAccess(
+    [assistant],
+    currentModelMap,
+    authorUserId,
+  );
+  await validateImportedPromptTools(
+    [assistant],
+    currentModelMap,
+    authorUserId,
+  );
+}
+
 function importedFieldType(value: string): ImportedFieldType {
   switch (value) {
     case "short_text":
@@ -427,6 +457,11 @@ export async function createAssistantsFromImport(
     try {
       const result = await executeTransaction(
         async (tx) => {
+          await revalidateAssistantAuthoringBeforeWrite(
+            assistant,
+            modelMap,
+            userId,
+          );
           await options.beforeAssistantInsert?.(tx);
           return insertAssistantGraph(tx, assistant, modelMap, userId);
         },
@@ -636,6 +671,11 @@ export async function updateAssistantFromImport(
       );
     }
 
+    await revalidateAssistantAuthoringBeforeWrite(
+      assistant,
+      modelMap,
+      callerUserId,
+    );
     return replaceAssistantGraph(tx, assistantId, assistant, modelMap);
   }, "updateAssistantFromImport");
 

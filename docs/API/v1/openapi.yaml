@@ -1584,6 +1584,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "413":
+          description: Execution request body exceeds the 128 KiB transport limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /assistants/{id}/conversations:
     post:
@@ -1673,6 +1679,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "413":
+          description: Conversation request body exceeds the 128 KiB transport limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /assistants/{id}/conversations/{cid}/messages:
     post:
@@ -1692,7 +1704,10 @@ paths:
         with no active rooms keep ordinary behavior. Model and repository checks
         are unchanged.
 
-        Before the body is parsed or a message is written, the server unions
+        After bounded body parsing, the server creates an active execution while
+        holding the assistant-row lock and repeats approved-status and current
+        grant checks before loading the graph. That row blocks import
+        replacement until streaming finishes or fails. The server then unions
         every prompt-bound repository with the conversation's bounded runtime
         repository IDs and rechecks the executing principal's current ACL. The
         model receives bounded hybrid retrieval context and vector, keyword, and
@@ -1736,6 +1751,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Conversation not found or not bound to this assistant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Follow-up request body exceeds the 128 KiB transport limit.
           content:
             application/json:
               schema:

@@ -2381,7 +2381,10 @@ async function emitVariableSubstitutionEvent(
   inputMapping: Record<string, string>,
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
-  const substitutedVars: Record<string, string> = {};
+  const substitutedVars: Record<string, string> = Object.create(null) as Record<
+    string,
+    string
+  >;
   const sourcePrompts: number[] = [];
 
   // Extract which variables were substituted
@@ -2400,7 +2403,7 @@ async function emitVariableSubstitutionEvent(
           truncated: value.length > 500
         });
       }
-    } else if (varName in inputs) {
+    } else if (Object.hasOwn(inputs, varName)) {
       const inputValue = String(inputs[varName]);
       substitutedVars[varName] = String(sanitizeForLogging(inputValue)).substring(0, 500);
       if (inputValue.length > 500) {
@@ -3092,7 +3095,7 @@ function substituteVariables(
     const varName = dollarVar || braceVar;
 
     // 1. Check if there's an input mapping for this variable
-    if (mapping[varName]) {
+    if (Object.hasOwn(mapping, varName) && mapping[varName]) {
       const mappedPath = mapping[varName];
 
       // Handle prompt output references: "prompt_X.output"
@@ -3113,7 +3116,7 @@ function substituteVariables(
     }
 
     // 2. Try direct input lookup
-    if (varName in inputs) {
+    if (Object.hasOwn(inputs, varName)) {
       const value = inputs[varName];
       return value !== undefined && value !== null ? String(value) : match;
     }
@@ -3134,7 +3137,11 @@ function resolvePath(
   let current: unknown = context;
 
   for (const part of parts) {
-    if (current && typeof current === 'object') {
+    if (
+      current &&
+      typeof current === 'object' &&
+      Object.hasOwn(current, part)
+    ) {
       current = (current as Record<string, unknown>)[part];
     } else {
       return undefined;

@@ -590,6 +590,30 @@ it("creates caller-owned pending assistants and ignores imported approved status
   expect(database.fields).toHaveLength(1);
 });
 
+it("rechecks authoring grants immediately before the assistant write", async () => {
+  mockFilterAccessibleResourceIds
+    .mockResolvedValueOnce(new Set(["91"]))
+    .mockResolvedValueOnce(new Set());
+
+  const result = await createAssistantsFromImport(envelope(), 7);
+
+  expect(result).toMatchObject({
+    total: 1,
+    successful: 0,
+    failed: 1,
+    results: [
+      {
+        name: "Imported assistant",
+        status: "error",
+        error: "One or more prompt models are unavailable",
+      },
+    ],
+  });
+  expect(mockFilterAccessibleResourceIds).toHaveBeenCalledTimes(2);
+  expect(database.assistants).toHaveLength(0);
+  expect(database.prompts).toHaveLength(0);
+});
+
 it("rejects agent tools unavailable to the author before starting a transaction", async () => {
   mockValidateAgentToolsForAuthor.mockResolvedValue({
     isValid: false,

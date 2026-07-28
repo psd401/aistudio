@@ -165,7 +165,8 @@ async function parseStartRequest(
   const result = await parseRequestBody(
     request,
     startConversationSchema,
-    requestId
+    requestId,
+    { maximumBytes: 128 * 1024 }
   )
   if (isErrorResponse(result)) return { response: result }
 

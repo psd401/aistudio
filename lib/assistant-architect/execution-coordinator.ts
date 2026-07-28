@@ -1,7 +1,8 @@
-import { and, count, eq, gte } from "drizzle-orm"
+import { and, count, eq, gte, inArray } from "drizzle-orm"
 import { AGENT_LIMIT_CEILINGS, AGENT_LIMIT_DEFAULTS } from "@/lib/agents/types"
 import { checkUserRole } from "@/lib/db/drizzle/users"
 import {
+  executeQuery,
   executeTransaction,
   type DbTransaction,
 } from "@/lib/db/drizzle-client"
@@ -163,11 +164,15 @@ interface LockedAssistant {
 
 async function requireCurrentExecutionAccess(
   tx: DbTransaction,
-  assistant: LockedAssistant,
-  userId: number,
-  requireApproved: boolean,
+  args: {
+    assistant: LockedAssistant
+    userId: number
+    requireApproved: boolean
+    modelAccessMode: "configured_graph" | "final_prompt"
+  },
   dependencies: AssistantExecutionCoordinatorDependencies
 ): Promise<number> {
+  const { assistant, userId, requireApproved, modelAccessMode } = args
   if (requireApproved && assistant.status !== "approved") {
     throw ErrorFactories.dbRecordNotFound(
       "assistant_architects",
@@ -206,33 +211,47 @@ async function requireCurrentExecutionAccess(
   }
 
   const promptModels = await tx
-    .select({ modelId: chainPrompts.modelId })
+    .select({
+      modelId: chainPrompts.modelId,
+      position: chainPrompts.position,
+    })
     .from(chainPrompts)
     .where(eq(chainPrompts.assistantArchitectId, assistant.id))
-  if ((assistant.modelRoutingMode ?? "legacy") === "legacy") {
-    const modelIds = [
+  const modelIds =
+    modelAccessMode === "final_prompt"
+      ? [
+          promptModels.reduce<
+            { modelId: number; position: number } | undefined
+          >(
+            (last, prompt) =>
+              !last || prompt.position > last.position ? prompt : last,
+            undefined
+          )?.modelId,
+        ].filter((modelId): modelId is number => Boolean(modelId))
+      : (assistant.modelRoutingMode ?? "legacy") === "legacy"
+        ? [
       ...new Set(
         promptModels
           .map(({ modelId }) => modelId)
           .filter((modelId): modelId is number => modelId > 0)
       ),
     ]
-    for (const modelId of modelIds) {
-      const canAccessModel = await dependencies.userCanAccessResource(
-        userId,
-        "model",
-        modelId,
-        {},
-        tx
-      )
-      if (!canAccessModel) {
-        throw ErrorFactories.authzToolAccessDenied("assistant execution", {
-          userMessage:
-            "You do not have access to a model this assistant uses",
-          technicalMessage:
-            "Assistant model resource grants changed before the execution lock was acquired",
-        })
-      }
+        : []
+  for (const modelId of modelIds) {
+    const canAccessModel = await dependencies.userCanAccessResource(
+      userId,
+      "model",
+      modelId,
+      {},
+      tx
+    )
+    if (!canAccessModel) {
+      throw ErrorFactories.authzToolAccessDenied("assistant execution", {
+        userMessage:
+          "You do not have access to a model this assistant uses",
+        technicalMessage:
+          "Assistant model resource grants changed before the execution lock was acquired",
+      })
     }
   }
   return promptModels.length
@@ -285,6 +304,7 @@ export async function createCoordinatedAssistantExecution(
     inputs: Record<string, unknown>
     enforceAgentRateCap?: boolean
     requireApproved?: boolean
+    modelAccessMode?: "configured_graph" | "final_prompt"
   },
   dependencies: AssistantExecutionCoordinatorDependencies =
     defaultDependencies
@@ -321,13 +341,15 @@ export async function createCoordinatedAssistantExecution(
 
       const promptCount = await requireCurrentExecutionAccess(
         tx,
-        assistant,
-        args.userId,
-        args.requireApproved === true,
+        {
+          assistant,
+          userId: args.userId,
+          requireApproved: args.requireApproved === true,
+          modelAccessMode: args.modelAccessMode ?? "configured_graph",
+        },
         dependencies
       )
       if (
-        args.enforceAgentRateCap === true &&
         (promptCount === 0 ||
           promptCount > ASSISTANT_EXECUTION_MAX_PROMPTS)
       ) {
@@ -380,5 +402,35 @@ export async function createCoordinatedAssistantExecution(
       }
     },
     "createToolExecutionWithAssistantLock"
+  )
+}
+
+export async function settleCoordinatedAssistantExecution(args: {
+  executionId: number
+  status: "completed" | "failed"
+  errorMessage?: string
+}): Promise<void> {
+  await executeQuery(
+    (db) =>
+      db
+        .update(toolExecutions)
+        .set({
+          status: args.status,
+          completedAt: new Date(),
+          errorMessage:
+            args.status === "failed"
+              ? (args.errorMessage ?? "Assistant execution failed").slice(
+                  0,
+                  2000
+                )
+              : null,
+        })
+        .where(
+          and(
+            eq(toolExecutions.id, args.executionId),
+            inArray(toolExecutions.status, ["pending", "running"])
+          )
+        ),
+    "settleCoordinatedAssistantExecution"
   )
 }
