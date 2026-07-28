@@ -90,6 +90,8 @@ export interface TokenizationResult {
   tokens: TokenMapping[];
   /** Whether any PII was detected */
   hasPII: boolean;
+  /** Whether PII detection and any required token storage completed successfully */
+  scanCompleted: boolean;
 }
 
 /**

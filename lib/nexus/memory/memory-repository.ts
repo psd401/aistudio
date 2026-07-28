@@ -41,7 +41,10 @@ export interface MemoryRepository {
     record: MemoryWriteRecord,
     threshold: number,
   ): Promise<MemoryWriteResult>
-  listProfileMemories(userId: number): Promise<StoredNexusMemory[]>
+  listProfileMemories(
+    userId: number,
+    limit: number,
+  ): Promise<StoredNexusMemory[]>
   findRelevantMemories(
     userId: number,
     embedding: number[],
@@ -180,7 +183,7 @@ export const drizzleMemoryRepository: MemoryRepository = {
     )
   },
 
-  listProfileMemories(userId) {
+  listProfileMemories(userId, limit) {
     return executeQuery(
       (db) =>
         db
@@ -193,7 +196,8 @@ export const drizzleMemoryRepository: MemoryRepository = {
               isNull(nexusUserMemories.deletedAt),
             ),
           )
-          .orderBy(desc(nexusUserMemories.updatedAt)),
+          .orderBy(desc(nexusUserMemories.updatedAt))
+          .limit(limit),
       "listNexusProfileMemories",
     )
   },

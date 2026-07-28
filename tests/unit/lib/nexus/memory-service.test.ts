@@ -2,6 +2,7 @@ import { ContentSafetyBlockedError } from "@/lib/streaming/types"
 import {
   createMemoryService,
   MEMORY_DEDUP_THRESHOLD,
+  MAX_PROFILE_MEMORIES_PER_TURN,
 } from "@/lib/nexus/memory/memory-service"
 import type {
   MemoryRepository,
@@ -53,7 +54,11 @@ describe("Nexus memory service", () => {
     })
     const processInput = jest.fn(async () => {
       events.push("safety")
-      return { allowed: true, processedContent: "sanitized content" }
+      return {
+        allowed: true,
+        processedContent: "sanitized content",
+        piiScanCompleted: true,
+      }
     })
     const generateEmbedding = jest.fn(async () => {
       events.push("embedding")
@@ -92,6 +97,7 @@ describe("Nexus memory service", () => {
         processedContent:
           "Email [PII:11111111-1111-4111-8111-111111111111]",
         hasPII: true,
+        piiScanCompleted: true,
       })),
       generateEmbedding,
       getSetting: jest.fn(async () => null),
@@ -152,6 +158,7 @@ describe("Nexus memory service", () => {
       processInput: jest.fn(async (content) => ({
         allowed: true,
         processedContent: content,
+        piiScanCompleted: true,
       })),
       generateEmbedding,
       getSetting: jest.fn(async () => null),
@@ -170,6 +177,44 @@ describe("Nexus memory service", () => {
     expect(generateEmbedding).not.toHaveBeenCalled()
     expect(repository.saveWithDedup).not.toHaveBeenCalled()
   })
+})
+
+describe("Nexus memory privacy scan availability", () => {
+  it.each([false, undefined])(
+    "rejects a durable write when the PII scan attestation is %s",
+    async (piiScanCompleted) => {
+      const repository = createRepository()
+      const generateEmbedding = jest.fn(async () => [0.1])
+      const service = createMemoryService({
+        repository,
+        processInput: jest.fn(async () => ({
+          allowed: true,
+          processedContent: "Looks safe but was not conclusively screened",
+          hasPII: false,
+          piiScanCompleted,
+        })),
+        generateEmbedding,
+        getSetting: jest.fn(async () => null),
+      })
+
+      await expect(
+        service.save({
+          userId: 7,
+          sessionId: "cognito-sub",
+          content: "Looks safe but was not conclusively screened",
+          category: "context",
+          source: "tool",
+        }),
+      ).rejects.toMatchObject({
+        blockedMessage:
+          "Memory is temporarily unavailable because its privacy check could not be completed.",
+        blockedCategories: ["pii_scan_unavailable"],
+      })
+      expect(repository.conversationIsOwned).not.toHaveBeenCalled()
+      expect(generateEmbedding).not.toHaveBeenCalled()
+      expect(repository.saveWithDedup).not.toHaveBeenCalled()
+    },
+  )
 })
 
 describe("Nexus memory service retrieval and deletion", () => {
@@ -191,7 +236,10 @@ describe("Nexus memory service retrieval and deletion", () => {
 
     await expect(service.retrieve({ userId: 7, query: "current topic" }))
       .resolves.toEqual([profile, relevant])
-    expect(repository.listProfileMemories).toHaveBeenCalledWith(7)
+    expect(repository.listProfileMemories).toHaveBeenCalledWith(
+      7,
+      MAX_PROFILE_MEMORIES_PER_TURN,
+    )
     expect(repository.findRelevantMemories).toHaveBeenCalledWith(
       7,
       [0.5, 0.5],

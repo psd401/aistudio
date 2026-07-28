@@ -1,7 +1,10 @@
 import type { ToolSet } from "ai"
 import { resolveNexusMemoryContext } from "@/lib/nexus/memory/memory-context"
 import { buildNexusSystemPrompt } from "@/lib/nexus/system-prompt"
-import { buildUserMemoryFragment } from "@/lib/nexus/memory/memory-fragment"
+import {
+  buildUserMemoryFragment,
+  MAX_MEMORY_FRAGMENT_CHARS,
+} from "@/lib/nexus/memory/memory-fragment"
 import type { StoredNexusMemory } from "@/lib/nexus/memory/memory-repository"
 
 const MEMORY: StoredNexusMemory = {
@@ -101,5 +104,25 @@ describe("Nexus memory turn context", () => {
     expect(prompt.indexOf("Repository context")).toBeLessThan(
       prompt.indexOf("User memory marker"),
     )
+  })
+
+  it("bounds prompt injection while preserving complete quoted JSON entries", () => {
+    const memories = Array.from({ length: 10 }, (_, index) => ({
+      ...MEMORY,
+      id: `${String(index).padStart(8, "0")}-1111-4111-8111-111111111111`,
+      content: `${index}:${"x".repeat(7_900)}`,
+    }))
+
+    const fragment = buildUserMemoryFragment(memories)
+
+    expect(fragment).toBeDefined()
+    expect(fragment?.length).toBeLessThanOrEqual(MAX_MEMORY_FRAGMENT_CHARS)
+    const entryLines =
+      fragment?.split("\n").filter((line) => line.startsWith("- ")) ?? []
+    expect(entryLines.length).toBeGreaterThan(0)
+    expect(entryLines.length).toBeLessThan(memories.length)
+    for (const line of entryLines) {
+      expect(() => JSON.parse(line.slice(2))).not.toThrow()
+    }
   })
 })

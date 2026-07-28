@@ -19,12 +19,14 @@ const DEFAULT_RETRIEVAL_THRESHOLD = 0.3
 const DEFAULT_RETRIEVAL_TOP_K = 6
 const MAX_RETRIEVAL_TOP_K = 20
 const MAX_MEMORY_CONTENT_CHARS = 8_000
+export const MAX_PROFILE_MEMORIES_PER_TURN = 20
 const PII_PLACEHOLDER_PATTERN = /\[PII:[^\]\r\n]+\]/i
 
 interface SafetyResult {
   allowed: boolean
   processedContent: string
   hasPII?: boolean
+  piiScanCompleted?: boolean
   blockedMessage?: string
   blockedCategories?: string[]
 }
@@ -109,6 +111,16 @@ export function createMemoryService(
           "input",
         )
       }
+      if (safety.piiScanCompleted !== true) {
+        // Ordinary chat intentionally degrades gracefully when PII screening
+        // is disabled or unavailable. Durable memory cannot: accepting an
+        // indeterminate result would persist unscreened user content.
+        throw new ContentSafetyBlockedError(
+          "Memory is temporarily unavailable because its privacy check could not be completed.",
+          ["pii_scan_unavailable"],
+          "input",
+        )
+      }
       const sanitized = safety.processedContent.trim()
       if (
         safety.hasPII === true ||
@@ -155,7 +167,10 @@ export function createMemoryService(
     async retrieve(input) {
       try {
         const profilePromise =
-          dependencies.repository.listProfileMemories(input.userId)
+          dependencies.repository.listProfileMemories(
+            input.userId,
+            MAX_PROFILE_MEMORIES_PER_TURN,
+          )
         const relevantPromise = input.query.trim()
           ? (async (): Promise<StoredNexusMemory[]> => {
               try {
