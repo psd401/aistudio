@@ -18,7 +18,7 @@ mockForkAssistant = jest.fn()
 jest.mock("@/lib/assistant-architect/import-service", () => {
   class TestAssistantImportServiceError extends Error {
     constructor(
-      public readonly code: "VALIDATION_ERROR" | "NOT_FOUND" | "FORBIDDEN",
+      public readonly code: "VALIDATION_ERROR" | "NOT_FOUND" | "CONFLICT",
       message: string,
     ) {
       super(message)
@@ -239,11 +239,11 @@ describe("MCP assistant import service authorization errors", () => {
     mockForkAssistant.mockReset()
   })
 
-  it("returns a permission error when a staff caller updates another owner's assistant", async () => {
+  it("returns a masked not-found error for another owner's assistant", async () => {
     mockUpdateAssistantFromImport.mockRejectedValue(
       new AssistantImportServiceError(
-        "FORBIDDEN",
-        "You do not have permission to update this assistant",
+        "NOT_FOUND",
+        "Assistant not found: 31",
       ),
     )
 
@@ -253,7 +253,7 @@ describe("MCP assistant import service authorization errors", () => {
     )
 
     expect(result.isError).toBe(true)
-    expect(result.content[0].text).toMatch(/do not have permission/)
+    expect(result.content[0].text).toBe("Assistant not found: 31")
   })
 
   it("returns a masked not-found error for an invisible fork source", async () => {

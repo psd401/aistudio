@@ -38,7 +38,7 @@ type ImportedFieldType =
   "short_text" | "long_text" | "select" | "multi_select" | "file_upload";
 
 export type AssistantImportServiceErrorCode =
-  "VALIDATION_ERROR" | "NOT_FOUND" | "FORBIDDEN" | "CONFLICT";
+  "VALIDATION_ERROR" | "NOT_FOUND" | "CONFLICT";
 
 export class AssistantImportServiceError extends Error {
   constructor(
@@ -466,8 +466,8 @@ export async function updateAssistantFromImport(
     }
     if (!isAdmin && existing.userId !== callerUserId) {
       throw new AssistantImportServiceError(
-        "FORBIDDEN",
-        "You do not have permission to update this assistant",
+        "NOT_FOUND",
+        `Assistant not found: ${assistantId}`,
       );
     }
 

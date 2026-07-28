@@ -169,8 +169,6 @@ export const PUT = withApiAuth(async (request: NextRequest, auth, requestId) => 
           ? 400
           : error.code === "CONFLICT"
             ? 409
-          : error.code === "FORBIDDEN"
-            ? 403
             : 404
       return createErrorResponse(
         requestId,

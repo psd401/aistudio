@@ -736,7 +736,7 @@ it("rejects replacement while an execution can still reference live prompts", as
   expect(database).toEqual(before);
 });
 
-it("denies a staff caller updating an assistant they do not own", async () => {
+it("existence-masks a staff caller updating an assistant they do not own", async () => {
   database.assistants.push({
     id: 12,
     name: "Other owner",
@@ -748,7 +748,8 @@ it("denies a staff caller updating an assistant they do not own", async () => {
   await expect(
     updateAssistantFromImport(12, envelope(), 7),
   ).rejects.toMatchObject({
-    code: "FORBIDDEN",
+    code: "NOT_FOUND",
+    message: "Assistant not found: 12",
   } satisfies Partial<AssistantImportServiceError>);
 });
 
@@ -807,6 +808,20 @@ it("masks a resource-invisible fork source as not found", async () => {
   await expect(forkAssistant(12, 7)).rejects.toMatchObject({
     code: "NOT_FOUND",
   } satisfies Partial<AssistantImportServiceError>);
+});
+
+it("masks a non-owner pending fork source before resource lookup", async () => {
+  mockExecuteQuery.mockImplementation((_query: unknown, operation: unknown) =>
+    operation === "getAssistantForFork"
+      ? Promise.resolve([{ userId: 99, status: "pending_approval" }])
+      : Promise.resolve([]),
+  );
+
+  await expect(forkAssistant(12, 7)).rejects.toMatchObject({
+    code: "NOT_FOUND",
+    message: "Assistant not found: 12",
+  } satisfies Partial<AssistantImportServiceError>);
+  expect(mockUserCanAccessResource).not.toHaveBeenCalled();
 });
 
 it("forks into a caller-owned pending copy without changing the source", async () => {

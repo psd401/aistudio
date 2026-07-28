@@ -84,7 +84,6 @@ jest.mock("@/lib/assistant-architect/import-service", () => {
       public readonly code:
         | "VALIDATION_ERROR"
         | "NOT_FOUND"
-        | "FORBIDDEN"
         | "CONFLICT",
       message: string,
     ) {
@@ -467,11 +466,11 @@ describe("Assistant import REST v1 payload limits", () => {
 describe("Assistant import REST v1 service authorization errors", () => {
   beforeEach(resetMocks)
 
-  it("returns 403 when a staff caller tries to update another owner's assistant", async () => {
+  it("returns a masked 404 when a staff caller updates another owner's assistant", async () => {
     mockUpdateAssistantFromImport.mockRejectedValue(
       new AssistantImportServiceError(
-        "FORBIDDEN",
-        "You do not have permission to update this assistant",
+        "NOT_FOUND",
+        "Assistant not found: 12",
       ),
     )
 
@@ -485,9 +484,9 @@ describe("Assistant import REST v1 service authorization errors", () => {
       "req-update-forbidden",
     )
 
-    expect(response.status).toBe(403)
+    expect(response.status).toBe(404)
     expect(await response.json()).toMatchObject({
-      error: { code: "FORBIDDEN" },
+      error: { code: "NOT_FOUND" },
     })
   })
 

@@ -810,8 +810,10 @@ Every write preserves the existing human approval gate:
 - create: every assistant is owned by the authenticated caller and enters
   `pending_approval`, regardless of the envelope's `status`;
 - update: staff may replace only their own assistants; administrators may
-  replace any assistant; prompts and input fields are wholesale-replaced in the
-  same transaction and status resets to `pending_approval`. The assistant row is
+  replace any assistant. Missing ids and assistants owned by another user both
+  return a masked `404 NOT_FOUND`. Prompts and input fields are
+  wholesale-replaced in the same transaction and status resets to
+  `pending_approval`. The assistant row is
   locked for replacement, and a pending or running execution returns
   `409 CONFLICT` before any graph mutation so its in-memory prompt ids remain
   valid. Prompts referenced
