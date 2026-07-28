@@ -2,10 +2,11 @@ import {
   clearGatewayToolsCache,
   executeWorkflowGatewayTool,
   getCallerBoundArgumentNames,
-  isMutatingWorkflowToolName,
+  getCallerBoundArgumentNamesForTool,
   listGatewayTools,
   parseGatewayToolsList,
   parseSseFrames,
+  requiresCallerBinding,
   resolveGatewayEndpoint,
   unwrapWorkflowToolResult,
   WorkflowGatewayClient,
@@ -196,6 +197,19 @@ describe("workflow gateway SSE boundary", () => {
       })
     ).toEqual({ isError: false, data: { success: true } })
   })
+
+  it("preserves every item in a multi-content MCP result", () => {
+    const result = {
+      content: [
+        { type: "text", text: '{"success":true}' },
+        { type: "resource", resource: { uri: "https://example.com/result" } },
+      ],
+    }
+    expect(unwrapWorkflowToolResult(result)).toEqual({
+      isError: false,
+      data: result,
+    })
+  })
 })
 
 const roster = [
@@ -238,20 +252,44 @@ describe("workflow gateway roster parsing", () => {
     ).toEqual(["requester_email", "approver_email"])
   })
 
-  it("classifies every state-changing workflow verb as mutating", () => {
-    for (const verb of [
-      "approve",
-      "cancel",
-      "create",
-      "delete",
-      "reject",
-      "submit",
-      "update",
+  it("requires caller binding by default with explicit read-only prefixes", () => {
+    for (const toolName of [
+      "approve_example_request",
+      "CREATE_example_request",
+      "createExampleRequest",
+      "example_request_submit",
+      "search_example_request",
+      "submitx",
     ]) {
-      expect(isMutatingWorkflowToolName(`${verb}_example_request`)).toBe(true)
+      expect(requiresCallerBinding(toolName)).toBe(true)
     }
-    expect(isMutatingWorkflowToolName("get_example_request")).toBe(false)
-    expect(isMutatingWorkflowToolName("list_example_requests")).toBe(false)
+    expect(requiresCallerBinding("get_example_request")).toBe(false)
+    expect(requiresCallerBinding("list_example_requests")).toBe(false)
+  })
+
+  it("rejects non-string markers and bridges legacy caller-scoped tools", () => {
+    expect(() =>
+      getCallerBoundArgumentNames({
+        type: "object",
+        properties: {
+          approvers: {
+            type: "array",
+            description: "Verified approvers [caller-bound]",
+          },
+        },
+      })
+    ).toThrow(/top-level string/)
+    expect(
+      getCallerBoundArgumentNamesForTool("list_supervised_employees", {
+        type: "object",
+        properties: {
+          evaluator_email: {
+            type: "string",
+            description: "Evaluator email without the new marker",
+          },
+        },
+      })
+    ).toEqual(["evaluator_email"])
   })
 })
 

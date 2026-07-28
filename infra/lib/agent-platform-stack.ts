@@ -92,6 +92,8 @@ interface BundledSkillManifestEntry {
   imageTag: string;
 }
 
+const RETIRED_BUNDLED_SKILL_NAMES = ['psd-classified-evaluation'] as const;
+
 /**
  * AgentPlatformStack - Foundational infrastructure for the PSD AI Agent Platform
  *
@@ -4296,10 +4298,12 @@ export class AgentPlatformStack extends cdk.Stack {
 
     // Trigger string forces the Custom Resource to re-fire on every deploy
     // so manifest updates land even when the Lambda code hash is unchanged.
-    const skillInitTrigger = bundledSkillsManifest
-      .map((s) => `${s.name}:${s.sourceHash.slice(0, 8)}`)
-      .sort()
-      .join(',');
+    const skillInitTrigger = [
+      ...bundledSkillsManifest.map(
+        (skill) => `${skill.name}:${skill.sourceHash.slice(0, 8)}`,
+      ),
+      ...RETIRED_BUNDLED_SKILL_NAMES.map((name) => `retired:${name}`),
+    ].sort().join(',');
 
     const agentImageTagContext = this.node.tryGetContext('agentImageTag') ?? 'unset';
 
@@ -4313,6 +4317,7 @@ export class AgentPlatformStack extends cdk.Stack {
             RequestType: 'Create',
             ResourceProperties: {
               skills: bundledSkillsManifest,
+              retiredSkills: RETIRED_BUNDLED_SKILL_NAMES,
               imageTag: agentImageTagContext,
               trigger: skillInitTrigger,
             },
@@ -4329,6 +4334,7 @@ export class AgentPlatformStack extends cdk.Stack {
             RequestType: 'Update',
             ResourceProperties: {
               skills: bundledSkillsManifest,
+              retiredSkills: RETIRED_BUNDLED_SKILL_NAMES,
               imageTag: agentImageTagContext,
               trigger: skillInitTrigger,
             },

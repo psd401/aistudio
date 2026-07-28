@@ -19,15 +19,13 @@ const { validatedFs } = require('../../../validated-fs.cjs');
 const gateway = require('./gateway');
 
 const CALLER_BOUND_MARKER = '[caller-bound]';
-const MUTATING_TOOL_PREFIXES = [
-  'approve_',
-  'cancel_',
-  'create_',
-  'delete_',
-  'reject_',
-  'submit_',
-  'update_',
-];
+const READ_ONLY_TOOL_PREFIXES = ['get_', 'list_'];
+// One-release bridge for the pre-marker classified-evaluation gateway schemas.
+// Keep in sync with LEGACY_CALLER_BOUND_ARGUMENTS in workflow-gateway.ts.
+const LEGACY_CALLER_BOUND_ARGUMENTS = {
+  list_supervised_employees: ['evaluator_email'],
+  submit_classified_evaluation: ['evaluator_email'],
+};
 const USAGE = `Usage:
   node run.js list
   node run.js describe --tool <name>
@@ -151,10 +149,16 @@ function callerBoundArgumentNames(inputSchema) {
   if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return [];
   return Object.entries(properties).flatMap(([name, schema]) => {
     if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return [];
-    return typeof schema.description === 'string' &&
-      schema.description.includes(CALLER_BOUND_MARKER)
-      ? [name]
-      : [];
+    const marked = typeof schema.description === 'string' &&
+      schema.description.includes(CALLER_BOUND_MARKER);
+    if (!marked) return [];
+    if (schema.type !== 'string') {
+      throw new CliError(
+        `Caller-bound argument "${name}" must be a top-level string.`,
+        13
+      );
+    }
+    return [name];
   });
 }
 
@@ -173,8 +177,17 @@ function familyForTool(name) {
   return family || 'other';
 }
 
-function isMutatingToolName(name) {
-  return MUTATING_TOOL_PREFIXES.some((prefix) => name.startsWith(prefix));
+function callerBoundArgumentNamesForTool(toolName, inputSchema) {
+  return [...new Set([
+    ...callerBoundArgumentNames(inputSchema),
+    ...(LEGACY_CALLER_BOUND_ARGUMENTS[toolName] || []),
+  ])];
+}
+
+function requiresCallerBinding(toolName) {
+  return !READ_ONLY_TOOL_PREFIXES.some((prefix) =>
+    toolName.startsWith(prefix)
+  );
 }
 
 function groupTools(tools) {
@@ -232,10 +245,13 @@ async function runCall(args, dependencies) {
   const payload = loadCallArgs(args, dependencies.readFileSync);
   const tool = findTool(await dependencies.listGatewayTools(), toolName);
   if (!tool) throw new CliError(`Tool "${toolName}" is not in the live roster.`, 13);
-  const callerArguments = callerBoundArgumentNames(tool.inputSchema);
-  if (isMutatingToolName(toolName) && callerArguments.length === 0) {
+  const callerArguments = callerBoundArgumentNamesForTool(
+    toolName,
+    tool.inputSchema
+  );
+  if (requiresCallerBinding(toolName) && callerArguments.length === 0) {
     throw new CliError(
-      `Gateway mutating tool "${toolName}" is missing a ${CALLER_BOUND_MARKER} argument marker.`,
+      `Gateway tool "${toolName}" is missing a ${CALLER_BOUND_MARKER} argument marker.`,
       13
     );
   }
@@ -262,7 +278,10 @@ async function run(argv, dependencies = {}) {
   const subcommand = argv[0] && !argv[0].startsWith('--') ? argv[0] : null;
   const args = parseArgs(subcommand ? argv.slice(1) : argv);
 
-  if (args.help || subcommand === null) return USAGE;
+  if (args.help) return USAGE;
+  if (subcommand === null) {
+    throw new CliError(`A subcommand is required.\n${USAGE}`);
+  }
   try {
     if (subcommand === 'list') return runList(args, listGatewayTools);
     if (subcommand === 'describe') return runDescribe(args, listGatewayTools);
@@ -302,14 +321,15 @@ module.exports = {
   USAGE,
   bindCallerArguments,
   callerBoundArgumentNames,
+  callerBoundArgumentNamesForTool,
   familyForTool,
   groupTools,
-  isMutatingToolName,
   loadCallArgs,
   main,
   parseArgs,
   requireTool,
   requireUser,
+  requiresCallerBinding,
   run,
   statusForCode,
 };

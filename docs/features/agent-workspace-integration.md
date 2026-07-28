@@ -157,10 +157,14 @@ paste it verbatim into Chat and stop the turn. Exit 14 carries **no** URL.
    The `psd-workflows` skill discovers the gateway's live MCP `tools/list`
    roster through the signed web broker; an absent/incomplete secret → exit 11
    `not-configured`. Every gateway parameter that represents the verified
-   caller must include `[caller-bound]` in that parameter's `inputSchema`
-   description. The broker replaces all marked values with the signed owner and
-   rejects any unmarked mutating tool (`approve_*`, `cancel_*`, `create_*`,
-   `delete_*`, `reject_*`, `submit_*`, or `update_*`).
+   caller must be a top-level string property actually consumed by the workflow
+   and include `[caller-bound]` in that property's `inputSchema` description.
+   The broker replaces all marked values with the signed owner. Only lowercase
+   `get_*` and `list_*` names are treated as read-only; every other tool fails
+   closed without a marker, regardless of case or naming style. For one release,
+   `list_supervised_employees.evaluator_email` and
+   `submit_classified_evaluation.evaluator_email` are also owner-bound
+   explicitly so older gateway schemas remain safe during the marker rollout.
 7. Deploy infra (AgentPlatformStack + FrontendStack) and the new agent image. No
    `-c` context flags are needed for the gateway or DWD config.
 8. **Remediation (one-off, run manually):**

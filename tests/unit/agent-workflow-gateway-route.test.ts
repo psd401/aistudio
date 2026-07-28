@@ -224,7 +224,12 @@ describe("POST /api/agent/workflow-gateway", () => {
 })
 
 describe("POST /api/agent/workflow-gateway safety", () => {
-  it.each(["submit_future_packet", "create_future_packet"])(
+  it.each([
+    "submit_future_packet",
+    "create_future_packet",
+    "CREATE_future_packet",
+    "future_packet_submit",
+  ])(
     "rejects unmarked mutating tool %s with an actionable error",
     async (unsafeToolName) => {
       executingTool = {
@@ -253,6 +258,33 @@ describe("POST /api/agent/workflow-gateway safety", () => {
       expect(executeToolMock).toHaveBeenCalledTimes(1)
     }
   )
+
+  it("preserves legacy owner binding for caller-scoped list tools", async () => {
+    executingTool = {
+      name: "list_supervised_employees",
+      description: "Legacy caller-scoped roster",
+      inputSchema: {
+        type: "object",
+        properties: {
+          evaluator_email: {
+            type: "string",
+            description: "Evaluator email without the new marker",
+          },
+        },
+      },
+    }
+    const response = await POST(
+      request({
+        toolName: executingTool.name,
+        arguments: { evaluator_email: "attacker@psd401.net" },
+      })
+    )
+
+    expect(response.status).toBe(200)
+    expect(preparedArguments).toEqual({
+      evaluator_email: "owner@psd401.net",
+    })
+  })
 
   it("rejects tools absent from the live roster", async () => {
     executeToolMock.mockRejectedValueOnce(

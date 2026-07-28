@@ -30,8 +30,9 @@ node /opt/psd-skills/psd-workflows/run.js describe --tool <tool-name>
 ```
 
 Read its description and `inputSchema`, including required fields and field
-descriptions. A caller identity field is marked `[caller-bound]`; the web broker
-always replaces that field with the verified signed owner.
+descriptions. A caller identity field is a top-level string property marked
+`[caller-bound]`; it must be the field the workflow actually consumes. The web
+broker always replaces that field with the verified signed owner.
 
 ### 2. Load the workflow family's schema
 
@@ -85,9 +86,9 @@ node /opt/psd-skills/psd-workflows/run.js call \
 ```
 
 The broker derives the verified caller from the signed invocation context and
-overrides every `[caller-bound]` argument. Any mutating tool (`approve_*`,
-`cancel_*`, `create_*`, `delete_*`, `reject_*`, `submit_*`, or `update_*`)
-missing that marker is rejected; do not work around this failure. Relay
+overrides every `[caller-bound]` argument. Only lowercase `get_*` and `list_*`
+names are treated as read-only; every other tool missing that marker is rejected
+regardless of case or naming style. Do not work around this failure. Relay
 actionable gateway validation errors and correct the input rather than retrying
 blindly.
 

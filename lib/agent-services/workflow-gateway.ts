@@ -1,15 +1,13 @@
 import { safeFetch } from "@/lib/security/safe-fetch"
 
 export const CALLER_BOUND_MARKER = "[caller-bound]"
-const MUTATING_WORKFLOW_TOOL_PREFIXES = [
-  "approve_",
-  "cancel_",
-  "create_",
-  "delete_",
-  "reject_",
-  "submit_",
-  "update_",
-] as const
+const READ_ONLY_WORKFLOW_TOOL_PREFIXES = ["get_", "list_"] as const
+const LEGACY_CALLER_BOUND_ARGUMENTS: Readonly<
+  Record<string, readonly string[]>
+> = {
+  list_supervised_employees: ["evaluator_email"],
+  submit_classified_evaluation: ["evaluator_email"],
+}
 export const WORKFLOW_SSE_LIMITS = {
   rawBytes: 4 * 1024 * 1024,
   chunkBytes: 256 * 1024,
@@ -129,11 +127,12 @@ export function unwrapWorkflowToolResult(result: unknown): {
     isError?: unknown
     content?: unknown
   }
+  const content = Array.isArray(value.content) ? value.content : null
   const first =
-    Array.isArray(value.content) &&
-    value.content[0] &&
-    typeof value.content[0] === "object"
-      ? (value.content[0] as { text?: unknown })
+    content?.length === 1 &&
+    content[0] &&
+    typeof content[0] === "object"
+      ? (content[0] as { text?: unknown })
       : null
   if (typeof first?.text !== "string") {
     if (
@@ -599,15 +598,34 @@ export function getCallerBoundArgumentNames(
   if (!properties) return []
   return Object.entries(properties).flatMap(([name, schema]) => {
     if (!isRecord(schema)) return []
-    return typeof schema.description === "string" &&
+    const marked =
+      typeof schema.description === "string" &&
       schema.description.includes(CALLER_BOUND_MARKER)
-      ? [name]
-      : []
+    if (!marked) return []
+    if (schema.type !== "string") {
+      throw new WorkflowGatewayError(
+        `Caller-bound argument "${name}" must be a top-level string`,
+        "request"
+      )
+    }
+    return [name]
   })
 }
 
-export function isMutatingWorkflowToolName(toolName: string): boolean {
-  return MUTATING_WORKFLOW_TOOL_PREFIXES.some((prefix) =>
+export function getCallerBoundArgumentNamesForTool(
+  toolName: string,
+  inputSchema: Record<string, unknown>
+): string[] {
+  return [
+    ...new Set([
+      ...getCallerBoundArgumentNames(inputSchema),
+      ...(LEGACY_CALLER_BOUND_ARGUMENTS[toolName] ?? []),
+    ]),
+  ]
+}
+
+export function requiresCallerBinding(toolName: string): boolean {
+  return !READ_ONLY_WORKFLOW_TOOL_PREFIXES.some((prefix) =>
     toolName.startsWith(prefix)
   )
 }
