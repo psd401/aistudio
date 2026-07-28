@@ -275,7 +275,7 @@ function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part1() {
     expect(mockRollbackNewNexusAttachmentConversation).not.toHaveBeenCalled()
   })
 
-  it("defers automatic-routing model authorization to the selected model", async () => {
+  it("retains fallback-model authorization for resumable conversations", async () => {
     mockGetAssistantArchitect.mockResolvedValueOnce({
       isSuccess: true,
       message: "ok",
@@ -303,7 +303,7 @@ function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part1() {
 
     expect(response.status).toBe(200)
     expect(mockVerifyAssistantResourceGrants).toHaveBeenCalledWith(
-      expect.objectContaining({ architectId: 5, modelDbIds: [] })
+      expect.objectContaining({ architectId: 5, modelDbIds: [3] })
     )
   })
 

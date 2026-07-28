@@ -129,15 +129,12 @@ async function verifyStartAuthorization(
     auth,
     architectUserId: architect.userId,
     architectId: architect.id,
-    modelDbIds:
-      (architect.modelRoutingMode ?? "legacy") === "legacy"
-        ? prompts
-            .map((prompt) => prompt.modelId)
-            .filter(
-              (modelId): modelId is number =>
-                typeof modelId === "number" && modelId > 0
-            )
-        : [],
+    modelDbIds: prompts
+      .map((prompt) => prompt.modelId)
+      .filter(
+        (modelId): modelId is number =>
+          typeof modelId === "number" && modelId > 0
+      ),
     assistantId,
     requestId,
     log,
