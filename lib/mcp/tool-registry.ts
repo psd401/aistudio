@@ -459,8 +459,9 @@ Example:
       type: "object",
       properties: {
         assistantId: {
-          type: "number",
+          type: "integer",
           description: "Numeric ID of the visible assistant to fork.",
+          minimum: 1,
         },
         name: {
           type: "string",

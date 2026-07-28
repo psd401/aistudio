@@ -336,6 +336,169 @@ function defineAssistantExecutionServiceRepositoryPreflightSuite1Part3() {it("re
   })
 }
 
+function parallelFinalPromptAssistant() {
+  return {
+    isSuccess: true,
+    data: {
+      id: 5,
+      name: "Parallel assistant",
+      userId: 99,
+      mode: "prompt-chain",
+      modelRoutingMode: "legacy",
+      modelRoutingFamily: null,
+      prompts: [10, 11].map((id) => ({
+        id,
+        name: `Parallel ${id}`,
+        content: `Prompt ${id}`,
+        systemContext: null,
+        modelId: 3,
+        position: 0,
+        parallelGroup: id,
+        inputMapping: null,
+        repositoryIds: [],
+        enabledTools: null,
+        timeoutSeconds: null,
+      })),
+    },
+  }
+}
+
+interface FinishCallbacks {
+  onFinish: (result: {
+    text: string
+    usage: {
+      promptTokens: number
+      completionTokens: number
+      totalTokens: number
+    }
+  }) => Promise<void>
+}
+
+const finishResult = {
+  text: "done",
+  usage: {
+    promptTokens: 1,
+    completionTokens: 1,
+    totalTokens: 2,
+  },
+}
+
+function completedExecutionCallCount(): number {
+  return mockExecuteQuery.mock.calls.filter(
+    (call) => call[1] === "updateToolExecutionCompleted"
+  ).length
+}
+
+function defineAssistantExecutionCompletionBarrierSuite() {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockResolveRuntimeRepositoryInputs.mockResolvedValue({
+      repositoryIds: [],
+      queryContext: "",
+      references: [],
+      modelInputs: {},
+    })
+    mockRepositoryAccessPreflight.mockResolvedValue({
+      isAllowed: true,
+      repositoryIds: [],
+    })
+    mockCreateCoordinatedAssistantExecution.mockResolvedValue({
+      created: true,
+      executionId: 123,
+      startedAt: new Date("2026-07-28T00:00:00.000Z"),
+      deadlineAt: new Date("2026-07-28T00:15:00.000Z"),
+    })
+    mockExecuteQuery.mockResolvedValue([{ id: 123 }])
+    mockRetrieveKnowledgeForPrompt.mockResolvedValue([])
+    mockRetrieveAtriumKnowledgeForPrompt.mockResolvedValue([])
+    mockCreateRepositoryTools.mockReturnValue({})
+    mockStoreExecutionEvent.mockResolvedValue(undefined)
+    mockRouteAssistantArchitectModel.mockResolvedValue({
+      modelId: "model-3",
+      provider: "openai",
+      metadata: { mode: "legacy" },
+    })
+    mockGetAssistantArchitectByIdAction.mockResolvedValue(
+      parallelFinalPromptAssistant()
+    )
+    mockUnifiedStream.mockImplementation(async () => ({
+      result: {
+        toUIMessageStreamResponse: () => new Response("stream"),
+      },
+    }))
+  })
+
+  it("keeps a streaming execution active until every final sibling persists", async () => {
+    const callbacks: FinishCallbacks[] = []
+    let callbacksReady!: () => void
+    const ready = new Promise<void>((resolve) => {
+      callbacksReady = resolve
+    })
+    mockUnifiedStream.mockImplementation(async (request: unknown) => {
+      callbacks.push((request as { callbacks: FinishCallbacks }).callbacks)
+      if (callbacks.length === 2) callbacksReady()
+      return {
+        result: {
+          toUIMessageStreamResponse: () => new Response("stream"),
+        },
+      }
+    })
+
+    const execution = executeAssistant({
+      assistantId: 5,
+      inputs: {},
+      userId: 7,
+      cognitoSub: "executor-sub",
+      requestId: "request-parallel-stream",
+    })
+    await ready
+    await callbacks[0].onFinish(finishResult)
+    expect(completedExecutionCallCount()).toBe(0)
+
+    await callbacks[1].onFinish(finishResult)
+    await execution
+    expect(completedExecutionCallCount()).toBe(1)
+  })
+
+  it("keeps a job execution active until every final sibling persists", async () => {
+    const callbacks: FinishCallbacks[] = []
+    let firstReady!: () => void
+    let secondReady!: () => void
+    const first = new Promise<void>((resolve) => {
+      firstReady = resolve
+    })
+    const second = new Promise<void>((resolve) => {
+      secondReady = resolve
+    })
+    mockUnifiedStream.mockImplementation(async (request: unknown) => {
+      callbacks.push((request as { callbacks: FinishCallbacks }).callbacks)
+      if (callbacks.length === 1) firstReady()
+      if (callbacks.length === 2) secondReady()
+      return {
+        result: {
+          toUIMessageStreamResponse: () => new Response("stream"),
+        },
+      }
+    })
+
+    const execution = executeAssistantForJobCompletion({
+      assistantId: 5,
+      inputs: {},
+      userId: 7,
+      cognitoSub: "executor-sub",
+      requestId: "request-parallel-job",
+    })
+    await first
+    await callbacks[0].onFinish(finishResult)
+    await second
+    expect(completedExecutionCallCount()).toBe(0)
+
+    await callbacks[1].onFinish(finishResult)
+    await execution
+    expect(completedExecutionCallCount()).toBe(1)
+  })
+}
+
 const defineAssistantExecutionServiceRepositoryPreflightSuite1 = () => {
   defineAssistantExecutionServiceRepositoryPreflightSuite1Part1()
   defineAssistantExecutionServiceRepositoryPreflightSuite1Part2()
@@ -343,3 +506,7 @@ const defineAssistantExecutionServiceRepositoryPreflightSuite1 = () => {
 };
 
 describe("assistant execution service repository preflight", defineAssistantExecutionServiceRepositoryPreflightSuite1)
+describe(
+  "assistant execution completion barrier",
+  defineAssistantExecutionCompletionBarrierSuite
+)

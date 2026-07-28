@@ -155,6 +155,7 @@ interface LockedAssistant {
   userId: number | null
   status: string
   mode: string
+  modelRoutingMode: string | null
   timeoutSeconds: number | null
   agentTimeoutSeconds: number
   agentMaxRequestsPerHour: number | null
@@ -208,28 +209,30 @@ async function requireCurrentExecutionAccess(
     .select({ modelId: chainPrompts.modelId })
     .from(chainPrompts)
     .where(eq(chainPrompts.assistantArchitectId, assistant.id))
-  const modelIds = [
-    ...new Set(
-      promptModels
-        .map(({ modelId }) => modelId)
-        .filter((modelId): modelId is number => modelId > 0)
-    ),
-  ]
-  for (const modelId of modelIds) {
-    const canAccessModel = await dependencies.userCanAccessResource(
-      userId,
-      "model",
-      modelId,
-      {},
-      tx
-    )
-    if (!canAccessModel) {
-      throw ErrorFactories.authzToolAccessDenied("assistant execution", {
-        userMessage:
-          "You do not have access to a model this assistant uses",
-        technicalMessage:
-          "Assistant model resource grants changed before the execution lock was acquired",
-      })
+  if ((assistant.modelRoutingMode ?? "legacy") === "legacy") {
+    const modelIds = [
+      ...new Set(
+        promptModels
+          .map(({ modelId }) => modelId)
+          .filter((modelId): modelId is number => modelId > 0)
+      ),
+    ]
+    for (const modelId of modelIds) {
+      const canAccessModel = await dependencies.userCanAccessResource(
+        userId,
+        "model",
+        modelId,
+        {},
+        tx
+      )
+      if (!canAccessModel) {
+        throw ErrorFactories.authzToolAccessDenied("assistant execution", {
+          userMessage:
+            "You do not have access to a model this assistant uses",
+          technicalMessage:
+            "Assistant model resource grants changed before the execution lock was acquired",
+        })
+      }
     }
   }
   return promptModels.length
@@ -268,10 +271,12 @@ async function isAgentRateLimited(
  * Serialize execution start with import/update replacement.
  *
  * The assistant row lock is the shared coordination point. While holding it,
- * this function revalidates assistant visibility plus every prompt model grant,
- * applies the optional web-route agent rate cap, and creates the active
- * execution row. Import updates take the same lock before checking active rows,
- * so a caller can only load a graph after its execution row protects that graph.
+ * this function revalidates assistant visibility plus every pinned legacy
+ * prompt model grant, applies the optional web-route agent rate cap, and
+ * creates the active execution row. Automatically routed modes authorize the
+ * model selected by the router rather than the stored fallback. Import updates
+ * take the same lock before checking active rows, so a caller can only load a
+ * graph after its execution row protects that graph.
  */
 export async function createCoordinatedAssistantExecution(
   args: {
@@ -297,6 +302,7 @@ export async function createCoordinatedAssistantExecution(
           userId: assistantArchitects.userId,
           status: assistantArchitects.status,
           mode: assistantArchitects.mode,
+          modelRoutingMode: assistantArchitects.modelRoutingMode,
           timeoutSeconds: assistantArchitects.timeoutSeconds,
           agentTimeoutSeconds: assistantArchitects.agentTimeoutSeconds,
           agentMaxRequestsPerHour:

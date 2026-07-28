@@ -1049,6 +1049,12 @@ the `Accept: application/json` async-job path, MCP `execute_assistant`, and the
 browser Assistant Architect route all use the same assistant-lock execution
 coordinator. Its mode-specific deadline is also the enforced streaming timeout,
 so update reconciliation and live runtimes agree on when a row can be stale.
+Legacy routing rechecks every pinned prompt-model grant under that lock.
+Standard and advanced routing instead authorize the router's current selected
+model, not a stored fallback that may never be used. The coordinated execution
+row remains active until every prompt in a final parallel position has settled
+and persisted, so an import replacement cannot delete a sibling's prompt while
+it is still completing.
 API-key, JWT, and MCP execution accepts only `approved` assistants and repeats
 that status check under the assistant-row lock; authenticated browser sessions
 retain the owner/administrator draft-preview path.

@@ -22,6 +22,7 @@ interface AssistantRow {
   userId: number | null
   status: string
   mode: string
+  modelRoutingMode: string | null
   timeoutSeconds: number | null
   agentTimeoutSeconds: number
   agentMaxRequestsPerHour: number | null
@@ -93,6 +94,7 @@ const approvedAssistant: AssistantRow = {
   userId: 99,
   status: "approved",
   mode: "prompt_chain",
+  modelRoutingMode: "legacy",
   timeoutSeconds: 600,
   agentTimeoutSeconds: 300,
   agentMaxRequestsPerHour: null,
@@ -141,8 +143,8 @@ describe("createCoordinatedAssistantExecution", () => {
     const { tx, insert } = createTransaction(approvedAssistant, [3])
     const dependencies = coordinatorDependencies(tx)
     mockUserCanAccessResource
+      .mockResolvedValue(false)
       .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(false)
 
     await expect(
       createCoordinatedAssistantExecution({
@@ -155,6 +157,33 @@ describe("createCoordinatedAssistantExecution", () => {
         "You do not have access to a model this assistant uses",
     })
     expect(insert).not.toHaveBeenCalled()
+  })
+
+  it("leaves fallback authorization to the model router outside legacy mode", async () => {
+    const automaticallyRoutedAssistant = {
+      ...approvedAssistant,
+      modelRoutingMode: "standard",
+    }
+    const { tx, insert } = createTransaction(
+      automaticallyRoutedAssistant,
+      [3],
+    )
+    mockUserCanAccessResource
+      .mockResolvedValue(false)
+      .mockResolvedValueOnce(true)
+
+    await expect(
+      createCoordinatedAssistantExecution({
+        assistantId: 5,
+        userId: 7,
+        inputs: {},
+      }, coordinatorDependencies(tx))
+    ).resolves.toMatchObject({ created: true, executionId: 123 })
+    expect(mockUserCanAccessResource).toHaveBeenCalledTimes(1)
+    expect(
+      mockUserCanAccessResource.mock.calls[0] as unknown[]
+    ).toEqual([7, "assistant", 5, { ownerUserId: 99 }, tx])
+    expect(insert).toHaveBeenCalledTimes(1)
   })
 
   it("fails before graph reads or insert when assistant access was revoked", async () => {

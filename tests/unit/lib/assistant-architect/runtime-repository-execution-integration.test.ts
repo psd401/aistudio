@@ -130,4 +130,23 @@ describe("Assistant Architect runtime repository execution integration", () => {
       "references: runtimeRepositoryInputs.references"
     );
   });
+
+  it("finalizes a parallel last position only after every sibling settles", () => {
+    const parallelStart = routeSource.indexOf(
+      "async function executeParallelPositionGroup("
+    );
+    const allSettledIndex = routeSource.indexOf(
+      "await Promise.allSettled(parallelPromises)",
+      parallelStart
+    );
+    const finalizeIndex = routeSource.indexOf(
+      "await finalizeExecutionOnLastPrompt(",
+      allSettledIndex
+    );
+
+    expect(parallelStart).toBeGreaterThan(-1);
+    expect(routeSource).toContain("completeExecution: false");
+    expect(allSettledIndex).toBeGreaterThan(parallelStart);
+    expect(finalizeIndex).toBeGreaterThan(allSettledIndex);
+  });
 });

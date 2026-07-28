@@ -558,6 +558,7 @@ async function executePromptChain(
           log,
           totalPrompts: prompts.length,
           isLastPrompt: isLastPosition && idx === 0,
+          completeExecution: false,
           prompts,
         })
       )
@@ -572,6 +573,9 @@ async function executePromptChain(
           `${failures.length} of ${promptsAtPosition.length} parallel prompt(s) failed at position ${position}: ${truncated}`,
           { cause: firstError instanceof Error ? firstError : undefined }
         )
+      }
+      if (isLastPosition) {
+        await recordAssistantExecutionCompletion(context, log)
       }
 
       const successResults = results.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<typeof lastStreamResponse>[]
@@ -643,6 +647,7 @@ async function executePromptChainForText(
         log,
         totalPrompts: prompts.length,
         isLastPrompt: isLast,
+        completeExecution: false,
         prompts,
       })
 
@@ -653,6 +658,7 @@ async function executePromptChainForText(
     }
   }
 
+  await recordAssistantExecutionCompletion(context, log, lastUsage)
   return { text: lastText, usage: lastUsage }
 }
 
@@ -759,6 +765,7 @@ interface SinglePromptExecutionOptions {
   log: ReturnType<typeof createLogger>
   totalPrompts: number
   isLastPrompt: boolean
+  completeExecution?: boolean
   prompts: ChainPrompt[]
 }
 
@@ -780,6 +787,7 @@ interface PreparedPromptRun {
   promptTools: NonNullable<StreamRequest["tools"]>
   modelRoute: Awaited<ReturnType<typeof routeAssistantArchitectModel>>
   isLastPrompt: boolean
+  completeExecution: boolean
 }
 
 async function emitPromptStart(
@@ -854,6 +862,8 @@ async function preparePromptRun(
     promptTools,
     modelRoute,
     isLastPrompt: options.isLastPrompt,
+    completeExecution:
+      options.completeExecution ?? options.isLastPrompt,
   }
 }
 
@@ -916,7 +926,9 @@ async function recordPromptCompletion(
   }).catch((error) => {
     run.log.error("Failed to store prompt-complete event", { error })
   })
-  if (run.isLastPrompt) await recordAssistantExecutionCompletion(run, usage)
+  if (run.completeExecution) {
+    await recordAssistantExecutionCompletion(run.context, run.log, usage)
+  }
 }
 
 async function saveCompletedPromptResult(
@@ -941,24 +953,25 @@ async function saveCompletedPromptResult(
 }
 
 async function recordAssistantExecutionCompletion(
-  run: PreparedPromptRun,
+  context: PromptExecutionContext,
+  log: ReturnType<typeof createLogger>,
   usage?: PromptUsage
 ): Promise<void> {
   await executeQuery(
     (db) => db.execute(sql`
       UPDATE tool_executions
       SET status = 'completed', completed_at = ${new Date().toISOString()}::timestamp
-      WHERE id = ${run.context.executionId}
+      WHERE id = ${context.executionId}
     `),
     "updateToolExecutionCompleted"
   )
-  await storeExecutionEvent(run.context.executionId, "execution-complete", {
-    executionId: run.context.executionId,
+  await storeExecutionEvent(context.executionId, "execution-complete", {
+    executionId: context.executionId,
     totalTokens: usage?.totalTokens || 0,
-    duration: Date.now() - run.context.executionStartTime,
+    duration: Date.now() - context.executionStartTime,
     success: true,
   }).catch((error) => {
-    run.log.error("Failed to store execution-complete event", { error })
+    log.error("Failed to store execution-complete event", { error })
   })
 }
 

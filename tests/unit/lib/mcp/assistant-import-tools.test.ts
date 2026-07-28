@@ -95,6 +95,9 @@ function expectCompleteAssistantImportSchemas(): void {
   const updateTool = MCP_TOOLS.find(
     (tool) => tool.name === "update_assistant",
   )
+  const forkTool = MCP_TOOLS.find(
+    (tool) => tool.name === "fork_assistant",
+  )
 
   expect(createTool?.inputSchema).toMatchObject({
     required: ["version", "assistants"],
@@ -159,6 +162,12 @@ function expectCompleteAssistantImportSchemas(): void {
     properties: {
       assistantId: { type: "integer", minimum: 1 },
       assistants: { minItems: 1, maxItems: 1 },
+    },
+  })
+  expect(forkTool?.inputSchema).toMatchObject({
+    required: ["assistantId"],
+    properties: {
+      assistantId: { type: "integer", minimum: 1 },
     },
   })
 }

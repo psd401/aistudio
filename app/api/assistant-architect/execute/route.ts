@@ -1273,7 +1273,8 @@ type SinglePromptResult = Awaited<ReturnType<typeof executeSinglePromptWithCompl
  * failed prompt ids (mapped positionally to the original prompts) and throws a
  * wrapped sysInternalError. On success, returns the UI stream response from the
  * prompt explicitly marked for UI streaming (only one is), or undefined.
- * Behavior matches the original inline `if (isParallel)` branch exactly.
+ * The execution-complete transition deliberately occurs only after the final
+ * position's entire sibling set has settled.
  */
 async function executeParallelPositionGroup(args: {
   promptsAtPosition: ChainPrompt[];
@@ -1306,7 +1307,8 @@ async function executeParallelPositionGroup(args: {
       log,
       totalPrompts,
       // First prompt in last position gets stream response for UI
-      isLastPrompt: isLastPosition && idx === 0
+      isLastPrompt: isLastPosition && idx === 0,
+      completeExecution: false
     })
   );
 
@@ -1350,6 +1352,14 @@ async function executeParallelPositionGroup(args: {
         },
         cause: firstError instanceof Error ? firstError : undefined
       }
+    );
+  }
+  if (isLastPosition) {
+    await finalizeExecutionOnLastPrompt(
+      context,
+      undefined,
+      totalPrompts,
+      log
     );
   }
 
@@ -2176,6 +2186,7 @@ interface SinglePromptOptions {
   log: ReturnType<typeof createLogger>;
   totalPrompts: number;
   isLastPrompt: boolean;
+  completeExecution?: boolean;
 }
 
 function getPromptRepositoryIds(
@@ -2629,7 +2640,14 @@ async function runPromptOnFinish(args: {
     options, finish, promptStartTime, promptTimer, processedContent,
     repositoryContext, userMessage, streamResponsePromise, resolve, reject,
   } = args;
-  const { prompt, context, totalPrompts, isLastPrompt, log } = options;
+  const {
+    prompt,
+    context,
+    totalPrompts,
+    isLastPrompt,
+    completeExecution,
+    log,
+  } = options;
   const { text, usage, finishReason } = finish;
   // Compute once and reuse — identical to the original repeated `text || ''` and
   // `text?.length || 0` expressions (both map undefined/'' to the same value).
@@ -2695,8 +2713,9 @@ async function runPromptOnFinish(args: {
     // Each prompt in the chain gets its own message for later resumption
     await savePromptConversationMessage({ prompt, context, text: safeText, usage, executionTimeMs, log });
 
-    // If this is the last prompt, update execution status to completed
-    if (isLastPrompt) {
+    // Sequential last prompts finalize here. Parallel groups defer this until
+    // every sibling's onFinish persistence has settled.
+    if (completeExecution ?? isLastPrompt) {
       await finalizeExecutionOnLastPrompt(context, usage, totalPrompts, log);
     }
 

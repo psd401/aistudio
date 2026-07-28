@@ -1461,12 +1461,17 @@ paths:
         - API-key and JWT callers may execute only `approved` assistants;
           authenticated browser sessions retain owner/administrator draft preview
 
-        Beyond the assistant scope check, the caller must have per-resource access
-        (Epic #1202 Phase 3) to BOTH the assistant and every model its prompt
-        graph can use. Execution creation takes the same assistant-row lock as
-        import replacement, rechecks those current grants in that transaction,
-        creates the active execution row, and only then loads the executable
-        prompt graph. Active room assignment grants access to the assistant, even when
+        Beyond the assistant scope check, the caller must have per-resource
+        access (Epic #1202 Phase 3) to the assistant and the model selected for
+        each prompt. For legacy routing, execution creation rechecks every
+        pinned prompt-model grant in the assistant-row lock transaction. For
+        standard and advanced routing, the router authorizes its current
+        selected model rather than the stored fallback. Execution creation takes
+        the same assistant-row lock as import replacement, rechecks the
+        applicable current grants, creates the active execution row, and only
+        then loads the executable prompt graph. The row remains active until
+        every prompt in a final parallel position has settled and persisted.
+        Active room assignment grants access to the assistant, even when
         its role/Google-group grants would deny the caller. A caller whose only
         AI Studio role is `student` and who has an active room may execute only
         room-assigned assistants; assistant ownership and zero-grant
