@@ -15,6 +15,7 @@ import {
   type TokenMappingSink,
 } from '@/lib/safety/token-mapping-sink';
 import { getModelConfig } from '@/lib/ai/model-config';
+import { modelSupportsFunctionCalling } from '@/lib/ai/model-router/core';
 import type {
   ImageGenerationResult,
   ReferenceImage,
@@ -89,6 +90,8 @@ import {
 } from '@/lib/skills/skill-tool-enforcement';
 import { readSkillMarkdown } from '@/lib/skills/skill-publish-pipeline';
 import { buildWorkspaceChatTools } from '@/lib/nexus/workspace-chat-tools';
+import { resolveNexusMemoryContext } from '@/lib/nexus/memory/memory-context';
+import { buildNexusSystemPrompt } from '@/lib/nexus/system-prompt';
 import { mergeRoutedToolNames, routeNexusRequest } from '@/lib/nexus/model-router/router';
 import { NexusSpecialistUnavailableError } from '@/lib/nexus/model-router/errors';
 import {
@@ -191,30 +194,34 @@ function createOnFinishCallback(params: {
 
 /**
  * Pre-merge the adapter (universal) tools with per-user MCP connector tools and
- * the open-workspace content tools (§1087). Returns undefined when neither
- * connectors nor workspace tools are active (the streaming service then builds
- * adapter tools itself from `enabledTools`). Connector + workspace tools take
- * precedence over adapter tools on a name collision.
+ * the server-built workspace, attachment, and memory tools. Returns undefined
+ * when no pre-merged tool source is active (the streaming service then builds
+ * adapter tools itself from `enabledTools`). Server-built tools take precedence
+ * over adapter tools on a name collision.
  */
 async function buildMergedChatTools(params: {
   enabledTools: string[];
   connectorToolResults: McpConnectorToolsResult[];
   workspaceTools?: ToolSet;
   attachmentTools?: ToolSet;
+  memoryTools?: ToolSet;
 }): Promise<ToolSet | undefined> {
   const {
     enabledTools,
     connectorToolResults,
     workspaceTools,
     attachmentTools,
+    memoryTools,
   } = params;
   const hasWorkspaceTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
   const hasAttachmentTools =
     !!attachmentTools && Object.keys(attachmentTools).length > 0;
+  const hasMemoryTools = !!memoryTools && Object.keys(memoryTools).length > 0;
   if (
     connectorToolResults.length === 0 &&
     !hasWorkspaceTools &&
-    !hasAttachmentTools
+    !hasAttachmentTools &&
+    !hasMemoryTools
   ) {
     return undefined;
   }
@@ -230,6 +237,13 @@ async function buildMergedChatTools(params: {
     // bindings. It is core input handling (like image input), not a client
     // selectable capability, so a skill pin cannot remove or widen it.
     Object.assign(merged, attachmentTools);
+  }
+  if (hasMemoryTools) {
+    // Memory tools are server-built from the authenticated owner and current
+    // conversation. Like attachment tools, they are core chat behavior rather
+    // than client-selected skill tools, so a skill allowed-tools pin cannot
+    // silently disable or widen them.
+    Object.assign(merged, memoryTools);
   }
   return merged;
 }
@@ -330,6 +344,10 @@ async function executeStreaming(params: {
   attachmentTools?: ToolSet;
   /** Server-derived project and skill repository instructions. */
   repositoryPromptFragment?: string;
+  /** Owner-scoped save/forget tools, present only when all memory gates pass. */
+  memoryTools?: ToolSet;
+  /** Sanitized, owner-scoped memory context for this turn. */
+  userMemoryFragment?: string;
   reasoningEffort: "minimal" | "low" | "medium" | "high";
   responseMode: "standard" | "flex" | "priority";
   requestId: string;
@@ -358,6 +376,8 @@ async function executeStreaming(params: {
     workspacePromptFragment,
     attachmentTools,
     repositoryPromptFragment,
+    memoryTools,
+    userMemoryFragment,
     reasoningEffort,
     responseMode,
     requestId,
@@ -374,18 +394,22 @@ async function executeStreaming(params: {
   const hasAttachmentTools =
     !!attachmentTools &&
     Object.hasOwn(attachmentTools, "searchNexusAttachments");
-  const systemPrompt = buildNexusSystemPrompt(
+  const systemPrompt = buildNexusSystemPrompt({
     skillInstructions,
     skillName,
     workspacePromptFragment,
     hasAttachmentTools,
     repositoryPromptFragment,
-  );
+    userMemoryFragment,
+  });
 
   const hasWorkspaceTools =
     !!workspaceTools && Object.keys(workspaceTools).length > 0;
   const multiStepToolsActive =
-    connectorToolResults.length > 0 || hasWorkspaceTools || hasRepositoryTools;
+    connectorToolResults.length > 0 ||
+    hasWorkspaceTools ||
+    hasRepositoryTools ||
+    (!!memoryTools && Object.keys(memoryTools).length > 0);
 
   // Pre-merge adapter + connector + workspace tools (undefined when none active).
   const mergedTools = await buildMergedChatTools({
@@ -393,6 +417,7 @@ async function executeStreaming(params: {
     connectorToolResults,
     workspaceTools: hasWorkspaceTools ? workspaceTools : undefined,
     attachmentTools: hasRepositoryTools ? attachmentTools : undefined,
+    memoryTools,
   });
 
   const streamRequest: StreamRequest = {
@@ -412,10 +437,9 @@ async function executeStreaming(params: {
     enabledTools,
     enabledConnectors,
     tools: mergedTools,
-    // maxSteps enables multi-step tool use (agent loop). Needed when MCP connector
-    // tools OR workspace content tools (§1087: read→edit→confirm) are active —
-    // without them the model uses single-step tool calls only. 10 steps is a
-    // reasonable upper bound for a read→edit→respond chain.
+    // maxSteps enables multi-step tool use (agent loop). Needed when MCP,
+    // workspace, repository, or memory tools are active. Ten is the hard bound
+    // for a save/forget/read→edit→confirm chain.
     maxSteps: multiStepToolsActive ? 10 : undefined,
     options: { reasoningEffort, responseMode },
     precomputedInputTokenMappings,
@@ -1265,6 +1289,7 @@ async function resolveRequestRouting(args: {
 }): Promise<{
   routing: Awaited<ReturnType<typeof routeNexusRequest>>;
   specialRouteMessages: z.infer<typeof ChatRequestSchema>['messages'];
+  protectedLatestUserText: string;
 }> {
   const rawRoutingText = extractImagePrompt(args.messages);
   const protectedRoutingInput = await prepareRoutingText(rawRoutingText, args.sessionId);
@@ -1286,6 +1311,7 @@ async function resolveRequestRouting(args: {
   });
   return {
     routing,
+    protectedLatestUserText: protectedRoutingInput.text,
     specialRouteMessages: protectedRoutingInput.contentModified
       ? withProtectedLastUserText(args.messages, protectedRoutingInput.text)
       : args.messages,
@@ -1671,47 +1697,6 @@ async function scopeRoutedEnabledTools(args: {
   return scoped;
 }
 
-const NEXUS_BASE_SYSTEM_PROMPT = `You are a helpful AI assistant in the Nexus interface.
-
-When discussing hardware, networking equipment, or technical specifications, treat model numbers, part numbers, and product identifiers as publicly available product information. Do not suggest that such identifiers have been redacted or withheld.
-
-IMPORTANT: If text contains privacy tokens like [PII:xxxx-xxxx-xxxx-xxxx], preserve them exactly as written. Do not modify, expand, or interpret these tokens.`;
-
-/**
- * Build the session system prompt. Skill session binding (#925): the bound
- * skill's SKILL.md is appended so the session follows the skill's instructions
- * (the tool pin alone restricted tools without changing behavior — epic #922
- * completion audit). The content is the scanned, admin-approved artifact loaded
- * server-side; it is never taken from the client.
- */
-function buildNexusSystemPrompt(
-  skillInstructions: string | undefined,
-  skillName: string | undefined,
-  workspacePromptFragment?: string,
-  hasAttachmentTools = false,
-  repositoryPromptFragment?: string
-): string {
-  let prompt = NEXUS_BASE_SYSTEM_PROMPT;
-  if (skillInstructions) {
-    prompt += `\n\n---\n\nThe user has loaded the skill "${skillName ?? 'skill'}" into this session. Follow its instructions below for this conversation.\n\n${skillInstructions}`;
-  }
-  // Atrium §1087: when a workspace document/artifact is open beside the chat,
-  // tell the model it can act on that object via the workspace tools.
-  if (workspacePromptFragment) {
-    prompt += `\n\n---\n\n${workspacePromptFragment}`;
-  }
-  if (hasAttachmentTools) {
-    prompt +=
-      "\n\n---\n\nThe user attached private repository content to this conversation. " +
-      "Use searchNexusAttachments before making claims about those attachments. " +
-      "Cite the returned source labels and never invent content that was not returned.";
-  }
-  if (repositoryPromptFragment) {
-    prompt += `\n\n---\n\n${repositoryPromptFragment}`;
-  }
-  return prompt;
-}
-
 /**
  * Load the session's bound skill (#925 AC#4/#6 — epic #922 completion audit).
  * Returns the approved skill's session data (allowed-tools pin + name + s3Key)
@@ -1969,6 +1954,7 @@ interface ResolvedChatRequest {
   messagesWithParts: UIMessage[];
   persistenceMessagesWithParts: UIMessage[];
   precomputedInputTokenMappings: TokenMapping[];
+  protectedLatestUserText: string;
 }
 
 type ResolvedChatResult =
@@ -2160,7 +2146,11 @@ async function resolveChatModel(params: {
   log: ReturnType<typeof createLogger>;
 }): Promise<ResolvedChatResult> {
   const { prepared, requestId, timer, log } = params;
-  const { routing, specialRouteMessages } = await resolveRequestRouting({
+  const {
+    routing,
+    specialRouteMessages,
+    protectedLatestUserText,
+  } = await resolveRequestRouting({
     messages: prepared.safeModelMessages,
     fallbackModelId: prepared.validationData.modelId,
     nexusMode: prepared.validationData.nexusMode,
@@ -2285,6 +2275,7 @@ async function resolveChatModel(params: {
       messagesWithParts: inlineSafetyResult.messages,
       persistenceMessagesWithParts,
       precomputedInputTokenMappings: inlineSafetyResult.tokens,
+      protectedLatestUserText,
     },
   };
 }
@@ -2438,6 +2429,25 @@ async function resolveToolsAndStream(params: {
       requestId: params.requestId,
       skillAllowedTools: skillBinding.skillAllowedTools,
     });
+  const memoryToolCallingSupported = modelSupportsFunctionCalling({
+    provider: resolved.modelConfig.provider,
+    providerMetadata: resolved.modelConfig.providerMetadata,
+  });
+  const memoryContext = await resolveNexusMemoryContext({
+    userId: prepared.userId,
+    cognitoSub: prepared.session.sub,
+    conversationId: conversation.conversationId,
+    latestUserText: resolved.protectedLatestUserText,
+    requestId: params.requestId,
+    toolCallingSupported: memoryToolCallingSupported,
+  });
+  log.info("Nexus memory turn context resolved", {
+    conversationId: conversation.conversationId,
+    enabled: memoryContext.enabled,
+    reason: memoryContext.reason,
+    hasFragment: !!memoryContext.userMemoryFragment,
+    toolsBound: !!memoryContext.tools,
+  });
   return executeStreaming({
     messages: repositories.lightweightMessages,
     modelConfig: resolved.modelConfig,
@@ -2459,6 +2469,8 @@ async function resolveToolsAndStream(params: {
       projectBinding: prepared.projectBinding,
       skillRepositoryIds: skillBinding.skillRepositoryIds,
     }),
+    memoryTools: memoryContext.tools,
+    userMemoryFragment: memoryContext.userMemoryFragment,
     reasoningEffort: prepared.validationData.reasoningEffort || "medium",
     responseMode: prepared.validationData.responseMode || "standard",
     requestId: params.requestId,

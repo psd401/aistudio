@@ -56,6 +56,7 @@ export * from "./tables/nexus-cache-entries";
 export * from "./tables/nexus-shares";
 export * from "./tables/nexus-templates";
 export * from "./tables/nexus-user-preferences";
+export * from "./tables/nexus-user-memories";
 export * from "./tables/nexus-provider-metrics";
 export * from "./tables/deep-research-reservations";
 export * from "./tables/agentic-cost-reservations";

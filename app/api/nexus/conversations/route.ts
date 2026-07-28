@@ -8,6 +8,7 @@ import {
   createConversation,
   recordConversationEvent,
 } from "@/lib/db/drizzle/nexus-conversations";
+import { resolveMemoryControlAvailability } from "@/lib/nexus/memory/memory-availability";
 
 // Valid provider values matching database schema constraints
 const VALID_PROVIDERS = [
@@ -115,6 +116,10 @@ export async function GET(req: Request) {
 
     // Query conversations using Drizzle ORM
     const conversations = await getConversations(userId, queryOptions);
+    const memoryControlAvailable = await resolveMemoryControlAvailability({
+      userId,
+      cognitoSub: session.sub,
+    });
 
     // Get total count (same filters, no pagination)
     const total = await getConversationCount(userId, {
@@ -133,6 +138,7 @@ export async function GET(req: Request) {
 
     return Response.json({
       conversations,
+      memoryControlAvailable,
       pagination: {
         limit,
         offset,

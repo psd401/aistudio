@@ -1,7 +1,7 @@
 {
   "summary": {
     "actions": 32,
-    "features": 9,
+    "features": 10,
     "scopes": 32,
     "agentInvocableActions": 25
   },
@@ -784,6 +784,17 @@
       "defaultRoles": [
         "administrator",
         "staff"
+      ],
+      "humanDriven": true
+    },
+    {
+      "identifier": "nexus-memory",
+      "name": "Nexus Memory",
+      "description": "Remember user-owned profile, preference, and working-context facts across Nexus conversations.",
+      "defaultRoles": [
+        "administrator",
+        "staff",
+        "student"
       ],
       "humanDriven": true
     },

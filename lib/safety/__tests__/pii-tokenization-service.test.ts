@@ -59,6 +59,7 @@ const definePIITokenizationServiceSuite1Registration3: NonNullable<Parameters<ty
       expect(result.tokenizedText).toBe('Hello John');
       expect(result.hasPII).toBe(false);
       expect(result.tokens).toEqual([]);
+      expect(result.scanCompleted).toBe(false);
     });
 
     it('should handle errors gracefully', async () => {
@@ -68,6 +69,7 @@ const definePIITokenizationServiceSuite1Registration3: NonNullable<Parameters<ty
       expect(result.tokenizedText).toBe('Hello John');
       expect(result.hasPII).toBe(false);
       expect(result.tokens).toEqual([]);
+      expect(result.scanCompleted).toBe(false);
     });
   };
 const definePIITokenizationServiceSuite1Registration4: NonNullable<Parameters<typeof describe>[1]> = () => {
@@ -205,6 +207,7 @@ const definePIITokenizationServiceSuite1Registration7: NonNullable<Parameters<ty
       expect(result.hasPII).toBe(false);
       expect(result.tokens).toHaveLength(0);
       expect(result.tokenizedText).toBe(text);
+      expect(result.scanCompleted).toBe(true);
     });
 
     it('should NOT tokenize NAME detections just below the threshold (score 0.89)', async () => {

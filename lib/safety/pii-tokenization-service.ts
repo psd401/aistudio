@@ -231,6 +231,7 @@ export class PIITokenizationService {
         tokenizedText: text,
         tokens: [],
         hasPII: false,
+        scanCompleted: false,
       };
     }
 
@@ -277,6 +278,7 @@ export class PIITokenizationService {
           tokenizedText: text,
           tokens: [],
           hasPII: false,
+          scanCompleted: true,
         };
       }
 
@@ -321,6 +323,7 @@ export class PIITokenizationService {
         tokenizedText,
         tokens,
         hasPII: true,
+        scanCompleted: true,
       };
     } catch (error) {
       this.log.error("PII tokenization failed", {
@@ -333,6 +336,7 @@ export class PIITokenizationService {
         tokenizedText: text,
         tokens: [],
         hasPII: false,
+        scanCompleted: false,
       };
     }
   }

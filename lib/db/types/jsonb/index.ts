@@ -96,6 +96,8 @@ export interface NexusConversationMetadata {
   tags?: string[];
   customFields?: Record<string, unknown>;
   providerData?: Record<string, unknown>;
+  /** When true, no memories are retrieved or writable for this conversation. */
+  memoryDisabled?: boolean;
   [key: string]: unknown;
 }
 
@@ -164,6 +166,8 @@ export interface NexusUserSettings {
   nexusMode?: "standard" | "advanced";
   /** Optional provider-family constraint used only in Advanced mode. */
   preferredModelFamily?: "auto" | "openai" | "anthropic" | "google";
+  /** Account-level Nexus memory toggle. Absent means enabled. */
+  memoryEnabled?: boolean;
   [key: string]: unknown;
 }
 

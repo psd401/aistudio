@@ -5,6 +5,7 @@ import {
   inferModelFamily,
   inferModelTier,
   isExecutableTextModel,
+  modelSupportsFunctionCalling,
   modelSupportsProviderNativeTool,
   selectRoutedTextModel,
   type RoutableModel,
@@ -27,6 +28,21 @@ describe("shared model router core", () => {
 
   it("excludes specialist-only image endpoints from text routing", () => {
     expect(isExecutableTextModel(models[4])).toBe(false)
+  })
+
+  it("treats Latimer and explicit metadata opt-outs as tool-incapable", () => {
+    expect(modelSupportsFunctionCalling({
+      provider: "latimer",
+      providerMetadata: { supports_function_calling: true },
+    })).toBe(false)
+    expect(modelSupportsFunctionCalling({
+      provider: "openai",
+      providerMetadata: { supports_function_calling: false },
+    })).toBe(false)
+    expect(modelSupportsFunctionCalling({
+      provider: "amazon-bedrock",
+      providerMetadata: null,
+    })).toBe(true)
   })
 
   it("matches routed native tools to the provider adapter that can materialize them", () => {
