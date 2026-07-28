@@ -36,7 +36,13 @@ function generateMigrationTemplate(
   const now = new Date().toISOString();
   const formattedNumber = String(migrationNumber).padStart(3, "0");
 
-  return `-- Migration ${formattedNumber}: ${description}
+  // Collapse newlines before interpolating into the `--` comment. A raw newline
+  // in the description ends the comment, so the rest of the argument lands as
+  // live SQL in a file the migration Lambda executes against the database.
+  // Dev-only input (process.argv[2]), but it is a one-line guard.
+  const commentSafeDescription = description.replace(/[\r\n]+/g, " ");
+
+  return `-- Migration ${formattedNumber}: ${commentSafeDescription}
 -- Created: ${now.split("T")[0]}
 -- Part of Epic #526 - RDS Data API to Drizzle ORM Migration
 --
@@ -109,21 +115,38 @@ function main(): void {
   console.log(`   Next number: ${formattedNumber}`);
   console.log(`   Filename: ${filename}`);
 
-  // Step 2: Check if file already exists
+  // Step 2 + 3: Create the migration file, failing if it already exists.
+  //
+  // The existence check and the write are a single atomic operation via the
+  // "wx" flag (O_CREAT | O_EXCL) instead of an fs.existsSync() guard followed
+  // by fs.writeFileSync(). The two-step form is a TOCTOU race
+  // (CodeQL js/file-system-race): between the check and the write, another
+  // process can create the same path, and the unguarded write then silently
+  // clobbers it.
+  //
+  // Scope of the guarantee: this makes writing THIS path atomic and
+  // non-clobbering. It is not a fix for two people running the script at once —
+  // getNextMigrationNumber() scans the directory, so two concurrent runs with
+  // different descriptions both compute N and write NNN-a.sql / NNN-b.sql,
+  // different paths, so O_EXCL never fires and you get a duplicated number.
+  // Catching that needs the numbering itself to be serialized; out of scope here.
   const filePath = getAbsolutePath(path.join(LAMBDA_SCHEMA_DIR, filename));
-  if (validatedFs.existsSync(filePath)) {
-    console.error("");
-    console.error(`❌ Migration file already exists: ${filePath}`);
-    console.error("");
-    process.exit(1);
-  }
 
-  // Step 3: Create the migration file
   console.log("");
   console.log("📝 Step 2: Creating migration file...");
 
   const content = generateMigrationTemplate(nextNumber, description);
-  validatedFs.writeFileSync(filePath, content);
+  try {
+    validatedFs.writeFileSync(filePath, content, { flag: "wx" });
+  } catch (error: unknown) {
+    if ((error as { code?: string } | null)?.code === "EEXIST") {
+      console.error("");
+      console.error(`❌ Migration file already exists: ${filePath}`);
+      console.error("");
+      process.exit(1);
+    }
+    throw error;
+  }
 
   console.log(`   ✅ Created: ${filePath}`);
 

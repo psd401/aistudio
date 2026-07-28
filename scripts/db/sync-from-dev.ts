@@ -27,6 +27,26 @@ const LOCAL_DB_URL =
   process.env.LOCAL_DATABASE_URL ||
   "postgresql://postgres:postgres@localhost:5432/aistudio";
 
+/**
+ * Split a libpq connection URL into a password-free URL plus the password, so
+ * the password can travel in PGPASSWORD instead of argv (out of `ps` output and
+ * out of any error text this script logs).
+ *
+ * LOCAL_DATABASE_URL is operator-supplied and may not parse; fall back to using
+ * it verbatim rather than failing the sync.
+ */
+function splitConnectionUrl(url: string): { url: string; password?: string } {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.password) return { url };
+    const password = decodeURIComponent(parsed.password);
+    parsed.password = "";
+    return { url: parsed.toString(), password };
+  } catch {
+    return { url };
+  }
+}
+
 // Tables to exclude from sync (contain sensitive production data)
 const EXCLUDED_TABLES = [
   "users", // Contains real user emails/PII
@@ -108,17 +128,42 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const awsPgEnv = {
+  // The AWS connection is passed entirely through libpq's environment
+  // variables rather than assembled into a URL argv entry. Three reasons, all
+  // of them things the URL form got wrong:
+  //
+  //  - The password never reaches argv, so it is not in `ps` output and not in
+  //    any error text this script logs.
+  //  - Nothing is interpolated into a string libpq has to re-parse. In the URL
+  //    form the user and host were injected unencoded, so
+  //    AWS_DEV_DB_USER='x@evil.example/' silently redirected the connection to
+  //    evil.example — and sslmode=require does not verify the host, so that
+  //    server would have received the credentials.
+  //  - No argv entry can be mistaken for an option (see the psql calls below).
+  const childEnv = {
     ...process.env,
+    PGHOST: awsHost,
+    PGPORT: "5432",
+    PGUSER: awsUser,
     PGPASSWORD: awsPassword,
+    PGDATABASE: awsDatabase,
     PGSSLMODE: "require",
   };
 
-  // Create temp directory for dump files
+  // Same treatment for the local connection: password into PGPASSWORD, so it is
+  // neither in argv nor in a logged error message.
+  const local = splitConnectionUrl(LOCAL_DB_URL);
+  const localDbUrl = local.url;
+  const localEnv = local.password
+    ? { ...process.env, PGPASSWORD: local.password }
+    : process.env;
+
+  // Create temp directory for dump files.
+  // mkdirSync({ recursive: true }) is already a no-op on an existing directory,
+  // so the existsSync() guard was both redundant and a check-then-use race
+  // (CodeQL js/file-system-race).
   const tmpDir = path.join(process.cwd(), "tmp", "db-sync");
-  if (!fs.existsSync(tmpDir)) {
-    fs.mkdirSync(tmpDir, { recursive: true });
-  }
+  fs.mkdirSync(tmpDir, { recursive: true });
 
   log.info("Syncing the following tables:");
   for (const t of TABLES_TO_SYNC) log.info(`  - ${t}`);
@@ -131,60 +176,75 @@ async function main(): Promise<void> {
     log.info(`Syncing ${table}...`);
 
     try {
-      // Export from AWS
+      // Export from AWS.
+      // runPgCommand runs spawnSync with an argv array and no shell: the
+      // connection details come from AWS_DEV_DB_* / LOCAL_DATABASE_URL
+      // environment variables, so interpolating them into a shell command lets
+      // a hostile env value break out of the quotes and run arbitrary commands
+      // (CodeQL js/indirect-command-line-injection). With an argv array each
+      // value is passed as a single entry and is never parsed by a shell.
+      // Losing the shell also loses `>` redirection, so the dump is written by
+      // handing pg_dump an fd for its stdout — which keeps the streaming
+      // behaviour instead of buffering whole tables in memory.
       log.debug(`  Exporting from AWS...`);
       const dumpFd = validatedFs.openSync(dumpFile, "w", 0o600);
       try {
         runPgCommand(
           "pg_dump",
           [
-            "--host",
-            awsHost,
-            "--port",
-            "5432",
-            "--username",
-            awsUser,
-            "--dbname",
-            awsDatabase,
-            "--table",
-            table,
+            `--table=${table}`,
             "--data-only",
             "--column-inserts",
             "--on-conflict-do-nothing",
           ],
-          { env: awsPgEnv, stdoutFd: dumpFd }
+          { env: childEnv, stdoutFd: dumpFd }
         );
       } finally {
         validatedFs.closeSync(dumpFd);
       }
 
-      // Import to local
+      // Import to local.
+      // --dbname=<url>, not a bare positional: removing the shell does not
+      // remove psql's own option parser, and LOCAL_DATABASE_URL is
+      // operator-supplied. A value beginning with "-" would be read as an
+      // option, and psql's \! meta-command shells out — so
+      // LOCAL_DATABASE_URL='-c\! <cmd>' would still be arbitrary code
+      // execution. Binding the value to --dbname= leaves nothing to reinterpret.
       log.debug(`  Importing to local...`);
-      runPgCommand("psql", [
-        "--dbname",
-        LOCAL_DB_URL,
-        "--file",
-        dumpFile,
-      ]);
+      runPgCommand("psql", [`--dbname=${localDbUrl}`, "--file", dumpFile], {
+        env: localEnv,
+      });
 
       // Get row count
-      const countResult = runPgCommand("psql", [
-        "--dbname",
-        LOCAL_DB_URL,
-        "--tuples-only",
-        "--command",
-        `SELECT COUNT(*) FROM ${table};`,
-      ]);
+      const countResult = runPgCommand(
+        "psql",
+        [
+          `--dbname=${localDbUrl}`,
+          "--tuples-only",
+          "--command",
+          `SELECT COUNT(*) FROM ${table};`,
+        ],
+        { env: localEnv }
+      );
       log.success(`${table} (${countResult.trim()} rows)`);
     } catch (error: unknown) {
       const err = error as Error;
-      log.warn(`Failed to sync ${table}: ${err.message}`);
+      // Passwords are no longer in argv at all (PGPASSWORD), and the AWS
+      // connection is entirely in the env — but psql's own stderr can echo the
+      // local --dbname= value, so scrub it rather than print an operator's
+      // connection string into the log.
+      const safeMessage = (err.message ?? "")
+        .split(localDbUrl)
+        .join("<local-connection>")
+        .split(LOCAL_DB_URL)
+        .join("<local-connection>");
+      log.warn(`Failed to sync ${table}: ${safeMessage}`);
     }
 
-    // Clean up dump file
-    if (validatedFs.existsSync(dumpFile)) {
-      validatedFs.unlinkSync(dumpFile);
-    }
+    // Clean up dump file.
+    // rmSync({ force: true }) ignores a missing path, so no existsSync() guard
+    // is needed — that guard was another check-then-use race.
+    validatedFs.rmSync(dumpFile, { force: true });
   }
 
   // Clean up temp directory

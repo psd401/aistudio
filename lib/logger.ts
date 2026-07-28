@@ -152,9 +152,29 @@ function sanitizeForLoggerInternal(data: unknown, maxDepth: number, seen: WeakSe
     return sanitizeLoggerArray(data, maxDepth, seen)
   }
   if (typeof data === "object") {
+    // Dates have no own enumerable properties, so sanitizeLoggerObject() below
+    // turns them into `{}` — the timestamp just vanishes from the log. Emit the
+    // ISO string instead. This matters now that logPerformance() routes its
+    // metadata through here: startTimer(...)({ completedAt: date }) used to
+    // reach winston as a real Date and would otherwise start logging as an
+    // empty object.
+    //
+    // Tested BEFORE the circular-reference bookkeeping in sanitizeLoggerObject:
+    // a Date is a leaf and cannot take part in a cycle, but `seen` is shared
+    // across the whole traversal, so recording it there made the SECOND
+    // reference to one Date instance in a single payload — `{ startedAt: d,
+    // endedAt: d }`, or the same Date in two array slots — render as
+    // '[Circular]' instead of its timestamp.
+    if (data instanceof Date) {
+      return Number.isNaN(data.getTime()) ? '[Invalid Date]' : data.toISOString()
+    }
     return sanitizeLoggerObject(data, maxDepth, seen)
   }
-  return String(data).slice(0, 100)
+  // Fallback for unknown types (functions, symbols, bigint). Route through the
+  // same string sanitization as the string branch — String(fn) can carry
+  // newlines straight out of the function source, and nested values never see
+  // the final barrier pass in sanitizeLogMetadata().
+  return sanitizeLoggerString(String(data)).slice(0, 100)
 }
 
 const isProd = process.env.NODE_ENV === "production"
@@ -190,6 +210,12 @@ const SENSITIVE_PATTERNS = [
 
 // Email masking pattern (show domain only) - using simpler non-backtracking pattern
 const EMAIL_PATTERN = /\b[\dA-Za-z][\w%+.-]*@([\dA-Za-z][\d.A-Za-z-]*\.[A-Za-z]{2,})\b/g
+
+// Property names that must never be carried into a log object built from
+// caller-supplied keys. filterSensitiveDataInternal() already drops these; the
+// metadata barrier re-applies the same list so each place that materialises an
+// object from untrusted keys carries its own guard.
+const PROTOTYPE_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype'])
 
 /**
  * Filters sensitive data from log messages and metadata
@@ -255,6 +281,16 @@ function filterSensitiveObject(
 // Private recursive implementation - WeakSet shared across all recursive calls
 function filterSensitiveDataInternal(data: unknown, maxDepth: number, seen: WeakSet<object>): unknown {
   if (typeof data === "string") return filterSensitiveString(data)
+  // Dates are leaf values, not containers. Without this branch the generic
+  // object traversal below reaches them first and Object.entries(date) is
+  // empty, so the timestamp is flattened to {} before sanitizeForLogger()'s
+  // `instanceof Date` branch can turn it into an ISO string — sanitizeLogMetadata()
+  // runs filterSensitiveData() FIRST, so that branch never saw a live Date and
+  // startTimer(...)({ completedAt: date }) logged an empty object. Returning the
+  // Date unchanged hands it on intact; the two callers that do not run it
+  // through sanitizeForLogger() afterwards both JSON.stringify it, which
+  // serialises a Date as its ISO string rather than as {}.
+  if (data instanceof Date) return data
   if (maxDepth <= 0) return '[Max Depth Reached]'
   if (Array.isArray(data)) {
     if (!markSeen(data, seen)) return '[Circular]'
@@ -384,6 +420,10 @@ export async function withLogContext<T>(
  * @param input - The message to sanitize
  * @returns Sanitized string safe for logging
  */
+// Exported for tests only. The message path and the metadata path sanitize
+// differently (see the U+2028 note below), and that divergence is exactly where
+// a bug hid — observing it through createLogger() would need a winston mock, so
+// the pure function is exposed instead.
 export function sanitizeLogMessage(input: unknown): string {
   // Convert to string if needed
   let str = typeof input === 'string' ? input : String(input)
@@ -424,21 +464,65 @@ export function sanitizeLogMessage(input: unknown): string {
  * @param data - The metadata to sanitize
  * @returns Sanitized metadata object
  */
+// Exported for tests only, on the same rationale as sanitizeLogMessage above:
+// this is the metadata path, and its two passes run in the opposite order to
+// sanitizeForLogging()'s, which is exactly where the Date-flattening bug lived.
+// Observing it through createLogger() would need a winston mock.
 export function sanitizeLogMetadata(data: unknown): Record<string, unknown> {
   // First remove sensitive data
   const filtered = filterSensitiveData(data)
   // Then sanitize for CodeQL (removes taint)
   const sanitized = sanitizeForLogger(filtered)
-  // Apply one final literal-regex barrier to the complete serialized shape,
-  // immediately before winston receives it. Parsing restores the same
-  // structured metadata without a user-controlled bracket assignment.
-  const serialized = JSON.stringify(sanitized) ?? '{}'
-  const lineSafe = serialized.replace(/\n/g, ' ').replace(/\r/g, ' ')
-  const parsed: unknown = JSON.parse(lineSafe)
-  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-    return parsed as Record<string, unknown>
+
+  // Final barrier, applied immediately before the value is handed to winston.
+  //
+  // sanitizeForLogger() already neutralises every string, but it does so from
+  // inside a depth-limited self-recursive traversal that rebuilds objects
+  // through Maps and `as unknown` casts. Taint analysis follows property reads
+  // straight through that shape without ever seeing the barrier land on the
+  // value that reaches the sink — which is why the createLogger() sinks stayed
+  // flagged even though the data was already clean at runtime (this repo has
+  // the same finding recorded in
+  // docs/learnings/security/2026-02-20-codeql-taint-break-static-data-block.md).
+  // Re-applying literal-regex line-break stripping to the top-level entries
+  // here is O(keys) on an already-sanitised, small object, and puts the barrier
+  // one step from the sink where it is visible.
+  if (sanitized === null || typeof sanitized !== 'object' || Array.isArray(sanitized)) {
+    // Every current caller passes an object literal, so this is defensive.
+    // Wrap rather than return {} — Object.entries() on a string would explode
+    // it into per-character entries, but silently dropping the payload would
+    // lose exactly the forensic detail someone is reading the log for.
+    return { value: sanitized }
   }
-  return Object.fromEntries([['value', parsed]])
+
+  // Materialised with Object.fromEntries rather than `result[key] = value` in a
+  // loop. The keys come from caller-supplied metadata, so a computed member
+  // write is a dynamic property write on a user-controlled name — CodeQL
+  // js/remote-property-injection, which this barrier itself introduced.
+  // Object.fromEntries defines own data properties directly (CreateDataProperty),
+  // so no inherited setter — __proto__'s included — is ever invoked, and the
+  // explicit PROTOTYPE_KEYS filter states the intent rather than relying on the
+  // upstream pass having already applied it.
+  const safeEntries: [string, unknown][] = []
+  for (const [key, value] of Object.entries(sanitized as Record<string, unknown>)) {
+    const safeKey = key.replace(/\n/g, ' ').replace(/\r/g, ' ')
+    if (PROTOTYPE_KEYS.has(safeKey)) {
+      continue
+    }
+    safeEntries.push([
+      safeKey,
+      typeof value === 'string' ? value.replace(/\n/g, ' ').replace(/\r/g, ' ') : value,
+    ])
+  }
+
+  // Object.create(null) target: a null-prototype accumulator is the codebase
+  // rule for model/user-influenced keys (see CLAUDE.md), and Object.assign
+  // copies the already-defined own properties across without re-introducing a
+  // computed write on an untrusted name.
+  return Object.assign(
+    Object.create(null) as Record<string, unknown>,
+    Object.fromEntries(safeEntries)
+  )
 }
 
 /**
@@ -505,12 +589,20 @@ export function logPerformance(
   const duration = Date.now() - startTime
   const context = getLogContext()
 
-  logger.info(`Performance: ${operation}`, {
-    ...context,
-    operation,
-    duration,
-    ...metadata,
-  })
+  // Route through the same sanitizers the createLogger() methods use. This sink
+  // previously took `operation` and `...metadata` straight to winston with no
+  // sanitization at all — and `operation` is caller-supplied on every
+  // startTimer() call across the server actions, so a value carrying CR/LF
+  // could forge log entries (js/log-injection).
+  logger.info(
+    sanitizeLogMessage(`Performance: ${operation}`),
+    sanitizeLogMetadata({
+      ...context,
+      operation,
+      duration,
+      ...metadata,
+    })
+  )
 }
 
 /**

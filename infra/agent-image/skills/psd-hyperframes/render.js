@@ -132,7 +132,13 @@ function isCompositionIdAttributeAt(html, index) {
   if (html[index] !== 'd') return false;
   const target = 'data-composition-id';
   if (!html.startsWith(target, index)) return false;
-  if (!isHtmlWhitespace(html[index - 1])) return false;
+  // A closing quote is also a legal boundary: browsers (and the regex this
+  // scanner replaced) treat `class="x"data-composition-id` as carrying the
+  // attribute even without the separating space.
+  const before = html[index - 1];
+  if (!isHtmlWhitespace(before) && before !== '"' && before !== "'") {
+    return false;
+  }
   const after = html[index + target.length];
   return (
     after === '=' ||

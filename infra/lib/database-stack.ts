@@ -81,8 +81,12 @@ export function computeDbInitAssetHash(databaseDir: string): string {
   }
   hash.update(validatedFs.readFileSync(path.join(databaseDir, 'migrations.json'), 'utf8'));
   const schemaDir = path.join(databaseDir, 'schema');
+  // isSymbolicLink() as well as isFile(): a Dirent reports the directory
+  // entry's own kind and does not follow links. Without the second test a
+  // symlinked schema file would drop silently out of the hash, and CDK would
+  // reuse a stale migration Lambda asset when only that file changed.
   const schemaEntries = validatedFs.readdirSync(schemaDir, { withFileTypes: true })
-    .filter(e => e.isFile())
+    .filter(e => e.isFile() || e.isSymbolicLink())
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const e of schemaEntries) {
     hash.update(`${e.name}\0`);

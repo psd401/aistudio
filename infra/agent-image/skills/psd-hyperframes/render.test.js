@@ -291,3 +291,160 @@ test('main emits the bare result JSON with the url on success', async () => {
   expect(out.s3Key).toBe('public-images/p@psd401.net/uuid.mp4');
   expect(out.sharing).toBe('public-by-link');
 });
+
+
+// ── injectAudioElement / composition-root lookup (#1298) ─────────────────────
+//
+// The root lookup used to be /<[a-zA-Z][^>]*\bdata-composition-id\b[^>]*>/,
+// whose two unbounded [^>]* runs make matching quadratic in the input
+// (CodeQL js/polynomial-redos). `html` comes straight from --html/--file, so
+// these cover both that the linear replacement kept the old semantics and that
+// the quadratic blow-up is gone.
+
+const AUDIO_URL = 'https://example.com/a.mp3';
+
+test('injectAudioElement inserts the audio tag just after the composition root', () => {
+  const out = injectAudioElement('<div data-composition-id="demo">hi</div>', AUDIO_URL, 3);
+  expect(out).toBe(
+    '<div data-composition-id="demo">\n' +
+      `<audio src="${AUDIO_URL}" data-start="0" data-duration="3" data-track-index="0" data-volume="1"></audio>` +
+      'hi</div>'
+  );
+});
+
+test('injectAudioElement finds a composition root that is not the first tag', () => {
+  const out = injectAudioElement('<html><body><section data-composition-id="d">x</section></body></html>', AUDIO_URL, 2);
+  expect(out.indexOf('<audio')).toBe('<html><body><section data-composition-id="d">\n'.length);
+});
+
+test('injectAudioElement respects word boundaries around the attribute name', () => {
+  // `data-composition-ids` and `xdata-composition-id` are NOT the attribute;
+  // both fall through to the </body> branch, exactly as the old \b regex did.
+  for (const attr of ['data-composition-ids', 'xdata-composition-id']) {
+    const out = injectAudioElement(`<div ${attr}="d">x</div><body>y</body>`, AUDIO_URL, 1);
+    expect(out.indexOf('<audio')).toBeLessThan(out.indexOf('</body>'));
+    expect(out.indexOf('<audio')).toBeGreaterThan(out.indexOf('<div'));
+  }
+});
+
+test('injectAudioElement falls back to before </body> when there is no root', () => {
+  const out = injectAudioElement('<html><body>hi</body></html>', AUDIO_URL, 1);
+  expect(out).toContain('hi<audio');
+  expect(out.indexOf('<audio')).toBeLessThan(out.indexOf('</body>'));
+});
+
+test('injectAudioElement falls back to appending when there is no body either', () => {
+  const out = injectAudioElement('plain text', AUDIO_URL, 1);
+  expect(out.startsWith('plain text\n<audio')).toBe(true);
+});
+
+test('injectAudioElement ignores tags whose name does not start with a letter', () => {
+  // <!-- ... --> and <1foo ...> are not element open tags; the old regex
+  // required [a-zA-Z] after '<' and so does the linear scan.
+  const out = injectAudioElement('<!-- data-composition-id --><body>x</body>', AUDIO_URL, 1);
+  expect(out.indexOf('<audio')).toBeLessThan(out.indexOf('</body>'));
+  expect(out.indexOf('<audio')).toBeGreaterThan(out.indexOf('-->'));
+});
+
+test('injectAudioElement handles an unterminated tag without matching', () => {
+  const out = injectAudioElement('<div data-composition-id="d"', AUDIO_URL, 1);
+  expect(out).toBe(`<div data-composition-id="d"\n<audio src="${AUDIO_URL}" data-start="0" data-duration="1" data-track-index="0" data-volume="1"></audio>`);
+});
+
+test('injectAudioElement handles one long unterminated tag', () => {
+  // '<a' + a long run with no '>'. Measured honestly: the OLD regex was already
+  // fast here (~1 ms at n=100k) because V8's literal prefilter for
+  // "data-composition-id" skips the run, so this is a correctness regression
+  // test, not a ReDoS witness. The real witness is the next test.
+  const out = injectAudioElement('<a' + 'a'.repeat(200000), AUDIO_URL, 1);
+  expect(out.endsWith('</audio>')).toBe(true);
+});
+
+test('injectAudioElement is linear on the quadratic witness (many unclosed tags)', () => {
+  // '<a' repeated is the shape that actually blew up. Measured on the old
+  // regex, node 22: n=20k 365 ms, n=50k 1753 ms, n=100k 4497 ms — 5x input for
+  // ~12x time, i.e. quadratic, and a real DoS lever because `html` comes
+  // straight from --html/--file. The linear scan: n=100k 2 ms, n=400k 4 ms.
+  // The 1 s bound below therefore fails loudly against the old implementation
+  // (4497 ms) while leaving ~500x headroom for the new one on slow CI.
+  const witness = '<a'.repeat(50000); // 100k chars
+  const started = Date.now();
+  const out = injectAudioElement(witness, AUDIO_URL, 1);
+  expect(Date.now() - started).toBeLessThan(1000);
+  expect(out.endsWith('</audio>')).toBe(true);
+});
+
+// ── findCompositionRootOpenTagEnd: parity with the regex it replaced (#1298) ──
+//
+// The scanner must agree with /<[a-zA-Z][^>]*\bdata-composition-id\b[^>]*>/ on
+// everything except the one case where that regex was itself wrong (a quoted
+// '>' inside an attribute value, which its [^>]* could not cross).
+
+function oldRegexFind(html) {
+  const m = html.match(/<[a-zA-Z][^>]*\bdata-composition-id\b[^>]*>/);
+  return m ? m.index + m[0].length : -1;
+}
+
+const PARITY_CASES = [
+  ['plain root', '<div data-composition-id="demo">hi</div>'],
+  ['root not first', '<html><body><section data-composition-id="d">x</section></body></html>'],
+  // '<' inside a quoted attribute value: [^>]* crossed it happily, so a scanner
+  // that treats every '<' as a restart would lose the root and silently drop
+  // the narration track.
+  ['quoted <', '<div title="a < b" data-composition-id="root"><p>s</p></div>'],
+  ['attr suffix', '<div data-composition-ids="d">x</div>'],
+  ['attr prefix', '<div xdata-composition-id="d">x</div>'],
+  // No whitespace before the attribute — \b accepts '"' as the boundary.
+  ['quote, no space', '<div class="x"data-composition-id>y</div>'],
+  ['nested <', '<<a data-composition-id>'],
+  ['comment first', '<!-- data-composition-id --><div data-composition-id>x</div>'],
+  // An apostrophe inside a comment is not an attribute quote. Quote-tracking a
+  // non-element `<` let `don't` open a quote that never closed, so every later
+  // `>` was swallowed, the scan hit end-of-input and returned -1 — the audio
+  // was then appended outside the composition root and silently dropped from
+  // the MP4. Only `<` + ASCII letter starts a tag, exactly as the old regex.
+  ['apostrophe in comment', "<!-- don't inject here --><div data-composition-id=\"root\">x</div>"],
+  ['apostrophe in text', "it's here <div data-composition-id=\"r\">x</div>"],
+  ['doctype before root', '<!DOCTYPE html><div data-composition-id="r">x</div>'],
+  ['closing tag before root', '</p><div data-composition-id="r">x</div>'],
+  // <data-composition-id> is a legal custom-element name. The old regex could
+  // never match it (its mandatory [a-zA-Z] ate the name's first character), so
+  // an element *named* this must not be mistaken for one *carrying* the attr.
+  ['element named attr', '<data-composition-id>hi</data-composition-id>'],
+  ['unterminated', '<div data-composition-id="d"'],
+  ['empty', ''],
+  ['bare <', '<'],
+  ['no attr', '<a>'],
+];
+
+for (const [name, html] of PARITY_CASES) {
+  test(`findCompositionRootOpenTagEnd matches the old regex: ${name}`, () => {
+    expect(findCompositionRootOpenTagEnd(html)).toBe(oldRegexFind(html));
+  });
+}
+
+test('findCompositionRootOpenTagEnd crosses a quoted > that the old regex could not', () => {
+  // The one intentional divergence: [^>]* stopped at the quoted '>', so the old
+  // regex found no root and the audio was appended outside the composition.
+  const html = '<div title="a>b" data-composition-id="z">x</div>';
+  expect(oldRegexFind(html)).toBe(-1);
+  expect(findCompositionRootOpenTagEnd(html)).toBe(40 + 1);
+  expect(injectAudioElement(html, AUDIO_URL, 1)).toContain('">\n<audio');
+});
+
+test('findCompositionRootOpenTagEnd stays linear on quote-heavy witnesses', () => {
+  // Quote tracking must not reintroduce rescanning. Each shape is 400k chars;
+  // measured 2-10 ms each, against a 1 s bound.
+  const shapes = [
+    '<a'.repeat(200000), // unclosed tags
+    '<"'.repeat(200000), // quote open/close churn
+    '<a x="' + 'a'.repeat(400000), // one never-closed quote
+    '<!--' + "'".repeat(400000), // apostrophe churn inside a non-element token
+    '<a ' + 'data-composition-idz '.repeat(19047) + '>', // many near-misses in one tag
+  ];
+  for (const html of shapes) {
+    const started = Date.now();
+    findCompositionRootOpenTagEnd(html);
+    expect(Date.now() - started).toBeLessThan(1000);
+  }
+});
