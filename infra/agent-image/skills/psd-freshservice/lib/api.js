@@ -14,8 +14,8 @@
  * which blamed the user for a broken skill.
  *
  * The owner is derived from the proxy-signed invocation context server-side;
- * there is no --user to spoof. Mirrors psd-redrover, which was migrated at the
- * time #1353 landed.
+ * there is no --user to spoof. Mirrors the other server-side broker
+ * operations migrated when #1353 landed.
  *
  * Domain is fixed at psd401.freshservice.com in the BROKER, not here.
  */

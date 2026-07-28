@@ -231,14 +231,15 @@ describe("Freshservice broker behaviour", () => {
 
   it("is not gated behind a capability that cannot be granted", async () => {
     // REGRESSION PIN. The route case briefly checked `skill.freshservice`,
-    // copied from the redrover case. That identifier existed nowhere else, so
-    // no role could hold it and every call 403'd forever — and the message
-    // ("access is not granted for this account") pointed debugging at account
-    // provisioning rather than at the gate that had just been invented.
+    // copied from a case that gated a SHARED district credential. That
+    // identifier existed nowhere else, so no role could hold it and every call
+    // 403'd forever — and the message ("access is not granted for this
+    // account") pointed debugging at account provisioning rather than at the
+    // gate that had just been invented.
     //
-    // Red Rover is not a precedent: it uses a SHARED district credential, so
-    // gating who may borrow it is meaningful. Freshservice uses the caller's
-    // OWN per-user key, so the credential is already the authorization.
+    // Shared-credential cases are not a precedent: gating who may borrow the
+    // district's account is meaningful. Freshservice uses the caller's OWN
+    // per-user key, so the credential is already the authorization.
     // Comment-stripped: the prose above the case explains WHY the gate was
     // removed and names the identifier, so a raw substring check would fail on
     // correct source.
@@ -258,8 +259,13 @@ describe("Freshservice broker behaviour", () => {
     expect(freshserviceCase).not.toContain("canAccessSkill")
     expect(routeSource).not.toContain("skill.freshservice")
 
-    // The redrover case KEEPS its gate — it uses a shared district credential.
-    expect(routeSource).toContain("skill.redrover")
+    // Shared-credential cases KEEP their gate; openai-image is the live one.
+    expect(routeSource).toContain("skill.image-gen")
+
+    // psd-redrover was removed in #1396 — Red Rover data is served through
+    // psd-data now, so neither the case nor its capability may come back.
+    expect(routeSource).not.toContain("skill.redrover")
+    expect(routeSource).not.toContain('case "redrover"')
   })
 
   it("refuses to follow redirects", async () => {

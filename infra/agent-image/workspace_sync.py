@@ -276,6 +276,11 @@ _SKIP_RELATIVE_PREFIXES = (
     # deleted skill from being resurrected under ~/.openclaw/skills/ on sync.
     "skills/psd-html-output/",
     "skills/psd-image-gen/",
+    # psd-redrover was REMOVED from the image (#1396 — Red Rover data is now
+    # served through the warehouse via psd-data, which authenticates as the
+    # calling user), but its skip entry is intentionally retained for the same
+    # reason as psd-html-output above: stale synced copies in users' S3
+    # prefixes must not be resurrected under ~/.openclaw/skills/ on sync.
     "skills/psd-redrover/",
     "skills/psd-rules/",
     "skills/psd-schedules/",

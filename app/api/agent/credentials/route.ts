@@ -11,7 +11,6 @@ import {
   executePlaudOperation,
   executePsdDataOperation,
   executeFreshserviceOperation,
-  executeRedRoverOperation,
 } from "@/lib/agent-credentials/owner-operation-broker"
 
 const log = createLogger({ module: "agent-credential-broker" })
@@ -81,31 +80,11 @@ async function executeCredentialOperation(
         })
       )
     }
-    case "redrover": {
-      const granted = await broker.canAccessSkill(
-        invocation.ownerEmail,
-        "skill.redrover",
-        undefined
-      )
-      if (!granted) {
-        return NextResponse.json({ error: "Forbidden" }, { status: 403 })
-      }
-      return NextResponse.json(
-        await executeRedRoverOperation({
-          ownerEmail: invocation.ownerEmail,
-          sessionId: invocation.sessionId,
-          operation: body.action,
-          startDate: body.startDate,
-          endDate: body.endDate,
-          filledFilter: body.filledFilter,
-        })
-      )
-    }
     case "freshservice": {
       // Freshservice uses the caller's own owner-scoped key, so that
-      // credential is the authorization. Unlike Red Rover's shared district
-      // credential, this operation must not gain an ungrantable capability
-      // gate between the signed owner context and the broker.
+      // credential is the authorization. Unlike operations backed by a shared
+      // district credential, this operation must not gain an ungrantable
+      // capability gate between the signed owner context and the broker.
       return NextResponse.json(
         await executeFreshserviceOperation({
           ownerEmail: invocation.ownerEmail,

@@ -9,9 +9,6 @@ const MAX_MCP_SSE_EVENTS = 2_000;
 const MAX_MCP_SSE_LINE_BYTES = 1024 * 1024;
 const MAX_PLAUD_ACCESS_TOKEN_BYTES = 16 * 1024;
 const MAX_PLAUD_SESSION_ID_BYTES = 1024;
-const MAX_RED_ROVER_DATE_SPAN_DAYS = 31;
-const MAX_RED_ROVER_VACANCY_ITEMS = 5_000;
-const MAX_RED_ROVER_SERIALIZED_BYTES = 8 * 1024 * 1024;
 
 type OperationResult =
   | { status: "ok"; result: unknown }
@@ -19,7 +16,6 @@ type OperationResult =
   | { status: "forbidden"; detail: string }
   | { status: "rate-limited" };
 
-const RED_ROVER_BASE_URL = "https://connect.redroverk12.com";
 const log = createLogger({ module: "agent-owner-operation-broker" });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -560,28 +556,6 @@ export async function executePlaudOperation(input: {
   };
 }
 
-async function sharedCredentialJson(
-  broker: AgentCredentialBroker,
-  ownerEmail: string,
-  name: string,
-  sessionId: string,
-): Promise<Record<string, unknown>> {
-  const credential = await broker.get(ownerEmail, name, {
-    sharedOnly: true,
-    sessionId,
-  });
-  if (!credential || credential.scope !== "shared") {
-    throw new Error("Required operation credential is not configured");
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(credential.value);
-  } catch {
-    throw new Error("Required operation credential is malformed");
-  }
-  return boundedRecord(parsed, "Operation credential");
-}
-
 interface OpenAiImageOperationInput {
   ownerEmail: string;
   sessionId: string;
@@ -701,266 +675,6 @@ export async function executeOpenAiImageOperation(
   return { imageBase64: imageBase64FromPayload(payload) };
 }
 
-async function redRoverAuthority(input: {
-  ownerEmail: string;
-  sessionId: string;
-}): Promise<{
-  username: string;
-  password: string;
-  staticApiKey: string | null;
-}> {
-  const credential = await sharedCredentialJson(
-    new AgentCredentialBroker(),
-    input.ownerEmail,
-    "redrover_credentials",
-    input.sessionId,
-  );
-  if (
-    typeof credential.username !== "string" ||
-    typeof credential.password !== "string"
-  ) {
-    throw new TypeError("Red Rover operation credential is malformed");
-  }
-  return {
-    username: credential.username,
-    password: credential.password,
-    staticApiKey:
-      typeof credential.apiKey === "string" ? credential.apiKey : null,
-  };
-}
-
-async function redRoverGet(
-  path: string,
-  authority: Awaited<ReturnType<typeof redRoverAuthority>>,
-  apiKey?: string,
-): Promise<unknown> {
-  const response = await fetch(`${RED_ROVER_BASE_URL}${path}`, {
-    method: "GET",
-    headers: {
-      Authorization: `Basic ${Buffer.from(
-        `${authority.username}:${authority.password}`,
-      ).toString("base64")}`,
-      Accept: "application/json",
-      ...(apiKey ? { apiKey } : {}),
-    },
-    redirect: "error",
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok) throw new Error(`Red Rover API HTTP ${response.status}`);
-  return readBoundedJson(response, 4 * 1024 * 1024);
-}
-
-function redRoverOrganizationName(
-  organization: Record<string, unknown>,
-): string | undefined {
-  const candidate =
-    organization.name ?? organization.orgName ?? organization.organizationName;
-  if (candidate === undefined) return undefined;
-  if (
-    typeof candidate !== "string" ||
-    candidate.length === 0 ||
-    candidate.length > 256 ||
-    hasAsciiControl(candidate)
-  ) {
-    throw new Error("Red Rover organization name is malformed");
-  }
-  return candidate;
-}
-
-function parseRedRoverOrganization(
-  payload: unknown,
-  staticApiKey: string | null,
-): { orgId: string; apiKey: string; name?: string } {
-  const organization = Array.isArray(payload) ? payload[0] : payload;
-  if (
-    !isRecord(organization) ||
-    typeof organization.orgId !== "string" ||
-    organization.orgId.length === 0 ||
-    organization.orgId.length > 256
-  ) {
-    throw new Error("Red Rover organization response is malformed");
-  }
-  const apiKey =
-    typeof organization.apiKey === "string"
-      ? organization.apiKey
-      : staticApiKey;
-  if (!apiKey) throw new Error("Red Rover organization API key is unavailable");
-  const name = redRoverOrganizationName(organization);
-  return { orgId: organization.orgId, apiKey, ...(name ? { name } : {}) };
-}
-
-async function redRoverOrganization(
-  authority: Awaited<ReturnType<typeof redRoverAuthority>>,
-): Promise<{ orgId: string; apiKey: string; name?: string }> {
-  const payload = await redRoverGet("/api/v1/organization", authority);
-  return parseRedRoverOrganization(payload, authority.staticApiKey);
-}
-
-function parseUtcDay(value: string): number | null {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  if (!match) return null;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const timestamp = Date.UTC(year, month - 1, day);
-  const parsed = new Date(timestamp);
-  if (
-    parsed.getUTCFullYear() !== year ||
-    parsed.getUTCMonth() !== month - 1 ||
-    parsed.getUTCDate() !== day
-  ) {
-    return null;
-  }
-  return timestamp;
-}
-
-function assertRedRoverDateRange(startDate: string, endDate: string): void {
-  const start = parseUtcDay(startDate);
-  const end = parseUtcDay(endDate);
-  const daySpan =
-    start === null || end === null ? -1 : (end - start) / 86_400_000;
-  if (
-    start === null ||
-    end === null ||
-    daySpan < 0 ||
-    daySpan >= MAX_RED_ROVER_DATE_SPAN_DAYS
-  ) {
-    throw new Error(
-      `Red Rover date range must be at most ${MAX_RED_ROVER_DATE_SPAN_DAYS} inclusive days`,
-    );
-  }
-}
-
-type RedRoverOperationInput = {
-  ownerEmail: string;
-  sessionId: string;
-  operation: unknown;
-  startDate: unknown;
-  endDate: unknown;
-  filledFilter: unknown;
-};
-
-type ValidatedRedRoverOperation =
-  | { operation: "organization" }
-  | {
-      operation: "vacancies";
-      startDate: string;
-      endDate: string;
-      filledFilter: "filled" | "unfilled" | null;
-    };
-
-function validatedRedRoverOperation(
-  input: RedRoverOperationInput,
-): ValidatedRedRoverOperation {
-  if (input.operation !== "organization" && input.operation !== "vacancies") {
-    throw new Error("Invalid Red Rover operation");
-  }
-  if (input.operation === "organization") return { operation: "organization" };
-  const validFilter =
-    input.filledFilter === undefined ||
-    input.filledFilter === null ||
-    input.filledFilter === "filled" ||
-    input.filledFilter === "unfilled";
-  if (
-    typeof input.startDate !== "string" ||
-    typeof input.endDate !== "string" ||
-    !validFilter
-  ) {
-    throw new Error("Invalid Red Rover operation");
-  }
-  assertRedRoverDateRange(input.startDate, input.endDate);
-  return {
-    operation: "vacancies",
-    startDate: input.startDate,
-    endDate: input.endDate,
-    filledFilter:
-      input.filledFilter === "filled" || input.filledFilter === "unfilled"
-        ? input.filledFilter
-        : null,
-  };
-}
-
-function redRoverFilledQuery(
-  filter: "filled" | "unfilled" | null,
-): Record<string, string> {
-  if (filter === "filled") return { filled: "true" };
-  if (filter === "unfilled") return { filled: "false" };
-  return {};
-}
-
-function appendRedRoverVacancies(
-  allData: unknown[],
-  pageData: unknown[],
-  serializedBytes: number,
-): number {
-  if (allData.length + pageData.length > MAX_RED_ROVER_VACANCY_ITEMS) {
-    throw new Error("Red Rover query exceeded the aggregate item limit");
-  }
-  let nextBytes = serializedBytes;
-  for (const item of pageData) {
-    nextBytes += Buffer.byteLength(JSON.stringify(item), "utf8");
-    if (nextBytes > MAX_RED_ROVER_SERIALIZED_BYTES) {
-      throw new Error("Red Rover query exceeded the aggregate byte limit");
-    }
-    allData.push(item);
-  }
-  return nextBytes;
-}
-
-async function redRoverVacancies(
-  operation: Extract<ValidatedRedRoverOperation, { operation: "vacancies" }>,
-  authority: Awaited<ReturnType<typeof redRoverAuthority>>,
-  organization: Awaited<ReturnType<typeof redRoverOrganization>>,
-): Promise<{ data: unknown[]; total: number }> {
-  const allData: unknown[] = [];
-  let serializedBytes = 0;
-  for (let page = 1; page <= 200; page += 1) {
-    const query = new URLSearchParams({
-      fromDate: `${operation.startDate}T00:00:00Z`,
-      toDate: `${operation.endDate}T23:59:59Z`,
-      pageSize: "100",
-      page: String(page),
-      ...redRoverFilledQuery(operation.filledFilter),
-    });
-    const payload = await redRoverGet(
-      `/api/v1/${encodeURIComponent(
-        organization.orgId,
-      )}/Vacancy/details?${query}`,
-      authority,
-      organization.apiKey,
-    );
-    if (!isRecord(payload)) throw new Error("Red Rover response is malformed");
-    if (!Array.isArray(payload.data)) {
-      throw new TypeError("Red Rover response data is malformed");
-    }
-    serializedBytes = appendRedRoverVacancies(
-      allData,
-      payload.data,
-      serializedBytes,
-    );
-    if (payload.hasMoreData !== true) {
-      return { data: allData, total: allData.length };
-    }
-  }
-  throw new Error("Red Rover query exceeded the maximum page limit");
-}
-
-export async function executeRedRoverOperation(
-  input: RedRoverOperationInput,
-): Promise<unknown> {
-  const operation = validatedRedRoverOperation(input);
-
-  const authority = await redRoverAuthority(input);
-  const organization = await redRoverOrganization(authority);
-  if (operation.operation === "organization") {
-    return {
-      orgId: organization.orgId,
-      ...(organization.name ? { name: organization.name } : {}),
-    };
-  }
-  return redRoverVacancies(operation, authority, organization);
-}
-
 // ---------------------------------------------------------------------------
 // Freshservice
 // ---------------------------------------------------------------------------
@@ -973,7 +687,7 @@ export async function executeRedRoverOperation(
 // checks whether a key is provisioned, and the resulting error blames the
 // user's credentials rather than the skill.
 //
-// The key now stays server-side, exactly like Red Rover above.
+// The key now stays server-side, like every other operation in this module.
 
 const FRESHSERVICE_DOMAIN = "psd401.freshservice.com"
 const FRESHSERVICE_BASE_URL = `https://${FRESHSERVICE_DOMAIN}/api/v2`
