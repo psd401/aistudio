@@ -91,6 +91,23 @@ type DeleteTarget =
   | { kind: "single"; memory: NexusMemoryListItem }
   | { kind: "bulk"; memoryIds: string[] }
 
+async function refreshAfterMemoryMutation(
+  refreshMemories: () => Promise<void>,
+  operation: string,
+) {
+  try {
+    await refreshMemories()
+  } catch (error) {
+    log.error("Refreshing Nexus memories after a mutation failed", {
+      operation,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    toast.warning(
+      "The change was saved, but the memory list could not be refreshed",
+    )
+  }
+}
+
 function MemoryCategorySelect({
   value,
   onValueChange,
@@ -447,6 +464,24 @@ function useMemoryCollection(initialData: NexusMemoryTabData) {
     }
   }
 
+  const upsertMemory = (memory: NexusMemoryListItem) => {
+    setMemories((current) => [
+      memory,
+      ...current.filter((item) => item.id !== memory.id),
+    ])
+  }
+
+  const removeMemories = (memoryIds: readonly string[]) => {
+    const removedIds = new Set(memoryIds)
+    setMemories((current) =>
+      current.filter((memory) => !removedIds.has(memory.id)),
+    )
+    setSelectedIds(
+      (current) =>
+        new Set([...current].filter((id) => !removedIds.has(id))),
+    )
+  }
+
   const setSelected = (memoryId: string, selected: boolean) => {
     setSelectedIds((current) => {
       const next = new Set(current)
@@ -494,10 +529,15 @@ function useMemoryCollection(initialData: NexusMemoryTabData) {
     selectAll,
     refreshMemories,
     loadMore,
+    upsertMemory,
+    removeMemories,
   }
 }
 
-function useMemoryEditing(refreshMemories: () => Promise<void>) {
+function useMemoryEditing(
+  refreshMemories: () => Promise<void>,
+  upsertMemory: (memory: NexusMemoryListItem) => void,
+) {
   const [addOpen, setAddOpen] = useState(false)
   const [editing, setEditing] = useState<EditingMemory | null>(null)
   const [isAdding, setIsAdding] = useState(false)
@@ -511,9 +551,10 @@ function useMemoryEditing(refreshMemories: () => Promise<void>) {
         toast.error(result.message)
         return false
       }
-      await refreshMemories()
+      upsertMemory(result.data)
       setAddOpen(false)
       toast.success(result.message)
+      await refreshAfterMemoryMutation(refreshMemories, "add")
       return true
     } catch (error) {
       log.error("Adding Nexus memory failed", {
@@ -539,9 +580,10 @@ function useMemoryEditing(refreshMemories: () => Promise<void>) {
         toast.error(result.message)
         return
       }
-      await refreshMemories()
+      upsertMemory(result.data)
       setEditing(null)
       toast.success(result.message)
+      await refreshAfterMemoryMutation(refreshMemories, "update")
     } catch (error) {
       log.error("Updating Nexus memory failed", {
         memoryId: editing.id,
@@ -568,6 +610,7 @@ function useMemoryEditing(refreshMemories: () => Promise<void>) {
 function useMemoryDeletion(
   refreshMemories: () => Promise<void>,
   clearSelection: () => void,
+  removeMemories: (memoryIds: readonly string[]) => void,
 ) {
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
@@ -584,10 +627,17 @@ function useMemoryDeletion(
         toast.error(result.message)
         return
       }
-      await refreshMemories()
-      if (deleteTarget.kind === "bulk") clearSelection()
+      const removedIds =
+        deleteTarget.kind === "single"
+          ? [deleteTarget.memory.id]
+          : deleteTarget.memoryIds
+      removeMemories(removedIds)
+      if (deleteTarget.kind === "bulk") {
+        clearSelection()
+      }
       setDeleteTarget(null)
       toast.success(result.message)
+      await refreshAfterMemoryMutation(refreshMemories, "delete")
     } catch (error) {
       log.error("Deleting Nexus memory failed", {
         kind: deleteTarget.kind,
@@ -943,15 +993,20 @@ function MemoryDeleteDialog({
   )
 }
 
-export function MemoryTab({
+function MemoryTabContent({
   initialData,
 }: {
   initialData: NexusMemoryTabData
 }) {
   const collection = useMemoryCollection(initialData)
-  const editor = useMemoryEditing(collection.refreshMemories)
-  const deletion = useMemoryDeletion(collection.refreshMemories, () =>
-    collection.setSelectedIds(new Set()),
+  const editor = useMemoryEditing(
+    collection.refreshMemories,
+    collection.upsertMemory,
+  )
+  const deletion = useMemoryDeletion(
+    collection.refreshMemories,
+    () => collection.setSelectedIds(new Set()),
+    collection.removeMemories,
   )
   const toggle = useMemoryToggle(
     collection.memoryEnabled,
@@ -975,4 +1030,69 @@ export function MemoryTab({
       <MemoryDeleteDialog deletion={deletion} />
     </>
   )
+}
+
+export function MemoryTab({
+  initialData,
+  initialError = null,
+}: {
+  initialData: NexusMemoryTabData | null
+  initialError?: string | null
+}) {
+  const [data, setData] = useState(initialData)
+  const [error, setError] = useState(initialError)
+  const [isRetrying, setIsRetrying] = useState(false)
+
+  const handleRetry = async () => {
+    setIsRetrying(true)
+    try {
+      const result = await listNexusMemories()
+      if (!result.isSuccess) {
+        setError(result.message)
+        return
+      }
+      setData(result.data)
+      setError(null)
+    } catch (retryError) {
+      log.error("Retrying the initial Nexus memory load failed", {
+        error:
+          retryError instanceof Error
+            ? retryError.message
+            : String(retryError),
+      })
+      setError("Failed to load memories")
+    } finally {
+      setIsRetrying(false)
+    }
+  }
+
+  if (!data) {
+    return (
+      <Card data-testid="memory-load-error">
+        <CardHeader>
+          <CardTitle>Memories could not be loaded</CardTitle>
+          <CardDescription>
+            {error ??
+              "The memory service is temporarily unavailable. Try again."}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button
+            type="button"
+            variant="outline"
+            data-testid="memory-retry"
+            disabled={isRetrying}
+            onClick={() => void handleRetry()}
+          >
+            {isRetrying && (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            )}
+            Retry
+          </Button>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  return <MemoryTabContent initialData={data} />
 }

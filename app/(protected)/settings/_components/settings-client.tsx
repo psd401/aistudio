@@ -14,7 +14,8 @@ interface SettingsClientProps {
   apiKeys: ApiKeyInfo[]
   nexusPreferences: NexusChatPreferences
   hasMemoryCapability: boolean
-  memoryData: NexusMemoryTabData
+  memoryData: NexusMemoryTabData | null
+  memoryLoadError: string | null
 }
 
 export function SettingsClient({
@@ -23,6 +24,7 @@ export function SettingsClient({
   nexusPreferences,
   hasMemoryCapability,
   memoryData,
+  memoryLoadError,
 }: SettingsClientProps) {
   return (
     <Tabs defaultValue="profile" className="w-full">
@@ -56,7 +58,10 @@ export function SettingsClient({
 
       {hasMemoryCapability && (
         <TabsContent value="memory" className="mt-6">
-          <MemoryTab initialData={memoryData} />
+          <MemoryTab
+            initialData={memoryData}
+            initialError={memoryLoadError}
+          />
         </TabsContent>
       )}
     </Tabs>

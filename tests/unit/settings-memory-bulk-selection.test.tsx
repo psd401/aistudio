@@ -35,7 +35,26 @@ jest.mock("@/components/ui/alert-dialog", () => {
   }) => (open ? <>{children}</> : null)
   return {
     AlertDialog: ClosedRoot,
-    AlertDialogAction: PassThrough,
+    AlertDialogAction: ({
+      children,
+      disabled,
+      onClick,
+      "data-testid": testId,
+    }: {
+      children?: import("react").ReactNode
+      disabled?: boolean
+      onClick?: () => void
+      "data-testid"?: string
+    }) => (
+      <button
+        type="button"
+        disabled={disabled}
+        data-testid={testId}
+        onClick={onClick}
+      >
+        {children}
+      </button>
+    ),
     AlertDialogCancel: PassThrough,
     AlertDialogContent: PassThrough,
     AlertDialogDescription: PassThrough,
@@ -107,6 +126,7 @@ jest.mock("@/components/ui/switch", () => ({
 import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryTab } from "@/app/(protected)/settings/_components/memory-tab"
 import {
+  deleteNexusMemory,
   listNexusMemories,
   type NexusMemoryListItem,
 } from "@/actions/nexus/memory.actions"
@@ -124,6 +144,10 @@ function memory(index: number): NexusMemoryListItem {
 }
 
 describe("Settings memory bulk selection", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
   it("caps select-all and manual selection at the server limit", () => {
     render(
       <MemoryTab
@@ -204,6 +228,12 @@ describe("Settings memory bulk selection", () => {
       screen.getByRole("button", { name: "Enable Nexus memory" }),
     ).toBeEnabled()
   })
+})
+
+describe("Settings memory collection resilience", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
 
   it("loads the next bounded page without duplicating existing rows", async () => {
     const cursor = {
@@ -239,5 +269,71 @@ describe("Settings memory bulk selection", () => {
     expect(listNexusMemories).toHaveBeenCalledWith({ cursor })
     expect(screen.getAllByTestId("memory-row")).toHaveLength(2)
     expect(screen.queryByTestId("memory-load-more")).not.toBeInTheDocument()
+  })
+
+  it("retries an explicit initial-load error instead of showing disabled defaults", async () => {
+    jest.mocked(listNexusMemories).mockResolvedValueOnce({
+      isSuccess: true,
+      message: "Loaded",
+      data: {
+        memories: [memory(1)],
+        memoryEnabled: true,
+        globalMemoryEnabled: true,
+        nextCursor: null,
+      },
+    })
+    render(
+      <MemoryTab
+        initialData={null}
+        initialError="Failed to load memories"
+      />,
+    )
+
+    expect(screen.getByTestId("memory-load-error")).toHaveTextContent(
+      "Memories could not be loaded",
+    )
+    expect(
+      screen.queryByTestId("memory-global-disabled"),
+    ).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId("memory-retry"))
+
+    await waitFor(() =>
+      expect(screen.getByText("Memory 1")).toBeInTheDocument(),
+    )
+    expect(screen.queryByTestId("memory-load-error")).not.toBeInTheDocument()
+  })
+
+  it("keeps a committed deletion successful when the refresh fails", async () => {
+    jest.mocked(deleteNexusMemory).mockResolvedValueOnce({
+      isSuccess: true,
+      message: "Memory deleted",
+      data: { memoryId: memory(1).id },
+    })
+    jest.mocked(listNexusMemories).mockResolvedValueOnce({
+      isSuccess: false,
+      message: "Failed to load memories",
+    })
+    render(
+      <MemoryTab
+        initialData={{
+          memories: [memory(1)],
+          memoryEnabled: true,
+          globalMemoryEnabled: true,
+          nextCursor: null,
+        }}
+      />,
+    )
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Delete memory: Memory 1" }),
+    )
+    fireEvent.click(screen.getByTestId("memory-delete-confirm"))
+
+    await waitFor(() =>
+      expect(screen.queryByText("Memory 1")).not.toBeInTheDocument(),
+    )
+    expect(deleteNexusMemory).toHaveBeenCalledWith(memory(1).id)
+    expect(listNexusMemories).toHaveBeenCalled()
   })
 })

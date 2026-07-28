@@ -37,6 +37,7 @@ const BASE_PROPS = {
     globalMemoryEnabled: true,
     nextCursor: null,
   },
+  memoryLoadError: null,
 }
 
 describe("Settings memory capability visibility", () => {

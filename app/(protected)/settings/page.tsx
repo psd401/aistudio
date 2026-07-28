@@ -42,14 +42,12 @@ export default async function SettingsPage() {
         }
         hasMemoryCapability={hasMemoryCapability}
         memoryData={
-          memoryResult?.isSuccess
-            ? memoryResult.data
-            : {
-                memories: [],
-                memoryEnabled: true,
-                globalMemoryEnabled: false,
-                nextCursor: null,
-              }
+          memoryResult?.isSuccess ? memoryResult.data : null
+        }
+        memoryLoadError={
+          memoryResult && !memoryResult.isSuccess
+            ? memoryResult.message
+            : null
         }
       />
     </div>
