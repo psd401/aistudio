@@ -40,6 +40,35 @@ def _is_safe_path_component(value: str) -> bool:
     return bool(_SAFE_PATH_ID.match(value or "")) and value not in {".", ".."}
 
 
+def _catalog_tool_names(catalog: object) -> List[str]:
+    """Return every exact tool name from the gateway catalog, in source order."""
+
+    names: List[str] = []
+    seen: set[str] = set()
+
+    def collect(value: object) -> None:
+        if isinstance(value, dict):
+            name = value.get("name")
+            if isinstance(name, str) and name and name not in seen:
+                seen.add(name)
+                names.append(name)
+            for nested in value.values():
+                if isinstance(nested, (dict, list, tuple)):
+                    collect(nested)
+            return
+        if isinstance(value, (list, tuple)):
+            for nested in value:
+                if isinstance(nested, str):
+                    if nested and nested not in seen:
+                        seen.add(nested)
+                        names.append(nested)
+                else:
+                    collect(nested)
+
+    collect(catalog)
+    return names
+
+
 @dataclasses.dataclass
 class TurnResult:
     """Structured result of a single agent turn.
@@ -653,9 +682,13 @@ class OpenClawAdapter(HarnessAdapter):
                             if msg_c.get("ok"):
                                 payload = msg_c.get("payload", {})
                                 tools = payload.get("tools") or payload.get("grouped") or payload
+                                names = _catalog_tool_names(tools)
                                 logger.info(
                                     "tools.catalog ok: %s",
-                                    json.dumps(tools)[:1500],
+                                    json.dumps(
+                                        {"names": names},
+                                        separators=(",", ":"),
+                                    ),
                                 )
                             else:
                                 logger.warning(

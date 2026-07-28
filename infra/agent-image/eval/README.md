@@ -136,6 +136,8 @@ A fixture file is a list (or an object containing a `fixtures` list):
 allowlisted route without a matching fixture returns a named
 `EvalFixtureMissing` response and automatically fails the trial; it never
 falls through to a live service or a silent empty response.
+Broker operations mirror production: fixtures and requests must use `POST`,
+and request bodies must be JSON objects.
 
 Available graders:
 
@@ -146,8 +148,8 @@ Available graders:
 - `output_match` applies a regular expression to the final result.
 - `trajectory_in_order` requires relative tool order while allowing extra
   intervening steps.
-- `tools_catalog` checks the per-turn `tools.catalog` diagnostic for every
-  expected entry.
+- `tools_catalog` checks the per-turn compact, complete `tools.catalog` name
+  diagnostic for every expected entry.
 
 Each JSONL record includes `broker_requests` plus a `grade` object containing
 the per-grader boolean and human-readable reason. Task reliability uses

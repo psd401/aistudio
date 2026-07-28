@@ -37,6 +37,45 @@ extract_text = OpenClawAdapter._extract_text
 OLD_LITERAL = "psd-agent-internal-gateway-token"
 
 
+class CatalogDiagnosticTests(unittest.TestCase):
+    def test_compacts_every_name_without_the_old_diagnostic_truncation(self):
+        tools = [
+            {
+                "name": f"tool.{index:02d}",
+                "description": "x" * 100,
+            }
+            for index in range(40)
+        ]
+
+        names = harness_adapter._catalog_tool_names(tools)
+        compact = json.dumps({"names": names}, separators=(",", ":"))
+
+        self.assertGreater(len(json.dumps(tools)), 1500)
+        self.assertLess(len(compact), 1500)
+        self.assertEqual(names[0], "tool.00")
+        self.assertEqual(names[-1], "tool.39")
+        self.assertEqual(len(names), 40)
+
+    def test_reads_names_from_grouped_catalogs_and_deduplicates(self):
+        names = harness_adapter._catalog_tool_names(
+            {
+                "workspace": [
+                    {"name": "workspace.execute"},
+                    {"name": "skills.search"},
+                ],
+                "core": [
+                    {"name": "skills.search"},
+                    {"name": "read"},
+                ],
+            }
+        )
+
+        self.assertEqual(
+            names,
+            ["workspace.execute", "skills.search", "read"],
+        )
+
+
 class GatewayTokenTests(unittest.TestCase):
     def test_token_generated_and_nonempty(self):
         a = harness_adapter.OpenClawAdapter()

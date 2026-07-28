@@ -412,7 +412,7 @@ def _grade_tools_catalog(
 
 
 def _parse_tools_catalog_names(log_text: str) -> set[str]:
-    """Extract exact tool names from complete or length-truncated diagnostics."""
+    """Extract exact names from the compact catalog or legacy diagnostics."""
 
     observed: set[str] = set()
 
@@ -443,9 +443,9 @@ def _parse_tools_catalog_names(log_text: str) -> set[str]:
             continue
         except json.JSONDecodeError:
             pass
-        # harness_adapter.py intentionally caps this diagnostic at 1500
-        # characters. Extract only explicit JSON `name` fields when that cap
-        # cuts a catalog off mid-document.
+        # Older candidate images capped the complete catalog diagnostic at
+        # 1500 characters. Preserve best-effort compatibility with their
+        # explicit JSON `name` fields; current images log every name compactly.
         for match in re.finditer(
             r'"name"\s*:\s*("(?:\\.|[^"\\])*")',
             payload,

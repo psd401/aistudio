@@ -259,6 +259,62 @@ class BrokerStubHttpTests(unittest.TestCase):
         self.assertEqual(capture["body"], {"url": "https://example.com"})
         self.assertIn("EvalUnsupportedAgentRoute", capture["stub_error"])
 
+    def test_non_post_method_is_rejected_even_when_a_fixture_would_match(self):
+        self.stub.configure(
+            [
+                {
+                    "route": "/api/agent/directory-lookup",
+                    "method": "GET",
+                    "response": {"body": {"people": []}},
+                }
+            ]
+        )
+
+        status, response = self.stub.request(
+            "/agent-broker/api/agent/directory-lookup",
+            method="GET",
+        )
+
+        self.assertEqual(status, 404)
+        self.assertEqual(
+            response["error"],
+            broker_stub.UNSUPPORTED_METHOD_ERROR,
+        )
+        [capture] = self.stub.captures()
+        self.assertIn(
+            broker_stub.UNSUPPORTED_METHOD_ERROR,
+            capture["stub_error"],
+        )
+
+    def test_non_object_json_bodies_are_rejected_and_captured(self):
+        for body in ("not-an-object", ["Ada"]):
+            with self.subTest(body=body):
+                self.stub.configure(
+                    [
+                        {
+                            "route": "/api/agent/directory-lookup",
+                            "response": {"body": {"people": []}},
+                        }
+                    ]
+                )
+                status, response = self.stub.request(
+                    "/agent-broker/api/agent/directory-lookup",
+                    method="POST",
+                    body=body,
+                )
+
+                self.assertEqual(status, 400)
+                self.assertEqual(
+                    response["error"],
+                    broker_stub.INVALID_REQUEST_BODY_ERROR,
+                )
+                [capture] = self.stub.captures()
+                self.assertEqual(capture["body"], body)
+                self.assertIn(
+                    broker_stub.INVALID_REQUEST_BODY_ERROR,
+                    capture["stub_error"],
+                )
+
     def test_unavailable_trial_config_preserves_the_request_body_in_capture(self):
         self.stub.configure([])
         (

@@ -28,6 +28,8 @@ TRIAL_CONFIG_FILENAME = "trial.json"
 CAPTURE_FILENAME = "capture.jsonl"
 MAX_REQUEST_BYTES = 50 * 1024 * 1024
 MISSING_FIXTURE_ERROR = "EvalFixtureMissing"
+UNSUPPORTED_METHOD_ERROR = "EvalUnsupportedAgentMethod"
+INVALID_REQUEST_BODY_ERROR = "EvalInvalidRequestBody"
 
 ALLOWED_AGENT_BROKER_ROUTES = frozenset(
     {
@@ -255,8 +257,23 @@ class BrokerStubRequestHandler(BaseHTTPRequestHandler):
             trial = self.server.state.load_trial()
             trial_id = trial.get("trial_id")
             task_id = trial.get("task_id")
+            request_error: str | None = None
+            response_status = HTTPStatus.NOT_FOUND
             if route not in ALLOWED_AGENT_BROKER_ROUTES:
-                error = f"EvalUnsupportedAgentRoute: {self.command} {route}"
+                request_error = (
+                    f"EvalUnsupportedAgentRoute: {self.command} {route}"
+                )
+            elif self.command != "POST":
+                request_error = (
+                    f"{UNSUPPORTED_METHOD_ERROR}: {self.command} {route}"
+                )
+            elif not isinstance(body, Mapping):
+                request_error = (
+                    f"{INVALID_REQUEST_BODY_ERROR}: POST {route} "
+                    "requires a JSON object"
+                )
+                response_status = HTTPStatus.BAD_REQUEST
+            if request_error is not None:
                 self.server.state.capture(
                     {
                         "trial_id": trial_id,
@@ -268,12 +285,16 @@ class BrokerStubRequestHandler(BaseHTTPRequestHandler):
                             for key, value in self.headers.items()
                         },
                         "body": body,
-                        "stub_error": error,
+                        "stub_error": request_error,
                     }
                 )
                 self._send_json(
-                    HTTPStatus.NOT_FOUND,
-                    {"error": "EvalUnsupportedAgentRoute", "route": route},
+                    response_status,
+                    {
+                        "error": request_error.split(":", 1)[0],
+                        "message": request_error,
+                        "route": route,
+                    },
                 )
                 return
             fixture = self.server.state.find_fixture(

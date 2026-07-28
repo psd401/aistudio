@@ -269,6 +269,31 @@ class SuiteLoadingTests(unittest.TestCase):
             ):
                 runner.load_suite(task_path)
 
+    def test_fixture_loading_rejects_non_post_methods_and_scalar_selectors(self):
+        invalid_fixtures = (
+            {
+                "route": "/api/agent/directory-lookup",
+                "method": "GET",
+                "response": {"body": {}},
+            },
+            {
+                "route": "/api/agent/directory-lookup",
+                "request_body": "Ada",
+                "response": {"body": {}},
+            },
+        )
+        for index, fixture in enumerate(invalid_fixtures):
+            with self.subTest(fixture=fixture):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / f"invalid-{index}.json"
+                    path.write_text(
+                        json.dumps([fixture]),
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaises(runner.EvalRunnerError):
+                        runner._load_fixture_files((path,))
+
     def test_python_adjacent_string_syntax_is_not_accepted_as_yaml(self):
         with tempfile.TemporaryDirectory() as directory:
             task_path = Path(directory) / "adjacent-strings.yaml"

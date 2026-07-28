@@ -366,9 +366,14 @@ def _load_fixture_files(paths: Sequence[Path]) -> list[dict[str, object]]:
                     "agent-broker allowlist"
                 )
             method = entry.get("method", "POST")
-            if not isinstance(method, str) or not method:
+            if not isinstance(method, str) or method.upper() != "POST":
                 raise EvalRunnerError(
-                    f"{path}: fixture {index} method must be a non-empty string"
+                    f"{path}: fixture {index} method must be POST"
+                )
+            request_body = entry.get("request_body")
+            if request_body is not None and not isinstance(request_body, Mapping):
+                raise EvalRunnerError(
+                    f"{path}: fixture {index} request_body must be an object"
                 )
             response = entry.get("response", {})
             if not isinstance(response, Mapping):
@@ -394,7 +399,7 @@ def _load_fixture_files(paths: Sequence[Path]) -> list[dict[str, object]]:
                     f"{path}: fixture {index} response status must be 100-599"
                 )
             normalized = dict(entry)
-            normalized["method"] = method.upper()
+            normalized["method"] = "POST"
             normalized["response"] = dict(response)
             fixtures.append(normalized)
     return fixtures
