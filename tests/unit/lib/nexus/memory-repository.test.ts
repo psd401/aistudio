@@ -170,6 +170,7 @@ describe("Nexus memory repository deduplication", () => {
     const rendered = new PgDialect().sqlToQuery(statement)
     expect(rendered.sql).toContain("AS MATERIALIZED")
     expect(rendered.sql).toContain("FROM owner_memories")
+    expect(rendered.sql).toContain("'profile', 'preference', 'context'")
     expect(rendered.params).toContain(7)
   })
 })

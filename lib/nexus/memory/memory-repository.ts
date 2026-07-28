@@ -241,7 +241,7 @@ export const drizzleMemoryRepository: MemoryRepository = {
               updated_at
             FROM nexus_user_memories
             WHERE user_id = ${userId}
-              AND category IN ('preference', 'context')
+              AND category IN ('profile', 'preference', 'context')
               AND deleted_at IS NULL
               AND embedding IS NOT NULL
           )

@@ -218,12 +218,21 @@ describe("Nexus memory privacy scan availability", () => {
 })
 
 describe("Nexus memory service retrieval and deletion", () => {
-  it("retrieves every owned profile memory plus thresholded preference/context results", async () => {
+  it("adds relevant older profiles without duplicating the newest profile set", async () => {
     const repository = createRepository()
     const profile = storedMemory({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", category: "profile" })
+    const olderProfile = storedMemory({
+      id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      category: "profile",
+      content: "Previously lived in Oregon",
+    })
     const relevant = storedMemory({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" })
     repository.listProfileMemories.mockResolvedValue([profile])
-    repository.findRelevantMemories.mockResolvedValue([profile, relevant])
+    repository.findRelevantMemories.mockResolvedValue([
+      profile,
+      olderProfile,
+      relevant,
+    ])
     const getSetting = jest.fn(async (key: string) =>
       key === "MEMORY_RETRIEVAL_THRESHOLD" ? "0.42" : "9",
     )
@@ -235,7 +244,7 @@ describe("Nexus memory service retrieval and deletion", () => {
     })
 
     await expect(service.retrieve({ userId: 7, query: "current topic" }))
-      .resolves.toEqual([profile, relevant])
+      .resolves.toEqual([profile, olderProfile, relevant])
     expect(repository.listProfileMemories).toHaveBeenCalledWith(
       7,
       MAX_PROFILE_MEMORIES_PER_TURN,
