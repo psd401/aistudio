@@ -1,0 +1,7 @@
+# Phase-0 smoke suite for issue #1422. Each task is L0 and needs no live skill
+# broker. The first two tasks deliberately prove that fresh session headers do
+# not carry conversation state across trials/tasks.
+tasks:
+  - tasks/session-seed.yaml
+  - tasks/session-recall.yaml
+  - tasks/arithmetic.yaml

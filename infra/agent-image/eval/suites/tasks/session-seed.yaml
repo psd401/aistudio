@@ -1,0 +1,6 @@
+id: session-isolation-seed
+skill: runner-core
+level: L0
+workspace: pure
+prompt: "Remember the passphrase cobalt-orchid for this conversation. Reply exactly: STORED"
+trials: 3

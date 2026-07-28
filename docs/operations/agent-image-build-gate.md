@@ -67,6 +67,28 @@ That is usually all you need. When `AGENT_PROBE_APP_BASE_URL` and
 Both steps need AWS credentials for the target environment. If either fails,
 the build **stops** — it does not push an unverified image.
 
+## Running the repeated local eval
+
+The build gate's SSE/payload helpers are also used by
+`infra/agent-image/eval/runner.py`. The runner extends the one-shot canary into
+an N-task × K-trial local Docker run while leaving the build-probe artifact
+schema unchanged:
+
+```bash
+python3 infra/agent-image/eval/runner.py \
+  --image <tag-or-digest> \
+  --suite infra/agent-image/eval/suites/core.yaml \
+  --trials 3 \
+  --out /tmp/agent-eval-core.jsonl
+```
+
+Pure tasks share a booted container but receive a fresh AgentCore session UUID
+and freshly minted signed context on every trial. Workspace-mutating tasks get
+a fresh container per trial. The context TTL tracks the configured invocation
+timeout with a safety margin, and the same freshly resolved AWS credential
+chain is used for context minting and the candidate container. See
+`infra/agent-image/eval/README.md` for the task format and complete options.
+
 ### Minting a context by hand
 
 Useful when building against an environment other than the one your default
