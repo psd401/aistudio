@@ -60,6 +60,13 @@ describe('buildJobPayload / parseJobPayload round-trip', () => {
     expect(parsed.threadName).toBeUndefined();
   });
 
+  test('round-trips an aside response marker for the background reply', () => {
+    const parsed = parseJobPayload(
+      buildJobPayload({ ...BASE, responsePrefix: '[aside] ' })
+    );
+    expect(parsed.responsePrefix).toBe('[aside] ');
+  });
+
   test('prompt excerpt truncates to keep the payload under the RunTask 8KiB cap', () => {
     const parsed = parseJobPayload(
       buildJobPayload({ ...BASE, originalPrompt: 'x'.repeat(10_000) })

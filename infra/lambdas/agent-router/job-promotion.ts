@@ -67,6 +67,8 @@ export interface JobPayload {
   threadName?: string;
   /** In shared spaces the reply is prefixed [Name's Agent]; DMs are not. */
   isDM: boolean;
+  /** Optional router-selected marker retained on acknowledgement/final replies. */
+  responsePrefix?: string;
   /** Truncated excerpt of the original request (context only, see above). */
   promptExcerpt: string;
 }
@@ -121,6 +123,7 @@ export function buildJobPayload(input: {
   threadName?: string;
   isDM: boolean;
   originalPrompt: string;
+  responsePrefix?: string;
 }): string {
   const payload: JobPayload = {
     sessionId: input.sessionId,
@@ -133,6 +136,9 @@ export function buildJobPayload(input: {
     spaceName: input.spaceName,
     ...(input.threadName ? { threadName: input.threadName } : {}),
     isDM: input.isDM,
+    ...(input.responsePrefix
+      ? { responsePrefix: input.responsePrefix }
+      : {}),
     // A CONTINUATION resumes a session whose transcript already holds the full
     // request, so an excerpt is context garnish. A RESTART has no transcript —
     // a truncated prompt there means the agent silently executes an incomplete
@@ -194,6 +200,9 @@ export function parseJobPayload(raw: string | undefined): JobPayload {
       ? { threadName: obj.threadName }
       : {}),
     isDM: obj.isDM === true,
+    ...(typeof obj.responsePrefix === 'string' && obj.responsePrefix
+      ? { responsePrefix: obj.responsePrefix }
+      : {}),
     promptExcerpt:
       typeof obj.promptExcerpt === 'string' ? obj.promptExcerpt : '',
   };

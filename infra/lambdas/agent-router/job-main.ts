@@ -129,7 +129,9 @@ async function main(): Promise<number> {
     // harness's failure frame — posting it satisfies "always post something".
     const maxLength = 4096;
     const truncationSuffix = '\n\n_(Response truncated — ask me to continue)_';
-    const prefix = job.isDM ? '' : `[${job.displayName}'s Agent] `;
+    const prefix =
+      job.responsePrefix ||
+      (job.isDM ? '' : `[${job.displayName}'s Agent] `);
     const availableLength = maxLength - prefix.length;
     const truncatedResponse =
       agentResult.response.length > availableLength
