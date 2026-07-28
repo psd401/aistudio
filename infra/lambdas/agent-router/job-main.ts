@@ -14,7 +14,7 @@
  *   - AGENTCORE_TIMEOUT_MS_OVERRIDE is set on the task definition so the
  *     undici dispatcher in index.ts outlives the 2h invocation.
  *   - The router pre-acquired the kind='job' session lock; this process
- *     renews it every 5 minutes and releases it on exit.
+ *     renews it at startup and every 5 minutes, then releases it on exit.
  *   - ALWAYS posts something to the originating space: the final answer,
  *     the harness's failure frame, or a runner-error message. No silent
  *     deaths.
@@ -248,14 +248,28 @@ async function main(): Promise<number> {
     deadlineS: JOB_DEADLINE_S,
   });
 
-  // Keep the kind='job' lock alive for the duration — the router uses it to
-  // answer mid-job user messages instantly with "still working".
-  const renewTimer = setInterval(() => {
-    void renewSessionLock(job.sessionId, job.lockToken, log);
-  }, RENEW_INTERVAL_MS);
-
   const startTime = Date.now();
+  let renewTimer: ReturnType<typeof setInterval> | undefined;
   try {
+    // The inherited lease started before RunTask, so Fargate startup already
+    // consumed part of it. Renew once before any external work, then start the
+    // cadence; otherwise a slow start plus one missed interval can expose the
+    // session before the second attempt.
+    const ownsLock = await renewSessionLock(
+      job.sessionId,
+      job.lockToken,
+      log,
+      true,
+    );
+    if (!ownsLock) {
+      throw new Error(
+        'Background job lost its session lock before execution',
+      );
+    }
+    renewTimer = setInterval(() => {
+      void renewSessionLock(job.sessionId, job.lockToken, log);
+    }, RENEW_INTERVAL_MS);
+
     const agentResult = await invokeAgentCore(
       prompt,
       job.userEmail,
@@ -290,7 +304,7 @@ async function main(): Promise<number> {
     const exitCode = await handleJobRunnerError(job, error, startTime, log);
     return exitCode;
   } finally {
-    clearInterval(renewTimer);
+    if (renewTimer) clearInterval(renewTimer);
     await releaseSessionLock(job.sessionId, job.lockToken, log);
   }
 }

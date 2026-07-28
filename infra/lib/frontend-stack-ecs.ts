@@ -448,6 +448,10 @@ export class FrontendStackEcs extends cdk.Stack {
           action: 'invoke',
           parameters: {
             FunctionName: backfill.functionName,
+            // A full group can take longer than the custom-resource provider's
+            // synchronous SDK timeout. Let Lambda's configured async retries,
+            // DLQ, and alarm supervise the migration after acceptance.
+            InvocationType: 'Event',
             Payload: JSON.stringify({
               RequestType: 'Create',
               migrationVersion: 'scheduled-time-delivery-policy-v3',

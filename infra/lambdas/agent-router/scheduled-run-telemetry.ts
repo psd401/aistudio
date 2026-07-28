@@ -4,6 +4,7 @@ export interface ScheduledJobContext {
   scheduleId?: string;
   scheduleName?: string;
   scheduledRunId?: string;
+  fireKey?: string;
   userEmail: string;
   sessionId: string;
 }
@@ -18,6 +19,7 @@ export interface ScheduledJobOutcome {
 
 export interface ScheduledRunWrite extends ScheduledJobOutcome {
   scheduledRunId?: string;
+  fireKey?: string;
   userEmail: string;
   scheduleId: string;
   scheduleName?: string;
@@ -54,6 +56,7 @@ export async function recordScheduledJobTerminal(
       ...(job.scheduledRunId
         ? { scheduledRunId: job.scheduledRunId }
         : {}),
+      ...(job.fireKey ? { fireKey: job.fireKey } : {}),
       sessionId: job.sessionId,
       ...outcome,
       ...(outcome.errorMessage

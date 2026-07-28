@@ -15,6 +15,9 @@ const routerSource = fs.readFileSync(
 
 const scheduledJob = {
   scheduledRunId: "901",
+  fireKey:
+    "schedule-fire#36bb0456-1c51-4fb8-97d1-4e87d02765ce#" +
+    "2026-07-28T15:00:00.000Z",
   scheduleId: "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
   scheduleName: "Morning brief",
   userEmail: "owner@psd401.net",

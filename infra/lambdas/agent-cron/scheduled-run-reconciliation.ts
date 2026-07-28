@@ -8,6 +8,7 @@ export const SCHEDULED_RUN_RECONCILIATION_DELAY_SECONDS = 8 * 60;
 export interface ScheduledRunReconciliationMessage {
   type: 'scheduled-run-reconciliation';
   scheduledRunId: string;
+  fireKey: string;
   userEmail: string;
   scheduleId: string;
   scheduleName: string;
@@ -59,6 +60,23 @@ function requiredString(
   return value;
 }
 
+function optionalString(
+  record: Record<string, unknown>,
+  key: string,
+  maxLength: number,
+): string | undefined {
+  const value = record[key];
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.length > maxLength
+  ) {
+    throw new Error(`Invalid scheduled-run reconciliation ${key}`);
+  }
+  return value;
+}
+
 export function parseScheduledRunReconciliationMessage(
   body: string,
 ): ScheduledRunReconciliationMessage {
@@ -83,6 +101,12 @@ export function parseScheduledRunReconciliationMessage(
   return {
     type: 'scheduled-run-reconciliation',
     scheduledRunId,
+    // Messages written by a pre-fire-key cron bundle can remain queued during
+    // a rolling deploy. Their reserved row ID is immutable and therefore a
+    // safe idempotency key for repairing the corresponding failure mirror.
+    fireKey:
+      optionalString(record, 'fireKey', 192)
+      ?? `scheduled-run#${scheduledRunId}`,
     userEmail: requiredString(record, 'userEmail', 320),
     scheduleId: requiredString(record, 'scheduleId', 128),
     scheduleName: requiredString(record, 'scheduleName', 200),
@@ -110,23 +134,15 @@ export async function reconcileScheduledRun(
     `Background launch remained ambiguous: no ECS task with startedBy ` +
     `${message.startedBy} was visible after the durable ` +
     `${SCHEDULED_RUN_RECONCILIATION_DELAY_SECONDS}-second consistency window`;
-  const updated = await dependencies.terminalize({
-    scheduledRunId: message.scheduledRunId,
-    userEmail: message.userEmail,
-    scheduleId: message.scheduleId,
-    scheduleName: message.scheduleName,
-    sessionId: message.sessionId,
-    inputTokens: 0,
-    outputTokens: 0,
-    latencyMs: SCHEDULED_RUN_RECONCILIATION_DELAY_SECONDS * 1000,
-    status: 'error',
-    errorMessage,
-  });
-  if (!updated) return { status: 'no-pending-run' };
 
+  // Persist the idempotent failure first. If this succeeds and terminalization
+  // fails, SQS retries and upserts the same fire. If it fails, the promoted row
+  // remains pending and the message retries. There is no crash point that can
+  // leave a terminal error row without its failure mirror.
   await dependencies.recordFailure({
     userEmail: message.userEmail,
     scheduleId: message.scheduleId,
+    fireKey: message.fireKey,
     scheduleName: message.scheduleName,
     sessionId: message.sessionId,
     errorMessage,
@@ -138,5 +154,19 @@ export async function reconcileScheduledRun(
         SCHEDULED_RUN_RECONCILIATION_DELAY_SECONDS,
     },
   });
+  const updated = await dependencies.terminalize({
+    scheduledRunId: message.scheduledRunId,
+    fireKey: message.fireKey,
+    userEmail: message.userEmail,
+    scheduleId: message.scheduleId,
+    scheduleName: message.scheduleName,
+    sessionId: message.sessionId,
+    inputTokens: 0,
+    outputTokens: 0,
+    latencyMs: SCHEDULED_RUN_RECONCILIATION_DELAY_SECONDS * 1000,
+    status: 'error',
+    errorMessage,
+  });
+  if (!updated) return { status: 'no-pending-run' };
   return { status: 'terminalized', errorMessage };
 }

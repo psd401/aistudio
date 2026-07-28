@@ -69,6 +69,8 @@ export interface JobPayload {
   scheduleName?: string;
   /** Per-fire agent_scheduled_runs primary key created before RunTask. */
   scheduledRunId?: string;
+  /** Immutable Scheduler occurrence identity for retry-safe failure repair. */
+  fireKey?: string;
   threadName?: string;
   /** In shared spaces the reply is prefixed [Name's Agent]; DMs are not. */
   isDM: boolean;
@@ -158,6 +160,7 @@ export function buildJobPayload(input: {
   scheduleId?: string;
   scheduleName?: string;
   scheduledRunId?: string;
+  fireKey?: string;
   threadName?: string;
   isDM: boolean;
   originalPrompt: string;
@@ -177,6 +180,7 @@ export function buildJobPayload(input: {
     ...(input.scheduledRunId
       ? { scheduledRunId: input.scheduledRunId }
       : {}),
+    ...(input.fireKey ? { fireKey: input.fireKey } : {}),
     ...(input.threadName ? { threadName: input.threadName } : {}),
     isDM: input.isDM,
     ...(input.responsePrefix
@@ -253,6 +257,7 @@ export function parseJobPayload(raw: string | undefined): JobPayload {
     SCHEDULE_NAME_MAX_LENGTH
   );
   const scheduledRunId = readScheduledRunId(obj);
+  const fireKey = boundedOptionalString(obj, 'fireKey', 192);
   return {
     sessionId: requireString('sessionId'),
     // Unknown/absent -> 'deadline'. A payload from an older cron build must
@@ -269,6 +274,7 @@ export function parseJobPayload(raw: string | undefined): JobPayload {
     ...(scheduleId ? { scheduleId } : {}),
     ...(scheduleName ? { scheduleName } : {}),
     ...(scheduledRunId ? { scheduledRunId } : {}),
+    ...(fireKey ? { fireKey } : {}),
     ...(typeof obj.threadName === 'string' && obj.threadName
       ? { threadName: obj.threadName }
       : {}),

@@ -304,7 +304,7 @@ describe("agent-cron ordinary run telemetry", () => {
         userId: "o***@psd401.net",
       }),
     )
-    expect(execute.mock.calls[1][0].parameters).toEqual(
+    expect(execute.mock.calls[0][0].parameters).toEqual(
       expect.arrayContaining([
         { name: "severity", value: { stringValue: "warn" } },
         {
@@ -343,7 +343,7 @@ describe("agent-cron ordinary run telemetry", () => {
       log,
     )
 
-    const scheduledRunInput = execute.mock.calls[0][0]
+    const scheduledRunInput = execute.mock.calls[1][0]
     const errorParameter = scheduledRunInput.parameters.find(
       (parameter: { name: string }) => parameter.name === "error_message",
     )
@@ -383,7 +383,7 @@ describe("agent-cron fire-idempotent telemetry", () => {
     expect(execute.mock.calls[0][0]).toEqual(
       expect.objectContaining({
         sql: expect.stringMatching(
-          /ON CONFLICT \(fire_key\)[\s\S]+DO UPDATE SET/,
+          /ON CONFLICT \(source, fire_key\)[\s\S]+DO UPDATE SET/,
         ),
         parameters: expect.arrayContaining([{
           name: "fire_key",
@@ -394,7 +394,7 @@ describe("agent-cron fire-idempotent telemetry", () => {
     expect(execute.mock.calls[1][0]).toEqual(
       expect.objectContaining({
         sql: expect.stringMatching(
-          /ON CONFLICT \(source, fire_key\)[\s\S]+DO UPDATE SET/,
+          /ON CONFLICT \(fire_key\)[\s\S]+DO UPDATE SET/,
         ),
         parameters: expect.arrayContaining([{
           name: "fire_key",
@@ -402,6 +402,30 @@ describe("agent-cron fire-idempotent telemetry", () => {
         }]),
       }),
     )
+  })
+
+  it("propagates a strict failure-mirror outage for Lambda retry", async () => {
+    const { telemetry, execute, log } = harness()
+    execute.mockRejectedValueOnce(new Error("failure mirror unavailable"))
+
+    await expect(
+      telemetry.recordRunStrict(
+        {
+          fireKey:
+            "schedule-fire#schedule-id#2026-07-28T15:00:00.000Z",
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          sessionId: "schedule-session",
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 3,
+          status: "error",
+          errorMessage: "Task stopped",
+        },
+        log,
+      ),
+    ).rejects.toThrow("failure mirror unavailable")
+    expect(execute).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -424,7 +448,7 @@ describe("agent-cron failure telemetry", () => {
     )
 
     expect(execute).toHaveBeenCalledTimes(2)
-    const failureInput = execute.mock.calls[1][0]
+    const failureInput = execute.mock.calls[0][0]
     expect(failureInput.sql).toContain("INSERT INTO agent_failures")
     expect(failureInput.parameters).toEqual(
       expect.arrayContaining([

@@ -13,10 +13,16 @@ import { sanitizeDiagnostic } from './diagnostic-sanitization';
 // quickly after a hard crash. Immediately before execution, the owner
 // conditionally advances it to the long lease below.
 const ACQUIRED_LEASE_SECONDS = 5;
-// EventBridge Scheduler retries this target for at most 60 minutes. Once work
-// may have started, keep the fire claimed beyond that horizon to prevent replay.
-const EXECUTING_LEASE_SECONDS = 65 * 60;
-const COMPLETED_MARKER_SECONDS = 65 * 60;
+// EventBridge Scheduler may retry delivery for 60 minutes. If Lambda accepted
+// a delivery but Scheduler lost the acknowledgement, that duplicate can then
+// remain in Lambda's async queue for another 60 minutes. Keep a five-minute
+// margin beyond the combined replay horizon.
+const FIRE_REPLAY_HORIZON_SECONDS = 2 * 60 * 60;
+const FIRE_MARKER_MARGIN_SECONDS = 5 * 60;
+const FIRE_MARKER_SECONDS =
+  FIRE_REPLAY_HORIZON_SECONDS + FIRE_MARKER_MARGIN_SECONDS;
+const EXECUTING_LEASE_SECONDS = FIRE_MARKER_SECONDS;
+const COMPLETED_MARKER_SECONDS = FIRE_MARKER_SECONDS;
 const ECS_STARTED_BY_MAX_LENGTH = 36;
 const SCHEDULED_STARTED_BY_PREFIX = 'scheduled-';
 const SCHEDULED_STARTED_BY_DIGEST_LENGTH =
@@ -176,6 +182,8 @@ export function scheduleFireIdentity(
 ): ScheduleFireIdentity | null {
   if (
     typeof event.scheduleId !== 'string'
+    || event.scheduleId.length === 0
+    || event.scheduleId.length > 128
     || !validScheduledTime(event.scheduledTime)
   ) {
     return null;

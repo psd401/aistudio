@@ -76,6 +76,9 @@ describe('buildJobPayload / parseJobPayload round-trip', () => {
         scheduleId: '36bb0456-1c51-4fb8-97d1-4e87d02765ce',
         scheduleName: longestValidScheduleName,
         scheduledRunId: '901',
+        fireKey:
+          'schedule-fire#36bb0456-1c51-4fb8-97d1-4e87d02765ce#' +
+          '2026-07-28T15:00:00.000Z',
       })
     );
     expect(parsed.scheduleId).toBe(
@@ -83,6 +86,10 @@ describe('buildJobPayload / parseJobPayload round-trip', () => {
     );
     expect(parsed.scheduleName).toBe(longestValidScheduleName);
     expect(parsed.scheduledRunId).toBe('901');
+    expect(parsed.fireKey).toBe(
+      'schedule-fire#36bb0456-1c51-4fb8-97d1-4e87d02765ce#' +
+      '2026-07-28T15:00:00.000Z'
+    );
   });
 
   test('prompt excerpt truncates to keep the payload under the RunTask 8KiB cap', () => {

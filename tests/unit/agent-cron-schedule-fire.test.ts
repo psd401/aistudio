@@ -50,6 +50,12 @@ describe("agent-cron scheduled fire idempotency", () => {
         scheduledTime: "not-a-time",
       })
     ).toBeNull()
+    expect(
+      scheduleFireIdentity({
+        scheduleId: "x".repeat(129),
+        scheduledTime: SCHEDULED_TIME,
+      }),
+    ).toBeNull()
   })
 
   it("derives an ECS identity from the immutable fire, not a lock token", () => {
@@ -194,7 +200,7 @@ describe("agent-cron scheduled fire lifecycle", () => {
     )
     const updateInput = (dynamo.update as jest.Mock).mock.calls[0][0]
     expect(updateInput.ExpressionAttributeValues[":expiresAt"])
-      .toBeGreaterThanOrEqual(beforeExecution + 65 * 60)
+      .toBeGreaterThanOrEqual(beforeExecution + 125 * 60)
   })
 
   it("stops a predecessor whose recoverable claim was replaced", async () => {
@@ -224,6 +230,7 @@ describe("agent-cron scheduled fire lifecycle", () => {
 
   it("marks success idempotently and conditionally releases failures", async () => {
     const dynamo = client()
+    const beforeCompletion = Math.floor(Date.now() / 1000)
     const claim = {
       claimed: true as const,
       identity,
@@ -243,6 +250,9 @@ describe("agent-cron scheduled fire lifecycle", () => {
         }),
       })
     )
+    const updateInput = (dynamo.update as jest.Mock).mock.calls[0][0]
+    expect(updateInput.ExpressionAttributeValues[":expiresAt"])
+      .toBeGreaterThanOrEqual(beforeCompletion + 125 * 60)
     expect(dynamo.delete).toHaveBeenCalledWith({
       TableName: TABLE,
       Key: { sessionId: identity.key },

@@ -1,3 +1,5 @@
+import fs from "node:fs"
+import path from "node:path"
 import {
   isJobRunnerStoppedEvent,
   monitorStoppedJob,
@@ -5,6 +7,13 @@ import {
   type JobRunnerStoppedEvent,
   type JobTaskSnapshot,
 } from "../../infra/lambdas/agent-cron/job-monitor"
+
+const cronHandlerSource = fs.readFileSync(
+  path.join(process.cwd(), "infra/lambdas/agent-cron/index.ts"),
+  "utf8",
+)
+const strictFailureWriterCall =
+  "runTelemetry.recordCronFailureStrict(record, log)"
 
 const taskArn =
   "arn:aws:ecs:us-east-1:123456789012:task/cluster/task-id"
@@ -24,6 +33,9 @@ const event = {
 
 const scheduledPayloadValue = {
   scheduledRunId: "901",
+  fireKey:
+    "schedule-fire#36bb0456-1c51-4fb8-97d1-4e87d02765ce#" +
+    "2026-07-28T15:00:00.000Z",
   scheduleId: "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
   scheduleName: "Morning brief",
   userEmail: "owner@psd401.net",
@@ -79,6 +91,9 @@ function harness(task: JobTaskSnapshot) {
 }
 
 describe("agent job STOPPED-state monitor", () => {
+  it("wires the supervisor to the strict failure-mirror writer", () =>
+    expect(cronHandlerSource).toContain(strictFailureWriterCall))
+
   it("confirms authoritative success after a clean scheduled job exit", async () => {
     const { dependencies, writeRun, recordFailure, log } = harness(snapshot(0))
 
@@ -91,6 +106,7 @@ describe("agent job STOPPED-state monitor", () => {
 
     expect(writeRun).toHaveBeenCalledWith({
       scheduledRunId: "901",
+      fireKey: scheduledPayloadValue.fireKey,
       userEmail: "owner@psd401.net",
       scheduleId: "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
       scheduleName: "Morning brief",
@@ -127,11 +143,15 @@ describe("agent job STOPPED-state monitor", () => {
     )
     expect(recordFailure).toHaveBeenCalledWith(
       expect.objectContaining({
+        fireKey: scheduledPayloadValue.fireKey,
         context: expect.objectContaining({
           phase: "job-supervisor",
           taskArn,
         }),
       }),
+    )
+    expect(recordFailure.mock.invocationCallOrder[0]).toBeLessThan(
+      writeRun.mock.invocationCallOrder[0],
     )
     expect(log.error).toHaveBeenCalledWith(
       "Scheduled background job stopped unsuccessfully",
@@ -167,7 +187,7 @@ describe("agent job STOPPED-state monitor", () => {
     ).rejects.toThrow("Aurora unavailable")
   })
 
-  it("does not duplicate the failure mirror when the runner recorded terminal state", async () => {
+  it("repairs the failure mirror when the runner already recorded terminal state", async () => {
     const { dependencies, recordFailure, log } = harness(snapshot(2))
     dependencies.writeRun.mockResolvedValueOnce(false)
 
@@ -177,7 +197,38 @@ describe("agent job STOPPED-state monitor", () => {
       status: "error",
       scheduleId: "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
     })
-    expect(recordFailure).not.toHaveBeenCalled()
+    expect(recordFailure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fireKey: scheduledPayloadValue.fireKey,
+        context: expect.objectContaining({ phase: "job-supervisor" }),
+      }),
+    )
+  })
+
+  it("propagates failure-mirror outages after an idempotent terminal retry", async () => {
+    const { dependencies, writeRun, log } = harness(snapshot(2))
+    dependencies.writeRun.mockResolvedValueOnce(false)
+    dependencies.recordFailure.mockRejectedValueOnce(
+      new Error("failure mirror unavailable"),
+    )
+
+    await expect(
+      monitorStoppedJob(event, "job-runner", dependencies, log),
+    ).rejects.toThrow("failure mirror unavailable")
+    expect(writeRun).not.toHaveBeenCalled()
+  })
+
+  it("derives a stable failure key for payloads from a rolling deployment", async () => {
+    const { fireKey: _fireKey, ...legacyPayload } = scheduledPayloadValue
+    const { dependencies, recordFailure, log } = harness(
+      snapshot(2, JSON.stringify(legacyPayload)),
+    )
+
+    await monitorStoppedJob(event, "job-runner", dependencies, log)
+
+    expect(recordFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ fireKey: "scheduled-run#901" }),
+    )
   })
 
   it("keeps two fires in the shared daily session correlated by run ID", async () => {

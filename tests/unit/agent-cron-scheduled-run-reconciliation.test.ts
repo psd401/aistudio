@@ -7,6 +7,9 @@ import {
 const valid = {
   type: "scheduled-run-reconciliation",
   scheduledRunId: "901",
+  fireKey:
+    "schedule-fire#36bb0456-1c51-4fb8-97d1-4e87d02765ce#" +
+    "2026-07-28T15:00:00.000Z",
   userEmail: "owner@psd401.net",
   scheduleId: "schedule-id",
   scheduleName: "Morning brief",
@@ -25,12 +28,24 @@ describe("agent-cron delayed scheduled-run reconciliation", () => {
     ).toEqual(valid)
   })
 
+  it("derives a stable fire key for a rolling-deploy legacy message", () => {
+    const { fireKey: _fireKey, ...legacy } = valid
+
+    expect(
+      parseScheduledRunReconciliationMessage(JSON.stringify(legacy)),
+    ).toEqual({
+      ...legacy,
+      fireKey: `scheduled-run#${valid.scheduledRunId}`,
+    })
+  })
+
   it.each([
     { ...valid, type: "other" },
     { ...valid, scheduledRunId: "not-a-row" },
     { ...valid, startedBy: "scheduled-not-a-digest" },
     { ...valid, startedBy: `scheduled-${"a".repeat(64)}` },
     { ...valid, userEmail: "" },
+    { ...valid, fireKey: "" },
   ])("rejects malformed resolver messages", (message) => {
     expect(() =>
       parseScheduledRunReconciliationMessage(JSON.stringify(message)),
@@ -74,6 +89,7 @@ describe("agent-cron delayed scheduled-run reconciliation", () => {
     expect(terminalize).toHaveBeenCalledWith(
       expect.objectContaining({
         scheduledRunId: valid.scheduledRunId,
+        fireKey: valid.fireKey,
         status: "error",
         errorMessage: expect.stringContaining(
           `${SCHEDULED_RUN_RECONCILIATION_DELAY_SECONDS}-second`,
@@ -82,11 +98,31 @@ describe("agent-cron delayed scheduled-run reconciliation", () => {
     )
     expect(recordFailure).toHaveBeenCalledWith(
       expect.objectContaining({
+        fireKey: valid.fireKey,
         context: expect.objectContaining({
           phase: "run-task-ambiguous-terminal",
         }),
       }),
     )
+    expect(recordFailure.mock.invocationCallOrder[0]).toBeLessThan(
+      terminalize.mock.invocationCallOrder[0],
+    )
+  })
+
+  it("keeps the promoted row pending when the strict failure mirror fails", async () => {
+    const terminalize = jest.fn()
+
+    await expect(
+      reconcileScheduledRun(valid, {
+        isPending: jest.fn().mockResolvedValue(true),
+        findTask: jest.fn().mockResolvedValue(undefined),
+        terminalize,
+        recordFailure: jest.fn().mockRejectedValue(
+          new Error("failure database unavailable"),
+        ),
+      }),
+    ).rejects.toThrow("failure database unavailable")
+    expect(terminalize).not.toHaveBeenCalled()
   })
 
   it("does nothing when the reserved row was never inserted or is terminal", async () => {

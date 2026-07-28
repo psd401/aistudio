@@ -13,6 +13,7 @@ interface PreflightLogger {
 interface SchedulePreflightOptions {
   requestId: string;
   startedAt: number;
+  fireKey?: string;
   load: () => Promise<ScheduleLoadResult>;
   telemetry: RunTelemetry;
   log: PreflightLogger;
@@ -56,6 +57,7 @@ export async function runSchedulePreflight(
     });
     await options.telemetry.recordRun(
       {
+        fireKey: options.fireKey,
         userEmail: referencedOwner,
         scheduleId: referencedScheduleId,
         sessionId: referenceSessionId,
@@ -77,6 +79,7 @@ export async function runSchedulePreflight(
     });
     await options.telemetry.recordRun(
       {
+        fireKey: options.fireKey,
         userEmail: referencedOwner,
         scheduleId: referencedScheduleId,
         sessionId: referenceSessionId,

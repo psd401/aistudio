@@ -57,6 +57,9 @@ const baseInput = {
   scheduleId: "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
   scheduleName: "Morning dispatch",
   scheduledRunId: "901",
+  fireKey:
+    "schedule-fire#36bb0456-1c51-4fb8-97d1-4e87d02765ce#" +
+    "2026-07-28T15:00:00.000Z",
   isDM: true,
   originalPrompt: "Assemble the morning dispatch.",
 }
@@ -76,6 +79,7 @@ const baseInput = {
       expect(parsed.scheduleId).toBe(baseInput.scheduleId)
       expect(parsed.scheduleName).toBe(baseInput.scheduleName)
       expect(parsed.scheduledRunId).toBe(baseInput.scheduledRunId)
+      expect(parsed.fireKey).toBe(baseInput.fireKey)
       expect(parsed.isDM).toBe(true)
       expect(parsed.promptExcerpt).toBe(baseInput.originalPrompt)
     })
@@ -402,7 +406,19 @@ const baseInput = {
       expect(launch.indexOf("await afterLaunchFailure(")).toBeLessThan(
         launch.indexOf("phase: 'run-task'"),
       )
+      const rejectedLaunch = cronSource.slice(
+        cronSource.indexOf("async function recordPromotionLaunchFailure("),
+        cronSource.indexOf("async function enqueuePromotionReconciliation("),
+      )
+      expect(
+        rejectedLaunch.indexOf("recordCronFailureStrict("),
+      ).toBeLessThan(
+        rejectedLaunch.indexOf("updatePromotedRunTerminal("),
+      )
       expect(cronSource).toContain("scheduleFireLaunchIdentity(fireIdentity)")
+      expect(cronSource).toContain(
+        "fireKey: options.fireIdentity?.key",
+      )
       expect(cronSource).toContain(
         "clientToken: launchIdentity.clientToken",
       )

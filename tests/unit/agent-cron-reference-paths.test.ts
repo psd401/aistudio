@@ -5,16 +5,21 @@ const event = {
   ownerEmail: "owner@psd401.net",
   scheduleId: "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
   version: 2,
+  scheduledTime: "2026-07-28T15:00:00.000Z",
 }
+const fireKey =
+  `schedule-fire#${event.scheduleId}#${event.scheduledTime}`
 
 function harness() {
   const recordRun = jest.fn().mockResolvedValue(undefined)
   const recordRunStrict = jest.fn().mockResolvedValue(undefined)
   const recordCronFailure = jest.fn().mockResolvedValue(undefined)
+  const recordCronFailureStrict = jest.fn().mockResolvedValue(undefined)
   const telemetry = {
     recordRun,
     recordRunStrict,
     recordCronFailure,
+    recordCronFailureStrict,
   } satisfies RunTelemetry
   const log = {
     warn: jest.fn(),
@@ -36,6 +41,7 @@ describe("agent-cron pre-invocation telemetry", () => {
       runSchedulePreflight(event, {
         requestId: "cron_request",
         startedAt: Date.now(),
+        fireKey,
         load: async () => ({ authorized: false, reason }),
         telemetry,
         log,
@@ -48,6 +54,7 @@ describe("agent-cron pre-invocation telemetry", () => {
       expect.objectContaining({
         userEmail: event.ownerEmail,
         scheduleId: event.scheduleId,
+        fireKey,
         status: "skipped",
         errorMessage: `Schedule reference rejected: ${reason}`,
       }),
@@ -65,6 +72,7 @@ describe("agent-cron pre-invocation telemetry", () => {
       runSchedulePreflight(event, {
         requestId: "cron_request",
         startedAt: Date.now(),
+        fireKey,
         load: async () => {
           throw lookupError
         },
@@ -76,6 +84,7 @@ describe("agent-cron pre-invocation telemetry", () => {
       expect.objectContaining({
         userEmail: event.ownerEmail,
         scheduleId: event.scheduleId,
+        fireKey,
         status: "error",
         errorMessage:
           "Authoritative schedule lookup failed: DynamoDB unavailable for " +

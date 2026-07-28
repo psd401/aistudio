@@ -45,6 +45,7 @@ export interface JobTaskSnapshot {
 
 interface ScheduledJobIdentity {
   scheduledRunId?: string;
+  fireKey?: string;
   userEmail: string;
   scheduleId: string;
   scheduleName?: string;
@@ -107,8 +108,14 @@ function scheduledJobIdentity(rawPayload: string): ScheduledJobIdentity | null {
     && /^\d{1,20}$/.test(rawScheduledRunId)
     ? rawScheduledRunId
     : undefined;
+  // New payloads carry the immutable Scheduler fire key. Retain a stable
+  // fallback for tasks launched during a rolling deployment before that field
+  // existed, so their failure repair is still idempotent.
+  const fireKey = nonEmptyString(payload.fireKey, 192)
+    ?? (scheduledRunId ? `scheduled-run#${scheduledRunId}` : undefined);
   return {
     ...(scheduledRunId ? { scheduledRunId } : {}),
+    ...(fireKey ? { fireKey } : {}),
     userEmail,
     scheduleId,
     ...(scheduleName ? { scheduleName } : {}),
@@ -229,8 +236,11 @@ export async function monitorStoppedJob(
     ...(errorMessage ? { errorMessage } : {}),
   };
 
-  const terminalRepaired = await dependencies.writeRun(record);
-  if (errorMessage && terminalRepaired) {
+  if (errorMessage) {
+    // Persist the strict, idempotent failure mirror before terminalizing the
+    // run. A failure leaves the promoted row retryable; a later terminal-write
+    // failure retries and upserts this same fire. Also retry it when an earlier
+    // invocation already terminalized the row.
     await dependencies.recordFailure({
       ...identity,
       errorMessage,
@@ -242,6 +252,9 @@ export async function monitorStoppedJob(
         exitCode: container?.exitCode ?? null,
       },
     });
+  }
+  await dependencies.writeRun(record);
+  if (errorMessage) {
     log.error('Scheduled background job stopped unsuccessfully', {
       scheduleId: identity.scheduleId,
       owner: sanitizeEmailForLog(identity.userEmail),

@@ -672,14 +672,17 @@ async function releaseSessionLock(
  * conditioned on still owning it (lockToken match). The async job-runner
  * (#1138) calls this every ~5 min for up to the 2h job ceiling so the
  * `kind='job'` marker stays live while the job runs. Returns false when the
- * lock was lost (expired + re-acquired by someone else) — the runner keeps
- * going regardless (losing the lock affects messaging UX, not correctness;
- * OpenClaw serializes the session itself).
+ * lock was lost (expired + re-acquired by someone else), and in confirmation
+ * mode when a transient error prevents proving the startup extension. The
+ * runner refuses to start external work without that proof; later losses
+ * remain advisory because work may already have side effects and OpenClaw
+ * serializes the session itself.
  */
 async function renewSessionLock(
   sessionId: string,
   lockToken: string,
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
+  requireConfirmation = false,
 ): Promise<boolean> {
   const tableName = process.env.SESSION_LOCKS_TABLE;
   if (!tableName || lockToken === LOCK_PASS_THROUGH) return true;
@@ -706,7 +709,10 @@ async function renewSessionLock(
     log.warn('Session lock renewal failed; will retry on next interval', {
       error: error instanceof Error ? error.message : String(error),
     });
-    return true; // Transient DDB error — keep renewing.
+    // Once external work is underway, a transient error is advisory and the
+    // interval keeps trying. At startup there is no work to preserve, so
+    // require an actually confirmed extension before invoking AgentCore.
+    return !requireConfirmation;
   }
 }
 
@@ -2496,6 +2502,7 @@ async function writeScheduledRun(params: ScheduledRunWrite): Promise<void> {
   if (params.scheduledRunId) {
     const updated = await sql`UPDATE agent_scheduled_runs
       SET schedule_name = ${params.scheduleName ?? null},
+          fire_key = COALESCE(fire_key, ${params.fireKey ?? null}),
           input_tokens = input_tokens + ${params.inputTokens},
           output_tokens = output_tokens + ${params.outputTokens},
           latency_ms = latency_ms + ${params.latencyMs},
@@ -2516,12 +2523,12 @@ async function writeScheduledRun(params: ScheduledRunWrite): Promise<void> {
   }
   await sql`INSERT INTO agent_scheduled_runs
       (user_id, schedule_id, schedule_name, session_id,
-       input_tokens, output_tokens, latency_ms, status, error_message)
+       input_tokens, output_tokens, latency_ms, status, error_message, fire_key)
     VALUES (${params.userEmail}, ${params.scheduleId},
             ${params.scheduleName ?? null}, ${params.sessionId},
             ${params.inputTokens}, ${params.outputTokens},
             ${params.latencyMs}, ${params.status},
-            ${errorMessage})`;
+            ${errorMessage}, ${params.fireKey ?? null})`;
 }
 
 // ---------------------------------------------------------------------------

@@ -724,6 +724,7 @@ interface LaunchScheduledJobOptions {
   input: ScheduledJobInput;
   lockToken: string;
   scheduledRunId: string;
+  fireKey?: string;
   launchIdentity: ScheduledJobLaunchIdentity;
   config: JobRunnerConfig;
   log: Logger;
@@ -952,6 +953,7 @@ async function launchScheduledJob(
     input,
     lockToken,
     scheduledRunId,
+    fireKey,
     launchIdentity,
     config,
     log,
@@ -968,6 +970,7 @@ async function launchScheduledJob(
     scheduleId: input.scheduleId,
     scheduleName: input.scheduleName,
     scheduledRunId,
+    fireKey,
     // Scheduled tasks always deliver to the owner's DM, never a shared space.
     isDM: true,
     originalPrompt: input.originalPrompt,
@@ -1081,6 +1084,7 @@ async function promoteScheduledTurnToJob(
       input,
       lockToken,
       scheduledRunId,
+      fireKey: options.fireIdentity?.key,
       launchIdentity,
       config,
       log,
@@ -1280,6 +1284,28 @@ async function recordPromotionLaunchFailure(
   errorMessage: string,
 ): Promise<void> {
   const { schedule, scheduleName, sessionId, log } = context;
+  const fireKey =
+    context.fireIdentity?.key ?? `scheduled-run#${scheduledRunId}`;
+  // RunTask rejected the request, so no ECS supervisor can repair this path.
+  // Write the idempotent failure mirror before terminalizing the promoted row:
+  // a failure keeps the row pending for retry, while a later terminalization
+  // failure can safely upsert this same fire on the next invocation.
+  await runTelemetry.recordCronFailureStrict(
+    {
+      userEmail: schedule.ownerEmail,
+      scheduleId: schedule.scheduleId,
+      fireKey,
+      scheduleName,
+      sessionId,
+      errorMessage,
+      severity: 'error',
+      context: {
+        phase: 'run-task',
+        scheduledRunId,
+      },
+    },
+    log,
+  );
   await updatePromotedRunTerminal(
     {
       databaseResourceArn: DATABASE_RESOURCE_ARN,
@@ -1289,7 +1315,7 @@ async function recordPromotionLaunchFailure(
     runTelemetryRdsClient,
     {
       scheduledRunId,
-      fireKey: context.fireIdentity?.key,
+      fireKey,
       userEmail: schedule.ownerEmail,
       scheduleId: schedule.scheduleId,
       scheduleName,
@@ -1318,6 +1344,8 @@ async function enqueuePromotionReconciliation(
   const message: ScheduledRunReconciliationMessage = {
     type: 'scheduled-run-reconciliation',
     scheduledRunId,
+    fireKey:
+      context.fireIdentity?.key ?? `scheduled-run#${scheduledRunId}`,
     userEmail: schedule.ownerEmail,
     scheduleId: schedule.scheduleId,
     scheduleName,
@@ -1871,7 +1899,7 @@ async function handleJobRunnerStopped(
           record,
         ),
       recordFailure: (record) =>
-        runTelemetry.recordCronFailure(record, log),
+        runTelemetry.recordCronFailureStrict(record, log),
     },
     log,
   );
@@ -1932,7 +1960,7 @@ async function handleScheduledRunReconciliation(
         record,
       ),
     recordFailure: (record) =>
-      runTelemetry.recordCronFailure(record, log),
+      runTelemetry.recordCronFailureStrict(record, log),
   });
   if (reconciliation.status === 'task-found') {
     log.info('Delayed promotion reconciliation found the ECS task', {
@@ -2004,9 +2032,11 @@ export async function handler(
     scheduleId:
       typeof event?.scheduleId === 'string' ? event.scheduleId : 'unknown',
   });
+  const fireIdentity = scheduleFireIdentity(event);
   const { loaded, referencedScheduleId } = await runSchedulePreflight(event, {
     requestId,
     startedAt: handlerStartedAt,
+    fireKey: fireIdentity?.key,
     load: () =>
       loadAuthorizedSchedule(event, scheduleRecordDynamoClient, SCHEDULES_TABLE),
     telemetry: runTelemetry,
@@ -2025,8 +2055,6 @@ export async function handler(
     scheduleName,
     email: sanitizeEmailForLog(schedule.ownerEmail),
   });
-
-  const fireIdentity = scheduleFireIdentity(event);
 
   // Session ID — stable for a schedule within a calendar day and isolated from
   // interactive sessions. The shared ID lets the conditional lock serialize

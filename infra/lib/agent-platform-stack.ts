@@ -2118,9 +2118,9 @@ export class AgentPlatformStack extends cdk.Stack {
 
     resources.cronLambda = new lambda.Function(this, 'CronLambda', {
       deadLetterQueue: resources.agentAsyncDlq, // async-invoke failures → DLQ + alarm (REV-INFRA-128)
-      // Scheduler's delivery horizon is one hour. Bound Lambda's separate
-      // accepted-async-event queue to the same horizon so the 65-minute fire
-      // marker always outlives every possible redelivery.
+      // Explicitly bound Lambda's accepted-event queue to one hour. The fire
+      // marker spans this horizon plus Scheduler's separate one-hour delivery
+      // horizon and a five-minute margin.
       maxEventAge: cdk.Duration.hours(1),
       retryAttempts: 2,
       // Fleet-level capacity. Per-schedule overlap is guarded by the

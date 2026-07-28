@@ -283,6 +283,7 @@ describe("agent schedule target backfill infrastructure", () => {
     expect(frontendSource).toContain(
       "migrationVersion: 'scheduled-time-delivery-policy-v3'",
     )
+    expect(frontendSource).toContain("InvocationType: 'Event'")
     expect(frontendSource).toContain(
       "trigger.node.addDependency(this.ecsService.service)",
     )

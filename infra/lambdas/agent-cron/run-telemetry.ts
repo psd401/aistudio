@@ -62,6 +62,10 @@ export interface RunTelemetry {
     params: CronFailureRecord,
     log: CronTelemetryLogger,
   ): Promise<void>;
+  recordCronFailureStrict(
+    params: CronFailureRecord,
+    log: CronTelemetryLogger,
+  ): Promise<void>;
 }
 
 function nullableStringParameter(name: string, value?: string | null) {
@@ -386,6 +390,59 @@ export async function updatePromotedRunTerminal(
   );
 }
 
+/**
+ * Strict failure-mirror writer for retryable durability boundaries such as the
+ * ECS STOPPED-state supervisor.
+ */
+export async function writeCronFailure(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  params: CronFailureRecord,
+): Promise<void> {
+  if (!config.databaseResourceArn || !config.databaseSecretArn) {
+    throw new Error('Cron failure telemetry database is not configured');
+  }
+  const severity = params.severity ?? 'error';
+  const truncatedError = params.errorMessage
+    ? sanitizeDiagnostic(params.errorMessage, 4000)
+    : null;
+  const context = JSON.stringify({
+    scheduleId: params.scheduleId,
+    ...params.context,
+  });
+  await rdsDataClient.execute(
+    {
+      resourceArn: config.databaseResourceArn,
+      secretArn: config.databaseSecretArn,
+      database: config.databaseName,
+      sql: `INSERT INTO agent_failures
+              (source, severity, user_id, session_id, schedule_name,
+               error_message, context, occurred_at, fire_key)
+            VALUES
+              ('cron', :severity, :user_id, :session_id, :schedule_name,
+               :error_message, CAST(:context AS jsonb), NOW(), :fire_key)
+            ON CONFLICT (source, fire_key)
+              WHERE fire_key IS NOT NULL
+            DO UPDATE SET
+              severity = EXCLUDED.severity,
+              user_id = EXCLUDED.user_id,
+              session_id = EXCLUDED.session_id,
+              schedule_name = EXCLUDED.schedule_name,
+              error_message = EXCLUDED.error_message,
+              context = EXCLUDED.context`,
+      parameters: [
+        { name: 'severity', value: { stringValue: severity } },
+        { name: 'user_id', value: { stringValue: params.userEmail } },
+        { name: 'session_id', value: { stringValue: params.sessionId } },
+        nullableStringParameter('schedule_name', params.scheduleName),
+        nullableStringParameter('error_message', truncatedError),
+        { name: 'context', value: { stringValue: context } },
+        nullableStringParameter('fire_key', params.fireKey),
+      ],
+    },
+  );
+}
+
 export function createRunTelemetry(
   config: RunTelemetryConfig,
   rdsDataClient: RunTelemetryRdsClient,
@@ -394,19 +451,14 @@ export function createRunTelemetry(
     config.databaseResourceArn.length > 0 &&
     config.databaseSecretArn.length > 0;
 
-  async function recordCronFailure(
+  function logCronFailure(
     params: CronFailureRecord,
     log: CronTelemetryLogger,
-  ): Promise<void> {
+  ): void {
     const severity = params.severity ?? 'error';
     const truncatedError = params.errorMessage
       ? sanitizeDiagnostic(params.errorMessage, 4000)
       : null;
-    const context = JSON.stringify({
-      scheduleId: params.scheduleId,
-      ...params.context,
-    });
-
     log.error('AGENT_FAILURE_RECORD', {
       source: 'cron',
       severity,
@@ -419,40 +471,16 @@ export function createRunTelemetry(
         : null,
       context: params.context ?? {},
     });
+  }
 
+  async function recordCronFailure(
+    params: CronFailureRecord,
+    log: CronTelemetryLogger,
+  ): Promise<void> {
+    logCronFailure(params, log);
     if (!databaseConfigured) return;
     try {
-      await rdsDataClient.execute(
-        {
-          resourceArn: config.databaseResourceArn,
-          secretArn: config.databaseSecretArn,
-          database: config.databaseName,
-          sql: `INSERT INTO agent_failures
-                  (source, severity, user_id, session_id, schedule_name,
-                   error_message, context, occurred_at, fire_key)
-                VALUES
-                  ('cron', :severity, :user_id, :session_id, :schedule_name,
-                   :error_message, CAST(:context AS jsonb), NOW(), :fire_key)
-                ON CONFLICT (source, fire_key)
-                  WHERE fire_key IS NOT NULL
-                DO UPDATE SET
-                  severity = EXCLUDED.severity,
-                  user_id = EXCLUDED.user_id,
-                  session_id = EXCLUDED.session_id,
-                  schedule_name = EXCLUDED.schedule_name,
-                  error_message = EXCLUDED.error_message,
-                  context = EXCLUDED.context`,
-          parameters: [
-            { name: 'severity', value: { stringValue: severity } },
-            { name: 'user_id', value: { stringValue: params.userEmail } },
-            { name: 'session_id', value: { stringValue: params.sessionId } },
-            nullableStringParameter('schedule_name', params.scheduleName),
-            nullableStringParameter('error_message', truncatedError),
-            { name: 'context', value: { stringValue: context } },
-            nullableStringParameter('fire_key', params.fireKey),
-          ],
-        },
-      );
+      await writeCronFailure(config, rdsDataClient, params);
     } catch (error) {
       log.error('Failed to record cron failure mirror', {
         scheduleId: params.scheduleId,
@@ -463,10 +491,37 @@ export function createRunTelemetry(
     }
   }
 
+  async function recordCronFailureStrict(
+    params: CronFailureRecord,
+    log: CronTelemetryLogger,
+  ): Promise<void> {
+    logCronFailure(params, log);
+    await writeCronFailure(config, rdsDataClient, params);
+  }
+
   async function recordRun(
     params: ScheduledRunRecord,
     log: CronTelemetryLogger,
   ): Promise<void> {
+    if (params.status === 'error' || params.failure) {
+      // Failure visibility is the primary contract of this telemetry. Persist
+      // its idempotent mirror before the run row so a hard crash cannot leave
+      // a terminal error with no failure record.
+      await recordCronFailure(
+        {
+          userEmail: params.userEmail,
+          sessionId: params.sessionId,
+          scheduleId: params.scheduleId,
+          scheduleName: params.scheduleName,
+          errorMessage: params.errorMessage ?? null,
+          severity: params.failure?.severity,
+          context: params.failure?.context ?? { phase: 'scheduled-run' },
+          fireKey: params.fireKey,
+        },
+        log,
+      );
+    }
+
     if (!databaseConfigured) {
       log.warn('Database not configured — skipping run telemetry', {
         scheduleId: params.scheduleId,
@@ -484,30 +539,14 @@ export function createRunTelemetry(
       }
     }
 
-    if (params.status === 'error' || params.failure) {
-      await recordCronFailure(
-        {
-          userEmail: params.userEmail,
-          sessionId: params.sessionId,
-          scheduleId: params.scheduleId,
-          scheduleName: params.scheduleName,
-          errorMessage: params.errorMessage ?? null,
-          severity: params.failure?.severity,
-          context: params.failure?.context ?? { phase: 'scheduled-run' },
-          fireKey: params.fireKey,
-        },
-        log,
-      );
-    }
   }
 
   async function recordRunStrict(
     params: ScheduledRunRecord,
     log: CronTelemetryLogger,
   ): Promise<void> {
-    await writeScheduledRun(config, rdsDataClient, params);
     if (params.status === 'error' || params.failure) {
-      await recordCronFailure(
+      await recordCronFailureStrict(
         {
           userEmail: params.userEmail,
           sessionId: params.sessionId,
@@ -521,7 +560,13 @@ export function createRunTelemetry(
         log,
       );
     }
+    await writeScheduledRun(config, rdsDataClient, params);
   }
 
-  return { recordRun, recordRunStrict, recordCronFailure };
+  return {
+    recordRun,
+    recordRunStrict,
+    recordCronFailure,
+    recordCronFailureStrict,
+  };
 }
