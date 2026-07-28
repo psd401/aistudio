@@ -860,7 +860,10 @@ connectors, agent limits, retrieval scope, prompt input mappings, repository
 ids, and prompt tools. These properties are optional for compatibility with
 older v1.0 files; missing values use the existing database defaults. Unsupported
 input field types and invalid configuration values fail envelope validation
-before any assistant transaction begins.
+before any assistant transaction begins. Explicit `null` is also portable for
+nullable image, prompt context/group/mapping, prompt/assistant timeout, and
+input-field option properties; every non-null timeout must be a positive
+integer.
 Advanced model routing requires an OpenAI, Anthropic, or Google routing family,
 while legacy and standard routing reject a non-null family. Agent cost caps,
 when present, must be positive. An update cannot reverse an agentic assistant

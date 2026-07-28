@@ -137,6 +137,65 @@ function defineAssistantConfigInvariantTests() {
   })
 }
 
+function definePortableContractTests() {
+  it('accepts explicit nulls for every nullable portable property', () => {
+    const data = {
+      ...validImport,
+      assistants: [{
+        ...validAssistant,
+        image_path: null,
+        timeout_seconds: null,
+        prompts: [{
+          ...validAssistant.prompts[0],
+          system_context: null,
+          parallel_group: null,
+          input_mapping: null,
+          timeout_seconds: null,
+        }],
+        input_fields: [{
+          name: 'format',
+          label: 'Format',
+          field_type: 'select',
+          position: 0,
+          options: null,
+        }],
+      }],
+    }
+    expect(validateImportFile(data)).toEqual({ valid: true })
+  })
+
+  it.each([
+    {
+      label: 'assistant timeout',
+      assistant: { ...validAssistant, timeout_seconds: 0 },
+      expected: /timeout_seconds must be a positive integer/,
+    },
+    {
+      label: 'prompt timeout',
+      assistant: {
+        ...validAssistant,
+        prompts: [{ ...validAssistant.prompts[0], timeout_seconds: 0 }],
+      },
+      expected: /prompt timeout_seconds must be a positive integer/,
+    },
+    {
+      label: 'string prompt timeout',
+      assistant: {
+        ...validAssistant,
+        prompts: [{ ...validAssistant.prompts[0], timeout_seconds: '30' }],
+      },
+      expected: /prompt timeout_seconds must be a positive integer/,
+    },
+  ])('rejects an invalid $label before persistence', ({ assistant, expected }) => {
+    const result = validateImportFile({
+      ...validImport,
+      assistants: [assistant],
+    })
+    expect(result.valid).toBe(false)
+    expect(result.error).toMatch(expected)
+  })
+}
+
 describe('validateImportFile', () => {
   it('accepts a valid import file', () => {
     expect(validateImportFile(validImport)).toEqual({ valid: true })
@@ -244,6 +303,8 @@ describe('validateImportFile', () => {
     }
     expect(validateImportFile(data)).toEqual({ valid: true })
   })
+
+  definePortableContractTests()
 
   defineAssistantConfigInvariantTests()
 

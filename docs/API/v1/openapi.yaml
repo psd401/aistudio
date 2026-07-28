@@ -3573,18 +3573,18 @@ components:
           type: string
           maxLength: 10000000
         system_context:
-          type: string
+          type: [string, "null"]
           maxLength: 10000000
         model_name:
           type: string
           description: Portable model id/name resolved against active models.
         position: { type: integer }
-        parallel_group: { type: integer }
+        parallel_group: { type: [integer, "null"] }
         input_mapping:
-          type: object
-          additionalProperties: true
+          type: [object, "null"]
+          additionalProperties: { type: string }
         timeout_seconds:
-          type: integer
+          type: [integer, "null"]
           minimum: 1
         repository_ids:
           type: array
@@ -3607,7 +3607,7 @@ components:
           enum: [short_text, long_text, select, multi_select, file_upload]
         position: { type: integer }
         options:
-          type: object
+          type: [object, "null"]
           additionalProperties: true
 
     AssistantImportDefinition:
@@ -3622,10 +3622,10 @@ components:
         status:
           type: string
           description: Accepted for format compatibility but ignored; writes always use pending_approval.
-        image_path: { type: string }
+        image_path: { type: [string, "null"] }
         is_parallel: { type: boolean }
         timeout_seconds:
-          type: integer
+          type: [integer, "null"]
           minimum: 1
         mode:
           type: string

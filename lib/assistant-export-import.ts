@@ -280,6 +280,29 @@ function validateSerializedImportSize(data: unknown): string | undefined {
   return undefined
 }
 
+function isOptionalNullableInteger(
+  value: unknown,
+  minimum: number,
+  maximum?: number
+): boolean {
+  return value === undefined ||
+    value === null ||
+    (Number.isInteger(value) &&
+      Number(value) >= minimum &&
+      (maximum === undefined || Number(value) <= maximum))
+}
+
+function isOptionalInteger(
+  value: unknown,
+  minimum: number,
+  maximum?: number
+): boolean {
+  return value === undefined ||
+    (Number.isInteger(value) &&
+      Number(value) >= minimum &&
+      (maximum === undefined || Number(value) <= maximum))
+}
+
 function validatePromptRepositories(
   assistantName: string,
   prompt: Record<string, unknown>
@@ -326,6 +349,30 @@ function validatePromptInputMapping(
   return undefined
 }
 
+function validatePromptScalarConfiguration(
+  assistantName: string,
+  prompt: Record<string, unknown>
+): string | undefined {
+  if (
+    prompt.system_context !== undefined &&
+    prompt.system_context !== null &&
+    typeof prompt.system_context !== "string"
+  ) {
+    return `Assistant ${assistantName}: prompt system_context must be a string or null`
+  }
+  if (
+    prompt.parallel_group !== undefined &&
+    prompt.parallel_group !== null &&
+    !Number.isInteger(prompt.parallel_group)
+  ) {
+    return `Assistant ${assistantName}: prompt parallel_group must be an integer or null`
+  }
+  if (!isOptionalNullableInteger(prompt.timeout_seconds, 1)) {
+    return `Assistant ${assistantName}: prompt timeout_seconds must be a positive integer or null`
+  }
+  return undefined
+}
+
 function validateImportedPrompt(
   assistantName: string,
   prompt: unknown
@@ -343,6 +390,7 @@ function validateImportedPrompt(
     return `Assistant ${assistantName}: prompt is missing required fields`
   }
   const configurationError =
+    validatePromptScalarConfiguration(assistantName, promptData) ??
     validatePromptRepositories(assistantName, promptData) ??
     validatePromptTools(assistantName, promptData) ??
     validatePromptInputMapping(assistantName, promptData)
@@ -373,6 +421,20 @@ function validateImportedPrompts(
   return undefined
 }
 
+function validateImportedInputFieldOptions(
+  assistantName: string,
+  options: unknown
+): string | undefined {
+  if (
+    options !== undefined &&
+    options !== null &&
+    (typeof options !== "object" || Array.isArray(options))
+  ) {
+    return `Assistant ${assistantName}: input field options must be an object or null`
+  }
+  return undefined
+}
+
 function validateImportedInputFields(
   assistantName: string,
   fields: unknown
@@ -399,6 +461,11 @@ function validateImportedInputFields(
     if (!IMPORTED_FIELD_TYPES.has(fieldData.field_type)) {
       return `Assistant ${assistantName}: unsupported input field type: ${fieldData.field_type}`
     }
+    const optionsError = validateImportedInputFieldOptions(
+      assistantName,
+      fieldData.options
+    )
+    if (optionsError) return optionsError
   }
   return undefined
 }
@@ -406,18 +473,6 @@ function validateImportedInputFields(
 function isOptionalStringArray(value: unknown): boolean {
   return value === undefined ||
     (Array.isArray(value) && value.every(item => typeof item === "string"))
-}
-
-function isOptionalNullableInteger(
-  value: unknown,
-  minimum: number,
-  maximum?: number
-): boolean {
-  return value === undefined ||
-    value === null ||
-    (Number.isInteger(value) &&
-      Number(value) >= minimum &&
-      (maximum === undefined || Number(value) <= maximum))
 }
 
 function validateAssistantModelRoutingFamily(
@@ -478,10 +533,10 @@ function validateAssistantAgentConfiguration(
   if (!isOptionalStringArray(assistant.agent_enabled_connectors)) {
     return `Assistant ${assistantName}: agent_enabled_connectors must contain strings`
   }
-  if (!isOptionalNullableInteger(assistant.agent_max_steps, 1, 50)) {
+  if (!isOptionalInteger(assistant.agent_max_steps, 1, 50)) {
     return `Assistant ${assistantName}: agent_max_steps must be between 1 and 50`
   }
-  if (!isOptionalNullableInteger(assistant.agent_timeout_seconds, 1, 900)) {
+  if (!isOptionalInteger(assistant.agent_timeout_seconds, 1, 900)) {
     return `Assistant ${assistantName}: agent_timeout_seconds must be between 1 and 900`
   }
   if (!isOptionalNullableInteger(assistant.agent_cost_cap_cents, 1)) {
@@ -489,6 +544,41 @@ function validateAssistantAgentConfiguration(
   }
   if (!isOptionalNullableInteger(assistant.agent_max_requests_per_hour, 1)) {
     return `Assistant ${assistantName}: agent_max_requests_per_hour must be a positive integer`
+  }
+  return undefined
+}
+
+function validateAssistantPortableConfiguration(
+  assistantName: string,
+  assistant: Record<string, unknown>
+): string | undefined {
+  if (
+    assistant.description !== undefined &&
+    typeof assistant.description !== "string"
+  ) {
+    return `Assistant ${assistantName}: description must be a string`
+  }
+  if (
+    assistant.status !== undefined &&
+    typeof assistant.status !== "string"
+  ) {
+    return `Assistant ${assistantName}: status must be a string`
+  }
+  if (
+    assistant.image_path !== undefined &&
+    assistant.image_path !== null &&
+    typeof assistant.image_path !== "string"
+  ) {
+    return `Assistant ${assistantName}: image_path must be a string or null`
+  }
+  if (
+    assistant.is_parallel !== undefined &&
+    typeof assistant.is_parallel !== "boolean"
+  ) {
+    return `Assistant ${assistantName}: is_parallel must be a boolean`
+  }
+  if (!isOptionalNullableInteger(assistant.timeout_seconds, 1)) {
+    return `Assistant ${assistantName}: timeout_seconds must be a positive integer or null`
   }
   return undefined
 }
@@ -531,6 +621,7 @@ function validateImportedAssistantConfiguration(
   assistant: Record<string, unknown>
 ): string | undefined {
   return (
+    validateAssistantPortableConfiguration(assistantName, assistant) ??
     validateAssistantRoutingConfiguration(assistantName, assistant) ??
     validateAssistantAgentConfiguration(assistantName, assistant) ??
     validateAssistantRetrievalScope(assistantName, assistant.retrieval_scope)
