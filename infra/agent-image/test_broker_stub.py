@@ -87,23 +87,24 @@ class RunningStub:
         return f"http://{host}:{port}"
 
     def configure(self, fixtures: list[dict[str, object]]) -> None:
-        path = self.control_directory / broker_stub.TRIAL_CONFIG_FILENAME
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(
-                {
-                    "task_id": "stub-test",
-                    "trial_id": "stub-test:1:session",
-                    "fixtures": fixtures,
-                }
-            ),
-            encoding="utf-8",
+        serialized = json.dumps(
+            {
+                "task_id": "stub-test",
+                "trial_id": "stub-test:1:session",
+                "fixtures": fixtures,
+            }
+        ).encode("utf-8")
+        if self.server.state.finalization_state == "closed":
+            broker_stub.install_and_activate_trial(
+                self.control_directory,
+                serialized,
+                port=self.server.server_address[1],
+            )
+            return
+        broker_stub.install_trial_configuration(
+            self.control_directory,
+            serialized,
         )
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-        capture = self.control_directory / broker_stub.CAPTURE_FILENAME
-        capture.write_text("", encoding="utf-8")
-        os.chmod(capture, 0o600)
 
     def request(
         self,
@@ -162,6 +163,29 @@ class BrokerRouteParityTests(unittest.TestCase):
 
 
 class BrokerControlStorageTests(unittest.TestCase):
+    def test_runner_control_token_survives_a_proxy_restart(self):
+        with tempfile.TemporaryDirectory(
+            prefix="issue-1424-control-test-"
+        ) as directory:
+            control_directory = Path(directory)
+            first = broker_stub._ensure_runner_control_token(
+                control_directory
+            )
+            second = broker_stub._ensure_runner_control_token(
+                control_directory
+            )
+
+            self.assertEqual(first, second)
+            self.assertEqual(len(first), 43)
+            self.assertEqual(
+                (
+                    control_directory
+                    / broker_stub.RUNNER_CONTROL_TOKEN_FILENAME
+                ).stat().st_mode
+                & 0o777,
+                0o600,
+            )
+
     def test_runner_commands_install_and_collect_owner_only_state(self):
         with tempfile.TemporaryDirectory(
             prefix="issue-1424-control-test-"
@@ -219,6 +243,28 @@ class BrokerStubHttpTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.stub.close()
+
+    def test_runner_gate_rejects_an_untrusted_transition(self):
+        status, response = self.stub.request(
+            broker_stub.RUNNER_OPEN_TRIAL_PATH,
+            method="POST",
+            headers={broker_stub.RUNNER_CONTROL_HEADER: "not-the-token"},
+        )
+
+        self.assertEqual(status, 404)
+        self.assertEqual(response, {"error": "NotFound"})
+        self.assertEqual(
+            self.stub.server.state.finalization_state,
+            "closed",
+        )
+        self.assertEqual(
+            (
+                self.stub.control_directory
+                / broker_stub.RUNNER_CONTROL_TOKEN_FILENAME
+            ).stat().st_mode
+            & 0o777,
+            0o600,
+        )
 
     def test_replays_every_allowlisted_route_and_captures_each_request(self):
         fixtures = [
@@ -531,6 +577,36 @@ class BrokerStubHttpTests(unittest.TestCase):
             headers={"X-Agent-Workspace-Flush": self.stub.flush_token},
         )
         self.assertEqual((end_status, end), (200, {"finalizing": False}))
+        self.assertEqual(
+            self.stub.server.state.finalization_state,
+            "closed",
+        )
+        capture_count = len(self.stub.captures())
+
+        late_status, late = self.stub.request(
+            "/agent-broker/api/agent/directory-lookup",
+            method="POST",
+            body={"query": "Late"},
+        )
+        self.assertEqual(late_status, 503)
+        self.assertEqual(late["error"], broker_stub.FINALIZING_ERROR)
+        self.assertEqual(len(self.stub.captures()), capture_count)
+
+        self.stub.configure(
+            [
+                {
+                    "route": "/api/agent/directory-lookup",
+                    "response": {"body": {"people": ["new-trial"]}},
+                }
+            ]
+        )
+        next_status, next_response = self.stub.request(
+            "/agent-broker/api/agent/directory-lookup",
+            method="POST",
+            body={"query": "Next"},
+        )
+        self.assertEqual(next_status, 200)
+        self.assertEqual(next_response, {"people": ["new-trial"]})
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import sys
 import threading
 import time
@@ -22,6 +23,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import ClassVar
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 from urllib.parse import urlsplit
 
 
@@ -41,6 +44,9 @@ INVALID_REQUEST_BODY_ERROR = "EvalInvalidRequestBody"
 FINALIZING_ERROR = "EvalFinalizationInProgress"
 RUNNER_WRITE_TRIAL_COMMAND = "--runner-write-trial"
 RUNNER_READ_CAPTURES_COMMAND = "--runner-read-captures"
+RUNNER_CONTROL_TOKEN_FILENAME = "runner-control-token"
+RUNNER_CONTROL_HEADER = "X-Agent-Eval-Runner-Control"
+RUNNER_OPEN_TRIAL_PATH = "/internal/eval-trial/open"
 
 ALLOWED_AGENT_BROKER_ROUTES = frozenset(
     {
@@ -66,6 +72,71 @@ ALLOWED_AGENT_BROKER_ROUTES = frozenset(
 
 class BrokerStubConfigurationError(RuntimeError):
     """The runner supplied an invalid or unreadable trial fixture."""
+
+
+def _ensure_runner_control_token(control_directory: Path) -> str:
+    """Create or reuse the root-only token for runner-owned gate transitions."""
+
+    path = control_directory / RUNNER_CONTROL_TOKEN_FILENAME
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        read_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, read_flags)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "r", encoding="ascii") as handle:
+            token = handle.read().strip()
+    else:
+        token = secrets.token_urlsafe(32)
+        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(token)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    if len(token) != 43:
+        raise BrokerStubConfigurationError(
+            "runner control token is malformed"
+        )
+    return token
+
+
+def activate_installed_trial(
+    control_directory: Path,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 18791,
+) -> None:
+    """Open the in-process gate only after root installed the next trial."""
+
+    token_path = control_directory / RUNNER_CONTROL_TOKEN_FILENAME
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(token_path, flags)
+    with os.fdopen(descriptor, "r", encoding="ascii") as handle:
+        token = handle.read().strip()
+    request = urllib_request.Request(
+        f"http://{host}:{port}{RUNNER_OPEN_TRIAL_PATH}",
+        data=b"",
+        method="POST",
+        headers={RUNNER_CONTROL_HEADER: token},
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=5) as response:
+            if response.status != HTTPStatus.OK:
+                raise BrokerStubConfigurationError(
+                    f"runner gate open returned {response.status}"
+                )
+    except urllib_error.HTTPError as error:
+        error.read(500)
+        raise BrokerStubConfigurationError(
+            f"runner gate open returned {error.code}"
+        ) from error
+    except urllib_error.URLError as error:
+        raise BrokerStubConfigurationError(
+            f"runner gate open failed: {error.reason}"
+        ) from error
 
 
 def install_trial_configuration(
@@ -140,6 +211,23 @@ def collect_trial_captures(control_directory: Path) -> bytes:
     return serialized
 
 
+def install_and_activate_trial(
+    control_directory: Path,
+    serialized: bytes,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 18791,
+) -> None:
+    """Install the next trial and then cross its authenticated gate boundary."""
+
+    install_trial_configuration(control_directory, serialized)
+    activate_installed_trial(
+        control_directory,
+        host=host,
+        port=port,
+    )
+
+
 def _strict_equal(actual: object, expected: object) -> bool:
     return type(actual) is type(expected) and actual == expected
 
@@ -163,7 +251,7 @@ def _mapping_contains(actual: object, expected: object) -> bool:
 
 
 class BrokerStubState:
-    """Read active fixtures and append captures under a runner-owned directory."""
+    """Read fixtures and append captures under a root-owned directory."""
 
     def __init__(
         self,
@@ -176,9 +264,12 @@ class BrokerStubState:
             workspace_flush_token_path
             or Path(DEFAULT_WORKSPACE_FLUSH_TOKEN_PATH)
         )
+        self._runner_control_token = _ensure_runner_control_token(
+            control_directory
+        )
         self._capture_lock = threading.Lock()
         self._finalization_condition = threading.Condition()
-        self._finalization_state = "open"
+        self._finalization_state = "closed"
         self._active_requests = 0
 
     @property
@@ -263,14 +354,28 @@ class BrokerStubState:
             and hmac.compare_digest(supplied_token, expected_token)
         )
 
-    def enter_request(self, *, final_flush: bool = False) -> bool:
+    def valid_runner_control_token(self, supplied_token: str | None) -> bool:
+        return (
+            isinstance(supplied_token, str)
+            and hmac.compare_digest(
+                supplied_token,
+                self._runner_control_token,
+            )
+        )
+
+    def enter_request(
+        self,
+        *,
+        final_flush: bool = False,
+    ) -> tuple[bool, str]:
         with self._finalization_condition:
-            if self._finalization_state == "draining":
-                return False
-            if self._finalization_state == "flushing" and not final_flush:
-                return False
+            state = self._finalization_state
+            if state in {"draining", "closed"}:
+                return False, state
+            if state == "flushing" and not final_flush:
+                return False, state
             self._active_requests += 1
-            return True
+            return True, state
 
     def leave_request(self) -> None:
         with self._finalization_condition:
@@ -297,8 +402,18 @@ class BrokerStubState:
 
     def end_finalization(self) -> None:
         with self._finalization_condition:
-            self._finalization_state = "open"
+            self._finalization_state = "closed"
             self._finalization_condition.notify_all()
+
+    def activate_trial(self) -> bool:
+        with self._finalization_condition:
+            if (
+                self._finalization_state != "closed"
+                or self._active_requests
+            ):
+                return False
+            self._finalization_state = "open"
+            return True
 
     @property
     def finalization_state(self) -> str:
@@ -333,6 +448,7 @@ class BrokerStubRequestHandler(BaseHTTPRequestHandler):
             "/usage",
             "/internal/finalization/begin",
             "/internal/finalization/end",
+            RUNNER_OPEN_TRIAL_PATH,
         }
     )
 
@@ -381,6 +497,21 @@ class BrokerStubRequestHandler(BaseHTTPRequestHandler):
                     "model": None,
                 },
             )
+            return True
+        if path == RUNNER_OPEN_TRIAL_PATH and self.command == "POST":
+            self._read_body()
+            if not self.server.state.valid_runner_control_token(
+                self.headers.get(RUNNER_CONTROL_HEADER)
+            ):
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "NotFound"})
+                return True
+            if not self.server.state.activate_trial():
+                self._send_json(
+                    HTTPStatus.CONFLICT,
+                    {"error": "EvalTrialGateStateInvalid"},
+                )
+                return True
+            self._send_json(HTTPStatus.OK, {"trial_open": True})
             return True
         if path == "/internal/finalization/begin" and self.command == "POST":
             self._read_body()
@@ -574,8 +705,12 @@ class BrokerStubRequestHandler(BaseHTTPRequestHandler):
                     self.headers.get("X-Agent-Workspace-Flush")
                 )
             )
-            if not self.server.state.enter_request(final_flush=final_flush):
-                self._capture_finalization_rejection(route)
+            entered, rejected_state = self.server.state.enter_request(
+                final_flush=final_flush
+            )
+            if not entered:
+                if rejected_state != "closed":
+                    self._capture_finalization_rejection(route)
                 self._send_json(
                     HTTPStatus.SERVICE_UNAVAILABLE,
                     {"error": FINALIZING_ERROR},
@@ -622,7 +757,10 @@ def main(arguments: list[str] | None = None) -> None:
         os.environ.get(CONTROL_DIRECTORY_ENV, DEFAULT_CONTROL_DIRECTORY)
     )
     if requested == [RUNNER_WRITE_TRIAL_COMMAND]:
-        install_trial_configuration(control_directory, sys.stdin.buffer.read())
+        install_and_activate_trial(
+            control_directory,
+            sys.stdin.buffer.read(),
+        )
         return
     if requested == [RUNNER_READ_CAPTURES_COMMAND]:
         sys.stdout.buffer.write(collect_trial_captures(control_directory))

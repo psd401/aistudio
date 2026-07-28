@@ -66,9 +66,11 @@ or forge grader inputs even when its numeric UID matches the host runner. The
 stub implements the same 16 fixed `/api/agent/*` routes as `agent-broker.js` and
 `mantle_proxy.py`, plus the health, usage, and finalization endpoints the wrapper
 needs. Finalization drains already-active broker requests and rejects new work
-before acknowledging the boundary, so captures cannot spill across trials. L0
-and L2 tasks retain the image's real proxy; pure live and stubbed tasks use
-separate containers.
+before acknowledging the boundary. The wrapper's end transition leaves the
+stub closed through runner capture collection; installing the next trial uses
+a separate root-only token to reopen it, so delayed work cannot spill across
+trials. L0 and L2 tasks retain the image's real proxy; pure live and stubbed
+tasks use separate containers.
 
 ## Task and suite files
 
