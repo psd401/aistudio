@@ -93,7 +93,12 @@ async function verifyStartAuthorization(
   const scopeError = requireAssistantScope(auth, assistantId, requestId)
   if (scopeError) return scopeError
 
-  const accessError = await verifyAssistantAccess(assistantId, auth, requestId)
+  const accessError = await verifyAssistantAccess(
+    assistantId,
+    auth,
+    requestId,
+    { requireApproved: auth.authType !== "session" }
+  )
   if (accessError) return accessError
 
   const architectResult = await getAssistantArchitectByIdAction(
@@ -352,6 +357,7 @@ async function startConversation(
       cognitoSub: auth.cognitoSub,
       requestId,
       preparedInputs,
+      requireApproved: auth.authType !== "session",
     })
     return new NextResponse(execution.streamResponse.body, {
       status: execution.streamResponse.status,

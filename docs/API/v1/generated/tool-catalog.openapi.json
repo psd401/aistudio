@@ -68,7 +68,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Success"
+            "description": "Assistant replaced and returned in pending-approval state."
           },
           "400": {
             "description": "Validation error — malformed body or invalid inputs."
@@ -81,6 +81,12 @@
           },
           "404": {
             "description": "Resource not found, or the tool is disabled in the catalog."
+          },
+          "409": {
+            "description": "Conflict with the resource's current execution or mutation state."
+          },
+          "413": {
+            "description": "Request payload exceeds the endpoint limit."
           },
           "429": {
             "description": "Concurrent-execution or rate limit exceeded."
@@ -167,8 +173,8 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "Success"
+          "201": {
+            "description": "Assistant fork created in pending-approval state."
           },
           "400": {
             "description": "Validation error — malformed body or invalid inputs."
@@ -181,6 +187,9 @@
           },
           "404": {
             "description": "Resource not found, or the tool is disabled in the catalog."
+          },
+          "413": {
+            "description": "Request payload exceeds the endpoint limit."
           },
           "429": {
             "description": "Concurrent-execution or rate limit exceeded."
@@ -205,8 +214,8 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "Success"
+          "201": {
+            "description": "Assistants created; individual results include pending-approval ids."
           },
           "400": {
             "description": "Validation error — malformed body or invalid inputs."
@@ -219,6 +228,9 @@
           },
           "404": {
             "description": "Resource not found, or the tool is disabled in the catalog."
+          },
+          "413": {
+            "description": "Request payload exceeds the endpoint limit."
           },
           "429": {
             "description": "Concurrent-execution or rate limit exceeded."

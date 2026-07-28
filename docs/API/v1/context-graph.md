@@ -1046,12 +1046,16 @@ the `Accept: application/json` async-job path, MCP `execute_assistant`, and the
 browser Assistant Architect route all use the same assistant-lock execution
 coordinator. Its mode-specific deadline is also the enforced streaming timeout,
 so update reconciliation and live runtimes agree on when a row can be stale.
+API-key, JWT, and MCP execution accepts only `approved` assistants and repeats
+that status check under the assistant-row lock; authenticated browser sessions
+retain the owner/administrator draft-preview path.
 The browser route existence-masks private draft/pending assistants as `404`,
 preflights durable repository bindings before counting its optional
 assistant-wide agentic rate cap, then repeats repository validation after the
 coordinated row protects the executable graph. If connector/cost setup consumes
-the coordinated deadline before an agentic stream starts, those acquired
-resources are released on that pre-stream failure path.
+the coordinated deadline before an agentic stream starts, or any post-resolution
+agent setup step fails, those acquired resources are released on that pre-stream
+failure path.
 The conversation endpoint reuses the exact server-prepared input for execution,
 so it does not persist raw marker data or resolve the source twice. It binds
 temporary references to the new owned conversation before the first message
@@ -1092,8 +1096,9 @@ resource gate before returning assistant prompts or input definitions.
 the existing assistant existence/status visibility check, then return `403` if
 the current shared assistant/model/resource decision denies the run.
 
-**Authentication and scopes:** Bearer API key or authenticated session.
-Requires `assistants:execute`, `assistants:*`,
+**Authentication and scopes:** Bearer API key/JWT or authenticated session.
+API-key/JWT callers can execute only `approved` assistants; session callers keep
+the owner/administrator draft-preview behavior. Requires `assistants:execute`, `assistants:*`,
 `assistant:{id}:execute`, or `*`, plus per-resource access to the assistant and
 every model/repository used by the run.
 

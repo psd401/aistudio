@@ -226,6 +226,10 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
         path: "/api/v1/assistants/import",
         summary: "Create assistants from an ExportFormat envelope",
         operationId: "createAssistants",
+        successResponses: {
+          "201": "Assistants created; individual results include pending-approval ids.",
+        },
+        errorResponses: ["400", "404", "413", "429"],
       },
     },
   },
@@ -243,6 +247,10 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
         path: "/api/v1/assistants/{id}",
         summary: "Replace an assistant from an ExportFormat envelope",
         operationId: "updateAssistant",
+        successResponses: {
+          "200": "Assistant replaced and returned in pending-approval state.",
+        },
+        errorResponses: ["400", "404", "409", "413", "429"],
       },
     },
   },
@@ -258,6 +266,10 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
         path: "/api/v1/assistants/{id}/fork",
         summary: "Fork a visible assistant",
         operationId: "forkAssistant",
+        successResponses: {
+          "201": "Assistant fork created in pending-approval state.",
+        },
+        errorResponses: ["400", "404", "413", "429"],
       },
     },
   },

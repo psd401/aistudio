@@ -28,6 +28,7 @@ import { getScopesForRoles } from '@/lib/api-keys/scopes';
 import {
   resolveAgentTools,
   closeAgentConnectorClients,
+  withAgentConnectorCleanupOnError,
   resolveAgentRunLimits,
   extractImageInputParts,
 } from '@/lib/agents';
@@ -1823,6 +1824,7 @@ async function prepareAgenticRun(args: {
       { details: { executionId: args.context.executionId } }
     );
   }
+  const drivingModelId = drivingPrompt.modelId;
   const resolved = await resolveAgentTools({
     enabledToolIdentifiers: config.enabledToolIdentifiers,
     enabledConnectorIds: config.enabledConnectorIds,
@@ -1842,65 +1844,71 @@ async function prepareAgenticRun(args: {
         event
       ),
   });
-  const repositoryContext = createAgenticRepositoryContext({
-    prompts: orderedPrompts,
-    runtimeRepositoryIds: args.context.runtimeRepositoryIds,
-    userCognitoSub: args.context.userCognitoSub,
-  });
-  const effectiveTools: ToolSet = {
-    ...resolved.tools,
-    ...repositoryContext.tools,
-  };
-  args.log.info('Agentic tools resolved', {
-    executionId: args.context.executionId,
-    granted: resolved.grantedToolIdentifiers.length,
-    denied: resolved.deniedToolIdentifiers.length,
-    connectorTools: resolved.connectorResults.length,
-    repositoryCount: repositoryContext.repositoryIds.length,
-    maxSteps: config.maxSteps,
-  });
-  const { systemPrompt, userText } = buildAgenticInitialMessage(
-    orderedPrompts,
-    args.inputs
+  return withAgentConnectorCleanupOnError(
+    resolved.connectorResults,
+    args.requestId,
+    async () => {
+      const repositoryContext = createAgenticRepositoryContext({
+        prompts: orderedPrompts,
+        runtimeRepositoryIds: args.context.runtimeRepositoryIds,
+        userCognitoSub: args.context.userCognitoSub,
+      });
+      const effectiveTools: ToolSet = {
+        ...resolved.tools,
+        ...repositoryContext.tools,
+      };
+      args.log.info('Agentic tools resolved', {
+        executionId: args.context.executionId,
+        granted: resolved.grantedToolIdentifiers.length,
+        denied: resolved.deniedToolIdentifiers.length,
+        connectorTools: resolved.connectorResults.length,
+        repositoryCount: repositoryContext.repositoryIds.length,
+        maxSteps: config.maxSteps,
+      });
+      const { systemPrompt, userText } = buildAgenticInitialMessage(
+        orderedPrompts,
+        args.inputs
+      );
+      const effectiveSystemPrompt =
+        [systemPrompt, repositoryContext.systemGuidance]
+          .filter(Boolean)
+          .join('\n\n') || undefined;
+      const imageParts = extractImageInputParts(args.inputs);
+      if (imageParts.length > 0) {
+        args.log.info('Attaching image inputs to agentic run', {
+          executionId: args.context.executionId,
+          imageCount: imageParts.length,
+        });
+      }
+      const userMessage: UIMessage = {
+        id: `agentic-${args.context.executionId}-${Date.now()}`,
+        role: 'user',
+        parts: [{ type: 'text', text: userText }, ...imageParts],
+      };
+      const modelRoute = await routeAssistantArchitectModel({
+        text: userText,
+        userId: args.context.userId,
+        fallbackModelDbId: drivingModelId,
+        routingMode: args.context.modelRoutingMode,
+        requestedFamily: args.context.modelRoutingFamily,
+        requirements: {
+          requiredTools: config.enabledToolIdentifiers,
+          requiresFunctionCalling: Object.keys(effectiveTools).length > 0,
+          requiresVision: imageParts.length > 0,
+        },
+      });
+      args.context.modelRoutes.set(drivingPrompt.id, modelRoute.metadata);
+      return {
+        config,
+        drivingPrompt,
+        resolved,
+        effectiveTools,
+        effectiveSystemPrompt,
+        userMessage,
+        modelRoute,
+      };
+    }
   );
-  const effectiveSystemPrompt =
-    [systemPrompt, repositoryContext.systemGuidance]
-      .filter(Boolean)
-      .join('\n\n') || undefined;
-  const imageParts = extractImageInputParts(args.inputs);
-  if (imageParts.length > 0) {
-    args.log.info('Attaching image inputs to agentic run', {
-      executionId: args.context.executionId,
-      imageCount: imageParts.length,
-    });
-  }
-  const userMessage: UIMessage = {
-    id: `agentic-${args.context.executionId}-${Date.now()}`,
-    role: 'user',
-    parts: [{ type: 'text', text: userText }, ...imageParts],
-  };
-  const modelRoute = await routeAssistantArchitectModel({
-    text: userText,
-    userId: args.context.userId,
-    fallbackModelDbId: drivingPrompt.modelId,
-    routingMode: args.context.modelRoutingMode,
-    requestedFamily: args.context.modelRoutingFamily,
-    requirements: {
-      requiredTools: config.enabledToolIdentifiers,
-      requiresFunctionCalling: Object.keys(effectiveTools).length > 0,
-      requiresVision: imageParts.length > 0,
-    },
-  });
-  args.context.modelRoutes.set(drivingPrompt.id, modelRoute.metadata);
-  return {
-    config,
-    drivingPrompt,
-    resolved,
-    effectiveTools,
-    effectiveSystemPrompt,
-    userMessage,
-    modelRoute,
-  };
 }
 
 async function reserveAgenticRunCost(args: {

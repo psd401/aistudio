@@ -401,6 +401,7 @@ async function insertAssistantGraph(
 export async function createAssistantsFromImport(
   data: unknown,
   userId: number,
+  options: { throwOnAssistantFailure?: boolean } = {},
 ): Promise<AssistantImportBatchResult> {
   const importData = asValidatedImport(data);
   await validateAgentAuthoringPermissions(importData.assistants, userId);
@@ -422,6 +423,7 @@ export async function createAssistantsFromImport(
       );
       results.push(result);
     } catch (error) {
+      if (options.throwOnAssistantFailure) throw error;
       const internalMessage =
         error instanceof Error ? error.message : "Unknown import error";
       log.error("Assistant import failed", {
@@ -693,10 +695,17 @@ export async function forkAssistant(
       ...(nameOverride !== undefined ? { name: nameOverride } : {}),
     },
   ]);
-  const created = await createAssistantsFromImport(forkData, callerUserId);
+  const created = await createAssistantsFromImport(
+    forkData,
+    callerUserId,
+    { throwOnAssistantFailure: true },
+  );
   const result = created.results[0];
   if (!result || result.status === "error") {
-    throw new Error(result?.error ?? "Failed to fork assistant");
+    throw new AssistantImportServiceError(
+      "VALIDATION_ERROR",
+      result?.error ?? "Failed to fork assistant",
+    );
   }
 
   return {

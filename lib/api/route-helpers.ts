@@ -85,10 +85,14 @@ export async function isAdminByUserId(userId: number): Promise<boolean> {
 export async function verifyAssistantAccess(
   assistantId: number,
   auth: ApiAuthContext,
-  requestId: string
+  requestId: string,
+  options: { requireApproved?: boolean } = {}
 ): Promise<NextResponse | null> {
   const accessRow = await getAssistantForAccessCheck(assistantId)
   if (!accessRow) {
+    return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
+  }
+  if (options.requireApproved && accessRow.status !== "approved") {
     return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
   }
 

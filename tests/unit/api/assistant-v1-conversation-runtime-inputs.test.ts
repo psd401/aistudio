@@ -58,6 +58,7 @@ jest.mock("@/lib/api", () => ({
         auth: {
           userId: number
           cognitoSub: string
+          authType: "session" | "api_key" | "jwt"
           scopes: string[]
         },
         requestId: string
@@ -69,6 +70,7 @@ jest.mock("@/lib/api", () => ({
         {
           userId: 7,
           cognitoSub: "executor-sub",
+          authType: "api_key",
           scopes: ["assistants:execute"],
         },
         "request-1"
@@ -256,6 +258,7 @@ function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part1() {
         userId: 7,
         cognitoSub: "executor-sub",
         preparedInputs,
+        requireApproved: true,
       })
     )
     expect(mockRollbackNewNexusAttachmentConversation).not.toHaveBeenCalled()

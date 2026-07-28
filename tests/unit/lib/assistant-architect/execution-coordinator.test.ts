@@ -174,6 +174,50 @@ describe("createCoordinatedAssistantExecution", () => {
     expect(insert).not.toHaveBeenCalled()
   })
 
+  it.each([
+    { caller: "owner", userId: 99, isAdmin: false },
+    { caller: "administrator", userId: 7, isAdmin: true },
+  ])(
+    "requires approved status for a programmatic $caller under the lock",
+    async ({ userId, isAdmin }) => {
+      const pendingAssistant = {
+        ...approvedAssistant,
+        status: "pending_approval",
+      }
+      const { tx, insert } = createTransaction(pendingAssistant, [3])
+      mockCheckUserRole.mockResolvedValue(isAdmin)
+
+      await expect(
+        createCoordinatedAssistantExecution({
+          assistantId: 5,
+          userId,
+          inputs: {},
+          requireApproved: true,
+        }, coordinatorDependencies(tx))
+      ).rejects.toThrow(/Record not found in assistant_architects/)
+      expect(mockCheckUserRole).not.toHaveBeenCalled()
+      expect(tx.select).toHaveBeenCalledTimes(1)
+      expect(insert).not.toHaveBeenCalled()
+    }
+  )
+
+  it("retains the owner draft-preview path when approval is not required", async () => {
+    const pendingAssistant = {
+      ...approvedAssistant,
+      status: "pending_approval",
+    }
+    const { tx, insert } = createTransaction(pendingAssistant, [3])
+
+    await expect(
+      createCoordinatedAssistantExecution({
+        assistantId: 5,
+        userId: 99,
+        inputs: {},
+      }, coordinatorDependencies(tx))
+    ).resolves.toMatchObject({ created: true, executionId: 123 })
+    expect(insert).toHaveBeenCalledTimes(1)
+  })
+
   it("applies the web agentic rate cap while still holding the assistant lock", async () => {
     const agenticAssistant: AssistantRow = {
       ...approvedAssistant,

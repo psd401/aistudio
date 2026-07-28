@@ -1040,6 +1040,35 @@ it("masks a non-owner pending fork source before resource lookup", async () => {
   expect(mockUserCanAccessResource).not.toHaveBeenCalled();
 });
 
+it("preserves a downstream import validation error while forking", async () => {
+  database.assistants.push({
+    id: 12,
+    name: "Source",
+    description: "",
+    status: "approved",
+    userId: 7,
+  });
+  const executeTransaction =
+    mockExecuteTransaction.getMockImplementation();
+  mockExecuteTransaction.mockImplementation(
+    async (callback: unknown, operationName: string) => {
+      if (operationName === "createAssistantFromImport") {
+        throw new AssistantImportServiceError(
+          "VALIDATION_ERROR",
+          "Forked assistant configuration is no longer valid",
+        );
+      }
+      if (!executeTransaction) throw new Error("Missing transaction mock");
+      return executeTransaction(callback, operationName);
+    },
+  );
+
+  await expect(forkAssistant(12, 7)).rejects.toMatchObject({
+    code: "VALIDATION_ERROR",
+    message: "Forked assistant configuration is no longer valid",
+  } satisfies Partial<AssistantImportServiceError>);
+});
+
 it("forks into a caller-owned pending copy without changing the source", async () => {
   database = {
     assistants: [

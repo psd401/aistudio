@@ -68,7 +68,18 @@ async function parseForkName(
       ),
     };
   }
-  const name = (body as Record<string, unknown>).name;
+  const bodyData = body as Record<string, unknown>;
+  if (Object.keys(bodyData).some((key) => key !== "name")) {
+    return {
+      response: createErrorResponse(
+        requestId,
+        400,
+        "VALIDATION_ERROR",
+        "Request body contains unsupported properties",
+      ),
+    };
+  }
+  const name = bodyData.name;
   if (
     name !== undefined &&
     (typeof name !== "string" ||

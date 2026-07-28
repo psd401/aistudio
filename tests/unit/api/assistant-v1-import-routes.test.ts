@@ -413,6 +413,24 @@ describe("Assistant fork REST v1 route", () => {
     expect(response.status).toBe(201)
     expect(mockForkAssistant).toHaveBeenCalledWith(12, 7, undefined)
   })
+
+  it("rejects undocumented fork body properties before mutation", async () => {
+    const response = await forkRoute(
+      jsonRequest(
+        "http://localhost/api/v1/assistants/12/fork",
+        "POST",
+        JSON.stringify({ name: "Caller copy", unexpected: true }),
+      ),
+      { userId: 7, scopes: ["assistants:write"] },
+      "req-fork-unknown-property",
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({
+      error: { code: "VALIDATION_ERROR" },
+    })
+    expect(mockForkAssistant).not.toHaveBeenCalled()
+  })
 })
 
 describe("Assistant import REST v1 payload limits", () => {

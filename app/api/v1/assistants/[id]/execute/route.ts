@@ -140,7 +140,13 @@ async function authorizeExecution(
 
   const scopeError = await requireExecuteScope(auth, assistantId, requestId)
   if (scopeError) return { ok: false, response: scopeError }
-  const accessError = await verifyAssistantAccess(assistantId, auth, requestId)
+  const requireApproved = auth.authType !== "session"
+  const accessError = await verifyAssistantAccess(
+    assistantId,
+    auth,
+    requestId,
+    { requireApproved }
+  )
   if (accessError) return { ok: false, response: accessError }
 
   const architectResult = await getAssistantArchitectByIdAction(
@@ -313,6 +319,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       cognitoSub: auth.cognitoSub,
       requestId,
       preparedInputs,
+      requireApproved: auth.authType !== "session",
     })
 
     // Cast to NextResponse — streaming Response is compatible at runtime
@@ -337,7 +344,11 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
 async function handleAsyncExecution(
   assistantId: number,
   preparedInputs: PreparedAssistantExecutionInputs,
-  auth: { userId: number; cognitoSub: string },
+  auth: {
+    userId: number
+    cognitoSub: string
+    authType: "session" | "api_key" | "jwt"
+  },
   requestId: string,
   log: ReturnType<typeof createLogger>
 ) {
@@ -374,6 +385,7 @@ async function handleAsyncExecution(
         cognitoSub: auth.cognitoSub,
         requestId,
         preparedInputs,
+        requireApproved: auth.authType !== "session",
       })
 
       await jobManagementService.completeJob(jobId, {

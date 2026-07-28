@@ -164,8 +164,16 @@ async function requireCurrentExecutionAccess(
   tx: DbTransaction,
   assistant: LockedAssistant,
   userId: number,
+  requireApproved: boolean,
   dependencies: AssistantExecutionCoordinatorDependencies
 ): Promise<number> {
+  if (requireApproved && assistant.status !== "approved") {
+    throw ErrorFactories.dbRecordNotFound(
+      "assistant_architects",
+      assistant.id
+    )
+  }
+
   if (assistant.userId !== userId && assistant.status !== "approved") {
     const isAdmin = await dependencies.checkUserRole(
       userId,
@@ -271,6 +279,7 @@ export async function createCoordinatedAssistantExecution(
     userId: number
     inputs: Record<string, unknown>
     enforceAgentRateCap?: boolean
+    requireApproved?: boolean
   },
   dependencies: AssistantExecutionCoordinatorDependencies =
     defaultDependencies
@@ -308,6 +317,7 @@ export async function createCoordinatedAssistantExecution(
         tx,
         assistant,
         args.userId,
+        args.requireApproved === true,
         dependencies
       )
       if (

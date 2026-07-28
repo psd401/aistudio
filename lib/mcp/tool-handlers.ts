@@ -566,6 +566,7 @@ async function handleExecuteAssistant(
       userId: context.userId,
       cognitoSub: context.cognitoSub,
       requestId: context.requestId,
+      requireApproved: true,
     })
 
     log.info("Assistant executed via MCP", {

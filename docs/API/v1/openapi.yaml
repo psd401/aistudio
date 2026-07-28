@@ -1449,6 +1449,8 @@ paths:
         Execute an assistant with the given inputs.
         - `Accept: text/event-stream` (default) returns an SSE stream
         - `Accept: application/json` returns 202 with a jobId for async polling
+        - API-key and JWT callers may execute only `approved` assistants;
+          authenticated browser sessions retain owner/administrator draft preview
 
         Beyond the assistant scope check, the caller must have per-resource access
         (Epic #1202 Phase 3) to BOTH the assistant and every model its prompt

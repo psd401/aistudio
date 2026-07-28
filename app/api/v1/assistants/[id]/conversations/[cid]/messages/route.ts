@@ -130,7 +130,12 @@ async function verifyFollowUpAccess(
 ): Promise<NextResponse | null> {
   const scopeError = requireAssistantScope(auth, ids.assistantId, requestId)
   if (scopeError) return scopeError
-  return verifyAssistantAccess(ids.assistantId, auth, requestId)
+  return verifyAssistantAccess(
+    ids.assistantId,
+    auth,
+    requestId,
+    { requireApproved: auth.authType !== "session" }
+  )
 }
 
 async function loadConversationBinding(

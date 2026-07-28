@@ -56,6 +56,7 @@ jest.mock("@/lib/api", () => ({
         auth: {
           userId: number
           cognitoSub: string
+          authType: "session" | "api_key" | "jwt"
           scopes: string[]
         },
         requestId: string
@@ -67,6 +68,7 @@ jest.mock("@/lib/api", () => ({
         {
           userId: 7,
           cognitoSub: "executor-sub",
+          authType: "api_key",
           scopes: ["assistants:execute"],
         },
         "request-1"
@@ -208,6 +210,7 @@ describe("v1 async assistant runtime repository inputs", () => {
       cognitoSub: "executor-sub",
       requestId: "request-1",
       preparedInputs,
+      requireApproved: true,
     })
     expect(JSON.stringify(mockCreateJob.mock.calls)).not.toContain(bindingId)
     expect(JSON.stringify(mockCreateJob.mock.calls)).not.toContain(

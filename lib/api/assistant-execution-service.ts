@@ -71,6 +71,12 @@ export interface ExecuteAssistantParams {
   cognitoSub: string
   requestId: string
   /**
+   * Programmatic API/MCP callers may execute only approved assistants. The
+   * coordinator enforces this again under the assistant-row lock so an approval
+   * change cannot race execution startup.
+   */
+  requireApproved?: boolean
+  /**
    * A server-created preparation may be reused by entry points that must
    * validate and sanitize inputs before creating their own durable records.
    * Arbitrary caller-created objects are rejected by this module.
@@ -251,6 +257,7 @@ async function prepareAssistantExecution(
     userId,
     assistantId,
     inputs: preparedInputs.inputs,
+    requireApproved: params.requireApproved,
   })
   if (!coordinated.created) {
     throw ErrorFactories.sysInternalError(
