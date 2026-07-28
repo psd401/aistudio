@@ -15,6 +15,7 @@ import {
   type TokenMappingSink,
 } from '@/lib/safety/token-mapping-sink';
 import { getModelConfig } from '@/lib/ai/model-config';
+import { modelSupportsFunctionCalling } from '@/lib/ai/model-router/core';
 import type {
   ImageGenerationResult,
   ReferenceImage,
@@ -2428,18 +2429,24 @@ async function resolveToolsAndStream(params: {
       requestId: params.requestId,
       skillAllowedTools: skillBinding.skillAllowedTools,
     });
+  const memoryToolCallingSupported = modelSupportsFunctionCalling({
+    provider: resolved.modelConfig.provider,
+    providerMetadata: resolved.modelConfig.providerMetadata,
+  });
   const memoryContext = await resolveNexusMemoryContext({
     userId: prepared.userId,
     cognitoSub: prepared.session.sub,
     conversationId: conversation.conversationId,
     latestUserText: resolved.protectedLatestUserText,
     requestId: params.requestId,
+    toolCallingSupported: memoryToolCallingSupported,
   });
   log.info("Nexus memory turn context resolved", {
     conversationId: conversation.conversationId,
     enabled: memoryContext.enabled,
     reason: memoryContext.reason,
     hasFragment: !!memoryContext.userMemoryFragment,
+    toolsBound: !!memoryContext.tools,
   });
   return executeStreaming({
     messages: repositories.lightweightMessages,

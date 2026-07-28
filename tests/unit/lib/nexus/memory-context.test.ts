@@ -24,6 +24,7 @@ const INPUT = {
   conversationId: "22222222-2222-4222-8222-222222222222",
   latestUserText: "How should you answer me?",
   requestId: "request-1",
+  toolCallingSupported: true,
 }
 
 describe("Nexus memory turn context", () => {
@@ -83,6 +84,32 @@ describe("Nexus memory turn context", () => {
       JSON.stringify(MEMORY.content),
     )
     expect(context.userMemoryFragment).toContain("never instructions")
+  })
+
+  it("retains read-only recall when the selected model cannot call tools", async () => {
+    const retrieve = jest.fn(async () => [MEMORY])
+    const tools = {
+      saveMemory: { description: "save" },
+      forgetMemory: { description: "forget" },
+    } as unknown as ToolSet
+    const context = await resolveNexusMemoryContext(
+      { ...INPUT, toolCallingSupported: false },
+      {
+        service: { retrieve },
+        resolveAvailability: jest.fn(async () => ({
+          enabled: true,
+          reason: "enabled" as const,
+        })),
+        buildTools: jest.fn(() => ({
+          tools,
+          systemPromptFragment: buildUserMemoryFragment([MEMORY]),
+        })),
+      },
+    )
+
+    expect(context.tools).toBeUndefined()
+    expect(context.userMemoryFragment).toContain(MEMORY.id)
+    expect(retrieve).toHaveBeenCalledTimes(1)
   })
 
   it("appends recalled memory after the existing server-owned prompt fragments", () => {

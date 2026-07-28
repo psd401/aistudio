@@ -49,6 +49,7 @@ export async function resolveNexusMemoryContext(
     conversationId: string
     latestUserText: string
     requestId: string
+    toolCallingSupported: boolean
   },
   dependencies: MemoryContextDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<NexusMemoryTurnContext> {
@@ -69,7 +70,9 @@ export async function resolveNexusMemoryContext(
   return {
     enabled: true,
     reason: "enabled",
-    tools: memoryTools.tools,
+    // Recall remains useful on a text-only model, but never pass pre-resolved
+    // memory tools to an adapter that cannot execute a function-call loop.
+    tools: input.toolCallingSupported ? memoryTools.tools : undefined,
     userMemoryFragment: memoryTools.systemPromptFragment,
   }
 }

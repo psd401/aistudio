@@ -1,10 +1,9 @@
 /**
  * @jest-environment node
  *
- * Tests getModelConfig (REV-PERF-002). It now returns `capabilities` so the Nexus
- * chat route can derive image/deep-research routing from this single fetched row
- * instead of re-reading the same ai_models row. The active/nexusEnabled gate is
- * preserved.
+ * Tests getModelConfig (REV-PERF-002). It returns `capabilities` and provider
+ * metadata so the Nexus route can derive special routing and function-calling
+ * support from one fetched row. The active/nexusEnabled gate is preserved.
  */
 
 const mockGetAIModelById = jest.fn()
@@ -28,6 +27,7 @@ const activeModel = {
   active: true,
   nexusEnabled: true,
   capabilities: { imageGeneration: true },
+  providerMetadata: { supports_function_calling: false },
 }
 
 describe('getModelConfig (REV-PERF-002)', () => {
@@ -35,7 +35,7 @@ describe('getModelConfig (REV-PERF-002)', () => {
     jest.clearAllMocks()
   })
 
-  it('returns capabilities alongside the trimmed config (so the route needs no 2nd fetch)', async () => {
+  it('returns route capability metadata without a second model fetch', async () => {
     mockGetAIModelByModelId.mockResolvedValue(activeModel)
 
     const result = await getModelConfig('gemini-2.0-flash')
@@ -46,6 +46,7 @@ describe('getModelConfig (REV-PERF-002)', () => {
       provider: 'google',
       model_id: 'gemini-2.0-flash',
       capabilities: { imageGeneration: true },
+      providerMetadata: { supports_function_calling: false },
     })
     // Only one ai_models read for a string model id.
     expect(mockGetAIModelByModelId).toHaveBeenCalledTimes(1)
