@@ -57,6 +57,7 @@ import {
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
+import { MemoryImportDialog } from "./memory-import-dialog"
 
 const log = createLogger({ component: "MemoryTab" })
 
@@ -692,9 +693,11 @@ function useMemoryToggle(
 function MemoryCardHeader({
   writeDisabled,
   onAdd,
+  onImport,
 }: {
   writeDisabled: boolean
   onAdd: () => void
+  onImport: () => void
 }) {
   return (
     <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -712,8 +715,14 @@ function MemoryCardHeader({
         <Button
           type="button"
           variant="outline"
-          disabled
-          title="Memory import is coming next"
+          data-testid="memory-import-open"
+          disabled={writeDisabled}
+          title={
+            writeDisabled
+              ? "Enable Nexus memory before importing memories"
+              : undefined
+          }
+          onClick={onImport}
         >
           <Upload className="mr-2 h-4 w-4" />
           Import memories
@@ -874,11 +883,13 @@ function MemorySettingsCard({
   editor,
   deletion,
   toggle,
+  onImport,
 }: {
   collection: ReturnType<typeof useMemoryCollection>
   editor: ReturnType<typeof useMemoryEditing>
   deletion: ReturnType<typeof useMemoryDeletion>
   toggle: ReturnType<typeof useMemoryToggle>
+  onImport: () => void
 }) {
   const writeDisabled =
     !collection.globalMemoryEnabled || !collection.memoryEnabled
@@ -894,6 +905,7 @@ function MemorySettingsCard({
         <MemoryCardHeader
           writeDisabled={writeDisabled}
           onAdd={() => editor.setAddOpen(true)}
+          onImport={onImport}
         />
         {!collection.globalMemoryEnabled && (
           <div
@@ -1015,6 +1027,7 @@ function MemoryTabContent({
     collection.memoryEnabled,
     collection.setMemoryEnabled,
   )
+  const [importOpen, setImportOpen] = useState(false)
 
   return (
     <>
@@ -1023,12 +1036,18 @@ function MemoryTabContent({
         editor={editor}
         deletion={deletion}
         toggle={toggle}
+        onImport={() => setImportOpen(true)}
       />
       <AddMemoryDialog
         open={editor.addOpen}
         isSaving={editor.isAdding}
         onOpenChange={editor.setAddOpen}
         onSave={editor.handleAdd}
+      />
+      <MemoryImportDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        onImported={collection.refreshMemories}
       />
       <MemoryDeleteDialog deletion={deletion} />
     </>
