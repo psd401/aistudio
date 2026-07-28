@@ -280,7 +280,7 @@ class DockerRuntime:
             raise EvalRunnerError("container has not been started")
         return self._container_id
 
-    def prepare(self) -> None:
+    def _resolve_credentials_for_invocation(self) -> AwsCredentials:
         credentials = self._credential_provider.resolve()
         if credentials.expires_at is not None:
             required_seconds = (
@@ -295,21 +295,41 @@ class DockerRuntime:
                     "active AWS credentials expire before the configured invocation "
                     "timeout; refresh the AWS login before continuing"
                 )
-        if self._container_id is None:
-            self._active_credentials = credentials
-            self._start()
-            return
-        if (
-            self._active_credentials is not None
-            and credentials.identity == self._active_credentials.identity
-        ):
-            self._active_credentials = credentials
-            return
-        LOGGER.info("AWS credentials rotated; recycling candidate container")
-        self.stop()
-        self._active_credentials = credentials
-        self._name = self._new_name()
-        self._start()
+        return credentials
+
+    def prepare(self) -> None:
+        try:
+            credentials = self._resolve_credentials_for_invocation()
+            # A boot can consume a meaningful part of a temporary credential's
+            # remaining life. Re-resolve after every start, recycling if the
+            # provider rotated during boot, and bound pathological churn.
+            for _ in range(3):
+                if (
+                    self._container_id is not None
+                    and self._active_credentials is not None
+                    and credentials.identity == self._active_credentials.identity
+                ):
+                    self._active_credentials = credentials
+                    return
+                if self._container_id is not None:
+                    LOGGER.info(
+                        "AWS credentials rotated; recycling candidate container"
+                    )
+                    self.stop()
+                    self._name = self._new_name()
+                self._active_credentials = credentials
+                self._start()
+                credentials = self._resolve_credentials_for_invocation()
+                if credentials.identity == self._active_credentials.identity:
+                    self._active_credentials = credentials
+                    return
+            self.stop()
+            raise EvalRunnerError(
+                "AWS credentials kept rotating while the candidate container booted"
+            )
+        except Exception:
+            self.stop()
+            raise
 
     def _start(self) -> None:
         if self._container_id is not None:

@@ -481,7 +481,9 @@ class DockerRuntimeTests(unittest.TestCase):
         executor = RecordingExecutor()
         first = aws_credentials()
         second = aws_credentials("access-2", "token-2")
-        provider = SequenceCredentialProvider([first, first, second])
+        provider = SequenceCredentialProvider(
+            [first, first, first, second, second]
+        )
         runtime = runner.DockerRuntime(
             executor,
             "candidate@sha256:digest",
@@ -502,7 +504,7 @@ class DockerRuntimeTests(unittest.TestCase):
         docker_runs = [
             call for call in executor.calls if call[:2] == ("docker", "run")
         ]
-        self.assertEqual(provider.calls, 3)
+        self.assertEqual(provider.calls, 5)
         self.assertEqual(len(docker_runs), 2)
         self.assertEqual(
             sum(call[:3] == ("docker", "rm", "-f") for call in executor.calls),
@@ -534,6 +536,38 @@ class DockerRuntimeTests(unittest.TestCase):
             runtime.prepare()
         self.assertFalse(
             any(call[:2] == ("docker", "run") for call in executor.calls)
+        )
+
+    def test_credentials_are_rechecked_after_container_startup(self):
+        executor = RecordingExecutor()
+        now = datetime(2026, 7, 28, tzinfo=timezone.utc)
+        runtime = runner.DockerRuntime(
+            executor,
+            "candidate@sha256:digest",
+            "linux/arm64",
+            {"APP_BASE_URL": "https://dev.example.invalid"},
+            SequenceCredentialProvider(
+                [
+                    aws_credentials(expires_at=now + timedelta(seconds=961)),
+                    aws_credentials(expires_at=now + timedelta(seconds=959)),
+                ]
+            ),
+            boot_timeout_seconds=120,
+            invocation_timeout_seconds=900,
+            poll_interval_seconds=0,
+            name_prefix="psd-agent-eval-issue-1422-test",
+            now=lambda: now,
+        )
+
+        with self.assertRaisesRegex(runner.EvalRunnerError, "refresh the AWS login"):
+            runtime.prepare()
+        self.assertEqual(
+            sum(call[:2] == ("docker", "run") for call in executor.calls),
+            1,
+        )
+        self.assertEqual(
+            sum(call[:3] == ("docker", "rm", "-f") for call in executor.calls),
+            1,
         )
 
 
