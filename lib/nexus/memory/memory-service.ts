@@ -7,6 +7,7 @@ import type {
   NexusMemorySource,
 } from "@/lib/db/schema"
 import { generateMemoryEmbedding } from "./memory-embeddings"
+import { MAX_NEXUS_MEMORY_CONTENT_CHARS } from "./memory-constants"
 import {
   drizzleMemoryRepository,
   type MemoryRepository,
@@ -18,7 +19,6 @@ export const MEMORY_DEDUP_THRESHOLD = 0.9
 const DEFAULT_RETRIEVAL_THRESHOLD = 0.3
 const DEFAULT_RETRIEVAL_TOP_K = 6
 const MAX_RETRIEVAL_TOP_K = 20
-const MAX_MEMORY_CONTENT_CHARS = 8_000
 export const MAX_PROFILE_MEMORIES_PER_TURN = 20
 const PII_PLACEHOLDER_PATTERN = /\[PII:[^\]\r\n]+\]/i
 
@@ -47,6 +47,14 @@ export interface SaveMemoryInput {
   sourceConversationId?: string
 }
 
+export interface UpdateMemoryInput {
+  memoryId: string
+  userId: number
+  sessionId: string
+  content: string
+  category: NexusMemoryCategory
+}
+
 export interface RetrieveMemoryInput {
   userId: number
   query: string
@@ -54,6 +62,7 @@ export interface RetrieveMemoryInput {
 
 export interface NexusMemoryService {
   save(input: SaveMemoryInput): Promise<MemoryWriteResult>
+  update(input: UpdateMemoryInput): Promise<StoredNexusMemory | null>
   retrieve(input: RetrieveMemoryInput): Promise<StoredNexusMemory[]>
   forget(memoryId: string, userId: number): Promise<boolean>
 }
@@ -75,7 +84,10 @@ function boundedThreshold(raw: string | null): number {
     : DEFAULT_RETRIEVAL_THRESHOLD
 }
 
-function validateInput(input: SaveMemoryInput): string {
+function validateInput(input: {
+  userId: number
+  content: string
+}): string {
   if (!Number.isSafeInteger(input.userId) || input.userId <= 0) {
     throw new Error("A positive Nexus memory owner id is required")
   }
@@ -83,12 +95,61 @@ function validateInput(input: SaveMemoryInput): string {
   if (!content) {
     throw new Error("Memory content cannot be empty")
   }
-  if (content.length > MAX_MEMORY_CONTENT_CHARS) {
+  if (content.length > MAX_NEXUS_MEMORY_CONTENT_CHARS) {
     throw new Error(
-      `Memory content cannot exceed ${MAX_MEMORY_CONTENT_CHARS} characters`,
+      `Memory content cannot exceed ${MAX_NEXUS_MEMORY_CONTENT_CHARS} characters`,
     )
   }
   return content
+}
+
+async function sanitizeMemoryContent(
+  dependencies: MemoryServiceDependencies,
+  input: {
+    userId: number
+    sessionId: string
+    content: string
+  },
+): Promise<string> {
+  const content = validateInput(input)
+
+  // Non-negotiable safety choke point: EVERY current and future write enters
+  // here before embedding or database access. System-prompt memory is not
+  // re-screened later, so reordering this would expose raw user content.
+  const safety = await dependencies.processInput(content, input.sessionId)
+  if (!safety.allowed) {
+    throw new ContentSafetyBlockedError(
+      safety.blockedMessage || "This memory cannot be saved",
+      safety.blockedCategories || [],
+      "input",
+    )
+  }
+  if (safety.piiScanCompleted !== true) {
+    // Ordinary chat intentionally degrades gracefully when PII screening is
+    // unavailable. Durable memory cannot persist an indeterminate result.
+    throw new ContentSafetyBlockedError(
+      "Memory is temporarily unavailable because its privacy check could not be completed.",
+      ["pii_scan_unavailable"],
+      "input",
+    )
+  }
+  const sanitized = safety.processedContent.trim()
+  if (
+    safety.hasPII === true ||
+    PII_PLACEHOLDER_PATTERN.test(sanitized)
+  ) {
+    // PII token mappings expire. Persisting a placeholder would later corrupt
+    // the memory, while detokenizing here would store raw PII.
+    throw new ContentSafetyBlockedError(
+      "For privacy, personal information cannot be saved to memory.",
+      ["pii"],
+      "input",
+    )
+  }
+  if (!sanitized) {
+    throw new Error("Memory content is empty after safety processing")
+  }
+  return sanitized
 }
 
 export function createMemoryService(
@@ -98,47 +159,7 @@ export function createMemoryService(
 
   return {
     async save(input) {
-      const content = validateInput(input)
-
-      // Non-negotiable safety choke point: EVERY current and future write
-      // enters here before embedding or database access. System-prompt memory is
-      // not re-screened later, so reordering this would expose raw user content.
-      const safety = await dependencies.processInput(content, input.sessionId)
-      if (!safety.allowed) {
-        throw new ContentSafetyBlockedError(
-          safety.blockedMessage || "This memory cannot be saved",
-          safety.blockedCategories || [],
-          "input",
-        )
-      }
-      if (safety.piiScanCompleted !== true) {
-        // Ordinary chat intentionally degrades gracefully when PII screening
-        // is disabled or unavailable. Durable memory cannot: accepting an
-        // indeterminate result would persist unscreened user content.
-        throw new ContentSafetyBlockedError(
-          "Memory is temporarily unavailable because its privacy check could not be completed.",
-          ["pii_scan_unavailable"],
-          "input",
-        )
-      }
-      const sanitized = safety.processedContent.trim()
-      if (
-        safety.hasPII === true ||
-        PII_PLACEHOLDER_PATTERN.test(sanitized)
-      ) {
-        // PII token mappings intentionally expire after one hour. Persisting
-        // their placeholders would corrupt durable memory once the mapping
-        // expires, while detokenizing here would store raw PII. Reject the
-        // write after the mandatory safety pass instead.
-        throw new ContentSafetyBlockedError(
-          "For privacy, personal information cannot be saved to memory.",
-          ["pii"],
-          "input",
-        )
-      }
-      if (!sanitized) {
-        throw new Error("Memory content is empty after safety processing")
-      }
+      const sanitized = await sanitizeMemoryContent(dependencies, input)
       if (
         input.sourceConversationId &&
         !(await dependencies.repository.conversationIsOwned(
@@ -162,6 +183,16 @@ export function createMemoryService(
         },
         MEMORY_DEDUP_THRESHOLD,
       )
+    },
+
+    async update(input) {
+      const sanitized = await sanitizeMemoryContent(dependencies, input)
+      const embedding = await dependencies.generateEmbedding(sanitized)
+      return dependencies.repository.updateOwned(input.memoryId, input.userId, {
+        content: sanitized,
+        category: input.category,
+        embedding,
+      })
     },
 
     async retrieve(input) {

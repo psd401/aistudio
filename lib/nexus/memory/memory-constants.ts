@@ -1,0 +1,1 @@
+export const MAX_NEXUS_MEMORY_CONTENT_CHARS = 8_000

@@ -41,6 +41,11 @@ export interface MemoryRepository {
     record: MemoryWriteRecord,
     threshold: number,
   ): Promise<MemoryWriteResult>
+  updateOwned(
+    memoryId: string,
+    userId: number,
+    record: Pick<MemoryWriteRecord, "content" | "category" | "embedding">,
+  ): Promise<StoredNexusMemory | null>
   listProfileMemories(
     userId: number,
     limit: number,
@@ -198,6 +203,30 @@ export const drizzleMemoryRepository: MemoryRepository = {
       "saveNexusUserMemory",
       { isolationLevel: "read committed" },
     )
+  },
+
+  async updateOwned(memoryId, userId, record) {
+    const [updated] = await executeQuery(
+      (db) =>
+        db
+          .update(nexusUserMemories)
+          .set({
+            content: record.content,
+            category: record.category,
+            embedding: record.embedding,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(nexusUserMemories.id, memoryId),
+              eq(nexusUserMemories.userId, userId),
+              isNull(nexusUserMemories.deletedAt),
+            ),
+          )
+          .returning(selectedMemoryColumns()),
+      "updateOwnedNexusMemory",
+    )
+    return updated ?? null
   },
 
   listProfileMemories(userId, limit) {
