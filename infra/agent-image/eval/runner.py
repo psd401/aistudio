@@ -1,0 +1,858 @@
+#!/usr/bin/env python3
+"""Run a repeated task suite against a local PSD Agent Docker image.
+
+Example:
+    python3 runner.py --image <tag-or-digest> --suite suites/core.yaml \
+        --trials 3 --out /tmp/issue-1422-run.jsonl
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import logging
+import os
+import re
+import subprocess
+import sys
+import time
+import uuid
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Protocol, TextIO
+
+if __package__:
+    from .probe import build_invocation_payload, extract_last_result_event
+else:
+    from probe import build_invocation_payload, extract_last_result_event
+
+LOGGER = logging.getLogger("agent_eval")
+DEFAULT_OWNER_EMAIL = "canary@build-gate.invalid"
+DEFAULT_CONTEXT_TTL_SECONDS = 900
+REQUIRED_METADATA_FIELDS = frozenset(
+    {
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_write_input_tokens",
+        "model_call_count",
+        "duration_ms",
+        "latency_ms",
+        "nudged",
+        "tool_calls",
+        "failed",
+        "error_class",
+    }
+)
+
+
+class EvalRunnerError(RuntimeError):
+    """The local runner could not safely complete the requested evaluation."""
+
+
+@dataclass(frozen=True)
+class Task:
+    id: str
+    skill: str
+    level: str
+    workspace: str
+    prompt: str
+    trials: int
+
+
+@dataclass(frozen=True)
+class InvocationAuthority:
+    invocation_context: str
+    request_proof_key: str
+    owner_email: str
+    session_id: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+class CommandExecutor:
+    """Shell-free subprocess adapter that keeps secrets out of command logs."""
+
+    def run(
+        self,
+        arguments: Sequence[str],
+        *,
+        input_text: str | None = None,
+        timeout: float | None = None,
+        env: Mapping[str, str] | None = None,
+        check: bool = True,
+    ) -> CommandResult:
+        try:
+            completed = subprocess.run(
+                list(arguments),
+                input=input_text,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                env=dict(env) if env is not None else None,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise EvalRunnerError(
+                f"command failed to execute: {arguments[0]}: {error}"
+            ) from error
+        result = CommandResult(
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+        if check and result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            raise EvalRunnerError(
+                f"{arguments[0]} exited {result.returncode}: {detail[-2000:]}"
+            )
+        return result
+
+
+class ContextMinter(Protocol):
+    def mint(self, session_id: str) -> InvocationAuthority:
+        """Mint authority bound to the exact trial session."""
+
+
+class Runtime(Protocol):
+    def start(self) -> None:
+        """Boot and health-check the candidate container."""
+
+    def invoke(
+        self,
+        task: Task,
+        session_id: str,
+        authority: InvocationAuthority,
+    ) -> dict[str, object]:
+        """Invoke one task and return its terminal event."""
+
+    def stop(self) -> None:
+        """Remove only this runner-owned container."""
+
+
+class RuntimeFactory(Protocol):
+    def create(self) -> Runtime:
+        """Create an unstarted, independently owned runtime."""
+
+
+class ProbeContextMinter:
+    """Mint a new 900-second context immediately before every trial."""
+
+    def __init__(
+        self,
+        executor: CommandExecutor,
+        repo_root: Path,
+        environment: str,
+        region: str,
+        *,
+        ttl_seconds: int = DEFAULT_CONTEXT_TTL_SECONDS,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._executor = executor
+        self._script = repo_root / "scripts/agent-workspace/mint-agent-probe-context.ts"
+        self._environment = environment
+        self._region = region
+        self._ttl_seconds = ttl_seconds
+        self._now = now or (lambda: datetime.now(timezone.utc))
+
+    def mint(self, session_id: str) -> InvocationAuthority:
+        if not self._script.is_file():
+            raise EvalRunnerError(f"context minter not found: {self._script}")
+        environment = dict(os.environ)
+        environment["ENVIRONMENT"] = self._environment
+        environment["AWS_REGION"] = self._region
+        result = self._executor.run(
+            [
+                "bun",
+                "run",
+                str(self._script),
+                "--json",
+                "--session",
+                session_id,
+                "--ttl",
+                str(self._ttl_seconds),
+            ],
+            timeout=90,
+            env=environment,
+        )
+        try:
+            minted = json.loads(result.stdout)
+            expires_at = datetime.fromisoformat(
+                str(minted["expiresAt"]).replace("Z", "+00:00")
+            )
+            returned_session = str(minted["sessionId"])
+            authority = InvocationAuthority(
+                invocation_context=str(minted["invocationContext"]),
+                request_proof_key=str(minted["requestProofKey"]),
+                owner_email=str(minted.get("ownerEmail") or DEFAULT_OWNER_EMAIL),
+                session_id=returned_session,
+                expires_at=expires_at,
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise EvalRunnerError("context minter returned malformed JSON") from error
+        if authority.session_id != session_id:
+            raise EvalRunnerError(
+                "context minter returned a token for a different session"
+            )
+        if (authority.expires_at - self._now()).total_seconds() < 30:
+            raise EvalRunnerError("context minter returned an already-expiring token")
+        return authority
+
+
+class DockerRuntime:
+    def __init__(
+        self,
+        executor: CommandExecutor,
+        image: str,
+        platform: str,
+        environment_values: Mapping[str, str],
+        *,
+        boot_timeout_seconds: int,
+        invocation_timeout_seconds: int,
+        poll_interval_seconds: float,
+        name_prefix: str,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._executor = executor
+        self._image = image
+        self._platform = platform
+        self._environment_values = dict(environment_values)
+        self._boot_timeout_seconds = boot_timeout_seconds
+        self._invocation_timeout_seconds = invocation_timeout_seconds
+        self._poll_interval_seconds = poll_interval_seconds
+        self._name = f"{name_prefix}-{uuid.uuid4().hex[:10]}"
+        self._monotonic = monotonic
+        self._sleep = sleep
+        self._container_id: str | None = None
+
+    @property
+    def container_id(self) -> str:
+        if self._container_id is None:
+            raise EvalRunnerError("container has not been started")
+        return self._container_id
+
+    def start(self) -> None:
+        if self._container_id is not None:
+            raise EvalRunnerError("container was already started")
+        arguments = [
+            "docker",
+            "run",
+            "-d",
+            "--platform",
+            self._platform,
+            "--name",
+            self._name,
+        ]
+        for key, value in sorted(self._environment_values.items()):
+            arguments.extend(["-e", f"{key}={value}"])
+        arguments.append(self._image)
+        result = self._executor.run(arguments, timeout=60)
+        container_id = result.stdout.strip()
+        if not container_id:
+            raise EvalRunnerError("docker run returned no container id")
+        self._container_id = container_id
+        try:
+            self._wait_for_boot()
+            self._wait_for_listener()
+        except Exception:
+            self._log_tail()
+            self.stop()
+            raise
+
+    def _wait_for_boot(self) -> None:
+        deadline = self._monotonic() + self._boot_timeout_seconds
+        while self._monotonic() < deadline:
+            logs = self._executor.run(
+                ["docker", "logs", self.container_id],
+                check=False,
+                timeout=15,
+            )
+            if "BOOT_OK" in f"{logs.stdout}\n{logs.stderr}":
+                return
+            state = self._executor.run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format={{.State.Running}}",
+                    self.container_id,
+                ],
+                check=False,
+                timeout=10,
+            )
+            if state.returncode != 0 or state.stdout.strip() != "true":
+                raise EvalRunnerError("container exited before logging BOOT_OK")
+            self._sleep(self._poll_interval_seconds)
+        raise EvalRunnerError(
+            f"container did not log BOOT_OK within {self._boot_timeout_seconds}s"
+        )
+
+    def _wait_for_listener(self) -> None:
+        attempts = max(1, int(30 / max(self._poll_interval_seconds, 0.1)))
+        for _ in range(attempts):
+            response = self._executor.run(
+                [
+                    "docker",
+                    "exec",
+                    self.container_id,
+                    "curl",
+                    "-s",
+                    "-o",
+                    "/dev/null",
+                    "-m",
+                    "2",
+                    "http://127.0.0.1:8080/ping",
+                ],
+                check=False,
+                timeout=5,
+            )
+            if response.returncode == 0:
+                return
+            self._sleep(self._poll_interval_seconds)
+        raise EvalRunnerError("container logged BOOT_OK but listener never became ready")
+
+    def invoke(
+        self,
+        task: Task,
+        session_id: str,
+        authority: InvocationAuthority,
+    ) -> dict[str, object]:
+        if authority.session_id != session_id:
+            raise EvalRunnerError("invocation authority does not match trial session")
+        payload = build_invocation_payload(
+            task.prompt,
+            authority.owner_email,
+            authority.invocation_context,
+            authority.request_proof_key,
+        )
+        response = self._executor.run(
+            [
+                "docker",
+                "exec",
+                self.container_id,
+                "curl",
+                "-sS",
+                "-N",
+                "-f",
+                "-m",
+                str(self._invocation_timeout_seconds),
+                "-X",
+                "POST",
+                "http://127.0.0.1:8080/invocations",
+                "-H",
+                "Content-Type: application/json",
+                "-H",
+                f"X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: {session_id}",
+                "-d",
+                payload,
+            ],
+            check=False,
+            timeout=self._invocation_timeout_seconds + 15,
+        )
+        if response.returncode != 0:
+            self._log_tail()
+            detail = (response.stderr or response.stdout).strip()
+            raise EvalRunnerError(
+                f"invocation curl exited {response.returncode}: {detail[-2000:]}"
+            )
+        return extract_last_result_event(response.stdout)
+
+    def _log_tail(self) -> None:
+        if self._container_id is None:
+            return
+        logs = self._executor.run(
+            ["docker", "logs", "--tail", "60", self._container_id],
+            check=False,
+            timeout=15,
+        )
+        detail = f"{logs.stdout}\n{logs.stderr}".strip()
+        if detail:
+            LOGGER.error("candidate container log tail:\n%s", detail)
+
+    def stop(self) -> None:
+        if self._container_id is None:
+            return
+        container_id = self._container_id
+        self._container_id = None
+        self._executor.run(
+            ["docker", "rm", "-f", container_id],
+            check=False,
+            timeout=30,
+        )
+
+
+class DockerRuntimeFactory:
+    def __init__(
+        self,
+        executor: CommandExecutor,
+        image: str,
+        platform: str,
+        environment_values: Mapping[str, str],
+        *,
+        boot_timeout_seconds: int,
+        invocation_timeout_seconds: int,
+        poll_interval_seconds: float,
+        name_prefix: str,
+    ) -> None:
+        self._executor = executor
+        self._image = image
+        self._platform = platform
+        self._environment_values = dict(environment_values)
+        self._boot_timeout_seconds = boot_timeout_seconds
+        self._invocation_timeout_seconds = invocation_timeout_seconds
+        self._poll_interval_seconds = poll_interval_seconds
+        self._name_prefix = name_prefix
+
+    def create(self) -> DockerRuntime:
+        return DockerRuntime(
+            self._executor,
+            self._image,
+            self._platform,
+            self._environment_values,
+            boot_timeout_seconds=self._boot_timeout_seconds,
+            invocation_timeout_seconds=self._invocation_timeout_seconds,
+            poll_interval_seconds=self._poll_interval_seconds,
+            name_prefix=self._name_prefix,
+        )
+
+
+class EvaluationRunner:
+    def __init__(
+        self,
+        runtime_factory: RuntimeFactory,
+        context_minter: ContextMinter,
+        image: str = "unknown",
+        *,
+        session_id_factory: Callable[[], str] | None = None,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._runtime_factory = runtime_factory
+        self._context_minter = context_minter
+        self._image = image
+        self._session_id_factory = session_id_factory or (lambda: str(uuid.uuid4()))
+        self._now = now or (lambda: datetime.now(timezone.utc))
+
+    def run(
+        self,
+        tasks: Sequence[Task],
+        output: TextIO,
+        *,
+        trials_override: int | None = None,
+    ) -> list[dict[str, object]]:
+        records: list[dict[str, object]] = []
+        pure_runtime: Runtime | None = None
+        try:
+            for task in tasks:
+                trial_count = (
+                    trials_override if trials_override is not None else task.trials
+                )
+                if trial_count < 1:
+                    raise EvalRunnerError("trial count must be positive")
+                for trial_number in range(1, trial_count + 1):
+                    owns_runtime = task.workspace == "mutating"
+                    if owns_runtime:
+                        runtime = self._runtime_factory.create()
+                    else:
+                        if pure_runtime is None:
+                            pure_runtime = self._runtime_factory.create()
+                            pure_runtime.start()
+                        runtime = pure_runtime
+                    try:
+                        if owns_runtime:
+                            runtime.start()
+                        session_id = self._session_id_factory()
+                        if len(session_id) < 33 or len(session_id) > 256:
+                            raise EvalRunnerError(
+                                "session id must contain 33-256 characters"
+                            )
+                        # Mint immediately before every trial. This is stronger
+                        # than a timer-based refresh: even a multi-hour suite can
+                        # never begin a turn with a context from an earlier trial.
+                        authority = self._context_minter.mint(session_id)
+                        event = runtime.invoke(task, session_id, authority)
+                        record = self._make_record(
+                            task,
+                            trial_number,
+                            trial_count,
+                            session_id,
+                            event,
+                        )
+                        output.write(json.dumps(record, separators=(",", ":")) + "\n")
+                        output.flush()
+                        records.append(record)
+                    finally:
+                        if owns_runtime:
+                            runtime.stop()
+        finally:
+            if pure_runtime is not None:
+                pure_runtime.stop()
+        return records
+
+    def _make_record(
+        self,
+        task: Task,
+        trial_number: int,
+        trial_count: int,
+        session_id: str,
+        event: Mapping[str, object],
+    ) -> dict[str, object]:
+        result = event.get("result")
+        metadata = event.get("metadata")
+        if not isinstance(metadata, dict):
+            raise EvalRunnerError(
+                f"task {task.id} trial {trial_number} returned no metadata object"
+            )
+        missing = sorted(REQUIRED_METADATA_FIELDS.difference(metadata))
+        if missing:
+            raise EvalRunnerError(
+                f"task {task.id} trial {trial_number} dropped metadata fields: "
+                + ", ".join(missing)
+            )
+        metadata_session = metadata.get("session_id")
+        if metadata_session is not None and metadata_session != session_id:
+            raise EvalRunnerError(
+                f"task {task.id} trial {trial_number} returned a mismatched session"
+            )
+        error_class = metadata.get("error_class")
+        if error_class in {"InvocationContextInvalid", "WorkspaceAuthorityChanged"}:
+            raise EvalRunnerError(
+                f"task {task.id} trial {trial_number} hit runner isolation error "
+                f"{error_class}"
+            )
+        return {
+            "task_id": task.id,
+            "image": self._image,
+            "skill": task.skill,
+            "level": task.level,
+            "workspace": task.workspace,
+            "trial": trial_number,
+            "trials": trial_count,
+            "prompt": task.prompt,
+            "session_id": session_id,
+            "result": "" if result is None else str(result),
+            # Preserve the complete final-event metadata object. Later grader
+            # issues can consume new telemetry without changing this runner.
+            "metadata": metadata,
+            "recorded_at": self._now().isoformat(),
+        }
+
+
+def _parse_scalar(value: str, path: Path, line_number: int) -> object:
+    stripped = value.strip()
+    if not stripped:
+        return ""
+    if stripped[0] in {'"', "'", "[", "{"}:
+        try:
+            return ast.literal_eval(stripped)
+        except (SyntaxError, ValueError) as error:
+            raise EvalRunnerError(
+                f"{path}:{line_number}: invalid quoted/inline value"
+            ) from error
+    lowered = stripped.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    if lowered in {"null", "none", "~"}:
+        return None
+    if re.fullmatch(r"-?\d+", stripped):
+        return int(stripped)
+    return stripped
+
+
+def _load_document(path: Path) -> object:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise EvalRunnerError(f"could not read suite/task file {path}: {error}") from error
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Issue #1422's task contract is intentionally flat. Supporting that small
+    # YAML subset here keeps the runner dependency-free; nested grader YAML is
+    # introduced by #1424 and can extend the loader with its schema.
+    document: dict[str, object] = {}
+    active_list: list[object] | None = None
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        if "\t" in raw_line[: len(raw_line) - len(raw_line.lstrip())]:
+            raise EvalRunnerError(f"{path}:{line_number}: tabs are not valid indentation")
+        indent = len(raw_line) - len(raw_line.lstrip())
+        content = raw_line.strip()
+        if indent == 0:
+            active_list = None
+            if ":" not in content:
+                raise EvalRunnerError(f"{path}:{line_number}: expected key: value")
+            key, value = content.split(":", 1)
+            key = key.strip()
+            if not key:
+                raise EvalRunnerError(f"{path}:{line_number}: empty key")
+            if value.strip():
+                document[key] = _parse_scalar(value, path, line_number)
+            else:
+                active_list = []
+                document[key] = active_list
+            continue
+        if active_list is None or indent < 2 or not content.startswith("- "):
+            raise EvalRunnerError(
+                f"{path}:{line_number}: only a top-level scalar list is supported"
+            )
+        active_list.append(_parse_scalar(content[2:], path, line_number))
+    return document
+
+
+def _task_from_mapping(value: Mapping[str, object], source: Path) -> Task:
+    try:
+        task = Task(
+            id=str(value["id"]),
+            skill=str(value["skill"]),
+            level=str(value["level"]),
+            workspace=str(value["workspace"]),
+            prompt=str(value["prompt"]),
+            trials=int(value.get("trials", 3)),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise EvalRunnerError(f"{source}: malformed task definition") from error
+    if not task.id or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", task.id):
+        raise EvalRunnerError(f"{source}: task id must be lowercase kebab-case")
+    if not task.skill or not task.prompt.strip():
+        raise EvalRunnerError(f"{source}: skill and prompt must be non-empty")
+    if task.level not in {"L0", "L1", "L2"}:
+        raise EvalRunnerError(f"{source}: level must be L0, L1, or L2")
+    if task.workspace not in {"pure", "mutating"}:
+        raise EvalRunnerError(f"{source}: workspace must be pure or mutating")
+    if task.trials < 1 or task.trials > 20:
+        raise EvalRunnerError(f"{source}: trials must be between 1 and 20")
+    return task
+
+
+def load_suite(path: Path) -> list[Task]:
+    document = _load_document(path)
+    if isinstance(document, dict) and "id" in document:
+        tasks = [_task_from_mapping(document, path)]
+    else:
+        entries: object
+        if isinstance(document, dict):
+            entries = document.get("tasks")
+        else:
+            entries = document
+        if not isinstance(entries, list) or not entries:
+            raise EvalRunnerError(f"{path}: suite must contain a non-empty tasks list")
+        tasks = []
+        for entry in entries:
+            if isinstance(entry, dict):
+                tasks.append(_task_from_mapping(entry, path))
+                continue
+            if not isinstance(entry, str):
+                raise EvalRunnerError(f"{path}: suite task entries must be paths or mappings")
+            task_path = (path.parent / entry).resolve()
+            task_document = _load_document(task_path)
+            if not isinstance(task_document, dict):
+                raise EvalRunnerError(f"{task_path}: task must be a mapping")
+            tasks.append(_task_from_mapping(task_document, task_path))
+    ids = [task.id for task in tasks]
+    duplicates = sorted({task_id for task_id in ids if ids.count(task_id) > 1})
+    if duplicates:
+        raise EvalRunnerError(f"{path}: duplicate task ids: {', '.join(duplicates)}")
+    return tasks
+
+
+def _resolve_app_base_url(
+    executor: CommandExecutor,
+    environment: str,
+    region: str,
+    explicit: str | None,
+) -> str:
+    configured = (
+        explicit
+        or os.environ.get("AGENT_EVAL_APP_BASE_URL")
+        or os.environ.get("AGENT_PROBE_APP_BASE_URL")
+    )
+    if configured:
+        return configured
+    env_capitalized = environment[:1].upper() + environment[1:]
+    stack_name = f"AIStudio-AgentPlatformStack-{env_capitalized}"
+    stack = executor.run(
+        [
+            "aws",
+            "cloudformation",
+            "describe-stacks",
+            "--stack-name",
+            stack_name,
+            "--query",
+            "Stacks[0].Outputs[?OutputKey=='RouterLambdaArn'].OutputValue",
+            "--output",
+            "text",
+            "--region",
+            region,
+        ],
+        timeout=30,
+    )
+    router_arn = stack.stdout.strip()
+    if not router_arn or router_arn == "None":
+        raise EvalRunnerError(f"stack {stack_name} has no RouterLambdaArn output")
+    configuration = executor.run(
+        [
+            "aws",
+            "lambda",
+            "get-function-configuration",
+            "--function-name",
+            router_arn,
+            "--query",
+            "Environment.Variables.APP_BASE_URL",
+            "--output",
+            "text",
+            "--region",
+            region,
+        ],
+        timeout=30,
+    )
+    resolved = configuration.stdout.strip()
+    if not resolved or resolved == "None":
+        raise EvalRunnerError("router Lambda has no APP_BASE_URL")
+    return resolved
+
+
+def _resolve_aws_credentials(executor: CommandExecutor) -> dict[str, str]:
+    allowed = {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+    }
+    exported = executor.run(
+        ["aws", "configure", "export-credentials", "--format", "env-no-export"],
+        check=False,
+        timeout=30,
+    )
+    credentials: dict[str, str] = {}
+    if exported.returncode == 0:
+        for line in exported.stdout.splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in allowed and value:
+                credentials[key] = value
+    if not {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}.issubset(credentials):
+        credentials = {
+            key: os.environ[key]
+            for key in allowed
+            if os.environ.get(key)
+        }
+    if not {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}.issubset(credentials):
+        raise EvalRunnerError(
+            "could not resolve AWS credentials for the candidate container"
+        )
+    return credentials
+
+
+def _positive_integer(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def _trial_count(value: str) -> int:
+    parsed = _positive_integer(value)
+    if parsed > 20:
+        raise argparse.ArgumentTypeError("must be 20 or fewer")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+def _open_output(path: Path, overwrite: bool) -> TextIO:
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    flags |= os.O_TRUNC if overwrite else os.O_EXCL
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        os.chmod(path, 0o600)
+        return os.fdopen(descriptor, "w", encoding="utf-8")
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--image", required=True, help="candidate image tag or digest")
+    parser.add_argument("--suite", required=True, type=Path)
+    parser.add_argument("--trials", type=_trial_count)
+    parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--environment", default=os.environ.get("ENVIRONMENT", "dev"))
+    parser.add_argument("--region", default=os.environ.get("AWS_REGION", "us-east-1"))
+    parser.add_argument("--app-base-url")
+    parser.add_argument("--platform", default="linux/arm64")
+    parser.add_argument("--boot-timeout", type=_positive_integer, default=120)
+    parser.add_argument("--invocation-timeout", type=_positive_integer, default=900)
+    parser.add_argument("--poll-interval", type=_positive_float, default=2.0)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    try:
+        tasks = load_suite(args.suite.resolve())
+        executor = CommandExecutor()
+        repo_root = Path(__file__).resolve().parents[3]
+        app_base_url = _resolve_app_base_url(
+            executor,
+            args.environment,
+            args.region,
+            args.app_base_url,
+        )
+        environment_values = {
+            "ENVIRONMENT": args.environment,
+            "AWS_REGION": args.region,
+            "APP_BASE_URL": app_base_url,
+            "BUILD_MARKER": f"eval:{args.image}",
+            **_resolve_aws_credentials(executor),
+        }
+        name_token = re.sub(r"[^a-z0-9-]", "-", f"issue-1422-{os.getpid()}".lower())
+        runtime_factory = DockerRuntimeFactory(
+            executor,
+            args.image,
+            args.platform,
+            environment_values,
+            boot_timeout_seconds=args.boot_timeout,
+            invocation_timeout_seconds=args.invocation_timeout,
+            poll_interval_seconds=args.poll_interval,
+            name_prefix=f"psd-agent-eval-{name_token}",
+        )
+        minter = ProbeContextMinter(
+            executor,
+            repo_root,
+            args.environment,
+            args.region,
+        )
+        runner = EvaluationRunner(runtime_factory, minter, image=args.image)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        with _open_output(args.out, args.overwrite) as output:
+            records = runner.run(tasks, output, trials_override=args.trials)
+        LOGGER.info("wrote %d trial records to %s", len(records), args.out)
+        return 0
+    except (EvalRunnerError, OSError) as error:
+        LOGGER.error("%s", error)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

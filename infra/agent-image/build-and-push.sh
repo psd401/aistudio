@@ -269,15 +269,8 @@ except Exception:
     # The payload's user_email is identity metadata only — the broker derives
     # the real owner from the signed claims. Read it back OUT of the token so
     # the two can never disagree in logs, whoever minted the context.
-    CANARY_OWNER_EMAIL=$(printf '%s' "${PROBE_INVOCATION_CONTEXT}" | "${PYTHON}" -c '
-import base64, json, sys
-fallback = "canary@build-gate.invalid"
-try:
-    segment = sys.stdin.read().strip().split(".")[1]
-    claims = json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
-    print(claims.get("ownerEmail") or fallback)
-except Exception:
-    print(fallback)')
+    CANARY_OWNER_EMAIL=$("${PYTHON}" "${SCRIPT_DIR}/eval/probe.py" owner-email \
+      "${PROBE_INVOCATION_CONTEXT}")
     CID=""
     # Always reap the probe container, even on failure/exit.
     cleanup_probe() { [ -n "${CID}" ] && docker rm -f "${CID}" >/dev/null 2>&1 || true; }
@@ -387,8 +380,7 @@ except Exception:
     # _install_invocation_authority() rejects the turn outright when either the
     # signed context or its derived request-proof key is missing or malformed,
     # and the web broker verifies a per-request signature made with that key.
-    CANARY_PAYLOAD=$("${PYTHON}" -c \
-      'import json, sys; print(json.dumps({"prompt": sys.argv[1], "user_email": sys.argv[2], "invocation_context": sys.argv[3], "invocation_request_proof_key": sys.argv[4]}))' \
+    CANARY_PAYLOAD=$("${PYTHON}" "${SCRIPT_DIR}/eval/probe.py" make-payload \
       "${CANARY_MESSAGE}" "${CANARY_OWNER_EMAIL}" \
       "${PROBE_INVOCATION_CONTEXT}" "${PROBE_REQUEST_PROOF_KEY}")
     CANARY_START=$(date +%s)
@@ -397,20 +389,8 @@ except Exception:
       -H "Content-Type: application/json" -d "${CANARY_PAYLOAD}" 2>&1) \
       && CANARY_STATUS=0 || CANARY_STATUS=$?
     CANARY_ELAPSED=$(( $(date +%s) - CANARY_START ))
-    CANARY_ANSWER=$(printf '%s' "${CANARY_OUT}" | "${PYTHON}" -c '
-import json, sys
-answer = ""
-for line in sys.stdin:
-    line = line.strip()
-    if not line.startswith("data: "):
-        continue
-    try:
-        event = json.loads(line[len("data: "):])
-    except ValueError:
-        continue
-    if isinstance(event, dict) and "result" in event:
-        answer = str(event.get("result") or "")
-print(answer)')
+    CANARY_ANSWER=$(printf '%s' "${CANARY_OUT}" | \
+      "${PYTHON}" "${SCRIPT_DIR}/eval/probe.py" last-result)
     echo "    [canary] answer: ${CANARY_ANSWER:-<none>}"
 
     # Match the extracted answer with a word-bounded, case-SENSITIVE 'OK' — a
