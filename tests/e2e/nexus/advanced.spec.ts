@@ -8,18 +8,20 @@ import { authenticateContext } from '../helpers/session-auth'
 
 // ── Fork API — Auth-independent ───────────────────────────────────────────────
 
-test.describe('Nexus Fork API — Unauthenticated', () => {
+const defineNexusForkAPIUnauthenticatedSuite1 = () => {
   test('POST /api/nexus/conversations/<id>/fork returns 401 without auth', async ({ request }) => {
     const res = await request.post('/api/nexus/conversations/some-id/fork', {
       data: { atMessageId: 'msg-1' },
     })
     expect(res.status()).toBe(401)
   })
-})
+};
+
+test.describe('Nexus Fork API — Unauthenticated', defineNexusForkAPIUnauthenticatedSuite1)
 
 // ── Fork conversation — Authenticated ────────────────────────────────────────
 
-test.describe('Nexus Fork Conversation — Authenticated', () => {
+const defineNexusForkConversationAuthenticatedSuite2 = () => {
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
@@ -88,11 +90,13 @@ test.describe('Nexus Fork Conversation — Authenticated', () => {
     expect(forkResult.body).toHaveProperty('forkedConversation')
     expect(forkResult.body.forkedConversation.id).not.toBe(conversationId)
   })
-})
+};
+
+test.describe('Nexus Fork Conversation — Authenticated', defineNexusForkConversationAuthenticatedSuite2)
 
 // ── Voice UI — Authenticated ─────────────────────────────────────────────────
 
-test.describe('Nexus Voice UI — Authenticated', () => {
+const defineNexusVoiceUIAuthenticatedSuite3 = () => {
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
@@ -115,11 +119,13 @@ test.describe('Nexus Voice UI — Authenticated', () => {
       test.skip(true, 'Voice button not found in this environment')
     }
   })
-})
+};
+
+test.describe('Nexus Voice UI — Authenticated', defineNexusVoiceUIAuthenticatedSuite3)
 
 // ── Error Handling ────────────────────────────────────────────────────────────
 
-test.describe('Nexus Error Handling — Authenticated', () => {
+const defineNexusErrorHandlingAuthenticatedSuite4 = () => {
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
@@ -172,11 +178,13 @@ test.describe('Nexus Error Handling — Authenticated', () => {
     // A whitespace-only submit is guarded too — no user message is created.
     await expect(page.locator('[data-role="user"]')).toHaveCount(0)
   })
-})
+};
+
+test.describe('Nexus Error Handling — Authenticated', defineNexusErrorHandlingAuthenticatedSuite4)
 
 // ── API Error Handling ────────────────────────────────────────────────────────
 
-test.describe('Nexus API Error Handling — Authenticated', () => {
+const defineNexusAPIErrorHandlingAuthenticatedSuite5 = () => {
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
@@ -240,11 +248,13 @@ test.describe('Nexus API Error Handling — Authenticated', () => {
 
     expect(result.status).toBe(404)
   })
-})
+};
+
+test.describe('Nexus API Error Handling — Authenticated', defineNexusAPIErrorHandlingAuthenticatedSuite5)
 
 // ── Conversation Messages After Chat ─────────────────────────────────────────
 
-test.describe('Nexus Message Persistence — Authenticated', () => {
+const defineNexusMessagePersistenceAuthenticatedSuite6 = () => {
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
@@ -357,4 +367,6 @@ test.describe('Nexus Message Persistence — Authenticated', () => {
     expect(firstMsg).toHaveProperty('createdAt')
     expect(['user', 'assistant', 'system']).toContain(firstMsg.role)
   })
-})
+};
+
+test.describe('Nexus Message Persistence — Authenticated', defineNexusMessagePersistenceAuthenticatedSuite6)

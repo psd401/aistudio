@@ -18,6 +18,114 @@ export interface ModelValidationResult {
   errors: string[];
 }
 
+function validateRequiredString(
+  model: Record<string, unknown>,
+  field: "name" | "modelId",
+  prefix: string,
+  errors: string[]
+): void {
+  const value = model[field]
+  if (typeof value === "string" && value.trim()) return
+  errors.push(
+    `${prefix}: '${field}' is required and must be a non-empty string`
+  )
+}
+
+function validateProvider(
+  model: Record<string, unknown>,
+  prefix: string,
+  errors: string[]
+): void {
+  if (typeof model.provider !== "string" || !model.provider) {
+    errors.push(`${prefix}: 'provider' is required`)
+    return
+  }
+  if (!VALID_PROVIDERS_SET.has(model.provider)) {
+    errors.push(
+      `${prefix}: Invalid provider '${model.provider}'. Valid values: ${VALID_PROVIDERS.join(", ")}`
+    )
+  }
+}
+
+function validateStringArray(
+  value: unknown,
+  field: "capabilities" | "allowedRoles",
+  prefix: string,
+  errors: string[]
+): void {
+  if (value === undefined) return
+  if (!Array.isArray(value)) {
+    errors.push(`${prefix}: '${field}' must be an array`)
+    return
+  }
+  if (!value.every((entry) => typeof entry === "string")) {
+    errors.push(`${prefix}: '${field}' must be an array of strings`)
+  }
+}
+
+function validateOptionalScalars(
+  model: Record<string, unknown>,
+  prefix: string,
+  errors: string[]
+): void {
+  if (
+    model.description !== undefined
+    && typeof model.description !== "string"
+  ) {
+    errors.push(`${prefix}: 'description' must be a string`)
+  }
+  if (model.maxTokens === undefined) return
+  if (
+    typeof model.maxTokens !== "number"
+    || !Number.isInteger(model.maxTokens)
+  ) {
+    errors.push(`${prefix}: 'maxTokens' must be an integer`)
+    return
+  }
+  if (model.maxTokens < 0) {
+    errors.push(`${prefix}: 'maxTokens' must be non-negative`)
+  }
+}
+
+function validateBooleanFields(
+  model: Record<string, unknown>,
+  prefix: string,
+  errors: string[]
+): void {
+  const booleanFields = ["active", "nexusEnabled", "architectEnabled"] as const
+  for (const field of booleanFields) {
+    if (model[field] !== undefined && typeof model[field] !== "boolean") {
+      errors.push(`${prefix}: '${field}' must be a boolean`)
+    }
+  }
+}
+
+function validatePricingFields(
+  model: Record<string, unknown>,
+  prefix: string,
+  errors: string[]
+): void {
+  const pricingFields = [
+    "inputCostPer1kTokens",
+    "outputCostPer1kTokens",
+    "cachedInputCostPer1kTokens",
+  ] as const
+  for (const field of pricingFields) {
+    const value = model[field]
+    if (value === undefined) continue
+    if (typeof value !== "string" && typeof value !== "number") {
+      errors.push(`${prefix}: '${field}' must be a number or string`)
+      continue
+    }
+    const numericValue = Number(value)
+    if (Number.isNaN(numericValue) || numericValue < 0) {
+      errors.push(
+        `${prefix}: '${field}' must be a valid non-negative number`
+      )
+    }
+  }
+}
+
 /**
  * Validate a single model object against schema requirements
  * @param model - The model object to validate
@@ -37,97 +145,16 @@ export function validateModel(
 
   const m = model as Record<string, unknown>;
 
-  // Required fields
-  if (!m.name || typeof m.name !== "string" || !(m.name as string).trim()) {
-    modelErrors.push(
-      `${prefix}: 'name' is required and must be a non-empty string`
-    );
-  }
-
-  if (
-    !m.modelId ||
-    typeof m.modelId !== "string" ||
-    !(m.modelId as string).trim()
-  ) {
-    modelErrors.push(
-      `${prefix}: 'modelId' is required and must be a non-empty string`
-    );
-  }
-
-  if (!m.provider || typeof m.provider !== "string") {
-    modelErrors.push(`${prefix}: 'provider' is required`);
-  } else if (!VALID_PROVIDERS_SET.has(m.provider)) {
-    modelErrors.push(
-      `${prefix}: Invalid provider '${m.provider}'. Valid values: ${VALID_PROVIDERS.join(", ")}`
-    );
-  }
-
-  // Optional field type validation
-  if (m.description !== undefined && typeof m.description !== "string") {
-    modelErrors.push(`${prefix}: 'description' must be a string`);
-  }
-
-  if (m.capabilities !== undefined) {
-    if (!Array.isArray(m.capabilities)) {
-      modelErrors.push(`${prefix}: 'capabilities' must be an array`);
-    } else if (
-      !(m.capabilities as unknown[]).every((c) => typeof c === "string")
-    ) {
-      modelErrors.push(`${prefix}: 'capabilities' must be an array of strings`);
-    }
-  }
-
-  if (m.maxTokens !== undefined) {
-    if (typeof m.maxTokens !== "number" || !Number.isInteger(m.maxTokens)) {
-      modelErrors.push(`${prefix}: 'maxTokens' must be an integer`);
-    } else if ((m.maxTokens as number) < 0) {
-      modelErrors.push(`${prefix}: 'maxTokens' must be non-negative`);
-    }
-  }
-
-  // Boolean fields
-  const booleanFields = ["active", "nexusEnabled", "architectEnabled"] as const;
-  for (const field of booleanFields) {
-    if (m[field] !== undefined && typeof m[field] !== "boolean") {
-      modelErrors.push(`${prefix}: '${field}' must be a boolean`);
-    }
-  }
-
-  // Array fields. 'allowedRoles' no longer maps to a column (#1207) — it is
-  // translated into role grants (resource_access_grants) after import — but it is
-  // still a meaningful, validated field so a malformed value fails loudly instead of
-  // silently importing a model with the wrong (or no) access restriction.
-  if (m.allowedRoles !== undefined) {
-    if (!Array.isArray(m.allowedRoles)) {
-      modelErrors.push(`${prefix}: 'allowedRoles' must be an array`);
-    } else if (
-      !(m.allowedRoles as unknown[]).every((r) => typeof r === "string")
-    ) {
-      modelErrors.push(`${prefix}: 'allowedRoles' must be an array of strings`);
-    }
-  }
-
-  // Pricing fields (string numbers)
-  const pricingFields = [
-    "inputCostPer1kTokens",
-    "outputCostPer1kTokens",
-    "cachedInputCostPer1kTokens",
-  ] as const;
-  for (const field of pricingFields) {
-    if (m[field] !== undefined) {
-      const value = m[field];
-      if (typeof value !== "string" && typeof value !== "number") {
-        modelErrors.push(`${prefix}: '${field}' must be a number or string`);
-      } else {
-        const num = Number(value);
-        if (Number.isNaN(num) || num < 0) {
-          modelErrors.push(
-            `${prefix}: '${field}' must be a valid non-negative number`
-          );
-        }
-      }
-    }
-  }
+  validateRequiredString(m, "name", prefix, modelErrors)
+  validateRequiredString(m, "modelId", prefix, modelErrors)
+  validateProvider(m, prefix, modelErrors)
+  validateOptionalScalars(m, prefix, modelErrors)
+  validateStringArray(m.capabilities, "capabilities", prefix, modelErrors)
+  // allowedRoles becomes resource grants after import, but malformed values
+  // must still fail loudly instead of silently widening access.
+  validateStringArray(m.allowedRoles, "allowedRoles", prefix, modelErrors)
+  validateBooleanFields(m, prefix, modelErrors)
+  validatePricingFields(m, prefix, modelErrors)
 
   return {
     valid: modelErrors.length === 0,

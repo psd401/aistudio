@@ -336,7 +336,7 @@ describe("syncToolCatalogManifest", () => {
   // Issue #927 (epic #922 completion audit): a published version's schema is
   // FROZEN. A manifest edit changing it is refused wholesale — the row is left
   // untouched and the key is reported in schemaViolations.
-  describe("version schema immutability (#927)", () => {
+
     it("refuses an inputSchema change to a published version and reports it", async () => {
       await runSync([entry()])
 
@@ -373,5 +373,5 @@ describe("syncToolCatalogManifest", () => {
       expect(result.updated).toEqual(["decisions.search@v1"])
       expect(fakeTools[0].description).toBe("New description")
     })
-  })
+
 })

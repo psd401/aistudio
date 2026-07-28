@@ -21,8 +21,8 @@
 'use strict';
 
 const { test, expect, beforeEach, afterEach } = require('bun:test');
-const fs = require('node:fs');
 const os = require('node:os');
+const { validatedFs } = require('../../../validated-fs.cjs');
 const path = require('node:path');
 
 const mod = require('./run');
@@ -30,7 +30,7 @@ const { main, _internals } = mod;
 const { validateBody, titleFromBody, buildDocument, collectImages, applyReplacements } =
   _internals;
 
-const VALID_BODY = fs.readFileSync(
+const VALID_BODY = validatedFs.readFileSync(
   path.join(__dirname, 'test-fixtures', 'valid-sop.md'),
   'utf8'
 );
@@ -392,7 +392,7 @@ function atriumStub(overrides = {}) {
     const capture = { ...spec, files: {} };
     for (const flag of ['--markdown-file', '--body-file']) {
       const at = spec.args.indexOf(flag);
-      if (at !== -1) capture.files[flag] = fs.readFileSync(spec.args[at + 1], 'utf8');
+      if (at !== -1) capture.files[flag] = validatedFs.readFileSync(spec.args[at + 1], 'utf8');
     }
     calls.push(capture);
     const sub = spec.args[0];
@@ -427,7 +427,7 @@ function atriumStub(overrides = {}) {
     }
     if (sub === 'get-asset') {
       const out = spec.args[spec.args.indexOf('--out') + 1];
-      fs.writeFileSync(out, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      validatedFs.writeFileSync(out, Buffer.from([0x89, 0x50, 0x4E, 0x47]));
       return { code: 0, stdout: JSON.stringify({ id: 'src-asset', path: out }), stderr: '' };
     }
     return { code: 0, stdout: JSON.stringify({ ok: true }), stderr: '' };
@@ -474,8 +474,8 @@ test('create with no images posts the whole document in one call', () => {
 });
 
 test('create with a local image creates the object FIRST, uploads, then writes the body', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sop-img-'));
-  fs.writeFileSync(path.join(dir, 'panel.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  const dir = validatedFs.mkdtempSync(path.join(os.tmpdir(), 'sop-img-'));
+  validatedFs.writeFileSync(path.join(dir, 'panel.png'), Buffer.from([0x89, 0x50, 0x4E, 0x47]));
   const body = VALID_BODY.replace(
     'All schools and administrative buildings',
     'All schools and administrative buildings\n\n![Control panel](panel.png)'
@@ -661,10 +661,10 @@ test('--body-file and --body are mutually exclusive', () => {
   // dir is pre-creatable by a local actor and collides between same-millisecond
   // runs. Same reason the skill itself uses mkdtempSync for its scratch dir.
   const file = path.join(
-    fs.mkdtempSync(path.join(os.tmpdir(), 'psd-sop-body-')),
+    validatedFs.mkdtempSync(path.join(os.tmpdir(), 'psd-sop-body-')),
     'sop.md'
   );
-  fs.writeFileSync(file, VALID_BODY);
+  validatedFs.writeFileSync(file, VALID_BODY);
   expect(run(['validate', '--body-file', file]).code).toBe(0);
   expect(run(['validate', '--body-file', file, '--body', VALID_BODY]).code).toBe(1);
 });
@@ -674,8 +674,8 @@ test('an unknown subcommand exits 1', () => {
 });
 
 test('a non-UUID asset id is rejected — the directive would render as literal text', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sop-uuid-'));
-  fs.writeFileSync(path.join(dir, 'panel.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  const dir = validatedFs.mkdtempSync(path.join(os.tmpdir(), 'sop-uuid-'));
+  validatedFs.writeFileSync(path.join(dir, 'panel.png'), Buffer.from([0x89, 0x50, 0x4E, 0x47]));
   const body = VALID_BODY.replace(
     'All schools and administrative buildings',
     'All schools\n\n![Panel](panel.png)'
@@ -749,8 +749,8 @@ test('create refuses a missing --source-id before creating anything', () => {
 });
 
 test('a failed upload discards the document it already created', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sop-fail-'));
-  fs.writeFileSync(path.join(dir, 'panel.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  const dir = validatedFs.mkdtempSync(path.join(os.tmpdir(), 'sop-fail-'));
+  validatedFs.writeFileSync(path.join(dir, 'panel.png'), Buffer.from([0x89, 0x50, 0x4E, 0x47]));
   const body = VALID_BODY.replace(
     'All schools and administrative buildings',
     'All schools\n\n![Panel](panel.png)'
@@ -784,8 +784,8 @@ test('a failed upload discards the document it already created', () => {
 });
 
 test('a failed cleanup is reported so the caller can delete the orphan by id', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sop-fail2-'));
-  fs.writeFileSync(path.join(dir, 'panel.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  const dir = validatedFs.mkdtempSync(path.join(os.tmpdir(), 'sop-fail2-'));
+  validatedFs.writeFileSync(path.join(dir, 'panel.png'), Buffer.from([0x89, 0x50, 0x4E, 0x47]));
   const body = VALID_BODY.replace(
     'All schools and administrative buildings',
     'All schools\n\n![Panel](panel.png)'

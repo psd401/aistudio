@@ -264,7 +264,9 @@ describe("signed-owner Atrium operations", () => {
       expect.objectContaining({ outcome: "approval_required" })
     )
   })
+})
 
+describe("signed-owner Atrium source reads and authored assets", () => {
   it("reads a document body through the source alias without authoring capability", async () => {
     sourceReadMock.mockResolvedValue({
       versionId: "version-1",
@@ -397,7 +399,9 @@ describe("signed-owner Atrium operations", () => {
     expect(result.httpStatus).toBe(400)
     expect(assetInitiateMock).not.toHaveBeenCalled()
   })
+})
 
+describe("signed-owner Atrium asset bytes and authorization guards", () => {
   it("serves asset bytes base64-encoded and refuses an oversized read", async () => {
     assetGetMock.mockResolvedValue({
       id: "asset-3",

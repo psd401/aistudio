@@ -32,7 +32,8 @@
  * trusted web broker regardless of scope.
  * Additionally, file creation (Drive/Docs/Sheets/Slides) is blocked on the
  * USER slot: files created there are owned by the user's account
- * (impersonation). Create with --scope agent and share explicitly.
+ * (impersonation). Create with --scope agent; permission changes require the
+ * server-recorded provenance flow.
  *
  * Flow:
  *   1. Phase 1 gate check on --command (forbidden ops → exit 13)
@@ -72,6 +73,125 @@ const {
 } = require('./common');
 const { requestAgentBroker } = require('../_shared/agent-broker');
 
+function resolveScope(scope) {
+  if (scope === 'agent') return 'agent_account';
+  if (scope === 'user' || scope === undefined) return 'user_account';
+  fail('--scope must be "user" or "agent"');
+}
+
+function emitForbiddenGate(gateCheck) {
+  emit({
+    status: 'phase1-forbidden',
+    reason: gateCheck.reason,
+    message:
+      `Phase 1 forbids this operation: ${gateCheck.reason}. ` +
+      `If the user explicitly approved, route via the appropriate ` +
+      `confirmation flow rather than calling this skill directly.`,
+  });
+  process.exit(13);
+}
+
+function restorePayloadArguments(argv, resolvedPayloads) {
+  if (!resolvedPayloads) return argv;
+  return argv.map((token) =>
+    Object.prototype.hasOwnProperty.call(resolvedPayloads.payloads, token)
+      ? resolvedPayloads.payloads[token]
+      : token
+  );
+}
+
+function prepareWorkspaceArguments(command, scope, ownerEmail) {
+  const resolvedPayloads = resolvePayloadFiles(command);
+  let guardedCommand = resolvedPayloads
+    ? resolvedPayloads.syntheticCommand
+    : command;
+  const gateCheck = enforcePhase1Gates(guardedCommand, { scope, ownerEmail });
+  if (!gateCheck.allowed) emitForbiddenGate(gateCheck);
+
+  guardedCommand = injectMarkers(guardedCommand);
+  if (!resolvedPayloads) return splitCommand(guardedCommand);
+
+  const jsonPlaceholder = '@@PSD_PAYLOAD_JSON@@';
+  if (resolvedPayloads.payloads[jsonPlaceholder]) {
+    const mutatedJson = extractJsonArg(guardedCommand);
+    if (mutatedJson) resolvedPayloads.payloads[jsonPlaceholder] = mutatedJson;
+  }
+  return restorePayloadArguments(
+    splitCommand(resolvedPayloads.execCommand),
+    resolvedPayloads
+  );
+}
+
+function isWorkspaceAuthError(status) {
+  return [
+    'needs-auth',
+    'token-revoked',
+    'scope-upgrade-required',
+  ].includes(status);
+}
+
+async function emitWorkspaceConsent(response) {
+  let consent;
+  try {
+    consent = await requestAgentBroker('/api/agent/consent-link', {
+      kind: 'user_account',
+    });
+  } catch (consentError) {
+    fail(
+      `Workspace authorization is required and consent-link creation failed: ${consentError.message}`,
+      12
+    );
+  }
+  const revoked = response.status === 'token-revoked';
+  const scopeUpgrade = response.status === 'scope-upgrade-required';
+  emit({
+    status: response.status,
+    consent_url: consent.url,
+    consent_chat_hyperlink:
+      `<${consent.url}|${revoked || scopeUpgrade ? 'Re-authorize' : 'Authorize'} Google Workspace>`,
+    kind: 'user_account',
+    ...(scopeUpgrade && Array.isArray(response.missingScopes)
+      ? { missing_scopes: response.missingScopes }
+      : {}),
+    message: scopeUpgrade
+      ? `I need one more permission to ${response.capability || 'use this Drive feature'} — click the link to grant it. Do not retry until the user confirms.`
+      : revoked
+        ? 'Workspace access was revoked — click the link to re-authorize.'
+        : 'Click the link to authorize Google Workspace, then retry.',
+  });
+  process.exit(scopeUpgrade ? 15 : revoked ? 11 : 10);
+}
+
+async function handleWorkspaceError(err) {
+  const response = err.responseBody || {};
+  if (response.status === 'account-not-provisioned') {
+    emit({
+      status: 'account-provisioning',
+      kind: 'agent_account',
+      message:
+        'Your agent Workspace account is being set up automatically. Try again in about 30 minutes.',
+    });
+    process.exit(14);
+  }
+  if (isWorkspaceAuthError(response.status)) {
+    await emitWorkspaceConsent(response);
+  }
+  fail(`Workspace broker failed: ${err.message}`, 12);
+}
+
+async function executeWorkspace(scope, argv) {
+  try {
+    const result = await requestAgentBroker('/api/agent/workspace-execute', {
+      scope: scope === 'agent_account' ? 'agent' : 'user',
+      argv,
+    });
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+  } catch (err) {
+    await handleWorkspaceError(err);
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
@@ -86,127 +206,10 @@ async function main() {
     fail('--command is required (e.g. --command "gmail.list --query is:unread")');
   }
 
-  // Resolve scope. Default for Phase 1 is 'user' — the agent acts on the
-  // human user's own data. Pass --scope agent to act as the agent identity
-  // (mostly for sending/owning artifacts the agent itself creates).
-  const scope = args.scope === 'agent' ? 'agent_account'
-    : args.scope === 'user' || args.scope === undefined ? 'user_account'
-    : (() => { fail('--scope must be "user" or "agent"'); return null })();
-
+  const scope = resolveScope(args.scope);
   const ownerEmail = args.user;
-  let command = args.command;
-
-  // 0. Payload files (#1138 follow-up) — `--json-file` / `--body-file`
-  // deliver arbitrary text (quotes, apostrophes, newlines) that cannot ride
-  // inside the --command string (splitCommand has no escape syntax). The
-  // gates and marker injection below run against `syntheticCommand`, which
-  // has the REAL file content inlined, so neither protection is blinded by
-  // the indirection; execution uses the placeholder form + payload map so
-  // tokenization never touches the content.
-  const resolvedPayloads = resolvePayloadFiles(command);
-  let guardedCommand = resolvedPayloads
-    ? resolvedPayloads.syntheticCommand
-    : command;
-
-  // 1. Phase 1 hard gates — refused at the skill layer regardless of scope
-  // or how the model phrases the request. The scope+ownerEmail context lets
-  // the gate apply a narrow exception for share-to-caller handoffs (the
-  // agent shares files it owns back to the conversation owner, read-only).
-  const gateCheck = enforcePhase1Gates(guardedCommand, { scope, ownerEmail });
-  if (!gateCheck.allowed) {
-    emit({
-      status: 'phase1-forbidden',
-      reason: gateCheck.reason,
-      message:
-        `Phase 1 forbids this operation: ${gateCheck.reason}. ` +
-        `If the user explicitly approved, route via the appropriate ` +
-        `confirmation flow rather than calling this skill directly.`,
-    });
-    process.exit(13);
-  }
-
-  // 2. Marker injection — calendar/drafts/tasks/drive get auto-markers so
-  // every artifact the agent touches is auditable as agent-touched. Runs on
-  // the synthetic (payload-inlined) form so file-based JSON payloads get
-  // markers too; the mutated JSON is pulled back into the payload map below.
-  guardedCommand = injectMarkers(guardedCommand);
-  if (resolvedPayloads) {
-    const jsonPlaceholder = '@@PSD_PAYLOAD_JSON@@';
-    if (resolvedPayloads.payloads[jsonPlaceholder]) {
-      const mutatedJson = extractJsonArg(guardedCommand);
-      if (mutatedJson) {
-        resolvedPayloads.payloads[jsonPlaceholder] = mutatedJson;
-      }
-    }
-    command = resolvedPayloads.execCommand;
-  } else {
-    command = guardedCommand;
-  }
-
-  // 3. Tokenize locally, preserving payload-file contents as one argv value,
-  // then delegate to the owner-bound broker. The model runtime receives
-  // neither a Google token nor a raw gws binary.
-  let argv = splitCommand(command);
-  if (resolvedPayloads) {
-    argv = argv.map((token) =>
-      Object.prototype.hasOwnProperty.call(resolvedPayloads.payloads, token)
-        ? resolvedPayloads.payloads[token]
-        : token
-    );
-  }
-
-  try {
-    const result = await requestAgentBroker('/api/agent/workspace-execute', {
-      scope: scope === 'agent_account' ? 'agent' : 'user',
-      argv,
-    });
-    if (result.stdout) process.stdout.write(result.stdout);
-    if (result.stderr) process.stderr.write(result.stderr);
-  } catch (err) {
-    const response = err.responseBody || {};
-    if (response.status === 'account-not-provisioned') {
-      emit({
-        status: 'account-provisioning',
-        kind: 'agent_account',
-        message:
-          'Your agent Workspace account is being set up automatically. Try again in about 30 minutes.',
-      });
-      process.exit(14);
-    }
-    if (
-      response.status === 'needs-auth'
-      || response.status === 'token-revoked'
-      || response.status === 'scope-upgrade-required'
-    ) {
-      let consent;
-      try {
-        consent = await requestAgentBroker('/api/agent/consent-link', {
-          kind: 'user_account',
-        });
-      } catch (consentError) {
-        fail(`Workspace authorization is required and consent-link creation failed: ${consentError.message}`, 12);
-      }
-      const revoked = response.status === 'token-revoked';
-      const scopeUpgrade = response.status === 'scope-upgrade-required';
-      emit({
-        status: response.status,
-        consent_url: consent.url,
-        consent_chat_hyperlink:
-          `<${consent.url}|${revoked || scopeUpgrade ? 'Re-authorize' : 'Authorize'} Google Workspace>`,
-        kind: 'user_account',
-        ...(scopeUpgrade && Array.isArray(response.missingScopes)
-          ? { missing_scopes: response.missingScopes }
-          : {}),
-        message: scopeUpgrade
-          ? `I need one more permission to ${response.capability || 'use this Drive feature'} — click the link to grant it. Do not retry until the user confirms.`
-          : revoked
-            ? 'Workspace access was revoked — click the link to re-authorize.'
-            : 'Click the link to authorize Google Workspace, then retry.',
-      });
-      process.exit(scopeUpgrade ? 15 : revoked ? 11 : 10);
-    }
-    fail(`Workspace broker failed: ${err.message}`, 12);
-  }
+  const argv = prepareWorkspaceArguments(args.command, scope, ownerEmail);
+  await executeWorkspace(scope, argv);
 }
 
 main().catch((err) => {

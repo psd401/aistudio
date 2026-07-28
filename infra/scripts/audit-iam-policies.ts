@@ -11,9 +11,10 @@
  *   bunx ts-node infra/scripts/audit-iam-policies.ts
  */
 
-import * as fs from "fs"
-import * as path from "path"
+
+import * as path from "node:path"
 import * as glob from "glob"
+import { validatedFs } from "../lib/validated-fs";
 
 interface PolicyViolation {
   file: string
@@ -64,10 +65,10 @@ const ALLOWED_WILDCARDS = [
 
 function auditFile(filePath: string): PolicyViolation[] {
   const violations: PolicyViolation[] = []
-  const content = fs.readFileSync(filePath, "utf-8")
+  const content = validatedFs.readFileSync(filePath, "utf-8")
   const lines = content.split("\n")
 
-  lines.forEach((line, index) => {
+  for (const [index, line] of lines.entries()) {
     const lineNumber = index + 1
 
     // Check for wildcard resources
@@ -103,13 +104,13 @@ function auditFile(filePath: string): PolicyViolation[] {
     }
 
     // Check for service-level wildcards
-    Object.entries({
+    for (const [name, pattern] of Object.entries({
       s3Star: PATTERNS.s3Star,
       dynamodbStar: PATTERNS.dynamodbStar,
       lambdaStar: PATTERNS.lambdaStar,
       ec2Star: PATTERNS.ec2Star,
       iamStar: PATTERNS.iamStar,
-    }).forEach(([name, pattern]) => {
+    })) {
       if (pattern.test(line)) {
         violations.push({
           file: filePath,
@@ -120,8 +121,8 @@ function auditFile(filePath: string): PolicyViolation[] {
           suggestion: `Replace ${name.replace("Star", ":*")} with specific actions`,
         })
       }
-    })
-  })
+    }
+  }
 
   return violations
 }
@@ -131,11 +132,11 @@ function generateReport(violations: PolicyViolation[]): AuditReport {
   const bySeverity: Record<string, number> = {}
   const byFile: Record<string, number> = {}
 
-  violations.forEach((v) => {
+  for (const v of violations) {
     byType[v.type] = (byType[v.type] || 0) + 1
     bySeverity[v.severity] = (bySeverity[v.severity] || 0) + 1
     byFile[v.file] = (byFile[v.file] || 0) + 1
-  })
+  }
 
   return {
     timestamp: new Date().toISOString(),
@@ -171,45 +172,43 @@ function printReport(report: AuditReport): void {
 
   // Summary by severity
   console.log("VIOLATIONS BY SEVERITY:")
-  Object.entries(report.summary.bySeverity)
+  for (const [severity, count] of Object.entries(report.summary.bySeverity)
     .sort((a, b) => {
       const order = { critical: 0, high: 1, medium: 2, low: 3 }
       return order[a[0] as keyof typeof order] - order[b[0] as keyof typeof order]
-    })
-    .forEach(([severity, count]) => {
+    })) {
       const icon = severity === "critical" || severity === "high" ? "❌" : "⚠️"
       console.log(`  ${icon} ${severity.toUpperCase()}: ${count}`)
-    })
+    }
   console.log()
 
   // Summary by type
   console.log("VIOLATIONS BY TYPE:")
-  Object.entries(report.summary.byType).forEach(([type, count]) => {
+  for (const [type, count] of Object.entries(report.summary.byType)) {
     console.log(`  • ${type}: ${count}`)
-  })
+  }
   console.log()
 
   // Top violating files
   console.log("TOP 10 FILES WITH MOST VIOLATIONS:")
-  Object.entries(report.summary.byFile)
+  for (const [file, count] of Object.entries(report.summary.byFile)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
-    .forEach(([file, count]) => {
+    .slice(0, 10)) {
       const relPath = path.relative(process.cwd(), file)
       console.log(`  • ${relPath}: ${count} violations`)
-    })
+    }
   console.log()
 
   // Detailed violations (show first 20)
   console.log("DETAILED VIOLATIONS (first 20):")
   console.log("-".repeat(80))
-  report.violations.slice(0, 20).forEach((v, index) => {
+  for (const [index, v] of report.violations.slice(0, 20).entries()) {
     const relPath = path.relative(process.cwd(), v.file)
     console.log(`\n${index + 1}. [${v.severity.toUpperCase()}] ${relPath}:${v.line}`)
     console.log(`   Type: ${v.type}`)
     console.log(`   Code: ${v.snippet}`)
     console.log(`   Fix:  ${v.suggestion}`)
-  })
+  }
 
   if (report.violationsFound > 20) {
     console.log(`\n... and ${report.violationsFound - 20} more violations`)
@@ -221,7 +220,7 @@ function printReport(report: AuditReport): void {
 }
 
 function saveReport(report: AuditReport, outputPath: string): void {
-  fs.writeFileSync(outputPath, JSON.stringify(report, null, 2))
+  validatedFs.writeFileSync(outputPath, JSON.stringify(report, null, 2))
   console.log(`Full report saved to: ${outputPath}`)
 }
 
@@ -243,10 +242,10 @@ async function main() {
 
   // Audit all files
   const allViolations: PolicyViolation[] = []
-  files.forEach((file) => {
+  for (const file of files) {
     const violations = auditFile(file)
     allViolations.push(...violations)
-  })
+  }
 
   // Generate and print report
   const report = generateReport(allViolations)

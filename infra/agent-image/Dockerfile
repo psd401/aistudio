@@ -431,7 +431,14 @@ RUN apt-get update && \
 # observed 2026-05-03. User-authored draft skills go through
 # psd-skills-meta and are uploaded to S3 directly — no local-FS write
 # path is needed for legitimate work.
-RUN chown -R root:root /opt/psd-skills && chmod -R a-w /opt/psd-skills
+# The symlink makes `require("../../../validated-fs.cjs")` — which every
+# lint-hardened skill resolves to /validated-fs.cjs from /opt/psd-skills/<skill>/ —
+# find the copy build-and-push.sh stages into skills/ (shipped by the existing
+# COPY above; the image sits at the 53-layer Firecracker ceiling, so a dedicated
+# COPY layer is not an option). Appended here rather than a new RUN for the same
+# reason. Guarded by tests/unit/agent-image-validated-fs-ship.test.ts.
+RUN chown -R root:root /opt/psd-skills && chmod -R a-w /opt/psd-skills \
+  && ln -s /opt/psd-skills/validated-fs.cjs /validated-fs.cjs
 
 # Defense-in-depth: disable OpenClaw's cron subsystem via both config
 # (cron.enabled: false in openclaw.json) and env var (OPENCLAW_SKIP_CRON=1)

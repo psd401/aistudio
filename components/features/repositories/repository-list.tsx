@@ -33,6 +33,104 @@ import { Badge } from "@/components/ui/badge"
 import { useToast } from "@/components/ui/use-toast"
 import { PageBranding } from "@/components/ui/page-branding"
 
+function RepositoriesTable({
+  repositories,
+  onOpen,
+  onDelete,
+}: {
+  repositories: Repository[]
+  onOpen: (repository: Repository) => void
+  onDelete: (repository: Repository) => void
+}) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Name</TableHead>
+          <TableHead>Description</TableHead>
+          <TableHead>Owner</TableHead>
+          <TableHead>Items</TableHead>
+          <TableHead>Visibility</TableHead>
+          <TableHead>Access</TableHead>
+          <TableHead>Created</TableHead>
+          <TableHead className="text-right">Actions</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {repositories.map((repository) => (
+          <TableRow key={repository.id}>
+            <TableCell className="font-medium">{repository.name}</TableCell>
+            <TableCell>
+              {repository.description || (
+                <span className="text-muted-foreground">No description</span>
+              )}
+            </TableCell>
+            <TableCell>
+              <div>{repository.ownerName || "Unknown"}</div>
+              <span className="text-xs capitalize text-muted-foreground">
+                {repository.repositoryKind} · {repository.lifecycleStatus}
+              </span>
+            </TableCell>
+            <TableCell>
+              <Badge variant="secondary">
+                {repository.itemCount || 0} items
+              </Badge>
+            </TableCell>
+            <TableCell>
+              <div className="flex items-center gap-1">
+                {repository.isPublic ? (
+                  <Globe className="h-4 w-4" />
+                ) : (
+                  <Lock className="h-4 w-4" />
+                )}
+                <span>{repository.isPublic ? "Public" : "Private"}</span>
+              </div>
+            </TableCell>
+            <TableCell>
+              <Badge
+                variant={repository.canManage ? "secondary" : "outline"}
+              >
+                {repository.canManage ? "Manager" : "Shared read only"}
+              </Badge>
+            </TableCell>
+            <TableCell>
+              {repository.createdAt
+                ? format(new Date(repository.createdAt), "MMM d, yyyy")
+                : "-"}
+            </TableCell>
+            <TableCell className="text-right">
+              <div className="flex justify-end gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={repository.lifecycleStatus !== "active"}
+                  onClick={() => onOpen(repository)}
+                >
+                  <FolderOpen className="h-4 w-4" />
+                </Button>
+                {repository.canManage ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => onDelete(repository)}
+                    aria-label={`${
+                      repository.lifecycleStatus === "deleting"
+                        ? "Retry deletion of"
+                        : "Delete"
+                    } ${repository.name}`}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                ) : null}
+              </div>
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  )
+}
+
 export function RepositoryList() {
   const router = useRouter()
   const { toast } = useToast()
@@ -119,90 +217,13 @@ export function RepositoryList() {
               </Button>
             </div>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Description</TableHead>
-                  <TableHead>Owner</TableHead>
-                  <TableHead>Items</TableHead>
-                  <TableHead>Visibility</TableHead>
-                  <TableHead>Access</TableHead>
-                  <TableHead>Created</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {repositories.map((repo) => (
-                  <TableRow key={repo.id}>
-                    <TableCell className="font-medium">{repo.name}</TableCell>
-                    <TableCell>
-                      {repo.description || (
-                        <span className="text-muted-foreground">
-                          No description
-                        </span>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <div>{repo.ownerName || "Unknown"}</div>
-                      <span className="text-xs capitalize text-muted-foreground">
-                        {repo.repositoryKind} · {repo.lifecycleStatus}
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="secondary">
-                        {repo.itemCount || 0} items
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      {repo.isPublic ? (
-                        <div className="flex items-center gap-1">
-                          <Globe className="h-4 w-4" />
-                          <span>Public</span>
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-1">
-                          <Lock className="h-4 w-4" />
-                          <span>Private</span>
-                        </div>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={repo.canManage ? "secondary" : "outline"}>
-                        {repo.canManage ? "Manager" : "Shared read only"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      {repo.createdAt ? format(new Date(repo.createdAt), "MMM d, yyyy") : "-"}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex justify-end gap-2">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={repo.lifecycleStatus !== "active"}
-                          onClick={() =>
-                            router.push(`/repositories/${repo.id}`)
-                          }
-                        >
-                          <FolderOpen className="h-4 w-4" />
-                        </Button>
-                        {repo.canManage ? (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setDeleteTarget(repo)}
-                            aria-label={`${repo.lifecycleStatus === "deleting" ? "Retry deletion of" : "Delete"} ${repo.name}`}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        ) : null}
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <RepositoriesTable
+              repositories={repositories}
+              onOpen={(repository) =>
+                router.push(`/repositories/${repository.id}`)
+              }
+              onDelete={setDeleteTarget}
+            />
           )}
         </CardContent>
       </Card>

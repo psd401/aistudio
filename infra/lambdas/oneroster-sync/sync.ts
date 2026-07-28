@@ -11,6 +11,7 @@ import {
   COLLECTIONS,
   RevisionChangedError,
   type CollectionName,
+  type CollectionPullResult,
   type CollectionPullSuccess,
   type RosterPull,
 } from "./oneroster-client";
@@ -36,7 +37,7 @@ export interface OneRosterSyncPorts {
   readLastPermRev(): Promise<string | null>;
   pullRoster(previousPermRev: string | null): Promise<RosterPull>;
   reconcileCollection(
-    collection: CollectionPullSuccess
+    collection: CollectionPullSuccess,
   ): Promise<{ synced: number; deactivated: number }>;
   writeLastPermRev(permRev: string): Promise<void>;
   log: {
@@ -48,17 +49,14 @@ export interface OneRosterSyncPorts {
 
 const MAX_WHOLE_PULL_ATTEMPTS = 3;
 
-export async function runOneRosterSync(
-  ports: OneRosterSyncPorts
-): Promise<OneRosterSyncResult> {
-  const previousPermRev = await ports.readLastPermRev();
-  let pull: RosterPull | null = null;
+async function pullRosterSnapshot(
+  ports: OneRosterSyncPorts,
+  previousPermRev: string | null,
+): Promise<{ pull: RosterPull; restartCount: number }> {
   let restartCount = 0;
-
   for (let attempt = 1; attempt <= MAX_WHOLE_PULL_ATTEMPTS; attempt += 1) {
     try {
-      pull = await ports.pullRoster(previousPermRev);
-      break;
+      return { pull: await ports.pullRoster(previousPermRev), restartCount };
     } catch (error) {
       if (
         !(error instanceof RevisionChangedError) ||
@@ -69,16 +67,97 @@ export async function runOneRosterSync(
       restartCount += 1;
       ports.log.warn(
         "OneRoster revision changed during pull; discarding staged data and restarting",
-        { attempt }
+        { attempt },
       );
     }
   }
+  throw new Error("OneRoster pull did not produce a snapshot");
+}
 
-  if (!pull) {
-    throw new Error("OneRoster pull did not produce a snapshot");
+async function reconcileRosterCollection(
+  ports: OneRosterSyncPorts,
+  name: CollectionName,
+  collection: CollectionPullResult | undefined,
+): Promise<CollectionRunResult> {
+  if (!collection || !("records" in collection)) {
+    const error =
+      collection && "error" in collection
+        ? collection.error
+        : "collection was not returned";
+    ports.log.error(
+      "OneRoster collection pull failed; preserving last-known-good rows",
+      {
+        collection: name,
+        error,
+      },
+    );
+    return {
+      name,
+      synced: 0,
+      failed: 1,
+      deactivated: 0,
+      recordsTotal: 0,
+      error,
+    };
   }
+  if (collection.records.length === 0) {
+    const error = "collection returned zero records; reconciliation skipped";
+    ports.log.warn(
+      "OneRoster collection was empty; preserving last-known-good rows",
+      { collection: name },
+    );
+    return {
+      name,
+      synced: 0,
+      failed: 1,
+      deactivated: 0,
+      recordsTotal: 0,
+      error,
+    };
+  }
+  try {
+    const reconciled = await ports.reconcileCollection(collection);
+    ports.log.info("OneRoster collection reconciled", {
+      collection: name,
+      records: collection.records.length,
+      deactivated: reconciled.deactivated,
+    });
+    return {
+      name,
+      synced: reconciled.synced,
+      failed: 0,
+      deactivated: reconciled.deactivated,
+      recordsTotal: collection.records.length,
+    };
+  } catch (error) {
+    const message = safeErrorMessage(error);
+    ports.log.error(
+      "OneRoster collection reconciliation failed; transaction rolled back",
+      { collection: name, error: message },
+    );
+    return {
+      name,
+      synced: 0,
+      failed: 1,
+      deactivated: 0,
+      recordsTotal: collection.records.length,
+      error: message,
+    };
+  }
+}
+
+export async function runOneRosterSync(
+  ports: OneRosterSyncPorts,
+): Promise<OneRosterSyncResult> {
+  const previousPermRev = await ports.readLastPermRev();
+  const { pull, restartCount } = await pullRosterSnapshot(
+    ports,
+    previousPermRev,
+  );
   if (pull.unchanged) {
-    ports.log.info("OneRoster revision unchanged; skipping full reconciliation");
+    ports.log.info(
+      "OneRoster revision unchanged; skipping full reconciliation",
+    );
     return {
       unchanged: true,
       fullySuccessful: true,
@@ -98,77 +177,13 @@ export async function runOneRosterSync(
   const collectionResults: CollectionRunResult[] = [];
 
   for (const name of COLLECTIONS) {
-    const collection = byName.get(name);
-    if (!collection || !("records" in collection)) {
-      const error =
-        collection && "error" in collection
-          ? collection.error
-          : "collection was not returned";
-      ports.log.error("OneRoster collection pull failed; preserving last-known-good rows", {
-        collection: name,
-        error,
-      });
-      collectionResults.push({
-        name,
-        synced: 0,
-        failed: 1,
-        deactivated: 0,
-        recordsTotal: 0,
-        error,
-      });
-      continue;
-    }
-
-    if (collection.records.length === 0) {
-      const error = "collection returned zero records; reconciliation skipped";
-      ports.log.warn(
-        "OneRoster collection was empty; preserving last-known-good rows",
-        { collection: name }
-      );
-      collectionResults.push({
-        name,
-        synced: 0,
-        failed: 1,
-        deactivated: 0,
-        recordsTotal: 0,
-        error,
-      });
-      continue;
-    }
-
-    try {
-      const reconciled = await ports.reconcileCollection(collection);
-      collectionResults.push({
-        name,
-        synced: reconciled.synced,
-        failed: 0,
-        deactivated: reconciled.deactivated,
-        recordsTotal: collection.records.length,
-      });
-      ports.log.info("OneRoster collection reconciled", {
-        collection: name,
-        records: collection.records.length,
-        deactivated: reconciled.deactivated,
-      });
-    } catch (error) {
-      const message = safeErrorMessage(error);
-      ports.log.error(
-        "OneRoster collection reconciliation failed; transaction rolled back",
-        { collection: name, error: message }
-      );
-      collectionResults.push({
-        name,
-        synced: 0,
-        failed: 1,
-        deactivated: 0,
-        recordsTotal: collection.records.length,
-        error: message,
-      });
-    }
+    collectionResults.push(
+      await reconcileRosterCollection(ports, name, byName.get(name)),
+    );
   }
 
   const fullySuccessful = collectionResults.every(
-    (collection) => collection.failed === 0
+    (collection) => collection.failed === 0,
   );
   // The checkpoint represents a fully-applied snapshot. Never advance it after
   // a partial/empty/DB-failed run or the next night could incorrectly no-op and

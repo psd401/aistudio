@@ -29,7 +29,7 @@ let insertedTables: string[] = [];
 const tableName = (t: unknown): string =>
   (t as { __table?: string })?.__table ?? "unknown";
 
-const shiftTx = () => (txResults.length ? txResults.shift() : []);
+const shiftTx = () => (txResults.length > 0 ? txResults.shift() : []);
 const txChain: Record<string, unknown> = {};
 const txProxy: unknown = new Proxy(txChain, {
   get(_t, prop: string | symbol) {

@@ -25,9 +25,12 @@ jest.setTimeout(10 * 60 * 1000); // 10 minutes
 // This prevents CI from hanging on tests that need running server + auth
 const describeOrSkip = shouldSkipPerformanceTests() ? describe.skip : describe;
 
-describeOrSkip('Streaming Performance - TTFT Validation', () => {
-  let authToken: string | undefined;
-  let baseUrl: string;
+let authToken: string | undefined;
+let baseUrl: string;
+
+function defineStreamingPerformanceTTFTValidationSuite1Part1() {
+
+
 
   // Validate test setup before running
   beforeAll(createSetupValidator());
@@ -112,7 +115,9 @@ describeOrSkip('Streaming Performance - TTFT Validation', () => {
     expect(aggregated.ttft.p95).toBeLessThanOrEqual(targets.ttftP95);
   });
 
-  test('TTFT: Medium prompts performance validation', async () => {
+  }
+
+function defineStreamingPerformanceTTFTValidationSuite1Part2() {test('TTFT: Medium prompts performance validation', async () => {
     const collector = new MetricsCollector();
     const targets = getPerformanceTargets();
     const iterations = 30;
@@ -229,20 +234,22 @@ describeOrSkip('Streaming Performance - TTFT Validation', () => {
     console.log(`\n📊 Cross-Provider TTFT Comparison:`);
     console.log(`\n| Provider | Model | TTFT p95 (ms) | TTFT Median (ms) | Error Rate |`);
     console.log(`|----------|-------|---------------|------------------|------------|`);
-    results.forEach(r => {
+    for (const r of results) {
       console.log(
         `| ${r.provider.padEnd(8)} | ${r.modelId.padEnd(30)} | ${r.ttftP95.toFixed(2).padStart(13)} | ${r.ttftMedian.toFixed(2).padStart(16)} | ${r.errorRate.toFixed(2)}% |`
       );
-    });
+    }
 
     // All providers should meet the target
     const targets = getPerformanceTargets();
-    results.forEach(r => {
+    for (const r of results) {
       expect(r.ttftP95).toBeLessThanOrEqual(targets.ttftP95);
-    });
+    }
   });
 
-  test('TTFT: Response time should be consistent across sequential requests', async () => {
+  }
+
+function defineStreamingPerformanceTTFTValidationSuite1Part3() {test('TTFT: Response time should be consistent across sequential requests', async () => {
     const collector = new MetricsCollector();
     const iterations = 30;
 
@@ -296,4 +303,12 @@ describeOrSkip('Streaming Performance - TTFT Validation', () => {
     // TTFT should be reasonably consistent (CV < 50% indicates acceptable consistency)
     expect(coefficientOfVariation).toBeLessThan(50);
   });
-});
+}
+
+const defineStreamingPerformanceTTFTValidationSuite1 = () => {
+  defineStreamingPerformanceTTFTValidationSuite1Part1()
+  defineStreamingPerformanceTTFTValidationSuite1Part2()
+  defineStreamingPerformanceTTFTValidationSuite1Part3()
+};
+
+describeOrSkip('Streaming Performance - TTFT Validation', defineStreamingPerformanceTTFTValidationSuite1);

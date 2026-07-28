@@ -21,11 +21,10 @@
  * Issue #872
  */
 
-/* eslint-disable no-undef, @typescript-eslint/no-require-imports, unicorn/prefer-node-protocol -- CJS script outside Next.js runtime */
-const http = require('http')
-const net = require('net')
+const http = require('node:http')
+const net = require('node:net')
 const { WebSocketServer } = require('ws')
-const { parse } = require('url')
+const { parse } = require('node:url')
 
 const VOICE_WS_PATH = '/api/nexus/voice'
 

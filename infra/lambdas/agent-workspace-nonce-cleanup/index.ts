@@ -109,7 +109,7 @@ export async function handler(): Promise<{
     // CloudWatch metric via structured log line — avoids the cost and
     // permission surface of putting a real CloudWatch metric. Operators
     // can build a log-metric filter on `agent.workspace.nonces.deleted`.
-    // eslint-disable-next-line no-console
+
     console.log(JSON.stringify({
       level: 'info',
       message: 'agent.workspace.nonces.deleted',

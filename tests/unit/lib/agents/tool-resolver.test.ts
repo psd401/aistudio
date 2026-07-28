@@ -71,7 +71,7 @@ const caller = {
   roleNames: ["staff"],
 }
 
-describe("resolveAgentTools", () => {
+function defineResolveAgentToolsSuite1Part1() {
   beforeEach(() => {
     listMock.mockReset().mockResolvedValue([])
     dispatchMock
@@ -174,7 +174,9 @@ describe("resolveAgentTools", () => {
     expect(out).toContain("scope_denied")
   })
 
-  it("merges connector tools and records failed connector ids", async () => {
+  }
+
+function defineResolveAgentToolsSuite1Part2() {it("merges connector tools and records failed connector ids", async () => {
     listMock.mockResolvedValue([])
     getConnectorToolsMock.mockImplementation((serverId: string) =>
       serverId === "srv-ok"
@@ -271,7 +273,9 @@ describe("resolveAgentTools", () => {
     expect(audits[0].error).toContain("remote boom")
   })
 
-  describe("destructive-tool confirmation gate (#926)", () => {
+  }
+
+function defineResolveAgentToolsSuite1Part3() {describe("destructive-tool confirmation gate (#926)", () => {
     const destructiveEntry = entry({
       identifier: "decisions.capture",
       name: "capture_decision",
@@ -336,9 +340,17 @@ describe("resolveAgentTools", () => {
       expect(result).toBe("ok")
     })
   })
-})
+}
 
-describe("closeAgentConnectorClients", () => {
+const defineResolveAgentToolsSuite1 = () => {
+  defineResolveAgentToolsSuite1Part1()
+  defineResolveAgentToolsSuite1Part2()
+  defineResolveAgentToolsSuite1Part3()
+};
+
+describe("resolveAgentTools", defineResolveAgentToolsSuite1)
+
+const defineCloseAgentConnectorClientsSuite2 = () => {
   it("counts a hung close() as a failure (and does not stall)", async () => {
     jest.useFakeTimers()
     try {
@@ -371,4 +383,6 @@ describe("closeAgentConnectorClients", () => {
       jest.useRealTimers()
     }
   })
-})
+};
+
+describe("closeAgentConnectorClients", defineCloseAgentConnectorClientsSuite2)

@@ -1,85 +1,92 @@
-'use client'
+"use client";
 
-import { createLogger } from '@/lib/client-logger'
+import { createLogger } from "@/lib/client-logger";
 import type {
   ThreadHistoryAdapter,
   ThreadMessage,
   MessageFormatAdapter,
   MessageFormatRepository,
   MessageFormatItem,
-  GenericThreadHistoryAdapter
-} from '@assistant-ui/react'
+  GenericThreadHistoryAdapter,
+} from "@assistant-ui/react";
 // @assistant-ui/react 0.14.23 moved fromThreadMessageLike from the INTERNAL
 // namespace to a top-level export.
-import { fromThreadMessageLike } from '@assistant-ui/react'
+import { fromThreadMessageLike } from "@assistant-ui/react";
 
 // Import ExportedMessageRepository type and utility
 type ExportedMessageRepository = {
-  headId?: string | null
+  headId?: string | null;
   messages: Array<{
-    message: ThreadMessage
-    parentId: string | null
-  }>
-}
+    message: ThreadMessage;
+    parentId: string | null;
+  }>;
+};
 
 // Type for incoming message data from API
 type MessageData = {
-  id: string
-  role: 'user' | 'assistant' | 'system'
-  content?: Array<{ type: 'text'; text?: string; [key: string]: unknown }> | string
-  createdAt?: string | Date
-  [key: string]: unknown
-}
+  id: string;
+  role: "user" | "assistant" | "system";
+  content?:
+    Array<{ type: "text"; text?: string; [key: string]: unknown }> | string;
+  createdAt?: string | Date;
+  [key: string]: unknown;
+};
 
 // Allow only https: image URLs to prevent javascript:/data: XSS via stored imageUrl values.
 const isSafeImageUrl = (url: string): boolean => {
   try {
-    return new URL(url).protocol === 'https:'
+    return new URL(url).protocol === "https:";
   } catch {
-    return false
+    return false;
   }
-}
+};
 
 // Helper to convert a content part to text format
 // Handles text, image, and other part types by converting to displayable text
-const convertPartToText = (part: { type: string; text?: string; imageUrl?: string; [key: string]: unknown }): string => {
-  if (part.type === 'text') {
-    return part.text || ''
+const convertPartToText = (part: {
+  type: string;
+  text?: string;
+  imageUrl?: string;
+  [key: string]: unknown;
+}): string => {
+  if (part.type === "text") {
+    return part.text || "";
   }
-  if (part.type === 'image' && part.imageUrl && isSafeImageUrl(part.imageUrl)) {
+  if (part.type === "image" && part.imageUrl && isSafeImageUrl(part.imageUrl)) {
     // Convert image parts to markdown image syntax (URL already validated as https: only)
-    return `![Generated Image](${part.imageUrl})`
+    return `![Generated Image](${part.imageUrl})`;
   }
   // Skip step-start, step-finish, and other control types
-  if (part.type === 'step-start' || part.type === 'step-finish') {
-    return ''
+  if (part.type === "step-start" || part.type === "step-finish") {
+    return "";
   }
-  return ''
-}
+  return "";
+};
 
 // Validated role set — guards against non-standard roles from partial writes or migrations.
-const VALID_ROLES = new Set(['user', 'assistant', 'system'] as const)
-type ValidRole = 'user' | 'assistant' | 'system'
+const VALID_ROLES = new Set(["user", "assistant", "system"] as const);
+type ValidRole = "user" | "assistant" | "system";
 const safeRole = (role: string | undefined): ValidRole =>
-  VALID_ROLES.has(role as ValidRole) ? (role as ValidRole) : 'user'
+  VALID_ROLES.has(role as ValidRole) ? (role as ValidRole) : "user";
 
 // Returns a valid Date if the value is parseable and finite, otherwise undefined.
 const safeDate = (value: string | Date | undefined): Date | undefined => {
-  if (!value) return undefined
-  const d = new Date(value)
-  return isFinite(d.getTime()) ? d : undefined
-}
+  if (!value) return undefined;
+  const d = new Date(value);
+  return Number.isFinite(d.getTime()) ? d : undefined;
+};
 
 // JSON object type for tool arguments (matches assistant-ui's ReadonlyJSONObject)
-type JSONObject = { readonly [key: string]: JSONValue }
-type JSONValue = string | number | boolean | null | JSONObject | readonly JSONValue[]
+type JSONObject = { readonly [key: string]: JSONValue };
+type JSONValue =
+  string | number | boolean | null | JSONObject | readonly JSONValue[];
 
 // Type for assistant-ui content parts
 // Uses tool-call format for fromThreadMessageLike compatibility (Issue #798)
 type ContentPartLike =
-  | { type: 'text'; text: string }
+  | { type: "text"; text: string }
   | {
-      type: 'tool-call';
+      type: "tool-call";
       toolCallId: string;
       toolName: string;
       args: JSONObject;
@@ -87,153 +94,168 @@ type ContentPartLike =
       result?: unknown;
       isError?: boolean;
       // AI SDK v6 UIMessage fields required by convertToModelMessages (Issue #977)
-      state: 'input-available' | 'output-available' | 'output-error';
+      state: "input-available" | "output-available" | "output-error";
       input: JSONObject;
+    };
+
+type StoredPartData = {
+  type: string;
+  text?: string;
+  imageUrl?: string;
+  toolCallId?: string;
+  toolName?: string;
+  args?: unknown;
+  result?: unknown;
+  isError?: boolean;
+  state?: unknown;
+};
+
+function storedToolState(
+  part: StoredPartData,
+): "input-available" | "output-available" | "output-error" {
+  if (
+    part.state === "input-available" ||
+    part.state === "output-available" ||
+    part.state === "output-error"
+  ) {
+    return part.state;
+  }
+  if (part.isError === true) return "output-error";
+  return part.result == null ? "input-available" : "output-available";
+}
+
+function storedToolPart(part: StoredPartData): ContentPartLike | null {
+  if (!part.toolName || !part.toolCallId) return null;
+  const args: JSONObject = (part.args ?? {}) as JSONObject;
+  return {
+    type: "tool-call",
+    toolCallId: part.toolCallId,
+    toolName: part.toolName,
+    args,
+    argsText: JSON.stringify(args),
+    result: part.result,
+    isError: part.isError === true,
+    state: storedToolState(part),
+    input: args,
+  };
+}
+
+function storedContentPart(part: StoredPartData): ContentPartLike | null {
+  if (part.type === "text") {
+    return { type: "text", text: part.text || "" };
+  }
+  if (part.type === "tool-call") return storedToolPart(part);
+  if (part.type === "image" && part.imageUrl && isSafeImageUrl(part.imageUrl)) {
+    return { type: "text", text: `![Generated Image](${part.imageUrl})` };
+  }
+  return null;
+}
+
+function messageContent(message: MessageData): ContentPartLike[] {
+  if (typeof message.content === "string") {
+    return [{ type: "text", text: message.content }];
+  }
+  if (!Array.isArray(message.content)) return [{ type: "text", text: "" }];
+  const parts = message.content
+    .map((part) => storedContentPart(part as StoredPartData))
+    .filter((part): part is ContentPartLike => part !== null);
+  return parts.length > 0 ? parts : [{ type: "text", text: "" }];
+}
+
+function repositoryParentId(
+  messages: MessageData[],
+  index: number,
+): string | null {
+  return index === 0 ? null : messages[index - 1]?.id || null;
+}
+
+function placeholderMessage(message: MessageData): ThreadMessage {
+  return fromThreadMessageLike(
+    {
+      id: message.id,
+      role: safeRole(message.role),
+      content: [
+        { type: "text", text: "[Message could not be loaded]" },
+      ] as unknown as string,
+    },
+    message.id,
+    { type: "complete", reason: "unknown" },
+  );
+}
+
+function convertRepositoryMessage(
+  message: MessageData,
+  index: number,
+  messages: MessageData[],
+): ExportedMessageRepository["messages"][number] | null {
+  const role = safeRole(message.role);
+  const createdAt = safeDate(message.createdAt);
+  const parentId = repositoryParentId(messages, index);
+  try {
+    const converted = fromThreadMessageLike(
+      {
+        id: message.id,
+        role,
+        content: messageContent(message) as unknown as string,
+        ...(createdAt && { createdAt }),
+      },
+      message.id,
+      { type: "complete", reason: "unknown" },
+    );
+    if (!converted) throw new Error("fromThreadMessageLike returned falsy");
+    return { message: converted, parentId };
+  } catch (error) {
+    log.warn("Failed to convert message, using placeholder", {
+      messageId: message.id,
+      messageIndex: index,
+      error:
+        error instanceof Error
+          ? error.message.substring(0, 200)
+          : String(error).substring(0, 200),
+    });
+    try {
+      return { message: placeholderMessage(message), parentId };
+    } catch (fallbackError) {
+      log.error("Fallback message construction failed, skipping message", {
+        messageId: message.id,
+        messageIndex: index,
+        error:
+          fallbackError instanceof Error
+            ? fallbackError.message.substring(0, 200)
+            : String(fallbackError).substring(0, 200),
+      });
+      return null;
     }
+  }
+}
 
 // We'll use a simple implementation since ExportedMessageRepository.fromArray may not be accessible
-const createExportedMessageRepository = (messages: MessageData[]): ExportedMessageRepository => {
+const createExportedMessageRepository = (
+  messages: MessageData[],
+): ExportedMessageRepository => {
   // Filter out null/undefined entries and messages with malformed IDs before processing.
   // This guards against partially-persisted messages (e.g. from expired-session writes)
   // that would cause fromThreadMessageLike to throw and crash the whole conversation load.
   const validMessages = messages.filter(
-    (msg): msg is MessageData => msg != null && typeof msg.id === 'string'
-  )
+    (msg): msg is MessageData => msg != null && typeof msg.id === "string",
+  );
 
   return {
-    messages: validMessages.map((msg, index) => {
-      // Ensure content is in the correct format for assistant-ui
-      // Content can include text parts and static tool parts for UI rendering
-      let content: ContentPartLike[] = []
-
-      if (Array.isArray(msg.content)) {
-        // Process each part - text becomes text, tool-call converts to static tool, images become markdown
-        const processedParts = msg.content
-          .map((part): ContentPartLike | null => {
-            const partData = part as { type: string; text?: string; imageUrl?: string; toolCallId?: string; toolName?: string; args?: unknown; argsText?: string; result?: unknown; isError?: boolean }
-
-            if (partData.type === 'text') {
-              return { type: 'text', text: partData.text || '' }
-            }
-            if (partData.type === 'tool-call' && partData.toolName && partData.toolCallId) {
-              // Use tool-call format (not static tool-{name} format) so that
-              // fromThreadMessageLike processes it correctly. The static format
-              // (type: 'tool-show_chart') is not handled by fromThreadMessageLike's
-              // switch and throws "Unsupported assistant message part type". (Issue #798)
-              const args: JSONObject = (partData.args ?? {}) as JSONObject
-
-              // Derive state from result so convertToModelMessages emits paired
-              // tool_result blocks on conversation replay. Without state+input,
-              // convertToModelMessages emits tool_use without tool_result, causing
-              // AI_MissingToolResultsError on follow-up messages. (Issue #977)
-              const hasResult = partData.result != null
-              const isError = partData.isError === true
-              // Prefer the stored state field — a part persisted with state 'output-error'
-              // but isError=false and a non-null result would be wrongly classified as
-              // 'output-available' if we only checked isError and hasResult.
-              const rawState = (partData as unknown as Record<string, unknown>).state
-              const state: 'input-available' | 'output-available' | 'output-error' =
-                rawState === 'input-available' || rawState === 'output-available' || rawState === 'output-error'
-                  ? rawState
-                  : isError ? 'output-error' : hasResult ? 'output-available' : 'input-available'
-
-              const toolPart: ContentPartLike = {
-                type: 'tool-call',
-                toolCallId: partData.toolCallId,
-                toolName: partData.toolName,
-                args,
-                argsText: JSON.stringify(args),
-                result: partData.result,
-                isError,
-                state,
-                input: args,
-              }
-              return toolPart
-            }
-            if (partData.type === 'image' && partData.imageUrl && isSafeImageUrl(partData.imageUrl)) {
-              return { type: 'text', text: `![Generated Image](${partData.imageUrl})` }
-            }
-            // Skip step-start, step-finish, tool-result (legacy), and other control types
-            return null
-          })
-          .filter((part): part is ContentPartLike => part !== null)
-
-        content = processedParts
-
-        // Ensure at least one content part
-        if (content.length === 0) {
-          content = [{ type: 'text', text: '' }]
-        }
-      } else if (typeof msg.content === 'string') {
-        content = [{ type: 'text', text: msg.content }]
-      } else {
-        content = [{ type: 'text', text: '' }]
-      }
-
-      // Validate role and createdAt before passing to fromThreadMessageLike.
-      // msg.role arrives from the DB and may be non-standard in partial-write scenarios;
-      // msg.createdAt may be an unparseable or extreme string — both must be sanitised.
-      const msgRole = safeRole(msg.role)
-      const msgDate = safeDate(msg.createdAt as string | Date | undefined)
-
-      try {
-        const converted = fromThreadMessageLike({
-          id: msg.id,
-          role: msgRole,
-          content: content as unknown as string,  // Cast needed for tool-result parts
-          ...(msgDate && { createdAt: msgDate }),
-        }, msg.id, { type: 'complete', reason: 'unknown' })
-        // Guard against a falsy return (library contract is to throw, but defensive check
-        // prevents downstream crashes in withFormat.load which reads .message.id).
-        if (!converted) {
-          throw new Error('fromThreadMessageLike returned falsy')
-        }
-        return {
-          message: converted,
-          parentId: index === 0 ? null : validMessages[index - 1]?.id || null
-        }
-      } catch (error) {
-        // fromThreadMessageLike can throw when a message part structure is incompatible
-        // with the current runtime (e.g. image-gen message loaded under a chat runtime).
-        // Fall back to a safe placeholder so the rest of the conversation still loads.
-        log.warn('Failed to convert message, using placeholder', {
-          messageId: msg.id,
-          messageIndex: index,
-          // Truncate error message to avoid forwarding arbitrary content to logs (L-2)
-          error: error instanceof Error ? error.message.substring(0, 200) : String(error).substring(0, 200),
-        })
-        // Guard the fallback construction too — if INTERNAL.fromThreadMessageLike itself
-        // is the source of the failure (e.g. null dereference on msg.id), the same call
-        // with a static content array could throw again and escape the outer catch.
-        try {
-          return {
-            message: fromThreadMessageLike({
-              id: msg.id,
-              role: msgRole,
-              content: [{ type: 'text', text: '[Message could not be loaded]' }] as unknown as string,
-            }, msg.id, { type: 'complete', reason: 'unknown' }),
-            parentId: index === 0 ? null : validMessages[index - 1]?.id || null
-          }
-        } catch (fallbackError) {
-          log.error('Fallback message construction failed, skipping message', {
-            messageId: msg.id,
-            messageIndex: index,
-            error: fallbackError instanceof Error ? fallbackError.message.substring(0, 200) : String(fallbackError).substring(0, 200),
-          })
-          return null
-        }
-      }
-    }).filter((item): item is NonNullable<typeof item> => item !== null)
-  }
-}
+    messages: validMessages
+      .map((message, index) =>
+        convertRepositoryMessage(message, index, validMessages),
+      )
+      .filter((item): item is NonNullable<typeof item> => item !== null),
+  };
+};
 
 // ExportedMessageRepositoryItem is not exported from the main module, so we'll define it based on the expected structure
 type ExportedMessageRepositoryItem = {
-  message: ThreadMessage
-  parentId: string | null
-}
+  message: ThreadMessage;
+  parentId: string | null;
+};
 
-const log = createLogger({ moduleName: 'nexus-history-adapter' })
+const log = createLogger({ moduleName: "nexus-history-adapter" });
 
 /**
  * Creates a ThreadHistoryAdapter that loads and saves conversation messages.
@@ -244,48 +266,53 @@ const log = createLogger({ moduleName: 'nexus-history-adapter' })
  * load() mid-stream, which would fetch already-displayed messages from
  * the database and cause duplicate message rendering. (Issue #868)
  */
-export function createNexusHistoryAdapter(getConversationId: () => string | null): ThreadHistoryAdapter {
+export function createNexusHistoryAdapter(
+  getConversationId: () => string | null,
+): ThreadHistoryAdapter {
   const adapter: ThreadHistoryAdapter = {
-    async load(): Promise<ExportedMessageRepository & { unstable_resume?: boolean }> {
-      const conversationId = getConversationId()
+    async load(): Promise<
+      ExportedMessageRepository & { unstable_resume?: boolean }
+    > {
+      const conversationId = getConversationId();
       if (!conversationId) {
-        log.debug('No conversation ID, returning empty repository')
-        return { messages: [] }
+        log.debug("No conversation ID, returning empty repository");
+        return { messages: [] };
       }
 
       try {
-        log.debug('Loading conversation messages', { conversationId })
+        log.debug("Loading conversation messages", { conversationId });
 
-        const response = await fetch(`/api/nexus/conversations/${conversationId}/messages`)
+        const response = await fetch(
+          `/api/nexus/conversations/${conversationId}/messages`,
+        );
 
         if (!response.ok) {
           if (response.status === 404) {
-            log.warn('Conversation not found', { conversationId })
-            return { messages: [] }
+            log.warn("Conversation not found", { conversationId });
+            return { messages: [] };
           }
-          throw new Error(`Failed to load messages: ${response.status}`)
+          throw new Error(`Failed to load messages: ${response.status}`);
         }
 
-        const data = await response.json()
-        const { messages = [] } = data
+        const data = await response.json();
+        const { messages = [] } = data;
 
         // Convert messages using our helper function
-        const repository = createExportedMessageRepository(messages)
+        const repository = createExportedMessageRepository(messages);
 
-        log.debug('Messages loaded successfully', {
+        log.debug("Messages loaded successfully", {
           conversationId,
-          messageCount: repository.messages.length
-        })
+          messageCount: repository.messages.length,
+        });
 
-        return repository
-
+        return repository;
       } catch (error) {
-        log.error('Failed to load conversation messages', {
+        log.error("Failed to load conversation messages", {
           conversationId,
-          error: error instanceof Error ? error.message : String(error)
-        })
+          error: error instanceof Error ? error.message : String(error),
+        });
 
-        return { messages: [] }
+        return { messages: [] };
       }
     },
 
@@ -293,31 +320,31 @@ export function createNexusHistoryAdapter(getConversationId: () => string | null
       // Messages are persisted server-side in the /api/nexus/chat route handler:
       // user messages by setupConversation() and assistant messages by onFinish().
       // This no-op prevents the runtime from double-saving through the history adapter.
-      log.debug('Skipping message save - handled by chat route handler', {
+      log.debug("Skipping message save - handled by chat route handler", {
         conversationId: getConversationId(),
         messageRole: item.message.role,
-        messageId: item.message.id
-      })
-      return
+        messageId: item.message.id,
+      });
+      return;
     },
 
     withFormat<TMessage, TStorageFormat extends Record<string, unknown>>(
-      formatAdapter: MessageFormatAdapter<TMessage, TStorageFormat>
+      formatAdapter: MessageFormatAdapter<TMessage, TStorageFormat>,
     ): GenericThreadHistoryAdapter<TMessage> {
       return {
         async load(): Promise<MessageFormatRepository<TMessage>> {
           // Load from base adapter (returns ExportedMessageRepository with ThreadMessages)
           const exportedRepo = await adapter.load();
 
-          log.debug('withFormat.load called', {
+          log.debug("withFormat.load called", {
             conversationId: getConversationId(),
-            messageCount: exportedRepo.messages.length
+            messageCount: exportedRepo.messages.length,
           });
 
           // Convert ThreadMessage format to storage format, then decode to TMessage
           return {
             headId: exportedRepo.headId || null,
-            messages: exportedRepo.messages.map(item => {
+            messages: exportedRepo.messages.map((item) => {
               // ThreadMessage has .content (array of parts)
               // Storage format expects .parts (array of parts)
               const threadMessage = item.message;
@@ -330,24 +357,28 @@ export function createNexusHistoryAdapter(getConversationId: () => string | null
                 content: {
                   role: threadMessage.role,
                   parts: threadMessage.content, // Convert .content → .parts
-                  ...(threadMessage.createdAt && { createdAt: threadMessage.createdAt }),
-                } as unknown as TStorageFormat
+                  ...(threadMessage.createdAt && {
+                    createdAt: threadMessage.createdAt,
+                  }),
+                } as unknown as TStorageFormat,
               };
 
               // Use format adapter to decode into the expected message format
               return formatAdapter.decode(storageEntry);
-            })
+            }),
           };
         },
 
         async append(item: MessageFormatItem<TMessage>): Promise<void> {
-          log.debug('withFormat.append called', { conversationId: getConversationId() });
+          log.debug("withFormat.append called", {
+            conversationId: getConversationId(),
+          });
 
           // Encode the message to storage format
           const encoded = formatAdapter.encode(item);
           // Parts may include AI SDK v5 control types (step-start, step-finish) that need filtering
           const encodedAny = encoded as unknown as {
-            role: 'user' | 'assistant' | 'system';
+            role: "user" | "assistant" | "system";
             parts: Array<{ type: string; text?: string }>;
             createdAt?: Date;
           };
@@ -356,32 +387,42 @@ export function createNexusHistoryAdapter(getConversationId: () => string | null
           // Storage has .parts, ThreadMessage expects .content
           // Convert all parts to text format (handles images as markdown, filters control types)
           const textParts = encodedAny.parts
-            .map(part => convertPartToText(part as { type: string; text?: string; imageUrl?: string }))
-            .filter(text => text.length > 0)
-            .map(text => ({ type: 'text' as const, text }))
+            .map((part) =>
+              convertPartToText(
+                part as { type: string; text?: string; imageUrl?: string },
+              ),
+            )
+            .filter((text) => text.length > 0)
+            .map((text) => ({ type: "text" as const, text }));
 
           // Ensure at least one content part
-          const content = textParts.length > 0 ? textParts : [{ type: 'text' as const, text: '' }]
+          const content =
+            textParts.length > 0
+              ? textParts
+              : [{ type: "text" as const, text: "" }];
 
-          const threadMessage = fromThreadMessageLike({
-            id: formatAdapter.getId(item.message),
-            role: encodedAny.role,
-            content,
-            ...(encodedAny.createdAt && {
-              createdAt: encodedAny.createdAt
-            }),
-          }, formatAdapter.getId(item.message), { type: 'complete', reason: 'unknown' });
+          const threadMessage = fromThreadMessageLike(
+            {
+              id: formatAdapter.getId(item.message),
+              role: encodedAny.role,
+              content,
+              ...(encodedAny.createdAt && {
+                createdAt: encodedAny.createdAt,
+              }),
+            },
+            formatAdapter.getId(item.message),
+            { type: "complete", reason: "unknown" },
+          );
 
           // Delegate to base adapter
           await adapter.append({
             parentId: item.parentId,
-            message: threadMessage
+            message: threadMessage,
           });
-        }
+        },
       };
-    }
+    },
   };
 
   return adapter;
 }
-

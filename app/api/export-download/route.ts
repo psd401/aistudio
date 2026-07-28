@@ -1,13 +1,13 @@
-import { type NextRequest, NextResponse } from 'next/server'
-import { getServerSession } from '@/lib/auth/server-session'
-import { createLogger, generateRequestId, startTimer } from '@/lib/logger'
+import { type NextRequest, NextResponse } from "next/server";
+import { getServerSession } from "@/lib/auth/server-session";
+import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 
-export const runtime = 'nodejs'
+export const runtime = "nodejs";
 // Exports can be large CSVs; allow up to 2 minutes before ALB times out.
-export const maxDuration = 120
+export const maxDuration = 120;
 
 // 50 MB hard cap — prevents a single large export from exhausting ECS task memory.
-const MAX_EXPORT_BYTES = 50 * 1024 * 1024
+const MAX_EXPORT_BYTES = 50 * 1024 * 1024;
 
 /**
  * Validates that the URL is a legitimate AWS S3 presigned URL.
@@ -17,18 +17,18 @@ const MAX_EXPORT_BYTES = 50 * 1024 * 1024
  * Rejects everything else to prevent the proxy being used for SSRF.
  */
 function isAllowedS3Url(raw: string): boolean {
-  let parsed: URL
+  let parsed: URL;
   try {
-    parsed = new URL(raw)
+    parsed = new URL(raw);
   } catch {
-    return false
+    return false;
   }
-  if (parsed.protocol !== 'https:') return false
+  if (parsed.protocol !== "https:") return false;
   // Require .amazonaws.com with a leading dot to reject attacker-amazonaws.com.
   // String-based checks avoid ReDoS vulnerabilities from complex regex quantifiers.
-  const host = parsed.hostname
-  if (!host.endsWith('.amazonaws.com')) return false
-  return host.split('.').includes('s3')
+  const host = parsed.hostname;
+  if (!host.endsWith(".amazonaws.com")) return false;
+  return host.split(".").includes("s3");
 }
 
 /**
@@ -40,26 +40,40 @@ function isAllowedS3Url(raw: string): boolean {
  * Auth: session required.
  * URL validation: only AWS S3 hostnames are allowed (SSRF guard).
  */
+function isExpiredExportStatus(status: number): boolean {
+  return status === 403 || status === 404;
+}
+
+function exportFilename(url: string): string {
+  const objectName = new URL(url).pathname.split("/").pop();
+  if (!objectName) return "export.csv";
+  const sanitized = objectName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 200);
+  return sanitized || "export.csv";
+}
+
 export async function GET(req: NextRequest) {
-  const requestId = generateRequestId()
-  const timer = startTimer('exportDownload')
-  const log = createLogger({ requestId, action: 'exportDownload' })
+  const requestId = generateRequestId();
+  const timer = startTimer("exportDownload");
+  const log = createLogger({ requestId, action: "exportDownload" });
 
-  const session = await getServerSession()
+  const session = await getServerSession();
   if (!session?.sub) {
-    log.warn('Unauthorized export-download request')
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    log.warn("Unauthorized export-download request");
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const userId = session.sub
+  const userId = session.sub;
 
-  const url = req.nextUrl.searchParams.get('url')
+  const url = req.nextUrl.searchParams.get("url");
   if (!url) {
-    return NextResponse.json({ error: 'Missing url parameter' }, { status: 400 })
+    return NextResponse.json(
+      { error: "Missing url parameter" },
+      { status: 400 },
+    );
   }
 
   if (!isAllowedS3Url(url)) {
-    log.warn('Rejected non-S3 export URL', { userId })
-    return NextResponse.json({ error: 'Invalid export URL' }, { status: 400 })
+    log.warn("Rejected non-S3 export URL", { userId });
+    return NextResponse.json({ error: "Invalid export URL" }, { status: 400 });
   }
 
   try {
@@ -68,82 +82,99 @@ export async function GET(req: NextRequest) {
     // The outer maxDuration=120 is the true streaming ceiling; 30s guards hung connections.
     // codeql[js/server-side-request-forgery] URL validated to AWS S3 hostname by isAllowedS3Url before reaching fetch; redirect:error blocks SSRF via open redirects
     const upstream = await fetch(url, {
-      redirect: 'error',
+      redirect: "error",
       signal: AbortSignal.timeout(30_000),
-    })
+    });
 
     if (!upstream.ok) {
-      if (upstream.status === 403 || upstream.status === 404) {
-        log.warn('Presigned URL expired or invalid', { upstreamStatus: upstream.status, userId })
-        timer({ status: 'expired' })
+      if (isExpiredExportStatus(upstream.status)) {
+        log.warn("Presigned URL expired or invalid", {
+          upstreamStatus: upstream.status,
+          userId,
+        });
+        timer({ status: "expired" });
         return NextResponse.json(
           {
             error:
-              'Export link has expired — please re-run the query to generate a new download link.',
+              "Export link has expired — please re-run the query to generate a new download link.",
           },
-          { status: 410 }
-        )
+          { status: 410 },
+        );
       }
-      log.error('Upstream S3 error', { upstreamStatus: upstream.status, userId })
-      timer({ status: 'error' })
-      return NextResponse.json({ error: 'Failed to fetch export file' }, { status: 502 })
+      log.error("Upstream S3 error", {
+        upstreamStatus: upstream.status,
+        userId,
+      });
+      timer({ status: "error" });
+      return NextResponse.json(
+        { error: "Failed to fetch export file" },
+        { status: 502 },
+      );
     }
 
     // Reject oversized exports before streaming to protect ECS task memory.
     // Content-Length guard covers the common case; the TransformStream counter below
     // catches chunked responses where S3 omits Content-Length.
-    const contentLength = upstream.headers.get('Content-Length')
+    const contentLength = upstream.headers.get("Content-Length");
     if (contentLength && Number(contentLength) > MAX_EXPORT_BYTES) {
-      log.warn('Export too large to proxy', { bytes: contentLength, userId })
-      timer({ status: 'too-large' })
+      log.warn("Export too large to proxy", { bytes: contentLength, userId });
+      timer({ status: "too-large" });
       return NextResponse.json(
-        { error: `Export is too large to download via the browser (max ${MAX_EXPORT_BYTES / 1024 / 1024} MB). Contact support.` },
-        { status: 413 }
-      )
+        {
+          error: `Export is too large to download via the browser (max ${MAX_EXPORT_BYTES / 1024 / 1024} MB). Contact support.`,
+        },
+        { status: 413 },
+      );
     }
 
     // Derive a sensible filename from the S3 object key.
-    const s3Path = new URL(url).pathname
-    const rawFilename = s3Path.split('/').pop() || 'export.csv'
-    // Strip any query-string remnant and sanitize (allowlist: alphanumeric, dots, hyphens, underscores)
-    const filename = rawFilename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200) || 'export.csv'
+    const filename = exportFilename(url);
 
-    timer({ status: 'success' })
-    log.info('Export proxied successfully', { filename, contentLength, userId })
+    timer({ status: "success" });
+    log.info("Export proxied successfully", {
+      filename,
+      contentLength,
+      userId,
+    });
 
     // Force text/csv regardless of what S3 reports — the upstream Content-Type
     // is attacker-influenced (object owner controls object metadata). Passthrough
     // would let an html/js payload be delivered with an executable MIME type.
     const headers: Record<string, string> = {
-      'Content-Type': 'text/csv; charset=utf-8',
-      'Content-Disposition': `attachment; filename="${filename}"`,
-      'Cache-Control': 'no-store',
-      'X-Content-Type-Options': 'nosniff',
-    }
-    if (contentLength) headers['Content-Length'] = contentLength
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    };
+    if (contentLength) headers["Content-Length"] = contentLength;
 
     // Byte-counter TransformStream: enforces the size cap during streaming even
     // when S3 uses chunked transfer encoding and omits Content-Length.
-    let bytesSeen = 0
+    let bytesSeen = 0;
     const sizeLimiter = new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, controller) {
-        bytesSeen += chunk.byteLength
+        bytesSeen += chunk.byteLength;
         if (bytesSeen > MAX_EXPORT_BYTES) {
-          controller.error(new Error('TOO_LARGE'))
+          controller.error(new Error("TOO_LARGE"));
         } else {
-          controller.enqueue(chunk)
+          controller.enqueue(chunk);
         }
       },
-    })
+    });
 
-    const limitedBody = upstream.body ? upstream.body.pipeThrough(sizeLimiter) : null
-    return new NextResponse(limitedBody, { headers })
+    const limitedBody = upstream.body
+      ? upstream.body.pipeThrough(sizeLimiter)
+      : null;
+    return new NextResponse(limitedBody, { headers });
   } catch (err) {
-    timer({ status: 'error' })
-    log.error('Export download failed', {
+    timer({ status: "error" });
+    log.error("Export download failed", {
       error: err instanceof Error ? err.message : String(err),
       userId,
-    })
-    return NextResponse.json({ error: 'Failed to fetch export file' }, { status: 502 })
+    });
+    return NextResponse.json(
+      { error: "Failed to fetch export file" },
+      { status: 502 },
+    );
   }
 }

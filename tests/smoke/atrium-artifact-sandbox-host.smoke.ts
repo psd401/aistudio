@@ -58,7 +58,7 @@ function renderHostHtml(allowedParentOrigins: string[]): string {
   );
   // Path is built from process.cwd() + fixed literal segments (the repo's
   // committed host template) — no external input. The lint rule cannot see that.
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
+
   const template = fs.readFileSync(templatePath, "utf8");
   // Mirror atrium-sandbox-stack.ts substitution.
   const csp = "default-src 'none'; script-src 'unsafe-inline'; connect-src 'none'; worker-src 'none'; img-src data:";

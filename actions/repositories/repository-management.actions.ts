@@ -127,6 +127,70 @@ function sourceSummary(
   )
 }
 
+async function loadVersionViews(
+  itemId: number,
+  currentVersionId: string | null
+): Promise<RepositoryVersionManagementView[]> {
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select()
+        .from(repositoryItemVersions)
+        .where(eq(repositoryItemVersions.itemId, itemId))
+        .orderBy(desc(repositoryItemVersions.versionNumber)),
+    "getRepositoryItemManagementView.versions"
+  )
+  return rows.map((version) => ({
+    id: version.id,
+    versionNumber: version.versionNumber,
+    sourceKind: version.sourceKind,
+    sourceRevision: version.sourceRevision,
+    originalFileName: originalFileName(version.metadata),
+    declaredContentType: version.declaredContentType,
+    detectedContentType: version.detectedContentType,
+    byteSize: version.byteSize,
+    sha256: version.sha256,
+    storageStatus: version.storageStatus,
+    inspectionStatus: version.inspectionStatus,
+    processingStatus: version.processingStatus,
+    processorVersion: version.processorVersion,
+    createdAt: version.createdAt,
+    isCurrent: version.id === currentVersionId,
+  }))
+}
+
+async function loadCitationRows(
+  versionIds: string[],
+  activeIndexGenerationId: string | null
+) {
+  if (!activeIndexGenerationId || versionIds.length === 0) return []
+  return executeQuery(
+    (db) =>
+      db
+        .select({
+          chunkId: repositoryItemChunks.id,
+          itemVersionId: repositoryItemChunks.itemVersionId,
+          artifactId: repositoryItemChunks.artifactId,
+          chunkIndex: repositoryItemChunks.chunkIndex,
+          modality: repositoryItemChunks.modality,
+          sourceLocator: repositoryItemChunks.sourceLocator,
+        })
+        .from(repositoryItemChunks)
+        .where(
+          and(
+            eq(
+              repositoryItemChunks.indexGenerationId,
+              activeIndexGenerationId
+            ),
+            inArray(repositoryItemChunks.itemVersionId, versionIds)
+          )
+        )
+        .orderBy(repositoryItemChunks.chunkIndex)
+        .limit(100),
+    "getRepositoryItemManagementView.citations"
+  )
+}
+
 export async function getRepositoryItemManagementView(
   itemId: number
 ): Promise<ActionState<RepositoryItemManagementView>> {
@@ -160,32 +224,10 @@ export async function getRepositoryItemManagementView(
     const userId = await getUserIdFromSession(session.sub)
     const canManage = await canModifyRepository(item.repositoryId, userId)
 
-    const versionRows = await executeQuery(
-      (db) =>
-        db
-          .select()
-          .from(repositoryItemVersions)
-          .where(eq(repositoryItemVersions.itemId, itemId))
-          .orderBy(desc(repositoryItemVersions.versionNumber)),
-      "getRepositoryItemManagementView.versions"
+    const versions = await loadVersionViews(
+      itemId,
+      item.currentVersionId
     )
-    const versions: RepositoryVersionManagementView[] = versionRows.map((version) => ({
-      id: version.id,
-      versionNumber: version.versionNumber,
-      sourceKind: version.sourceKind,
-      sourceRevision: version.sourceRevision,
-      originalFileName: originalFileName(version.metadata),
-      declaredContentType: version.declaredContentType,
-      detectedContentType: version.detectedContentType,
-      byteSize: version.byteSize,
-      sha256: version.sha256,
-      storageStatus: version.storageStatus,
-      inspectionStatus: version.inspectionStatus,
-      processingStatus: version.processingStatus,
-      processorVersion: version.processorVersion,
-      createdAt: version.createdAt,
-      isCurrent: version.id === item.currentVersionId,
-    }))
     const versionIds = versions.map((version) => version.id)
 
     const [jobRows, artifactRows, generationRows] = await Promise.all([
@@ -227,33 +269,10 @@ export async function getRepositoryItemManagementView(
 
     const activeIndexGenerationId =
       generationRows[0]?.activeIndexGenerationId ?? null
-    const citationRows = activeIndexGenerationId && versionIds.length > 0
-      ? await executeQuery(
-          (db) =>
-            db
-              .select({
-                chunkId: repositoryItemChunks.id,
-                itemVersionId: repositoryItemChunks.itemVersionId,
-                artifactId: repositoryItemChunks.artifactId,
-                chunkIndex: repositoryItemChunks.chunkIndex,
-                modality: repositoryItemChunks.modality,
-                sourceLocator: repositoryItemChunks.sourceLocator,
-              })
-              .from(repositoryItemChunks)
-              .where(
-                and(
-                  eq(
-                    repositoryItemChunks.indexGenerationId,
-                    activeIndexGenerationId
-                  ),
-                  inArray(repositoryItemChunks.itemVersionId, versionIds)
-                )
-              )
-              .orderBy(repositoryItemChunks.chunkIndex)
-              .limit(100),
-          "getRepositoryItemManagementView.citations"
-        )
-      : []
+    const citationRows = await loadCitationRows(
+      versionIds,
+      activeIndexGenerationId
+    )
 
     const currentVersion = versions.find((version) => version.isCurrent)
     const result: RepositoryItemManagementView = {

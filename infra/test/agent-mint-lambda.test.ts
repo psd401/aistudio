@@ -16,8 +16,8 @@
  * `agentImageTag`, and disable Lambda asset bundling so the test never runs
  * esbuild / bun install.
  */
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { AgentPlatformStack } from '../lib/agent-platform-stack';

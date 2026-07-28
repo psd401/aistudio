@@ -18,8 +18,8 @@ import {
 } from '@/lib/streaming/sse-event-schemas'
 import { VALID_SSE_EVENT_TYPES } from '@/lib/streaming/sse-event-types'
 
-describe('SSE Event Schemas', () => {
-  describe('TextDeltaSchema', () => {
+function defineSSEEventSchemasSuite1Part1() {
+
     it('should validate correct text-delta events', () => {
       const validEvent = {
         type: 'text-delta',
@@ -67,9 +67,9 @@ describe('SSE Event Schemas', () => {
 
       expect(result.success).toBe(false)
     })
-  })
 
-  describe('TextStartSchema', () => {
+
+
     it('should validate correct text-start events', () => {
       const validEvent = {
         type: 'text-start',
@@ -91,9 +91,9 @@ describe('SSE Event Schemas', () => {
 
       expect(result.success).toBe(false)
     })
-  })
 
-  describe('ToolCallSchema', () => {
+
+
     it('should validate correct tool-call events', () => {
       const validEvent = {
         type: 'tool-call',
@@ -121,7 +121,9 @@ describe('SSE Event Schemas', () => {
       expect(result.success).toBe(true)
     })
 
-    it('should reject tool-call with missing required fields', () => {
+    }
+
+function defineSSEEventSchemasSuite1Part2() {it('should reject tool-call with missing required fields', () => {
       const invalidEvent = {
         type: 'tool-call',
         toolCallId: 'call-123'
@@ -132,9 +134,9 @@ describe('SSE Event Schemas', () => {
 
       expect(result.success).toBe(false)
     })
-  })
 
-  describe('ErrorEventSchema', () => {
+
+
     it('should validate error events', () => {
       const validEvent = {
         type: 'error',
@@ -170,9 +172,9 @@ describe('SSE Event Schemas', () => {
 
       expect(result.success).toBe(false)
     })
-  })
 
-  describe('validateEventType', () => {
+
+
     it('should validate specific event types', () => {
       const event = {
         type: 'text-delta',
@@ -207,9 +209,9 @@ describe('SSE Event Schemas', () => {
       expect(result.success).toBe(false)
       expect(result.error?.hint).toContain('not recognized')
     })
-  })
 
-  describe('Discriminated Union', () => {
+
+
     it('should validate events using discriminated union', () => {
       const events = [
         { type: 'text-delta', delta: 'Hello' },
@@ -219,15 +221,17 @@ describe('SSE Event Schemas', () => {
         { type: 'error', error: 'Failed' }
       ]
 
-      events.forEach(event => {
+      for (const event of events) {
         const result = validateSSEEvent(event)
         expect(result.success).toBe(true)
-      })
+      }
     })
-  })
 
-  describe('Field Extraction', () => {
-    it('should extract field names from event', () => {
+
+
+    }
+
+function defineSSEEventSchemasSuite1Part3() {it('should extract field names from event', () => {
       const event = {
         type: 'text-delta',
         delta: 'Hello',
@@ -250,9 +254,9 @@ describe('SSE Event Schemas', () => {
       expect(extractEventFields('string')).toEqual([])
       expect(extractEventFields(123)).toEqual([])
     })
-  })
 
-  describe('Error Message Generation', () => {
+
+
     it('should generate helpful error message for field mismatch', () => {
       const invalidEvent = {
         type: 'text-delta',
@@ -302,9 +306,9 @@ describe('SSE Event Schemas', () => {
         expect(message).toContain('validation failed')
       }
     })
-  })
 
-  describe('Bug #355 Regression Prevention', () => {
+
+
     it('should catch the exact bug from #355', () => {
       // This is the exact scenario from bug #355:
       // SDK sent 'textDelta' but we expected 'delta'
@@ -327,7 +331,9 @@ describe('SSE Event Schemas', () => {
       }
     })
 
-    it('should validate correct field name (delta)', () => {
+    }
+
+function defineSSEEventSchemasSuite1Part4() {it('should validate correct field name (delta)', () => {
       // This is the correct format
       const correctEvent = {
         type: 'text-delta',
@@ -339,9 +345,9 @@ describe('SSE Event Schemas', () => {
       expect(result.success).toBe(true)
       expect(result.data).toEqual(correctEvent)
     })
-  })
 
-  describe('Optional Fields', () => {
+
+
     it('should allow optional fields', () => {
       const eventWithOptional = {
         type: 'text-delta',
@@ -365,9 +371,9 @@ describe('SSE Event Schemas', () => {
 
       expect(result.success).toBe(true)
     })
-  })
 
-  describe('Complex Events', () => {
+
+
     it('should validate finish events with usage', () => {
       const finishEvent = {
         type: 'finish',
@@ -403,9 +409,9 @@ describe('SSE Event Schemas', () => {
 
       expect(result.success).toBe(true)
     })
-  })
 
-  describe('Schema Performance', () => {
+
+
     it('should validate quickly with many events', () => {
       const events = Array.from({ length: 1000 }, (_, i) => ({
         type: 'text-delta',
@@ -414,18 +420,18 @@ describe('SSE Event Schemas', () => {
 
       const startTime = Date.now()
 
-      events.forEach(event => {
+      for (const event of events) {
         validateSSEEvent(event)
-      })
+      }
 
       const duration = Date.now() - startTime
 
       // Should complete in reasonable time (< 100ms for 1000 events)
       expect(duration).toBeLessThan(100)
     })
-  })
 
-  describe('ToolInputDeltaSchema', () => {
+
+
     it('should validate tool-input-delta with toolCallId and delta', () => {
       const event = { type: 'tool-input-delta', toolCallId: 'call-123', delta: '{"key":' }
       const result = validateSSEEvent(event)
@@ -438,14 +444,16 @@ describe('SSE Event Schemas', () => {
       expect(result.success).toBe(true)
     })
 
-    it('should reject tool-input-delta missing toolCallId', () => {
+    }
+
+function defineSSEEventSchemasSuite1Part5() {it('should reject tool-input-delta missing toolCallId', () => {
       const event = { type: 'tool-input-delta', delta: '{"key":' }
       const result = validateSSEEvent(event)
       expect(result.success).toBe(false)
     })
-  })
 
-  describe('ToolInputAvailableSchema', () => {
+
+
     it('should validate tool-input-available with toolCallId only', () => {
       const event = { type: 'tool-input-available', toolCallId: 'call-123' }
       const result = validateSSEEvent(event)
@@ -468,9 +476,9 @@ describe('SSE Event Schemas', () => {
       const result = validateSSEEvent(event)
       expect(result.success).toBe(false)
     })
-  })
 
-  describe('SourceUrlSchema', () => {
+
+
     it('should validate source-url with valid https URL', () => {
       const event = { type: 'source-url', sourceId: 'ws_1', url: 'https://example.com' }
       const result = validateSSEEvent(event)
@@ -500,9 +508,9 @@ describe('SSE Event Schemas', () => {
       const result = validateSSEEvent(event)
       expect(result.success).toBe(false)
     })
-  })
 
-  describe('Schema Sync', () => {
+
+
     it('SSEEventSchema and VALID_SSE_EVENT_TYPES must contain identical event types', () => {
       // Extract type literals from discriminated union options
       const schemaTypes = new Set(
@@ -522,5 +530,15 @@ describe('SSE Event Schemas', () => {
       // Sets must be the same size
       expect(schemaTypes.size).toBe(VALID_SSE_EVENT_TYPES.size)
     })
-  })
-})
+
+}
+
+const defineSSEEventSchemasSuite1 = () => {
+  defineSSEEventSchemasSuite1Part1()
+  defineSSEEventSchemasSuite1Part2()
+  defineSSEEventSchemasSuite1Part3()
+  defineSSEEventSchemasSuite1Part4()
+  defineSSEEventSchemasSuite1Part5()
+};
+
+describe('SSE Event Schemas', defineSSEEventSchemasSuite1)

@@ -47,7 +47,7 @@ async function getModelClient(modelConfig: ModelConfig): Promise<LanguageModel> 
     provider: modelConfig.provider,
     modelId: modelConfig.modelId
   });
-  
+
   try {
     const model = await createProviderModel(modelConfig.provider, modelConfig.modelId);
     logger.info('[ai-helpers] Model client created successfully');
@@ -69,7 +69,7 @@ export async function generateCompletion(
   tools?: Record<string, unknown>
 ) {
   const model = await getModelClient(modelConfig);
-  
+
   try {
     const result = await generateText({
       model,
@@ -87,15 +87,15 @@ export async function generateCompletion(
     // Handle specific AI SDK errors
     if (error instanceof NoSuchToolError) {
       logger.error('[generateCompletion] Tool not found:', error.toolName);
-      throw new Error(`AI tried to use unknown tool: ${error.toolName}`);
+      throw new Error(`AI tried to use unknown tool: ${error.toolName}`, { cause: error });
     } else if (error instanceof InvalidToolInputError) {
       logger.error('[generateCompletion] Invalid tool arguments:', error);
-      throw new Error(`Invalid arguments for tool: ${error.message}`);
+      throw new Error(`Invalid arguments for tool: ${error.message}`, { cause: error });
     } else if (error instanceof Error && error.name === 'ToolExecutionError') {
       logger.error('[generateCompletion] Tool execution failed:', error);
-      throw new Error(`Tool execution failed: ${error.message}`);
+      throw new Error(`Tool execution failed: ${error.message}`, { cause: error });
     }
-    
+
     throw error;
   }
 }
@@ -114,7 +114,7 @@ export async function streamCompletion(
     modelId: modelConfig.modelId,
     hasTools: !!tools
   });
-  
+
   try {
     // Convert CoreMessage to UIMessage format for unified streaming
     const uiMessages: UIMessage[] = messages.map((msg, index) => ({
@@ -122,12 +122,12 @@ export async function streamCompletion(
       role: msg.role as 'user' | 'assistant' | 'system',
       parts: [{
         type: 'text',
-        text: typeof msg.content === 'string' 
-          ? msg.content 
+        text: typeof msg.content === 'string'
+          ? msg.content
           : JSON.stringify(msg.content)
       }]
     }));
-    
+
     // Create stream request for unified service
     const streamRequest: StreamRequest = {
       messages: uiMessages,
@@ -154,7 +154,7 @@ export async function streamCompletion(
         }
       }
     };
-    
+
     // Note: The unified streaming service doesn't directly support tools yet
     // For now, we'll fall back to the provider's native implementation when tools are needed
     if (tools) {
@@ -174,13 +174,13 @@ export async function streamCompletion(
         onFinish: options?.onFinish
       });
     }
-    
+
     // Use unified streaming service for non-tool calls
     const response = await unifiedStreamingService.stream(streamRequest);
     // The response.result is already a StreamTextResult-compatible object
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return response.result as unknown as StreamTextResult<any, any>;
-    
+
   } catch (error) {
     logger.error('[streamCompletion] Error during unified streaming:', error);
     throw error;
@@ -194,7 +194,7 @@ export async function generateStructuredOutput<T>(
   schema: z.ZodType<T>
 ): Promise<T> {
   const model = await getModelClient(modelConfig);
-  
+
   const result = await generateObject({
     model,
     messages,
@@ -237,12 +237,12 @@ export async function getEmbeddingConfig(): Promise<EmbeddingConfig> {
   const { getSettings } = await import('@/lib/settings-manager');
   const settings = await getSettings([
     'EMBEDDING_MODEL_PROVIDER',
-    'EMBEDDING_MODEL_ID', 
+    'EMBEDDING_MODEL_ID',
     'EMBEDDING_DIMENSIONS',
     'EMBEDDING_MAX_TOKENS',
     'EMBEDDING_BATCH_SIZE'
   ])
-  
+
   const repositoryConfig = repositoryEmbeddingConfigurationFromSettings(settings)
   const maxTokens = Number.parseInt(settings['EMBEDDING_MAX_TOKENS'] || '8192', 10)
   const batchSize = Number.parseInt(settings['EMBEDDING_BATCH_SIZE'] || '100', 10)
@@ -268,49 +268,49 @@ export async function getEmbeddingConfig(): Promise<EmbeddingConfig> {
 // eslint-disable-next-line complexity -- explicit provider branches keep credential handling isolated
 async function getEmbeddingModelClient(config: ModelConfig) {
   const { Settings } = await import('@/lib/settings-manager');
-  
+
   logger.info('[ai-helpers] Getting embedding model client', {
     provider: config.provider,
     modelId: config.modelId
   });
-  
+
   switch (config.provider) {
     case 'openai': {
       const openAIKey = await Settings.getOpenAI();
-      
+
       if (!openAIKey) {
         throw new Error('OpenAI API key not configured');
       }
-      
+
       const openai = createOpenAI({
         apiKey: openAIKey
       });
-      
+
       // Type casting needed for AI SDK v5 compatibility
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return openai.embedding(config.modelId) as any;
     }
-    
+
     case 'amazon-bedrock': {
       try {
         const bedrockConfig = await Settings.getBedrock();
-        
+
         const bedrockOptions: Parameters<typeof createAmazonBedrock>[0] = {
           region: bedrockConfig.region || 'us-east-1'
         };
-        
+
         // In AWS Lambda, use IAM role credentials
         const isAwsLambda = !!process.env.AWS_LAMBDA_FUNCTION_NAME;
-        
+
         if (bedrockConfig.accessKeyId && bedrockConfig.secretAccessKey && !isAwsLambda) {
           // Only use stored credentials for local development
           bedrockOptions.accessKeyId = bedrockConfig.accessKeyId;
           bedrockOptions.secretAccessKey = bedrockConfig.secretAccessKey;
         }
-        
+
         const bedrock = createAmazonBedrock(bedrockOptions);
         const embeddingModel = bedrock.embedding(config.modelId);
-        
+
         logger.info('[ai-helpers] Embedding model created successfully');
         // Type casting needed for AI SDK v5 compatibility
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -337,7 +337,7 @@ async function getEmbeddingModelClient(config: ModelConfig) {
       }
       return createAzure(azureOptions).embedding(config.modelId)
     }
-    
+
     default:
       throw new Error(`Unsupported embedding provider: ${config.provider}`)
   }
@@ -349,24 +349,24 @@ export async function generateEmbedding(
   config?: Partial<EmbeddingConfig>
 ): Promise<number[]> {
   const embeddingConfig = config ? { ...await getEmbeddingConfig(), ...config } : await getEmbeddingConfig()
-  
+
   const modelConfig: ModelConfig = {
     provider: embeddingConfig.provider,
     modelId: embeddingConfig.modelId
   }
-  
+
   const model = await getEmbeddingModelClient(modelConfig)
-  
+
   try {
     const result = await embed({
       model,
       value: text
     })
-    
+
     return Array.from(result.embedding)
   } catch (error) {
     logger.error('[generateEmbedding] Error generating embedding:', error)
-    throw new Error(`Failed to generate embedding: ${error instanceof Error ? error.message : 'Unknown error'}`)
+    throw new Error(`Failed to generate embedding: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error })
   }
 }
 
@@ -376,35 +376,35 @@ export async function generateEmbeddings(
   config?: Partial<EmbeddingConfig>
 ): Promise<number[][]> {
   const embeddingConfig = config ? { ...await getEmbeddingConfig(), ...config } : await getEmbeddingConfig()
-  
+
   const modelConfig: ModelConfig = {
     provider: embeddingConfig.provider,
     modelId: embeddingConfig.modelId
   }
-  
+
   const model = await getEmbeddingModelClient(modelConfig)
-  
+
   try {
     // Process in batches according to configured batch size
     const embeddings: number[][] = []
     const batchSize = embeddingConfig.batchSize
-    
+
     for (let i = 0; i < texts.length; i += batchSize) {
       const batch = texts.slice(i, i + batchSize)
-      
+
       const result = await embedMany({
         model,
         values: batch
       })
-      
+
       // Convert embeddings to arrays of numbers
       embeddings.push(...result.embeddings.map(embedding => Array.from(embedding)))
     }
-    
+
     return embeddings
   } catch (error) {
     logger.error('[generateEmbeddings] Error generating embeddings:', error)
-    throw new Error(`Failed to generate embeddings: ${error instanceof Error ? error.message : 'Unknown error'}`)
+    throw new Error(`Failed to generate embeddings: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error })
   }
 }
 
@@ -413,24 +413,24 @@ export function cosineSimilarity(embedding1: number[], embedding2: number[]): nu
   if (embedding1.length !== embedding2.length) {
     throw new Error('Embeddings must have the same length')
   }
-  
+
   let dotProduct = 0
   let norm1 = 0
   let norm2 = 0
-  
+
   for (const [i, element] of embedding1.entries()) {
     dotProduct += element * embedding2[i]
     norm1 += element * element
     norm2 += embedding2[i] * embedding2[i]
   }
-  
+
   norm1 = Math.sqrt(norm1)
   norm2 = Math.sqrt(norm2)
-  
+
   if (norm1 === 0 || norm2 === 0) {
     return 0
   }
-  
+
   return dotProduct / (norm1 * norm2)
 }
 
@@ -444,7 +444,7 @@ export function findMostSimilar(
     id: item.id,
     similarity: cosineSimilarity(queryEmbedding, item.embedding)
   }))
-  
+
   // Sort by similarity descending and take top K
   return similarities
     .sort((a, b) => b.similarity - a.similarity)

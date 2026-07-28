@@ -103,6 +103,38 @@ async function warnIfSystemUserIsAdmin(
   }
 }
 
+async function findOidcAccount(_ctx: unknown, id: string) {
+  const { executeQuery } = await import("@/lib/db/drizzle-client")
+  const { eq } = await import("drizzle-orm")
+  const { users } = await import("@/lib/db/schema")
+  const [user] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: users.id,
+          cognitoSub: users.cognitoSub,
+          email: users.email,
+          firstName: users.firstName,
+          lastName: users.lastName,
+        })
+        .from(users)
+        .where(eq(users.id, Number.parseInt(id, 10)))
+        .limit(1),
+    "oidc.findAccount"
+  )
+  if (!user) return undefined
+  return {
+    accountId: String(user.id),
+    async claims() {
+      return {
+        sub: String(user.id),
+        email: user.email,
+        name: [user.firstName, user.lastName].filter(Boolean).join(" "),
+      }
+    },
+  }
+}
+
 export async function getOidcProvider(
   options?: OidcProviderOptions
 ): Promise<InstanceType<typeof Provider>> {
@@ -286,40 +318,7 @@ export async function getOidcProvider(
     // ==========================================
     // Account claims
     // ==========================================
-    async findAccount(_ctx, id) {
-      const { executeQuery } = await import("@/lib/db/drizzle-client")
-      const { eq } = await import("drizzle-orm")
-      const { users } = await import("@/lib/db/schema")
-
-      const [user] = await executeQuery(
-        (db) =>
-          db
-            .select({
-              id: users.id,
-              cognitoSub: users.cognitoSub,
-              email: users.email,
-              firstName: users.firstName,
-              lastName: users.lastName,
-            })
-            .from(users)
-            .where(eq(users.id, Number.parseInt(id, 10)))
-            .limit(1),
-        "oidc.findAccount"
-      )
-
-      if (!user) return undefined
-
-      return {
-        accountId: String(user.id),
-        async claims() {
-          return {
-            sub: String(user.id),
-            email: user.email,
-            name: [user.firstName, user.lastName].filter(Boolean).join(" "),
-          }
-        },
-      }
-    },
+    findAccount: findOidcAccount,
 
     // ==========================================
     // Response types & grant types

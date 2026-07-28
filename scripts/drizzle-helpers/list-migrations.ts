@@ -13,9 +13,10 @@
  *   bun run migration:list
  */
 
-import * as fs from "node:fs";
+
 import * as path from "node:path";
 import { getAbsolutePath, getNextMigrationNumber } from "./lib/migration-utils";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 // Constants
 const LAMBDA_SCHEMA_DIR = "./infra/database/schema";
@@ -40,7 +41,7 @@ interface MigrationInfo {
  */
 function getMigrations(): MigrationInfo[] {
   const manifestPath = getAbsolutePath(MIGRATIONS_MANIFEST_PATH);
-  const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as unknown;
+  const parsed = JSON.parse(validatedFs.readFileSync(manifestPath, "utf-8")) as unknown;
   if (
     typeof parsed !== "object" ||
     parsed === null ||
@@ -62,13 +63,13 @@ function getMigrations(): MigrationInfo[] {
     const number = numberMatch ? Number.parseInt(numberMatch[1], 10) : 0;
 
     const filePath = getAbsolutePath(path.join(LAMBDA_SCHEMA_DIR, filename));
-    const exists = fs.existsSync(filePath);
+    const exists = validatedFs.existsSync(filePath);
 
     let size: number | undefined;
     let modified: Date | undefined;
 
     if (exists) {
-      const stats = fs.statSync(filePath);
+      const stats = validatedFs.statSync(filePath);
       size = stats.size;
       modified = stats.mtime;
     }

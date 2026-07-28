@@ -2,8 +2,14 @@
  * Database Initialization Handler - Version 2026-01-07-10:00
  * Updated to import migrations from single source of truth (migrations.json)
  */
-import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
-import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import {
+  RDSDataClient,
+  ExecuteStatementCommand,
+  type ExecuteStatementCommandOutput,
+} from '@aws-sdk/client-rds-data';
+
+import * as path from 'node:path';
+import { readBundledSchemaFile } from './schema-file-reader';
 // migrations.json is copied to the Lambda package root during bundling
 // Using require for runtime resolution (file doesn't exist in source, only in Lambda package)
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -15,8 +21,10 @@ const migrationsConfig = require('./migrations.json') as {
 };
 
 const rdsClient = new RDSDataClient({});
-const secretsClient = new SecretsManagerClient({});
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 interface CustomResourceEvent {
   RequestType: 'Create' | 'Update' | 'Delete';
   ResourceProperties: {
@@ -30,14 +38,14 @@ interface CustomResourceEvent {
 
 /**
  * CRITICAL: Database Initialization and Migration Handler
- * 
+ *
  * This Lambda handles TWO distinct scenarios:
  * 1. Fresh Installation: Runs all initial setup files (001-005)
  * 2. Existing Database: ONLY runs migration files (010+)
- * 
+ *
  * WARNING: The initial setup files (001-005) MUST exactly match the existing
  * database structure or they will cause data corruption!
- * 
+ *
  * @see /docs/database-restoration/DATABASE-MIGRATIONS.md for full details
  */
 
@@ -50,10 +58,10 @@ const MIGRATION_FILES = migrationsConfig.migrationFiles;
 // WARNING: These must EXACTLY match existing database structure!
 const INITIAL_SETUP_FILES = migrationsConfig.initialSetupFiles;
 
-export async function handler(event: CustomResourceEvent): Promise<any> {
+export async function handler(event: CustomResourceEvent): Promise<unknown> {
   console.log('Database initialization event:', JSON.stringify(event, null, 2));
   console.log('Handler version: 2026-02-18-v15 - Add nexus MCP user tokens migration 058');
-  
+
   // SAFETY CHECK: Log what mode we're in
   console.log(`🔍 Checking database state for safety...`);
 
@@ -66,15 +74,15 @@ export async function handler(event: CustomResourceEvent): Promise<any> {
     };
   }
 
-  const { ClusterArn, SecretArn, DatabaseName, Environment } = event.ResourceProperties;
+  const { ClusterArn, SecretArn, DatabaseName } = event.ResourceProperties;
 
   try {
     // CRITICAL: Check if this is a fresh database or existing one
     const isDatabaseEmpty = await checkIfDatabaseEmpty(ClusterArn, SecretArn, DatabaseName);
-    
+
     if (isDatabaseEmpty) {
       console.log('🆕 Empty database detected - running full initialization');
-      
+
       // Run initial setup files for fresh installation
       for (const sqlFile of INITIAL_SETUP_FILES) {
         console.log(`Executing initial setup: ${sqlFile}`);
@@ -87,29 +95,37 @@ export async function handler(event: CustomResourceEvent): Promise<any> {
 
     // ALWAYS run migrations (they should be idempotent and safe)
     console.log('🔄 Processing migrations...');
-    
+
     // Ensure migration tracking table exists
     await ensureMigrationTable(ClusterArn, SecretArn, DatabaseName);
-    
+
     // Run each migration that hasn't been run yet
     for (const migrationFile of MIGRATION_FILES) {
       const hasRun = await checkMigrationRun(ClusterArn, SecretArn, DatabaseName, migrationFile);
-      
+
       if (!hasRun) {
         console.log(`▶️  Running migration: ${migrationFile}`);
-        const startTime = Date.now();
-        
         try {
           await executeFileStatements(ClusterArn, SecretArn, DatabaseName, migrationFile);
-          
+
           // Record successful migration
-          await recordMigration(ClusterArn, SecretArn, DatabaseName, migrationFile, true, Date.now() - startTime);
+          await recordMigration(ClusterArn, SecretArn, DatabaseName, {
+            migrationFile,
+            success: true,
+          });
           console.log(`✅ Migration ${migrationFile} completed successfully`);
-          
-        } catch (error: any) {
+
+        } catch (error: unknown) {
           // Record failed migration
-          await recordMigration(ClusterArn, SecretArn, DatabaseName, migrationFile, false, Date.now() - startTime, error.message);
-          throw new Error(`Migration ${migrationFile} failed: ${error.message}`);
+          await recordMigration(ClusterArn, SecretArn, DatabaseName, {
+            migrationFile,
+            success: false,
+            errorMessage: error instanceof Error ? error.message : String(error),
+          });
+          throw new Error(
+            `Migration ${migrationFile} failed: ${errorMessage(error)}`,
+            { cause: error }
+          );
         }
       } else {
         console.log(`⏭️  Skipping migration ${migrationFile} - already run`);
@@ -147,14 +163,14 @@ async function checkIfDatabaseEmpty(
       clusterArn,
       secretArn,
       database,
-      `SELECT COUNT(*) FROM information_schema.tables 
-       WHERE table_schema = 'public' 
+      `SELECT COUNT(*) FROM information_schema.tables
+       WHERE table_schema = 'public'
        AND table_name = 'users'`
     );
-    
+
     const count = result.records?.[0]?.[0]?.longValue || 0;
     return count === 0;
-  } catch (error) {
+  } catch {
     // If we can't check, assume empty for safety
     console.log('Could not check if database is empty, assuming fresh install');
     return true;
@@ -182,7 +198,7 @@ async function ensureMigrationTable(
       executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `;
-  
+
   await executeSql(clusterArn, secretArn, database, sql);
 }
 
@@ -210,7 +226,7 @@ async function checkMigrationRun(
 
     const count = result.records?.[0]?.[0]?.longValue || 0;
     return count > 0;
-  } catch (error) {
+  } catch {
     // If we can't check, assume not run
     return false;
   }
@@ -228,11 +244,13 @@ async function recordMigration(
   clusterArn: string,
   secretArn: string,
   database: string,
-  migrationFile: string,
-  success: boolean,
-  executionTime: number,
-  errorMessage?: string
+  result: {
+    migrationFile: string;
+    success: boolean;
+    errorMessage?: string;
+  }
 ): Promise<void> {
+  const { migrationFile, success, errorMessage } = result;
   const maxStepResult = await executeSql(
     clusterArn,
     secretArn,
@@ -310,77 +328,85 @@ async function executeFileStatements(
   validateStatements(statements, filename);
 
   for (const statement of statements) {
-    if (statement.trim()) {
-      try {
-        await executeSql(clusterArn, secretArn, database, statement);
-      } catch (error: any) {
-        // For initial setup files, we might want to continue on "already exists" errors
-        // For migrations, we should fail fast
-        if (INITIAL_SETUP_FILES.includes(filename) && 
-            (error.message?.includes('already exists') || 
-             error.message?.includes('duplicate key'))) {
-          console.log(`⚠️  Skipping (already exists): ${error.message}`);
-        } else if (MIGRATION_FILES.includes(filename)) {
-          // CREATE TYPE … AS ENUM cannot be written `IF NOT EXISTS` (PostgreSQL
-          // has no such form) and the statement splitter cannot handle the
-          // DO $$ … $$ guard pattern (it closes the block on the inner `);`).
-          // So an enum CREATE TYPE is inherently non-idempotent: on a partial-
-          // failure re-run it raises "type … already exists" (SQLSTATE 42710),
-          // which would otherwise hit the throw below and permanently wedge the
-          // migration. Treat that specific case as already-applied, matching the
-          // idempotency the migration header promises. Scoped to CREATE TYPE so
-          // genuine "already exists" failures in other statements still surface.
-          const isCreateType = statement.trim().toUpperCase().startsWith('CREATE TYPE');
-          if (isCreateType && error.message?.includes('already exists')) {
-            console.log(`⚠️  Skipping (type already exists): ${error.message}`);
-            continue;
-          }
+    if (!statement.trim()) continue;
 
-          // For migration files, check if it's an ALTER TABLE that actually succeeded
-          // RDS Data API sometimes returns an error-like response for successful ALTER TABLEs
-          const isAlterTable = statement.trim().toUpperCase().startsWith('ALTER TABLE');
-
-          if (isAlterTable) {
-            // Verify if the ALTER actually succeeded by checking the table structure
-            console.log(`⚠️  ALTER TABLE may have succeeded despite error response. Verifying...`);
-            
-            // Extract table name and column from ALTER statement
-            const alterMatch = statement.match(/ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(IF\s+NOT\s+EXISTS\s+)?(\w+)/i);
-            
-            if (alterMatch) {
-              const tableName = alterMatch[1];
-              const columnName = alterMatch[3];
-              
-              try {
-                // Check if the column exists
-                const checkResult = await executeSql(
-                  clusterArn,
-                  secretArn,
-                  database,
-                  `SELECT column_name FROM information_schema.columns 
-                   WHERE table_schema = 'public' 
-                   AND table_name = '${tableName}' 
-                   AND column_name = '${columnName}'`
-                );
-                
-                if (checkResult.records && checkResult.records.length > 0) {
-                  console.log(`✅ Column ${columnName} exists in table ${tableName} - ALTER succeeded`);
-                  // Column exists, so the ALTER worked - continue
-                  continue;
-                }
-              } catch (checkError) {
-                console.log(`Could not verify column existence: ${checkError}`);
-              }
-            }
-          }
-          
-          // If we couldn't verify success, throw the original error
-          throw error;
-        } else {
-          throw error;
-        }
-      }
+    try {
+      await executeSql(clusterArn, secretArn, database, statement);
+    } catch (error: unknown) {
+      await handleStatementExecutionError(
+        { clusterArn, secretArn, database, filename, statement },
+        error
+      );
     }
+  }
+}
+
+interface StatementExecutionContext {
+  clusterArn: string;
+  secretArn: string;
+  database: string;
+  filename: string;
+  statement: string;
+}
+
+async function handleStatementExecutionError(
+  context: StatementExecutionContext,
+  error: unknown
+): Promise<void> {
+  const message = errorMessage(error);
+  if (isSkippableInitialSetupError(context.filename, message)) {
+    console.log(`⚠️  Skipping (already exists): ${message}`);
+    return;
+  }
+
+  if (!MIGRATION_FILES.includes(context.filename)) throw error;
+
+  const normalizedStatement = context.statement.trim().toUpperCase();
+  if (normalizedStatement.startsWith('CREATE TYPE') && message.includes('already exists')) {
+    console.log(`⚠️  Skipping (type already exists): ${message}`);
+    return;
+  }
+
+  if (
+    normalizedStatement.startsWith('ALTER TABLE') &&
+    await verifyAlterTableSucceeded(context)
+  ) {
+    return;
+  }
+
+  throw error;
+}
+
+function isSkippableInitialSetupError(filename: string, message: string): boolean {
+  return INITIAL_SETUP_FILES.includes(filename) &&
+    (message.includes('already exists') || message.includes('duplicate key'));
+}
+
+async function verifyAlterTableSucceeded(
+  context: StatementExecutionContext
+): Promise<boolean> {
+  console.log('⚠️  ALTER TABLE may have succeeded despite error response. Verifying...');
+  const addedColumn = parseAddedColumn(context.statement);
+  if (!addedColumn) return false;
+
+  const { tableName, columnName } = addedColumn;
+  try {
+    const checkResult = await executeSql(
+      context.clusterArn,
+      context.secretArn,
+      context.database,
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = 'public'
+       AND table_name = '${tableName}'
+       AND column_name = '${columnName}'`
+    );
+    if (!checkResult.records?.length) return false;
+
+    console.log(`✅ Column ${columnName} exists in table ${tableName} - ALTER succeeded`);
+    return true;
+  } catch (checkError) {
+    console.log(`Could not verify column existence: ${checkError}`);
+    return false;
   }
 }
 
@@ -389,7 +415,7 @@ async function executeSql(
   secretArn: string,
   database: string,
   sql: string
-): Promise<any> {
+): Promise<ExecuteStatementCommandOutput> {
   const command = new ExecuteStatementCommand({
     resourceArn: clusterArn,
     secretArn: secretArn,
@@ -401,20 +427,20 @@ async function executeSql(
   try {
     const response = await rdsClient.send(command);
     return response;
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const message = errorMessage(error);
     // Log the full error for debugging
     console.error(`SQL execution error for statement: ${sql.substring(0, 100)}...`);
     console.error(`Error details:`, JSON.stringify(error, null, 2));
-    
+
     // Check if this is a false-positive error for ALTER TABLE
     // RDS Data API sometimes returns errors for successful DDL operations
-    if (sql.trim().toUpperCase().startsWith('ALTER TABLE') && 
-        error.message && 
-        (error.message.includes('Database returned SQL exception') || 
-         error.message.includes('BadRequestException'))) {
+    if (sql.trim().toUpperCase().startsWith('ALTER TABLE') &&
+        (message.includes('Database returned SQL exception') ||
+         message.includes('BadRequestException'))) {
       console.log(`⚠️  Potential false-positive error for ALTER TABLE - will verify in caller`);
     }
-    
+
     throw error;
   }
 }
@@ -430,29 +456,29 @@ function splitSqlStatements(sql: string): string[] {
   const statements: string[] = [];
   let currentStatement = '';
   let inBlock = false;
-  
+
   const lines = withoutComments.split('\n');
-  
+
   for (const line of lines) {
     const trimmedLine = line.trim().toUpperCase();
-    
+
     // Check if we're entering a block (CREATE TYPE, CREATE FUNCTION, etc.)
-    if (trimmedLine.startsWith('CREATE TYPE') || 
+    if (trimmedLine.startsWith('CREATE TYPE') ||
         trimmedLine.startsWith('CREATE FUNCTION') ||
         trimmedLine.startsWith('CREATE OR REPLACE FUNCTION') ||
         trimmedLine.startsWith('DROP TYPE')) {
       inBlock = true;
     }
-    
+
     currentStatement += line + '\n';
-    
+
     // Check if this line ends with a semicolon
     if (line.trim().endsWith(';')) {
       // If we're in a block, check if this is the end
       if (inBlock && (trimmedLine === ');' || trimmedLine.endsWith(');') || trimmedLine.endsWith("' LANGUAGE PLPGSQL;"))) {
         inBlock = false;
       }
-      
+
       // If not in a block, this statement is complete
       if (!inBlock) {
         statements.push(currentStatement.trim());
@@ -460,28 +486,54 @@ function splitSqlStatements(sql: string): string[] {
       }
     }
   }
-  
+
   // Add any remaining statement
   if (currentStatement.trim()) {
     statements.push(currentStatement.trim());
   }
-  
+
   return statements;
+}
+
+function isSqlIdentifier(value: string | undefined): value is string {
+  if (!value || !/^[A-Za-z_]$/.test(value[0])) return false;
+  return [...value].every((character) => /^[A-Za-z0-9_]$/.test(character));
+}
+
+function parseAddedColumn(
+  statement: string
+): { tableName: string; columnName: string } | null {
+  const tokens = statement.trim().replace(/[;,]/g, ' ').split(/\s+/);
+  const upper = tokens.map((token) => token.toUpperCase());
+  if (
+    upper[0] !== 'ALTER' ||
+    upper[1] !== 'TABLE' ||
+    upper[3] !== 'ADD' ||
+    upper[4] !== 'COLUMN'
+  ) {
+    return null;
+  }
+
+  const columnIndex =
+    upper[5] === 'IF' && upper[6] === 'NOT' && upper[7] === 'EXISTS'
+      ? 8
+      : 5;
+  const tableName = tokens[2];
+  const columnName = tokens[columnIndex];
+  return isSqlIdentifier(tableName) && isSqlIdentifier(columnName)
+    ? { tableName, columnName }
+    : null;
 }
 
 // Load SQL content from bundled schema files
 async function getSqlContent(filename: string): Promise<string> {
-  const fs = require('fs').promises;
-  const path = require('path');
-  
   try {
     // Schema files are copied to the Lambda deployment package
-    const schemaPath = path.join(__dirname, 'schema', filename);
-    const content = await fs.readFile(schemaPath, 'utf8');
+    const schemaDirectory = path.join(__dirname, 'schema');
+    const content = await readBundledSchemaFile(schemaDirectory, filename);
     return content;
   } catch (error) {
     console.error(`Failed to read SQL file ${filename}:`, error);
-    throw new Error(`Could not load SQL file: ${filename}`);
+    throw new Error(`Could not load SQL file: ${filename}`, { cause: error });
   }
 }
-

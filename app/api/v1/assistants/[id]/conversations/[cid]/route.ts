@@ -37,6 +37,84 @@ const messageRowSchema = z.object({
   createdAt: z.date(),
 })
 
+function isBoundAssistantConversation(
+  conversation: { provider: string; metadata: unknown },
+  assistantId: number
+): boolean {
+  const metadata = parseBoundAssistantConversationMetadata(
+    conversation.metadata
+  )
+  return (
+    conversation.provider === "assistant-architect" &&
+    metadata?.assistantId === assistantId
+  )
+}
+
+function mapConversationMessages(
+  messages: unknown[],
+  conversationId: string,
+  log: ReturnType<typeof createLogger>
+) {
+  return messages.flatMap((message) => {
+    const validated = messageRowSchema.safeParse(message)
+    if (!validated.success) {
+      log.warn("Invalid message format in conversation", {
+        conversationId,
+        error: validated.error.message,
+      })
+      return []
+    }
+    return [{
+      id: validated.data.id,
+      role: validated.data.role,
+      content: validated.data.content,
+      parts: validated.data.parts,
+      createdAt: validated.data.createdAt.toISOString(),
+    }]
+  })
+}
+
+function parseHistoryRequest(
+  url: string,
+  requestId: string
+):
+  | { value: { assistantId: number; conversationId: string; limit: number; offset: number } }
+  | { response: ReturnType<typeof createErrorResponse> } {
+  const assistantId = extractNumericParam(url, "assistants")
+  const conversationId = extractStringParam(url, "conversations")
+  if (!assistantId) {
+    return {
+      response: createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid assistant ID"),
+    }
+  }
+  if (!conversationId) {
+    return {
+      response: createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid conversation ID"),
+    }
+  }
+  const params = Object.fromEntries(new URL(url).searchParams.entries())
+  const parsed = querySchema.safeParse(params)
+  if (!parsed.success) {
+    return {
+      response: createErrorResponse(
+        requestId,
+        400,
+        "VALIDATION_ERROR",
+        "Invalid query parameters",
+        parsed.error.issues
+      ),
+    }
+  }
+  return {
+    value: {
+      assistantId,
+      conversationId,
+      limit: parsed.data.limit ?? 50,
+      offset: parsed.data.offset ?? 0,
+    },
+  }
+}
+
 // ============================================
 // GET — Get Conversation History
 // ============================================
@@ -47,22 +125,9 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
 
   const log = createLogger({ requestId, route: "api.v1.assistants.conversations.get" })
 
-  const assistantId = extractNumericParam(request.url, "assistants")
-  const conversationId = extractStringParam(request.url, "conversations")
-  if (!assistantId) {
-    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid assistant ID")
-  }
-  if (!conversationId) {
-    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid conversation ID")
-  }
-
-  // Parse query params
-  const { searchParams } = new URL(request.url)
-  const params = Object.fromEntries(searchParams.entries())
-  const parsed = querySchema.safeParse(params)
-  if (!parsed.success) {
-    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid query parameters", parsed.error.issues)
-  }
+  const parsedRequest = parseHistoryRequest(request.url, requestId)
+  if ("response" in parsedRequest) return parsedRequest.response
+  const { assistantId, conversationId, limit, offset } = parsedRequest.value
 
   try {
     // Verify conversation exists and belongs to user
@@ -70,37 +135,22 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
     if (!conversation) {
       return createErrorResponse(requestId, 404, "NOT_FOUND", `Conversation not found: ${conversationId}`)
     }
-    const metadata = parseBoundAssistantConversationMetadata(
-      conversation.metadata
-    )
-    if (
-      conversation.provider !== "assistant-architect" ||
-      metadata?.assistantId !== assistantId
-    ) {
+    if (!isBoundAssistantConversation(conversation, assistantId)) {
       return createErrorResponse(requestId, 404, "NOT_FOUND", `Conversation not found: ${conversationId}`)
     }
 
     // Get messages
     const messages = await getMessagesByConversation(conversationId, {
-      limit: parsed.data.limit ?? 50,
-      offset: parsed.data.offset ?? 0,
+      limit,
+      offset,
     })
 
     // Validate and map messages to API response shape
-    const responseMessages = (messages as unknown[]).map((msg) => {
-      const validated = messageRowSchema.safeParse(msg)
-      if (!validated.success) {
-        log.warn("Invalid message format in conversation", { conversationId, error: validated.error.message })
-        return null
-      }
-      return {
-        id: validated.data.id,
-        role: validated.data.role,
-        content: validated.data.content,
-        parts: validated.data.parts,
-        createdAt: validated.data.createdAt.toISOString(),
-      }
-    }).filter((m): m is NonNullable<typeof m> => m !== null)
+    const responseMessages = mapConversationMessages(
+      messages as unknown[],
+      conversationId,
+      log
+    )
 
     log.info("Retrieved conversation history", {
       conversationId,
@@ -122,8 +172,8 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
         },
         meta: {
           requestId,
-          limit: parsed.data.limit ?? 50,
-          offset: parsed.data.offset ?? 0,
+          limit,
+          offset,
         },
       },
       requestId

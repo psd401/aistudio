@@ -16,7 +16,7 @@ import {
 // Constants & Type Definitions
 // ============================================
 
-describe("Decision Node Types", () => {
+const defineDecisionNodeTypesSuite1 = () => {
   it("should define exactly 9 node types", () => {
     expect(DECISION_NODE_TYPES).toHaveLength(9)
   })
@@ -43,9 +43,11 @@ describe("Decision Node Types", () => {
       expect(DECISION_NODE_TYPE_DESCRIPTIONS[nodeType].length).toBeGreaterThan(0)
     }
   })
-})
+};
 
-describe("Decision Edge Types", () => {
+describe("Decision Node Types", defineDecisionNodeTypesSuite1)
+
+const defineDecisionEdgeTypesSuite2 = () => {
   it("should define exactly 22 edge types", () => {
     expect(DECISION_EDGE_TYPES).toHaveLength(22)
   })
@@ -86,13 +88,15 @@ describe("Decision Edge Types", () => {
       expect(DECISION_EDGE_TYPE_DESCRIPTIONS[edgeType].length).toBeGreaterThan(0)
     }
   })
-})
+};
+
+describe("Decision Edge Types", defineDecisionEdgeTypesSuite2)
 
 // ============================================
 // Type Guards
 // ============================================
 
-describe("isDecisionNodeType", () => {
+const defineIsDecisionNodeTypeSuite3 = () => {
   it("should return true for valid node types", () => {
     expect(isDecisionNodeType("decision")).toBe(true)
     expect(isDecisionNodeType("evidence")).toBe(true)
@@ -117,9 +121,11 @@ describe("isDecisionNodeType", () => {
     expect(isDecisionNodeType({})).toBe(false)
     expect(isDecisionNodeType([])).toBe(false)
   })
-})
+};
 
-describe("isDecisionEdgeType", () => {
+describe("isDecisionNodeType", defineIsDecisionNodeTypeSuite3)
+
+const defineIsDecisionEdgeTypeSuite4 = () => {
   it("should return true for valid edge types", () => {
     expect(isDecisionEdgeType("INFORMED")).toBe(true)
     expect(isDecisionEdgeType("PROPOSED")).toBe(true)
@@ -142,15 +148,15 @@ describe("isDecisionEdgeType", () => {
     expect(isDecisionEdgeType({})).toBe(false)
     expect(isDecisionEdgeType([])).toBe(false)
   })
-})
+};
+
+describe("isDecisionEdgeType", defineIsDecisionEdgeTypeSuite4)
 
 // ============================================
 // Completeness Validation
 // ============================================
 
-describe("validateDecisionCompleteness", () => {
-  // Helper to create a complete decision subgraph
-  function buildCompleteSubgraph(): {
+function buildCompleteSubgraph(): {
     nodes: DecisionSubgraphNode[]
     edges: DecisionSubgraphEdge[]
   } {
@@ -167,6 +173,10 @@ describe("validateDecisionCompleteness", () => {
     ]
     return { nodes, edges }
   }
+
+function defineValidateDecisionCompletenessSuite5Part1() {
+  // Helper to create a complete decision subgraph
+
 
   it("should pass for a complete decision subgraph", () => {
     const { nodes, edges } = buildCompleteSubgraph()
@@ -265,7 +275,9 @@ describe("validateDecisionCompleteness", () => {
     )
   })
 
-  it("should fail when no evidence or constraint is connected", () => {
+  }
+
+function defineValidateDecisionCompletenessSuite5Part2() {it("should fail when no evidence or constraint is connected", () => {
     const nodes: DecisionSubgraphNode[] = [
       { id: "d1", nodeType: "decision" },
       { id: "p1", nodeType: "person" },
@@ -374,7 +386,9 @@ describe("validateDecisionCompleteness", () => {
     expect(result.complete).toBe(true)
   })
 
-  it("should handle edges with empty edgeType", () => {
+  }
+
+function defineValidateDecisionCompletenessSuite5Part3() {it("should handle edges with empty edgeType", () => {
     const nodes: DecisionSubgraphNode[] = [
       { id: "d1", nodeType: "decision" },
       { id: "p1", nodeType: "person" },
@@ -424,13 +438,21 @@ describe("validateDecisionCompleteness", () => {
     expect(result.complete).toBe(true)
     expect(result.missing).toHaveLength(0)
   })
-})
+}
+
+const defineValidateDecisionCompletenessSuite5 = () => {
+  defineValidateDecisionCompletenessSuite5Part1()
+  defineValidateDecisionCompletenessSuite5Part2()
+  defineValidateDecisionCompletenessSuite5Part3()
+};
+
+describe("validateDecisionCompleteness", defineValidateDecisionCompletenessSuite5)
 
 // ============================================
 // LLM Prompt Fragment
 // ============================================
 
-describe("DEFAULT_DECISION_FRAMEWORK_PROMPT", () => {
+const defineDEFAULTDECISIONFRAMEWORKPROMPTSuite6 = () => {
   it("should be a non-empty string", () => {
     expect(typeof DEFAULT_DECISION_FRAMEWORK_PROMPT).toBe("string")
     expect(DEFAULT_DECISION_FRAMEWORK_PROMPT.length).toBeGreaterThan(0)
@@ -455,4 +477,6 @@ describe("DEFAULT_DECISION_FRAMEWORK_PROMPT", () => {
     expect(DEFAULT_DECISION_FRAMEWORK_PROMPT).toContain("evidence")
     expect(DEFAULT_DECISION_FRAMEWORK_PROMPT).toContain("condition")
   })
-})
+};
+
+describe("DEFAULT_DECISION_FRAMEWORK_PROMPT", defineDEFAULTDECISIONFRAMEWORKPROMPTSuite6)

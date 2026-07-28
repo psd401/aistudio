@@ -9,8 +9,8 @@
  * Cedar correctly used `*synergy*`. This test asserts the two agree and that a
  * representative Synergy hostname is blocked.
  */
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 const POLICIES_DIR = path.join(__dirname, '..', 'policies');
 const allowlist = JSON.parse(
@@ -23,15 +23,23 @@ const cedar = fs.readFileSync(
 
 // Allowlist/Cedar-style glob: `*` is the only metacharacter and matches any
 // sequence (including `/` and `.`), everything else is literal.
-function globToRegExp(pattern: string): RegExp {
-  const translated = pattern.replace(/[.*+?^${}()|[\]\\]/g, (ch) =>
-    ch === '*' ? '.*' : `\\${ch}`
-  );
-  return new RegExp(`^${translated}$`);
+function matchesAllowlistGlob(value: string, pattern: string): boolean {
+  const literals = pattern.split('*');
+  let cursor = 0;
+
+  for (const [index, literal] of literals.entries()) {
+    if (literal.length === 0) continue;
+    const foundAt = value.indexOf(literal, cursor);
+    if (foundAt === -1 || (index === 0 && foundAt !== 0)) return false;
+    cursor = foundAt + literal.length;
+  }
+
+  const finalLiteral = literals.at(-1) ?? '';
+  return pattern.endsWith('*') || value.endsWith(finalLiteral);
 }
 
 function isBlocked(url: string, patterns: string[]): boolean {
-  return patterns.some((p) => globToRegExp(p).test(url));
+  return patterns.some((pattern) => matchesAllowlistGlob(url, pattern));
 }
 
 describe('mcp-allowlist blockedPatterns (REV-COR-487)', () => {
@@ -55,7 +63,9 @@ describe('mcp-allowlist blockedPatterns (REV-COR-487)', () => {
 
   it('regression: the old *synergysis* pattern missed real Synergy hosts', () => {
     // Proves why the fix was needed — the previous pattern never matched.
-    expect(globToRegExp('*synergysis*').test('https://synergy.example.net')).toBe(false);
+    expect(
+      matchesAllowlistGlob('https://synergy.example.net', '*synergysis*')
+    ).toBe(false);
     // The corrected pattern must be present.
     expect(allowlist.blockedPatterns).toContain('*synergy*');
     expect(allowlist.blockedPatterns).not.toContain('*synergysis*');

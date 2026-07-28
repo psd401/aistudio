@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * run.js — psd-learning-page skill entrypoint (Issue #1245).
  *
@@ -36,6 +37,8 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -136,7 +139,7 @@ function loadAuditHtml() {
   ];
   for (const p of candidates) {
     try {
-      if (fs.existsSync(p)) return require(p).auditHtml;
+      if (validatedFs.existsSync(p)) return require(p).auditHtml;
     } catch {
       /* try next */
     }
@@ -231,67 +234,125 @@ function readStdin() {
 async function ingestSource(args, deps) {
   const run = deps.runSkill || runSkill;
 
-  if (typeof args.text === 'string') {
-    return { markdown: args.text, sourceLabel: 'inline text' };
-  }
-  if (typeof args.source_file === 'string') {
-    let md;
-    try {
-      md = fs.readFileSync(args.source_file, 'utf8');
-    } catch (err) {
-      fail(`--source-file not readable: ${err.message}`, 'bad_args');
-    }
-    return { markdown: md, sourceLabel: path.basename(args.source_file) };
-  }
+  if (typeof args.text === 'string') return { markdown: args.text, sourceLabel: 'inline text' };
+  if (typeof args.source_file === 'string') return ingestSourceFile(args.source_file);
+  if (hasPdfSource(args)) return ingestPdfSource(args, run);
+  if (args.gdoc_url || args.gdoc_id) return ingestGoogleDocSource(args, run);
 
-  // PDF → psd-pdf-to-markdown
-  if (args.pdf_url || args.pdf_s3_key || args.pdf_path) {
-    const pdfArgs = [];
-    if (args.pdf_url) pdfArgs.push('--url', String(args.pdf_url));
-    else if (args.pdf_s3_key) pdfArgs.push('--user', String(args.user), '--s3-key', String(args.pdf_s3_key));
-    else pdfArgs.push('--path', String(args.pdf_path));
-    const res = run({ skill: 'pdf', args: pdfArgs });
-    const out = lastJson(res.stdout);
-    if (res.code !== 0 || !out || out.status !== 'ok') {
-      fail(
-        `PDF ingest failed: ${(out && out.message) || res.stderr || 'unknown error'}`,
-        'ingest_failed',
-        2
-      );
-    }
-    // Large PDFs inline only a preview; read the full markdown from output_path.
-    let md = typeof out.markdown === 'string' ? out.markdown : '';
-    if ((!md || out.preview) && out.output_path) {
-      try {
-        md = fs.readFileSync(out.output_path, 'utf8');
-      } catch {
-        /* fall back to whatever inline text we have */
-      }
-    }
-    return { markdown: md, sourceLabel: 'PDF document' };
-  }
-
-  // Google Docs → psd-workspace `drive files export` on the AGENT scope
-  if (args.gdoc_url || args.gdoc_id) {
-    const id = parseGdocId(String(args.gdoc_url || args.gdoc_id));
-    if (!id) {
-      fail('could not parse a Google Docs file id from --gdoc-url/--gdoc-id', 'bad_args');
-    }
-    const md = exportGoogleDoc(id, String(args.user), run);
-    return { markdown: md, sourceLabel: 'Google Doc' };
-  }
-
-  // stdin fallback
   const piped = readStdin();
-  if (piped && piped.trim()) {
-    return { markdown: piped, sourceLabel: 'piped text' };
-  }
+  if (piped && piped.trim()) return { markdown: piped, sourceLabel: 'piped text' };
 
   fail(
     'no source provided — pass one of --source-file / --text / stdin / --pdf-url|--pdf-s3-key|--pdf-path / --gdoc-url|--gdoc-id',
     'bad_args'
   );
   return { markdown: '', sourceLabel: '' }; // unreachable (fail exits)
+}
+
+function ingestSourceFile(sourceFile) {
+  try {
+    return {
+      markdown: validatedFs.readFileSync(sourceFile, 'utf8'),
+      sourceLabel: path.basename(sourceFile),
+    };
+  } catch (err) {
+    fail(`--source-file not readable: ${err.message}`, 'bad_args');
+    return { markdown: '', sourceLabel: '' };
+  }
+}
+
+function hasPdfSource(args) {
+  return Boolean(args.pdf_url || args.pdf_s3_key || args.pdf_path);
+}
+
+function pdfSkillArgs(args) {
+  if (args.pdf_url) return ['--url', String(args.pdf_url)];
+  if (args.pdf_s3_key) {
+    return ['--user', String(args.user), '--s3-key', String(args.pdf_s3_key)];
+  }
+  return ['--path', String(args.pdf_path)];
+}
+
+function readPdfMarkdown(out) {
+  let markdown = typeof out.markdown === 'string' ? out.markdown : '';
+  if ((markdown && !out.preview) || !out.output_path) return markdown;
+  try {
+    markdown = validatedFs.readFileSync(out.output_path, 'utf8');
+  } catch {
+    /* fall back to inline text */
+  }
+  return markdown;
+}
+
+function ingestPdfSource(args, run) {
+  const res = run({ skill: 'pdf', args: pdfSkillArgs(args) });
+  const out = lastJson(res.stdout);
+  if (res.code !== 0 || !out || out.status !== 'ok') {
+    fail(
+      `PDF ingest failed: ${(out && out.message) || res.stderr || 'unknown error'}`,
+      'ingest_failed',
+      2
+    );
+  }
+  return { markdown: readPdfMarkdown(out), sourceLabel: 'PDF document' };
+}
+
+function ingestGoogleDocSource(args, run) {
+  const id = parseGdocId(String(args.gdoc_url || args.gdoc_id));
+  if (!id) {
+    fail('could not parse a Google Docs file id from --gdoc-url/--gdoc-id', 'bad_args');
+  }
+  return {
+    markdown: exportGoogleDoc(id, String(args.user), run),
+    sourceLabel: 'Google Doc',
+  };
+}
+
+function isAccountProvisioningExport(res, out) {
+  return res.code === 14 || Boolean(out && out.status === 'account-provisioning');
+}
+
+function googleDocDeniedText(res, out) {
+  return (out && (out.message || out.guidance)) || res.stderr || '';
+}
+
+function handleGoogleDocExportFailure(res, out) {
+  if (isAccountProvisioningExport(res, out)) {
+    fail(
+      (out && out.message) ||
+        'Your agent Workspace account is still being set up automatically — no action needed. Try again in about 30 minutes.',
+      'gdoc_provisioning',
+      2
+    );
+  }
+  if (res.code === 12) {
+    fail(
+      `Couldn't reach Google Workspace to read that document — a transient network/broker error. Try again shortly.${
+        res.stderr ? ` (${res.stderr.trim()})` : ''
+      }`,
+      'ingest_failed',
+      2
+    );
+  }
+  if (/40[34]|permission|consent|not shared|access denied|share/i.test(
+    googleDocDeniedText(res, out)
+  )) {
+    fail(
+      (out && (out.message || out.guidance)) ||
+        `Couldn't read that Google Doc. Share it with your agent account ` +
+          `(agnt_<your-uniqname>@psd401.net, Reader is enough) and try again.`,
+      'gdoc_denied',
+      2
+    );
+  }
+}
+
+function exportedGoogleDocText(res) {
+  const out = lastJson(res.stdout);
+  if (out && typeof out.content === 'string') return out.content;
+  if (out && typeof out.markdown === 'string') return out.markdown;
+  if (out && typeof out.text === 'string') return out.text;
+  return String(res.stdout || '');
 }
 
 // Export a Google Doc to markdown as the agent identity; markdown → text/plain fallback.
@@ -312,49 +373,7 @@ function exportGoogleDoc(fileId, userEmail, run) {
   let res = tryExport('text/markdown');
   if (res.code !== 0) {
     const out = lastJson(res.stdout);
-    // Classify the failure by psd-workspace's documented exit codes (run.js:45-54)
-    // — NOT everything non-zero is a sharing problem, and telling the user to
-    // re-share a doc that is already shared (or whose account is still being
-    // provisioned) sends them down the wrong path.
-    //
-    // 14 = agent Workspace account still being auto-provisioned. Wait, don't
-    // re-share. psd-workspace emits its own "try again in ~30 min" message.
-    if (res.code === 14 || (out && out.status === 'account-provisioning')) {
-      fail(
-        (out && out.message) ||
-          'Your agent Workspace account is still being set up automatically — no action needed. Try again in about 30 minutes.',
-        'gdoc_provisioning',
-        2
-      );
-    }
-    // 12 = transport/broker/network failure reaching Google. Transient — retry,
-    // don't re-share. The real diagnostic is on stderr (psd-workspace's fail()
-    // writes there); surface it rather than the sharing guidance.
-    if (res.code === 12) {
-      fail(
-        `Couldn't reach Google Workspace to read that document — a transient network/broker error. Try again shortly.${
-          res.stderr ? ` (${res.stderr.trim()})` : ''
-        }`,
-        'ingest_failed',
-        2
-      );
-    }
-    // A genuine permission/consent denial: Drive returns 403/404 for a doc the
-    // agent account can't see (the drive.file scope masks unshared files as 404).
-    // gws prints that error to the inherited stderr, so match on stdout JSON OR
-    // stderr. THIS is the case where re-sharing with the agent account fixes it.
-    const deniedText = (out && (out.message || out.guidance)) || res.stderr || '';
-    if (/40[34]|permission|consent|not shared|access denied|share/i.test(deniedText)) {
-      fail(
-        (out && (out.message || out.guidance)) ||
-          `Couldn't read that Google Doc. Share it with your agent account ` +
-            `(agnt_<your-uniqname>@psd401.net, Reader is enough) and try again.`,
-        'gdoc_denied',
-        2
-      );
-    }
-    // Otherwise the markdown export may just be unsupported for this doc → retry
-    // as plain text before giving up.
+    handleGoogleDocExportFailure(res, out);
     res = tryExport('text/plain');
   }
   if (res.code !== 0) {
@@ -365,13 +384,7 @@ function exportGoogleDoc(fileId, userEmail, run) {
       2
     );
   }
-  // gws prints the exported document body on stdout. If it wrapped the payload
-  // in JSON, pull the text field; otherwise treat stdout as the doc content.
-  const out = lastJson(res.stdout);
-  if (out && typeof out.content === 'string') return out.content;
-  if (out && typeof out.markdown === 'string') return out.markdown;
-  if (out && typeof out.text === 'string') return out.text;
-  return String(res.stdout || '');
+  return exportedGoogleDocText(res);
 }
 
 // ── content derivation (deterministic fallback; --content-json overrides) ──────
@@ -446,59 +459,62 @@ const GENERIC_DISTRACTORS = [
  * from the source markdown. Deterministic (no model call) so the dry-run works
  * fully offline; a caller can override any part via --content-json.
  */
-function deriveContent(markdown, title, overrides) {
-  const headings = extractHeadings(markdown);
-  const paragraphs = extractParagraphs(markdown);
-
-  const summaryBullets =
-    // Coerce authored entries to strings — a bare number/object from LLM-authored
-    // JSON must not reach buildNarration (`b.endsWith`) and throw an uncaught
-    // TypeError that degrades to a generic exit(2) instead of a clean bad_args.
-    (overrides && Array.isArray(overrides.summary) && overrides.summary.length && overrides.summary.map((s) => String(s))) ||
-    paragraphs.slice(0, 6).map((p) => {
+function deriveSummaryBullets(paragraphs, title, overrides) {
+  const authored = overrides && Array.isArray(overrides.summary)
+    ? overrides.summary
+    : [];
+  const bullets = authored.length > 0
+    ? authored.map(String)
+    : paragraphs.slice(0, 6).map((p) => {
       const first = splitSentences(p)[0] || p;
       return first.length > 220 ? first.slice(0, 217).trimEnd() + '…' : first;
     });
+  if (bullets.length === 0) bullets.push(`Key points from ${title}.`);
+  return bullets;
+}
 
-  // Guarantee at least one bullet so the page is never empty.
-  if (!summaryBullets.length) {
-    summaryBullets.push(`Key points from ${title}.`);
-  }
-
-  // Prefer section headings (## / ###) for targets — these are the topics, not
-  // the doc title (already shown as the <h1>). Fall back to any non-title
-  // heading, then to title-derived defaults.
+function deriveLearningTargets(headings, title, overrides) {
+  const authored = overrides && Array.isArray(overrides.learningTargets)
+    ? overrides.learningTargets
+    : [];
+  if (authored.length > 0) return authored.map(String);
   const titleLc = String(title).toLowerCase().trim();
   const level2 = headings.filter((h) => h.level >= 2).map((h) => h.text);
   const nonTitle = headings.filter((h) => h.text.toLowerCase().trim() !== titleLc).map((h) => h.text);
   const headingTargets = level2.length >= 2 ? level2 : nonTitle;
-  const learningTargets =
-    (overrides && Array.isArray(overrides.learningTargets) && overrides.learningTargets.length && overrides.learningTargets.map((t) => String(t))) ||
-    (headingTargets.length >= 2
-      ? headingTargets.slice(0, 4).map((h) => `Understand ${h}.`)
-      : [`Understand the key points of ${title}.`, `Explain why ${title} matters and when it applies.`]);
+  return headingTargets.length >= 2
+    ? headingTargets.slice(0, 4).map((h) => `Understand ${h}.`)
+    : [`Understand the key points of ${title}.`, `Explain why ${title} matters and when it applies.`];
+}
 
-  // Normalize FIRST, then check the normalized length: an authored quiz whose
-  // every item fails validation (e.g. <2 options) yields []; `[] || fallback`
-  // would keep the truthy empty array, shipping a zero-question quiz. Bind it so
-  // the deterministic fallback actually runs when nothing survives.
+function deriveQuizItems(overrides, summaryBullets, learningTargets, title) {
   const authoredQuiz =
-    overrides && Array.isArray(overrides.quiz) && overrides.quiz.length
+    overrides && Array.isArray(overrides.quiz) && overrides.quiz.length > 0
       ? normalizeAuthoredQuiz(overrides.quiz)
       : null;
-  const quizItems =
-    (authoredQuiz && authoredQuiz.length && authoredQuiz) ||
-    buildDeterministicQuiz(summaryBullets, learningTargets, title);
+  return authoredQuiz && authoredQuiz.length > 0
+    ? authoredQuiz
+    : buildDeterministicQuiz(summaryBullets, learningTargets, title);
+}
 
-  const narration =
-    // Require a NON-BLANK script — `typeof "" === "string"` is true, so a blank
-    // authored script would otherwise ship empty captions/transcript instead of
-    // falling back to the deterministic narration the way an absent key does.
-    (overrides && overrides.narration && typeof overrides.narration.script === 'string' &&
-      overrides.narration.script.trim() &&
-      normalizeAuthoredNarration(overrides.narration)) ||
-    buildNarration(title, learningTargets, summaryBullets);
+function deriveNarration(overrides, title, learningTargets, summaryBullets) {
+  const narration = overrides && overrides.narration;
+  const hasAuthoredScript =
+    narration &&
+    typeof narration.script === 'string' &&
+    Boolean(narration.script.trim());
+  return hasAuthoredScript
+    ? normalizeAuthoredNarration(narration)
+    : buildNarration(title, learningTargets, summaryBullets);
+}
 
+function deriveContent(markdown, title, overrides) {
+  const headings = extractHeadings(markdown);
+  const paragraphs = extractParagraphs(markdown);
+  const summaryBullets = deriveSummaryBullets(paragraphs, title, overrides);
+  const learningTargets = deriveLearningTargets(headings, title, overrides);
+  const quizItems = deriveQuizItems(overrides, summaryBullets, learningTargets, title);
+  const narration = deriveNarration(overrides, title, learningTargets, summaryBullets);
   return { learningTargets, summaryBullets, quizItems, narration };
 }
 
@@ -575,7 +591,7 @@ function buildDeterministicQuiz(summaryBullets, learningTargets, title) {
 function buildNarration(title, learningTargets, summaryBullets) {
   const parts = [];
   parts.push(`Welcome. In this short lesson, we'll walk through ${title}, and why it matters to you.`);
-  if (learningTargets.length) {
+  if (learningTargets.length > 0) {
     parts.push(`By the end, you should be able to: ${learningTargets.join(' ')}`);
   }
   parts.push('Here are the key points.');
@@ -610,13 +626,13 @@ function segmentScript(script) {
 function normalizeAuthoredNarration(narr) {
   const script = String(narr.script || '');
   const segments =
-    Array.isArray(narr.segments) && narr.segments.length ? narr.segments : segmentScript(script);
+    Array.isArray(narr.segments) && narr.segments.length > 0 ? narr.segments : segmentScript(script);
   return { ...narr, script, segments, transcript: narr.transcript || script };
 }
 
 // Unclamped narration length in seconds (may exceed the hyperframes video cap).
 function fullNarrationSeconds(narration) {
-  if (narration.segments && narration.segments.length) {
+  if (narration.segments && narration.segments.length > 0) {
     return narration.segments[narration.segments.length - 1].end;
   }
   const words = String(narration.script || '').split(/\s+/).filter(Boolean).length;
@@ -656,13 +672,13 @@ function vttTime(seconds) {
 
 function buildVtt(segments) {
   const lines = ['WEBVTT', ''];
-  segments.forEach((seg, i) => {
+  for (const [i, seg] of segments.entries()) {
     lines.push(String(i + 1));
     lines.push(`${vttTime(seg.start)} --> ${vttTime(seg.end)}`);
     // VTT is plain text; escape the cue payload's markup-significant chars.
     lines.push(escapeHtml(seg.text));
     lines.push('');
-  });
+  };
   return lines.join('\n');
 }
 
@@ -779,7 +795,7 @@ function renderSourceHtml(markdown) {
     .split(/\n{2,}/)
     .map((b) => b.replace(/\s+$/g, ''))
     .filter((b) => b.trim().length);
-  if (!blocks.length) return '<p>(No source content.)</p>';
+  if (blocks.length === 0) return '<p>(No source content.)</p>';
   return blocks
     .map((b) => `<p>${escapeHtml(b).replace(/\n/g, '<br>')}</p>`)
     .join('\n');
@@ -881,9 +897,8 @@ const PAGE_SCRIPT = `
  * Assemble the single self-contained WCAG 2.2 AA page. `media.video` /
  * `media.audio` are { url, note } or null (omitted → a noted omission).
  */
-function assemblePage(opts) {
-  const { title, subtitle, learningTargets, summaryBullets, quizItems, media, narration, vttDataUri, sourceMarkdown, omissions } = opts;
-
+function buildPageSections(opts) {
+  const { title, learningTargets, summaryBullets, quizItems, media, narration, vttDataUri, sourceMarkdown, omissions } = opts;
   const targetsHtml = section(
     'targets',
     'What you will be able to do',
@@ -947,9 +962,12 @@ function assemblePage(opts) {
       sourceMarkdown
     )}\n  </div>\n</details>`
   );
+  return [targetsHtml, videoSection, audioSection, quizSection, summarySection, sourceSection].join('\n');
+}
 
-  const sectionsHtml = [targetsHtml, videoSection, audioSection, quizSection, summarySection, sourceSection].join('\n');
-
+function assemblePage(opts) {
+  const { title, subtitle } = opts;
+  const sectionsHtml = buildPageSections(opts);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1101,7 +1119,9 @@ ${sectionsHtml}
 function isSafeMediaUrl(url, kind) {
   if (typeof url !== 'string') return false;
   if (/^https?:\/\//i.test(url)) return true;
-  return new RegExp(`^data:${kind}\\/`, 'i').test(url);
+  if (kind === 'audio') return /^data:audio\//i.test(url);
+  if (kind === 'video') return /^data:video\//i.test(url);
+  return false;
 }
 
 async function resolveAudio(args, narration, deps, dryRunPlaceholders) {
@@ -1156,59 +1176,78 @@ ${clips}
 </body></html>`;
 }
 
-async function resolveVideo(args, audioUrl, title, points, narration, deps, dryRunPlaceholders) {
-  const run = deps.runSkill || runSkill;
-  if (typeof args.video_url === 'string') {
-    if (!isSafeMediaUrl(args.video_url, 'video')) {
-      return { media: null, omission: 'supplied --video-url rejected (must be http(s):// or data:video/)' };
-    }
-    return { media: { url: args.video_url }, omission: null };
-  }
-  const shouldGenerate = !args.dry_run || args.generate_media;
-  if (!shouldGenerate) {
-    return dryRunPlaceholders
-      ? { media: { url: MP4_DATA_URI, note: 'Dry-run preview (2-second placeholder). The published page uses a generated explainer video.' }, omission: null }
-      : { media: null, omission: 'not generated (dry-run)' };
-  }
-  const duration = estimateNarrationSeconds(narration);
-  const composition = buildComposition(title, points, duration);
-  let sceneDir;
-  let scenePath;
+function suppliedVideoResult(args) {
+  if (typeof args.video_url !== 'string') return null;
+  return isSafeMediaUrl(args.video_url, 'video')
+    ? { media: { url: args.video_url }, omission: null }
+    : {
+        media: null,
+        omission: 'supplied --video-url rejected (must be http(s):// or data:video/)',
+      };
+}
+
+function dryRunVideoResult(args, dryRunPlaceholders) {
+  if (!args.dry_run || args.generate_media) return null;
+  return dryRunPlaceholders
+    ? {
+        media: {
+          url: MP4_DATA_URI,
+          note: 'Dry-run preview (2-second placeholder). The published page uses a generated explainer video.',
+        },
+        omission: null,
+      }
+    : { media: null, omission: 'not generated (dry-run)' };
+}
+
+function stageVideoComposition(composition) {
+  let directory;
   try {
-    sceneDir = makeScratchDir('lp-scene-');
-    scenePath = path.join(sceneDir, 'scene.html');
-    fs.writeFileSync(scenePath, composition);
+    directory = makeScratchDir('lp-scene-');
+    const scenePath = path.join(directory, 'scene.html');
+    validatedFs.writeFileSync(scenePath, composition);
+    return { directory, scenePath, error: null };
   } catch (err) {
-    if (sceneDir) {
-      try { fs.rmSync(sceneDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    if (directory) {
+      try {
+        fs.rmSync(directory, { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
     }
-    return { media: null, omission: `could not write composition: ${err.message}` };
+    return { directory: null, scenePath: null, error: err.message };
   }
-  let res;
+}
+
+function runVideoRender(run, args, scene, duration, audioUrl) {
+  const videoArgs = [
+    '--user', String(args.user),
+    '--file', scene.scenePath,
+    '--duration', String(duration),
+    '--fps', String(VIDEO_FPS),
+    '--width', '1280',
+    '--height', '720',
+  ];
+  const audioSupported =
+    audioUrl &&
+    (/^https:\/\//i.test(audioUrl) || /^data:audio\//i.test(audioUrl));
+  if (audioSupported) videoArgs.push('--audio-url', audioUrl);
   try {
-    const vArgs = ['--user', String(args.user), '--file', scenePath, '--duration', String(duration), '--fps', String(VIDEO_FPS), '--width', '1280', '--height', '720'];
-    // psd-hyperframes accepts https:// or data:audio/ for the muxed narration track.
-    if (audioUrl && (/^https:\/\//i.test(audioUrl) || /^data:audio\//i.test(audioUrl))) {
-      vArgs.push('--audio-url', audioUrl);
-    }
-    res = run({ skill: 'hyperframes', args: vArgs });
+    return run({ skill: 'hyperframes', args: videoArgs });
   } finally {
-    // Always clean up the staged composition dir, even if run() throws.
     try {
-      fs.rmSync(sceneDir, { recursive: true, force: true });
+      fs.rmSync(scene.directory, { recursive: true, force: true });
     } catch {
       /* best-effort cleanup */
     }
   }
+}
+
+function renderedVideoResult(res, narration) {
   const out = lastJson(res.stdout);
   if (res.code !== 0 || !out || !out.url) {
     return { media: null, omission: (out && out.error) || 'psd-hyperframes failed' };
   }
   const media = { url: out.url };
-  // The video runs the full narration up to the MAX_VIDEO_SECONDS (3 min) cap;
-  // only a narration longer than that is trimmed by hyperframes. Note it (via the
-  // existing hook) and point to the full audio + transcript so a trimmed video is
-  // not reported as if it carried the whole narration.
   if (fullNarrationSeconds(narration) > MAX_VIDEO_SECONDS) {
     const mins = Math.round(MAX_VIDEO_SECONDS / 60);
     media.note =
@@ -1216,6 +1255,33 @@ async function resolveVideo(args, audioUrl, title, points, narration, deps, dryR
       `continues in the audio player and transcript below.`;
   }
   return { media, omission: null };
+}
+
+async function resolveVideo({
+  args,
+  audioUrl,
+  title,
+  points,
+  narration,
+  deps,
+  dryRunPlaceholders,
+}) {
+  const run = deps.runSkill || runSkill;
+  const supplied = suppliedVideoResult(args);
+  if (supplied) return supplied;
+  const dryRun = dryRunVideoResult(args, dryRunPlaceholders);
+  if (dryRun) return dryRun;
+
+  const duration = estimateNarrationSeconds(narration);
+  const composition = buildComposition(title, points, duration);
+  const scene = stageVideoComposition(composition);
+  if (scene.error) {
+    return { media: null, omission: `could not write composition: ${scene.error}` };
+  }
+  return renderedVideoResult(
+    runVideoRender(run, args, scene, duration, audioUrl),
+    narration
+  );
 }
 
 // ── publish ────────────────────────────────────────────────────────────────────
@@ -1232,17 +1298,11 @@ function buildReaderUrl(created) {
   return null;
 }
 
-function publishToAtrium(html, title, deps) {
-  const run = deps.runSkill || runSkill;
-
-  // Pass the artifact code via a temp file, not a --code argv. A real board
-  // policy rendered with the full source inlined can exceed Linux's per-arg
-  // MAX_ARG_STRLEN (128 KB) and fail spawn with an opaque E2BIG. --code-file
-  // sidesteps the argv limit entirely.
+function createAtriumArtifact(run, html, title) {
   const codeDir = makeScratchDir('lp-artifact-');
   const codePath = path.join(codeDir, 'artifact.html');
   try {
-    fs.writeFileSync(codePath, html);
+    validatedFs.writeFileSync(codePath, html);
   } catch (err) {
     try { fs.rmSync(codeDir, { recursive: true, force: true }); } catch { /* best-effort */ }
     fail(`could not stage the artifact for publish: ${err.message}`, 'publish_failed', 2);
@@ -1265,7 +1325,6 @@ function publishToAtrium(html, title, deps) {
       /* best-effort cleanup */
     }
   }
-
   const created = lastJson(createRes.stdout);
   if (createRes.code !== 0 || !created || !created.id) {
     fail(
@@ -1274,11 +1333,10 @@ function publishToAtrium(html, title, deps) {
       2
     );
   }
-  // psd-atrium's own §26.4 signal: an unauthorized "internal" create is silently
-  // created PRIVATE with approvalRequired: true (exit 0, real id — see emitCreated
-  // in psd-atrium/run.js). Publishing on top of that would still leave the page
-  // private, invisible to the staff/student audience it's for. Surface this
-  // instead of reporting unconditional success.
+  return created;
+}
+
+function requireAtriumVisibility(created) {
   if (created.approvalRequired) {
     fail(
       `Atrium created artifact ${created.id}${created.slug ? ` (slug ${created.slug})` : ''} as ` +
@@ -1290,6 +1348,9 @@ function publishToAtrium(html, title, deps) {
       2
     );
   }
+}
+
+function publishAtriumArtifact(run, created) {
   const pubRes = run({
     skill: 'atrium',
     args: ['publish', '--id', String(created.id), '--destination', 'intranet'],
@@ -1309,29 +1370,41 @@ function publishToAtrium(html, title, deps) {
       2
     );
   }
-  return { artifact: created, publish: published, readerUrl: buildReaderUrl(created) };
+  return published;
+}
+
+function publishToAtrium(html, title, deps) {
+  const run = deps.runSkill || runSkill;
+  const created = createAtriumArtifact(run, html, title);
+  requireAtriumVisibility(created);
+  const published = publishAtriumArtifact(run, created);
+  return {
+    artifact: created,
+    publish: published,
+    readerUrl: buildReaderUrl(created),
+  };
 }
 
 // ── main ───────────────────────────────────────────────────────────────────────
 
-async function main(argv, deps = {}) {
-  const args = parseArgs(argv);
-  if (args.help) {
-    process.stdout.write(
-      [
-        'Usage: node run.js --user <email> --title "<t>" <source> [media] [--dry-run --out <path>]',
-        '  source:  --source-file <md> | --text <s> | stdin',
-        '           | --pdf-url|--pdf-s3-key|--pdf-path <pdf>',
-        '           | --gdoc-url|--gdoc-id <google-doc>',
-        '  media:   --video-url <mp4> --audio-url <mp3> (else generated via psd-tts/psd-hyperframes)',
-        '  content: --content-json <path> (agent-authored learning targets/summary/quiz/narration)',
-        '  --dry-run --out <path>  assemble locally (no Atrium); embeds tiny placeholder media',
-        '  --generate-media        force real media generation even in --dry-run',
-      ].join('\n') + '\n'
-    );
-    return;
-  }
+function printHelp(args) {
+  if (!args.help) return false;
+  process.stdout.write(
+    [
+      'Usage: node run.js --user <email> --title "<t>" <source> [media] [--dry-run --out <path>]',
+      '  source:  --source-file <md> | --text <s> | stdin',
+      '           | --pdf-url|--pdf-s3-key|--pdf-path <pdf>',
+      '           | --gdoc-url|--gdoc-id <google-doc>',
+      '  media:   --video-url <mp4> --audio-url <mp3> (else generated via psd-tts/psd-hyperframes)',
+      '  content: --content-json <path> (agent-authored learning targets/summary/quiz/narration)',
+      '  --dry-run --out <path>  assemble locally (no Atrium); embeds tiny placeholder media',
+      '  --generate-media        force real media generation even in --dry-run',
+    ].join('\n') + '\n'
+  );
+  return true;
+}
 
+function validateMainArgs(args) {
   if (!validateEmail(args.user)) {
     fail('--user <caller-email> is required and must be a valid email', 'bad_args');
   }
@@ -1342,60 +1415,44 @@ async function main(argv, deps = {}) {
   if (args.dry_run && typeof args.out !== 'string') {
     fail('--dry-run requires --out <path> to write the assembled HTML', 'bad_args');
   }
+  return title;
+}
 
-  const auditHtml = deps.auditHtml || loadAuditHtml();
-
-  // Optional agent-authored content overrides.
-  let overrides = null;
-  if (typeof args.content_json === 'string') {
-    try {
-      overrides = JSON.parse(fs.readFileSync(args.content_json, 'utf8'));
-    } catch (err) {
-      fail(`--content-json not readable/parseable: ${err.message}`, 'bad_args');
-    }
+function readContentOverrides(args) {
+  if (typeof args.content_json !== 'string') return null;
+  try {
+    return JSON.parse(validatedFs.readFileSync(args.content_json, 'utf8'));
+  } catch (err) {
+    fail(`--content-json not readable/parseable: ${err.message}`, 'bad_args');
+    return null;
   }
+}
 
-  // 1. Ingest → markdown. Normalize CRLF once so every downstream consumer
-  // (heading/paragraph extraction, block splitting, full-source render) sees LF.
+async function generateLearningPage(args, title, overrides, deps) {
   const ingested = await ingestSource(args, deps);
   const markdown = String(ingested.markdown || '').replace(/\r\n?/g, '\n');
   const sourceLabel = ingested.sourceLabel;
-
-  // 2. Derive (or accept) the pedagogy content.
   const content = deriveContent(markdown, title, overrides);
-
-  // 3+4. Resolve media. Bare --dry-run (no URLs, no --generate-media) uses tiny
-  // self-contained placeholders so all five modalities are present offline.
   const dryRunPlaceholders = Boolean(args.dry_run) && !args.generate_media;
   const audioRes = await resolveAudio(args, content.narration, deps, dryRunPlaceholders);
-  const videoRes = await resolveVideo(
+  const videoRes = await resolveVideo({
     args,
-    audioRes.media && audioRes.media.url,
+    audioUrl: audioRes.media && audioRes.media.url,
     title,
-    content.summaryBullets,
-    content.narration,
+    points: content.summaryBullets,
+    narration: content.narration,
     deps,
-    dryRunPlaceholders
-  );
-
+    dryRunPlaceholders,
+  });
   const omissions = {
     audio: audioRes.omission,
     video: videoRes.omission,
   };
-
-  // 5. Captions from the narration script (present whenever we have narration).
-  // Only cap the cues to the 60s clamp when the video is HYPERFRAMES-GENERATED
-  // (its muxed narration is trimmed to fit MAX_VIDEO_SECONDS). A caller-supplied
-  // --video-url has an unknown, possibly-longer duration and its own audio track,
-  // so capping the captions there would silently drop them past 60s. Use the full
-  // (uncapped) segments for a supplied video.
   const captionMaxSeconds =
     typeof args.video_url === 'string' ? Infinity : estimateNarrationSeconds(content.narration);
   const vttDataUri = toVttDataUri(
     buildVtt(capSegments(content.narration.segments || [], captionMaxSeconds))
   );
-
-  // 6. Assemble the self-contained page.
   const html = assemblePage({
     title,
     subtitle: `From ${sourceLabel}. Watch, listen, read, and check your understanding.`,
@@ -1408,10 +1465,10 @@ async function main(argv, deps = {}) {
     sourceMarkdown: markdown,
     omissions,
   });
+  return { html, markdown, content, audioRes, videoRes, omissions };
+}
 
-  // 7. HARD GATE — the SAME shared WCAG 2.2 AA axe gate deliver.js runs. The page
-  // is never written/published if it has critical/serious violations.
-  const report = await auditHtml(html);
+function requireAccessiblePage(report) {
   if (!report.pass) {
     process.stderr.write(
       `Error: assembled page failed the WCAG 2.2 AA gate: ${report.blocking
@@ -1421,34 +1478,35 @@ async function main(argv, deps = {}) {
     process.stdout.write(JSON.stringify({ error: 'a11y_violations', message: 'assembled learning page has critical/serious accessibility violations', ...report }, null, 2) + '\n');
     process.exit(3);
   }
+}
 
-  const modalities = {
-    video: Boolean(videoRes.media),
-    audio: Boolean(audioRes.media),
-    quiz: content.quizItems.length,
-    summary: content.summaryBullets.length,
-    learningTargets: content.learningTargets.length,
-    // Trim-check: a whitespace-only source renders the "(No source content.)"
-    // placeholder, so it must not be reported as a present full-source modality.
-    fullSource: markdown.trim().length > 0,
+function learningModalities(page) {
+  return {
+    video: Boolean(page.videoRes.media),
+    audio: Boolean(page.audioRes.media),
+    quiz: page.content.quizItems.length,
+    summary: page.content.summaryBullets.length,
+    learningTargets: page.content.learningTargets.length,
+    fullSource: page.markdown.trim().length > 0,
   };
+}
 
-  // 8. Dry-run: write locally. Otherwise publish to Atrium.
+function deliverLearningPage(args, title, page, report, deps) {
+  const modalities = learningModalities(page);
   if (args.dry_run) {
-    fs.writeFileSync(args.out, html);
+    validatedFs.writeFileSync(args.out, page.html);
     emit({
       status: 'ok',
       mode: 'dry-run',
       outPath: args.out,
-      bytes: Buffer.byteLength(html),
+      bytes: Buffer.byteLength(page.html),
       modalities,
-      omissions,
+      omissions: page.omissions,
       a11y: { pass: true, standard: report.standard, counts: report.counts },
     });
     return;
   }
-
-  const { artifact, publish, readerUrl } = publishToAtrium(html, title, deps);
+  const { artifact, publish, readerUrl } = publishToAtrium(page.html, title, deps);
   emit({
     status: 'ok',
     mode: 'published',
@@ -1456,9 +1514,21 @@ async function main(argv, deps = {}) {
     publish,
     readerUrl,
     modalities,
-    omissions,
+    omissions: page.omissions,
     a11y: { pass: true, standard: report.standard, counts: report.counts },
   });
+}
+
+async function main(argv, deps = {}) {
+  const args = parseArgs(argv);
+  if (printHelp(args)) return;
+  const title = validateMainArgs(args);
+  const auditHtml = deps.auditHtml || loadAuditHtml();
+  const overrides = readContentOverrides(args);
+  const page = await generateLearningPage(args, title, overrides, deps);
+  const report = await auditHtml(page.html);
+  requireAccessiblePage(report);
+  deliverLearningPage(args, title, page, report, deps);
 }
 
 if (require.main === module) {

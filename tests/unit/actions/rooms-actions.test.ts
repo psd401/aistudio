@@ -52,36 +52,38 @@ import {
 
 const roomId = "b56adf63-75c2-4d92-9f6f-d6d69c90a2fb";
 
-describe("room actions — server authorization", () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    mockGetServerSession.mockResolvedValue({
-      sub: "teacher-sub",
-      email: "teacher@example.com",
-    });
-    mockResolveUserId.mockResolvedValue(7);
-    mockHasCapabilityAccess.mockResolvedValue(true);
-    mockGetRoomActor.mockResolvedValue({
-      email: "teacher@example.com",
-      isAdministrator: false,
-    });
-    mockListTeacherSections.mockResolvedValue([
-      {
-        sourcedId: "owned-section",
-        title: "Owned",
-        classCode: null,
-        schoolName: null,
-        studentCount: 1,
-      },
-    ]);
-    mockAccessibleApprovedAssistantIds.mockResolvedValue(new Set<number>());
-    mockAccessibleActiveRosterStudentEmails.mockResolvedValue(
-      new Set(["student@example.com"])
-    );
-    mockListRoomsForManagement.mockResolvedValue([]);
-    mockCreateManagedRoom.mockResolvedValue(roomId);
-    mockUpdateManagedRoom.mockResolvedValue(undefined);
+function resetRoomActionMocks(): void {
+  jest.clearAllMocks();
+  mockGetServerSession.mockResolvedValue({
+    sub: "teacher-sub",
+    email: "teacher@example.com",
   });
+  mockResolveUserId.mockResolvedValue(7);
+  mockHasCapabilityAccess.mockResolvedValue(true);
+  mockGetRoomActor.mockResolvedValue({
+    email: "teacher@example.com",
+    isAdministrator: false,
+  });
+  mockListTeacherSections.mockResolvedValue([
+    {
+      sourcedId: "owned-section",
+      title: "Owned",
+      classCode: null,
+      schoolName: null,
+      studentCount: 1,
+    },
+  ]);
+  mockAccessibleApprovedAssistantIds.mockResolvedValue(new Set<number>());
+  mockAccessibleActiveRosterStudentEmails.mockResolvedValue(
+    new Set(["student@example.com"])
+  );
+  mockListRoomsForManagement.mockResolvedValue([]);
+  mockCreateManagedRoom.mockResolvedValue(roomId);
+  mockUpdateManagedRoom.mockResolvedValue(undefined);
+}
+
+describe("room actions — server authorization", () => {
+  beforeEach(resetRoomActionMocks);
 
   it("rejects a section that is not the signed-in teacher's own", async () => {
     const result = await createRoomAction({

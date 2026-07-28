@@ -30,18 +30,39 @@ interface CacheEntry {
 const cache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 5 * 60_000;
 
-/**
- * Heading patterns the user can use to mark the section. Match any of
- * these (case-insensitive) — we want to be tolerant of slight wording
- * differences across users.
- */
-const SECTION_HEADERS = [
-  /^#{1,4}\s*email\s*triage\s*→\s*(?:life\s*os\s*)?task\s*creation/i,
-  /^#{1,4}\s*email\s*triage\s*->.*task\s*creation/i,
-  /^#{1,4}\s*email\s*triage\s+task\s+creation/i,
-  /^#{1,4}\s*psd-email-triage\s+task\s+request/i,
-  /^#{1,4}\s*task\s+creation\s+from\s+email/i,
-];
+interface MarkdownHeading {
+  depth: number;
+  title: string;
+}
+
+function parseMarkdownHeading(line: string): MarkdownHeading | null {
+  let depth = 0;
+  while (line[depth] === "#") depth += 1;
+  if (depth === 0 || depth > 4) return null;
+  return {
+    depth,
+    title: line.slice(depth).trim(),
+  };
+}
+
+function isTaskInstructionsHeading(title: string): boolean {
+  const normalized = title
+    .toLowerCase()
+    .replace("→", "->")
+    .split(/\s+/)
+    .join(" ");
+  if (
+    normalized === "email triage task creation" ||
+    normalized === "psd-email-triage task request" ||
+    normalized === "task creation from email"
+  ) {
+    return true;
+  }
+
+  if (!normalized.startsWith("email triage ->")) return false;
+  const target = normalized.slice("email triage ->".length).trim();
+  return target.length <= 160 && target.endsWith("task creation");
+}
 
 /**
  * Fetch the user's MEMORY.md and return the "Email Triage" section's
@@ -94,23 +115,20 @@ export function extractSection(markdown: string): string | null {
   const lines = markdown.split(/\r?\n/);
   let startIdx = -1;
   let startDepth = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    for (const pat of SECTION_HEADERS) {
-      if (pat.test(line)) {
-        startIdx = i + 1;
-        startDepth = (line.match(/^#+/) ?? [""])[0].length;
-        break;
-      }
+  for (const [i, line] of lines.entries()) {
+    const heading = parseMarkdownHeading(line);
+    if (heading && isTaskInstructionsHeading(heading.title)) {
+      startIdx = i + 1;
+      startDepth = heading.depth;
+      break;
     }
-    if (startIdx >= 0) break;
   }
   if (startIdx < 0) return null;
 
   let endIdx = lines.length;
   for (let i = startIdx; i < lines.length; i++) {
-    const m = lines[i].match(/^(#+)\s/);
-    if (m && m[1].length <= startDepth) {
+    const heading = parseMarkdownHeading(lines[i]);
+    if (heading && heading.depth <= startDepth) {
       endIdx = i;
       break;
     }

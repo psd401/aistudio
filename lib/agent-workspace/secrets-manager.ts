@@ -7,15 +7,15 @@
  * Part of Epic #912 — Agent-Owned Google Workspace Integration
  */
 
-import { createLogger } from "@/lib/logger"
-import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
+import { createLogger } from "@/lib/logger";
+import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation";
 
-const log = createLogger({ module: "agent-workspace-secrets" })
+const log = createLogger({ module: "agent-workspace-secrets" });
 
 export interface WorkspaceTokenData {
-  refresh_token: string
-  granted_scopes: string[]
-  obtained_at: string
+  refresh_token: string;
+  granted_scopes: string[];
+  obtained_at: string;
 }
 
 /**
@@ -29,18 +29,21 @@ export interface WorkspaceTokenData {
  * The 'user_account' path is suffixed (-user) so revocation tools that
  * iterate by prefix can clearly distinguish the two slots.
  */
-export type WorkspaceTokenKind = "agent_account" | "user_account"
+export type WorkspaceTokenKind = "agent_account" | "user_account";
 
 export function workspaceSecretId(
   ownerEmail: string,
-  kind: WorkspaceTokenKind = "agent_account"
+  kind: WorkspaceTokenKind = "agent_account",
 ): string {
   if (!SAFE_EMAIL_RE.test(ownerEmail)) {
-    throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)
+    throw new Error(
+      `Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`,
+    );
   }
-  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
-  const suffix = kind === "user_account" ? "-user" : ""
-  return `psd-agent-creds/${environment}/user/${ownerEmail}/google-workspace${suffix}`
+  const environment =
+    process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev";
+  const suffix = kind === "user_account" ? "-user" : "";
+  return `psd-agent-creds/${environment}/user/${ownerEmail}/google-workspace${suffix}`;
 }
 
 /**
@@ -51,10 +54,10 @@ export function workspaceSecretId(
  * (no new IAM). Record shape below.
  */
 export interface PlaudTokenData {
-  refresh_token: string
-  client_id: string
-  scope?: string
-  obtained_at: string
+  refresh_token: string;
+  client_id: string;
+  scope?: string;
+  obtained_at: string;
 }
 
 /**
@@ -62,28 +65,40 @@ export interface PlaudTokenData {
  * Plaud OAuth client_id after Dynamic Client Registration (no manual step). The
  * secret is created empty by CDK; this fills it. No-op in local dev.
  */
-export async function putSecretString(secretId: string, value: string): Promise<void> {
+export async function putSecretString(
+  secretId: string,
+  value: string,
+): Promise<void> {
   if (process.env.NODE_ENV === "development") {
     // Cache in-memory so repeated local requests (e.g. re-registering the Plaud
     // OAuth client) reuse the same value instead of hitting the network again —
     // AWS writes stay disabled.
-    _secretCache.set(secretId, { value, cachedAt: Date.now() })
-    log.info("Local dev mode — caching secret value in memory, not writing to AWS", { secretId })
-    return
+    _secretCache.set(secretId, { value, cachedAt: Date.now() });
+    log.info(
+      "Local dev mode — caching secret value in memory, not writing to AWS",
+      { secretId },
+    );
+    return;
   }
-  const { PutSecretValueCommand } = await import("@aws-sdk/client-secrets-manager")
-  const client = await getSecretsManagerClient()
-  await client.send(new PutSecretValueCommand({ SecretId: secretId, SecretString: value }))
-  _secretCache.delete(secretId)
-  log.info("Secret value written", { secretId })
+  const { PutSecretValueCommand } =
+    await import("@aws-sdk/client-secrets-manager");
+  const client = await getSecretsManagerClient();
+  await client.send(
+    new PutSecretValueCommand({ SecretId: secretId, SecretString: value }),
+  );
+  _secretCache.delete(secretId);
+  log.info("Secret value written", { secretId });
 }
 
 export function plaudSecretId(ownerEmail: string): string {
   if (!SAFE_EMAIL_RE.test(ownerEmail)) {
-    throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)
+    throw new Error(
+      `Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`,
+    );
   }
-  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
-  return `psd-agent-creds/${environment}/user/${ownerEmail}/plaud`
+  const environment =
+    process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev";
+  return `psd-agent-creds/${environment}/user/${ownerEmail}/plaud`;
 }
 
 /**
@@ -92,28 +107,31 @@ export function plaudSecretId(ownerEmail: string): string {
  */
 export async function storePlaudRefreshToken(
   ownerEmail: string,
-  tokenData: PlaudTokenData
+  tokenData: PlaudTokenData,
 ): Promise<string | null> {
-  const secretId = plaudSecretId(ownerEmail)
-  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+  const secretId = plaudSecretId(ownerEmail);
+  const environment =
+    process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev";
   if (process.env.NODE_ENV === "development") {
-    log.info("Local dev mode — skipping Plaud secret write", { secretId })
-    return null
+    log.info("Local dev mode — skipping Plaud secret write", { secretId });
+    return null;
   }
   const {
     PutSecretValueCommand,
     CreateSecretCommand,
-    DescribeSecretCommand,
     ResourceNotFoundException,
-  } = await import("@aws-sdk/client-secrets-manager")
-  const client = await getSecretsManagerClient()
-  const secretString = JSON.stringify(tokenData)
+  } = await import("@aws-sdk/client-secrets-manager");
+  const client = await getSecretsManagerClient();
+  const secretString = JSON.stringify(tokenData);
   try {
     const putResp = await client.send(
-      new PutSecretValueCommand({ SecretId: secretId, SecretString: secretString })
-    )
-    log.info("Plaud refresh token stored", { secretId })
-    return putResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+      new PutSecretValueCommand({
+        SecretId: secretId,
+        SecretString: secretString,
+      }),
+    );
+    log.info("Plaud refresh token stored", { secretId });
+    return putResp.ARN ?? (await describeArn(secretId));
   } catch (error) {
     if (error instanceof ResourceNotFoundException) {
       try {
@@ -127,21 +145,27 @@ export async function storePlaudRefreshToken(
               { Key: "ManagedBy", Value: "aistudio" },
               { Key: "OwnerEmail", Value: ownerEmail },
             ],
-          })
-        )
-        log.info("Plaud refresh token secret created", { secretId })
-        return createResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+          }),
+        );
+        log.info("Plaud refresh token secret created", { secretId });
+        return createResp.ARN ?? (await describeArn(secretId));
       } catch (createError) {
-        if (createError instanceof Error && createError.name === "ResourceExistsException") {
+        if (
+          createError instanceof Error &&
+          createError.name === "ResourceExistsException"
+        ) {
           const putResp = await client.send(
-            new PutSecretValueCommand({ SecretId: secretId, SecretString: secretString })
-          )
-          return putResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+            new PutSecretValueCommand({
+              SecretId: secretId,
+              SecretString: secretString,
+            }),
+          );
+          return putResp.ARN ?? (await describeArn(secretId));
         }
-        throw createError
+        throw createError;
       }
     }
-    throw error
+    throw error;
   }
 }
 
@@ -158,58 +182,62 @@ export async function storePlaudRefreshToken(
  * exchange) plus the granted scope and mint time.
  */
 export interface CanvaTokenData {
-  refresh_token: string
-  scope?: string
-  obtained_at: string
+  refresh_token: string;
+  scope?: string;
+  obtained_at: string;
 }
 
 export interface AistudioOAuthTokenData {
-  access_token: string
-  refresh_token: string
-  token_type: "Bearer"
-  scope: string
-  expires_at: string
-  obtained_at: string
+  access_token: string;
+  refresh_token: string;
+  token_type: "Bearer";
+  scope: string;
+  expires_at: string;
+  obtained_at: string;
 }
 
 export function aistudioOAuthSecretId(ownerEmail: string): string {
   if (!SAFE_EMAIL_RE.test(ownerEmail)) {
-    throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)
+    throw new Error(
+      `Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`,
+    );
   }
   const environment =
-    process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
-  return `psd-agent-creds/${environment}/user/${ownerEmail}/aistudio_oauth`
+    process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev";
+  return `psd-agent-creds/${environment}/user/${ownerEmail}/aistudio_oauth`;
 }
 
 export async function storeAistudioOAuthTokens(
   ownerEmail: string,
-  tokenData: AistudioOAuthTokenData
+  tokenData: AistudioOAuthTokenData,
 ): Promise<string | null> {
-  const secretId = aistudioOAuthSecretId(ownerEmail)
+  const secretId = aistudioOAuthSecretId(ownerEmail);
   const environment =
-    process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+    process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev";
   if (process.env.NODE_ENV === "development") {
     log.info("Local dev mode — skipping AI Studio OAuth secret write", {
       secretId,
-    })
-    return null
+    });
+    return null;
   }
   const {
     PutSecretValueCommand,
     CreateSecretCommand,
-    DescribeSecretCommand,
     ResourceNotFoundException,
-  } = await import("@aws-sdk/client-secrets-manager")
-  const client = await getSecretsManagerClient()
-  const secretString = JSON.stringify(tokenData)
+  } = await import("@aws-sdk/client-secrets-manager");
+  const client = await getSecretsManagerClient();
+  const secretString = JSON.stringify(tokenData);
   try {
     const response = await client.send(
-      new PutSecretValueCommand({ SecretId: secretId, SecretString: secretString })
-    )
-    _secretCache.delete(secretId)
-    return response.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+      new PutSecretValueCommand({
+        SecretId: secretId,
+        SecretString: secretString,
+      }),
+    );
+    _secretCache.delete(secretId);
+    return response.ARN ?? (await describeArn(secretId));
   } catch (error) {
-    if (!(error instanceof ResourceNotFoundException)) throw error
+    if (!(error instanceof ResourceNotFoundException)) throw error;
     try {
       const response = await client.send(
         new CreateSecretCommand({
@@ -221,10 +249,10 @@ export async function storeAistudioOAuthTokens(
             { Key: "ManagedBy", Value: "aistudio" },
             { Key: "OwnerEmail", Value: ownerEmail },
           ],
-        })
-      )
-      _secretCache.delete(secretId)
-      return response.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+        }),
+      );
+      _secretCache.delete(secretId);
+      return response.ARN ?? (await describeArn(secretId));
     } catch (createError) {
       if (
         createError instanceof Error &&
@@ -234,52 +262,54 @@ export async function storeAistudioOAuthTokens(
           new PutSecretValueCommand({
             SecretId: secretId,
             SecretString: secretString,
-          })
-        )
-        _secretCache.delete(secretId)
-        return response.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+          }),
+        );
+        _secretCache.delete(secretId);
+        return response.ARN ?? (await describeArn(secretId));
       }
-      throw createError
+      throw createError;
     }
   }
 }
 
 export async function deleteAistudioOAuthSecret(
-  ownerEmail: string
+  ownerEmail: string,
 ): Promise<boolean> {
-  const secretId = aistudioOAuthSecretId(ownerEmail)
+  const secretId = aistudioOAuthSecretId(ownerEmail);
   if (process.env.NODE_ENV === "development") {
-    _secretCache.delete(secretId)
-    return false
+    _secretCache.delete(secretId);
+    return false;
   }
-  const { DeleteSecretCommand, ResourceNotFoundException } = await import(
-    "@aws-sdk/client-secrets-manager"
-  )
-  const client = await getSecretsManagerClient()
+  const { DeleteSecretCommand, ResourceNotFoundException } =
+    await import("@aws-sdk/client-secrets-manager");
+  const client = await getSecretsManagerClient();
   try {
     await client.send(
       new DeleteSecretCommand({
         SecretId: secretId,
         ForceDeleteWithoutRecovery: true,
-      })
-    )
-    _secretCache.delete(secretId)
-    return true
+      }),
+    );
+    _secretCache.delete(secretId);
+    return true;
   } catch (error) {
     if (error instanceof ResourceNotFoundException) {
-      _secretCache.delete(secretId)
-      return false
+      _secretCache.delete(secretId);
+      return false;
     }
-    throw error
+    throw error;
   }
 }
 
 export function canvaSecretId(ownerEmail: string): string {
   if (!SAFE_EMAIL_RE.test(ownerEmail)) {
-    throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)
+    throw new Error(
+      `Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`,
+    );
   }
-  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
-  return `psd-agent-creds/${environment}/user/${ownerEmail}/canva`
+  const environment =
+    process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev";
+  return `psd-agent-creds/${environment}/user/${ownerEmail}/canva`;
 }
 
 /**
@@ -291,28 +321,31 @@ export function canvaSecretId(ownerEmail: string): string {
  */
 export async function storeCanvaRefreshToken(
   ownerEmail: string,
-  tokenData: CanvaTokenData
+  tokenData: CanvaTokenData,
 ): Promise<string | null> {
-  const secretId = canvaSecretId(ownerEmail)
-  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+  const secretId = canvaSecretId(ownerEmail);
+  const environment =
+    process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev";
   if (process.env.NODE_ENV === "development") {
-    log.info("Local dev mode — skipping Canva secret write", { secretId })
-    return null
+    log.info("Local dev mode — skipping Canva secret write", { secretId });
+    return null;
   }
   const {
     PutSecretValueCommand,
     CreateSecretCommand,
-    DescribeSecretCommand,
     ResourceNotFoundException,
-  } = await import("@aws-sdk/client-secrets-manager")
-  const client = await getSecretsManagerClient()
-  const secretString = JSON.stringify(tokenData)
+  } = await import("@aws-sdk/client-secrets-manager");
+  const client = await getSecretsManagerClient();
+  const secretString = JSON.stringify(tokenData);
   try {
     const putResp = await client.send(
-      new PutSecretValueCommand({ SecretId: secretId, SecretString: secretString })
-    )
-    log.info("Canva refresh token stored", { secretId })
-    return putResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+      new PutSecretValueCommand({
+        SecretId: secretId,
+        SecretString: secretString,
+      }),
+    );
+    log.info("Canva refresh token stored", { secretId });
+    return putResp.ARN ?? (await describeArn(secretId));
   } catch (error) {
     if (error instanceof ResourceNotFoundException) {
       try {
@@ -326,21 +359,27 @@ export async function storeCanvaRefreshToken(
               { Key: "ManagedBy", Value: "aistudio" },
               { Key: "OwnerEmail", Value: ownerEmail },
             ],
-          })
-        )
-        log.info("Canva refresh token secret created", { secretId })
-        return createResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+          }),
+        );
+        log.info("Canva refresh token secret created", { secretId });
+        return createResp.ARN ?? (await describeArn(secretId));
       } catch (createError) {
-        if (createError instanceof Error && createError.name === "ResourceExistsException") {
+        if (
+          createError instanceof Error &&
+          createError.name === "ResourceExistsException"
+        ) {
           const putResp = await client.send(
-            new PutSecretValueCommand({ SecretId: secretId, SecretString: secretString })
-          )
-          return putResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+            new PutSecretValueCommand({
+              SecretId: secretId,
+              SecretString: secretString,
+            }),
+          );
+          return putResp.ARN ?? (await describeArn(secretId));
         }
-        throw createError
+        throw createError;
       }
     }
-    throw error
+    throw error;
   }
 }
 
@@ -352,54 +391,56 @@ export async function storeCanvaRefreshToken(
  * No-op in local dev.
  */
 export async function deleteCanvaSecret(ownerEmail: string): Promise<boolean> {
-  const secretId = canvaSecretId(ownerEmail)
+  const secretId = canvaSecretId(ownerEmail);
 
   if (process.env.NODE_ENV === "development") {
-    return false
+    return false;
   }
 
-  const { DeleteSecretCommand, ResourceNotFoundException } = await import(
-    "@aws-sdk/client-secrets-manager"
-  )
-  const client = await getSecretsManagerClient()
+  const { DeleteSecretCommand, ResourceNotFoundException } =
+    await import("@aws-sdk/client-secrets-manager");
+  const client = await getSecretsManagerClient();
 
   try {
     await client.send(
       new DeleteSecretCommand({
         SecretId: secretId,
         ForceDeleteWithoutRecovery: true,
-      })
-    )
-    log.info("Canva refresh token secret deleted", { secretId })
-    return true
+      }),
+    );
+    log.info("Canva refresh token secret deleted", { secretId });
+    return true;
   } catch (err) {
     if (err instanceof ResourceNotFoundException) {
-      return false
+      return false;
     }
     log.error("Failed to delete Canva refresh token secret", {
       secretId,
       error: err instanceof Error ? err.message : String(err),
-    })
-    throw err
+    });
+    throw err;
   }
 }
 
 // Module-scoped client — reuses the HTTP connection pool across calls.
 // Lazily initialized on first non-dev invocation.
-let _smClient: InstanceType<typeof import("@aws-sdk/client-secrets-manager").SecretsManagerClient> | null = null
+let _smClient: InstanceType<
+  typeof import("@aws-sdk/client-secrets-manager").SecretsManagerClient
+> | null = null;
 
 async function getSecretsManagerClient() {
-  if (_smClient) return _smClient
-  const { SecretsManagerClient } = await import("@aws-sdk/client-secrets-manager")
-  _smClient = new SecretsManagerClient({})
-  return _smClient
+  if (_smClient) return _smClient;
+  const { SecretsManagerClient } =
+    await import("@aws-sdk/client-secrets-manager");
+  _smClient = new SecretsManagerClient({});
+  return _smClient;
 }
 
 // Runtime cache for low-traffic secrets fetched at request time.
 // Keyed by secretId, value = { json, cachedAt }. TTL short enough that a
 // real rotation surfaces within a few minutes without hammering SM.
-const _secretCache = new Map<string, { value: string; cachedAt: number }>()
-const SECRET_TTL_MS = 5 * 60 * 1000
+const _secretCache = new Map<string, { value: string; cachedAt: number }>();
+const SECRET_TTL_MS = 5 * 60 * 1000;
 
 /**
  * Fetch a secret string at request time. Caches for 5 minutes.
@@ -409,31 +450,34 @@ const SECRET_TTL_MS = 5 * 60 * 1000
  * Returns null if the secret does not exist or is empty. Caller is
  * responsible for surfacing a user-friendly "not configured" message.
  */
-export async function getSecretString(secretId: string): Promise<string | null> {
-  const cached = _secretCache.get(secretId)
+export async function getSecretString(
+  secretId: string,
+): Promise<string | null> {
+  const cached = _secretCache.get(secretId);
   if (cached && Date.now() - cached.cachedAt < SECRET_TTL_MS) {
-    return cached.value
+    return cached.value;
   }
 
-  const { GetSecretValueCommand, ResourceNotFoundException } = await import(
-    "@aws-sdk/client-secrets-manager"
-  )
-  const client = await getSecretsManagerClient()
+  const { GetSecretValueCommand, ResourceNotFoundException } =
+    await import("@aws-sdk/client-secrets-manager");
+  const client = await getSecretsManagerClient();
 
   try {
-    const resp = await client.send(new GetSecretValueCommand({ SecretId: secretId }))
-    const value = resp.SecretString ?? null
+    const resp = await client.send(
+      new GetSecretValueCommand({ SecretId: secretId }),
+    );
+    const value = resp.SecretString ?? null;
     if (value) {
-      _secretCache.set(secretId, { value, cachedAt: Date.now() })
+      _secretCache.set(secretId, { value, cachedAt: Date.now() });
     }
-    return value
+    return value;
   } catch (err) {
-    if (err instanceof ResourceNotFoundException) return null
+    if (err instanceof ResourceNotFoundException) return null;
     log.error("Failed to read secret", {
       secretId,
       error: err instanceof Error ? err.message : String(err),
-    })
-    throw err
+    });
+    throw err;
   }
 }
 
@@ -442,15 +486,85 @@ export async function getSecretString(secretId: string): Promise<string | null> 
  * unparseable. Cached via getSecretString.
  */
 export async function getSecretJson<T = Record<string, unknown>>(
-  secretId: string
+  secretId: string,
 ): Promise<T | null> {
-  const raw = await getSecretString(secretId)
-  if (!raw) return null
+  const raw = await getSecretString(secretId);
+  if (!raw) return null;
   try {
-    return JSON.parse(raw) as T
+    return JSON.parse(raw) as T;
   } catch {
-    log.warn("Secret is not valid JSON — treating as unconfigured", { secretId })
-    return null
+    log.warn("Secret is not valid JSON — treating as unconfigured", {
+      secretId,
+    });
+    return null;
+  }
+}
+
+function workspaceSecretDescription(
+  ownerEmail: string,
+  kind: WorkspaceTokenKind,
+): string {
+  return kind === "user_account"
+    ? `Google Workspace refresh token (user account) for ${ownerEmail}`
+    : `Google Workspace refresh token (agent account) for agent of ${ownerEmail}`;
+}
+
+async function putRefreshTokenSecret(
+  secretId: string,
+  secretString: string,
+  message = "Refresh token stored in Secrets Manager",
+): Promise<string | null> {
+  const { PutSecretValueCommand } =
+    await import("@aws-sdk/client-secrets-manager");
+  const client = await getSecretsManagerClient();
+  const response = await client.send(
+    new PutSecretValueCommand({
+      SecretId: secretId,
+      SecretString: secretString,
+    }),
+  );
+  log.info(message, { secretId });
+  return response.ARN ?? (await describeArn(secretId));
+}
+
+async function createRefreshTokenSecret(
+  secretId: string,
+  secretString: string,
+  ownerEmail: string,
+  kind: WorkspaceTokenKind,
+  environment: string,
+): Promise<string | null> {
+  const { CreateSecretCommand } =
+    await import("@aws-sdk/client-secrets-manager");
+  const client = await getSecretsManagerClient();
+  try {
+    const response = await client.send(
+      new CreateSecretCommand({
+        Name: secretId,
+        SecretString: secretString,
+        Description: workspaceSecretDescription(ownerEmail, kind),
+        Tags: [
+          { Key: "Environment", Value: environment },
+          { Key: "ManagedBy", Value: "aistudio" },
+          { Key: "OwnerEmail", Value: ownerEmail },
+        ],
+      }),
+    );
+    log.info("Refresh token secret created in Secrets Manager", { secretId });
+    return response.ARN ?? (await describeArn(secretId));
+  } catch (error) {
+    if (error instanceof Error && error.name === "ResourceExistsException") {
+      return putRefreshTokenSecret(
+        secretId,
+        secretString,
+        "Refresh token stored after concurrent secret creation",
+      );
+    }
+    log.error("Failed to create refresh token secret in Secrets Manager", {
+      secretId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
   }
 }
 
@@ -471,89 +585,39 @@ export async function getSecretJson<T = Record<string, unknown>>(
 export async function storeRefreshToken(
   ownerEmail: string,
   tokenData: WorkspaceTokenData,
-  kind: WorkspaceTokenKind = "agent_account"
+  kind: WorkspaceTokenKind = "agent_account",
 ): Promise<string | null> {
-  const secretId = workspaceSecretId(ownerEmail, kind)
-  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+  const secretId = workspaceSecretId(ownerEmail, kind);
+  const environment =
+    process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev";
 
   // Skip Secrets Manager in local development.
   if (process.env.NODE_ENV === "development") {
-    log.info("Local dev mode — skipping Secrets Manager write", { secretId })
-    return null
+    log.info("Local dev mode — skipping Secrets Manager write", { secretId });
+    return null;
   }
 
-  const {
-    PutSecretValueCommand,
-    CreateSecretCommand,
-    DescribeSecretCommand,
-    ResourceNotFoundException,
-  } = await import("@aws-sdk/client-secrets-manager")
-  const client = await getSecretsManagerClient()
-  const secretString = JSON.stringify(tokenData)
+  const { ResourceNotFoundException } =
+    await import("@aws-sdk/client-secrets-manager");
+  const secretString = JSON.stringify(tokenData);
 
   try {
-    const putResp = await client.send(
-      new PutSecretValueCommand({
-        SecretId: secretId,
-        SecretString: secretString,
-      })
-    )
-    log.info("Refresh token stored in Secrets Manager", { secretId })
-    // PutSecretValue returns ARN. Falls back to DescribeSecret if (per
-    // SDK v3 docs) the field is unexpectedly absent.
-    return putResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+    return await putRefreshTokenSecret(secretId, secretString);
   } catch (error) {
-    // If the secret doesn't exist yet, create it. Handle the race condition
-    // where two concurrent callbacks both see "not found" and both try to
-    // create — the loser gets ResourceExistsException and retries with Put.
     if (error instanceof ResourceNotFoundException) {
-      try {
-        const createResp = await client.send(
-          new CreateSecretCommand({
-            Name: secretId,
-            SecretString: secretString,
-            Description: kind === "user_account"
-              ? `Google Workspace refresh token (user account) for ${ownerEmail}`
-              : `Google Workspace refresh token (agent account) for agent of ${ownerEmail}`,
-            Tags: [
-              { Key: "Environment", Value: environment },
-              { Key: "ManagedBy", Value: "aistudio" },
-              { Key: "OwnerEmail", Value: ownerEmail },
-            ],
-          })
-        )
-        log.info("Refresh token secret created in Secrets Manager", { secretId })
-        return createResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
-      } catch (createError) {
-        // Concurrent first-write race: another request created the secret
-        // between our "not found" and our "create". Retry with PutSecretValue.
-        if (
-          createError instanceof Error &&
-          createError.name === "ResourceExistsException"
-        ) {
-          const putResp = await client.send(
-            new PutSecretValueCommand({
-              SecretId: secretId,
-              SecretString: secretString,
-            })
-          )
-          log.info("Refresh token stored after concurrent secret creation", { secretId })
-          return putResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
-        } else {
-          log.error("Failed to create refresh token secret in Secrets Manager", {
-            secretId,
-            error: createError instanceof Error ? createError.message : String(createError),
-          })
-          throw createError
-        }
-      }
-    } else {
-      log.error("Failed to store refresh token in Secrets Manager", {
+      return createRefreshTokenSecret(
         secretId,
-        error: error instanceof Error ? error.message : String(error),
-      })
-      throw error
+        secretString,
+        ownerEmail,
+        kind,
+        environment,
+      );
     }
+    log.error("Failed to store refresh token in Secrets Manager", {
+      secretId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
   }
 }
 
@@ -562,16 +626,16 @@ export async function storeRefreshToken(
  * Put/Create response unexpectedly omits ARN. Empirically this hasn't
  * happened, but the SDK types mark ARN optional, so handle it.
  */
-async function describeArn(
-  secretId: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  DescribeSecretCommand: any
-): Promise<string | null> {
-  const client = await getSecretsManagerClient()
-  const resp = (await client.send(new DescribeSecretCommand({ SecretId: secretId }))) as {
-    ARN?: string
-  }
-  return resp.ARN ?? null
+async function describeArn(secretId: string): Promise<string | null> {
+  const { DescribeSecretCommand } =
+    await import("@aws-sdk/client-secrets-manager");
+  const client = await getSecretsManagerClient();
+  const resp = (await client.send(
+    new DescribeSecretCommand({ SecretId: secretId }),
+  )) as {
+    ARN?: string;
+  };
+  return resp.ARN ?? null;
 }
 
 /**
@@ -589,39 +653,38 @@ async function describeArn(
  */
 export async function deleteWorkspaceSecret(
   ownerEmail: string,
-  kind: WorkspaceTokenKind = "agent_account"
+  kind: WorkspaceTokenKind = "agent_account",
 ): Promise<boolean> {
-  const secretId = workspaceSecretId(ownerEmail, kind)
+  const secretId = workspaceSecretId(ownerEmail, kind);
 
   if (process.env.NODE_ENV === "development") {
-    return false
+    return false;
   }
 
-  const { DeleteSecretCommand, ResourceNotFoundException } = await import(
-    "@aws-sdk/client-secrets-manager"
-  )
-  const client = await getSecretsManagerClient()
+  const { DeleteSecretCommand, ResourceNotFoundException } =
+    await import("@aws-sdk/client-secrets-manager");
+  const client = await getSecretsManagerClient();
 
   try {
     await client.send(
       new DeleteSecretCommand({
         SecretId: secretId,
         ForceDeleteWithoutRecovery: true,
-      })
-    )
-    log.info("Workspace refresh token secret deleted", { secretId, kind })
-    return true
+      }),
+    );
+    log.info("Workspace refresh token secret deleted", { secretId, kind });
+    return true;
   } catch (err) {
     if (err instanceof ResourceNotFoundException) {
       // No secret to delete — user never connected this slot. Not an error.
-      return false
+      return false;
     }
     log.error("Failed to delete workspace refresh token secret", {
       secretId,
       kind,
       error: err instanceof Error ? err.message : String(err),
-    })
-    throw err
+    });
+    throw err;
   }
 }
 
@@ -632,15 +695,15 @@ export async function deleteWorkspaceSecret(
  * a failure on one doesn't block the other.
  */
 export async function deleteAllWorkspaceSecrets(ownerEmail: string): Promise<{
-  agent_account: boolean
-  user_account: boolean
+  agent_account: boolean;
+  user_account: boolean;
 }> {
   const results = await Promise.allSettled([
     deleteWorkspaceSecret(ownerEmail, "agent_account"),
     deleteWorkspaceSecret(ownerEmail, "user_account"),
-  ])
+  ]);
   return {
     agent_account: results[0].status === "fulfilled" ? results[0].value : false,
     user_account: results[1].status === "fulfilled" ? results[1].value : false,
-  }
+  };
 }

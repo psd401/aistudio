@@ -17,10 +17,11 @@
  * For most development work, the seed data (npm run db:seed) is sufficient.
  */
 
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { scriptLogger as log } from "./script-logger";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 const LOCAL_DB_URL =
   process.env.LOCAL_DATABASE_URL ||
@@ -53,6 +54,35 @@ const TABLES_TO_SYNC = [
   "prompt_categories",
 ];
 
+function runPgCommand(
+  command: "pg_dump" | "psql",
+  args: readonly string[],
+  options: {
+    env?: NodeJS.ProcessEnv;
+    stdoutFd?: number;
+  } = {}
+): string {
+  const result = spawnSync(command, [...args], {
+    encoding: "utf8",
+    env: options.env,
+    stdio:
+      options.stdoutFd === undefined
+        ? ["ignore", "pipe", "pipe"]
+        : ["ignore", options.stdoutFd, "pipe"],
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const detail =
+      typeof result.stderr === "string" ? result.stderr.trim() : "";
+    throw new Error(
+      `${command} exited with status ${result.status ?? "unknown"}${
+        detail ? `: ${detail}` : ""
+      }`
+    );
+  }
+  return typeof result.stdout === "string" ? result.stdout : "";
+}
+
 async function main(): Promise<void> {
   log.section("AI Studio - Sync Data from AWS Dev");
 
@@ -78,7 +108,11 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const awsDbUrl = `postgresql://${awsUser}:${encodeURIComponent(awsPassword)}@${awsHost}:5432/${awsDatabase}?sslmode=require`;
+  const awsPgEnv = {
+    ...process.env,
+    PGPASSWORD: awsPassword,
+    PGSSLMODE: "require",
+  };
 
   // Create temp directory for dump files
   const tmpDir = path.join(process.cwd(), "tmp", "db-sync");
@@ -99,22 +133,48 @@ async function main(): Promise<void> {
     try {
       // Export from AWS
       log.debug(`  Exporting from AWS...`);
-      execSync(
-        `pg_dump "${awsDbUrl}" --table=${table} --data-only --column-inserts --on-conflict-do-nothing > "${dumpFile}"`,
-        { stdio: "pipe" }
-      );
+      const dumpFd = validatedFs.openSync(dumpFile, "w", 0o600);
+      try {
+        runPgCommand(
+          "pg_dump",
+          [
+            "--host",
+            awsHost,
+            "--port",
+            "5432",
+            "--username",
+            awsUser,
+            "--dbname",
+            awsDatabase,
+            "--table",
+            table,
+            "--data-only",
+            "--column-inserts",
+            "--on-conflict-do-nothing",
+          ],
+          { env: awsPgEnv, stdoutFd: dumpFd }
+        );
+      } finally {
+        validatedFs.closeSync(dumpFd);
+      }
 
       // Import to local
       log.debug(`  Importing to local...`);
-      execSync(`psql "${LOCAL_DB_URL}" -f "${dumpFile}"`, {
-        stdio: "pipe",
-      });
+      runPgCommand("psql", [
+        "--dbname",
+        LOCAL_DB_URL,
+        "--file",
+        dumpFile,
+      ]);
 
       // Get row count
-      const countResult = execSync(
-        `psql "${LOCAL_DB_URL}" -t -c "SELECT COUNT(*) FROM ${table};"`,
-        { encoding: "utf8" }
-      );
+      const countResult = runPgCommand("psql", [
+        "--dbname",
+        LOCAL_DB_URL,
+        "--tuples-only",
+        "--command",
+        `SELECT COUNT(*) FROM ${table};`,
+      ]);
       log.success(`${table} (${countResult.trim()} rows)`);
     } catch (error: unknown) {
       const err = error as Error;
@@ -122,8 +182,8 @@ async function main(): Promise<void> {
     }
 
     // Clean up dump file
-    if (fs.existsSync(dumpFile)) {
-      fs.unlinkSync(dumpFile);
+    if (validatedFs.existsSync(dumpFile)) {
+      validatedFs.unlinkSync(dumpFile);
     }
   }
 

@@ -34,9 +34,9 @@
 
 'use strict';
 
-const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { validatedFs } = require('../../../validated-fs.cjs');
 const { spawnSync } = require('node:child_process');
 
 // Container layout (overridable so the unit tests can point at fakes).
@@ -264,104 +264,91 @@ function sectionBody(lines, headings, position) {
  * Structural gate. Returns a violation list (empty = valid). Pure — no IO — so
  * `validate` and `create` cannot drift apart.
  */
-function validateBody(markdown) {
-  const violations = [];
-  const add = (code, message, fix, extra = {}) =>
-    violations.push({ code, message, fix, ...extra });
+/**
+ * Line-level rules, data-driven so `checkLineRules` stays one loop instead of
+ * five (the complexity ceiling is 15). Each rule reports its FIRST hit only —
+ * one actionable violation per rule beats a wall of repeats of the same
+ * mistake. `detect` returns a truthy match (used in the message) or null.
+ */
+const LINE_RULES = [
+  {
+    // The skill injects the logo, the H1, and the metadata block. A body that
+    // brings its own would render them twice.
+    code: 'injected_heading',
+    detect: (text) => (/^#[ \t]+/.test(text) ? text : null),
+    message: (line) =>
+      `Line ${line.index + 1} is a level-1 heading. The skill injects "${H1}" itself.`,
+    fix: 'Remove the H1 from your body; start at "## Title".',
+  },
+  {
+    // Raw HTML is DROPPED by the editor-seeding path (markdown-bridge overrides
+    // marked's `html` renderer), so it would vanish with no error at all.
+    // Refusing it here is the only place the author finds out. Two flat regex
+    // alternatives (bare tag | tag with attributes) instead of one
+    // nested-optional-quantifier pattern, which trips security/detect-unsafe-regex.
+    code: 'raw_html',
+    detect: (text) => {
+      const tag =
+        /<\/?[a-zA-Z][a-zA-Z0-9-]*\/?>|<\/?[a-zA-Z][a-zA-Z0-9-]*[ \t][^>]*>/.exec(
+          text
+        );
+      return tag ? tag[0] : null;
+    },
+    message: (line, match) =>
+      `Line ${line.index + 1} contains raw HTML (${match}). Atrium drops raw HTML silently — it will not render.`,
+    fix: 'Rewrite it as markdown. Pipe tables, headings, lists, bold, and links all work.',
+  },
+  {
+    // `data:` URIs are stripped by the sanitizer, so the image would disappear.
+    code: 'data_uri',
+    detect: (text) => (/!\[[^\]]*\]\(\s*data:/i.test(text) ? text : null),
+    message: (line) =>
+      `Line ${line.index + 1} embeds an image as a data: URI. Those are stripped.`,
+    fix: 'Save the image to a file and reference its path, or use an https URL.',
+  },
+  {
+    // Reference-style images (![alt][ref]) would pass every other check but the
+    // collector only understands the inline form — the reference would never be
+    // uploaded and would ship as a dead link in a "validated" document.
+    code: 'reference_image',
+    detect: (text) => (/!\[[^\]]*\]\[[^\]]*\]/.test(text) ? text : null),
+    message: (line) =>
+      `Line ${line.index + 1} uses a reference-style image (![alt][ref]). Those bypass image upload and render as dead links.`,
+    fix: 'Use the inline form on its own line instead: ![alt](path-or-https-url).',
+  },
+  {
+    // An image sharing a line with prose SPLITS that paragraph into three
+    // blocks, cutting the sentence in half around the picture.
+    code: 'inline_image',
+    detect: (text) =>
+      /!\[[^\]]*\]\([^)]*\)/.test(text) &&
+      !/^\s*!\[[^\]]*\]\([^)]*\)\s*$/.test(text)
+        ? text
+        : null,
+    message: (line) =>
+      `Line ${line.index + 1} has an image inside a line of prose. That splits the paragraph around the image and breaks the sentence.`,
+    fix: 'Put the image on a line of its own, with blank lines around it.',
+  },
+];
 
-  const text = String(markdown || '');
-  if (!text.trim()) {
-    add(
-      'empty_body',
-      'The body is empty.',
-      'Write the SOP body starting at "## Title". See references/template.md.'
-    );
-    return violations;
-  }
-
-  const lines = scanLines(text);
-
-  // The skill injects the logo, the H1, and the metadata block. A body that
-  // brings its own would render them twice.
-  for (const line of lines) {
-    if (line.inCode) continue;
-    if (/^#[ \t]+/.test(line.text)) {
-      add(
-        'injected_heading',
-        `Line ${line.index + 1} is a level-1 heading. The skill injects "${H1}" itself.`,
-        'Remove the H1 from your body; start at "## Title".',
-        { line: line.index + 1 }
-      );
-      break;
+function checkLineRules(lines, add) {
+  for (const rule of LINE_RULES) {
+    for (const line of lines) {
+      if (line.inCode) continue;
+      const match = rule.detect(line.text);
+      if (match) {
+        add(rule.code, rule.message(line, match), rule.fix, {
+          line: line.index + 1,
+        });
+        break;
+      }
     }
   }
+}
 
-  // Raw HTML is DROPPED by the editor-seeding path (markdown-bridge overrides
-  // marked's `html` renderer), so it would vanish with no error at all. Refusing
-  // it here is the only place the author finds out.
-  for (const line of lines) {
-    if (line.inCode) continue;
-    const tag = /<\/?[a-zA-Z][a-zA-Z0-9-]*(?:[ \t][^>]*)?\/?>/.exec(line.text);
-    if (tag) {
-      add(
-        'raw_html',
-        `Line ${line.index + 1} contains raw HTML (${tag[0]}). Atrium drops raw HTML silently — it will not render.`,
-        'Rewrite it as markdown. Pipe tables, headings, lists, bold, and links all work.',
-        { line: line.index + 1 }
-      );
-      break;
-    }
-  }
-
-  // `data:` URIs are stripped by the sanitizer, so the image would disappear.
-  for (const line of lines) {
-    if (line.inCode) continue;
-    if (/!\[[^\]]*\]\(\s*data:/i.test(line.text)) {
-      add(
-        'data_uri',
-        `Line ${line.index + 1} embeds an image as a data: URI. Those are stripped.`,
-        'Save the image to a file and reference its path, or use an https URL.',
-        { line: line.index + 1 }
-      );
-      break;
-    }
-  }
-
-  // Reference-style images (![alt][ref]) would pass every other check but the
-  // collector only understands the inline form — the reference would never be
-  // uploaded and would ship as a dead link in a "validated" document.
-  for (const line of lines) {
-    if (line.inCode) continue;
-    if (/!\[[^\]]*\]\[[^\]]*\]/.test(line.text)) {
-      add(
-        'reference_image',
-        `Line ${line.index + 1} uses a reference-style image (![alt][ref]). Those bypass image upload and render as dead links.`,
-        'Use the inline form on its own line instead: ![alt](path-or-https-url).',
-        { line: line.index + 1 }
-      );
-      break;
-    }
-  }
-
-  // An image sharing a line with prose SPLITS that paragraph into three blocks,
-  // cutting the sentence in half around the picture.
-  for (const line of lines) {
-    if (line.inCode) continue;
-    if (!/!\[[^\]]*\]\([^)]*\)/.test(line.text)) continue;
-    if (!/^\s*!\[[^\]]*\]\([^)]*\)\s*$/.test(line.text)) {
-      add(
-        'inline_image',
-        `Line ${line.index + 1} has an image inside a line of prose. That splits the paragraph around the image and breaks the sentence.`,
-        'Put the image on a line of its own, with blank lines around it.',
-        { line: line.index + 1 }
-      );
-      break;
-    }
-  }
-
-  const headings = collectHeadings(lines);
+/** Unknown, duplicated, and missing headings against the template skeleton. */
+function checkHeadingPresence(headings, add) {
   const names = headings.map((h) => h.name);
-
   for (const heading of headings) {
     if (!CANONICAL_ORDER.includes(heading.name)) {
       add(
@@ -396,8 +383,10 @@ function validateBody(markdown) {
       );
     }
   }
+}
 
-  // Order: the heading sequence must be a subsequence of CANONICAL_ORDER.
+/** Heading order (subsequence of CANONICAL_ORDER) and empty required sections. */
+function checkHeadingOrderAndContent(lines, headings, add) {
   let cursor = -1;
   for (const heading of headings) {
     const rank = CANONICAL_ORDER.indexOf(heading.name);
@@ -425,6 +414,29 @@ function validateBody(markdown) {
       );
     }
   }
+}
+
+function validateBody(markdown) {
+  const violations = [];
+  const add = (code, message, fix, extra = {}) =>
+    violations.push({ code, message, fix, ...extra });
+
+  const text = String(markdown || '');
+  if (!text.trim()) {
+    add(
+      'empty_body',
+      'The body is empty.',
+      'Write the SOP body starting at "## Title". See references/template.md.'
+    );
+    return violations;
+  }
+
+  const lines = scanLines(text);
+  checkLineRules(lines, add);
+
+  const headings = collectHeadings(lines);
+  checkHeadingPresence(headings, add);
+  checkHeadingOrderAndContent(lines, headings, add);
 
   return violations;
 }
@@ -618,7 +630,7 @@ function preflightLocalImages(images) {
     try {
       // accessSync, not existsSync: an unreadable file exists but still cannot
       // be uploaded, and finding that out later costs an orphan document.
-      fs.accessSync(image.resolved, fs.constants.R_OK);
+      validatedFs.accessSync(image.resolved, validatedFs.constants.R_OK);
     } catch {
       fail(
         `image not found or not readable: ${image.src} (resolved to ${image.resolved}). ` +
@@ -742,7 +754,7 @@ function readBody(args) {
       // CRLF normalization: the heading/structure regexes anchor on $, which
       // does not match \r — a Windows-authored file would report every
       // required section as missing.
-      return fs.readFileSync(file, 'utf8').replace(/\r\n?/g, '\n');
+      return validatedFs.readFileSync(file, 'utf8').replace(/\r\n?/g, '\n');
     } catch (err) {
       fail(`--body-file not readable: ${err.message}`);
     }
@@ -753,7 +765,7 @@ function readBody(args) {
 function cmdValidate(args) {
   const body = readBody(args);
   const violations = validateBody(body);
-  if (violations.length) emitViolations(violations);
+  if (violations.length > 0) emitViolations(violations);
   emit({
     status: 'ok',
     valid: true,
@@ -763,10 +775,8 @@ function cmdValidate(args) {
   });
 }
 
-function cmdCreate(args, deps = {}) {
-  const run = deps.runSkill || runSkill;
-  const body = readBody(args);
-
+/** The three required metadata flags, validated before anything is created. */
+function requireCreateMeta(args) {
   const owner = requireStr(args, 'owner', 'owner');
   const department = requireStr(args, 'department', 'department');
   const effectiveDate = requireStr(args, 'effective_date', 'effective-date');
@@ -776,16 +786,42 @@ function cmdCreate(args, deps = {}) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate)) {
     fail('--effective-date must be YYYY-MM-DD');
   }
+  return { owner, department, effectiveDate };
+}
 
-  // Structure is checked BEFORE anything is created, so a rejected draft never
-  // leaves a stray empty document behind in Atrium.
-  const violations = validateBody(body);
-  if (violations.length) emitViolations(violations);
-
+/** --title, else the body's `## Title` section — an SOP without one is refused. */
+function resolveTitle(args, body) {
   const title = optStr(args, 'title', 'title') || titleFromBody(body);
   if (!title) {
     fail('could not determine a title — pass --title or put it under "## Title"');
   }
+  return title;
+}
+
+/** Refuse an ::atrium-asset reference with no --source-id BEFORE creating. */
+function requireSourceIdForAssets(images, sourceId) {
+  if (sourceId) return;
+  const orphan = images.find((image) => image.kind === 'asset');
+  if (!orphan) return;
+  fail(
+    `the body references ::atrium-asset{id="${orphan.assetId}"}, an image owned by another ` +
+      'Atrium object. Pass --source-id <that object> so its bytes can be copied — an asset ' +
+      'cannot be referenced across objects. Nothing was created in Atrium.',
+    'source_id_required'
+  );
+}
+
+function cmdCreate(args, deps = {}) {
+  const run = deps.runSkill || runSkill;
+  const body = readBody(args);
+  const { owner, department, effectiveDate } = requireCreateMeta(args);
+
+  // Structure is checked BEFORE anything is created, so a rejected draft never
+  // leaves a stray empty document behind in Atrium.
+  const violations = validateBody(body);
+  if (violations.length > 0) emitViolations(violations);
+
+  const title = resolveTitle(args, body);
 
   const logoUrl = logoUrlFrom(appBaseUrl());
   const collection = optStr(args, 'collection', 'collection') || DEFAULT_COLLECTION;
@@ -800,21 +836,13 @@ function cmdCreate(args, deps = {}) {
   // the common mistakes (bad structure, a typo'd image path, a missing
   // --source-id) cost nothing and leave nothing behind.
   preflightLocalImages(images);
-  if (!sourceId && images.some((image) => image.kind === 'asset')) {
-    const orphan = images.find((image) => image.kind === 'asset');
-    fail(
-      `the body references ::atrium-asset{id="${orphan.assetId}"}, an image owned by another ` +
-        'Atrium object. Pass --source-id <that object> so its bytes can be copied — an asset ' +
-        'cannot be referenced across objects. Nothing was created in Atrium.',
-      'source_id_required'
-    );
-  }
+  requireSourceIdForAssets(images, sourceId);
 
   // A whole SOP can exceed the 128 KiB per-argument limit, which fails the spawn
   // with E2BIG before psd-atrium starts. Bodies go through a file, always — not
   // only when they happen to be large, so the big-document path is the one that
   // is exercised every run rather than the one nobody tests.
-  const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'psd-sop-'));
+  const scratchDir = validatedFs.mkdtempSync(path.join(os.tmpdir(), 'psd-sop-'));
   try {
     // Step 1 — create the document. Bodyless on purpose when there are images to
     // upload: assets attach to an OBJECT, so the object has to exist first, and a
@@ -831,7 +859,7 @@ function cmdCreate(args, deps = {}) {
     if (tags) createArgs.push('--tags', tags);
     if (!needsUpload) {
       const bodyPath = path.join(scratchDir, 'sop.md');
-      fs.writeFileSync(
+      validatedFs.writeFileSync(
         bodyPath,
         buildDocument({ body, owner, department, effectiveDate, logoUrl })
       );
@@ -857,7 +885,7 @@ function cmdCreate(args, deps = {}) {
         });
         uploaded = done;
         const finalPath = path.join(scratchDir, 'sop-final.md');
-        fs.writeFileSync(
+        validatedFs.writeFileSync(
           finalPath,
           buildDocument({
             body: applyReplacements(body, replacements),
@@ -907,7 +935,7 @@ function cmdCreate(args, deps = {}) {
       uploaded,
     });
   } finally {
-    fs.rmSync(scratchDir, { recursive: true, force: true });
+    validatedFs.rmSync(scratchDir, { recursive: true, force: true });
   }
 }
 

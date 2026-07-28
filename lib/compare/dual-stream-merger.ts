@@ -1,8 +1,8 @@
-import { createLogger, generateRequestId } from '@/lib/logger';
-import type { StreamTextResult, ToolSet } from 'ai';
-import { isTransientStreamError } from '@/lib/streaming/provider-adapters/base-adapter';
+import { createLogger, generateRequestId } from "@/lib/logger";
+import type { StreamTextResult, ToolSet } from "ai";
+import { isTransientStreamError } from "@/lib/streaming/provider-adapters/base-adapter";
 
-const log = createLogger({ module: 'dual-stream-merger' });
+const log = createLogger({ module: "dual-stream-merger" });
 
 /** Usage data included in finish events */
 interface StreamUsage {
@@ -14,19 +14,55 @@ interface StreamUsage {
 /** Discriminated union — TypeScript enforces that warning/error/chunk fields
  *  only appear on the correct event type. */
 export type DualStreamEvent =
-  | { modelId: 'model1' | 'model2'; type: 'content'; chunk: string }
-  | { modelId: 'model1' | 'model2'; type: 'image'; imageUrl: string }
-  | { modelId: 'model1' | 'model2'; type: 'finish'; finishReason: string; usage?: StreamUsage }
-  | { modelId: 'model1' | 'model2'; type: 'error'; error: string }
-  | { modelId: 'model1' | 'model2'; type: 'warning'; warning: string };
+  | { modelId: "model1" | "model2"; type: "content"; chunk: string }
+  | { modelId: "model1" | "model2"; type: "image"; imageUrl: string }
+  | {
+      modelId: "model1" | "model2";
+      type: "finish";
+      finishReason: string;
+      usage?: StreamUsage;
+    }
+  | { modelId: "model1" | "model2"; type: "error"; error: string }
+  | { modelId: "model1" | "model2"; type: "warning"; warning: string };
 
 /** Generic client-facing messages — raw provider errors are logged server-side only */
 const CLIENT_MESSAGES = {
-  initFailed: 'Stream initialization failed',
-  mergeFailed: 'Stream merge failed',
-  responseUnavailable: 'Comparison unavailable — model response could not be generated',
-  streamFailed: 'Stream processing failed',
+  initFailed: "Stream initialization failed",
+  mergeFailed: "Stream merge failed",
+  responseUnavailable:
+    "Comparison unavailable — model response could not be generated",
+  streamFailed: "Stream processing failed",
 } as const;
+
+type ModelId = DualStreamEvent["modelId"];
+
+function streamTaskFromSettlement<T extends ToolSet>(
+  settlement: PromiseSettledResult<StreamTextResult<T, never>>,
+  modelId: ModelId,
+  requestId: string,
+): AsyncGenerator<DualStreamEvent> {
+  if (settlement.status === "fulfilled") {
+    return processStream(settlement.value, modelId, requestId);
+  }
+
+  const reason = settlement.reason;
+  const errorMessage =
+    reason instanceof Error ? reason.message : String(reason);
+  const isTransient = reason instanceof Error && isTransientStreamError(reason);
+  const modelLabel = modelId === "model1" ? "Model 1" : "Model 2";
+  if (isTransient) {
+    log.warn(`${modelLabel} stream failed to initialize (transient)`, {
+      requestId,
+      error: errorMessage,
+    });
+  } else {
+    log.error(`${modelLabel} stream failed to initialize`, {
+      requestId,
+      error: errorMessage,
+    });
+  }
+  return emitInitFailureEvent(modelId, isTransient);
+}
 
 /**
  * Merges two AI streaming responses into a single SSE stream with model identification.
@@ -38,14 +74,17 @@ const CLIENT_MESSAGES = {
  * Note: StreamTextResult is both a Promise AND has async iterable properties,
  * so we accept it directly and await it internally.
  */
-export async function* mergeStreamsWithIdentifiers<T1 extends ToolSet, T2 extends ToolSet>(
+export async function* mergeStreamsWithIdentifiers<
+  T1 extends ToolSet,
+  T2 extends ToolSet,
+>(
   stream1Promise: StreamTextResult<T1, never>,
-  stream2Promise: StreamTextResult<T2, never>
+  stream2Promise: StreamTextResult<T2, never>,
 ): AsyncGenerator<Uint8Array> {
   const requestId = generateRequestId();
   const encoder = new TextEncoder();
 
-  log.info('Starting dual stream merge', { requestId });
+  log.info("Starting dual stream merge", { requestId });
 
   try {
     // Resolve each stream independently so one failure doesn't block the other.
@@ -55,37 +94,10 @@ export async function* mergeStreamsWithIdentifiers<T1 extends ToolSet, T2 extend
       stream2Promise,
     ]);
 
-    const streamTasks: AsyncGenerator<DualStreamEvent>[] = [];
-
-    // Handle stream1
-    if (stream1Settled.status === 'fulfilled') {
-      streamTasks.push(processStream(stream1Settled.value, 'model1', requestId));
-    } else {
-      const reason = stream1Settled.reason;
-      const errorMessage = reason instanceof Error ? reason.message : String(reason);
-      const isTransient = reason instanceof Error && isTransientStreamError(reason);
-      if (isTransient) {
-        log.warn('Model 1 stream failed to initialize (transient)', { requestId, error: errorMessage });
-      } else {
-        log.error('Model 1 stream failed to initialize', { requestId, error: errorMessage });
-      }
-      streamTasks.push(emitInitFailureEvent('model1', isTransient));
-    }
-
-    // Handle stream2
-    if (stream2Settled.status === 'fulfilled') {
-      streamTasks.push(processStream(stream2Settled.value, 'model2', requestId));
-    } else {
-      const reason = stream2Settled.reason;
-      const errorMessage = reason instanceof Error ? reason.message : String(reason);
-      const isTransient = reason instanceof Error && isTransientStreamError(reason);
-      if (isTransient) {
-        log.warn('Model 2 stream failed to initialize (transient)', { requestId, error: errorMessage });
-      } else {
-        log.error('Model 2 stream failed to initialize', { requestId, error: errorMessage });
-      }
-      streamTasks.push(emitInitFailureEvent('model2', isTransient));
-    }
+    const streamTasks = [
+      streamTaskFromSettlement(stream1Settled, "model1", requestId),
+      streamTaskFromSettlement(stream2Settled, "model2", requestId),
+    ];
 
     // Yield chunks as they arrive from either stream
     for await (const eventData of mergeAsyncIterables(streamTasks)) {
@@ -93,26 +105,37 @@ export async function* mergeStreamsWithIdentifiers<T1 extends ToolSet, T2 extend
       yield encoder.encode(sseEvent);
     }
 
-    log.info('Dual stream merge completed', { requestId });
+    log.info("Dual stream merge completed", { requestId });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const isTransient = error instanceof Error && isTransientStreamError(error);
 
     if (isTransient) {
-      log.warn('Dual stream merge failed (transient)', { requestId, error: errorMessage });
+      log.warn("Dual stream merge failed (transient)", {
+        requestId,
+        error: errorMessage,
+      });
     } else {
-      log.error('Dual stream merge failed', { requestId, error: errorMessage });
+      log.error("Dual stream merge failed", { requestId, error: errorMessage });
     }
 
     // Send terminal events for both models since a merge-level failure affects both.
     // Use warning for transient failures, error for persistent ones.
     // Always follow with finish so the client knows both models are done.
-    for (const modelId of ['model1', 'model2'] as const) {
+    for (const modelId of ["model1", "model2"] as const) {
       const terminalEvent: DualStreamEvent = isTransient
-        ? { modelId, type: 'warning', warning: CLIENT_MESSAGES.responseUnavailable }
-        : { modelId, type: 'error', error: CLIENT_MESSAGES.mergeFailed };
+        ? {
+            modelId,
+            type: "warning",
+            warning: CLIENT_MESSAGES.responseUnavailable,
+          }
+        : { modelId, type: "error", error: CLIENT_MESSAGES.mergeFailed };
       yield encoder.encode(`data: ${JSON.stringify(terminalEvent)}\n\n`);
-      const finishEvent: DualStreamEvent = { modelId, type: 'finish', finishReason: 'error' };
+      const finishEvent: DualStreamEvent = {
+        modelId,
+        type: "finish",
+        finishReason: "error",
+      };
       yield encoder.encode(`data: ${JSON.stringify(finishEvent)}\n\n`);
     }
   }
@@ -126,27 +149,35 @@ export async function* mergeStreamsWithIdentifiers<T1 extends ToolSet, T2 extend
  * for-await loop via encoder.encode().
  */
 async function* emitInitFailureEvent(
-  modelId: 'model1' | 'model2',
-  isTransient: boolean
+  modelId: "model1" | "model2",
+  isTransient: boolean,
 ): AsyncGenerator<DualStreamEvent> {
   if (isTransient) {
     const warningEvent: DualStreamEvent = {
       modelId,
-      type: 'warning',
+      type: "warning",
       warning: CLIENT_MESSAGES.responseUnavailable,
     };
     yield warningEvent;
-    const finishEvent: DualStreamEvent = { modelId, type: 'finish', finishReason: 'error' };
+    const finishEvent: DualStreamEvent = {
+      modelId,
+      type: "finish",
+      finishReason: "error",
+    };
     yield finishEvent;
   } else {
     const errorEvent: DualStreamEvent = {
       modelId,
-      type: 'error',
+      type: "error",
       error: CLIENT_MESSAGES.initFailed,
     };
     yield errorEvent;
     // Emit finish so client knows this model is done, consistent with the transient path.
-    const finishEvent: DualStreamEvent = { modelId, type: 'finish', finishReason: 'error' };
+    const finishEvent: DualStreamEvent = {
+      modelId,
+      type: "finish",
+      finishReason: "error",
+    };
     yield finishEvent;
   }
 }
@@ -154,7 +185,9 @@ async function* emitInitFailureEvent(
 /**
  * Convert AsyncGenerator to ReadableStream for Response
  */
-export function asyncGeneratorToStream(generator: AsyncGenerator<Uint8Array>): ReadableStream {
+export function asyncGeneratorToStream(
+  generator: AsyncGenerator<Uint8Array>,
+): ReadableStream {
   return new ReadableStream({
     async start(controller) {
       try {
@@ -165,7 +198,7 @@ export function asyncGeneratorToStream(generator: AsyncGenerator<Uint8Array>): R
       } catch (error) {
         controller.error(error);
       }
-    }
+    },
   });
 }
 
@@ -184,18 +217,18 @@ export function asyncGeneratorToStream(generator: AsyncGenerator<Uint8Array>): R
  */
 async function* processStream<T extends ToolSet>(
   streamResult: StreamTextResult<T, never>,
-  modelId: 'model1' | 'model2',
-  requestId: string
+  modelId: "model1" | "model2",
+  requestId: string,
 ): AsyncGenerator<DualStreamEvent> {
-  log.debug('Processing stream', { requestId, modelId });
+  log.debug("Processing stream", { requestId, modelId });
 
   try {
     // Stream the text chunks
     for await (const chunk of streamResult.textStream) {
       const event: DualStreamEvent = {
         modelId,
-        type: 'content',
-        chunk
+        type: "content",
+        chunk,
       };
       yield event;
     }
@@ -210,27 +243,29 @@ async function* processStream<T extends ToolSet>(
     // Send completion event with usage data
     const finishEvent: DualStreamEvent = {
       modelId,
-      type: 'finish',
-      usage: usage ? {
-        promptTokens: usage.inputTokens || 0,
-        completionTokens: usage.outputTokens || 0,
-        totalTokens: (usage.inputTokens || 0) + (usage.outputTokens || 0)
-      } : undefined,
-      finishReason: finishReason ?? 'stop'
+      type: "finish",
+      usage: usage
+        ? {
+            promptTokens: usage.inputTokens || 0,
+            completionTokens: usage.outputTokens || 0,
+            totalTokens: (usage.inputTokens || 0) + (usage.outputTokens || 0),
+          }
+        : undefined,
+      finishReason: finishReason ?? "stop",
     };
     yield finishEvent;
 
-    log.info('Stream processing completed', {
+    log.info("Stream processing completed", {
       requestId,
       modelId,
-      usage: result.usage
+      usage: result.usage,
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const isTransient = error instanceof Error && isTransientStreamError(error);
 
     if (isTransient) {
-      log.warn('Stream failed with transient error, falling back', {
+      log.warn("Stream failed with transient error, falling back", {
         requestId,
         modelId,
         error: errorMessage,
@@ -240,7 +275,7 @@ async function* processStream<T extends ToolSet>(
       // Raw error message is logged above — send only a generic string to the browser.
       const warningEvent: DualStreamEvent = {
         modelId,
-        type: 'warning',
+        type: "warning",
         warning: CLIENT_MESSAGES.responseUnavailable,
       };
       yield warningEvent;
@@ -248,12 +283,12 @@ async function* processStream<T extends ToolSet>(
       // Emit finish so the client knows this model is done
       const finishEvent: DualStreamEvent = {
         modelId,
-        type: 'finish',
-        finishReason: 'error',
+        type: "finish",
+        finishReason: "error",
       };
       yield finishEvent;
     } else {
-      log.error('Stream processing failed', {
+      log.error("Stream processing failed", {
         requestId,
         modelId,
         error: errorMessage,
@@ -263,12 +298,16 @@ async function* processStream<T extends ToolSet>(
       // Raw error is logged above.
       const errorEvent: DualStreamEvent = {
         modelId,
-        type: 'error',
+        type: "error",
         error: CLIENT_MESSAGES.streamFailed,
       };
       yield errorEvent;
       // Emit finish so the client knows this model is done, consistent with all other error paths.
-      const finishEvent: DualStreamEvent = { modelId, type: 'finish', finishReason: 'error' };
+      const finishEvent: DualStreamEvent = {
+        modelId,
+        type: "finish",
+        finishReason: "error",
+      };
       yield finishEvent;
     }
   }
@@ -280,26 +319,37 @@ async function* processStream<T extends ToolSet>(
  */
 export async function* mergeResponseGenerators(
   gen1: AsyncGenerator<DualStreamEvent>,
-  gen2: AsyncGenerator<DualStreamEvent>
+  gen2: AsyncGenerator<DualStreamEvent>,
 ): AsyncGenerator<Uint8Array> {
   const requestId = generateRequestId();
   const encoder = new TextEncoder();
 
-  log.info('Starting response generator merge', { requestId });
+  log.info("Starting response generator merge", { requestId });
 
   try {
     for await (const eventData of mergeAsyncIterables([gen1, gen2])) {
       yield encoder.encode(`data: ${JSON.stringify(eventData)}\n\n`);
     }
-    log.info('Response generator merge completed', { requestId });
+    log.info("Response generator merge completed", { requestId });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    log.error('Response generator merge failed', { requestId, error: errorMessage });
+    log.error("Response generator merge failed", {
+      requestId,
+      error: errorMessage,
+    });
 
-    for (const modelId of ['model1', 'model2'] as const) {
-      const errorEvent: DualStreamEvent = { modelId, type: 'error', error: CLIENT_MESSAGES.mergeFailed };
+    for (const modelId of ["model1", "model2"] as const) {
+      const errorEvent: DualStreamEvent = {
+        modelId,
+        type: "error",
+        error: CLIENT_MESSAGES.mergeFailed,
+      };
       yield encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`);
-      const finishEvent: DualStreamEvent = { modelId, type: 'finish', finishReason: 'error' };
+      const finishEvent: DualStreamEvent = {
+        modelId,
+        type: "finish",
+        finishReason: "error",
+      };
       yield encoder.encode(`data: ${JSON.stringify(finishEvent)}\n\n`);
     }
   }
@@ -316,15 +366,17 @@ export async function* mergeResponseGenerators(
  * more efficient approach (e.g. a shared queue) if N grows significantly.
  */
 async function* mergeAsyncIterables<T>(
-  iterables: AsyncGenerator<T>[]
+  iterables: AsyncGenerator<T>[],
 ): AsyncGenerator<T> {
-  const promises: Promise<IteratorResult<T>>[] = iterables.map(it => it.next());
+  const promises: Promise<IteratorResult<T>>[] = iterables.map((it) =>
+    it.next(),
+  );
   const generators = [...iterables];
 
   while (promises.length > 0) {
     // Wait for the first promise to resolve
     const { value, done, index } = await Promise.race(
-      promises.map((p, i) => p.then(result => ({ ...result, index: i })))
+      promises.map((p, i) => p.then((result) => ({ ...result, index: i }))),
     );
 
     if (!done) {

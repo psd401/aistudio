@@ -74,6 +74,17 @@ export function splitTokenizerAwareText(
 ): string[] {
   const maximumTokens = options.maximumTokens ?? DEFAULT_SEGMENT_TOKEN_LIMIT;
   const overlapTokens = options.overlapTokens ?? DEFAULT_SEGMENT_TOKEN_OVERLAP;
+  requireValidTokenSegmentOptions(maximumTokens, overlapTokens);
+
+  const text = value.trim();
+  if (!text) return [];
+  return splitTextWithinTokenLimit(text, maximumTokens, overlapTokens);
+}
+
+function requireValidTokenSegmentOptions(
+  maximumTokens: number,
+  overlapTokens: number
+): void {
   if (!Number.isSafeInteger(maximumTokens) || maximumTokens < 64) {
     throw new Error("maximumTokens must be an integer of at least 64");
   }
@@ -84,9 +95,13 @@ export function splitTokenizerAwareText(
   ) {
     throw new Error("overlapTokens must be smaller than maximumTokens");
   }
+}
 
-  const text = value.trim();
-  if (!text) return [];
+function splitTextWithinTokenLimit(
+  text: string,
+  maximumTokens: number,
+  overlapTokens: number
+): string[] {
   const output: string[] = [];
   let start = 0;
   while (start < text.length) {

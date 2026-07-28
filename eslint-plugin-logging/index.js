@@ -8,6 +8,53 @@
  * - No generic error messages
  */
 
+function importsNamed(node, sources, importedName) {
+  if (!sources.includes(node.source.value)) return false;
+  return node.specifiers.some(
+    (specifier) =>
+      specifier.type === 'ImportSpecifier' &&
+      specifier.imported &&
+      specifier.imported.name === importedName
+  );
+}
+
+function checksTypedErrors(filename) {
+  const isServerCode =
+    filename.includes('/actions/') ||
+    filename.includes('/app/api/') ||
+    filename.includes('/lib/');
+  const isTest = filename.includes('.test.') || filename.includes('.spec.');
+  return isServerCode && !isTest;
+}
+
+function typedErrorSuggestion(message) {
+  if (
+    message.includes('auth') ||
+    message.includes('session') ||
+    message.includes('unauthorized')
+  ) {
+    return 'authNoSession or authExpiredSession';
+  }
+  if (
+    message.includes('database') ||
+    message.includes('db') ||
+    message.includes('query')
+  ) {
+    return 'dbQueryFailed or dbRecordNotFound';
+  }
+  if (
+    message.includes('invalid') ||
+    message.includes('required') ||
+    message.includes('validation')
+  ) {
+    return 'validationFailed or invalidInput';
+  }
+  if (message.includes('permission') || message.includes('access')) {
+    return 'authzInsufficientPermissions';
+  }
+  return 'appropriate error factory';
+}
+
 module.exports = {
   rules: {
     /**
@@ -111,40 +158,23 @@ module.exports = {
 
         return {
           ImportDeclaration(node) {
-            if (node.source.value === '@/lib/logger') {
-              const specifiers = node.specifiers;
-              for (const spec of specifiers) {
-                if (spec.type === 'ImportSpecifier' && spec.imported && spec.imported.name === 'generateRequestId') {
-                  hasGenerateRequestIdImport = true;
-                }
-              }
+            if (importsNamed(node, ['@/lib/logger'], 'generateRequestId')) {
+              hasGenerateRequestIdImport = true;
             }
-            // Check if using withErrorHandling from api-utils
-            if (node.source.value === '@/lib/api-utils') {
-              const specifiers = node.specifiers;
-              for (const spec of specifiers) {
-                if (spec.type === 'ImportSpecifier' && spec.imported && spec.imported.name === 'withErrorHandling') {
-                  usesWithErrorHandling = true;
-                }
-              }
+            if (importsNamed(node, ['@/lib/api-utils'], 'withErrorHandling')) {
+              usesWithErrorHandling = true;
             }
-            // Check if using withApiAuth (generates requestId internally)
-            if (node.source.value === '@/lib/api' || node.source.value === '@/lib/api/with-api-auth') {
-              const specifiers = node.specifiers;
-              for (const spec of specifiers) {
-                if (spec.type === 'ImportSpecifier' && spec.imported && spec.imported.name === 'withApiAuth') {
-                  usesWithApiAuth = true;
-                }
-              }
+            if (
+              importsNamed(
+                node,
+                ['@/lib/api', '@/lib/api/with-api-auth'],
+                'withApiAuth'
+              )
+            ) {
+              usesWithApiAuth = true;
             }
-            // Check if using createAuthHandlers (NextAuth)
-            if (node.source.value === '@/auth') {
-              const specifiers = node.specifiers;
-              for (const spec of specifiers) {
-                if (spec.type === 'ImportSpecifier' && spec.imported && spec.imported.name === 'createAuthHandlers') {
-                  usesCreateAuthHandlers = true;
-                }
-              }
+            if (importsNamed(node, ['@/auth'], 'createAuthHandlers')) {
+              usesCreateAuthHandlers = true;
             }
           },
           CallExpression(node) {
@@ -355,36 +385,16 @@ module.exports = {
         return {
           ThrowStatement(node) {
             const filename = context.filename;
-            
-            // Only check server code
-            if (!filename.includes('/actions/') && 
-                !filename.includes('/app/api/') &&
-                !filename.includes('/lib/')) {
-              return;
-            }
-
-            if (filename.includes('.test.') || filename.includes('.spec.')) {
-              return;
-            }
+            if (!checksTypedErrors(filename)) return;
 
             if (
               node.argument.type === 'NewExpression' &&
               node.argument.callee.name === 'Error'
             ) {
-              // Try to suggest appropriate error factory based on message
-              let suggestion = 'appropriate error factory';
-              if (node.argument.arguments[0] && node.argument.arguments[0].value) {
-                const message = node.argument.arguments[0].value.toLowerCase();
-                if (message.includes('auth') || message.includes('session') || message.includes('unauthorized')) {
-                  suggestion = 'authNoSession or authExpiredSession';
-                } else if (message.includes('database') || message.includes('db') || message.includes('query')) {
-                  suggestion = 'dbQueryFailed or dbRecordNotFound';
-                } else if (message.includes('invalid') || message.includes('required') || message.includes('validation')) {
-                  suggestion = 'validationFailed or invalidInput';
-                } else if (message.includes('permission') || message.includes('access')) {
-                  suggestion = 'authzInsufficientPermissions';
-                }
-              }
+              const value = node.argument.arguments[0]?.value;
+              const suggestion = value
+                ? typedErrorSuggestion(value.toLowerCase())
+                : 'appropriate error factory';
 
               context.report({
                 node,

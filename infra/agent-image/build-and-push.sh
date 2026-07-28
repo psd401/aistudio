@@ -141,10 +141,17 @@ aws ecr get-login-password --region "${REGION}" | \
 # Build the image (ARM64 for AgentCore)
 echo ""
 echo "Building image (ARM64)..."
+# Stage the canonical fs validator into the build context: skill files require
+# ../../../validated-fs.cjs, which resolves to /validated-fs.cjs in-container —
+# the Dockerfile symlinks that to this staged copy inside /opt/psd-skills.
+# Staged (gitignored) rather than checked in twice, so it can never drift from
+# infra/validated-fs.cjs.
+cp "${SCRIPT_DIR}/../validated-fs.cjs" "${SCRIPT_DIR}/skills/validated-fs.cjs"
 docker build \
   --platform linux/arm64 \
   -t "${ECR_URI}:${TAG}" \
   "${SCRIPT_DIR}"
+rm -f "${SCRIPT_DIR}/skills/validated-fs.cjs"
 
 # ---------------------------------------------------------------------------
 # Build-time eval gate (issue #1161): runtime boot probe + signed canary turn.

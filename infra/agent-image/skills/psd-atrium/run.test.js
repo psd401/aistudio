@@ -1,3 +1,4 @@
+
 /**
  * Regression tests for run.js's CLI subcommand → Atrium content REST wiring.
  *
@@ -19,6 +20,8 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
 
 // bun loads every *.test.js into ONE process and common.js reads these env vars at
 // module-load time, so this file MUST set the SAME values as common.test.js — else
@@ -296,21 +299,20 @@ test('create-artifact requires --body-format (exit 1)', async () => {
 });
 
 test('create-artifact reads code from --code-file (avoids the argv-size limit)', async () => {
-  const fs = require('node:fs');
   const os = require('node:os');
   const path = require('node:path');
   // Private, unpredictable temp dir (not os.tmpdir()+predictable name).
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atrium-test-'));
+  const dir = validatedFs.mkdtempSync(path.join(os.tmpdir(), 'atrium-test-'));
   const file = path.join(dir, 'code.html');
   const code = '<html><body><h1>From file</h1><script>x()</script></body></html>';
-  fs.writeFileSync(file, code);
+  validatedFs.writeFileSync(file, code);
   try {
     await run('create-artifact', '--title', 'Big', '--code-file', file, '--body-format', 'html');
     const body = restCalls[0].opts.body;
     expect(body).toMatchObject({ kind: 'artifact', title: 'Big', bodyFormat: 'html', codeEncoding: 'base64' });
     expect(Buffer.from(body.body, 'base64').toString('utf8')).toBe(code);
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    validatedFs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -510,20 +512,19 @@ test('an unknown subcommand fails (exit 1)', async () => {
 // collaborative store), and until #1284's assets reached this broker an agent
 // could not put a real image in a document at all. These cover both.
 
-const fs = require('node:fs');
 const os = require('node:os');
 const nodePath = require('node:path');
 const crypto = require('node:crypto');
 
 const PNG_BYTES = Buffer.concat([
-  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
   Buffer.from('fake-png-body'),
 ]);
 
 function tmpFile(name, bytes) {
-  const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-test-'));
+  const dir = validatedFs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-test-'));
   const p = nodePath.join(dir, name);
-  fs.writeFileSync(p, bytes);
+  validatedFs.writeFileSync(p, bytes);
   return p;
 }
 
@@ -694,7 +695,7 @@ test('upload-asset requires --id and --file (exit 1)', async () => {
 
 test('get-asset decodes the base64 payload to disk', async () => {
   const out = nodePath.join(
-    fs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-out-')),
+    validatedFs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-out-')),
     'copied.png'
   );
   restResponder = () => ({
@@ -716,13 +717,13 @@ test('get-asset decodes the base64 payload to disk', async () => {
     method: 'GET',
     path: '/obj-1/assets/asset-7/bytes',
   });
-  expect(fs.readFileSync(out).equals(PNG_BYTES)).toBe(true);
+  expect(validatedFs.readFileSync(out).equals(PNG_BYTES)).toBe(true);
   expect(emitted[0].byteLength).toBe(PNG_BYTES.length);
 });
 
 test('get-asset refuses to write bytes that are not a real image', async () => {
   const out = nodePath.join(
-    fs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-bad-')),
+    validatedFs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-bad-')),
     'evil.png'
   );
   restResponder = () => ({
@@ -748,16 +749,16 @@ test('get-asset refuses to write bytes that are not a real image', async () => {
     code = err.code;
   }
   expect(code).toBe(12);
-  expect(fs.existsSync(out)).toBe(false);
+  expect(validatedFs.existsSync(out)).toBe(false);
 });
 
 test('create-document accepts a large body via --markdown-file', async () => {
-  const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-md-'));
+  const dir = validatedFs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-md-'));
   const file = nodePath.join(dir, 'big.md');
   // Comfortably past MAX_ARG_STRLEN (128 KiB), which is exactly the case that
   // fails with E2BIG when passed as a single argv value.
   const big = `# Big\n\n${'x'.repeat(200_000)}\n`;
-  fs.writeFileSync(file, big);
+  validatedFs.writeFileSync(file, big);
   restResponder = () => ({
     approvalRequired: false,
     status: 201,
@@ -772,9 +773,9 @@ test('create-document accepts a large body via --markdown-file', async () => {
 });
 
 test('edit accepts --body-file, and refuses it combined with --body', async () => {
-  const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-edit-'));
+  const dir = validatedFs.mkdtempSync(nodePath.join(os.tmpdir(), 'psd-atrium-edit-'));
   const file = nodePath.join(dir, 'body.md');
-  fs.writeFileSync(file, '# Replacement');
+  validatedFs.writeFileSync(file, '# Replacement');
   restResponder = () => ({
     approvalRequired: false,
     status: 201,

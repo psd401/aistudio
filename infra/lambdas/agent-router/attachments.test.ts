@@ -8,7 +8,7 @@ import { describe, expect, test } from 'bun:test';
 
 import { buildWorkspacePath, extractAttachments } from './attachments';
 
-describe('extractAttachments', () => {
+function defineExtractAttachmentsSuite1Part1() {
   test('empty message → no attachments', () => {
     expect(extractAttachments({})).toEqual([]);
     expect(extractAttachments({ attachment: [], annotations: [] })).toEqual([]);
@@ -118,7 +118,9 @@ describe('extractAttachments', () => {
     expect(result[0].name).toBe('Shared Doc');
   });
 
-  test('sanitizes bracket/newline injection in name and bad chars in id', () => {
+  }
+
+function defineExtractAttachmentsSuite1Part2() {test('sanitizes bracket/newline injection in name and bad chars in id', () => {
     const result = extractAttachments({
       attachment: [
         {
@@ -221,7 +223,9 @@ describe('extractAttachments', () => {
     ).toEqual([]);
   });
 
-  test('uploaded file with no contentName gets a fallback name', () => {
+  }
+
+function defineExtractAttachmentsSuite1Part3() {test('uploaded file with no contentName gets a fallback name', () => {
     const result = extractAttachments({
       attachment: [
         {
@@ -234,9 +238,17 @@ describe('extractAttachments', () => {
     expect(result[0].name).toBe('uploaded file');
     expect(result[0].source).toBe('chat-upload');
   });
-});
+}
 
-describe('buildWorkspacePath', () => {
+const defineExtractAttachmentsSuite1 = () => {
+  defineExtractAttachmentsSuite1Part1()
+  defineExtractAttachmentsSuite1Part2()
+  defineExtractAttachmentsSuite1Part3()
+};
+
+describe('extractAttachments', defineExtractAttachmentsSuite1);
+
+const defineBuildWorkspacePathSuite2 = () => {
   const now = new Date('2026-07-06T23:51:33.123Z');
 
   test('safe filename passes through under a stamped attachments/ prefix', () => {
@@ -282,4 +294,6 @@ describe('buildWorkspacePath', () => {
       buildWorkspacePath('a.txt', 1, now)
     );
   });
-});
+};
+
+describe('buildWorkspacePath', defineBuildWorkspacePathSuite2);

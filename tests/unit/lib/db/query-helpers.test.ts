@@ -19,7 +19,7 @@ import {
 } from '@/lib/db/drizzle/helpers'
 
 describe('Query Helpers - Pagination', () => {
-  describe('calculateOffset', () => {
+
     it('should calculate correct offset for page 1', () => {
       const result = calculateOffset({ page: 1, limit: 10 })
       expect(result).toEqual({ offset: 0, limit: 10 })
@@ -60,9 +60,9 @@ describe('Query Helpers - Pagination', () => {
       const result = calculateOffset({ page: 1, limit: 0 })
       expect(result.limit).toBe(1)
     })
-  })
 
-  describe('buildPaginationMeta', () => {
+
+
     it('should build correct metadata for first page', () => {
       const meta = buildPaginationMeta({ page: 1, limit: 25 }, 100)
       expect(meta).toEqual({
@@ -122,9 +122,9 @@ describe('Query Helpers - Pagination', () => {
         hasPreviousPage: false,
       })
     })
-  })
 
-  describe('createPaginatedResult', () => {
+
+
     it('should create result with data and pagination', () => {
       const data = [{ id: 1 }, { id: 2 }, { id: 3 }]
       const result = createPaginatedResult(data, { page: 1, limit: 10 }, 3)
@@ -140,9 +140,9 @@ describe('Query Helpers - Pagination', () => {
       expect(result.data).toEqual([])
       expect(result.pagination.total).toBe(0)
     })
-  })
 
-  describe('processCursorResults', () => {
+
+
     it('should detect more results when extra item present', () => {
       const results = [
         { id: 1, createdAt: new Date('2024-01-05') },
@@ -189,11 +189,11 @@ describe('Query Helpers - Pagination', () => {
       expect(result.data).toHaveLength(1)
       expect(result.hasMore).toBe(false)
     })
-  })
+
 })
 
 describe('Query Helpers - Search', () => {
-  describe('escapeSearchPattern', () => {
+
     it('should escape percent signs', () => {
       expect(escapeSearchPattern('100%')).toBe('100\\%')
     })
@@ -213,9 +213,9 @@ describe('Query Helpers - Search', () => {
     it('should leave regular text unchanged', () => {
       expect(escapeSearchPattern('hello world')).toBe('hello world')
     })
-  })
 
-  describe('buildSearchPattern', () => {
+
+
     it('should build contains pattern by default', () => {
       expect(buildSearchPattern('test')).toBe('%test%')
     })
@@ -239,5 +239,5 @@ describe('Query Helpers - Search', () => {
     it('should trim whitespace', () => {
       expect(buildSearchPattern('  test  ')).toBe('%test%')
     })
-  })
+
 })

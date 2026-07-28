@@ -4,9 +4,21 @@ const mockListLabels = jest.fn()
 const mockGetMessageMetadata = jest.fn()
 const mockModifyMessage = jest.fn()
 const mockApplyRules = jest.fn()
+const mockGetFreshAccessToken = jest.fn()
+const mockGetMessageFullBody = jest.fn()
+const mockListHistory = jest.fn()
+const mockModifyThread = jest.fn()
+const mockClaimTaskGesture = jest.fn()
+const mockGetUserProfile = jest.fn()
+const mockRecordPollResult = jest.fn()
+const mockRecordTaskCreated = jest.fn()
+const mockReleaseTaskGestureClaim = jest.fn()
+const mockRequestTaskCreation = jest.fn()
+const mockPostTaskOutcome = jest.fn()
 
 jest.mock("@/infra/lambdas/agent-triage-poll/workspace-token", () => ({
-  getFreshAccessTokenForUser: jest.fn(),
+  getFreshAccessTokenForUser: (...args: unknown[]) =>
+    mockGetFreshAccessToken(...args),
   workspaceSecretId: jest.fn(),
 }))
 
@@ -14,13 +26,14 @@ jest.mock("@/infra/lambdas/agent-triage-poll/gmail", () => ({
   extractFromEmail: () => "sender@example.net",
   extractSubject: () => "Subject",
   getCurrentHistoryId: jest.fn(),
-  getMessageFullBody: jest.fn(),
+  getMessageFullBody: (...args: unknown[]) =>
+    mockGetMessageFullBody(...args),
   getMessageMetadata: (...args: unknown[]) =>
     mockGetMessageMetadata(...args),
   listLabels: (...args: unknown[]) => mockListLabels(...args),
-  listHistory: jest.fn(),
+  listHistory: (...args: unknown[]) => mockListHistory(...args),
   modifyMessage: (...args: unknown[]) => mockModifyMessage(...args),
-  modifyThread: jest.fn(),
+  modifyThread: (...args: unknown[]) => mockModifyThread(...args),
   threadHasUserReply: jest.fn().mockResolvedValue(false),
 }))
 
@@ -37,23 +50,25 @@ jest.mock("@/infra/lambdas/agent-triage-poll/rules", () => ({
 
 jest.mock("@/infra/lambdas/agent-triage-poll/chat", () => ({
   postEscalation: jest.fn(),
-  postTaskOutcome: jest.fn(),
+  postTaskOutcome: (...args: unknown[]) => mockPostTaskOutcome(...args),
   resolveDmSpace: jest.fn(),
 }))
 
 jest.mock("@/infra/lambdas/agent-triage-poll/storage", () => ({
   backfillDmSpaceName: jest.fn(),
-  claimTaskGesture: jest.fn(),
+  claimTaskGesture: (...args: unknown[]) => mockClaimTaskGesture(...args),
   getGoogleIdentityForEmail: jest.fn(),
-  getUserProfile: jest.fn(),
-  recordPollResult: jest.fn(),
-  recordTaskCreated: jest.fn(),
-  releaseTaskGestureClaim: jest.fn(),
+  getUserProfile: (...args: unknown[]) => mockGetUserProfile(...args),
+  recordPollResult: (...args: unknown[]) => mockRecordPollResult(...args),
+  recordTaskCreated: (...args: unknown[]) => mockRecordTaskCreated(...args),
+  releaseTaskGestureClaim: (...args: unknown[]) =>
+    mockReleaseTaskGestureClaim(...args),
   resetCursor: jest.fn(),
 }))
 
 jest.mock("@/infra/lambdas/agent-triage-poll/agentcore", () => ({
-  requestTaskCreation: jest.fn(),
+  requestTaskCreation: (...args: unknown[]) =>
+    mockRequestTaskCreation(...args),
 }))
 
 interface TestTriageRow {
@@ -78,6 +93,11 @@ interface TestTriageRow {
   digestEnabled: boolean
   recentDecisions: never[]
   recentCorrections: never[]
+  lastHistoryId?: string
+  tasksMode?: "none" | "invoke-agent"
+  tasksNotifySuccess?: boolean
+  dmSpaceName?: string
+  agentcoreRuntimeId?: string
 }
 
 interface ClassifyResult {
@@ -86,12 +106,13 @@ interface ClassifyResult {
   }
 }
 
-const { classifyAndLabel } = jest.requireActual<{
+const { classifyAndLabel, processUser } = jest.requireActual<{
   classifyAndLabel: (
     state: TestTriageRow,
     accessToken: string,
     message: { id: string; threadId: string }
   ) => Promise<ClassifyResult | null>
+  processUser: (state: TestTriageRow) => Promise<void>
 }>("@/infra/lambdas/agent-triage-poll/index")
 
 const IDS = {
@@ -152,6 +173,17 @@ describe("agent triage worker label sink", () => {
       reason: "mute:test",
       source: "rule",
     })
+    mockGetFreshAccessToken.mockResolvedValue({ access_token: "token" })
+    mockGetMessageFullBody.mockResolvedValue("Full message body")
+    mockClaimTaskGesture.mockResolvedValue(true)
+    mockGetUserProfile.mockResolvedValue({
+      workspacePrefix: "owner-a1b2c3d4",
+    })
+    mockRecordPollResult.mockResolvedValue(undefined)
+    mockRecordTaskCreated.mockResolvedValue(undefined)
+    mockReleaseTaskGestureClaim.mockResolvedValue(undefined)
+    mockPostTaskOutcome.mockResolvedValue(undefined)
+    mockModifyThread.mockResolvedValue(undefined)
   })
 
   it.each([
@@ -200,6 +232,116 @@ describe("agent triage worker label sink", () => {
       "message-1",
       ["Label_later"],
       ["INBOX"]
+    )
+  })
+})
+
+describe("agent triage task gestures", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockListLabels.mockResolvedValue(liveLabels())
+    mockGetFreshAccessToken.mockResolvedValue({ access_token: "token" })
+    mockListHistory.mockResolvedValue({
+      events: [
+        {
+          labelsAdded: [
+            {
+              labelIds: [IDS.task],
+              message: {
+                id: "message-1",
+                labelIds: ["INBOX", IDS.task],
+                threadId: "thread-1",
+              },
+            },
+          ],
+        },
+      ],
+      latestHistoryId: "101",
+      tooOld: false,
+    })
+    mockGetMessageMetadata.mockResolvedValue({
+      id: "message-1",
+      threadId: "thread-1",
+      labelIds: ["INBOX", IDS.task],
+      snippet: "Preview",
+    })
+    mockGetMessageFullBody.mockResolvedValue("Full task request")
+    mockClaimTaskGesture.mockResolvedValue(true)
+    mockGetUserProfile.mockResolvedValue({
+      workspacePrefix: "owner-a1b2c3d4",
+    })
+    mockRecordPollResult.mockResolvedValue(undefined)
+    mockRecordTaskCreated.mockResolvedValue(undefined)
+    mockReleaseTaskGestureClaim.mockResolvedValue(undefined)
+    mockPostTaskOutcome.mockResolvedValue(undefined)
+    mockModifyThread.mockResolvedValue(undefined)
+  })
+
+  it("archives and records a successful task after advancing the cursor", async () => {
+    mockRequestTaskCreation.mockResolvedValue({
+      ok: true,
+      taskRef: "TASK-42",
+    })
+
+    await processUser(
+      row({
+        lastHistoryId: "100",
+        tasksMode: "invoke-agent",
+        tasksNotifySuccess: true,
+        dmSpaceName: "spaces/dm-1",
+      })
+    )
+
+    expect(mockRecordPollResult).toHaveBeenCalledWith(
+      "owner@example.com",
+      expect.objectContaining({ lastHistoryId: "101" }),
+      [],
+      []
+    )
+    expect(mockModifyThread).toHaveBeenCalledWith(
+      "token",
+      "thread-1",
+      [],
+      ["INBOX", IDS.task]
+    )
+    expect(mockRecordTaskCreated).toHaveBeenCalledWith(
+      "owner@example.com",
+      "message-1",
+      "TASK-42",
+      expect.any(String)
+    )
+    expect(
+      mockRecordPollResult.mock.invocationCallOrder[0]
+    ).toBeLessThan(mockClaimTaskGesture.mock.invocationCallOrder[0])
+  })
+
+  it("releases a failed task claim and leaves Gmail unchanged", async () => {
+    mockRequestTaskCreation.mockResolvedValue({
+      ok: false,
+      reason: "Task provider unavailable",
+    })
+
+    await processUser(
+      row({
+        lastHistoryId: "100",
+        tasksMode: "invoke-agent",
+        dmSpaceName: "spaces/dm-1",
+      })
+    )
+
+    expect(mockReleaseTaskGestureClaim).toHaveBeenCalledWith(
+      "owner@example.com",
+      "message-1"
+    )
+    expect(mockModifyThread).not.toHaveBeenCalled()
+    expect(mockRecordTaskCreated).not.toHaveBeenCalled()
+    expect(mockPostTaskOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dmSpaceName: "spaces/dm-1",
+        messageId: "message-1",
+        ok: false,
+        reason: "Task provider unavailable",
+      })
     )
   })
 })

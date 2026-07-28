@@ -28,21 +28,25 @@ jest.doMock('@/lib/logger', () => ({
 }));
 
 // Import after mocking - disable ESLint for this specific case
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { UnifiedStreamingService } = require('../unified-streaming-service');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { createTokenMappingSink } = require('../../safety/token-mapping-sink');
 
-describe('UnifiedStreamingService', () => {
-  let streamingService: any;
-  let mockAdapter: any;
-  let mockTelemetryConfig: any;
+let streamingService: any;
+let mockAdapter: any;
+let mockTelemetryConfig: any;
+
+function defineUnifiedStreamingServiceSuite1Part1() {
+
+
+
 
   beforeEach(() => {
     jest.clearAllMocks();
-    
+
     streamingService = new UnifiedStreamingService();
-    
+
     mockAdapter = {
       createModel: jest.fn(),
       createTools: (jest.fn() as jest.Mock<any>).mockResolvedValue({}),
@@ -50,7 +54,7 @@ describe('UnifiedStreamingService', () => {
       getProviderOptions: jest.fn(),
       streamWithEnhancements: jest.fn()
     };
-    
+
     mockTelemetryConfig = {
       isEnabled: true,
       functionId: 'test-function',
@@ -67,13 +71,15 @@ describe('UnifiedStreamingService', () => {
         }))
       }
     };
-    
+
     mockGetProviderAdapter.mockResolvedValue(mockAdapter);
     mockGetTelemetryConfig.mockResolvedValue(mockTelemetryConfig);
   });
 
-  describe('stream', () => {
-    it('detokenizes assistant output with mappings added by a tool after the response wrapper is created', async () => {
+
+    }
+
+function defineUnifiedStreamingServiceSuite1Part2() {it('detokenizes assistant output with mappings added by a tool after the response wrapper is created', async () => {
       const {
         ReadableStream: NodeReadableStream,
         TransformStream: NodeTransformStream,
@@ -193,7 +199,9 @@ describe('UnifiedStreamingService', () => {
       expect(clientBody).not.toContain(emailPlaceholder);
     });
 
-    it('should successfully stream with OpenAI provider', async () => {
+    }
+
+function defineUnifiedStreamingServiceSuite1Part3() {it('should successfully stream with OpenAI provider', async () => {
       // Arrange
       const request = {
         provider: 'openai',
@@ -307,7 +315,9 @@ describe('UnifiedStreamingService', () => {
       );
     });
 
-    it('should handle Claude thinking models', async () => {
+    }
+
+function defineUnifiedStreamingServiceSuite1Part4() {it('should handle Claude thinking models', async () => {
       // Arrange
       const request = {
         provider: 'amazon-bedrock',
@@ -403,7 +413,7 @@ describe('UnifiedStreamingService', () => {
 
       // Trip the circuit breaker by failing multiple times
       const streamingServiceWithFailures = new UnifiedStreamingService();
-      
+
       // Make 5 failed attempts to open the circuit (failureThreshold is 5)
       for (let i = 0; i < 5; i++) {
         try {
@@ -418,12 +428,14 @@ describe('UnifiedStreamingService', () => {
       await expect(streamingServiceWithFailures.stream(request)).rejects.toThrow(
         'Circuit breaker is open for provider: openai'
       );
-      
+
       // Verify the adapter wasn't called again after circuit opened
       expect(failingAdapter.streamWithEnhancements).toHaveBeenCalledTimes(5);
     });
 
-    it('should record telemetry correctly', async () => {
+    }
+
+function defineUnifiedStreamingServiceSuite1Part5() {it('should record telemetry correctly', async () => {
       // Arrange
       const request = {
         provider: 'openai',
@@ -475,5 +487,15 @@ describe('UnifiedStreamingService', () => {
       expect(callArgs.modelId).toBe('gpt-4');
       expect(callArgs.provider).toBe('openai');
     });
-  });
-});
+  ;
+}
+
+const defineUnifiedStreamingServiceSuite1 = () => {
+  defineUnifiedStreamingServiceSuite1Part1()
+  defineUnifiedStreamingServiceSuite1Part2()
+  defineUnifiedStreamingServiceSuite1Part3()
+  defineUnifiedStreamingServiceSuite1Part4()
+  defineUnifiedStreamingServiceSuite1Part5()
+};
+
+describe('UnifiedStreamingService', defineUnifiedStreamingServiceSuite1);

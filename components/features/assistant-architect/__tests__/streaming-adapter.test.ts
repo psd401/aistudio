@@ -11,8 +11,8 @@
 import { parseSSEEvent, isTextDeltaEvent, isTextStartEvent, isErrorEvent, isFinishEvent } from '@/lib/streaming/sse-event-types';
 import { createMockSSEResponse, createFailingSSEStream, SSE_FIXTURES, accumulateText } from '@/lib/streaming/__tests__/mock-sse-factory';
 
-describe('Assistant Architect Streaming Adapter', () => {
-  describe('SSE Event Processing', () => {
+function defineAssistantArchitectStreamingAdapterSuite1Part1() {
+
     it('should parse and handle text-delta events correctly', async () => {
       const mockResponse = createMockSSEResponse([...SSE_FIXTURES.simpleText]);
 
@@ -51,13 +51,13 @@ describe('Assistant Architect Streaming Adapter', () => {
       expect(textDeltaEvents.length).toBe(2);
 
       // Verify delta field exists (not textDelta)
-      textDeltaEvents.forEach(event => {
+      for (const event of textDeltaEvents) {
         expect(event.delta).toBeDefined();
         expect(typeof event.delta).toBe('string');
 
         // Ensure textDelta doesn't exist
         expect('textDelta' in event).toBe(false);
-      });
+      };
 
       // Verify accumulated text
       const text = accumulateText(events);
@@ -101,7 +101,9 @@ describe('Assistant Architect Streaming Adapter', () => {
       expect(finishEvents.length).toBe(1);
     });
 
-    it('should process tool call events correctly', async () => {
+    }
+
+function defineAssistantArchitectStreamingAdapterSuite1Part2() {it('should process tool call events correctly', async () => {
       const mockResponse = createMockSSEResponse([...SSE_FIXTURES.withToolCall]);
 
       const reader = mockResponse.body!.getReader();
@@ -185,10 +187,12 @@ describe('Assistant Architect Streaming Adapter', () => {
       expect(text).toContain('Analyzing input');
       expect(text).toContain('Here is the result');
     });
-  });
+  ;
 
-  describe('Error Handling', () => {
-    it('should handle error events gracefully', async () => {
+
+    }
+
+function defineAssistantArchitectStreamingAdapterSuite1Part3() {it('should handle error events gracefully', async () => {
       const mockResponse = createMockSSEResponse([...SSE_FIXTURES.withError]);
 
       const reader = mockResponse.body!.getReader();
@@ -267,7 +271,9 @@ describe('Assistant Architect Streaming Adapter', () => {
       // The important thing is that the error was caught
     });
 
-    it('should handle tool execution errors', async () => {
+    }
+
+function defineAssistantArchitectStreamingAdapterSuite1Part4() {it('should handle tool execution errors', async () => {
       const mockResponse = createMockSSEResponse([...SSE_FIXTURES.withToolError]);
 
       const reader = mockResponse.body!.getReader();
@@ -303,9 +309,9 @@ describe('Assistant Architect Streaming Adapter', () => {
         expect(toolErrorEvent.errorText).toBe('API rate limit exceeded');
       }
     });
-  });
+  ;
 
-  describe('Performance', () => {
+
     it('should handle large streaming responses efficiently', async () => {
       const mockResponse = createMockSSEResponse([...SSE_FIXTURES.large]);
 
@@ -345,10 +351,12 @@ describe('Assistant Architect Streaming Adapter', () => {
       // Should complete reasonably quickly (adjust threshold as needed)
       expect(elapsedTime).toBeLessThan(1000);
     });
-  });
+  ;
 
-  describe('Edge Cases', () => {
-    it('should handle empty responses', async () => {
+
+    }
+
+function defineAssistantArchitectStreamingAdapterSuite1Part5() {it('should handle empty responses', async () => {
       const mockResponse = createMockSSEResponse([...SSE_FIXTURES.empty]);
 
       const reader = mockResponse.body!.getReader();
@@ -422,5 +430,15 @@ describe('Assistant Architect Streaming Adapter', () => {
       const reasoningEnd = events.find(e => e.type === 'reasoning-end');
       expect(reasoningEnd).toBeDefined();
     });
-  });
-});
+  ;
+}
+
+const defineAssistantArchitectStreamingAdapterSuite1 = () => {
+  defineAssistantArchitectStreamingAdapterSuite1Part1()
+  defineAssistantArchitectStreamingAdapterSuite1Part2()
+  defineAssistantArchitectStreamingAdapterSuite1Part3()
+  defineAssistantArchitectStreamingAdapterSuite1Part4()
+  defineAssistantArchitectStreamingAdapterSuite1Part5()
+};
+
+describe('Assistant Architect Streaming Adapter', defineAssistantArchitectStreamingAdapterSuite1);

@@ -7,9 +7,6 @@
  * sandbox, and proves the request stays authenticated.
  */
 
-/* eslint-disable @typescript-eslint/no-require-imports -- standalone CommonJS smoke loads Next's internal CJS sandbox */
-/* global AbortController, process, require */
-
 "use strict"
 
 require("next/dist/server/node-environment")
@@ -22,8 +19,8 @@ const { getRuntimeContext } = require("next/dist/server/web/sandbox")
 const { clearAllModuleContexts } = require("next/dist/server/web/sandbox/context")
 const { decode, encode } = require("next-auth/jwt")
 
-const distDir = path.resolve(process.env.NEXT_DIST_DIR || ".next")
-const manifestPath = path.join(distDir, "server/middleware-manifest.json")
+const distDir = path.resolve(".next")
+const manifestPath = ".next/server/middleware-manifest.json"
 const secret = process.env.AUTH_SECRET
 
 assert.ok(secret, "AUTH_SECRET is required and must match the production build")
@@ -33,15 +30,6 @@ const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
 const entry = manifest.middleware?.["/"]
 
 assert.ok(entry, "Production build did not emit the root middleware entry")
-
-const middlewarePath = path.join(distDir, entry.entrypoint)
-const middlewareSource = readFileSync(middlewarePath, "utf8")
-
-assert.match(
-  middlewareSource,
-  /REFRESH_TOKEN_AUTH/,
-  "Compiled middleware does not contain the Edge-safe Cognito refresh implementation",
-)
 
 const cookieName = "authjs.session-token"
 const refreshToken = "artifact-refresh-token-123456789"

@@ -1,10 +1,4 @@
-import {
-  chmodSync,
-  existsSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs"
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import {
@@ -14,8 +8,9 @@ import {
   validateEmailTaskGitHubCommand,
   validateGitHubCommand,
 } from "@/lib/agent-github/command-executor"
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
-describe("GitHub command boundary", () => {
+function defineGitHubCommandBoundarySuite1Part1() {
   it("limits sender-influenced email tasks to issue creation", () => {
     expect(() =>
       validateEmailTaskGitHubCommand([
@@ -102,10 +97,12 @@ describe("GitHub command boundary", () => {
     expect(output).toContain("[REDACTED]")
   })
 
-  it("redacts subprocess output and removes the invocation-private directory", async () => {
+  }
+
+function defineGitHubCommandBoundarySuite1Part2() {it("redacts subprocess output and removes the invocation-private directory", async () => {
     const fixtureDirectory = mkdtempSync(join(tmpdir(), "fake-gh-"))
     const executable = join(fixtureDirectory, "gh")
-    writeFileSync(
+    validatedFs.writeFileSync(
       executable,
       [
         "#!/bin/sh",
@@ -113,7 +110,7 @@ describe("GitHub command boundary", () => {
         "printf '%s' \"$GH_TOKEN\" >&2",
       ].join("\n")
     )
-    chmodSync(executable, 0o700)
+    validatedFs.chmodSync(executable, 0o700)
     const previousExecutable = process.env.GH_EXECUTABLE
     process.env.GH_EXECUTABLE = executable
     try {
@@ -122,7 +119,7 @@ describe("GitHub command boundary", () => {
         "github_pat_abcdefghijklmnopqrstuvwxyz123456"
       )
       expect(result.stderr).toBe("[REDACTED]")
-      expect(existsSync(dirname(result.stdout))).toBe(false)
+      expect(validatedFs.existsSync(dirname(result.stdout))).toBe(false)
     } finally {
       if (previousExecutable === undefined) {
         delete process.env.GH_EXECUTABLE
@@ -136,7 +133,7 @@ describe("GitHub command boundary", () => {
   it("isolates concurrent homes/configs and redacts both tokens", async () => {
     const fixtureDirectory = mkdtempSync(join(tmpdir(), "fake-gh-parallel-"))
     const executable = join(fixtureDirectory, "gh")
-    writeFileSync(
+    validatedFs.writeFileSync(
       executable,
       [
         "#!/bin/sh",
@@ -146,7 +143,7 @@ describe("GitHub command boundary", () => {
         "printf '%s|%s|%s' \"$HOME\" \"$GH_CONFIG_DIR\" \"$GH_TOKEN\"",
       ].join("\n")
     )
-    chmodSync(executable, 0o700)
+    validatedFs.chmodSync(executable, 0o700)
     const previousExecutable = process.env.GH_EXECUTABLE
     process.env.GH_EXECUTABLE = executable
     try {
@@ -164,8 +161,8 @@ describe("GitHub command boundary", () => {
       expect(secondToken).toBe("[REDACTED]")
       expect(first.stdout).not.toContain("contaminated")
       expect(second.stdout).not.toContain("contaminated")
-      expect(existsSync(firstHome)).toBe(false)
-      expect(existsSync(secondHome)).toBe(false)
+      expect(validatedFs.existsSync(firstHome)).toBe(false)
+      expect(validatedFs.existsSync(secondHome)).toBe(false)
     } finally {
       if (previousExecutable === undefined) {
         delete process.env.GH_EXECUTABLE
@@ -179,7 +176,7 @@ describe("GitHub command boundary", () => {
   it("redacts the token from subprocess error output", async () => {
     const fixtureDirectory = mkdtempSync(join(tmpdir(), "fake-gh-error-"))
     const executable = join(fixtureDirectory, "gh")
-    writeFileSync(
+    validatedFs.writeFileSync(
       executable,
       [
         "#!/bin/sh",
@@ -187,7 +184,7 @@ describe("GitHub command boundary", () => {
         "exit 7",
       ].join("\n")
     )
-    chmodSync(executable, 0o700)
+    validatedFs.chmodSync(executable, 0o700)
     const previousExecutable = process.env.GH_EXECUTABLE
     process.env.GH_EXECUTABLE = executable
     try {
@@ -207,17 +204,19 @@ describe("GitHub command boundary", () => {
     }
   })
 
-  it("fails with a bounded error when output exceeds the maximum", async () => {
+  }
+
+function defineGitHubCommandBoundarySuite1Part3() {it("fails with a bounded error when output exceeds the maximum", async () => {
     const fixtureDirectory = mkdtempSync(join(tmpdir(), "fake-gh-large-"))
     const executable = join(fixtureDirectory, "gh")
-    writeFileSync(
+    validatedFs.writeFileSync(
       executable,
       [
         "#!/bin/sh",
         "/usr/bin/head -c 1100000 /dev/zero",
       ].join("\n")
     )
-    chmodSync(executable, 0o700)
+    validatedFs.chmodSync(executable, 0o700)
     const previousExecutable = process.env.GH_EXECUTABLE
     process.env.GH_EXECUTABLE = executable
     try {
@@ -239,4 +238,12 @@ describe("GitHub command boundary", () => {
       rmSync(fixtureDirectory, { recursive: true, force: true })
     }
   })
-})
+}
+
+const defineGitHubCommandBoundarySuite1 = () => {
+  defineGitHubCommandBoundarySuite1Part1()
+  defineGitHubCommandBoundarySuite1Part2()
+  defineGitHubCommandBoundarySuite1Part3()
+};
+
+describe("GitHub command boundary", defineGitHubCommandBoundarySuite1)

@@ -23,6 +23,14 @@ const ALLOWED_FIELDS = new Set([
   "checksumSha256",
   "reservationId",
 ])
+const STORAGE_OPERATIONS = new Set([
+  "list",
+  "download",
+  "upload",
+  "publish",
+  "download-public",
+  "complete-upload",
+])
 
 type StorageRequest = {
   operation:
@@ -41,41 +49,129 @@ type StorageRequest = {
   reservationId?: string
 }
 
+type AgentInvocation = NonNullable<
+  Awaited<ReturnType<typeof verifyAgentInvocationContext>>
+>
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string"
+}
+
+function hasValidStorageFields(body: Record<string, unknown>): boolean {
+  const contentLengthValid =
+    body.contentLength === undefined ||
+    (Number.isSafeInteger(body.contentLength) &&
+      (body.contentLength as number) >= 1)
+  const idempotencyKeyValid =
+    body.idempotencyKey === undefined ||
+    (typeof body.idempotencyKey === "string" &&
+      body.idempotencyKey.length >= 8 &&
+      body.idempotencyKey.length <= 128)
+  const checksumValid =
+    body.checksumSha256 === undefined ||
+    (typeof body.checksumSha256 === "string" &&
+      /^[A-Za-z0-9+/]{43}=$/.test(body.checksumSha256))
+  const reservationValid =
+    body.reservationId === undefined ||
+    (typeof body.reservationId === "string" &&
+      /^[0-9a-f-]{36}$/i.test(body.reservationId))
+  return [
+    isOptionalString(body.path),
+    isOptionalString(body.continuationToken),
+    isOptionalString(body.contentType),
+    contentLengthValid,
+    idempotencyKeyValid,
+    checksumValid,
+    reservationValid,
+  ].every(Boolean)
+}
+
 function parseRequest(value: unknown): StorageRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null
   const body = value as Record<string, unknown>
   if (Object.keys(body).some((field) => !ALLOWED_FIELDS.has(field))) return null
   if (
-    body.operation !== "list" &&
-    body.operation !== "download" &&
-    body.operation !== "upload" &&
-    body.operation !== "publish" &&
-    body.operation !== "download-public" &&
-    body.operation !== "complete-upload"
-  ) {
-    return null
-  }
-  if (
-    body.path !== undefined && typeof body.path !== "string" ||
-    body.continuationToken !== undefined &&
-      typeof body.continuationToken !== "string" ||
-    body.contentType !== undefined && typeof body.contentType !== "string"
-    || body.contentLength !== undefined &&
-      (!Number.isSafeInteger(body.contentLength) || (body.contentLength as number) < 1)
-    || body.idempotencyKey !== undefined &&
-      (typeof body.idempotencyKey !== "string" ||
-        body.idempotencyKey.length < 8 ||
-        body.idempotencyKey.length > 128)
-    || body.checksumSha256 !== undefined &&
-      (typeof body.checksumSha256 !== "string" ||
-        !/^[A-Za-z0-9+/]{43}=$/.test(body.checksumSha256))
-    || body.reservationId !== undefined &&
-      (typeof body.reservationId !== "string" ||
-        !/^[0-9a-f-]{36}$/i.test(body.reservationId))
-  ) {
-    return null
-  }
+    typeof body.operation !== "string" ||
+    !STORAGE_OPERATIONS.has(body.operation) ||
+    !hasValidStorageFields(body)
+  ) return null
   return body as StorageRequest
+}
+
+async function executeStorageOperation(
+  input: StorageRequest,
+  context: AgentInvocation
+): Promise<object | null> {
+  const contextKey = `${context.sessionId}:${context.nonce}`
+  switch (input.operation) {
+    case "list":
+      return listWorkspaceObjects(
+        context.workspacePrefix,
+        input.continuationToken
+      )
+    case "download":
+      return input.path
+        ? createWorkspaceDownloadUrl(context.workspacePrefix, input.path)
+        : null
+    case "upload":
+      return executePrivateUpload(input, context, contextKey)
+    case "publish":
+      return executePublicUpload(input, context, contextKey)
+    case "download-public":
+      return input.path
+        ? createPublicArtifactDownloadUrl(context.ownerEmail, input.path)
+        : null
+    case "complete-upload":
+      return input.reservationId
+        ? completeWorkspaceUpload(context.ownerEmail, input.reservationId)
+        : null
+  }
+}
+
+function executePrivateUpload(
+  input: StorageRequest,
+  context: AgentInvocation,
+  contextKey: string
+): Promise<object> | null {
+  if (
+    !input.path ||
+    !input.contentLength ||
+    !input.idempotencyKey ||
+    !input.checksumSha256
+  ) return null
+  return createWorkspaceUploadUrl({
+    ownerEmail: context.ownerEmail,
+    signedWorkspacePrefix: context.workspacePrefix,
+    relativePath: input.path,
+    contentLength: input.contentLength,
+    contextKey,
+    idempotencyKey: input.idempotencyKey,
+    checksumSha256: input.checksumSha256,
+    contentType: input.contentType,
+  })
+}
+
+function executePublicUpload(
+  input: StorageRequest,
+  context: AgentInvocation,
+  contextKey: string
+): Promise<object> | null {
+  if (
+    !input.path ||
+    !input.contentType ||
+    !input.contentLength ||
+    !input.idempotencyKey ||
+    !input.checksumSha256
+  ) return null
+  return createPublicArtifactUpload({
+    ownerEmail: context.ownerEmail,
+    fileName: input.path,
+    contentType: input.contentType,
+    contentLength: input.contentLength,
+    contextKey,
+    idempotencyKey: input.idempotencyKey,
+    checksumSha256: input.checksumSha256,
+  })
 }
 
 export async function POST(request: NextRequest) {
@@ -99,65 +195,8 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    let result: object
-    if (input.operation === "list") {
-      result = await listWorkspaceObjects(
-        context.workspacePrefix,
-        input.continuationToken
-      )
-    } else if (input.operation === "download" && input.path) {
-      result = await createWorkspaceDownloadUrl(
-        context.workspacePrefix,
-        input.path
-      )
-    } else if (
-      input.operation === "upload" &&
-      input.path &&
-      input.contentLength &&
-      input.idempotencyKey &&
-      input.checksumSha256
-    ) {
-      result = await createWorkspaceUploadUrl(
-          context.ownerEmail,
-          context.workspacePrefix,
-          input.path,
-          input.contentLength,
-          `${context.sessionId}:${context.nonce}`,
-          input.idempotencyKey,
-          input.checksumSha256,
-          input.contentType
-        )
-    } else if (
-      input.operation === "publish" &&
-      input.path &&
-      input.contentType &&
-      input.contentLength &&
-      input.idempotencyKey &&
-      input.checksumSha256
-    ) {
-      result = await createPublicArtifactUpload(
-        context.ownerEmail,
-        input.path,
-        input.contentType,
-        input.contentLength,
-        `${context.sessionId}:${context.nonce}`,
-        input.idempotencyKey,
-        input.checksumSha256,
-      )
-    } else if (input.operation === "download-public" && input.path) {
-      result = await createPublicArtifactDownloadUrl(
-        context.ownerEmail,
-        input.path
-      )
-    } else if (
-      input.operation === "complete-upload" &&
-      input.reservationId
-    ) {
-      result = await completeWorkspaceUpload(
-        context.ownerEmail,
-        input.reservationId,
-      )
-    } else {
+    const result = await executeStorageOperation(input, context)
+    if (!result) {
       return NextResponse.json(
         { error: "Storage operation is missing required fields" },
         { status: 400 }

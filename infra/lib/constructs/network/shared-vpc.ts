@@ -75,7 +75,7 @@ export class SharedVPC extends Construct {
       vpcName: `aistudio-${environment}-vpc`,
       maxAzs: config.network.maxAzs,
       natGateways: config.network.natGateways,
-      natGatewayProvider: this.createOptimizedNatProvider(environment),
+      natGatewayProvider: this.createOptimizedNatProvider(),
 
       subnetConfiguration: [
         {
@@ -149,7 +149,6 @@ export class SharedVPC extends Construct {
     }
 
     // Add CloudWatch metrics
-    this.addVpcMetrics(environment)
   }
 
   /**
@@ -171,9 +170,7 @@ export class SharedVPC extends Construct {
    * Cost: ~$45/month per NAT gateway (consistent across all environments)
    * Benefit: Managed service, no AMI lookups, more reliable, consistent behavior
    */
-  private createOptimizedNatProvider(
-    environment: string
-  ): ec2.NatProvider {
+  private createOptimizedNatProvider(): ec2.NatProvider {
     // Use managed NAT gateways for all environments
     // This avoids AMI lookup issues in CI/CD with --no-lookups flag
     return ec2.NatProvider.gateway()
@@ -456,22 +453,6 @@ export class SharedVPC extends Construct {
         `aistudio-isolated-${subnet.availabilityZone}`
       )
     }
-  }
-
-  /**
-   * Add CloudWatch metrics for VPC monitoring.
-   *
-   * Creates a CloudWatch dashboard with:
-   * - NAT Gateway data transfer metrics (prod/staging only)
-   * - VPC Endpoint usage metrics
-   *
-   * Note: Metrics will populate after resources are deployed and generate traffic.
-   * Dashboard shows aggregated metrics across all NAT gateways and endpoints.
-   */
-  private addVpcMetrics(environment: string): void {
-    // Custom CloudWatch dashboard for VPC metrics removed
-    // Metrics now exported to consolidated dashboards via MonitoringStack
-    // VPC/NAT Gateway metrics available for consolidation
   }
 
   /**

@@ -49,7 +49,7 @@ export function extractRichEnvelope(text: string | null | undefined): ExtractRes
   let lastEnvelope: RichEnvelope | null = null;
   let sawMalformed = false;
 
-  // eslint-disable-next-line no-constant-condition
+
   while (true) {
     const openIdx = remaining.indexOf(RICH_ENVELOPE_OPEN);
     if (openIdx === -1) break;

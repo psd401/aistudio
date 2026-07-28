@@ -671,7 +671,7 @@ export function parseSSEEvent(data: string): SSEEvent {
     return parsed as unknown as SSEEvent;
   } catch (error) {
     if (error instanceof SyntaxError) {
-      throw new Error(`Failed to parse SSE event JSON: ${error.message}`);
+      throw new Error(`Failed to parse SSE event JSON: ${error.message}`, { cause: error });
     }
     throw error;
   }

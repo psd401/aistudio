@@ -180,6 +180,19 @@ export function segmentPdfPages(
   const maxCharacters = options.maxCharacters ?? DEFAULT_MAX_SEGMENT_CHARACTERS;
   const overlapCharacters =
     options.overlapCharacters ?? DEFAULT_OVERLAP_CHARACTERS;
+  requireValidPdfSegmentOptions(maxCharacters, overlapCharacters);
+
+  const segments: PdfSegment[] = [];
+  for (const page of pages) {
+    appendPdfPageSegments(segments, page, options, maxCharacters, overlapCharacters);
+  }
+  return segments;
+}
+
+function requireValidPdfSegmentOptions(
+  maxCharacters: number,
+  overlapCharacters: number
+): void {
   if (!Number.isSafeInteger(maxCharacters) || maxCharacters < 200) {
     throw new Error("maxCharacters must be an integer of at least 200");
   }
@@ -190,33 +203,36 @@ export function segmentPdfPages(
   ) {
     throw new Error("overlapCharacters must be smaller than maxCharacters");
   }
+}
 
-  const segments: PdfSegment[] = [];
-  for (const page of pages) {
-    const normalized = normalizePageText(page.text);
-    if (!normalized) continue;
-    const contents =
-      options.maxCharacters != null || options.overlapCharacters != null
-        ? pageSegments(normalized, maxCharacters, overlapCharacters)
-        : splitTokenizerAwareText(normalized, {
-            maximumTokens: options.maxTokens,
-            overlapTokens: options.overlapTokens,
-          });
-    const parentChunkIndex = segments.length;
-    for (const [pageChunkIndex, content] of contents.entries()) {
-      const contextPrefix = `Page ${page.page}`;
-      segments.push({
-        content,
-        contentHash: createHash("sha256").update(content).digest("hex"),
-        chunkIndex: segments.length,
-        tokens: countRepositoryTokens(`${contextPrefix}\n${content}`),
-        sourceLocator: { page: page.page, pageEnd: page.page },
-        contextPrefix,
-        segmentLevel: pageChunkIndex === 0 ? "section" : "chunk",
-        parentChunkIndex:
-          pageChunkIndex === 0 ? undefined : parentChunkIndex,
-      });
-    }
+function appendPdfPageSegments(
+  segments: PdfSegment[],
+  page: PdfPageText,
+  options: PdfSegmentOptions,
+  maxCharacters: number,
+  overlapCharacters: number
+): void {
+  const normalized = normalizePageText(page.text);
+  if (!normalized) return;
+  const contents =
+    options.maxCharacters != null || options.overlapCharacters != null
+      ? pageSegments(normalized, maxCharacters, overlapCharacters)
+      : splitTokenizerAwareText(normalized, {
+          maximumTokens: options.maxTokens,
+          overlapTokens: options.overlapTokens,
+        });
+  const parentChunkIndex = segments.length;
+  for (const [pageChunkIndex, content] of contents.entries()) {
+    const contextPrefix = `Page ${page.page}`;
+    segments.push({
+      content,
+      contentHash: createHash("sha256").update(content).digest("hex"),
+      chunkIndex: segments.length,
+      tokens: countRepositoryTokens(`${contextPrefix}\n${content}`),
+      sourceLocator: { page: page.page, pageEnd: page.page },
+      contextPrefix,
+      segmentLevel: pageChunkIndex === 0 ? "section" : "chunk",
+      parentChunkIndex: pageChunkIndex === 0 ? undefined : parentChunkIndex,
+    });
   }
-  return segments;
 }

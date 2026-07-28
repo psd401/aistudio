@@ -29,7 +29,7 @@
  */
 import { describe, it, expect } from '@jest/globals'
 
-describe('Drizzle Client Configuration', () => {
+function defineDrizzleClientConfigurationSuite1Part1() {
   describe('QueryRetryOptions type definition', () => {
     it('should define correct default values as documented', () => {
       // Document the expected default values from drizzle-client.ts
@@ -81,7 +81,9 @@ describe('Drizzle Client Configuration', () => {
     })
   })
 
-  describe('TransactionOptions type definition', () => {
+  }
+
+function defineDrizzleClientConfigurationSuite1Part2() {describe('TransactionOptions type definition', () => {
     it('should support all PostgreSQL isolation levels', () => {
       type IsolationLevel =
         | 'read uncommitted'
@@ -151,7 +153,9 @@ describe('Drizzle Client Configuration', () => {
     })
   })
 
-  describe('Circuit Breaker Configuration', () => {
+  }
+
+function defineDrizzleClientConfigurationSuite1Part3() {describe('Circuit Breaker Configuration', () => {
     it('should document circuit breaker thresholds', () => {
       // These values are defined in rds-error-handler.ts
       // and used by drizzle-client.ts
@@ -260,7 +264,9 @@ describe('Drizzle Client Configuration', () => {
     })
   })
 
-  describe('Environment Configuration', () => {
+  }
+
+function defineDrizzleClientConfigurationSuite1Part4() {describe('Environment Configuration', () => {
     it('should document required environment variables', () => {
       const requiredEnvVars = [
         'RDS_SECRET_ARN',
@@ -288,9 +294,18 @@ describe('Drizzle Client Configuration', () => {
       expect(DEFAULT_AWS_REGION).toBe('us-east-1')
     })
   })
-})
+}
 
-describe('executeQuery behavior documentation', () => {
+const defineDrizzleClientConfigurationSuite1 = () => {
+  defineDrizzleClientConfigurationSuite1Part1()
+  defineDrizzleClientConfigurationSuite1Part2()
+  defineDrizzleClientConfigurationSuite1Part3()
+  defineDrizzleClientConfigurationSuite1Part4()
+};
+
+describe('Drizzle Client Configuration', defineDrizzleClientConfigurationSuite1)
+
+const defineExecuteQueryBehaviorDocumentationSuite2 = () => {
   it('should document that executeQuery wraps Drizzle operations', () => {
     // executeQuery takes a query function and context string
     // It wraps the operation with:
@@ -323,9 +338,11 @@ describe('executeQuery behavior documentation', () => {
     expect(errorBehaviors.nonRetryableError).toBe('throws immediately')
     expect(errorBehaviors.circuitBreakerOpen).toBe('throws immediately')
   })
-})
+};
 
-describe('executeTransaction behavior documentation', () => {
+describe('executeQuery behavior documentation', defineExecuteQueryBehaviorDocumentationSuite2)
+
+const defineExecuteTransactionBehaviorDocumentationSuite3 = () => {
   it('should document transaction wrapper behavior', () => {
     // executeTransaction wraps db.transaction with:
     // - All executeQuery behaviors (circuit breaker, retry)
@@ -364,9 +381,11 @@ describe('executeTransaction behavior documentation', () => {
     expect(prohibitedSideEffects).toHaveLength(4)
     expect(allowedOperations).toHaveLength(1)
   })
-})
+};
 
-describe('validateDatabaseConnection behavior documentation', () => {
+describe('executeTransaction behavior documentation', defineExecuteTransactionBehaviorDocumentationSuite3)
+
+const defineValidateDatabaseConnectionBehaviorDocumentationSuite4 = () => {
   it('should document connection validation purpose', () => {
     // validateDatabaseConnection is used for health checks to verify:
     // - Environment variables are configured (RDS_SECRET_ARN, RDS_RESOURCE_ARN)
@@ -472,4 +491,6 @@ describe('validateDatabaseConnection behavior documentation', () => {
     expect(regionPrecedence[0]).toBe('AWS_REGION')
     expect(regionPrecedence[3]).toBe('us-east-1 (default)')
   })
-})
+};
+
+describe('validateDatabaseConnection behavior documentation', defineValidateDatabaseConnectionBehaviorDocumentationSuite4)

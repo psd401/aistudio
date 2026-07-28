@@ -38,7 +38,7 @@ function correction(
   };
 }
 
-describe("computeLearning", () => {
+function defineComputeLearningSuite1Part1() {
   test("no corrections → empty result", () => {
     const r = computeLearning({ corrections: [], decisions: [], rules: emptyRules, now: NOW });
     expect(r.learnedPatterns).toEqual([]);
@@ -137,7 +137,9 @@ describe("computeLearning", () => {
     expect(r.suggestions).toEqual([]);
   });
 
-  test("already-VIP sender is not re-suggested", () => {
+  }
+
+function defineComputeLearningSuite1Part2() {test("already-VIP sender is not re-suggested", () => {
     const corrections = [
       correction({ toLabel: "inbox", fromLabel: "later", fromEmail: "boss@psd401.net" }),
       correction({ toLabel: "inbox", fromLabel: "later", fromEmail: "boss@psd401.net" }),
@@ -203,9 +205,16 @@ describe("computeLearning", () => {
     const oldP = r.learnedPatterns.find((p) => p.pattern === "old@x.com");
     expect(freshP.weight).toBeGreaterThan(oldP?.weight ?? 0);
   });
-});
+}
 
-describe("mergeSuggestions", () => {
+const defineComputeLearningSuite1 = () => {
+  defineComputeLearningSuite1Part1()
+  defineComputeLearningSuite1Part2()
+};
+
+describe("computeLearning", defineComputeLearningSuite1);
+
+const defineMergeSuggestionsSuite2 = () => {
   const s = (id: string, createdAt = "2026-07-01T00:00:00Z"): Suggestion => ({
     id,
     kind: id.startsWith("vip") ? "vip" : "mute",
@@ -243,4 +252,6 @@ describe("mergeSuggestions", () => {
     expect(merged.map((m) => m.id)).toEqual(["vip:b@x.com"]);
     expect(added.map((a) => a.id)).toEqual(["vip:b@x.com"]);
   });
-});
+};
+
+describe("mergeSuggestions", defineMergeSuggestionsSuite2);

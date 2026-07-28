@@ -106,7 +106,7 @@ afterAll(() => {
   delete process.env.PSD_DATA_MCP_URL
 })
 
-describe("owner-only operation credential broker", () => {
+function defineOwnerOnlyOperationCredentialBrokerSuite1Part1() {
   it("rejects destructive or newly introduced Plaud tools", async () => {
     const fetchMock = jest.fn()
     globalThis.fetch = fetchMock as typeof fetch
@@ -202,7 +202,9 @@ describe("owner-only operation credential broker", () => {
     ])
   })
 
-  it("rejects an oversized token response before parsing", async () => {
+  }
+
+function defineOwnerOnlyOperationCredentialBrokerSuite1Part2() {it("rejects an oversized token response before parsing", async () => {
     globalThis.fetch = jest.fn().mockResolvedValueOnce(
       jsonResponse(
         { access_token: "attacker" },
@@ -287,7 +289,9 @@ describe("owner-only operation credential broker", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
-  it("does not accept an unrelated Plaud SSE JSON-RPC event", async () => {
+  }
+
+function defineOwnerOnlyOperationCredentialBrokerSuite1Part3() {it("does not accept an unrelated Plaud SSE JSON-RPC event", async () => {
     const fetchMock = jest.fn(async (_url: unknown, init?: RequestInit) => {
       if (fetchMock.mock.calls.length === 1) {
         return jsonResponse({ access_token: "ephemeral-access" })
@@ -372,7 +376,9 @@ describe("owner-only operation credential broker", () => {
     ).resolves.toEqual({ status: "ok", result: { tools: [] } })
   })
 
-  it("returns only allowlisted Red Rover organization fields", async () => {
+  }
+
+function defineOwnerOnlyOperationCredentialBrokerSuite1Part4() {it("returns only allowlisted Red Rover organization fields", async () => {
     globalThis.fetch = jest.fn().mockResolvedValueOnce(
       jsonResponse([
         {
@@ -481,4 +487,13 @@ describe("owner-only operation credential broker", () => {
       })
     ).rejects.toThrow("aggregate byte limit")
   })
-})
+}
+
+const defineOwnerOnlyOperationCredentialBrokerSuite1 = () => {
+  defineOwnerOnlyOperationCredentialBrokerSuite1Part1()
+  defineOwnerOnlyOperationCredentialBrokerSuite1Part2()
+  defineOwnerOnlyOperationCredentialBrokerSuite1Part3()
+  defineOwnerOnlyOperationCredentialBrokerSuite1Part4()
+};
+
+describe("owner-only operation credential broker", defineOwnerOnlyOperationCredentialBrokerSuite1)

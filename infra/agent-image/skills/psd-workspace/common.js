@@ -1,3 +1,4 @@
+
 /**
  * Shared helpers for the psd-workspace OpenClaw skill (#912).
  *
@@ -7,8 +8,10 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
 
-const fs = require('node:fs');
+
+
 const APP_BASE_URL = process.env.APP_BASE_URL || '';
 
 // Strict email regex — must stay in sync with lib/agent-workspace/validation.ts.
@@ -65,8 +68,7 @@ function splitCommand(cmd) {
   const tokens = [];
   let buf = '';
   let quote = null;
-  for (let i = 0; i < cmd.length; i++) {
-    const ch = cmd[i];
+  for (const ch of cmd) {
     if (quote) {
       if (ch === quote) { quote = null; continue; }
       buf += ch;
@@ -105,13 +107,60 @@ function splitCommand(cmd) {
 // splitCommand, so tokenization never touches the content.
 
 const PAYLOAD_PLACEHOLDERS = {
-  '--json-file': { flag: '--json', placeholder: '@@PSD_PAYLOAD_JSON@@', kind: 'json' },
-  '--body-file': { flag: '--body', placeholder: '@@PSD_PAYLOAD_BODY@@', kind: 'text' },
+  '--json-file': {
+    flag: '--json',
+    matcher: /(^|\s)--json-file\s+(\S+)/g,
+    inlineMatcher: /(^|\s)--json\s/,
+    placeholder: '@@PSD_PAYLOAD_JSON@@',
+    kind: 'json',
+  },
+  '--body-file': {
+    flag: '--body',
+    matcher: /(^|\s)--body-file\s+(\S+)/g,
+    inlineMatcher: /(^|\s)--body\s/,
+    placeholder: '@@PSD_PAYLOAD_BODY@@',
+    kind: 'text',
+  },
   // chat +send message text. Added after the live 2026-07-07 run: the agent
   // GUESSED `--text-file` while fumbling +send syntax against the clock —
   // it's the natural generalization of the two flags above, so make it real.
-  '--text-file': { flag: '--text', placeholder: '@@PSD_PAYLOAD_TEXT@@', kind: 'text' },
+  '--text-file': {
+    flag: '--text',
+    matcher: /(^|\s)--text-file\s+(\S+)/g,
+    inlineMatcher: /(^|\s)--text\s/,
+    placeholder: '@@PSD_PAYLOAD_TEXT@@',
+    kind: 'text',
+  },
 };
+
+function normalizePayloadFilePath(rawPath, fileFlag, reject) {
+  let filePath = rawPath;
+  const singleQuoted = filePath.startsWith("'") && filePath.endsWith("'");
+  const doubleQuoted = filePath.startsWith('"') && filePath.endsWith('"');
+  if (filePath.length >= 2 && (singleQuoted || doubleQuoted)) {
+    filePath = filePath.slice(1, -1);
+  }
+  if (!filePath.startsWith('/')) {
+    reject(`${fileFlag} requires an absolute path (got "${filePath}")`);
+  }
+  return filePath;
+}
+
+function readPayloadFile(filePath, fileFlag, kind, reject) {
+  let content;
+  try {
+    content = validatedFs.readFileSync(filePath, 'utf8');
+  } catch (err) {
+    reject(`${fileFlag}: cannot read ${filePath}: ${err.message}`);
+  }
+  if (kind !== 'json') return content;
+
+  try {
+    return JSON.stringify(JSON.parse(content));
+  } catch (err) {
+    reject(`${fileFlag}: ${filePath} is not valid JSON: ${err.message}`);
+  }
+}
 
 /**
  * Resolve `--json-file` / `--body-file` references in a --command string.
@@ -129,67 +178,45 @@ const PAYLOAD_PLACEHOLDERS = {
  * --json-file, duplicate use of the same flag, or --json-file alongside an
  * inline --json (ambiguous — exactly one payload source allowed).
  */
-function resolvePayloadFiles(commandString) {
+function resolvePayloadFiles(commandString, options = {}) {
   if (!commandString || typeof commandString !== 'string') return null;
+  const onError = options.onError || fail;
+  const reject = (message) => {
+    onError(message);
+    throw new Error('resolvePayloadFiles onError callback must not return');
+  };
   let execCommand = commandString;
   let syntheticCommand = commandString;
   const payloads = {};
 
   for (const [fileFlag, spec] of Object.entries(PAYLOAD_PLACEHOLDERS)) {
-    const re = new RegExp(`(^|\\s)${fileFlag}\\s+(\\S+)`, 'g');
-    const matches = [...commandString.matchAll(re)];
+    const matches = [...commandString.matchAll(spec.matcher)];
     if (matches.length === 0) continue;
     if (matches.length > 1) {
-      fail(`${fileFlag} may appear at most once per command`);
+      reject(`${fileFlag} may appear at most once per command`);
     }
     // Exactly one payload source per flag: reject the file form alongside its
     // inline counterpart (--json + --json-file, --body + --body-file) —
     // otherwise gws would receive two occurrences of the same flag and pick
     // one silently. `--json\s` does not match `--json-file` (hyphen, not
     // whitespace, follows), so the file flag never trips its own check.
-    const inlineRe = new RegExp(`(^|\\s)${spec.flag}\\s`);
-    if (inlineRe.test(commandString)) {
-      fail(`use either ${spec.flag} or ${fileFlag}, not both`);
+    if (spec.inlineMatcher.test(commandString)) {
+      reject(`use either ${spec.flag} or ${fileFlag}, not both`);
     }
-    let filePath = matches[0][2];
+    const filePath = normalizePayloadFilePath(matches[0][2], fileFlag, reject);
     // Models habitually quote flag values (every SKILL.md example quotes
     // --params). \S+ captures those quotes, so strip one matching
     // surrounding pair before validating — otherwise a valid quoted path
     // fails the absolute-path check with a misleading error.
-    if (
-      filePath.length >= 2 &&
-      ((filePath.startsWith("'") && filePath.endsWith("'")) ||
-        (filePath.startsWith('"') && filePath.endsWith('"')))
-    ) {
-      filePath = filePath.slice(1, -1);
-    }
-    if (!filePath.startsWith('/')) {
-      fail(`${fileFlag} requires an absolute path (got "${filePath}")`);
-    }
-    let content;
-    try {
-      content = fs.readFileSync(filePath, 'utf8');
-    } catch (err) {
-      fail(`${fileFlag}: cannot read ${filePath}: ${err.message}`);
-    }
-    if (spec.kind === 'json') {
-      try {
-        // Minify so the synthetic inline command is single-line — the
-        // marker injector's brace scanner and the gate regexes both operate
-        // on it, and a compact form keeps their behavior identical to the
-        // inline --json path.
-        content = JSON.stringify(JSON.parse(content));
-      } catch (err) {
-        fail(`${fileFlag}: ${filePath} is not valid JSON: ${err.message}`);
-      }
-    }
+    // JSON is minified so the marker injector and gates see one line.
+    const content = readPayloadFile(filePath, fileFlag, spec.kind, reject);
     payloads[spec.placeholder] = content;
     execCommand = execCommand.replace(
-      re,
+      spec.matcher,
       (m, lead) => `${lead}${spec.flag} ${spec.placeholder}`
     );
     syntheticCommand = syntheticCommand.replace(
-      re,
+      spec.matcher,
       (m, lead) => `${lead}${spec.flag} ${content}`
     );
   }
@@ -255,8 +282,8 @@ function extractJsonArgFromTokens(tokens) {
 // USER's account to route around the sharing gate ("do not create documents
 // as my account, that's a huge hole security-wise"). File creation as the
 // user is impersonation — every artifact must be owned by the agent identity
-// (auditable, gate-enforced sharing) and shared explicitly via
-// isPermittedExplicitShare. Drafts/calendar/tasks on the user slot remain
+// (auditable, gate-enforced sharing). Permission changes require a separate,
+// server-recorded provenance flow. Drafts/calendar/tasks on the user slot remain
 // allowed: they are marker-stamped, land in review surfaces (Drafts folder,
 // own calendar), and were explicitly designed as user-slot writes.
 //
@@ -404,8 +431,8 @@ const DRIVE_METADATA_FIELDS = new Set([
 const DRIVE_CONTENT_FLAG = /^--(media|media-file|media-body|upload|upload-file|upload-type|content|content-file|data|data-file|body|body-file|text|text-file|file|source|source-file)$/i;
 
 /**
- * Pull the JSON resource out of a gws command, using the SAME dual extraction
- * as isPermittedExplicitShare: prefer the argv token that actually executes
+ * Pull the JSON resource out of a gws command, using the same dual extraction
+ * used by every Drive payload gate: prefer the argv token that actually executes
  * (REV-COR-346 — the gate must see what gws sees), and fall back to the
  * brace-balanced raw-string scan for the payload-file flow, whose synthetic
  * command inlines minified JSON unquoted and so mangles under splitCommand.
@@ -562,108 +589,6 @@ function detectGmailSendHelper(tokens) {
   return null;
 }
 
-// District domain for the explicit-share exception. Env-overridable so
-// non-prod environments could narrow/redirect it; the default is the only
-// domain the platform serves.
-const AGENT_SHARE_DOMAIN = (process.env.AGENT_SHARE_DOMAIN || 'psd401.net').toLowerCase();
-
-/**
- * Exception to the `drive.permissions.create` block: the agent may grant
- * EXPLICIT, bounded permissions on files it owns (scope === 'agent_account').
- *
- * Rationale: the agent stores artifacts it creates (reports, generated docs,
- * meeting summaries) on its own agent_account Drive. Originally it could
- * share them only back to the CALLER; product decision 2026-07-07 (Hagel,
- * #1138 — team docs must land in shared Chat spaces) widened this to
- * in-district sharing with explicit grants.
- *
- * Hard constraints (ALL must be true to allow):
- *   - context.scope is 'agent_account'  (sharing FROM the agent's own Drive;
- *     permission changes on user-owned files remain fully blocked)
- *   - create only (update/delete remain blocked)
- *   - EITHER type === 'user' with an @psd401.net emailAddress,
- *     role ∈ {reader, commenter, writer} (writer added 2026-07-08, Hagel:
- *     explicitly NAMED district individuals may edit agent-owned docs —
- *     team collaboration on posted docs)
- *   - OR     type === 'domain' with domain === psd401.net, role === 'reader'
- *     (broad in-district visibility for docs posted to shared spaces;
- *     domain-wide stays read-only — district-wide edit is vandalism surface)
- *   - NEVER: type 'anyone' or 'group', external addresses/domains,
- *     owner transfer.
- *
- * Returns true if the share request fits the explicit in-district shape;
- * false otherwise. False means fall through to the existing block.
- */
-function isPermittedExplicitShare(commandString, tokens, context) {
-  if (!context || context.scope !== 'agent_account' || !context.ownerEmail) {
-    return false;
-  }
-  // Must be the create variant — update/delete remain blocked. Match against
-  // the executed tokenization (REV-COR-346), not the raw string.
-  const spaceJoined = tokens.join(' ').toLowerCase();
-  const dotJoined = tokens.join('.').toLowerCase();
-  const createRe = /\bdrive[\s.]+permissions[\s.]+create\b/i;
-  if (!createRe.test(spaceJoined) && !createRe.test(dotJoined)) {
-    return false;
-  }
-
-  // Read the --json payload from the argv token that actually executes, so the
-  // exception cannot be granted on a benign-looking payload that differs from
-  // what gws receives (REV-COR-346). The payload-file flow's synthetic command
-  // inlines minified JSON UNQUOTED, which splitCommand's quote handling mangles
-  // (the embedded `"` toggle quote state) — for that flow fall back to the
-  // brace-balanced raw-string scan. The fallback only fires when the executed
-  // token is not itself valid JSON, in which case gws rejects the payload
-  // rather than executing a diverging one.
-  let payload = null;
-  const tokenJson = extractJsonArgFromTokens(tokens);
-  if (tokenJson) {
-    try {
-      payload = JSON.parse(tokenJson);
-    } catch {
-      payload = null;
-    }
-  }
-  if (!payload) {
-    const rawJson = extractJsonArg(commandString);
-    if (!rawJson) return false;
-    try {
-      payload = JSON.parse(rawJson);
-    } catch {
-      return false;
-    }
-  }
-
-  // gws drive permissions create wraps the permission under `resource`,
-  // `requestBody`, or accepts the fields at top level depending on the
-  // invocation style. Look in all three.
-  const perm = payload.resource || payload.requestBody || payload;
-  if (!perm || typeof perm !== 'object') return false;
-
-  const type = typeof perm.type === 'string' ? perm.type.toLowerCase() : '';
-  const role = typeof perm.role === 'string' ? perm.role.toLowerCase() : '';
-  const emailAddress = typeof perm.emailAddress === 'string'
-    ? perm.emailAddress.toLowerCase()
-    : '';
-  const domain = typeof perm.domain === 'string' ? perm.domain.toLowerCase() : '';
-
-  if (type === 'user') {
-    // Explicit named recipient — must be in-district. Writer allowed for
-    // named individuals (2026-07-08); owner transfer never.
-    if (role !== 'reader' && role !== 'commenter' && role !== 'writer') {
-      return false;
-    }
-    return emailAddress.endsWith(`@${AGENT_SHARE_DOMAIN}`);
-  }
-  if (type === 'domain') {
-    // Whole-district visibility (docs linked in shared Chat spaces) —
-    // read-only, and ONLY our own domain.
-    return role === 'reader' && domain === AGENT_SHARE_DOMAIN;
-  }
-  // 'anyone', 'group', and everything else stay blocked.
-  return false;
-}
-
 // ============================================================================
 // Lazy scope upgrades (#1305)
 // ============================================================================
@@ -745,7 +670,7 @@ function missingScopesForCommand(commandString, grantedScopeString) {
     if (!missing.includes(req.scope)) missing.push(req.scope);
     if (!capability) capability = req.capability;
   }
-  return missing.length ? { scopes: missing, capability } : null;
+  return missing.length > 0 ? { scopes: missing, capability } : null;
 }
 
 /**
@@ -936,15 +861,7 @@ function injectMarkers(commandString) {
  * inclusive) or null when there is no parseable --json object. Shared by
  * mutateJsonField (marker injection) and extractJsonArg (payload-file flow).
  */
-function findJsonSpan(commandString) {
-  // Match --json followed by a single-quoted or double-quoted JSON object.
-  // The simple/robust approach: find --json, then balanced-brace scan from
-  // the next non-quote character forward.
-  const jsonFlagIdx = commandString.search(/--json\s+['"]?\{/);
-  if (jsonFlagIdx === -1) return null;
-
-  // Find the start of the JSON object (`{`). Skip the `--json` token,
-  // any whitespace, and any opening quote.
+function findJsonObjectStart(commandString, jsonFlagIdx) {
   let i = jsonFlagIdx + '--json'.length;
   while (i < commandString.length && /\s/.test(commandString[i])) i++;
   let openQuote = '';
@@ -954,13 +871,14 @@ function findJsonSpan(commandString) {
   }
   const jsonStart = i;
   if (commandString[jsonStart] !== '{') return null;
+  return { jsonStart, openQuote };
+}
 
-  // Brace-balance scan to find the matching close.
+function findBalancedJsonEnd(commandString, jsonStart) {
   let depth = 0;
   let inString = false;
   let stringChar = '';
   let escape = false;
-  let jsonEnd = -1;
   for (let j = jsonStart; j < commandString.length; j++) {
     const ch = commandString[j];
     if (escape) { escape = false; continue; }
@@ -977,11 +895,19 @@ function findJsonSpan(commandString) {
     if (ch === '{') depth++;
     else if (ch === '}') {
       depth--;
-      if (depth === 0) { jsonEnd = j; break; }
+      if (depth === 0) return j;
     }
   }
-  if (jsonEnd === -1) return null;
-  return { jsonStart, jsonEnd, openQuote };
+  return -1;
+}
+
+function findJsonSpan(commandString) {
+  const jsonFlagIdx = commandString.search(/--json\s+['"]?\{/);
+  if (jsonFlagIdx === -1) return null;
+  const start = findJsonObjectStart(commandString, jsonFlagIdx);
+  if (!start) return null;
+  const jsonEnd = findBalancedJsonEnd(commandString, start.jsonStart);
+  return jsonEnd === -1 ? null : { ...start, jsonEnd };
 }
 
 /**

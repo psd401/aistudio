@@ -1,6 +1,13 @@
 import { sql } from "drizzle-orm";
-import { executeTransaction, toPgRows } from "@/lib/db/drizzle-client";
-import { getContentPlatformConfig } from "./config";
+import {
+  executeTransaction,
+  toPgRows,
+  type DbTransaction,
+} from "@/lib/db/drizzle-client";
+import {
+  getContentPlatformConfig,
+  type ContentPlatformConfig,
+} from "./config";
 import { assessContentRetirementReadiness } from "./migration-reconciliation";
 
 interface RetirementGateRow {
@@ -17,9 +24,214 @@ interface RetirementGateRow {
   verified: number | string;
 }
 
+const EMPTY_RETIREMENT_GATE: RetirementGateRow = {
+  active_runs: 0,
+  discovered: 0,
+  dry_runs: 0,
+  failed: 0,
+  migrated: 0,
+  mismatched: 0,
+  recovery_window_ends_at: null,
+  rollback_drills: 0,
+  uncovered: 0,
+  unrecoverable: 0,
+  verified: 0,
+};
+
+const EXCLUDE_NON_MIGRATABLE_REPOSITORY_ITEMS = sql`
+  AND NOT (COALESCE(item.metadata, '{}'::jsonb) ? 'migrationSourceKind')
+  AND NOT EXISTS (
+    SELECT 1
+    FROM repository_connector_sources connector_source
+    WHERE connector_source.repository_item_id = item.id
+      AND connector_source.status = 'unsupported'
+  )
+`;
+
 function count(value: number | string | null | undefined): number {
   const parsed = Number(value ?? 0);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function isRetirementGateReady(
+  config: ContentPlatformConfig,
+  row: RetirementGateRow | undefined,
+): boolean {
+  const gate = row ?? EMPTY_RETIREMENT_GATE;
+  const recoveryWindowEndsAt = gate.recovery_window_ends_at
+    ? new Date(gate.recovery_window_ends_at)
+    : null;
+  return assessContentRetirementReadiness({
+    cutoversEnabled: [
+      config.enabled,
+      config.readV2Enabled,
+      config.repositoryCutoverEnabled,
+      config.nexusCutoverEnabled,
+      config.assistantArchitectCutoverEnabled,
+    ].every(Boolean),
+    retirementConfigured: config.legacyRetirementEnabled,
+    dryRunCompleted: count(gate.dry_runs) > 0,
+    inventoryComplete: count(gate.uncovered) === 0,
+    activeRunCount: count(gate.active_runs),
+    migrationMetrics: {
+      discovered: count(gate.discovered),
+      migrated: count(gate.migrated),
+      verified: count(gate.verified),
+      mismatched: count(gate.mismatched),
+      failed: count(gate.failed),
+      unrecoverable: count(gate.unrecoverable),
+    },
+    rollbackDrillCompleted: count(gate.rollback_drills) > 0,
+    recoveryWindowEndsAt,
+  }).ready;
+}
+
+async function loadRetirementGateRow(
+  tx: DbTransaction,
+): Promise<RetirementGateRow | undefined> {
+  const result = await tx.execute(sql`
+      SELECT
+        COUNT(*) FILTER (
+          WHERE status IN ('queued', 'running')
+        )::integer AS active_runs,
+        COUNT(*) FILTER (
+          WHERE mode = 'dry_run'
+            AND status = 'completed'
+            AND source_kinds @> '[
+              "repository_item",
+              "nexus_document",
+              "assistant_pdf_job"
+            ]'::jsonb
+        )::integer AS dry_runs,
+        (
+          SELECT COUNT(*)::integer
+          FROM repository_migration_items
+          WHERE status <> 'excluded'
+        ) AS discovered,
+        (
+          SELECT COUNT(*)::integer
+          FROM repository_migration_items
+          WHERE status IN ('migrated', 'verified', 'mismatch')
+        ) AS migrated,
+        (
+          SELECT COUNT(*)::integer
+          FROM repository_migration_items
+          WHERE status = 'verified'
+        ) AS verified,
+        (
+          SELECT COUNT(*)::integer
+          FROM repository_migration_items
+          WHERE status = 'mismatch'
+        ) AS mismatched,
+        (
+          SELECT COUNT(*)::integer
+          FROM repository_migration_items
+          WHERE status = 'failed'
+        ) AS failed,
+        (
+          SELECT COUNT(*)::integer
+          FROM repository_migration_items
+          WHERE status = 'unrecoverable'
+        ) AS unrecoverable,
+        COUNT(*) FILTER (
+          WHERE mode = 'rollback'
+            AND status = 'completed'
+            AND snapshot->>'rollbackDrill' = 'true'
+        )::integer AS rollback_drills,
+        GREATEST(
+          MAX(recovery_window_ends_at) FILTER (
+            WHERE mode = 'backfill'
+              AND status IN ('completed', 'completed_with_errors')
+          ),
+          (
+            SELECT MAX(verified_at) + make_interval(
+              days => COALESCE((
+                SELECT CASE
+                  WHEN value ~ '^[0-9]+$'
+                    AND value::integer BETWEEN 1 AND 90
+                  THEN value::integer
+                  ELSE 7
+                END
+                FROM settings
+                WHERE key = 'CONTENT_MIGRATION_RECOVERY_DAYS'
+              ), 7)
+            )
+            FROM repository_migration_items
+            WHERE status = 'verified'
+          ),
+          (
+            SELECT (MAX(updated_at) AT TIME ZONE 'UTC') + make_interval(
+              days => COALESCE((
+                SELECT CASE
+                  WHEN value ~ '^[0-9]+$'
+                    AND value::integer BETWEEN 1 AND 90
+                  THEN value::integer
+                  ELSE 7
+                END
+                FROM settings
+                WHERE key = 'CONTENT_MIGRATION_RECOVERY_DAYS'
+              ), 7)
+            )
+            FROM settings
+            WHERE key IN (
+              'CONTENT_REPOSITORY_CUTOVER_ENABLED',
+              'CONTENT_NEXUS_CUTOVER_ENABLED',
+              'CONTENT_ASSISTANT_ARCHITECT_CUTOVER_ENABLED'
+            )
+              AND value = 'true'
+          )
+        ) AS recovery_window_ends_at,
+        (
+          SELECT COUNT(*)::integer
+          FROM repository_items item
+          JOIN knowledge_repositories repository
+            ON repository.id = item.repository_id
+          WHERE item.lifecycle_status = 'active'
+            AND repository.lifecycle_status = 'active'
+            AND item.type IN ('document', 'text', 'url')
+            ${EXCLUDE_NON_MIGRATABLE_REPOSITORY_ITEMS}
+            AND (
+              item.current_version_id IS NULL
+              OR EXISTS (
+                SELECT 1
+                FROM repository_item_chunks legacy_chunk
+                WHERE legacy_chunk.item_id = item.id
+                  AND legacy_chunk.item_version_id IS NULL
+              )
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM repository_migration_items migration
+              WHERE migration.source_kind = 'repository_item'
+                AND migration.source_id = item.id
+                AND migration.status = 'verified'
+            )
+        ) + (
+          SELECT COUNT(*)::integer
+          FROM documents document
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM repository_migration_items migration
+            WHERE migration.source_kind = 'nexus_document'
+              AND migration.source_id = document.id
+              AND migration.status = 'verified'
+          )
+        ) + (
+          SELECT COUNT(*)::integer
+          FROM jobs job
+          WHERE job.type = 'pdf-to-markdown'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM repository_migration_items migration
+              WHERE migration.source_kind = 'assistant_pdf_job'
+                AND migration.source_id = job.id
+                AND migration.status = 'verified'
+            )
+        ) AS uncovered
+      FROM repository_migration_runs
+    `);
+  const row = toPgRows<RetirementGateRow>(result)[0];
+  return row;
 }
 
 /**
@@ -81,180 +293,7 @@ export async function isLegacyContentRetirementActive(): Promise<boolean> {
       return false;
     }
 
-    const result = await tx.execute(sql`
-        SELECT
-          COUNT(*) FILTER (
-            WHERE status IN ('queued', 'running')
-          )::integer AS active_runs,
-          COUNT(*) FILTER (
-            WHERE mode = 'dry_run'
-              AND status = 'completed'
-              AND source_kinds @> '[
-                "repository_item",
-                "nexus_document",
-                "assistant_pdf_job"
-              ]'::jsonb
-          )::integer AS dry_runs,
-          (
-            SELECT COUNT(*)::integer
-            FROM repository_migration_items
-            WHERE status <> 'excluded'
-          ) AS discovered,
-          (
-            SELECT COUNT(*)::integer
-            FROM repository_migration_items
-            WHERE status IN ('migrated', 'verified', 'mismatch')
-          ) AS migrated,
-          (
-            SELECT COUNT(*)::integer
-            FROM repository_migration_items
-            WHERE status = 'verified'
-          ) AS verified,
-          (
-            SELECT COUNT(*)::integer
-            FROM repository_migration_items
-            WHERE status = 'mismatch'
-          ) AS mismatched,
-          (
-            SELECT COUNT(*)::integer
-            FROM repository_migration_items
-            WHERE status = 'failed'
-          ) AS failed,
-          (
-            SELECT COUNT(*)::integer
-            FROM repository_migration_items
-            WHERE status = 'unrecoverable'
-          ) AS unrecoverable,
-          COUNT(*) FILTER (
-            WHERE mode = 'rollback'
-              AND status = 'completed'
-              AND snapshot->>'rollbackDrill' = 'true'
-          )::integer AS rollback_drills,
-          GREATEST(
-            MAX(recovery_window_ends_at) FILTER (
-              WHERE mode = 'backfill'
-                AND status IN ('completed', 'completed_with_errors')
-            ),
-            (
-              SELECT MAX(verified_at) + make_interval(
-                days => COALESCE((
-                  SELECT CASE
-                    WHEN value ~ '^[0-9]+$'
-                      AND value::integer BETWEEN 1 AND 90
-                    THEN value::integer
-                    ELSE 7
-                  END
-                  FROM settings
-                  WHERE key = 'CONTENT_MIGRATION_RECOVERY_DAYS'
-                ), 7)
-              )
-              FROM repository_migration_items
-              WHERE status = 'verified'
-            ),
-            (
-              SELECT (MAX(updated_at) AT TIME ZONE 'UTC') + make_interval(
-                days => COALESCE((
-                  SELECT CASE
-                    WHEN value ~ '^[0-9]+$'
-                      AND value::integer BETWEEN 1 AND 90
-                    THEN value::integer
-                    ELSE 7
-                  END
-                  FROM settings
-                  WHERE key = 'CONTENT_MIGRATION_RECOVERY_DAYS'
-                ), 7)
-              )
-              FROM settings
-              WHERE key IN (
-                'CONTENT_REPOSITORY_CUTOVER_ENABLED',
-                'CONTENT_NEXUS_CUTOVER_ENABLED',
-                'CONTENT_ASSISTANT_ARCHITECT_CUTOVER_ENABLED'
-              )
-                AND value = 'true'
-            )
-          ) AS recovery_window_ends_at,
-          (
-            SELECT COUNT(*)::integer
-            FROM repository_items item
-            JOIN knowledge_repositories repository
-              ON repository.id = item.repository_id
-            WHERE item.lifecycle_status = 'active'
-              AND repository.lifecycle_status = 'active'
-              AND item.type IN ('document', 'text', 'url')
-              AND NOT (
-                COALESCE(item.metadata, '{}'::jsonb) ? 'migrationSourceKind'
-              )
-              AND NOT EXISTS (
-                SELECT 1
-                FROM repository_connector_sources connector_source
-                WHERE connector_source.repository_item_id = item.id
-                  AND connector_source.status = 'unsupported'
-              )
-              AND (
-                item.current_version_id IS NULL
-                OR EXISTS (
-                  SELECT 1
-                  FROM repository_item_chunks legacy_chunk
-                  WHERE legacy_chunk.item_id = item.id
-                    AND legacy_chunk.item_version_id IS NULL
-                )
-              )
-              AND NOT EXISTS (
-                SELECT 1
-                FROM repository_migration_items migration
-                WHERE migration.source_kind = 'repository_item'
-                  AND migration.source_id = item.id
-                  AND migration.status = 'verified'
-              )
-          ) + (
-            SELECT COUNT(*)::integer
-            FROM documents document
-            WHERE NOT EXISTS (
-              SELECT 1
-              FROM repository_migration_items migration
-              WHERE migration.source_kind = 'nexus_document'
-                AND migration.source_id = document.id
-                AND migration.status = 'verified'
-            )
-          ) + (
-            SELECT COUNT(*)::integer
-            FROM jobs job
-            WHERE job.type = 'pdf-to-markdown'
-              AND NOT EXISTS (
-                SELECT 1
-                FROM repository_migration_items migration
-                WHERE migration.source_kind = 'assistant_pdf_job'
-                  AND migration.source_id = job.id
-                  AND migration.status = 'verified'
-              )
-          ) AS uncovered
-        FROM repository_migration_runs
-      `);
-    const row = toPgRows<RetirementGateRow>(result)[0];
-    const recoveryWindowEndsAt = row?.recovery_window_ends_at
-      ? new Date(row.recovery_window_ends_at)
-      : null;
-    return assessContentRetirementReadiness({
-      cutoversEnabled:
-        config.enabled &&
-        config.readV2Enabled &&
-        config.repositoryCutoverEnabled &&
-        config.nexusCutoverEnabled &&
-        config.assistantArchitectCutoverEnabled,
-      retirementConfigured: config.legacyRetirementEnabled,
-      dryRunCompleted: count(row?.dry_runs) > 0,
-      inventoryComplete: count(row?.uncovered) === 0,
-      activeRunCount: count(row?.active_runs),
-      migrationMetrics: {
-        discovered: count(row?.discovered),
-        migrated: count(row?.migrated),
-        verified: count(row?.verified),
-        mismatched: count(row?.mismatched),
-        failed: count(row?.failed),
-        unrecoverable: count(row?.unrecoverable),
-      },
-      rollbackDrillCompleted: count(row?.rollback_drills) > 0,
-      recoveryWindowEndsAt,
-    }).ready;
+    const row = await loadRetirementGateRow(tx);
+    return isRetirementGateReady(config, row);
   }, "contentRetirement.readGate");
 }

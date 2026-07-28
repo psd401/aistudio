@@ -17,6 +17,48 @@ import type { SSEEvent } from './sse-event-types';
 
 const log = createLogger({ module: 'sdk-compatibility-adapter' });
 
+function validateTextDeltaEvent(
+  event: Record<string, unknown>,
+  sdkMajorVersion: number
+): string[] {
+  const expectedField = sdkMajorVersion >= 5 ? 'delta' : 'textDelta';
+  const issues: string[] = [];
+  if (!(expectedField in event)) {
+    issues.push(
+      `text-delta event missing "${expectedField}" field for SDK v${sdkMajorVersion}`
+    );
+  } else if (typeof event[expectedField] !== 'string') {
+    issues.push(`text-delta "${expectedField}" field must be a string`);
+  }
+  return issues;
+}
+
+function validateReasoningDeltaEvent(event: Record<string, unknown>): string[] {
+  if (!('delta' in event)) {
+    return ['reasoning-delta event missing "delta" field'];
+  }
+  return typeof event.delta === 'string'
+    ? []
+    : ['reasoning-delta "delta" field must be a string'];
+}
+
+function validateToolEvent(
+  eventType: string,
+  event: Record<string, unknown>
+): string[] {
+  const issues: string[] = [];
+  if (!('toolCallId' in event)) {
+    issues.push(`${eventType} event missing "toolCallId" field`);
+  }
+  const outputEvent =
+    eventType === 'tool-output-error' ||
+    eventType === 'tool-output-available';
+  if (!outputEvent && !('toolName' in event)) {
+    issues.push(`${eventType} event missing "toolName" field`);
+  }
+  return issues;
+}
+
 /**
  * Field mapping for version compatibility
  * Maps old field names to new field names for each SDK version
@@ -233,45 +275,14 @@ export class SSEEventAdapter {
     // Type-specific validation based on SDK version
     const eventType = evt.type;
 
-    // Validate text-delta events
     if (eventType === 'text-delta') {
-      const expectedField = this.version.major >= 5 ? 'delta' : 'textDelta';
-
-      if (!(expectedField in evt)) {
-        issues.push(
-          `text-delta event missing "${expectedField}" field for SDK v${this.version.major}`
-        );
-      }
-
-      if (expectedField in evt && typeof evt[expectedField] !== 'string') {
-        issues.push(`text-delta "${expectedField}" field must be a string`);
-      }
+      issues.push(...validateTextDeltaEvent(evt, this.version.major));
     }
-
-    // Validate reasoning-delta events
     if (eventType === 'reasoning-delta') {
-      if (!('delta' in evt)) {
-        issues.push('reasoning-delta event missing "delta" field');
-      }
-
-      if ('delta' in evt && typeof evt.delta !== 'string') {
-        issues.push('reasoning-delta "delta" field must be a string');
-      }
+      issues.push(...validateReasoningDeltaEvent(evt));
     }
-
-    // Validate tool events
     if (eventType.startsWith('tool-')) {
-      if (!('toolCallId' in evt)) {
-        issues.push(`${eventType} event missing "toolCallId" field`);
-      }
-
-      if (
-        eventType !== 'tool-output-error' &&
-        eventType !== 'tool-output-available' &&
-        !('toolName' in evt)
-      ) {
-        issues.push(`${eventType} event missing "toolName" field`);
-      }
+      issues.push(...validateToolEvent(eventType, evt));
     }
 
     return {
@@ -304,7 +315,7 @@ export class SSEEventAdapter {
           error: error.message,
           data: data.substring(0, 100), // Log first 100 chars
         });
-        throw new Error(`Failed to parse SSE event JSON: ${error.message}`);
+        throw new Error(`Failed to parse SSE event JSON: ${error.message}`, { cause: error });
       }
       throw error;
     }

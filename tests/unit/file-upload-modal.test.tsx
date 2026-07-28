@@ -34,8 +34,9 @@ jest.mock("@/components/ui/form", () => {
   } = jest.requireActual("react-hook-form")
   const pass =
     (tag: string) =>
-    ({ children }: { children?: React.ReactNode }) =>
-      React.createElement(tag, null, children)
+    function MockPassThrough({ children }: { children?: React.ReactNode }) {
+      return React.createElement(tag, null, children)
+    }
   return {
     Form: ({
       children,
@@ -54,9 +55,9 @@ jest.mock("@/components/ui/form", () => {
   }
 })
 jest.mock("lucide-react", () => {
-  const Icon = (props: React.HTMLAttributes<HTMLSpanElement>) => (
-    <span {...props} />
-  )
+  function Icon(props: React.HTMLAttributes<HTMLSpanElement>) {
+    return <span {...props} />
+  }
   return {
     AlertCircle: Icon,
     CheckCircle2: Icon,
@@ -74,8 +75,9 @@ jest.mock("@/components/ui/dialog", () => {
   const React = require("react")
   const pass =
     (tag: string) =>
-    ({ children }: { children?: React.ReactNode }) =>
-      React.createElement(tag, null, children)
+    function MockPassThrough({ children }: { children?: React.ReactNode }) {
+      return React.createElement(tag, null, children)
+    }
   return {
     Dialog: pass("div"),
     DialogContent: pass("div"),

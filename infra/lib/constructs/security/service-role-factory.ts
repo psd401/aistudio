@@ -56,7 +56,7 @@ export class ServiceRoleFactory {
 
     // VPC access if enabled
     if (props.vpcEnabled) {
-      policies.push(this.buildVPCAccessPolicy(props))
+      policies.push(this.buildVPCAccessPolicy())
     }
 
     // Secrets Manager access
@@ -275,7 +275,7 @@ export class ServiceRoleFactory {
   /**
    * Build VPC access policy for Lambda
    */
-  private static buildVPCAccessPolicy(props: LambdaRoleProps): iam.PolicyDocument {
+  private static buildVPCAccessPolicy(): iam.PolicyDocument {
     return new iam.PolicyDocument({
       statements: [
         new iam.PolicyStatement({

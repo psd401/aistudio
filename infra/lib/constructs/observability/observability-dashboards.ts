@@ -141,188 +141,199 @@ export class ObservabilityDashboards extends Construct {
       DashboardWidgetFactory.createSectionHeader('System Health Overview', 'High-level infrastructure status')
     );
 
-    // Add comprehensive system health widgets
     if (metrics) {
-      // Lambda health overview
-      if (metrics.lambda) {
-        const lambdaFunctions = Object.keys(metrics.lambda);
-        dashboard.addWidgets(
-          new cloudwatch.TextWidget({
-            markdown: `### Lambda Functions\n\n**${lambdaFunctions.length}** active functions\n\n${lambdaFunctions.map(f => `- ${f}`).join('\n')}`,
-            width: 6,
-            height: 4,
-          })
-        );
-
-        // Total Lambda invocations across all functions
-        const totalInvocations = Object.values(metrics.lambda).map(m => m.invocations);
-        if (totalInvocations.length > 0) {
-          dashboard.addWidgets(
-            new cloudwatch.GraphWidget({
-              title: 'Total Lambda Invocations',
-              left: totalInvocations,
-              width: 9,
-              height: 4,
-            })
-          );
-        }
-
-        // Total Lambda errors across all functions
-        const totalErrors = Object.values(metrics.lambda).map(m => m.errors);
-        if (totalErrors.length > 0) {
-          dashboard.addWidgets(
-            new cloudwatch.GraphWidget({
-              title: 'Total Lambda Errors',
-              left: totalErrors,
-              width: 9,
-              height: 4,
-            })
-          );
-        }
-      }
-
-      // ECS health overview
-      if (metrics.ecs) {
-        Object.entries(metrics.ecs).forEach(([name, ecsMetrics]) => {
-          dashboard.addWidgets(
-            new cloudwatch.SingleValueWidget({
-              title: `${name} - Status`,
-              metrics: [ecsMetrics.runningTasks],
-              width: 6,
-              height: 4,
-            })
-          );
-
-          dashboard.addWidgets(
-            new cloudwatch.GraphWidget({
-              title: `${name} - Resource Utilization`,
-              left: [ecsMetrics.cpuUtilization, ecsMetrics.memoryUtilization],
-              leftYAxis: { min: 0, max: 100 },
-              width: 18,
-              height: 4,
-            })
-          );
-        });
-      }
-
-      // Aurora health overview
-      if (metrics.aurora) {
-        dashboard.addWidgets(
-          new cloudwatch.SingleValueWidget({
-            title: 'Database ACU',
-            metrics: [metrics.aurora.capacity],
-            width: 6,
-            height: 4,
-          })
-        );
-
-        dashboard.addWidgets(
-          new cloudwatch.SingleValueWidget({
-            title: 'Database Connections',
-            metrics: [metrics.aurora.connections],
-            width: 6,
-            height: 4,
-          })
-        );
-
-        dashboard.addWidgets(
-          new cloudwatch.GraphWidget({
-            title: 'Database Performance',
-            left: [metrics.aurora.acuUtilization, metrics.aurora.cpuUtilization],
-            leftYAxis: { min: 0, max: 100 },
-            width: 12,
-            height: 4,
-          })
-        );
-      }
-
-      // API health overview
-      if (metrics.api) {
-        dashboard.addWidgets(
-          new cloudwatch.GraphWidget({
-            title: 'API Request Volume',
-            left: [metrics.api.requestCount],
-            width: 12,
-            height: 4,
-          })
-        );
-
-        dashboard.addWidgets(
-          new cloudwatch.GraphWidget({
-            title: 'API Error Rate',
-            left: [
-              new cloudwatch.MathExpression({
-                expression: '(errors / requests) * 100',
-                usingMetrics: {
-                  errors: metrics.api.errorCount,
-                  requests: metrics.api.requestCount,
-                },
-                label: 'Error Rate (%)',
-              }),
-            ],
-            leftYAxis: { min: 0, max: 100 },
-            width: 12,
-            height: 4,
-          })
-        );
-      }
-
-      // Storage overview
-      if (metrics.storage) {
-        Object.entries(metrics.storage).forEach(([name, storageMetrics]) => {
-          dashboard.addWidgets(
-            new cloudwatch.SingleValueWidget({
-              title: `${name} - Size`,
-              metrics: [storageMetrics.bucketSize],
-              width: 6,
-              height: 4,
-            })
-          );
-
-          dashboard.addWidgets(
-            new cloudwatch.SingleValueWidget({
-              title: `${name} - Objects`,
-              metrics: [storageMetrics.objectCount],
-              width: 6,
-              height: 4,
-            })
-          );
-        });
-      }
-    }
-
-    // Add cost summary if available
-    if (metrics?.cost) {
-      dashboard.addWidgets(
-        DashboardWidgetFactory.createSectionHeader('Cost Summary', 'Monthly cost tracking and projections')
-      );
-
-      if (metrics.cost.totalEstimatedCost) {
-        dashboard.addWidgets(
-          DashboardWidgetFactory.createTotalCostWidget(metrics.cost, { width: 8, height: 4 })
-        );
-      }
-
-      // Cost breakdown by service
-      const costMetrics: cloudwatch.IMetric[] = [];
-      if (metrics.cost.lambdaCost) costMetrics.push(metrics.cost.lambdaCost);
-      if (metrics.cost.auroraCost) costMetrics.push(metrics.cost.auroraCost);
-      if (metrics.cost.s3Cost) costMetrics.push(metrics.cost.s3Cost);
-      if (metrics.cost.ecsCost) costMetrics.push(metrics.cost.ecsCost);
-
-      if (costMetrics.length > 0) {
-        dashboard.addWidgets(
-          new cloudwatch.GraphWidget({
-            title: 'Cost by Service',
-            left: costMetrics,
-            width: 16,
-            height: 6,
-          })
-        );
-      }
+      this.addExecutiveLambdaOverview(dashboard, metrics);
+      this.addExecutiveEcsOverview(dashboard, metrics);
+      this.addExecutiveAuroraOverview(dashboard, metrics);
+      this.addExecutiveApiOverview(dashboard, metrics);
+      this.addExecutiveStorageOverview(dashboard, metrics);
+      this.addExecutiveCostSummary(dashboard, metrics);
     }
 
     return dashboard;
+  }
+
+  private addExecutiveLambdaOverview(
+    dashboard: cloudwatch.Dashboard,
+    metrics: ConsolidatedMetrics
+  ): void {
+    if (!metrics.lambda) return;
+
+    const lambdaFunctions = Object.keys(metrics.lambda);
+    const lambdaMetrics = Object.values(metrics.lambda);
+    dashboard.addWidgets(
+      new cloudwatch.TextWidget({
+        markdown: `### Lambda Functions\n\n**${lambdaFunctions.length}** active functions\n\n${lambdaFunctions.map(name => `- ${name}`).join('\n')}`,
+        width: 6,
+        height: 4,
+      })
+    );
+
+    const totalInvocations = lambdaMetrics.map(metric => metric.invocations);
+    const totalErrors = lambdaMetrics.map(metric => metric.errors);
+    if (totalInvocations.length > 0) {
+      dashboard.addWidgets(
+        new cloudwatch.GraphWidget({
+          title: 'Total Lambda Invocations',
+          left: totalInvocations,
+          width: 9,
+          height: 4,
+        })
+      );
+    }
+    if (totalErrors.length > 0) {
+      dashboard.addWidgets(
+        new cloudwatch.GraphWidget({
+          title: 'Total Lambda Errors',
+          left: totalErrors,
+          width: 9,
+          height: 4,
+        })
+      );
+    }
+  }
+
+  private addExecutiveEcsOverview(
+    dashboard: cloudwatch.Dashboard,
+    metrics: ConsolidatedMetrics
+  ): void {
+    if (!metrics.ecs) return;
+
+    for (const [name, ecsMetrics] of Object.entries(metrics.ecs)) {
+      dashboard.addWidgets(
+        new cloudwatch.SingleValueWidget({
+          title: `${name} - Status`,
+          metrics: [ecsMetrics.runningTasks],
+          width: 6,
+          height: 4,
+        }),
+        new cloudwatch.GraphWidget({
+          title: `${name} - Resource Utilization`,
+          left: [ecsMetrics.cpuUtilization, ecsMetrics.memoryUtilization],
+          leftYAxis: { min: 0, max: 100 },
+          width: 18,
+          height: 4,
+        })
+      );
+    }
+  }
+
+  private addExecutiveAuroraOverview(
+    dashboard: cloudwatch.Dashboard,
+    metrics: ConsolidatedMetrics
+  ): void {
+    if (!metrics.aurora) return;
+
+    dashboard.addWidgets(
+      new cloudwatch.SingleValueWidget({
+        title: 'Database ACU',
+        metrics: [metrics.aurora.capacity],
+        width: 6,
+        height: 4,
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: 'Database Connections',
+        metrics: [metrics.aurora.connections],
+        width: 6,
+        height: 4,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Database Performance',
+        left: [metrics.aurora.acuUtilization, metrics.aurora.cpuUtilization],
+        leftYAxis: { min: 0, max: 100 },
+        width: 12,
+        height: 4,
+      })
+    );
+  }
+
+  private addExecutiveApiOverview(
+    dashboard: cloudwatch.Dashboard,
+    metrics: ConsolidatedMetrics
+  ): void {
+    if (!metrics.api) return;
+
+    dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'API Request Volume',
+        left: [metrics.api.requestCount],
+        width: 12,
+        height: 4,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'API Error Rate',
+        left: [
+          new cloudwatch.MathExpression({
+            expression: '(errors / requests) * 100',
+            usingMetrics: {
+              errors: metrics.api.errorCount,
+              requests: metrics.api.requestCount,
+            },
+            label: 'Error Rate (%)',
+          }),
+        ],
+        leftYAxis: { min: 0, max: 100 },
+        width: 12,
+        height: 4,
+      })
+    );
+  }
+
+  private addExecutiveStorageOverview(
+    dashboard: cloudwatch.Dashboard,
+    metrics: ConsolidatedMetrics
+  ): void {
+    if (!metrics.storage) return;
+
+    for (const [name, storageMetrics] of Object.entries(metrics.storage)) {
+      dashboard.addWidgets(
+        new cloudwatch.SingleValueWidget({
+          title: `${name} - Size`,
+          metrics: [storageMetrics.bucketSize],
+          width: 6,
+          height: 4,
+        }),
+        new cloudwatch.SingleValueWidget({
+          title: `${name} - Objects`,
+          metrics: [storageMetrics.objectCount],
+          width: 6,
+          height: 4,
+        })
+      );
+    }
+  }
+
+  private addExecutiveCostSummary(
+    dashboard: cloudwatch.Dashboard,
+    metrics: ConsolidatedMetrics
+  ): void {
+    if (!metrics.cost) return;
+
+    dashboard.addWidgets(
+      DashboardWidgetFactory.createSectionHeader('Cost Summary', 'Monthly cost tracking and projections')
+    );
+    if (metrics.cost.totalEstimatedCost) {
+      dashboard.addWidgets(
+        DashboardWidgetFactory.createTotalCostWidget(metrics.cost, { width: 8, height: 4 })
+      );
+    }
+
+    const costMetrics = [
+      metrics.cost.lambdaCost,
+      metrics.cost.auroraCost,
+      metrics.cost.s3Cost,
+      metrics.cost.ecsCost,
+    ].filter((metric): metric is cloudwatch.IMetric => metric !== undefined);
+    if (costMetrics.length > 0) {
+      dashboard.addWidgets(
+        new cloudwatch.GraphWidget({
+          title: 'Cost by Service',
+          left: costMetrics,
+          width: 16,
+          height: 6,
+        })
+      );
+    }
   }
 
   /**
@@ -392,10 +403,18 @@ export class ObservabilityDashboards extends Construct {
       )
     );
 
-    // Lambda metrics - create comprehensive monitoring section for each function
-    // Layout: Use full 24-unit width with side-by-side widgets
-    if (metrics.lambda) {
-      Object.entries(metrics.lambda).forEach(([name, lambdaMetrics]) => {
+    this.addLambdaInfrastructureHealth(dashboard, metrics);
+    this.addEcsInfrastructureHealth(dashboard, metrics);
+    this.addAuroraInfrastructureHealth(dashboard, metrics);
+  }
+
+  private addLambdaInfrastructureHealth(
+    dashboard: cloudwatch.Dashboard,
+    metrics: ConsolidatedMetrics
+  ): void {
+    if (!metrics.lambda) return;
+
+    for (const [name, lambdaMetrics] of Object.entries(metrics.lambda)) {
         // Section header for each Lambda function (full width)
         dashboard.addWidgets(
           DashboardWidgetFactory.createSectionHeader(`${name} Metrics`, `Detailed performance monitoring for ${name}`)
@@ -468,12 +487,16 @@ export class ObservabilityDashboards extends Construct {
         );
 
         dashboard.addWidgets(...row2Widgets);
-      });
     }
+  }
 
-    // ECS metrics - create comprehensive monitoring section with horizontal layout
-    if (metrics.ecs) {
-      Object.entries(metrics.ecs).forEach(([name, ecsMetrics]) => {
+  private addEcsInfrastructureHealth(
+    dashboard: cloudwatch.Dashboard,
+    metrics: ConsolidatedMetrics
+  ): void {
+    if (!metrics.ecs) return;
+
+    for (const [name, ecsMetrics] of Object.entries(metrics.ecs)) {
         // Section header for ECS service (full width)
         dashboard.addWidgets(
           DashboardWidgetFactory.createSectionHeader(`${name} ECS Service`, `Container performance and health metrics`)
@@ -544,56 +567,53 @@ export class ObservabilityDashboards extends Construct {
         }
 
         dashboard.addWidgets(...statusWidgets);
-      });
     }
+  }
 
-    // Aurora metrics - comprehensive database monitoring with horizontal layout
-    if (metrics.aurora) {
-      // Row 1: Capacity + Connections side-by-side (12 + 12 = 24)
-      dashboard.addWidgets(
-        DashboardWidgetFactory.createAuroraWidget(metrics.aurora, { width: 12, height: 6 }),
-        DashboardWidgetFactory.createAuroraConnectionsWidget(metrics.aurora.connections, { width: 12, height: 6 })
-      );
+  private addAuroraInfrastructureHealth(
+    dashboard: cloudwatch.Dashboard,
+    metrics: ConsolidatedMetrics
+  ): void {
+    if (!metrics.aurora) return;
 
-      // Row 2: CPU graph full width or split with another metric
-      dashboard.addWidgets(
-        new cloudwatch.GraphWidget({
-          title: 'Aurora - CPU Utilization',
-          left: [metrics.aurora.cpuUtilization],
-          leftYAxis: { label: 'Percent', min: 0, max: 100 },
-          width: 24,
-          height: 6,
-        })
-      );
+    dashboard.addWidgets(
+      DashboardWidgetFactory.createAuroraWidget(metrics.aurora, { width: 12, height: 6 }),
+      DashboardWidgetFactory.createAuroraConnectionsWidget(metrics.aurora.connections, { width: 12, height: 6 }),
+      new cloudwatch.GraphWidget({
+        title: 'Aurora - CPU Utilization',
+        left: [metrics.aurora.cpuUtilization],
+        leftYAxis: { label: 'Percent', min: 0, max: 100 },
+        width: 24,
+        height: 6,
+      })
+    );
 
-      // Row 3: Four single value widgets (6 + 6 + 6 + 6 = 24)
-      dashboard.addWidgets(
-        new cloudwatch.SingleValueWidget({
-          title: 'Aurora - Current ACU',
-          metrics: [metrics.aurora.capacity],
-          width: 6,
-          height: 4,
-        }),
-        new cloudwatch.SingleValueWidget({
-          title: 'Aurora - ACU Utilization %',
-          metrics: [metrics.aurora.acuUtilization],
-          width: 6,
-          height: 4,
-        }),
-        new cloudwatch.SingleValueWidget({
-          title: 'Aurora - Connections',
-          metrics: [metrics.aurora.connections],
-          width: 6,
-          height: 4,
-        }),
-        new cloudwatch.SingleValueWidget({
-          title: 'Aurora - CPU %',
-          metrics: [metrics.aurora.cpuUtilization],
-          width: 6,
-          height: 4,
-        })
-      );
-    }
+    dashboard.addWidgets(
+      new cloudwatch.SingleValueWidget({
+        title: 'Aurora - Current ACU',
+        metrics: [metrics.aurora.capacity],
+        width: 6,
+        height: 4,
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: 'Aurora - ACU Utilization %',
+        metrics: [metrics.aurora.acuUtilization],
+        width: 6,
+        height: 4,
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: 'Aurora - Connections',
+        metrics: [metrics.aurora.connections],
+        width: 6,
+        height: 4,
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: 'Aurora - CPU %',
+        metrics: [metrics.aurora.cpuUtilization],
+        width: 6,
+        height: 4,
+      })
+    );
   }
 
   /**
@@ -611,78 +631,50 @@ export class ObservabilityDashboards extends Construct {
       )
     );
 
-    // Row 1: HTTP response codes breakdown (6 + 6 + 6 + 6 = 24)
-    dashboard.addWidgets(
-      new cloudwatch.GraphWidget({
-        title: 'HTTP 2XX Responses (Success)',
-        left: [
-          new cloudwatch.MathExpression({
-            expression:
-              'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="HTTPCode_Target_2XX_Count" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
-            label: '2XX Count',
-            usingMetrics: {},
-          }),
-        ],
-        width: 6,
-        height: 6,
-      }),
-      new cloudwatch.GraphWidget({
-        title: 'HTTP 3XX Responses (Redirects)',
-        left: [
-          new cloudwatch.MathExpression({
-            expression:
-              'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="HTTPCode_Target_3XX_Count" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
-            label: '3XX Count',
-            usingMetrics: {},
-          }),
-        ],
-        width: 6,
-        height: 6,
-      }),
-      new cloudwatch.GraphWidget({
-        title: 'HTTP 4XX Responses (Client Errors)',
-        left: [
-          new cloudwatch.MathExpression({
-            expression:
-              'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="HTTPCode_Target_4XX_Count" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
-            label: '4XX Count',
-            usingMetrics: {},
-          }),
-        ],
-        width: 6,
-        height: 6,
-      }),
-      new cloudwatch.GraphWidget({
-        title: 'HTTP 5XX Responses (Server Errors)',
-        left: [
-          new cloudwatch.MathExpression({
-            expression:
-              'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="HTTPCode_Target_5XX_Count" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
-            label: '5XX Count',
-            usingMetrics: {},
-          }),
-        ],
-        width: 6,
-        height: 6,
-      })
-    );
+    this.addAlbResponseCodeWidgets(dashboard);
+    this.addAlbConnectionWidgets(dashboard);
+    this.addAlbTransferWidgets(dashboard);
+    this.addApplicationStatusWidgets(dashboard, metrics);
+  }
 
-    // Row 2: Target health and connection metrics (12 + 12 = 24)
+  private addAlbResponseCodeWidgets(dashboard: cloudwatch.Dashboard): void {
+    const responses = [
+      ['2XX', 'Success'],
+      ['3XX', 'Redirects'],
+      ['4XX', 'Client Errors'],
+      ['5XX', 'Server Errors'],
+    ] as const;
+    dashboard.addWidgets(
+      ...responses.map(([statusCode, label]) =>
+        new cloudwatch.GraphWidget({
+          title: `HTTP ${statusCode} Responses (${label})`,
+          left: [
+            this.createAlbSearchExpression(
+              `HTTPCode_Target_${statusCode}_Count`,
+              `${statusCode} Count`
+            ),
+          ],
+          width: 6,
+          height: 6,
+        })
+      )
+    );
+  }
+
+  private addAlbConnectionWidgets(dashboard: cloudwatch.Dashboard): void {
     dashboard.addWidgets(
       new cloudwatch.GraphWidget({
         title: 'Target Health (Healthy vs Unhealthy)',
         left: [
-          new cloudwatch.MathExpression({
-            expression:
-              'SEARCH(\'{AWS/ApplicationELB,TargetGroup,LoadBalancer} MetricName="HealthyHostCount" TargetGroup="*aistudio*"\', \'Average\', 300)',
-            label: 'Healthy Targets',
-            usingMetrics: {},
+          this.createAlbSearchExpression('HealthyHostCount', 'Healthy Targets', {
+            dimensions: 'TargetGroup,LoadBalancer',
+            target: 'TargetGroup',
+            statistic: 'Average',
           }),
-          new cloudwatch.MathExpression({
-            expression:
-              'SEARCH(\'{AWS/ApplicationELB,TargetGroup,LoadBalancer} MetricName="UnHealthyHostCount" TargetGroup="*aistudio*"\', \'Average\', 300)',
-            label: 'Unhealthy Targets',
-            usingMetrics: {},
+          this.createAlbSearchExpression('UnHealthyHostCount', 'Unhealthy Targets', {
+            dimensions: 'TargetGroup,LoadBalancer',
+            target: 'TargetGroup',
+            statistic: 'Average',
           }),
         ],
         width: 12,
@@ -691,115 +683,95 @@ export class ObservabilityDashboards extends Construct {
       new cloudwatch.GraphWidget({
         title: 'ALB Connection Metrics',
         left: [
-          new cloudwatch.MathExpression({
-            expression:
-              'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="ActiveConnectionCount" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
-            label: 'Active Connections',
-            usingMetrics: {},
-          }),
-          new cloudwatch.MathExpression({
-            expression:
-              'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="NewConnectionCount" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
-            label: 'New Connections',
-            usingMetrics: {},
-          }),
+          this.createAlbSearchExpression('ActiveConnectionCount', 'Active Connections'),
+          this.createAlbSearchExpression('NewConnectionCount', 'New Connections'),
         ],
         width: 12,
         height: 6,
       })
     );
+  }
 
-    // Row 3: Request processing and data transfer (8 + 8 + 8 = 24)
+  private addAlbTransferWidgets(dashboard: cloudwatch.Dashboard): void {
+    const metrics = [
+      ['Processed Bytes', 'ProcessedBytes', 'Total Bytes'],
+      ['Rejected Connections', 'RejectedConnectionCount', 'Rejected'],
+      ['Client TLS Negotiation Errors', 'ClientTLSNegotiationErrorCount', 'TLS Errors'],
+    ] as const;
     dashboard.addWidgets(
-      new cloudwatch.GraphWidget({
-        title: 'Processed Bytes',
-        left: [
-          new cloudwatch.MathExpression({
-            expression:
-              'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="ProcessedBytes" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
-            label: 'Total Bytes',
-            usingMetrics: {},
-          }),
-        ],
-        width: 8,
-        height: 6,
-      }),
-      new cloudwatch.GraphWidget({
-        title: 'Rejected Connections',
-        left: [
-          new cloudwatch.MathExpression({
-            expression:
-              'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="RejectedConnectionCount" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
-            label: 'Rejected',
-            usingMetrics: {},
-          }),
-        ],
-        width: 8,
-        height: 6,
-      }),
-      new cloudwatch.GraphWidget({
-        title: 'Client TLS Negotiation Errors',
-        left: [
-          new cloudwatch.MathExpression({
-            expression:
-              'SEARCH(\'{AWS/ApplicationELB,LoadBalancer} MetricName="ClientTLSNegotiationErrorCount" LoadBalancer="*aistudio*"\', \'Sum\', 300)',
-            label: 'TLS Errors',
-            usingMetrics: {},
-          }),
-        ],
-        width: 8,
-        height: 6,
-      })
+      ...metrics.map(([title, metricName, label]) =>
+        new cloudwatch.GraphWidget({
+          title,
+          left: [this.createAlbSearchExpression(metricName, label)],
+          width: 8,
+          height: 6,
+        })
+      )
     );
+  }
 
-    // Row 4: Single value status widgets (6 + 6 + 6 + 6 = 24)
-    if (metrics.api) {
-      const statusWidgets: cloudwatch.IWidget[] = [];
+  private createAlbSearchExpression(
+    metricName: string,
+    label: string,
+    options: {
+      dimensions?: string;
+      target?: string;
+      statistic?: string;
+    } = {}
+  ): cloudwatch.MathExpression {
+    const {
+      dimensions = 'LoadBalancer',
+      target = 'LoadBalancer',
+      statistic = 'Sum',
+    } = options;
+    return new cloudwatch.MathExpression({
+      expression: `SEARCH('{AWS/ApplicationELB,${dimensions}} MetricName="${metricName}" ${target}="*aistudio*"', '${statistic}', 300)`,
+      label,
+      usingMetrics: {},
+    });
+  }
 
+  private addApplicationStatusWidgets(
+    dashboard: cloudwatch.Dashboard,
+    metrics: ConsolidatedMetrics
+  ): void {
+    if (!metrics.api) return;
+
+    const statusWidgets: cloudwatch.IWidget[] = [
+      new cloudwatch.SingleValueWidget({
+        title: 'Current Request Count',
+        metrics: [metrics.api.requestCount],
+        width: 6,
+        height: 4,
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: 'Error Count',
+        metrics: [metrics.api.errorCount],
+        width: 6,
+        height: 4,
+      }),
+    ];
+    if (metrics.api.latencyP99) {
       statusWidgets.push(
         new cloudwatch.SingleValueWidget({
-          title: 'Current Request Count',
-          metrics: [metrics.api.requestCount],
+          title: 'p99 Latency',
+          metrics: [metrics.api.latencyP99],
           width: 6,
           height: 4,
         })
       );
-
-      statusWidgets.push(
-        new cloudwatch.SingleValueWidget({
-          title: 'Error Count',
-          metrics: [metrics.api.errorCount],
-          width: 6,
-          height: 4,
-        })
-      );
-
-      if (metrics.api.latencyP99) {
-        statusWidgets.push(
-          new cloudwatch.SingleValueWidget({
-            title: 'p99 Latency',
-            metrics: [metrics.api.latencyP99],
-            width: 6,
-            height: 4,
-          })
-        );
-      }
-
-      if (metrics.api.availability) {
-        statusWidgets.push(
-          new cloudwatch.SingleValueWidget({
-            title: 'Healthy Targets',
-            metrics: [metrics.api.availability],
-            width: 6,
-            height: 4,
-          })
-        );
-      }
-
-      if (statusWidgets.length > 0) {
-        dashboard.addWidgets(...statusWidgets);
-      }
     }
+    if (metrics.api.availability) {
+      statusWidgets.push(
+        new cloudwatch.SingleValueWidget({
+          title: 'Healthy Targets',
+          metrics: [metrics.api.availability],
+          width: 6,
+          height: 4,
+        })
+      );
+    }
+    dashboard.addWidgets(...statusWidgets);
   }
 
   /**
@@ -880,7 +852,7 @@ export class ObservabilityDashboards extends Construct {
       DashboardWidgetFactory.createSectionHeader('Storage Analytics', 'S3 bucket metrics and costs')
     );
 
-    Object.entries(metrics.storage).forEach(([bucketName, storageMetrics]) => {
+    for (const [bucketName, storageMetrics] of Object.entries(metrics.storage)) {
       dashboard.addWidgets(
         DashboardWidgetFactory.createStorageWidget(bucketName, storageMetrics, { width: 12, height: 6 })
       );
@@ -895,7 +867,7 @@ export class ObservabilityDashboards extends Construct {
           )
         );
       }
-    });
+    };
   }
 
   /**

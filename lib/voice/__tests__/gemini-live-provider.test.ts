@@ -12,17 +12,19 @@ const mockSession = {
   conn: { close: mockClose },
 }
 
+const mockConnectImplementation = async (params: Record<string, unknown>) => {
+  // Simulate successful connection — call onopen
+  const callbacks = params.callbacks as Record<string, () => void> | undefined
+  if (callbacks?.onopen) {
+    setTimeout(callbacks.onopen, 0)
+  }
+  return mockSession
+}
+
 jest.mock("@google/genai", () => ({
   GoogleGenAI: jest.fn().mockImplementation(() => ({
     live: {
-      connect: mockLiveConnect.mockImplementation(async (params: Record<string, unknown>) => {
-        // Simulate successful connection — call onopen
-        const callbacks = params.callbacks as Record<string, () => void> | undefined
-        if (callbacks?.onopen) {
-          setTimeout(() => callbacks.onopen(), 0)
-        }
-        return mockSession
-      }),
+      connect: mockLiveConnect.mockImplementation(mockConnectImplementation),
     },
   })),
   Modality: { AUDIO: "AUDIO" },
@@ -39,8 +41,15 @@ jest.mock("@/lib/logger", () => ({
   startTimer: () => jest.fn(),
 }))
 
-describe("GeminiLiveProvider", () => {
-  let provider: GeminiLiveProvider
+let provider: GeminiLiveProvider
+const baseConfig: VoiceProviderConfig = {
+    model: "gemini-2.0-flash-live-001",
+    apiKey: "test-api-key",
+    language: "en-US",
+  }
+
+function defineGeminiLiveProviderSuite1Part1() {
+
 
   beforeEach(() => {
     provider = new GeminiLiveProvider()
@@ -55,19 +64,15 @@ describe("GeminiLiveProvider", () => {
     })
   })
 
-  const baseConfig: VoiceProviderConfig = {
-    model: "gemini-2.0-flash-live-001",
-    apiKey: "test-api-key",
-    language: "en-US",
-  }
 
-  describe("providerId", () => {
+
+
     it('should be "gemini-live"', () => {
       expect(provider.providerId).toBe("gemini-live")
     })
-  })
 
-  describe("initial state", () => {
+
+
     it("should not be connected initially", () => {
       expect(provider.isConnected()).toBe(false)
     })
@@ -78,9 +83,9 @@ describe("GeminiLiveProvider", () => {
       expect(state.speaking).toBe("none")
       expect(state.transcript).toEqual([])
     })
-  })
 
-  describe("connect", () => {
+
+
     it("should throw if no API key provided", async () => {
       const noKeyConfig = { ...baseConfig, apiKey: undefined }
       await expect(provider.connect(noKeyConfig, jest.fn())).rejects.toThrow(
@@ -152,7 +157,9 @@ describe("GeminiLiveProvider", () => {
       expect(connectArgs.config.systemInstruction).toBe("You are a helpful assistant")
     })
 
-    it("should enable context window compression", async () => {
+    }
+
+function defineGeminiLiveProviderSuite1Part2() {it("should enable context window compression", async () => {
       await provider.connect(baseConfig, jest.fn())
 
       const connectArgs = mockLiveConnect.mock.calls[0][0]
@@ -167,9 +174,9 @@ describe("GeminiLiveProvider", () => {
       const connectArgs = mockLiveConnect.mock.calls[0][0]
       expect(connectArgs.config.sessionResumption).toEqual({})
     })
-  })
 
-  describe("sendAudio", () => {
+
+
     it("should not throw when not connected", () => {
       expect(() => provider.sendAudio(Buffer.from("test"))).not.toThrow()
     })
@@ -187,9 +194,9 @@ describe("GeminiLiveProvider", () => {
         },
       })
     })
-  })
 
-  describe("disconnect", () => {
+
+
     it("should be safe to call when not connected", async () => {
       await expect(provider.disconnect()).resolves.not.toThrow()
     })
@@ -220,9 +227,9 @@ describe("GeminiLiveProvider", () => {
         expect(endEvent.reason).toBe("cancelled")
       }
     })
-  })
 
-  describe("getSessionState", () => {
+
+
     it("should return a copy of the state", () => {
       const state1 = provider.getSessionState()
       const state2 = provider.getSessionState()
@@ -230,9 +237,9 @@ describe("GeminiLiveProvider", () => {
       expect(state1).not.toBe(state2)
       expect(state1.transcript).not.toBe(state2.transcript)
     })
-  })
 
-  describe("sendAudio size validation", () => {
+
+
     it("should reject buffers larger than MAX_AUDIO_BUFFER_SIZE", async () => {
       await provider.connect(baseConfig, jest.fn())
       // 65KB > 64KB limit
@@ -248,9 +255,9 @@ describe("GeminiLiveProvider", () => {
       provider.sendAudio(validBuffer)
       expect(mockSendRealtimeInput).toHaveBeenCalled()
     })
-  })
 
-  describe("buildLiveConfig validation", () => {
+
+
     it("should truncate long voice names", async () => {
       const longNameConfig = {
         ...baseConfig,
@@ -262,7 +269,9 @@ describe("GeminiLiveProvider", () => {
       expect(connectArgs.config.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName).toHaveLength(100)
     })
 
-    it("should truncate long system instructions", async () => {
+    }
+
+function defineGeminiLiveProviderSuite1Part3() {it("should truncate long system instructions", async () => {
       const longInstructionConfig = {
         ...baseConfig,
         systemInstruction: "X".repeat(20_000),
@@ -297,5 +306,13 @@ describe("GeminiLiveProvider", () => {
       const args = mockLiveConnect.mock.calls[0][0]
       expect(args.config.speechConfig?.languageCode).toBeUndefined()
     })
-  })
-})
+
+}
+
+const defineGeminiLiveProviderSuite1 = () => {
+  defineGeminiLiveProviderSuite1Part1()
+  defineGeminiLiveProviderSuite1Part2()
+  defineGeminiLiveProviderSuite1Part3()
+};
+
+describe("GeminiLiveProvider", defineGeminiLiveProviderSuite1)

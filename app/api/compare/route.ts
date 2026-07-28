@@ -54,6 +54,46 @@ interface ImageGeneratorOptions extends GeneratorOptions {
   userId: string;
 }
 
+interface ComparisonRecordOptions {
+  userId: number;
+  prompt: string;
+  model1Config: ModelConfig;
+  model2Config: ModelConfig;
+  model1Name?: string;
+  model2Name?: string;
+  requestId: string;
+  sessionId: string;
+}
+
+async function createComparisonRecord(
+  options: ComparisonRecordOptions
+): Promise<number> {
+  const now = new Date();
+  const result = await executeQuery(
+    (db) =>
+      db
+        .insert(modelComparisons)
+        .values({
+          userId: options.userId,
+          prompt: options.prompt,
+          model1Id: Number(options.model1Config.id),
+          model2Id: Number(options.model2Config.id),
+          model1Name: options.model1Name || String(options.model1Config.name),
+          model2Name: options.model2Name || String(options.model2Config.name),
+          metadata: {
+            source: 'compare-streaming',
+            requestId: options.requestId,
+            sessionId: options.sessionId
+          },
+          createdAt: now,
+          updatedAt: now
+        })
+        .returning({ id: modelComparisons.id }),
+    'createComparisonRecord'
+  );
+  return Number(result[0].id);
+}
+
 /** Options for persisting a completed text response to the comparison record. */
 interface SaveTextResponseOptions {
   slotNum: 1 | 2;
@@ -562,29 +602,16 @@ export async function POST(req: Request) {
     }));
 
     // 7. Create comparison record for tracking
-    const now = new Date();
-    const comparisonResult = await executeQuery(
-      (db) => db.insert(modelComparisons)
-        .values({
-          userId,
-          prompt,
-          model1Id: Number(model1Config.id),
-          model2Id: Number(model2Config.id),
-          model1Name: model1Name || String(model1Config.name),
-          model2Name: model2Name || String(model2Config.name),
-          metadata: {
-            source: 'compare-streaming',
-            requestId,
-            sessionId: session.sub
-          },
-          createdAt: now,
-          updatedAt: now
-        })
-        .returning({ id: modelComparisons.id }),
-      'createComparisonRecord'
-    );
-
-    const comparisonId = Number(comparisonResult[0].id);
+    const comparisonId = await createComparisonRecord({
+      userId,
+      prompt,
+      model1Config,
+      model2Config,
+      model1Name,
+      model2Name,
+      requestId,
+      sessionId: session.sub
+    });
 
     log.info('Comparison record created', sanitizeForLogging({ comparisonId }));
 

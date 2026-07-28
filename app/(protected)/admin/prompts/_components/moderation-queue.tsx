@@ -24,6 +24,51 @@ interface ModerationQueueProps {
   onRefresh: () => void
 }
 
+type BulkModerationAction = 'approved' | 'rejected'
+
+function BulkActionConfirmation({
+  action,
+  selectedCount,
+  onClose,
+  onConfirm,
+}: {
+  action: BulkModerationAction | null
+  selectedCount: number
+  onClose: () => void
+  onConfirm: (action: BulkModerationAction) => void
+}) {
+  const isApproval = action === 'approved'
+  return (
+    <AlertDialog open={action !== null} onOpenChange={onClose}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            Confirm Bulk {isApproval ? 'Approval' : 'Rejection'}
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            Are you sure you want to {isApproval ? 'approve' : 'reject'}{' '}
+            {selectedCount} prompt{selectedCount > 1 ? 's' : ''}? This action
+            cannot be undone.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={() => action && onConfirm(action)}
+            className={
+              action === 'rejected'
+                ? 'bg-destructive hover:bg-destructive/90'
+                : ''
+            }
+          >
+            {isApproval ? 'Approve' : 'Reject'}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  )
+}
+
 export function ModerationQueue({ items, isLoading, onRefresh }: ModerationQueueProps) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [isBulkProcessing, setIsBulkProcessing] = useState(false)
@@ -175,29 +220,12 @@ export function ModerationQueue({ items, isLoading, onRefresh }: ModerationQueue
         ))}
       </div>
 
-      {/* Bulk Action Confirmation Dialog */}
-      <AlertDialog open={bulkAction !== null} onOpenChange={() => setBulkAction(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              Confirm Bulk {bulkAction === 'approved' ? 'Approval' : 'Rejection'}
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to {bulkAction === 'approved' ? 'approve' : 'reject'} {selectedIds.size} prompt{selectedIds.size > 1 ? 's' : ''}?
-              This action cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => bulkAction && handleBulkAction(bulkAction)}
-              className={bulkAction === 'rejected' ? 'bg-destructive hover:bg-destructive/90' : ''}
-            >
-              {bulkAction === 'approved' ? 'Approve' : 'Reject'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <BulkActionConfirmation
+        action={bulkAction}
+        selectedCount={selectedIds.size}
+        onClose={() => setBulkAction(null)}
+        onConfirm={handleBulkAction}
+      />
     </div>
   )
 }

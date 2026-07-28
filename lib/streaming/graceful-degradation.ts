@@ -71,6 +71,108 @@ const NESTED_TEXT_PATHS = [
   ['text', 'content']
 ] as const
 
+function extractedText(
+  text: string,
+  extractedFrom: string,
+  hint: string
+): ContentExtractionResult {
+  return { success: true, text, extractedFrom, hint }
+}
+
+function extractTopLevelText(
+  event: Record<string, unknown>
+): ContentExtractionResult | null {
+  for (const field of TEXT_EXTRACTION_FIELDS) {
+    const value = event[field]
+    if (typeof value === 'string' && value.length > 0) {
+      return extractedText(
+        value,
+        field,
+        `Found text in standard field '${field}'`
+      )
+    }
+  }
+  return null
+}
+
+function readNestedPath(
+  event: Record<string, unknown>,
+  path: readonly string[]
+): unknown {
+  let current: unknown = event
+  for (const key of path) {
+    if (!current || typeof current !== 'object' || !(key in current)) {
+      return undefined
+    }
+    current = (current as Record<string, unknown>)[key]
+  }
+  return current
+}
+
+function extractNestedText(
+  event: Record<string, unknown>
+): ContentExtractionResult | null {
+  for (const path of NESTED_TEXT_PATHS) {
+    const value = readNestedPath(event, path)
+    if (typeof value === 'string' && value.length > 0) {
+      const pathName = path.join('.')
+      return extractedText(
+        value,
+        pathName,
+        `Found text in nested path '${pathName}'`
+      )
+    }
+  }
+  return null
+}
+
+function textFromPart(part: unknown): string | null {
+  if (!part || typeof part !== 'object') return null
+  if (!('type' in part) || part.type !== 'text') return null
+  if (!('text' in part) || typeof part.text !== 'string') return null
+  return part.text
+}
+
+function extractPartsText(
+  event: Record<string, unknown>
+): ContentExtractionResult | null {
+  if (!Array.isArray(event.parts)) return null
+  for (const part of event.parts) {
+    const text = textFromPart(part)
+    if (text !== null) {
+      return extractedText(
+        text,
+        'parts[].text',
+        'Found text in parts array (message format)'
+      )
+    }
+  }
+  return null
+}
+
+const METADATA_FIELDS = new Set(['type', 'id', 'timestamp'])
+
+function extractNonstandardText(
+  event: Record<string, unknown>
+): ContentExtractionResult | null {
+  for (const [key, value] of Object.entries(event)) {
+    if (METADATA_FIELDS.has(key)) continue
+    if (typeof value !== 'string' || value.length === 0) continue
+
+    log.info('Found text in unexpected field', {
+      field: key,
+      sample: value.substring(0, 50),
+      hint: 'This may be a new event format'
+    })
+    return extractedText(
+      value,
+      key,
+      `Found text in non-standard field '${key}' - this may indicate a new event format`
+    )
+  }
+  return null
+}
+
 /**
  * Extract text content from an unknown SSE event
  *
@@ -93,90 +195,13 @@ const NESTED_TEXT_PATHS = [
  * ```
  */
 export function extractTextFromUnknownEvent(event: Record<string, unknown>): ContentExtractionResult {
-  // Strategy 1: Check known text field names in priority order
-  for (const field of TEXT_EXTRACTION_FIELDS) {
-    const value = event[field]
-    if (typeof value === 'string' && value.length > 0) {
-      return {
-        success: true,
-        text: value,
-        extractedFrom: field,
-        hint: `Found text in standard field '${field}'`
-      }
-    }
-  }
-
-  // Strategy 2: Check nested paths
-  for (const path of NESTED_TEXT_PATHS) {
-    let current: unknown = event
-    let validPath = true
-
-    for (const key of path) {
-      if (current && typeof current === 'object' && key in current) {
-        current = (current as Record<string, unknown>)[key]
-      } else {
-        validPath = false
-        break
-      }
-    }
-
-    if (validPath && typeof current === 'string' && current.length > 0) {
-      return {
-        success: true,
-        text: current,
-        extractedFrom: path.join('.'),
-        hint: `Found text in nested path '${path.join('.')}'`
-      }
-    }
-  }
-
-  // Strategy 3: Check for parts array (message-style events)
-  if ('parts' in event && Array.isArray(event.parts)) {
-    for (const part of event.parts) {
-      if (
-        part &&
-        typeof part === 'object' &&
-        'type' in part &&
-        part.type === 'text' &&
-        'text' in part &&
-        typeof part.text === 'string'
-      ) {
-        return {
-          success: true,
-          text: part.text,
-          extractedFrom: 'parts[].text',
-          hint: 'Found text in parts array (message format)'
-        }
-      }
-    }
-  }
-
-  // Strategy 4: Last resort - check all string values
-  const allKeys = Object.keys(event)
-  for (const key of allKeys) {
-    const value = event[key]
-    // Skip metadata fields
-    if (key === 'type' || key === 'id' || key === 'timestamp') {
-      continue
-    }
-
-    if (typeof value === 'string' && value.length > 0) {
-      log.info('Found text in unexpected field', {
-        field: key,
-        sample: value.substring(0, 50),
-        hint: 'This may be a new event format'
-      })
-
-      return {
-        success: true,
-        text: value,
-        extractedFrom: key,
-        hint: `Found text in non-standard field '${key}' - this may indicate a new event format`
-      }
-    }
-  }
-
-  return {
+  const topLevel = extractTopLevelText(event)
+  if (topLevel) return topLevel
+  const nested = extractNestedText(event)
+  if (nested) return nested
+  const parts = extractPartsText(event)
+  if (parts) return parts
+  return extractNonstandardText(event) ?? {
     success: false,
     hint: 'No text content found in event'
   }

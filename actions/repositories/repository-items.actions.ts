@@ -304,6 +304,47 @@ function validatePresignedUrlInput(input: AddDocumentWithPresignedUrlInput): str
   return null
 }
 
+type DocumentObjectMetadata = Awaited<
+  ReturnType<typeof getDocumentObjectMetadata>
+>
+
+type PresignedObjectValidation =
+  | { isValid: true; metadata: DocumentObjectMetadata }
+  | { isValid: false; message: string }
+
+async function validatePresignedObject(
+  input: AddDocumentWithPresignedUrlInput,
+  log: ReturnType<typeof createLogger>
+): Promise<PresignedObjectValidation> {
+  const metadata = await getDocumentObjectMetadata(input.s3Key)
+  if (metadata.contentLength !== input.metadata.size) {
+    log.warn("Presigned upload size mismatch", {
+      repositoryId: input.repository_id,
+      expectedSize: input.metadata.size,
+      actualSize: metadata.contentLength,
+    })
+    return {
+      isValid: false,
+      message: "Uploaded file size did not match the request",
+    }
+  }
+  if (
+    metadata.contentType &&
+    metadata.contentType !== input.metadata.contentType
+  ) {
+    log.warn("Presigned upload content type mismatch", {
+      repositoryId: input.repository_id,
+      expectedContentType: input.metadata.contentType,
+      actualContentType: metadata.contentType,
+    })
+    return {
+      isValid: false,
+      message: "Uploaded file type did not match the request",
+    }
+  }
+  return { isValid: true, metadata }
+}
+
 // Validate addDocumentItem input; returns a user-facing error message or null when valid
 function validateAddDocumentInput(input: AddDocumentInput): string | null {
   if (!input.name || input.name.trim().length === 0) {
@@ -596,26 +637,11 @@ export async function addDocumentWithPresignedUrl(
     // actually landed in S3 before persisting or queueing it. This closes the
     // gap where a caller could request a small allowed upload, PUT different
     // bytes, then register misleading metadata.
-    const objectMetadata = await getDocumentObjectMetadata(input.s3Key)
-    if (objectMetadata.contentLength !== input.metadata.size) {
-      log.warn("Presigned upload size mismatch", {
-        repositoryId: input.repository_id,
-        expectedSize: input.metadata.size,
-        actualSize: objectMetadata.contentLength,
-      })
-      return { isSuccess: false, message: "Uploaded file size did not match the request" }
+    const objectValidation = await validatePresignedObject(input, log)
+    if (!objectValidation.isValid) {
+      return { isSuccess: false, message: objectValidation.message }
     }
-    if (
-      objectMetadata.contentType &&
-      objectMetadata.contentType !== input.metadata.contentType
-    ) {
-      log.warn("Presigned upload content type mismatch", {
-        repositoryId: input.repository_id,
-        expectedContentType: input.metadata.contentType,
-        actualContentType: objectMetadata.contentType,
-      })
-      return { isSuccess: false, message: "Uploaded file type did not match the request" }
-    }
+    const objectMetadata = objectValidation.metadata
 
     // Create repository item with S3 key reference via Drizzle
     log.info("Creating repository item in database", {
@@ -720,6 +746,59 @@ function validateUrl(url: string): boolean {
   }
 }
 
+async function processRepositoryUrl(
+  item: RepositoryItem,
+  input: AddUrlInput,
+  context: {
+    userId: number
+    requestId: string
+    canonicalCutover: boolean
+    log: ReturnType<typeof createLogger>
+  }
+): Promise<void> {
+  const { userId, requestId, canonicalCutover, log } = context
+  try {
+    if (canonicalCutover) {
+      const canonical = await registerCanonicalUrlSnapshot({
+        itemId: item.id,
+        repositoryId: input.repository_id,
+        userId,
+        name: input.name,
+        url: input.url,
+        traceId: requestId,
+      })
+      await dispatchContentProcessingJob({
+        jobId: canonical.inspectJob.id,
+        itemVersionId: canonical.version.id,
+      }).catch((dispatchError) => {
+        log.warn("Canonical URL processing is pending scheduled dispatch", {
+          processingJobId: canonical.inspectJob.id,
+          error:
+            dispatchError instanceof Error
+              ? dispatchError.message
+              : "Unknown error",
+        })
+      })
+    } else {
+      await processUrl(item.id, input.url, input.name)
+    }
+    log.info("URL processing registered successfully", { canonicalCutover })
+  } catch (error) {
+    log.error("Failed to process URL", {
+      itemId: item.id,
+      canonicalCutover,
+      error: error instanceof Error ? error.message : "Unknown error"
+    })
+    await updateRepositoryItemStatus(
+      item.id,
+      "failed",
+      canonicalCutover
+        ? "Canonical URL snapshot failed. Retry this item."
+        : "Legacy URL processing failed. Retry this item."
+    )
+  }
+}
+
 export async function addUrlItem(
   input: AddUrlInput
 ): Promise<ActionState<RepositoryItem>> {
@@ -818,46 +897,11 @@ export async function addUrlItem(
       canonicalCutover,
     })
     
-    try {
-      if (canonicalCutover) {
-        const canonical = await registerCanonicalUrlSnapshot({
-          itemId: item.id,
-          repositoryId: input.repository_id,
-          userId,
-          name: input.name,
-          url: input.url,
-          traceId: requestId,
-        })
-        await dispatchContentProcessingJob({
-          jobId: canonical.inspectJob.id,
-          itemVersionId: canonical.version.id,
-        }).catch((dispatchError) => {
-          log.warn("Canonical URL processing is pending scheduled dispatch", {
-            processingJobId: canonical.inspectJob.id,
-            error:
-              dispatchError instanceof Error
-                ? dispatchError.message
-                : "Unknown error",
-          })
-        })
-      } else {
-        await processUrl(item.id, input.url, input.name)
-      }
-      log.info("URL processing registered successfully", { canonicalCutover })
-    } catch (error) {
-      log.error("Failed to process URL", {
-        itemId: item.id,
-        canonicalCutover,
-        error: error instanceof Error ? error.message : "Unknown error"
-      })
-      await updateRepositoryItemStatus(
-        item.id,
-        "failed",
-        canonicalCutover
-          ? "Canonical URL snapshot failed. Retry this item."
-          : "Legacy URL processing failed. Retry this item."
-      )
-    }
+    await processRepositoryUrl(
+      item,
+      input,
+      { userId, requestId, canonicalCutover, log }
+    )
 
     log.info("URL added successfully", {
       itemId: item.id,

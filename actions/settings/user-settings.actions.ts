@@ -279,78 +279,11 @@ export async function updateUserProfile(
       throw ErrorFactories.dbRecordNotFound("users", session.sub)
     }
 
-    // Validate field lengths (defense-in-depth: mirrors client-side validation)
-    const validationErrors: Array<{ field: string; message: string }> = []
-
-    if (input.jobTitle && input.jobTitle.length > 255) {
-      validationErrors.push({ field: "jobTitle", message: "Job title must be 255 characters or less" })
-    }
-    if (input.department && input.department.length > 255) {
-      validationErrors.push({ field: "department", message: "Department must be 255 characters or less" })
-    }
-    if (input.building && input.building.length > 255) {
-      validationErrors.push({ field: "building", message: "Building must be 255 characters or less" })
-    }
-    if (input.bio && input.bio.length > 500) {
-      validationErrors.push({ field: "bio", message: "Bio must be 500 characters or less" })
-    }
-
-    // Validate JSONB profile fields
-    if (input.profile) {
-      if (input.profile.yearsInDistrict !== undefined) {
-        const years = input.profile.yearsInDistrict
-        if (typeof years !== "number" || !Number.isFinite(years) || years < 0 || years > 100) {
-          validationErrors.push({ field: "yearsInDistrict", message: "Years in district must be between 0 and 100" })
-        }
-      }
-      if (input.profile.preferredName && input.profile.preferredName.length > 255) {
-        validationErrors.push({ field: "preferredName", message: "Preferred name must be 255 characters or less" })
-      }
-      if (input.profile.pronouns && input.profile.pronouns.length > 100) {
-        validationErrors.push({ field: "pronouns", message: "Pronouns must be 100 characters or less" })
-      }
-    }
-
+    const validationErrors = profileValidationErrors(input)
     if (validationErrors.length > 0) {
       throw ErrorFactories.validationFailed(validationErrors)
     }
-
-    // Build the set clause for standard columns
-    const setClause: Record<string, unknown> = {
-      updatedAt: new Date(),
-    }
-
-    if (input.jobTitle !== undefined) setClause.jobTitle = input.jobTitle
-    if (input.department !== undefined) setClause.department = input.department
-    if (input.building !== undefined) setClause.building = input.building
-    if (input.gradeLevels !== undefined) setClause.gradeLevels = input.gradeLevels
-    if (input.bio !== undefined) setClause.bio = input.bio
-
-    // JSONB partial merge: Application-layer merge for security
-    // Fetch current profile, merge with updates, then save complete object
-    if (input.profile && Object.keys(input.profile).length > 0) {
-      // Fetch current profile value
-      const [currentUser] = await executeQuery(
-        (db) =>
-          db
-            .select({ profile: users.profile })
-            .from(users)
-            .where(eq(users.id, userId))
-            .limit(1),
-        "getUserProfileForMerge"
-      )
-
-      // Merge at application layer: existing fields + new fields
-      // New fields overwrite, existing fields are preserved
-      const currentProfile = currentUser?.profile ?? {}
-      const mergedProfile: UserProfile = {
-        ...currentProfile,
-        ...input.profile,
-      }
-
-      // Use safeJsonbStringify for proper JSONB handling with parameterization
-      setClause.profile = sql`${safeJsonbStringify(mergedProfile)}::jsonb`
-    }
+    const setClause = await buildProfileUpdate(userId, input)
 
     await executeQuery(
       (db) =>
@@ -373,6 +306,100 @@ export async function updateUserProfile(
       operation: "updateUserProfile",
     })
   }
+}
+
+type ProfileValidationIssue = { field: string; message: string }
+
+function profileValidationErrors(
+  input: UpdateProfileInput
+): ProfileValidationIssue[] {
+  const errors: ProfileValidationIssue[] = []
+  addLengthError(errors, "jobTitle", input.jobTitle, 255, "Job title")
+  addLengthError(errors, "department", input.department, 255, "Department")
+  addLengthError(errors, "building", input.building, 255, "Building")
+  addLengthError(errors, "bio", input.bio, 500, "Bio")
+  addProfileJsonErrors(errors, input.profile)
+  return errors
+}
+
+function addLengthError(
+  errors: ProfileValidationIssue[],
+  field: string,
+  value: string | null | undefined,
+  maximum: number,
+  label: string
+): void {
+  if (value && value.length > maximum) {
+    errors.push({
+      field,
+      message: `${label} must be ${maximum} characters or less`,
+    })
+  }
+}
+
+function addProfileJsonErrors(
+  errors: ProfileValidationIssue[],
+  profile: UpdateProfileInput["profile"]
+): void {
+  if (!profile) return
+  const years = profile.yearsInDistrict
+  if (
+    years !== undefined &&
+    (typeof years !== "number" ||
+      !Number.isFinite(years) ||
+      years < 0 ||
+      years > 100)
+  ) {
+    errors.push({
+      field: "yearsInDistrict",
+      message: "Years in district must be between 0 and 100",
+    })
+  }
+  addLengthError(errors, "preferredName", profile.preferredName, 255, "Preferred name")
+  addLengthError(errors, "pronouns", profile.pronouns, 100, "Pronouns")
+}
+
+async function buildProfileUpdate(
+  userId: number,
+  input: UpdateProfileInput
+): Promise<Record<string, unknown>> {
+  const update: Record<string, unknown> = { updatedAt: new Date() }
+  copyDefinedProfileColumns(update, input)
+  if (input.profile && Object.keys(input.profile).length > 0) {
+    update.profile = await mergedProfileSql(userId, input.profile)
+  }
+  return update
+}
+
+function copyDefinedProfileColumns(
+  update: Record<string, unknown>,
+  input: UpdateProfileInput
+): void {
+  if (input.jobTitle !== undefined) update.jobTitle = input.jobTitle
+  if (input.department !== undefined) update.department = input.department
+  if (input.building !== undefined) update.building = input.building
+  if (input.gradeLevels !== undefined) update.gradeLevels = input.gradeLevels
+  if (input.bio !== undefined) update.bio = input.bio
+}
+
+async function mergedProfileSql(
+  userId: number,
+  profile: NonNullable<UpdateProfileInput["profile"]>
+) {
+  const [currentUser] = await executeQuery(
+    (db) =>
+      db
+        .select({ profile: users.profile })
+        .from(users)
+        .where(eq(users.id, userId))
+        .limit(1),
+    "getUserProfileForMerge"
+  )
+  const merged: UserProfile = {
+    ...(currentUser?.profile ?? {}),
+    ...profile,
+  }
+  return sql`${safeJsonbStringify(merged)}::jsonb`
 }
 
 // ============================================

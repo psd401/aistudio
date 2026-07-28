@@ -165,7 +165,7 @@ function scheduleSessionConfig(ws: MockWs, config?: { conversationId?: string })
   }, 10)
 }
 
-describe("handleVoiceConnection", () => {
+function defineHandleVoiceConnectionSuite1Part1() {
   beforeEach(() => {
     jest.clearAllMocks()
     process.env.AUTH_SECRET = "test-secret-key-for-testing-only-32chars!"
@@ -175,7 +175,7 @@ describe("handleVoiceConnection", () => {
     delete process.env.AUTH_SECRET
   })
 
-  describe("authentication", () => {
+
     it("should close with 4001 when no session cookie present", async () => {
       const ws = createMockWs()
       const req = createMockReq({})
@@ -258,7 +258,9 @@ describe("handleVoiceConnection", () => {
       })
     })
 
-    it("should reassemble chunked session cookies", async () => {
+    }
+
+function defineHandleVoiceConnectionSuite1Part2() {it("should reassemble chunked session cookies", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
       mockVoiceAccess.mockResolvedValue(true)
 
@@ -278,7 +280,7 @@ describe("handleVoiceConnection", () => {
         secret: expect.any(String),
       })
     })
-  })
+
 
   describe("authorization", () => {
     beforeEach(() => {
@@ -365,8 +367,10 @@ describe("handleVoiceConnection", () => {
     })
   })
 
-  describe("error handling", () => {
-    it("should close with 4001 when AUTH_SECRET is not configured", async () => {
+
+    }
+
+function defineHandleVoiceConnectionSuite1Part3() {it("should close with 4001 when AUTH_SECRET is not configured", async () => {
       delete process.env.AUTH_SECRET
       delete process.env.NEXTAUTH_SECRET
 
@@ -455,9 +459,11 @@ describe("handleVoiceConnection", () => {
       expect(ws.removeAllListeners).toHaveBeenCalledWith("close")
       expect(ws.removeAllListeners).toHaveBeenCalledWith("error")
     })
-  })
 
-  describe("message handling", () => {
+
+  }
+
+function defineHandleVoiceConnectionSuite1Part4() {describe("message handling", () => {
     beforeEach(() => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
       mockVoiceAccess.mockResolvedValue(true)
@@ -552,7 +558,9 @@ describe("handleVoiceConnection", () => {
     })
   })
 
-  describe("session_config handling", () => {
+  }
+
+function defineHandleVoiceConnectionSuite1Part5() {describe("session_config handling", () => {
     beforeEach(() => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
       mockVoiceAccess.mockResolvedValue(true)
@@ -630,7 +638,9 @@ describe("handleVoiceConnection", () => {
     })
   })
 
-  describe("session_config timeout", () => {
+  }
+
+function defineHandleVoiceConnectionSuite1Part6() {describe("session_config timeout", () => {
     beforeEach(() => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
       mockVoiceAccess.mockResolvedValue(true)
@@ -668,7 +678,7 @@ describe("handleVoiceConnection", () => {
     })
   })
 
-  describe("chunked cookie edge cases", () => {
+
     it("should handle cookies with = in value", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
       mockVoiceAccess.mockResolvedValue(true)
@@ -707,5 +717,16 @@ describe("handleVoiceConnection", () => {
         expect.objectContaining({ token: "chunk0" })
       )
     })
-  })
-})
+
+}
+
+const defineHandleVoiceConnectionSuite1 = () => {
+  defineHandleVoiceConnectionSuite1Part1()
+  defineHandleVoiceConnectionSuite1Part2()
+  defineHandleVoiceConnectionSuite1Part3()
+  defineHandleVoiceConnectionSuite1Part4()
+  defineHandleVoiceConnectionSuite1Part5()
+  defineHandleVoiceConnectionSuite1Part6()
+};
+
+describe("handleVoiceConnection", defineHandleVoiceConnectionSuite1)

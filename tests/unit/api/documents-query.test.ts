@@ -41,340 +41,338 @@ jest.mock('@/lib/logger', () => ({
 // Test UUID conversationId (Issue #549 - changed from integer to UUID)
 const TEST_CONVERSATION_ID = '550e8400-e29b-41d4-a716-446655440000';
 
-describe('POST /api/documents/query', () => {
+beforeEach(() => {
+  jest.clearAllMocks();
+  // REV-SEC-121 added a conversation-ownership check ahead of the document
+  // lookup; default it to "found" so existing suites exercise the same
+  // paths they did before that check was added.
+  (getConversationById as jest.Mock).mockResolvedValue({
+    id: TEST_CONVERSATION_ID,
+    userId: 1
+  } as unknown);
+});
+
+describe('Authentication and Authorization', () => {
+  it('should return 401 if no session', async () => {
+    (getServerSession as jest.Mock).mockResolvedValue(null);
+
+    const request = new NextRequest('http://localhost:3000/api/documents/query', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
+    });
+
+    const response = await POST(request);
+    expect(response.status).toBe(401);
+    const data = await response.json();
+    expect(data.error).toBe('Unauthorized');
+  });
+
+  it('should return 401 if user not found', async () => {
+    (getServerSession as jest.Mock).mockResolvedValue({ user: { sub: 'test-sub' } } as unknown);
+    (getCurrentUserAction as jest.Mock).mockResolvedValue({ isSuccess: false, message: 'User not found' });
+
+    const request = new NextRequest('http://localhost:3000/api/documents/query', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
+    });
+
+    const response = await POST(request);
+    expect(response.status).toBe(401);
+    const data = await response.json();
+    expect(data.error).toBe('User not found');
+  });
+});
+
+describe('Input Validation', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
-    // REV-SEC-121 added a conversation-ownership check ahead of the document
-    // lookup; default it to "found" so existing suites exercise the same
-    // paths they did before that check was added.
-    (getConversationById as jest.Mock).mockResolvedValue({
-      id: TEST_CONVERSATION_ID,
-      userId: 1
-    } as any);
+    (getServerSession as jest.Mock).mockResolvedValue({ user: { sub: 'test-sub' } } as unknown);
+    (getCurrentUserAction as jest.Mock).mockResolvedValue({
+      isSuccess: true,
+      data: { user: { id: BigInt(1) } }
+    } as unknown);
   });
 
-  describe('Authentication and Authorization', () => {
-    it('should return 401 if no session', async () => {
-      (getServerSession as jest.Mock).mockResolvedValue(null);
-
-      const request = new NextRequest('http://localhost:3000/api/documents/query', {
-        method: 'POST',
-        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
-      });
-
-      const response = await POST(request);
-      expect(response.status).toBe(401);
-      const data = await response.json();
-      expect(data.error).toBe('Unauthorized');
+  it('should return 400 if conversationId is missing', async () => {
+    const request = new NextRequest('http://localhost:3000/api/documents/query', {
+      method: 'POST',
+      body: JSON.stringify({ query: 'test' }),
     });
 
-    it('should return 401 if user not found', async () => {
-      (getServerSession as jest.Mock).mockResolvedValue({ user: { sub: 'test-sub' } } as any);
-      (getCurrentUserAction as jest.Mock).mockResolvedValue({ isSuccess: false, message: 'User not found' });
-
-      const request = new NextRequest('http://localhost:3000/api/documents/query', {
-        method: 'POST',
-        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
-      });
-
-      const response = await POST(request);
-      expect(response.status).toBe(401);
-      const data = await response.json();
-      expect(data.error).toBe('User not found');
-    });
+    const response = await POST(request);
+    expect(response.status).toBe(400);
+    const data = await response.json();
+    // Zod validation error when conversationId is undefined
+    expect(data.error).toContain('expected string');
   });
 
-  describe('Input Validation', () => {
-    beforeEach(() => {
-      (getServerSession as jest.Mock).mockResolvedValue({ user: { sub: 'test-sub' } } as any);
-      (getCurrentUserAction as jest.Mock).mockResolvedValue({
-        isSuccess: true,
-        data: { user: { id: BigInt(1) } }
-      } as any);
+  it('should return 400 if query is missing', async () => {
+    const request = new NextRequest('http://localhost:3000/api/documents/query', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID }),
     });
 
-    it('should return 400 if conversationId is missing', async () => {
-      const request = new NextRequest('http://localhost:3000/api/documents/query', {
-        method: 'POST',
-        body: JSON.stringify({ query: 'test' }),
-      });
-
-      const response = await POST(request);
-      expect(response.status).toBe(400);
-      const data = await response.json();
-      // Zod validation error when conversationId is undefined
-      expect(data.error).toContain('expected string');
-    });
-
-    it('should return 400 if query is missing', async () => {
-      const request = new NextRequest('http://localhost:3000/api/documents/query', {
-        method: 'POST',
-        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID }),
-      });
-
-      const response = await POST(request);
-      expect(response.status).toBe(400);
-      const data = await response.json();
-      // Zod validation error when query is undefined
-      expect(data.error).toContain('expected string');
-    });
-
-    it('should return 400 if query is not a string', async () => {
-      const request = new NextRequest('http://localhost:3000/api/documents/query', {
-        method: 'POST',
-        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 123 }),
-      });
-
-      const response = await POST(request);
-      expect(response.status).toBe(400);
-      const data = await response.json();
-      // Zod validation error message for type mismatch
-      expect(data.error).toContain('expected string');
-    });
-
-    it('should return 400 if query is too long', async () => {
-      const longQuery = 'a'.repeat(1001);
-      const request = new NextRequest('http://localhost:3000/api/documents/query', {
-        method: 'POST',
-        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: longQuery }),
-      });
-
-      const response = await POST(request);
-      expect(response.status).toBe(400);
-      const data = await response.json();
-      expect(data.error).toBe('Query is too long (max 1000 characters)');
-    });
+    const response = await POST(request);
+    expect(response.status).toBe(400);
+    const data = await response.json();
+    // Zod validation error when query is undefined
+    expect(data.error).toContain('expected string');
   });
 
-  describe('Regex Injection Protection', () => {
-    beforeEach(() => {
-      (getServerSession as jest.Mock).mockResolvedValue({ user: { sub: 'test-sub' } } as any);
-      (getCurrentUserAction as jest.Mock).mockResolvedValue({
-        isSuccess: true,
-        data: { user: { id: BigInt(1) } }
-      } as any);
-      (getDocumentsByConversationId as jest.Mock).mockResolvedValue([
-        { id: 1, name: 'Test Doc', conversationId: TEST_CONVERSATION_ID }
-      ] as any);
-      (getDocumentChunksByDocumentId as jest.Mock).mockResolvedValue([
-        { 
-          id: 1, 
-          documentId: 1, 
-          chunkIndex: 0, 
-          content: 'This is a test document with special characters: .*+?^${}()|[]\\' 
-        }
-      ] as any);
+  it('should return 400 if query is not a string', async () => {
+    const request = new NextRequest('http://localhost:3000/api/documents/query', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 123 }),
     });
 
-    it('should handle regex special characters safely', async () => {
-      const maliciousQueries = [
-        '.*',
-        '.+',
-        '[a-z]+',
-        '(test)',
-        'test|other',
-        '^test$',
-        'test{2,3}',
-        'test?',
-        'test*',
-        'test\\d',
-        'test[123]',
-        'test(group)',
-        'test$'
-      ];
-
-      for (const query of maliciousQueries) {
-        const request = new NextRequest('http://localhost:3000/api/documents/query', {
-          method: 'POST',
-          body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query }),
-        });
-
-        const response = await POST(request);
-        expect(response.status).toBe(200);
-        const data = await response.json();
-        expect(data.success).toBe(true);
-        // Should not throw regex errors
-      }
-    });
-
-    it('should correctly match escaped special characters', async () => {
-      (getDocumentChunksByDocumentId as jest.Mock).mockResolvedValue([
-        { 
-          id: 1, 
-          documentId: 1, 
-          chunkIndex: 0, 
-          content: 'This document contains a literal .* pattern' 
-        },
-        { 
-          id: 2, 
-          documentId: 1, 
-          chunkIndex: 1, 
-          content: 'This document does not contain the pattern' 
-        }
-      ] as any);
-
-      const request = new NextRequest('http://localhost:3000/api/documents/query', {
-        method: 'POST',
-        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: '.*' }),
-      });
-
-      const response = await POST(request);
-      expect(response.status).toBe(200);
-      const data = await response.json();
-      expect(data.success).toBe(true);
-      expect(data.results).toHaveLength(1);
-      expect(data.results[0].content).toContain('literal .* pattern');
-    });
+    const response = await POST(request);
+    expect(response.status).toBe(400);
+    const data = await response.json();
+    // Zod validation error message for type mismatch
+    expect(data.error).toContain('expected string');
   });
 
-  describe('Search Functionality', () => {
-    beforeEach(() => {
-      (getServerSession as jest.Mock).mockResolvedValue({ user: { sub: 'test-sub' } } as any);
-      (getCurrentUserAction as jest.Mock).mockResolvedValue({
-        isSuccess: true,
-        data: { user: { id: BigInt(1) } }
-      } as any);
-      (getDocumentsByConversationId as jest.Mock).mockResolvedValue([
-        { id: 1, name: 'Test Doc 1', conversationId: TEST_CONVERSATION_ID },
-        { id: 2, name: 'Test Doc 2', conversationId: TEST_CONVERSATION_ID }
-      ] as any);
+  it('should return 400 if query is too long', async () => {
+    const longQuery = 'a'.repeat(1001);
+    const request = new NextRequest('http://localhost:3000/api/documents/query', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: longQuery }),
     });
 
-    it('should return empty results when no documents found', async () => {
-      (getDocumentsByConversationId as jest.Mock).mockResolvedValue([]);
+    const response = await POST(request);
+    expect(response.status).toBe(400);
+    const data = await response.json();
+    expect(data.error).toBe('Query is too long (max 1000 characters)');
+  });
+});
 
-      const request = new NextRequest('http://localhost:3000/api/documents/query', {
-        method: 'POST',
-        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
-      });
-
-      const response = await POST(request);
-      expect(response.status).toBe(200);
-      const data = await response.json();
-      expect(data.success).toBe(true);
-      expect(data.results).toEqual([]);
-      expect(data.message).toBe('No documents found for this conversation');
-    });
-
-    it('should search case-insensitively', async () => {
-      (getDocumentChunksByDocumentId as jest.Mock)
-        .mockResolvedValueOnce([
-          { 
-            id: 1, 
-            documentId: 1, 
-            chunkIndex: 0, 
-            content: 'This is a TEST document' 
-          }
-        ] as any)
-        .mockResolvedValueOnce([
-          { 
-            id: 2, 
-            documentId: 2, 
-            chunkIndex: 0, 
-            content: 'This document has no matching content' 
-          }
-        ] as any);
-
-      const request = new NextRequest('http://localhost:3000/api/documents/query', {
-        method: 'POST',
-        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
-      });
-
-      const response = await POST(request);
-      expect(response.status).toBe(200);
-      const data = await response.json();
-      expect(data.success).toBe(true);
-      expect(data.results).toHaveLength(1);
-    });
-
-    it('should calculate relevance based on occurrence count', async () => {
-      (getDocumentChunksByDocumentId as jest.Mock)
-        .mockResolvedValueOnce([
-          { 
-            id: 1, 
-            documentId: 1, 
-            chunkIndex: 0, 
-            content: 'test test test' // 3 occurrences
-          }
-        ] as any)
-        .mockResolvedValueOnce([
-          { 
-            id: 2, 
-            documentId: 2, 
-            chunkIndex: 0, 
-            content: 'test' // 1 occurrence
-          }
-        ] as any);
-
-      const request = new NextRequest('http://localhost:3000/api/documents/query', {
-        method: 'POST',
-        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
-      });
-
-      const response = await POST(request);
-      expect(response.status).toBe(200);
-      const data = await response.json();
-      expect(data.success).toBe(true);
-      expect(data.results).toHaveLength(2);
-      expect(data.results[0].relevance).toBe(3);
-      expect(data.results[1].relevance).toBe(1);
-    });
-
-    it('should limit results to top 5', async () => {
-      const chunks = Array.from({ length: 10 }, (_, i) => ({
-        id: i,
+describe('Regex Injection Protection', () => {
+  beforeEach(() => {
+    (getServerSession as jest.Mock).mockResolvedValue({ user: { sub: 'test-sub' } } as unknown);
+    (getCurrentUserAction as jest.Mock).mockResolvedValue({
+      isSuccess: true,
+      data: { user: { id: BigInt(1) } }
+    } as unknown);
+    (getDocumentsByConversationId as jest.Mock).mockResolvedValue([
+      { id: 1, name: 'Test Doc', conversationId: TEST_CONVERSATION_ID }
+    ] as unknown);
+    (getDocumentChunksByDocumentId as jest.Mock).mockResolvedValue([
+      {
+        id: 1,
         documentId: 1,
-        chunkIndex: i,
-        content: `Document chunk ${i} contains test`
-      }));
-      (getDocumentChunksByDocumentId as jest.Mock).mockResolvedValue(chunks as any);
+        chunkIndex: 0,
+        content: 'This is a test document with special characters: .*+?^${}()|[]\\'
+      }
+    ] as unknown);
+  });
 
+  it('should handle regex special characters safely', async () => {
+    const maliciousQueries = [
+      '.*',
+      '.+',
+      '[a-z]+',
+      '(test)',
+      'test|other',
+      '^test$',
+      'test{2,3}',
+      'test?',
+      'test*',
+      'test\\d',
+      'test[123]',
+      'test(group)',
+      'test$'
+    ];
+
+    for (const query of maliciousQueries) {
       const request = new NextRequest('http://localhost:3000/api/documents/query', {
         method: 'POST',
-        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
+        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query }),
       });
 
       const response = await POST(request);
       expect(response.status).toBe(200);
       const data = await response.json();
       expect(data.success).toBe(true);
-      expect(data.results).toHaveLength(5);
-    });
+      // Should not throw regex errors
+    }
   });
 
-  describe('Error Handling', () => {
-    beforeEach(() => {
-      (getServerSession as jest.Mock).mockResolvedValue({ user: { sub: 'test-sub' } } as any);
-      (getCurrentUserAction as jest.Mock).mockResolvedValue({
-        isSuccess: true,
-        data: { user: { id: BigInt(1) } }
-      } as any);
+  it('should correctly match escaped special characters', async () => {
+    (getDocumentChunksByDocumentId as jest.Mock).mockResolvedValue([
+      {
+        id: 1,
+        documentId: 1,
+        chunkIndex: 0,
+        content: 'This document contains a literal .* pattern'
+      },
+      {
+        id: 2,
+        documentId: 1,
+        chunkIndex: 1,
+        content: 'This document does not contain the pattern'
+      }
+    ] as unknown);
+
+    const request = new NextRequest('http://localhost:3000/api/documents/query', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: '.*' }),
     });
 
-    it('should handle database errors gracefully', async () => {
-      (getDocumentsByConversationId as jest.Mock).mockRejectedValue(new Error('Database connection failed'));
+    const response = await POST(request);
+    expect(response.status).toBe(200);
+    const data = await response.json();
+    expect(data.success).toBe(true);
+    expect(data.results).toHaveLength(1);
+    expect(data.results[0].content).toContain('literal .* pattern');
+  });
+});
 
-      const request = new NextRequest('http://localhost:3000/api/documents/query', {
-        method: 'POST',
-        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
-      });
+describe('Search Functionality', () => {
+  beforeEach(() => {
+    (getServerSession as jest.Mock).mockResolvedValue({ user: { sub: 'test-sub' } } as unknown);
+    (getCurrentUserAction as jest.Mock).mockResolvedValue({
+      isSuccess: true,
+      data: { user: { id: BigInt(1) } }
+    } as unknown);
+    (getDocumentsByConversationId as jest.Mock).mockResolvedValue([
+      { id: 1, name: 'Test Doc 1', conversationId: TEST_CONVERSATION_ID },
+      { id: 2, name: 'Test Doc 2', conversationId: TEST_CONVERSATION_ID }
+    ] as unknown);
+  });
 
-      const response = await POST(request);
-      expect(response.status).toBe(500);
-      const data = await response.json();
-      // REV-COR-208: route returns a fixed generic message instead of the raw
-      // exception detail; the real error is logged server-side, not echoed.
-      expect(data.error).toBe('Failed to query documents');
+  it('should return empty results when no documents found', async () => {
+    (getDocumentsByConversationId as jest.Mock).mockResolvedValue([]);
+
+    const request = new NextRequest('http://localhost:3000/api/documents/query', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
     });
 
-    it('should handle invalid JSON gracefully', async () => {
-      const request = new NextRequest('http://localhost:3000/api/documents/query', {
-        method: 'POST',
-        body: 'invalid json',
-      });
+    const response = await POST(request);
+    expect(response.status).toBe(200);
+    const data = await response.json();
+    expect(data.success).toBe(true);
+    expect(data.results).toEqual([]);
+    expect(data.message).toBe('No documents found for this conversation');
+  });
 
-      const response = await POST(request);
-      expect(response.status).toBe(500);
+  it('should search case-insensitively', async () => {
+    (getDocumentChunksByDocumentId as jest.Mock)
+      .mockResolvedValueOnce([
+        {
+          id: 1,
+          documentId: 1,
+          chunkIndex: 0,
+          content: 'This is a TEST document'
+        }
+      ] as unknown)
+      .mockResolvedValueOnce([
+        {
+          id: 2,
+          documentId: 2,
+          chunkIndex: 0,
+          content: 'This document has no matching content'
+        }
+      ] as unknown);
+
+    const request = new NextRequest('http://localhost:3000/api/documents/query', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
     });
+
+    const response = await POST(request);
+    expect(response.status).toBe(200);
+    const data = await response.json();
+    expect(data.success).toBe(true);
+    expect(data.results).toHaveLength(1);
+  });
+
+  it('should calculate relevance based on occurrence count', async () => {
+    (getDocumentChunksByDocumentId as jest.Mock)
+      .mockResolvedValueOnce([
+        {
+          id: 1,
+          documentId: 1,
+          chunkIndex: 0,
+          content: 'test test test' // 3 occurrences
+        }
+      ] as unknown)
+      .mockResolvedValueOnce([
+        {
+          id: 2,
+          documentId: 2,
+          chunkIndex: 0,
+          content: 'test' // 1 occurrence
+        }
+      ] as unknown);
+
+    const request = new NextRequest('http://localhost:3000/api/documents/query', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
+    });
+
+    const response = await POST(request);
+    expect(response.status).toBe(200);
+    const data = await response.json();
+    expect(data.success).toBe(true);
+    expect(data.results).toHaveLength(2);
+    expect(data.results[0].relevance).toBe(3);
+    expect(data.results[1].relevance).toBe(1);
+  });
+
+  it('should limit results to top 5', async () => {
+    const chunks = Array.from({ length: 10 }, (_, i) => ({
+      id: i,
+      documentId: 1,
+      chunkIndex: i,
+      content: `Document chunk ${i} contains test`
+    }));
+    (getDocumentChunksByDocumentId as jest.Mock).mockResolvedValue(chunks as unknown);
+
+    const request = new NextRequest('http://localhost:3000/api/documents/query', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
+    });
+
+    const response = await POST(request);
+    expect(response.status).toBe(200);
+    const data = await response.json();
+    expect(data.success).toBe(true);
+    expect(data.results).toHaveLength(5);
+  });
+});
+
+describe('Error Handling', () => {
+  beforeEach(() => {
+    (getServerSession as jest.Mock).mockResolvedValue({ user: { sub: 'test-sub' } } as unknown);
+    (getCurrentUserAction as jest.Mock).mockResolvedValue({
+      isSuccess: true,
+      data: { user: { id: BigInt(1) } }
+    } as unknown);
+  });
+
+  it('should handle database errors gracefully', async () => {
+    (getDocumentsByConversationId as jest.Mock).mockRejectedValue(new Error('Database connection failed'));
+
+    const request = new NextRequest('http://localhost:3000/api/documents/query', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
+    });
+
+    const response = await POST(request);
+    expect(response.status).toBe(500);
+    const data = await response.json();
+    // REV-COR-208: route returns a fixed generic message instead of the raw
+    // exception detail; the real error is logged server-side, not echoed.
+    expect(data.error).toBe('Failed to query documents');
+  });
+
+  it('should handle invalid JSON gracefully', async () => {
+    const request = new NextRequest('http://localhost:3000/api/documents/query', {
+      method: 'POST',
+      body: 'invalid json',
+    });
+
+    const response = await POST(request);
+    expect(response.status).toBe(500);
   });
 });

@@ -38,6 +38,131 @@ const emptyForm: EdgeFormData = {
   metadata: "{}",
 }
 
+function GraphNodeSelect({
+  label,
+  value,
+  search,
+  nodes,
+  onSearchChange,
+  onValueChange,
+}: {
+  label: "Source" | "Target"
+  value: string
+  search: string
+  nodes: PublicGraphNode[]
+  onSearchChange: (value: string) => void
+  onValueChange: (value: string) => void
+}) {
+  const lowerLabel = label.toLowerCase()
+  return (
+    <div className="space-y-2">
+      <Label>
+        {label} Node <span className="text-destructive">*</span>
+      </Label>
+      <div className="space-y-2">
+        <Input
+          placeholder="Search nodes..."
+          value={search}
+          onChange={(event) => onSearchChange(event.target.value)}
+          icon={<IconSearch className="h-4 w-4" />}
+          className="w-full"
+        />
+        <Select value={value} onValueChange={onValueChange}>
+          <SelectTrigger aria-label={`Select ${lowerLabel} node`}>
+            <SelectValue placeholder={`Select ${lowerLabel} node...`} />
+          </SelectTrigger>
+          <SelectContent>
+            {nodes.length === 0 ? (
+              <div className="px-3 py-2 text-sm text-muted-foreground">
+                No nodes found
+              </div>
+            ) : (
+              nodes.map((node) => (
+                <SelectItem key={node.id} value={node.id}>
+                  <span className="font-medium">{node.name}</span>
+                  <span className="ml-2 text-xs text-muted-foreground">
+                    ({node.nodeType})
+                  </span>
+                </SelectItem>
+              ))
+            )}
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+  )
+}
+
+function EdgeFormFields({
+  form,
+  sourceSearch,
+  targetSearch,
+  sourceNodes,
+  targetNodes,
+  metadataError,
+  onChange,
+  onSourceSearchChange,
+  onTargetSearchChange,
+  onMetadataChange,
+}: {
+  form: EdgeFormData
+  sourceSearch: string
+  targetSearch: string
+  sourceNodes: PublicGraphNode[]
+  targetNodes: PublicGraphNode[]
+  metadataError: string | null
+  onChange: (updates: Partial<EdgeFormData>) => void
+  onSourceSearchChange: (value: string) => void
+  onTargetSearchChange: (value: string) => void
+  onMetadataChange: (value: string) => void
+}) {
+  return (
+    <div className="space-y-4 pb-4">
+      <GraphNodeSelect
+        label="Source"
+        value={form.sourceNodeId}
+        search={sourceSearch}
+        nodes={sourceNodes}
+        onSearchChange={onSourceSearchChange}
+        onValueChange={(sourceNodeId) => onChange({ sourceNodeId })}
+      />
+      <div className="space-y-2">
+        <Label htmlFor="edge-type">
+          Edge Type <span className="text-destructive">*</span>
+        </Label>
+        <Input
+          id="edge-type"
+          placeholder="e.g., informs, depends_on, supersedes"
+          value={form.edgeType}
+          onChange={(event) => onChange({ edgeType: event.target.value })}
+        />
+      </div>
+      <GraphNodeSelect
+        label="Target"
+        value={form.targetNodeId}
+        search={targetSearch}
+        nodes={targetNodes}
+        onSearchChange={onTargetSearchChange}
+        onValueChange={(targetNodeId) => onChange({ targetNodeId })}
+      />
+      <div className="space-y-2">
+        <Label htmlFor="edge-metadata">Metadata (JSON, optional)</Label>
+        <Textarea
+          id="edge-metadata"
+          placeholder='{"key": "value"}'
+          value={form.metadata}
+          onChange={(event) => onMetadataChange(event.target.value)}
+          rows={3}
+          className={metadataError ? "border-destructive" : "font-mono text-sm"}
+        />
+        {metadataError && (
+          <p className="text-xs text-destructive">{metadataError}</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function EdgeFormSheet({
   open,
   onOpenChange,
@@ -155,128 +280,20 @@ export function EdgeFormSheet({
 
           {/* Body */}
           <div className="flex-1 overflow-y-auto px-6">
-            <div className="space-y-4 pb-4">
-              <div className="space-y-2">
-                <Label>
-                  Source Node <span className="text-destructive">*</span>
-                </Label>
-                <div className="space-y-2">
-                  <div className="relative">
-                    <Input
-                      placeholder="Search nodes..."
-                      value={sourceSearch}
-                      onChange={(e) => setSourceSearch(e.target.value)}
-                      icon={<IconSearch className="h-4 w-4" />}
-                      className="w-full"
-                    />
-                  </div>
-                  <Select
-                    value={form.sourceNodeId}
-                    onValueChange={(value) =>
-                      setForm((prev) => ({ ...prev, sourceNodeId: value }))
-                    }
-                  >
-                    <SelectTrigger aria-label="Select source node">
-                      <SelectValue placeholder="Select source node..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {filteredSourceNodes.length === 0 ? (
-                        <div className="py-2 px-3 text-sm text-muted-foreground">
-                          No nodes found
-                        </div>
-                      ) : (
-                        filteredSourceNodes.map((node) => (
-                          <SelectItem key={node.id} value={node.id}>
-                            <span className="font-medium">{node.name}</span>
-                            <span className="ml-2 text-muted-foreground text-xs">
-                              ({node.nodeType})
-                            </span>
-                          </SelectItem>
-                        ))
-                      )}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="edge-type">
-                  Edge Type <span className="text-destructive">*</span>
-                </Label>
-                <Input
-                  id="edge-type"
-                  placeholder="e.g., informs, depends_on, supersedes"
-                  value={form.edgeType}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, edgeType: e.target.value }))
-                  }
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label>
-                  Target Node <span className="text-destructive">*</span>
-                </Label>
-                <div className="space-y-2">
-                  <div className="relative">
-                    <Input
-                      placeholder="Search nodes..."
-                      value={targetSearch}
-                      onChange={(e) => setTargetSearch(e.target.value)}
-                      icon={<IconSearch className="h-4 w-4" />}
-                      className="w-full"
-                    />
-                  </div>
-                  <Select
-                    value={form.targetNodeId}
-                    onValueChange={(value) =>
-                      setForm((prev) => ({ ...prev, targetNodeId: value }))
-                    }
-                  >
-                    <SelectTrigger aria-label="Select target node">
-                      <SelectValue placeholder="Select target node..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {filteredTargetNodes.length === 0 ? (
-                        <div className="py-2 px-3 text-sm text-muted-foreground">
-                          No nodes found
-                        </div>
-                      ) : (
-                        filteredTargetNodes.map((node) => (
-                          <SelectItem key={node.id} value={node.id}>
-                            <span className="font-medium">{node.name}</span>
-                            <span className="ml-2 text-muted-foreground text-xs">
-                              ({node.nodeType})
-                            </span>
-                          </SelectItem>
-                        ))
-                      )}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="edge-metadata">
-                  Metadata (JSON, optional)
-                </Label>
-                <Textarea
-                  id="edge-metadata"
-                  placeholder='{"key": "value"}'
-                  value={form.metadata}
-                  onChange={(e) => handleMetadataChange(e.target.value)}
-                  rows={3}
-                  className={
-                    metadataError
-                      ? "border-destructive"
-                      : "font-mono text-sm"
-                  }
-                />
-                {metadataError && (
-                  <p className="text-xs text-destructive">{metadataError}</p>
-                )}
-              </div>
-            </div>
+            <EdgeFormFields
+              form={form}
+              sourceSearch={sourceSearch}
+              targetSearch={targetSearch}
+              sourceNodes={filteredSourceNodes}
+              targetNodes={filteredTargetNodes}
+              metadataError={metadataError}
+              onChange={(updates) =>
+                setForm((previous) => ({ ...previous, ...updates }))
+              }
+              onSourceSearchChange={setSourceSearch}
+              onTargetSearchChange={setTargetSearch}
+              onMetadataChange={handleMetadataChange}
+            />
           </div>
 
           {/* Footer */}

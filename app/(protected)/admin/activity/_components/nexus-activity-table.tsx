@@ -3,23 +3,13 @@
 import { useState, useMemo } from "react"
 import {
   ColumnDef,
-  flexRender,
   getCoreRowModel,
   getSortedRowModel,
-  useReactTable,
   SortingState,
 } from "@tanstack/react-table"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
+import { useUncompiledReactTable } from "@/components/ui/use-uncompiled-react-table"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Skeleton } from "@/components/ui/skeleton"
 import {
   IconChevronDown,
   IconChevronUp,
@@ -28,6 +18,7 @@ import {
 } from "@tabler/icons-react"
 import { formatDistanceToNow } from "date-fns"
 import type { NexusActivityItem } from "@/actions/admin/activity-management.actions"
+import { ActivityDataTable } from "./activity-data-table"
 
 interface SortableHeaderProps {
   column: {
@@ -67,6 +58,8 @@ export function NexusActivityTable({
   loading,
   onViewDetail,
 }: NexusActivityTableProps) {
+  "use no memo"
+
   const [sorting, setSorting] = useState<SortingState>([
     { id: "lastMessageAt", desc: true },
   ])
@@ -170,7 +163,7 @@ export function NexusActivityTable({
     [onViewDetail]
   )
 
-  const table = useReactTable({
+  const table = useUncompiledReactTable({
     data,
     columns,
     state: { sorting },
@@ -179,55 +172,11 @@ export function NexusActivityTable({
     getSortedRowModel: getSortedRowModel(),
   })
 
-  if (loading) {
-    return (
-      <div className="space-y-3">
-        {Array.from({ length: 5 }).map((_, i) => (
-          <Skeleton key={i} className="h-16 w-full" />
-        ))}
-      </div>
-    )
-  }
-
-  if (data.length === 0) {
-    return (
-      <div className="text-center py-12 text-muted-foreground">
-        No Nexus conversations found
-      </div>
-    )
-  }
-
   return (
-    <div className="border rounded-lg">
-      <Table>
-        <TableHeader>
-          {table.getHeaderGroups().map((headerGroup) => (
-            <TableRow key={headerGroup.id}>
-              {headerGroup.headers.map((header) => (
-                <TableHead key={header.id}>
-                  {header.isPlaceholder
-                    ? null
-                    : flexRender(
-                        header.column.columnDef.header,
-                        header.getContext()
-                      )}
-                </TableHead>
-              ))}
-            </TableRow>
-          ))}
-        </TableHeader>
-        <TableBody>
-          {table.getRowModel().rows.map((row) => (
-            <TableRow key={row.id}>
-              {row.getVisibleCells().map((cell) => (
-                <TableCell key={cell.id}>
-                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                </TableCell>
-              ))}
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
+    <ActivityDataTable
+      table={table}
+      loading={loading}
+      emptyMessage="No Nexus conversations found"
+    />
   )
 }

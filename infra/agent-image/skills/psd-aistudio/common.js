@@ -88,6 +88,62 @@ async function disconnectOAuth(callerEmail) {
   });
 }
 
+function resolveKeySource(value) {
+  if (value === 'oauth') return 'oauth';
+  if (value === 'personal') return 'personal';
+  return 'shared';
+}
+
+function handleTerminalMcpStatus(brokerResult, httpStatus, keySource) {
+  if (httpStatus === 401) {
+    const guidance = {
+      oauth: 'Your delegated connection expired or was revoked — run connect again.',
+      personal:
+        'Your stored AI Studio key is invalid or revoked — re-store a current ' +
+        'key with psd-credentials put --name aistudio_personal_key.',
+      shared: 'The shared key must be a valid sk- key holding at least platform:read.',
+    };
+    emit({
+      status: 'unauthorized',
+      message: `AI Studio MCP rejected the API key (401). ${guidance[keySource]}`,
+      detail: String(brokerResult.rawText || '').slice(0, 512),
+    });
+    process.exit(11);
+  }
+  if (httpStatus === 429) {
+    emit({
+      status: 'rate-limited',
+      message:
+        'AI Studio MCP is rate-limiting requests for this key. Wait and retry.',
+    });
+    process.exit(14);
+  }
+}
+
+function parseMcpEnvelope(data, httpStatus, keySource) {
+  if (!data) {
+    fail(`AI Studio MCP returned a non-JSON body (HTTP ${httpStatus})`, 12);
+  }
+  if (data.error) {
+    return { jsonrpcError: data.error, httpStatus, keySource };
+  }
+  if (httpStatus < 200 || httpStatus >= 300) {
+    fail(
+      `AI Studio MCP returned HTTP ${httpStatus}: ` +
+        `${JSON.stringify(data).slice(0, 512)}`,
+      12
+    );
+  }
+  if (typeof data !== 'object' || !('result' in data)) {
+    fail(
+      `AI Studio MCP returned HTTP 200 without a JSON-RPC result or error: ` +
+        `${JSON.stringify(data).slice(0, 512)}`,
+      12
+    );
+  }
+  return { result: data.result ?? null, keySource };
+}
+
 /**
  * Low-level MCP call through the owner-bound broker. The model runtime never
  * receives either the owner's personal key or the platform fallback key.
@@ -124,71 +180,10 @@ async function callMcpRaw(method, params, callerEmail, timeoutMs = MCP_FETCH_TIM
   }
 
   const httpStatus = Number(brokerResult.httpStatus);
-  const keySource =
-    brokerResult.keySource === 'oauth'
-      ? 'oauth'
-      : brokerResult.keySource === 'personal'
-        ? 'personal'
-        : 'shared';
+  const keySource = resolveKeySource(brokerResult.keySource);
   const data = brokerResult.payload;
-  if (httpStatus === 401) {
-    emit({
-      status: 'unauthorized',
-      message:
-        'AI Studio MCP rejected the API key (401). ' +
-        (keySource === 'oauth'
-          ? 'Your delegated connection expired or was revoked — run connect again.'
-          : keySource === 'personal'
-          ? 'Your stored AI Studio key is invalid or revoked — re-store a current ' +
-            'key with psd-credentials put --name aistudio_personal_key.'
-          : 'The shared key must be a valid sk- key holding at least platform:read.'),
-      detail: String(brokerResult.rawText || '').slice(0, 512),
-    });
-    process.exit(11);
-  }
-  if (httpStatus === 429) {
-    emit({
-      status: 'rate-limited',
-      message:
-        'AI Studio MCP is rate-limiting requests for this key. Wait and retry.',
-    });
-    process.exit(14);
-  }
-
-  if (!data) {
-    fail(`AI Studio MCP returned a non-JSON body (HTTP ${httpStatus})`, 12);
-  }
-
-  if (data.error) {
-    // JSON-RPC error (e.g. "Insufficient scope for tool: execute_assistant",
-    // unknown tool). Return it verbatim; the caller surfaces it (+ scope hint)
-    // and exits — do NOT retry, do NOT fall back to another key.
-    return { jsonrpcError: data.error, httpStatus, keySource };
-  }
-
-  // A non-2xx status with a JSON body but NO JSON-RPC error field (e.g. an infra
-  // 502/503 proxy page) must NOT be treated as success — otherwise we'd silently
-  // return `null`, hiding the real HTTP status (CLAUDE.md silent-failure pattern).
-  if (httpStatus < 200 || httpStatus >= 300) {
-    fail(
-      `AI Studio MCP returned HTTP ${httpStatus}: ` +
-        `${JSON.stringify(data).slice(0, 512)}`,
-      12
-    );
-  }
-
-  // HTTP 200 with NEITHER `result` NOR `error` is a malformed JSON-RPC envelope
-  // (proxy/gateway body corruption) — emitting `null` as a success would hide
-  // it. A present-but-null `result` is still a legitimate success.
-  if (typeof data !== 'object' || !('result' in data)) {
-    fail(
-      `AI Studio MCP returned HTTP 200 without a JSON-RPC result or error: ` +
-        `${JSON.stringify(data).slice(0, 512)}`,
-      12
-    );
-  }
-
-  return { result: data.result ?? null, keySource };
+  handleTerminalMcpStatus(brokerResult, httpStatus, keySource);
+  return parseMcpEnvelope(data, httpStatus, keySource);
 }
 
 /**

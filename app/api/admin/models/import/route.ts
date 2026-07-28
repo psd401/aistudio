@@ -35,6 +35,210 @@ interface ModelJsonInput {
   cachedInputCostPer1kTokens?: string;
 }
 
+interface ImportFailure {
+  logContext?: Record<string, unknown>;
+  logMessage: string;
+  reason: string;
+  response: NextResponse;
+}
+
+type ImportRequestResult =
+  | { ok: true; models: ModelJsonInput[] }
+  | { ok: false; failure: ImportFailure };
+
+interface ImportFailureOptions {
+  body: Record<string, unknown>;
+  logContext?: Record<string, unknown>;
+  logMessage: string;
+  reason: string;
+  requestId: string;
+  status: number;
+}
+
+function importFailure(options: ImportFailureOptions): ImportRequestResult {
+  return {
+    ok: false,
+    failure: {
+      logContext: options.logContext,
+      logMessage: options.logMessage,
+      reason: options.reason,
+      response: NextResponse.json(options.body, {
+        status: options.status,
+        headers: { "X-Request-Id": options.requestId },
+      }),
+    },
+  };
+}
+
+function collectValidationErrors(models: unknown[]): string[] {
+  return models.flatMap((model, index) => {
+    const result = validateModel(model, index);
+    return result.valid ? [] : result.errors;
+  });
+}
+
+function findDuplicateModelIds(models: ModelJsonInput[]): string[] {
+  const modelIds = new Set<string>();
+  const duplicates: string[] = [];
+  for (const model of models) {
+    if (modelIds.has(model.modelId)) duplicates.push(model.modelId);
+    modelIds.add(model.modelId);
+  }
+  return duplicates;
+}
+
+async function parseImportRequest(
+  request: Request,
+  requestId: string
+): Promise<ImportRequestResult> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength && Number.parseInt(contentLength) > MAX_BODY_SIZE) {
+    return importFailure({
+      body: {
+        isSuccess: false,
+        message: `Request body exceeds maximum size of ${MAX_BODY_SIZE / (1024 * 1024)}MB`,
+      },
+      logContext: { contentLength },
+      logMessage: "Request body too large",
+      reason: "body_too_large",
+      requestId,
+      status: 413,
+    });
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return importFailure({
+      body: { isSuccess: false, message: "Invalid JSON in request body" },
+      logMessage: "Invalid JSON in request body",
+      reason: "invalid_json",
+      requestId,
+      status: 400,
+    });
+  }
+
+  if (!body || typeof body !== "object") {
+    return importFailure({
+      body: { isSuccess: false, message: "Request body must be an object" },
+      logMessage: "Request body must be an object",
+      reason: "invalid_body",
+      requestId,
+      status: 400,
+    });
+  }
+
+  const models = (body as { models?: unknown }).models;
+  if (!Array.isArray(models)) {
+    return importFailure({
+      body: { isSuccess: false, message: "'models' field must be an array" },
+      logMessage: "'models' field must be an array",
+      reason: "invalid_models",
+      requestId,
+      status: 400,
+    });
+  }
+  if (models.length === 0) {
+    return importFailure({
+      body: { isSuccess: false, message: "No models to import" },
+      logMessage: "No models to import",
+      reason: "empty_models",
+      requestId,
+      status: 400,
+    });
+  }
+  if (models.length > MAX_MODELS_PER_IMPORT) {
+    return importFailure({
+      body: {
+        isSuccess: false,
+        message: `Maximum ${MAX_MODELS_PER_IMPORT} models per import`,
+      },
+      logContext: { count: models.length },
+      logMessage: "Too many models in import",
+      reason: "too_many_models",
+      requestId,
+      status: 400,
+    });
+  }
+
+  const validationErrors = collectValidationErrors(models);
+  if (validationErrors.length > 0) {
+    return importFailure({
+      body: {
+        isSuccess: false,
+        message: "Validation failed",
+        errors: validationErrors,
+      },
+      logContext: { errorCount: validationErrors.length },
+      logMessage: "Model validation failed",
+      reason: "validation",
+      requestId,
+      status: 400,
+    });
+  }
+
+  const validatedModels = models as ModelJsonInput[];
+  const duplicates = findDuplicateModelIds(validatedModels);
+  if (duplicates.length > 0) {
+    return importFailure({
+      body: {
+        isSuccess: false,
+        message: "Duplicate modelIds in import",
+        errors: duplicates.map((id) => `Duplicate modelId: ${id}`),
+      },
+      logContext: { duplicates },
+      logMessage: "Duplicate modelIds in import",
+      reason: "duplicate_model_ids",
+      requestId,
+      status: 400,
+    });
+  }
+
+  return { ok: true, models: validatedModels };
+}
+
+function toImportModel(model: ModelJsonInput) {
+  return {
+    name: model.name,
+    modelId: model.modelId,
+    provider: model.provider,
+    description: model.description,
+    capabilities: model.capabilities,
+    maxTokens: model.maxTokens,
+    active: model.active,
+    nexusEnabled: model.nexusEnabled,
+    architectEnabled: model.architectEnabled,
+    inputCostPer1kTokens: model.inputCostPer1kTokens
+      ? String(model.inputCostPer1kTokens)
+      : undefined,
+    outputCostPer1kTokens: model.outputCostPer1kTokens
+      ? String(model.outputCostPer1kTokens)
+      : undefined,
+    cachedInputCostPer1kTokens: model.cachedInputCostPer1kTokens
+      ? String(model.cachedInputCostPer1kTokens)
+      : undefined,
+  };
+}
+
+async function translateLegacyRoleGrants(
+  models: ModelJsonInput[]
+): Promise<number> {
+  const byModelId = new Map<string, string[]>();
+  for (const model of models) {
+    if (Array.isArray(model.allowedRoles)) {
+      byModelId.set(model.modelId, model.allowedRoles);
+    }
+  }
+  for (const [modelId, roleNames] of byModelId) {
+    const persisted = await getAIModelByModelId(modelId);
+    if (persisted) {
+      await setModelRoleGrantsFromNames(persisted.id, roleNames, null);
+    }
+  }
+  return byModelId.size;
+}
+
 /**
  * POST /api/admin/models/import
  * Bulk import AI models from JSON
@@ -55,169 +259,28 @@ export async function POST(request: Request) {
       return authError;
     }
 
-    // Check content length header
-    const contentLength = request.headers.get("content-length");
-    if (contentLength && Number.parseInt(contentLength) > MAX_BODY_SIZE) {
-      log.warn("Request body too large", { contentLength });
-      timer({ status: "error", reason: "body_too_large" });
-      return NextResponse.json(
-        {
-          isSuccess: false,
-          message: `Request body exceeds maximum size of ${MAX_BODY_SIZE / (1024 * 1024)}MB`,
-        },
-        { status: 413, headers: { "X-Request-Id": requestId } }
-      );
-    }
-
-    // Parse request body
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      log.warn("Invalid JSON in request body");
-      timer({ status: "error", reason: "invalid_json" });
-      return NextResponse.json(
-        { isSuccess: false, message: "Invalid JSON in request body" },
-        { status: 400, headers: { "X-Request-Id": requestId } }
-      );
-    }
-
-    // Extract models array from body
-    if (!body || typeof body !== "object") {
-      log.warn("Request body must be an object");
-      timer({ status: "error", reason: "invalid_body" });
-      return NextResponse.json(
-        { isSuccess: false, message: "Request body must be an object" },
-        { status: 400, headers: { "X-Request-Id": requestId } }
-      );
-    }
-
-    const requestBody = body as { models?: unknown };
-    const models = requestBody.models;
-
-    if (!Array.isArray(models)) {
-      log.warn("'models' field must be an array");
-      timer({ status: "error", reason: "invalid_models" });
-      return NextResponse.json(
-        { isSuccess: false, message: "'models' field must be an array" },
-        { status: 400, headers: { "X-Request-Id": requestId } }
-      );
-    }
-
-    if (models.length === 0) {
-      log.warn("No models to import");
-      timer({ status: "error", reason: "empty_models" });
-      return NextResponse.json(
-        { isSuccess: false, message: "No models to import" },
-        { status: 400, headers: { "X-Request-Id": requestId } }
-      );
-    }
-
-    if (models.length > MAX_MODELS_PER_IMPORT) {
-      log.warn("Too many models in import", { count: models.length });
-      timer({ status: "error", reason: "too_many_models" });
-      return NextResponse.json(
-        {
-          isSuccess: false,
-          message: `Maximum ${MAX_MODELS_PER_IMPORT} models per import`,
-        },
-        { status: 400, headers: { "X-Request-Id": requestId } }
-      );
-    }
-
-    // Validate all models
-    const validationErrors: string[] = [];
-    for (const [i, model] of models.entries()) {
-      const result = validateModel(model, i);
-      if (!result.valid) {
-        validationErrors.push(...result.errors);
-      }
-    }
-
-    if (validationErrors.length > 0) {
-      log.warn("Model validation failed", { errorCount: validationErrors.length });
-      timer({ status: "error", reason: "validation" });
-      return NextResponse.json(
-        {
-          isSuccess: false,
-          message: "Validation failed",
-          errors: validationErrors,
-        },
-        { status: 400, headers: { "X-Request-Id": requestId } }
-      );
-    }
-
-    // Check for duplicate modelIds in input
-    const modelIds = new Set<string>();
-    const duplicates: string[] = [];
-    for (const model of models as ModelJsonInput[]) {
-      if (modelIds.has(model.modelId)) {
-        duplicates.push(model.modelId);
-      }
-      modelIds.add(model.modelId);
-    }
-
-    if (duplicates.length > 0) {
-      log.warn("Duplicate modelIds in import", { duplicates });
-      timer({ status: "error", reason: "duplicate_model_ids" });
-      return NextResponse.json(
-        {
-          isSuccess: false,
-          message: "Duplicate modelIds in import",
-          errors: duplicates.map((id) => `Duplicate modelId: ${id}`),
-        },
-        { status: 400, headers: { "X-Request-Id": requestId } }
-      );
+    const parsed = await parseImportRequest(request, requestId);
+    if (!parsed.ok) {
+      log.warn(parsed.failure.logMessage, parsed.failure.logContext ?? {});
+      timer({ status: "error", reason: parsed.failure.reason });
+      return parsed.failure.response;
     }
 
     // Transform models for import
-    const modelsToImport = (models as ModelJsonInput[]).map((model) => ({
-      name: model.name,
-      modelId: model.modelId,
-      provider: model.provider,
-      description: model.description,
-      capabilities: model.capabilities,
-      maxTokens: model.maxTokens,
-      active: model.active,
-      nexusEnabled: model.nexusEnabled,
-      architectEnabled: model.architectEnabled,
-      inputCostPer1kTokens: model.inputCostPer1kTokens
-        ? String(model.inputCostPer1kTokens)
-        : undefined,
-      outputCostPer1kTokens: model.outputCostPer1kTokens
-        ? String(model.outputCostPer1kTokens)
-        : undefined,
-      cachedInputCostPer1kTokens: model.cachedInputCostPer1kTokens
-        ? String(model.cachedInputCostPer1kTokens)
-        : undefined,
-    }));
+    const modelsToImport = parsed.models.map(toImportModel);
 
     log.info("Importing models", { count: modelsToImport.length });
 
     // Execute bulk import
     const result = await bulkImportAIModels(modelsToImport);
 
-    // Translate any legacy `allowedRoles` into `role`-kind resource_access_grants
-    // (#1207). Without this, an import that specified a role restriction would land
-    // as zero grant rows = UNRESTRICTED (visible to everyone). Only touches models
-    // that actually carry the field; preserves any group grants already set.
-    const byModelId = new Map<string, string[]>();
-    for (const model of models as ModelJsonInput[]) {
-      if (Array.isArray(model.allowedRoles)) {
-        byModelId.set(model.modelId, model.allowedRoles);
-      }
-    }
-    for (const [modelIdStr, roleNames] of byModelId) {
-      const persisted = await getAIModelByModelId(modelIdStr);
-      if (persisted) {
-        await setModelRoleGrantsFromNames(persisted.id, roleNames, null);
-      }
-    }
+    // Preserve legacy restrictions: zero grant rows means unrestricted access.
+    const roleGrantsTranslated = await translateLegacyRoleGrants(parsed.models);
 
     log.info("Bulk import completed", {
       created: result.created,
       updated: result.updated,
-      roleGrantsTranslated: byModelId.size,
+      roleGrantsTranslated,
     });
     timer({ status: "success", created: result.created, updated: result.updated });
 

@@ -76,3 +76,6 @@ tests/e2e/.auth/
 
 # Agent-image build-time eval-gate probe artifacts (#1161)
 infra/agent-image/.build-probes/
+
+# Staged into the agent-image build context by build-and-push.sh; canonical copy is infra/validated-fs.cjs
+infra/agent-image/skills/validated-fs.cjs

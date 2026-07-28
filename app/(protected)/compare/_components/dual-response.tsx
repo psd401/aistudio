@@ -24,15 +24,154 @@ interface DualResponseProps {
   onStopModel2: () => void
 }
 
+type ModelKey = 'model1' | 'model2'
+
+function ResponseHeader({
+  response,
+  modelKey,
+  copiedModel,
+  onCopy,
+  onStop,
+}: {
+  response: ModelResponse
+  modelKey: ModelKey
+  copiedModel: ModelKey | null
+  onCopy: (text: string, model: ModelKey) => void
+  onStop: () => void
+}) {
+  return (
+    <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3 bg-gray-50">
+      <h3 className="font-semibold text-sm text-gray-900">
+        {response.model?.name || 'Select a model'}
+      </h3>
+      <div className="flex items-center gap-2">
+        {response.status === 'streaming' && (
+          <Button
+            onClick={onStop}
+            size="sm"
+            variant="ghost"
+            className="h-7 px-2"
+            data-testid="streaming-indicator"
+          >
+            <IconPlayerStop className="h-3 w-3" />
+          </Button>
+        )}
+        {response.imageUrl && (
+          <a
+            href={response.imageUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center justify-center h-7 w-7 rounded-md hover:bg-accent hover:text-accent-foreground"
+            aria-label="Open generated image in new tab"
+          >
+            <IconExternalLink className="h-3 w-3" />
+          </a>
+        )}
+        {response.response && !response.imageUrl && (
+          <Button
+            onClick={() => onCopy(response.response, modelKey)}
+            size="sm"
+            variant="ghost"
+            className="h-7 px-2"
+          >
+            {copiedModel === modelKey ? (
+              <IconCheck className="h-3 w-3 text-green-500" />
+            ) : (
+              <IconCopy className="h-3 w-3" />
+            )}
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ResponseBody({ response }: { response: ModelResponse }) {
+  const hasContent = Boolean(
+    response.response ||
+      response.imageUrl ||
+      response.error ||
+      response.status !== 'ready'
+  )
+  const loadingLabel = response.isImageModel
+    ? 'Generating image...'
+    : `${response.model?.name || 'Model'} is thinking...`
+
+  return (
+    <ScrollArea className="flex-1 p-4">
+      {!hasContent && (
+        <div className="text-center text-muted-foreground py-8">
+          <p className="text-sm">Responses will appear here</p>
+        </div>
+      )}
+      {response.error && (
+        <div className="rounded-md bg-destructive/10 p-4 text-sm text-destructive">
+          {response.error}
+        </div>
+      )}
+      {response.status === 'streaming' &&
+        !response.response &&
+        !response.imageUrl && (
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <IconLoader2 className="h-4 w-4 animate-spin" />
+            <span className="text-sm">{loadingLabel}</span>
+          </div>
+        )}
+      {response.imageUrl && (
+        <div className="space-y-2">
+          {/* Image rendered directly because S3 domains are not allowlisted. */}
+          <img
+            src={response.imageUrl}
+            alt="AI-generated result"
+            loading="lazy"
+            className="w-full rounded-md border border-border object-contain"
+            style={{ maxHeight: '600px' }}
+          />
+        </div>
+      )}
+      {response.response && !response.imageUrl && (
+        <ResponseDisplay content={response.response} />
+      )}
+    </ScrollArea>
+  )
+}
+
+function ResponsePane({
+  response,
+  modelKey,
+  copiedModel,
+  onCopy,
+  onStop,
+}: {
+  response: ModelResponse
+  modelKey: ModelKey
+  copiedModel: ModelKey | null
+  onCopy: (text: string, model: ModelKey) => void
+  onStop: () => void
+}) {
+  return (
+    <div className="flex flex-col h-full">
+      <ResponseHeader
+        response={response}
+        modelKey={modelKey}
+        copiedModel={copiedModel}
+        onCopy={onCopy}
+        onStop={onStop}
+      />
+      <ResponseBody response={response} />
+    </div>
+  )
+}
+
 export function DualResponse({
   model1,
   model2,
   onStopModel1,
   onStopModel2
 }: DualResponseProps) {
-  const [copiedModel, setCopiedModel] = useState<'model1' | 'model2' | null>(null)
+  const [copiedModel, setCopiedModel] = useState<ModelKey | null>(null)
 
-  const handleCopy = async (text: string, model: 'model1' | 'model2') => {
+  const handleCopy = async (text: string, model: ModelKey) => {
     try {
       await navigator.clipboard.writeText(text)
       setCopiedModel(model)
@@ -40,99 +179,6 @@ export function DualResponse({
     } catch {
       // Failed to copy - silently handle
     }
-  }
-
-  const renderResponse = (response: ModelResponse, modelKey: 'model1' | 'model2', onStop: () => void) => {
-    const hasContent = response.response || response.imageUrl || response.error || response.status !== 'ready'
-    const loadingLabel = response.isImageModel ? 'Generating image...' : `${response.model?.name || 'Model'} is thinking...`
-
-    return (
-      <div className="flex flex-col h-full">
-        <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3 bg-gray-50">
-          <h3 className="font-semibold text-sm text-gray-900">
-            {response.model?.name || 'Select a model'}
-          </h3>
-          <div className="flex items-center gap-2">
-            {response.status === 'streaming' && (
-              <Button
-                onClick={onStop}
-                size="sm"
-                variant="ghost"
-                className="h-7 px-2"
-                data-testid="streaming-indicator"
-              >
-                <IconPlayerStop className="h-3 w-3" />
-              </Button>
-            )}
-            {response.imageUrl && (
-              // The `download` attribute is ignored by browsers for cross-origin URLs
-              // (S3 presigned URLs). Open in a new tab instead of mislabelling as download.
-              <a
-                href={response.imageUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center justify-center h-7 w-7 rounded-md hover:bg-accent hover:text-accent-foreground"
-                aria-label="Open generated image in new tab"
-              >
-                <IconExternalLink className="h-3 w-3" />
-              </a>
-            )}
-            {response.response && !response.imageUrl && (
-              <Button
-                onClick={() => handleCopy(response.response, modelKey)}
-                size="sm"
-                variant="ghost"
-                className="h-7 px-2"
-              >
-                {copiedModel === modelKey ? (
-                  <IconCheck className="h-3 w-3 text-green-500" />
-                ) : (
-                  <IconCopy className="h-3 w-3" />
-                )}
-              </Button>
-            )}
-          </div>
-        </div>
-
-        <ScrollArea className="flex-1 p-4">
-          {!hasContent && (
-            <div className="text-center text-muted-foreground py-8">
-              <p className="text-sm">Responses will appear here</p>
-            </div>
-          )}
-
-          {response.error && (
-            <div className="rounded-md bg-destructive/10 p-4 text-sm text-destructive">
-              {response.error}
-            </div>
-          )}
-
-          {response.status === 'streaming' && !response.response && !response.imageUrl && (
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <IconLoader2 className="h-4 w-4 animate-spin" />
-              <span className="text-sm">{loadingLabel}</span>
-            </div>
-          )}
-
-          {response.imageUrl && (
-            <div className="space-y-2">
-              {/* Image rendered directly — Next.js Image component doesn't support external S3 domains without next.config allowlisting */}
-              <img
-                src={response.imageUrl}
-                alt="AI-generated result"
-                loading="lazy"
-                className="w-full rounded-md border border-border object-contain"
-                style={{ maxHeight: '600px' }}
-              />
-            </div>
-          )}
-
-          {response.response && !response.imageUrl && (
-            <ResponseDisplay content={response.response} />
-          )}
-        </ScrollArea>
-      </div>
-    )
   }
 
   return (
@@ -149,18 +195,42 @@ export function DualResponse({
             </TabsTrigger>
           </TabsList>
           <TabsContent value="model1" className="flex-1 mt-0">
-            {renderResponse(model1, 'model1', onStopModel1)}
+            <ResponsePane
+              response={model1}
+              modelKey="model1"
+              copiedModel={copiedModel}
+              onCopy={handleCopy}
+              onStop={onStopModel1}
+            />
           </TabsContent>
           <TabsContent value="model2" className="flex-1 mt-0">
-            {renderResponse(model2, 'model2', onStopModel2)}
+            <ResponsePane
+              response={model2}
+              modelKey="model2"
+              copiedModel={copiedModel}
+              onCopy={handleCopy}
+              onStop={onStopModel2}
+            />
           </TabsContent>
         </Tabs>
       </div>
 
       {/* Desktop view - Side by side */}
       <div className="hidden md:grid grid-cols-2 divide-x divide-gray-200 h-full">
-        {renderResponse(model1, 'model1', onStopModel1)}
-        {renderResponse(model2, 'model2', onStopModel2)}
+        <ResponsePane
+          response={model1}
+          modelKey="model1"
+          copiedModel={copiedModel}
+          onCopy={handleCopy}
+          onStop={onStopModel1}
+        />
+        <ResponsePane
+          response={model2}
+          modelKey="model2"
+          copiedModel={copiedModel}
+          onCopy={handleCopy}
+          onStop={onStopModel2}
+        />
       </div>
     </>
   )

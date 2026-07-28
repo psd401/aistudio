@@ -11,6 +11,7 @@ import {
   requireRepositoryConnectorManager,
 } from "@/lib/repositories/google-drive/route-access";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
+import { ErrorFactories } from "@/lib/error-utils";
 
 export async function GET(
   _request: Request,
@@ -35,7 +36,12 @@ export async function GET(
         connector.ownedByViewer &&
         connector.status !== "revoked",
     );
-    if (!personal) throw new Error("Connector not found");
+    if (!personal) {
+      throw ErrorFactories.authzResourceNotFound(
+        "Google Drive connector",
+        "personal"
+      );
+    }
     const credential = await getGoogleDriveConnectorCredential({
       connectorId: personal.id,
       userId: manager.userId,

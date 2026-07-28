@@ -36,6 +36,25 @@ const jsonResponse = (status: number, body: unknown): Response =>
     text: async () => JSON.stringify(body),
   }) as unknown as Response
 
+const OLD_ENV = { ...process.env }
+let fetchMock: FetchMock
+
+function prepareRefreshTest(): void {
+  __resetRefreshStateForTests()
+  jest.spyOn(console, "warn").mockImplementation(() => {})
+  jest.spyOn(console, "error").mockImplementation(() => {})
+  process.env.AUTH_COGNITO_CLIENT_ID = "test-client-id"
+  process.env.AUTH_COGNITO_ISSUER = ISSUER
+  delete process.env.COGNITO_ACCESS_TOKEN_LIFETIME_SECONDS
+  fetchMock = jest.fn() as unknown as FetchMock
+  global.fetch = fetchMock as unknown as typeof fetch
+}
+
+function restoreRefreshTest(): void {
+  jest.restoreAllMocks()
+  process.env = { ...OLD_ENV }
+}
+
 describe("resolveCognitoIdpEndpoint", () => {
   it("derives the regional endpoint from the issuer origin", () => {
     expect(resolveCognitoIdpEndpoint(ISSUER)).toBe("https://cognito-idp.us-east-1.amazonaws.com/")
@@ -129,25 +148,9 @@ describe("classifyInitiateAuthError", () => {
   })
 })
 
-describe("refreshCognitoTokens", () => {
-  const OLD_ENV = { ...process.env }
-  let fetchMock: FetchMock
-
-  beforeEach(() => {
-    __resetRefreshStateForTests()
-    jest.spyOn(console, "warn").mockImplementation(() => {})
-    jest.spyOn(console, "error").mockImplementation(() => {})
-    process.env.AUTH_COGNITO_CLIENT_ID = "test-client-id"
-    process.env.AUTH_COGNITO_ISSUER = ISSUER
-    delete process.env.COGNITO_ACCESS_TOKEN_LIFETIME_SECONDS
-    fetchMock = jest.fn() as unknown as FetchMock
-    global.fetch = fetchMock as unknown as typeof fetch
-  })
-
-  afterEach(() => {
-    jest.restoreAllMocks()
-    process.env = { ...OLD_ENV }
-  })
+describe("refreshCognitoTokens responses", () => {
+  beforeEach(prepareRefreshTest)
+  afterEach(restoreRefreshTest)
 
   it("posts an unsigned InitiateAuth REFRESH_TOKEN_AUTH call and returns fresh tokens", async () => {
     fetchMock.mockResolvedValue(
@@ -277,6 +280,11 @@ describe("refreshCognitoTokens", () => {
     })
     expect(result).toMatchObject({ ok: false, reason: "transient" })
   })
+})
+
+describe("refreshCognitoTokens validation", () => {
+  beforeEach(prepareRefreshTest)
+  afterEach(restoreRefreshTest)
 
   it("fails closed when the refreshed ID token belongs to a different subject", async () => {
     fetchMock.mockResolvedValue(
@@ -421,6 +429,11 @@ describe("refreshCognitoTokens", () => {
     expect(result).toMatchObject({ ok: false, reason: "configuration" })
     expect(fetchMock).not.toHaveBeenCalled()
   })
+})
+
+describe("refreshCognitoTokens request lifecycle", () => {
+  beforeEach(prepareRefreshTest)
+  afterEach(restoreRefreshTest)
 
   it("never follows a redirect — the refresh token is in the request body", async () => {
     fetchMock.mockResolvedValue(
@@ -508,6 +521,11 @@ describe("refreshCognitoTokens", () => {
     await refreshCognitoTokens({ refreshToken: VALID_REFRESH_TOKEN, tokenSub: "user-1" })
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
+})
+
+describe("refreshCognitoTokens rate limits and logging", () => {
+  beforeEach(prepareRefreshTest)
+  afterEach(restoreRefreshTest)
 
   it("rate limits a user after the per-window budget is spent", async () => {
     fetchMock.mockResolvedValue(

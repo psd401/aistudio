@@ -71,7 +71,7 @@ jest.mock('@/components/ui/use-toast', () => ({
 // (Portal.displayName), which is undefined under jsdom. The dialog is closed
 // in these tests, so a passthrough mock is sufficient.
 jest.mock('@/components/ui/alert-dialog', () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+
   const React = require('react')
   const passthrough = (name: string) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -103,7 +103,6 @@ jest.mock('@/actions/admin/agent-triage.actions', () => ({
   forceReonboard: jest.fn(),
 }))
 
-// eslint-disable-next-line import/first
 import { TriageDetailClient } from './triage-detail-client'
 
 describe('TriageDetailClient (#1172 sections)', () => {

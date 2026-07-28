@@ -6,7 +6,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
+
 import postgres from "postgres";
 import {
   reconcileCollection,
@@ -14,6 +14,7 @@ import {
   writeSyncStatus,
 } from "./db";
 import type { CollectionPullSuccess } from "./oneroster-client";
+import { validatedFs } from "../../lib/validated-fs";
 
 const databaseUrl = process.env.ONEROSTER_DB_TEST_URL;
 const describeDatabase = databaseUrl ? describe : describe.skip;
@@ -46,7 +47,7 @@ function orgs(
   };
 }
 
-describeDatabase("OneRoster PostgreSQL reconciliation", () => {
+function defineOneRosterPostgreSQLReconciliationSuite1Part1() {
   beforeAll(async () => {
     if (!sql) return;
     await sql.unsafe(`
@@ -120,12 +121,14 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
       "../../database/schema/141-oneroster-core.sql",
       import.meta.url
     );
-    await sql.unsafe(readFileSync(migrationUrl, "utf8"));
+    await sql.unsafe(validatedFs.readFileSync(migrationUrl, "utf8"));
     const roleSourceMigrationUrl = new URL(
       "../../database/schema/156-oneroster-user-role-source.sql",
       import.meta.url
     );
-    await sql.unsafe(readFileSync(roleSourceMigrationUrl, "utf8"));
+    await sql.unsafe(
+      validatedFs.readFileSync(roleSourceMigrationUrl, "utf8")
+    );
   });
 
   beforeEach(async () => {
@@ -178,7 +181,9 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
   afterAll(async () => {
     if (sql) await sql.end({ timeout: 5 });
   });
+}
 
+function defineOneRosterPostgreSQLReconciliationSuite1CollectionTests() {
   it("upserts changed fields and deactivates only rows absent from a complete snapshot", async () => {
     if (!sql) throw new Error("database connection was not initialized");
     await reconcileCollection(
@@ -240,7 +245,9 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
       { sourced_id: "org-2", name: "Still active", is_active: true },
     ]);
   });
+}
 
+function defineOneRosterPostgreSQLReconciliationSuite1Part2() {
   it("persists explicit to-be-deleted state and insert sync timestamps", async () => {
     if (!sql) throw new Error("database connection was not initialized");
     await reconcileCollection(
@@ -309,49 +316,50 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
     expect(row.category).toBe("integrations");
     expect(row.is_secret).toBe(false);
   });
+}
 
-  it("reconciles lowercased roles and transfers overlapping provider ownership atomically", async () => {
-    if (!sql) throw new Error("database connection was not initialized");
-    const roleRows = await sql<Array<{ id: number; name: string }>>`
+async function seedRoleReconciliationScenario() {
+  if (!sql) throw new Error("database connection was not initialized");
+  const roleRows = await sql<Array<{ id: number; name: string }>>`
       SELECT id, lower(name) AS name
         FROM roles
        WHERE lower(name) = ANY(${["student", "staff", "administrator"]}::text[])
     `;
-    const roleIds = new Map(roleRows.map((role) => [role.name, role.id]));
-    const studentRoleId = roleIds.get("student");
-    const staffRoleId = roleIds.get("staff");
-    const administratorRoleId = roleIds.get("administrator");
-    if (!studentRoleId || !staffRoleId || !administratorRoleId) {
-      throw new Error("required integration roles were not initialized");
-    }
+  const roleIds = new Map(roleRows.map((role) => [role.name, role.id]));
+  const studentRoleId = roleIds.get("student");
+  const staffRoleId = roleIds.get("staff");
+  const administratorRoleId = roleIds.get("administrator");
+  if (!studentRoleId || !staffRoleId || !administratorRoleId) {
+    throw new Error("required integration roles were not initialized");
+  }
 
-    const [mixedCaseUser] = await sql<Array<{ id: number }>>`
+  const [mixedCaseUser] = await sql<Array<{ id: number }>>`
       INSERT INTO users (email, role_version)
       VALUES ('Mixed.Case@ONEROSTER-ROLE.TEST', 10)
       RETURNING id
     `;
-    const [staffUser] = await sql<Array<{ id: number }>>`
+  const [staffUser] = await sql<Array<{ id: number }>>`
       INSERT INTO users (email, role_version)
       VALUES ('staff@oneroster-role.test', 20)
       RETURNING id
     `;
-    const [removedUser] = await sql<Array<{ id: number }>>`
+  const [removedUser] = await sql<Array<{ id: number }>>`
       INSERT INTO users (email, role_version)
       VALUES ('removed@oneroster-role.test', 30)
       RETURNING id
     `;
-    const [unchangedUser] = await sql<Array<{ id: number }>>`
+  const [unchangedUser] = await sql<Array<{ id: number }>>`
       INSERT INTO users (email, role_version)
       VALUES ('unchanged@oneroster-role.test', 40)
       RETURNING id
     `;
-    const [protectedAdminUser] = await sql<Array<{ id: number }>>`
+  const [protectedAdminUser] = await sql<Array<{ id: number }>>`
       INSERT INTO users (email, role_version)
       VALUES ('protected-admin@oneroster-role.test', 50)
       RETURNING id
     `;
 
-    await sql`
+  await sql`
       INSERT INTO user_roles (user_id, role_id, source)
       VALUES
         (${mixedCaseUser.id}, ${administratorRoleId}, 'manual'),
@@ -361,7 +369,7 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
         (${unchangedUser.id}, ${studentRoleId}, 'oneroster'),
         (${protectedAdminUser.id}, ${administratorRoleId}, 'oneroster')
     `;
-    await sql`
+  await sql`
       INSERT INTO oneroster_users (
         sourced_id,
         email,
@@ -375,7 +383,7 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
         ('roster-unchanged', 'unchanged@oneroster-role.test', true, 'active', true),
         ('roster-unmatched', 'not-signed-in@oneroster-role.test', true, 'active', true)
     `;
-    await sql`
+  await sql`
       INSERT INTO oneroster_user_roles (
         user_sourced_id,
         role,
@@ -390,7 +398,7 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
         ('roster-unchanged', 'student', 'primary', 'active', true),
         ('roster-unmatched', 'teacher', 'primary', 'active', true)
     `;
-    const [studentGroup] = await sql<Array<{ id: string }>>`
+  const [studentGroup] = await sql<Array<{ id: string }>>`
       INSERT INTO groups (
         group_email,
         name,
@@ -405,15 +413,20 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
       )
       RETURNING id
     `;
-    await sql`
+  await sql`
       INSERT INTO group_members (group_id, member_email)
       VALUES (${studentGroup.id}, 'staff@oneroster-role.test')
     `;
-    await sql`
+  await sql`
       INSERT INTO group_role_mappings (group_email, role_id)
       VALUES ('roster-student@oneroster-role.test', ${studentRoleId})
     `;
+}
 
+function defineOneRosterPostgreSQLReconciliationSuite1Part3() {
+  it("reconciles lowercased roles and transfers overlapping provider ownership atomically", async () => {
+    if (!sql) throw new Error("database connection was not initialized");
+    await seedRoleReconciliationScenario();
     const result = await reconcileOneRosterRoles(sql);
     const groupResult = await reconcileGoogleGroupRoles(sql);
     const grants = await sql<
@@ -487,4 +500,13 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
       { email: "unchanged@oneroster-role.test", role_version: 40 },
     ]);
   });
-});
+}
+
+const defineOneRosterPostgreSQLReconciliationSuite1 = () => {
+  defineOneRosterPostgreSQLReconciliationSuite1Part1();
+  defineOneRosterPostgreSQLReconciliationSuite1CollectionTests();
+  defineOneRosterPostgreSQLReconciliationSuite1Part2();
+  defineOneRosterPostgreSQLReconciliationSuite1Part3();
+};
+
+describeDatabase("OneRoster PostgreSQL reconciliation", defineOneRosterPostgreSQLReconciliationSuite1);
