@@ -33,6 +33,18 @@ LOGGER = logging.getLogger("agent_eval")
 DEFAULT_OWNER_EMAIL = "canary@build-gate.invalid"
 DEFAULT_CONTEXT_TTL_SECONDS = 900
 AWS_CREDENTIAL_EXPIRY_MARGIN_SECONDS = 60
+INVOCATION_AUTHORITY_EXPIRY_MARGIN_SECONDS = 60
+CONTEXT_MINT_ROUNDING_SECONDS = 5
+MAX_CONTEXT_TTL_SECONDS = 7200
+AWS_CREDENTIAL_ENVIRONMENT_KEYS = frozenset(
+    {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+        "AWS_CREDENTIAL_EXPIRATION",
+    }
+)
 REQUIRED_METADATA_FIELDS = frozenset(
     {
         "input_tokens",
@@ -176,7 +188,7 @@ class ActiveAwsCredentialProvider:
 
 
 class ProbeContextMinter:
-    """Mint a new 900-second context immediately before every trial."""
+    """Mint fresh context authority immediately before every trial."""
 
     def __init__(
         self,
@@ -185,20 +197,37 @@ class ProbeContextMinter:
         environment: str,
         region: str,
         *,
+        credential_provider: CredentialProvider | None = None,
         ttl_seconds: int = DEFAULT_CONTEXT_TTL_SECONDS,
+        minimum_remaining_seconds: int = 30,
         now: Callable[[], datetime] | None = None,
     ) -> None:
+        if not 30 <= ttl_seconds <= MAX_CONTEXT_TTL_SECONDS:
+            raise EvalRunnerError(
+                f"context TTL must be between 30 and {MAX_CONTEXT_TTL_SECONDS} seconds"
+            )
+        if not 1 <= minimum_remaining_seconds <= ttl_seconds:
+            raise EvalRunnerError(
+                "minimum context lifetime must be positive and no longer than its TTL"
+            )
         self._executor = executor
         self._script = repo_root / "scripts/agent-workspace/mint-agent-probe-context.ts"
         self._environment = environment
         self._region = region
+        self._credential_provider = credential_provider
         self._ttl_seconds = ttl_seconds
+        self._minimum_remaining_seconds = minimum_remaining_seconds
         self._now = now or (lambda: datetime.now(timezone.utc))
 
     def mint(self, session_id: str) -> InvocationAuthority:
         if not self._script.is_file():
             raise EvalRunnerError(f"context minter not found: {self._script}")
         environment = dict(os.environ)
+        if self._credential_provider is not None:
+            credentials = self._credential_provider.resolve()
+            for key in AWS_CREDENTIAL_ENVIRONMENT_KEYS:
+                environment.pop(key, None)
+            environment.update(credentials.environment)
         environment["ENVIRONMENT"] = self._environment
         environment["AWS_REGION"] = self._region
         result = self._executor.run(
@@ -234,8 +263,13 @@ class ProbeContextMinter:
             raise EvalRunnerError(
                 "context minter returned a token for a different session"
             )
-        if (authority.expires_at - self._now()).total_seconds() < 30:
-            raise EvalRunnerError("context minter returned an already-expiring token")
+        if (
+            authority.expires_at - self._now()
+        ).total_seconds() < self._minimum_remaining_seconds:
+            raise EvalRunnerError(
+                "context minter returned authority that cannot outlive the "
+                "configured invocation timeout"
+            )
         return authority
 
 
@@ -482,11 +516,18 @@ class DockerRuntime:
             return
         container_id = self._container_id
         self._container_id = None
-        self._executor.run(
+        result = self._executor.run(
             ["docker", "rm", "-f", container_id],
             check=False,
             timeout=30,
         )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            LOGGER.warning(
+                "failed to remove candidate container %s: %s",
+                container_id,
+                detail[-500:] or f"docker rm exited {result.returncode}",
+            )
 
 
 class DockerRuntimeFactory:
@@ -906,6 +947,25 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
+def _context_ttl_seconds(invocation_timeout_seconds: int) -> int:
+    ttl_seconds = (
+        invocation_timeout_seconds
+        + INVOCATION_AUTHORITY_EXPIRY_MARGIN_SECONDS
+        + CONTEXT_MINT_ROUNDING_SECONDS
+    )
+    if ttl_seconds > MAX_CONTEXT_TTL_SECONDS:
+        maximum_timeout = (
+            MAX_CONTEXT_TTL_SECONDS
+            - INVOCATION_AUTHORITY_EXPIRY_MARGIN_SECONDS
+            - CONTEXT_MINT_ROUNDING_SECONDS
+        )
+        raise EvalRunnerError(
+            "invocation timeout exceeds the context verifier limit; "
+            f"use {maximum_timeout} seconds or fewer"
+        )
+    return ttl_seconds
+
+
 def _open_output(path: Path, overwrite: bool) -> TextIO:
     flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     flags |= os.O_TRUNC if overwrite else os.O_EXCL
@@ -957,13 +1017,14 @@ def main(argv: list[str] | None = None) -> int:
             "APP_BASE_URL": app_base_url,
             "BUILD_MARKER": f"eval:{args.image}",
         }
+        credential_provider = ActiveAwsCredentialProvider(executor)
         name_token = re.sub(r"[^a-z0-9-]", "-", f"issue-1422-{os.getpid()}".lower())
         runtime_factory = DockerRuntimeFactory(
             executor,
             args.image,
             args.platform,
             environment_values,
-            ActiveAwsCredentialProvider(executor),
+            credential_provider,
             boot_timeout_seconds=args.boot_timeout,
             invocation_timeout_seconds=args.invocation_timeout,
             poll_interval_seconds=args.poll_interval,
@@ -974,6 +1035,12 @@ def main(argv: list[str] | None = None) -> int:
             repo_root,
             args.environment,
             args.region,
+            credential_provider=credential_provider,
+            ttl_seconds=_context_ttl_seconds(args.invocation_timeout),
+            minimum_remaining_seconds=(
+                args.invocation_timeout
+                + INVOCATION_AUTHORITY_EXPIRY_MARGIN_SECONDS
+            ),
         )
         runner = EvaluationRunner(runtime_factory, minter, image=args.image)
         args.out.parent.mkdir(parents=True, exist_ok=True)

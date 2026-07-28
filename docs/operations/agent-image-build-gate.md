@@ -84,7 +84,9 @@ python3 infra/agent-image/eval/runner.py \
 
 Pure tasks share a booted container but receive a fresh AgentCore session UUID
 and freshly minted signed context on every trial. Workspace-mutating tasks get
-a fresh container per trial. See
+a fresh container per trial. The context TTL tracks the configured invocation
+timeout with a safety margin, and the same freshly resolved AWS credential
+chain is used for context minting and the candidate container. See
 `infra/agent-image/eval/README.md` for the task format and complete options.
 
 ### Minting a context by hand

@@ -21,17 +21,27 @@ The runner uses the active AWS credential chain and discovers the dev web
 broker from the deployed router Lambda. Set `AGENT_EVAL_APP_BASE_URL` or pass
 `--app-base-url` to override discovery. The same credentials must be able to
 read `psd-agent/<environment>/invocation-signing-key` so the runner can mint
-short-lived invocation authority. The active chain is re-resolved before every
-trial, after any container boot, and after context minting immediately before
-invocation. If temporary credentials rotate, a shared pure-task container is
-recycled with the new values; credentials that cannot outlive the configured
-invocation timeout fail closed before the trial starts.
+short-lived invocation authority. The authority TTL is derived from
+`--invocation-timeout` with a 60-second safety margin (plus five seconds for
+issuance rounding), up to the verifier's 7,200-second limit. The active
+credential chain is re-resolved for both context minting and the candidate
+container before every trial, after any container boot, and after context
+minting immediately before invocation. If temporary credentials rotate, a
+shared pure-task container is recycled with the new values; credentials that
+cannot outlive the configured invocation timeout fail closed before the trial
+starts.
 When a post-mint credential check recycles the runtime, the runner discards
 that authority and remints it for the ready container before invoking.
 
 JSONL output is created with owner-only (`0600`) permissions because complete
 metadata can contain prompts, messages, and tool details. Keep it in an
 issue-specific temporary path; do not commit run transcripts.
+
+Resolved short-lived AWS credentials are passed into the candidate container's
+environment and are therefore visible to users with access to the local Docker
+daemon (for example through `docker inspect`). Run evals only on a trusted
+workstation. The runner removes its containers on completion and logs a warning
+if Docker cannot remove one.
 
 Every trial gets:
 

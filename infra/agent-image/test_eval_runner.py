@@ -109,6 +109,11 @@ class SuiteLoadingTests(unittest.TestCase):
                     Path("inline.yaml"),
                 )
 
+    def test_context_ttl_outlives_the_invocation_timeout(self):
+        self.assertEqual(runner._context_ttl_seconds(900), 965)
+        with self.assertRaisesRegex(runner.EvalRunnerError, "7135"):
+            runner._context_ttl_seconds(7136)
+
 
 class AdvancingClock:
     def __init__(self) -> None:
@@ -470,6 +475,14 @@ class RecordingExecutor:
         return runner.CommandResult(0, "true\n", "")
 
 
+class FailedRemoveExecutor(RecordingExecutor):
+    def run(self, arguments, **options):
+        result = super().run(arguments, **options)
+        if tuple(arguments)[:3] == ("docker", "rm", "-f"):
+            return runner.CommandResult(1, "", "daemon unavailable")
+        return result
+
+
 class SequenceCredentialProvider:
     def __init__(self, credentials: list[runner.AwsCredentials]) -> None:
         self.credentials = credentials
@@ -495,6 +508,55 @@ def aws_credentials(
         },
         expires_at=expires_at,
     )
+
+
+class ProbeContextMinterTests(unittest.TestCase):
+    def test_uses_resolved_credentials_and_requested_ttl(self):
+        clock = AdvancingClock()
+        executor = mock.Mock()
+        executor.run.return_value = runner.CommandResult(
+            0,
+            json.dumps(
+                {
+                    "invocationContext": "context",
+                    "requestProofKey": "proof",
+                    "ownerEmail": "canary@build-gate.invalid",
+                    "sessionId": "session-id",
+                    "expiresAt": (
+                        clock.now() + timedelta(seconds=965)
+                    ).isoformat(),
+                }
+            ),
+            "",
+        )
+        provider = SequenceCredentialProvider([aws_credentials("fresh", "fresh-token")])
+        minter = runner.ProbeContextMinter(
+            executor,
+            AGENT_IMAGE_DIR.parent.parent,
+            "dev",
+            "us-east-1",
+            credential_provider=provider,
+            ttl_seconds=965,
+            minimum_remaining_seconds=960,
+            now=clock.now,
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AWS_ACCESS_KEY_ID": "stale",
+                "AWS_SECRET_ACCESS_KEY": "stale",
+                "AWS_SESSION_TOKEN": "stale",
+            },
+        ):
+            authority = minter.mint("session-id")
+
+        self.assertEqual(authority.session_id, "session-id")
+        self.assertEqual(provider.calls, 1)
+        call = executor.run.call_args
+        self.assertEqual(call.args[0][-2:], ["--ttl", "965"])
+        self.assertEqual(call.kwargs["env"]["AWS_ACCESS_KEY_ID"], "fresh")
+        self.assertEqual(call.kwargs["env"]["AWS_SESSION_TOKEN"], "fresh-token")
 
 
 class DockerRuntimeTests(unittest.TestCase):
@@ -661,6 +723,86 @@ class DockerRuntimeTests(unittest.TestCase):
         self.assertEqual(
             sum(call[:3] == ("docker", "rm", "-f") for call in executor.calls),
             1,
+        )
+
+    def test_failed_container_removal_is_visible(self):
+        executor = FailedRemoveExecutor()
+        runtime = runner.DockerRuntime(
+            executor,
+            "candidate@sha256:digest",
+            "linux/arm64",
+            {"APP_BASE_URL": "https://dev.example.invalid"},
+            SequenceCredentialProvider([aws_credentials()]),
+            boot_timeout_seconds=120,
+            invocation_timeout_seconds=900,
+            poll_interval_seconds=0,
+            name_prefix="psd-agent-eval-issue-1422-test",
+        )
+        runtime.prepare()
+
+        with self.assertLogs("agent_eval", level="WARNING") as captured:
+            runtime.stop()
+
+        self.assertIn("daemon unavailable", "\n".join(captured.output))
+
+
+class MainWiringTests(unittest.TestCase):
+    def test_invocation_timeout_controls_context_ttl_and_credentials(self):
+        provider = mock.Mock()
+        minter = mock.Mock()
+        evaluation = mock.Mock()
+        evaluation.run.return_value = []
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            runner,
+            "load_suite",
+            return_value=[],
+        ), mock.patch.object(
+            runner,
+            "_resolve_app_base_url",
+            return_value="https://dev.example.invalid",
+        ), mock.patch.object(
+            runner,
+            "ActiveAwsCredentialProvider",
+            return_value=provider,
+        ), mock.patch.object(
+            runner,
+            "DockerRuntimeFactory",
+        ) as runtime_factory, mock.patch.object(
+            runner,
+            "ProbeContextMinter",
+            return_value=minter,
+        ) as context_minter, mock.patch.object(
+            runner,
+            "EvaluationRunner",
+            return_value=evaluation,
+        ):
+            status = runner.main(
+                [
+                    "--image",
+                    "candidate@sha256:digest",
+                    "--suite",
+                    "suite.yaml",
+                    "--out",
+                    str(Path(directory) / "results.jsonl"),
+                    "--invocation-timeout",
+                    "1200",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertIs(runtime_factory.call_args.args[4], provider)
+        self.assertEqual(
+            runtime_factory.call_args.kwargs["invocation_timeout_seconds"],
+            1200,
+        )
+        self.assertEqual(context_minter.call_args.kwargs["ttl_seconds"], 1265)
+        self.assertEqual(
+            context_minter.call_args.kwargs["minimum_remaining_seconds"],
+            1260,
+        )
+        self.assertIs(
+            context_minter.call_args.kwargs["credential_provider"],
+            provider,
         )
 
 
