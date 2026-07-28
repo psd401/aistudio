@@ -111,13 +111,35 @@ describe("Atrium MCP content tools registry", () => {
 
   it("list_content exposes an optional ISO date-time `since` property", () => {
     const tool = CONTENT_MCP_TOOLS.find((t) => t.name === "list_content");
-    const manifestEntry = TOOL_MANIFEST.find((t) => t.name === "list_content");
+    const manifestEntries = TOOL_MANIFEST.filter(
+      (entry) => entry.identifier === "content.list"
+    );
+    const v1 = manifestEntries.find((entry) => entry.version === "v1");
+    const v2 = manifestEntries.find((entry) => entry.version === "v2");
+
     expect(tool?.inputSchema.properties.since).toMatchObject({
       type: "string",
       format: "date-time",
     });
     expect(tool?.inputSchema.required ?? []).not.toContain("since");
-    expect(manifestEntry?.version).toBe("v2");
+    expect(v2?.inputSchema.properties.since).toEqual(
+      tool?.inputSchema.properties.since
+    );
+    expect(v1).toMatchObject({
+      name: "list_content",
+      description:
+        "List content the caller may view. Filterable by kind, collection, tag, status, and title text.",
+      surfaces: ["mcp", "internal"],
+      requiredScopes: ["content:read"],
+      surfaceScopes: { internal: ["content:read"] },
+    });
+    expect(Object.keys(v1?.inputSchema.properties ?? {})).toEqual([
+      "kind",
+      "collection",
+      "tag",
+      "status",
+      "query",
+    ]);
   });
 
   it("the body-carrying create/version tools expose an optional codeEncoding: base64", () => {
