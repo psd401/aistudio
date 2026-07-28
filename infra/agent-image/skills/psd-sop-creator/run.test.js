@@ -371,6 +371,21 @@ test('a pipe in the owner value cannot corrupt the metadata table', () => {
   expect(row.split(/(?<!\\)\|/).length).toBe(4);
 });
 
+test('a backslash in the owner value cannot neutralize the pipe escaping', () => {
+  const doc = buildDocument({
+    body: '## Title\n\nX',
+    owner: 'Ops\\| still one cell',
+    department: 'Technology',
+    effectiveDate: '2026-08-01',
+    logoUrl: 'https://aistudio.test/branding/psd-logo.png',
+  });
+  // The input's backslash is escaped first, then the pipe — so the cell keeps
+  // exactly two columns and the raw sequence never reaches the table syntax.
+  const row = doc.split('\n').find((l) => l.includes('**Owner**'));
+  expect(row).toBe('| **Owner** | Ops\\\\\\| still one cell |');
+  expect(row.split(/(?<!\\)\|/).length).toBe(4);
+});
+
 test('applyReplacements swaps only the referenced lines', () => {
   const body = 'a\n![x](p.png)\nb';
   expect(applyReplacements(body, new Map([[1, '::atrium-asset{id="z" alt="x"}']]))).toBe(

@@ -466,7 +466,10 @@ function titleFromBody(markdown) {
 function buildDocument({ body, owner, department, effectiveDate, logoUrl }) {
   // Metadata values land in pipe-table cells; an unescaped "|" in free text
   // (owner is unrestricted) would add a column and corrupt the masthead table.
-  const cell = (value) => String(value).replace(/\|/g, '\\|');
+  // Backslashes are escaped FIRST so a value ending in "\" cannot neutralize
+  // the pipe escape this adds (js/incomplete-sanitization).
+  const cell = (value) =>
+    String(value).replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
   return [
     `![${LOGO_ALT}](${logoUrl})`,
     '',
