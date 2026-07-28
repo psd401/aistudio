@@ -67,6 +67,8 @@ export interface JobPayload {
   /** Present only for cron-promoted turns; enables terminal run telemetry. */
   scheduleId?: string;
   scheduleName?: string;
+  /** Per-fire agent_scheduled_runs primary key created before RunTask. */
+  scheduledRunId?: string;
   threadName?: string;
   /** In shared spaces the reply is prefixed [Name's Agent]; DMs are not. */
   isDM: boolean;
@@ -155,6 +157,7 @@ export function buildJobPayload(input: {
   spaceName: string;
   scheduleId?: string;
   scheduleName?: string;
+  scheduledRunId?: string;
   threadName?: string;
   isDM: boolean;
   originalPrompt: string;
@@ -171,6 +174,9 @@ export function buildJobPayload(input: {
     spaceName: input.spaceName,
     ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
     ...(input.scheduleName ? { scheduleName: input.scheduleName } : {}),
+    ...(input.scheduledRunId
+      ? { scheduledRunId: input.scheduledRunId }
+      : {}),
     ...(input.threadName ? { threadName: input.threadName } : {}),
     isDM: input.isDM,
     ...(input.responsePrefix
@@ -211,6 +217,13 @@ function boundedOptionalString(
     : undefined;
 }
 
+function readScheduledRunId(
+  obj: Record<string, unknown>,
+): string | undefined {
+  const value = boundedOptionalString(obj, 'scheduledRunId', 20);
+  return value && /^\d{1,20}$/.test(value) ? value : undefined;
+}
+
 /**
  * Parse + validate a JOB_PAYLOAD env value in the runner. Throws with a
  * field-specific message on anything missing — the runner catches, logs,
@@ -239,6 +252,7 @@ export function parseJobPayload(raw: string | undefined): JobPayload {
     'scheduleName',
     SCHEDULE_NAME_MAX_LENGTH
   );
+  const scheduledRunId = readScheduledRunId(obj);
   return {
     sessionId: requireString('sessionId'),
     // Unknown/absent -> 'deadline'. A payload from an older cron build must
@@ -254,6 +268,7 @@ export function parseJobPayload(raw: string | undefined): JobPayload {
     spaceName: requireString('spaceName'),
     ...(scheduleId ? { scheduleId } : {}),
     ...(scheduleName ? { scheduleName } : {}),
+    ...(scheduledRunId ? { scheduledRunId } : {}),
     ...(typeof obj.threadName === 'string' && obj.threadName
       ? { threadName: obj.threadName }
       : {}),

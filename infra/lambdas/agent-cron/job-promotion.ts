@@ -107,6 +107,7 @@ export interface JobPayload {
   spaceName: string;
   scheduleId?: string;
   scheduleName?: string;
+  scheduledRunId?: string;
   threadName?: string;
   isDM: boolean;
   promptExcerpt: string;
@@ -132,6 +133,7 @@ export function buildJobPayload(input: {
   spaceName: string;
   scheduleId?: string;
   scheduleName?: string;
+  scheduledRunId?: string;
   threadName?: string;
   isDM: boolean;
   originalPrompt: string;
@@ -147,6 +149,9 @@ export function buildJobPayload(input: {
     spaceName: input.spaceName,
     ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
     ...(input.scheduleName ? { scheduleName: input.scheduleName } : {}),
+    ...(input.scheduledRunId
+      ? { scheduledRunId: input.scheduledRunId }
+      : {}),
     ...(input.threadName ? { threadName: input.threadName } : {}),
     isDM: input.isDM,
     // A CONTINUATION resumes a session whose transcript already holds the full

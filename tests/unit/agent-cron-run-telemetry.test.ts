@@ -1,6 +1,7 @@
 import {
+  createPromotedRun,
   createRunTelemetry,
-  writeTerminalRunIfMissing,
+  updatePromotedRunTerminal,
   type CronTelemetryLogger,
 } from "../../infra/lambdas/agent-cron/run-telemetry"
 
@@ -23,18 +24,48 @@ function harness(overrides: Partial<typeof config> = {}) {
 }
 
 describe("agent-cron run telemetry", () => {
-  it("makes the STOPPED fallback conditional on a missing terminal session", async () => {
-    const execute = jest.fn().mockResolvedValue({ numberOfRecordsUpdated: 1 })
+  it("creates a promoted row and returns its per-fire primary key", async () => {
+    const execute = jest.fn().mockResolvedValue({
+      records: [[{ stringValue: "901" }]],
+    })
 
     await expect(
-      writeTerminalRunIfMissing(
+      createPromotedRun(
         config,
         { execute },
         {
           userEmail: "owner@psd401.net",
           scheduleId: "schedule-id",
           scheduleName: "Morning brief",
-          sessionId: "scheduled-session",
+          sessionId: "shared-daily-session",
+          inputTokens: 1,
+          outputTokens: 2,
+          latencyMs: 3,
+          status: "promoted",
+        },
+      ),
+    ).resolves.toBe("901")
+
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sql: expect.stringContaining("RETURNING CAST(id AS TEXT)"),
+      }),
+    )
+  })
+
+  it("keys the STOPPED terminal repair by the promoted row ID", async () => {
+    const execute = jest.fn().mockResolvedValue({ numberOfRecordsUpdated: 1 })
+
+    await expect(
+      updatePromotedRunTerminal(
+        config,
+        { execute },
+        {
+          scheduledRunId: "902",
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          scheduleName: "Morning brief",
+          sessionId: "shared-daily-session",
           inputTokens: 0,
           outputTokens: 0,
           latencyMs: 10_000,
@@ -46,12 +77,71 @@ describe("agent-cron run telemetry", () => {
     expect(execute).toHaveBeenCalledWith(
       expect.objectContaining({
         sql: expect.stringMatching(
-          /WHERE NOT EXISTS[\s\S]+status IN \('success', 'error'\)/,
+          /WHERE id = CAST\(:scheduled_run_id AS bigint\)[\s\S]+status = 'promoted'/,
         ),
+        parameters: expect.arrayContaining([
+          {
+            name: "scheduled_run_id",
+            value: { stringValue: "902" },
+          },
+        ]),
       }),
     )
   })
 
+  it("verifies an exact terminal row when the supervisor update is a no-op", async () => {
+    const execute = jest
+      .fn()
+      .mockResolvedValueOnce({ numberOfRecordsUpdated: 0 })
+      .mockResolvedValueOnce({
+        records: [[{ stringValue: "success" }]],
+      })
+
+    await expect(
+      updatePromotedRunTerminal(
+        config,
+        { execute },
+        {
+          scheduledRunId: "902",
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          sessionId: "shared-daily-session",
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 10_000,
+          status: "success",
+        },
+      ),
+    ).resolves.toBe(false)
+    expect(execute).toHaveBeenCalledTimes(2)
+  })
+
+  it("rejects a missing per-fire row instead of acknowledging false durability", async () => {
+    const execute = jest
+      .fn()
+      .mockResolvedValueOnce({ numberOfRecordsUpdated: 0 })
+      .mockResolvedValueOnce({ records: [] })
+
+    await expect(
+      updatePromotedRunTerminal(
+        config,
+        { execute },
+        {
+          scheduledRunId: "902",
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          sessionId: "shared-daily-session",
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 10_000,
+          status: "error",
+        },
+      ),
+    ).rejects.toThrow("has no terminal state")
+  })
+})
+
+describe("agent-cron ordinary run telemetry", () => {
   it("records a rejected reference as a skipped scheduled run", async () => {
     const { telemetry, execute, log } = harness()
 

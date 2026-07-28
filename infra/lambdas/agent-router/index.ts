@@ -2481,6 +2481,27 @@ async function writeScheduledRun(params: ScheduledRunWrite): Promise<void> {
     throw new Error('Database not configured for scheduled run telemetry');
   }
   const sql = await getDbClient();
+  if (params.scheduledRunId) {
+    const updated = await sql`UPDATE agent_scheduled_runs
+      SET schedule_name = ${params.scheduleName ?? null},
+          input_tokens = input_tokens + ${params.inputTokens},
+          output_tokens = output_tokens + ${params.outputTokens},
+          latency_ms = latency_ms + ${params.latencyMs},
+          status = ${params.status},
+          error_message = ${params.errorMessage ?? null}
+      WHERE id = CAST(${params.scheduledRunId} AS bigint)
+        AND user_id = ${params.userEmail}
+        AND schedule_id = ${params.scheduleId}
+        AND session_id = ${params.sessionId}
+        AND status = 'promoted'
+      RETURNING id`;
+    if (updated.length !== 1) {
+      throw new Error(
+        `Promoted scheduled run ${params.scheduledRunId} was not updateable`,
+      );
+    }
+    return;
+  }
   await sql`INSERT INTO agent_scheduled_runs
       (user_id, schedule_id, schedule_name, session_id,
        input_tokens, output_tokens, latency_ms, status, error_message)

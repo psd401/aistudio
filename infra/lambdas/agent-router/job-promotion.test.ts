@@ -75,12 +75,14 @@ describe('buildJobPayload / parseJobPayload round-trip', () => {
         ...BASE,
         scheduleId: '36bb0456-1c51-4fb8-97d1-4e87d02765ce',
         scheduleName: longestValidScheduleName,
+        scheduledRunId: '901',
       })
     );
     expect(parsed.scheduleId).toBe(
       '36bb0456-1c51-4fb8-97d1-4e87d02765ce'
     );
     expect(parsed.scheduleName).toBe(longestValidScheduleName);
+    expect(parsed.scheduledRunId).toBe('901');
   });
 
   test('prompt excerpt truncates to keep the payload under the RunTask 8KiB cap', () => {

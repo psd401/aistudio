@@ -71,8 +71,9 @@ import {
   type LockedJobResult,
 } from './job-lock';
 import {
+  createPromotedRun,
   createRunTelemetry,
-  writeTerminalRunIfMissing,
+  updatePromotedRunTerminal,
 } from './run-telemetry';
 import { runSchedulePreflight } from './schedule-preflight';
 import {
@@ -676,6 +677,7 @@ type PromotionResult =
         | 'job-runner-config'
         | 'lock-config'
         | 'lock-renew'
+        | 'run-telemetry'
         | 'run-task';
       severity: 'error' | 'warn';
       errorMessage: string;
@@ -704,6 +706,7 @@ function readJobRunnerConfig(log: Logger): JobRunnerConfig | null {
 async function launchScheduledJob(
   input: ScheduledJobInput,
   lockToken: string,
+  scheduledRunId: string,
   config: JobRunnerConfig,
   log: Logger,
 ): Promise<void> {
@@ -718,6 +721,7 @@ async function launchScheduledJob(
     spaceName: input.spaceName,
     scheduleId: input.scheduleId,
     scheduleName: input.scheduleName,
+    scheduledRunId,
     // Scheduled tasks always deliver to the owner's DM, never a shared space.
     isDM: true,
     originalPrompt: input.originalPrompt,
@@ -728,6 +732,7 @@ async function launchScheduledJob(
       taskDefinition: config.taskDefArn,
       launchType: 'FARGATE',
       count: 1,
+      clientToken: lockToken,
       startedBy: 'agent-cron-promotion',
       networkConfiguration: {
         awsvpcConfiguration: {
@@ -770,7 +775,7 @@ async function promoteScheduledTurnToJob(
   input: ScheduledJobInput,
   lockToken: string,
   log: Logger,
-  beforeLaunch: () => Promise<void>,
+  beforeLaunch: () => Promise<string>,
 ): Promise<PromotionResult> {
   const config = readJobRunnerConfig(log);
   if (!config) {
@@ -796,12 +801,31 @@ async function promoteScheduledTurnToJob(
       errorMessage: renewal.errorMessage,
     };
   }
+  let scheduledRunId: string;
   try {
-    // Persist the intermediate state before RunTask. A task can fail and emit
-    // STOPPED immediately after acceptance; writing promoted afterward could
-    // otherwise overtake the supervisor's terminal row.
-    await beforeLaunch();
-    await launchScheduledJob(input, lockToken, config, log);
+    // Persist the intermediate row and recover its per-fire primary key before
+    // RunTask. The task and its STOPPED supervisor update this exact row.
+    scheduledRunId = await beforeLaunch();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    log.error('Job promotion telemetry failed — posting the partial instead', {
+      error: detail,
+    });
+    return {
+      promoted: false,
+      phase: 'run-telemetry',
+      severity: 'error',
+      errorMessage: `Promotion telemetry failed: ${detail}`,
+    };
+  }
+  try {
+    await launchScheduledJob(
+      input,
+      lockToken,
+      scheduledRunId,
+      config,
+      log,
+    );
     return { promoted: true };
   } catch (error) {
     const errorMessage =
@@ -903,9 +927,15 @@ async function sendPromotionAcknowledgement(
 
 async function recordPromotedRun(
   context: ScheduledResultContext,
-): Promise<void> {
+): Promise<string> {
   const { schedule, scheduleName, sessionId, result, startTime, log } = context;
-  await runTelemetry.recordRun(
+  const scheduledRunId = await createPromotedRun(
+    {
+      databaseResourceArn: DATABASE_RESOURCE_ARN,
+      databaseSecretArn: DATABASE_SECRET_ARN,
+      databaseName: DATABASE_NAME,
+    },
+    runTelemetryRdsClient,
     {
       userEmail: schedule.ownerEmail,
       scheduleId: schedule.scheduleId,
@@ -916,15 +946,16 @@ async function recordPromotedRun(
       latencyMs: Date.now() - startTime,
       status: 'promoted',
     },
-    log,
   );
   log.info('Scheduled task promotion state persisted', {
+    scheduledRunId,
     scheduleId: schedule.scheduleId,
     scheduleName,
     sessionId,
     email: sanitizeEmailForLog(schedule.ownerEmail),
     latencyMs: Date.now() - startTime,
   });
+  return scheduledRunId;
 }
 
 async function tryPromoteScheduledResult(
@@ -1321,7 +1352,7 @@ async function handleJobRunnerStopped(
         return task;
       },
       writeRun: (record) =>
-        writeTerminalRunIfMissing(
+        updatePromotedRunTerminal(
           {
             databaseResourceArn: DATABASE_RESOURCE_ARN,
             databaseSecretArn: DATABASE_SECRET_ARN,

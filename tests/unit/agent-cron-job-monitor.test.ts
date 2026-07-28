@@ -22,12 +22,14 @@ const event = {
   },
 } satisfies JobRunnerStoppedEvent
 
-const scheduledPayload = JSON.stringify({
+const scheduledPayloadValue = {
+  scheduledRunId: "901",
   scheduleId: "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
   scheduleName: "Morning brief",
   userEmail: "owner@psd401.net",
   sessionId: "workspace-sched-36bb0456-2026-07-28",
-})
+}
+const scheduledPayload = JSON.stringify(scheduledPayloadValue)
 
 function snapshot(
   exitCode: number | undefined,
@@ -77,7 +79,7 @@ function harness(task: JobTaskSnapshot) {
 }
 
 describe("agent job STOPPED-state monitor", () => {
-  it("appends authoritative success after a clean scheduled job exit", async () => {
+  it("confirms authoritative success after a clean scheduled job exit", async () => {
     const { dependencies, writeRun, recordFailure, log } = harness(snapshot(0))
 
     await expect(
@@ -88,6 +90,7 @@ describe("agent job STOPPED-state monitor", () => {
     })
 
     expect(writeRun).toHaveBeenCalledWith({
+      scheduledRunId: "901",
       userEmail: "owner@psd401.net",
       scheduleId: "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
       scheduleName: "Morning brief",
@@ -99,7 +102,7 @@ describe("agent job STOPPED-state monitor", () => {
     })
     expect(recordFailure).not.toHaveBeenCalled()
     expect(log.info).toHaveBeenCalledWith(
-      "Scheduled background job terminal success confirmed",
+      "Scheduled background job terminal state confirmed",
       expect.objectContaining({ owner: "o***@psd401.net" }),
     )
   })
@@ -175,6 +178,25 @@ describe("agent job STOPPED-state monitor", () => {
       scheduleId: "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
     })
     expect(recordFailure).not.toHaveBeenCalled()
+  })
+
+  it("keeps two fires in the shared daily session correlated by run ID", async () => {
+    const secondPayload = JSON.stringify({
+      ...scheduledPayloadValue,
+      scheduledRunId: "902",
+    })
+    const { dependencies, writeRun, log } = harness(
+      snapshot(undefined, secondPayload),
+    )
+
+    await monitorStoppedJob(event, "job-runner", dependencies, log)
+
+    expect(writeRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scheduledRunId: "902",
+        sessionId: "workspace-sched-36bb0456-2026-07-28",
+      }),
+    )
   })
 
   it("recognizes only valid ECS STOPPED task events", () => {

@@ -1,9 +1,17 @@
+import fs from "node:fs"
+import path from "node:path"
 import {
   recordScheduledJobTerminal,
   type ScheduledJobContext,
 } from "../../infra/lambdas/agent-router/scheduled-run-telemetry"
 
+const routerSource = fs.readFileSync(
+  path.join(process.cwd(), "infra/lambdas/agent-router/index.ts"),
+  "utf8",
+)
+
 const scheduledJob = {
+  scheduledRunId: "901",
   scheduleId: "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
   scheduleName: "Morning brief",
   userEmail: "owner@psd401.net",
@@ -15,7 +23,7 @@ function logger() {
 }
 
 describe("promoted scheduled-run terminal telemetry", () => {
-  it("appends the terminal result for a cron-promoted job", async () => {
+  it("updates the correlated terminal result for a cron-promoted job", async () => {
     const writer = jest.fn().mockResolvedValue(undefined)
 
     await recordScheduledJobTerminal(
@@ -37,6 +45,16 @@ describe("promoted scheduled-run terminal telemetry", () => {
       outputTokens: 34,
       latencyMs: 456,
     })
+  })
+
+  it("persists the terminal result by promoted primary key", () => {
+    expect(routerSource).toContain(
+      "WHERE id = CAST(${params.scheduledRunId} AS bigint)",
+    )
+    expect(routerSource).toContain("AND status = 'promoted'")
+    expect(routerSource).toContain(
+      "input_tokens = input_tokens + ${params.inputTokens}",
+    )
   })
 
   it("does not create scheduled telemetry for an interactive job", async () => {

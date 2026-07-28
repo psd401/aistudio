@@ -44,6 +44,7 @@ export interface JobTaskSnapshot {
 }
 
 interface ScheduledJobIdentity {
+  scheduledRunId?: string;
   userEmail: string;
   scheduleId: string;
   scheduleName?: string;
@@ -101,7 +102,13 @@ function scheduledJobIdentity(rawPayload: string): ScheduledJobIdentity | null {
     throw new Error('Stopped scheduled job payload is missing its owner or session');
   }
   const scheduleName = nonEmptyString(payload.scheduleName, 120);
+  const rawScheduledRunId = nonEmptyString(payload.scheduledRunId, 20);
+  const scheduledRunId = rawScheduledRunId
+    && /^\d{1,20}$/.test(rawScheduledRunId)
+    ? rawScheduledRunId
+    : undefined;
   return {
+    ...(scheduledRunId ? { scheduledRunId } : {}),
     userEmail,
     scheduleId,
     ...(scheduleName ? { scheduleName } : {}),
@@ -222,8 +229,8 @@ export async function monitorStoppedJob(
     ...(errorMessage ? { errorMessage } : {}),
   };
 
-  const fallbackInserted = await dependencies.writeRun(record);
-  if (errorMessage && fallbackInserted) {
+  const terminalRepaired = await dependencies.writeRun(record);
+  if (errorMessage && terminalRepaired) {
     await dependencies.recordFailure({
       ...identity,
       errorMessage,
@@ -242,7 +249,7 @@ export async function monitorStoppedJob(
       exitCode: container?.exitCode ?? null,
     });
   } else {
-    log.info('Scheduled background job terminal success confirmed', {
+    log.info('Scheduled background job terminal state confirmed', {
       scheduleId: identity.scheduleId,
       owner: sanitizeEmailForLog(identity.userEmail),
       taskArn: event.detail.taskArn,

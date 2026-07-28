@@ -17,6 +17,8 @@ export interface CronFailureRecord {
 }
 
 export interface ScheduledRunRecord {
+  /** Primary-key correlation for a promoted run; absent on ordinary cron rows. */
+  scheduledRunId?: string;
   userEmail: string;
   scheduleId: string;
   scheduleName?: string;
@@ -75,6 +77,55 @@ function scheduledRunParameters(
   ];
 }
 
+function firstStringValue(result: unknown): string | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const value = (
+    result as {
+      records?: Array<Array<{ stringValue?: unknown }>>;
+    }
+  ).records?.[0]?.[0]?.stringValue;
+  return typeof value === 'string' ? value : undefined;
+}
+
+function updatedRecordCount(result: unknown): 0 | 1 {
+  const updated = result && typeof result === 'object'
+    ? (result as { numberOfRecordsUpdated?: unknown }).numberOfRecordsUpdated
+    : undefined;
+  if (updated !== 0 && updated !== 1) {
+    throw new Error('Scheduled-run terminal update returned no update count');
+  }
+  return updated;
+}
+
+function promotedRunLocator(scheduledRunId?: string): string {
+  return scheduledRunId
+    ? 'id = CAST(:scheduled_run_id AS bigint)'
+    : `id = (
+        SELECT id
+        FROM agent_scheduled_runs
+        WHERE user_id = :user_id
+          AND schedule_id = :schedule_id
+          AND session_id = :session_id
+          AND status = 'promoted'
+        ORDER BY id DESC
+        LIMIT 1
+      )`;
+}
+
+function promotedRunParameters(
+  params: ScheduledRunRecord,
+): NonNullable<ExecuteStatementCommandInput['parameters']> {
+  return [
+    ...scheduledRunParameters(params),
+    ...(params.scheduledRunId
+      ? [{
+        name: 'scheduled_run_id',
+        value: { stringValue: params.scheduledRunId },
+      }]
+      : []),
+  ];
+}
+
 /**
  * Strict scheduled-run writer for durability boundaries such as the ECS task
  * supervisor. The ordinary cron path wraps this best-effort so observability
@@ -106,12 +157,84 @@ export async function writeScheduledRun(
 }
 
 /**
- * Strict, idempotent fallback for the ECS STOPPED supervisor. The job runner
- * normally writes the richer terminal row before exiting. Insert only when
- * that exact scheduled session has no terminal row so a supervisor retry (or
- * a clean job) cannot replace accurate token/error telemetry with its fallback.
+ * Strictly create the promoted row before RunTask and return its database ID.
+ * That ID is the per-fire correlation key carried in JOB_PAYLOAD; the daily
+ * AgentCore session ID is deliberately not unique enough for this purpose.
  */
-export async function writeTerminalRunIfMissing(
+export async function createPromotedRun(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  params: ScheduledRunRecord,
+): Promise<string> {
+  if (!config.databaseResourceArn || !config.databaseSecretArn) {
+    throw new Error('Scheduled-run telemetry database is not configured');
+  }
+  if (params.status !== 'promoted') {
+    throw new Error('Promoted scheduled run must use promoted status');
+  }
+  const result = await rdsDataClient.execute(
+    {
+      resourceArn: config.databaseResourceArn,
+      secretArn: config.databaseSecretArn,
+      database: config.databaseName,
+      sql: `INSERT INTO agent_scheduled_runs
+              (user_id, schedule_id, schedule_name, session_id,
+               input_tokens, output_tokens, latency_ms, status, error_message)
+            VALUES
+              (:user_id, :schedule_id, :schedule_name, :session_id,
+               :input_tokens, :output_tokens, :latency_ms, :status, :error_message)
+            RETURNING CAST(id AS TEXT)`,
+      parameters: scheduledRunParameters(params),
+    },
+  );
+  const scheduledRunId = firstStringValue(result);
+  if (
+    typeof scheduledRunId !== 'string'
+    || !/^\d{1,20}$/.test(scheduledRunId)
+  ) {
+    throw new Error('Promoted scheduled run returned no valid ID');
+  }
+  return scheduledRunId;
+}
+
+async function hasExactTerminalRun(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  params: ScheduledRunRecord & { scheduledRunId: string },
+): Promise<boolean> {
+  const result = await rdsDataClient.execute(
+    {
+      resourceArn: config.databaseResourceArn,
+      secretArn: config.databaseSecretArn,
+      database: config.databaseName,
+      sql: `SELECT status
+            FROM agent_scheduled_runs
+            WHERE id = CAST(:scheduled_run_id AS bigint)
+              AND user_id = :user_id
+              AND schedule_id = :schedule_id
+              AND session_id = :session_id`,
+      parameters: [
+        { name: 'user_id', value: { stringValue: params.userEmail } },
+        { name: 'schedule_id', value: { stringValue: params.scheduleId } },
+        { name: 'session_id', value: { stringValue: params.sessionId } },
+        {
+          name: 'scheduled_run_id',
+          value: { stringValue: params.scheduledRunId },
+        },
+      ],
+    },
+  );
+  const status = firstStringValue(result);
+  return status === 'success' || status === 'error';
+}
+
+/**
+ * Strict, idempotent terminal repair for the ECS STOPPED supervisor. The job
+ * runner normally updates this same promoted row before exiting. Updating by
+ * its per-fire primary key means earlier terminal rows from the shared daily
+ * AgentCore session cannot suppress a later task's startup-failure repair.
+ */
+export async function updatePromotedRunTerminal(
   config: RunTelemetryConfig,
   rdsDataClient: RunTelemetryRdsClient,
   params: ScheduledRunRecord,
@@ -124,30 +247,35 @@ export async function writeTerminalRunIfMissing(
       resourceArn: config.databaseResourceArn,
       secretArn: config.databaseSecretArn,
       database: config.databaseName,
-      sql: `INSERT INTO agent_scheduled_runs
-              (user_id, schedule_id, schedule_name, session_id,
-               input_tokens, output_tokens, latency_ms, status, error_message)
-            SELECT
-              :user_id, :schedule_id, :schedule_name, :session_id,
-              :input_tokens, :output_tokens, :latency_ms, :status, :error_message
-            WHERE NOT EXISTS (
-              SELECT 1
-              FROM agent_scheduled_runs
-              WHERE user_id = :user_id
-                AND schedule_id = :schedule_id
-                AND session_id = :session_id
-                AND status IN ('success', 'error')
-            )`,
-      parameters: scheduledRunParameters(params),
+      sql: `UPDATE agent_scheduled_runs
+            SET schedule_name = :schedule_name,
+                input_tokens = input_tokens + :input_tokens,
+                output_tokens = output_tokens + :output_tokens,
+                latency_ms = latency_ms + :latency_ms,
+                status = :status,
+                error_message = :error_message
+            WHERE ${promotedRunLocator(params.scheduledRunId)}
+              AND user_id = :user_id
+              AND schedule_id = :schedule_id
+              AND session_id = :session_id
+              AND status = 'promoted'`,
+      parameters: promotedRunParameters(params),
     },
   );
-  const updated = result && typeof result === 'object'
-    ? (result as { numberOfRecordsUpdated?: unknown }).numberOfRecordsUpdated
-    : undefined;
-  if (updated !== 0 && updated !== 1) {
-    throw new Error('Scheduled-run fallback returned no update count');
-  }
-  return updated === 1;
+  const updated = updatedRecordCount(result);
+  if (updated === 1) return true;
+  if (!params.scheduledRunId) return false;
+
+  if (
+    await hasExactTerminalRun(
+      config,
+      rdsDataClient,
+      { ...params, scheduledRunId: params.scheduledRunId },
+    )
+  ) return false;
+  throw new Error(
+    `Promoted scheduled run ${params.scheduledRunId} has no terminal state`,
+  );
 }
 
 export function createRunTelemetry(

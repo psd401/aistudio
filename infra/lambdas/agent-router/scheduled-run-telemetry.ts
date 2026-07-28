@@ -1,6 +1,7 @@
 export interface ScheduledJobContext {
   scheduleId?: string;
   scheduleName?: string;
+  scheduledRunId?: string;
   userEmail: string;
   sessionId: string;
 }
@@ -14,6 +15,7 @@ export interface ScheduledJobOutcome {
 }
 
 export interface ScheduledRunWrite extends ScheduledJobOutcome {
+  scheduledRunId?: string;
   userEmail: string;
   scheduleId: string;
   scheduleName?: string;
@@ -29,8 +31,8 @@ export type ScheduledRunWriter = (
 ) => Promise<void>;
 
 /**
- * Append the terminal row for a cron-promoted job. Interactive promotions have
- * no scheduleId and remain on the router's ordinary telemetry path.
+ * Update the per-fire promoted row for a cron-promoted job. Interactive
+ * promotions have no scheduleId and remain on the ordinary telemetry path.
  *
  * Telemetry cannot be allowed to turn a delivered background result into a
  * retry, so writer failures are loud but intentionally non-throwing.
@@ -47,6 +49,9 @@ export async function recordScheduledJobTerminal(
       userEmail: job.userEmail,
       scheduleId: job.scheduleId,
       ...(job.scheduleName ? { scheduleName: job.scheduleName } : {}),
+      ...(job.scheduledRunId
+        ? { scheduledRunId: job.scheduledRunId }
+        : {}),
       sessionId: job.sessionId,
       ...outcome,
       ...(outcome.errorMessage

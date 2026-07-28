@@ -56,6 +56,7 @@ const baseInput = {
   spaceName: "spaces/AAAA1111",
   scheduleId: "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
   scheduleName: "Morning dispatch",
+  scheduledRunId: "901",
   isDM: true,
   originalPrompt: "Assemble the morning dispatch.",
 }
@@ -74,6 +75,7 @@ const baseInput = {
       expect(parsed.spaceName).toBe(baseInput.spaceName)
       expect(parsed.scheduleId).toBe(baseInput.scheduleId)
       expect(parsed.scheduleName).toBe(baseInput.scheduleName)
+      expect(parsed.scheduledRunId).toBe(baseInput.scheduledRunId)
       expect(parsed.isDM).toBe(true)
       expect(parsed.promptExcerpt).toBe(baseInput.originalPrompt)
     })
