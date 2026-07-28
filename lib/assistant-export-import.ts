@@ -204,14 +204,6 @@ const RETRIEVAL_VISIBILITY_LEVELS = new Set([
 ])
 export const ASSISTANT_IMPORT_MAX_BYTES = 10 * 1024 * 1024
 
-export function assistantImportContentLengthExceedsLimit(
-  contentLength: string | null
-): boolean {
-  if (!contentLength) return false
-  const parsed = Number(contentLength)
-  return Number.isFinite(parsed) && parsed > ASSISTANT_IMPORT_MAX_BYTES
-}
-
 function validateSerializedImportSize(data: unknown): string | undefined {
   try {
     const serialized = JSON.stringify(data)

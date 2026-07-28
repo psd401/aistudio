@@ -797,9 +797,12 @@ source of truth on both surfaces; the REST routes use `assistants:write` as a
 fallback only when the catalog entry is unavailable.
 
 Import envelopes are limited to 10 MB across the admin, REST, and MCP surfaces.
-REST create and update reject an advertised oversized `Content-Length` with
-`413 PAYLOAD_TOO_LARGE` before parsing; shared validation enforces the same cap
-after parsing, including for chunked REST requests and MCP tool arguments.
+REST create/update and the MCP transport count bytes while reading the request
+stream and cancel before buffering more than the limit, so a missing or
+understated `Content-Length` cannot bypass the pre-parse bound. An advertised
+oversized length is rejected immediately. The MCP transport reserves 64 KiB for
+the JSON-RPC envelope while shared import validation keeps the assistant payload
+itself at 10 MB.
 
 Every write preserves the existing human approval gate:
 

@@ -9,7 +9,13 @@ import {
   AssistantImportServiceError,
   createAssistantsFromImport,
 } from "@/lib/assistant-architect/import-service"
-import { assistantImportContentLengthExceedsLimit } from "@/lib/assistant-export-import"
+import {
+  ASSISTANT_IMPORT_MAX_BYTES,
+} from "@/lib/assistant-export-import"
+import {
+  BoundedJsonRequestError,
+  parseBoundedJsonRequest,
+} from "@/lib/api/bounded-json-request"
 import { createLogger } from "@/lib/logger"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 
@@ -29,23 +35,24 @@ export const POST = withApiAuth(
       if (scopeError) return scopeError
     }
 
-    if (
-      assistantImportContentLengthExceedsLimit(
-        request.headers.get("content-length"),
-      )
-    ) {
-      return createErrorResponse(
-        requestId,
-        413,
-        "PAYLOAD_TOO_LARGE",
-        "Import payload too large (maximum 10 MB)",
-      )
-    }
-
     let body: unknown
     try {
-      body = await request.json()
-    } catch {
+      body = await parseBoundedJsonRequest(
+        request,
+        ASSISTANT_IMPORT_MAX_BYTES,
+      )
+    } catch (error) {
+      if (
+        error instanceof BoundedJsonRequestError &&
+        error.status === 413
+      ) {
+        return createErrorResponse(
+          requestId,
+          413,
+          "PAYLOAD_TOO_LARGE",
+          "Import payload too large (maximum 10 MB)",
+        )
+      }
       return createErrorResponse(
         requestId,
         400,

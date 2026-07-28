@@ -158,16 +158,23 @@ function jsonRequest(
   body: string,
   contentLength?: number,
 ): NextRequest {
-  return new NextRequest(url, {
+  const bytes = new TextEncoder().encode(body)
+  return {
+    url,
     method,
-    headers: {
+    headers: new Headers({
       "Content-Type": "application/json",
       ...(contentLength === undefined
         ? {}
         : { "Content-Length": String(contentLength) }),
-    },
-    body,
-  })
+    }),
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes)
+        controller.close()
+      },
+    }),
+  } as unknown as NextRequest
 }
 
 function resetMocks(): void {
@@ -344,6 +351,28 @@ describe("Assistant import REST v1 routes", () => {
 
 describe("Assistant import REST v1 payload limits", () => {
   beforeEach(resetMocks)
+
+  it("rejects an oversized streamed create payload without Content-Length", async () => {
+    const oversizedBody = `{"padding":"${"x".repeat(10 * 1024 * 1024)}"}`
+    const request = jsonRequest(
+      "http://localhost/api/v1/assistants/import",
+      "POST",
+      oversizedBody,
+    )
+
+    expect(request.headers.get("content-length")).toBeNull()
+    const response = await createRoute(
+      request,
+      { userId: 7, scopes: ["assistants:write"] },
+      "req-create-stream-too-large",
+    )
+
+    expect(response.status).toBe(413)
+    expect(await response.json()).toMatchObject({
+      error: { code: "PAYLOAD_TOO_LARGE" },
+    })
+    expect(mockCreateAssistantsFromImport).not.toHaveBeenCalled()
+  })
 
   it("rejects an oversized create payload before parsing or importing", async () => {
     const response = await createRoute(

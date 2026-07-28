@@ -1104,7 +1104,9 @@ paths:
         permissions before any assistant transaction starts.
         Model names are resolved by exact model id, then provider-family
         fallback, then the first active model; the applied mappings are returned.
-        Import envelopes are limited to 10 MB on every surface.
+        Import envelopes are limited to 10 MB on every surface. The REST
+        transport enforces the limit while reading the request stream, including
+        when `Content-Length` is missing or understated.
         Requires `assistants:write`.
       security:
         - BearerAuth: []
