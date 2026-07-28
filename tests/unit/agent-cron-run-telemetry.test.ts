@@ -215,6 +215,40 @@ describe("agent-cron promoted run terminal repair", () => {
   })
 })
 
+describe("agent-cron preflight run telemetry", () => {
+  it("never overwrites an existing fire with stale preflight telemetry", async () => {
+    const execute = jest.fn().mockResolvedValue({
+      records: [[{ stringValue: "promoted" }]],
+    })
+    const telemetry = createRunTelemetry(config, { execute })
+    const log = {
+      warn: jest.fn(),
+      error: jest.fn(),
+    } satisfies CronTelemetryLogger
+
+    await telemetry.recordPreflightRun(
+      {
+        fireKey: "schedule-fire#schedule-id#2026-07-28T15:00:00.000Z",
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        sessionId: "reference-session",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 12,
+        status: "skipped",
+        errorMessage: "Schedule reference rejected: version-mismatch",
+      },
+      log,
+    )
+
+    expect(execute).toHaveBeenCalledTimes(1)
+    const input = execute.mock.calls[0][0]
+    expect(input.sql).toContain("DO NOTHING")
+    expect(input.sql).not.toContain("DO UPDATE")
+    expect(input.sql).toContain("existing.fire_key = :fire_key")
+  })
+})
+
 describe("agent-cron ordinary run telemetry", () => {
   it("propagates a strict run write failure at acknowledgement boundaries", async () => {
     const execute = jest.fn().mockRejectedValue(new Error("RDS unavailable"))

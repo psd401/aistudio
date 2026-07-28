@@ -11,11 +11,13 @@ const fireKey =
   `schedule-fire#${event.scheduleId}#${event.scheduledTime}`
 
 function harness() {
+  const recordPreflightRun = jest.fn().mockResolvedValue(undefined)
   const recordRun = jest.fn().mockResolvedValue(undefined)
   const recordRunStrict = jest.fn().mockResolvedValue(undefined)
   const recordCronFailure = jest.fn().mockResolvedValue(undefined)
   const recordCronFailureStrict = jest.fn().mockResolvedValue(undefined)
   const telemetry = {
+    recordPreflightRun,
     recordRun,
     recordRunStrict,
     recordCronFailure,
@@ -25,7 +27,7 @@ function harness() {
     warn: jest.fn(),
     error: jest.fn(),
   }
-  return { telemetry, recordRun, log }
+  return { telemetry, recordPreflightRun, log }
 }
 
 describe("agent-cron pre-invocation telemetry", () => {
@@ -35,7 +37,7 @@ describe("agent-cron pre-invocation telemetry", () => {
     "version-mismatch",
     "disabled",
   ] as const)("records %s schedule references as skipped", async (reason) => {
-    const { telemetry, recordRun, log } = harness()
+    const { telemetry, recordPreflightRun, log } = harness()
 
     await expect(
       runSchedulePreflight(event, {
@@ -50,7 +52,7 @@ describe("agent-cron pre-invocation telemetry", () => {
       loaded: { authorized: false, reason },
       referencedScheduleId: event.scheduleId,
     })
-    expect(recordRun).toHaveBeenCalledWith(
+    expect(recordPreflightRun).toHaveBeenCalledWith(
       expect.objectContaining({
         userEmail: event.ownerEmail,
         scheduleId: event.scheduleId,
@@ -63,7 +65,7 @@ describe("agent-cron pre-invocation telemetry", () => {
   })
 
   it("records and rethrows DynamoDB lookup failures for retry and alarms", async () => {
-    const { telemetry, recordRun, log } = harness()
+    const { telemetry, recordPreflightRun, log } = harness()
     const lookupError = new Error(
       "DynamoDB unavailable for owner@psd401.net token=top-secret",
     )
@@ -80,7 +82,7 @@ describe("agent-cron pre-invocation telemetry", () => {
         log,
       }),
     ).rejects.toThrow(lookupError)
-    expect(recordRun).toHaveBeenCalledWith(
+    expect(recordPreflightRun).toHaveBeenCalledWith(
       expect.objectContaining({
         userEmail: event.ownerEmail,
         scheduleId: event.scheduleId,

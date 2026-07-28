@@ -55,7 +55,7 @@ export async function runSchedulePreflight(
     options.log.error('Authoritative schedule lookup failed', {
       error: detail,
     });
-    await options.telemetry.recordRun(
+    await options.telemetry.recordPreflightRun(
       {
         fireKey: options.fireKey,
         userEmail: referencedOwner,
@@ -77,7 +77,7 @@ export async function runSchedulePreflight(
     options.log.warn('Schedule reference rejected before invocation', {
       reason: loaded.reason,
     });
-    await options.telemetry.recordRun(
+    await options.telemetry.recordPreflightRun(
       {
         fireKey: options.fireKey,
         userEmail: referencedOwner,

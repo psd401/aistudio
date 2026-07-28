@@ -50,6 +50,10 @@ export interface RunTelemetryRdsClient {
 }
 
 export interface RunTelemetry {
+  recordPreflightRun(
+    params: ScheduledRunRecord,
+    log: CronTelemetryLogger,
+  ): Promise<void>;
   recordRun(
     params: ScheduledRunRecord,
     log: CronTelemetryLogger,
@@ -183,6 +187,58 @@ export async function writeScheduledRun(
       parameters: scheduledRunParameters(params),
     },
   );
+}
+
+/**
+ * Insert preflight telemetry only when this Scheduler occurrence has no row.
+ * A stale duplicate can fail authoritative lookup after the winning invocation
+ * already promoted or completed; it must never rewrite that existing fire.
+ * Return the durable status so failure mirroring is attempted only for the
+ * occurrence state that actually remains visible.
+ */
+export async function writePreflightRun(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  params: ScheduledRunRecord,
+): Promise<string> {
+  if (!config.databaseResourceArn || !config.databaseSecretArn) {
+    throw new Error('Scheduled-run telemetry database is not configured');
+  }
+  const result = await rdsDataClient.execute(
+    {
+      resourceArn: config.databaseResourceArn,
+      secretArn: config.databaseSecretArn,
+      database: config.databaseName,
+      sql: `WITH inserted AS (
+              INSERT INTO agent_scheduled_runs
+                (user_id, schedule_id, schedule_name, session_id,
+                 input_tokens, output_tokens, latency_ms, status,
+                 error_message, fire_key)
+              VALUES
+                (:user_id, :schedule_id, :schedule_name, :session_id,
+                 :input_tokens, :output_tokens, :latency_ms, :status,
+                 :error_message, :fire_key)
+              ON CONFLICT (fire_key)
+                WHERE fire_key IS NOT NULL
+              DO NOTHING
+              RETURNING status
+            )
+            SELECT status FROM inserted
+            UNION ALL
+            SELECT existing.status
+            FROM agent_scheduled_runs AS existing
+            WHERE :fire_key IS NOT NULL
+              AND existing.fire_key = :fire_key
+              AND NOT EXISTS (SELECT 1 FROM inserted)
+            LIMIT 1`,
+      parameters: scheduledRunParameters(params),
+    },
+  );
+  const storedStatus = firstStringValue(result);
+  if (!storedStatus) {
+    throw new Error('Preflight telemetry returned no durable fire status');
+  }
+  return storedStatus;
 }
 
 /**
@@ -443,6 +499,66 @@ export async function writeCronFailure(
   );
 }
 
+type CronFailureRecorder = (
+  params: CronFailureRecord,
+  log: CronTelemetryLogger,
+) => Promise<void>;
+
+function preflightFailureRecord(
+  params: ScheduledRunRecord,
+): CronFailureRecord {
+  return {
+    userEmail: params.userEmail,
+    sessionId: params.sessionId,
+    scheduleId: params.scheduleId,
+    scheduleName: params.scheduleName,
+    errorMessage: params.errorMessage ?? null,
+    severity: params.failure?.severity,
+    context: params.failure?.context ?? { phase: 'schedule-preflight' },
+    fireKey: params.fireKey,
+  };
+}
+
+function createPreflightRecorder(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  databaseConfigured: boolean,
+  recordCronFailure: CronFailureRecorder,
+): RunTelemetry['recordPreflightRun'] {
+  return async (params, log) => {
+    const failure = preflightFailureRecord(params);
+    const hasFailure = params.status === 'error' || Boolean(params.failure);
+    if (!databaseConfigured) {
+      if (hasFailure) await recordCronFailure(failure, log);
+      log.warn('Database not configured — skipping preflight telemetry', {
+        scheduleId: params.scheduleId,
+      });
+      return;
+    }
+
+    let storedStatus: string;
+    try {
+      storedStatus = await writePreflightRun(config, rdsDataClient, params);
+    } catch (error) {
+      if (hasFailure) await recordCronFailure(failure, log);
+      log.error('Failed to write preflight run telemetry', {
+        scheduleId: params.scheduleId,
+        error: sanitizeDiagnostic(
+          error instanceof Error ? error.message : String(error),
+        ),
+      });
+      return;
+    }
+
+    // Repair a missing mirror on retry only when the durable row is itself an
+    // error. A stale lookup failure must not create a failure beside an
+    // existing promoted or successful occurrence.
+    if (hasFailure && storedStatus === 'error') {
+      await recordCronFailure(failure, log);
+    }
+  };
+}
+
 export function createRunTelemetry(
   config: RunTelemetryConfig,
   rdsDataClient: RunTelemetryRdsClient,
@@ -498,6 +614,13 @@ export function createRunTelemetry(
     logCronFailure(params, log);
     await writeCronFailure(config, rdsDataClient, params);
   }
+
+  const recordPreflightRun = createPreflightRecorder(
+    config,
+    rdsDataClient,
+    databaseConfigured,
+    recordCronFailure,
+  );
 
   async function recordRun(
     params: ScheduledRunRecord,
@@ -564,6 +687,7 @@ export function createRunTelemetry(
   }
 
   return {
+    recordPreflightRun,
     recordRun,
     recordRunStrict,
     recordCronFailure,
