@@ -72,6 +72,7 @@ import {
   claimScheduleFire,
   completeScheduleFire,
   releaseScheduleFire,
+  resolveScheduleLockContention,
   scheduleFireIdentity,
   type ScheduleFireClaim,
   type ScheduleFireFailure,
@@ -1200,23 +1201,23 @@ async function handleScheduleLockContention(
   failure: JobLockFailure,
   fireClaim: OwnedScheduleFireClaim | null,
 ): Promise<HandlerResult> {
-  if (!fireClaim) {
-    const retryFailure: JobLockFailure = {
-      ...failure,
-      severity: 'error',
-      errorMessage:
-        'Legacy scheduled fire contended; retrying without acknowledging',
-    };
-    await recordScheduleGuardFailure(context, retryFailure, 'error');
-    throw new JobLockAcquisitionError(retryFailure);
+  const resolution = resolveScheduleLockContention(
+    failure,
+    fireClaim,
+  );
+  if (resolution.action === 'retry') {
+    await recordScheduleGuardFailure(context, resolution.failure, 'error');
+    throw new JobLockAcquisitionError(resolution.failure);
   }
   const result = await recordScheduleGuardFailure(
     context,
-    failure,
+    resolution.failure,
     'skipped',
   );
+  // This is an intentional coalesce, not an unobserved success: the skipped
+  // run/failure is durable before the distinct fire is marked complete.
   await completeScheduleFire(
-    fireClaim,
+    resolution.fireClaim,
     SESSION_LOCKS_TABLE,
     scheduleFireDynamoClient,
     context.log,

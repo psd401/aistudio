@@ -248,6 +248,7 @@ export function scheduleTransactionToken(
 function publicSchedule(
   record: AgentScheduleRecord,
   lastRun?: AgentScheduleLastRun,
+  runEnrichmentAvailable = true,
 ): PublicAgentSchedule {
   return {
     scheduleId: record.scheduleId,
@@ -260,7 +261,9 @@ function publicSchedule(
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     lastRunAt: lastRun?.createdAt.toISOString() ?? null,
-    lastRunStatus: lastRun?.status ?? null,
+    lastRunStatus: runEnrichmentAvailable
+      ? lastRun?.status ?? null
+      : "unknown",
     lastRunError: lastRun?.errorMessage
       ? lastRun.errorMessage.slice(0, LAST_RUN_ERROR_MAX_LENGTH)
       : null,
@@ -679,19 +682,25 @@ export class AgentScheduleService {
       .map((item) => parseRecord(item, ownerEmail))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
     let lastRuns = new Map<string, AgentScheduleLastRun>();
+    let runEnrichmentAvailable = true;
     try {
       lastRuns = await this.runReader.latestBySchedule(
         ownerEmail,
         records.map((record) => record.scheduleId),
       );
     } catch (error) {
+      runEnrichmentAvailable = false;
       log.warn("Latest schedule run enrichment unavailable", {
         scheduleCount: records.length,
         error: error instanceof Error ? error.message : String(error),
       });
     }
     return records.map((record) =>
-      publicSchedule(record, lastRuns.get(record.scheduleId)),
+      publicSchedule(
+        record,
+        lastRuns.get(record.scheduleId),
+        runEnrichmentAvailable,
+      ),
     );
   }
 

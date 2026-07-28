@@ -21,7 +21,9 @@ function renderLastRunStatus(result) {
         lastRunStatus:
           typeof schedule.lastRunAt === 'string'
             ? schedule.lastRunStatus || 'unknown'
-            : 'never run',
+            : schedule.lastRunStatus === 'unknown'
+              ? 'unknown'
+              : 'never run',
       };
     }),
   };

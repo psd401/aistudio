@@ -2,6 +2,7 @@ import {
   claimScheduleFire,
   completeScheduleFire,
   releaseScheduleFire,
+  resolveScheduleLockContention,
   scheduleFireIdentity,
   type ScheduleFireDynamoClient,
 } from "../../infra/lambdas/agent-cron/schedule-fire"
@@ -230,5 +231,43 @@ describe("agent-cron scheduled fire durability", () => {
     ).rejects.toThrow(
       "Schedule fire cleanup failed: delete unavailable; update unavailable"
     )
+  })
+})
+
+describe("agent-cron daily-session contention policy", () => {
+  const contention = {
+    acquired: false as const,
+    phase: "lock-contention" as const,
+    severity: "warn" as const,
+    errorMessage: "Scheduled turn lock is already held",
+  }
+  const fireClaim = {
+    claimed: true as const,
+    identity,
+    claimToken: "owned-token",
+  }
+
+  it("coalesces a distinct identified fire with explicit telemetry detail", () => {
+    expect(resolveScheduleLockContention(contention, fireClaim)).toEqual({
+      action: "coalesce",
+      fireClaim,
+      failure: {
+        ...contention,
+        errorMessage:
+          "Scheduled fire was coalesced because its daily session is still active",
+      },
+    })
+  })
+
+  it("retries legacy contention that could be a same-fire redelivery", () => {
+    expect(resolveScheduleLockContention(contention, null)).toEqual({
+      action: "retry",
+      failure: {
+        ...contention,
+        severity: "error",
+        errorMessage:
+          "Legacy scheduled fire contended; retrying without acknowledging",
+      },
+    })
   })
 })

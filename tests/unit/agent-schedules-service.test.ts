@@ -324,7 +324,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part2() {it("rolls bac
     })
   })
 
-  it("returns schedules without run enrichment when telemetry is unavailable", async () => {
+  it("marks run status unknown when telemetry is unavailable", async () => {
     const { service, dynamoSend, latestBySchedule } = harness()
     dynamoSend.mockResolvedValueOnce({ Items: [scheduleRecord()] })
     latestBySchedule.mockRejectedValueOnce(new Error("Aurora unavailable"))
@@ -333,7 +333,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part2() {it("rolls bac
       expect.objectContaining({
         scheduleId: SCHEDULE_ID,
         lastRunAt: null,
-        lastRunStatus: null,
+        lastRunStatus: "unknown",
         lastRunError: null,
       }),
     ])

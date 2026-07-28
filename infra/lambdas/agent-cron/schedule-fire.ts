@@ -5,6 +5,7 @@ import type {
   UpdateCommandInput,
 } from '@aws-sdk/lib-dynamodb';
 import * as crypto from 'node:crypto';
+import type { JobLockFailure } from './job-lock';
 import type { ScheduleReferenceEvent } from './schedule-record';
 
 const RUNNING_LEASE_SECONDS = 16 * 60;
@@ -45,6 +46,50 @@ export type ScheduleFireClaim =
       claimed: false;
       failure: ScheduleFireFailure;
     };
+
+export type ScheduleLockContentionResolution =
+  | {
+      action: 'coalesce';
+      failure: JobLockFailure;
+      fireClaim: Extract<ScheduleFireClaim, { claimed: true }>;
+    }
+  | {
+      action: 'retry';
+      failure: JobLockFailure;
+    };
+
+/**
+ * Distinct fires share a daily AgentCore session. If its prior background turn
+ * is still active, queueing every high-frequency fire would deliver stale
+ * prompts in a burst after the lock clears. Coalesce that distinct fire and
+ * preserve the skip in telemetry. Legacy targets have no fire identity, so
+ * contention may be a retry of the same fire and must remain retryable.
+ */
+export function resolveScheduleLockContention(
+  failure: JobLockFailure,
+  fireClaim: Extract<ScheduleFireClaim, { claimed: true }> | null,
+): ScheduleLockContentionResolution {
+  if (fireClaim) {
+    return {
+      action: 'coalesce',
+      fireClaim,
+      failure: {
+        ...failure,
+        errorMessage:
+          'Scheduled fire was coalesced because its daily session is still active',
+      },
+    };
+  }
+  return {
+    action: 'retry',
+    failure: {
+      ...failure,
+      severity: 'error',
+      errorMessage:
+        'Legacy scheduled fire contended; retrying without acknowledging',
+    },
+  };
+}
 
 function errorName(error: unknown): string | undefined {
   return (error as { name?: string } | null)?.name;

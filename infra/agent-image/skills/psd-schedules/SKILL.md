@@ -50,7 +50,8 @@ node /opt/psd-skills/psd-schedules/list.js
 
 Each listed schedule includes its last-run time, status, and truncated error
 detail when applicable. Schedules that have not fired yet report
-`lastRunStatus: "never run"`.
+`lastRunStatus: "never run"`. If run telemetry is temporarily unavailable,
+the status is `"unknown"` instead of being reported as never run.
 
 ### `update_schedule` — change fields on an existing schedule
 
