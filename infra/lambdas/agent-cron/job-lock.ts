@@ -1,6 +1,7 @@
 import type {
   DeleteCommandInput,
   PutCommandInput,
+  UpdateCommandInput,
 } from '@aws-sdk/lib-dynamodb';
 import * as crypto from 'node:crypto';
 
@@ -13,11 +14,19 @@ export interface JobLockDynamoClient {
   delete(input: DeleteCommandInput): Promise<unknown>;
 }
 
+export interface JobLockLeaseDynamoClient {
+  update(input: UpdateCommandInput): Promise<unknown>;
+}
+
 export type JobLockResult =
   | { acquired: true; lockToken: string }
   | {
       acquired: false;
-      phase: 'lock-config' | 'lock-contention' | 'lock-acquire';
+      phase:
+        | 'lock-config'
+        | 'lock-contention'
+        | 'lock-acquire'
+        | 'lock-renew';
       severity: 'error' | 'warn';
       errorMessage: string;
     };
@@ -132,6 +141,45 @@ export async function releaseJobLock(
     log.warn('Job lock release failed; relying on TTL backstop', {
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+}
+
+export async function renewJobLock(
+  sessionId: string,
+  lockToken: string,
+  tableName: string,
+  dynamoClient: JobLockLeaseDynamoClient,
+  log: JobLockLogger,
+): Promise<JobLockResult> {
+  if (!tableName) {
+    return {
+      acquired: false,
+      phase: 'lock-config',
+      severity: 'error',
+      errorMessage: 'SESSION_LOCKS_TABLE is not configured',
+    };
+  }
+  try {
+    await dynamoClient.update({
+      TableName: tableName,
+      Key: { sessionId },
+      UpdateExpression: 'SET expiresAt = :expiresAt',
+      ConditionExpression: 'lockToken = :token',
+      ExpressionAttributeValues: {
+        ':expiresAt': Math.floor(Date.now() / 1000) + 16 * 60,
+        ':token': lockToken,
+      },
+    });
+    return { acquired: true, lockToken };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    log.warn('Scheduled job lock renewal failed', { error: detail });
+    return {
+      acquired: false,
+      phase: 'lock-renew',
+      severity: 'error',
+      errorMessage: `Session lock renewal failed: ${detail}`,
+    };
   }
 }
 

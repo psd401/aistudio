@@ -324,6 +324,21 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part2() {it("rolls bac
     })
   })
 
+  it("returns schedules without run enrichment when telemetry is unavailable", async () => {
+    const { service, dynamoSend, latestBySchedule } = harness()
+    dynamoSend.mockResolvedValueOnce({ Items: [scheduleRecord()] })
+    latestBySchedule.mockRejectedValueOnce(new Error("Aurora unavailable"))
+
+    await expect(service.list(OWNER)).resolves.toEqual([
+      expect.objectContaining({
+        scheduleId: SCHEDULE_ID,
+        lastRunAt: null,
+        lastRunStatus: null,
+        lastRunError: null,
+      }),
+    ])
+  })
+
   it("seeds legacy quota from all existing rows before admitting a create", async () => {
     const { service, dynamoSend, schedulerSend } = harness()
     const legacy = Array.from({ length: config.maxSchedulesPerOwner }, (_, i) =>

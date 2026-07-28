@@ -60,6 +60,7 @@ import {
 } from './schedule-record';
 import {
   JobLockAcquisitionError,
+  renewJobLock,
   runWithJobLock,
   type JobLockFailure,
   type LockedJobExecution,
@@ -144,13 +145,13 @@ const jobLockDynamoClient = {
     dynamoClient.send(new PutCommand(input)),
   delete: (input: ConstructorParameters<typeof DeleteCommand>[0]) =>
     dynamoClient.send(new DeleteCommand(input)),
+  update: (input: ConstructorParameters<typeof UpdateCommand>[0]) =>
+    dynamoClient.send(new UpdateCommand(input)),
 };
 const scheduleFireDynamoClient = {
   ...jobLockDynamoClient,
   get: (input: ConstructorParameters<typeof GetCommand>[0]) =>
     dynamoClient.send(new GetCommand(input)),
-  update: (input: ConstructorParameters<typeof UpdateCommand>[0]) =>
-    dynamoClient.send(new UpdateCommand(input)),
 };
 const scheduleRecordDynamoClient = {
   get: (input: ConstructorParameters<typeof GetCommand>[0]) =>
@@ -666,7 +667,11 @@ type PromotionResult =
   | { promoted: true }
   | {
       promoted: false;
-      phase: 'job-runner-config' | 'run-task';
+      phase:
+        | 'job-runner-config'
+        | 'lock-config'
+        | 'lock-renew'
+        | 'run-task';
       severity: 'error' | 'warn';
       errorMessage: string;
     };
@@ -766,6 +771,21 @@ async function promoteScheduledTurnToJob(
       phase: 'job-runner-config',
       severity: 'error',
       errorMessage: 'Background job runner configuration is incomplete',
+    };
+  }
+  const renewal = await renewJobLock(
+    input.sessionId,
+    lockToken,
+    SESSION_LOCKS_TABLE,
+    jobLockDynamoClient,
+    log,
+  );
+  if (!renewal.acquired) {
+    return {
+      promoted: false,
+      phase: renewal.phase === 'lock-config' ? 'lock-config' : 'lock-renew',
+      severity: renewal.severity,
+      errorMessage: renewal.errorMessage,
     };
   }
   try {
@@ -1079,7 +1099,6 @@ async function recordScheduleGuardFailure(
   context: Omit<LockedScheduleContext, 'lambdaContext'>,
   failure: ScheduleGuardFailure,
   status: HandlerResult['status'],
-  mirrorFailure = true,
 ): Promise<HandlerResult> {
   const { schedule, scheduleName, sessionId, startTime, log } = context;
   await runTelemetry.recordRun(
@@ -1093,12 +1112,10 @@ async function recordScheduleGuardFailure(
       latencyMs: Date.now() - startTime,
       status,
       errorMessage: failure.errorMessage,
-      failure: mirrorFailure
-        ? {
-            severity: failure.severity,
-            context: { phase: failure.phase },
-          }
-        : undefined,
+      failure: {
+        severity: failure.severity,
+        context: { phase: failure.phase },
+      },
     },
     log,
   );
@@ -1128,12 +1145,20 @@ async function acquireScheduleFireClaim(
   );
   if (claim.claimed) return claim;
 
+  if (claim.failure.phase === 'fire-completed') {
+    context.log.info('Completed duplicate schedule fire suppressed', {
+      scheduleId: context.schedule.scheduleId,
+    });
+    return {
+      status: 'skipped',
+      scheduleId: context.schedule.scheduleId,
+    };
+  }
   const status = claim.failure.retryable ? 'error' : 'skipped';
   const result = await recordScheduleGuardFailure(
     context,
     claim.failure,
     status,
-    claim.failure.phase !== 'fire-completed',
   );
   if (claim.failure.retryable) {
     throw new Error(claim.failure.errorMessage);

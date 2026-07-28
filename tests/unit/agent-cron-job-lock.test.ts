@@ -1,5 +1,6 @@
 import {
   releaseJobLock,
+  renewJobLock,
   runWithJobLock,
   tryAcquireJobLock,
 } from "../../infra/lambdas/agent-cron/job-lock"
@@ -105,6 +106,32 @@ describe("agent-cron per-schedule promotion lock", () => {
       ConditionExpression: "lockToken = :token",
       ExpressionAttributeValues: { ":token": "owned-token" },
     })
+  })
+
+  it("renews the transferred lock before launching the background runner", async () => {
+    const update = jest.fn().mockResolvedValue({})
+
+    await expect(
+      renewJobLock(
+        SESSION_ID,
+        "owned-token",
+        TABLE,
+        { update },
+        logger(),
+      ),
+    ).resolves.toEqual({ acquired: true, lockToken: "owned-token" })
+
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        TableName: TABLE,
+        Key: { sessionId: SESSION_ID },
+        UpdateExpression: "SET expiresAt = :expiresAt",
+        ConditionExpression: "lockToken = :token",
+        ExpressionAttributeValues: expect.objectContaining({
+          ":token": "owned-token",
+        }),
+      }),
+    )
   })
 
   it("releases the pre-invocation lock after a normal scheduled turn", async () => {

@@ -34,6 +34,7 @@ import {
   type AgentScheduleLastRun,
   type AgentScheduleRunReader,
 } from "@/lib/agent-schedules/run-reader";
+import { createLogger } from "@/lib/logger";
 
 const DEFAULT_TIMEZONE = "America/Los_Angeles";
 const DEFAULT_MAX_SCHEDULES_PER_OWNER = 50;
@@ -42,6 +43,7 @@ const SCHEDULE_MAXIMUM_EVENT_AGE_SECONDS = 60 * 60;
 const SCHEDULE_MAXIMUM_RETRY_ATTEMPTS = 2;
 const GOOGLE_IDENTITY_RE = /^users\/\d+$/;
 const DM_SPACE_RE = /^spaces\/[\w-]{1,256}$/;
+const log = createLogger({ module: "agent-schedules-service" });
 type ScheduleTransactItems = NonNullable<
   ConstructorParameters<typeof TransactWriteCommand>[0]["TransactItems"]
 >;
@@ -676,10 +678,18 @@ export class AgentScheduleService {
       )
       .map((item) => parseRecord(item, ownerEmail))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-    const lastRuns = await this.runReader.latestBySchedule(
-      ownerEmail,
-      records.map((record) => record.scheduleId),
-    );
+    let lastRuns = new Map<string, AgentScheduleLastRun>();
+    try {
+      lastRuns = await this.runReader.latestBySchedule(
+        ownerEmail,
+        records.map((record) => record.scheduleId),
+      );
+    } catch (error) {
+      log.warn("Latest schedule run enrichment unavailable", {
+        scheduleCount: records.length,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     return records.map((record) =>
       publicSchedule(record, lastRuns.get(record.scheduleId)),
     );
