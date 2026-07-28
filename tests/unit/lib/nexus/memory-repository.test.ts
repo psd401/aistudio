@@ -140,5 +140,10 @@ describe("Nexus memory repository deduplication", () => {
     }
     const renderedNearest = new PgDialect().sqlToQuery(nearestStatement)
     expect(renderedNearest.sql).toContain("FOR UPDATE")
+    expect(mockExecuteTransaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      "saveNexusUserMemory",
+      { isolationLevel: "read committed" },
+    )
   })
 })

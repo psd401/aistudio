@@ -124,6 +124,8 @@ export const drizzleMemoryRepository: MemoryRepository = {
       async (tx) => {
         // FOR UPDATE cannot lock a missing nearest row, so serialize the
         // check-then-insert decision per user even when the memory set is empty.
+        // READ COMMITTED below is intentional: after waiting for this lock, the
+        // nearest-row query must take a fresh snapshot that sees the prior save.
         await tx.execute(
           sql`SELECT pg_advisory_xact_lock(
             ${NEXUS_MEMORY_DEDUP_LOCK_NAMESPACE},
@@ -189,7 +191,7 @@ export const drizzleMemoryRepository: MemoryRepository = {
         return { memory: inserted, action: "inserted" as const }
       },
       "saveNexusUserMemory",
-      { isolationLevel: "serializable" },
+      { isolationLevel: "read committed" },
     )
   },
 
