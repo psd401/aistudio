@@ -3629,6 +3629,14 @@ async function invokeOwnerAgentWithDependencies(
     return null;
   }
 
+  // Preserve the existing owner-turn contract: uploaded files are persisted
+  // even when a busy main job means a shared-space turn cannot run yet.
+  await dependencies.fetchChatUploads(
+    human.attachments,
+    user.workspacePrefix,
+    log
+  );
+
   let sessionId = mainSessionId;
   let prompt = messageText;
   let responsePrefix = '';
@@ -3670,11 +3678,6 @@ async function invokeOwnerAgentWithDependencies(
     }
   }
 
-  await dependencies.fetchChatUploads(
-    human.attachments,
-    user.workspacePrefix,
-    log
-  );
   const lockToken = isAside
     ? await dependencies.tryAcquireSessionLock(sessionId, log)
     : await dependencies.waitForSessionLock(sessionId, log);

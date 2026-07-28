@@ -488,6 +488,52 @@ describe("owner-DM aside fallback, scope, and responses", () => {
     expect(invokedPrompt).toBe("/btw This must not use the sidecar")
   })
 
+  test("persists shared-space attachments before a busy main-job reply", async () => {
+    const human = ownerHuman({
+      spaceType: "ROOM",
+      messageText: "Please use this file",
+    })
+    human.attachments.push({
+      name: "notes.txt",
+      mimeType: "text/plain",
+      source: "chat-upload",
+      attachmentResourceName: "spaces/owner-room/messages/one/attachments/one",
+    })
+    let fetchedAttachments: OwnerHuman["attachments"] | undefined
+    let fetchedWorkspacePrefix = ""
+    const responses: string[] = []
+
+    const turn = await invokeOwnerAgentWithDependencies(
+      human,
+      OWNER_USER,
+      human.messageText,
+      TEST_LOG,
+      ownerDependencies({
+        fetchChatUploads: async (attachments, workspacePrefix) => {
+          fetchedAttachments = attachments
+          fetchedWorkspacePrefix = workspacePrefix
+        },
+        isJobLockActive: async () => true,
+        waitForSessionLock: async () => {
+          throw new Error("busy shared-space turns must not wait for a lock")
+        },
+        invokeAgentCore: async () => {
+          throw new Error("busy shared-space turns must not invoke the agent")
+        },
+        sendGoogleChatResponse: async (_space, _thread, text) => {
+          responses.push(text)
+        },
+      })
+    )
+
+    expect(turn).toBeNull()
+    expect(fetchedAttachments).toBe(human.attachments)
+    expect(fetchedWorkspacePrefix).toBe(OWNER_USER.workspacePrefix)
+    expect(responses).toEqual([
+      "I'm still working on your earlier task in the background — I'll post the result here when it's done.",
+    ])
+  })
+
   test("marks explicit aside replies and preserves the aside id for promotion", async () => {
     const human = ownerHuman({ messageText: "/btw Check deployment status" })
     const turn = await invokeOwnerAgentWithDependencies(
