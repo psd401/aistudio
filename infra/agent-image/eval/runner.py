@@ -25,9 +25,17 @@ from pathlib import Path
 from typing import Protocol, TextIO
 
 if __package__:
-    from .probe import build_invocation_payload, extract_last_result_event
+    from .probe import (
+        ProbeProtocolError,
+        build_invocation_payload,
+        extract_last_result_event,
+    )
 else:
-    from probe import build_invocation_payload, extract_last_result_event
+    from probe import (
+        ProbeProtocolError,
+        build_invocation_payload,
+        extract_last_result_event,
+    )
 
 LOGGER = logging.getLogger("agent_eval")
 DEFAULT_OWNER_EMAIL = "canary@build-gate.invalid"
@@ -503,7 +511,10 @@ class DockerRuntime:
             raise EvalRunnerError(
                 f"invocation curl exited {response.returncode}: {detail[-2000:]}"
             )
-        return extract_last_result_event(response.stdout)
+        try:
+            return extract_last_result_event(response.stdout)
+        except ProbeProtocolError as error:
+            raise EvalRunnerError(f"invalid invocation response: {error}") from error
 
     def _log_tail(self) -> None:
         if self._container_id is None:

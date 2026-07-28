@@ -524,6 +524,14 @@ class FailedRemoveExecutor(RecordingExecutor):
         return result
 
 
+class MissingResultExecutor(RecordingExecutor):
+    def run(self, arguments, **options):
+        result = super().run(arguments, **options)
+        if "http://127.0.0.1:8080/invocations" in tuple(arguments):
+            return runner.CommandResult(0, 'data: {"type":"start"}\n', "")
+        return result
+
+
 class SequenceCredentialProvider:
     def __init__(self, credentials: list[runner.AwsCredentials]) -> None:
         self.credentials = credentials
@@ -694,6 +702,39 @@ class DockerRuntimeTests(unittest.TestCase):
             f"X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: {session_id}",
             invocation_call,
         )
+
+    def test_missing_result_is_reported_as_a_runner_error(self):
+        runtime = runner.DockerRuntime(
+            MissingResultExecutor(),
+            "candidate@sha256:digest",
+            "linux/arm64",
+            {"APP_BASE_URL": "https://dev.example.invalid"},
+            SequenceCredentialProvider([aws_credentials()]),
+            boot_timeout_seconds=120,
+            invocation_timeout_seconds=900,
+            poll_interval_seconds=0,
+            name_prefix="psd-agent-eval-issue-1422-test",
+        )
+        runtime.prepare()
+        session_id = str("a" * 36)
+        authority = runner.InvocationAuthority(
+            invocation_context="context",
+            request_proof_key="proof",
+            owner_email="canary@build-gate.invalid",
+            session_id=session_id,
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+        )
+
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "invalid invocation response: invocation stream contained no result event",
+        ):
+            runtime.invoke(
+                runner.Task("task", "core", "L0", "pure", "prompt", 1),
+                session_id,
+                authority,
+            )
+        runtime.stop()
 
     def test_rotated_credentials_recycle_shared_runtime_before_next_trial(self):
         executor = RecordingExecutor()
