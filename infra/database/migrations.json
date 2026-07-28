@@ -150,6 +150,7 @@
     "157-rooms.sql",
     "158-student-rooms-navigation.sql",
     "159-unified-content-concurrency-recovery.sql",
-    "160-unified-content-migration-source-eligibility.sql"
+    "160-unified-content-migration-source-eligibility.sql",
+    "161-atrium-sop-collection.sql"
   ]
 }

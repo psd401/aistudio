@@ -223,6 +223,98 @@ function parseGrants(value, label = 'grants') {
   return grants.length > 0 ? grants : undefined;
 }
 
+/**
+ * The base64url SHA-256 digest the Atrium asset API expects (`sha256` on both
+ * initiate and complete). NOT base64 — the server validates
+ * /^[A-Za-z0-9_-]{43}$/ and re-derives the same digest from the uploaded bytes,
+ * so a padded/standard-alphabet digest is rejected at initiate.
+ */
+function sha256Base64Url(bytes) {
+  return require('node:crypto').createHash('sha256').update(bytes).digest('base64url');
+}
+
+/**
+ * Identify an image by its MAGIC BYTES, not its filename. The asset API accepts
+ * only PNG/JPEG/WebP and re-derives the true type server-side during
+ * normalization, so trusting a `.png` suffix on JPEG bytes would reserve an
+ * upload that then fails completion with an opaque rejection. Returns null for
+ * anything else so the caller can refuse with a clear message.
+ */
+function detectImageContentType(bytes) {
+  const b = Buffer.from(bytes);
+  if (b.length >= 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))) {
+    return 'image/png';
+  }
+  if (b.length >= 3 && b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) {
+    return 'image/jpeg';
+  }
+  if (
+    b.length >= 12 &&
+    b.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    b.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+  return null;
+}
+
+/**
+ * PUT raw bytes at a presigned S3 URL. This is the ONE call in this skill that
+ * does not go through the loopback broker: the reservation returns a
+ * short-lived, pre-signed, checksum-pinned URL, and the agent runtime has
+ * outbound HTTPS. Routing megabytes of image through the broker instead would
+ * put them through a JSON envelope for no gain.
+ *
+ * The URL is never author-supplied — it comes straight back from the Atrium
+ * initiate response — and only https is accepted, so this cannot be steered at
+ * an internal endpoint by document content.
+ */
+async function putPresignedBytes(url, headers, bytes, timeoutMs = REQUEST_TIMEOUT_MS) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    fail('asset upload URL returned by AI Studio is not a valid URL', 12);
+  }
+  if (parsed.protocol !== 'https:') {
+    fail(`asset upload URL must be https, got ${parsed.protocol}`, 12);
+  }
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method: 'PUT',
+      headers,
+      body: bytes,
+      redirect: 'error',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      fail(`asset upload timed out after ${timeoutMs}ms`, 12);
+    }
+    fail(`network error uploading asset bytes: ${err.message}`, 12);
+  }
+  if (!resp.ok) {
+    // Read the body for context BEFORE deciding — S3 returns a descriptive XML
+    // error (SignatureDoesNotMatch, EntityTooLarge, …) that is the only clue.
+    let detail = '';
+    try {
+      detail = (await resp.text()).slice(0, 512);
+    } catch {
+      /* body already consumed / not readable */
+    }
+    emit({
+      status: 'error',
+      http_status: resp.status,
+      message: `asset upload storage rejected the PUT (HTTP ${resp.status})`,
+      detail,
+    });
+    process.exit(12);
+  }
+}
+
+_internals.putPresignedBytes = putPresignedBytes;
+
 module.exports = {
   fail,
   emit,
@@ -232,5 +324,8 @@ module.exports = {
   restFetch,
   encodeContentBody,
   withEncodedBody,
+  sha256Base64Url,
+  detectImageContentType,
+  putPresignedBytes,
   _internals,
 };

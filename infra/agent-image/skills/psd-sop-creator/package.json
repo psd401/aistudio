@@ -1,0 +1,7 @@
+{
+  "name": "psd-sop-creator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenClaw skill: turn a described, PDF, Google Doc, or Atrium source procedure into a PSD Standard Operating Procedure, filed in Atrium as an editable private draft with the official template, letterhead, and the source's images preserved. Composes psd-atrium, psd-pdf-to-markdown, and psd-workspace; zero npm dependencies.",
+  "main": "run.js"
+}
