@@ -30,7 +30,12 @@ export interface ScheduleFireIdentity {
 }
 
 export interface ScheduleFireFailure {
-  phase: 'fire-config' | 'fire-acquire' | 'fire-in-progress' | 'fire-completed';
+  phase:
+    | 'fire-config'
+    | 'fire-acquire'
+    | 'fire-in-progress'
+    | 'fire-completed'
+    | 'fire-completion';
   severity: 'error' | 'warn';
   errorMessage: string;
   retryable: boolean;
@@ -45,6 +50,13 @@ export type ScheduleFireClaim =
   | {
       claimed: false;
       failure: ScheduleFireFailure;
+    };
+
+export type ScheduleFireCompletion =
+  | { persisted: true }
+  | {
+      persisted: false;
+      errorMessage: string;
     };
 
 export type ScheduleLockContentionResolution =
@@ -224,33 +236,63 @@ export async function completeScheduleFire(
   tableName: string,
   dynamoClient: ScheduleFireDynamoClient,
   log: ScheduleFireLogger,
-): Promise<void> {
-  try {
-    await dynamoClient.update({
-      TableName: tableName,
-      Key: { sessionId: claim.identity.key },
-      UpdateExpression:
-        'SET #status = :completed, completedAt = :completedAt, expiresAt = :expiresAt',
-      ConditionExpression: 'lockToken = :token',
-      ExpressionAttributeNames: { '#status': 'status' },
-      ExpressionAttributeValues: {
-        ':completed': 'completed',
-        ':completedAt': new Date().toISOString(),
-        ':expiresAt':
-          Math.floor(Date.now() / 1000) + COMPLETED_MARKER_SECONDS,
-        ':token': claim.claimToken,
-      },
-    });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    log.warn('Schedule fire completion marker failed', {
-      error: detail,
-    });
-    throw new Error(
-      `Schedule fire completion marker failed: ${detail}`,
-      { cause: error },
-    );
+): Promise<ScheduleFireCompletion> {
+  const updateInput: UpdateCommandInput = {
+    TableName: tableName,
+    Key: { sessionId: claim.identity.key },
+    UpdateExpression:
+      'SET #status = :completed, completedAt = :completedAt, expiresAt = :expiresAt',
+    ConditionExpression: 'lockToken = :token',
+    ExpressionAttributeNames: { '#status': 'status' },
+    ExpressionAttributeValues: {
+      ':completed': 'completed',
+      ':completedAt': new Date().toISOString(),
+      ':expiresAt':
+        Math.floor(Date.now() / 1000) + COMPLETED_MARKER_SECONDS,
+      ':token': claim.claimToken,
+    },
+  };
+  const failures: string[] = [];
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      await dynamoClient.update(updateInput);
+      return { persisted: true };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      failures.push(`update ${attempt}: ${detail}`);
+      log.warn('Schedule fire completion marker write failed', {
+        attempt,
+        error: detail,
+      });
+    }
+
+    try {
+      const existing = await dynamoClient.get({
+        TableName: tableName,
+        Key: { sessionId: claim.identity.key },
+        ConsistentRead: true,
+      });
+      if (
+        existing.Item?.status === 'completed'
+        && existing.Item?.lockToken === claim.claimToken
+      ) {
+        return { persisted: true };
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      failures.push(`verify ${attempt}: ${detail}`);
+      log.warn('Schedule fire completion verification failed', {
+        attempt,
+        error: detail,
+      });
+    }
   }
+  const errorMessage =
+    `Schedule fire completion marker failed: ${failures.join('; ')}`;
+  log.warn('Schedule fire completion remains undurable; claim retained', {
+    error: errorMessage,
+  });
+  return { persisted: false, errorMessage };
 }
 
 export async function releaseScheduleFire(

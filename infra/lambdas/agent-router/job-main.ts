@@ -34,9 +34,14 @@ import {
   releaseSessionLock,
   renewSessionLock,
   sendGoogleChatResponse,
+  writeScheduledRun,
 } from './index';
+import { recordScheduledJobTerminal } from './scheduled-run-telemetry';
 
 const RENEW_INTERVAL_MS = 10 * 60 * 1000;
+type JobPayload = ReturnType<typeof parseJobPayload>;
+type AgentResult = Awaited<ReturnType<typeof invokeAgentCore>>;
+type JobLogger = ReturnType<typeof createLogger>;
 
 /**
  * Best-effort lock release when JOB_PAYLOAD fails full validation (review,
@@ -48,7 +53,7 @@ const RENEW_INTERVAL_MS = 10 * 60 * 1000;
  */
 async function releaseLockFromRawPayload(
   raw: string | undefined,
-  log: ReturnType<typeof createLogger>
+  log: JobLogger
 ): Promise<void> {
   if (!raw) return;
   try {
@@ -65,13 +70,142 @@ async function releaseLockFromRawPayload(
   }
 }
 
+function scheduledFailureContext(job: JobPayload) {
+  return {
+    phase: 'job_runner',
+    ...(job.scheduleId ? { scheduleId: job.scheduleId } : {}),
+  };
+}
+
+async function recordDeliveredJobResult(
+  job: JobPayload,
+  agentResult: AgentResult,
+  latencyMs: number,
+  log: JobLogger
+): Promise<void> {
+  await logTelemetry(
+    {
+      userId: job.userEmail,
+      sessionId: job.sessionId,
+      model: agentResult.model,
+      inputTokens: agentResult.inputTokens,
+      outputTokens: agentResult.outputTokens,
+      cacheReadInputTokens: agentResult.cacheReadInputTokens,
+      cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
+      latencyMs,
+      modelCallCount: agentResult.modelCallCount,
+      durationMs: agentResult.durationMs,
+      nudged: agentResult.nudged,
+      guardrailBlocked: false,
+      spaceName: job.spaceName,
+      messages: agentResult.messages,
+      toolCalls: agentResult.toolCalls,
+    },
+    log
+  );
+  await recordScheduledJobTerminal(
+    job,
+    {
+      status: agentResult.failed ? 'error' : 'success',
+      inputTokens: agentResult.inputTokens,
+      outputTokens: agentResult.outputTokens,
+      latencyMs,
+      ...(agentResult.failed
+        ? { errorMessage: agentResult.response }
+        : {}),
+    },
+    writeScheduledRun,
+    log
+  );
+
+  if (!agentResult.failed) {
+    log.info('Background job completed', {
+      sessionId: job.sessionId,
+      latencyMs,
+      outputTokens: agentResult.outputTokens,
+    });
+    return;
+  }
+  if (agentResult.errorSource === 'router') {
+    await recordFailure(
+      {
+        source: 'router',
+        severity: 'error',
+        userId: job.userEmail,
+        sessionId: job.sessionId,
+        scheduleName: job.scheduleName,
+        model: agentResult.model,
+        errorClass: agentResult.errorClass ?? 'JobLegError',
+        errorMessage: agentResult.response,
+        context: scheduledFailureContext(job),
+      },
+      log
+    );
+  }
+  log.warn('Background job finished with a failed turn', {
+    marker: 'JOB_RUNNER_FAILED_TURN',
+    errorClass: agentResult.errorClass ?? 'unknown',
+    latencyMs,
+  });
+}
+
+async function handleJobRunnerError(
+  job: JobPayload,
+  error: unknown,
+  startTime: number,
+  log: JobLogger
+): Promise<number> {
+  const message = error instanceof Error ? error.message : String(error);
+  try {
+    await sendGoogleChatResponse(
+      job.spaceName,
+      job.threadName,
+      '⚠️ The background job hit an internal error and could not finish. ' +
+        'Some steps may have already completed — ask me to check before ' +
+        'retrying.',
+      log
+    );
+  } catch (sendError) {
+    log.error('Failed to post job-error message to Chat', {
+      error:
+        sendError instanceof Error ? sendError.message : String(sendError),
+    });
+  }
+  await recordFailure(
+    {
+      source: 'router',
+      severity: 'error',
+      userId: job.userEmail,
+      sessionId: job.sessionId,
+      scheduleName: job.scheduleName,
+      errorClass: 'JobRunnerError',
+      errorMessage: message,
+      context: scheduledFailureContext(job),
+    },
+    log
+  );
+  await recordScheduledJobTerminal(
+    job,
+    {
+      status: 'error',
+      inputTokens: 0,
+      outputTokens: 0,
+      latencyMs: Date.now() - startTime,
+      errorMessage: message,
+    },
+    writeScheduledRun,
+    log
+  );
+  return 1;
+}
+
 async function main(): Promise<number> {
   const log = createLogger({ service: 'agent-job-runner' });
 
   // A broken payload means there is no Chat destination to post to —
   // log loudly, release the pre-acquired lock if recoverable, and exit
   // nonzero (CloudWatch is the record).
-  let job: ReturnType<typeof parseJobPayload>;
+  let job: JobPayload;
   try {
     job = parseJobPayload(process.env.JOB_PAYLOAD);
   } catch (error) {
@@ -137,92 +271,11 @@ async function main(): Promise<number> {
 
     const latencyMs =
       agentResult.latencyMs > 0 ? agentResult.latencyMs : Date.now() - startTime;
-    await logTelemetry(
-      {
-        userId: job.userEmail,
-        sessionId: job.sessionId,
-        model: agentResult.model,
-        inputTokens: agentResult.inputTokens,
-        outputTokens: agentResult.outputTokens,
-        cacheReadInputTokens: agentResult.cacheReadInputTokens,
-        cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
-        latencyMs,
-        modelCallCount: agentResult.modelCallCount,
-        durationMs: agentResult.durationMs,
-        nudged: agentResult.nudged,
-        // Guardrails ran on the original message in the first leg.
-        guardrailBlocked: false,
-        spaceName: job.spaceName,
-        messages: agentResult.messages,
-        toolCalls: agentResult.toolCalls,
-      },
-      log
-    );
-
-    if (agentResult.failed) {
-      // Harness-side failures were already recorded by the container; a
-      // router-source failure (e.g. HTTP error) gets recorded here so the
-      // job leg is visible in agent_failures.
-      if (agentResult.errorSource === 'router') {
-        await recordFailure(
-          {
-            source: 'router',
-            severity: 'error',
-            userId: job.userEmail,
-            sessionId: job.sessionId,
-            model: agentResult.model,
-            errorClass: agentResult.errorClass ?? 'JobLegError',
-            errorMessage: agentResult.response,
-            context: { phase: 'job_runner' },
-          },
-          log
-        );
-      }
-      log.warn('Background job finished with a failed turn', {
-        // Stable marker for the JobRunnerFailure metric filter (#1161).
-        marker: 'JOB_RUNNER_FAILED_TURN',
-        errorClass: agentResult.errorClass ?? 'unknown',
-        latencyMs,
-      });
-    } else {
-      log.info('Background job completed', {
-        sessionId: job.sessionId,
-        latencyMs,
-        outputTokens: agentResult.outputTokens,
-      });
-    }
+    await recordDeliveredJobResult(job, agentResult, latencyMs, log);
     return 0;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    // Best-effort user notification — the job must never die silently.
-    try {
-      await sendGoogleChatResponse(
-        job.spaceName,
-        job.threadName,
-        '⚠️ The background job hit an internal error and could not finish. ' +
-          'Some steps may have already completed — ask me to check before ' +
-          'retrying.',
-        log
-      );
-    } catch (sendError) {
-      log.error('Failed to post job-error message to Chat', {
-        error:
-          sendError instanceof Error ? sendError.message : String(sendError),
-      });
-    }
-    await recordFailure(
-      {
-        source: 'router',
-        severity: 'error',
-        userId: job.userEmail,
-        sessionId: job.sessionId,
-        errorClass: 'JobRunnerError',
-        errorMessage: message,
-        context: { phase: 'job_runner' },
-      },
-      log
-    );
-    return 1;
+    const exitCode = await handleJobRunnerError(job, error, startTime, log);
+    return exitCode;
   } finally {
     clearInterval(renewTimer);
     await releaseSessionLock(job.sessionId, job.lockToken, log);

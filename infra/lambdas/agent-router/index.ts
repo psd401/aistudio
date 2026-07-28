@@ -75,6 +75,7 @@ import {
   buildJobPayload,
   shouldPromoteToJob,
 } from './job-promotion';
+import type { ScheduledRunWrite } from './scheduled-run-telemetry';
 import {
   createAgentRequestProof,
   createInvocationContextToken,
@@ -2475,6 +2476,21 @@ async function logTelemetry(
   }
 }
 
+async function writeScheduledRun(params: ScheduledRunWrite): Promise<void> {
+  if (!DATABASE_HOST || !DATABASE_SECRET_ARN) {
+    throw new Error('Database not configured for scheduled run telemetry');
+  }
+  const sql = await getDbClient();
+  await sql`INSERT INTO agent_scheduled_runs
+      (user_id, schedule_id, schedule_name, session_id,
+       input_tokens, output_tokens, latency_ms, status, error_message)
+    VALUES (${params.userEmail}, ${params.scheduleId},
+            ${params.scheduleName ?? null}, ${params.sessionId},
+            ${params.inputTokens}, ${params.outputTokens},
+            ${params.latencyMs}, ${params.status},
+            ${params.errorMessage ?? null})`;
+}
+
 // ---------------------------------------------------------------------------
 // Failure capture (agent_failures)
 // ---------------------------------------------------------------------------
@@ -3957,6 +3973,7 @@ export {
   invokeAgentCore,
   sendGoogleChatResponse,
   logTelemetry,
+  writeScheduledRun,
   recordFailure,
   renewSessionLock,
   releaseSessionLock,

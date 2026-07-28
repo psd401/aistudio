@@ -48,6 +48,8 @@ const baseInput = {
   displayName: "Kris Hagel",
   workspacePrefix: "hagelk-db0f32b5",
   spaceName: "spaces/AAAA1111",
+  scheduleId: "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
+  scheduleName: "Morning dispatch",
   isDM: true,
   originalPrompt: "Assemble the morning dispatch.",
 }
@@ -64,6 +66,8 @@ const baseInput = {
       expect(parsed.displayName).toBe(baseInput.displayName)
       expect(parsed.workspacePrefix).toBe(baseInput.workspacePrefix)
       expect(parsed.spaceName).toBe(baseInput.spaceName)
+      expect(parsed.scheduleId).toBe(baseInput.scheduleId)
+      expect(parsed.scheduleName).toBe(baseInput.scheduleName)
       expect(parsed.isDM).toBe(true)
       expect(parsed.promptExcerpt).toBe(baseInput.originalPrompt)
     })

@@ -646,6 +646,7 @@ async function invokeAgentCore(
  */
 interface ScheduledJobInput {
   sessionId: string;
+  scheduleId: string;
   runtimeId: string;
   userEmail: string;
   displayName: string;
@@ -712,6 +713,8 @@ async function launchScheduledJob(
     displayName: input.displayName,
     workspacePrefix: input.workspacePrefix,
     spaceName: input.spaceName,
+    scheduleId: input.scheduleId,
+    scheduleName: input.scheduleName,
     // Scheduled tasks always deliver to the owner's DM, never a shared space.
     isDM: true,
     originalPrompt: input.originalPrompt,
@@ -944,6 +947,7 @@ async function tryPromoteScheduledResult(
   const promotion = await promoteScheduledTurnToJob(
     {
       sessionId,
+      scheduleId: schedule.scheduleId,
       runtimeId,
       userEmail: schedule.ownerEmail,
       displayName: schedule.displayName ?? '',
@@ -1196,6 +1200,33 @@ async function runLockedScheduleTurn(
   }
 }
 
+async function finalizeScheduleFire(
+  context: LockedScheduleContext,
+  fireClaim: OwnedScheduleFireClaim,
+): Promise<void> {
+  const completion = await completeScheduleFire(
+    fireClaim,
+    SESSION_LOCKS_TABLE,
+    scheduleFireDynamoClient,
+    context.log,
+  );
+  if (completion.persisted) return;
+
+  // The scheduled turn has already reached a terminal external outcome. Make
+  // the durability gap visible, but never release/retry the claim here: doing
+  // so would replay AgentCore tools and Chat delivery after successful work.
+  await recordScheduleGuardFailure(
+    context,
+    {
+      phase: 'fire-completion',
+      severity: 'error',
+      errorMessage: completion.errorMessage,
+      retryable: false,
+    },
+    'error',
+  );
+}
+
 async function handleScheduleLockContention(
   context: LockedScheduleContext,
   failure: JobLockFailure,
@@ -1216,12 +1247,7 @@ async function handleScheduleLockContention(
   );
   // This is an intentional coalesce, not an unobserved success: the skipped
   // run/failure is durable before the distinct fire is marked complete.
-  await completeScheduleFire(
-    resolution.fireClaim,
-    SESSION_LOCKS_TABLE,
-    scheduleFireDynamoClient,
-    context.log,
-  );
+  await finalizeScheduleFire(context, resolution.fireClaim);
   return result;
 }
 
@@ -1229,24 +1255,9 @@ async function runGuardedScheduleTurn(
   context: LockedScheduleContext,
   fireClaim: OwnedScheduleFireClaim | null,
 ): Promise<HandlerResult> {
+  let locked: LockedJobResult<HandlerResult>;
   try {
-    const locked = await runLockedScheduleTurn(context);
-    if (!locked.executed) {
-      return await handleScheduleLockContention(
-        context,
-        locked.lock,
-        fireClaim,
-      );
-    }
-    if (fireClaim) {
-      await completeScheduleFire(
-        fireClaim,
-        SESSION_LOCKS_TABLE,
-        scheduleFireDynamoClient,
-        context.log,
-      );
-    }
-    return locked.value;
+    locked = await runLockedScheduleTurn(context);
   } catch (error) {
     if (fireClaim) {
       await releaseScheduleFire(
@@ -1258,6 +1269,15 @@ async function runGuardedScheduleTurn(
     }
     throw error;
   }
+  if (!locked.executed) {
+    return handleScheduleLockContention(
+      context,
+      locked.lock,
+      fireClaim,
+    );
+  }
+  if (fireClaim) await finalizeScheduleFire(context, fireClaim);
+  return locked.value;
 }
 
 // ---------------------------------------------------------------------------

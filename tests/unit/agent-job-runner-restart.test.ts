@@ -72,4 +72,12 @@ describe("job runner restart handling", () => {
     // died. The runner's "always post something" contract must survive.
     expect(source).toContain("sendGoogleChatResponse")
   })
+
+  it("records the terminal result of a cron-promoted job", () => {
+    expect(source).toContain("recordScheduledJobTerminal(")
+    expect(source).toContain("writeScheduledRun,")
+    expect(source).toContain(
+      "status: agentResult.failed ? 'error' : 'success'",
+    )
+  })
 })

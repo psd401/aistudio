@@ -149,7 +149,9 @@ describe("agent-cron scheduled fire idempotency", () => {
       claimToken: "owned-token",
     }
 
-    await completeScheduleFire(claim, TABLE, dynamo, logger())
+    await expect(
+      completeScheduleFire(claim, TABLE, dynamo, logger())
+    ).resolves.toEqual({ persisted: true })
     await releaseScheduleFire(claim, TABLE, dynamo, logger())
 
     expect(dynamo.update).toHaveBeenCalledWith(
@@ -171,8 +173,8 @@ describe("agent-cron scheduled fire idempotency", () => {
   })
 })
 
-describe("agent-cron scheduled fire durability", () => {
-  it("does not acknowledge a failed completion marker write", async () => {
+describe("agent-cron scheduled fire completion durability", () => {
+  it("reports an undurable marker without replaying completed work", async () => {
     const dynamo = client({
       update: jest.fn().mockRejectedValue(new Error("DynamoDB throttled")),
     })
@@ -184,11 +186,56 @@ describe("agent-cron scheduled fire durability", () => {
 
     await expect(
       completeScheduleFire(claim, TABLE, dynamo, logger())
-    ).rejects.toThrow(
-      "Schedule fire completion marker failed: DynamoDB throttled"
-    )
+    ).resolves.toEqual({
+      persisted: false,
+      errorMessage:
+        "Schedule fire completion marker failed: update 1: DynamoDB throttled; update 2: DynamoDB throttled",
+    })
+    expect(dynamo.update).toHaveBeenCalledTimes(2)
   })
 
+  it("recognizes an applied update after an ambiguous SDK failure", async () => {
+    const dynamo = client({
+      update: jest.fn().mockRejectedValue(new Error("socket reset")),
+      get: jest.fn().mockResolvedValue({
+        Item: {
+          status: "completed",
+          lockToken: "owned-token",
+        },
+      }),
+    })
+    const claim = {
+      claimed: true as const,
+      identity,
+      claimToken: "owned-token",
+    }
+
+    await expect(
+      completeScheduleFire(claim, TABLE, dynamo, logger())
+    ).resolves.toEqual({ persisted: true })
+    expect(dynamo.update).toHaveBeenCalledTimes(1)
+  })
+
+  it("retries only the marker write after a transient failure", async () => {
+    const update = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("DynamoDB throttled"))
+      .mockResolvedValueOnce({})
+    const dynamo = client({ update })
+    const claim = {
+      claimed: true as const,
+      identity,
+      claimToken: "owned-token",
+    }
+
+    await expect(
+      completeScheduleFire(claim, TABLE, dynamo, logger())
+    ).resolves.toEqual({ persisted: true })
+    expect(update).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe("agent-cron scheduled fire release durability", () => {
   it("expires a failed claim immediately when conditional delete fails", async () => {
     const dynamo = client({
       delete: jest.fn().mockRejectedValue(new Error("delete throttled")),

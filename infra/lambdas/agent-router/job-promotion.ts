@@ -64,6 +64,9 @@ export interface JobPayload {
   displayName: string;
   workspacePrefix: string;
   spaceName: string;
+  /** Present only for cron-promoted turns; enables terminal run telemetry. */
+  scheduleId?: string;
+  scheduleName?: string;
   threadName?: string;
   /** In shared spaces the reply is prefixed [Name's Agent]; DMs are not. */
   isDM: boolean;
@@ -147,6 +150,8 @@ export function buildJobPayload(input: {
   displayName: string;
   workspacePrefix: string;
   spaceName: string;
+  scheduleId?: string;
+  scheduleName?: string;
   threadName?: string;
   isDM: boolean;
   originalPrompt: string;
@@ -161,6 +166,8 @@ export function buildJobPayload(input: {
     displayName: input.displayName,
     workspacePrefix: input.workspacePrefix,
     spaceName: input.spaceName,
+    ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
+    ...(input.scheduleName ? { scheduleName: input.scheduleName } : {}),
     ...(input.threadName ? { threadName: input.threadName } : {}),
     isDM: input.isDM,
     ...(input.responsePrefix
@@ -188,6 +195,19 @@ export function buildJobPayload(input: {
   return serialized;
 }
 
+function boundedOptionalString(
+  obj: Record<string, unknown>,
+  field: string,
+  maxLength: number
+): string | undefined {
+  const value = obj[field];
+  return typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= maxLength
+    ? value
+    : undefined;
+}
+
 /**
  * Parse + validate a JOB_PAYLOAD env value in the runner. Throws with a
  * field-specific message on anything missing — the runner catches, logs,
@@ -210,6 +230,8 @@ export function parseJobPayload(raw: string | undefined): JobPayload {
     }
     return v;
   };
+  const scheduleId = boundedOptionalString(obj, 'scheduleId', 64);
+  const scheduleName = boundedOptionalString(obj, 'scheduleName', 100);
   return {
     sessionId: requireString('sessionId'),
     // Unknown/absent -> 'deadline'. A payload from an older cron build must
@@ -223,6 +245,8 @@ export function parseJobPayload(raw: string | undefined): JobPayload {
     displayName: typeof obj.displayName === 'string' ? obj.displayName : '',
     workspacePrefix: requireString('workspacePrefix'),
     spaceName: requireString('spaceName'),
+    ...(scheduleId ? { scheduleId } : {}),
+    ...(scheduleName ? { scheduleName } : {}),
     ...(typeof obj.threadName === 'string' && obj.threadName
       ? { threadName: obj.threadName }
       : {}),
