@@ -1,4 +1,4 @@
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   createExportFile,
   getAssistantDataForExport,
@@ -23,6 +23,7 @@ import {
   capabilities,
   chainPrompts,
   promptResults,
+  toolExecutions,
   toolInputFields,
 } from "@/lib/db/schema";
 import { userCanAccessResource } from "@/lib/db/drizzle/resource-access";
@@ -37,7 +38,7 @@ type ImportedFieldType =
   "short_text" | "long_text" | "select" | "multi_select" | "file_upload";
 
 export type AssistantImportServiceErrorCode =
-  "VALIDATION_ERROR" | "NOT_FOUND" | "FORBIDDEN";
+  "VALIDATION_ERROR" | "NOT_FOUND" | "FORBIDDEN" | "CONFLICT";
 
 export class AssistantImportServiceError extends Error {
   constructor(
@@ -454,7 +455,8 @@ export async function updateAssistantFromImport(
       .select({ userId: assistantArchitects.userId })
       .from(assistantArchitects)
       .where(eq(assistantArchitects.id, assistantId))
-      .limit(1);
+      .limit(1)
+      .for("update");
 
     if (!existing) {
       throw new AssistantImportServiceError(
@@ -466,6 +468,23 @@ export async function updateAssistantFromImport(
       throw new AssistantImportServiceError(
         "FORBIDDEN",
         "You do not have permission to update this assistant",
+      );
+    }
+
+    const activeExecutions = await tx
+      .select({ id: toolExecutions.id })
+      .from(toolExecutions)
+      .where(
+        and(
+          eq(toolExecutions.assistantArchitectId, assistantId),
+          inArray(toolExecutions.status, ["pending", "running"]),
+        ),
+      )
+      .limit(1);
+    if (activeExecutions.length > 0) {
+      throw new AssistantImportServiceError(
+        "CONFLICT",
+        "Assistant cannot be updated while an execution is in progress",
       );
     }
 

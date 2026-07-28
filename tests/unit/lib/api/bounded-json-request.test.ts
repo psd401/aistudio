@@ -76,4 +76,12 @@ describe("parseBoundedJsonRequest", () => {
       status: 400,
     });
   });
+
+  it("returns the configured value for an optional empty body", async () => {
+    const request = jsonRequest("", "0");
+
+    await expect(
+      parseBoundedJsonRequest(request, 32, { emptyBodyValue: {} }),
+    ).resolves.toEqual({});
+  });
 });

@@ -21,6 +21,7 @@ mockValidateAgentConnectorsForAuthor = jest.fn();
 mockValidatePromptToolsForRouting = jest.fn();
 
 jest.mock("drizzle-orm", () => ({
+  and: (...conditions: unknown[]) => ({ conditions }),
   eq: (left: unknown, right: unknown) => ({ left, right }),
   inArray: (left: unknown, right: unknown) => ({ left, right }),
 }));
@@ -45,6 +46,12 @@ jest.mock("@/lib/db/schema", () => ({
   promptResults: {
     table: "results",
     promptId: "results.prompt_id",
+  },
+  toolExecutions: {
+    table: "executions",
+    id: "executions.id",
+    assistantArchitectId: "executions.assistant_id",
+    status: "executions.status",
   },
   toolInputFields: {
     table: "fields",
@@ -104,6 +111,7 @@ import {
   capabilities,
   chainPrompts,
   promptResults,
+  toolExecutions,
   toolInputFields,
 } from "@/lib/db/schema";
 import { getAssistantDataForExport } from "@/lib/assistant-export-import";
@@ -152,9 +160,16 @@ interface DatabaseState {
   prompts: ChildState[];
   fields: ChildState[];
   promptResults: Array<{ promptId: number; outputData: string }>;
+  executions: Array<{
+    id: number;
+    assistantArchitectId: number;
+    status: "pending" | "running" | "completed" | "failed";
+  }>;
 }
 
 interface EqualityCondition {
+  conditions?: EqualityCondition[];
+  left?: unknown;
   right?: unknown;
 }
 
@@ -200,6 +215,7 @@ function cloneState(state: DatabaseState): DatabaseState {
     prompts: state.prompts.map((row) => ({ ...row })),
     fields: state.fields.map((row) => ({ ...row })),
     promptResults: state.promptResults.map((row) => ({ ...row })),
+    executions: state.executions.map((row) => ({ ...row })),
   };
 }
 
@@ -235,6 +251,76 @@ function insertAssistantRow(
   return { id };
 }
 
+function selectFromState(state: DatabaseState, table: unknown) {
+  if (table === chainPrompts) {
+    return {
+      innerJoin(joinedTable: unknown) {
+        expect(joinedTable).toBe(promptResults);
+        return {
+          where(condition: EqualityCondition) {
+            const assistantId = Number(condition.right);
+            const referencedPromptIds = new Set(
+              state.promptResults.map((row) => row.promptId),
+            );
+            return thenable(() =>
+              state.prompts
+                .filter(
+                  (row) =>
+                    row.assistantArchitectId === assistantId &&
+                    row.id !== undefined &&
+                    referencedPromptIds.has(row.id),
+                )
+                .map((row) => ({ id: row.id as number })),
+            );
+          },
+        };
+      },
+    };
+  }
+  if (table === toolExecutions) {
+    return {
+      where(condition: EqualityCondition) {
+        const assistantId = Number(
+          condition.conditions?.find(
+            (item) => item.left === toolExecutions.assistantArchitectId,
+          )?.right,
+        );
+        const statuses = condition.conditions?.find(
+          (item) => item.left === toolExecutions.status,
+        )?.right;
+        return {
+          limit: async () =>
+            state.executions
+              .filter(
+                (row) =>
+                  row.assistantArchitectId === assistantId &&
+                  Array.isArray(statuses) &&
+                  statuses.includes(row.status),
+              )
+              .slice(0, 1)
+              .map(({ id }) => ({ id })),
+        };
+      },
+    };
+  }
+  return {
+    where(condition: EqualityCondition) {
+      return {
+        limit: () => ({
+          for: async () => {
+            const id =
+              typeof condition.right === "number"
+                ? condition.right
+                : state.assistants[0]?.id;
+            const found = state.assistants.find((row) => row.id === id);
+            return found ? [{ userId: found.userId }] : [];
+          },
+        }),
+      };
+    },
+  };
+}
+
 function createTransaction(state: DatabaseState) {
   return {
     insert(table: unknown) {
@@ -268,45 +354,7 @@ function createTransaction(state: DatabaseState) {
     select() {
       return {
         from(table: unknown) {
-          if (table === chainPrompts) {
-            return {
-              innerJoin(joinedTable: unknown) {
-                expect(joinedTable).toBe(promptResults);
-                return {
-                  where(condition: EqualityCondition) {
-                    const assistantId = Number(condition.right);
-                    const referencedPromptIds = new Set(
-                      state.promptResults.map((row) => row.promptId),
-                    );
-                    return thenable(() =>
-                      state.prompts
-                        .filter(
-                          (row) =>
-                            row.assistantArchitectId === assistantId &&
-                            row.id !== undefined &&
-                            referencedPromptIds.has(row.id),
-                        )
-                        .map((row) => ({ id: row.id as number })),
-                    );
-                  },
-                };
-              },
-            };
-          }
-          return {
-            where(condition: EqualityCondition) {
-              return {
-                limit: async () => {
-                  const id =
-                    typeof condition.right === "number"
-                      ? condition.right
-                      : state.assistants[0]?.id;
-                  const found = state.assistants.find((row) => row.id === id);
-                  return found ? [{ userId: found.userId }] : [];
-                },
-              };
-            },
-          };
+          return selectFromState(state, table);
         },
       };
     },
@@ -388,6 +436,7 @@ beforeEach(() => {
     prompts: [],
     fields: [],
     promptResults: [],
+    executions: [],
   };
   failPromptName = null;
   mockExecuteQuery.mockReset();
@@ -580,6 +629,7 @@ it("lets an owner replace prompts and fields and resets approval", async () => {
     prompts: [{ assistantArchitectId: 12, name: "Old prompt" }],
     fields: [{ assistantArchitectId: 12, name: "old_field" }],
     promptResults: [],
+    executions: [],
   };
 
   const result = await updateAssistantFromImport(12, envelope(), 7);
@@ -621,6 +671,7 @@ it("retains historical prompt results when replacing an executed graph", async (
     ],
     fields: [],
     promptResults: [{ promptId: 41, outputData: "Historical output" }],
+    executions: [],
   };
 
   await updateAssistantFromImport(12, envelope(), 7);
@@ -646,6 +697,43 @@ it("retains historical prompt results when replacing an executed graph", async (
       expect.objectContaining({ id: 42, name: "Never executed" }),
     ]),
   );
+});
+
+it("rejects replacement while an execution can still reference live prompts", async () => {
+  database = {
+    assistants: [
+      {
+        id: 12,
+        name: "Executing",
+        description: "In progress",
+        status: "approved",
+        userId: 7,
+      },
+    ],
+    capabilities: [{ promptChainToolId: 12, isActive: true }],
+    prompts: [
+      { id: 41, assistantArchitectId: 12, name: "In-flight prompt" },
+    ],
+    fields: [{ assistantArchitectId: 12, name: "existing_field" }],
+    promptResults: [],
+    executions: [
+      {
+        id: 91,
+        assistantArchitectId: 12,
+        status: "running",
+      },
+    ],
+  };
+  const before = cloneState(database);
+
+  await expect(
+    updateAssistantFromImport(12, envelope(), 7),
+  ).rejects.toMatchObject({
+    code: "CONFLICT",
+    message: "Assistant cannot be updated while an execution is in progress",
+  } satisfies Partial<AssistantImportServiceError>);
+
+  expect(database).toEqual(before);
 });
 
 it("denies a staff caller updating an assistant they do not own", async () => {
@@ -697,6 +785,7 @@ it("rolls back the whole replacement on a mid-update failure", async () => {
     prompts: [{ assistantArchitectId: 12, name: "Original prompt" }],
     fields: [{ assistantArchitectId: 12, name: "original_field" }],
     promptResults: [],
+    executions: [],
   };
   failPromptName = "Prompt one";
   const before = cloneState(database);
@@ -735,6 +824,7 @@ it("forks into a caller-owned pending copy without changing the source", async (
     prompts: [{ assistantArchitectId: 12, name: "Source prompt" }],
     fields: [],
     promptResults: [],
+    executions: [],
   };
   mockExecuteQuery.mockImplementation((_query: unknown, operation: unknown) => {
     switch (operation) {

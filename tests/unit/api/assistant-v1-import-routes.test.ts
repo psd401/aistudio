@@ -81,7 +81,11 @@ jest.mock("@/lib/api", () => ({
 jest.mock("@/lib/assistant-architect/import-service", () => {
   class TestAssistantImportServiceError extends Error {
     constructor(
-      public readonly code: "VALIDATION_ERROR" | "NOT_FOUND" | "FORBIDDEN",
+      public readonly code:
+        | "VALIDATION_ERROR"
+        | "NOT_FOUND"
+        | "FORBIDDEN"
+        | "CONFLICT",
       message: string,
     ) {
       super(message)
@@ -318,6 +322,10 @@ describe("Assistant import REST v1 routes", () => {
     })
     expect(mockUpdateAssistantFromImport).not.toHaveBeenCalled()
   })
+})
+
+describe("Assistant fork REST v1 route", () => {
+  beforeEach(resetMocks)
 
   it("forks through the catalog-resolved write scope", async () => {
     mockForkAssistant.mockResolvedValue({
@@ -330,10 +338,11 @@ describe("Assistant import REST v1 routes", () => {
     })
 
     const response = await forkRoute(
-      {
-        url: "http://localhost/api/v1/assistants/12/fork",
-        text: async () => JSON.stringify({ name: "Caller copy" }),
-      } as unknown as NextRequest,
+      jsonRequest(
+        "http://localhost/api/v1/assistants/12/fork",
+        "POST",
+        JSON.stringify({ name: "Caller copy" }),
+      ),
       { userId: 7, scopes: ["assistants:write"] },
       "req-fork",
     )
@@ -346,6 +355,30 @@ describe("Assistant import REST v1 routes", () => {
         result: { id: 44, status: "pending_approval" },
       },
     })
+  })
+
+  it("forks with the source-derived name when the optional body is empty", async () => {
+    mockForkAssistant.mockResolvedValue({
+      result: {
+        name: "Source copy",
+        id: 45,
+        status: "pending_approval",
+      },
+      modelMappings: [],
+    })
+
+    const response = await forkRoute(
+      jsonRequest(
+        "http://localhost/api/v1/assistants/12/fork",
+        "POST",
+        "",
+      ),
+      { userId: 7, scopes: ["assistants:write"] },
+      "req-fork-empty",
+    )
+
+    expect(response.status).toBe(201)
+    expect(mockForkAssistant).toHaveBeenCalledWith(12, 7, undefined)
   })
 })
 
@@ -411,6 +444,24 @@ describe("Assistant import REST v1 payload limits", () => {
     })
     expect(mockUpdateAssistantFromImport).not.toHaveBeenCalled()
   })
+
+  it("rejects an oversized streamed fork payload before forking", async () => {
+    const response = await forkRoute(
+      jsonRequest(
+        "http://localhost/api/v1/assistants/12/fork",
+        "POST",
+        JSON.stringify({ name: "x".repeat(4 * 1024) }),
+      ),
+      { userId: 7, scopes: ["assistants:write"] },
+      "req-fork-too-large",
+    )
+
+    expect(response.status).toBe(413)
+    expect(await response.json()).toMatchObject({
+      error: { code: "PAYLOAD_TOO_LARGE" },
+    })
+    expect(mockForkAssistant).not.toHaveBeenCalled()
+  })
 })
 
 describe("Assistant import REST v1 service authorization errors", () => {
@@ -440,16 +491,41 @@ describe("Assistant import REST v1 service authorization errors", () => {
     })
   })
 
+  it("returns 409 when an execution is still using the assistant prompts", async () => {
+    mockUpdateAssistantFromImport.mockRejectedValue(
+      new AssistantImportServiceError(
+        "CONFLICT",
+        "Assistant cannot be updated while an execution is in progress",
+      ),
+    )
+
+    const response = await updateRoute(
+      jsonRequest(
+        "http://localhost/api/v1/assistants/12",
+        "PUT",
+        JSON.stringify(importEnvelope),
+      ),
+      { userId: 7, scopes: ["assistants:write"] },
+      "req-update-conflict",
+    )
+
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({
+      error: { code: "CONFLICT" },
+    })
+  })
+
   it("returns a masked 404 when the fork source is not visible", async () => {
     mockForkAssistant.mockRejectedValue(
       new AssistantImportServiceError("NOT_FOUND", "Assistant not found: 12"),
     )
 
     const response = await forkRoute(
-      {
-        url: "http://localhost/api/v1/assistants/12/fork",
-        text: async () => "{}",
-      } as unknown as NextRequest,
+      jsonRequest(
+        "http://localhost/api/v1/assistants/12/fork",
+        "POST",
+        "{}",
+      ),
       { userId: 7, scopes: ["assistants:write"] },
       "req-fork-hidden",
     )

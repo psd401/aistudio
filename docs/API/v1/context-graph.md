@@ -802,7 +802,8 @@ stream and cancel before buffering more than the limit, so a missing or
 understated `Content-Length` cannot bypass the pre-parse bound. An advertised
 oversized length is rejected immediately. The MCP transport reserves 64 KiB for
 the JSON-RPC envelope while shared import validation keeps the assistant payload
-itself at 10 MB.
+itself at 10 MB. The optional REST fork body is independently stream-bounded to
+4 KiB before JSON decoding.
 
 Every write preserves the existing human approval gate:
 
@@ -810,7 +811,10 @@ Every write preserves the existing human approval gate:
   `pending_approval`, regardless of the envelope's `status`;
 - update: staff may replace only their own assistants; administrators may
   replace any assistant; prompts and input fields are wholesale-replaced in the
-  same transaction and status resets to `pending_approval`. Prompts referenced
+  same transaction and status resets to `pending_approval`. The assistant row is
+  locked for replacement, and a pending or running execution returns
+  `409 CONFLICT` before any graph mutation so its in-memory prompt ids remain
+  valid. Prompts referenced
   by earlier execution results are detached from the live graph rather than
   deleted, preserving their outputs, errors, timings, feedback, and original
   prompt configuration in execution history. Any linked UI capability is

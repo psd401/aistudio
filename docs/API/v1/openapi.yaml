@@ -1230,7 +1230,9 @@ paths:
         Atomically replaces the assistant's import-controlled fields, prompts,
         and input fields from a single-assistant ExportFormat v1.0 envelope.
         Staff callers may update only assistants they own; administrators may
-        update any assistant. Every successful update resets status to
+        update any assistant. An update returns `409 CONFLICT` while a pending
+        or running execution can still reference the live prompt rows. Every
+        successful update resets status to
         `pending_approval` and atomically deactivates its linked UI capability
         until re-approval. Reapproval reuses the capability's stable identifier
         even when the replacement renamed the assistant. Agent tools, connectors,
@@ -1304,6 +1306,12 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: A pending or running execution is still using the assistant's prompt graph.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -1319,6 +1327,7 @@ paths:
         owner/admin/approved and resource/room rules as assistant detail. The
         source is unchanged. The fork is owned by the caller and enters
         `pending_approval`; an optional `name` overrides the copied name.
+        The optional JSON body is stream-bounded to 4 KB before decoding.
         Copied agent tools and connectors must be available to the caller as an
         author, and copied prompt tools must be supported by their mapped/routed
         models, before the fork is persisted.
@@ -1391,6 +1400,12 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: Source assistant is missing or not visible to the caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Fork request body exceeds the 4 KB limit.
           content:
             application/json:
               schema:

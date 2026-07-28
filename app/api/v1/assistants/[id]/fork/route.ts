@@ -10,11 +10,16 @@ import {
   AssistantImportServiceError,
   forkAssistant,
 } from "@/lib/assistant-architect/import-service";
+import {
+  BoundedJsonRequestError,
+  parseBoundedJsonRequest,
+} from "@/lib/api/bounded-json-request";
 import { createLogger } from "@/lib/logger";
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog";
 
 const FORK_TOOL_IDENTIFIER = "assistants.fork";
 const MAX_ASSISTANT_NAME_LENGTH = 255;
+const ASSISTANT_FORK_MAX_BYTES = 4 * 1024;
 
 async function parseForkName(
   request: NextRequest,
@@ -23,11 +28,27 @@ async function parseForkName(
   | { name: string | undefined }
   | { response: ReturnType<typeof createErrorResponse> }
 > {
-  let body: unknown = {};
+  let body: unknown;
   try {
-    const rawBody = await request.text();
-    if (rawBody.trim()) body = JSON.parse(rawBody);
-  } catch {
+    body = await parseBoundedJsonRequest(
+      request,
+      ASSISTANT_FORK_MAX_BYTES,
+      { emptyBodyValue: {} },
+    );
+  } catch (error) {
+    if (
+      error instanceof BoundedJsonRequestError &&
+      error.status === 413
+    ) {
+      return {
+        response: createErrorResponse(
+          requestId,
+          413,
+          "PAYLOAD_TOO_LARGE",
+          "Fork payload too large (maximum 4 KB)",
+        ),
+      };
+    }
     return {
       response: createErrorResponse(
         requestId,

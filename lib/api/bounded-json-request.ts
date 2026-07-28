@@ -18,6 +18,23 @@ interface JsonBodyRequest {
   headers: Pick<Headers, "get">;
 }
 
+interface BoundedJsonRequestOptions {
+  /**
+   * Value returned for an absent or zero-byte body. Omit this option when an
+   * empty body should remain an INVALID_JSON error.
+   */
+  emptyBodyValue?: unknown;
+}
+
+function hasEmptyBodyValue(
+  options: BoundedJsonRequestOptions | undefined,
+): options is Required<BoundedJsonRequestOptions> {
+  return (
+    options !== undefined &&
+    Object.prototype.hasOwnProperty.call(options, "emptyBodyValue")
+  );
+}
+
 function validateDeclaredLength(
   headers: Pick<Headers, "get">,
   maximumBytes: number,
@@ -59,9 +76,13 @@ function validateDeclaredLength(
 export async function parseBoundedJsonRequest(
   request: JsonBodyRequest,
   maximumBytes: number,
+  options?: BoundedJsonRequestOptions,
 ): Promise<unknown> {
   const declaredLength = validateDeclaredLength(request.headers, maximumBytes);
   if (!request.body) {
+    if (hasEmptyBodyValue(options)) {
+      return options.emptyBodyValue;
+    }
     throw new BoundedJsonRequestError(
       "INVALID_JSON",
       400,
@@ -92,10 +113,10 @@ export async function parseBoundedJsonRequest(
     reader.releaseLock();
   }
 
-  if (
-    totalBytes === 0 ||
-    (declaredLength !== null && declaredLength !== totalBytes)
-  ) {
+  if (totalBytes === 0 && hasEmptyBodyValue(options)) {
+    return options.emptyBodyValue;
+  }
+  if (totalBytes === 0 || (declaredLength !== null && declaredLength !== totalBytes)) {
     throw new BoundedJsonRequestError(
       "INVALID_JSON",
       400,
