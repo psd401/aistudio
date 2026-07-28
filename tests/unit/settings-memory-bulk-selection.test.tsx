@@ -7,6 +7,11 @@ jest.mock("@/actions/nexus/memory.actions", () => ({
   updateNexusMemory: jest.fn(),
 }))
 
+jest.mock("@/actions/nexus/memory-import.actions", () => ({
+  extractImportCandidates: jest.fn(),
+  saveImportedMemories: jest.fn(),
+}))
+
 jest.mock("lucide-react", () => {
   const Icon = () => <span aria-hidden="true" />
   return {

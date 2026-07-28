@@ -1,5 +1,5 @@
 -- ============================================================================
--- 164 — Per-fire scheduled telemetry idempotency
+-- 165 — Per-fire scheduled telemetry idempotency
 --
 -- A Scheduler occurrence can be redelivered after its primary run row commits
 -- but before the DynamoDB fire marker reaches "completed". Persist the immutable

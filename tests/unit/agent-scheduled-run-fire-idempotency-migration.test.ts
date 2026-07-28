@@ -4,7 +4,7 @@ import path from "node:path"
 const migration = fs.readFileSync(
   path.join(
     process.cwd(),
-    "infra/database/schema/164-agent-scheduled-run-fire-idempotency.sql",
+    "infra/database/schema/165-agent-scheduled-run-fire-idempotency.sql",
   ),
   "utf8",
 )
