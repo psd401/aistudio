@@ -20,7 +20,6 @@ import {
   resolveRestRequester,
   updateCollectionBodySchema,
 } from "@/lib/content/rest";
-import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
 
 export const PATCH = withApiAuth(
   async (request: NextRequest, auth, requestId, params) => {
@@ -47,7 +46,6 @@ export const PATCH = withApiAuth(
     if ("response" in resolved) return resolved.response;
 
     try {
-      await assertContentAuthoringCapability(auth);
       const collection = await collectionManagementService.update(
         resolved.req,
         id,

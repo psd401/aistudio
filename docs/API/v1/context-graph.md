@@ -1318,7 +1318,10 @@ applied or downgraded.
 Returns the same requester-visible hierarchy as `collectionService.tree(req)`.
 Requires `content:read`. Filtering and visible-object counts are permission-pushed
 on the server; a hidden collection is never loaded into the client or exposed
-through a secondary id/name lookup.
+through a secondary id/name lookup. If an accessible child exists below a denied
+ancestor, the denied node is omitted and the child is re-rooted beneath its
+nearest returned ancestor (or at the root); `parentId` and `path` reflect that
+permission-filtered projection.
 
 - `shape=tree` (default) retains nested `children`.
 - `shape=flat` walks that tree in stable Atrium position/name pre-order, omits
@@ -1355,9 +1358,9 @@ failures are `401`/`403`. A slug/UUID selected from this response is passed to
 
 #### `POST /api/v1/content/collections`
 
-Creates a collection. Requires `content:create`; session callers must also have
-the `atrium-content` capability. `scope: "private"` creates an owner-bound
-hierarchy for the acting human. `scope: "district"` requires administrator
+Creates a collection. Requires `content:create`; REST authorization remains
+scope-based. `scope: "private"` creates an owner-bound hierarchy for the acting
+human. `scope: "district"` requires administrator
 authority.
 
 ```json

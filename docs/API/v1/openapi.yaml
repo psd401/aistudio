@@ -2166,7 +2166,10 @@ paths:
         same stable pre-order without `children`, retaining each node's display
         `path`. When the caller also holds `content:create`,
         `selectableForCreate` is included so an external picker can select a
-        destination without hard-coded slugs or ids.
+        destination without hard-coded slugs or ids. If an accessible child is
+        below a denied ancestor, the denied node is omitted and the child is
+        re-rooted beneath its nearest returned ancestor (or at the root);
+        `parentId` and `path` reflect this permission-filtered projection.
       security:
         - BearerAuth: []
       parameters:
@@ -4650,6 +4653,7 @@ components:
           type: string
           format: uuid
           nullable: true
+          description: Nearest returned ancestor; null when no admitted ancestor is returned.
         path:
           type: array
           minItems: 1

@@ -267,8 +267,13 @@ function nextSlug(
   const nameSlug = slugifyTitle(name);
   // Private slugs are owner-namespaced so another user's hidden collection name
   // cannot be inferred from an otherwise surprising global collision suffix.
-  const base =
+  const unboundedBase =
     ownerUserId == null ? nameSlug : `private-${ownerUserId}-${nameSlug}`;
+  // `slugifyTitle` bounds the name part, but a private owner prefix can push the
+  // combined value past content_collections.slug's varchar(200) limit.
+  const base = unboundedBase
+    .slice(0, NAME_MAX_LENGTH)
+    .replace(/-+$/g, "");
   const taken = new Set(rows.map((row) => row.slug));
   for (let attempt = 0; attempt <= taken.size; attempt++) {
     const candidate = slugCandidate(base, attempt);
@@ -281,11 +286,23 @@ function nextPosition(
   rows: CollectionAccessRow[],
   parentId: string | null
 ): number {
-  return (
-    rows
-      .filter((row) => row.parentId === parentId)
-      .reduce((highest, row) => Math.max(highest, row.position), -1) + 1
+  const siblings = rows.filter((row) => row.parentId === parentId);
+  const highest = siblings.reduce(
+    (value, row) => Math.max(value, row.position),
+    -1
   );
+  if (highest < POSITION_MAX) return highest + 1;
+
+  // An explicitly positioned sibling may already occupy PostgreSQL's int4 max.
+  // Reuse the first non-negative gap instead of overflowing to 2147483648.
+  const used = new Set(siblings.map((row) => row.position));
+  const fallbackLimit = Math.min(siblings.length, POSITION_MAX);
+  for (let candidate = 0; candidate <= fallbackLimit; candidate++) {
+    if (!used.has(candidate)) return candidate;
+  }
+  throw new ConflictError("Collection position space is exhausted", {
+    parentId,
+  });
 }
 
 async function replaceGrants(
@@ -343,6 +360,7 @@ export const collectionManagementInternals = {
   assertNoCycle,
   assertSiblingNameAvailable,
   descendantIds,
+  nextPosition,
   nextSlug,
   normalizeGrants,
 };

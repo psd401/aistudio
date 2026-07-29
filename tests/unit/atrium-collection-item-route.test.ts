@@ -55,7 +55,9 @@ beforeEach(() => {
     data: { parentId: null, position: 1 },
   });
   resolveRestRequesterMock.mockResolvedValue({ req: requester });
-  capabilityMock.mockResolvedValue(undefined);
+  capabilityMock.mockRejectedValue(
+    new Error("UI capability checks must not gate REST endpoints")
+  );
   updateMock.mockResolvedValue({
     id: "f9999999-9999-4999-8999-999999999999",
     name: "Moved",
@@ -63,14 +65,19 @@ beforeEach(() => {
 });
 
 describe("PATCH /api/v1/content/collections/:id (#1438)", () => {
-  it("moves/updates through the shared collection service", async () => {
+  it("uses the API scope without applying a UI capability gate", async () => {
     await handler(
       {} as NextRequest,
-      { scopes: ["content:update"] },
+      {
+        scopes: ["content:update"],
+        authType: "session",
+        cognitoSub: "cognito-sub",
+      } as { scopes: string[] },
       "req-update",
       { id: "f9999999-9999-4999-8999-999999999999" }
     );
 
+    expect(capabilityMock).not.toHaveBeenCalled();
     expect(updateMock).toHaveBeenCalledWith(
       requester,
       "f9999999-9999-4999-8999-999999999999",

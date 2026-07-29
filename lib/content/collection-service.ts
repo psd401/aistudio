@@ -11,7 +11,8 @@
  * object visibility. Owner-bound private collections are visible/selectable only
  * to their owner; administrator metadata oversight never grants content access.
  * Zero effective district grants preserve the original default-visibility model.
- * A visible object also keeps its connected ancestor path in the tree.
+ * A visible object also keeps its requester-admitted ancestor path in the tree;
+ * denied ancestors are omitted and accessible descendants are re-rooted.
  *
  * See docs/features/atrium-design-spec.md §21.
  */
@@ -150,32 +151,22 @@ function levelAdmitsPrincipal(
   return false;
 }
 
-/** Index collections by id and by parent id (the child lists), in one pass. */
-function indexCollections(collections: CollectionRow[]): {
-  byId: Map<string, CollectionRow>;
-  childrenOf: Map<string | null, CollectionRow[]>;
-} {
+/** Index collections by id in one pass. */
+function indexCollections(
+  collections: CollectionRow[]
+): Map<string, CollectionRow> {
   const byId = new Map<string, CollectionRow>();
-  const childrenOf = new Map<string | null, CollectionRow[]>();
   for (const c of collections) {
     byId.set(c.id, c);
-    const siblings = childrenOf.get(c.parentId) ?? [];
-    siblings.push(c);
-    childrenOf.set(c.parentId, siblings);
   }
-  return { byId, childrenOf };
+  return byId;
 }
 
 /**
  * The set of collection ids to KEEP: every directly-visible collection (its level
- * admits the principal OR it holds ≥1 visible object) plus every ANCESTOR of one,
- * so the tree stays connected.
- *
- * The ancestor walk stops as soon as it reaches a node already in `keep`: because
- * any node added to `keep` had its full ancestor chain added in the same walk,
- * hitting an already-kept node means every node above it is kept too. That
- * `!keep.has(cursorId)` terminator doubles as the cycle guard (a cycle revisits a
- * kept node and stops), so no per-iteration `seen` set is needed.
+ * admits the principal OR it holds ≥1 visible object) plus every requester-
+ * admitted ancestor. Denied ancestors are never added merely to preserve the
+ * canonical hierarchy; the returned tree compresses across those gaps instead.
  */
 function computeKeepSet(
   collections: CollectionRow[],
@@ -196,10 +187,16 @@ function computeKeepSet(
     const hasVisibleObject = (visibleCountByCollection.get(c.id) ?? 0) > 0;
     if (!levelOk && !(allowed && hasVisibleObject)) continue;
 
-    // Directly visible: mark it and every not-yet-kept ancestor KEEP.
+    // Directly visible: mark it and each admitted ancestor. Keep walking past a
+    // denied ancestor so an independently admitted grandparent can still provide
+    // context, but never add the denied row itself.
     let cursorId: string | null = c.id;
-    while (cursorId != null && byId.has(cursorId) && !keep.has(cursorId)) {
-      keep.add(cursorId);
+    const seen = new Set<string>();
+    while (cursorId != null && byId.has(cursorId) && !seen.has(cursorId)) {
+      seen.add(cursorId);
+      if (access.allowedCollectionIds.has(cursorId)) {
+        keep.add(cursorId);
+      }
       cursorId = byId.get(cursorId)?.parentId ?? null;
     }
   }
@@ -231,15 +228,15 @@ export const collectionService = {
   /**
    * Build the requester-visible collection tree (the reader sidebar / library
    * section tree). Returns only the collections the requester may enter, with the
-   * empty/forbidden subtrees pruned but every ANCESTOR of a visible node kept so
-   * the tree stays connected.
+   * empty/forbidden subtrees pruned. Requester-admitted ancestors of visible
+   * nodes are retained; denied ancestors are omitted and descendants re-rooted.
    *
    * Algorithm:
    *  1. Load all collections + the requester's visible objects (one permission-
    *     pushed `listVisible`).
    *  2. A collection is "directly visible" if its level admits the principal OR it
-   *     holds ≥1 visible object; mark it and its ancestors KEEP.
-   *  3. Assemble the kept collections into a parent/child forest.
+   *     holds ≥1 visible object; mark it and its admitted ancestors KEEP.
+   *  3. Assemble the kept collections into a forest, compressing denied gaps.
    */
   async tree(req: Requester): Promise<CollectionTreeNode[]> {
     const principal = principalOf(req);
@@ -268,7 +265,7 @@ export const collectionService = {
       .filter((row) => !row.archivedAt)
       .map((row) => ({ ...row, navItemId: navById.get(row.id) ?? null }));
 
-    const { byId, childrenOf } = indexCollections(collections);
+    const byId = indexCollections(collections);
     const keep = computeKeepSet(
       collections,
       byId,
@@ -277,16 +274,39 @@ export const collectionService = {
       access
     );
 
-    // Build the kept forest. A child is attached only when both it and its parent
-    // are kept; ancestor-propagation guarantees a kept node's parent is also kept.
+    // Project each kept node onto the nearest kept ancestor. This prevents a
+    // denied canonical parent's id/name/slug from leaking while keeping an
+    // independently admitted descendant reachable in both tree and flat shapes.
+    const visibleParentById = new Map<string, string | null>();
+    const visibleChildrenOf = new Map<string | null, CollectionRow[]>();
+    for (const collection of collections) {
+      if (!keep.has(collection.id)) continue;
+      let visibleParentId = collection.parentId;
+      const seen = new Set<string>([collection.id]);
+      while (
+        visibleParentId != null &&
+        !keep.has(visibleParentId) &&
+        !seen.has(visibleParentId)
+      ) {
+        seen.add(visibleParentId);
+        visibleParentId = byId.get(visibleParentId)?.parentId ?? null;
+      }
+      if (visibleParentId != null && seen.has(visibleParentId)) {
+        visibleParentId = null;
+      }
+      visibleParentById.set(collection.id, visibleParentId);
+      const siblings = visibleChildrenOf.get(visibleParentId) ?? [];
+      siblings.push(collection);
+      visibleChildrenOf.set(visibleParentId, siblings);
+    }
+
     const build = (parentId: string | null): CollectionTreeNode[] =>
-      (childrenOf.get(parentId) ?? [])
-        .filter((c) => keep.has(c.id))
+      (visibleChildrenOf.get(parentId) ?? [])
         .map((c) => ({
           id: c.id,
           name: c.name,
           slug: c.slug,
-          parentId: c.parentId,
+          parentId: visibleParentById.get(c.id) ?? null,
           scope: c.ownerUserId == null ? "district" : "private",
           ownerUserId: c.ownerUserId,
           defaultVisibilityLevel: c.defaultVisibilityLevel,

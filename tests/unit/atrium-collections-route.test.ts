@@ -82,25 +82,31 @@ beforeEach(() => {
     name: "My Projects",
     scope: "private",
   });
-  mockAssertContentAuthoringCapability.mockResolvedValue(undefined);
+  mockAssertContentAuthoringCapability.mockRejectedValue(
+    new Error("UI capability checks must not gate REST endpoints")
+  );
 });
 
 describe("POST /api/v1/content/collections (#1438)", () => {
-  it("creates through the shared service with REST audit context", async () => {
+  it("uses the API scope without applying a UI capability gate", async () => {
     await postHandler(
       {
         url: "https://app.test/api/v1/content/collections",
       } as NextRequest,
-      { scopes: ["content:create"] },
+      {
+        scopes: ["content:create"],
+        authType: "session",
+        cognitoSub: "cognito-sub",
+      } as { scopes: string[] },
       "req-create"
     );
 
     expect(mockRequireScope).toHaveBeenCalledWith(
-      { scopes: ["content:create"] },
+      expect.objectContaining({ scopes: ["content:create"] }),
       "content:create",
       "req-create"
     );
-    expect(mockAssertContentAuthoringCapability).toHaveBeenCalled();
+    expect(mockAssertContentAuthoringCapability).not.toHaveBeenCalled();
     expect(mockCreateCollection).toHaveBeenCalledWith(
       requester,
       { name: "My Projects", scope: "private" },

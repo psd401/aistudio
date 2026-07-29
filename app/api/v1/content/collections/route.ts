@@ -24,7 +24,6 @@ import {
   createCollectionBodySchema,
   resolveRestRequester,
 } from "@/lib/content/rest";
-import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
 
 const querySchema = z.object({
   shape: z.enum(["tree", "flat"]).default("tree"),
@@ -84,7 +83,6 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   if ("response" in resolved) return resolved.response;
 
   try {
-    await assertContentAuthoringCapability(auth);
     const collection = await collectionManagementService.create(
       resolved.req,
       parsedBody.data,

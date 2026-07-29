@@ -52,6 +52,9 @@ Collection access is enforced in both point reads and permission-pushed content
 listing/count queries. An archived collection admits neither reads nor creates.
 Slug/UUID resolution for list filters and content placement is requester-aware;
 an inaccessible private collection is reported exactly like an absent one.
+If an accessible child cuts off inheritance beneath a denied ancestor,
+collection discovery omits the denied ancestor and re-roots the child at the
+nearest returned ancestor, so denied names, slugs, and ids are not exposed.
 When a collection default is `group`, its effective `view` grants become the new
 object's group-visibility grants. Private collection content is always private.
 

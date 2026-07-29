@@ -31,6 +31,7 @@ let allCollections: Array<{
   archivedAt?: Date | null;
   navItemId: number | null;
   position: number;
+  viewAllowed?: boolean;
 }> = [];
 
 let visibleObjects: Array<{ collectionId: string | null }> = [];
@@ -85,8 +86,9 @@ jest.mock("@/lib/content/collection-access", () => ({
       collections
         .filter(
           (row) =>
-            row.ownerUserId == null ||
-            (req.kind === "user" && row.ownerUserId === req.userId)
+            row.viewAllowed !== false &&
+            (row.ownerUserId == null ||
+              (req.kind === "user" && row.ownerUserId === req.userId))
         )
         .map((row) => row.id)
     );
@@ -195,6 +197,45 @@ describe("collectionService.tree visibility filtering", () => {
     expect(tree).toHaveLength(1);
     expect(tree[0].id).toBe("root");
     expect(tree[0].children.map((c) => c.id)).toEqual(["child"]);
+  });
+
+  it("re-roots an admitted child without exposing a denied ancestor", async () => {
+    allCollections = [
+      {
+        id: "denied-root",
+        name: "Restricted Leadership",
+        slug: "restricted-leadership",
+        parentId: null,
+        defaultVisibilityLevel: "internal",
+        navItemId: null,
+        position: 0,
+        viewAllowed: false,
+      },
+      {
+        id: "admitted-child",
+        name: "Staff Handbook",
+        slug: "staff-handbook",
+        parentId: "denied-root",
+        defaultVisibilityLevel: "internal",
+        inheritGrants: false,
+        navItemId: null,
+        position: 0,
+      },
+    ];
+
+    const tree = await collectionService.tree(staff);
+
+    expect(tree).toHaveLength(1);
+    expect(tree[0]).toEqual(
+      expect.objectContaining({
+        id: "admitted-child",
+        name: "Staff Handbook",
+        parentId: null,
+      })
+    );
+    expect(JSON.stringify(tree)).not.toContain("denied-root");
+    expect(JSON.stringify(tree)).not.toContain("Restricted Leadership");
+    expect(JSON.stringify(tree)).not.toContain("restricted-leadership");
   });
 
   it("prunes an empty private subtree the requester cannot enter", async () => {

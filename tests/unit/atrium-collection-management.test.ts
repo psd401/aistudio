@@ -191,6 +191,29 @@ describe("collection management naming and grants", () => {
     ).toBe("private-7-projects-1");
   });
 
+  it("keeps owner-prefixed private slugs within the database column limit", () => {
+    const name = "a".repeat(200);
+    const first = collectionManagementInternals.nextSlug([], name, 7);
+    expect(first).toHaveLength(200);
+    expect(first.startsWith("private-7-")).toBe(true);
+
+    const collision = collectionManagementInternals.nextSlug(
+      [row("existing", { slug: first, ownerUserId: 7 })],
+      name,
+      7
+    );
+    expect(collision).toHaveLength(200);
+    expect(collision.endsWith("-1")).toBe(true);
+  });
+
+  it("allocates a safe position when a sibling already uses int4 max", () => {
+    const rows = [
+      row("max", { position: 2_147_483_647 }),
+      row("zero", { position: 0 }),
+    ];
+    expect(collectionManagementInternals.nextPosition(rows, null)).toBe(1);
+  });
+
   it("normalizes/deduplicates grants and rejects malformed group values", () => {
     expect(
       collectionManagementInternals.normalizeGrants([
