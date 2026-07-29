@@ -1081,11 +1081,26 @@ def check_repository(repo_root: Path) -> list[Path]:
         if value
     ]
     for relative_path in tracked:
-        try:
-            content = (repo_root / relative_path).read_bytes()
-        except OSError as error:
-            raise EvalSummaryError(f"could not read {relative_path}: {error}") from error
-        validate_committed_summary(relative_path, content)
+        indexed_blob = subprocess.run(
+            [
+                "git",
+                "cat-file",
+                "blob",
+                f":{relative_path.as_posix()}",
+            ],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+        )
+        if indexed_blob.returncode != 0:
+            detail = indexed_blob.stderr.decode(
+                "utf-8",
+                errors="replace",
+            ).strip()
+            raise EvalSummaryError(
+                f"could not read staged {relative_path}: {detail}"
+            )
+        validate_committed_summary(relative_path, indexed_blob.stdout)
     return tracked
 
 

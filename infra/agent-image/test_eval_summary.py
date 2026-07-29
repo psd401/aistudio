@@ -484,6 +484,34 @@ class CommittedArtifactGuardTests(unittest.TestCase):
             with self.assertRaisesRegex(summarize.EvalSummaryError, "transcript"):
                 summarize.check_repository(repo)
 
+    def test_repository_check_validates_index_blob_not_working_tree_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(
+                ["git", "init", "-q"],
+                cwd=repo,
+                check=True,
+            )
+            artifact_dir = repo / ".eval-runs"
+            artifact_dir.mkdir()
+            artifact = artifact_dir / f"{IMAGE_DIGEST.replace(':', '-')}.json"
+            safe_content = self.safe_summary_bytes()
+            unsafe_value = json.loads(safe_content)
+            unsafe_value["prompt"] = "private staged prompt"
+            artifact.write_text(json.dumps(unsafe_value), encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "-f", artifact.relative_to(repo)],
+                cwd=repo,
+                check=True,
+            )
+            artifact.write_bytes(safe_content)
+
+            with self.assertRaisesRegex(
+                summarize.EvalSummaryError,
+                "forbidden transcript field",
+            ):
+                summarize.check_repository(repo)
+
 
 class EvalAutomationContractTests(unittest.TestCase):
     def test_image_build_stamps_clean_aistudio_source_revision(self):
