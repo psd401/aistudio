@@ -9,16 +9,18 @@
  *
  * ## Provenance: imported content is agent-authored (spec §36.3 / §11)
  * A machine transformed an external bundle into content; nobody typed it. So every
- * imported object + version is written as the seeded **`atrium-importer`** agent
- * identity (an `agent-autonomous` requester), stamping `actor_kind = 'agent'` and
- * `author_agent_id` — never fabricated human authorship. The human/agent that
- * TRIGGERED the import is still authorized at the surface (`content:create`) and
- * recorded in the audit row; only the content provenance is the importer agent.
+ * imported object + version is attributed to the seeded **`atrium-importer`**
+ * agent identity, stamping `actor_kind = 'agent'` and `author_agent_id` — never
+ * fabricated human authorship. Ownership and collection authorization remain
+ * bound to the human/delegated caller, so imported content can safely live in
+ * that caller's private hierarchy.
  *
  * ## Safe defaults
- * Imported objects are created **private + draft** (owner = the §26.5 system user):
- * inbound external content must not land pre-widened. A human/agent publishes or
- * widens it afterward through the normal gated paths.
+ * Imported objects are created **private + draft** and owned by the triggering
+ * human/delegated owner. Inbound external content must not land pre-widened. An
+ * autonomous caller may import into an existing selectable collection, but
+ * cannot mint an ownerless/shared hierarchy as a side door around collection
+ * administration.
  *
  * ## Retry / partial-failure semantics (NOT transactional)
  * Import is deliberately **additive and NOT wrapped in a single transaction**:
@@ -28,19 +30,27 @@
  * `OKF_IMPORT_MAX_FILES` creates would also pin a pooled connection far too long).
  * Consequently, if a run fails partway, the collections + objects already created
  * are **left in place** (they are valid private/draft content), and there is no
- * dedup on path/`sourceRef` — a client **retry re-imports the whole bundle as new
- * objects** (unique slugs are auto-suffixed). Callers that need idempotency should
- * import into a fresh `targetCollectionId` and treat a failed run as "delete the
- * partial target collection, then retry". Documented on the REST/MCP surfaces.
+ * dedup on path/`sourceRef`. A blind retry may duplicate objects or meet a
+ * sibling-name conflict. Callers that need idempotency should create/select a
+ * fresh target and treat a failed run as "archive the partial imported subtree,
+ * then retry into a new target". Documented on the REST/MCP surfaces.
  */
 
-import { executeQuery } from "@/lib/db/drizzle-client";
-import { contentCollections } from "@/lib/db/schema";
 import { createLogger } from "@/lib/logger";
 import { contentService } from "../content-service";
-import { assertCanCreate, slugCandidate, slugifyTitle } from "../helpers";
-import { ConflictError, ValidationError } from "../errors";
-import type { BodyFormat, Requester } from "../types";
+import { collectionManagementService } from "../collection-management-service";
+import {
+  collectionAccessSnapshot,
+  collectionOwnerUserId,
+} from "../collection-access";
+import { assertCanCreate } from "../helpers";
+import { ForbiddenError, ValidationError } from "../errors";
+import type {
+  BodyFormat,
+  CollectionScope,
+  Requester,
+} from "../types";
+import type { ContentAuditSurface } from "../audit";
 import { OKF_GENERATOR, OKF_INDEX_FILE, OKF_LOG_FILE, kindForOkfType, type OkfFile } from "./profile";
 import { parseConceptFile, parseFrontmatter } from "./frontmatter";
 
@@ -91,12 +101,6 @@ export interface OkfImportResult {
   objectCount: number;
 }
 
-const isUniqueViolation = (error: unknown): boolean =>
-  typeof error === "object" &&
-  error !== null &&
-  "code" in error &&
-  (error as { code?: string }).code === "23505";
-
 /**
  * The directory portion of a slash-path — everything before the last "/", or "" when
  * top-level. Works on a file path (`a/b.md` → `a`) AND on a directory key, where it
@@ -116,37 +120,56 @@ function baseOf(path: string): string {
   return idx === -1 ? path : path.slice(idx + 1);
 }
 
-/** Insert one collection, retrying with a `-N` slug suffix on a unique collision. */
+interface OkfImportOptions {
+  surface?: ContentAuditSurface;
+  requestId?: string;
+}
+
+/** Create one collection through the shared authority/audit write path. */
 async function createCollection(
+  req: Requester,
   name: string,
-  baseSlug: string,
-  parentId: string | null
+  parentId: string | null,
+  scope: CollectionScope,
+  options: OkfImportOptions
 ): Promise<string> {
-  const base = slugifyTitle(baseSlug || name);
-  for (let attempt = 0; attempt < 50; attempt++) {
-    const slug = slugCandidate(base, attempt);
-    try {
-      const rows = await executeQuery(
-        (db) =>
-          db
-            .insert(contentCollections)
-            .values({
-              name: name.slice(0, 200),
-              slug,
-              parentId,
-              // Inbound external content lands private-by-default (safe).
-              defaultVisibilityLevel: "private",
-            })
-            .returning({ id: contentCollections.id }),
-        "okf.import.createCollection"
-      );
-      if (rows[0]) return rows[0].id;
-    } catch (err) {
-      if (isUniqueViolation(err)) continue;
-      throw err;
-    }
+  const collection = await collectionManagementService.create(
+    req,
+    {
+      name: name.slice(0, 200),
+      scope,
+      parentId,
+      defaultVisibilityLevel: "private",
+      inheritGrants: scope === "district",
+    },
+    options
+  );
+  return collection.id;
+}
+
+async function importCollectionScope(
+  req: Requester,
+  targetCollectionId: string | undefined
+): Promise<CollectionScope> {
+  const access = await collectionAccessSnapshot(req);
+  const target = targetCollectionId
+    ? access.byId.get(targetCollectionId)
+    : undefined;
+  if (
+    targetCollectionId &&
+    (!target || !access.selectableCollectionIds.has(targetCollectionId))
+  ) {
+    throw new ValidationError("Target collection not found");
   }
-  throw new ConflictError("Could not allocate a unique collection slug", { base });
+  if (target) {
+    return target.ownerUserId == null ? "district" : "private";
+  }
+  if (collectionOwnerUserId(req) == null) {
+    throw new ForbiddenError(
+      "Autonomous imports require an existing selectable target collection"
+    );
+  }
+  return "private";
 }
 
 /** Parse the `title` frontmatter from an `index.md`, if present. */
@@ -165,12 +188,15 @@ function indexTitle(files: Map<string, OkfFile>, dir: string): string | undefine
  * when supplied, else to a freshly created root collection.
  */
 async function reconstructCollections(
+  req: Requester,
   dirs: Set<string>,
   fileMap: Map<string, OkfFile>,
-  targetCollectionId: string | undefined
+  targetCollectionId: string | undefined,
+  options: OkfImportOptions
 ): Promise<{ map: Map<string, string | null>; created: number }> {
   const map = new Map<string, string | null>();
   let created = 0;
+  const scope = await importCollectionScope(req, targetCollectionId);
 
   // Depth-sorted so a parent directory is always created before its children.
   const ordered = Array.from(dirs).sort(
@@ -183,7 +209,10 @@ async function reconstructCollections(
         map.set("", targetCollectionId);
       } else {
         const rootName = indexTitle(fileMap, "") ?? "Imported OKF bundle";
-        map.set("", await createCollection(rootName, rootName, null));
+        map.set(
+          "",
+          await createCollection(req, rootName, null, scope, options)
+        );
         created++;
       }
       continue;
@@ -191,7 +220,10 @@ async function reconstructCollections(
     const parentId = map.get(dirOf(dir)) ?? targetCollectionId ?? null;
     const segment = baseOf(dir);
     const name = indexTitle(fileMap, dir) ?? segment;
-    map.set(dir, await createCollection(name, segment, parentId));
+    map.set(
+      dir,
+      await createCollection(req, name, parentId, scope, options)
+    );
     created++;
   }
   return { map, created };
@@ -233,6 +265,7 @@ function conceptBodyForCreate(
 
 /** Create ONE imported object from a concept file, as the import agent. */
 async function importConcept(
+  callerReq: Requester,
   importReq: Requester,
   file: OkfFile,
   dirToCollection: Map<string, string | null>,
@@ -245,17 +278,21 @@ async function importConcept(
     dirToCollection.get(dirOf(file.path)) ?? targetCollectionId ?? undefined;
   const { body, bodyFormat } = conceptBodyForCreate(kind, concept.body);
 
-  const createdObject = await contentService.create(importReq, {
-    kind,
-    title,
-    collectionId,
-    body,
-    bodyFormat,
-    // Inbound content is private + draft; never pre-widened.
-    visibility: { level: "private" },
-    tags: concept.frontmatter.tags,
-    sourceRef: { type: "okf", generator: OKF_GENERATOR },
-  });
+  const createdObject = await contentService.create(
+    callerReq,
+    {
+      kind,
+      title,
+      collectionId,
+      body,
+      bodyFormat,
+      // Inbound content is private + draft; never pre-widened.
+      visibility: { level: "private" },
+      tags: concept.frontmatter.tags,
+      sourceRef: { type: "okf", generator: OKF_GENERATOR },
+    },
+    { attributionRequester: importReq }
+  );
   return {
     id: createdObject.id,
     slug: createdObject.slug,
@@ -271,7 +308,8 @@ export const okfImportService = {
    */
   async importBundle(
     callerReq: Requester,
-    input: OkfImportInput
+    input: OkfImportInput,
+    options: OkfImportOptions = {}
   ): Promise<OkfImportResult> {
     const log = createLogger({ action: "okf.import" });
     // Defense in depth: the surface already gated `content:create`, but re-assert so
@@ -305,16 +343,24 @@ export const okfImportService = {
       }
     }
     const { map: dirToCollection, created } = await reconstructCollections(
+      callerReq,
       dirs,
       fileMap,
-      input.targetCollectionId
+      input.targetCollectionId,
+      options
     );
 
     const importReq = importRequester();
     const objects: OkfImportedObject[] = [];
     for (const file of conceptFiles) {
       objects.push(
-        await importConcept(importReq, file, dirToCollection, input.targetCollectionId)
+        await importConcept(
+          callerReq,
+          importReq,
+          file,
+          dirToCollection,
+          input.targetCollectionId
+        )
       );
     }
 

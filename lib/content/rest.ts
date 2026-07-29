@@ -122,6 +122,33 @@ export const restGrantSchema = z.object({
   value: z.string(),
 });
 
+export const restCollectionGrantSchema = restGrantSchema.extend({
+  access: z.enum(["view", "create"]),
+});
+
+export const createCollectionBodySchema = z
+  .object({
+    name: z.string().min(1).max(200),
+    scope: z.enum(["district", "private"]),
+    parentId: z.string().uuid().nullable().optional(),
+    position: z.number().int().min(0).optional(),
+    defaultVisibilityLevel: z
+      .enum(["private", "group", "internal", "public"])
+      .optional(),
+    inheritGrants: z.boolean().optional(),
+    grants: z.array(restCollectionGrantSchema).max(200).optional(),
+  })
+  .strict();
+
+export const updateCollectionBodySchema = createCollectionBodySchema
+  .omit({ scope: true })
+  .partial()
+  .extend({ archived: z.boolean().optional() })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "At least one collection field is required",
+  });
+
 export const restVisibilitySchema = z.object({
   level: z.enum(["private", "group", "internal", "public"]),
   grants: z.array(restGrantSchema).optional(),

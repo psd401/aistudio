@@ -78,6 +78,24 @@ jest.mock("@/lib/db/drizzle-client", () => ({
         return loadAssistantScopeResult;
       case "content.grantsFor":
         return grantsForResult;
+      case "collectionAccess.loadCollections":
+        return [
+          {
+            id: "col-hs-staff",
+            name: "High School Staff",
+            slug: "high-school-staff",
+            parentId: null,
+            ownerUserId: null,
+            defaultVisibilityLevel: "group",
+            inheritGrants: true,
+            position: 0,
+            archivedAt: null,
+          },
+        ];
+      case "collectionAccess.loadGrants":
+        // No collection-level rows preserves the legacy district-wide boundary;
+        // the object-level role/group grants below remain the predicate under test.
+        return [];
       default:
         return [];
     }

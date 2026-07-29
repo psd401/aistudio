@@ -43,6 +43,7 @@ export async function listEmbeddingDocuments(
           title: contentObjects.title,
           slug: contentObjects.slug,
           ownerUserId: contentObjects.ownerUserId,
+          collectionId: contentObjects.collectionId,
           visibilityLevel: contentObjects.visibilityLevel,
           status: contentObjects.status,
         })
@@ -61,6 +62,7 @@ export async function listEmbeddingDocuments(
     const viewable = await visibilityService.canView(requester, {
       id: r.id,
       ownerUserId: r.ownerUserId,
+      collectionId: r.collectionId,
       visibilityLevel: r.visibilityLevel,
     });
     if (viewable) out.push({ id: r.id, title: r.title, slug: r.slug });

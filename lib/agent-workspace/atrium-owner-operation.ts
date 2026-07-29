@@ -3,6 +3,8 @@ import {
   ApprovalRequiredError,
   ForbiddenError,
   contentAssetService,
+  collectionManagementService,
+  collectionService,
   contentService,
   contentSourceService,
   isContentError,
@@ -22,6 +24,10 @@ import {
   resolveCollectionId,
 } from "@/lib/content/surface-helpers"
 import { contentSourceRefSchema } from "@/lib/content/source-ref"
+import {
+  createCollectionBodySchema,
+  updateCollectionBodySchema,
+} from "@/lib/content/rest"
 import { getUserByEmail } from "@/lib/db/drizzle/users"
 
 const visibilitySchema = z
@@ -249,6 +255,22 @@ function recordAudit(
 /** Hands a branch's audit record back to the top-level catch. */
 type SetAudit = (audit: MutationAudit) => void
 
+async function executeSingleSegmentRead(
+  req: Requester,
+  segment: string,
+  requestId: string
+): Promise<AgentAtriumOperationResult> {
+  if (segment === "collections") {
+    const collections = await collectionService.discover(req, {
+      shape: "flat",
+      includeCreateSelection: true,
+    })
+    return success(collections, requestId)
+  }
+  const object = await contentService.get(req, segment)
+  return success({ ...object, url: contentDeepLink(object.slug) }, requestId)
+}
+
 /**
  * The READ half of the fixed surface.
  *
@@ -269,7 +291,11 @@ async function executeAtriumRead(
 
   if (segments.length === 0) {
     const query = listQuerySchema.parse(input.query ?? {})
-    const collectionId = await resolveCollectionId(query.collection)
+    const collectionId = await resolveCollectionId(
+      req,
+      query.collection,
+      "view"
+    )
     const items = await contentService.list(req, {
       kind: query.kind,
       collectionId,
@@ -288,11 +314,7 @@ async function executeAtriumRead(
   }
 
   if (segments.length === 1) {
-    const object = await contentService.get(req, segments[0])
-    return success(
-      { ...object, url: contentDeepLink(object.slug) },
-      input.requestId
-    )
+    return executeSingleSegmentRead(req, segments[0], input.requestId)
   }
 
   // Committed markdown source. `GET /<id>` deliberately omits a DOCUMENT's
@@ -373,7 +395,11 @@ async function executeContentWrite(
       {
         kind: body.kind,
         title: body.title,
-        collectionId: await resolveCollectionId(body.collectionId),
+        collectionId: await resolveCollectionId(
+          req,
+          body.collectionId,
+          "create"
+        ),
         body: decodeContentBody(body.body, body.codeEncoding),
         bodyFormat: body.bodyFormat,
         visibility: body.visibility,
@@ -414,6 +440,36 @@ async function executeContentWrite(
   return null
 }
 
+async function executeCollectionWrite(
+  req: Requester,
+  input: AgentAtriumOperationInput,
+  segments: string[]
+): Promise<AgentAtriumOperationResult | null> {
+  if (segments[0] !== "collections") return null
+
+  if (input.method === "POST" && segments.length === 1) {
+    const body = createCollectionBodySchema.parse(input.body ?? {})
+    const created = await collectionManagementService.create(req, body, {
+      surface: "rest",
+      requestId: input.requestId,
+    })
+    return success(created, input.requestId, 201)
+  }
+
+  if (input.method === "PATCH" && segments.length === 2) {
+    const body = updateCollectionBodySchema.parse(input.body ?? {})
+    const updated = await collectionManagementService.update(
+      req,
+      segments[1],
+      body,
+      { surface: "rest", requestId: input.requestId }
+    )
+    return success(updated, input.requestId)
+  }
+
+  return null
+}
+
 /**
  * Metadata writes: title/tags/collection/status, visibility level, and delete.
  * None of these carries a body — they change what an object IS or who may see
@@ -434,7 +490,7 @@ async function executeMetadataWrite(
         ? undefined
         : body.collectionId === null
           ? null
-          : await resolveCollectionId(body.collectionId)
+          : await resolveCollectionId(req, body.collectionId, "create")
     const updated = await contentService.update(req, segments[0], {
       title: body.title,
       tags: body.tags,
@@ -623,6 +679,7 @@ export async function executeOwnerAtriumOperation(
     })
 
     const written =
+      (await executeCollectionWrite(req, input, segments)) ??
       (await executeContentWrite(req, input, segments, setAudit)) ??
       (await executeMetadataWrite(req, input, segments, setAudit)) ??
       (await executeAssetWrite(req, input, segments, setAudit)) ??

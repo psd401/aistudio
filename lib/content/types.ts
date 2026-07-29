@@ -38,6 +38,54 @@ export interface VisibilityGrant {
 
 export type VisibilityLevel = "private" | "group" | "internal" | "public";
 
+export type CollectionScope = "district" | "private";
+export type CollectionGrantAccess = "view" | "create";
+
+export interface CollectionGrant {
+  access: CollectionGrantAccess;
+  kind: GrantKind;
+  value: string;
+}
+
+export interface CreateCollectionInput {
+  name: string;
+  scope: CollectionScope;
+  parentId?: string | null;
+  position?: number;
+  defaultVisibilityLevel?: VisibilityLevel;
+  inheritGrants?: boolean;
+  grants?: CollectionGrant[];
+}
+
+export interface UpdateCollectionInput {
+  name?: string;
+  parentId?: string | null;
+  position?: number;
+  defaultVisibilityLevel?: VisibilityLevel;
+  inheritGrants?: boolean;
+  grants?: CollectionGrant[];
+  archived?: boolean;
+}
+
+export interface CollectionDTO {
+  id: string;
+  name: string;
+  slug: string;
+  parentId: string | null;
+  path: string[];
+  scope: CollectionScope;
+  ownerUserId: number | null;
+  ownerName: string | null;
+  defaultVisibilityLevel: VisibilityLevel;
+  inheritGrants: boolean;
+  position: number;
+  archivedAt: string | null;
+  directContentCount: number;
+  subtreeContentCount: number;
+  grants: CollectionGrant[];
+  selectableForCreate: boolean;
+}
+
 export interface VisibilityInput {
   level: VisibilityLevel;
   /** Required (and only meaningful) when `level === "group"`. */

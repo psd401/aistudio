@@ -9,12 +9,22 @@ import { z } from "zod";
 import {
   createApiResponse,
   createErrorResponse,
+  parseRequestBody,
   requireScope,
   withApiAuth,
 } from "@/lib/api";
 import { hasScope } from "@/lib/api-keys/key-service";
-import { collectionService, requesterFromApiAuth } from "@/lib/content";
-import { contentErrorToResponse } from "@/lib/content/rest";
+import {
+  collectionManagementService,
+  collectionService,
+  requesterFromApiAuth,
+} from "@/lib/content";
+import {
+  contentErrorToResponse,
+  createCollectionBodySchema,
+  resolveRestRequester,
+} from "@/lib/content/rest";
+import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
 
 const querySchema = z.object({
   shape: z.enum(["tree", "flat"]).default("tree"),
@@ -53,6 +63,37 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
         },
       },
       requestId
+    );
+  } catch (error) {
+    return contentErrorToResponse(error, requestId);
+  }
+});
+
+export const POST = withApiAuth(async (request: NextRequest, auth, requestId) => {
+  const scopeError = requireScope(auth, "content:create", requestId);
+  if (scopeError) return scopeError;
+
+  const parsedBody = await parseRequestBody(
+    request,
+    createCollectionBodySchema,
+    requestId
+  );
+  if (parsedBody instanceof Response) return parsedBody;
+
+  const resolved = await resolveRestRequester(auth, requestId);
+  if ("response" in resolved) return resolved.response;
+
+  try {
+    await assertContentAuthoringCapability(auth);
+    const collection = await collectionManagementService.create(
+      resolved.req,
+      parsedBody.data,
+      { surface: "rest", requestId }
+    );
+    return createApiResponse(
+      { data: collection, meta: { requestId } },
+      requestId,
+      201
     );
   } catch (error) {
     return contentErrorToResponse(error, requestId);

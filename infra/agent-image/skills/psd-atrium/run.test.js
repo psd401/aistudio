@@ -153,6 +153,110 @@ test('find rejects an invalid --kind (exit 1)', async () => {
   expect(code).toBe(1);
 });
 
+test('collection commands map to the fixed owner-bound broker surface', async () => {
+  await run('list-collections');
+  await run(
+    'create-collection',
+    '--name',
+    'HR',
+    '--scope',
+    'district',
+    '--parent',
+    'root',
+    '--position',
+    '2',
+    '--default-visibility',
+    'internal',
+    '--inherit-grants',
+    'true',
+    '--grants',
+    'view:role:staff,create:group:hr-editors@psd401.net'
+  );
+  await run(
+    'edit-collection',
+    '--id',
+    'collection-1',
+    '--name',
+    'People Operations',
+    '--grants',
+    'none'
+  );
+  await run(
+    'move-collection',
+    '--id',
+    'collection-1',
+    '--parent',
+    'collection-root',
+    '--position',
+    '0'
+  );
+  await run('archive-collection', '--id', 'collection-1');
+  await run('restore-collection', '--id', 'collection-1');
+
+  expect(restCalls.map(({ method, path }) => ({ method, path }))).toEqual([
+    { method: 'GET', path: '/collections' },
+    { method: 'POST', path: '/collections' },
+    { method: 'PATCH', path: '/collections/collection-1' },
+    { method: 'PATCH', path: '/collections/collection-1' },
+    { method: 'PATCH', path: '/collections/collection-1' },
+    { method: 'PATCH', path: '/collections/collection-1' },
+  ]);
+  expect(restCalls[1].opts.body).toEqual({
+    name: 'HR',
+    scope: 'district',
+    parentId: null,
+    position: 2,
+    defaultVisibilityLevel: 'internal',
+    inheritGrants: true,
+    grants: [
+      { access: 'view', kind: 'role', value: 'staff' },
+      {
+        access: 'create',
+        kind: 'group',
+        value: 'hr-editors@psd401.net',
+      },
+    ],
+  });
+  expect(restCalls[2].opts.body.grants).toEqual([]);
+  expect(restCalls[3].opts.body).toEqual({
+    parentId: 'collection-root',
+    position: 0,
+  });
+  expect(restCalls[4].opts.body).toEqual({ archived: true });
+  expect(restCalls[5].opts.body).toEqual({ archived: false });
+});
+
+test('collection commands reject malformed hierarchy flags locally', async () => {
+  let code;
+  try {
+    await run(
+      'create-collection',
+      '--name',
+      'Bad',
+      '--position',
+      '-1'
+    );
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+  expect(restCalls).toHaveLength(0);
+
+  try {
+    await run(
+      'create-collection',
+      '--name',
+      'Bad',
+      '--grants',
+      'role:staff'
+    );
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+  expect(restCalls).toHaveLength(0);
+});
+
 test('read GETs /<id> and surfaces the inline body', async () => {
   restResponder = () => ({
     approvalRequired: false,

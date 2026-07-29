@@ -101,6 +101,9 @@ describe("POST /api/agent/atrium", () => {
   })
 
   it.each([
+    ["GET", "/collections"],
+    ["POST", "/collections"],
+    ["PATCH", "/collections/f9999999-9999-4999-8999-999999999999"],
     ["GET", "/content-1/source"],
     ["GET", "/content-1/assets"],
     ["GET", "/content-1/assets/asset-1/bytes"],
@@ -128,6 +131,8 @@ describe("POST /api/agent/atrium", () => {
     ["POST", "/content-1/source"],
     ["DELETE", "/content-1/assets/asset-1"],
     ["PATCH", "/content-1/assets"],
+    ["DELETE", "/collections/content-1"],
+    ["PATCH", "/collections/content-1/archive"],
   ])("rejects operation %s %s outside the fixed API surface", async (method, path) => {
     const response = await POST(request({ method, path }))
     expect(response.status).toBe(400)

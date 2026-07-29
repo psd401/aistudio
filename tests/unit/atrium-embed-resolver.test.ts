@@ -39,6 +39,10 @@ let canViewResult = false;
 jest.mock("@/lib/content/visibility-service", () => ({
   visibilityService: { canView: jest.fn(async () => canViewResult) },
 }));
+let mayViewCollection = true;
+jest.mock("@/lib/content/collection-access", () => ({
+  requesterMayViewCollection: jest.fn(async () => mayViewCollection),
+}));
 
 // A viewable artifact loads its current head code; default to a version + code so the
 // positive-control test can assert a live render. Overridden per test where needed.
@@ -87,6 +91,7 @@ beforeEach(() => {
   queuedRows = [];
   queuedPublicationRows = [{ publishedVersionId: "pv1" }];
   canViewResult = false;
+  mayViewCollection = true;
   currentVersion = { id: "v1" };
   publishedVersion = { id: "pv1" };
   artifactCode = "<h1>live</h1>";
@@ -163,6 +168,7 @@ describe("resolveEmbedForReader resolves a viewable artifact", () => {
     id: ARTIFACT_ID,
     kind: "artifact" as const,
     ownerUserId: 9,
+    collectionId: "public-collection",
     visibilityLevel: "public" as const,
     title: "Metrics",
     slug: "metrics",
@@ -185,6 +191,15 @@ describe("resolveEmbedForReader resolves a viewable artifact", () => {
     const res = await resolveEmbedForReader(ARTIFACT_ID, { audience: "public" });
     expect(res.available).toBe(true);
     expect(res.href).toBe("/p/metrics");
+  });
+
+  it("public: masks an artifact in a collection anonymous users cannot enter", async () => {
+    queuedRows = [artifactRow];
+    mayViewCollection = false;
+    const res = await resolveEmbedForReader(ARTIFACT_ID, {
+      audience: "public",
+    });
+    expect(res).toEqual(expectedMask(ARTIFACT_ID));
   });
 
   it("public: renders the PUBLISHED version, never the live head", async () => {

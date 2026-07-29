@@ -412,6 +412,7 @@ async function search(
       visibilityService.canView(req, {
         id: obj.id,
         ownerUserId: obj.ownerUserId,
+        collectionId: obj.collectionId,
         visibilityLevel: obj.visibilityLevel,
       })
     )
@@ -444,6 +445,7 @@ async function getContextDocument(
   const visible = await visibilityService.canView(req, {
     id: obj.id,
     ownerUserId: obj.ownerUserId,
+    collectionId: obj.collectionId,
     visibilityLevel: obj.visibilityLevel,
   });
   if (!visible) return null;

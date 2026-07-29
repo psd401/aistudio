@@ -6,50 +6,36 @@
  * sections a requester may enter — so a user never sees a section they cannot
  * enter (spec §21).
  *
- * ## Visibility model for a collection (no per-collection grant table exists)
- * Collections carry only `default_visibility_level` (there is no
- * `collection_visibility_grants` table — grants live on objects). A collection is
- * therefore "enterable" by a principal when EITHER:
- *  - the collection's `default_visibility_level` admits the principal at the
- *    LEVEL check (public → everyone; internal → any authenticated principal;
- *    private → admin only; group → cannot be satisfied at the collection level
- *    because collections carry no grants — see below), OR
- *  - the principal can view at least one content object placed in the collection
- *    (its subtree counts too). The visible-object counts are computed by the same
- *    permission-pushed visibility predicate (`buildVisibilitySql`) every other
- *    read path uses, via a per-collection `GROUP BY` aggregate bounded by
- *    collection count (not object count), so a `group`-scoped collection
- *    naturally becomes visible to exactly the principals who can see content
- *    inside it (via the objects' own grants).
- *
- * This keeps the two acceptance guarantees aligned:
- *  - "Published content appears in the collection tree" — a visible object lights
- *    up its collection (and all ancestors).
- *  - "Sidebar is filtered by visibility" — an empty/forbidden section the user
- *    cannot enter (no level access AND no visible object) is pruned entirely.
- *
- * An admin sees every collection (the level check short-circuits on `isAdmin`,
- * mirroring `visibilityService.canView`).
+ * Collection ACLs distinguish `view` and `create`, inherit through district
+ * parents until `inherit_grants=false`, and form an additional boundary around
+ * object visibility. Owner-bound private collections are visible/selectable only
+ * to their owner; administrator metadata oversight never grants content access.
+ * Zero effective district grants preserve the original default-visibility model.
+ * A visible object also keeps its connected ancestor path in the tree.
  *
  * See docs/features/atrium-design-spec.md §21.
  */
 
-import { asc, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentCollections } from "@/lib/db/schema";
 import { principalOf } from "./helpers";
 import { visibilityService } from "./visibility-service";
-import type { Principal, Requester, VisibilityLevel } from "./types";
+import {
+  collectionAccessSnapshot,
+  type CollectionAccessRow,
+  type CollectionAccessSnapshot,
+} from "./collection-access";
+import type {
+  CollectionScope,
+  Principal,
+  Requester,
+  VisibilityLevel,
+} from "./types";
 
 /** A collection row as loaded for the tree (timestamps not needed here). */
-interface CollectionRow {
-  id: string;
-  name: string;
-  slug: string;
-  parentId: string | null;
-  defaultVisibilityLevel: VisibilityLevel;
+interface CollectionRow extends CollectionAccessRow {
   navItemId: number | null;
-  position: number;
 }
 
 /** A node in the visibility-filtered collection tree returned to surfaces. */
@@ -58,9 +44,12 @@ export interface CollectionTreeNode {
   name: string;
   slug: string;
   parentId: string | null;
+  scope: CollectionScope;
+  ownerUserId: number | null;
   defaultVisibilityLevel: VisibilityLevel;
   navItemId: number | null;
   position: number;
+  selectableForCreate: boolean;
   /** Number of objects in THIS collection the requester can view (not subtree). */
   visibleObjectCount: number;
   children: CollectionTreeNode[];
@@ -73,6 +62,8 @@ export interface CollectionDiscoveryNode {
   slug: string;
   parentId: string | null;
   path: string[];
+  scope: CollectionScope;
+  ownerUserId: number | null;
   defaultVisibilityLevel: VisibilityLevel;
   visibleObjectCount: number;
   /**
@@ -102,9 +93,13 @@ function discoveryTree(
       slug: node.slug,
       parentId: node.parentId,
       path,
+      scope: node.scope,
+      ownerUserId: node.ownerUserId,
       defaultVisibilityLevel: node.defaultVisibilityLevel,
       visibleObjectCount: node.visibleObjectCount,
-      ...(includeCreateSelection ? { selectableForCreate: true } : {}),
+      ...(includeCreateSelection
+        ? { selectableForCreate: node.selectableForCreate }
+        : {}),
       children: discoveryTree(
         node.children,
         path,
@@ -130,16 +125,17 @@ function flattenDiscoveryTree(
 
 /**
  * Whether a principal may enter a collection based on its default visibility
- * LEVEL alone (no object/grant lookup). Mirrors the level rules in
- * `visibilityService.canView`, minus the owner branch (collections have no
- * owner) and the grant branches (collections have no grant table):
+ * LEVEL alone. This fallback is used only for grant-unrestricted district
+ * collections; private ownership and effective collection grants are resolved
+ * separately by `collectionAccessSnapshot`:
  *  - public   → everyone (incl. unauthenticated).
  *  - internal → any authenticated principal (a user id or a role).
  *  - private  → admin only.
  *  - group    → not satisfiable at the collection level (no collection grants);
  *               such a section surfaces only when it contains a visible object.
  *
- * Admin short-circuits to true for every level, matching `canView`.
+ * Admin short-circuits for district collections; owner-bound private rows never
+ * reach this fallback unless the requester is their owner.
  */
 function levelAdmitsPrincipal(
   principal: Principal,
@@ -152,30 +148,6 @@ function levelAdmitsPrincipal(
   }
   // private / group: not enterable on the level check alone for a non-admin.
   return false;
-}
-
-/** Load every collection ordered by (position, name) for a stable tree. */
-async function loadAllCollections(): Promise<CollectionRow[]> {
-  const rows = await executeQuery(
-    (db) =>
-      db
-        .select({
-          id: contentCollections.id,
-          name: contentCollections.name,
-          slug: contentCollections.slug,
-          parentId: contentCollections.parentId,
-          defaultVisibilityLevel: contentCollections.defaultVisibilityLevel,
-          navItemId: contentCollections.navItemId,
-          position: contentCollections.position,
-        })
-        .from(contentCollections)
-        .orderBy(asc(contentCollections.position), asc(contentCollections.name)),
-    "collection.loadAll"
-  );
-  return rows.map((r) => ({
-    ...r,
-    defaultVisibilityLevel: r.defaultVisibilityLevel as VisibilityLevel,
-  }));
 }
 
 /** Index collections by id and by parent id (the child lists), in one pass. */
@@ -209,13 +181,20 @@ function computeKeepSet(
   collections: CollectionRow[],
   byId: Map<string, CollectionRow>,
   principal: Principal,
-  visibleCountByCollection: Map<string, number>
+  visibleCountByCollection: Map<string, number>,
+  access: CollectionAccessSnapshot
 ): Set<string> {
   const keep = new Set<string>();
   for (const c of collections) {
-    const levelOk = levelAdmitsPrincipal(principal, c.defaultVisibilityLevel);
+    const allowed = access.allowedCollectionIds.has(c.id);
+    const hasViewAcl = access.effectiveGrants(c.id, "view").length > 0;
+    const levelOk =
+      allowed &&
+      (c.ownerUserId != null ||
+        hasViewAcl ||
+        levelAdmitsPrincipal(principal, c.defaultVisibilityLevel));
     const hasVisibleObject = (visibleCountByCollection.get(c.id) ?? 0) > 0;
-    if (!levelOk && !hasVisibleObject) continue;
+    if (!levelOk && !(allowed && hasVisibleObject)) continue;
 
     // Directly visible: mark it and every not-yet-kept ancestor KEEP.
     let cursorId: string | null = c.id;
@@ -264,8 +243,8 @@ export const collectionService = {
    */
   async tree(req: Requester): Promise<CollectionTreeNode[]> {
     const principal = principalOf(req);
-    const [collections, visibleCountByCollection] = await Promise.all([
-      loadAllCollections(),
+    const [access, visibleCountByCollection, navRows] = await Promise.all([
+      collectionAccessSnapshot(req),
       // Per-collection visible-object counts (permission-pushed, GROUP BY in SQL).
       // Excludes archived; published + draft both count toward "this section has
       // content I can see". Bounded by collection count, not object count, so a
@@ -273,14 +252,29 @@ export const collectionService = {
       // outside a capped list page (the reader sidebar is the same visibility, so
       // a non-author only ever counts published content they're entitled to).
       visibilityService.visibleCountsByCollection(req),
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              id: contentCollections.id,
+              navItemId: contentCollections.navItemId,
+            })
+            .from(contentCollections),
+        "collection.loadNavItems"
+      ),
     ]);
+    const navById = new Map(navRows.map((row) => [row.id, row.navItemId]));
+    const collections: CollectionRow[] = access.collections
+      .filter((row) => !row.archivedAt)
+      .map((row) => ({ ...row, navItemId: navById.get(row.id) ?? null }));
 
     const { byId, childrenOf } = indexCollections(collections);
     const keep = computeKeepSet(
       collections,
       byId,
       principal,
-      visibleCountByCollection
+      visibleCountByCollection,
+      access
     );
 
     // Build the kept forest. A child is attached only when both it and its parent
@@ -293,9 +287,12 @@ export const collectionService = {
           name: c.name,
           slug: c.slug,
           parentId: c.parentId,
+          scope: c.ownerUserId == null ? "district" : "private",
+          ownerUserId: c.ownerUserId,
           defaultVisibilityLevel: c.defaultVisibilityLevel,
           navItemId: c.navItemId,
           position: c.position,
+          selectableForCreate: access.selectableCollectionIds.has(c.id),
           visibleObjectCount: visibleCountByCollection.get(c.id) ?? 0,
           children: build(c.id),
         }));

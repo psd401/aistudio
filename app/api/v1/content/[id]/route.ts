@@ -100,7 +100,7 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId, p
         ? undefined
         : patch.collectionId === null
           ? null
-          : await resolveCollectionId(patch.collectionId);
+          : await resolveCollectionId(req, patch.collectionId, "create");
     const updated = await contentService.update(req, id, {
       title: patch.title,
       tags: patch.tags,

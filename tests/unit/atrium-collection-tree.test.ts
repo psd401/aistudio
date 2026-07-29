@@ -26,6 +26,9 @@ let allCollections: Array<{
   slug: string;
   parentId: string | null;
   defaultVisibilityLevel: string;
+  ownerUserId?: number | null;
+  inheritGrants?: boolean;
+  archivedAt?: Date | null;
   navItemId: number | null;
   position: number;
 }> = [];
@@ -67,6 +70,40 @@ jest.mock("@/lib/content/visibility-service", () => ({
       return counts;
     }),
   },
+}));
+
+jest.mock("@/lib/content/collection-access", () => ({
+  collectionAccessSnapshot: jest.fn(
+    async (req: { kind: string; userId?: number | null }) => {
+    const collections = allCollections.map((row) => ({
+      ...row,
+      ownerUserId: row.ownerUserId ?? null,
+      inheritGrants: row.inheritGrants ?? true,
+      archivedAt: row.archivedAt ?? null,
+    }));
+    const allowedCollectionIds = new Set(
+      collections
+        .filter(
+          (row) =>
+            row.ownerUserId == null ||
+            (req.kind === "user" && row.ownerUserId === req.userId)
+        )
+        .map((row) => row.id)
+    );
+      return {
+        collections,
+        byId: new Map(collections.map((row) => [row.id, row])),
+        directGrants: new Map(),
+        effectiveGrants: () => [],
+        allowedCollectionIds,
+        selectableCollectionIds: new Set(
+          req.kind === "user" && req.userId != null
+            ? [...allowedCollectionIds]
+            : []
+        ),
+      };
+    }
+  ),
 }));
 
 import { collectionService } from "@/lib/content/collection-service";

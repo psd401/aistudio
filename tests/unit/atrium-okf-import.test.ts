@@ -26,22 +26,35 @@ jest.mock("@/lib/content/content-service", () => ({
   },
 }));
 
-// executeQuery serves createCollection (nested dirs). The root-only tests pass a
-// targetCollectionId, so no fresh collection is created there.
-jest.mock("@/lib/db/drizzle-client", () => ({
-  executeQuery: jest.fn(async () => [{ id: "coll-new" }]),
+const mockCollectionCreate = jest.fn(async (..._args: unknown[]) => ({
+  id: "coll-new",
 }));
-
-jest.mock("@/lib/db/schema", () => ({
-  contentCollections: { id: "contentCollections.id" },
+jest.mock("@/lib/content/collection-management-service", () => ({
+  collectionManagementService: {
+    create: (...args: unknown[]) => mockCollectionCreate(...args),
+  },
+}));
+jest.mock("@/lib/content/collection-access", () => ({
+  collectionOwnerUserId: (req: { kind: string; userId?: number }) =>
+    req.kind === "user" ? req.userId ?? null : null,
+  collectionAccessSnapshot: jest.fn(async () => ({
+    byId: new Map([
+      [
+        "target-coll",
+        {
+          id: "target-coll",
+          ownerUserId: null,
+        },
+      ],
+    ]),
+    selectableCollectionIds: new Set(["target-coll"]),
+  })),
 }));
 
 import { contentService } from "@/lib/content/content-service";
-import { executeQuery } from "@/lib/db/drizzle-client";
 import { okfImportService, ATRIUM_IMPORT_AGENT_ID } from "@/lib/content/okf/import";
 
 const createMock = contentService.create as jest.Mock;
-const executeQueryMock = executeQuery as jest.Mock;
 import { buildConceptFile, type ConceptSource } from "@/lib/content/okf/serialize";
 import { serializeFrontmatter } from "@/lib/content/okf/frontmatter";
 import { OKF_INDEX_FILE } from "@/lib/content/okf/profile";
@@ -69,7 +82,7 @@ const docSource: ConceptSource = {
 describe("okfImportService.importBundle — provenance + safe defaults", () => {
   beforeEach(() => {
     createMock.mockClear();
-    executeQueryMock.mockClear();
+    mockCollectionCreate.mockClear();
   });
 
   it("reconstructs every ancestor collection for a nested concept path", async () => {
@@ -79,7 +92,12 @@ describe("okfImportService.importBundle — provenance + safe defaults", () => {
       files: [{ path: "math/algebra/equations.md", content: buildConceptFile(docSource) }],
     });
     // createCollection is issued for the root ("") + "math" + "math/algebra" = 3.
-    expect(executeQueryMock).toHaveBeenCalledTimes(3);
+    expect(mockCollectionCreate).toHaveBeenCalledTimes(3);
+    expect(mockCollectionCreate).toHaveBeenCalledWith(
+      userCaller,
+      expect.objectContaining({ scope: "private" }),
+      {}
+    );
     // The concept lands in the deepest reconstructed collection.
     const [, input] = createMock.mock.calls[0];
     expect(input.collectionId).toBe("coll-new");
@@ -95,11 +113,12 @@ describe("okfImportService.importBundle — provenance + safe defaults", () => {
     });
 
     expect(createMock).toHaveBeenCalledTimes(1);
-    const [req, input] = createMock.mock.calls[0];
-    // The WRITE identity is the importer agent — NOT the human caller.
-    expect((req as Requester).kind).toBe("agent-autonomous");
-    expect((req as { agentId: string }).agentId).toBe(ATRIUM_IMPORT_AGENT_ID);
-    expect((req as { kind: string }).kind).not.toBe("user");
+    const [req, input, options] = createMock.mock.calls[0];
+    // Ownership/authorization stays with the caller while provenance is the
+    // seeded importer agent.
+    expect(req).toBe(userCaller);
+    expect(options.attributionRequester.kind).toBe("agent-autonomous");
+    expect(options.attributionRequester.agentId).toBe(ATRIUM_IMPORT_AGENT_ID);
 
     // Mapped fields round-trip from the exporter's concept file.
     expect(input.kind).toBe("document");
@@ -194,5 +213,22 @@ describe("okfImportService.importBundle — provenance + safe defaults", () => {
       })
     ).rejects.toBeInstanceOf(ForbiddenError);
     expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it("prevents autonomous callers from minting ownerless/shared hierarchy", async () => {
+    const autonomous: Requester = {
+      kind: "agent-autonomous",
+      agentId: "some-agent",
+      roleId: null,
+      roles: [],
+      scopes: ["content:create"],
+      agentLabel: "scoped-agent",
+    };
+    await expect(
+      okfImportService.importBundle(autonomous, {
+        files: [{ path: "a.md", content: buildConceptFile(docSource) }],
+      })
+    ).rejects.toBeInstanceOf(ForbiddenError);
+    expect(mockCollectionCreate).not.toHaveBeenCalled();
   });
 });

@@ -20,6 +20,8 @@
  */
 
 import {
+  boolean,
+  check,
   foreignKey,
   index,
   integer,
@@ -28,7 +30,9 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { navigationItems } from "./navigation-items";
+import { users } from "./users";
 import { visibilityLevelEnum } from "../enums";
 
 export const contentCollections = pgTable(
@@ -42,6 +46,16 @@ export const contentCollections = pgTable(
     defaultVisibilityLevel: visibilityLevelEnum("default_visibility_level")
       .default("internal")
       .notNull(),
+    /**
+     * NULL = district/shared collection. A user id = owner-bound private
+     * collection. Private collections are forced to private/no-inheritance by
+     * both the service and the database check below.
+     */
+    ownerUserId: integer("owner_user_id").references(() => users.id, {
+      onDelete: "restrict",
+    }),
+    inheritGrants: boolean("inherit_grants").default(true).notNull(),
+    archivedAt: timestamp("archived_at"),
     navItemId: integer("nav_item_id").references(() => navigationItems.id),
     position: integer("position").default(0).notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -49,6 +63,12 @@ export const contentCollections = pgTable(
   },
   (t) => [
     index("idx_collection_parent").on(t.parentId),
+    index("idx_collection_owner").on(t.ownerUserId),
+    index("idx_collection_archived").on(t.archivedAt),
+    check(
+      "ck_collection_private_owner_policy",
+      sql`${t.ownerUserId} IS NULL OR (${t.defaultVisibilityLevel} = 'private' AND ${t.inheritGrants} = false)`
+    ),
     foreignKey({
       columns: [t.parentId],
       foreignColumns: [t.id],

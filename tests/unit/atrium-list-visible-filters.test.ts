@@ -44,6 +44,11 @@ jest.mock("@/lib/db/drizzle-helpers", () => ({
   pgTimestampAsText: (c: unknown) => c,
   stripJsonQuotes: (v: unknown) => v,
 }));
+jest.mock("@/lib/content/collection-access", () => ({
+  collectionAccessSnapshot: jest.fn(async () => ({
+    allowedCollectionIds: new Set<string>(),
+  })),
+}));
 
 /** A captured sql`` invocation: raw template chunks + interpolated values. */
 interface CapturedSql {

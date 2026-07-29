@@ -14,7 +14,7 @@
  * trail).
  */
 
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, or, sql } from "drizzle-orm";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import {
   createSuccess,
@@ -46,6 +46,8 @@ export interface ContentAuditFilter {
 export interface ContentAuditRowDTO {
   id: string;
   objectId: string | null;
+  collectionId: string | null;
+  collectionName: string | null;
   action: string;
   surface: string;
   actorKind: "human" | "agent";
@@ -92,14 +94,22 @@ function buildAuditWhere(filter: ContentAuditFilter) {
   const objectQuery = filter.objectId?.trim();
   if (objectQuery) {
     if (UUID_RE.test(objectQuery)) {
-      conditions.push(eq(contentAuditLogs.objectId, objectQuery));
+      conditions.push(
+        or(
+          eq(contentAuditLogs.objectId, objectQuery),
+          sql`${contentAuditLogs.details}->>'collectionId' = ${objectQuery}`
+        )
+      );
     } else {
       // Substring match against the uuid's text form. Escape LIKE wildcards
       // so a pasted `%`/`_` is treated literally (drizzle parameterizes the
       // value itself, so there is no injection surface here).
       const escaped = objectQuery.replace(/[\\%_]/g, (m) => `\\${m}`);
       conditions.push(
-        sql`${contentAuditLogs.objectId}::text ILIKE ${`%${escaped}%`}`
+        or(
+          sql`${contentAuditLogs.objectId}::text ILIKE ${`%${escaped}%`}`,
+          sql`${contentAuditLogs.details}->>'collectionId' ILIKE ${`%${escaped}%`}`
+        )
       );
     }
   }
@@ -155,6 +165,8 @@ export async function listContentAuditAction(
       rows: rows.map((row) => ({
         id: row.id,
         objectId: row.objectId,
+        collectionId: row.details?.collectionId ?? null,
+        collectionName: row.details?.collectionName ?? null,
         action: row.action,
         surface: row.surface,
         actorKind: row.actorKind,

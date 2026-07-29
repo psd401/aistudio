@@ -19,9 +19,10 @@
  *   uses. Expand links target `/c/<slug>`.
  * - `public` (the anonymous `/p/[slug]` reader) gates STRICTLY on
  *   `visibility_level === 'public'` AND a LIVE `public_web` publication, and
+ *   admits the fixed anonymous principal to the containing collection. It
  *   consults NO session — matching the public reader's own contract (a public
- *   surface must serve the same thing to everyone, and an unpublish must mask
- *   immediately). Expand links target `/p/<slug>`.
+ *   surface must serve the same thing to everyone, and an unpublish/archive must
+ *   mask immediately). Expand links target `/p/<slug>`.
  *
  * The resolved `code` is the artifact's CURRENT head for internal audiences (the
  * "live artifact" the mockup describes). The PUBLIC audience instead receives the
@@ -37,12 +38,20 @@ import { contentObjects, contentPublications } from "@/lib/db/schema";
 import { createLogger } from "@/lib/logger";
 import { versionService } from "./version-service";
 import { visibilityService } from "./visibility-service";
+import { requesterMayViewCollection } from "./collection-access";
 import { getArtifactSandboxRenderUrl } from "./artifact-sandbox-config";
 import { isArtifactId } from "./embed-directive";
 import { renderDocumentToParts } from "./render/document-parts";
 import type { Requester } from "./types";
 
 const log = createLogger({ context: "atrium.embedResolver" });
+const ANONYMOUS_REQUESTER: Requester = {
+  kind: "user",
+  userId: null,
+  roles: [],
+  groups: [],
+  isAdmin: false,
+};
 
 /** A resolved embed: either a live sandbox render or an unavailable placeholder. */
 export interface ResolvedEmbed {
@@ -93,6 +102,7 @@ export async function resolveEmbedForReader(
           id: contentObjects.id,
           kind: contentObjects.kind,
           ownerUserId: contentObjects.ownerUserId,
+          collectionId: contentObjects.collectionId,
           visibilityLevel: contentObjects.visibilityLevel,
           title: contentObjects.title,
           slug: contentObjects.slug,
@@ -109,11 +119,16 @@ export async function resolveEmbedForReader(
   // Visibility gate — on the ARTIFACT's own visibility for THIS viewer.
   const visible =
     opts.audience === "public"
-      ? obj.visibilityLevel === "public"
+      ? obj.visibilityLevel === "public" &&
+        (await requesterMayViewCollection(
+          ANONYMOUS_REQUESTER,
+          obj.collectionId
+        ))
       : opts.requester != null &&
         (await visibilityService.canView(opts.requester, {
           id: obj.id,
           ownerUserId: obj.ownerUserId,
+          collectionId: obj.collectionId,
           visibilityLevel: obj.visibilityLevel,
         }));
   if (!visible) return unavailable(artifactId);

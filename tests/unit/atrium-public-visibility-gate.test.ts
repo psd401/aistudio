@@ -23,10 +23,9 @@
 // --- mocks (hoisted above imports by jest) ---
 
 let executeTransactionCalls = 0;
-// A queue of canned executeQuery results (e.g. the collection-default lookup);
-// each call shifts the next, falling back to [] — lets a test drive
-// `collectionDefaultOutsideTx` to a specific default_visibility_level.
-let executeQueryResults: unknown[] = [];
+// Canned rows for the collection access resolver. Label routing keeps its two
+// parallel reads deterministic.
+let collectionRowsResult: unknown[] = [];
 
 // A chainable tx proxy: awaited terminals `.limit()` / `.returning()` yield the
 // next queued result; every other builder method keeps the chain fluent. This
@@ -61,8 +60,11 @@ jest.mock("@/lib/db/drizzle-client", () => ({
       return cb(txProxy);
     }
   ),
-  executeQuery: jest.fn(async () => {
-    return executeQueryResults.length > 0 ? executeQueryResults.shift() : [];
+  executeQuery: jest.fn(async (_cb: unknown, label: string) => {
+    if (label === "collectionAccess.loadCollections") {
+      return collectionRowsResult;
+    }
+    return [];
   }),
 }));
 
@@ -142,7 +144,7 @@ beforeEach(() => {
   txUpdateCalls = 0;
   emitCalls = [];
   txResults = [];
-  executeQueryResults = [];
+  collectionRowsResult = [];
   // An autonomous agent owns content as the configured system user (§26.5). With
   // create-as-private (issue #1118), an autonomous public create now proceeds to
   // the write path (owner = system user) instead of short-circuiting at the old
@@ -193,7 +195,19 @@ describe("§26.4 create-as-private — contentService.create with visibility.lev
     // The seeded `public-site` collection has default_visibility_level = 'public',
     // so a create into it with NO explicit visibility resolves to "public" via the
     // collection default — the same create-as-private downgrade applies.
-    executeQueryResults = [[{ level: "public" }]]; // collection-default lookup -> public
+    collectionRowsResult = [
+      {
+        id: "col-public-site",
+        name: "Public site",
+        slug: "public-site",
+        parentId: null,
+        ownerUserId: null,
+        defaultVisibilityLevel: "public",
+        inheritGrants: true,
+        position: 0,
+        archivedAt: null,
+      },
+    ];
     await expect(
       contentService.create(staffUser, {
         kind: "document",

@@ -2204,6 +2204,119 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+    post:
+      operationId: createContentCollection
+      tags: [Content]
+      summary: Create an Atrium collection
+      description: |
+        Creates an owner-bound `private` collection for the calling human, or a
+        district/shared collection when the caller is an administrator. Requires
+        `content:create`. Private collections are always private, never inherit
+        grants, and may nest only under collections owned by the same user.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCollectionRequest"
+            examples:
+              private:
+                value:
+                  name: My Projects
+                  scope: private
+                  parentId: null
+              district:
+                value:
+                  name: Human Resources
+                  scope: district
+                  defaultVisibilityLevel: internal
+                  inheritGrants: true
+                  grants:
+                    - access: view
+                      kind: role
+                      value: staff
+                    - access: create
+                      kind: group
+                      value: hr-editors@psd401.net
+      responses:
+        "201":
+          description: Collection created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionManagementResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/ContentConflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /content/collections/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Collection UUID returned by collection discovery or creation.
+        schema:
+          type: string
+          format: uuid
+    patch:
+      operationId: updateContentCollection
+      tags: [Content]
+      summary: Rename, reorder, move, archive, or restore an Atrium collection
+      description: |
+        Applies a partial collection update. `parentId` and `position` move/reorder
+        the collection; `archived=true|false` recursively archives/restores its
+        subtree without deleting content. Requires `content:update`. District
+        collections require administrator authority; private collections remain
+        owner-bound and cannot be managed or read by district administrators.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCollectionRequest"
+            examples:
+              move:
+                value:
+                  parentId: c0ffee00-0000-4000-8000-000000000001
+                  position: 0
+              archiveSubtree:
+                value:
+                  archived: true
+      responses:
+        "200":
+          description: Updated collection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionManagementResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/ContentConflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /content/{id}:
     parameters:
       - $ref: "#/components/parameters/contentIdPath"
@@ -3140,14 +3253,19 @@ paths:
         **Provenance:** imported objects are **agent-authored**
         (`actor_kind = 'agent'`, attributed to the seeded `atrium-importer`
         identity) and created **private + draft** — never fabricated human
-        authorship, never pre-widened. The triggering caller is recorded in the
-        audit trail.
+        authorship, never pre-widened. Ownership and collection authorization
+        remain bound to the triggering human/delegated caller.
+
+        Reconstructed hierarchy uses the shared collection-management service.
+        Without a target, human/delegated callers receive a private root they
+        own. Descendants beneath a district target require administrator
+        authority. Autonomous callers must supply an existing selectable target.
 
         **Retry semantics:** import is additive and NOT transactional. A run that
-        fails partway leaves the already-created private/draft content in place, and
-        a retry re-imports the whole bundle as new objects (no dedup). For
-        idempotency, import into a fresh `targetCollectionId` and delete that partial
-        collection before retrying.
+        fails partway leaves already-created private/draft content in place. A
+        blind retry can duplicate objects or meet a sibling-name conflict. For
+        idempotency, use a fresh target and archive the partial imported subtree
+        before retrying into a new target.
       security:
         - BearerAuth: []
       requestBody:
@@ -4516,6 +4634,8 @@ components:
         - slug
         - parentId
         - path
+        - scope
+        - ownerUserId
         - defaultVisibilityLevel
         - visibleObjectCount
       properties:
@@ -4535,6 +4655,13 @@ components:
           minItems: 1
           items:
             type: string
+        scope:
+          type: string
+          enum: [district, private]
+        ownerUserId:
+          type: integer
+          nullable: true
+          description: Present for owner-bound private collections.
         defaultVisibilityLevel:
           type: string
           enum: [private, group, internal, public]
@@ -4571,6 +4698,166 @@ components:
             count:
               type: integer
               minimum: 0
+
+    CollectionGrant:
+      type: object
+      additionalProperties: false
+      required: [access, kind, value]
+      properties:
+        access:
+          type: string
+          enum: [view, create]
+        kind:
+          type: string
+          enum: [role, building, department, grade, user, group]
+        value:
+          type: string
+          minLength: 1
+          maxLength: 255
+
+    CreateCollectionRequest:
+      type: object
+      additionalProperties: false
+      required: [name, scope]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        scope:
+          type: string
+          enum: [district, private]
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+        position:
+          type: integer
+          minimum: 0
+        defaultVisibilityLevel:
+          type: string
+          enum: [private, group, internal, public]
+        inheritGrants:
+          type: boolean
+        grants:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/CollectionGrant"
+
+    UpdateCollectionRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: |
+        A collection cannot change between district and private ownership.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+        position:
+          type: integer
+          minimum: 0
+        defaultVisibilityLevel:
+          type: string
+          enum: [private, group, internal, public]
+        inheritGrants:
+          type: boolean
+        grants:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/CollectionGrant"
+        archived:
+          type: boolean
+
+    CollectionManagement:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - slug
+        - parentId
+        - path
+        - scope
+        - ownerUserId
+        - ownerName
+        - defaultVisibilityLevel
+        - inheritGrants
+        - position
+        - archivedAt
+        - directContentCount
+        - subtreeContentCount
+        - grants
+        - selectableForCreate
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+        path:
+          type: array
+          items:
+            type: string
+        scope:
+          type: string
+          enum: [district, private]
+        ownerUserId:
+          type: integer
+          nullable: true
+        ownerName:
+          type: string
+          nullable: true
+        defaultVisibilityLevel:
+          type: string
+          enum: [private, group, internal, public]
+        inheritGrants:
+          type: boolean
+        position:
+          type: integer
+          minimum: 0
+        archivedAt:
+          type: string
+          format: date-time
+          nullable: true
+        directContentCount:
+          type: integer
+          minimum: 0
+        subtreeContentCount:
+          type: integer
+          minimum: 0
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/CollectionGrant"
+        selectableForCreate:
+          type: boolean
+
+    CollectionManagementResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/CollectionManagement"
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
 
     ContentObject:
       type: object
@@ -5335,7 +5622,7 @@ components:
             $ref: "#/components/schemas/OkfFile"
         targetCollectionId:
           type: string
-          description: Existing collection slug or id to import the bundle root INTO (a fresh root collection is created when omitted).
+          description: Existing selectable collection slug or id to import the bundle root INTO. When omitted, a human/delegated caller gets a fresh owner-bound private root; autonomous callers must supply a target.
 
     OkfImportResponse:
       type: object

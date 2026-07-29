@@ -1336,6 +1336,8 @@ through a secondary id/name lookup.
       "slug": "technology-guides",
       "parentId": null,
       "path": ["Technology Guides"],
+      "scope": "district",
+      "ownerUserId": null,
       "defaultVisibilityLevel": "internal",
       "visibleObjectCount": 42,
       "selectableForCreate": true,
@@ -1350,6 +1352,95 @@ through a secondary id/name lookup.
 failures are `401`/`403`. A slug/UUID selected from this response is passed to
 `POST /content` unchanged. If it is deleted before create, the existing typed
 `400 CONTENT_VALIDATION` collection-not-found response is returned.
+
+#### `POST /api/v1/content/collections`
+
+Creates a collection. Requires `content:create`; session callers must also have
+the `atrium-content` capability. `scope: "private"` creates an owner-bound
+hierarchy for the acting human. `scope: "district"` requires administrator
+authority.
+
+```json
+{
+  "name": "Human Resources",
+  "scope": "district",
+  "parentId": null,
+  "position": 2,
+  "defaultVisibilityLevel": "internal",
+  "inheritGrants": true,
+  "grants": [
+    { "access": "view", "kind": "role", "value": "staff" },
+    {
+      "access": "create",
+      "kind": "group",
+      "value": "hr-editors@psd401.net"
+    }
+  ]
+}
+```
+
+Grant `access` is independent: `view` controls collection/content discovery;
+`create` controls whether content may be placed there. Child collections inherit
+ancestor grants while `inheritGrants` is true. Zero effective grants preserve the
+legacy unrestricted district behavior. A `group` default uses effective
+collection `view` grants as the new object's group-visibility grants.
+
+Private collections are always `private`, never inherit or carry grants, and can
+nest only under private collections owned by the same user. An administrator can
+inspect private collection metadata/counts in the oversight UI but cannot enter,
+read, or mutate another user's private collection.
+
+**Response `201`**
+
+```json
+{
+  "data": {
+    "id": "c0ffee00-0000-4000-8000-000000000001",
+    "name": "Human Resources",
+    "slug": "human-resources",
+    "parentId": null,
+    "path": ["Human Resources"],
+    "scope": "district",
+    "ownerUserId": null,
+    "ownerName": null,
+    "defaultVisibilityLevel": "internal",
+    "inheritGrants": true,
+    "position": 2,
+    "archivedAt": null,
+    "directContentCount": 0,
+    "subtreeContentCount": 0,
+    "grants": [
+      { "access": "view", "kind": "role", "value": "staff" }
+    ],
+    "selectableForCreate": true
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+#### `PATCH /api/v1/content/collections/{id}`
+
+Requires `content:update`. Any subset of `name`, `parentId`, `position`,
+`defaultVisibilityLevel`, `inheritGrants`, `grants`, or `archived` may be sent.
+`parentId` + `position` implement move/reorder. `archived: true` archives the
+selected collection and its subtree; `false` restores the subtree. Content rows
+are retained.
+
+```json
+{ "parentId": "c0ffee00-0000-4000-8000-000000000001", "position": 0 }
+```
+
+Slugs remain stable on rename. Sibling names are case-insensitively unique within
+the district hierarchy or one private owner's hierarchy; different owners may
+use the same top-level name.
+Crossing district/private ownership boundaries, moving under a descendant,
+restoring under an archived parent, or conflicting concurrent hierarchy writes
+is rejected (`400`/`409`). The response uses the same management shape as create.
+
+Content counts have explicit semantics: `directContentCount` counts only rows
+filed directly in the collection; `subtreeContentCount` includes all descendants.
+Content selection in the library/API remains **direct collection only**; subtree
+counts do not change list filtering semantics.
 
 ---
 
@@ -2042,19 +2133,26 @@ Import an OKF bundle into content. Requires `content:create`.
 | Field | Type | Required | Constraints |
 |-------|------|----------|-------------|
 | `files` | array of `{ path, content }` | yes | ≥ 1 file |
-| `targetCollectionId` | string | no | Import the bundle root INTO this collection; a fresh root is created when omitted |
+| `targetCollectionId` | string | no | Import the bundle root INTO this selectable collection; a fresh owner-bound private root is created for human/delegated callers when omitted |
 
 **Provenance (§36.3):** imported objects are **agent-authored**
 (`actor_kind = 'agent'`, attributed to the seeded `atrium-importer` identity) and
 created **private + draft** — never fabricated human authorship, never pre-widened.
-The triggering caller is recorded in the audit trail.
+Object ownership and collection authorization remain bound to the triggering
+human/delegated caller, who is recorded in the audit trail.
+
+Reconstructed hierarchy uses the shared collection-management service. A
+human/delegated caller without a target gets a private hierarchy they own.
+Creating descendants beneath a district target requires administrator authority.
+Autonomous callers must supply an existing selectable target and cannot mint an
+ownerless/shared hierarchy.
 
 **Retry semantics (not transactional):** import is additive and not wrapped in a
 single transaction (`contentService.create` does its own tx + post-commit S3 IO
 per object). A run that fails partway leaves the already-created private/draft
-content in place, and a retry re-imports the whole bundle as **new** objects (no
-path/`sourceRef` dedup; slugs auto-suffix). For idempotency, import into a fresh
-`targetCollectionId` and, on failure, delete that partial collection before retrying.
+content in place. A blind retry can duplicate objects or meet a sibling-name
+conflict. For idempotency, use a fresh `targetCollectionId` and, on failure,
+archive the partial imported subtree before retrying into a new target.
 
 **Response `201`**
 

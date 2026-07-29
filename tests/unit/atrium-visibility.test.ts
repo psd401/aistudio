@@ -14,9 +14,16 @@ jest.mock("@/lib/db/drizzle-client", () => ({
 }));
 jest.mock("@/lib/db/schema", () => ({
   contentObjects: {},
+  contentCollections: { id: {}, ownerUserId: {} },
   contentVisibilityGrants: {},
   // listVisible LEFT JOINs users to project the owner display name (#1052).
   users: { id: {}, firstName: {}, lastName: {}, email: {} },
+}));
+jest.mock("@/lib/content/collection-access", () => ({
+  requesterMayViewCollection: jest.fn(async () => true),
+  collectionAccessSnapshot: jest.fn(async () => ({
+    allowedCollectionIds: new Set<string>(),
+  })),
 }));
 jest.mock("@/lib/db/drizzle-helpers", () => ({
   pgTimestampAsText: (c: unknown) => c,
@@ -50,7 +57,7 @@ function obj(
   visibilityLevel: "private" | "group" | "internal" | "public",
   ownerUserId = OWNER_ID
 ) {
-  return { id: "obj-1", ownerUserId, visibilityLevel };
+  return { id: "obj-1", ownerUserId, collectionId: null, visibilityLevel };
 }
 
 const staffUser: Requester = {
@@ -406,6 +413,15 @@ describe("setLevelInTx — level + grant write semantics", () => {
     // (`clearNonUserGrantsInTx` → `and(eq(objectId), ne(kind, "user"))`).
     const deletes: unknown[] = [];
     const tx = {
+      select: () => ({
+        from: () => ({
+          leftJoin: () => ({
+            where: () => ({
+              limit: async () => [{ ownerUserId: null }],
+            }),
+          }),
+        }),
+      }),
       delete: () => ({
         where: async (clause: unknown) => {
           deletes.push(clause);

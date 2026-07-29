@@ -50,6 +50,10 @@ import {
 import { snapshotInTx, versionService } from "./version-service";
 import { visibilityService } from "./visibility-service";
 import {
+  collectionAccessSnapshot,
+  requesterMayCreateInCollection,
+} from "./collection-access";
+import {
   ConflictError,
   ForbiddenError,
   NotFoundError,
@@ -170,22 +174,64 @@ async function uniqueSlug(tx: DbTransaction, title: string): Promise<string> {
  * decision that might itself branch into other I/O).
  */
 async function collectionDefaultOutsideTx(
+  req: Requester,
   collectionId: string | undefined
-): Promise<VisibilityLevel | null> {
+): Promise<{
+  level: VisibilityLevel;
+  ownerUserId: number | null;
+  grants: VisibilityGrant[];
+} | null> {
   if (!collectionId) return null;
-  const rows = await executeQuery(
-    (db) =>
-      db
-        .select({ level: contentCollections.defaultVisibilityLevel })
-        .from(contentCollections)
-        .where(eq(contentCollections.id, collectionId))
-        .limit(1),
-    "content.create.collectionDefault"
-  );
-  if (!rows[0]) {
+  const access = await collectionAccessSnapshot(req);
+  const collection = access.byId.get(collectionId);
+  if (!collection) {
     throw new ValidationError("Collection not found", { collectionId });
   }
-  return rows[0].level as VisibilityLevel;
+  if (
+    collection.archivedAt ||
+    !access.selectableCollectionIds.has(collectionId)
+  ) {
+    throw new ForbiddenError("Not permitted to create content in this collection", {
+      collectionId,
+    });
+  }
+  return {
+    level: collection.defaultVisibilityLevel,
+    ownerUserId: collection.ownerUserId,
+    grants: access
+      .effectiveGrants(collectionId, "view")
+      .map(({ kind, value }) => ({ kind, value })),
+  };
+}
+
+type CollectionDefault = NonNullable<
+  Awaited<ReturnType<typeof collectionDefaultOutsideTx>>
+>;
+
+function createVisibilityGrants(
+  input: CreateObjectInput,
+  collection: CollectionDefault | null
+): VisibilityGrant[] {
+  if (input.visibility?.grants) return input.visibility.grants;
+  if (input.visibility?.level == null && collection?.level === "group") {
+    return collection.grants;
+  }
+  return [];
+}
+
+function assertPrivateCollectionVisibility(
+  collection: CollectionDefault | null,
+  level: VisibilityLevel,
+  grants: VisibilityGrant[]
+): void {
+  if (
+    collection?.ownerUserId != null &&
+    (level !== "private" || grants.length > 0)
+  ) {
+    throw new ValidationError(
+      "Content in a private collection must remain private and cannot carry grants"
+    );
+  }
 }
 
 /**
@@ -194,11 +240,19 @@ async function collectionDefaultOutsideTx(
  * `collectionDefault` — so an invalid `collectionId` surfaces as a user-facing
  * 400 rather than a raw Postgres FK violation (SQLSTATE 23503).
  */
-async function assertCollectionExists(collectionId: string): Promise<void> {
+async function assertCollectionWritable(
+  req: Requester,
+  collectionId: string,
+  objectOwnerUserId: number
+): Promise<{ ownerUserId: number | null }> {
   const rows = await executeQuery(
     (db) =>
       db
-        .select({ id: contentCollections.id })
+        .select({
+          id: contentCollections.id,
+          ownerUserId: contentCollections.ownerUserId,
+          archivedAt: contentCollections.archivedAt,
+        })
         .from(contentCollections)
         .where(eq(contentCollections.id, collectionId))
         .limit(1),
@@ -207,6 +261,24 @@ async function assertCollectionExists(collectionId: string): Promise<void> {
   if (!rows[0]) {
     throw new ValidationError("Collection not found", { collectionId });
   }
+  if (
+    rows[0].archivedAt ||
+    !(await requesterMayCreateInCollection(req, collectionId))
+  ) {
+    throw new ForbiddenError("Not permitted to move content into this collection", {
+      collectionId,
+    });
+  }
+  if (
+    rows[0].ownerUserId != null &&
+    rows[0].ownerUserId !== objectOwnerUserId
+  ) {
+    throw new ForbiddenError(
+      "A private collection may contain only content owned by its collection owner",
+      { collectionId }
+    );
+  }
+  return { ownerUserId: rows[0].ownerUserId };
 }
 
 /**
@@ -319,7 +391,11 @@ async function resolveCreateVisibility(
   publicWidenRequested: boolean;
 }> {
   const explicitLevel = input.visibility?.level;
-  const grants = input.visibility?.grants ?? [];
+  // Resolve and authorize collection placement even when visibility is explicit.
+  // The former `explicit ?? collectionDefault()` skipped this lookup entirely for
+  // explicit visibility and could defer a bad id to an opaque FK error.
+  const collection = await collectionDefaultOutsideTx(req, input.collectionId);
+  const grants = createVisibilityGrants(input, collection);
 
   // A group object with no grants is invisible to everyone but the owner/admin
   // (equivalent to private without the semantics) — almost always a mistake.
@@ -333,24 +409,10 @@ async function resolveCreateVisibility(
     );
   }
 
-  let visibilityLevel: VisibilityLevel =
-    explicitLevel ??
-    (await collectionDefaultOutsideTx(input.collectionId)) ??
-    "private";
+  const visibilityLevel: VisibilityLevel =
+    explicitLevel ?? collection?.level ?? "private";
 
-  // A collection whose default is `group` can't be satisfied at create time:
-  // the create surface (library "New doc/artifact", the dialog takes only a
-  // title) authors no grants, and a grantless `group` is invisible to all but
-  // owner/admin. Rather than BLOCK creation from a group-default section
-  // (every seeded group collection would 400), fall back to `private`
-  // (owner-only) when the level was INHERITED from the collection default and
-  // no grants were supplied; the author then sets group visibility + grants
-  // via the Phase 3 visibility editor. An EXPLICIT grantless group still
-  // fails (the pre-transaction guard above + the assert below) — only the
-  // silent collection-default inheritance is softened here.
-  if (explicitLevel == null && visibilityLevel === "group" && grants.length === 0) {
-    visibilityLevel = "private";
-  }
+  assertPrivateCollectionVisibility(collection, visibilityLevel, grants);
 
   // Validate the RESOLVED level + grants BEFORE the transaction so an invalid
   // combination (e.g. an explicit `group` with no grants) fails without
@@ -371,6 +433,63 @@ async function resolveCreateVisibility(
   }
 
   return { visibilityLevel, grants, publicWidenRequested: false };
+}
+
+type ContentObjectSetValues = Partial<typeof contentObjects.$inferInsert>;
+
+function applyTitleAndTags(
+  patch: UpdatePatch,
+  setValues: ContentObjectSetValues
+): void {
+  if (patch.title !== undefined) {
+    if (!patch.title.trim()) throw new ValidationError("Title cannot be empty");
+    if (patch.title.trim().length > TITLE_MAX_LENGTH) {
+      throw new ValidationError(
+        `Title must be ${TITLE_MAX_LENGTH} characters or fewer`
+      );
+    }
+    setValues.title = patch.title;
+  }
+  if (patch.tags !== undefined) setValues.tags = patch.tags ?? [];
+}
+
+async function applyCollectionChange(
+  req: Requester,
+  existing: ContentObjectDTO,
+  patch: UpdatePatch,
+  setValues: ContentObjectSetValues
+): Promise<void> {
+  if (patch.collectionId === undefined) return;
+  if (patch.collectionId != null) {
+    const collection = await assertCollectionWritable(
+      req,
+      patch.collectionId,
+      existing.ownerUserId
+    );
+    if (
+      collection.ownerUserId != null &&
+      existing.visibilityLevel !== "private"
+    ) {
+      throw new ValidationError(
+        "Set content visibility to private before moving it into a private collection"
+      );
+    }
+  }
+  setValues.collectionId = patch.collectionId ?? null;
+}
+
+function applyStatusChange(
+  patch: UpdatePatch,
+  setValues: ContentObjectSetValues
+): void {
+  if (patch.status === undefined) return;
+  if (patch.status === "published") {
+    throw new ValidationError(
+      "Cannot set status to 'published' via update — use the publish endpoint/tool instead",
+      { status: patch.status }
+    );
+  }
+  setValues.status = patch.status;
 }
 
 export const contentService = {
@@ -460,7 +579,15 @@ export const contentService = {
   async create(
     req: Requester,
     input: CreateObjectInput,
-    opts: { hasPublishPublicCapability?: boolean } = {}
+    opts: {
+      hasPublishPublicCapability?: boolean;
+      /**
+       * Trusted internal workflows may attribute a write to a machine while
+       * keeping ownership/authorization bound to `req` (OKF import). Never map a
+       * client-supplied value into this option.
+       */
+      attributionRequester?: Requester;
+    } = {}
   ): Promise<ContentObjectWithVersion> {
     assertCanCreate(req);
     assertValidCreateInput(input);
@@ -472,11 +599,12 @@ export const contentService = {
     );
 
     const ownerUserId = ownerFor(req);
+    const attributionRequester = opts.attributionRequester ?? req;
     // Use the shared resolvers so object-level provenance matches version-level
     // (snapshotInTx uses the same helpers): actor === 'agent' iff an agent id is
     // recorded (autonomous only); delegated agents record as 'human'.
-    const createdByActor = actorKindOf(req);
-    const createdByAgentId = agentIdOf(req);
+    const createdByActor = actorKindOf(attributionRequester);
+    const createdByAgentId = agentIdOf(attributionRequester);
 
     // Resolve level + grants. An unauthorized public create is downgraded to
     // private here (create-as-private, §26.4); `publicWidenRequested` then drives
@@ -491,7 +619,11 @@ export const contentService = {
     // a pooled connection. Fail-closed: blocked or unscreenable content throws
     // ValidationError and nothing is created. The returned proof is asserted
     // inside `snapshotInTx` (issue #1118 item 3).
-    const screeningProof = await screenAgentBodyForWrite(req, input.body, null);
+    const screeningProof = await screenAgentBodyForWrite(
+      attributionRequester,
+      input.body,
+      null
+    );
 
     const { object, version, s3Writes } = await executeTransaction(
       async (tx) => {
@@ -559,7 +691,7 @@ export const contentService = {
         if (input.body !== undefined) {
           const snap = await snapshotInTx(
             tx,
-            req,
+            attributionRequester,
             { id: dto.id, kind: input.kind },
             { body: input.body, bodyFormat: input.bodyFormat },
             { proof: screeningProof }
@@ -733,51 +865,12 @@ export const contentService = {
 
     // Typed against the table's insert shape so a column-name typo is a compile
     // error (a `Record<string, unknown>` would silently no-op an unknown key).
-    const setValues: Partial<typeof contentObjects.$inferInsert> = {
+    const setValues: ContentObjectSetValues = {
       updatedAt: new Date(),
     };
-    if (patch.title !== undefined) {
-      if (!patch.title.trim()) throw new ValidationError("Title cannot be empty");
-      // Mirror create()'s varchar(500) guard so an over-long title is a typed
-      // 400, not a raw Postgres 22001 error.
-      if (patch.title.trim().length > TITLE_MAX_LENGTH) {
-        throw new ValidationError(
-          `Title must be ${TITLE_MAX_LENGTH} characters or fewer`
-        );
-      }
-      setValues.title = patch.title;
-    }
-    // Coerce to `[]` (never NULL) so updated rows match the `create()` invariant
-    // (tags is always an array). Downstream `.length`/`.filter()` callers would
-    // otherwise throw a TypeError on a null tags column.
-    if (patch.tags !== undefined) setValues.tags = patch.tags ?? [];
-    if (patch.collectionId !== undefined) {
-      // Validate existence so an invalid id is a typed 400, not a raw FK
-      // violation. A null clears the collection (no existence check needed).
-      if (patch.collectionId != null) {
-        await assertCollectionExists(patch.collectionId);
-      }
-      setValues.collectionId = patch.collectionId ?? null;
-    }
-    if (patch.status !== undefined) {
-      // "published" is NOT a plain metadata transition — it must go through
-      // `publishService.publish()`, which creates the `content_publications`
-      // row, calls the destination adapter, emits `content.published`, and
-      // enforces the §26.4 public-publish gate. Writing it directly here
-      // (content:update alone, no content:publish_internal/publish_public)
-      // would leave `status: "published"` with none of that: a caller could
-      // mark content "published" while it was never actually published
-      // anywhere, and — for a caller who otherwise couldn't pass the gate —
-      // outside the audited/gated flow entirely. "draft" and "archived"
-      // remain plain metadata transitions.
-      if (patch.status === "published") {
-        throw new ValidationError(
-          "Cannot set status to 'published' via update — use the publish endpoint/tool instead",
-          { status: patch.status }
-        );
-      }
-      setValues.status = patch.status;
-    }
+    applyTitleAndTags(patch, setValues);
+    await applyCollectionChange(req, existing, patch, setValues);
+    applyStatusChange(patch, setValues);
     // Slice-F presentation fields (cover gradient + emoji icon), validated at the
     // action boundary and merged as a typed partial (see presentationSetValues).
     Object.assign(setValues, presentationSetValues(patch));
@@ -1058,6 +1151,7 @@ async function assertViewable(
   const viewable = await visibilityService.canView(req, {
     id: obj.id,
     ownerUserId: obj.ownerUserId,
+    collectionId: obj.collectionId,
     visibilityLevel: obj.visibilityLevel,
   });
   if (!viewable) throw new NotFoundError("Content not found", { ref });

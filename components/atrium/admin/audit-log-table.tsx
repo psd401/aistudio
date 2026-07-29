@@ -43,6 +43,10 @@ const ACTIONS = [
   "unpublish",
   "export_okf",
   "import_okf",
+  "collection_create",
+  "collection_update",
+  "collection_archive",
+  "collection_restore",
 ] as const
 // `ui` is the in-app authoring surface — the source of the #1336
 // public-exposure notifications, so it must be filterable here.
@@ -149,8 +153,8 @@ function AuditFilters({
         className="w-[280px]"
         value={objectId}
         onChange={(e) => onObjectIdChange(e.target.value)}
-        placeholder="Object id (full or fragment)"
-        aria-label="Filter by object id"
+        placeholder="Object or collection id"
+        aria-label="Filter by object or collection id"
       />
 
       <Button size="sm" onClick={onApply} disabled={isPending}>
@@ -222,7 +226,7 @@ export function AuditLogTable({ initialData, initialError }: AuditLogTableProps)
               <TableHead>Action</TableHead>
               <TableHead>Surface</TableHead>
               <TableHead>Actor</TableHead>
-              <TableHead>Object</TableHead>
+              <TableHead>Object / collection</TableHead>
               <TableHead>Destination</TableHead>
               <TableHead>Outcome</TableHead>
               <TableHead>Error</TableHead>
@@ -251,8 +255,16 @@ export function AuditLogTable({ initialData, initialError }: AuditLogTableProps)
                 <TableCell>{actorOf(row)}</TableCell>
                 <TableCell>
                   <span className="font-mono text-xs">
-                    {row.objectId ?? "—"}
+                    {row.objectId ??
+                      row.collectionName ??
+                      row.collectionId ??
+                      "—"}
                   </span>
+                  {row.collectionName && row.collectionId ? (
+                    <span className="block font-mono text-[10px] text-muted-foreground">
+                      {row.collectionId}
+                    </span>
+                  ) : null}
                 </TableCell>
                 <TableCell>{row.destination ?? "—"}</TableCell>
                 <TableCell>

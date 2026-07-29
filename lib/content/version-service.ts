@@ -742,6 +742,7 @@ export const versionService = {
         db
           .select({
             ownerUserId: contentObjects.ownerUserId,
+            collectionId: contentObjects.collectionId,
             visibilityLevel: contentObjects.visibilityLevel,
           })
           .from(contentObjects)
@@ -759,6 +760,7 @@ export const versionService = {
     const viewable = await visibilityService.canView(req, {
       id: objectId,
       ownerUserId: owner[0].ownerUserId,
+      collectionId: owner[0].collectionId,
       visibilityLevel: owner[0].visibilityLevel,
     });
     if (!viewable) {

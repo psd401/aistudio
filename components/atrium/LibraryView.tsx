@@ -34,6 +34,7 @@ import { createLogger } from "@/lib/client-logger";
 import { LibraryList } from "./LibraryList";
 import { LibraryBulkBar } from "./LibraryBulkBar";
 import { CreateContentDialog } from "./CreateContentDialog";
+import { PrivateCollectionsDialog } from "./PrivateCollectionsDialog";
 
 const log = createLogger({ component: "LibraryView" });
 
@@ -184,6 +185,7 @@ function LibraryHeader({
           ⌘K
         </kbd>
       </div>
+      <PrivateCollectionsDialog />
       <button type="button" className="mer-btn" onClick={onNewArtifact}>
         <Sparkles className="h-4 w-4" aria-hidden="true" />
         New artifact
