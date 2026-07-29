@@ -115,10 +115,17 @@ schema unchanged:
 ```bash
 python3 infra/agent-image/eval/runner.py \
   --image <tag-or-digest> \
+  --candidate-metadata infra/agent-image/.candidate-builds/<tag>.json \
   --suite infra/agent-image/eval/suites/core.yaml \
   --trials 3 \
   --out /tmp/agent-eval-core.jsonl
 ```
+
+The finalized sidecar makes provider authentication fail closed: its
+tag/digest must match `--image`; native SigV4 candidates receive no provider
+secret; Mantle candidates resolve the environment stack's
+`BedrockApiKeySecretArn` and pass only that ARN to the short-lived eval
+container.
 
 Pure tasks share a booted container but receive a fresh AgentCore session UUID
 and freshly minted signed context on every trial. Workspace-mutating tasks get

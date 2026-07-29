@@ -84,7 +84,7 @@ and [supported cross-region profiles](https://docs.aws.amazon.com/bedrock/latest
 - Credential: `AWS_BEARER_TOKEN_BEDROCK`, loaded from the stack's
   `BedrockApiKeySecretArn` for the candidate probe and atomically inlined
   before OpenClaw starts.
-- IAM for the key-backed API: `bedrock-mantle:CallWithBearerToken` requires
+- IAM for the key-backed API: `bedrock:CallWithBearerToken` requires
   resource `*`; the probe principal also needs `secretsmanager:GetSecretValue`
   on that one environment secret. Model access should be constrained with a
   Bedrock project/API-key policy when this path is used beyond a local
@@ -100,7 +100,7 @@ and [Mantle IAM projects](https://docs.aws.amazon.com/bedrock/latest/userguide/s
 - `auth`: `api-key`
 - `baseUrl`: `https://bedrock-mantle.us-east-1.api.aws/anthropic`; OpenClaw
   appends `/v1/messages`.
-- Credential/IAM: the same API-key and `bedrock-mantle:CallWithBearerToken`
+- Credential/IAM: the same API-key and `bedrock:CallWithBearerToken`
   contract as the OpenAI-compatible path.
 
 Source: [Bedrock Mantle Messages API](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-messages-api.html).
@@ -147,3 +147,19 @@ The finalized JSON sidecar records:
 `.candidate-builds/` is ignored because it is local build evidence. Copy the
 sidecar into the issue/PR evidence when reporting the candidate; do not commit
 credentials or eval transcripts.
+
+Pass the same finalized sidecar to repeated evaluations:
+
+```bash
+python3 infra/agent-image/eval/runner.py \
+  --image <immutable-ecr-uri@sha256:digest> \
+  --candidate-metadata infra/agent-image/.candidate-builds/<tag>.json \
+  --suite infra/agent-image/eval/suites/regression.yaml \
+  --out /tmp/candidate-regression.jsonl
+```
+
+The runner verifies that the sidecar tag/digest matches the image. Native
+SigV4 remains a no-secret path. For either Mantle path, it resolves the
+environment's `BedrockApiKeySecretArn` stack output and gives the container
+only that ARN; the container retrieves the key using the active, refreshed AWS
+credential chain.

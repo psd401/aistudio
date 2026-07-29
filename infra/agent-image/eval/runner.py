@@ -111,6 +111,19 @@ DEPLOYED_RUNTIME_ENVIRONMENT_KEYS = (
     "HYPERFRAMES_RENDER_FUNCTION",
     "SUMMARIZE_MODEL_ID",
 )
+SUPPORTED_CANDIDATE_PROVIDER_PATHS = frozenset(
+    {
+        "native-bedrock-sigv4",
+        "mantle-openai-compatible",
+        "mantle-anthropic-messages",
+    }
+)
+MANTLE_CANDIDATE_PROVIDER_PATHS = frozenset(
+    {
+        "mantle-openai-compatible",
+        "mantle-anthropic-messages",
+    }
+)
 
 
 class EvalRunnerError(RuntimeError):
@@ -1353,6 +1366,86 @@ def _resolve_app_base_url(
     return resolved
 
 
+def _resolve_candidate_runtime_environment(
+    executor: CommandExecutor,
+    metadata_path: Path | None,
+    image: str,
+    environment: str,
+    region: str,
+) -> dict[str, str]:
+    """Resolve only the secret ARN required by a token-auth candidate.
+
+    Finalized candidate metadata is the authority for the provider path and
+    immutable image identity. Native SigV4 candidates remain a strict no-op;
+    Mantle candidates receive only the secret ARN and resolve its value inside
+    the short-lived container using the already-supplied AWS credentials.
+    """
+    if metadata_path is None:
+        return {}
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise EvalRunnerError(
+            f"cannot read candidate metadata {metadata_path}: {error}"
+        ) from error
+    if not isinstance(metadata, dict) or metadata.get("schemaVersion") != 1:
+        raise EvalRunnerError(
+            f"candidate metadata {metadata_path} must be a schemaVersion 1 object"
+        )
+    provider_path = metadata.get("providerPath")
+    if provider_path not in SUPPORTED_CANDIDATE_PROVIDER_PATHS:
+        raise EvalRunnerError(
+            f"candidate metadata {metadata_path} has unsupported providerPath"
+        )
+    metadata_image = metadata.get("image")
+    image_digest = metadata.get("imageDigest")
+    if (
+        not isinstance(metadata_image, str)
+        or not metadata_image
+        or not isinstance(image_digest, str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest)
+    ):
+        raise EvalRunnerError(
+            f"candidate metadata {metadata_path} is not finalized"
+        )
+    repository = metadata_image.rsplit(":", 1)[0]
+    if image not in {metadata_image, f"{repository}@{image_digest}"}:
+        raise EvalRunnerError(
+            f"--image does not match finalized candidate metadata {metadata_path}"
+        )
+    if provider_path not in MANTLE_CANDIDATE_PROVIDER_PATHS:
+        return {}
+    if metadata.get("providerAuth") != "api-key":
+        raise EvalRunnerError(
+            f"Mantle candidate metadata {metadata_path} must use api-key auth"
+        )
+
+    env_capitalized = environment[:1].upper() + environment[1:]
+    stack_name = f"AIStudio-AgentPlatformStack-{env_capitalized}"
+    result = executor.run(
+        [
+            "aws",
+            "cloudformation",
+            "describe-stacks",
+            "--stack-name",
+            stack_name,
+            "--query",
+            "Stacks[0].Outputs[?OutputKey=='BedrockApiKeySecretArn'].OutputValue",
+            "--output",
+            "text",
+            "--region",
+            region,
+        ],
+        timeout=30,
+    )
+    secret_arn = result.stdout.strip()
+    if not secret_arn or secret_arn == "None":
+        raise EvalRunnerError(
+            f"stack {stack_name} has no BedrockApiKeySecretArn output"
+        )
+    return {"BEDROCK_API_KEY_SECRET_ARN": secret_arn}
+
+
 def _resolve_deployed_runtime_environment(
     executor: CommandExecutor,
     runtime_id: str | None,
@@ -1546,6 +1639,14 @@ def _open_output(path: Path, overwrite: bool) -> TextIO:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True, help="candidate image tag or digest")
+    parser.add_argument(
+        "--candidate-metadata",
+        type=Path,
+        help=(
+            "finalized .candidate-builds sidecar for --image; required for "
+            "Mantle candidates so the runner can resolve their secret ARN"
+        ),
+    )
     parser.add_argument("--suite", required=True, type=Path)
     parser.add_argument("--trials", type=_trial_count)
     parser.add_argument("--out", required=True, type=Path)
@@ -1600,12 +1701,20 @@ def main(argv: list[str] | None = None) -> int:
             args.agent_runtime_id,
             args.region,
         )
+        candidate_runtime_environment = _resolve_candidate_runtime_environment(
+            executor,
+            args.candidate_metadata.resolve() if args.candidate_metadata else None,
+            args.image,
+            args.environment,
+            args.region,
+        )
         environment_values = {
             "ENVIRONMENT": args.environment,
             "AWS_REGION": args.region,
             "APP_BASE_URL": app_base_url,
             "BUILD_MARKER": f"eval:{args.image}",
             **deployed_runtime_environment,
+            **candidate_runtime_environment,
         }
         credential_provider = ActiveAwsCredentialProvider(executor)
         name_token = _docker_name_token(args.name_prefix, os.getpid())

@@ -298,6 +298,13 @@ def _provider_template(
         or any(not isinstance(item, str) or not item for item in resources)
     ):
         raise CandidateError(f"{template_path}: iam actions/resources must be lists")
+    if provider_path.startswith("mantle-") and (
+        "bedrock:CallWithBearerToken" not in actions or "*" not in resources
+    ):
+        raise CandidateError(
+            f"{template_path}: Mantle IAM must include "
+            "bedrock:CallWithBearerToken on Resource '*'"
+        )
     inference_profile = iam.get("inferenceProfileId")
     member_models = iam.get("crossRegionFoundationModelArns")
     if inference_profile is not None and (
@@ -368,6 +375,7 @@ def _load_contract(
             f"{baseline_path}: composed baseline no longer matches "
             f"{CANONICAL_CONFIG}"
         )
+    _validate_baseline_harness_and_prompt(baseline_axes, baseline_path)
     manifest["_resolvedId"] = candidate_id
     baseline["_resolvedId"] = baseline_id
     return manifest, axes, baseline, template_path, template
@@ -431,6 +439,46 @@ def _validate_prompt(axis: object, label: str) -> tuple[str, Path, Path]:
     soul = _safe_relative_file(prompt.get("soul"), f"{label}.soul")
     rules = _safe_relative_file(prompt.get("rules"), f"{label}.rules")
     return variant, soul, rules
+
+
+def _validate_baseline_harness_and_prompt(
+    axes: dict[str, object],
+    baseline_path: Path,
+) -> None:
+    """Prove the non-model baseline axes still match production defaults."""
+    harness = _validate_harness(
+        axes["harness"], f"{baseline_path}: axes.harness"
+    )
+    dockerfile = CANONICAL_DOCKERFILE.read_text(encoding="utf-8")
+    if _render_pin_contract(*harness) != dockerfile:
+        raise CandidateError(
+            f"{baseline_path}: baseline harness no longer matches the "
+            f"production defaults in {CANONICAL_DOCKERFILE}"
+        )
+
+    variant, soul_path, rules_path = _validate_prompt(
+        axes["prompt"], f"{baseline_path}: axes.prompt"
+    )
+    soul_relative = soul_path.relative_to(AGENT_IMAGE_DIR).as_posix()
+    rules_relative = rules_path.relative_to(AGENT_IMAGE_DIR).as_posix()
+    prompt_defaults_match = (
+        variant == "default"
+        and re.search(
+            rf"^ARG SOUL_PREAMBLE={re.escape(soul_relative)}\s*$",
+            dockerfile,
+            re.MULTILINE,
+        )
+        and re.search(
+            rf"^ARG PSD_RULES_SKILL={re.escape(rules_relative)}\s*$",
+            dockerfile,
+            re.MULTILINE,
+        )
+    )
+    if not prompt_defaults_match:
+        raise CandidateError(
+            f"{baseline_path}: baseline prompt no longer matches the "
+            f"production defaults in {CANONICAL_DOCKERFILE}"
+        )
 
 
 def _atomic_json(path: Path, value: object) -> None:

@@ -172,6 +172,58 @@ class CandidateMatrixTests(unittest.TestCase):
 
                 self.assertEqual(summary["variedAxis"], declared_axis)
 
+    def test_rejects_baseline_harness_or_prompt_drift_from_production(self):
+        original_baseline = json.loads(
+            (self.manifests_dir / "baseline.json").read_text(encoding="utf-8")
+        )
+        original_candidate = json.loads(
+            (self.manifests_dir / "glm-5-native.json").read_text(encoding="utf-8")
+        )
+        for drifted_axis in ("harness", "prompt"):
+            with self.subTest(axis=drifted_axis), tempfile.TemporaryDirectory(
+                dir=self.manifests_dir.parent, prefix=".candidate-contract-test."
+            ) as directory:
+                baseline = json.loads(json.dumps(original_baseline))
+                source = json.loads(json.dumps(original_candidate))
+                baseline["axes"]["model"]["providerTemplate"] = (
+                    "../providers/native-bedrock-sonnet-5.json"
+                )
+                source["baseline"] = "baseline.json"
+                source["axes"]["model"]["providerTemplate"] = (
+                    "../providers/native-bedrock-glm-5.json"
+                )
+                if drifted_axis == "harness":
+                    baseline["axes"]["harness"]["hostVersion"] = "2099.1.1"
+                else:
+                    baseline["axes"]["prompt"]["variant"] = "stale-default"
+                source["axes"][drifted_axis] = baseline["axes"][drifted_axis]
+
+                directory_path = Path(directory)
+                (directory_path / "baseline.json").write_text(
+                    json.dumps(baseline), encoding="utf-8"
+                )
+                temporary_manifest = directory_path / "candidate.json"
+                temporary_manifest.write_text(
+                    json.dumps(source), encoding="utf-8"
+                )
+
+                with self.assertRaisesRegex(
+                    candidate.CandidateError,
+                    rf"baseline {drifted_axis} no longer matches",
+                ):
+                    candidate.validate(temporary_manifest)
+
+    def test_mantle_templates_use_the_bedrock_iam_service_prefix(self):
+        providers_dir = self.manifests_dir.parent / "providers"
+        for template_path in providers_dir.glob("mantle-*.json"):
+            with self.subTest(template=template_path.name):
+                template = json.loads(template_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    template["iam"]["actions"],
+                    ["bedrock:CallWithBearerToken"],
+                )
+                self.assertEqual(template["iam"]["resources"], ["*"])
+
     def test_dockerfile_defaults_keep_production_pins_and_assertion(self):
         dockerfile = (HERE / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn(

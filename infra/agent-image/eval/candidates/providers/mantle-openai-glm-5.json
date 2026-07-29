@@ -46,7 +46,7 @@
   },
   "iam": {
     "authMechanism": "Bedrock API key loaded from Secrets Manager and sent as a Bearer token",
-    "actions": ["bedrock-mantle:CallWithBearerToken"],
+    "actions": ["bedrock:CallWithBearerToken"],
     "resources": ["*"],
     "inferenceProfileId": null,
     "crossRegionFoundationModelArns": [],

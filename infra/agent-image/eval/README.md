@@ -12,6 +12,7 @@ From the repository root:
 ```bash
 python3 infra/agent-image/eval/runner.py \
   --image <tag-or-digest> \
+  --candidate-metadata infra/agent-image/.candidate-builds/<tag>.json \
   --suite infra/agent-image/eval/suites/regression.yaml \
   --trials 3 \
   --out /tmp/issue-1426-regression.jsonl \
@@ -48,6 +49,16 @@ credential action's `aws-expiration` output.
 When a post-mint credential check recycles the runtime, the runner discards
 that authority and remints it for the ready container before invoking.
 
+Candidate-matrix runs must pass the finalized `.candidate-builds/<tag>.json`
+sidecar. The runner rejects a sidecar whose tag/digest does not match
+`--image`. Native SigV4 metadata causes no provider-secret lookup. For Mantle
+OpenAI/Anthropic metadata, the runner resolves
+`BedrockApiKeySecretArn` from the selected environment's agent-platform stack
+and passes only that ARN into each short-lived container; the container reads
+the value with the same refreshed AWS credential chain. The caller therefore
+needs `secretsmanager:GetSecretValue` on that environment secret for Mantle
+evaluations.
+
 Owner-bound skill tasks must pass an eval-only address on the real PSD domain
 with `--owner-email` (or `AGENT_EVAL_OWNER_EMAIL`). The signed context makes
 that address the trial's actor and owner, so the model exercises the same
@@ -81,7 +92,7 @@ Before push, the candidate must boot and pass one exact-output graded turn.
 After push, `.candidate-builds/<tag>.json` binds the immutable digest to its
 model ID, provider path, harness and plugin pins, prompt variant, cache mode,
 axis delta, cost sources, and source commit. That local sidecar is comparison
-evidence, not a deployment instruction.
+evidence and the runner's provider-auth contract, not a deployment instruction.
 
 See [`candidates/README.md`](./candidates/README.md) for the complete
 OpenAI/GLM/Kimi/Qwen/Claude manifest matrix and the verified native Bedrock,
