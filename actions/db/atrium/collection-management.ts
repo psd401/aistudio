@@ -133,10 +133,13 @@ export async function updateCollectionAction(
         grants: input.grants?.length ?? undefined,
       }),
     });
+    // Authenticate and capability-gate before branching on attacker-controlled
+    // identifiers. Besides keeping logged-out responses consistently at 401,
+    // this prevents validation behavior from becoming an authorization oracle.
+    const requester = await authorizedRequester(requestId);
     if (!collectionId) {
       throw ErrorFactories.missingRequiredField("collectionId");
     }
-    const requester = await authorizedRequester(requestId);
     const parsed = updateCollectionBodySchema.safeParse(input);
     if (!parsed.success) {
       throw new ValidationError("Invalid collection update", {
