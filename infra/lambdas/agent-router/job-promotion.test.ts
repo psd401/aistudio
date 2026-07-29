@@ -10,6 +10,8 @@ import {
   buildContinuationPrompt,
   buildJobPayload,
   formatJobChatResponse,
+  jobAgentAudienceContext,
+  jobChatDeliveryContext,
   JOB_DEADLINE_S,
   parseJobPayload,
   shouldPromoteToJob,
@@ -35,6 +37,7 @@ const BASE = {
   lockToken: 'tok-1',
   runtimeId: 'psd_agent_dev-XYZ',
   userEmail: 'hagelk@psd401.net',
+  googleIdentity: 'users/123456789',
   displayName: 'Kris Hagel',
   workspacePrefix: 'hagelk-abc123',
   spaceName: 'spaces/AAA',
@@ -49,6 +52,7 @@ describe('buildJobPayload / parseJobPayload round-trip', () => {
     expect(parsed.lockToken).toBe(BASE.lockToken);
     expect(parsed.runtimeId).toBe(BASE.runtimeId);
     expect(parsed.userEmail).toBe(BASE.userEmail);
+    expect(parsed.googleIdentity).toBe(BASE.googleIdentity);
     expect(parsed.workspacePrefix).toBe(BASE.workspacePrefix);
     expect(parsed.spaceName).toBe(BASE.spaceName);
     expect(parsed.threadName).toBe('spaces/AAA/threads/t1');
@@ -148,6 +152,43 @@ describe('formatJobChatResponse', () => {
         'room result'
       )
     ).toBe(`[${BASE.displayName}'s Agent] room result`);
+  });
+});
+
+describe('promoted-job Chat context', () => {
+  test('retains the sender identity and public audience for room delivery', () => {
+    const roomJob = {
+      isDM: false,
+      googleIdentity: BASE.googleIdentity,
+      userEmail: BASE.userEmail,
+      sessionId: BASE.sessionId,
+    };
+
+    expect(jobChatDeliveryContext(roomJob)).toEqual({
+      isSharedSpace: true,
+      senderGoogleIdentity: BASE.googleIdentity,
+      userId: BASE.userEmail,
+      sessionId: BASE.sessionId,
+    });
+    expect(jobAgentAudienceContext(roomJob)).toEqual({
+      audience: 'shared-space',
+    });
+  });
+
+  test('omits sender fallback and public audience for DM delivery', () => {
+    const dmJob = {
+      isDM: true,
+      googleIdentity: BASE.googleIdentity,
+      userEmail: BASE.userEmail,
+      sessionId: BASE.sessionId,
+    };
+
+    expect(jobChatDeliveryContext(dmJob)).toEqual({
+      isSharedSpace: false,
+      userId: BASE.userEmail,
+      sessionId: BASE.sessionId,
+    });
+    expect(jobAgentAudienceContext(dmJob)).toEqual({});
   });
 });
 

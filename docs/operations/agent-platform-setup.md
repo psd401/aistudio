@@ -60,15 +60,97 @@ All GCP steps are done in the web console. No `gcloud` CLI required.
 
 1. Go to **APIs & Services** → **Enabled APIs** → click **Google Chat API** → **Configuration** tab
 2. Fill in:
-   - App name: `PSD Agent` (or your district name)
+   - App name and visibility:
+     - **Dev — `psd-aistudio-dev`:** app name **PSD Agent Dev**; visibility
+       limited to the named testers who will use the dev app.
+     - **Prod — `aistudio-462612`:** app name **PSD AI Agent**; visibility
+       set to the intended domain audience.
    - Avatar URL: (optional, leave blank for now)
    - Description: "Personal AI agent for district staff"
    - Enable **Interactive features**
+   - Functionality: **Join spaces and group conversations**
    - Connection settings: **Cloud Pub/Sub**
    - Pub/Sub topic: `projects/<your-project-id>/topics/agent-chat-messages`
-   - Visibility: **Make this Chat app available to everyone in [your domain]** (the Router Lambda's `ALLOWED_DOMAINS` handles access control on the AWS side)
    - Logs: **Log errors to Logging**
 3. Click **Save**
+
+#### 1.7 Allow the Chat app to operate in spaces
+
+A Chat app can work in 1:1 DMs while Workspace policy still blocks every API
+action in a multi-user space. There are two control planes to check:
+
+1. In **Google Admin Console** → **Apps** → **Google Workspace** → **Google
+   Chat** → **Chat apps**, select the **top-level organizational unit** and set
+   **Allow users to install Chat apps** to **On**. This enables the Chat-app
+   capability; access to a specific Marketplace app is still controlled
+   separately by the app allowlist in step 2.
+2. If the district uses a Google Workspace Marketplace allowlist, go to
+   **Apps** → **Google Workspace Marketplace apps** → **Apps list** and add the
+   production app by its exact name, **PSD AI Agent**. Apply explicit allow
+   entries to the intended **`/Staff`** organizational unit and
+   **`/Miscellaneous/Agent Account`**, where OneSync places the `agnt_...`
+   identities. Do not allow the app for Students or broaden it to the top-level
+   organization without an explicit district policy decision. Google documents
+   that an app allowed on a child OU but not its parent can be rejected in
+   shared spaces. The router handles that intentional least-privilege
+   configuration by recording the room-post 403 and delivering the completed
+   response privately to the human sender instead. The current Marketplace
+   allowlist limits those senders to the intended OUs. The unpublished **PSD
+   Agent Dev** app does not appear in the Marketplace allowlist; Google permits
+   an unpublished development app for up to five named testers while Chat apps
+   are enabled.
+3. Configure the two apps separately in **GCP Console** → **Google Chat API** →
+   **Configuration**:
+   - **Dev — `psd-aistudio-dev` / PSD Agent Dev:** enable **Interactive
+     features**, select **Join spaces and group conversations**, keep the
+     Cloud Pub/Sub topic `projects/psd-aistudio-dev/topics/agent-chat-messages`,
+     and keep **Visibility** limited to the named testers. Add every person who
+     will mention the app during the live test. Domain-wide visibility is not
+     required for a development app.
+   - **Prod — `aistudio-462612` / PSD AI Agent:** enable **Interactive
+     features**, select **Join spaces and group conversations**, keep the
+     configured production Pub/Sub topic, and make the app available to the
+     intended domain audience. If Marketplace access is allowlist-only, step 2
+     must also be complete.
+4. Allow time for Workspace policy propagation. With each app's own service
+   account credential and the `chat.bot` scope, call `spaces.get` for a ROOM
+   that app has joined:
+   - `200` means the app may post the response in the originating room thread.
+   - A `403` stating that the organization's administrator restricts the Chat
+     app is expected when the app is deliberately allowed only for Staff at a
+     child OU and Google rejects app-authenticated shared-space operations.
+     Confirm that the router records `ChatPostPermissionDenied` and sends the
+     completed response to the human sender's existing DM with the policy
+     notice. The router is identity-aware, not OU-aware; the Marketplace
+     allowlist is what limits the current audience to Staff. Do not broaden the
+     app to Students to make this probe return 200.
+
+   Then @mention the app and confirm either the room-thread reply (when policy
+   permits it) or the private DM fallback (under the Staff-only child-OU
+   policy).
+
+These settings are console-managed. The Google Cloud CLI has no `gcloud chat`
+command, and `gcloud workspace-add-ons deployments` manages add-on deployments,
+not Chat API configuration or Workspace tenant policy. The Google Terraform
+provider manages the surrounding APIs, service accounts, Pub/Sub topics,
+subscriptions, and IAM, but has no resource for either setting above. Record
+the console state in the private `psd401/psd-gcp-infra` runbook; do not add an
+unsupported Terraform workaround or run `terraform apply` for this policy
+change.
+
+There are two distinct identities that can post to Chat:
+
+- The **Chat app service account** receives mentions and posts router replies
+  with the `chat.bot` scope. Workspace app policy can restrict this identity
+  in spaces even while its DMs to allowed users work. The router's 403 fallback
+  is also sent by this Chat app identity. The router does not inspect OU
+  membership; the Marketplace allowlist enforces the Staff-only audience.
+- The per-user **`agnt_...` Workspace account** is a real delegated user used
+  by the `psd-workspace` skill (`--scope agent`). OneSync places these accounts
+  in **`/Miscellaneous/Agent Account`**, which has its own explicit
+  **PSD AI Agent → Allow app** override. The account is not used for Chat reply
+  delivery, and its ability to post or manage memberships does not prove that
+  the Chat app identity is allowed.
 
 ### Phase 2: AWS Infrastructure Deploy
 
@@ -227,6 +309,16 @@ psql $DATABASE_URL -c "SELECT * FROM agent_sessions ORDER BY created_at DESC LIM
    - CloudWatch logs show the full pipeline execution
    - `agent_messages` table has a new row
    - `agent_sessions` table has a new/updated row
+5. In a multi-user test space, @mention the agent in an existing thread and
+   verify:
+   - When the Chat app may post to the room, the reply appears in the mention's
+     thread, not as a new top-level message.
+   - Under the intentional Staff-only child-OU policy, a room-post 403 produces
+     one private DM fallback to the human sender with the policy notice and does
+     not rerun the completed agent turn.
+   - A shared-space request does not volunteer private memory content.
+   - Before reading or summarizing the caller's Gmail, Calendar, or Drive, the
+     agent asks for confirmation that the result may be shared publicly.
 
 #### 4.4 Guardrail Test
 
@@ -469,6 +561,7 @@ intent text.
 | Lambda timeout | AgentCore Runtime not deployed | Deploy with `--context agentImageTag=<tag>` |
 | "Google credentials secret contains invalid JSON" | Secret not populated | Run `aws secretsmanager put-secret-value` from step 2.2 |
 | "Database not configured, skipping telemetry" | DATABASE_HOST not set | Check Lambda env vars in CloudWatch |
+| Mention in a space gets no room reply; Router logs `403 "This organization's administrator restricts this Chat app from performing this action"` | The app is intentionally allowed only for Staff at a child OU, and Google blocks its `chat.bot` identity in the shared space | Do not broaden the app to Students. Confirm `ChatPostPermissionDenied` telemetry and the private DM fallback described in step 1.7. The separate `agnt_...` Workspace user's ability to post is unrelated. |
 | Guardrail blocks everything | GUARDRAIL_FAIL_OPEN=false + guardrail misconfigured | Check guardrail rules in Bedrock console |
 | DLQ alarm firing | Messages failing after 3 retries | Check CloudWatch logs for Router Lambda errors |
 | Pub/Sub push fails to SQS | SQS requires signed requests | Add API Gateway → SQS proxy in front of the queue |
