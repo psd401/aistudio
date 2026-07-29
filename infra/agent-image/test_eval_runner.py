@@ -251,7 +251,7 @@ class SuiteLoadingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             runner.EvalRunnerError,
-            "suite must be regression or capability",
+            "suite must be regression, capability, or unclassified",
         ):
             runner._task_from_mapping(
                 {
@@ -264,6 +264,17 @@ class SuiteLoadingTests(unittest.TestCase):
                 },
                 Path("inline.yaml"),
             )
+
+    def test_docker_name_token_sanitizes_prefix_before_appending_pid(self):
+        self.assertEqual(
+            runner._docker_name_token("Issue 1425/Regression", 123),
+            "issue-1425-regression-123",
+        )
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "name prefix must contain a letter or number",
+        ):
+            runner._docker_name_token("***", 123)
 
     def test_non_integer_trial_counts_are_rejected(self):
         base_task: dict[str, object] = {

@@ -1219,7 +1219,7 @@ def _task_from_mapping(value: Mapping[str, object], source: Path) -> Task:
         raise EvalRunnerError(f"{source}: workspace must be pure or mutating")
     if task.suite not in {"regression", "capability", "unclassified"}:
         raise EvalRunnerError(
-            f"{source}: suite must be regression or capability"
+            f"{source}: suite must be regression, capability, or unclassified"
         )
     if task.trials < 1 or task.trials > 20:
         raise EvalRunnerError(f"{source}: trials must be between 1 and 20")
@@ -1399,6 +1399,17 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
+def _docker_name_token(prefix: str, pid: int) -> str:
+    sanitized_prefix = re.sub(
+        r"[^a-z0-9-]",
+        "-",
+        prefix.lower(),
+    ).strip("-")
+    if not sanitized_prefix:
+        raise EvalRunnerError("name prefix must contain a letter or number")
+    return f"{sanitized_prefix}-{pid}"
+
+
 def _context_ttl_seconds(invocation_timeout_seconds: int) -> int:
     ttl_seconds = (
         invocation_timeout_seconds
@@ -1480,13 +1491,7 @@ def main(argv: list[str] | None = None) -> int:
             "BUILD_MARKER": f"eval:{args.image}",
         }
         credential_provider = ActiveAwsCredentialProvider(executor)
-        name_token = re.sub(
-            r"[^a-z0-9-]",
-            "-",
-            f"{args.name_prefix}-{os.getpid()}".lower(),
-        ).strip("-")
-        if not name_token:
-            raise EvalRunnerError("name prefix must contain a letter or number")
+        name_token = _docker_name_token(args.name_prefix, os.getpid())
         runtime_factory = DockerRuntimeFactory(
             executor,
             args.image,
