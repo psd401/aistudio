@@ -245,6 +245,9 @@ describe("Freshservice broker behaviour", () => {
     "/tickets?noequals",
     // Preset filters are a closed Freshservice-defined list.
     "/tickets?filter=all",
+    // The two filter-only keys cannot ride along on sibling endpoints.
+    '/agents?query="status:2"',
+    "/workspaces?filter=watching",
     // Filter expressions may not smuggle path separators.
     '/tickets/filter?query="status:2/admin"',
   ])("rejects query %s", async (path) => {

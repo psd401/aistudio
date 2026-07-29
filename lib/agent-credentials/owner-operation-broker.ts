@@ -786,11 +786,19 @@ const FRESHSERVICE_PRESET_FILTERS = new Set([
 ])
 
 function isAllowedFreshserviceQueryValue(
+  pathname: string,
   key: string,
   value: string
 ): boolean {
-  if (key === "filter") return FRESHSERVICE_PRESET_FILTERS.has(value)
-  if (key === "query") return FRESHSERVICE_FILTER_QUERY_CHARS.test(value)
+  if (key === "filter") {
+    return pathname === "/tickets" && FRESHSERVICE_PRESET_FILTERS.has(value)
+  }
+  if (key === "query") {
+    return (
+      pathname === "/tickets/filter" &&
+      FRESHSERVICE_FILTER_QUERY_CHARS.test(value)
+    )
+  }
   return FRESHSERVICE_VALUE_CHARS.test(value)
 }
 
@@ -825,7 +833,7 @@ function canonicalFreshservicePath(method: string, path: string): string | null 
 
   if (rawQuery.length === 0) return canonicalPath
 
-  const query = canonicalFreshserviceQuery(rawQuery)
+  const query = canonicalFreshserviceQuery(canonicalPath, rawQuery)
   if (query === null) return null
   return query.length > 0 ? `${canonicalPath}?${query}` : canonicalPath
 }
@@ -835,7 +843,10 @@ function canonicalFreshservicePath(method: string, path: string): string | null 
  * is unrecognized. Split out from the path canonicalizer to keep each half
  * under the complexity ceiling and independently readable.
  */
-function canonicalFreshserviceQuery(rawQuery: string): string | null {
+function canonicalFreshserviceQuery(
+  canonicalPath: string,
+  rawQuery: string
+): string | null {
   const rebuilt = new URLSearchParams()
   for (const pair of rawQuery.split("&")) {
     if (pair.length === 0) continue
@@ -849,7 +860,7 @@ function canonicalFreshserviceQuery(rawQuery: string): string | null {
     } catch {
       return null
     }
-    if (!isAllowedFreshserviceQueryValue(key, value)) return null
+    if (!isAllowedFreshserviceQueryValue(canonicalPath, key, value)) return null
     rebuilt.append(key, value)
   }
   return rebuilt.toString()
