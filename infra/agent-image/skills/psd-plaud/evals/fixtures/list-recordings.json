@@ -1,0 +1,26 @@
+[
+  {
+    "route": "/api/agent/credentials",
+    "method": "POST",
+    "request_body": {
+      "operation": "plaud-mcp",
+      "method": "tools/call",
+      "toolName": "list_files",
+      "toolArgs": {"keyword": "EVAL-1426"}
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "status": "ok",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"files\":[{\"id\":\"recording-eval-1426\",\"name\":\"EVAL-1426 Recording\"}]}"
+            }
+          ]
+        }
+      }
+    }
+  }
+]

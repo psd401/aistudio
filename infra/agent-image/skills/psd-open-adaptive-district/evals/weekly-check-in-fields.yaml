@@ -1,0 +1,9 @@
+id: open-adaptive-weekly-check-in-fields
+skill: psd-open-adaptive-district
+level: L0
+workspace: pure
+suite: regression
+prompt: "Use the Open Adaptive District guidance to give the exact four headings for a SHIP Weekly Check-In. Keep it concise."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"(?is)Tried.*Learned.*Stuck.*Needs"}

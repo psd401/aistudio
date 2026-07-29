@@ -105,6 +105,10 @@ BROKER_CONTROL_TMPFS_OPTIONS = (
     "rw,noexec,nosuid,nodev,size=268435456,mode=0700,uid=0,gid=0"
 )
 BROKER_STUB_CONTAINER_PATH = "/app/mantle_proxy.py"
+DEPLOYED_RUNTIME_ENVIRONMENT_KEYS = (
+    "HYPERFRAMES_RENDER_FUNCTION",
+    "SUMMARIZE_MODEL_ID",
+)
 
 
 class EvalRunnerError(RuntimeError):
@@ -1331,6 +1335,58 @@ def _resolve_app_base_url(
     return resolved
 
 
+def _resolve_deployed_runtime_environment(
+    executor: CommandExecutor,
+    runtime_id: str | None,
+    region: str,
+) -> dict[str, str]:
+    """Read only the non-secret deployment config required by L2 skills."""
+
+    if not runtime_id:
+        return {}
+    query_fields = ",".join(
+        f"{key}:environmentVariables.{key}"
+        for key in DEPLOYED_RUNTIME_ENVIRONMENT_KEYS
+    )
+    result = executor.run(
+        [
+            "aws",
+            "bedrock-agentcore-control",
+            "get-agent-runtime",
+            "--agent-runtime-id",
+            runtime_id,
+            "--query",
+            f"{{{query_fields}}}",
+            "--output",
+            "json",
+            "--region",
+            region,
+        ],
+        timeout=30,
+    )
+    try:
+        values = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise EvalRunnerError(
+            "deployed runtime environment query returned invalid JSON"
+        ) from error
+    if not isinstance(values, dict):
+        raise EvalRunnerError(
+            "deployed runtime environment query returned a non-object"
+        )
+    environment: dict[str, str] = {}
+    for key in DEPLOYED_RUNTIME_ENVIRONMENT_KEYS:
+        value = values.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise EvalRunnerError(
+                f"deployed runtime environment field {key} is invalid"
+            )
+        environment[key] = value
+    return environment
+
+
 def _resolve_aws_credentials(executor: CommandExecutor) -> AwsCredentials:
     allowed = {
         "AWS_ACCESS_KEY_ID",
@@ -1472,6 +1528,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="synthetic owner identity embedded in signed trial contexts",
     )
     parser.add_argument("--app-base-url")
+    parser.add_argument(
+        "--agent-runtime-id",
+        default=os.environ.get("AGENT_EVAL_RUNTIME_ID"),
+        help=(
+            "deployed runtime whose allowlisted non-secret environment config "
+            "should be mirrored into L2 containers"
+        ),
+    )
     parser.add_argument("--platform", default="linux/arm64")
     parser.add_argument("--boot-timeout", type=_positive_integer, default=120)
     parser.add_argument("--invocation-timeout", type=_positive_integer, default=900)
@@ -1501,11 +1565,17 @@ def main(argv: list[str] | None = None) -> int:
             args.region,
             args.app_base_url,
         )
+        deployed_runtime_environment = _resolve_deployed_runtime_environment(
+            executor,
+            args.agent_runtime_id,
+            args.region,
+        )
         environment_values = {
             "ENVIRONMENT": args.environment,
             "AWS_REGION": args.region,
             "APP_BASE_URL": app_base_url,
             "BUILD_MARKER": f"eval:{args.image}",
+            **deployed_runtime_environment,
         }
         credential_provider = ActiveAwsCredentialProvider(executor)
         name_token = _docker_name_token(args.name_prefix, os.getpid())

@@ -14,12 +14,16 @@ python3 infra/agent-image/eval/runner.py \
   --image <tag-or-digest> \
   --suite infra/agent-image/eval/suites/regression.yaml \
   --trials 3 \
-  --out /tmp/issue-1425-regression.jsonl \
-  --owner-email eval.issue1425@psd401.net \
-  --name-prefix psd-agent-eval-issue-1425
+  --out /tmp/issue-1426-regression.jsonl \
+  --agent-runtime-id <deployed-dev-runtime-id> \
+  --owner-email eval.issue1426@psd401.net \
+  --name-prefix psd-agent-eval-issue-1426
 ```
 
 Use `eval/suites/capability.yaml` for the harder daily-driver comparison set.
+Passing `--agent-runtime-id` mirrors only the allowlisted, non-secret deployment
+fields required by L2 skills (currently HyperFrames and the optional summarize
+model override); it never copies the runtime's complete environment.
 The legacy `core.yaml` remains the three-task runner/isolation smoke suite.
 
 The runner uses the active AWS credential chain and discovers the dev web
@@ -122,6 +126,81 @@ committed `core.yaml` suite has three unclassified L0 smoke tasks; its
 seed/recall pair checks that a passphrase stated under one session is unknown
 under the next.
 
+### Coverage inventory and drift gate
+
+Coverage follows the shipped tree rather than a hard-coded epic count. The
+current image contains 31 directories with `SKILL.md`; 30 have one or more
+co-located tasks and `psd-rules` is the sole documented opt-out. `_shared` is
+not a skill because it has no `SKILL.md`.
+
+`psd-rules` is concatenated into `SOUL.md` at image build time. It is global
+bootstrap policy, not an independently invoked skill, so assigning it an
+invocation task would falsely imply a callable boundary. Its behavior is
+exercised transitively by every task.
+
+Run the same inventory check CI runs:
+
+```bash
+python3 infra/agent-image/check_eval_coverage.py
+python3 -m unittest infra/agent-image/test_eval_coverage.py
+```
+
+The check fails when any new shipped skill lacks an `evals/*.yaml` file. The
+test suite also creates a fixture skill without `evals/` and proves that the
+failure fires. Opt-outs live in `check_eval_coverage.py`; stale or reasonless
+entries fail as configuration errors.
+
+The regression and capability manifests contain 50 tasks total. At least 25%
+are explicit negative cases: they prove that a route or side effect is not
+used, rather than treating non-invocation as an unobserved success.
+
+### Level policy
+
+Use the lowest hermeticity level that exercises the real skill boundary:
+
+| Level | Contract | Current uses |
+|---|---|---|
+| L0 | No external network or live service | Local renderers/converters, bundled references, offline self-checks, and policy/clarification tasks |
+| L1 | All service traffic crosses the loopback broker and is fixture-backed or asserted absent | AI Studio, Atrium reads, Canva reads, credentials, data MCP, directory, email triage, Freshservice, GitHub, Plaud, schedules, skills catalog, workflow gateway, Workspace |
+| L2 | A required provider, AWS API, or out-of-band upload cannot be represented by the broker fixture contract | QuickChart, failure-report CloudWatch emission, HyperFrames Lambda, positive image generation/upload, keyless web research, records-safe model summarization, Polly/audio upload |
+
+Some skills support more than one level. `psd-html-artifact` is L0 when its
+`--audit-only` gate is evaluated, but a delivery task is L2 because the
+presigned `PUT` is outside the broker capture. `psd-learning-page` has an L0
+contract task; a full publish is L2 because it composes TTS, video rendering,
+and Atrium. `psd-image-gen` has an L1 fail-closed capability task; a positive
+generation remains L2 because artifact delivery uses a presigned `PUT` outside
+the broker capture. `psd-data` is L1 in the current image: its MCP transport now
+crosses the owner-bound credentials broker, despite older design notes
+describing a direct Lambda URL.
+
+Regression tasks pin stable routing, safety, and output contracts. Capability
+tasks deliberately require more judgment or generation and are the comparison
+surface where model changes may improve. A task belongs in regression only
+when the current baseline should reliably pass it 3/3.
+
+### Weekly live-dev fixture-drift run
+
+`.github/workflows/agent-eval-l2.yml` runs `l2-live.yaml` every Tuesday and on
+manual dispatch. It resolves the image digest currently deployed to the dev
+AgentCore runtime (or accepts an explicit ECR image for manual runs), executes
+three trials per task on an ARM64 runner, and fails unless every trial passes.
+
+The workflow uses `canary@build-gate.invalid`, the existing RFC 2606 disposable
+owner identity. Every live prompt is labeled `EVAL-1426` or synthetic. The
+subset is intentionally small:
+
+- QuickChart and recent-source research use synthetic/public inputs;
+- summarization uses fabricated PII to verify exclusion;
+- TTS uploads only the phrase `EVAL 1426 synthetic audio canary`;
+- failure reporting writes an explicitly labeled synthetic canary record.
+
+Repository secret `AGENT_EVAL_AWS_ROLE_ARN` must name a least-privilege OIDC
+role able to read the deployed runtime and ECR image, pull that image, discover
+the dev broker, mint signed probe authority, and perform the listed L2 calls.
+The workflow never uploads or commits JSONL transcripts. It prints only task
+IDs and failure reasons, then deletes the owner-only run file even on failure.
+
 ## L1 fixtures and graders
 
 An L1 task names one or more relative JSON fixture files and at least one
@@ -206,8 +285,9 @@ the per-grader boolean and human-readable reason. Task reliability uses
 ## Hermetic tests
 
 ```bash
-UV_CACHE_DIR=/tmp/issue-1425-uv-cache \
+UV_CACHE_DIR=/tmp/issue-1426-uv-cache \
   uv run --python 3.12 --no-project -m unittest \
+  infra/agent-image/test_eval_coverage.py \
   infra/agent-image/test_broker_stub.py \
   infra/agent-image/test_graders.py \
   infra/agent-image/test_eval_runner.py

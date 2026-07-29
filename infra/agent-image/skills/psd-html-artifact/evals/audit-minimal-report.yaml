@@ -1,0 +1,9 @@
+id: html-artifact-audit-minimal-report
+skill: psd-html-artifact
+level: L0
+workspace: mutating
+suite: regression
+prompt: "Create a minimal self-contained HTML status report at /tmp/eval-1426-report.html with lang=\"en\", one h1 reading \"EVAL 1426\", and a main landmark. Run psd-html-artifact's audit-only gate. Do not upload it. Report whether the accessibility audit passed."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"(?i)(audit|accessibility|wcag).*(pass|clean|zero|no (?:critical|serious))"}

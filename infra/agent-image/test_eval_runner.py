@@ -123,7 +123,7 @@ class SuiteLoadingTests(unittest.TestCase):
         self.assertEqual({task.workspace for task in tasks}, {"pure"})
         self.assertEqual({task.trials for task in tasks}, {3})
 
-    def test_committed_daily_driver_suites_meet_issue_1425_contract(self):
+    def test_committed_skill_suites_meet_issue_1426_contract(self):
         suite_paths = {
             "regression": AGENT_IMAGE_DIR / "eval" / "suites" / "regression.yaml",
             "capability": AGENT_IMAGE_DIR / "eval" / "suites" / "capability.yaml",
@@ -138,23 +138,23 @@ class SuiteLoadingTests(unittest.TestCase):
             for task in suite_tasks
         ]
 
-        self.assertEqual(len(tasks), 12)
-        self.assertEqual(len({task.id for task in tasks}), 12)
-        self.assertEqual(
-            Counter(task.skill for task in tasks),
-            Counter(
-                {
-                    "chat-card": 3,
-                    "psd-directory": 3,
-                    "psd-freshservice": 3,
-                    "psd-workspace": 3,
-                }
-            ),
+        self.assertGreaterEqual(len(tasks), 50)
+        self.assertEqual(len({task.id for task in tasks}), len(tasks))
+        shipped_skills = {
+            path.name
+            for path in (AGENT_IMAGE_DIR / "skills").iterdir()
+            if path.is_dir() and (path / "SKILL.md").is_file()
+        }
+        covered_skills = shipped_skills - {"psd-rules"}
+        self.assertEqual({task.skill for task in tasks}, covered_skills)
+        self.assertTrue(
+            all(Counter(task.skill for task in tasks)[skill] >= 1 for skill in covered_skills)
         )
         self.assertEqual({task.trials for task in tasks}, {3})
         for suite, suite_tasks in tasks_by_suite.items():
             self.assertEqual({task.suite for task in suite_tasks}, {suite})
 
+        suite_task_paths: set[Path] = set()
         required_fields = {
             "id",
             "skill",
@@ -170,21 +170,55 @@ class SuiteLoadingTests(unittest.TestCase):
             self.assertIsInstance(suite_document, dict)
             for relative_path in suite_document["tasks"]:
                 task_path = (suite_path.parent / relative_path).resolve()
+                self.assertNotIn(
+                    task_path,
+                    suite_task_paths,
+                    f"{task_path} is listed by more than one suite",
+                )
+                suite_task_paths.add(task_path)
                 task_document = runner._load_document(task_path)
                 self.assertTrue(
                     required_fields.issubset(task_document),
                     f"{task_path} omitted required task fields",
                 )
+        committed_task_paths = {
+            path.resolve()
+            for path in (AGENT_IMAGE_DIR / "skills").glob("*/evals/*.yaml")
+        }
+        self.assertEqual(suite_task_paths, committed_task_paths)
 
         negative_task_ids = {
+            "aistudio-explain-without-call",
+            "atrium-draft-without-publish",
+            "canva-ideas-without-design",
             "chat-card-single-sentence-plain-text",
+            "credentials-refuse-secret-read",
             "directory-literal-address-no-lookup",
+            "email-triage-generic-inbox-no-config",
+            "github-never-merge",
+            "image-gen-capability-denied",
+            "schedules-clarify-missing-time",
+            "skills-meta-search-without-author",
+            "workflows-confirm-before-submit",
             "workspace-draft-email-not-send",
+            "workspace-summary-without-side-effect",
         }
         # Cross-multiply to keep the 25% threshold exact without float math.
         self.assertGreaterEqual(len(negative_task_ids) * 4, len(tasks))
         tasks_by_id = {task.id: task for task in tasks}
         self.assertTrue(negative_task_ids.issubset(tasks_by_id))
+        for task_id in negative_task_ids:
+            self.assertTrue(
+                any(
+                    grader.get("type") == "no_route_called"
+                    or (
+                        grader.get("type") == "output_match"
+                        and "(?!" in str(grader.get("pattern"))
+                    )
+                    for grader in tasks_by_id[task_id].graders
+                ),
+                f"{task_id} is counted as negative without a negative assertion",
+            )
 
         def broker_body(task_id: str) -> dict[str, object]:
             spec = next(
@@ -371,6 +405,7 @@ class SuiteLoadingTests(unittest.TestCase):
                     fixture_path.is_relative_to(expected_root),
                     f"{fixture_path} is not co-located with {task.skill}",
                 )
+            runner._load_fixture_files(task.fixture_paths)
 
     def test_invalid_workspace_fails_closed(self):
         with self.subTest("validation happens after parsing"):
@@ -1836,6 +1871,49 @@ class DockerRuntimeTests(unittest.TestCase):
 
 
 class MainWiringTests(unittest.TestCase):
+    def test_deployed_runtime_environment_is_allowlisted(self):
+        executor = mock.Mock()
+        executor.run.return_value = runner.CommandResult(
+            0,
+            json.dumps(
+                {
+                    "HYPERFRAMES_RENDER_FUNCTION": "psd-hyperframes-render-dev",
+                    "SUMMARIZE_MODEL_ID": None,
+                    "UNEXPECTED_SECRET": "must-not-pass",
+                }
+            ),
+            "",
+        )
+
+        environment = runner._resolve_deployed_runtime_environment(
+            executor,
+            "runtime-123",
+            "us-east-1",
+        )
+
+        self.assertEqual(
+            environment,
+            {
+                "HYPERFRAMES_RENDER_FUNCTION": "psd-hyperframes-render-dev",
+            },
+        )
+        command = executor.run.call_args.args[0]
+        self.assertNotIn("UNEXPECTED_SECRET", " ".join(command))
+
+    def test_deployed_runtime_environment_rejects_invalid_json(self):
+        executor = mock.Mock()
+        executor.run.return_value = runner.CommandResult(0, "not-json", "")
+
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "returned invalid JSON",
+        ):
+            runner._resolve_deployed_runtime_environment(
+                executor,
+                "runtime-123",
+                "us-east-1",
+            )
+
     def test_invocation_timeout_controls_context_ttl_and_credentials(self):
         provider = mock.Mock()
         minter = mock.Mock()

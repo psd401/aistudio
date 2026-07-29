@@ -1,0 +1,9 @@
+id: brand-guidelines-logo-variant-choice
+skill: psd-brand-guidelines
+level: L0
+workspace: pure
+suite: capability
+prompt: "A PSD staff slide has a dark Pacific background and a wide footer. Use psd-brand-guidelines to name the bundled logo variant that preserves contrast and fits the wide layout. Include the exact asset filename."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"(?i)psd_logo-white-(?:horizontal|fulllandscape)\\.png"}

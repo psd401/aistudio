@@ -1,0 +1,9 @@
+id: pdf-to-markdown-bundled-brand-guide
+skill: psd-pdf-to-markdown
+level: L0
+workspace: mutating
+suite: regression
+prompt: "Use psd-pdf-to-markdown to convert /opt/psd-skills/psd-brand-guidelines/assets/PSD_Branding_Guide.pdf to /tmp/eval-1426-brand-guide.md without extracting images. Report the converter status and output path."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"(?is)(status[^\\n]*ok|converted).*eval-1426-brand-guide\\.md"}

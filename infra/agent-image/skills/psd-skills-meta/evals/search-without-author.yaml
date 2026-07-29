@@ -1,0 +1,10 @@
+id: skills-meta-search-without-author
+skill: psd-skills-meta
+level: L1
+workspace: pure
+suite: capability
+prompt: "Brainstorm a possible skill name for checking classroom projectors. Do not search, load, author, save, or submit a skill draft."
+trials: 3
+graders:
+  - {"type":"no_route_called","route":"/api/agent/skills"}
+  - {"type":"output_match","pattern":"(?i)projector"}

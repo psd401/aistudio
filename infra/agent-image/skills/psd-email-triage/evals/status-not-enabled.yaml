@@ -1,0 +1,13 @@
+id: email-triage-status-not-enabled
+skill: psd-email-triage
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-email-triage to show my current triage status. Do not enable, disable, train, sweep, or change any rule."
+trials: 3
+fixtures:
+  - fixtures/status-not-enabled.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/email-triage","method":"POST","body":{"operation":{"exact":"get-state"}}}
+  - {"type":"no_route_called","route":"/api/agent/email-triage","method":"POST","body":{"operation":{"contains_any":["update-state","delete-state","create-label","modify-message"]}}}
+  - {"type":"output_match","pattern":"(?:not|isn['’]?t) (?:enabled|set up)|disabled","ignore_case":true}

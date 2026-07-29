@@ -1,0 +1,9 @@
+id: tts-synthetic-short-audio
+skill: psd-tts
+level: L2
+workspace: pure
+suite: capability
+prompt: "Use psd-tts to synthesize exactly this clearly marked test sentence with the default voice: \"EVAL 1426 synthetic audio canary.\" Return the bare MP3 URL and do not add any other source content."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"https://[^\\s]+\\.mp3(?:\\?[^\\s]+)?"}

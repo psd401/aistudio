@@ -1,0 +1,12 @@
+id: data-list-tables
+skill: psd-data
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-data to list the available warehouse tables without querying any rows. Report whether the EVAL_1426_ATTENDANCE table is available."
+trials: 3
+fixtures:
+  - fixtures/list-tables.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"psd-data-mcp"},"method":{"exact":"tools/call"},"params.name":{"exact":"list_available_tables"},"params.arguments.detailed":{"exact":true}}}
+  - {"type":"output_match","pattern":"EVAL_1426_ATTENDANCE"}

@@ -1,0 +1,28 @@
+[
+  {
+    "route": "/api/agent/credentials",
+    "method": "POST",
+    "request_body": {
+      "operation": "psd-data-mcp",
+      "method": "tools/call",
+      "params": {
+        "name": "list_available_tables",
+        "arguments": {"detailed": true}
+      }
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "status": "ok",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"tables\":[\"EVAL_1426_ATTENDANCE\"]}"
+            }
+          ]
+        }
+      }
+    }
+  }
+]

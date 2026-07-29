@@ -1,0 +1,136 @@
+name: Agent Eval L2 Fixture Drift
+
+on:
+  schedule:
+    # Weekly, outside the main CI traffic window.
+    - cron: "17 15 * * 2"
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Optional candidate image tag or digest; defaults to the deployed dev runtime image"
+        required: false
+        type: string
+
+concurrency:
+  group: agent-eval-l2-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  ENVIRONMENT: dev
+  AGENT_EVAL_OWNER_EMAIL: canary@build-gate.invalid
+
+jobs:
+  live-dev:
+    name: Live dev provider and broker drift
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+        with:
+          bun-version: "1.2.x"
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install repository dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AGENT_EVAL_AWS_ROLE_ARN }}
+          role-session-name: agent-eval-l2-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve deployed dev image
+        id: image
+        env:
+          REQUESTED_IMAGE: ${{ inputs.image }}
+        run: |
+          stack_name="AIStudio-AgentPlatformStack-Dev"
+          runtime_id="$(aws cloudformation describe-stacks \
+            --stack-name "${stack_name}" \
+            --query "Stacks[0].Outputs[?OutputKey=='AgentCoreRuntimeId'].OutputValue" \
+            --output text)"
+          if [ -n "${REQUESTED_IMAGE}" ]; then
+            image="${REQUESTED_IMAGE}"
+          else
+            image="$(aws bedrock-agentcore-control get-agent-runtime \
+              --agent-runtime-id "${runtime_id}" \
+              --query "agentRuntimeArtifact.containerConfiguration.containerUri" \
+              --output text)"
+          fi
+          case "${image}" in
+            *.dkr.ecr.*.amazonaws.com/*@sha256:*|*.dkr.ecr.*.amazonaws.com/*:*) ;;
+            *)
+              echo "Resolved image is not an ECR tag or digest" >&2
+              exit 1
+              ;;
+          esac
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+          echo "runtime_id=${runtime_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Run the live-dev drift subset
+        env:
+          CANDIDATE_IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          python3 infra/agent-image/eval/runner.py \
+            --image "${CANDIDATE_IMAGE}" \
+            --suite infra/agent-image/eval/suites/l2-live.yaml \
+            --trials 3 \
+            --out "${RUNNER_TEMP}/agent-eval-l2-${GITHUB_RUN_ID}.jsonl" \
+            --agent-runtime-id "${{ steps.image.outputs.runtime_id }}" \
+            --owner-email "${AGENT_EVAL_OWNER_EMAIL}" \
+            --name-prefix "psd-agent-eval-l2-${GITHUB_RUN_ID}"
+
+      - name: Enforce pass^3 without retaining transcripts
+        env:
+          RUN_FILE: ${{ runner.temp }}/agent-eval-l2-${{ github.run_id }}.jsonl
+        run: |
+          python3 - "${RUN_FILE}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          records = [
+              json.loads(line)
+              for line in path.read_text(encoding="utf-8").splitlines()
+              if line
+          ]
+          failed = [
+              record
+              for record in records
+              if record.get("grade", {}).get("passed") is not True
+          ]
+          task_ids = sorted({str(record.get("task_id")) for record in records})
+          print(
+              f"evaluated {len(task_ids)} tasks across {len(records)} trials; "
+              f"failed trials: {len(failed)}"
+          )
+          for record in failed:
+              print(
+                  f"{record.get('task_id')} trial {record.get('trial')}: "
+                  f"{record.get('grade', {}).get('reason', 'no grade reason')}"
+              )
+          raise SystemExit(1 if failed else 0)
+          PY
+
+      - name: Remove sensitive trial transcript
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/agent-eval-l2-${GITHUB_RUN_ID}.jsonl"

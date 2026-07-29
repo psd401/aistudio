@@ -1,0 +1,10 @@
+id: brand-guidelines-exact-core-colors
+skill: psd-brand-guidelines
+level: L0
+workspace: pure
+suite: regression
+prompt: "Use psd-brand-guidelines to report the exact hex values for the bundled pacific and seaGlass colors. Do not guess or substitute a generic district palette."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"#25424C","ignore_case":true}
+  - {"type":"output_match","pattern":"#6CA18A","ignore_case":true}

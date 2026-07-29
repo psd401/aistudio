@@ -1,0 +1,22 @@
+[
+  {
+    "route": "/api/agent/github-execute",
+    "method": "POST",
+    "request_body": {
+      "argv": {
+        "0": "issue",
+        "1": "view",
+        "2": "1426",
+        "3": "--repo",
+        "4": "psd401/aistudio"
+      }
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "stdout": "{\"number\":1426,\"title\":\"Task suite: all remaining skills + evals/ drift test\",\"url\":\"https://github.com/psd401/aistudio/issues/1426\"}\n",
+        "stderr": ""
+      }
+    }
+  }
+]

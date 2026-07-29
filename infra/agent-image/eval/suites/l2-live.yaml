@@ -1,0 +1,7 @@
+# Weekly live-dev fixture-drift subset. Every prompt uses synthetic test data.
+tasks:
+  - ../../skills/chat-chart/evals/synthetic-bar-chart.yaml
+  - ../../skills/psd-failure-report/evals/synthetic-missing-data.yaml
+  - ../../skills/psd-last30days/evals/keyless-eval-reliability-brief.yaml
+  - ../../skills/psd-summarize/evals/records-safe-projector-summary.yaml
+  - ../../skills/psd-tts/evals/synthetic-short-audio.yaml

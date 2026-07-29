@@ -1,0 +1,13 @@
+id: canva-list-designs
+skill: psd-canva
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-canva to list my Canva designs matching the exact query EVAL-1426. Do not create, edit, export, or upload anything. Report the matching title."
+trials: 3
+fixtures:
+  - fixtures/list-designs.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/canva","method":"POST","body":{"operation":{"exact":"status"}}}
+  - {"type":"broker_request","route":"/api/agent/canva","method":"POST","body":{"operation":{"exact":"request"},"method":{"exact":"GET"},"path":{"exact":"/v1/designs"},"query.query":{"exact":"EVAL-1426"}}}
+  - {"type":"output_match","pattern":"EVAL-1426 Design"}

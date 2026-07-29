@@ -1,0 +1,9 @@
+id: learning-page-accessibility-contract
+skill: psd-learning-page
+level: L0
+workspace: pure
+suite: capability
+prompt: "Before creating anything, use psd-learning-page to list the required multimodal and accessibility components of a completed learning page. Do not invoke TTS, video rendering, or Atrium."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"(?is)caption.*transcript.*quiz.*summary|summary.*quiz.*transcript.*caption"}

@@ -1,0 +1,9 @@
+id: last30days-keyless-eval-reliability-brief
+skill: psd-last30days
+level: L2
+workspace: pure
+suite: capability
+prompt: "Use psd-last30days to research recent public discussion of AI agent evaluation reliability over the last 7 days. Use only keyless public sources, return a brief in chat, do not upload HTML, and include source URLs."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"(?is)https?://.*(?:eval|reliab|agent)"}

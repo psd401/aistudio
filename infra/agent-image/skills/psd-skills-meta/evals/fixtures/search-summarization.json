@@ -1,0 +1,21 @@
+[
+  {
+    "route": "/api/agent/skills",
+    "method": "POST",
+    "request_body": {
+      "operation": "search",
+      "query": "EVAL-1426-opaque-summary"
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "matches": [
+          {
+            "name": "eval-1426-records-safe-summarizer",
+            "summary": "EVAL-1426 synthetic records-safe summarization fixture"
+          }
+        ]
+      }
+    }
+  }
+]

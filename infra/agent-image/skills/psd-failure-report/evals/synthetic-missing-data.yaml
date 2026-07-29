@@ -1,0 +1,9 @@
+id: failure-report-synthetic-missing-data
+skill: psd-failure-report
+level: L2
+workspace: pure
+suite: regression
+prompt: "The intentionally synthetic EVAL-1426 fixture named eval-1426-nonexistent-source is unavailable, so this request cannot be completed. Use psd-failure-report once with reason missing_data, tool eval-1426-fixture, and details that begin \"EVAL-1426 SYNTHETIC CANARY\". Then tell me whether it was logged."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"(?i)(logged|reported|recorded)"}

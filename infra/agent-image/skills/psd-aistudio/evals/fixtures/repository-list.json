@@ -1,0 +1,32 @@
+[
+  {
+    "route": "/api/agent/aistudio",
+    "method": "POST",
+    "request_body": {
+      "method": "tools/call",
+      "params": {
+        "name": "repositories_list",
+        "arguments": {"query": "EVAL-1426"}
+      }
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "httpStatus": 200,
+        "keySource": "oauth",
+        "payload": {
+          "jsonrpc": "2.0",
+          "id": "eval-1426",
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"repositories\":[{\"id\":1426,\"name\":\"EVAL-1426 Canary Repository\"}]}"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+]

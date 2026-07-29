@@ -1,0 +1,10 @@
+id: atrium-draft-without-publish
+skill: psd-atrium
+level: L1
+workspace: pure
+suite: capability
+prompt: "Suggest one title for a private Atrium draft about projector troubleshooting. Do not create, edit, publish, unpublish, archive, delete, or query any Atrium content."
+trials: 3
+graders:
+  - {"type":"no_route_called","route":"/api/agent/atrium"}
+  - {"type":"output_match","pattern":"(?i)projector"}

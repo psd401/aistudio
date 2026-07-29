@@ -1,0 +1,10 @@
+id: email-triage-generic-inbox-no-config
+skill: psd-email-triage
+level: L1
+workspace: pure
+suite: capability
+prompt: "In one sentence, explain what email triage means generally. Do not inspect my inbox or status and do not enable, disable, simulate, train, sweep, or change any triage setting."
+trials: 3
+graders:
+  - {"type":"no_route_called","route":"/api/agent/email-triage"}
+  - {"type":"output_match","pattern":"(?i)(priorit|categor|sort|organ)"}
