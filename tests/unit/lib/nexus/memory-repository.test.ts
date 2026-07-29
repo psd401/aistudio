@@ -188,3 +188,51 @@ describe("Nexus memory repository deduplication", () => {
     )
   })
 })
+
+describe("Nexus memory consolidation-neighbor search", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it("ranks consolidation neighbors inside the live owner subset and maps similarity", async () => {
+    const execute = jest.fn().mockResolvedValue({})
+    mockExecuteQuery.mockImplementation(
+      async (operation: (value: { execute: typeof execute }) => unknown) =>
+        operation({ execute }),
+    )
+    mockToPgRows.mockReturnValue([
+      {
+        id: MEMORY.id,
+        user_id: 7,
+        content: MEMORY.content,
+        category: MEMORY.category,
+        source: MEMORY.source,
+        source_conversation_id: null,
+        created_at: MEMORY.createdAt,
+        updated_at: MEMORY.updatedAt,
+        similarity: "0.9312",
+      },
+    ])
+
+    await expect(
+      drizzleMemoryRepository.findSimilarMemories(
+        7,
+        [0.1, 0.2],
+        5,
+      ),
+    ).resolves.toEqual([{ ...MEMORY, similarity: 0.9312 }])
+
+    const statement = execute.mock.calls[0]?.[0]
+    if (!(statement instanceof SQL)) {
+      throw new TypeError("Expected the consolidation-neighbor query to be SQL")
+    }
+    const rendered = new PgDialect().sqlToQuery(statement)
+    expect(rendered.sql).toContain("AS MATERIALIZED")
+    expect(rendered.sql).toContain("user_id =")
+    expect(rendered.sql).toContain("deleted_at IS NULL")
+    expect(rendered.sql).toContain("AS similarity")
+    expect(rendered.sql).toContain("ORDER BY embedding")
+    expect(rendered.params).toContain(7)
+    expect(rendered.params).toContain(5)
+  })
+})

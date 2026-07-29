@@ -33,6 +33,7 @@ function createRepository(): jest.Mocked<MemoryRepository> {
     updateOwned: jest.fn(),
     listProfileMemories: jest.fn(),
     findRelevantMemories: jest.fn(),
+    findSimilarMemories: jest.fn(),
     softDeleteOwned: jest.fn(),
     conversationIsOwned: jest.fn(),
   }

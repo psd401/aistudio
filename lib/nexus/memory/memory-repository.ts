@@ -22,6 +22,10 @@ export interface StoredNexusMemory {
   updatedAt: Date
 }
 
+export interface SimilarNexusMemory extends StoredNexusMemory {
+  similarity: number
+}
+
 export interface MemoryWriteRecord {
   userId: number
   content: string
@@ -57,6 +61,11 @@ export interface MemoryRepository {
     limit: number,
     excludedMemoryIds: readonly string[],
   ): Promise<StoredNexusMemory[]>
+  findSimilarMemories(
+    userId: number,
+    embedding: number[],
+    limit: number,
+  ): Promise<SimilarNexusMemory[]>
   softDeleteOwned(memoryId: string, userId: number): Promise<boolean>
   conversationIsOwned(
     conversationId: string,
@@ -78,6 +87,10 @@ interface RelevantMemoryRow {
   source_conversation_id: string | null
   created_at: Date
   updated_at: Date
+}
+
+interface SimilarMemoryRecord extends RelevantMemoryRow {
+  similarity: number | string
 }
 
 const NEXUS_MEMORY_DEDUP_LOCK_NAMESPACE = 1314210707
@@ -118,6 +131,17 @@ function rawMemory(row: RelevantMemoryRow): StoredNexusMemory {
     sourceConversationId: row.source_conversation_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  }
+}
+
+function rawSimilarMemory(row: SimilarMemoryRecord): SimilarNexusMemory {
+  const similarity = Number(row.similarity)
+  if (!Number.isFinite(similarity)) {
+    throw new TypeError("Nexus memory similarity must be a finite number")
+  }
+  return {
+    ...rawMemory(row),
+    similarity,
   }
 }
 
@@ -301,6 +325,46 @@ export const drizzleMemoryRepository: MemoryRepository = {
       "findRelevantNexusMemories",
     )
     return toPgRows<RelevantMemoryRow>(result).map(rawMemory)
+  },
+
+  async findSimilarMemories(userId, embedding, limit) {
+    const literal = vectorLiteral(embedding)
+    const result = await executeQuery(
+      (db) =>
+        db.execute(sql`
+          WITH owner_memories AS MATERIALIZED (
+            SELECT
+              id,
+              user_id,
+              content,
+              category,
+              source,
+              source_conversation_id,
+              embedding,
+              created_at,
+              updated_at
+            FROM nexus_user_memories
+            WHERE user_id = ${userId}
+              AND deleted_at IS NULL
+              AND embedding IS NOT NULL
+          )
+          SELECT
+            id,
+            user_id,
+            content,
+            category,
+            source,
+            source_conversation_id,
+            created_at,
+            updated_at,
+            1 - (embedding <=> ${literal}::vector) AS similarity
+          FROM owner_memories
+          ORDER BY embedding <=> ${literal}::vector
+          LIMIT ${limit}
+        `),
+      "findSimilarNexusMemoriesForConsolidation",
+    )
+    return toPgRows<SimilarMemoryRecord>(result).map(rawSimilarMemory)
   },
 
   async softDeleteOwned(memoryId, userId) {

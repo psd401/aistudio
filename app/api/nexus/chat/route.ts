@@ -91,6 +91,7 @@ import {
 import { readSkillMarkdown } from '@/lib/skills/skill-publish-pipeline';
 import { buildWorkspaceChatTools } from '@/lib/nexus/workspace-chat-tools';
 import { resolveNexusMemoryContext } from '@/lib/nexus/memory/memory-context';
+import { scheduleNexusMemoryAutoExtraction } from '@/lib/nexus/memory/auto-extraction';
 import { buildNexusSystemPrompt } from '@/lib/nexus/system-prompt';
 import { mergeRoutedToolNames, routeNexusRequest } from '@/lib/nexus/model-router/router';
 import { NexusSpecialistUnavailableError } from '@/lib/nexus/model-router/errors';
@@ -129,13 +130,28 @@ async function closeMcpClients(
 
 function createOnFinishCallback(params: {
   conversationId: string;
+  userId: number;
+  cognitoSub: string;
+  requestId: string;
+  latestUserText: string;
   dbModelId: number;
   connectorToolResults: McpConnectorToolsResult[];
   log: ReturnType<typeof createLogger>;
   timer: (data: Record<string, unknown>) => void;
   routingMetadata: NexusRoutingMetadata;
 }) {
-  const { conversationId, dbModelId, connectorToolResults, log, timer, routingMetadata } = params;
+  const {
+    conversationId,
+    userId,
+    cognitoSub,
+    requestId,
+    latestUserText,
+    dbModelId,
+    connectorToolResults,
+    log,
+    timer,
+    routingMetadata,
+  } = params;
 
   return async ({
     text,
@@ -163,6 +179,7 @@ function createOnFinishCallback(params: {
       stepCount: steps?.length ?? 0,
     });
 
+    let assistantMessagePersisted = false;
     try {
       if (steps && steps.length > 1) {
         // Multi-step agentic loop (MCP connectors): save each step as a separate
@@ -179,8 +196,22 @@ function createOnFinishCallback(params: {
           metadata: { routing: routingMetadata },
         });
       }
+      assistantMessagePersisted = true;
     } catch (saveError) {
       log.error('Failed to save assistant message', { error: saveError, conversationId });
+    }
+
+    if (assistantMessagePersisted) {
+      // Deliberately fire-and-forget after persistence. Automatic memory must
+      // never delay MCP cleanup, request timing, or the completed chat turn.
+      scheduleNexusMemoryAutoExtraction({
+        userId,
+        cognitoSub,
+        conversationId,
+        requestId,
+        userMessage: latestUserText,
+        assistantMessage: text,
+      });
     }
 
     // Close MCP clients AFTER all tool executions and message saving complete.
@@ -348,6 +379,8 @@ async function executeStreaming(params: {
   memoryTools?: ToolSet;
   /** Sanitized, owner-scoped memory context for this turn. */
   userMemoryFragment?: string;
+  /** Guardrail-processed latest user text used for post-turn extraction. */
+  latestUserText: string;
   reasoningEffort: "minimal" | "low" | "medium" | "high";
   responseMode: "standard" | "flex" | "priority";
   requestId: string;
@@ -378,6 +411,7 @@ async function executeStreaming(params: {
     repositoryPromptFragment,
     memoryTools,
     userMemoryFragment,
+    latestUserText,
     reasoningEffort,
     responseMode,
     requestId,
@@ -447,6 +481,10 @@ async function executeStreaming(params: {
     callbacks: {
       onFinish: createOnFinishCallback({
         conversationId,
+        userId,
+        cognitoSub: sessionId,
+        requestId,
+        latestUserText,
         dbModelId,
         connectorToolResults,
         log,
@@ -2471,6 +2509,7 @@ async function resolveToolsAndStream(params: {
     }),
     memoryTools: memoryContext.tools,
     userMemoryFragment: memoryContext.userMemoryFragment,
+    latestUserText: resolved.protectedLatestUserText,
     reasoningEffort: prepared.validationData.reasoningEffort || "medium",
     responseMode: prepared.validationData.responseMode || "standard",
     requestId: params.requestId,
