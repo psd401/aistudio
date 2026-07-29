@@ -304,6 +304,76 @@ class OutputAndTrajectoryGraderTests(unittest.TestCase):
 
         self.assertFalse(decision["passed"])
 
+    def test_tool_call_succeeded_requires_matching_completion_status(self):
+        spec = {
+            "type": "tool_call_succeeded",
+            "tool": "exec",
+            "args_pattern": r"psd-summarize/run\.js",
+        }
+        successful = grade(
+            [spec],
+            metadata={
+                "tool_calls": [
+                    {
+                        "name": "exec",
+                        "args": "node /opt/psd-skills/psd-summarize/run.js",
+                        "status": "success",
+                    },
+                    {"name": "exec", "args": None, "status": "success"},
+                ]
+            },
+        )
+        failed = grade(
+            [spec],
+            metadata={
+                "tool_calls": [
+                    {
+                        "name": "exec",
+                        "args": "node /opt/psd-skills/psd-summarize/run.js",
+                        "status": "success",
+                    },
+                    {"name": "exec", "args": None, "status": "error"},
+                    {
+                        "name": "exec",
+                        "args": "node /opt/psd-skills/psd-failure-report/report.js",
+                        "status": "success",
+                    },
+                    {"name": "exec", "args": None, "status": "success"},
+                ]
+            },
+        )
+
+        self.assertTrue(successful["passed"])
+        self.assertFalse(failed["passed"])
+        self.assertIn("status 'error'", failed["results"][0]["reason"])
+
+    def test_tool_call_succeeded_rejects_a_missing_matching_invocation(self):
+        decision = grade(
+            [
+                {
+                    "type": "tool_call_succeeded",
+                    "tool": "exec",
+                    "args_pattern": "psd-summarize",
+                }
+            ],
+            metadata={
+                "tool_calls": [
+                    {
+                        "name": "exec",
+                        "args": "node /opt/psd-skills/other/run.js",
+                        "status": "success",
+                    },
+                    {"name": "exec", "args": None, "status": "success"},
+                ]
+            },
+        )
+
+        self.assertFalse(decision["passed"])
+        self.assertIn(
+            "no exec invocation matched",
+            decision["results"][0]["reason"],
+        )
+
     def test_tools_catalog_requires_every_expected_entry(self):
         decision = grade(
             [

@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
+import tempfile
 from collections.abc import Collection, Mapping
 from pathlib import Path
 
@@ -31,6 +33,9 @@ LOCAL_EVAL_COVERAGE_OPT_OUTS: dict[str, str] = {
 def load_upstream_skill_inventory(
     manifest_path: Path = DEFAULT_UPSTREAM_SKILL_MANIFEST,
     dockerfile_path: Path = DEFAULT_DOCKERFILE,
+    *,
+    verify_upstream: bool = False,
+    upstream_skills_root: Path | None = None,
 ) -> tuple[set[str], dict[str, str]]:
     """Load and pin the build-added gws-* skill inventory."""
 
@@ -51,8 +56,13 @@ def load_upstream_skill_inventory(
     source = document.get("source")
     reason = document.get("optOutReason")
     raw_skills = document.get("skills")
-    if not isinstance(source, str) or not source.strip():
-        raise ValueError("upstream skill manifest source must be non-empty")
+    if not isinstance(source, str) or not re.fullmatch(
+        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+        source,
+    ):
+        raise ValueError(
+            "upstream skill manifest source must be an owner/repository name"
+        )
     if not isinstance(version, str) or not re.fullmatch(
         r"\d+\.\d+\.\d+",
         version,
@@ -111,8 +121,99 @@ def load_upstream_skill_inventory(
             "Dockerfile no longer installs the declared gws-* skill inventory"
         )
 
+    if verify_upstream and upstream_skills_root is not None:
+        raise ValueError(
+            "choose either verify_upstream or upstream_skills_root, not both"
+        )
+    observed_skills = (
+        _clone_upstream_skill_inventory(source, version)
+        if verify_upstream
+        else (
+            _discover_upstream_skill_inventory(upstream_skills_root)
+            if upstream_skills_root is not None
+            else None
+        )
+    )
+    if observed_skills is not None and observed_skills != skills:
+        differences: list[str] = []
+        missing = sorted(observed_skills - skills)
+        stale = sorted(skills - observed_skills)
+        if missing:
+            differences.append("missing from manifest: " + ", ".join(missing))
+        if stale:
+            differences.append(
+                "absent from pinned release: " + ", ".join(stale)
+            )
+        raise ValueError(
+            "upstream skill manifest does not match the pinned release; "
+            + "; ".join(differences)
+        )
+
     opt_out_reason = f"Pinned {source} v{version}. {reason.strip()}"
     return skills, {skill: opt_out_reason for skill in skills}
+
+
+def _discover_upstream_skill_inventory(skills_root: Path) -> set[str]:
+    if not skills_root.is_dir():
+        raise ValueError(
+            f"upstream skills root does not exist: {skills_root}"
+        )
+    skills = {
+        child.name
+        for child in skills_root.iterdir()
+        if child.is_dir()
+        and re.fullmatch(r"gws-[a-z0-9]+(?:-[a-z0-9]+)*", child.name)
+        and (child / "SKILL.md").is_file()
+    }
+    if not skills:
+        raise ValueError(
+            f"pinned upstream release has no gws-* skills in {skills_root}"
+        )
+    return skills
+
+
+def _clone_upstream_skill_inventory(source: str, version: str) -> set[str]:
+    with tempfile.TemporaryDirectory(
+        prefix="agent-eval-upstream-skills-"
+    ) as directory:
+        repository = Path(directory) / "repository"
+        command = [
+            "git",
+            "-c",
+            "protocol.file.allow=never",
+            "clone",
+            "--quiet",
+            "--depth",
+            "1",
+            "--branch",
+            f"v{version}",
+            "--single-branch",
+            f"https://github.com/{source}",
+            str(repository),
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        except FileNotFoundError as error:
+            raise ValueError(
+                "git is required to verify the pinned upstream skill inventory"
+            ) from error
+        except subprocess.TimeoutExpired as error:
+            raise ValueError(
+                "timed out cloning the pinned upstream skill inventory"
+            ) from error
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()[-500:]
+            raise ValueError(
+                "could not clone the pinned upstream skill inventory: "
+                f"{detail or f'git exited {result.returncode}'}"
+            )
+        return _discover_upstream_skill_inventory(repository / "skills")
 
 
 def discover_skills(skills_root: Path) -> set[str]:
@@ -179,13 +280,23 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SKILLS_ROOT,
         help="skill directory to inspect (defaults to the shipped image skills)",
     )
+    parser.add_argument(
+        "--verify-upstream",
+        action="store_true",
+        help=(
+            "clone the pinned upstream release and compare its gws-* "
+            "directories with the committed manifest"
+        ),
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        upstream_skills, upstream_opt_outs = load_upstream_skill_inventory()
+        upstream_skills, upstream_opt_outs = load_upstream_skill_inventory(
+            verify_upstream=args.verify_upstream,
+        )
         opt_outs = {
             **LOCAL_EVAL_COVERAGE_OPT_OUTS,
             **upstream_opt_outs,

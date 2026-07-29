@@ -146,9 +146,11 @@ The image build also adds 44 pinned `gws-*` guidance skills from
 `googleworkspace/cli`. They are documentation-only aliases: direct `gws`
 execution is disabled by `gws-wrapper.sh`, and the executable behavior is
 covered through `psd-workspace`. Their names and shared opt-out reason live in
-`eval/upstream-skill-inventory.json`. The drift gate requires that manifest's
-version to match Dockerfile `GWS_VERSION`, so changing the pinned upstream
-release also requires reviewing its shipped skill inventory.
+`eval/upstream-skill-inventory.json`. The drift gate requires the manifest's
+version to match Dockerfile `GWS_VERSION`; CI also shallow-clones that exact
+release and compares its `gws-*/SKILL.md` directory set with the manifest.
+Changing the pinned upstream release therefore requires reviewing the actual
+shipped skill inventory rather than only updating version strings.
 Together, the final image inventory is 75 skills: 30 directly evaluated and
 45 explicitly opted out (`psd-rules` plus the 44 documentation-only `gws-*`
 skills).
@@ -156,7 +158,7 @@ skills).
 Run the same inventory check CI runs:
 
 ```bash
-python3 infra/agent-image/check_eval_coverage.py
+python3 infra/agent-image/check_eval_coverage.py --verify-upstream
 python3 -m unittest infra/agent-image/test_eval_coverage.py
 ```
 
@@ -299,6 +301,10 @@ Available graders:
 - Broker grader routes must be in the production agent-broker allowlist; an
   explicit method must be `POST`.
 - `output_match` applies a regular expression to the final result.
+- `tool_call_succeeded` requires a tool invocation whose arguments match the
+  declared regular expression and a subsequent success completion record for
+  that invocation. This prevents a manually produced fallback from masking a
+  failed skill executable.
 - `trajectory_in_order` requires relative tool order while allowing extra
   intervening steps.
 - `tools_catalog` checks the per-turn compact, complete `tools.catalog` name

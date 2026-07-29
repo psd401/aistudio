@@ -47,7 +47,7 @@ jobs:
 
     - name: Check agent skill eval coverage
       run: |
-        python3 infra/agent-image/check_eval_coverage.py
+        python3 infra/agent-image/check_eval_coverage.py --verify-upstream
         python3 -m unittest \
           infra/agent-image/test_eval_coverage.py \
           infra/agent-image/test_broker_stub.py \

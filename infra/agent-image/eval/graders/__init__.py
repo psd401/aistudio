@@ -24,6 +24,7 @@ SUPPORTED_GRADERS = frozenset(
         "broker_request",
         "no_route_called",
         "output_match",
+        "tool_call_succeeded",
         "tools_catalog",
         "trajectory_in_order",
     }
@@ -168,6 +169,7 @@ def validate_grader_specs(
         "broker_request": {"type", "route", "method", "body"},
         "no_route_called": {"type", "route", "method", "body"},
         "output_match": {"type", "pattern", "ignore_case"},
+        "tool_call_succeeded": {"type", "tool", "args_pattern"},
         "trajectory_in_order": {"type", "tools"},
         "tools_catalog": {"type", "expected"},
     }
@@ -207,6 +209,23 @@ def validate_grader_specs(
                 raise GraderConfigurationError(
                     "output_match grader ignore_case must be a boolean"
                 )
+        elif grader == "tool_call_succeeded":
+            _require_nonempty_string(
+                raw_spec.get("tool"),
+                grader=grader,
+                field="tool",
+            )
+            pattern = _require_nonempty_string(
+                raw_spec.get("args_pattern"),
+                grader=grader,
+                field="args_pattern",
+            )
+            try:
+                re.compile(pattern)
+            except re.error as error:
+                raise GraderConfigurationError(
+                    f"tool_call_succeeded args_pattern is invalid: {error}"
+                ) from error
         elif grader in {"trajectory_in_order", "tools_catalog"}:
             field = "tools" if grader == "trajectory_in_order" else "expected"
             entries = raw_spec.get(field)
@@ -467,6 +486,85 @@ def _grade_trajectory(
     )
 
 
+def _render_tool_arguments(call: Mapping[str, object]) -> str | None:
+    arguments = call.get("args")
+    if arguments is None:
+        return None
+    if isinstance(arguments, str):
+        return arguments
+    try:
+        return json.dumps(arguments, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return str(arguments)
+
+
+def _grade_tool_call_succeeded(
+    spec: Mapping[str, object],
+    metadata: Mapping[str, object],
+) -> GraderResult:
+    """Require a named invocation and its matching completion to succeed."""
+
+    raw_calls = metadata.get("tool_calls")
+    calls = (
+        list(raw_calls)
+        if isinstance(raw_calls, Sequence)
+        and not isinstance(raw_calls, (str, bytes))
+        else []
+    )
+    expected_tool = str(spec["tool"])
+    args_pattern = str(spec["args_pattern"])
+    matched_invocations = 0
+    completion_statuses: list[str] = []
+
+    for index, raw_call in enumerate(calls):
+        if not isinstance(raw_call, Mapping):
+            continue
+        arguments = _render_tool_arguments(raw_call)
+        if (
+            _tool_name(raw_call) != expected_tool
+            or arguments is None
+            or re.search(args_pattern, arguments) is None
+        ):
+            continue
+        matched_invocations += 1
+        for later_call in calls[index + 1 :]:
+            if not isinstance(later_call, Mapping):
+                continue
+            if _tool_name(later_call) != expected_tool:
+                continue
+            if _render_tool_arguments(later_call) is not None:
+                break
+            status = later_call.get("status")
+            if isinstance(status, str) and status:
+                completion_statuses.append(status)
+                if status == "success":
+                    return GraderResult(
+                        "tool_call_succeeded",
+                        True,
+                        (
+                            f"{expected_tool} invocation matching "
+                            f"/{args_pattern}/ completed successfully"
+                        ),
+                    )
+                break
+
+    if matched_invocations == 0:
+        reason = (
+            f"no {expected_tool} invocation matched arguments /{args_pattern}/"
+        )
+    elif completion_statuses:
+        reason = (
+            f"{expected_tool} invocation matching /{args_pattern}/ "
+            f"completed with status {completion_statuses[-1]!r}"
+        )
+    else:
+        reason = (
+            f"{expected_tool} invocation matching /{args_pattern}/ "
+            "had no completion record"
+        )
+    return GraderResult("tool_call_succeeded", False, reason)
+
+
 def _grade_tools_catalog(
     spec: Mapping[str, object],
     artifacts: TrialArtifacts,
@@ -587,6 +685,8 @@ def grade_trial(
             grader_results.append(_grade_no_route_called(spec, artifacts))
         elif grader == "output_match":
             grader_results.append(_grade_output_match(spec, result))
+        elif grader == "tool_call_succeeded":
+            grader_results.append(_grade_tool_call_succeeded(spec, metadata))
         elif grader == "trajectory_in_order":
             grader_results.append(_grade_trajectory(spec, metadata))
         elif grader == "tools_catalog":

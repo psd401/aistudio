@@ -68,6 +68,60 @@ class EvalCoverageTests(unittest.TestCase):
                     dockerfile_path,
                 )
 
+    def test_upstream_inventory_must_match_pinned_release_directories(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="issue-1426-upstream-release-"
+        ) as directory:
+            root = Path(directory)
+            manifest_path = root / "inventory.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "source": "example/skills",
+                        "version": "1.2.3",
+                        "optOutReason": "documentation only",
+                        "skills": ["gws-declared", "gws-retired"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dockerfile_path = root / "Dockerfile"
+            dockerfile_path.write_text(
+                "\n".join(
+                    [
+                        "ARG GWS_VERSION=1.2.3",
+                        "RUN git clone https://github.com/example/skills "
+                        "/tmp/gws-repo",
+                        "RUN cp -r /tmp/gws-repo/skills/gws-* "
+                        "/opt/psd-skills/",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            upstream_skills_root = root / "upstream-skills"
+            for skill in ("gws-declared", "gws-added"):
+                skill_root = upstream_skills_root / skill
+                skill_root.mkdir(parents=True)
+                skill_root.joinpath("SKILL.md").write_text(
+                    f"---\nname: {skill}\n---\n",
+                    encoding="utf-8",
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                (
+                    "missing from manifest: gws-added; "
+                    "absent from pinned release: gws-retired"
+                ),
+            ):
+                check_eval_coverage.load_upstream_skill_inventory(
+                    manifest_path,
+                    dockerfile_path,
+                    upstream_skills_root=upstream_skills_root,
+                )
+
     def test_build_added_skill_requires_a_documented_opt_out(self) -> None:
         with tempfile.TemporaryDirectory(
             prefix="issue-1426-build-added-skill-"
