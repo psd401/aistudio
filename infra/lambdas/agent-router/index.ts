@@ -2311,6 +2311,8 @@ const CHAT_SPACE_DM_FALLBACK_NOTE =
   "⚠️ I couldn't post this reply in the shared space because your Workspace " +
   "administrator currently restricts this Chat app there. I'm sending it " +
   'to you privately instead.';
+const CHAT_MESSAGE_TRUNCATION_SUFFIX =
+  '\n\n_(Response truncated — ask me to continue)_';
 
 function errorStatusCode(error: unknown): number | undefined {
   if (typeof error !== 'object' || error === null) return undefined;
@@ -2351,16 +2353,26 @@ function dmFallbackMessageBody(
   const responseText =
     typeof fallbackBody.text === 'string' ? fallbackBody.text : '';
   const separator = responseText ? '\n\n' : '';
-  const reservedLength =
-    separator.length + CHAT_SPACE_DM_FALLBACK_NOTE.length;
-  const availableResponseLength = Math.max(
-    CHAT_MESSAGE_MAX_LENGTH - reservedLength,
+  const policySuffix = separator + CHAT_SPACE_DM_FALLBACK_NOTE;
+  const availableUntruncatedLength = Math.max(
+    CHAT_MESSAGE_MAX_LENGTH - policySuffix.length,
+    0
+  );
+  if (responseText.length <= availableUntruncatedLength) {
+    fallbackBody.text = responseText + policySuffix;
+    return fallbackBody;
+  }
+
+  const availableTruncatedLength = Math.max(
+    CHAT_MESSAGE_MAX_LENGTH -
+      policySuffix.length -
+      CHAT_MESSAGE_TRUNCATION_SUFFIX.length,
     0
   );
   fallbackBody.text =
-    responseText.slice(0, availableResponseLength) +
-    separator +
-    CHAT_SPACE_DM_FALLBACK_NOTE;
+    responseText.slice(0, availableTruncatedLength) +
+    CHAT_MESSAGE_TRUNCATION_SUFFIX +
+    policySuffix;
   return fallbackBody;
 }
 

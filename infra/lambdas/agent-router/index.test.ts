@@ -440,6 +440,9 @@ describe("Google Chat response limits", () => {
     const fallbackText = requests[1]?.requestBody.text
     expect(typeof fallbackText).toBe("string")
     expect(fallbackText).toHaveLength(4096)
+    expect(fallbackText).toContain(
+      "_(Response truncated — ask me to continue)_"
+    )
     expect(fallbackText).toEndWith(
       "I'm sending it to you privately instead."
     )
