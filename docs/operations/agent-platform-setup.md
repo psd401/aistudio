@@ -94,10 +94,11 @@ action in a multi-user space. There are two control planes to check:
    that an app allowed on a child OU but not its parent can be rejected in
    shared spaces. The router handles that intentional least-privilege
    configuration by recording the room-post 403 and delivering the completed
-   response privately to the Staff sender instead. The unpublished **PSD Agent
-   Dev** app does not appear in the Marketplace allowlist; Google permits an
-   unpublished development app for up to five named testers while Chat apps are
-   enabled.
+   response privately to the human sender instead. The current Marketplace
+   allowlist limits those senders to the intended OUs. The unpublished **PSD
+   Agent Dev** app does not appear in the Marketplace allowlist; Google permits
+   an unpublished development app for up to five named testers while Chat apps
+   are enabled.
 3. Configure the two apps separately in **GCP Console** → **Google Chat API** →
    **Configuration**:
    - **Dev — `psd-aistudio-dev` / PSD Agent Dev:** enable **Interactive
@@ -119,8 +120,10 @@ action in a multi-user space. There are two control planes to check:
      app is expected when the app is deliberately allowed only for Staff at a
      child OU and Google rejects app-authenticated shared-space operations.
      Confirm that the router records `ChatPostPermissionDenied` and sends the
-     completed response to the Staff sender's existing DM with the policy
-     notice. Do not broaden the app to Students to make this probe return 200.
+     completed response to the human sender's existing DM with the policy
+     notice. The router is identity-aware, not OU-aware; the Marketplace
+     allowlist is what limits the current audience to Staff. Do not broaden the
+     app to Students to make this probe return 200.
 
    Then @mention the app and confirm either the room-thread reply (when policy
    permits it) or the private DM fallback (under the Staff-only child-OU
@@ -139,9 +142,9 @@ There are two distinct identities that can post to Chat:
 
 - The **Chat app service account** receives mentions and posts router replies
   with the `chat.bot` scope. Workspace app policy can restrict this identity
-  in spaces even while its DMs to allowed Staff users work. The router's 403
-  fallback is also sent by this Chat app identity; it does not bypass the
-  Staff-only audience.
+  in spaces even while its DMs to allowed users work. The router's 403 fallback
+  is also sent by this Chat app identity. The router does not inspect OU
+  membership; the Marketplace allowlist enforces the Staff-only audience.
 - The per-user **`agnt_...` Workspace account** is a real delegated user used
   by the `psd-workspace` skill (`--scope agent`). OneSync places these accounts
   in **`/Miscellaneous/Agent Account`**, which has its own explicit
@@ -311,8 +314,8 @@ psql $DATABASE_URL -c "SELECT * FROM agent_sessions ORDER BY created_at DESC LIM
    - When the Chat app may post to the room, the reply appears in the mention's
      thread, not as a new top-level message.
    - Under the intentional Staff-only child-OU policy, a room-post 403 produces
-     one private DM fallback with the policy notice and does not rerun the
-     completed agent turn.
+     one private DM fallback to the human sender with the policy notice and does
+     not rerun the completed agent turn.
    - A shared-space request does not volunteer private memory content.
    - Before reading or summarizing the caller's Gmail, Calendar, or Drive, the
      agent asks for confirmation that the result may be shared publicly.

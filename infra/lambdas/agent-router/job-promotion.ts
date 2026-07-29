@@ -88,6 +88,29 @@ export interface JobInvocation {
   restart: boolean;
 }
 
+export function jobChatDeliveryContext(
+  job: Pick<
+    JobPayload,
+    'isDM' | 'googleIdentity' | 'userEmail' | 'sessionId'
+  >
+) {
+  const isSharedSpace = !job.isDM;
+  return {
+    isSharedSpace,
+    ...(isSharedSpace && job.googleIdentity
+      ? { senderGoogleIdentity: job.googleIdentity }
+      : {}),
+    userId: job.userEmail,
+    sessionId: job.sessionId,
+  };
+}
+
+export function jobAgentAudienceContext(
+  job: Pick<JobPayload, 'isDM'>
+): { audience?: 'shared-space' } {
+  return job.isDM ? {} : { audience: 'shared-space' };
+}
+
 const JOB_RESPONSE_MAX_LENGTH = 4096;
 const JOB_TRUNCATION_SUFFIX =
   '\n\n_(Response truncated — ask me to continue)_';

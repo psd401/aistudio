@@ -3345,7 +3345,7 @@ async function handleNonMessageEvent(
   const addedByEmail = chatEvent.message?.sender?.email;
   const addedByDomain = addedByEmail?.split('@')[1]?.toLowerCase();
   if (addedByDomain && ALLOWED_DOMAINS.includes(addedByDomain)) {
-    const isSharedSpace = chatEvent.space.type === 'ROOM';
+    const isSharedSpace = isSharedChatSpaceType(chatEvent.space.type);
     const senderGoogleIdentity = chatEvent.message?.sender?.name;
     await sendGoogleChatResponse(
       chatEvent.space.name,
@@ -3375,6 +3375,15 @@ interface IncomingMessage {
   rawText: string;
   attachments: AgentAttachment[];
   isSharedSpace: boolean;
+}
+
+function isSharedChatSpaceType(
+  spaceType: GoogleChatEvent['space']['type']
+): boolean {
+  // Treat unknown future/non-DM types as shared. This keeps privacy and
+  // delivery behavior fail-safe and matches the promoted-job `!isDM`
+  // classification.
+  return spaceType !== 'DM';
 }
 
 function extractIncomingMessage(
@@ -3415,7 +3424,7 @@ function extractIncomingMessage(
     message,
     rawText,
     attachments,
-    isSharedSpace: chatEvent.space.type === 'ROOM',
+    isSharedSpace: isSharedChatSpaceType(chatEvent.space.type),
   };
 }
 
@@ -4356,6 +4365,7 @@ export const agentRouterTestHelpers = {
   addOptionalAgentContext,
   buildAgentInvocationContext,
   sendGoogleChatResponseWithDependencies,
+  resolveDmSpace,
   btwSlashCommandId: BTW_SLASH_COMMAND_ID,
 };
 

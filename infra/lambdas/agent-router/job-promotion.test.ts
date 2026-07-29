@@ -10,6 +10,8 @@ import {
   buildContinuationPrompt,
   buildJobPayload,
   formatJobChatResponse,
+  jobAgentAudienceContext,
+  jobChatDeliveryContext,
   JOB_DEADLINE_S,
   parseJobPayload,
   shouldPromoteToJob,
@@ -150,6 +152,43 @@ describe('formatJobChatResponse', () => {
         'room result'
       )
     ).toBe(`[${BASE.displayName}'s Agent] room result`);
+  });
+});
+
+describe('promoted-job Chat context', () => {
+  test('retains the sender identity and public audience for room delivery', () => {
+    const roomJob = {
+      isDM: false,
+      googleIdentity: BASE.googleIdentity,
+      userEmail: BASE.userEmail,
+      sessionId: BASE.sessionId,
+    };
+
+    expect(jobChatDeliveryContext(roomJob)).toEqual({
+      isSharedSpace: true,
+      senderGoogleIdentity: BASE.googleIdentity,
+      userId: BASE.userEmail,
+      sessionId: BASE.sessionId,
+    });
+    expect(jobAgentAudienceContext(roomJob)).toEqual({
+      audience: 'shared-space',
+    });
+  });
+
+  test('omits sender fallback and public audience for DM delivery', () => {
+    const dmJob = {
+      isDM: true,
+      googleIdentity: BASE.googleIdentity,
+      userEmail: BASE.userEmail,
+      sessionId: BASE.sessionId,
+    };
+
+    expect(jobChatDeliveryContext(dmJob)).toEqual({
+      isSharedSpace: false,
+      userId: BASE.userEmail,
+      sessionId: BASE.sessionId,
+    });
+    expect(jobAgentAudienceContext(dmJob)).toEqual({});
   });
 });
 

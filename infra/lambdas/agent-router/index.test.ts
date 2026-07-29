@@ -17,6 +17,7 @@ const {
   addOptionalAgentContext,
   buildAgentInvocationContext,
   sendGoogleChatResponseWithDependencies,
+  resolveDmSpace,
   btwSlashCommandId,
 } = agentRouterTestHelpers
 
@@ -35,7 +36,7 @@ type ChatResponseDependencies = Parameters<
 const TEST_LOG = createLogger({ requestId: "agent-router-index-test" })
 
 function ownerHuman(options?: {
-  spaceType?: "DM" | "ROOM"
+  spaceType?: "DM" | "ROOM" | "TYPE_UNSPECIFIED"
   messageText?: string
   slashCommandId?: string
   argumentText?: string
@@ -83,7 +84,7 @@ function ownerHuman(options?: {
       createTime: "2026-07-27T12:00:00Z",
     },
     attachments: [],
-    isSharedSpace: spaceType === "ROOM",
+    isSharedSpace: spaceType !== "DM",
     senderName: "users/owner",
     senderEmail: "owner@psd401.net",
     senderDisplayName: "Owner",
@@ -261,6 +262,48 @@ describe("agent router result coercion", () => {
 })
 
 describe("Google Chat response delivery", () => {
+  test("resolves the real sender DM lookup and maps 404 to no existing DM", async () => {
+    const requests: Array<Record<string, unknown>> = []
+    const auth = {
+      request: async (request: Record<string, unknown>) => {
+        requests.push(request)
+        return { data: { name: "spaces/owner-dm" } }
+      },
+    } as unknown as Parameters<typeof resolveDmSpace>[0]
+
+    await expect(
+      resolveDmSpace(auth, "users/owner")
+    ).resolves.toBe("spaces/owner-dm")
+    expect(requests).toEqual([
+      {
+        url: "https://chat.googleapis.com/v1/spaces:findDirectMessage",
+        method: "GET",
+        params: { name: "users/owner" },
+      },
+    ])
+
+    const notFoundAuth = {
+      request: async () => {
+        throw Object.assign(new Error("not found"), { code: 404 })
+      },
+    } as unknown as Parameters<typeof resolveDmSpace>[0]
+    await expect(
+      resolveDmSpace(notFoundAuth, "users/missing")
+    ).resolves.toBeNull()
+  })
+
+  test("the real sender DM lookup rethrows non-404 failures", async () => {
+    const auth = {
+      request: async () => {
+        throw Object.assign(new Error("permission denied"), { code: 403 })
+      },
+    } as unknown as Parameters<typeof resolveDmSpace>[0]
+
+    await expect(
+      resolveDmSpace(auth, "users/owner")
+    ).rejects.toThrow("permission denied")
+  })
+
   test("sets the reply option whenever a thread name is present", async () => {
     const requests: Array<
       Parameters<ChatResponseDependencies["createMessage"]>[0]
@@ -453,6 +496,15 @@ describe("Google Chat response fallback failures", () => {
 })
 
 describe("AgentCore audience context", () => {
+  test("treats TYPE_UNSPECIFIED as shared at ingress", () => {
+    const incoming = extractIncomingMessage(
+      ownerHuman({ spaceType: "TYPE_UNSPECIFIED" }).chatEvent,
+      TEST_LOG
+    )
+
+    expect(incoming?.isSharedSpace).toBe(true)
+  })
+
   test("uses the current sender name for owner turns and the target name for cross-user turns", () => {
     const human = ownerHuman()
     human.senderDisplayName = "Current Owner Name"

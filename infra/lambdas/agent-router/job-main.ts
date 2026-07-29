@@ -22,6 +22,8 @@
 
 import {
   formatJobChatResponse,
+  jobAgentAudienceContext,
+  jobChatDeliveryContext,
   JOB_DEADLINE_S,
   parseJobPayload,
   resolveJobInvocation,
@@ -49,17 +51,6 @@ const RENEW_INTERVAL_MS = 5 * 60 * 1000;
 type JobPayload = ReturnType<typeof parseJobPayload>;
 type AgentResult = Awaited<ReturnType<typeof invokeAgentCore>>;
 type JobLogger = ReturnType<typeof createLogger>;
-
-function jobChatDeliveryContext(job: JobPayload) {
-  return {
-    isSharedSpace: !job.isDM,
-    ...(!job.isDM && job.googleIdentity
-      ? { senderGoogleIdentity: job.googleIdentity }
-      : {}),
-    userId: job.userEmail,
-    sessionId: job.sessionId,
-  };
-}
 
 /**
  * Best-effort lock release when JOB_PAYLOAD fails full validation (review,
@@ -290,7 +281,7 @@ async function main(): Promise<number> {
       {
         displayName: job.displayName,
         workspacePrefix: job.workspacePrefix,
-        ...(!job.isDM ? { audience: 'shared-space' } : {}),
+        ...jobAgentAudienceContext(job),
         deadlineS: JOB_DEADLINE_S,
         runtimeIdOverride: job.runtimeId,
       }
