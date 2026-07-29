@@ -176,10 +176,10 @@ class CandidateMatrixTests(unittest.TestCase):
         )
         self.assertIn("ARG BEDROCK_PLUGIN_VERSION=2026.7.1", dockerfile)
         self.assertIn(
-            "ARG BEDROCK_PLUGIN_EXPECTED_TOKEN=claude-sonnet-5", dockerfile
+            "ARG BEDROCK_PLUGIN_ASSERTION=claude-sonnet-5", dockerfile
         )
         self.assertIn(
-            'grep -Fq -- "${BEDROCK_PLUGIN_EXPECTED_TOKEN}"', dockerfile
+            'grep -Fq -- "${BEDROCK_PLUGIN_ASSERTION}"', dockerfile
         )
 
     def test_build_command_wires_manifest_inputs_and_digest_sidecar(self):
@@ -189,7 +189,7 @@ class CandidateMatrixTests(unittest.TestCase):
             "OPENCLAW_CONFIG=",
             "OPENCLAW_BASE_IMAGE=",
             "BEDROCK_PLUGIN_VERSION=",
-            "BEDROCK_PLUGIN_EXPECTED_TOKEN=",
+            "BEDROCK_PLUGIN_ASSERTION=",
             "candidate.py\" finalize",
             '"grader":"output_match"',
         ):

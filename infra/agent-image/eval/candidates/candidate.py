@@ -488,8 +488,8 @@ def _render_pin_contract(
             f"ARG BEDROCK_PLUGIN_VERSION={plugin_version}",
         ),
         (
-            r"^ARG BEDROCK_PLUGIN_EXPECTED_TOKEN=.*$",
-            f"ARG BEDROCK_PLUGIN_EXPECTED_TOKEN={expected_token}",
+            r"^ARG BEDROCK_PLUGIN_ASSERTION=.*$",
+            f"ARG BEDROCK_PLUGIN_ASSERTION={expected_token}",
         ),
     )
     for pattern, replacement in replacements:

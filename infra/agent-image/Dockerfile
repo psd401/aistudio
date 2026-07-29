@@ -350,7 +350,7 @@ COPY skills /opt/psd-skills
 # caching expectation — see check_config_consistency.py, which fails the build
 # if the two drift apart again.
 ARG BEDROCK_PLUGIN_VERSION=2026.7.1
-ARG BEDROCK_PLUGIN_EXPECTED_TOKEN=claude-sonnet-5
+ARG BEDROCK_PLUGIN_ASSERTION=claude-sonnet-5
 RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund && \
@@ -365,7 +365,7 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
     mv package amazon-bedrock && \
     rm "openclaw-amazon-bedrock-provider-${BEDROCK_PLUGIN_VERSION}.tgz" && \
     test -f /opt/openclaw-plugins/amazon-bedrock/openclaw.plugin.json && \
-    grep -Fq -- "${BEDROCK_PLUGIN_EXPECTED_TOKEN}" \
+    grep -Fq -- "${BEDROCK_PLUGIN_ASSERTION}" \
       /opt/openclaw-plugins/amazon-bedrock/dist/bedrock-options.js
 # chat-card has zero npm deps. chat-chart's npm install is paired with the
 # matplotlib install above — both stay disabled until we figure out the

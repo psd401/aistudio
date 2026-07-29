@@ -62,7 +62,7 @@ SOUL_PREAMBLE_BUILD_PATH="SOUL.md"
 PSD_RULES_BUILD_PATH="skills/psd-rules/SKILL.md"
 OPENCLAW_BASE_IMAGE=""
 BEDROCK_PLUGIN_VERSION=""
-BEDROCK_PLUGIN_EXPECTED_TOKEN=""
+BEDROCK_PLUGIN_ASSERTION=""
 CID=""
 
 cleanup_build() {
@@ -115,7 +115,7 @@ if [ -n "${CANDIDATE_MANIFEST}" ]; then
   PSD_RULES_BUILD_PATH="$(candidate_plan_value psdRulesSkill)"
   OPENCLAW_BASE_IMAGE="$(candidate_plan_value baseImage)"
   BEDROCK_PLUGIN_VERSION="$(candidate_plan_value bedrockPluginVersion)"
-  BEDROCK_PLUGIN_EXPECTED_TOKEN="$(candidate_plan_value expectedPluginToken)"
+  BEDROCK_PLUGIN_ASSERTION="$(candidate_plan_value expectedPluginToken)"
   CANDIDATE_METADATA="$(candidate_plan_value metadata)"
 fi
 
@@ -255,7 +255,7 @@ if [ -n "${CANDIDATE_ID}" ]; then
     --build-arg "PSD_RULES_SKILL=${PSD_RULES_BUILD_PATH}"
     --build-arg "OPENCLAW_BASE_IMAGE=${OPENCLAW_BASE_IMAGE}"
     --build-arg "BEDROCK_PLUGIN_VERSION=${BEDROCK_PLUGIN_VERSION}"
-    --build-arg "BEDROCK_PLUGIN_EXPECTED_TOKEN=${BEDROCK_PLUGIN_EXPECTED_TOKEN}"
+    --build-arg "BEDROCK_PLUGIN_ASSERTION=${BEDROCK_PLUGIN_ASSERTION}"
   )
 fi
 docker build "${DOCKER_BUILD_ARGS[@]}" "${SCRIPT_DIR}"
