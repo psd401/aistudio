@@ -3,7 +3,7 @@
 
 Example:
     python3 runner.py --image <tag-or-digest> --suite suites/core.yaml \
-        --trials 3 --out /tmp/issue-1422-run.jsonl
+        --trials 3 --out /tmp/issue-1424-run.jsonl
 """
 
 from __future__ import annotations
@@ -25,12 +25,40 @@ from pathlib import Path
 from typing import Protocol, TextIO
 
 if __package__:
+    from .broker_stub import (
+        ALLOWED_AGENT_BROKER_ROUTES,
+        CONTROL_DIRECTORY_ENV,
+        DEFAULT_CONTROL_DIRECTORY,
+        RUNNER_READ_CAPTURES_COMMAND,
+        RUNNER_WRITE_TRIAL_COMMAND,
+    )
+    from .graders import (
+        GraderConfigurationError,
+        TrialArtifacts,
+        aggregate_pass_k,
+        grade_trial,
+        validate_grader_specs,
+    )
     from .probe import (
         ProbeProtocolError,
         build_invocation_payload,
         extract_last_result_event,
     )
 else:
+    from broker_stub import (
+        ALLOWED_AGENT_BROKER_ROUTES,
+        CONTROL_DIRECTORY_ENV,
+        DEFAULT_CONTROL_DIRECTORY,
+        RUNNER_READ_CAPTURES_COMMAND,
+        RUNNER_WRITE_TRIAL_COMMAND,
+    )
+    from graders import (
+        GraderConfigurationError,
+        TrialArtifacts,
+        aggregate_pass_k,
+        grade_trial,
+        validate_grader_specs,
+    )
     from probe import (
         ProbeProtocolError,
         build_invocation_payload,
@@ -68,6 +96,14 @@ REQUIRED_METADATA_FIELDS = frozenset(
         "session_id",
     }
 )
+BROKER_CAPTURE_GRADER_TYPES = frozenset(
+    {"broker_request", "no_route_called"}
+)
+BROKER_CONTROL_TMPFS_OPTIONS = (
+    f"{DEFAULT_CONTROL_DIRECTORY}:"
+    "rw,noexec,nosuid,nodev,size=268435456,mode=0700,uid=0,gid=0"
+)
+BROKER_STUB_CONTAINER_PATH = "/app/mantle_proxy.py"
 
 
 class EvalRunnerError(RuntimeError):
@@ -82,6 +118,8 @@ class Task:
     workspace: str
     prompt: str
     trials: int
+    fixture_paths: tuple[Path, ...] = ()
+    graders: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -180,9 +218,20 @@ class Runtime(Protocol):
     def stop(self) -> None:
         """Remove only this runner-owned container."""
 
+    def begin_trial(
+        self,
+        task: Task,
+        trial_number: int,
+        session_id: str,
+    ) -> None:
+        """Install fixture/capture state immediately before invocation."""
+
+    def end_trial(self) -> TrialArtifacts:
+        """Collect the active trial's broker requests and diagnostic artifacts."""
+
 
 class RuntimeFactory(Protocol):
-    def create(self) -> Runtime:
+    def create(self, task: Task) -> Runtime:
         """Create an unstarted, independently owned runtime."""
 
 
@@ -287,6 +336,103 @@ class ProbeContextMinter:
         return authority
 
 
+def _load_fixture_files(paths: Sequence[Path]) -> list[dict[str, object]]:
+    """Load and validate JSON fixtures before exposing them to the container."""
+
+    fixtures: list[dict[str, object]] = []
+    allowed_fields = {"route", "method", "request_body", "response"}
+    for path in paths:
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except OSError as error:
+            raise EvalRunnerError(
+                f"could not read fixture file {path}: {error}"
+            ) from error
+        except json.JSONDecodeError as error:
+            raise EvalRunnerError(f"fixture file {path} is not valid JSON") from error
+        if isinstance(document, Mapping):
+            entries = document.get("fixtures")
+        else:
+            entries = document
+        if not isinstance(entries, list):
+            raise EvalRunnerError(
+                f"{path}: fixture file must be a list or contain a fixtures list"
+            )
+        for index, entry in enumerate(entries, start=1):
+            if not isinstance(entry, Mapping):
+                raise EvalRunnerError(f"{path}: fixture {index} must be an object")
+            unknown = sorted(set(entry).difference(allowed_fields))
+            if unknown:
+                raise EvalRunnerError(
+                    f"{path}: fixture {index} has unsupported fields: "
+                    + ", ".join(unknown)
+                )
+            route = entry.get("route")
+            if not isinstance(route, str) or route not in ALLOWED_AGENT_BROKER_ROUTES:
+                raise EvalRunnerError(
+                    f"{path}: fixture {index} route is not in the "
+                    "agent-broker allowlist"
+                )
+            method = entry.get("method", "POST")
+            if not isinstance(method, str) or method.upper() != "POST":
+                raise EvalRunnerError(
+                    f"{path}: fixture {index} method must be POST"
+                )
+            request_body = entry.get("request_body")
+            if request_body is not None and not isinstance(request_body, Mapping):
+                raise EvalRunnerError(
+                    f"{path}: fixture {index} request_body must be an object"
+                )
+            response = entry.get("response", {})
+            if not isinstance(response, Mapping):
+                raise EvalRunnerError(
+                    f"{path}: fixture {index} response must be an object"
+                )
+            response_unknown = sorted(
+                set(response).difference({"status", "body"})
+            )
+            if response_unknown:
+                raise EvalRunnerError(
+                    f"{path}: fixture {index} response has unsupported fields: "
+                    + ", ".join(response_unknown)
+                )
+            status = response.get("status", 200)
+            if (
+                isinstance(status, bool)
+                or not isinstance(status, int)
+                or status < 200
+                or status > 599
+            ):
+                raise EvalRunnerError(
+                    f"{path}: fixture {index} response status must be 200-599"
+                )
+            normalized = dict(entry)
+            normalized["method"] = "POST"
+            normalized["response"] = dict(response)
+            fixtures.append(normalized)
+    return fixtures
+
+
+def _parse_captures(serialized: str) -> tuple[Mapping[str, object], ...]:
+    """Validate captures copied from the root-only in-container control tmpfs."""
+
+    lines = serialized.splitlines()
+    captures: list[Mapping[str, object]] = []
+    for line_number, line in enumerate(lines, start=1):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise EvalRunnerError(
+                f"broker capture line {line_number} is malformed"
+            ) from error
+        if not isinstance(record, Mapping):
+            raise EvalRunnerError(
+                f"broker capture line {line_number} is not an object"
+            )
+        captures.append(record)
+    return tuple(captures)
+
+
 class DockerRuntime:
     def __init__(
         self,
@@ -300,6 +446,8 @@ class DockerRuntime:
         invocation_timeout_seconds: int,
         poll_interval_seconds: float,
         name_prefix: str,
+        broker_stub_path: Path | None = None,
+        use_broker_stub: bool = False,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], datetime] | None = None,
@@ -313,12 +461,17 @@ class DockerRuntime:
         self._invocation_timeout_seconds = invocation_timeout_seconds
         self._poll_interval_seconds = poll_interval_seconds
         self._name_prefix = name_prefix
+        self._broker_stub_path = broker_stub_path
+        self._use_broker_stub = use_broker_stub
         self._name = self._new_name()
         self._monotonic = monotonic
         self._sleep = sleep
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._container_id: str | None = None
         self._active_credentials: AwsCredentials | None = None
+        self._trial_log_since: datetime | None = None
+        self._capture_tools_catalog = False
+        self._trial_active = False
 
     def _new_name(self) -> str:
         return f"{self._name_prefix}-{uuid.uuid4().hex[:10]}"
@@ -395,6 +548,12 @@ class DockerRuntime:
             raise EvalRunnerError("container was already started")
         if self._active_credentials is None:
             raise EvalRunnerError("AWS credentials were not prepared")
+        if self._use_broker_stub:
+            if (
+                self._broker_stub_path is None
+                or not self._broker_stub_path.is_file()
+            ):
+                raise EvalRunnerError("eval broker stub source is unavailable")
         arguments = [
             "docker",
             "run",
@@ -404,10 +563,25 @@ class DockerRuntime:
             "--name",
             self._name,
         ]
+        if self._use_broker_stub:
+            arguments.extend(
+                [
+                    "--mount",
+                    (
+                        "type=bind,"
+                        f"src={self._broker_stub_path.resolve()},"
+                        f"dst={BROKER_STUB_CONTAINER_PATH},readonly"
+                    ),
+                    "--tmpfs",
+                    BROKER_CONTROL_TMPFS_OPTIONS,
+                ]
+            )
         environment_values = {
             **self._environment_values,
             **self._active_credentials.environment,
         }
+        if self._use_broker_stub:
+            environment_values[CONTROL_DIRECTORY_ENV] = DEFAULT_CONTROL_DIRECTORY
         for key, value in sorted(environment_values.items()):
             arguments.extend(["-e", f"{key}={value}"])
         arguments.append(self._image)
@@ -490,7 +664,9 @@ class DockerRuntime:
                     remaining_seconds,
                 )
             )
-        raise EvalRunnerError("container logged BOOT_OK but listener never became ready")
+        raise EvalRunnerError(
+            "container logged BOOT_OK but listener never became ready"
+        )
 
     def invoke(
         self,
@@ -541,6 +717,111 @@ class DockerRuntime:
         except ProbeProtocolError as error:
             raise EvalRunnerError(f"invalid invocation response: {error}") from error
 
+    def _write_broker_trial(self, value: Mapping[str, object]) -> None:
+        serialized = json.dumps(value, separators=(",", ":"))
+        self._executor.run(
+            [
+                "docker",
+                "exec",
+                "--user",
+                "0:0",
+                "--interactive",
+                self.container_id,
+                "python3",
+                BROKER_STUB_CONTAINER_PATH,
+                RUNNER_WRITE_TRIAL_COMMAND,
+            ],
+            input_text=serialized,
+            timeout=60,
+        )
+
+    def _read_broker_captures(self) -> tuple[Mapping[str, object], ...]:
+        result = self._executor.run(
+            [
+                "docker",
+                "exec",
+                "--user",
+                "0:0",
+                self.container_id,
+                "python3",
+                BROKER_STUB_CONTAINER_PATH,
+                RUNNER_READ_CAPTURES_COMMAND,
+            ],
+            timeout=60,
+        )
+        return _parse_captures(result.stdout)
+
+    def begin_trial(
+        self,
+        task: Task,
+        trial_number: int,
+        session_id: str,
+    ) -> None:
+        if self._trial_active:
+            raise EvalRunnerError("a broker capture trial is already active")
+        self._trial_log_since = self._now()
+        self._capture_tools_catalog = any(
+            spec.get("type") == "tools_catalog" for spec in task.graders
+        )
+        if not self._use_broker_stub:
+            if task.level == "L1":
+                raise EvalRunnerError("L1 task started without the eval broker stub")
+            self._trial_active = True
+            return
+        fixtures = _load_fixture_files(task.fixture_paths)
+        self._write_broker_trial(
+            {
+                "task_id": task.id,
+                "trial_id": f"{task.id}:{trial_number}:{session_id}",
+                "fixtures": fixtures,
+            },
+        )
+        self._trial_active = True
+
+    def end_trial(self) -> TrialArtifacts:
+        if not self._trial_active:
+            raise EvalRunnerError("no broker capture trial is active")
+        try:
+            captures: tuple[Mapping[str, object], ...] = ()
+            if self._use_broker_stub:
+                captures = self._read_broker_captures()
+            broker_errors = tuple(
+                str(capture["stub_error"])
+                for capture in captures
+                if capture.get("stub_error")
+            )
+            catalog_log = ""
+            if (
+                self._capture_tools_catalog
+                and self._trial_log_since is not None
+                and self._container_id is not None
+            ):
+                logs = self._executor.run(
+                    [
+                        "docker",
+                        "logs",
+                        "--since",
+                        self._trial_log_since.isoformat(),
+                        self.container_id,
+                    ],
+                    check=False,
+                    timeout=15,
+                )
+                catalog_log = "\n".join(
+                    line
+                    for line in f"{logs.stdout}\n{logs.stderr}".splitlines()
+                    if "tools.catalog " in line
+                )
+            return TrialArtifacts(
+                broker_requests=captures,
+                broker_errors=broker_errors,
+                tools_catalog_log=catalog_log,
+            )
+        finally:
+            self._trial_active = False
+            self._trial_log_since = None
+            self._capture_tools_catalog = False
+
     def _log_tail(self) -> None:
         if self._container_id is None:
             return
@@ -554,22 +835,27 @@ class DockerRuntime:
             LOGGER.error("candidate container log tail:\n%s", detail)
 
     def stop(self) -> None:
-        if self._container_id is None:
-            return
-        container_id = self._container_id
-        self._container_id = None
-        result = self._executor.run(
-            ["docker", "rm", "-f", container_id],
-            check=False,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip()
-            LOGGER.warning(
-                "failed to remove candidate container %s: %s",
-                container_id,
-                detail[-500:] or f"docker rm exited {result.returncode}",
+        removed = True
+        if self._container_id is not None:
+            container_id = self._container_id
+            result = self._executor.run(
+                ["docker", "rm", "-f", container_id],
+                check=False,
+                timeout=30,
             )
+            removed = result.returncode == 0
+            if removed:
+                self._container_id = None
+            else:
+                detail = (result.stderr or result.stdout).strip()
+                LOGGER.warning(
+                    "failed to remove candidate container %s: %s",
+                    container_id,
+                    detail[-500:] or f"docker rm exited {result.returncode}",
+                )
+        self._trial_active = False
+        self._trial_log_since = None
+        self._capture_tools_catalog = False
 
 
 class DockerRuntimeFactory:
@@ -585,6 +871,7 @@ class DockerRuntimeFactory:
         invocation_timeout_seconds: int,
         poll_interval_seconds: float,
         name_prefix: str,
+        broker_stub_path: Path,
     ) -> None:
         self._executor = executor
         self._image = image
@@ -595,8 +882,9 @@ class DockerRuntimeFactory:
         self._invocation_timeout_seconds = invocation_timeout_seconds
         self._poll_interval_seconds = poll_interval_seconds
         self._name_prefix = name_prefix
+        self._broker_stub_path = broker_stub_path
 
-    def create(self) -> DockerRuntime:
+    def create(self, task: Task) -> DockerRuntime:
         return DockerRuntime(
             self._executor,
             self._image,
@@ -607,6 +895,8 @@ class DockerRuntimeFactory:
             invocation_timeout_seconds=self._invocation_timeout_seconds,
             poll_interval_seconds=self._poll_interval_seconds,
             name_prefix=self._name_prefix,
+            broker_stub_path=self._broker_stub_path,
+            use_broker_stub=task.level == "L1",
         )
 
 
@@ -634,7 +924,7 @@ class EvaluationRunner:
         trials_override: int | None = None,
     ) -> list[dict[str, object]]:
         records: list[dict[str, object]] = []
-        pure_runtime: Runtime | None = None
+        pure_runtimes: dict[str, Runtime] = {}
         try:
             for task in tasks:
                 trial_count = (
@@ -644,12 +934,15 @@ class EvaluationRunner:
                     raise EvalRunnerError("trial count must be positive")
                 for trial_number in range(1, trial_count + 1):
                     owns_runtime = task.workspace == "mutating"
+                    runtime_mode = "stubbed" if task.level == "L1" else "live"
                     if owns_runtime:
-                        runtime = self._runtime_factory.create()
+                        runtime = self._runtime_factory.create(task)
                     else:
-                        if pure_runtime is None:
-                            pure_runtime = self._runtime_factory.create()
-                        runtime = pure_runtime
+                        if runtime_mode not in pure_runtimes:
+                            pure_runtimes[runtime_mode] = (
+                                self._runtime_factory.create(task)
+                            )
+                        runtime = pure_runtimes[runtime_mode]
                     try:
                         # Re-resolve the active credential chain before every
                         # trial. Pure runtimes remain shared while credentials
@@ -676,13 +969,27 @@ class EvaluationRunner:
                                 "runtime kept restarting while invocation "
                                 "authority was minted"
                             )
-                        event = runtime.invoke(task, session_id, authority)
+                        runtime.begin_trial(task, trial_number, session_id)
+                        try:
+                            event = runtime.invoke(task, session_id, authority)
+                        except BaseException as invocation_error:
+                            try:
+                                runtime.end_trial()
+                            except Exception as cleanup_error:
+                                invocation_error.add_note(
+                                    "trial artifact collection also failed: "
+                                    f"{cleanup_error}"
+                                )
+                            raise
+                        else:
+                            artifacts = runtime.end_trial()
                         record = self._make_record(
                             task,
                             trial_number,
                             trial_count,
                             session_id,
                             event,
+                            artifacts,
                         )
                         output.write(json.dumps(record, separators=(",", ":")) + "\n")
                         output.flush()
@@ -691,8 +998,8 @@ class EvaluationRunner:
                         if owns_runtime:
                             runtime.stop()
         finally:
-            if pure_runtime is not None:
-                pure_runtime.stop()
+            for runtime in pure_runtimes.values():
+                runtime.stop()
         return records
 
     def _make_record(
@@ -702,6 +1009,7 @@ class EvaluationRunner:
         trial_count: int,
         session_id: str,
         event: Mapping[str, object],
+        artifacts: TrialArtifacts,
     ) -> dict[str, object]:
         result = event.get("result")
         metadata = event.get("metadata")
@@ -726,6 +1034,12 @@ class EvaluationRunner:
                 f"task {task.id} trial {trial_number} hit runner isolation error "
                 f"{error_class}"
             )
+        grade = grade_trial(
+            task.graders,
+            result="" if result is None else str(result),
+            metadata=metadata,
+            artifacts=artifacts,
+        )
         return {
             "task_id": task.id,
             "image": self._image,
@@ -740,6 +1054,8 @@ class EvaluationRunner:
             # Preserve the complete final-event metadata object. Later grader
             # issues can consume new telemetry without changing this runner.
             "metadata": metadata,
+            "broker_requests": list(artifacts.broker_requests),
+            "grade": grade,
             "recorded_at": self._now().isoformat(),
         }
 
@@ -790,22 +1106,25 @@ def _load_document(path: Path) -> object:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as error:
-        raise EvalRunnerError(f"could not read suite/task file {path}: {error}") from error
+        raise EvalRunnerError(
+            f"could not read suite/task file {path}: {error}"
+        ) from error
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
 
-    # Issue #1422's task contract is intentionally flat. Supporting that small
-    # YAML subset here keeps the runner dependency-free; nested grader YAML is
-    # introduced by #1424 and can extend the loader with its schema.
+    # The task contract stays dependency-free: grader objects use inline
+    # JSON-compatible mappings inside top-level YAML lists.
     document: dict[str, object] = {}
     active_list: list[object] | None = None
     for line_number, raw_line in enumerate(text.splitlines(), start=1):
         if not raw_line.strip() or raw_line.lstrip().startswith("#"):
             continue
         if "\t" in raw_line[: len(raw_line) - len(raw_line.lstrip())]:
-            raise EvalRunnerError(f"{path}:{line_number}: tabs are not valid indentation")
+            raise EvalRunnerError(
+                f"{path}:{line_number}: tabs are not valid indentation"
+            )
         indent = len(raw_line) - len(raw_line.lstrip())
         content = raw_line.strip()
         if indent == 0:
@@ -840,6 +1159,31 @@ def _task_from_mapping(value: Mapping[str, object], source: Path) -> Task:
     raw_trials = value.get("trials", 3)
     if isinstance(raw_trials, bool) or not isinstance(raw_trials, int):
         raise EvalRunnerError(f"{source}: task trials must be an integer")
+    raw_fixture_paths = value.get("fixtures", [])
+    if (
+        not isinstance(raw_fixture_paths, list)
+        or any(not isinstance(path, str) or not path for path in raw_fixture_paths)
+    ):
+        raise EvalRunnerError(f"{source}: task fixtures must be a string list")
+    fixture_paths: list[Path] = []
+    for raw_path in raw_fixture_paths:
+        candidate = Path(raw_path)
+        if candidate.is_absolute():
+            raise EvalRunnerError(f"{source}: fixture paths must be relative")
+        resolved = (source.parent / candidate).resolve()
+        if not resolved.is_file():
+            raise EvalRunnerError(f"{source}: fixture file does not exist: {raw_path}")
+        fixture_paths.append(resolved)
+    raw_graders = value.get("graders", [])
+    if (
+        not isinstance(raw_graders, list)
+        or any(not isinstance(spec, Mapping) for spec in raw_graders)
+    ):
+        raise EvalRunnerError(f"{source}: task graders must be a mapping list")
+    try:
+        graders = validate_grader_specs(raw_graders)
+    except GraderConfigurationError as error:
+        raise EvalRunnerError(f"{source}: {error}") from error
     task = Task(
         id=text_fields["id"],
         skill=text_fields["skill"],
@@ -847,6 +1191,8 @@ def _task_from_mapping(value: Mapping[str, object], source: Path) -> Task:
         workspace=text_fields["workspace"],
         prompt=text_fields["prompt"],
         trials=raw_trials,
+        fixture_paths=tuple(fixture_paths),
+        graders=graders,
     )
     if not task.id or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", task.id):
         raise EvalRunnerError(f"{source}: task id must be lowercase kebab-case")
@@ -858,6 +1204,22 @@ def _task_from_mapping(value: Mapping[str, object], source: Path) -> Task:
         raise EvalRunnerError(f"{source}: workspace must be pure or mutating")
     if task.trials < 1 or task.trials > 20:
         raise EvalRunnerError(f"{source}: trials must be between 1 and 20")
+    broker_graders = sorted(
+        {
+            str(spec["type"])
+            for spec in task.graders
+            if spec.get("type") in BROKER_CAPTURE_GRADER_TYPES
+        }
+    )
+    if task.level != "L1" and broker_graders:
+        raise EvalRunnerError(
+            f"{source}: broker graders require level L1: "
+            + ", ".join(broker_graders)
+        )
+    if task.level != "L1" and task.fixture_paths:
+        raise EvalRunnerError(f"{source}: fixtures require level L1")
+    if task.level == "L1" and not task.graders:
+        raise EvalRunnerError(f"{source}: L1 tasks must configure at least one grader")
     return task
 
 
@@ -879,7 +1241,9 @@ def load_suite(path: Path) -> list[Task]:
                 tasks.append(_task_from_mapping(entry, path))
                 continue
             if not isinstance(entry, str):
-                raise EvalRunnerError(f"{path}: suite task entries must be paths or mappings")
+                raise EvalRunnerError(
+                    f"{path}: suite task entries must be paths or mappings"
+                )
             task_path = (path.parent / entry).resolve()
             task_document = _load_document(task_path)
             if not isinstance(task_document, dict):
@@ -1087,7 +1451,11 @@ def main(argv: list[str] | None = None) -> int:
             "BUILD_MARKER": f"eval:{args.image}",
         }
         credential_provider = ActiveAwsCredentialProvider(executor)
-        name_token = re.sub(r"[^a-z0-9-]", "-", f"issue-1422-{os.getpid()}".lower())
+        name_token = re.sub(
+            r"[^a-z0-9-]",
+            "-",
+            f"issue-1424-{os.getpid()}".lower(),
+        )
         runtime_factory = DockerRuntimeFactory(
             executor,
             args.image,
@@ -1098,6 +1466,11 @@ def main(argv: list[str] | None = None) -> int:
             invocation_timeout_seconds=args.invocation_timeout,
             poll_interval_seconds=args.poll_interval,
             name_prefix=f"psd-agent-eval-{name_token}",
+            broker_stub_path=repo_root
+            / "infra"
+            / "agent-image"
+            / "eval"
+            / "broker_stub.py",
         )
         minter = ProbeContextMinter(
             executor,
@@ -1115,6 +1488,21 @@ def main(argv: list[str] | None = None) -> int:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         with _open_output(args.out, args.overwrite) as output:
             records = runner.run(tasks, output, trials_override=args.trials)
+        graded_records = [
+            record
+            for record in records
+            if isinstance(record.get("grade"), Mapping)
+            and isinstance(record["grade"].get("passed"), bool)
+        ]
+        for summary in aggregate_pass_k(graded_records):
+            LOGGER.info(
+                "task %s pass^%s=%s (%s/%s trials)",
+                summary["task_id"],
+                summary["trials"],
+                summary["pass^k"],
+                summary["passed_trials"],
+                summary["trials"],
+            )
         LOGGER.info("wrote %d trial records to %s", len(records), args.out)
         return 0
     except (EvalRunnerError, OSError) as error:

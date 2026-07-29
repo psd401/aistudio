@@ -206,6 +206,163 @@ class SuiteLoadingTests(unittest.TestCase):
 
         self.assertEqual(task.prompt, "Don't use tools")
 
+    def test_l1_task_loads_fixture_paths_and_inline_graders(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / "directory.json"
+            fixture.write_text(
+                json.dumps(
+                    [
+                        {
+                            "route": "/api/agent/directory-lookup",
+                            "response": {"body": {"people": []}},
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            task_path = root / "task.yaml"
+            task_path.write_text(
+                "\n".join(
+                    [
+                        "id: directory-lookup",
+                        "skill: psd-directory",
+                        "level: L1",
+                        "workspace: pure",
+                        'prompt: "Find Ada."',
+                        "fixtures:",
+                        "  - directory.json",
+                        "graders:",
+                        (
+                            '  - {"type":"broker_request",'
+                            '"route":"/api/agent/directory-lookup"}'
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            [task] = runner.load_suite(task_path)
+
+            self.assertEqual(task.fixture_paths, (fixture.resolve(),))
+            self.assertEqual(task.graders[0]["type"], "broker_request")
+
+    def test_l1_task_without_a_grader_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task_path = Path(directory) / "task.yaml"
+            task_path.write_text(
+                "\n".join(
+                    [
+                        "id: ungraded",
+                        "skill: psd-directory",
+                        "level: L1",
+                        "workspace: pure",
+                        'prompt: "Find Ada."',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                runner.EvalRunnerError,
+                "L1 tasks must configure",
+            ):
+                runner.load_suite(task_path)
+
+    def test_live_tasks_reject_broker_capture_graders(self):
+        for level in ("L0", "L2"):
+            for grader_type in ("broker_request", "no_route_called"):
+                with self.subTest(level=level, grader=grader_type):
+                    with self.assertRaisesRegex(
+                        runner.EvalRunnerError,
+                        "broker graders require level L1",
+                    ):
+                        runner._task_from_mapping(
+                            {
+                                "id": "invalid-live-grader",
+                                "skill": "runner-core",
+                                "level": level,
+                                "workspace": "pure",
+                                "prompt": "hello",
+                                "graders": [
+                                    {
+                                        "type": grader_type,
+                                        "route": (
+                                            "/api/agent/directory-lookup"
+                                        ),
+                                    }
+                                ],
+                            },
+                            Path("inline.yaml"),
+                        )
+
+    def test_live_tasks_reject_ignored_fixture_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture_path = Path(directory) / "fixture.json"
+            fixture_path.write_text("[]", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                runner.EvalRunnerError,
+                "fixtures require level L1",
+            ):
+                runner._task_from_mapping(
+                    {
+                        "id": "invalid-live-fixture",
+                        "skill": "runner-core",
+                        "level": "L0",
+                        "workspace": "pure",
+                        "prompt": "hello",
+                        "fixtures": [fixture_path.name],
+                    },
+                    Path(directory) / "task.yaml",
+                )
+
+    def test_fixture_loading_rejects_non_post_methods_and_scalar_selectors(self):
+        invalid_fixtures = (
+            {
+                "route": "/api/agent/directory-lookup",
+                "method": "GET",
+                "response": {"body": {}},
+            },
+            {
+                "route": "/api/agent/directory-lookup",
+                "request_body": "Ada",
+                "response": {"body": {}},
+            },
+        )
+        for index, fixture in enumerate(invalid_fixtures):
+            with self.subTest(fixture=fixture):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / f"invalid-{index}.json"
+                    path.write_text(
+                        json.dumps([fixture]),
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaises(runner.EvalRunnerError):
+                        runner._load_fixture_files((path,))
+
+    def test_fixture_loading_rejects_informational_response_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "informational.json"
+            path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "route": "/api/agent/directory-lookup",
+                            "response": {"status": 199, "body": {}},
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                runner.EvalRunnerError,
+                "status must be 200-599",
+            ):
+                runner._load_fixture_files((path,))
+
     def test_python_adjacent_string_syntax_is_not_accepted_as_yaml(self):
         with tempfile.TemporaryDirectory() as directory:
             task_path = Path(directory) / "adjacent-strings.yaml"
@@ -266,6 +423,7 @@ class FakeRuntime:
         self.stopped = False
         self.invocations: list[tuple[str, str]] = []
         self.memory: dict[str, str] = {}
+        self.trial_active = False
 
     def prepare(self) -> bool:
         restarted = not self.started
@@ -304,6 +462,15 @@ class FakeRuntime:
             "metadata": metadata(session_id, future_field={"preserved": True}),
         }
 
+    def begin_trial(self, task, trial_number, session_id) -> None:
+        self.trial_active = True
+
+    def end_trial(self) -> runner.TrialArtifacts:
+        if not self.trial_active:
+            raise AssertionError("trial lifecycle violated")
+        self.trial_active = False
+        return runner.TrialArtifacts()
+
     def stop(self) -> None:
         self.stopped = True
 
@@ -313,7 +480,7 @@ class FakeRuntimeFactory:
         self.clock = clock
         self.runtimes: list[FakeRuntime] = []
 
-    def create(self) -> FakeRuntime:
+    def create(self, task: runner.Task) -> FakeRuntime:
         runtime = FakeRuntime(self.clock)
         self.runtimes.append(runtime)
         return runtime
@@ -401,7 +568,7 @@ class EvaluationRunnerTests(unittest.TestCase):
                 return super().invoke(task, session_id, authority)
 
         class OrderedFactory:
-            def create(self):
+            def create(self, task):
                 return OrderedRuntime(clock)
 
         class OrderedMinter(FakeMinter):
@@ -436,7 +603,7 @@ class EvaluationRunnerTests(unittest.TestCase):
                 return super().invoke(task, session_id, authority)
 
         class RestartingFactory:
-            def create(self):
+            def create(self, task):
                 return RestartingRuntime()
 
         class RecordingMinter(FakeMinter):
@@ -493,7 +660,7 @@ class EvaluationRunnerTests(unittest.TestCase):
                 return {"result": "answer", "metadata": incomplete}
 
         class IncompleteFactory:
-            def create(self):
+            def create(self, task):
                 return IncompleteRuntime(clock)
 
         with self.assertRaisesRegex(runner.EvalRunnerError, "latency_ms"):
@@ -502,6 +669,39 @@ class EvaluationRunnerTests(unittest.TestCase):
                 FakeMinter(clock),
                 now=clock.now,
             ).run(self.tasks[:1], io.StringIO(), trials_override=1)
+
+    def test_artifact_failure_does_not_mask_invocation_failure(self):
+        clock = AdvancingClock()
+
+        class DoubleFailureRuntime(FakeRuntime):
+            def invoke(self, task, session_id, authority):
+                raise runner.EvalRunnerError("primary invocation failure")
+
+            def end_trial(self):
+                super().end_trial()
+                raise runner.EvalRunnerError("secondary artifact failure")
+
+        class DoubleFailureFactory:
+            def create(self, task):
+                return DoubleFailureRuntime(clock)
+
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "primary invocation failure",
+        ) as raised:
+            runner.EvaluationRunner(
+                DoubleFailureFactory(),
+                FakeMinter(clock),
+                now=clock.now,
+            ).run(self.tasks[:1], io.StringIO(), trials_override=1)
+
+        self.assertEqual(
+            raised.exception.__notes__,
+            [
+                "trial artifact collection also failed: "
+                "secondary artifact failure"
+            ],
+        )
 
     def test_missing_metadata_session_is_never_synthesized(self):
         clock = AdvancingClock()
@@ -513,7 +713,7 @@ class EvaluationRunnerTests(unittest.TestCase):
                 return {"result": "answer", "metadata": incomplete}
 
         class MissingSessionFactory:
-            def create(self):
+            def create(self, task):
                 return MissingSessionRuntime(clock)
 
         with self.assertRaisesRegex(runner.EvalRunnerError, "session_id"):
@@ -538,7 +738,7 @@ class EvaluationRunnerTests(unittest.TestCase):
                 }
 
         class RejectedFactory:
-            def create(self):
+            def create(self, task):
                 return RejectedRuntime(clock)
 
         with self.assertRaisesRegex(
@@ -558,15 +758,81 @@ class EvaluationRunnerTests(unittest.TestCase):
                 output.write("{}\n")
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
 
+    def test_trial_artifacts_are_graded_and_preserved_in_the_record(self):
+        clock = AdvancingClock()
+
+        class CapturingRuntime(FakeRuntime):
+            def end_trial(self):
+                super().end_trial()
+                return runner.TrialArtifacts(
+                    broker_requests=(
+                        {
+                            "route": "/api/agent/directory-lookup",
+                            "method": "POST",
+                            "body": {"query": "Ada"},
+                            "stub_error": None,
+                        },
+                    ),
+                    tools_catalog_log=(
+                        'tools.catalog ok: [{"name":"skills.search"}]'
+                    ),
+                )
+
+        class CapturingFactory:
+            def create(self, task):
+                return CapturingRuntime(clock)
+
+        task = runner.Task(
+            id="graded-task",
+            skill="psd-directory",
+            level="L1",
+            workspace="pure",
+            prompt="Find Ada.",
+            trials=1,
+            graders=runner.validate_grader_specs(
+                [
+                    {
+                        "type": "broker_request",
+                        "route": "/api/agent/directory-lookup",
+                        "body": {"query": {"exact": "Ada"}},
+                    },
+                    {
+                        "type": "tools_catalog",
+                        "expected": ["skills.search"],
+                    },
+                ]
+            ),
+        )
+
+        records = runner.EvaluationRunner(
+            CapturingFactory(),
+            FakeMinter(clock),
+            now=clock.now,
+        ).run([task], io.StringIO())
+
+        self.assertTrue(records[0]["grade"]["passed"])
+        self.assertEqual(
+            records[0]["broker_requests"][0]["route"],
+            "/api/agent/directory-lookup",
+        )
+
 
 class RecordingExecutor:
     def __init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
+        self.broker_trial_config: dict[str, object] | None = None
+        self.broker_capture = ""
 
     def run(self, arguments, **options):
-        del options
         call = tuple(arguments)
         self.calls.append(call)
+        if call[-1:] == (runner.RUNNER_WRITE_TRIAL_COMMAND,):
+            self.broker_trial_config = json.loads(options["input_text"])
+            self.broker_capture = ""
+            return runner.CommandResult(0, "", "")
+        if call[-1:] == (runner.RUNNER_READ_CAPTURES_COMMAND,):
+            self.broker_trial_config = None
+            return runner.CommandResult(0, self.broker_capture, "")
         if call[:2] == ("docker", "run"):
             return runner.CommandResult(0, "container-123\n", "")
         if call[:2] == ("docker", "logs"):
@@ -618,6 +884,21 @@ class MissingResultExecutor(RecordingExecutor):
         result = super().run(arguments, **options)
         if "http://127.0.0.1:8080/invocations" in tuple(arguments):
             return runner.CommandResult(0, 'data: {"type":"start"}\n', "")
+        return result
+
+
+class CatalogExecutor(RecordingExecutor):
+    def run(self, arguments, **options):
+        result = super().run(arguments, **options)
+        if tuple(arguments)[:3] == ("docker", "logs", "--since"):
+            return runner.CommandResult(
+                0,
+                (
+                    'tools.catalog ok: [{"name":"skills.search"},'
+                    '{"name":"directory.lookup"}]'
+                ),
+                "",
+            )
         return result
 
 
@@ -803,6 +1084,154 @@ class DockerRuntimeTests(unittest.TestCase):
         self.assertIn(
             f"X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: {session_id}",
             invocation_call,
+        )
+
+    def test_l1_runtime_uses_root_tmpfs_and_collects_per_trial_capture(self):
+        executor = RecordingExecutor()
+        with tempfile.TemporaryDirectory() as directory:
+            fixture_path = Path(directory) / "fixture.json"
+            fixture_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "route": "/api/agent/directory-lookup",
+                            "response": {"body": {"people": []}},
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runtime = runner.DockerRuntime(
+                executor,
+                "candidate@sha256:digest",
+                "linux/arm64",
+                {"APP_BASE_URL": "https://dev.example.invalid"},
+                SequenceCredentialProvider([aws_credentials()]),
+                boot_timeout_seconds=120,
+                invocation_timeout_seconds=900,
+                poll_interval_seconds=0,
+                name_prefix="psd-agent-eval-issue-1424-test",
+                broker_stub_path=(
+                    AGENT_IMAGE_DIR / "eval" / "broker_stub.py"
+                ),
+                use_broker_stub=True,
+            )
+            runtime.prepare()
+            task = runner.Task(
+                id="directory-lookup",
+                skill="psd-directory",
+                level="L1",
+                workspace="pure",
+                prompt="Find Ada.",
+                trials=1,
+                fixture_paths=(fixture_path,),
+                graders=runner.validate_grader_specs(
+                    [
+                        {
+                            "type": "broker_request",
+                            "route": "/api/agent/directory-lookup",
+                        }
+                    ]
+                ),
+            )
+            session_id = "a" * 36
+            runtime.begin_trial(task, 1, session_id)
+            trial = executor.broker_trial_config
+            self.assertIsNotNone(trial)
+            self.assertEqual(
+                trial["fixtures"][0]["route"],
+                "/api/agent/directory-lookup",
+            )
+            executor.broker_capture = (
+                json.dumps(
+                    {
+                        "route": "/api/agent/directory-lookup",
+                        "method": "POST",
+                        "body": {"query": "Ada"},
+                        "stub_error": None,
+                    }
+                )
+                + "\n"
+            )
+
+            artifacts = runtime.end_trial()
+            runtime.stop()
+
+        docker_run = next(
+            call for call in executor.calls if call[:2] == ("docker", "run")
+        )
+        joined = "\n".join(docker_run)
+        self.assertIn("dst=/app/mantle_proxy.py,readonly", joined)
+        self.assertIn("--tmpfs", docker_run)
+        self.assertIn(runner.BROKER_CONTROL_TMPFS_OPTIONS, docker_run)
+        self.assertIn("mode=0700,uid=0,gid=0", joined)
+        self.assertNotIn("dst=/run/psd-agent-eval-broker", joined)
+        self.assertEqual(docker_run.count("--mount"), 1)
+        self.assertIn(
+            "AGENT_EVAL_BROKER_CONTROL_DIR=/run/psd-agent-eval-broker",
+            docker_run,
+        )
+        self.assertEqual(
+            artifacts.broker_requests[0]["route"],
+            "/api/agent/directory-lookup",
+        )
+        broker_execs = [
+            call
+            for call in executor.calls
+            if call[:2] == ("docker", "exec")
+            and call[-1]
+            in {
+                runner.RUNNER_WRITE_TRIAL_COMMAND,
+                runner.RUNNER_READ_CAPTURES_COMMAND,
+            }
+        ]
+        self.assertEqual(len(broker_execs), 2)
+        self.assertTrue(
+            all(
+                ("--user", "0:0") == call[2:4]
+                for call in broker_execs
+            )
+        )
+        self.assertIsNone(executor.broker_trial_config)
+
+    def test_runtime_collects_tools_catalog_diagnostic_for_its_trial(self):
+        executor = CatalogExecutor()
+        runtime = runner.DockerRuntime(
+            executor,
+            "candidate@sha256:digest",
+            "linux/arm64",
+            {"APP_BASE_URL": "https://dev.example.invalid"},
+            SequenceCredentialProvider([aws_credentials()]),
+            boot_timeout_seconds=120,
+            invocation_timeout_seconds=900,
+            poll_interval_seconds=0,
+            name_prefix="psd-agent-eval-issue-1424-test",
+        )
+        runtime.prepare()
+        task = runner.Task(
+            id="catalog-task",
+            skill="runner-core",
+            level="L0",
+            workspace="pure",
+            prompt="hello",
+            trials=1,
+            graders=runner.validate_grader_specs(
+                [
+                    {
+                        "type": "tools_catalog",
+                        "expected": ["skills.search", "directory.lookup"],
+                    }
+                ]
+            ),
+        )
+
+        runtime.begin_trial(task, 1, "a" * 36)
+        artifacts = runtime.end_trial()
+        runtime.stop()
+
+        self.assertIn('"skills.search"', artifacts.tools_catalog_log)
+        self.assertTrue(
+            any(call[:3] == ("docker", "logs", "--since") for call in executor.calls)
         )
 
     def test_missing_result_is_reported_as_a_runner_error(self):

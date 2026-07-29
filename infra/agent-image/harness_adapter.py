@@ -40,6 +40,39 @@ def _is_safe_path_component(value: str) -> bool:
     return bool(_SAFE_PATH_ID.match(value or "")) and value not in {".", ".."}
 
 
+def _catalog_tool_names(catalog: object) -> List[str]:
+    """Return explicit catalog-entry names without traversing their schemas."""
+
+    names: List[str] = []
+    seen: set[str] = set()
+
+    entries: List[object] = []
+    if isinstance(catalog, (list, tuple)):
+        entries.extend(catalog)
+    elif isinstance(catalog, dict):
+        if isinstance(catalog.get("name"), str):
+            entries.append(catalog)
+        else:
+            for group in catalog.values():
+                if isinstance(group, (list, tuple)):
+                    entries.extend(group)
+                elif isinstance(group, dict):
+                    group_tools = group.get("tools")
+                    if isinstance(group_tools, (list, tuple)):
+                        entries.extend(group_tools)
+                    elif isinstance(group.get("name"), str):
+                        entries.append(group)
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if isinstance(name, str) and name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
 @dataclasses.dataclass
 class TurnResult:
     """Structured result of a single agent turn.
@@ -653,9 +686,13 @@ class OpenClawAdapter(HarnessAdapter):
                             if msg_c.get("ok"):
                                 payload = msg_c.get("payload", {})
                                 tools = payload.get("tools") or payload.get("grouped") or payload
+                                names = _catalog_tool_names(tools)
                                 logger.info(
                                     "tools.catalog ok: %s",
-                                    json.dumps(tools)[:1500],
+                                    json.dumps(
+                                        {"names": names},
+                                        separators=(",", ":"),
+                                    ),
                                 )
                             else:
                                 logger.warning(
