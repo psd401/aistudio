@@ -97,6 +97,9 @@ node run.js restore-collection --id <uuid>
 ```
 
 - Use the collection UUID returned by `list-collections` for mutation commands.
+- `list-collections` returns both active and archived manageable collections,
+  including `archivedAt`, direct grants, `directContentCount`, and
+  `subtreeContentCount`; use it to rediscover a UUID before restoring a subtree.
 - `--parent root` moves to the top level.
 - `--grants none` clears direct grants. Grant entries are
   `view|create:role|group:<value>` (the API also accepts the other Atrium grant

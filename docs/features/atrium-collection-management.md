@@ -78,6 +78,8 @@ object's group-visibility grants. Private collection content is always private.
   - `PATCH /api/v1/content/collections/{id}`
 - `psd-atrium`: `list-collections`, `create-collection`, `edit-collection`,
   `move-collection`, `archive-collection`, and `restore-collection`.
+  `list-collections` includes archived manageable rows and their grants and
+  direct/subtree counts so restore targets remain discoverable.
 
 Every mutation uses `collectionManagementService` and records
 `collection_create`, `collection_update`, `collection_archive`, or

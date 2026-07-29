@@ -4,7 +4,6 @@ import {
   ForbiddenError,
   contentAssetService,
   collectionManagementService,
-  collectionService,
   contentService,
   contentSourceService,
   isContentError,
@@ -261,10 +260,11 @@ async function executeSingleSegmentRead(
   requestId: string
 ): Promise<AgentAtriumOperationResult> {
   if (segment === "collections") {
-    const collections = await collectionService.discover(req, {
-      shape: "flat",
-      includeCreateSelection: true,
-    })
+    // This command is the discovery surface for every collection mutation,
+    // including restore. Unlike the active-only picker projection, the
+    // management projection retains archived rows, UUIDs, grants, and counts.
+    // listManageable applies the owner/admin boundary before returning metadata.
+    const collections = await collectionManagementService.listManageable(req)
     return success(collections, requestId)
   }
   const object = await contentService.get(req, segment)

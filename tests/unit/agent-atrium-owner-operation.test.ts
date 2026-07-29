@@ -15,7 +15,7 @@ const assetGetMock = jest.fn()
 const assetReadBytesMock = jest.fn()
 const assetInitiateMock = jest.fn()
 const assetCompleteMock = jest.fn()
-const collectionListMock = jest.fn()
+const collectionManageableListMock = jest.fn()
 const collectionCreateMock = jest.fn()
 const collectionUpdateMock = jest.fn()
 
@@ -79,11 +79,10 @@ jest.mock("@/lib/content", () => {
       delete: (...args: unknown[]) => contentDeleteMock(...args),
     },
     collectionManagementService: {
+      listManageable: (...args: unknown[]) =>
+        collectionManageableListMock(...args),
       create: (...args: unknown[]) => collectionCreateMock(...args),
       update: (...args: unknown[]) => collectionUpdateMock(...args),
-    },
-    collectionService: {
-      discover: (...args: unknown[]) => collectionListMock(...args),
     },
     contentSourceService: {
       read: (...args: unknown[]) => sourceReadMock(...args),
@@ -134,10 +133,16 @@ beforeEach(() => {
 })
 
 describe("signed-owner Atrium operations", () => {
-  it("lists the owner's visible collections without widening content access", async () => {
-    collectionListMock.mockResolvedValue([
-      { id: "f9999999-9999-4999-8999-999999999999", scope: "private" },
-    ])
+  it("keeps archived manageable collections discoverable without widening content access", async () => {
+    const archived = {
+      id: "f9999999-9999-4999-8999-999999999999",
+      scope: "private",
+      archivedAt: "2026-07-29T07:00:00.000Z",
+      directContentCount: 2,
+      subtreeContentCount: 5,
+      grants: [],
+    }
+    collectionManageableListMock.mockResolvedValue([archived])
     const result = await executeOwnerAtriumOperation({
       ownerEmail: "owner@psd401.net",
       requestId: "request-collections",
@@ -145,10 +150,11 @@ describe("signed-owner Atrium operations", () => {
       path: "/collections",
     })
     expect(result.httpStatus).toBe(200)
-    expect(collectionListMock).toHaveBeenCalledWith(requester, {
-      shape: "flat",
-      includeCreateSelection: true,
+    expect(result.payload).toEqual({
+      data: [archived],
+      meta: { requestId: "request-collections" },
     })
+    expect(collectionManageableListMock).toHaveBeenCalledWith(requester)
     expect(assertContentAuthoringCapabilityMock).not.toHaveBeenCalled()
   })
 
