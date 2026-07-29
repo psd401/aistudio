@@ -2,7 +2,7 @@
   "summary": {
     "actions": 32,
     "features": 10,
-    "scopes": 32,
+    "scopes": 33,
     "agentInvocableActions": 25
   },
   "actions": [
@@ -1060,6 +1060,14 @@
     {
       "scope": "repositories:search",
       "description": "Search authorized repositories",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "repositories:write",
+      "description": "Add items to repositories the API principal can modify",
       "roles": [
         "staff",
         "administrator"

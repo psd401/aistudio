@@ -19,6 +19,13 @@ export {
 export { visibilityService } from "./visibility-service";
 export { collectionService } from "./collection-service";
 export type { CollectionTreeNode } from "./collection-service";
+export { collectionManagementService } from "./collection-management-service";
+export {
+  collectionAccessSnapshot,
+  collectionOwnerUserId,
+  requesterMayCreateInCollection,
+  requesterMayViewCollection,
+} from "./collection-access";
 export {
   cleanupExpiredContentAssets,
   contentAssetService,
@@ -122,6 +129,12 @@ export type {
   VisibilityGrant,
   GrantKind,
   VisibilityLevel,
+  CollectionScope,
+  CollectionGrantAccess,
+  CollectionGrant,
+  CreateCollectionInput,
+  UpdateCollectionInput,
+  CollectionDTO,
   ContentKind,
   BodyFormat,
   SnapshotInput,

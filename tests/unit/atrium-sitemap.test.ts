@@ -1,11 +1,11 @@
 /**
  * Unit tests for app/sitemap.ts (Epic #1059 — Atrium public reader SEO).
  *
- * The security-relevant assertion is the QUERY GATE: the sitemap must filter on
- * exactly the /p/[slug] public-gate conditions (visibility_level='public' AND a
- * live public_web publication) plus the status='published' subset guard — so it
- * can never advertise a URL the public reader would 404 (existence leak +
- * crawler soft-404s).
+ * The security-relevant assertion is the complete gate: the query requires
+ * visibility_level='public', a live public_web publication, and published
+ * lifecycle; the result is then filtered through the anonymous collection
+ * snapshot. The sitemap therefore cannot advertise a URL the public reader
+ * would 404 (existence leak + crawler soft-404s).
  *
  * Also covered: the fail-soft contract (empty sitemap + log.warn on a DB error
  * or a missing ATRIUM_PUBLIC_BASE_URL — never a throw) and the entry mapping
@@ -26,6 +26,7 @@ jest.mock("@/lib/db/schema", () => ({
     id: "co.id",
     slug: "co.slug",
     updatedAt: "co.updated_at",
+    collectionId: "co.collection_id",
     visibilityLevel: "co.visibility_level",
     status: "co.status",
   },
@@ -45,6 +46,11 @@ jest.mock("drizzle-orm", () => ({
 // a deterministic absolute URL.
 jest.mock("@/lib/content/surface-helpers", () => ({
   publicReaderLink: (slug: string) => `https://app.test/p/${slug}`,
+}));
+const collectionAccessSnapshotMock = jest.fn();
+jest.mock("@/lib/content/collection-access", () => ({
+  collectionAccessSnapshot: (...args: unknown[]) =>
+    collectionAccessSnapshotMock(...args),
 }));
 
 const mockWarn = jest.fn();
@@ -93,6 +99,9 @@ const ORIGINAL_BASE = process.env.ATRIUM_PUBLIC_BASE_URL;
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.ATRIUM_PUBLIC_BASE_URL = "https://app.test";
+  collectionAccessSnapshotMock.mockResolvedValue({
+    allowedCollectionIds: new Set(["visible-collection"]),
+  });
 });
 
 afterAll(() => {
@@ -128,8 +137,17 @@ describe("app/sitemap.ts — Atrium public reader sitemap", () => {
   it("maps rows to publicReaderLink URLs with lastModified", async () => {
     const updatedAt = new Date("2026-07-01T12:00:00Z");
     stubQuery([
-      { slug: "ai-guidelines", updatedAt },
-      { slug: "no-timestamp", updatedAt: null },
+      {
+        slug: "ai-guidelines",
+        updatedAt,
+        collectionId: "visible-collection",
+      },
+      { slug: "no-timestamp", updatedAt: null, collectionId: null },
+      {
+        slug: "hidden-collection-item",
+        updatedAt: null,
+        collectionId: "hidden-collection",
+      },
     ]);
 
     const entries = await sitemap();

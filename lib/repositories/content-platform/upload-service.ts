@@ -144,6 +144,31 @@ export class RepositoryUploadQuotaExceededError extends Error {
   }
 }
 
+export type RepositoryUploadCompletionFailure =
+  | "invalid-parts"
+  | "object-mismatch"
+  | "repository-inactive"
+  | "session-inactive"
+  | "session-not-found";
+
+/**
+ * Marks completion failures caused by caller-controlled input or an unavailable
+ * upload session. API routes may safely map these to a non-disclosing 400 while
+ * preserving unexpected database and storage failures as 5xx responses.
+ */
+export class RepositoryUploadCompletionError extends Error {
+  readonly code = "UPLOAD_COMPLETION_FAILED";
+  readonly httpStatus = 400;
+
+  constructor(
+    readonly failure: RepositoryUploadCompletionFailure,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RepositoryUploadCompletionError";
+  }
+}
+
 interface RepositoryUploadQuotaUsage {
   activeUploadCount: number;
   activeUploadBytes: number;
@@ -802,7 +827,10 @@ function validateParts(
   expectedCount: number
 ): Array<{ ETag: string; PartNumber: number }> {
   if (!parts || parts.length !== expectedCount) {
-    throw new Error(`Multipart completion requires exactly ${expectedCount} parts`);
+    throw new RepositoryUploadCompletionError(
+      "invalid-parts",
+      `Multipart completion requires exactly ${expectedCount} parts`,
+    );
   }
   const numbers = new Set(parts.map((part) => part.PartNumber));
   if (
@@ -815,9 +843,43 @@ function validateParts(
         part.PartNumber > expectedCount
     )
   ) {
-    throw new Error("Multipart parts are invalid or duplicated");
+    throw new RepositoryUploadCompletionError(
+      "invalid-parts",
+      "Multipart parts are invalid or duplicated",
+    );
   }
-  return parts;
+  return [...parts].sort((left, right) => left.PartNumber - right.PartNumber);
+}
+
+function multipartCompletionRequestError(
+  error: unknown,
+): RepositoryUploadCompletionError | null {
+  if (typeof error !== "object" || error === null) return null;
+  const candidate = error as { name?: unknown; Code?: unknown };
+  const code =
+    typeof candidate.Code === "string"
+      ? candidate.Code
+      : typeof candidate.name === "string"
+        ? candidate.name
+        : undefined;
+
+  if (code === "NoSuchUpload") {
+    return new RepositoryUploadCompletionError(
+      "session-inactive",
+      "Multipart upload session is no longer available",
+    );
+  }
+  if (
+    code === "EntityTooSmall" ||
+    code === "InvalidPart" ||
+    code === "InvalidPartOrder"
+  ) {
+    return new RepositoryUploadCompletionError(
+      "invalid-parts",
+      "Multipart upload parts were rejected",
+    );
+  }
+  return null;
 }
 
 function getRepositoryUploadSession(input: CompleteRepositoryUploadInput) {
@@ -838,6 +900,20 @@ function getRepositoryUploadSession(input: CompleteRepositoryUploadInput) {
   );
 }
 
+async function requireActiveRepositoryUploadSession(
+  input: CompleteRepositoryUploadInput,
+) {
+  const [session] = await getRepositoryUploadSession(input);
+  if (!session) {
+    throw new RepositoryUploadCompletionError(
+      "session-not-found",
+      "Upload session was not found",
+    );
+  }
+  assertRepositoryUploadSessionActive(session);
+  return session;
+}
+
 export function assertRepositoryUploadSessionActive(
   session: Pick<
     typeof repositoryUploadSessions.$inferSelect,
@@ -846,11 +922,15 @@ export function assertRepositoryUploadSessionActive(
   now = new Date()
 ): void {
   if (
-    session.expiresAt.getTime() <= now.getTime() ||
+    (session.status !== "completed" &&
+      session.expiresAt.getTime() <= now.getTime()) ||
     session.status === "aborted" ||
     session.status === "expired"
   ) {
-    throw new Error("Upload session is no longer active");
+    throw new RepositoryUploadCompletionError(
+      "session-inactive",
+      "Upload session is no longer active",
+    );
   }
 }
 
@@ -870,7 +950,31 @@ export function assertRepositoryProducerActive(
     (expiresAt !== undefined &&
       (Number.isNaN(expiresAt) || expiresAt <= now.getTime()))
   ) {
-    throw new Error("Repository is no longer active");
+    throw new RepositoryUploadCompletionError(
+      "repository-inactive",
+      "Repository is no longer active",
+    );
+  }
+}
+
+function assertUploadedObjectMatchesSession(
+  object: StoredObjectMetadata,
+  session: Pick<
+    typeof repositoryUploadSessions.$inferSelect,
+    "declaredContentType" | "expectedByteSize"
+  >,
+): void {
+  if (object.byteSize !== session.expectedByteSize) {
+    throw new RepositoryUploadCompletionError(
+      "object-mismatch",
+      "Uploaded object size does not match the initiated upload",
+    );
+  }
+  if (object.contentType && object.contentType !== session.declaredContentType) {
+    throw new RepositoryUploadCompletionError(
+      "object-mismatch",
+      "Uploaded object type does not match the initiated upload",
+    );
   }
 }
 
@@ -879,9 +983,7 @@ export async function completeRepositoryUpload(
   storage?: RepositoryUploadStorage
 ): Promise<CompletedRepositoryUpload> {
   const resolvedStorage = storage ?? (await createRepositoryUploadStorage());
-  const [session] = await getRepositoryUploadSession(input);
-  if (!session) throw new Error("Upload session was not found");
-  assertRepositoryUploadSessionActive(session);
+  const session = await requireActiveRepositoryUploadSession(input);
 
   if (session.uploadMethod === "multipart" && session.status !== "completed") {
     if (!session.multipartUploadId || !session.partCount) {
@@ -898,18 +1000,13 @@ export async function completeRepositoryUpload(
       // HEAD below proves the object exists and makes completion safely
       // retryable; otherwise preserve the original, more useful S3 error.
       await resolvedStorage.headObject(session.objectKey).catch(() => {
-        throw completionError;
+        throw multipartCompletionRequestError(completionError) ?? completionError;
       });
     }
   }
 
   const object = await resolvedStorage.headObject(session.objectKey);
-  if (object.byteSize !== session.expectedByteSize) {
-    throw new Error("Uploaded object size does not match the initiated upload");
-  }
-  if (object.contentType && object.contentType !== session.declaredContentType) {
-    throw new Error("Uploaded object type does not match the initiated upload");
-  }
+  assertUploadedObjectMatchesSession(object, session);
 
   return executeTransaction(
     async (tx) => {
@@ -934,7 +1031,12 @@ export async function completeRepositoryUpload(
         .where(eq(repositoryUploadSessions.id, session.id))
         .limit(1)
         .for("update");
-      if (!locked) throw new Error("Upload session was not found");
+      if (!locked) {
+        throw new RepositoryUploadCompletionError(
+          "session-not-found",
+          "Upload session was not found",
+        );
+      }
       // Expiry cleanup claims the same row with FOR UPDATE. Re-check the locked
       // state after all S3 work so a completion that waited behind cleanup
       // cannot register an item whose canonical object was just deleted.

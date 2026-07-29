@@ -12,6 +12,8 @@
  */
 
 let queue: Array<Array<{ id: string }>> = [];
+const requesterMayViewCollectionMock = jest.fn();
+const requesterMayCreateInCollectionMock = jest.fn();
 
 jest.mock("@/lib/db/drizzle-client", () => ({
   executeQuery: jest.fn(async () => queue.shift() ?? []),
@@ -22,6 +24,12 @@ jest.mock("@/lib/db/schema", () => ({
 }));
 
 jest.mock("drizzle-orm", () => ({ eq: (...a: unknown[]) => a }));
+jest.mock("@/lib/content/collection-access", () => ({
+  requesterMayViewCollection: (...args: unknown[]) =>
+    requesterMayViewCollectionMock(...args),
+  requesterMayCreateInCollection: (...args: unknown[]) =>
+    requesterMayCreateInCollectionMock(...args),
+}));
 
 const mockHasCapabilityAccess = jest.fn(async (..._args: unknown[]) => true);
 jest.mock("@/utils/roles", () => ({
@@ -36,45 +44,72 @@ import {
 import { ForbiddenError, ValidationError } from "@/lib/content/errors";
 
 const UUID = "11111111-1111-1111-1111-111111111111";
+const requester = {
+  kind: "user" as const,
+  userId: 7,
+  roles: ["staff"],
+  isAdmin: false,
+};
 
 beforeEach(() => {
   queue = [];
   jest.clearAllMocks();
   mockHasCapabilityAccess.mockResolvedValue(true);
+  requesterMayViewCollectionMock.mockResolvedValue(true);
+  requesterMayCreateInCollectionMock.mockResolvedValue(true);
 });
 
 describe("resolveCollectionId", () => {
   it("returns undefined when no collection is supplied", async () => {
-    expect(await resolveCollectionId(undefined)).toBeUndefined();
-    expect(await resolveCollectionId(null)).toBeUndefined();
-    expect(await resolveCollectionId("")).toBeUndefined();
+    expect(await resolveCollectionId(requester, undefined, "view")).toBeUndefined();
+    expect(await resolveCollectionId(requester, null, "view")).toBeUndefined();
+    expect(await resolveCollectionId(requester, "", "view")).toBeUndefined();
   });
 
   it("resolves a uuid that exists as an id", async () => {
     queue = [[{ id: UUID }]];
-    expect(await resolveCollectionId(UUID)).toBe(UUID);
+    expect(await resolveCollectionId(requester, UUID, "view")).toBe(UUID);
+    expect(requesterMayViewCollectionMock).toHaveBeenCalledWith(requester, UUID);
   });
 
   it("falls back to a slug lookup when a uuid-shaped value is not an id", async () => {
     // First call (id lookup) empty, second call (slug lookup) hits — a slug can
     // itself be uuid-shaped.
     queue = [[], [{ id: "c-2" }]];
-    expect(await resolveCollectionId(UUID)).toBe("c-2");
+    expect(await resolveCollectionId(requester, UUID, "view")).toBe("c-2");
   });
 
   it("throws ValidationError (not a raw FK 500) when a uuid matches nothing", async () => {
     queue = [[], []];
-    await expect(resolveCollectionId(UUID)).rejects.toThrow(ValidationError);
+    await expect(
+      resolveCollectionId(requester, UUID, "view")
+    ).rejects.toThrow(ValidationError);
   });
 
   it("resolves a slug that exists", async () => {
     queue = [[{ id: "c-3" }]];
-    expect(await resolveCollectionId("high-school")).toBe("c-3");
+    expect(
+      await resolveCollectionId(requester, "high-school", "create")
+    ).toBe("c-3");
+    expect(requesterMayCreateInCollectionMock).toHaveBeenCalledWith(
+      requester,
+      "c-3"
+    );
   });
 
   it("throws ValidationError when a slug matches nothing", async () => {
     queue = [[]];
-    await expect(resolveCollectionId("nope")).rejects.toThrow(ValidationError);
+    await expect(
+      resolveCollectionId(requester, "nope", "view")
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it("masks an inaccessible private collection exactly like an absent one", async () => {
+    queue = [[{ id: "private-other-owner" }]];
+    requesterMayViewCollectionMock.mockResolvedValue(false);
+    await expect(
+      resolveCollectionId(requester, "private-slug", "view")
+    ).rejects.toThrow("Collection not found");
   });
 });
 

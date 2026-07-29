@@ -180,6 +180,7 @@ async function resolveGatedObject(
   const viewable = await visibilityService.canView(requester, {
     id: obj.id,
     ownerUserId: obj.ownerUserId,
+    collectionId: obj.collectionId,
     visibilityLevel: obj.visibilityLevel,
   });
   // Mask existence: a non-viewable object 404s (never a 403) — the edit gate below

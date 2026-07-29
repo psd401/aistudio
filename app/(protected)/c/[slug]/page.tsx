@@ -99,6 +99,7 @@ async function loadPublishedObject(slug: string): Promise<{
   id: string;
   kind: "document" | "artifact";
   ownerUserId: number;
+  collectionId: string | null;
   visibilityLevel: "private" | "group" | "internal" | "public";
   title: string;
   /** The object's collection name (via left join), for the reader meta line. */
@@ -117,6 +118,7 @@ async function loadPublishedObject(slug: string): Promise<{
           id: contentObjects.id,
           kind: contentObjects.kind,
           ownerUserId: contentObjects.ownerUserId,
+          collectionId: contentObjects.collectionId,
           visibilityLevel: contentObjects.visibilityLevel,
           title: contentObjects.title,
           // Left join → collection name (or null when the object is uncollected),
@@ -225,6 +227,7 @@ export default async function ReaderPage({
   const viewable = await visibilityService.canView(requester, {
     id: published.id,
     ownerUserId: published.ownerUserId,
+    collectionId: published.collectionId,
     visibilityLevel: published.visibilityLevel,
   });
   if (!viewable) {

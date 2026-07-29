@@ -35,6 +35,7 @@ All `/api/v1/graph/*` endpoints require authentication. Two modes are supported:
 | `repositories:read` | Disclose current immutable source segments and citations |
 | `repositories:search` | Run retrieval v2 over currently authorized repositories |
 | `repositories:changes` | Poll the authorized repository item change feed |
+| `repositories:write` | Add uploaded items to repositories the principal can modify |
 
 API keys are created in **Settings > API Keys**. Administrators receive all scopes; staff receives `graph:read` by default.
 
@@ -585,6 +586,84 @@ Common errors are `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`/`INVALID_TOKEN`,
 `403 INSUFFICIENT_SCOPE`, `404 NOT_FOUND`, `429 RATE_LIMIT_EXCEEDED`, and
 `500 INTERNAL_ERROR`. Every response retains the standard request-id and
 rate-limit headers described above.
+
+#### `POST /api/v1/repositories/{id}/items/uploads`
+
+Requires `repositories:write`. The API key owner must be able to modify the
+active, user-managed durable repository. Missing, inaccessible, ephemeral,
+system-managed, expired, and inactive repositories all return `404 NOT_FOUND`.
+Canonical file-type, size, and quota validation is shared with the web upload
+flow.
+
+```bash
+curl -X POST -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"itemName":"Graduation policy","fileName":"policy.pdf",
+       "contentType":"application/pdf","byteSize":248731}' \
+  "https://your-domain/api/v1/repositories/42/items/uploads"
+```
+
+The `201` response contains `sessionId`, `objectKey`, `expiresAt`, and either:
+
+- `uploadMethod: "single"` with one `uploadUrl`; or
+- `uploadMethod: "multipart"` with `partSize` and numbered `partUrls`.
+
+```json
+{
+  "data": {
+    "sessionId": "11111111-2222-4333-8444-555555555555",
+    "objectKey": "repositories/42/11111111-2222-4333-8444-555555555555/policy.pdf",
+    "uploadMethod": "single",
+    "uploadUrl": "https://s3.example/presigned-put",
+    "expiresAt": "2026-07-29T01:00:00.000Z"
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+Upload the exact declared bytes with S3 `PUT` requests. Retain every multipart
+ETag. Invalid metadata returns `400 VALIDATION_ERROR`, exhausted upload quotas
+return `429 REPOSITORY_UPLOAD_QUOTA_EXCEEDED`, and a deployment where canonical
+uploads are disabled returns `503 UPLOAD_UNAVAILABLE`. JSON request bodies over
+128 KiB return `413 PAYLOAD_TOO_LARGE`.
+
+#### `POST /api/v1/repositories/{id}/items/uploads/{sessionId}/complete`
+
+Requires `repositories:write` and current modify access. Send `{}` for a
+single-part upload. For multipart, send every S3 ETag and part number:
+
+```json
+{
+  "parts": [
+    { "ETag": "\"9b2cf535f27731c974343645a3985328\"", "PartNumber": 1 }
+  ]
+}
+```
+
+Completion verifies the uploaded object, creates the immutable item version and
+durable processing job, and requests immediate dispatch. Scheduled dispatch
+retries a committed job if needed. The response contains `itemId`,
+`itemVersionId`, `processingJobId`, and `replayed`. Repeating a successful
+completion returns the same identifiers with `replayed: true` and the
+`Idempotency-Replayed: true` header. Invalid multipart input or an unavailable
+or foreign session returns `400 UPLOAD_COMPLETION_FAILED` without session
+details. Unexpected storage or database failures return
+`500 INTERNAL_ERROR`; callers can retry completion with the same session
+because registration is idempotent. Completed-session replays remain valid
+after the original presigned upload URL expires. JSON request bodies over
+128 KiB return `413 PAYLOAD_TOO_LARGE`.
+
+```json
+{
+  "data": {
+    "itemId": 87,
+    "itemVersionId": "33333333-4444-4555-8666-777777777777",
+    "processingJobId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "replayed": false
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
 
 ---
 
@@ -1318,7 +1397,10 @@ applied or downgraded.
 Returns the same requester-visible hierarchy as `collectionService.tree(req)`.
 Requires `content:read`. Filtering and visible-object counts are permission-pushed
 on the server; a hidden collection is never loaded into the client or exposed
-through a secondary id/name lookup.
+through a secondary id/name lookup. If an accessible child exists below a denied
+ancestor, the denied node is omitted and the child is re-rooted beneath its
+nearest returned ancestor (or at the root); `parentId` and `path` reflect that
+permission-filtered projection.
 
 - `shape=tree` (default) retains nested `children`.
 - `shape=flat` walks that tree in stable Atrium position/name pre-order, omits
@@ -1336,6 +1418,8 @@ through a secondary id/name lookup.
       "slug": "technology-guides",
       "parentId": null,
       "path": ["Technology Guides"],
+      "scope": "district",
+      "ownerUserId": null,
       "defaultVisibilityLevel": "internal",
       "visibleObjectCount": 42,
       "selectableForCreate": true,
@@ -1350,6 +1434,98 @@ through a secondary id/name lookup.
 failures are `401`/`403`. A slug/UUID selected from this response is passed to
 `POST /content` unchanged. If it is deleted before create, the existing typed
 `400 CONTENT_VALIDATION` collection-not-found response is returned.
+
+#### `POST /api/v1/content/collections`
+
+Creates a collection. Requires `content:create`; REST authorization remains
+scope-based. `scope: "private"` creates an owner-bound hierarchy for the acting
+human. `scope: "district"` requires administrator
+authority.
+
+```json
+{
+  "name": "Human Resources",
+  "scope": "district",
+  "parentId": null,
+  "position": 2,
+  "defaultVisibilityLevel": "internal",
+  "inheritGrants": true,
+  "grants": [
+    { "access": "view", "kind": "role", "value": "staff" },
+    {
+      "access": "create",
+      "kind": "group",
+      "value": "hr-editors@psd401.net"
+    }
+  ]
+}
+```
+
+Grant `access` is independent: `view` controls collection/content discovery;
+`create` controls whether content may be placed there. Child collections inherit
+ancestor grants while `inheritGrants` is true. Zero effective grants preserve the
+legacy unrestricted district behavior. A `group` default uses effective
+collection `view` grants as the new object's group-visibility grants and is
+rejected when no such grant exists.
+
+Private collections are always `private`, never inherit or carry grants, and can
+nest only under private collections owned by the same user. An administrator can
+inspect private collection metadata/counts in the oversight UI but cannot enter,
+read, or mutate another user's private collection.
+
+**Response `201`**
+
+```json
+{
+  "data": {
+    "id": "c0ffee00-0000-4000-8000-000000000001",
+    "name": "Human Resources",
+    "slug": "human-resources",
+    "parentId": null,
+    "path": ["Human Resources"],
+    "scope": "district",
+    "ownerUserId": null,
+    "ownerName": null,
+    "defaultVisibilityLevel": "internal",
+    "inheritGrants": true,
+    "position": 2,
+    "archivedAt": null,
+    "directContentCount": 0,
+    "subtreeContentCount": 0,
+    "grants": [
+      { "access": "view", "kind": "role", "value": "staff" }
+    ],
+    "selectableForCreate": true
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+#### `PATCH /api/v1/content/collections/{id}`
+
+Requires `content:update`. Any subset of `name`, `parentId`, `position`,
+`defaultVisibilityLevel`, `inheritGrants`, `grants`, or `archived` may be sent.
+`parentId` + `position` implement move/reorder. `archived: true` archives the
+selected collection and its subtree; `false` restores the subtree. Content rows
+are retained.
+
+```json
+{ "parentId": "c0ffee00-0000-4000-8000-000000000001", "position": 0 }
+```
+
+Slugs remain stable on rename. Sibling names are case-insensitively unique within
+the district hierarchy or one private owner's hierarchy; different owners may
+use the same top-level name.
+Crossing district/private ownership boundaries, moving under a descendant,
+restoring under an archived parent, or conflicting concurrent hierarchy writes
+is rejected (`400`/`409`). A resulting `group` default without any effective
+`view` grant is also rejected. The response uses the same management shape as
+create.
+
+Content counts have explicit semantics: `directContentCount` counts only rows
+filed directly in the collection; `subtreeContentCount` includes all descendants.
+Content selection in the library/API remains **direct collection only**; subtree
+counts do not change list filtering semantics.
 
 ---
 
@@ -1428,6 +1604,11 @@ initial version (v1) is snapshotted. Requires `content:create`.
 | `visibility` | object | no | `{ level, grants? }` (see Visibility below). Defaults to the collection default, else `private` |
 | `tags` | string[] | no | — |
 | `sourceRef` | object | no | Create-only typed provenance; see Capture provenance below |
+
+Collection placement is re-authorized inside the object write transaction under
+collection locks. The persisted default visibility and inherited grants are the
+locked current values; a concurrent archive or grant revocation cannot commit a
+stale create.
 
 **Capture provenance (#1290):** Atrium Capture may send
 `sourceRef: { type: "capture", provider, externalId, clientSurface, clientVersion,
@@ -1562,6 +1743,10 @@ Requires `content:update`.
 | `tags` | string[] \| null | Replaces all tags; `null` clears them |
 | `collectionId` | string \| null | Collection slug or UUID; `null` clears the collection |
 | `status` | `draft` \| `published` \| `archived` | — |
+
+When `collectionId` changes, the target collection and its effective create
+grants are re-authorized under collection locks in the same transaction as the
+object update.
 
 **Example request:**
 
@@ -2042,19 +2227,26 @@ Import an OKF bundle into content. Requires `content:create`.
 | Field | Type | Required | Constraints |
 |-------|------|----------|-------------|
 | `files` | array of `{ path, content }` | yes | ≥ 1 file |
-| `targetCollectionId` | string | no | Import the bundle root INTO this collection; a fresh root is created when omitted |
+| `targetCollectionId` | string | no | Import the bundle root INTO this selectable collection; a fresh owner-bound private root is created for human/delegated callers when omitted |
 
 **Provenance (§36.3):** imported objects are **agent-authored**
 (`actor_kind = 'agent'`, attributed to the seeded `atrium-importer` identity) and
 created **private + draft** — never fabricated human authorship, never pre-widened.
-The triggering caller is recorded in the audit trail.
+Object ownership and collection authorization remain bound to the triggering
+human/delegated caller, who is recorded in the audit trail.
+
+Reconstructed hierarchy uses the shared collection-management service. A
+human/delegated caller without a target gets a private hierarchy they own.
+Creating descendants beneath a district target requires administrator authority.
+Autonomous callers must supply an existing selectable target and cannot mint an
+ownerless/shared hierarchy.
 
 **Retry semantics (not transactional):** import is additive and not wrapped in a
 single transaction (`contentService.create` does its own tx + post-commit S3 IO
 per object). A run that fails partway leaves the already-created private/draft
-content in place, and a retry re-imports the whole bundle as **new** objects (no
-path/`sourceRef` dedup; slugs auto-suffix). For idempotency, import into a fresh
-`targetCollectionId` and, on failure, delete that partial collection before retrying.
+content in place. A blind retry can duplicate objects or meet a sibling-name
+conflict. For idempotency, use a fresh `targetCollectionId` and, on failure,
+archive the partial imported subtree before retrying into a new target.
 
 **Response `201`**
 

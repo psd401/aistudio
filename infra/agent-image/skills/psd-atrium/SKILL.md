@@ -76,6 +76,42 @@ item includes its canonical `url`.
 has open in the live editor may be **ahead** of this until a version is snapshotted
 — say so rather than presenting it as the current text.
 
+### Manage collections
+
+Every owner can create and manage an owner-bound private hierarchy. A private
+collection may be nested only below another collection owned by that same user;
+it cannot carry grants or widen its default visibility. Administrators can also
+manage the district/shared hierarchy and assign role/group `view` and `create`
+access independently.
+
+```bash
+node run.js list-collections
+node run.js create-collection --name "My projects" --scope private
+node run.js create-collection --name "HR" --scope district \
+  --parent root --default-visibility internal \
+  --grants view:role:staff,create:group:hr-editors@psd401.net
+node run.js edit-collection --id <uuid> --name "People Operations" --position 2
+node run.js move-collection --id <uuid> --parent <parent-uuid> --position 0
+node run.js archive-collection --id <uuid>
+node run.js restore-collection --id <uuid>
+```
+
+- Use the collection UUID returned by `list-collections` for mutation commands.
+- `list-collections` returns active collections you can enter (including
+  accessible district/shared collections) plus active and archived collections
+  you can manage. Manageable rows include `archivedAt`, direct grants,
+  `directContentCount`, and `subtreeContentCount`; use the command to rediscover
+  a UUID before restoring a subtree.
+- `--parent root` moves to the top level.
+- `--grants none` clears direct grants. Grant entries are
+  `view|create:role|group:<value>` (the API also accepts the other Atrium grant
+  kinds).
+- An archive/restore applies to the selected collection and its full subtree;
+  content is retained. Content counts include both `directContentCount` and
+  `subtreeContentCount`, so those meanings are never ambiguous.
+- Collection slugs stay stable across renames. Sibling names must be unique and
+  moving a collection below itself or a descendant is rejected.
+
 ### Images (authored assets)
 
 An image belongs to **one object**. Embedding it is a three-step flow, and the

@@ -158,6 +158,12 @@ export function CollectionTree({
     void load();
   }, [load]);
 
+  useEffect(() => {
+    const reload = () => void load();
+    window.addEventListener("atrium:collections-changed", reload);
+    return () => window.removeEventListener("atrium:collections-changed", reload);
+  }, [load]);
+
   return (
     <nav
       aria-label="Content sections"

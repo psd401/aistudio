@@ -35,6 +35,14 @@
  *   node run.js delete --id <id>
  *   node run.js set-visibility --id <id> --level private|group|internal|public
  *                    [--grants role:staff,building:GHS]
+ *   node run.js list-collections
+ *   node run.js create-collection --name <name> [--scope private|district]
+ *                    [--parent <uuid|root>] [--position <n>]
+ *   node run.js edit-collection --id <uuid> [--name <name>] [--parent <uuid|root>]
+ *                    [--position <n>] [--default-visibility <level>]
+ *   node run.js move-collection --id <uuid> --parent <uuid|root> [--position <n>]
+ *   node run.js archive-collection --id <uuid>
+ *   node run.js restore-collection --id <uuid>
  *
  * Artifact code is HTML/JS/CSS (including <script>/<style>) and is FULLY
  * supported: run.js base64-encodes every write body automatically (codeEncoding:
@@ -85,6 +93,7 @@ const BODY_FORMATS = ['markdown', 'html', 'jsx'];
 const ARTIFACT_FORMATS = ['html', 'jsx'];
 const PUBLISH_DESTINATIONS = ['intranet', 'public_web', 'schoology', 'google', 'okf'];
 const UNPUBLISH_DESTINATIONS = ['intranet', 'public_web', 'schoology', 'google'];
+const COLLECTION_SCOPES = ['private', 'district'];
 
 function usage() {
   process.stdout.write(
@@ -117,6 +126,19 @@ function usage() {
       '                       while published — unpublish everywhere first)',
       '  set-visibility --id <id> --level private|group|internal|public',
       '                 [--grants role:staff,building:GHS]',
+      '',
+      'Collections (private for every owner; district requires administrator):',
+      '  list-collections',
+      '  create-collection --name <name> [--scope private|district]',
+      '                    [--parent <uuid|root>] [--position <n>]',
+      '                    [--default-visibility <level>] [--inherit-grants true|false]',
+      '                    [--grants view:role:staff,create:group:staff@example.org]',
+      '  edit-collection --id <uuid> [--name <name>] [--parent <uuid|root>]',
+      '                  [--position <n>] [--default-visibility <level>]',
+      '                  [--inherit-grants true|false] [--grants access:kind:value,...]',
+      '  move-collection --id <uuid> --parent <uuid|root> [--position <n>]',
+      '  archive-collection --id <uuid>',
+      '  restore-collection --id <uuid>',
       '',
       'Artifact code (HTML/JS/CSS, incl. <script>/<style>) is fully supported and',
       'sent base64-encoded automatically — you pass raw code, nothing to escape.',
@@ -161,6 +183,57 @@ function optStr(args, name, label) {
   if (v === undefined) return undefined;
   if (v === true) fail(`--${label} requires a value`);
   return v;
+}
+
+function optNonNegativeInt(args, name, label) {
+  const value = optStr(args, name, label);
+  if (value === undefined) return undefined;
+  if (!/^\d+$/.test(value)) fail(`--${label} must be a non-negative integer`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) fail(`--${label} is too large`);
+  return parsed;
+}
+
+function optBoolean(args, name, label) {
+  const value = optStr(args, name, label);
+  if (value === undefined) return undefined;
+  if (value !== 'true' && value !== 'false') {
+    fail(`--${label} must be true or false`);
+  }
+  return value === 'true';
+}
+
+function optCollectionParent(args, required = false) {
+  const value = required
+    ? requireStr(args, 'parent', 'parent')
+    : optStr(args, 'parent', 'parent');
+  if (value === undefined) return undefined;
+  return value === 'root' ? null : value;
+}
+
+function parseCollectionGrants(raw) {
+  if (raw === undefined) return undefined;
+  if (raw === true || raw === '') {
+    fail('--grants requires access:kind:value entries');
+  }
+  if (raw === 'none') return [];
+  return raw.split(',').map((entry) => {
+    const first = entry.indexOf(':');
+    const second = entry.indexOf(':', first + 1);
+    if (first <= 0 || second <= first + 1 || second === entry.length - 1) {
+      fail(`invalid collection grant "${entry}"; expected access:kind:value`);
+    }
+    const access = entry.slice(0, first);
+    const kind = entry.slice(first + 1, second);
+    const value = entry.slice(second + 1);
+    if (!['view', 'create'].includes(access)) {
+      fail(`collection grant access must be view or create: ${entry}`);
+    }
+    if (!['role', 'building', 'department', 'grade', 'user', 'group'].includes(kind)) {
+      fail(`invalid collection grant kind: ${entry}`);
+    }
+    return { access, kind, value };
+  });
 }
 
 /**
@@ -524,6 +597,79 @@ async function archiveObject(args) {
   emit({ ...payload, archived: true });
 }
 
+async function listCollections() {
+  const { payload } = await restFetch('GET', '/collections');
+  emit(payload);
+}
+
+async function createCollection(args) {
+  const body = {
+    name: requireStr(args, 'name', 'name'),
+    scope:
+      optEnum(args, 'scope', 'scope', COLLECTION_SCOPES) || 'private',
+    parentId: optCollectionParent(args),
+    position: optNonNegativeInt(args, 'position', 'position'),
+    defaultVisibilityLevel: optEnum(
+      args,
+      'default_visibility',
+      'default-visibility',
+      LEVELS
+    ),
+    inheritGrants: optBoolean(args, 'inherit_grants', 'inherit-grants'),
+    grants: parseCollectionGrants(args.grants),
+  };
+  const { payload } = await restFetch('POST', '/collections', { body });
+  emit(payload);
+}
+
+async function editCollection(args) {
+  const id = requireStr(args, 'id', 'id');
+  const body = {
+    name: optStr(args, 'name', 'name'),
+    parentId: optCollectionParent(args),
+    position: optNonNegativeInt(args, 'position', 'position'),
+    defaultVisibilityLevel: optEnum(
+      args,
+      'default_visibility',
+      'default-visibility',
+      LEVELS
+    ),
+    inheritGrants: optBoolean(args, 'inherit_grants', 'inherit-grants'),
+    grants: parseCollectionGrants(args.grants),
+  };
+  const { payload } = await restFetch(
+    'PATCH',
+    `/collections/${encodeURIComponent(id)}`,
+    { body }
+  );
+  emit(payload);
+}
+
+async function moveCollection(args) {
+  const id = requireStr(args, 'id', 'id');
+  const { payload } = await restFetch(
+    'PATCH',
+    `/collections/${encodeURIComponent(id)}`,
+    {
+      body: {
+        parentId: optCollectionParent(args, true),
+        position: optNonNegativeInt(args, 'position', 'position'),
+      },
+    }
+  );
+  emit(payload);
+}
+
+async function setCollectionArchived(args, archived) {
+  const id = requireStr(args, 'id', 'id');
+  const { payload } = await restFetch(
+    'PATCH',
+    `/collections/${encodeURIComponent(id)}`,
+    { body: { archived } }
+  );
+  emit(payload);
+}
+
 async function deleteObject(args) {
   const id = requireStr(args, 'id', 'id');
   const { payload } = await restFetch('DELETE', `/${encodeURIComponent(id)}`);
@@ -594,6 +740,12 @@ const COMMANDS = {
   'create-artifact': createArtifact,
   edit: editObject,
   archive: archiveObject,
+  'list-collections': listCollections,
+  'create-collection': createCollection,
+  'edit-collection': editCollection,
+  'move-collection': moveCollection,
+  'archive-collection': (args) => setCollectionArchived(args, true),
+  'restore-collection': (args) => setCollectionArchived(args, false),
   delete: deleteObject,
   'set-visibility': setVisibility,
   publish: publishObject,

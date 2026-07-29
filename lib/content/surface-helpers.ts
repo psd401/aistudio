@@ -10,7 +10,12 @@ import { eq } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentCollections } from "@/lib/db/schema";
 import { hasCapabilityAccess } from "@/utils/roles";
+import {
+  requesterMayCreateInCollection,
+  requesterMayViewCollection,
+} from "./collection-access";
 import { ForbiddenError, ValidationError } from "./errors";
+import type { Requester } from "./types";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -32,9 +37,11 @@ async function collectionIdByColumn(
 }
 
 /**
- * Resolve a `collection` argument (a slug OR a uuid) to a collection id, or
- * `undefined` when none is supplied. Throws a user-facing `ValidationError`
- * (→ 400) when it matches no collection.
+ * Resolve a `collection` argument (a slug OR a uuid) to a requester-admitted
+ * collection id, or `undefined` when none is supplied. Throws the same
+ * user-facing `ValidationError` (→ 400) when the collection is absent or the
+ * requester lacks the requested view/create access, so private names and ids
+ * cannot be confirmed through a filter or placement side channel.
  *
  * EXISTENCE is validated here — not deferred to the service. `contentService.create`
  * skips its own collection check when an explicit `visibility.level` is supplied
@@ -43,30 +50,53 @@ async function collectionIdByColumn(
  * uuid-shaped input is tried as an id first, then as a slug (a slug can itself be
  * uuid-shaped) — mirroring `loadByIdOrSlug`.
  *
- * Overloads: a REQUIRED (non-empty) argument always resolves to a `string` — the
- * function only returns `undefined` for a falsy input, and either resolves or
- * throws otherwise — so a caller passing a zod-validated `.min(1)` id needs no
- * `undefined` narrowing. Passing an optional/nullable value keeps the
+ * Overloads: a REQUIRED (non-empty) collection always resolves to a `string` —
+ * the function only returns `undefined` for a falsy input, and either resolves
+ * or throws otherwise — so a caller passing a zod-validated `.min(1)` id needs
+ * no `undefined` narrowing. Passing an optional/nullable value keeps the
  * `string | undefined` result.
  */
-export function resolveCollectionId(collection: string): Promise<string>;
+type CollectionResolutionAccess = "view" | "create";
+
 export function resolveCollectionId(
-  collection?: string | null
+  req: Requester,
+  collection: string,
+  access: CollectionResolutionAccess
+): Promise<string>;
+export function resolveCollectionId(
+  req: Requester,
+  collection: string | null | undefined,
+  access: CollectionResolutionAccess
 ): Promise<string | undefined>;
 export async function resolveCollectionId(
-  collection?: string | null
+  req: Requester,
+  collection: string | null | undefined,
+  access: CollectionResolutionAccess
 ): Promise<string | undefined> {
   if (!collection) return undefined;
+  let collectionId: string | undefined;
   if (UUID_RE.test(collection)) {
-    const byId = await collectionIdByColumn(contentCollections.id, collection);
-    if (byId) return byId;
+    collectionId = await collectionIdByColumn(
+      contentCollections.id,
+      collection
+    );
     // Fall through: the value may be a uuid-shaped slug rather than an id.
   }
-  const bySlug = await collectionIdByColumn(contentCollections.slug, collection);
-  if (!bySlug) {
+  if (!collectionId) {
+    collectionId = await collectionIdByColumn(
+      contentCollections.slug,
+      collection
+    );
+  }
+  const permitted =
+    collectionId != null &&
+    (access === "create"
+      ? await requesterMayCreateInCollection(req, collectionId)
+      : await requesterMayViewCollection(req, collectionId));
+  if (!collectionId || !permitted) {
     throw new ValidationError("Collection not found", { collection });
   }
-  return bySlug;
+  return collectionId;
 }
 
 // The two reader-link builders moved to the dependency-free `./reader-links`

@@ -789,6 +789,172 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /repositories/{id}/items/uploads:
+    post:
+      operationId: initiateRepositoryItemUpload
+      tags: [Repositories]
+      summary: Initiate a repository item upload
+      description: |
+        Creates an owner-bound canonical upload session with presigned S3 URLs.
+        The API key owner must be able to modify the active, user-managed durable
+        repository. Other repository shapes are masked as `404 NOT_FOUND`.
+        Requires `repositories:write`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RepositoryUploadInitiateRequest"
+            example:
+              itemName: Graduation policy
+              fileName: graduation-policy.pdf
+              contentType: application/pdf
+              byteSize: 248731
+      responses:
+        "201":
+          description: Canonical upload session created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RepositoryUploadSession"
+                  meta:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+              example:
+                data:
+                  sessionId: 11111111-2222-4333-8444-555555555555
+                  objectKey: repositories/42/11111111-2222-4333-8444-555555555555/graduation-policy.pdf
+                  uploadMethod: single
+                  uploadUrl: https://s3.example/presigned-put
+                  expiresAt: "2026-07-29T01:00:00.000Z"
+                meta: { requestId: req_abc123 }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          description: JSON request body exceeds 128 KiB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: API-key rate limit or repository upload quota exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Canonical repository uploads are not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /repositories/{id}/items/uploads/{sessionId}/complete:
+    post:
+      operationId: completeRepositoryItemUpload
+      tags: [Repositories]
+      summary: Complete a repository item upload
+      description: |
+        Commits an owner-bound session, creates the immutable item version and
+        durable processing job, and requests dispatch. Successful completion is
+        idempotent. Requires `repositories:write` and current modify access.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RepositoryUploadCompleteRequest"
+            examples:
+              single:
+                summary: Complete a single-part upload
+                value: {}
+              multipart:
+                summary: Complete a multipart upload
+                value:
+                  parts:
+                    - ETag: '"9b2cf535f27731c974343645a3985328"'
+                      PartNumber: 1
+      responses:
+        "200":
+          description: Upload committed and processing queued.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/Idempotency-Replayed"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RepositoryUploadCompletion"
+                  meta:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+              example:
+                data:
+                  itemId: 87
+                  itemVersionId: 33333333-4444-4555-8666-777777777777
+                  processingJobId: aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee
+                  replayed: false
+                meta: { requestId: req_abc123 }
+        "400":
+          description: Invalid multipart parts or an unavailable upload session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          description: JSON request body exceeds 128 KiB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /repositories/search:
     post:
       operationId: searchRepositories
@@ -2087,6 +2253,9 @@ paths:
         Creates a document or artifact. Does NOT publish it. When `body` is
         supplied, an initial version (v1) is snapshotted. Mirrors the MCP
         `create_document` / `create_artifact` tools. Requires `content:create`.
+        Collection placement is re-authorized under collection locks in the
+        object write transaction, which also resolves the current default and
+        inherited grants.
 
         **Public create-as-private (§26.4, issue #1118):** creating directly at
         `visibility.level: "public"` (explicitly, or via a collection whose default
@@ -2166,7 +2335,10 @@ paths:
         same stable pre-order without `children`, retaining each node's display
         `path`. When the caller also holds `content:create`,
         `selectableForCreate` is included so an external picker can select a
-        destination without hard-coded slugs or ids.
+        destination without hard-coded slugs or ids. If an accessible child is
+        below a denied ancestor, the denied node is omitted and the child is
+        re-rooted beneath its nearest returned ancestor (or at the root);
+        `parentId` and `path` reflect this permission-filtered projection.
       security:
         - BearerAuth: []
       parameters:
@@ -2199,6 +2371,121 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: createContentCollection
+      tags: [Content]
+      summary: Create an Atrium collection
+      description: |
+        Creates an owner-bound `private` collection for the calling human, or a
+        district/shared collection when the caller is an administrator. Requires
+        `content:create`. Private collections are always private, never inherit
+        grants, and may nest only under collections owned by the same user. A
+        `group` default requires at least one effective `view` grant.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCollectionRequest"
+            examples:
+              private:
+                value:
+                  name: My Projects
+                  scope: private
+                  parentId: null
+              district:
+                value:
+                  name: Human Resources
+                  scope: district
+                  defaultVisibilityLevel: internal
+                  inheritGrants: true
+                  grants:
+                    - access: view
+                      kind: role
+                      value: staff
+                    - access: create
+                      kind: group
+                      value: hr-editors@psd401.net
+      responses:
+        "201":
+          description: Collection created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionManagementResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/ContentConflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /content/collections/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Collection UUID returned by collection discovery or creation.
+        schema:
+          type: string
+          format: uuid
+    patch:
+      operationId: updateContentCollection
+      tags: [Content]
+      summary: Rename, reorder, move, archive, or restore an Atrium collection
+      description: |
+        Applies a partial collection update. `parentId` and `position` move/reorder
+        the collection; `archived=true|false` recursively archives/restores its
+        subtree without deleting content. Requires `content:update`. District
+        collections require administrator authority; private collections remain
+        owner-bound and cannot be managed or read by district administrators. A
+        resulting `group` default requires at least one effective `view` grant.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCollectionRequest"
+            examples:
+              move:
+                value:
+                  parentId: c0ffee00-0000-4000-8000-000000000001
+                  position: 0
+              archiveSubtree:
+                value:
+                  archived: true
+      responses:
+        "200":
+          description: Updated collection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionManagementResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/ContentConflict"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -2258,7 +2545,9 @@ paths:
         Updates object metadata only — `title`, `tags`, `collectionId`, and
         `status`. Body changes go through the versions endpoint. `collectionId`
         accepts a slug or UUID; `null` clears the collection, `null` tags clears
-        all tags. Mirrors the MCP `update_content` tool. Requires `content:update`.
+        all tags. A collection move re-authorizes the target under collection
+        locks in the same transaction as the update. Mirrors the MCP
+        `update_content` tool. Requires `content:update`.
       security:
         - BearerAuth: []
       requestBody:
@@ -3140,14 +3429,19 @@ paths:
         **Provenance:** imported objects are **agent-authored**
         (`actor_kind = 'agent'`, attributed to the seeded `atrium-importer`
         identity) and created **private + draft** — never fabricated human
-        authorship, never pre-widened. The triggering caller is recorded in the
-        audit trail.
+        authorship, never pre-widened. Ownership and collection authorization
+        remain bound to the triggering human/delegated caller.
+
+        Reconstructed hierarchy uses the shared collection-management service.
+        Without a target, human/delegated callers receive a private root they
+        own. Descendants beneath a district target require administrator
+        authority. Autonomous callers must supply an existing selectable target.
 
         **Retry semantics:** import is additive and NOT transactional. A run that
-        fails partway leaves the already-created private/draft content in place, and
-        a retry re-imports the whole bundle as new objects (no dedup). For
-        idempotency, import into a fresh `targetCollectionId` and delete that partial
-        collection before retrying.
+        fails partway leaves already-created private/draft content in place. A
+        blind retry can duplicate objects or meet a sibling-name conflict. For
+        idempotency, use a fresh target and archive the partial imported subtree
+        before retrying into a new target.
       security:
         - BearerAuth: []
       requestBody:
@@ -3532,6 +3826,78 @@ components:
         lastUpdated: { type: [string, "null"], format: date-time }
         createdAt: { type: [string, "null"], format: date-time }
         updatedAt: { type: [string, "null"], format: date-time }
+
+    RepositoryUploadInitiateRequest:
+      type: object
+      additionalProperties: false
+      required: [itemName, fileName, contentType, byteSize]
+      properties:
+        itemName: { type: string, minLength: 1, maxLength: 500 }
+        fileName: { type: string, minLength: 1, maxLength: 500 }
+        contentType:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Canonical MIME type for a supported file.
+        byteSize:
+          type: integer
+          minimum: 1
+          description: Exact number of bytes to upload.
+
+    RepositoryUploadPartUrl:
+      type: object
+      required: [partNumber, uploadUrl]
+      properties:
+        partNumber: { type: integer, minimum: 1 }
+        uploadUrl: { type: string, format: uri }
+
+    RepositoryUploadSession:
+      type: object
+      required: [sessionId, objectKey, uploadMethod, expiresAt]
+      properties:
+        sessionId: { type: string, format: uuid }
+        objectKey: { type: string }
+        uploadMethod:
+          type: string
+          enum: [single, multipart]
+        uploadUrl:
+          type: string
+          format: uri
+          description: Present for single-part uploads.
+        partSize:
+          type: integer
+          minimum: 1
+        partUrls:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/RepositoryUploadPartUrl"
+        expiresAt: { type: string, format: date-time }
+
+    RepositoryUploadCompleteRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        parts:
+          type: array
+          maxItems: 10000
+          description: Required only for multipart uploads.
+          items:
+            type: object
+            additionalProperties: false
+            required: [ETag, PartNumber]
+            properties:
+              ETag: { type: string, minLength: 1, maxLength: 512 }
+              PartNumber: { type: integer, minimum: 1, maximum: 10000 }
+
+    RepositoryUploadCompletion:
+      type: object
+      required: [itemId, itemVersionId, processingJobId, replayed]
+      properties:
+        itemId: { type: integer, minimum: 1 }
+        itemVersionId: { type: string, format: uuid }
+        processingJobId: { type: string, format: uuid }
+        replayed: { type: boolean }
 
     RepositorySearchRequest:
       type: object
@@ -4516,6 +4882,8 @@ components:
         - slug
         - parentId
         - path
+        - scope
+        - ownerUserId
         - defaultVisibilityLevel
         - visibleObjectCount
       properties:
@@ -4530,11 +4898,19 @@ components:
           type: string
           format: uuid
           nullable: true
+          description: Nearest returned ancestor; null when no admitted ancestor is returned.
         path:
           type: array
           minItems: 1
           items:
             type: string
+        scope:
+          type: string
+          enum: [district, private]
+        ownerUserId:
+          type: integer
+          nullable: true
+          description: Present for owner-bound private collections.
         defaultVisibilityLevel:
           type: string
           enum: [private, group, internal, public]
@@ -4571,6 +4947,166 @@ components:
             count:
               type: integer
               minimum: 0
+
+    CollectionGrant:
+      type: object
+      additionalProperties: false
+      required: [access, kind, value]
+      properties:
+        access:
+          type: string
+          enum: [view, create]
+        kind:
+          type: string
+          enum: [role, building, department, grade, user, group]
+        value:
+          type: string
+          minLength: 1
+          maxLength: 255
+
+    CreateCollectionRequest:
+      type: object
+      additionalProperties: false
+      required: [name, scope]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        scope:
+          type: string
+          enum: [district, private]
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+        position:
+          type: integer
+          minimum: 0
+        defaultVisibilityLevel:
+          type: string
+          enum: [private, group, internal, public]
+        inheritGrants:
+          type: boolean
+        grants:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/CollectionGrant"
+
+    UpdateCollectionRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: |
+        A collection cannot change between district and private ownership.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+        position:
+          type: integer
+          minimum: 0
+        defaultVisibilityLevel:
+          type: string
+          enum: [private, group, internal, public]
+        inheritGrants:
+          type: boolean
+        grants:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/CollectionGrant"
+        archived:
+          type: boolean
+
+    CollectionManagement:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - slug
+        - parentId
+        - path
+        - scope
+        - ownerUserId
+        - ownerName
+        - defaultVisibilityLevel
+        - inheritGrants
+        - position
+        - archivedAt
+        - directContentCount
+        - subtreeContentCount
+        - grants
+        - selectableForCreate
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+        path:
+          type: array
+          items:
+            type: string
+        scope:
+          type: string
+          enum: [district, private]
+        ownerUserId:
+          type: integer
+          nullable: true
+        ownerName:
+          type: string
+          nullable: true
+        defaultVisibilityLevel:
+          type: string
+          enum: [private, group, internal, public]
+        inheritGrants:
+          type: boolean
+        position:
+          type: integer
+          minimum: 0
+        archivedAt:
+          type: string
+          format: date-time
+          nullable: true
+        directContentCount:
+          type: integer
+          minimum: 0
+        subtreeContentCount:
+          type: integer
+          minimum: 0
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/CollectionGrant"
+        selectableForCreate:
+          type: boolean
+
+    CollectionManagementResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/CollectionManagement"
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
 
     ContentObject:
       type: object
@@ -5335,7 +5871,7 @@ components:
             $ref: "#/components/schemas/OkfFile"
         targetCollectionId:
           type: string
-          description: Existing collection slug or id to import the bundle root INTO (a fresh root collection is created when omitted).
+          description: Existing selectable collection slug or id to import the bundle root INTO. When omitted, a human/delegated caller gets a fresh owner-bound private root; autonomous callers must supply a target.
 
     OkfImportResponse:
       type: object

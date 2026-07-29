@@ -4,9 +4,9 @@
  *
  * The public reader at `app/(public)/p/[slug]/page.tsx` is the anonymous, world-
  * readable surface. Its security contract is stricter than the internal reader:
- *   - it consults NO session/requester,
+ *   - it consults NO session-dependent requester,
  *   - it renders ONLY an object whose `visibility_level === 'public'` AND that has
- *     a LIVE `public_web` publication,
+ *     a LIVE `public_web` publication in a collection open to an anonymous user,
  *   - every other case (absent slug, non-public object, no live public_web
  *     publication, dangling version) resolves to `notFound()` (404) — NEVER 403,
  *     so a probe cannot distinguish "exists but not public" from "absent".
@@ -66,6 +66,11 @@ jest.mock("drizzle-orm", () => ({
 jest.mock("@/lib/content/visibility-service", () => ({
   visibilityService: { canView: jest.fn() },
 }));
+const requesterMayViewCollectionMock = jest.fn();
+jest.mock("@/lib/content/collection-access", () => ({
+  requesterMayViewCollection: (...args: unknown[]) =>
+    requesterMayViewCollectionMock(...args),
+}));
 
 const getByIdMock = jest.fn();
 const loadArtifactCodeMock = jest.fn();
@@ -114,12 +119,14 @@ const PUBLIC_OBJ = {
   id: "obj-1",
   kind: "document",
   title: "Public Doc",
+  collectionId: "collection-public",
   visibilityLevel: "public",
 };
 const INTERNAL_OBJ = {
   id: "obj-2",
   kind: "document",
   title: "Internal Doc",
+  collectionId: "collection-internal",
   visibilityLevel: "internal",
 };
 const PUBLICATION_ROW = { publishedVersionId: "ver-1" };
@@ -133,6 +140,7 @@ beforeEach(() => {
   getByIdMock.mockReset();
   getTextMock.mockReset();
   loadArtifactCodeMock.mockReset();
+  requesterMayViewCollectionMock.mockReset().mockResolvedValue(true);
   mockNotFound.mockClear();
 });
 
@@ -169,6 +177,20 @@ describe("Atrium public reader page — anonymous 404 masking", () => {
 
     expect(mockNotFound).toHaveBeenCalledTimes(1);
     expect(executeQueryMock).toHaveBeenCalledTimes(2);
+    expect(getByIdMock).not.toHaveBeenCalled();
+  });
+
+  it("404s public content in a collection the anonymous requester cannot enter", async () => {
+    executeQueryMock.mockResolvedValueOnce([PUBLIC_OBJ]);
+    requesterMayViewCollectionMock.mockResolvedValue(false);
+
+    await expect(render()).rejects.toBe(NOT_FOUND_SENTINEL);
+
+    expect(requesterMayViewCollectionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: null, roles: [] }),
+      "collection-public"
+    );
+    expect(executeQueryMock).toHaveBeenCalledTimes(1);
     expect(getByIdMock).not.toHaveBeenCalled();
   });
 

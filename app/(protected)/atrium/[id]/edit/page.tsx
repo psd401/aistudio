@@ -51,6 +51,7 @@ export default async function AtriumEditPage({
   const viewable = await visibilityService.canView(req, {
     id: obj.id,
     ownerUserId: obj.ownerUserId,
+    collectionId: obj.collectionId,
     visibilityLevel: obj.visibilityLevel,
   });
   // Existence-mask: a non-viewable object must NOT return 403 — that leaks existence

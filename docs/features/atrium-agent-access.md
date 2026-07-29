@@ -59,7 +59,7 @@ Consequences for external agents:
    | `publish_content` | `content:publish_internal` | Public destinations additionally require the human/admin-held `content:publish_public` — the tool surfaces a structured `approval_required` signal instead of publishing |
    | `unpublish_content` | `content:publish_internal` | Taking down a **public** destination is gated the same as putting it up (§26.4) |
    | `export_okf` | `content:read` | `--audience public` additionally needs `content:publish_public` |
-   | `import_okf` | `content:create` | Imports land private + draft |
+   | `import_okf` | `content:create` | Imports land private + draft; hierarchy creation follows collection ownership/admin rules |
 
 **Safety invariants:** all agent-created objects start **private + draft**
 (create → widen, never create-public), and every write is permission-gated by the
@@ -94,8 +94,18 @@ whose signed invocation proof identifies the workspace owner. The broker resolve
 that email to an active `users` row and `requesterForUserId`, then invokes the
 shared content services directly. No reusable content key enters the workspace
 and the route never falls back to the shared service principal.
-Subcommands: `find`, `read`, `create-document`, `create-artifact`, `edit`
-(`--mode replace|append`), `set-visibility`, `publish`, `unpublish`. The agent
+Subcommands include `find`, `read`, `create-document`, `create-artifact`, `edit`
+(`--mode replace|append`), `set-visibility`, `publish`, `unpublish`, plus
+`list-collections`, `create-collection`, `edit-collection`, `move-collection`,
+`archive-collection`, and `restore-collection`. Collection mutations use the same
+owner/admin hierarchy service as the UI and REST API: every owner can manage only
+their private tree, while district collection management requires administrator
+authority. `list-collections` combines active requester-visible collections
+(including accessible district/shared rows) with active and archived manageable
+rows. Manageable rows include grants and direct/subtree counts, so an owner can
+rediscover the UUID required to restore an archived subtree without losing
+district collection discovery.
+The agent
 works **version-based** (create-as-private, owner permission and capability
 gating) and acts as the **signed workspace owner** — a `user` requester. Writes
 are attributed to that owner; public publish/widen authority is never synthesized,

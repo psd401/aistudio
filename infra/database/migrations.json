@@ -155,6 +155,7 @@
     "162-nexus-user-memories.sql",
     "163-assistant-execution-deadline.sql",
     "164-nexus-memory-extraction-model.sql",
-    "165-agent-scheduled-run-fire-idempotency.sql"
+    "165-agent-scheduled-run-fire-idempotency.sql",
+    "166-atrium-collection-management.sql"
   ]
 }
