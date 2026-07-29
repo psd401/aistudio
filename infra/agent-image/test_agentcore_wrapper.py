@@ -24,6 +24,7 @@ sys.path.insert(0, __import__("os").path.dirname(__file__))
 import agentcore_wrapper  # noqa: E402
 from agentcore_wrapper import (  # noqa: E402
     _attachment_workspace_paths,
+    _frame_user_message,
     _render_attachments_header,
     _sanitize_header_field,
 )
@@ -659,6 +660,47 @@ class SafeHeaderValueTests(unittest.TestCase):
         self.assertEqual(header.count("["), 1)
         self.assertEqual(header.count("]"), 1)
         self.assertNotIn("cross-user-invocation:", header.split("agent-owner:")[0])
+
+
+class AudienceHeaderTests(unittest.TestCase):
+    def test_shared_space_header_marks_the_turn_as_public(self):
+        framed = _frame_user_message(
+            user_message="Summarize my inbox",
+            user_email="owner@psd401.net",
+            display_name="Owner",
+            now_header="[now: Tuesday]",
+            audience="shared-space",
+        )
+
+        self.assertIn(
+            "[audience: shared Google Chat space — public to all space members]",
+            framed,
+        )
+        self.assertTrue(framed.endswith("Summarize my inbox"))
+
+    def test_dm_turn_omits_the_audience_header(self):
+        framed = _frame_user_message(
+            user_message="Summarize my inbox",
+            user_email="owner@psd401.net",
+            display_name="Owner",
+            now_header="[now: Tuesday]",
+        )
+
+        self.assertNotIn("[audience:", framed)
+
+    def test_cross_user_shared_space_keeps_both_context_headers(self):
+        framed = _frame_user_message(
+            user_message="What is the plan?",
+            user_email="owner@psd401.net",
+            display_name="Owner",
+            now_header="[now: Tuesday]",
+            audience="shared-space",
+            invoked_by_email="caller@psd401.net",
+            invoked_by_display_name="Caller",
+        )
+
+        self.assertIn("[audience: shared Google Chat space", framed)
+        self.assertIn("[cross-user-invocation: Caller", framed)
 
 
 class TestRenderAttachmentsHeader(unittest.TestCase):

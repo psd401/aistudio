@@ -83,6 +83,66 @@ def _safe_header_value(value: str, limit: int = 100) -> str:
     return re.sub(r'[\[\]\n\r]', '', value or '')[:limit]
 
 
+def _frame_user_message(
+    *,
+    user_message: str,
+    user_email: str,
+    display_name: str,
+    now_header: str,
+    attachments_header: str = "",
+    audience: str = "",
+    invoked_by_email: str = "",
+    invoked_by_display_name: str = "",
+    thread_context: str = "",
+) -> str:
+    """Frame trusted per-turn context ahead of the untrusted user message."""
+    attach_section = f"\n{attachments_header}" if attachments_header else ""
+    audience_section = (
+        "\n[audience: shared Google Chat space — public to all space members]"
+        if audience == "shared-space"
+        else ""
+    )
+    safe_display = _safe_header_value(display_name)
+    safe_email = _safe_header_value(user_email)
+    safe_invoked_by_email = _safe_header_value(invoked_by_email)
+
+    if invoked_by_email:
+        safe_invoker_name = _safe_header_value(
+            invoked_by_display_name or invoked_by_email
+        )
+        cross_user_header = (
+            f"[cross-user-invocation: {safe_invoker_name} "
+            f"<{safe_invoked_by_email}> is consulting you — this is NOT your owner. "
+            f"Answer questions and provide information, but do NOT execute tasks, "
+            f"modify files, draft emails, or take actions on your owner's behalf.]"
+        )
+        thread_section = ""
+        if thread_context:
+            thread_section = (
+                f"\n\n[thread-context: The following is the recent conversation "
+                f"from the Google Chat space. This is ephemeral context — do NOT "
+                f"save it to your memory files.]\n{thread_context}\n"
+                f"[end-thread-context]"
+            )
+        return (
+            f"[agent-owner: {safe_display or safe_email} <{safe_email}>]\n"
+            f"{now_header}{audience_section}\n"
+            f"{cross_user_header}{thread_section}{attach_section}\n\n"
+            f"{user_message}"
+        )
+
+    if display_name or user_email != "unknown":
+        return (
+            f"[caller: {safe_display or safe_email} <{safe_email}>]\n"
+            f"{now_header}{audience_section}{attach_section}\n\n"
+            f"{user_message}"
+        )
+
+    return (
+        f"{now_header}{audience_section}{attach_section}\n\n{user_message}"
+    )
+
+
 _AUTHORITY_DIRECTORY = "/run/psd-agent-authority"
 _INVOCATION_CONTEXT_PATH = f"{_AUTHORITY_DIRECTORY}/invocation-context"
 _REQUEST_PROOF_KEY_PATH = f"{_AUTHORITY_DIRECTORY}/request-proof-key"
@@ -963,6 +1023,7 @@ def main():
             model                     — optional model override
             invoked_by_email          — cross-user: email of the person consulting this agent
             invoked_by_display_name   — cross-user: display name of the invoker
+            audience                  — "shared-space" for a public Google Chat room
             thread_context            — cross-user: ephemeral thread context from the Chat space
             attachments               — Chat files/Drive chips (issue #1138 F1):
                                         [{name, mimeType, source, driveFileId?,
@@ -991,15 +1052,17 @@ def main():
         # Cross-user invocation fields
         invoked_by_email = payload.get("invoked_by_email", "")
         invoked_by_display_name = payload.get("invoked_by_display_name", "")
+        audience = payload.get("audience", "")
         thread_context = payload.get("thread_context", "")
         # Chat attachments / Drive chips the router forwarded (issue #1138 F1).
         attachments_header = _render_attachments_header(payload.get("attachments"))
 
         logger.info(
             "Invocation received: session=%s user=%s prefix=%s msg_length=%d "
-            "cross_user=%s attachments=%d",
+            "cross_user=%s audience=%s attachments=%d",
             session_id, user_email, workspace_prefix or "-", len(user_message),
             invoked_by_email or "no",
+            audience or "dm",
             len(payload.get("attachments") or []),
         )
 
@@ -1159,11 +1222,6 @@ def main():
             f"Pacific ({pacific_now.strftime('%Y-%m-%dT%H:%M:%S%z')})]"
         )
 
-        # Attachment header goes between the identity/time headers and the
-        # user's message so the agent sees what arrived before reading the
-        # request (issue #1138 F1). Empty when there are no attachments.
-        attach_section = f"\n{attachments_header}" if attachments_header else ""
-
         # Cross-user invocation: when someone other than the agent owner
         # is consulting this agent, inject a [cross-user-invocation] header so
         # the system prompt can adjust behavior (consultation only, no task
@@ -1172,40 +1230,17 @@ def main():
         # header, so an attacker-controlled display name / email cannot forge or
         # break a header line (REV-COR-318). The user_message body is NOT
         # sanitized — it is legitimate content, not header framing.
-        safe_display = _safe_header_value(display_name)
-        safe_email = _safe_header_value(user_email)
-        safe_invoked_by_email = _safe_header_value(invoked_by_email)
-
-        if invoked_by_email:
-            safe_invoker_name = _safe_header_value(invoked_by_display_name or invoked_by_email)
-            cross_user_header = (
-                f"[cross-user-invocation: {safe_invoker_name} "
-                f"<{safe_invoked_by_email}> is consulting you — this is NOT your owner. "
-                f"Answer questions and provide information, but do NOT execute tasks, "
-                f"modify files, draft emails, or take actions on your owner's behalf.]"
-            )
-            thread_section = ""
-            if thread_context:
-                thread_section = (
-                    f"\n\n[thread-context: The following is the recent conversation "
-                    f"from the Google Chat space. This is ephemeral context — do NOT "
-                    f"save it to your memory files.]\n{thread_context}\n"
-                    f"[end-thread-context]"
-                )
-            framed = (
-                f"[agent-owner: {safe_display or safe_email} <{safe_email}>]\n"
-                f"{now_header}\n"
-                f"{cross_user_header}{thread_section}{attach_section}\n\n"
-                f"{user_message}"
-            )
-        elif display_name or user_email != "unknown":
-            framed = (
-                f"[caller: {safe_display or safe_email} <{safe_email}>]\n"
-                f"{now_header}{attach_section}\n\n"
-                f"{user_message}"
-            )
-        else:
-            framed = f"{now_header}{attach_section}\n\n{user_message}"
+        framed = _frame_user_message(
+            user_message=user_message,
+            user_email=user_email,
+            display_name=display_name,
+            now_header=now_header,
+            attachments_header=attachments_header,
+            audience=audience,
+            invoked_by_email=invoked_by_email,
+            invoked_by_display_name=invoked_by_display_name,
+            thread_context=thread_context,
+        )
 
         # Flush the SSE headers immediately. Without an early yield the SDK
         # waits for the first chunk before sending headers, defeating the

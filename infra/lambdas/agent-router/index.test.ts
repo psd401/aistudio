@@ -14,6 +14,10 @@ const {
   buildOwnerResponse,
   buildOwnerJobPromotionInput,
   extractIncomingMessage,
+  addOptionalAgentContext,
+  buildAgentInvocationContext,
+  sendGoogleChatResponseWithDependencies,
+  resolveDmSpace,
   btwSlashCommandId,
 } = agentRouterTestHelpers
 
@@ -25,11 +29,14 @@ type OwnerDependencies = Parameters<
 type OwnerTurn = NonNullable<
   Awaited<ReturnType<typeof invokeOwnerAgentWithDependencies>>
 >
+type ChatResponseDependencies = Parameters<
+  typeof sendGoogleChatResponseWithDependencies
+>[2]
 
 const TEST_LOG = createLogger({ requestId: "agent-router-index-test" })
 
 function ownerHuman(options?: {
-  spaceType?: "DM" | "ROOM"
+  spaceType?: "DM" | "ROOM" | "TYPE_UNSPECIFIED"
   messageText?: string
   slashCommandId?: string
   argumentText?: string
@@ -77,7 +84,7 @@ function ownerHuman(options?: {
       createTime: "2026-07-27T12:00:00Z",
     },
     attachments: [],
-    isSharedSpace: spaceType === "ROOM",
+    isSharedSpace: spaceType !== "DM",
     senderName: "users/owner",
     senderEmail: "owner@psd401.net",
     senderDisplayName: "Owner",
@@ -112,6 +119,17 @@ const AGENT_RESULT: OwnerTurn["result"] = {
   nudged: false,
   messages: [],
   toolCalls: [],
+}
+
+function chatResponseDependencies(
+  overrides: Partial<ChatResponseDependencies> = {}
+): ChatResponseDependencies {
+  return {
+    createMessage: async () => {},
+    resolveDmSpace: async () => null,
+    recordFailure: async () => {},
+    ...overrides,
+  }
 }
 
 function ownerDependencies(
@@ -240,6 +258,362 @@ describe("agent router result coercion", () => {
     expect(result.messages).toEqual([])
     expect(result.toolCalls).toEqual([])
     expect(result.failed).toBe(false)
+  })
+})
+
+describe("Google Chat response delivery", () => {
+  test("resolves the real sender DM lookup and maps 404 to no existing DM", async () => {
+    const requests: Array<Record<string, unknown>> = []
+    const auth = {
+      request: async (request: Record<string, unknown>) => {
+        requests.push(request)
+        return { data: { name: "spaces/owner-dm" } }
+      },
+    } as unknown as Parameters<typeof resolveDmSpace>[0]
+
+    await expect(
+      resolveDmSpace(auth, "users/owner")
+    ).resolves.toBe("spaces/owner-dm")
+    expect(requests).toEqual([
+      {
+        url: "https://chat.googleapis.com/v1/spaces:findDirectMessage",
+        method: "GET",
+        params: { name: "users/owner" },
+      },
+    ])
+
+    const notFoundAuth = {
+      request: async () => {
+        throw Object.assign(new Error("not found"), { code: 404 })
+      },
+    } as unknown as Parameters<typeof resolveDmSpace>[0]
+    await expect(
+      resolveDmSpace(notFoundAuth, "users/missing")
+    ).resolves.toBeNull()
+  })
+
+  test("the real sender DM lookup rethrows non-404 failures", async () => {
+    const auth = {
+      request: async () => {
+        throw Object.assign(new Error("permission denied"), { code: 403 })
+      },
+    } as unknown as Parameters<typeof resolveDmSpace>[0]
+
+    await expect(
+      resolveDmSpace(auth, "users/owner")
+    ).rejects.toThrow("permission denied")
+  })
+
+  test("sets the reply option whenever a thread name is present", async () => {
+    const requests: Array<
+      Parameters<ChatResponseDependencies["createMessage"]>[0]
+    > = []
+
+    const outcome = await sendGoogleChatResponseWithDependencies(
+      {
+        spaceName: "spaces/room",
+        threadName: "spaces/room/threads/thread-1",
+        text: "Threaded response",
+        deliveryContext: {},
+      },
+      TEST_LOG,
+      chatResponseDependencies({
+        createMessage: async request => {
+          requests.push(request)
+        },
+      })
+    )
+
+    expect(requests).toHaveLength(1)
+    expect(outcome).toBe("delivered")
+    expect(requests[0]).toEqual({
+      parent: "spaces/room",
+      requestBody: {
+        text: "Threaded response",
+        thread: { name: "spaces/room/threads/thread-1" },
+      },
+      messageReplyOption: "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
+    })
+  })
+
+  test("records a room-post 403 and delivers the response by DM without rethrowing", async () => {
+    const requests: Array<
+      Parameters<ChatResponseDependencies["createMessage"]>[0]
+    > = []
+    const failures: Array<
+      Parameters<ChatResponseDependencies["recordFailure"]>[0]
+    > = []
+    let createAttempt = 0
+
+    await expect(
+      sendGoogleChatResponseWithDependencies(
+        {
+          spaceName: "spaces/room",
+          threadName: "spaces/room/threads/thread-1",
+          text: "Private answer",
+          deliveryContext: {
+            isSharedSpace: true,
+            senderGoogleIdentity: "users/owner",
+            userId: "owner@psd401.net",
+            sessionId: "session-1",
+          },
+        },
+        TEST_LOG,
+        chatResponseDependencies({
+          createMessage: async request => {
+            requests.push(request)
+            createAttempt += 1
+            if (createAttempt === 1) {
+              throw Object.assign(
+                new Error(
+                  "This organization's administrator restricts this Chat app from performing this action"
+                ),
+                { code: 403, response: { status: 403 } }
+              )
+            }
+          },
+          resolveDmSpace: async googleIdentity => {
+            expect(googleIdentity).toBe("users/owner")
+            return "spaces/owner-dm"
+          },
+          recordFailure: async params => {
+            failures.push(params)
+          },
+        })
+      )
+    ).resolves.toBe("dm-fallback-delivered")
+
+    expect(requests).toHaveLength(2)
+    expect(requests[1]?.parent).toBe("spaces/owner-dm")
+    expect(requests[1]?.messageReplyOption).toBeUndefined()
+    expect(requests[1]?.requestBody.thread).toBeUndefined()
+    expect(requests[1]?.requestBody.text).toContain("Private answer")
+    expect(requests[1]?.requestBody.text).toContain(
+      "administrator currently restricts this Chat app"
+    )
+    expect(failures.map(failure => failure.errorClass)).toEqual([
+      "ChatPostPermissionDenied",
+    ])
+    expect(failures[0]).toMatchObject({
+      severity: "warn",
+      alert: false,
+      context: {
+        dmFallbackAttempted: true,
+        dmFallbackOutcome: "delivered",
+      },
+    })
+  })
+})
+
+describe("Google Chat response limits", () => {
+  test("truncates a DM fallback body to the Google Chat message limit", async () => {
+    const requests: Array<
+      Parameters<ChatResponseDependencies["createMessage"]>[0]
+    > = []
+    let createAttempt = 0
+
+    await expect(
+      sendGoogleChatResponseWithDependencies(
+        {
+          spaceName: "spaces/room",
+          threadName: "spaces/room/threads/thread-1",
+          text: "x".repeat(5000),
+          deliveryContext: {
+            isSharedSpace: true,
+            senderGoogleIdentity: "users/owner",
+          },
+        },
+        TEST_LOG,
+        chatResponseDependencies({
+          createMessage: async request => {
+            requests.push(request)
+            createAttempt += 1
+            if (createAttempt === 1) {
+              throw Object.assign(new Error("room post denied"), { code: 403 })
+            }
+          },
+          resolveDmSpace: async () => "spaces/owner-dm",
+        })
+      )
+    ).resolves.toBe("dm-fallback-delivered")
+
+    const fallbackText = requests[1]?.requestBody.text
+    expect(typeof fallbackText).toBe("string")
+    expect(fallbackText).toHaveLength(4096)
+    expect(fallbackText).toContain(
+      "_(Response truncated — ask me to continue)_"
+    )
+    expect(fallbackText).toEndWith(
+      "I'm sending it to you privately instead."
+    )
+  })
+})
+
+describe("Google Chat response fallback failures", () => {
+  test("records a missing sender DM without retrying the room post", async () => {
+    const requests: Array<
+      Parameters<ChatResponseDependencies["createMessage"]>[0]
+    > = []
+    const failures: Array<
+      Parameters<ChatResponseDependencies["recordFailure"]>[0]
+    > = []
+
+    await expect(
+      sendGoogleChatResponseWithDependencies(
+        {
+          spaceName: "spaces/room",
+          threadName: "spaces/room/threads/thread-1",
+          text: "Private answer",
+          deliveryContext: {
+            isSharedSpace: true,
+            senderGoogleIdentity: "users/owner",
+            userId: "owner@psd401.net",
+            sessionId: "session-1",
+          },
+        },
+        TEST_LOG,
+        chatResponseDependencies({
+          createMessage: async request => {
+            requests.push(request)
+            throw Object.assign(new Error("room post denied"), { code: 403 })
+          },
+          resolveDmSpace: async () => null,
+          recordFailure: async params => {
+            failures.push(params)
+          },
+        })
+      )
+    ).resolves.toBe("failed")
+
+    expect(requests).toHaveLength(1)
+    expect(failures.map(failure => failure.errorClass)).toEqual([
+      "ChatPostPermissionDenied",
+      "ChatDmFallbackFailed",
+    ])
+    expect(failures[0]?.severity).toBe("error")
+    expect(failures[0]?.alert).toBeUndefined()
+    expect(failures[1]?.context).toMatchObject({
+      dmFallbackAttempted: true,
+      dmFallbackOutcome: "dm-space-not-found",
+    })
+  })
+
+  test("records a failed DM post without surfacing an unhandled rejection", async () => {
+    const requests: Array<
+      Parameters<ChatResponseDependencies["createMessage"]>[0]
+    > = []
+    const failures: Array<
+      Parameters<ChatResponseDependencies["recordFailure"]>[0]
+    > = []
+
+    await expect(
+      sendGoogleChatResponseWithDependencies(
+        {
+          spaceName: "spaces/room",
+          threadName: "spaces/room/threads/thread-1",
+          text: "Private answer",
+          deliveryContext: {
+            isSharedSpace: true,
+            senderGoogleIdentity: "users/owner",
+            userId: "owner@psd401.net",
+            sessionId: "session-1",
+          },
+        },
+        TEST_LOG,
+        chatResponseDependencies({
+          createMessage: async request => {
+            requests.push(request)
+            if (requests.length === 1) {
+              throw Object.assign(new Error("room post denied"), { code: 403 })
+            }
+            throw new Error("DM post failed")
+          },
+          resolveDmSpace: async () => "spaces/owner-dm",
+          recordFailure: async params => {
+            failures.push(params)
+          },
+        })
+      )
+    ).resolves.toBe("failed")
+
+    expect(requests).toHaveLength(2)
+    expect(requests[1]?.parent).toBe("spaces/owner-dm")
+    expect(failures.map(failure => failure.errorClass)).toEqual([
+      "ChatPostPermissionDenied",
+      "ChatDmFallbackFailed",
+    ])
+    expect(failures[0]?.severity).toBe("error")
+    expect(failures[0]?.alert).toBeUndefined()
+    expect(failures[1]?.errorMessage).toBe("DM post failed")
+    expect(failures[1]?.context).toMatchObject({
+      dmFallbackAttempted: true,
+      dmFallbackOutcome: "failed",
+    })
+  })
+})
+
+describe("AgentCore audience context", () => {
+  test("treats TYPE_UNSPECIFIED as shared at ingress", () => {
+    const incoming = extractIncomingMessage(
+      ownerHuman({ spaceType: "TYPE_UNSPECIFIED" }).chatEvent,
+      TEST_LOG
+    )
+
+    expect(incoming?.isSharedSpace).toBe(true)
+  })
+
+  test("uses the current sender name for owner turns and the target name for cross-user turns", () => {
+    const human = ownerHuman()
+    human.senderDisplayName = "Current Owner Name"
+    const staleOwner = {
+      ...OWNER_USER,
+      displayName: "Persisted Owner Name",
+    }
+
+    const ownerContext = buildAgentInvocationContext(human, staleOwner)
+    const crossUserContext = buildAgentInvocationContext(
+      human,
+      staleOwner,
+      {
+        email: "caller@psd401.net",
+        displayName: "Caller",
+      }
+    )
+
+    expect(ownerContext.displayName).toBe("Current Owner Name")
+    expect(crossUserContext.displayName).toBe("Persisted Owner Name")
+  })
+
+  test("adds shared-space audience to owner and cross-user payloads", () => {
+    const roomHuman = ownerHuman({ spaceType: "ROOM" })
+    const ownerContext = buildAgentInvocationContext(roomHuman, OWNER_USER)
+    const crossUserContext = buildAgentInvocationContext(
+      roomHuman,
+      OWNER_USER,
+      {
+        email: "caller@psd401.net",
+        displayName: "Caller",
+      }
+    )
+    const ownerPayload: Record<string, unknown> = {}
+    const crossUserPayload: Record<string, unknown> = {}
+
+    addOptionalAgentContext(ownerPayload, ownerContext)
+    addOptionalAgentContext(crossUserPayload, crossUserContext)
+
+    expect(ownerPayload.audience).toBe("shared-space")
+    expect(crossUserPayload.audience).toBe("shared-space")
+    expect(crossUserPayload.invoked_by_email).toBe("caller@psd401.net")
+  })
+
+  test("omits audience from DM payloads", () => {
+    const dmContext = buildAgentInvocationContext(ownerHuman(), OWNER_USER)
+    const payload: Record<string, unknown> = {}
+
+    addOptionalAgentContext(payload, dmContext)
+
+    expect(dmContext.audience).toBeUndefined()
+    expect(payload.audience).toBeUndefined()
   })
 })
 

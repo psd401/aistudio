@@ -22,6 +22,8 @@
 
 import {
   formatJobChatResponse,
+  jobAgentAudienceContext,
+  jobChatDeliveryContext,
   JOB_DEADLINE_S,
   parseJobPayload,
   resolveJobInvocation,
@@ -84,12 +86,14 @@ function scheduledFailureContext(job: JobPayload) {
   };
 }
 
-async function recordDeliveredJobResult(
+async function recordCompletedJobResult(
   job: JobPayload,
   agentResult: AgentResult,
   latencyMs: number,
+  deliveryOutcome: Awaited<ReturnType<typeof sendGoogleChatResponse>>,
   log: JobLogger
 ): Promise<void> {
+  const deliveryFailed = deliveryOutcome === 'failed';
   await logTelemetry(
     {
       userId: job.userEmail,
@@ -110,30 +114,7 @@ async function recordDeliveredJobResult(
     },
     log
   );
-  await recordScheduledJobTerminal(
-    job,
-    {
-      status: agentResult.failed ? 'error' : 'success',
-      inputTokens: agentResult.inputTokens,
-      outputTokens: agentResult.outputTokens,
-      latencyMs,
-      ...(agentResult.failed
-        ? { errorMessage: agentResult.response }
-        : {}),
-    },
-    writeScheduledRun,
-    log
-  );
-
-  if (!agentResult.failed) {
-    log.info('Background job completed', {
-      sessionId: job.sessionId,
-      latencyMs,
-      outputTokens: agentResult.outputTokens,
-    });
-    return;
-  }
-  if (agentResult.errorSource === 'router') {
+  if (agentResult.failed && agentResult.errorSource === 'router') {
     await recordFailure(
       {
         source: 'router',
@@ -148,6 +129,50 @@ async function recordDeliveredJobResult(
       },
       log
     );
+  }
+  await recordScheduledJobTerminal(
+    job,
+    {
+      status: agentResult.failed || deliveryFailed ? 'error' : 'success',
+      inputTokens: agentResult.inputTokens,
+      outputTokens: agentResult.outputTokens,
+      latencyMs,
+      ...(deliveryFailed
+        ? {
+            errorMessage:
+              'Google Chat room post and private DM fallback both failed' +
+              (agentResult.failed
+                ? ` after agent error: ${agentResult.response}`
+                : ''),
+          }
+        : agentResult.failed
+          ? { errorMessage: agentResult.response }
+        : {}),
+    },
+    writeScheduledRun,
+    log
+  );
+
+  if (deliveryFailed) {
+    log.warn('Background job completed but no Chat response was delivered', {
+      // Keep this on the monitored job-runner failure marker so interactive
+      // promotions page through the existing JobRunnerFailures alarm too.
+      marker: 'JOB_RUNNER_FAILED_TURN',
+      failureKind: 'delivery',
+      deliveryMarker: 'JOB_RUNNER_DELIVERY_FAILED',
+      sessionId: job.sessionId,
+      latencyMs,
+    });
+    return;
+  }
+
+  if (!agentResult.failed) {
+    log.info('Background job completed', {
+      sessionId: job.sessionId,
+      latencyMs,
+      outputTokens: agentResult.outputTokens,
+    });
+    return;
   }
   log.warn('Background job finished with a failed turn', {
     marker: 'JOB_RUNNER_FAILED_TURN',
@@ -170,7 +195,8 @@ async function handleJobRunnerError(
       '⚠️ The background job hit an internal error and could not finish. ' +
         'Some steps may have already completed — ask me to check before ' +
         'retrying.',
-      log
+      log,
+      jobChatDeliveryContext(job)
     );
   } catch (sendError) {
     log.error('Failed to post job-error message to Chat', {
@@ -278,6 +304,7 @@ async function main(): Promise<number> {
       {
         displayName: job.displayName,
         workspacePrefix: job.workspacePrefix,
+        ...jobAgentAudienceContext(job),
         deadlineS: JOB_DEADLINE_S,
         runtimeIdOverride: job.runtimeId,
       }
@@ -286,20 +313,27 @@ async function main(): Promise<number> {
     // Deliver exactly like the router's Step 6: truncate the raw response,
     // then prefix in shared spaces. A failed turn's response is already the
     // harness's failure frame — posting it satisfies "always post something".
-    await sendGoogleChatResponse(
+    const deliveryOutcome = await sendGoogleChatResponse(
       job.spaceName,
       job.threadName,
       formatJobChatResponse(job, agentResult.response),
-      log
+      log,
+      jobChatDeliveryContext(job)
     );
 
     const latencyMs =
       agentResult.latencyMs > 0 ? agentResult.latencyMs : Date.now() - startTime;
-    await recordDeliveredJobResult(job, agentResult, latencyMs, log);
+    await recordCompletedJobResult(
+      job,
+      agentResult,
+      latencyMs,
+      deliveryOutcome,
+      log
+    );
     // The ECS STOPPED-state supervisor uses the process exit code as its
     // authoritative terminal signal. A delivered agent failure is not a clean
     // job even though Chat delivery itself succeeded.
-    return agentResult.failed ? 2 : 0;
+    return deliveryOutcome === 'failed' ? 3 : agentResult.failed ? 2 : 0;
   } catch (error) {
     const exitCode = await handleJobRunnerError(job, error, startTime, log);
     return exitCode;
