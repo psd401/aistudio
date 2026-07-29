@@ -6,8 +6,5 @@
   "main": "render.js",
   "scripts": {
     "test": "bun test"
-  },
-  "dependencies": {
-    "@aws-sdk/client-lambda": "^3.658.0"
   }
 }

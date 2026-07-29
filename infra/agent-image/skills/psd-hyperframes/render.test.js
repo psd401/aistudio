@@ -5,8 +5,8 @@ const { validatedFs } = require("../../../validated-fs.cjs");
 /**
  * Unit tests for psd-hyperframes/render.js (#1175).
  *
- * Covers CLI arg parsing + payload validation and the Lambda-invocation path
- * with a mocked LambdaClient (injected via `deps.client`) so no AWS is touched.
+ * Covers CLI arg parsing + payload validation and the root-owned Lambda-relay
+ * path with an injected relay so no AWS is touched.
  *
  * Run: cd infra/agent-image/skills/psd-hyperframes && bun test
  */
@@ -51,14 +51,12 @@ beforeEach(() => {
   process.exit = (code) => { throw new ExitError(code); };
   process.stdout.write = (chunk) => { stdout += chunk; return true; };
   process.stderr.write = () => true;
-  process.env.HYPERFRAMES_RENDER_FUNCTION = 'psd-hyperframes-render-dev';
 });
 
 afterEach(() => {
   process.exit = originalExit;
   process.stdout.write = originalStdout;
   process.stderr.write = originalStderr;
-  delete process.env.HYPERFRAMES_RENDER_FUNCTION;
 });
 
 function lastJson() {
@@ -219,21 +217,20 @@ test('buildPayload rejects an unsafe / non-https --audio-url', () => {
   expect(lastJson().error).toBe('bad_args');
 });
 
-// ── invokeRender (mocked LambdaClient) ───────────────────────────────────────
+// ── invokeRender (mocked root relay) ─────────────────────────────────────────
 
-function fakeClient(responder) {
-  const sent = [];
-  return {
-    sent,
-    send: async (command) => {
-      sent.push(command);
-      return responder(command);
-    },
+function fakeRelay(responder) {
+  const calls = [];
+  const relay = async (payload) => {
+    calls.push(payload);
+    return responder(payload);
   };
+  relay.calls = calls;
+  return relay;
 }
 
-function okPayload(extra = {}) {
-  return Buffer.from(JSON.stringify({
+function okResult(extra = {}) {
+  return {
     status: 'ok',
     url: 'https://psd-agents-dev.s3.us-east-1.amazonaws.com/public-images/p@psd401.net/uuid.mp4',
     s3Key: 'public-images/p@psd401.net/uuid.mp4',
@@ -244,48 +241,65 @@ function okPayload(extra = {}) {
     height: 1080,
     sharing: 'public-by-link',
     ...extra,
-  }));
+  };
 }
 
-test('invokeRender sends a RequestResponse invoke to the configured function and returns the parsed result', async () => {
-  const client = fakeClient(() => ({ Payload: okPayload() }));
-  const result = await invokeRender({ html: HTML, durationSeconds: 3 }, { client });
+test('invokeRender sends the validated payload through the fixed-operation relay', async () => {
+  const relay = fakeRelay(() => okResult());
+  const payload = { html: HTML, durationSeconds: 3 };
+  const result = await invokeRender(payload, { relay });
   expect(result.status).toBe('ok');
   expect(result.s3Key).toBe('public-images/p@psd401.net/uuid.mp4');
-  expect(client.sent).toHaveLength(1);
-  expect(client.sent[0].input.FunctionName).toBe('psd-hyperframes-render-dev');
-  expect(client.sent[0].input.InvocationType).toBe('RequestResponse');
-  const decoded = JSON.parse(Buffer.from(client.sent[0].input.Payload).toString('utf8'));
-  expect(decoded.html).toBe(HTML);
+  expect(relay.calls).toEqual([payload]);
 });
 
 test('invokeRender surfaces a structured render error (status:error) as an exit', async () => {
-  const client = fakeClient(() => ({
-    Payload: Buffer.from(JSON.stringify({ status: 'error', error: 'render_failed', message: 'chromium crashed' })),
+  const relay = fakeRelay(() => ({
+    status: 'error',
+    error: 'render_failed',
+    message: 'chromium crashed',
   }));
-  await expect(invokeRender({ html: HTML }, { client })).rejects.toThrow(ExitError);
+  await expect(invokeRender({ html: HTML }, { relay })).rejects.toThrow(ExitError);
   expect(lastJson().error).toBe('render_failed');
   expect(lastJson().message).toContain('chromium crashed');
 });
 
-test('invokeRender surfaces a Lambda FunctionError as render_failed', async () => {
-  const client = fakeClient(() => ({ FunctionError: 'Unhandled', Payload: Buffer.from('{"errorMessage":"Task timed out"}') }));
-  await expect(invokeRender({ html: HTML }, { client })).rejects.toThrow(ExitError);
-  expect(lastJson().error).toBe('render_failed');
+test('invokeRender surfaces a relay or Lambda transport failure without credentials', async () => {
+  const relay = fakeRelay(() => {
+    throw new Error('HyperFrames relay returned HTTP 502');
+  });
+  await expect(invokeRender({ html: HTML }, { relay })).rejects.toThrow(ExitError);
+  expect(lastJson().error).toBe('invoke_failed');
+  expect(lastJson().message).toContain('HTTP 502');
 });
 
-test('invokeRender fails misconfigured when the function name env var is unset', async () => {
-  delete process.env.HYPERFRAMES_RENDER_FUNCTION;
-  const client = fakeClient(() => ({ Payload: okPayload() }));
-  await expect(invokeRender({ html: HTML }, { client })).rejects.toThrow(ExitError);
-  expect(lastJson().error).toBe('misconfigured');
+test('invokeRender needs no AWS credential variables in the exec subprocess', async () => {
+  const credentialKeys = [
+    'AWS_ACCESS_KEY_ID',
+    'AWS_SECRET_ACCESS_KEY',
+    'AWS_SESSION_TOKEN',
+    'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+    'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
+  ];
+  const saved = Object.fromEntries(credentialKeys.map((key) => [key, process.env[key]]));
+  for (const key of credentialKeys) delete process.env[key];
+  try {
+    const relay = fakeRelay(() => okResult());
+    const result = await invokeRender({ html: HTML, durationSeconds: 3 }, { relay });
+    expect(result.status).toBe('ok');
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
-// ── main end-to-end (mocked client) ──────────────────────────────────────────
+// ── main end-to-end (mocked relay) ───────────────────────────────────────────
 
-test('main emits the bare result JSON with the url on success', async () => {
-  const client = fakeClient(() => ({ Payload: okPayload() }));
-  await main(argv('--user', 'p@psd401.net', '--html', HTML, '--duration', '3'), { client });
+test('main emits the bare result JSON with the url on relay success', async () => {
+  const relay = fakeRelay(() => okResult());
+  await main(argv('--user', 'p@psd401.net', '--html', HTML, '--duration', '3'), { relay });
   const out = lastJson();
   expect(out.url).toContain('/public-images/');
   expect(out.s3Key).toBe('public-images/p@psd401.net/uuid.mp4');

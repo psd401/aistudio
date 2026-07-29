@@ -355,6 +355,25 @@ Then update the `FROM` digest and the header block in `infra/agent-image/Dockerf
 and **always** finish with the Morning Brief smoke test (below) — a trivial
 "respond OK" prompt masks session-completion regressions.
 
+### Direct-AWS skill credential boundary
+
+The pinned OpenClaw release sanitizes the environment for every model-launched
+`exec` subprocess. In particular, it removes inherited `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and the ECS/AgentCore container-
+credential URI variables. This is intentional: forwarding those values would
+let arbitrary model-authored commands print or reuse the execution-role
+credentials.
+
+`psd-tts` and `psd-hyperframes` therefore do not instantiate AWS SDK clients in
+the model-facing subprocess. They call two fixed endpoints on the root-owned
+loopback relay in `mantle_proxy.py`. The relay inherits the AgentCore execution-
+role credential chain, validates bounded operation-specific payloads, and can
+only call Polly `SynthesizeSpeech` or the configured HyperFrames Lambda. It
+returns synthesized audio or the Lambda result, never credential values or a
+caller-selected AWS target. Keep future direct-AWS skills behind the same kind
+of fixed-operation boundary; do not add AWS credential keys to OpenClaw's exec
+allowlist.
+
 ## Rich Chat output — cards, charts, button callbacks
 
 Phase 1 of native Chat interactivity (#TBD) added two skills and one shared

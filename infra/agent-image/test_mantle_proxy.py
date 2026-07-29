@@ -15,6 +15,8 @@ touch aiohttp, so we stub it in sys.modules before import — the test exercises
 the parsing logic, not the HTTP server.
 """
 
+import json
+import os
 import sys
 import types
 import unittest
@@ -48,13 +50,20 @@ if "aiohttp" not in sys.modules:
     _aiohttp.ClientTimeout = object
     sys.modules["aiohttp"] = _aiohttp
 
+sys.path.insert(0, os.path.dirname(__file__))
+
 import asyncio  # noqa: E402
 
 import mantle_proxy  # noqa: E402
 from mantle_proxy import (  # noqa: E402
     AgentBrokerResponseTooLarge,
+    POLLY_TEXT_MAX_CHARS,
+    _invoke_hyperframes,
     _read_bounded_agent_broker_response,
     _resolve_agent_broker_route,
+    _synthesize_polly,
+    _validate_hyperframes_payload,
+    _validate_polly_payload,
     _workspace_flush_request_allowed,
     _extract_usage,
     _is_anthropic_model,
@@ -69,6 +78,111 @@ from mantle_proxy import (  # noqa: E402
     _parse_anthropic_stream,
     _parse_anthropic_response,
 )
+
+
+class _FakeAwsStream:
+    def __init__(self, body):
+        self._body = body
+        self._offset = 0
+        self.closed = False
+
+    def read(self, amount):
+        chunk = self._body[self._offset : self._offset + amount]
+        self._offset += len(chunk)
+        return chunk
+
+    def close(self):
+        self.closed = True
+
+
+class TestDirectAwsSkillRelay(unittest.TestCase):
+    def test_polly_relay_allows_only_one_bounded_synthesis_operation(self):
+        payload = _validate_polly_payload({
+            "text": "EVAL 1426 synthetic audio canary",
+            "voice": "Ruth",
+            "engine": "generative",
+        })
+        stream = _FakeAwsStream(b"synthetic-mp3")
+        client = mock.Mock()
+        client.synthesize_speech.return_value = {"AudioStream": stream}
+
+        with mock.patch.object(
+            mantle_proxy,
+            "_new_polly_client",
+            return_value=client,
+        ):
+            audio = _synthesize_polly(payload)
+
+        self.assertEqual(audio, b"synthetic-mp3")
+        self.assertTrue(stream.closed)
+        client.synthesize_speech.assert_called_once_with(
+            Text="EVAL 1426 synthetic audio canary",
+            OutputFormat="mp3",
+            VoiceId="Ruth",
+            Engine="generative",
+        )
+
+    def test_polly_relay_rejects_extra_fields_and_oversize_text(self):
+        with self.assertRaises(ValueError):
+            _validate_polly_payload({
+                "text": "canary",
+                "voice": "Ruth",
+                "engine": "generative",
+                "returnCredentials": True,
+            })
+        with self.assertRaises(ValueError):
+            _validate_polly_payload({
+                "text": "x" * (POLLY_TEXT_MAX_CHARS + 1),
+                "voice": "Ruth",
+                "engine": "generative",
+            })
+
+    def test_hyperframes_relay_chooses_the_function_outside_the_request(self):
+        payload = _validate_hyperframes_payload({
+            "html": '<div data-composition-id="eval">EVAL 1426</div>',
+            "durationSeconds": 1,
+            "fps": 20,
+            "width": 640,
+            "height": 360,
+            "userEmail": "eval.issue1426@psd401.net",
+        })
+        result_body = json.dumps({
+            "status": "ok",
+            "url": "https://example.invalid/synthetic.mp4",
+        }).encode("utf-8")
+        stream = _FakeAwsStream(result_body)
+        client = mock.Mock()
+        client.invoke.return_value = {"Payload": stream}
+
+        with mock.patch.dict(
+            mantle_proxy.os.environ,
+            {"HYPERFRAMES_RENDER_FUNCTION": "psd-hyperframes-render-dev"},
+            clear=False,
+        ), mock.patch.object(
+            mantle_proxy,
+            "_new_lambda_client",
+            return_value=client,
+        ):
+            result = _invoke_hyperframes(payload)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(stream.closed)
+        call = client.invoke.call_args.kwargs
+        self.assertEqual(call["FunctionName"], "psd-hyperframes-render-dev")
+        self.assertEqual(call["InvocationType"], "RequestResponse")
+        self.assertNotIn("FunctionName", json.loads(call["Payload"]))
+
+    def test_hyperframes_relay_rejects_caller_selected_function(self):
+        with self.assertRaises(ValueError):
+            _validate_hyperframes_payload({
+                "html": '<div data-composition-id="eval">EVAL 1426</div>',
+                "durationSeconds": 1,
+                "fps": 20,
+                "width": 640,
+                "height": 360,
+                "userEmail": "eval.issue1426@psd401.net",
+                "functionName": "attacker-selected-function",
+            })
 
 
 class TestAgentBrokerRoute(unittest.TestCase):

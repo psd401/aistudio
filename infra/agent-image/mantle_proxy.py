@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Transparent logging proxy for the owner-bound AI Studio model broker.
+Root-owned loopback relay for the AI Studio agent runtime.
 
-Why: we need ground-truth visibility into what OpenClaw actually sends to
-Mantle. OpenClaw's logs don't include request bodies, and the "!"-loop
-degeneracy we see isn't reproducible via direct curl calls with the same
-apparent payload. This proxy sits on 127.0.0.1:18791, logs request +
-response to stdout (CloudWatch), and forwards byte-for-byte to the trusted web
-tier. The web tier holds the provider credential and enforces the signed owner
-context plus a model/output allowlist.
+The primary path logs what OpenClaw sends to the owner-bound model broker and
+forwards it to the trusted web tier. Fixed agent-broker routes attach root-only
+invocation authority. Two direct-AWS endpoints also perform bounded Polly and
+HyperFrames operations with the root process's AgentCore execution-role
+credential chain. OpenClaw strips that chain from model-launched subprocesses,
+and these endpoints never return reusable credentials or accept arbitrary AWS
+targets.
 
 If this process dies, OpenClaw's requests also fail — so the entrypoint
 should (a) verify the proxy's /health before starting the gateway and
@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -71,6 +72,20 @@ ALLOWED_AGENT_BROKER_ROUTES = frozenset({
     "/api/agent/workspace-execute",
     "/api/agent/workspace-storage",
 })
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+POLLY_TEXT_MAX_CHARS = 3_000
+POLLY_HTTP_REQUEST_MAX_BYTES = 16 * 1024
+POLLY_AUDIO_MAX_BYTES = 16 * 1024 * 1024
+HYPERFRAMES_REQUEST_MAX_BYTES = 4 * 1024 * 1024
+HYPERFRAMES_HTTP_REQUEST_MAX_BYTES = 6 * 1024 * 1024
+HYPERFRAMES_RESPONSE_MAX_BYTES = 8 * 1024 * 1024
+HYPERFRAMES_MAX_DURATION_SECONDS = 180
+HYPERFRAMES_MAX_FRAMES = 3_600
+HYPERFRAMES_MIN_DIMENSION = 16
+HYPERFRAMES_MAX_DIMENSION = 3_840
+POLLY_ENGINES = frozenset({"generative", "long-form", "neural", "standard"})
+POLLY_VOICE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+EMAIL_RE = re.compile(r"^[^\s@/]+@[^\s@/]+\.[^\s@/]+$")
 
 
 def _read_authority() -> tuple[str, bytes]:
@@ -81,6 +96,172 @@ def _read_authority() -> tuple[str, bytes]:
         encoded_key = handle.read().strip()
     padded = encoded_key + ("=" * (-len(encoded_key) % 4))
     return context, base64.urlsafe_b64decode(padded)
+
+
+def _invocation_authority_is_available() -> bool:
+    """Require an active, root-readable turn before privileged AWS work."""
+    try:
+        context, proof_key = _read_authority()
+    except (OSError, ValueError):
+        return False
+    return bool(context) and len(proof_key) == 32
+
+
+def _read_bounded_aws_stream(stream, max_bytes: int) -> bytes:
+    """Read and close an AWS StreamingBody without allowing memory exhaustion."""
+    body = bytearray()
+    try:
+        while True:
+            remaining = max_bytes - len(body)
+            chunk = stream.read(min(64 * 1024, remaining + 1))
+            if not chunk:
+                break
+            body.extend(chunk)
+            if len(body) > max_bytes:
+                raise ValueError("AWS response exceeds the configured limit")
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+    return bytes(body)
+
+
+def _validate_polly_payload(payload: object) -> dict:
+    """Validate the only Polly operation exposed to the model-facing UID."""
+    if not isinstance(payload, dict) or set(payload) != {"text", "voice", "engine"}:
+        raise ValueError("invalid Polly request")
+    text = payload.get("text")
+    voice = payload.get("voice")
+    engine = payload.get("engine")
+    if not isinstance(text, str) or not text.strip() or len(text) > POLLY_TEXT_MAX_CHARS:
+        raise ValueError("invalid Polly text")
+    if not isinstance(voice, str) or not POLLY_VOICE_RE.fullmatch(voice):
+        raise ValueError("invalid Polly voice")
+    if engine not in POLLY_ENGINES:
+        raise ValueError("invalid Polly engine")
+    return {"text": text, "voice": voice, "engine": engine}
+
+
+def _new_polly_client():
+    import boto3
+
+    return boto3.client("polly", region_name=AWS_REGION)
+
+
+def _synthesize_polly(payload: dict) -> bytes:
+    """Call Polly with the root relay's ambient AgentCore role credentials."""
+    response = _new_polly_client().synthesize_speech(
+        Text=payload["text"],
+        OutputFormat="mp3",
+        VoiceId=payload["voice"],
+        Engine=payload["engine"],
+    )
+    stream = response.get("AudioStream")
+    if stream is None:
+        raise RuntimeError("Polly returned no audio")
+    return _read_bounded_aws_stream(stream, POLLY_AUDIO_MAX_BYTES)
+
+
+def _validate_hyperframes_payload(payload: object) -> dict:
+    """Constrain the fixed Lambda relay independently of the skill and Lambda."""
+    if not isinstance(payload, dict):
+        raise ValueError("invalid HyperFrames request")
+    allowed = {
+        "html",
+        "css",
+        "js",
+        "durationSeconds",
+        "fps",
+        "width",
+        "height",
+        "userEmail",
+        "dryRun",
+    }
+    if set(payload) - allowed:
+        raise ValueError("invalid HyperFrames fields")
+
+    html = payload.get("html")
+    css = payload.get("css")
+    javascript = payload.get("js")
+    if not isinstance(html, str) or not html.strip():
+        raise ValueError("invalid HyperFrames HTML")
+    if css is not None and not isinstance(css, str):
+        raise ValueError("invalid HyperFrames CSS")
+    if javascript is not None and not isinstance(javascript, str):
+        raise ValueError("invalid HyperFrames JavaScript")
+    composition_bytes = sum(
+        len(value.encode("utf-8"))
+        for value in (html, css, javascript)
+        if isinstance(value, str)
+    )
+    if composition_bytes > HYPERFRAMES_REQUEST_MAX_BYTES:
+        raise ValueError("HyperFrames composition exceeds the configured limit")
+
+    duration = payload.get("durationSeconds")
+    fps = payload.get("fps")
+    width = payload.get("width")
+    height = payload.get("height")
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, (int, float))
+        or not math.isfinite(duration)
+        or duration <= 0
+        or duration > HYPERFRAMES_MAX_DURATION_SECONDS
+    ):
+        raise ValueError("invalid HyperFrames duration")
+    if isinstance(fps, bool) or not isinstance(fps, int) or not 1 <= fps <= 60:
+        raise ValueError("invalid HyperFrames fps")
+    if math.ceil(duration * fps) > HYPERFRAMES_MAX_FRAMES:
+        raise ValueError("HyperFrames frame budget exceeded")
+    for value in (width, height):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not HYPERFRAMES_MIN_DIMENSION <= value <= HYPERFRAMES_MAX_DIMENSION
+        ):
+            raise ValueError("invalid HyperFrames dimensions")
+
+    email = payload.get("userEmail")
+    if (
+        not isinstance(email, str)
+        or len(email) > 320
+        or not EMAIL_RE.fullmatch(email)
+    ):
+        raise ValueError("invalid HyperFrames user")
+    if "dryRun" in payload and not isinstance(payload["dryRun"], bool):
+        raise ValueError("invalid HyperFrames dry-run flag")
+    return payload
+
+
+def _new_lambda_client():
+    import boto3
+
+    return boto3.client("lambda", region_name=AWS_REGION)
+
+
+def _invoke_hyperframes(payload: dict) -> dict:
+    """Invoke only the configured render Lambda with root-owned AWS authority."""
+    function_name = os.environ.get("HYPERFRAMES_RENDER_FUNCTION", "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", function_name):
+        raise RuntimeError("HyperFrames render function is not configured")
+    response = _new_lambda_client().invoke(
+        FunctionName=function_name,
+        InvocationType="RequestResponse",
+        Payload=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+    )
+    stream = response.get("Payload")
+    if stream is None:
+        raise RuntimeError("HyperFrames returned no payload")
+    body = _read_bounded_aws_stream(stream, HYPERFRAMES_RESPONSE_MAX_BYTES)
+    if response.get("FunctionError"):
+        raise RuntimeError("HyperFrames Lambda reported a function error")
+    try:
+        result = json.loads(body)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("HyperFrames returned invalid JSON") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError("HyperFrames returned an invalid response")
+    return result
 
 
 def _authority_headers(method: str, route: str, body: bytes) -> dict:
@@ -1081,6 +1262,66 @@ async def handle_usage(_request: web.Request) -> web.Response:
     return web.json_response(payload)
 
 
+async def _read_fixed_aws_request(
+    request: web.Request, *, max_bytes: int
+) -> dict:
+    """Read a small JSON request for one of the fixed direct-AWS operations."""
+    if request.content_length is not None and request.content_length > max_bytes:
+        raise ValueError("AWS skill request exceeds the configured limit")
+    body = bytearray()
+    async for chunk in request.content.iter_chunked(64 * 1024):
+        body.extend(chunk)
+        if len(body) > max_bytes:
+            raise ValueError("AWS skill request exceeds the configured limit")
+    try:
+        payload = json.loads(bytes(body))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid AWS skill request") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("invalid AWS skill request")
+    return payload
+
+
+async def handle_polly_synthesize(request: web.Request) -> web.Response:
+    """Run one bounded SynthesizeSpeech call without returning AWS credentials."""
+    if not _invocation_authority_is_available():
+        return web.json_response({"error": "Invocation authority is unavailable"}, status=503)
+    try:
+        payload = _validate_polly_payload(
+            await _read_fixed_aws_request(
+                request, max_bytes=POLLY_HTTP_REQUEST_MAX_BYTES
+            )
+        )
+    except ValueError:
+        return web.json_response({"error": "Invalid Polly request"}, status=400)
+    try:
+        audio = await asyncio.to_thread(_synthesize_polly, payload)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(j("polly_synthesize_failed", error=type(exc).__name__))
+        return web.json_response({"error": "Polly synthesis failed"}, status=502)
+    return web.Response(body=audio, content_type="audio/mpeg")
+
+
+async def handle_hyperframes_invoke(request: web.Request) -> web.Response:
+    """Invoke only the configured HyperFrames function; never accept an ARN."""
+    if not _invocation_authority_is_available():
+        return web.json_response({"error": "Invocation authority is unavailable"}, status=503)
+    try:
+        payload = _validate_hyperframes_payload(
+            await _read_fixed_aws_request(
+                request, max_bytes=HYPERFRAMES_HTTP_REQUEST_MAX_BYTES
+            )
+        )
+    except ValueError:
+        return web.json_response({"error": "Invalid HyperFrames request"}, status=400)
+    try:
+        result = await asyncio.to_thread(_invoke_hyperframes, payload)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(j("hyperframes_invoke_failed", error=type(exc).__name__))
+        return web.json_response({"error": "HyperFrames invocation failed"}, status=502)
+    return web.json_response(result)
+
+
 AGENT_BROKER_RESPONSE_MAX_BYTES = 64 * 1024 * 1024
 
 
@@ -1694,6 +1935,8 @@ def main() -> None:
         "/internal/finalization/{action}",
         handle_finalization_transition,
     )
+    app.router.add_post("/aws-skill/polly/synthesize", handle_polly_synthesize)
+    app.router.add_post("/aws-skill/hyperframes/invoke", handle_hyperframes_invoke)
     app.router.add_route("*", "/agent-broker/{route:.*}", handle_agent_broker)
     app.router.add_route("*", "/{path:.*}", handle_proxy)
     log.info(j("starting", host="127.0.0.1", port=18791, upstream=UPSTREAM))

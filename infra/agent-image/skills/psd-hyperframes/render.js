@@ -22,12 +22,11 @@
 'use strict';
 const { validatedFs } = require("../../../validated-fs.cjs");
 
-
-
-
-const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
-
-const REGION = process.env.AWS_REGION || 'us-east-1';
+const http = require('node:http');
+const AWS_RELAY_HOST = '127.0.0.1';
+const AWS_RELAY_PORT = 18791;
+const AWS_RELAY_PATH = '/aws-skill/hyperframes/invoke';
+const MAX_RELAY_RESPONSE_BYTES = 8 * 1024 * 1024;
 // Keep in sync with the render Lambda (infra/hyperframes-render/handler.js) and
 // SKILL.md. Client-side checks fail fast; the Lambda re-validates authoritatively.
 const MAX_DURATION_SECONDS = 180;
@@ -357,43 +356,61 @@ function buildPayload(args) {
 }
 
 /**
- * Invoke the render Lambda synchronously and return its parsed result.
- * `deps.client` is a test seam; production leaves it unset.
+ * Ask the root-owned relay to invoke the configured render Lambda. OpenClaw
+ * intentionally strips AWS credential variables from model-launched exec
+ * subprocesses, so this process never receives or returns reusable credentials.
  */
+function requestRenderRelay(payload) {
+  const body = Buffer.from(JSON.stringify(payload), 'utf8');
+  return new Promise((resolve, reject) => {
+    const request = http.request({
+      host: AWS_RELAY_HOST,
+      port: AWS_RELAY_PORT,
+      path: AWS_RELAY_PATH,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': String(body.length),
+      },
+    }, (response) => {
+      const chunks = [];
+      let bytes = 0;
+      response.on('data', (chunk) => {
+        bytes += chunk.length;
+        if (bytes > MAX_RELAY_RESPONSE_BYTES) {
+          request.destroy(new Error('HyperFrames relay response exceeded the configured limit'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        if (response.statusCode !== 200) {
+          reject(new Error(`HyperFrames relay returned HTTP ${response.statusCode || 502}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(raw));
+        } catch {
+          reject(new Error('HyperFrames relay returned invalid JSON'));
+        }
+      });
+    });
+    request.setTimeout(190_000, () => {
+      request.destroy(new Error('HyperFrames relay timed out'));
+    });
+    request.on('error', reject);
+    request.end(body);
+  });
+}
+
 async function invokeRender(payload, deps = {}) {
-  const functionName = process.env.HYPERFRAMES_RENDER_FUNCTION;
-  if (!functionName) {
-    fail(
-      'HYPERFRAMES_RENDER_FUNCTION env var not set — the render Lambda name is injected by the agent runtime. Ask an administrator to redeploy the agent platform.',
-      'misconfigured',
-    );
-  }
-
-  const client = deps.client || new LambdaClient({ region: REGION });
-  let resp;
-  try {
-    resp = await client.send(new InvokeCommand({
-      FunctionName: functionName,
-      InvocationType: 'RequestResponse',
-      Payload: Buffer.from(JSON.stringify(payload), 'utf8'),
-    }));
-  } catch (err) {
-    fail(`Render Lambda invocation failed: ${err instanceof Error ? err.message : String(err)}`, 'invoke_failed');
-  }
-
-  const raw = resp.Payload ? Buffer.from(resp.Payload).toString('utf8') : '';
-
-  // Unhandled Lambda exception (the handler catches its own errors, so this is
-  // an infra-level failure — OOM, timeout kill, cold-start crash).
-  if (resp.FunctionError) {
-    fail(`Render Lambda failed (${resp.FunctionError}): ${raw.slice(0, 600)}`, 'render_failed');
-  }
-
+  const relay = deps.relay || requestRenderRelay;
   let result;
   try {
-    result = JSON.parse(raw);
-  } catch {
-    fail(`Render Lambda returned non-JSON output: ${raw.slice(0, 300)}`, 'render_failed');
+    result = await relay(payload);
+  } catch (err) {
+    fail(`Render Lambda invocation failed: ${err instanceof Error ? err.message : String(err)}`, 'invoke_failed');
   }
 
   if (!result || result.status !== 'ok') {
@@ -445,6 +462,7 @@ module.exports = {
   findCompositionRootOpenTagEnd,
   injectAudioElement,
   invokeRender,
+  requestRenderRelay,
   validateEmail,
   MAX_DURATION_SECONDS,
 };

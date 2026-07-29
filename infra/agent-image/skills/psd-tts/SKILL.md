@@ -15,8 +15,9 @@ user can play in any browser (Google Chat renders it as a link). Same delivery m
 **Identity.** Requires `--user <caller-email>`. Pass the email verbatim from the
 `[caller: Name <email>]` header of the user turn (it scopes the S3 upload path).
 
-Polly is a standard AWS service (not Bedrock) authenticated by the execution role — no
-API key, no per-character prompt to the model. Long text is split at sentence boundaries
+Polly is a standard AWS service (not Bedrock). A root-owned, fixed-operation loopback
+relay authenticates with the AgentCore execution role — the model-facing subprocess never
+receives reusable AWS credentials or an API key. Long text is split at sentence boundaries
 and the MP3 chunks are concatenated automatically.
 
 ## Usage

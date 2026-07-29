@@ -4,7 +4,7 @@ contract.
 
 Flow on container start:
   1. Log BUILD_MARKER so CloudWatch proves which image is running
-  2. Start a credential-isolating local model proxy
+  2. Start a credential-isolating local model/direct-AWS relay
   3. Start the OpenClaw gateway pointed only at that loopback proxy
   4. Register the agent_invocation entrypoint with BedrockAgentCoreApp
   5. Route incoming payloads through the harness adapter via WebSocket
@@ -345,9 +345,10 @@ def _serialize_invocations(function):
 
 def start_mantle_proxy() -> None:
     """
-    Launch the Mantle logging proxy on 127.0.0.1:18791 and block until
-    /health returns 200. If it can't come up, exit — OpenClaw's openclaw.json
-    points its baseUrl at the proxy, so no proxy means no model calls.
+    Launch the root-owned model/direct-AWS relay on 127.0.0.1:18791 and block
+    until /health returns 200. If it can't come up, exit — OpenClaw's
+    openclaw.json points its baseUrl at the relay, so no relay means no model
+    calls or direct-AWS skills.
     """
     global _mantle_proxy_process
     import urllib.request

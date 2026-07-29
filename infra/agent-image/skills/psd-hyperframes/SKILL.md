@@ -154,19 +154,19 @@ Notes:
 - **`bad_args`** — missing/invalid `--user`, no composition, bad `--duration`/`--fps`/dimensions,
   a valueless `--css-file`/`--js-file`, an `--audio-url` that isn't `https://` / `data:audio/`,
   a combined html+css+js payload over the 4 MB cap, or a
-  composition whose declared `data-duration` exceeds the 60 s cap or whose root
+  composition whose declared `data-duration` exceeds the 180 s cap or whose root
   `data-width`/`data-height` exceeds the 3840 px cap. Fix and retry.
-- **`misconfigured`** — the render function name (`HYPERFRAMES_RENDER_FUNCTION`) is not injected.
-  Ask an administrator to redeploy the agent platform.
-- **`invoke_failed`** — the render Lambda could not be invoked (permissions/throttling). Retry
-  once; if it persists, report it.
+- **`invoke_failed`** — the fixed relay or render Lambda could not complete the invocation
+  (runtime configuration, permissions, throttling, or transport failure). Retry once; if it
+  persists, report it.
 - **`render_failed`** — the render Lambda ran but produced no video (composition error, Chromium
   crash, or a scene too heavy for the timeout). Simplify the scene or lower `--fps`, then retry.
 
 ## Operational Notes
 
-- Renders synchronously via the AWS SDK (`lambda:InvokeFunction` on the render function ARN
-  only) using the AgentCore execution-role credentials — no API key.
+- Renders synchronously through a root-owned, fixed-operation loopback relay. The relay's
+  AWS SDK has `lambda:InvokeFunction` on the configured render function ARN only; the
+  model-facing subprocess receives neither reusable AgentCore credentials nor an API key.
 - The trusted render function publishes the MP4 under the signed caller's
   public artifact prefix. The model role has no S3 authority.
 - The returned URL is unsigned and does not expire — anyone with the link can fetch until the
