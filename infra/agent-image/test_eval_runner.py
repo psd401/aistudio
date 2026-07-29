@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from collections import Counter
 from contextlib import redirect_stdout
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -289,6 +290,39 @@ class SuiteLoadingTests(unittest.TestCase):
             "name prefix must contain a letter or number",
         ):
             runner._docker_name_token("***", 123)
+
+    def test_production_l1_suites_require_an_explicit_psd_owner(self):
+        task = runner.Task(
+            "owner-bound",
+            "psd-directory",
+            "L1",
+            "pure",
+            "Look up a fixture.",
+            3,
+            suite="regression",
+        )
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "explicit synthetic @psd401.net --owner-email",
+        ):
+            runner._validate_owner_email_for_tasks(
+                [task],
+                runner.DEFAULT_OWNER_EMAIL,
+            )
+        with self.assertRaises(runner.EvalRunnerError):
+            runner._validate_owner_email_for_tasks(
+                [task],
+                "eval@example.net",
+            )
+
+        runner._validate_owner_email_for_tasks(
+            [task],
+            "eval.issue1425@psd401.net",
+        )
+        runner._validate_owner_email_for_tasks(
+            [replace(task, suite="unclassified")],
+            runner.DEFAULT_OWNER_EMAIL,
+        )
 
     def test_non_integer_trial_counts_are_rejected(self):
         base_task: dict[str, object] = {

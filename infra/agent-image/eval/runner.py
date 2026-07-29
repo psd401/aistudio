@@ -1410,6 +1410,22 @@ def _docker_name_token(prefix: str, pid: int) -> str:
     return f"{sanitized_prefix}-{pid}"
 
 
+def _validate_owner_email_for_tasks(tasks: Sequence[Task], owner_email: str) -> None:
+    requires_psd_owner = any(
+        task.level == "L1" and task.suite in {"regression", "capability"}
+        for task in tasks
+    )
+    if requires_psd_owner and not re.fullmatch(
+        r"[^@\s]+@psd401\.net",
+        owner_email,
+        flags=re.IGNORECASE,
+    ):
+        raise EvalRunnerError(
+            "production L1 suites require an explicit synthetic "
+            "@psd401.net --owner-email"
+        )
+
+
 def _context_ttl_seconds(invocation_timeout_seconds: int) -> int:
     ttl_seconds = (
         invocation_timeout_seconds
@@ -1476,6 +1492,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         tasks = load_suite(args.suite.resolve())
+        _validate_owner_email_for_tasks(tasks, args.owner_email)
         executor = CommandExecutor()
         repo_root = Path(__file__).resolve().parents[3]
         app_base_url = _resolve_app_base_url(

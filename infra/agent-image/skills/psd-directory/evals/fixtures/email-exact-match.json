@@ -3,16 +3,16 @@
     "route": "/api/agent/directory-lookup",
     "method": "POST",
     "request_body": {
-      "email": "pat.lee@psd401.net"
+      "email": "fixture.person@psd401.net"
     },
     "response": {
       "status": 200,
       "body": {
         "found": true,
-        "personId": "118000000000000000001",
-        "displayName": "Pat Lee",
-        "email": "pat.lee@psd401.net",
-        "title": "Library Media Specialist",
+        "personId": "100000000000000000002",
+        "displayName": "Fixture Person",
+        "email": "fixture.person@psd401.net",
+        "title": "Synthetic Directory Record",
         "department": "Harbor Ridge Middle School",
         "organization": "Peninsula School District",
         "cached": false

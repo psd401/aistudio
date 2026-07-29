@@ -3,11 +3,11 @@ skill: psd-directory
 level: L1
 workspace: pure
 suite: regression
-prompt: "Use psd-directory to look up the exact email pat.lee@psd401.net. Tell me the person's display name and title."
+prompt: "Use psd-directory to look up the exact email fixture.person@psd401.net. Tell me the person's display name and title."
 trials: 3
 fixtures:
   - fixtures/email-exact-match.json
 graders:
-  - {"type":"broker_request","route":"/api/agent/directory-lookup","method":"POST","body":{"email":{"exact":"pat.lee@psd401.net"}}}
-  - {"type":"output_match","pattern":"Pat Lee"}
-  - {"type":"output_match","pattern":"Library Media Specialist"}
+  - {"type":"broker_request","route":"/api/agent/directory-lookup","method":"POST","body":{"email":{"exact":"fixture.person@psd401.net"}}}
+  - {"type":"output_match","pattern":"Fixture Person"}
+  - {"type":"output_match","pattern":"Synthetic Directory Record"}

@@ -8,6 +8,6 @@ trials: 3
 fixtures:
   - fixtures/search-open-urgent-tickets.json
 graders:
-  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"freshservice"},"path":{"contains_any":["/tickets/filter?query="]},"method":{"exact":"GET"}}}
+  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"freshservice"},"path":{"exact":"/tickets/filter?query=\"status%3A2%20AND%20priority%3A4\"&workspace_id=2"},"method":{"exact":"GET"}}}
   - {"type":"output_match","pattern":"48291"}
   - {"type":"output_match","pattern":"Projector outage"}
