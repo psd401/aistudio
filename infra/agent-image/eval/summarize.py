@@ -745,6 +745,7 @@ def _validate_scope_telemetry_consistency(
     *,
     task_count: int,
     trial_count: int,
+    expected_graded_trials: int,
     pricing: Mapping[str, object],
 ) -> None:
     """Validate telemetry fields that are derived from a scope's counters."""
@@ -876,6 +877,11 @@ def _validate_scope_telemetry_consistency(
     if graded_trials > trial_count:
         raise EvalSummaryError(
             f"{description}.telemetry.failures.graded_trials exceeds trial_count"
+        )
+    if graded_trials != expected_graded_trials:
+        raise EvalSummaryError(
+            f"{description}.telemetry.failures.graded_trials is inconsistent "
+            "with task passed-trial counts"
         )
     _validate_derived_rate(
         failures.get("graded_rate"),
@@ -1088,6 +1094,17 @@ def _validate_scope_consistency(
         )
         for task_id in task_ids
     )
+    expected_graded_trials = sum(
+        _positive_integer(
+            tasks[task_id].get("trials"),
+            f"{description} task {task_id} trials",
+        )
+        - _nonnegative_integer(
+            tasks[task_id].get("passed_trials"),
+            f"{description} task {task_id} passed_trials",
+        )
+        for task_id in task_ids
+    )
     expected_passed_tasks = sum(
         tasks[task_id].get("pass^3") is True for task_id in task_ids
     )
@@ -1125,6 +1142,7 @@ def _validate_scope_consistency(
         description,
         task_count=expected_task_count,
         trial_count=expected_trial_count,
+        expected_graded_trials=expected_graded_trials,
         pricing=pricing,
     )
 

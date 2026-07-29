@@ -457,6 +457,23 @@ class CommittedArtifactGuardTests(unittest.TestCase):
             r"overall\.pass\^3\.passed_tasks is inconsistent",
         )
 
+    def test_graded_failures_must_match_failed_task_trials(self):
+        value = json.loads(self.safe_summary_bytes())
+        value["tasks"]["task-b"]["passed_trials"] = 3
+        value["tasks"]["task-b"]["pass^3"] = True
+        for scope in (
+            value["overall"],
+            value["suites"]["capability"],
+            value["skills"]["skill-a"],
+        ):
+            scope["pass^3"]["passed_tasks"] = scope["pass^3"]["total_tasks"]
+            scope["pass^3"]["rate"] = 1.0
+
+        self.assert_rejected(
+            value,
+            r"graded_trials is inconsistent with task passed-trial counts",
+        )
+
     def test_scope_telemetry_must_match_counts_rates_and_pricing(self):
         mutations = (
             (
