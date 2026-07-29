@@ -7,12 +7,12 @@ import {
   requireScope,
   withApiAuth,
 } from "@/lib/api";
-import { canModifyRepository } from "@/actions/repositories/repository-permissions";
+import { canModifyUserManagedDurableRepository } from "@/actions/repositories/repository-permissions";
 import { createLogger } from "@/lib/logger";
-import { assertNotSystemManagedRepository } from "@/lib/repositories/repository-access-guard";
 import {
   completeRepositoryUpload,
   dispatchContentProcessingJob,
+  RepositoryUploadCompletionError,
 } from "@/lib/repositories/content-platform";
 
 const completeSchema = z
@@ -30,18 +30,6 @@ const completeSchema = z
       .optional(),
   })
   .strict();
-
-async function callerCanManageRepository(
-  repositoryId: number,
-  userId: number,
-): Promise<boolean> {
-  try {
-    await assertNotSystemManagedRepository(repositoryId);
-    return await canModifyRepository(repositoryId, userId);
-  } catch {
-    return false;
-  }
-}
 
 export const POST = withApiAuth(
   async (request: NextRequest, auth, requestId, params) => {
@@ -63,24 +51,29 @@ export const POST = withApiAuth(
       );
     }
 
-    const parsed = await parseRequestBody(request, completeSchema, requestId);
-    if (parsed instanceof Response) return parsed;
-
-    if (!(await callerCanManageRepository(repositoryId, auth.userId))) {
-      return createErrorResponse(
-        requestId,
-        404,
-        "NOT_FOUND",
-        "Repository not found",
-      );
-    }
-
     const log = createLogger({
       requestId,
       route: "api.v1.repositories.items.uploads.complete",
     });
 
     try {
+      if (
+        !(await canModifyUserManagedDurableRepository(
+          repositoryId,
+          auth.userId,
+        ))
+      ) {
+        return createErrorResponse(
+          requestId,
+          404,
+          "NOT_FOUND",
+          "Repository not found",
+        );
+      }
+
+      const parsed = await parseRequestBody(request, completeSchema, requestId);
+      if (parsed instanceof Response) return parsed;
+
       const completed = await completeRepositoryUpload({
         repositoryId,
         userId: auth.userId,
@@ -126,10 +119,18 @@ export const POST = withApiAuth(
         sessionId: sessionId.data,
         error: error instanceof Error ? error.message : String(error),
       });
+      if (error instanceof RepositoryUploadCompletionError) {
+        return createErrorResponse(
+          requestId,
+          error.httpStatus,
+          error.code,
+          "Failed to complete repository upload",
+        );
+      }
       return createErrorResponse(
         requestId,
-        400,
-        "UPLOAD_COMPLETION_FAILED",
+        500,
+        "INTERNAL_ERROR",
         "Failed to complete repository upload",
       );
     }

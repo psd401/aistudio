@@ -646,7 +646,9 @@ retries a committed job if needed. The response contains `itemId`,
 completion returns the same identifiers with `replayed: true` and the
 `Idempotency-Replayed: true` header. Invalid multipart input or an unavailable
 or foreign session returns `400 UPLOAD_COMPLETION_FAILED` without session
-details.
+details. Unexpected storage or database failures return
+`500 INTERNAL_ERROR`; callers can retry completion with the same session
+because registration is idempotent.
 
 ```json
 {

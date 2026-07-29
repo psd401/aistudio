@@ -7,9 +7,8 @@ import {
   requireScope,
   withApiAuth,
 } from "@/lib/api";
-import { canModifyRepository } from "@/actions/repositories/repository-permissions";
+import { canModifyUserManagedDurableRepository } from "@/actions/repositories/repository-permissions";
 import { createLogger } from "@/lib/logger";
-import { assertNotSystemManagedRepository } from "@/lib/repositories/repository-access-guard";
 import {
   getContentPlatformConfig,
   initiateRepositoryUpload,
@@ -27,18 +26,6 @@ const initiateSchema = z
   })
   .strict();
 
-async function callerCanManageRepository(
-  repositoryId: number,
-  userId: number,
-): Promise<boolean> {
-  try {
-    await assertNotSystemManagedRepository(repositoryId);
-    return await canModifyRepository(repositoryId, userId);
-  } catch {
-    return false;
-  }
-}
-
 export const POST = withApiAuth(
   async (request: NextRequest, auth, requestId, params) => {
     const scopeError = requireScope(auth, "repositories:write", requestId);
@@ -54,24 +41,29 @@ export const POST = withApiAuth(
       );
     }
 
-    const parsed = await parseRequestBody(request, initiateSchema, requestId);
-    if (parsed instanceof Response) return parsed;
-
-    if (!(await callerCanManageRepository(repositoryId, auth.userId))) {
-      return createErrorResponse(
-        requestId,
-        404,
-        "NOT_FOUND",
-        "Repository not found",
-      );
-    }
-
     const log = createLogger({
       requestId,
       route: "api.v1.repositories.items.uploads.initiate",
     });
 
     try {
+      if (
+        !(await canModifyUserManagedDurableRepository(
+          repositoryId,
+          auth.userId,
+        ))
+      ) {
+        return createErrorResponse(
+          requestId,
+          404,
+          "NOT_FOUND",
+          "Repository not found",
+        );
+      }
+
+      const parsed = await parseRequestBody(request, initiateSchema, requestId);
+      if (parsed instanceof Response) return parsed;
+
       const config = await getContentPlatformConfig();
       if (!isCanonicalRepositoryUploadActive(config)) {
         return createErrorResponse(

@@ -6,8 +6,7 @@ const mockRequireScope = jest.fn();
 const mockParseRequestBody = jest.fn();
 const mockCreateApiResponse = jest.fn();
 const mockCreateErrorResponse = jest.fn();
-const mockCanModifyRepository = jest.fn();
-const mockAssertNotSystemManagedRepository = jest.fn();
+const mockCanModifyUserManagedDurableRepository = jest.fn();
 const mockGetContentPlatformConfig = jest.fn();
 const mockIsCanonicalRepositoryUploadActive = jest.fn();
 const mockValidateRepositoryUploadFile = jest.fn();
@@ -27,18 +26,26 @@ jest.mock("@/lib/api", () => ({
 }));
 
 jest.mock("@/actions/repositories/repository-permissions", () => ({
-  canModifyRepository: (...args: unknown[]) => mockCanModifyRepository(...args),
-}));
-
-jest.mock("@/lib/repositories/repository-access-guard", () => ({
-  assertNotSystemManagedRepository: (...args: unknown[]) =>
-    mockAssertNotSystemManagedRepository(...args),
+  canModifyUserManagedDurableRepository: (...args: unknown[]) =>
+    mockCanModifyUserManagedDurableRepository(...args),
 }));
 
 jest.mock("@/lib/repositories/content-platform", () => {
   class TestRepositoryUploadQuotaExceededError extends Error {
     readonly code = "REPOSITORY_UPLOAD_QUOTA_EXCEEDED";
     readonly httpStatus = 429;
+  }
+
+  class TestRepositoryUploadCompletionError extends Error {
+    readonly code = "UPLOAD_COMPLETION_FAILED";
+    readonly httpStatus = 400;
+
+    constructor(
+      readonly failure: string,
+      message: string,
+    ) {
+      super(message);
+    }
   }
 
   return {
@@ -55,6 +62,7 @@ jest.mock("@/lib/repositories/content-platform", () => {
     dispatchContentProcessingJob: (...args: unknown[]) =>
       mockDispatchContentProcessingJob(...args),
     RepositoryUploadQuotaExceededError: TestRepositoryUploadQuotaExceededError,
+    RepositoryUploadCompletionError: TestRepositoryUploadCompletionError,
   };
 });
 
@@ -68,7 +76,10 @@ jest.mock("@/lib/logger", () => ({
 
 import { POST as initiateUpload } from "@/app/api/v1/repositories/[id]/items/uploads/route";
 import { POST as completeUpload } from "@/app/api/v1/repositories/[id]/items/uploads/[sessionId]/complete/route";
-import { RepositoryUploadQuotaExceededError } from "@/lib/repositories/content-platform";
+import {
+  RepositoryUploadCompletionError,
+  RepositoryUploadQuotaExceededError,
+} from "@/lib/repositories/content-platform";
 import { API_SCOPES, ROLE_SCOPES } from "@/lib/api-keys/scopes";
 
 interface RouteAuth {
@@ -125,8 +136,7 @@ beforeEach(() => {
       message,
     }),
   );
-  mockCanModifyRepository.mockResolvedValue(true);
-  mockAssertNotSystemManagedRepository.mockResolvedValue(undefined);
+  mockCanModifyUserManagedDurableRepository.mockResolvedValue(true);
   mockGetContentPlatformConfig.mockResolvedValue(config);
   mockIsCanonicalRepositoryUploadActive.mockReturnValue(true);
   mockValidateRepositoryUploadFile.mockReturnValue(undefined);
@@ -177,8 +187,10 @@ describe("POST /api/v1/repositories/{id}/items/uploads", () => {
   it("uses the API key owner and canonical upload service", async () => {
     await initiateHandler(request, auth, "req-initiate", { id: "7" });
 
-    expect(mockAssertNotSystemManagedRepository).toHaveBeenCalledWith(7);
-    expect(mockCanModifyRepository).toHaveBeenCalledWith(7, auth.userId);
+    expect(mockCanModifyUserManagedDurableRepository).toHaveBeenCalledWith(
+      7,
+      auth.userId,
+    );
     expect(mockValidateRepositoryUploadFile).toHaveBeenCalledWith(
       initiateInput,
       config,
@@ -214,9 +226,7 @@ describe("POST /api/v1/repositories/{id}/items/uploads", () => {
   });
 
   it("masks absent, foreign, ephemeral, inactive, and system repositories", async () => {
-    mockAssertNotSystemManagedRepository.mockRejectedValue(
-      new Error("repository is system managed"),
-    );
+    mockCanModifyUserManagedDurableRepository.mockResolvedValue(false);
 
     await initiateHandler(request, auth, "req-hidden", { id: "7" });
 
@@ -226,19 +236,27 @@ describe("POST /api/v1/repositories/{id}/items/uploads", () => {
       "NOT_FOUND",
       "Repository not found",
     );
+    expect(mockParseRequestBody).not.toHaveBeenCalled();
     expect(mockInitiateRepositoryUpload).not.toHaveBeenCalled();
   });
 
-  it("also masks a durable repository the caller cannot modify", async () => {
-    mockCanModifyRepository.mockResolvedValue(false);
+  it("reports repository lookup failures instead of silently returning 404", async () => {
+    mockCanModifyUserManagedDurableRepository.mockRejectedValue(
+      new Error("database unavailable"),
+    );
 
-    await initiateHandler(request, auth, "req-foreign", { id: "7" });
+    await initiateHandler(request, auth, "req-access-failure", { id: "7" });
 
     expect(mockCreateErrorResponse).toHaveBeenCalledWith(
-      "req-foreign",
-      404,
-      "NOT_FOUND",
-      "Repository not found",
+      "req-access-failure",
+      500,
+      "INTERNAL_ERROR",
+      "Failed to initiate repository upload",
+    );
+    expect(mockParseRequestBody).not.toHaveBeenCalled();
+    expect(mockError).toHaveBeenCalledWith(
+      "Failed to initiate repository upload via API",
+      expect.objectContaining({ error: "database unavailable" }),
     );
   });
 
@@ -335,7 +353,10 @@ describe("POST /api/v1/repositories/{id}/items/uploads/{sessionId}/complete", ()
       "repositories:write",
       "req-complete",
     );
-    expect(mockCanModifyRepository).toHaveBeenCalledWith(7, auth.userId);
+    expect(mockCanModifyUserManagedDurableRepository).toHaveBeenCalledWith(
+      7,
+      auth.userId,
+    );
     expect(mockCompleteRepositoryUpload).toHaveBeenCalledWith({
       repositoryId: 7,
       userId: auth.userId,
@@ -412,7 +433,7 @@ describe("POST /api/v1/repositories/{id}/items/uploads/{sessionId}/complete", ()
   });
 
   it("masks repositories the caller cannot currently modify", async () => {
-    mockCanModifyRepository.mockResolvedValue(false);
+    mockCanModifyUserManagedDurableRepository.mockResolvedValue(false);
 
     await completeHandler(request, auth, "req-hidden", {
       id: "7",
@@ -425,12 +446,16 @@ describe("POST /api/v1/repositories/{id}/items/uploads/{sessionId}/complete", ()
       "NOT_FOUND",
       "Repository not found",
     );
+    expect(mockParseRequestBody).not.toHaveBeenCalled();
     expect(mockCompleteRepositoryUpload).not.toHaveBeenCalled();
   });
 
   it("returns a stable completion error without leaking session details", async () => {
     mockCompleteRepositoryUpload.mockRejectedValue(
-      new Error("Upload session was not found"),
+      new RepositoryUploadCompletionError(
+        "session-not-found",
+        "Upload session was not found",
+      ),
     );
 
     await completeHandler(request, auth, "req-failed", {
@@ -443,6 +468,28 @@ describe("POST /api/v1/repositories/{id}/items/uploads/{sessionId}/complete", ()
       400,
       "UPLOAD_COMPLETION_FAILED",
       "Failed to complete repository upload",
+    );
+  });
+
+  it("maps unexpected storage or database failures to a retryable 500", async () => {
+    mockCompleteRepositoryUpload.mockRejectedValue(
+      new Error("storage unavailable"),
+    );
+
+    await completeHandler(request, auth, "req-storage", {
+      id: "7",
+      sessionId,
+    });
+
+    expect(mockCreateErrorResponse).toHaveBeenCalledWith(
+      "req-storage",
+      500,
+      "INTERNAL_ERROR",
+      "Failed to complete repository upload",
+    );
+    expect(mockError).toHaveBeenCalledWith(
+      "Failed to complete repository upload via API",
+      expect.objectContaining({ error: "storage unavailable" }),
     );
   });
 });
