@@ -20,7 +20,7 @@ import candidate  # noqa: E402
 class CandidateMatrixTests(unittest.TestCase):
     manifests_dir = HERE / "eval" / "candidates" / "manifests"
 
-    def test_committed_matrix_covers_models_and_provider_paths(self):
+    def test_committed_matrix_covers_models_axes_and_provider_paths(self):
         manifest_paths = [
             path
             for path in sorted(self.manifests_dir.glob("*.json"))
@@ -34,7 +34,9 @@ class CandidateMatrixTests(unittest.TestCase):
                 "glm-5-native",
                 "kimi-k2-5",
                 "openai-gpt-oss-120b",
+                "openclaw-2026-7-2-beta-5",
                 "qwen3-coder-next",
+                "conservative-tool-routing",
                 "sonnet-5-mantle-anthropic",
             },
         )
@@ -60,6 +62,10 @@ class CandidateMatrixTests(unittest.TestCase):
                 "mantle-openai-compatible",
                 "mantle-anthropic-messages",
             },
+        )
+        self.assertEqual(
+            {summary["variedAxis"] for summary in summaries},
+            {"harness", "model", "prompt"},
         )
 
     def test_glm_native_prepares_reproducible_build_inputs_and_metadata(self):

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "conservative-tool-routing",
+  "baseline": "baseline.json",
+  "declaredAxis": "prompt",
+  "axes": {
+    "model": {
+      "providerTemplate": "../providers/native-bedrock-sonnet-5.json"
+    },
+    "harness": {
+      "baseImage": "ghcr.io/openclaw/openclaw@sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c",
+      "hostVersion": "2026.7.1",
+      "bedrockPluginVersion": "2026.7.1",
+      "expectedPluginToken": "claude-sonnet-5"
+    },
+    "prompt": {
+      "variant": "conservative-tool-routing",
+      "soul": "eval/candidates/prompts/conservative-tool-routing/SOUL.md",
+      "rules": "skills/psd-rules/SKILL.md"
+    }
+  }
+}
