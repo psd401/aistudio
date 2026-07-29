@@ -1,0 +1,12 @@
+id: atrium-find-private-drafts
+skill: psd-atrium
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-atrium to find draft content matching the exact query EVAL-1426. This is read-only. Report the returned title."
+trials: 3
+fixtures:
+  - fixtures/find-private-drafts.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/atrium","method":"POST","body":{"method":{"exact":"GET"},"path":{"exact":""},"query.query":{"exact":"EVAL-1426"}}}
+  - {"type":"output_match","pattern":"EVAL-1426 Private Draft"}

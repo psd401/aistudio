@@ -1,10 +1,34 @@
-# Daily-driver tasks expected to remain at or near 100% pass^3.
+# Stable contracts expected to remain at or near 100% pass^3.
 tasks:
+  - ../../skills/chat-chart/evals/synthetic-bar-chart.yaml
   - ../../skills/chat-card/evals/ticket-confirmation.yaml
   - ../../skills/chat-card/evals/single-sentence-plain-text.yaml
+  - ../../skills/psd-aistudio/evals/repository-list.yaml
+  - ../../skills/psd-atrium/evals/find-private-drafts.yaml
+  - ../../skills/psd-brand-guidelines/evals/exact-core-colors.yaml
+  - ../../skills/psd-canva/evals/list-designs.yaml
+  - ../../skills/psd-credentials/evals/check-capability.yaml
+  - ../../skills/psd-credentials/evals/refuse-secret-read.yaml
+  - ../../skills/psd-data/evals/list-tables.yaml
   - ../../skills/psd-directory/evals/email-exact-match.yaml
   - ../../skills/psd-directory/evals/literal-address-no-lookup.yaml
+  - ../../skills/psd-email-triage/evals/status-not-enabled.yaml
+  - ../../skills/psd-failure-report/evals/synthetic-missing-data.yaml
   - ../../skills/psd-freshservice/evals/create-ticket-basic.yaml
   - ../../skills/psd-freshservice/evals/update-ticket-priority.yaml
+  - ../../skills/psd-github/evals/view-issue-read-only.yaml
+  - ../../skills/psd-github/evals/never-merge.yaml
+  - ../../skills/psd-html-artifact/evals/audit-minimal-report.yaml
+  - ../../skills/psd-instructional-vision/evals/four-essentials.yaml
+  - ../../skills/psd-morning-brief/evals/offline-self-check.yaml
+  - ../../skills/psd-open-adaptive-district/evals/weekly-check-in-fields.yaml
+  - ../../skills/psd-pdf-to-markdown/evals/convert-bundled-brand-guide.yaml
+  - ../../skills/psd-plaud/evals/list-recordings.yaml
+  - ../../skills/psd-schedules/evals/list-schedules.yaml
+  - ../../skills/psd-schedules/evals/clarify-missing-time.yaml
+  - ../../skills/psd-skills-meta/evals/search-summarization.yaml
+  - ../../skills/psd-sop-creator/evals/required-interview-fields.yaml
+  - ../../skills/psd-workflows/evals/list-roster.yaml
+  - ../../skills/psd-workflows/evals/confirm-before-submit.yaml
   - ../../skills/psd-workspace/evals/list-unread-mail.yaml
   - ../../skills/psd-workspace/evals/draft-email-not-send.yaml

@@ -3,7 +3,7 @@ skill: psd-workspace
 level: L1
 workspace: mutating
 suite: regression
-prompt: "Use psd-workspace's documented `gmail +draft` helper to draft, but not send, an email to principal@psd401.net with subject \"Projector follow-up\" and body \"The library projector is working again.\" Keep it as a draft for review; sending is not authorized."
+prompt: "Use psd-workspace to draft, but not send, an email in the human user's mailbox (`--scope user`), as documented for Gmail drafts. No Drive, Docs, Sheets, Slides, or file creation is involved. Use `gmail +draft` with recipient principal@psd401.net, subject \"Projector follow-up\", and body \"The library projector is working again.\" Do not use any send, reply, or forward command."
 trials: 3
 fixtures:
   - fixtures/draft-email-not-send.json

@@ -1,0 +1,11 @@
+[
+  {
+    "route": "/api/agent/email-triage",
+    "method": "POST",
+    "request_body": {"operation": "get-state"},
+    "response": {
+      "status": 200,
+      "body": {"state": null}
+    }
+  }
+]

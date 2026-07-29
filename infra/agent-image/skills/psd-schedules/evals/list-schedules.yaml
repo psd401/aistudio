@@ -1,0 +1,13 @@
+id: schedules-list-read-only
+skill: psd-schedules
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-schedules to list my schedules read-only. Do not create, update, enable, disable, or delete anything. Report the EVAL-1426 schedule name and last-run status."
+trials: 3
+fixtures:
+  - fixtures/list-schedules.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/schedules","method":"POST","body":{"operation":{"exact":"list"}}}
+  - {"type":"no_route_called","route":"/api/agent/schedules","method":"POST","body":{"operation":{"contains_any":["create","update","delete"]}}}
+  - {"type":"output_match","pattern":"(?is)EVAL-1426 Read-only Canary.*never run"}

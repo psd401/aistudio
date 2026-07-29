@@ -1,13 +1,18 @@
-"""Deterministic graders for local agent-image evaluations.
+"""Graders for local agent-image evaluations.
 
-The graders deliberately operate on recorded outputs, telemetry, and broker
-requests. They never call a model or a live service.
+Most graders deliberately operate only on recorded outputs, telemetry, and
+broker requests. The ``quickchart_image`` L2 grader is the narrow exception: it
+probes an exact ``https://quickchart.io/chart`` URL after validating its encoded
+chart configuration, content type, and PNG signature. No grader calls a model.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import urllib.error as urllib_error
+import urllib.parse as urllib_parse
+import urllib.request as urllib_request
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -24,6 +29,8 @@ SUPPORTED_GRADERS = frozenset(
         "broker_request",
         "no_route_called",
         "output_match",
+        "quickchart_image",
+        "tool_call_succeeded",
         "tools_catalog",
         "trajectory_in_order",
     }
@@ -168,6 +175,14 @@ def validate_grader_specs(
         "broker_request": {"type", "route", "method", "body"},
         "no_route_called": {"type", "route", "method", "body"},
         "output_match": {"type", "pattern", "ignore_case"},
+        "quickchart_image": {
+            "type",
+            "chart_type",
+            "title",
+            "labels",
+            "values",
+        },
+        "tool_call_succeeded": {"type", "tool", "args_pattern"},
         "trajectory_in_order": {"type", "tools"},
         "tools_catalog": {"type", "expected"},
     }
@@ -207,6 +222,66 @@ def validate_grader_specs(
                 raise GraderConfigurationError(
                     "output_match grader ignore_case must be a boolean"
                 )
+        elif grader == "quickchart_image":
+            chart_type = _require_nonempty_string(
+                raw_spec.get("chart_type"),
+                grader=grader,
+                field="chart_type",
+            )
+            if chart_type not in {"bar", "line", "pie"}:
+                raise GraderConfigurationError(
+                    "quickchart_image grader chart_type must be "
+                    "bar, line, or pie"
+                )
+            _require_nonempty_string(
+                raw_spec.get("title"),
+                grader=grader,
+                field="title",
+            )
+            labels = raw_spec.get("labels")
+            if (
+                not isinstance(labels, Sequence)
+                or isinstance(labels, (str, bytes))
+                or not labels
+                or any(not isinstance(label, str) or not label for label in labels)
+            ):
+                raise GraderConfigurationError(
+                    "quickchart_image grader labels must be a non-empty string list"
+                )
+            values = raw_spec.get("values")
+            if (
+                not isinstance(values, Sequence)
+                or isinstance(values, (str, bytes))
+                or not values
+                or any(
+                    isinstance(value, bool) or not isinstance(value, Real)
+                    for value in values
+                )
+            ):
+                raise GraderConfigurationError(
+                    "quickchart_image grader values must be a non-empty number list"
+                )
+            if len(labels) != len(values):
+                raise GraderConfigurationError(
+                    "quickchart_image grader labels and values must have equal length"
+                )
+        elif grader == "tool_call_succeeded":
+            _require_nonempty_string(
+                raw_spec.get("tool"),
+                grader=grader,
+                field="tool",
+            )
+            pattern = _require_nonempty_string(
+                raw_spec.get("args_pattern"),
+                grader=grader,
+                field="args_pattern",
+            )
+            try:
+                re.compile(pattern)
+            except re.error as error:
+                raise GraderConfigurationError(
+                    f"tool_call_succeeded args_pattern is invalid: {error}"
+                ) from error
         elif grader in {"trajectory_in_order", "tools_catalog"}:
             field = "tools" if grader == "trajectory_in_order" else "expected"
             entries = raw_spec.get(field)
@@ -427,6 +502,221 @@ def _grade_output_match(
     )
 
 
+_QUICKCHART_URL_RE = re.compile(
+    r"https://quickchart\.io/chart\?[^\s\"'<>\\)\],}]+"
+)
+_RICH_ENVELOPE_RE = re.compile(
+    r"<<<PSD_AGENT_RICH_V1>>>\s*(.*?)\s*<<<END_PSD_AGENT_RICH_V1>>>",
+    flags=re.DOTALL,
+)
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+class _RejectRedirects(urllib_request.HTTPRedirectHandler):
+    """Keep an output-controlled URL from redirecting off the pinned host."""
+
+    def redirect_request(
+        self,
+        request: urllib_request.Request,
+        file_pointer: object,
+        code: int,
+        message: str,
+        headers: Mapping[str, str],
+        new_url: str,
+    ) -> None:
+        _ = (request, file_pointer, code, message, headers, new_url)
+        return None
+
+
+def _quickchart_config_error(
+    spec: Mapping[str, object],
+    url: str,
+) -> str | None:
+    """Return why a QuickChart URL is unsafe/wrong, or ``None`` when exact."""
+
+    try:
+        parsed = urllib_parse.urlsplit(url)
+        port = parsed.port
+    except ValueError as error:
+        return f"invalid QuickChart URL: {error}"
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "quickchart.io"
+        or port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != "/chart"
+        or parsed.fragment
+    ):
+        return "QuickChart URL did not use the pinned https host and /chart path"
+    try:
+        query = urllib_parse.parse_qs(
+            parsed.query,
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+    except ValueError as error:
+        return f"QuickChart URL query was invalid: {error}"
+    if query.get("format") != ["png"]:
+        return "QuickChart URL did not request format=png"
+    encoded_configs = query.get("c")
+    if not isinstance(encoded_configs, list) or len(encoded_configs) != 1:
+        return "QuickChart URL did not contain exactly one encoded config"
+    try:
+        config = json.loads(encoded_configs[0])
+    except (TypeError, json.JSONDecodeError) as error:
+        return f"QuickChart config was not valid JSON: {error}"
+    if not isinstance(config, Mapping):
+        return "QuickChart config was not an object"
+    if config.get("type") != spec["chart_type"]:
+        return "QuickChart config used the wrong chart type"
+    data = config.get("data")
+    if not isinstance(data, Mapping):
+        return "QuickChart config omitted data"
+    if data.get("labels") != list(spec["labels"]):
+        return "QuickChart config used the wrong labels"
+    datasets = data.get("datasets")
+    if (
+        not isinstance(datasets, list)
+        or len(datasets) != 1
+        or not isinstance(datasets[0], Mapping)
+    ):
+        return "QuickChart config did not contain exactly one dataset"
+    dataset = datasets[0]
+    if dataset.get("label") != spec["title"]:
+        return "QuickChart dataset used the wrong label"
+    if dataset.get("data") != list(spec["values"]):
+        return "QuickChart config used the wrong values"
+    options = config.get("options")
+    title = (
+        options.get("plugins", {}).get("title")
+        if isinstance(options, Mapping)
+        and isinstance(options.get("plugins"), Mapping)
+        else None
+    )
+    if (
+        not isinstance(title, Mapping)
+        or title.get("display") is not True
+        or title.get("text") != spec["title"]
+    ):
+        return "QuickChart config used the wrong visible title"
+    return None
+
+
+def _rich_envelope_image_urls(result: str) -> list[str]:
+    """Extract only image widget URLs that the Router will send to Chat."""
+
+    urls: list[str] = []
+    for match in _RICH_ENVELOPE_RE.finditer(result):
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        cards = payload.get("cardsV2")
+        if not isinstance(cards, list):
+            continue
+        for card_entry in cards:
+            if not isinstance(card_entry, Mapping):
+                continue
+            card = card_entry.get("card")
+            if not isinstance(card, Mapping):
+                continue
+            sections = card.get("sections")
+            if not isinstance(sections, list):
+                continue
+            for section in sections:
+                if not isinstance(section, Mapping):
+                    continue
+                widgets = section.get("widgets")
+                if not isinstance(widgets, list):
+                    continue
+                for widget in widgets:
+                    if not isinstance(widget, Mapping):
+                        continue
+                    image = widget.get("image")
+                    if not isinstance(image, Mapping):
+                        continue
+                    image_url = image.get("imageUrl")
+                    if isinstance(image_url, str) and image_url:
+                        urls.append(image_url)
+    return urls
+
+
+def _grade_quickchart_image(
+    spec: Mapping[str, object],
+    result: str,
+) -> GraderResult:
+    """Validate the rich-card chart, then prove QuickChart returned a PNG."""
+
+    urls = list(
+        dict.fromkeys(
+            url
+            for url in _rich_envelope_image_urls(result)
+            if _QUICKCHART_URL_RE.fullmatch(url) is not None
+        )
+    )
+    if not urls:
+        return GraderResult(
+            "quickchart_image",
+            False,
+            "rich envelope contained no https://quickchart.io/chart image URL",
+        )
+    config_errors: list[str] = []
+    for url in urls:
+        config_error = _quickchart_config_error(spec, url)
+        if config_error is not None:
+            config_errors.append(config_error)
+            continue
+        request = urllib_request.Request(
+            url,
+            headers={
+                "Accept": "image/png",
+                "User-Agent": "psd-agent-eval/1.0",
+            },
+        )
+        try:
+            opener = urllib_request.build_opener(_RejectRedirects)
+            with opener.open(request, timeout=15) as response:
+                status = getattr(response, "status", None)
+                if status is None:
+                    status = response.getcode()
+                content_type = response.headers.get("Content-Type", "")
+                signature = response.read(len(_PNG_SIGNATURE))
+        except (OSError, urllib_error.URLError, ValueError) as error:
+            return GraderResult(
+                "quickchart_image",
+                False,
+                f"QuickChart image probe failed: {error}",
+            )
+        if status != 200:
+            return GraderResult(
+                "quickchart_image",
+                False,
+                f"QuickChart image probe returned HTTP {status}",
+            )
+        if content_type.split(";", 1)[0].strip().lower() != "image/png":
+            return GraderResult(
+                "quickchart_image",
+                False,
+                f"QuickChart image probe returned {content_type!r}, not image/png",
+            )
+        if signature != _PNG_SIGNATURE:
+            return GraderResult(
+                "quickchart_image",
+                False,
+                "QuickChart image response did not start with the PNG signature",
+            )
+        return GraderResult(
+            "quickchart_image",
+            True,
+            "exact rich-card QuickChart configuration returned HTTP 200 image/png",
+        )
+    detail = config_errors[-1] if config_errors else "no usable chart URL"
+    return GraderResult("quickchart_image", False, detail)
+
+
 def _tool_name(call: object) -> str | None:
     if isinstance(call, str):
         return call
@@ -465,6 +755,117 @@ def _grade_trajectory(
             else f"expected relative order {expected!r}; observed {observed!r}"
         ),
     )
+
+
+def _render_tool_arguments(call: Mapping[str, object]) -> str | None:
+    arguments = call.get("args")
+    if arguments is None:
+        return None
+    if isinstance(arguments, str):
+        return arguments
+    try:
+        return json.dumps(arguments, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return str(arguments)
+
+
+def _grade_tool_call_succeeded(
+    spec: Mapping[str, object],
+    metadata: Mapping[str, object],
+) -> GraderResult:
+    """Require a named invocation and its matching completion to succeed.
+
+    Two telemetry shapes are reconciled here, because a task may be graded
+    against either the current harness or an already-deployed image:
+
+    1. Current (`harness_adapter.py`): one record per completed call, carrying
+       both the rendered ``args`` and the authoritative ``status``::
+
+           [{"name": "exec", "args": {...}, "status": "success"}]
+
+    2. Legacy (older deployed images): the call is split across two records --
+       an args-bearing invocation, immediately followed by an args-less record
+       holding the authoritative ``status``::
+
+           [{"name": "exec", "args": {...}, "status": "running"},
+            {"name": "exec", "args": None,  "status": "error"}]
+
+    The scan below therefore starts from the matched args-bearing record's own
+    status, then looks ahead for an immediately-following args-less record of
+    the same tool and lets that record's status win. The look-ahead stops at the
+    next args-bearing call of the same tool, since that is a new invocation
+    rather than this one's completion.
+    """
+
+    raw_calls = metadata.get("tool_calls")
+    calls = (
+        list(raw_calls)
+        if isinstance(raw_calls, Sequence)
+        and not isinstance(raw_calls, (str, bytes))
+        else []
+    )
+    expected_tool = str(spec["tool"])
+    args_pattern = str(spec["args_pattern"])
+    matched_invocations = 0
+    completion_statuses: list[str] = []
+
+    for index, raw_call in enumerate(calls):
+        if not isinstance(raw_call, Mapping):
+            continue
+        arguments = _render_tool_arguments(raw_call)
+        if (
+            _tool_name(raw_call) != expected_tool
+            or arguments is None
+            or re.search(args_pattern, arguments) is None
+        ):
+            continue
+        matched_invocations += 1
+        status = raw_call.get("status")
+        effective_status = (
+            status if isinstance(status, str) and status else None
+        )
+        # Deployed images predating the current harness may emit a second
+        # args-less record with the authoritative completion status. Prefer
+        # that record when present, while accepting the current single-record
+        # telemetry shape.
+        for later_call in calls[index + 1 :]:
+            if not isinstance(later_call, Mapping):
+                continue
+            if _tool_name(later_call) != expected_tool:
+                continue
+            if _render_tool_arguments(later_call) is not None:
+                break
+            later_status = later_call.get("status")
+            if isinstance(later_status, str) and later_status:
+                effective_status = later_status
+                break
+        if effective_status == "success":
+            return GraderResult(
+                "tool_call_succeeded",
+                True,
+                (
+                    f"{expected_tool} invocation matching "
+                    f"/{args_pattern}/ completed successfully"
+                ),
+            )
+        if effective_status is not None:
+            completion_statuses.append(effective_status)
+
+    if matched_invocations == 0:
+        reason = (
+            f"no {expected_tool} invocation matched arguments /{args_pattern}/"
+        )
+    elif completion_statuses:
+        reason = (
+            f"{expected_tool} invocation matching /{args_pattern}/ "
+            f"completed with status {completion_statuses[-1]!r}"
+        )
+    else:
+        reason = (
+            f"{expected_tool} invocation matching /{args_pattern}/ "
+            "had no completion record"
+        )
+    return GraderResult("tool_call_succeeded", False, reason)
 
 
 def _grade_tools_catalog(
@@ -587,6 +988,10 @@ def grade_trial(
             grader_results.append(_grade_no_route_called(spec, artifacts))
         elif grader == "output_match":
             grader_results.append(_grade_output_match(spec, result))
+        elif grader == "quickchart_image":
+            grader_results.append(_grade_quickchart_image(spec, result))
+        elif grader == "tool_call_succeeded":
+            grader_results.append(_grade_tool_call_succeeded(spec, metadata))
         elif grader == "trajectory_in_order":
             grader_results.append(_grade_trajectory(spec, metadata))
         elif grader == "tools_catalog":

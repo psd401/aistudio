@@ -1,0 +1,13 @@
+id: workflows-list-live-roster
+skill: psd-workflows
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-workflows to list the available workflow families. Do not describe or call any workflow. Report the EVAL-1426 evaluation schema tool."
+trials: 3
+fixtures:
+  - fixtures/list-roster.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/workflow-gateway","method":"POST","body":{"action":{"exact":"list-tools"}}}
+  - {"type":"no_route_called","route":"/api/agent/workflow-gateway","method":"POST","body":{"toolName":{"contains_any":["evaluation_submit","request_submit","timesheet_submit"]}}}
+  - {"type":"output_match","pattern":"eval1426_get_evaluation_schema"}

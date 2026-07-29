@@ -1,0 +1,13 @@
+id: skills-meta-search-summarization
+skill: psd-skills-meta
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use the skill catalog to search for the exact synthetic term EVAL-1426-opaque-summary. Search only; do not load or author a skill. Report the matching skill name from the catalog response."
+trials: 3
+fixtures:
+  - fixtures/search-summarization.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/skills","method":"POST","body":{"operation":{"exact":"search"},"query":{"exact":"EVAL-1426-opaque-summary"}}}
+  - {"type":"no_route_called","route":"/api/agent/skills","method":"POST","body":{"operation":{"contains_any":["load","author"]}}}
+  - {"type":"output_match","pattern":"eval-1426-records-safe-summarizer","ignore_case":true}

@@ -1,0 +1,10 @@
+id: summarize-records-safe-projector-summary
+skill: psd-summarize
+level: L2
+workspace: pure
+suite: capability
+prompt: "Use psd-summarize with the default student and personnel profiles on this synthetic source text: \"Student Avery Example, ID 999999, received discipline after damaging a projector. The facilities team decided to inventory projector power cables by Friday.\" Return only a brief records-safe summary."
+trials: 3
+graders:
+  - {"type":"tool_call_succeeded","tool":"exec","args_pattern":"psd-summarize/run\\.js"}
+  - {"type":"output_match","pattern":"(?is)^(?!.*Avery Example)(?!.*999999)(?!.*student)(?!.*disciplin).*projector.*(?:inventory|power cable|Friday)"}

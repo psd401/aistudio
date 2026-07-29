@@ -1,0 +1,10 @@
+id: aistudio-explain-without-call
+skill: psd-aistudio
+level: L1
+workspace: pure
+suite: capability
+prompt: "Explain the difference between listing AI Studio repositories and searching their contents. This is a conceptual question: do not call AI Studio, inspect a repository, or access live data."
+trials: 3
+graders:
+  - {"type":"no_route_called","route":"/api/agent/aistudio"}
+  - {"type":"output_match","pattern":"(?is)list.*(?:catalog|repositories|metadata).*search.*(?:content|segments|matches)"}

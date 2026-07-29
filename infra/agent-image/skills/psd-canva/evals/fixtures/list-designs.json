@@ -1,0 +1,32 @@
+[
+  {
+    "route": "/api/agent/canva",
+    "method": "POST",
+    "request_body": {"operation": "status"},
+    "response": {
+      "status": 200,
+      "body": {"connected": true}
+    }
+  },
+  {
+    "route": "/api/agent/canva",
+    "method": "POST",
+    "request_body": {
+      "operation": "request",
+      "method": "GET",
+      "path": "/v1/designs",
+      "query": {"query": "EVAL-1426"}
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "httpStatus": 200,
+        "payload": {
+          "items": [
+            {"id": "design-eval-1426", "title": "EVAL-1426 Design"}
+          ]
+        }
+      }
+    }
+  }
+]

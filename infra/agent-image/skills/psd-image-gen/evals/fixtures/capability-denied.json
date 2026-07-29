@@ -1,0 +1,26 @@
+[
+  {
+    "route": "/api/agent/credentials",
+    "method": "POST",
+    "request_body": {
+      "operation": "check-skill-access",
+      "capability": "skill.image-gen"
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "granted": false
+      }
+    }
+  },
+  {
+    "route": "/api/agent/failures",
+    "method": "POST",
+    "response": {
+      "status": 200,
+      "body": {
+        "ok": true
+      }
+    }
+  }
+]

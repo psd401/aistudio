@@ -70,6 +70,7 @@ LOGGER = logging.getLogger("agent_eval")
 DEFAULT_OWNER_EMAIL = "canary@build-gate.invalid"
 DEFAULT_CONTEXT_TTL_SECONDS = 900
 AWS_CREDENTIAL_EXPIRY_MARGIN_SECONDS = 60
+AWS_CREDENTIAL_EXPIRATION_ENV = "AGENT_EVAL_AWS_CREDENTIAL_EXPIRATION"
 INVOCATION_AUTHORITY_EXPIRY_MARGIN_SECONDS = 60
 CONTEXT_MINT_ROUNDING_SECONDS = 5
 MAX_CONTEXT_TTL_SECONDS = 7200
@@ -100,11 +101,16 @@ REQUIRED_METADATA_FIELDS = frozenset(
 BROKER_CAPTURE_GRADER_TYPES = frozenset(
     {"broker_request", "no_route_called"}
 )
+NETWORK_PROBE_GRADER_TYPES = frozenset({"quickchart_image"})
 BROKER_CONTROL_TMPFS_OPTIONS = (
     f"{DEFAULT_CONTROL_DIRECTORY}:"
     "rw,noexec,nosuid,nodev,size=268435456,mode=0700,uid=0,gid=0"
 )
 BROKER_STUB_CONTAINER_PATH = "/app/mantle_proxy.py"
+DEPLOYED_RUNTIME_ENVIRONMENT_KEYS = (
+    "HYPERFRAMES_RENDER_FUNCTION",
+    "SUMMARIZE_MODEL_ID",
+)
 
 
 class EvalRunnerError(RuntimeError):
@@ -1235,6 +1241,18 @@ def _task_from_mapping(value: Mapping[str, object], source: Path) -> Task:
             f"{source}: broker graders require level L1: "
             + ", ".join(broker_graders)
         )
+    network_probe_graders = sorted(
+        {
+            str(spec["type"])
+            for spec in task.graders
+            if spec.get("type") in NETWORK_PROBE_GRADER_TYPES
+        }
+    )
+    if task.level != "L2" and network_probe_graders:
+        raise EvalRunnerError(
+            f"{source}: network-probe graders require level L2: "
+            + ", ".join(network_probe_graders)
+        )
     if task.level != "L1" and task.fixture_paths:
         raise EvalRunnerError(f"{source}: fixtures require level L1")
     if task.level == "L1" and not task.graders:
@@ -1331,6 +1349,58 @@ def _resolve_app_base_url(
     return resolved
 
 
+def _resolve_deployed_runtime_environment(
+    executor: CommandExecutor,
+    runtime_id: str | None,
+    region: str,
+) -> dict[str, str]:
+    """Read only the non-secret deployment config required by L2 skills."""
+
+    if not runtime_id:
+        return {}
+    query_fields = ",".join(
+        f"{key}:environmentVariables.{key}"
+        for key in DEPLOYED_RUNTIME_ENVIRONMENT_KEYS
+    )
+    result = executor.run(
+        [
+            "aws",
+            "bedrock-agentcore-control",
+            "get-agent-runtime",
+            "--agent-runtime-id",
+            runtime_id,
+            "--query",
+            f"{{{query_fields}}}",
+            "--output",
+            "json",
+            "--region",
+            region,
+        ],
+        timeout=30,
+    )
+    try:
+        values = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise EvalRunnerError(
+            "deployed runtime environment query returned invalid JSON"
+        ) from error
+    if not isinstance(values, dict):
+        raise EvalRunnerError(
+            "deployed runtime environment query returned a non-object"
+        )
+    environment: dict[str, str] = {}
+    for key in DEPLOYED_RUNTIME_ENVIRONMENT_KEYS:
+        value = values.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise EvalRunnerError(
+                f"deployed runtime environment field {key} is invalid"
+            )
+        environment[key] = value
+    return environment
+
+
 def _resolve_aws_credentials(executor: CommandExecutor) -> AwsCredentials:
     allowed = {
         "AWS_ACCESS_KEY_ID",
@@ -1375,6 +1445,18 @@ def _resolve_aws_credentials(executor: CommandExecutor) -> AwsCredentials:
         raise EvalRunnerError(
             "could not resolve AWS credentials for the candidate container"
         )
+    explicit_expiration = os.environ.get(AWS_CREDENTIAL_EXPIRATION_ENV)
+    if expires_at is None and explicit_expiration:
+        try:
+            expires_at = datetime.fromisoformat(
+                explicit_expiration.replace("Z", "+00:00")
+            )
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+        except ValueError as error:
+            raise EvalRunnerError(
+                f"{AWS_CREDENTIAL_EXPIRATION_ENV} is not an ISO 8601 timestamp"
+            ) from error
     return AwsCredentials(environment=credentials, expires_at=expires_at)
 
 
@@ -1472,6 +1554,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="synthetic owner identity embedded in signed trial contexts",
     )
     parser.add_argument("--app-base-url")
+    parser.add_argument(
+        "--agent-runtime-id",
+        default=os.environ.get("AGENT_EVAL_RUNTIME_ID"),
+        help=(
+            "deployed runtime whose allowlisted non-secret environment config "
+            "should be mirrored into L2 containers"
+        ),
+    )
     parser.add_argument("--platform", default="linux/arm64")
     parser.add_argument("--boot-timeout", type=_positive_integer, default=120)
     parser.add_argument("--invocation-timeout", type=_positive_integer, default=900)
@@ -1501,11 +1591,17 @@ def main(argv: list[str] | None = None) -> int:
             args.region,
             args.app_base_url,
         )
+        deployed_runtime_environment = _resolve_deployed_runtime_environment(
+            executor,
+            args.agent_runtime_id,
+            args.region,
+        )
         environment_values = {
             "ENVIRONMENT": args.environment,
             "AWS_REGION": args.region,
             "APP_BASE_URL": app_base_url,
             "BUILD_MARKER": f"eval:{args.image}",
+            **deployed_runtime_environment,
         }
         credential_provider = ActiveAwsCredentialProvider(executor)
         name_token = _docker_name_token(args.name_prefix, os.getpid())

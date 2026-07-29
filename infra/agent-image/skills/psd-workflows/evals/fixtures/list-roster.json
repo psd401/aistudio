@@ -1,0 +1,19 @@
+[
+  {
+    "route": "/api/agent/workflow-gateway",
+    "method": "POST",
+    "request_body": {"action": "list-tools"},
+    "response": {
+      "status": 200,
+      "body": {
+        "tools": [
+          {
+            "name": "eval1426_get_evaluation_schema",
+            "description": "Synthetic read-only evaluation schema for the eval suite",
+            "inputSchema": {"type": "object", "properties": {}}
+          }
+        ]
+      }
+    }
+  }
+]

@@ -1,0 +1,14 @@
+[
+  {
+    "route": "/api/agent/credentials",
+    "method": "POST",
+    "request_body": {
+      "operation": "check-skill-access",
+      "capability": "psd-workspace"
+    },
+    "response": {
+      "status": 200,
+      "body": {"granted": true}
+    }
+  }
+]

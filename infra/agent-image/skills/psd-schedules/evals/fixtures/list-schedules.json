@@ -1,0 +1,19 @@
+[
+  {
+    "route": "/api/agent/schedules",
+    "method": "POST",
+    "request_body": {"operation": "list"},
+    "response": {
+      "status": 200,
+      "body": {
+        "schedules": [
+          {
+            "id": "schedule-eval-1426",
+            "name": "EVAL-1426 Read-only Canary",
+            "enabled": true
+          }
+        ]
+      }
+    }
+  }
+]
