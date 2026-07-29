@@ -310,7 +310,31 @@ class OutputAndTrajectoryGraderTests(unittest.TestCase):
             "tool": "exec",
             "args_pattern": r"psd-summarize/run\.js",
         }
-        successful = grade(
+        successful_current_shape = grade(
+            [spec],
+            metadata={
+                "tool_calls": [
+                    {
+                        "name": "exec",
+                        "args": "node /opt/psd-skills/psd-summarize/run.js",
+                        "status": "success",
+                    },
+                ]
+            },
+        )
+        failed_current_shape = grade(
+            [spec],
+            metadata={
+                "tool_calls": [
+                    {
+                        "name": "exec",
+                        "args": "node /opt/psd-skills/psd-summarize/run.js",
+                        "status": "error",
+                    },
+                ]
+            },
+        )
+        successful_legacy_shape = grade(
             [spec],
             metadata={
                 "tool_calls": [
@@ -323,7 +347,7 @@ class OutputAndTrajectoryGraderTests(unittest.TestCase):
                 ]
             },
         )
-        failed = grade(
+        failed_legacy_shape = grade(
             [spec],
             metadata={
                 "tool_calls": [
@@ -343,9 +367,14 @@ class OutputAndTrajectoryGraderTests(unittest.TestCase):
             },
         )
 
-        self.assertTrue(successful["passed"])
-        self.assertFalse(failed["passed"])
-        self.assertIn("status 'error'", failed["results"][0]["reason"])
+        self.assertTrue(successful_current_shape["passed"])
+        self.assertFalse(failed_current_shape["passed"])
+        self.assertTrue(successful_legacy_shape["passed"])
+        self.assertFalse(failed_legacy_shape["passed"])
+        self.assertIn(
+            "status 'error'",
+            failed_legacy_shape["results"][0]["reason"],
+        )
 
     def test_tool_call_succeeded_rejects_a_missing_matching_invocation(self):
         decision = grade(

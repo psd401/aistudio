@@ -302,9 +302,10 @@ Available graders:
   explicit method must be `POST`.
 - `output_match` applies a regular expression to the final result.
 - `tool_call_succeeded` requires a tool invocation whose arguments match the
-  declared regular expression and a subsequent success completion record for
-  that invocation. This prevents a manually produced fallback from masking a
-  failed skill executable.
+  declared regular expression and a successful completion status. It supports
+  both current single-record telemetry and the legacy split completion shape.
+  This prevents a manually produced fallback from masking a failed skill
+  executable.
 - `trajectory_in_order` requires relative tool order while allowing extra
   intervening steps.
 - `tools_catalog` checks the per-turn compact, complete `tools.catalog` name

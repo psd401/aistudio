@@ -527,6 +527,14 @@ def _grade_tool_call_succeeded(
         ):
             continue
         matched_invocations += 1
+        status = raw_call.get("status")
+        effective_status = (
+            status if isinstance(status, str) and status else None
+        )
+        # Deployed images predating the current harness may emit a second
+        # args-less record with the authoritative completion status. Prefer
+        # that record when present, while accepting the current single-record
+        # telemetry shape.
         for later_call in calls[index + 1 :]:
             if not isinstance(later_call, Mapping):
                 continue
@@ -534,19 +542,21 @@ def _grade_tool_call_succeeded(
                 continue
             if _render_tool_arguments(later_call) is not None:
                 break
-            status = later_call.get("status")
-            if isinstance(status, str) and status:
-                completion_statuses.append(status)
-                if status == "success":
-                    return GraderResult(
-                        "tool_call_succeeded",
-                        True,
-                        (
-                            f"{expected_tool} invocation matching "
-                            f"/{args_pattern}/ completed successfully"
-                        ),
-                    )
+            later_status = later_call.get("status")
+            if isinstance(later_status, str) and later_status:
+                effective_status = later_status
                 break
+        if effective_status == "success":
+            return GraderResult(
+                "tool_call_succeeded",
+                True,
+                (
+                    f"{expected_tool} invocation matching "
+                    f"/{args_pattern}/ completed successfully"
+                ),
+            )
+        if effective_status is not None:
+            completion_statuses.append(effective_status)
 
     if matched_invocations == 0:
         reason = (
