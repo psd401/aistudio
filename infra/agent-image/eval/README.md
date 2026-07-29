@@ -132,15 +132,26 @@ under the next.
 
 ### Coverage inventory and drift gate
 
-Coverage follows the shipped tree rather than a hard-coded epic count. The
-current image contains 31 directories with `SKILL.md`; 30 have one or more
-co-located tasks and `psd-rules` is the sole documented opt-out. `_shared` is
-not a skill because it has no `SKILL.md`.
+Coverage follows the final image inventory rather than a hard-coded epic
+count. The checked-in tree contains 31 directories with `SKILL.md`; 30 have
+one or more co-located tasks and `psd-rules` is a documented opt-out. `_shared`
+is not a skill because it has no `SKILL.md`.
 
 `psd-rules` is concatenated into `SOUL.md` at image build time. It is global
 bootstrap policy, not an independently invoked skill, so assigning it an
 invocation task would falsely imply a callable boundary. Its behavior is
 exercised transitively by every task.
+
+The image build also adds 44 pinned `gws-*` guidance skills from
+`googleworkspace/cli`. They are documentation-only aliases: direct `gws`
+execution is disabled by `gws-wrapper.sh`, and the executable behavior is
+covered through `psd-workspace`. Their names and shared opt-out reason live in
+`eval/upstream-skill-inventory.json`. The drift gate requires that manifest's
+version to match Dockerfile `GWS_VERSION`, so changing the pinned upstream
+release also requires reviewing its shipped skill inventory.
+Together, the final image inventory is 75 skills: 30 directly evaluated and
+45 explicitly opted out (`psd-rules` plus the 44 documentation-only `gws-*`
+skills).
 
 Run the same inventory check CI runs:
 
@@ -149,10 +160,11 @@ python3 infra/agent-image/check_eval_coverage.py
 python3 -m unittest infra/agent-image/test_eval_coverage.py
 ```
 
-The check fails when any new shipped skill lacks an `evals/*.yaml` file. The
-test suite also creates a fixture skill without `evals/` and proves that the
-failure fires. Opt-outs live in `check_eval_coverage.py`; stale or reasonless
-entries fail as configuration errors.
+The check fails when any new checked-in skill lacks an `evals/*.yaml` file or
+when any build-added skill is absent from the documented upstream opt-out
+inventory. The test suite also creates a fixture skill without `evals/` and
+proves that the failure fires. Stale or reasonless opt-outs and upstream pin
+drift fail as configuration errors.
 
 The regression and capability manifests contain 50 tasks total. At least 25%
 are explicit negative cases: they prove that a route or side effect is not
@@ -198,14 +210,21 @@ subset is intentionally small:
 
 - QuickChart and recent-source research use synthetic/public inputs;
 - summarization uses fabricated PII to verify exclusion;
-- TTS uploads only the phrase `EVAL 1426 synthetic audio canary`;
-- failure reporting writes an explicitly labeled synthetic canary record.
+- TTS uploads only the phrase `EVAL 1426 synthetic audio canary`.
+
+The L2 failure-report task remains in the regression suite but is excluded
+from this weekly subset: it requires an `@psd401.net` actor for attribution,
+which the RFC 2606 canary intentionally is not.
 
 Repository secret `AGENT_EVAL_AWS_ROLE_ARN` must name a least-privilege OIDC
 role able to read the deployed runtime and ECR image, pull that image, discover
 the dev broker, mint signed probe authority, and perform the listed L2 calls.
 The role must permit a three-hour session, matching the workflow's requested
 duration.
+Until #1440 and #1442 are fixed, the retained Summarize and TTS canaries are
+expected to fail and should be treated as known defect signals, not workflow
+misconfiguration. HyperFrames exercises the same #1442 direct-AWS credential
+boundary and is omitted from the weekly subset to avoid a duplicate alert.
 The workflow never uploads or commits JSONL transcripts. It prints only task
 IDs and failure reasons, then deletes the owner-only run file even on failure.
 

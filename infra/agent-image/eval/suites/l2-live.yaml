@@ -1,7 +1,11 @@
 # Weekly live-dev fixture-drift subset. Every prompt uses synthetic test data.
+# Summarize (#1440) and TTS (#1442) are intentionally retained as fail-closed
+# signals until their known dev defects land. HyperFrames shares #1442's direct
+# AWS credential boundary and is omitted to avoid duplicating the same alert.
+# Failure reporting remains in the regression suite but requires a @psd401.net
+# actor for attribution, so the RFC 2606 canary owner cannot exercise it live.
 tasks:
   - ../../skills/chat-chart/evals/synthetic-bar-chart.yaml
-  - ../../skills/psd-failure-report/evals/synthetic-missing-data.yaml
   - ../../skills/psd-last30days/evals/keyless-eval-reliability-brief.yaml
   - ../../skills/psd-summarize/evals/records-safe-projector-summary.yaml
   - ../../skills/psd-tts/evals/synthetic-short-audio.yaml

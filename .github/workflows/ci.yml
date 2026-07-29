@@ -25,6 +25,11 @@ jobs:
       with:
         bun-version: "1.2.x"
 
+    - name: Setup Python for agent eval gates
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.12"
+
     - name: Install dependencies
       run: bun install --frozen-lockfile
 
@@ -45,6 +50,8 @@ jobs:
         python3 infra/agent-image/check_eval_coverage.py
         python3 -m unittest \
           infra/agent-image/test_eval_coverage.py \
+          infra/agent-image/test_broker_stub.py \
+          infra/agent-image/test_graders.py \
           infra/agent-image/test_eval_runner.py
 
     - name: Run tests

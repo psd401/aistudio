@@ -13,7 +13,6 @@ import os
 import sys
 import tempfile
 import unittest
-from collections import Counter
 from contextlib import redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -147,9 +146,6 @@ class SuiteLoadingTests(unittest.TestCase):
         }
         covered_skills = shipped_skills - {"psd-rules"}
         self.assertEqual({task.skill for task in tasks}, covered_skills)
-        self.assertTrue(
-            all(Counter(task.skill for task in tasks)[skill] >= 1 for skill in covered_skills)
-        )
         self.assertEqual({task.trials for task in tasks}, {3})
         for suite, suite_tasks in tasks_by_suite.items():
             self.assertEqual({task.suite for task in suite_tasks}, {suite})
@@ -406,6 +402,28 @@ class SuiteLoadingTests(unittest.TestCase):
                     f"{fixture_path} is not co-located with {task.skill}",
                 )
             runner._load_fixture_files(task.fixture_paths)
+
+    def test_committed_l2_live_suite_is_a_valid_three_trial_subset(self):
+        l2_tasks = runner.load_suite(
+            AGENT_IMAGE_DIR / "eval" / "suites" / "l2-live.yaml"
+        )
+        comparison_tasks = [
+            *runner.load_suite(
+                AGENT_IMAGE_DIR / "eval" / "suites" / "regression.yaml"
+            ),
+            *runner.load_suite(
+                AGENT_IMAGE_DIR / "eval" / "suites" / "capability.yaml"
+            ),
+        ]
+
+        self.assertEqual(len(l2_tasks), 4)
+        self.assertEqual({task.level for task in l2_tasks}, {"L2"})
+        self.assertEqual({task.trials for task in l2_tasks}, {3})
+        self.assertTrue(
+            {task.id for task in l2_tasks}.issubset(
+                {task.id for task in comparison_tasks}
+            )
+        )
 
     def test_invalid_workspace_fails_closed(self):
         with self.subTest("validation happens after parsing"):
