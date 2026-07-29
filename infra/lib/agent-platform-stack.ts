@@ -2339,6 +2339,29 @@ export class AgentPlatformStack extends cdk.Stack {
       actions: ['scheduler:ListSchedules'],
       resources: ['*'],
     }));
+    // Self-invocation for continuation paging. The ARN is FORMATTED from the
+    // known functionName rather than read off the Function construct: a
+    // `backfill.functionArn` reference emits Fn::GetAtt into the role's
+    // DefaultPolicy, while CDK also makes CfnFunction DependsOn that same
+    // DefaultPolicy (Function adds a node dependency on its role, which covers
+    // the role's child policy). That is a CloudFormation resource cycle —
+    // synth passes and the deploy fails with "Circular dependency between
+    // resources: [ScheduleTargetBackfillLambda, ScheduleTargetBackfillRole
+    // DefaultPolicy, ScheduleTargetBackfillLambdaEventInvokeConfig]".
+    // functionName is deterministic here, so the literal ARN is exact.
+    role.addToPolicy(new iam.PolicyStatement({
+      sid: 'ScheduleTargetBackfillContinue',
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: [
+        this.formatArn({
+          service: 'lambda',
+          resource: 'function',
+          arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: functionName,
+        }),
+      ],
+    }));
     const logGroup = new logs.LogGroup(
       this,
       'ScheduleTargetBackfillLogGroup',
@@ -2377,12 +2400,6 @@ export class AgentPlatformStack extends cdk.Stack {
     );
     cdk.Tags.of(backfill).add('Environment', environment);
     cdk.Tags.of(backfill).add('ManagedBy', 'cdk');
-    role.addToPolicy(new iam.PolicyStatement({
-      sid: 'ScheduleTargetBackfillContinue',
-      effect: iam.Effect.ALLOW,
-      actions: ['lambda:InvokeFunction'],
-      resources: [backfill.functionArn],
-    }));
 
     // The invocation deliberately lives in FrontendStackEcs. That stack
     // deploys after AgentPlatformStack and makes the trigger depend on the ECS
