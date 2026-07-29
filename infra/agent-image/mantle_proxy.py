@@ -91,16 +91,25 @@ HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES = 6 * 1024 * 1024
 HYPERFRAMES_OWNER_BINDING_RESERVE_BYTES = 512
 HYPERFRAMES_HTTP_REQUEST_MAX_BYTES = HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES
 HYPERFRAMES_RESPONSE_MAX_BYTES = 8 * 1024 * 1024
-# 13 minutes leaves 60 seconds under the interactive turn's 840-second budget.
-# The render process itself is capped at 720 seconds, leaving another minute
-# for Lambda cleanup/upload/response. Both the AWS client and Node relay client
-# use this value so neither disconnects while a supported render is still live.
-HYPERFRAMES_RELAY_TIMEOUT_SECONDS = 780
+# The renderer is capped at 720s. The Lambda read budget leaves another minute
+# for cleanup/upload/response. Owner resolution, Lambda connection, and the
+# response wait are separate sequential phases, so the model-facing relay
+# timeout must cover all three plus a small transport margin.
+HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS = 30
+HYPERFRAMES_LAMBDA_CONNECT_TIMEOUT_SECONDS = 10
+HYPERFRAMES_LAMBDA_READ_TIMEOUT_SECONDS = 780
+HYPERFRAMES_RELAY_TRANSPORT_MARGIN_SECONDS = 5
+HYPERFRAMES_RELAY_TIMEOUT_SECONDS = (
+    HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS
+    + HYPERFRAMES_LAMBDA_CONNECT_TIMEOUT_SECONDS
+    + HYPERFRAMES_LAMBDA_READ_TIMEOUT_SECONDS
+    + HYPERFRAMES_RELAY_TRANSPORT_MARGIN_SECONDS
+)
 # Finalization must never restart this proxy while an accepted synchronous
 # render can still be running in Lambda. Keep a small transport margin above
 # the relay ceiling; workspace flushing retains its separate 120-second budget
 # in agentcore_wrapper.py.
-FINALIZATION_DRAIN_TIMEOUT_SECONDS = HYPERFRAMES_RELAY_TIMEOUT_SECONDS + 15
+FINALIZATION_DRAIN_TIMEOUT_SECONDS = HYPERFRAMES_RELAY_TIMEOUT_SECONDS + 5
 HYPERFRAMES_MAX_DURATION_SECONDS = 180
 HYPERFRAMES_MAX_FRAMES = 3_600
 HYPERFRAMES_MIN_DIMENSION = 16
@@ -262,8 +271,8 @@ def _new_lambda_client():
         "lambda",
         region_name=AWS_REGION,
         config=Config(
-            connect_timeout=10,
-            read_timeout=HYPERFRAMES_RELAY_TIMEOUT_SECONDS,
+            connect_timeout=HYPERFRAMES_LAMBDA_CONNECT_TIMEOUT_SECONDS,
+            read_timeout=HYPERFRAMES_LAMBDA_READ_TIMEOUT_SECONDS,
             # Retrying a timed-out synchronous invoke can start the same costly
             # render twice. The caller can make an explicit retry after a
             # definitive failure; the transport itself stays single-attempt.
@@ -354,7 +363,18 @@ def _authority_headers(method: str, route: str, body: bytes) -> dict:
 
 
 async def _resolve_invocation_owner() -> str:
-    """Resolve the signed turn owner in the trusted web tier before AWS work."""
+    """Resolve one signed owner within a total budget across both web routes."""
+    try:
+        return await asyncio.wait_for(
+            _resolve_invocation_owner_within_budget(),
+            timeout=HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError("Invocation identity verification timed out") from exc
+
+
+async def _resolve_invocation_owner_within_budget() -> str:
+    """Use the dedicated route or one authenticated old-tier compatibility probe."""
     status, response_body = await _post_signed_identity_request(
         INVOCATION_IDENTITY_ROUTE,
         skip_not_found_body=True,
@@ -402,7 +422,11 @@ async def _post_signed_identity_request(
         "Content-Type": "application/json",
         **_authority_headers("POST", route, body),
     }
-    timeout = ClientTimeout(total=30, sock_read=30, sock_connect=10)
+    timeout = ClientTimeout(
+        total=HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS,
+        sock_read=HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS,
+        sock_connect=10,
+    )
     async with ClientSession(timeout=timeout) as session:
         async with session.post(
             f"{APP_BASE_URL}{route}",

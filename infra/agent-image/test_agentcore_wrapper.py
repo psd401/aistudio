@@ -224,7 +224,7 @@ class TestSerializedInvocationSignature(unittest.TestCase):
 class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
     def test_privileged_drain_outlives_render_without_expanding_flush_budget(self):
         self.assertEqual(agentcore_wrapper.FINAL_WORKSPACE_FLUSH_SECONDS, 120)
-        self.assertEqual(agentcore_wrapper.PROXY_FINALIZATION_DRAIN_SECONDS, 795)
+        self.assertEqual(agentcore_wrapper.PROXY_FINALIZATION_DRAIN_SECONDS, 830)
 
     async def test_second_drain_failure_restarts_stuck_proxy_again(self):
         import os

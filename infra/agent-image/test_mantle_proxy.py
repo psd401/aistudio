@@ -59,7 +59,10 @@ import mantle_proxy  # noqa: E402
 from mantle_proxy import (  # noqa: E402
     AgentBrokerResponseTooLarge,
     FINALIZATION_DRAIN_TIMEOUT_SECONDS,
+    HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS,
     HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES,
+    HYPERFRAMES_LAMBDA_CONNECT_TIMEOUT_SECONDS,
+    HYPERFRAMES_LAMBDA_READ_TIMEOUT_SECONDS,
     HYPERFRAMES_OWNER_BINDING_RESERVE_BYTES,
     HYPERFRAMES_RELAY_TIMEOUT_SECONDS,
     POLLY_TEXT_MAX_CHARS,
@@ -262,8 +265,8 @@ class TestDirectAwsSkillRelay(unittest.TestCase):
 
         self.assertIs(result, client_constructor.return_value)
         config_constructor.assert_called_once_with(
-            connect_timeout=10,
-            read_timeout=HYPERFRAMES_RELAY_TIMEOUT_SECONDS,
+            connect_timeout=HYPERFRAMES_LAMBDA_CONNECT_TIMEOUT_SECONDS,
+            read_timeout=HYPERFRAMES_LAMBDA_READ_TIMEOUT_SECONDS,
             retries={"total_max_attempts": 1, "mode": "standard"},
         )
         client_constructor.assert_called_once_with(
@@ -274,6 +277,14 @@ class TestDirectAwsSkillRelay(unittest.TestCase):
 
     def test_finalization_drain_outlives_the_longest_relay_request(self):
         self.assertGreater(
+            HYPERFRAMES_RELAY_TIMEOUT_SECONDS,
+            (
+                HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS
+                + HYPERFRAMES_LAMBDA_CONNECT_TIMEOUT_SECONDS
+                + HYPERFRAMES_LAMBDA_READ_TIMEOUT_SECONDS
+            ),
+        )
+        self.assertGreater(
             FINALIZATION_DRAIN_TIMEOUT_SECONDS,
             HYPERFRAMES_RELAY_TIMEOUT_SECONDS,
         )
@@ -281,6 +292,30 @@ class TestDirectAwsSkillRelay(unittest.TestCase):
 
 
 class TestHyperframesOwnerResolution(unittest.IsolatedAsyncioTestCase):
+    async def test_owner_resolution_has_one_total_deadline(self):
+        async def never_returns(*_args, **_kwargs):
+            await asyncio.Event().wait()
+
+        with mock.patch.object(
+            mantle_proxy,
+            "HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS",
+            0.01,
+        ), mock.patch.object(
+            mantle_proxy,
+            "_post_signed_identity_request",
+            new=mock.AsyncMock(side_effect=never_returns),
+        ) as post_identity:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "identity verification timed out",
+            ):
+                await _resolve_invocation_owner()
+
+        post_identity.assert_awaited_once_with(
+            mantle_proxy.INVOCATION_IDENTITY_ROUTE,
+            skip_not_found_body=True,
+        )
+
     async def test_uses_only_the_web_verified_owner(self):
         payload = {
             "html": '<div data-composition-id="eval">EVAL 1426</div>',

@@ -88,10 +88,11 @@ _INVOCATION_CONTEXT_RE = re.compile(
 _REQUEST_PROOF_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _invocation_lock = asyncio.Lock()
 FINAL_WORKSPACE_FLUSH_SECONDS = 120
-# HyperFrames may legitimately hold a synchronous relay request for 780s.
-# Finalization must keep the gate closed and wait longer than that ceiling
-# instead of restarting the proxy and orphaning an accepted Lambda render.
-PROXY_FINALIZATION_DRAIN_SECONDS = 795
+# HyperFrames may legitimately spend 30s resolving owner authority, 10s
+# connecting to Lambda, 780s waiting for its response, and 5s on local
+# transport. Finalization must outlive that 825s relay ceiling instead of
+# restarting the proxy and orphaning an accepted Lambda render.
+PROXY_FINALIZATION_DRAIN_SECONDS = 830
 
 
 def _install_invocation_authority(token, request_proof_key) -> bool:

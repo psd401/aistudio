@@ -25,6 +25,10 @@ const {
   main,
   MAX_INVOKE_PAYLOAD_BYTES,
   MAX_RELAY_PAYLOAD_BYTES,
+  IDENTITY_TIMEOUT_MS,
+  LAMBDA_CONNECT_TIMEOUT_MS,
+  LAMBDA_READ_TIMEOUT_MS,
+  RELAY_TRANSPORT_MARGIN_MS,
   RELAY_TIMEOUT_MS,
 } = require('./render');
 
@@ -171,8 +175,15 @@ test('buildPayload enforces the serialized Lambda limit after JSON escaping', ()
   expect(lastJson().message).toContain('6 MiB Lambda invocation limit');
 });
 
-test('relay timeout leaves cleanup headroom inside the interactive turn budget', () => {
-  expect(RELAY_TIMEOUT_MS).toBe(780_000);
+test('relay timeout covers identity, Lambda connect/read, and transport budgets', () => {
+  expect(RELAY_TIMEOUT_MS).toBe(
+    IDENTITY_TIMEOUT_MS +
+      LAMBDA_CONNECT_TIMEOUT_MS +
+      LAMBDA_READ_TIMEOUT_MS +
+      RELAY_TRANSPORT_MARGIN_MS,
+  );
+  expect(RELAY_TIMEOUT_MS).toBe(825_000);
+  expect(RELAY_TIMEOUT_MS).toBeLessThan(840_000);
   expect(MAX_RELAY_PAYLOAD_BYTES).toBe(MAX_INVOKE_PAYLOAD_BYTES - 512);
 });
 

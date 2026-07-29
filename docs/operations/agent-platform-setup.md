@@ -376,12 +376,15 @@ the relay resolves `ownerEmail` through the signed
 verification. During a staggered rollout to an older web tier, it authenticates
 the installed token and proof through the existing model broker's fixed
 unsupported-path response before decoding the owner claim; any 403 or
-unexpected response fails closed. Finalization gives active privileged requests
-a 795-second drain ceiling (above the 780-second render relay ceiling) while
-retaining a separate 120-second workspace-flush budget, so a proxy restart
-cannot orphan an accepted Lambda render. Keep future direct-AWS skills behind
-the same kind of fixed-operation boundary; do not add AWS credential keys to
-OpenClaw's exec allowlist.
+unexpected response fails closed. Owner resolution has one 30-second total
+budget across the dedicated and compatibility routes. The model-facing render
+client then allows 825 seconds for owner resolution, Lambda connection, its
+780-second response budget, and transport margin. Finalization gives active
+privileged requests a matching 830-second drain ceiling while retaining a
+separate 120-second workspace-flush budget, so a proxy restart cannot orphan
+an accepted Lambda render. Keep future direct-AWS skills behind the same kind
+of fixed-operation boundary; do not add AWS credential keys to OpenClaw's exec
+allowlist.
 
 ## Rich Chat output — cards, charts, button callbacks
 

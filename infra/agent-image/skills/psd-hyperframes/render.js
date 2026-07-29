@@ -33,9 +33,19 @@ const MAX_INVOKE_PAYLOAD_BYTES = 6 * 1024 * 1024;
 const OWNER_BINDING_RESERVE_BYTES = 512;
 const MAX_RELAY_PAYLOAD_BYTES =
   MAX_INVOKE_PAYLOAD_BYTES - OWNER_BINDING_RESERVE_BYTES;
-// The renderer is capped at 720s. Leave 60s for Lambda cleanup/upload and
-// another 60s under the interactive turn's 840s ceiling.
-const RELAY_TIMEOUT_MS = 780_000;
+// The renderer is capped at 720s. The root relay may then spend up to 60s on
+// Lambda cleanup/upload/response, but first it must resolve the signed owner
+// and connect to Lambda. Cover every sequential phase plus a transport margin;
+// 825s remains below the interactive turn's 840s ceiling.
+const IDENTITY_TIMEOUT_MS = 30_000;
+const LAMBDA_CONNECT_TIMEOUT_MS = 10_000;
+const LAMBDA_READ_TIMEOUT_MS = 780_000;
+const RELAY_TRANSPORT_MARGIN_MS = 5_000;
+const RELAY_TIMEOUT_MS =
+  IDENTITY_TIMEOUT_MS +
+  LAMBDA_CONNECT_TIMEOUT_MS +
+  LAMBDA_READ_TIMEOUT_MS +
+  RELAY_TRANSPORT_MARGIN_MS;
 // Keep in sync with the render Lambda (infra/hyperframes-render/handler.js) and
 // SKILL.md. Client-side checks fail fast; the Lambda re-validates authoritatively.
 const MAX_DURATION_SECONDS = 180;
@@ -467,5 +477,9 @@ module.exports = {
   MAX_DURATION_SECONDS,
   MAX_INVOKE_PAYLOAD_BYTES,
   MAX_RELAY_PAYLOAD_BYTES,
+  IDENTITY_TIMEOUT_MS,
+  LAMBDA_CONNECT_TIMEOUT_MS,
+  LAMBDA_READ_TIMEOUT_MS,
+  RELAY_TRANSPORT_MARGIN_MS,
   RELAY_TIMEOUT_MS,
 };
