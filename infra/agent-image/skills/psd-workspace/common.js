@@ -1,45 +1,18 @@
+
 /**
  * Shared helpers for the psd-workspace OpenClaw skill (#912).
  *
  * Environment contract (set in agent-platform-stack.ts):
  *   AWS_REGION                         — e.g. us-east-1
  *   ENVIRONMENT                        — dev/staging/prod
- *   GOOGLE_OAUTH_CLIENT_SECRET_ID      — Secrets Manager ID for OAuth client creds
- *   AGENT_INTERNAL_API_KEY_SECRET_ID   — Secrets Manager ID for internal API key
- *   APP_BASE_URL                       — Base URL of the Next.js app (consent-link host)
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
 
-const { spawnSync } = require('node:child_process');
-const fs = require('node:fs');
 
-const {
-  SecretsManagerClient,
-  GetSecretValueCommand,
-} = require('@aws-sdk/client-secrets-manager');
 
-const REGION = process.env.AWS_REGION || 'us-east-1';
-const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
 const APP_BASE_URL = process.env.APP_BASE_URL || '';
-const GOOGLE_OAUTH_CLIENT_SECRET_ID = process.env.GOOGLE_OAUTH_CLIENT_SECRET_ID
-  || `psd-agent/${ENVIRONMENT}/google-oauth-client`;
-const AGENT_INTERNAL_API_KEY_SECRET_ID = process.env.AGENT_INTERNAL_API_KEY_SECRET_ID
-  || `psd-agent/${ENVIRONMENT}/internal-api-key`;
-
-// Two slots per user (#912 Phase 1 — see secrets-manager.ts):
-//   'agent_account' = OAuth on agnt_<uniqname>@psd401.net (broad scopes)
-//   'user_account'  = OAuth on the human user (scopes:
-//                     gmail.modify, calendar, tasks, drive.file)
-//
-// The user_account path is suffixed (-user) so revocation tools can iterate
-// by prefix and tell the slots apart.
-const WORKSPACE_SECRET_PATH = (email, kind = 'agent_account') => {
-  const suffix = kind === 'user_account' ? '-user' : '';
-  return `psd-agent-creds/${ENVIRONMENT}/user/${email}/google-workspace${suffix}`;
-};
-
-const smClient = new SecretsManagerClient({ region: REGION });
 
 // Strict email regex — must stay in sync with lib/agent-workspace/validation.ts.
 // The email is interpolated into a Secrets Manager path, so we reject anything
@@ -85,137 +58,6 @@ function validateUserEmail(email) {
   }
 }
 
-async function getSecretJson(secretId) {
-  const resp = await smClient.send(new GetSecretValueCommand({ SecretId: secretId }));
-  if (!resp.SecretString) {
-    throw new Error(`Secret ${secretId} has no SecretString value`);
-  }
-  try {
-    return JSON.parse(resp.SecretString);
-  } catch (err) {
-    throw new Error(`Secret ${secretId} is not valid JSON: ${err.message}`);
-  }
-}
-
-async function getSecretString(secretId) {
-  const resp = await smClient.send(new GetSecretValueCommand({ SecretId: secretId }));
-  if (!resp.SecretString) {
-    throw new Error(`Secret ${secretId} has no SecretString value`);
-  }
-  return resp.SecretString;
-}
-
-/**
- * Fetch the per-user workspace refresh-token record from Secrets Manager.
- * Returns null if not provisioned yet.
- * Record shape: { refresh_token, granted_scopes, obtained_at }
- *
- * `kind` selects which slot to read:
- *   'agent_account' (default) — agent's own identity, broad scopes
- *   'user_account'            — user's own identity, narrow Phase 1 scopes
- */
-async function getUserWorkspaceToken(userEmail, kind = 'agent_account') {
-  try {
-    return await getSecretJson(WORKSPACE_SECRET_PATH(userEmail, kind));
-  } catch (err) {
-    if (err.name === 'ResourceNotFoundException') return null;
-    throw err;
-  }
-}
-
-/**
- * Exchange a refresh token for an access token via Google's OAuth2 endpoint.
- * Throws with code='invalid_grant' on revocation so callers can mark stale.
- */
-async function refreshAccessToken(refreshToken, clientId, clientSecret) {
-  const body = new URLSearchParams({
-    client_id: clientId,
-    client_secret: clientSecret,
-    refresh_token: refreshToken,
-    grant_type: 'refresh_token',
-  });
-
-  const resp = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-  });
-
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    const err = new Error(`Google token exchange failed: ${resp.status} ${data.error || ''}`);
-    err.code = data.error || `http_${resp.status}`;
-    throw err;
-  }
-  return {
-    access_token: data.access_token,
-    expires_in: data.expires_in,
-    scope: data.scope,
-  };
-}
-
-/**
- * Ask the Next.js app for a fresh, signed consent URL for the given owner
- * and slot kind. The kind determines which scopes Google will be asked for
- * and which login_hint is set in the OAuth URL.
- */
-async function mintConsentUrl(ownerEmail, kind = 'agent_account') {
-  if (!APP_BASE_URL) {
-    throw new Error('APP_BASE_URL env var not set — cannot mint consent URL');
-  }
-  const apiKey = await getSecretString(AGENT_INTERNAL_API_KEY_SECRET_ID);
-  const resp = await fetch(`${APP_BASE_URL.replace(/\/$/, '')}/api/agent/consent-link`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ ownerEmail, kind }),
-  });
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok || !data.url) {
-    throw new Error(`Consent-link API failed: ${resp.status} ${data.error || ''}`);
-  }
-  return data.url;
-}
-
-/**
- * Fetch a short-lived Google access token for the caller's AGENT account from
- * the DWD token broker (#1232). Replaces the agent-slot refresh-token read +
- * refresh: no consent, no stored token — the broker mints on demand.
- *
- * Returns one of:
- *   { accessToken, expiresAt }   — a ~1h token for agnt_<owner>@psd401.net
- *   { notProvisioned: true }     — the agnt_ account doesn't exist yet (the
- *                                  router auto-provisions it; the user waits)
- * Throws on any other transport/auth failure.
- */
-async function fetchBrokerToken(ownerEmail) {
-  if (!APP_BASE_URL) {
-    throw new Error('APP_BASE_URL env var not set — cannot fetch agent workspace token');
-  }
-  const apiKey = await getSecretString(AGENT_INTERNAL_API_KEY_SECRET_ID);
-  const resp = await fetch(`${APP_BASE_URL.replace(/\/$/, '')}/api/agent/workspace-token`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ ownerEmail }),
-  });
-  if (resp.status === 404) {
-    const body = await resp.json().catch(() => ({}));
-    if (body && body.status === 'account-not-provisioned') {
-      return { notProvisioned: true };
-    }
-    throw new Error(`workspace-token endpoint 404: ${JSON.stringify(body).slice(0, 200)}`);
-  }
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok || !data.accessToken) {
-    throw new Error(`workspace-token endpoint failed: ${resp.status} ${data.error || ''}`);
-  }
-  return { accessToken: data.accessToken, expiresAt: data.expiresAt };
-}
 
 /**
  * Parse --command into argv-style tokens. Supports single-quoted segments so
@@ -226,8 +68,7 @@ function splitCommand(cmd) {
   const tokens = [];
   let buf = '';
   let quote = null;
-  for (let i = 0; i < cmd.length; i++) {
-    const ch = cmd[i];
+  for (const ch of cmd) {
     if (quote) {
       if (ch === quote) { quote = null; continue; }
       buf += ch;
@@ -266,13 +107,60 @@ function splitCommand(cmd) {
 // splitCommand, so tokenization never touches the content.
 
 const PAYLOAD_PLACEHOLDERS = {
-  '--json-file': { flag: '--json', placeholder: '@@PSD_PAYLOAD_JSON@@', kind: 'json' },
-  '--body-file': { flag: '--body', placeholder: '@@PSD_PAYLOAD_BODY@@', kind: 'text' },
+  '--json-file': {
+    flag: '--json',
+    matcher: /(^|\s)--json-file\s+(\S+)/g,
+    inlineMatcher: /(^|\s)--json\s/,
+    placeholder: '@@PSD_PAYLOAD_JSON@@',
+    kind: 'json',
+  },
+  '--body-file': {
+    flag: '--body',
+    matcher: /(^|\s)--body-file\s+(\S+)/g,
+    inlineMatcher: /(^|\s)--body\s/,
+    placeholder: '@@PSD_PAYLOAD_BODY@@',
+    kind: 'text',
+  },
   // chat +send message text. Added after the live 2026-07-07 run: the agent
   // GUESSED `--text-file` while fumbling +send syntax against the clock —
   // it's the natural generalization of the two flags above, so make it real.
-  '--text-file': { flag: '--text', placeholder: '@@PSD_PAYLOAD_TEXT@@', kind: 'text' },
+  '--text-file': {
+    flag: '--text',
+    matcher: /(^|\s)--text-file\s+(\S+)/g,
+    inlineMatcher: /(^|\s)--text\s/,
+    placeholder: '@@PSD_PAYLOAD_TEXT@@',
+    kind: 'text',
+  },
 };
+
+function normalizePayloadFilePath(rawPath, fileFlag, reject) {
+  let filePath = rawPath;
+  const singleQuoted = filePath.startsWith("'") && filePath.endsWith("'");
+  const doubleQuoted = filePath.startsWith('"') && filePath.endsWith('"');
+  if (filePath.length >= 2 && (singleQuoted || doubleQuoted)) {
+    filePath = filePath.slice(1, -1);
+  }
+  if (!filePath.startsWith('/')) {
+    reject(`${fileFlag} requires an absolute path (got "${filePath}")`);
+  }
+  return filePath;
+}
+
+function readPayloadFile(filePath, fileFlag, kind, reject) {
+  let content;
+  try {
+    content = validatedFs.readFileSync(filePath, 'utf8');
+  } catch (err) {
+    reject(`${fileFlag}: cannot read ${filePath}: ${err.message}`);
+  }
+  if (kind !== 'json') return content;
+
+  try {
+    return JSON.stringify(JSON.parse(content));
+  } catch (err) {
+    reject(`${fileFlag}: ${filePath} is not valid JSON: ${err.message}`);
+  }
+}
 
 /**
  * Resolve `--json-file` / `--body-file` references in a --command string.
@@ -290,67 +178,45 @@ const PAYLOAD_PLACEHOLDERS = {
  * --json-file, duplicate use of the same flag, or --json-file alongside an
  * inline --json (ambiguous — exactly one payload source allowed).
  */
-function resolvePayloadFiles(commandString) {
+function resolvePayloadFiles(commandString, options = {}) {
   if (!commandString || typeof commandString !== 'string') return null;
+  const onError = options.onError || fail;
+  const reject = (message) => {
+    onError(message);
+    throw new Error('resolvePayloadFiles onError callback must not return');
+  };
   let execCommand = commandString;
   let syntheticCommand = commandString;
   const payloads = {};
 
   for (const [fileFlag, spec] of Object.entries(PAYLOAD_PLACEHOLDERS)) {
-    const re = new RegExp(`(^|\\s)${fileFlag}\\s+(\\S+)`, 'g');
-    const matches = [...commandString.matchAll(re)];
+    const matches = [...commandString.matchAll(spec.matcher)];
     if (matches.length === 0) continue;
     if (matches.length > 1) {
-      fail(`${fileFlag} may appear at most once per command`);
+      reject(`${fileFlag} may appear at most once per command`);
     }
     // Exactly one payload source per flag: reject the file form alongside its
     // inline counterpart (--json + --json-file, --body + --body-file) —
     // otherwise gws would receive two occurrences of the same flag and pick
     // one silently. `--json\s` does not match `--json-file` (hyphen, not
     // whitespace, follows), so the file flag never trips its own check.
-    const inlineRe = new RegExp(`(^|\\s)${spec.flag}\\s`);
-    if (inlineRe.test(commandString)) {
-      fail(`use either ${spec.flag} or ${fileFlag}, not both`);
+    if (spec.inlineMatcher.test(commandString)) {
+      reject(`use either ${spec.flag} or ${fileFlag}, not both`);
     }
-    let filePath = matches[0][2];
+    const filePath = normalizePayloadFilePath(matches[0][2], fileFlag, reject);
     // Models habitually quote flag values (every SKILL.md example quotes
     // --params). \S+ captures those quotes, so strip one matching
     // surrounding pair before validating — otherwise a valid quoted path
     // fails the absolute-path check with a misleading error.
-    if (
-      filePath.length >= 2 &&
-      ((filePath.startsWith("'") && filePath.endsWith("'")) ||
-        (filePath.startsWith('"') && filePath.endsWith('"')))
-    ) {
-      filePath = filePath.slice(1, -1);
-    }
-    if (!filePath.startsWith('/')) {
-      fail(`${fileFlag} requires an absolute path (got "${filePath}")`);
-    }
-    let content;
-    try {
-      content = fs.readFileSync(filePath, 'utf8');
-    } catch (err) {
-      fail(`${fileFlag}: cannot read ${filePath}: ${err.message}`);
-    }
-    if (spec.kind === 'json') {
-      try {
-        // Minify so the synthetic inline command is single-line — the
-        // marker injector's brace scanner and the gate regexes both operate
-        // on it, and a compact form keeps their behavior identical to the
-        // inline --json path.
-        content = JSON.stringify(JSON.parse(content));
-      } catch (err) {
-        fail(`${fileFlag}: ${filePath} is not valid JSON: ${err.message}`);
-      }
-    }
+    // JSON is minified so the marker injector and gates see one line.
+    const content = readPayloadFile(filePath, fileFlag, spec.kind, reject);
     payloads[spec.placeholder] = content;
     execCommand = execCommand.replace(
-      re,
+      spec.matcher,
       (m, lead) => `${lead}${spec.flag} ${spec.placeholder}`
     );
     syntheticCommand = syntheticCommand.replace(
-      re,
+      spec.matcher,
       (m, lead) => `${lead}${spec.flag} ${content}`
     );
   }
@@ -385,32 +251,6 @@ function extractJsonArgFromTokens(tokens) {
  * (see resolvePayloadFiles). Substitution happens AFTER splitCommand, so the
  * content becomes exactly one argv token regardless of quotes/newlines.
  */
-function execGws(commandString, accessToken, payloads) {
-  let tokens = splitCommand(commandString);
-  if (payloads && typeof payloads === 'object') {
-    tokens = tokens.map((t) =>
-      Object.prototype.hasOwnProperty.call(payloads, t) ? payloads[t] : t
-    );
-  }
-  if (tokens.length === 0) {
-    fail('--command is empty');
-  }
-  // Call the real binary directly. In the agent container the model-facing
-  // `gws` on PATH is a refuse-by-default wrapper (bin/gws-wrapper.sh) that
-  // blocks direct data access; run.js is the only sanctioned caller, so it
-  // must reach the unwrapped binary at /usr/local/bin/gws.real. Local/dev
-  // images that ship no wrapper fall back to `gws` on PATH.
-  const REAL_GWS = '/usr/local/bin/gws.real';
-  const bin = fs.existsSync(REAL_GWS) ? REAL_GWS : 'gws';
-  const result = spawnSync(bin, tokens, {
-    env: { ...process.env, GOOGLE_WORKSPACE_CLI_TOKEN: accessToken },
-    stdio: ['ignore', 'inherit', 'inherit'],
-  });
-  if (result.error) {
-    fail(`Failed to exec gws: ${result.error.message}`, 2);
-  }
-  return result.status == null ? 1 : result.status;
-}
 
 // ============================================================================
 // Phase 1 hard gates (#912 Phase 1)
@@ -442,19 +282,56 @@ function execGws(commandString, accessToken, payloads) {
 // USER's account to route around the sharing gate ("do not create documents
 // as my account, that's a huge hole security-wise"). File creation as the
 // user is impersonation — every artifact must be owned by the agent identity
-// (auditable, gate-enforced sharing) and shared explicitly via
-// isPermittedExplicitShare. Drafts/calendar/tasks on the user slot remain
+// (auditable, gate-enforced sharing). Permission changes require a separate,
+// server-recorded provenance flow. Drafts/calendar/tasks on the user slot remain
 // allowed: they are marker-stamped, land in review surfaces (Drafts folder,
 // own calendar), and were explicitly designed as user-slot writes.
+//
+// Refined 2026-07-25 (#1305): the user slot now also holds drive.readonly +
+// drive.metadata so the agent can READ and ORGANIZE the user's Drive. The
+// impersonated-CREATION ban is untouched — with one deliberate exception,
+// creating a FOLDER, which is an organizing act and carries no content. See
+// isPermittedFolderCreate below.
 const USER_SCOPE_FORBIDDEN = [
-  { pattern: /\bdrive[\s.]+files[\s.]+(create|copy)\b/i,
-    reason: 'creating files owned by the user (create as the agent and share explicitly instead)' },
+  // `copy` is unconditional: a copy always produces a content-bearing file.
+  { pattern: /\bdrive[\s.]+files[\s.]+copy\b/i,
+    reason: 'copying a file into the user\'s Drive — the copy would be owned by the user (create as the agent and share explicitly instead)' },
+  // `create` has exactly ONE exception — mimeType application/vnd.google-apps.folder
+  // (isPermittedFolderCreate). Everything else still refuses here.
+  { pattern: /\bdrive[\s.]+files[\s.]+create\b/i,
+    exception: isPermittedFolderCreate,
+    reason: 'creating files owned by the user (only folders may be created on this slot; create documents as the agent and share explicitly instead)' },
+  // `update` is newly reachable across the user's whole Drive now that
+  // drive.metadata is granted, so it needs a gate it never needed under
+  // drive.file. Allowed ONLY for metadata-field writes
+  // (isMetadataOnlyDriveUpdate): rename, move, star. Content/media uploads and
+  // `trashed` are refused. Google also rejects content writes under
+  // readonly+metadata+file, so this is belt-and-suspenders — its real value is
+  // a comprehensible error instead of an opaque 403.
+  { pattern: /\bdrive[\s.]+files[\s.]+update\b/i,
+    exception: isMetadataOnlyDriveUpdate,
+    reason: 'writing file content or trashing in the user\'s Drive (this slot may only change metadata: rename, move, star, describe)' },
   { pattern: /\bdocs[\s.]+documents[\s.]+create\b/i,
     reason: 'creating a Google Doc owned by the user (create as the agent and share explicitly instead)' },
   { pattern: /\bsheets[\s.]+spreadsheets[\s.]+create\b/i,
     reason: 'creating a Google Sheet owned by the user (create as the agent and share explicitly instead)' },
   { pattern: /\bslides[\s.]+presentations[\s.]+create\b/i,
     reason: 'creating a Google Slides deck owned by the user (create as the agent and share explicitly instead)' },
+];
+
+const PROVENANCE_REQUIRED = [
+  { pattern: /\bcalendar[\s.]+events[\s.]+(patch|update)\b/i,
+    reason: 'calendar updates require server-recorded agent-created provenance' },
+  { pattern: /\btasks[\s.]+tasks[\s.]+(patch|update)\b/i,
+    reason: 'task updates require server-recorded agent-created provenance' },
+  { pattern: /\bdocs[\s.]+documents[\s.]+batchupdate\b/i,
+    reason: 'document mutations require server-recorded agent-created provenance' },
+  { pattern: /\bsheets[\s.]+spreadsheets[\s.]+batchupdate\b/i,
+    reason: 'spreadsheet mutations require server-recorded agent-created provenance' },
+  { pattern: /\bslides[\s.]+presentations[\s.]+batchupdate\b/i,
+    reason: 'presentation mutations require server-recorded agent-created provenance' },
+  { pattern: /\bdrive[\s.]+permissions[\s.]+create\b/i,
+    reason: 'permission creation requires server-recorded agent-created provenance' },
 ];
 
 const PHASE1_FORBIDDEN = [
@@ -496,10 +373,189 @@ const PHASE1_FORBIDDEN = [
   { pattern: /\btasks[\s.]+tasklists[\s.]+delete\b/i,
     reason: 'deleting tasklists (Phase 1: never destructive)' },
 
+  // Trashing a Drive file. `files.delete` and `emptyTrash` are blocked above,
+  // but trashing travels as a METADATA write — `files update {"trashed":true}`
+  // — so it does not match them. Before #1305 the user slot held only
+  // drive.file and Google refused this on any file the app had not created;
+  // now that drive.metadata is granted it would otherwise become reachable
+  // across the user's whole Drive. Blocked on BOTH slots: Phase 1 policy is
+  // "never destructive", and `trashed` is also absent from the
+  // metadata-update allowlist, so two independent rules have to fail for a
+  // trash to get through. This raw-string form is a fast fail only — the
+  // authoritative check is detectDriveTrashedWrite on the PARSED payload,
+  // which a JSON key escape cannot dodge (codex P1, PR #1346).
+  { pattern: /"trashed"\s*:\s*true/i,
+    reason: 'trashing a Drive file (Phase 1: never destructive — ask the user to trash it themselves)' },
+  { pattern: /\bdrive[\s.]+files[\s.]+untrash\b/i,
+    reason: 'untrashing a Drive file (Phase 1: the agent does not manage the trash)' },
+
   // Sharing externally / changing permissions on user data
   { pattern: /\bdrive[\s.]+permissions[\s.]+(create|update|delete)\b/i,
     reason: 'modifying Drive sharing permissions (Phase 1: no permission changes)' },
 ];
+
+// ============================================================================
+// User-slot Drive: read + organize (#1305)
+// ============================================================================
+//
+// The user slot gained drive.readonly + drive.metadata on 2026-07-25 so the
+// agent can read and ORGANIZE the user's Drive. Two narrow exceptions to
+// USER_SCOPE_FORBIDDEN implement "organize" without reopening impersonated
+// creation:
+//
+//   isPermittedFolderCreate   — files.create, folder mimeType ONLY
+//   isMetadataOnlyDriveUpdate — files.update, metadata fields ONLY
+//
+// Both are ALLOWLISTS. Anything they cannot positively prove is safe falls
+// through to the block, so a payload shape we did not anticipate is refused
+// rather than permitted.
+
+const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder';
+
+// Fields on the Drive `files` resource that carry no content and are covered
+// by drive.metadata. `trashed` is deliberately absent (see PHASE1_FORBIDDEN),
+// and so is anything that could carry bytes.
+const DRIVE_METADATA_FIELDS = new Set([
+  'name',
+  'starred',
+  'description',
+  'foldercolorrgb',
+  'properties',
+  'appproperties',
+]);
+
+// Flags that would attach a body/media stream to a Drive call. `--json` and
+// `--json-file` are the metadata resource and are fine; `--params` carries
+// query parameters (fileId, addParents, removeParents, supportsAllDrives) and
+// is checked separately for uploadType.
+const DRIVE_CONTENT_FLAG = /^--(media|media-file|media-body|upload|upload-file|upload-type|content|content-file|data|data-file|body|body-file|text|text-file|file|source|source-file)$/i;
+
+/**
+ * Pull the JSON resource out of a gws command, using the same dual extraction
+ * used by every Drive payload gate: prefer the argv token that actually executes
+ * (REV-COR-346 — the gate must see what gws sees), and fall back to the
+ * brace-balanced raw-string scan for the payload-file flow, whose synthetic
+ * command inlines minified JSON unquoted and so mangles under splitCommand.
+ * Returns the parsed object, or null when there is no parseable payload.
+ */
+function extractDriveResource(commandString, tokens) {
+  let payload = null;
+  const tokenJson = extractJsonArgFromTokens(tokens);
+  if (tokenJson) {
+    try { payload = JSON.parse(tokenJson); } catch { payload = null; }
+  }
+  if (!payload) {
+    const rawJson = extractJsonArg(commandString);
+    if (!rawJson) return null;
+    try { payload = JSON.parse(rawJson); } catch { return null; }
+  }
+  const resource = payload.resource || payload.requestBody || payload;
+  return resource && typeof resource === 'object' && !Array.isArray(resource)
+    ? resource
+    : null;
+}
+
+/** True if any argv token would attach content/media to the call. */
+function carriesDriveContent(tokens) {
+  for (let i = 0; i < tokens.length; i++) {
+    if (DRIVE_CONTENT_FLAG.test(tokens[i])) return true;
+    // `--params '{"uploadType":"media"}'` is a resumable/multipart upload in
+    // query-parameter clothing. Checked ONLY in the --params value, not across
+    // every token: a file the user asked to rename to "uploadType notes.txt"
+    // is a rename, and refusing it would be a false positive.
+    if (tokens[i] === '--params' && /uploadtype/i.test(tokens[i + 1] || '')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * ALLOW `drive files create` on the user slot for a FOLDER and nothing else.
+ *
+ * A folder holds no content, so creating one is an organizing act rather than
+ * impersonated authorship — it does not reintroduce the 2026-07-07 hole
+ * (#1138: "do not create documents as my account"). It rides the existing
+ * drive.file grant, which also means the agent keeps access to the folder it
+ * created so it can move files into it afterwards.
+ *
+ * ALL must hold: the command is files.create; a payload parses; its mimeType
+ * is EXACTLY the folder mimeType; and no token attaches content. A create with
+ * no parseable payload is refused — absence of proof is not proof of absence.
+ */
+function isPermittedFolderCreate(commandString, tokens) {
+  const spaceJoined = tokens.join(' ').toLowerCase();
+  const dotJoined = tokens.join('.').toLowerCase();
+  const createRe = /\bdrive[\s.]+files[\s.]+create\b/i;
+  if (!createRe.test(spaceJoined) && !createRe.test(dotJoined)) return false;
+  if (carriesDriveContent(tokens)) return false;
+
+  const resource = extractDriveResource(commandString, tokens);
+  if (!resource) return false;
+  const mimeType = typeof resource.mimeType === 'string'
+    ? resource.mimeType.trim().toLowerCase()
+    : '';
+  return mimeType === DRIVE_FOLDER_MIME;
+}
+
+/**
+ * ALLOW `drive files update` on the user slot when every field it writes is
+ * metadata: rename, move (addParents/removeParents ride --params, not the
+ * body), star, describe, recolour.
+ *
+ * Google enforces this too — neither drive.readonly nor drive.metadata permits
+ * a content write, so an upload against a file the agent did not create 403s
+ * regardless. The gate exists so the agent gets a comprehensible refusal
+ * instead of an opaque 403, and so `trashed` is refused by our own rule as
+ * well as by policy.
+ *
+ * An update with no parseable payload is refused: without a body we cannot
+ * prove the call is metadata-only.
+ */
+function isMetadataOnlyDriveUpdate(commandString, tokens) {
+  const spaceJoined = tokens.join(' ').toLowerCase();
+  const dotJoined = tokens.join('.').toLowerCase();
+  const updateRe = /\bdrive[\s.]+files[\s.]+update\b/i;
+  if (!updateRe.test(spaceJoined) && !updateRe.test(dotJoined)) return false;
+  if (carriesDriveContent(tokens)) return false;
+
+  const resource = extractDriveResource(commandString, tokens);
+  if (!resource) return false;
+  const keys = Object.keys(resource);
+  if (keys.length === 0) return false;
+  return keys.every((key) => DRIVE_METADATA_FIELDS.has(key.toLowerCase()));
+}
+
+/**
+ * REFUSE any Drive files write whose PARSED payload carries a `trashed` key.
+ *
+ * The raw-string PHASE1_FORBIDDEN pattern ('"trashed": true') is kept as a
+ * fast fail, but it can be routed around with a JSON string escape in the
+ * key — `--json '{"tr\u0061shed":true}'` — which the raw-string regex never
+ * matches while gws's JSON.parse decodes it right back to `trashed` and
+ * executes the trash (codex P1, PR #1346). The user slot happens to survive
+ * that because isMetadataOnlyDriveUpdate judges decoded keys, but the agent
+ * slot skips the user-slot allowlists entirely, so the gate must also judge
+ * the DECODED resource — same dual extraction the allowlists use.
+ *
+ * ANY value is refused, not just `true`: `trashed:false` is an untrash, and
+ * `files.untrash` is already blocked ("the agent does not manage the trash").
+ * Covers update/patch (trash/untrash) and create/copy (pre-trashed spawn).
+ * A payload our parse cannot read is not judged here — extractDriveResource
+ * uses the same JSON.parse gws does, and the unparseable case dies in gws.
+ */
+function detectDriveTrashedWrite(commandString, tokens) {
+  const spaceJoined = tokens.join(' ').toLowerCase();
+  const dotJoined = tokens.join('.').toLowerCase();
+  const driveWriteRe = /\bdrive[\s.]+files[\s.]+(update|patch|create|copy)\b/i;
+  if (!driveWriteRe.test(spaceJoined) && !driveWriteRe.test(dotJoined)) return null;
+  const resource = extractDriveResource(commandString, tokens);
+  if (!resource) return null;
+  const hasTrashed = Object.keys(resource).some((k) => k.toLowerCase() === 'trashed');
+  return hasTrashed
+    ? 'trashing/untrashing a Drive file (Phase 1: never destructive — ask the user to manage the trash themselves)'
+    : null;
+}
 
 // gws gmail "helper" verbs that put a message on the wire. The `+`-prefixed
 // forms are unambiguous (they never appear as a search-query value), so they
@@ -533,106 +589,88 @@ function detectGmailSendHelper(tokens) {
   return null;
 }
 
-// District domain for the explicit-share exception. Env-overridable so
-// non-prod environments could narrow/redirect it; the default is the only
-// domain the platform serves.
-const AGENT_SHARE_DOMAIN = (process.env.AGENT_SHARE_DOMAIN || 'psd401.net').toLowerCase();
+// ============================================================================
+// Lazy scope upgrades (#1305)
+// ============================================================================
+//
+// drive.readonly + drive.metadata were added to the user slot on 2026-07-25.
+// Existing refresh tokens keep the scope set they were ISSUED with — Google
+// does not retroactively widen them — so a user who has not re-consented since
+// then has a token that cannot perform the new Drive read/organize calls. There
+// is no forced migration; users upgrade lazily on their next consent click.
+//
+// WHY THIS IS A PRE-FLIGHT CHECK AND NOT 403 PARSING. The issue asked for
+// "missing-scope 403 detection". The skill CANNOT observe such a 403: execGws
+// spawns gws with stdio ['ignore', 'inherit', 'inherit'], so gws writes its
+// output straight to our stdout/stderr and the skill never sees a byte of it.
+// Intercepting would mean buffering every gws response, which would also break
+// the streaming behaviour the agent relies on. The token refresh response,
+// however, carries the GRANTED scope string — so the gap is detectable one step
+// earlier, before the call is even attempted. That is strictly better for the
+// user: a re-authorize link instead of a failed operation plus a link.
+//
+// The result is emitted through the SAME consent-link path as revoked-token
+// handling (run.js, invalid_grant -> exit 11), just with its own status and
+// exit code so a caller can tell "you never authorized me" from "your
+// authorization expired" from "you authorized me before this feature existed".
+
+const DRIVE_READ_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
+const DRIVE_METADATA_SCOPE = 'https://www.googleapis.com/auth/drive.metadata';
+
+// Commands that only work once the user has re-consented. Deliberately narrow:
+// only the operations #1305 introduced. Everything the slot could already do
+// keeps working on an old token with no prompt.
+const SCOPE_REQUIREMENTS = [
+  {
+    pattern: /\bdrive[\s.]+files[\s.]+(list|get|export)\b/i,
+    scope: DRIVE_READ_SCOPE,
+    capability: 'read files in your Drive',
+  },
+  {
+    pattern: /\bdrive[\s.]+(about|changes)[\s.]+/i,
+    scope: DRIVE_READ_SCOPE,
+    capability: 'read files in your Drive',
+  },
+  {
+    pattern: /\bdrive[\s.]+files[\s.]+update\b/i,
+    scope: DRIVE_METADATA_SCOPE,
+    capability: 'rename and move files in your Drive',
+  },
+];
 
 /**
- * Exception to the `drive.permissions.create` block: the agent may grant
- * EXPLICIT, bounded permissions on files it owns (scope === 'agent_account').
+ * Given a gws command and the space-separated `scope` string Google returned
+ * with the access token, report which newly-required scopes are missing.
  *
- * Rationale: the agent stores artifacts it creates (reports, generated docs,
- * meeting summaries) on its own agent_account Drive. Originally it could
- * share them only back to the CALLER; product decision 2026-07-07 (Hagel,
- * #1138 — team docs must land in shared Chat spaces) widened this to
- * in-district sharing with explicit grants.
+ * Returns `null` when the command needs nothing new (the overwhelmingly common
+ * case, so the caller pays nothing), otherwise
+ * `{ scopes: [...], capability: '<human phrase>' }`.
  *
- * Hard constraints (ALL must be true to allow):
- *   - context.scope is 'agent_account'  (sharing FROM the agent's own Drive;
- *     permission changes on user-owned files remain fully blocked)
- *   - create only (update/delete remain blocked)
- *   - EITHER type === 'user' with an @psd401.net emailAddress,
- *     role ∈ {reader, commenter, writer} (writer added 2026-07-08, Hagel:
- *     explicitly NAMED district individuals may edit agent-owned docs —
- *     team collaboration on posted docs)
- *   - OR     type === 'domain' with domain === psd401.net, role === 'reader'
- *     (broad in-district visibility for docs posted to shared spaces;
- *     domain-wide stays read-only — district-wide edit is vandalism surface)
- *   - NEVER: type 'anyone' or 'group', external addresses/domains,
- *     owner transfer.
- *
- * Returns true if the share request fits the explicit in-district shape;
- * false otherwise. False means fall through to the existing block.
+ * Fail-OPEN on an absent/unparseable scope string: Google always returns
+ * `scope` on a refresh, but if it ever did not, refusing every Drive call
+ * would be a self-inflicted outage. A genuinely missing scope still fails at
+ * Google with a 403 — the pre-flight is an improvement to the error, not the
+ * security boundary. The security boundaries are the OAuth grant itself and
+ * enforcePhase1Gates.
  */
-function isPermittedExplicitShare(commandString, tokens, context) {
-  if (!context || context.scope !== 'agent_account' || !context.ownerEmail) {
-    return false;
+function missingScopesForCommand(commandString, grantedScopeString) {
+  if (!commandString || typeof grantedScopeString !== 'string' || !grantedScopeString.trim()) {
+    return null;
   }
-  // Must be the create variant — update/delete remain blocked. Match against
-  // the executed tokenization (REV-COR-346), not the raw string.
+  const tokens = splitCommand(commandString);
   const spaceJoined = tokens.join(' ').toLowerCase();
   const dotJoined = tokens.join('.').toLowerCase();
-  const createRe = /\bdrive[\s.]+permissions[\s.]+create\b/i;
-  if (!createRe.test(spaceJoined) && !createRe.test(dotJoined)) {
-    return false;
-  }
+  const granted = new Set(grantedScopeString.split(/\s+/).filter(Boolean));
 
-  // Read the --json payload from the argv token that actually executes, so the
-  // exception cannot be granted on a benign-looking payload that differs from
-  // what gws receives (REV-COR-346). The payload-file flow's synthetic command
-  // inlines minified JSON UNQUOTED, which splitCommand's quote handling mangles
-  // (the embedded `"` toggle quote state) — for that flow fall back to the
-  // brace-balanced raw-string scan. The fallback only fires when the executed
-  // token is not itself valid JSON, in which case gws rejects the payload
-  // rather than executing a diverging one.
-  let payload = null;
-  const tokenJson = extractJsonArgFromTokens(tokens);
-  if (tokenJson) {
-    try {
-      payload = JSON.parse(tokenJson);
-    } catch {
-      payload = null;
-    }
+  const missing = [];
+  let capability = null;
+  for (const req of SCOPE_REQUIREMENTS) {
+    if (!req.pattern.test(spaceJoined) && !req.pattern.test(dotJoined)) continue;
+    if (granted.has(req.scope)) continue;
+    if (!missing.includes(req.scope)) missing.push(req.scope);
+    if (!capability) capability = req.capability;
   }
-  if (!payload) {
-    const rawJson = extractJsonArg(commandString);
-    if (!rawJson) return false;
-    try {
-      payload = JSON.parse(rawJson);
-    } catch {
-      return false;
-    }
-  }
-
-  // gws drive permissions create wraps the permission under `resource`,
-  // `requestBody`, or accepts the fields at top level depending on the
-  // invocation style. Look in all three.
-  const perm = payload.resource || payload.requestBody || payload;
-  if (!perm || typeof perm !== 'object') return false;
-
-  const type = typeof perm.type === 'string' ? perm.type.toLowerCase() : '';
-  const role = typeof perm.role === 'string' ? perm.role.toLowerCase() : '';
-  const emailAddress = typeof perm.emailAddress === 'string'
-    ? perm.emailAddress.toLowerCase()
-    : '';
-  const domain = typeof perm.domain === 'string' ? perm.domain.toLowerCase() : '';
-
-  if (type === 'user') {
-    // Explicit named recipient — must be in-district. Writer allowed for
-    // named individuals (2026-07-08); owner transfer never.
-    if (role !== 'reader' && role !== 'commenter' && role !== 'writer') {
-      return false;
-    }
-    return emailAddress.endsWith(`@${AGENT_SHARE_DOMAIN}`);
-  }
-  if (type === 'domain') {
-    // Whole-district visibility (docs linked in shared Chat spaces) —
-    // read-only, and ONLY our own domain.
-    return role === 'reader' && domain === AGENT_SHARE_DOMAIN;
-  }
-  // 'anyone', 'group', and everything else stay blocked.
-  return false;
+  return missing.length > 0 ? { scopes: missing, capability } : null;
 }
 
 /**
@@ -643,9 +681,8 @@ function isPermittedExplicitShare(commandString, tokens, context) {
  * The check is intentionally permissive on whitespace and dot-vs-space
  * separators so different gws invocation styles all hit the same rules.
  *
- * Optional `context` argument enables narrow per-request exceptions:
+ * Optional `context` argument applies account-scope restrictions:
  *   { scope: 'agent_account' | 'user_account', ownerEmail: '<caller@…>' }
- * Currently used for the share-to-caller handoff on Drive permissions.
  */
 function enforcePhase1Gates(commandString, context) {
   if (!commandString || typeof commandString !== 'string') {
@@ -662,30 +699,40 @@ function enforcePhase1Gates(commandString, context) {
   const dotJoined = tokens.join('.').toLowerCase();
   const hits = (pattern) => pattern.test(spaceJoined) || pattern.test(dotJoined);
 
+  for (const { pattern, reason } of PROVENANCE_REQUIRED) {
+    if (hits(pattern)) return { allowed: false, reason };
+  }
+
   // Scope-conditional gates: file creation as the USER is impersonation
   // (2026-07-07, see USER_SCOPE_FORBIDDEN). Checked first — these have no
   // exceptions. Fail-closed default: when scope is missing/unknown we still
   // apply the user-slot rules (run.js always passes a resolved scope; only
   // a buggy caller would omit it, and the agent slot is the privileged one).
   if (!context || context.scope !== 'agent_account') {
-    for (const { pattern, reason } of USER_SCOPE_FORBIDDEN) {
+    for (const { pattern, reason, exception } of USER_SCOPE_FORBIDDEN) {
       if (hits(pattern)) {
+        // #1305: `create` and `update` carry narrow allowlisted exceptions
+        // (folder-only create, metadata-only update). Every other entry has
+        // no `exception` and stays absolute.
+        if (exception && exception(commandString, tokens)) {
+          continue;
+        }
         return { allowed: false, reason };
       }
     }
   }
   for (const { pattern, reason } of PHASE1_FORBIDDEN) {
     if (hits(pattern)) {
-      // Exception: agent grants explicit, bounded in-district permissions
-      // on files it owns (see isPermittedExplicitShare).
-      if (
-        hits(/\bdrive[\s.]+permissions[\s.]+create\b/i) &&
-        isPermittedExplicitShare(commandString, tokens, context)
-      ) {
-        return { allowed: true };
-      }
       return { allowed: false, reason };
     }
+  }
+
+  // Trash travels as a body field, and the raw-string pattern above can be
+  // dodged with a JSON escape in the key — judge the DECODED payload too,
+  // on BOTH slots (codex P1, PR #1346).
+  const trashedReason = detectDriveTrashedWrite(commandString, tokens);
+  if (trashedReason) {
+    return { allowed: false, reason: trashedReason };
   }
 
   // Helper-form send/reply/forward (REV-COR-350) — `gws gmail +send`,
@@ -766,11 +813,35 @@ function injectMarkers(commandString) {
   // Drive files create: prefix filename + appProperties marker
   if (/\bdrive[\s.]+files[\s.]+create\b/i.test(commandString)) {
     return mutateJsonField(commandString, (obj) => {
-      if (obj.name && !obj.name.startsWith('[Agent] ')) {
-        obj.name = `[Agent] ${obj.name}`;
+      // Mark the FILE RESOURCE, not the envelope. gws accepts the resource at
+      // top level or wrapped under `resource` / `requestBody`, and the gate
+      // (isPermittedFolderCreate / isMetadataOnlyDriveUpdate, via
+      // extractDriveResource) unwraps all three. Marking only the outer object
+      // meant a wrapped payload was ALLOWED through the gate but its actual
+      // folder/file resource got neither the appProperties marker nor the
+      // folder-name handling — the audit trail silently went missing for
+      // exactly the shapes the gate accepts. Unwrap identically here so the
+      // gate and the marker can never disagree about which object is the file.
+      const target =
+        (obj.resource && typeof obj.resource === 'object' && !Array.isArray(obj.resource) && obj.resource) ||
+        (obj.requestBody && typeof obj.requestBody === 'object' && !Array.isArray(obj.requestBody) && obj.requestBody) ||
+        obj;
+
+      // FOLDERS are exempt from the visible `[Agent] ` prefix (#1305). A folder
+      // is an organizing container the USER asked for by name — "file these
+      // under Budget 2026" must not produce "[Agent] Budget 2026" in their own
+      // Drive. The prefix exists to mark agent-AUTHORED artifacts; a folder
+      // has no content to author. The invisible appProperties marker below is
+      // still applied, so the audit trail is unchanged and the folder remains
+      // identifiable as agent-created.
+      const isFolder =
+        typeof target.mimeType === 'string' &&
+        target.mimeType.trim().toLowerCase() === DRIVE_FOLDER_MIME;
+      if (target.name && !isFolder && !target.name.startsWith('[Agent] ')) {
+        target.name = `[Agent] ${target.name}`;
       }
-      obj.appProperties = obj.appProperties || {};
-      obj.appProperties.psdAgentCreated = 'true';
+      target.appProperties = target.appProperties || {};
+      target.appProperties.psdAgentCreated = 'true';
       return obj;
     });
   }
@@ -790,15 +861,7 @@ function injectMarkers(commandString) {
  * inclusive) or null when there is no parseable --json object. Shared by
  * mutateJsonField (marker injection) and extractJsonArg (payload-file flow).
  */
-function findJsonSpan(commandString) {
-  // Match --json followed by a single-quoted or double-quoted JSON object.
-  // The simple/robust approach: find --json, then balanced-brace scan from
-  // the next non-quote character forward.
-  const jsonFlagIdx = commandString.search(/--json\s+['"]?\{/);
-  if (jsonFlagIdx === -1) return null;
-
-  // Find the start of the JSON object (`{`). Skip the `--json` token,
-  // any whitespace, and any opening quote.
+function findJsonObjectStart(commandString, jsonFlagIdx) {
   let i = jsonFlagIdx + '--json'.length;
   while (i < commandString.length && /\s/.test(commandString[i])) i++;
   let openQuote = '';
@@ -808,13 +871,14 @@ function findJsonSpan(commandString) {
   }
   const jsonStart = i;
   if (commandString[jsonStart] !== '{') return null;
+  return { jsonStart, openQuote };
+}
 
-  // Brace-balance scan to find the matching close.
+function findBalancedJsonEnd(commandString, jsonStart) {
   let depth = 0;
   let inString = false;
   let stringChar = '';
   let escape = false;
-  let jsonEnd = -1;
   for (let j = jsonStart; j < commandString.length; j++) {
     const ch = commandString[j];
     if (escape) { escape = false; continue; }
@@ -831,11 +895,19 @@ function findJsonSpan(commandString) {
     if (ch === '{') depth++;
     else if (ch === '}') {
       depth--;
-      if (depth === 0) { jsonEnd = j; break; }
+      if (depth === 0) return j;
     }
   }
-  if (jsonEnd === -1) return null;
-  return { jsonStart, jsonEnd, openQuote };
+  return -1;
+}
+
+function findJsonSpan(commandString) {
+  const jsonFlagIdx = commandString.search(/--json\s+['"]?\{/);
+  if (jsonFlagIdx === -1) return null;
+  const start = findJsonObjectStart(commandString, jsonFlagIdx);
+  if (!start) return null;
+  const jsonEnd = findBalancedJsonEnd(commandString, start.jsonStart);
+  return jsonEnd === -1 ? null : { ...start, jsonEnd };
 }
 
 /**
@@ -888,27 +960,23 @@ function mutateJsonField(commandString, mutator) {
 }
 
 module.exports = {
-  REGION,
-  ENVIRONMENT,
   APP_BASE_URL,
-  GOOGLE_OAUTH_CLIENT_SECRET_ID,
-  AGENT_INTERNAL_API_KEY_SECRET_ID,
-  WORKSPACE_SECRET_PATH,
   fail,
   emit,
   parseArgs,
   validateUserEmail,
-  getSecretJson,
-  getSecretString,
-  getUserWorkspaceToken,
-  refreshAccessToken,
-  mintConsentUrl,
-  fetchBrokerToken,
   splitCommand,
-  execGws,
   enforcePhase1Gates,
   injectMarkers,
   resolvePayloadFiles,
   extractJsonArg,
+  missingScopesForCommand,
+  isPermittedFolderCreate,
+  isMetadataOnlyDriveUpdate,
   PHASE1_FORBIDDEN,
+  PROVENANCE_REQUIRED,
+  USER_SCOPE_FORBIDDEN,
+  DRIVE_FOLDER_MIME,
+  DRIVE_READ_SCOPE,
+  DRIVE_METADATA_SCOPE,
 };

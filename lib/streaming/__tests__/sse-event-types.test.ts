@@ -34,7 +34,7 @@ import {
 } from '../sse-event-types';
 
 describe('SSE Event Parsing', () => {
-  describe('parseSSEEvent', () => {
+
     it('should parse valid text-delta event', () => {
       const data = '{"type":"text-delta","delta":"Hello"}';
       const event = parseSSEEvent(data);
@@ -89,9 +89,9 @@ describe('SSE Event Parsing', () => {
       const event = parseSSEEvent(data);
       expect(event.type).toBe('unknown-type');
     });
-  });
+  ;
 
-  describe('tryParseSSEEvent', () => {
+
     it('should return parsed event for valid input', () => {
       const data = '{"type":"text-delta","delta":"Hello"}';
       const event = tryParseSSEEvent(data);
@@ -113,9 +113,9 @@ describe('SSE Event Parsing', () => {
 
       expect(event).toBeNull();
     });
-  });
+  ;
 
-  describe('isSSEEvent', () => {
+
     it('should return true for valid SSE event object', () => {
       const event = { type: 'text-delta', delta: 'Hello' };
 
@@ -137,11 +137,11 @@ describe('SSE Event Parsing', () => {
       expect(isSSEEvent(123)).toBe(false);
       expect(isSSEEvent(true)).toBe(false);
     });
-  });
+  ;
 });
 
 describe('Text Event Type Guards', () => {
-  describe('isTextDeltaEvent', () => {
+
     it('should return true for valid text-delta event', () => {
       const event: SSEEvent = { type: 'text-delta', delta: 'Hello' };
 
@@ -171,9 +171,9 @@ describe('Text Event Type Guards', () => {
 
       expect(isTextDeltaEvent(event)).toBe(false);
     });
-  });
+  ;
 
-  describe('isTextStartEvent', () => {
+
     it('should return true for valid text-start event', () => {
       const event: SSEEvent = { type: 'text-start', id: 'text-123' };
 
@@ -191,9 +191,9 @@ describe('Text Event Type Guards', () => {
 
       expect(isTextStartEvent(event)).toBe(false);
     });
-  });
+  ;
 
-  describe('isTextEndEvent', () => {
+
     it('should return true for valid text-end event', () => {
       const event: SSEEvent = { type: 'text-end', id: 'text-123' };
 
@@ -205,11 +205,11 @@ describe('Text Event Type Guards', () => {
 
       expect(isTextEndEvent(event)).toBe(false);
     });
-  });
+  ;
 });
 
 describe('Reasoning Event Type Guards', () => {
-  describe('isReasoningDeltaEvent', () => {
+
     it('should return true for valid reasoning-delta event', () => {
       const event: SSEEvent = { type: 'reasoning-delta', delta: 'thinking...' };
 
@@ -231,27 +231,27 @@ describe('Reasoning Event Type Guards', () => {
 
       expect(isReasoningDeltaEvent(event)).toBe(false);
     });
-  });
+  ;
 
-  describe('isReasoningStartEvent', () => {
+
     it('should return true for valid reasoning-start event', () => {
       const event: SSEEvent = { type: 'reasoning-start', id: 'reasoning-123' };
 
       expect(isReasoningStartEvent(event)).toBe(true);
     });
-  });
+  ;
 
-  describe('isReasoningEndEvent', () => {
+
     it('should return true for valid reasoning-end event', () => {
       const event: SSEEvent = { type: 'reasoning-end', id: 'reasoning-123' };
 
       expect(isReasoningEndEvent(event)).toBe(true);
     });
-  });
+  ;
 });
 
 describe('Tool Event Type Guards', () => {
-  describe('isToolCallEvent', () => {
+
     it('should return true for valid tool-call event', () => {
       const event: SSEEvent = {
         type: 'tool-call',
@@ -283,9 +283,9 @@ describe('Tool Event Type Guards', () => {
 
       expect(isToolCallEvent(event)).toBe(false);
     });
-  });
+  ;
 
-  describe('isToolCallDeltaEvent', () => {
+
     it('should return true for valid tool-call-delta event', () => {
       const event: SSEEvent = {
         type: 'tool-call-delta',
@@ -295,9 +295,9 @@ describe('Tool Event Type Guards', () => {
 
       expect(isToolCallDeltaEvent(event)).toBe(true);
     });
-  });
+  ;
 
-  describe('isToolInputStartEvent', () => {
+
     it('should return true for valid tool-input-start event', () => {
       const event: SSEEvent = {
         type: 'tool-input-start',
@@ -307,9 +307,9 @@ describe('Tool Event Type Guards', () => {
 
       expect(isToolInputStartEvent(event)).toBe(true);
     });
-  });
+  ;
 
-  describe('isToolInputDeltaEvent', () => {
+
     it('should return true for valid tool-input-delta event', () => {
       const event: SSEEvent = {
         type: 'tool-input-delta',
@@ -340,9 +340,9 @@ describe('Tool Event Type Guards', () => {
 
       expect(isToolInputDeltaEvent(event)).toBe(false);
     });
-  });
+  ;
 
-  describe('isToolInputAvailableEvent', () => {
+
     it('should return true for valid tool-input-available event', () => {
       const event: SSEEvent = {
         type: 'tool-input-available',
@@ -386,9 +386,9 @@ describe('Tool Event Type Guards', () => {
 
       expect(isToolInputAvailableEvent(event)).toBe(false);
     });
-  });
+  ;
 
-  describe('isToolInputErrorEvent', () => {
+
     it('should return true for valid tool-input-error event', () => {
       const event: SSEEvent = {
         type: 'tool-input-error',
@@ -399,9 +399,9 @@ describe('Tool Event Type Guards', () => {
 
       expect(isToolInputErrorEvent(event)).toBe(true);
     });
-  });
+  ;
 
-  describe('isToolOutputErrorEvent', () => {
+
     it('should return true for valid tool-output-error event', () => {
       const event: SSEEvent = {
         type: 'tool-output-error',
@@ -420,9 +420,9 @@ describe('Tool Event Type Guards', () => {
 
       expect(isToolOutputErrorEvent(event)).toBe(false);
     });
-  });
+  ;
 
-  describe('isToolOutputAvailableEvent', () => {
+
     it('should return true for valid tool-output-available event', () => {
       const event: SSEEvent = {
         type: 'tool-output-available',
@@ -431,11 +431,11 @@ describe('Tool Event Type Guards', () => {
 
       expect(isToolOutputAvailableEvent(event)).toBe(true);
     });
-  });
+  ;
 });
 
 describe('Lifecycle Event Type Guards', () => {
-  describe('isStartEvent', () => {
+
     it('should return true for valid start event', () => {
       const event: SSEEvent = { type: 'start' };
 
@@ -447,9 +447,9 @@ describe('Lifecycle Event Type Guards', () => {
 
       expect(isStartEvent(event)).toBe(false);
     });
-  });
+  ;
 
-  describe('isStartStepEvent', () => {
+
     it('should return true for valid start-step event', () => {
       const event: SSEEvent = { type: 'start-step' };
 
@@ -465,17 +465,17 @@ describe('Lifecycle Event Type Guards', () => {
 
       expect(isStartStepEvent(event)).toBe(true);
     });
-  });
+  ;
 
-  describe('isFinishStepEvent', () => {
+
     it('should return true for valid finish-step event', () => {
       const event: SSEEvent = { type: 'finish-step' };
 
       expect(isFinishStepEvent(event)).toBe(true);
     });
-  });
+  ;
 
-  describe('isFinishEvent', () => {
+
     it('should return true for valid finish event', () => {
       const event: SSEEvent = { type: 'finish' };
 
@@ -493,11 +493,11 @@ describe('Lifecycle Event Type Guards', () => {
 
       expect(isFinishEvent(event)).toBe(true);
     });
-  });
+  ;
 });
 
 describe('Message Event Type Guards', () => {
-  describe('isMessageEvent', () => {
+
     it('should return true for valid message event', () => {
       const event: SSEEvent = {
         type: 'message',
@@ -506,9 +506,9 @@ describe('Message Event Type Guards', () => {
 
       expect(isMessageEvent(event)).toBe(true);
     });
-  });
+  ;
 
-  describe('isAssistantMessageEvent', () => {
+
     it('should return true for valid assistant-message event', () => {
       const event: SSEEvent = {
         type: 'assistant-message',
@@ -518,11 +518,11 @@ describe('Message Event Type Guards', () => {
 
       expect(isAssistantMessageEvent(event)).toBe(true);
     });
-  });
+  ;
 });
 
 describe('Error Event Type Guards', () => {
-  describe('isErrorEvent', () => {
+
     it('should return true for valid error event', () => {
       const event: SSEEvent = {
         type: 'error',
@@ -554,11 +554,11 @@ describe('Error Event Type Guards', () => {
 
       expect(isErrorEvent(event)).toBe(false);
     });
-  });
+  ;
 });
 
 describe('Source Event Type Guards', () => {
-  describe('isSourceUrlEvent', () => {
+
     it('should return true for valid source-url event with https URL', () => {
       const event: SSEEvent = {
         type: 'source-url',
@@ -674,7 +674,7 @@ describe('Source Event Type Guards', () => {
 
       expect(isSourceUrlEvent(event)).toBe(false);
     });
-  });
+  ;
 });
 
 describe('Integration Tests', () => {
@@ -712,11 +712,11 @@ describe('Integration Tests', () => {
     const events = streamData.map(data => parseSSEEvent(data));
     let accumulatedText = '';
 
-    events.forEach(event => {
+    for (const event of events) {
       if (isTextDeltaEvent(event)) {
         accumulatedText += event.delta;
       }
-    });
+    };
 
     expect(accumulatedText).toBe('The answer is');
     expect(isFinishEvent(events[events.length - 1])).toBe(true);
@@ -738,13 +738,13 @@ describe('Integration Tests', () => {
     let text = '';
     const sources: Array<{ id: string; url: string; title?: string }> = [];
 
-    events.forEach(event => {
+    for (const event of events) {
       if (isTextDeltaEvent(event)) {
         text += event.delta;
       } else if (isSourceUrlEvent(event)) {
         sources.push({ id: event.sourceId, url: event.url, title: event.title });
       }
-    });
+    };
 
     expect(text).toBe('According to the source');
     expect(sources).toHaveLength(2);

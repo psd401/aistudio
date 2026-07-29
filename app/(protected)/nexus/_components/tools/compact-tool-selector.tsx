@@ -48,8 +48,10 @@ export function CompactToolSelector({
       .then(tools => {
         setAvailableTools(tools)
         // Auto-disable tools that are no longer available
+        const availableToolNames = new Set<string>()
+        for (const tool of tools) availableToolNames.add(tool.name)
         const newEnabledTools = enabledTools.filter(toolName =>
-          tools.some(tool => tool.name === toolName)
+          availableToolNames.has(toolName)
         )
         if (newEnabledTools.length !== enabledTools.length) {
           onToolsChange(newEnabledTools)
@@ -83,9 +85,9 @@ export function CompactToolSelector({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button 
-          variant="outline" 
-          size="sm" 
+        <Button
+          variant="outline"
+          size="sm"
           className="h-8 gap-2 text-xs"
           disabled={isLoading}
         >
@@ -109,7 +111,7 @@ export function CompactToolSelector({
           availableTools.map(tool => {
           const IconComponent = TOOL_ICONS[tool.name as keyof typeof TOOL_ICONS] || Wrench
           const isEnabled = enabledTools.includes(tool.name)
-          
+
           return (
             <DropdownMenuItem
               key={tool.name}

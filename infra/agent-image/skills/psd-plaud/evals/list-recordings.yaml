@@ -1,0 +1,12 @@
+id: plaud-list-recordings
+skill: psd-plaud
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-plaud to list my recordings matching EVAL-1426. Do not fetch any transcript or recording content. Report the matching recording title."
+trials: 3
+fixtures:
+  - fixtures/list-recordings.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"plaud-mcp"},"method":{"exact":"tools/call"},"toolName":{"exact":"list_files"},"toolArgs.keyword":{"exact":"EVAL-1426"}}}
+  - {"type":"output_match","pattern":"EVAL-1426 Recording"}

@@ -58,6 +58,7 @@ jest.mock("@/lib/api", () => ({
         auth: {
           userId: number
           cognitoSub: string
+          authType: "session" | "api_key" | "jwt"
           scopes: string[]
         },
         requestId: string
@@ -69,6 +70,7 @@ jest.mock("@/lib/api", () => ({
         {
           userId: 7,
           cognitoSub: "executor-sub",
+          authType: "api_key",
           scopes: ["assistants:execute"],
         },
         "request-1"
@@ -153,12 +155,23 @@ jest.mock("@/lib/logger", () => ({
 }))
 
 import { POST } from "@/app/api/v1/assistants/[id]/conversations/route"
+import { verifyAssistantResourceGrants } from "@/lib/api"
+import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
+
+const mockVerifyAssistantResourceGrants =
+  verifyAssistantResourceGrants as jest.MockedFunction<
+    typeof verifyAssistantResourceGrants
+  >
+const mockGetAssistantArchitect =
+  getAssistantArchitectByIdAction as jest.MockedFunction<
+    typeof getAssistantArchitectByIdAction
+  >
 
 const bindingId = "123e4567-e89b-42d3-a456-426614174000"
 const rawMarker =
   `[[repository-attachment:v1:${bindingId}:44:caller-forged-name.pdf]]`
 
-describe("v1 assistant conversation runtime repository inputs", () => {
+function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part1() {
   beforeEach(() => {
     jest.clearAllMocks()
     mockParseRequestBody.mockResolvedValue({
@@ -256,9 +269,83 @@ describe("v1 assistant conversation runtime repository inputs", () => {
         userId: 7,
         cognitoSub: "executor-sub",
         preparedInputs,
+        requireApproved: true,
       })
     )
     expect(mockRollbackNewNexusAttachmentConversation).not.toHaveBeenCalled()
+  })
+
+  it("retains fallback-model authorization for resumable conversations", async () => {
+    mockGetAssistantArchitect.mockResolvedValueOnce({
+      isSuccess: true,
+      message: "ok",
+      data: {
+        id: 5,
+        userId: 9,
+        modelRoutingMode: "standard",
+        prompts: [
+          { id: 10, position: 0, modelId: 2 },
+          { id: 11, position: 1, modelId: 3 },
+        ],
+      },
+    } as never)
+    mockPrepareAssistantExecutionInputs.mockResolvedValue({
+      ownerId: 7,
+      inputs: {},
+      runtimeRepositoryIds: [],
+      runtimeRepositoryQuery: "",
+      references: [],
+    })
+
+    const response = await POST(
+      new NextRequest("http://localhost/api/v1/assistants/5/conversations", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ id: "5" }) }
+    )
+
+    expect(response.status).toBe(200)
+    expect(mockVerifyAssistantResourceGrants).toHaveBeenCalledWith(
+      expect.objectContaining({ architectId: 5, modelDbIds: [3] })
+    )
+  })
+
+  }
+
+function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part2() {
+  it("retains every prompt-model authorization for legacy conversations", async () => {
+    mockGetAssistantArchitect.mockResolvedValueOnce({
+      isSuccess: true,
+      message: "ok",
+      data: {
+        id: 5,
+        userId: 9,
+        modelRoutingMode: "legacy",
+        prompts: [
+          { id: 10, position: 0, modelId: 2 },
+          { id: 11, position: 1, modelId: 3 },
+        ],
+      },
+    } as never)
+    mockPrepareAssistantExecutionInputs.mockResolvedValue({
+      ownerId: 7,
+      inputs: {},
+      runtimeRepositoryIds: [],
+      runtimeRepositoryQuery: "",
+      references: [],
+    })
+
+    const response = await POST(
+      new NextRequest("http://localhost/api/v1/assistants/5/conversations", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ id: "5" }) }
+    )
+
+    expect(response.status).toBe(200)
+    expect(mockVerifyAssistantResourceGrants).toHaveBeenCalledWith(
+      expect.objectContaining({ architectId: 5, modelDbIds: [2, 3] })
+    )
   })
 
   it("compensates the bound empty conversation when first-message persistence fails", async () => {
@@ -335,4 +422,41 @@ describe("v1 assistant conversation runtime repository inputs", () => {
     expect(mockCreateConversation).not.toHaveBeenCalled()
     expect(mockCreateMessageWithStats).not.toHaveBeenCalled()
   })
-})
+
+  it("preserves a coordinator 404 when approval changes under the execution lock", async () => {
+    mockPrepareAssistantExecutionInputs.mockResolvedValue({
+      ownerId: 7,
+      inputs: {},
+      runtimeRepositoryIds: [],
+      runtimeRepositoryQuery: "",
+      references: [],
+    })
+    mockExecuteAssistant.mockRejectedValue({
+      statusCode: 404,
+      userMessage: "Assistant not found: 5",
+    })
+
+    const response = await POST(
+      new NextRequest("http://localhost/api/v1/assistants/5/conversations", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ id: "5" }) }
+    )
+
+    expect(response.status).toBe(404)
+    expect(JSON.parse(String(response.body))).toEqual({
+      requestId: "request-1",
+      error: {
+        code: "NOT_FOUND",
+        message: "Assistant not found: 5",
+      },
+    })
+  })
+}
+
+const defineV1AssistantConversationRuntimeRepositoryInputsSuite1 = () => {
+  defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part1()
+  defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part2()
+};
+
+describe("v1 assistant conversation runtime repository inputs", defineV1AssistantConversationRuntimeRepositoryInputsSuite1)

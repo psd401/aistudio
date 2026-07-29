@@ -7,6 +7,7 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { UploadRequestSchema } from '@/lib/validation/document-upload.validation';
 import { apiRateLimit } from '@/lib/rate-limit';
 import { UploadClassifiedError, type UploadErrorCode } from '@/lib/errors/upload-errors';
+import { legacyContentRetirementResponse } from '@/lib/repositories/content-platform/legacy-retirement-response';
 
 /**
  * Server-side upload endpoint that proxies file uploads through the application server to S3.
@@ -151,6 +152,8 @@ async function uploadHandler(req: NextRequest) {
       log.warn('Unauthorized request');
       return NextResponse.json({ error: 'Unauthorized', code: 'UNAUTHORIZED', requestId }, { status: 401 });
     }
+    const retired = await legacyContentRetirementResponse();
+    if (retired) return retired;
     userId = session.sub;
 
     // Parse multipart form data

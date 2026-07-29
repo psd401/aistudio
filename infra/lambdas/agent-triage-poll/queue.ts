@@ -14,7 +14,7 @@
  *   - learn : nightly correction-driven learning (dispatcher, daily rule)
  */
 
-import { createHash } from "crypto";
+import { createHash } from "node:crypto";
 
 import {
   SQSClient,

@@ -5,6 +5,7 @@ import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { getDocumentsByConversationId, getDocumentChunksByDocumentId } from '@/lib/db/queries/documents';
 import { getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+import { legacyContentRetirementResponse } from '@/lib/repositories/content-platform/legacy-retirement-response';
 
 // Request validation schema
 // Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
@@ -39,6 +40,12 @@ export async function POST(request: NextRequest) {
     log.warn("User not found");
     timer({ status: "error", reason: "user_not_found" });
     return NextResponse.json({ error: 'User not found' }, { status: 401, headers: { "X-Request-Id": requestId } });
+  }
+
+  const retired = await legacyContentRetirementResponse();
+  if (retired) {
+    timer({ status: "success", reason: "legacy_retired" });
+    return retired;
   }
 
   try {

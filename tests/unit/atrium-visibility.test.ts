@@ -7,6 +7,7 @@
  */
 
 const executeQueryMock = jest.fn();
+const requesterMayViewCollectionMock = jest.fn(async () => true);
 jest.mock("@/lib/db/drizzle-client", () => ({
   executeQuery: (...args: unknown[]) => executeQueryMock(...args),
   // listVisible references these types only; provide inert stand-ins.
@@ -14,9 +15,17 @@ jest.mock("@/lib/db/drizzle-client", () => ({
 }));
 jest.mock("@/lib/db/schema", () => ({
   contentObjects: {},
+  contentCollections: { id: {}, ownerUserId: {} },
   contentVisibilityGrants: {},
   // listVisible LEFT JOINs users to project the owner display name (#1052).
   users: { id: {}, firstName: {}, lastName: {}, email: {} },
+}));
+jest.mock("@/lib/content/collection-access", () => ({
+  requesterMayViewCollection: (...args: unknown[]) =>
+    requesterMayViewCollectionMock(...(args as [])),
+  collectionAccessSnapshot: jest.fn(async () => ({
+    allowedCollectionIds: new Set<string>(),
+  })),
 }));
 jest.mock("@/lib/db/drizzle-helpers", () => ({
   pgTimestampAsText: (c: unknown) => c,
@@ -50,7 +59,7 @@ function obj(
   visibilityLevel: "private" | "group" | "internal" | "public",
   ownerUserId = OWNER_ID
 ) {
-  return { id: "obj-1", ownerUserId, visibilityLevel };
+  return { id: "obj-1", ownerUserId, collectionId: null, visibilityLevel };
 }
 
 const staffUser: Requester = {
@@ -91,6 +100,8 @@ const roledAgent: Requester = {
 
 beforeEach(() => {
   executeQueryMock.mockReset();
+  requesterMayViewCollectionMock.mockClear();
+  requesterMayViewCollectionMock.mockResolvedValue(true);
 });
 
 describe("canView — public", () => {
@@ -99,6 +110,20 @@ describe("canView — public", () => {
     expect(await visibilityService.canView(staffUser, obj("public"))).toBe(true);
     // No grant lookup needed for public.
     expect(executeQueryMock).not.toHaveBeenCalled();
+  });
+
+  it("uses a supplied collection snapshot without reloading collection access", async () => {
+    const collectionAccess = {
+      allowedCollectionIds: new Set(["collection-1"]),
+    };
+    const visible = await visibilityService.canView(
+      staffUser,
+      { ...obj("public"), collectionId: "collection-1" },
+      collectionAccess as never
+    );
+
+    expect(visible).toBe(true);
+    expect(requesterMayViewCollectionMock).not.toHaveBeenCalled();
   });
 });
 
@@ -406,6 +431,15 @@ describe("setLevelInTx — level + grant write semantics", () => {
     // (`clearNonUserGrantsInTx` → `and(eq(objectId), ne(kind, "user"))`).
     const deletes: unknown[] = [];
     const tx = {
+      select: () => ({
+        from: () => ({
+          leftJoin: () => ({
+            where: () => ({
+              limit: async () => [{ ownerUserId: null }],
+            }),
+          }),
+        }),
+      }),
       delete: () => ({
         where: async (clause: unknown) => {
           deletes.push(clause);
@@ -551,7 +585,7 @@ describe("listVisible — limit/offset clamping", () => {
   async function captureLimitOffset(
     filter: Record<string, unknown>
   ): Promise<{ limit: unknown; offset: unknown }> {
-    let captured: { limit: unknown; offset: unknown } = {
+    const captured: { limit: unknown; offset: unknown } = {
       limit: undefined,
       offset: undefined,
     };

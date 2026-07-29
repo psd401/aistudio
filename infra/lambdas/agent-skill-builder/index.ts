@@ -15,20 +15,36 @@
  * Part of Epic #910 — Agent Skills Platform
  */
 
-import { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
-import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
-import { execSync, type ExecSyncOptionsWithStringEncoding } from 'child_process';
-import * as fs from 'fs';
-import * as path from 'path';
-import type { Handler } from 'aws-lambda';
-import { findMalformedToolVersionPins } from './frontmatter-tools';
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
+import {
+  RDSDataClient,
+  ExecuteStatementCommand,
+} from "@aws-sdk/client-rds-data";
+import {
+  execSync,
+  type ExecSyncOptionsWithStringEncoding,
+} from "node:child_process";
+import { createHash } from "node:crypto";
+import * as path from "node:path";
+import type { Handler } from "aws-lambda";
+import { findMalformedToolVersionPins } from "./frontmatter-tools";
+import { validatedFs } from "./validated-fs";
 
-const REGION = process.env.AWS_REGION || 'us-east-1';
-const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
-const BUCKET = process.env.SKILLS_BUCKET || '';
-const DATABASE_RESOURCE_ARN = process.env.DATABASE_RESOURCE_ARN || '';
-const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || '';
-const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
+const REGION = process.env.AWS_REGION || "us-east-1";
+const ENVIRONMENT = process.env.ENVIRONMENT || "dev";
+const BUCKET = process.env.SKILLS_BUCKET || "";
+const DATABASE_RESOURCE_ARN = process.env.DATABASE_RESOURCE_ARN || "";
+const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || "";
+const DATABASE_NAME = process.env.DATABASE_NAME || "aistudio";
+const MAX_SKILL_INPUT_FILES = 50;
+const MAX_SKILL_INPUT_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_SKILL_INPUT_TOTAL_BYTES = 10 * 1024 * 1024;
 
 const s3 = new S3Client({ region: REGION });
 const rds = new RDSDataClient({ region: REGION });
@@ -43,9 +59,9 @@ type LambdaLogger = {
 };
 
 function createLogger(context: Record<string, unknown> = {}): LambdaLogger {
-  const base = { service: 'agent-skill-builder', ...context };
+  const base = { service: "agent-skill-builder", ...context };
   const emit = (
-    level: 'INFO' | 'WARN' | 'ERROR',
+    level: "INFO" | "WARN" | "ERROR",
     stream: NodeJS.WritableStream,
     msg: string,
     meta: Record<string, unknown> = {},
@@ -57,21 +73,23 @@ function createLogger(context: Record<string, unknown> = {}): LambdaLogger {
         timestamp: new Date().toISOString(),
         ...base,
         ...meta,
-      }) + '\n',
+      }) + "\n",
     );
   };
   return {
-    info: (m, meta) => emit('INFO', process.stdout, m, meta),
-    warn: (m, meta) => emit('WARN', process.stdout, m, meta),
-    error: (m, meta) => emit('ERROR', process.stderr, m, meta),
+    info: (m, meta) => emit("INFO", process.stdout, m, meta),
+    warn: (m, meta) => emit("WARN", process.stdout, m, meta),
+    error: (m, meta) => emit("ERROR", process.stderr, m, meta),
   };
 }
 
-const VALID_SCOPES = ['user', 'shared'] as const;
+const VALID_SCOPES = ["user", "shared"] as const;
 type ValidScope = (typeof VALID_SCOPES)[number];
 
 function isValidScope(s: unknown): s is ValidScope {
-  return typeof s === 'string' && (VALID_SCOPES as readonly string[]).includes(s);
+  return (
+    typeof s === "string" && (VALID_SCOPES as readonly string[]).includes(s)
+  );
 }
 
 // Patterns that indicate secrets in code files
@@ -93,9 +111,13 @@ const PII_PATTERNS = [
 
 interface SkillBuildEvent {
   skillId: string;
+  ownerKey: string;
+  version: number;
+  scanLeaseId: string;
+  idempotencyKey: string;
   s3Key: string;
   destinationPrefix: string;
-  scope: 'user' | 'shared';
+  scope: "user" | "shared";
   ownerUserId?: number;
   actorUserId?: number;
 }
@@ -108,147 +130,389 @@ interface ScanFindings {
   summary: string;
 }
 
-export const handler: Handler<SkillBuildEvent> = async (event) => {
-  const log = createLogger({ skillId: event.skillId });
+export function assertSkillScanPrefixes(
+  event: Pick<SkillBuildEvent, "ownerKey" | "s3Key" | "destinationPrefix">,
+): void {
+  const ownerPrefix = `skills/user/${event.ownerKey.toLowerCase()}/`;
+  const draftPath = event.s3Key.startsWith(ownerPrefix)
+    ? event.s3Key.slice(ownerPrefix.length)
+    : "";
+  const draftMatch = draftPath.match(
+    /^drafts\/([a-zA-Z0-9_.-]+)\/versions\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i,
+  );
+  if (!draftMatch) {
+    throw new Error("Invalid owner-bound skill scan prefixes");
+  }
+  const [, slug, generation] = draftMatch;
+  const expectedDestination = `${ownerPrefix}approved/${slug}/versions/${generation}`;
+  if (event.destinationPrefix !== expectedDestination) {
+    throw new Error("Invalid owner-bound skill scan prefixes");
+  }
+}
 
-  // Validate scope at the entry point so a bad value fails fast with a
-  // clear error rather than surfacing as a CAST failure inside the RDS Data
-  // API call. The DB enum is the source of truth for allowed values.
-  if (!isValidScope(event.scope)) {
-    log.error('Invalid scope in SkillBuildEvent', { scope: event.scope });
-    throw new Error(`Invalid scope: ${event.scope}. Must be one of: ${VALID_SCOPES.join(', ')}`);
+export function shouldRollbackDestinationUpload(
+  destinationUploaded: boolean,
+  promotionCommitted: boolean,
+): boolean {
+  return destinationUploaded && !promotionCommitted;
+}
+
+type DependencyAuditEvidence =
+  | { status: "not_applicable" }
+  | { status: "clean"; lockfileSha256: string };
+
+type SkillBuildTerminalResult = {
+  status: string;
+  skillId: string;
+  findings?: ScanFindings;
+  error?: string;
+};
+
+type DependencyBuildResult =
+  | { ok: true; evidence: DependencyAuditEvidence }
+  | { ok: false; result: SkillBuildTerminalResult };
+
+interface SkillBuildState {
+  claimed: boolean;
+  destinationUploaded: boolean;
+  promotionCommitted: boolean;
+}
+
+export function isValidOwnerKey(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 320) {
+    return false;
+  }
+  const at = value.indexOf("@");
+  if (at <= 0 || at !== value.lastIndexOf("@")) return false;
+  const domain = value.slice(at + 1);
+  const dot = domain.lastIndexOf(".");
+  if (dot <= 0 || dot === domain.length - 1) return false;
+  for (const character of value) {
+    if (character === "/" || character.trim().length === 0) return false;
+  }
+  return true;
+}
+
+function validateSkillBuildEvent(
+  event: SkillBuildEvent,
+  log: LambdaLogger,
+): void {
+  const valid =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      event.skillId,
+    ) &&
+    isValidOwnerKey(event.ownerKey) &&
+    isValidScope(event.scope) &&
+    Number.isSafeInteger(event.version) &&
+    event.version >= 1 &&
+    /^[0-9a-f-]{36}$/i.test(event.scanLeaseId) &&
+    typeof event.idempotencyKey === "string" &&
+    event.idempotencyKey.length > 0 &&
+    event.idempotencyKey.length <= 256;
+  if (!valid) {
+    log.error("Invalid scope in SkillBuildEvent", { scope: event.scope });
+    throw new Error("Invalid skill scan event");
+  }
+  assertSkillScanPrefixes(event);
+}
+
+async function handleFlaggedScan(
+  event: SkillBuildEvent,
+  findings: ScanFindings,
+): Promise<SkillBuildTerminalResult | null> {
+  if (findings.secrets.length === 0 && findings.pii.length === 0) return null;
+  if (!(await updateSkillStatus(event, "flagged", findings))) {
+    return { status: "stale", skillId: event.skillId };
+  }
+  await writeAuditLog(event.skillId, "scan_flagged", event.actorUserId, {
+    findings: findings.summary,
+  });
+  return {
+    status: "flagged",
+    skillId: event.skillId,
+    findings,
+  };
+}
+
+async function recordDependencyFailure(
+  event: SkillBuildEvent,
+  status: "build_failed" | "audit_error",
+  message: string,
+): Promise<DependencyBuildResult> {
+  const findings: ScanFindings = {
+    secrets: [],
+    pii: [],
+    npmAudit: [],
+    skillMdLint: [
+      status === "build_failed"
+        ? `npm install failed: ${message.substring(0, 500)}`
+        : `Dependency audit unavailable: ${message.substring(0, 500)}`,
+    ],
+    summary:
+      status === "build_failed"
+        ? "npm install failed"
+        : "dependency audit unavailable",
+  };
+  if (!(await updateSkillStatus(event, "flagged", findings))) {
+    return {
+      ok: false,
+      result: { status: "stale", skillId: event.skillId },
+    };
+  }
+  await writeAuditLog(
+    event.skillId,
+    status === "build_failed" ? "build_failed" : "audit_error",
+    event.actorUserId,
+    { error: message.substring(0, 500) },
+  );
+  return {
+    ok: false,
+    result: {
+      status,
+      skillId: event.skillId,
+      ...(status === "audit_error"
+        ? { findings }
+        : { error: message.substring(0, 500) }),
+    },
+  };
+}
+
+async function buildAndAuditDependencies(
+  event: SkillBuildEvent,
+  workDir: string,
+  log: LambdaLogger,
+): Promise<DependencyBuildResult> {
+  if (!validatedFs.existsSync(path.join(workDir, "package.json"))) {
+    return { ok: true, evidence: { status: "not_applicable" } };
+  }
+  try {
+    installSkillDependencies(workDir);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return recordDependencyFailure(event, "build_failed", message);
   }
 
-  log.info('Skill build event received', {
+  let npmAudit: { severity: string; title: string }[];
+  let lockfileSha256: string;
+  try {
+    npmAudit = auditInstalledDeps(workDir, log);
+    lockfileSha256 = hashDependencyLockfile(workDir);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return recordDependencyFailure(event, "audit_error", message);
+  }
+  const vulnerable = npmAudit.some(
+    (finding) =>
+      finding.severity === "critical" || finding.severity === "high",
+  );
+  if (!vulnerable) {
+    return { ok: true, evidence: { status: "clean", lockfileSha256 } };
+  }
+  const findings: ScanFindings = {
+    secrets: [],
+    pii: [],
+    npmAudit,
+    skillMdLint: [],
+    summary: `${npmAudit.length} high/critical npm vulnerability(ies)`,
+  };
+  if (!(await updateSkillStatus(event, "flagged", findings))) {
+    return {
+      ok: false,
+      result: { status: "stale", skillId: event.skillId },
+    };
+  }
+  await writeAuditLog(event.skillId, "scan_flagged", event.actorUserId, {
+    findings: findings.summary,
+    dependencyAudit: {
+      status: "vulnerable",
+      lockfileSha256,
+      findings: npmAudit,
+    },
+  });
+  return {
+    ok: false,
+    result: { status: "flagged", skillId: event.skillId, findings },
+  };
+}
+
+async function promoteBuiltSkill(
+  event: SkillBuildEvent,
+  workDir: string,
+  evidence: DependencyAuditEvidence,
+  state: SkillBuildState,
+): Promise<SkillBuildTerminalResult & { scope?: ValidScope; s3Key?: string }> {
+  await uploadSkillToS3(workDir, event.destinationPrefix);
+  state.destinationUploaded = true;
+  const promotionApplied = await updateSkillAfterPromotion(
+    event,
+    event.scope,
+    event.destinationPrefix,
+  );
+  if (!promotionApplied) {
+    await deleteSkillPrefix(event.destinationPrefix);
+    state.destinationUploaded = false;
+    return { status: "stale", skillId: event.skillId };
+  }
+  state.promotionCommitted = true;
+  const action =
+    event.scope === "shared" ? "promoted_to_shared" : "auto_promoted";
+  await writeAuditLog(event.skillId, action, event.actorUserId, {
+    destinationPrefix: event.destinationPrefix,
+    dependencyAudit: evidence,
+  });
+  return {
+    status: "promoted",
+    skillId: event.skillId,
+    scope: event.scope,
+    s3Key: event.destinationPrefix,
+  };
+}
+
+async function handleSkillBuildError(
+  event: SkillBuildEvent,
+  state: SkillBuildState,
+  error: unknown,
+  log: LambdaLogger,
+): Promise<void> {
+  const message = error instanceof Error ? error.message : String(error);
+  log.error("Skill build failed", { error: message });
+  if (
+    shouldRollbackDestinationUpload(
+      state.destinationUploaded,
+      state.promotionCommitted,
+    )
+  ) {
+    await deleteSkillPrefix(event.destinationPrefix).catch(() => undefined);
+  }
+  if (state.claimed) {
+    await clearFailedSkillClaim(event).catch(() => undefined);
+  }
+  await writeAuditLog(event.skillId, "build_error", event.actorUserId, {
+    error: message.substring(0, 1000),
+  }).catch((auditError: unknown) => {
+    log.error("Audit log failed (non-fatal)", {
+      error:
+        auditError instanceof Error ? auditError.message : String(auditError),
+    });
+  });
+}
+
+async function finishSkillBuild(
+  event: SkillBuildEvent,
+  state: SkillBuildState,
+  workDir: string,
+  log: LambdaLogger,
+): Promise<void> {
+  if (state.claimed) {
+    await finishSkillAdmission(event, 1).catch((error: unknown) => {
+      log.error("Failed to finish skill scan admission lease", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+  try {
+    validatedFs.rmSync(workDir, { recursive: true, force: true });
+  } catch {
+    // Best-effort cleanup.
+  }
+}
+
+export const handler: Handler<SkillBuildEvent> = async (event) => {
+  const log = createLogger({ skillId: event.skillId });
+  validateSkillBuildEvent(event, log);
+  log.info("Skill build event received", {
     s3Key: event.s3Key,
     scope: event.scope,
   });
 
-  const workDir = path.join('/tmp', `skill-${event.skillId}-${Date.now()}`);
+  const workDir = path.join("/tmp", `skill-${event.skillId}-${Date.now()}`);
+  const state: SkillBuildState = {
+    claimed: false,
+    destinationUploaded: false,
+    promotionCommitted: false,
+  };
 
   try {
-    // 1. Download skill files from S3
-    await downloadSkillFromS3(event.s3Key, workDir, log);
-
-    // 2. Run automated scan
-    const findings = await scanSkill(workDir);
-
-    // 3. Check if scan is clean. Dependency-vulnerability auditing does NOT run
-    // here — `npm audit` needs a resolved lockfile/node_modules, which don't
-    // exist pre-install, so it runs post-install below (REV-INFRA-062). This
-    // gate covers the pre-install secret/PII checks only.
-    const isFlagged = findings.secrets.length > 0 ||
-      findings.pii.length > 0;
-
-    if (isFlagged) {
-      // Update DB: mark as flagged with findings
-      await updateSkillStatus(event.skillId, 'flagged', findings);
-      await writeAuditLog(event.skillId, 'scan_flagged', event.actorUserId, {
-        findings: findings.summary,
+    state.claimed = await claimSkillScan(event);
+    if (!state.claimed) {
+      log.warn("Ignoring stale or duplicate skill scan event", {
+        version: event.version,
       });
-
-      return {
-        status: 'flagged',
-        skillId: event.skillId,
-        findings,
-      };
+      return { status: "stale", skillId: event.skillId };
     }
+    await downloadSkillFromS3(event.s3Key, workDir, log);
+    const findings = await scanSkill(workDir);
+    const flaggedResult = await handleFlaggedScan(event, findings);
+    if (flaggedResult) return flaggedResult;
 
-    // 4. Run npm install in sandbox
-    const packageJsonPath = path.join(workDir, 'package.json');
-    if (fs.existsSync(packageJsonPath)) {
-      try {
-        installSkillDependencies(workDir);
-      } catch (npmErr: unknown) {
-        const message = npmErr instanceof Error ? npmErr.message : String(npmErr);
-        await updateSkillStatus(event.skillId, 'flagged', {
-          secrets: [],
-          pii: [],
-          npmAudit: [],
-          skillMdLint: [`npm install failed: ${message.substring(0, 500)}`],
-          summary: 'npm install failed',
-        });
-        await writeAuditLog(event.skillId, 'build_failed', event.actorUserId, {
-          error: message.substring(0, 500),
-        });
-
-        return {
-          status: 'build_failed',
-          skillId: event.skillId,
-          error: message.substring(0, 500),
-        };
-      }
-
-      // 4b. Audit the *resolved* dependency tree now that `npm install` has
-      // produced a package-lock.json + node_modules. npm audit is a no-op
-      // (ENOLOCK) before install, which is why the pre-install scan could never
-      // catch dependency CVEs (REV-INFRA-062). A high/critical advisory flags
-      // the skill and skips promotion — nothing has been uploaded yet.
-      const npmAudit = auditInstalledDeps(workDir, log);
-      if (npmAudit.some(a => a.severity === 'critical' || a.severity === 'high')) {
-        const auditFindings: ScanFindings = {
-          secrets: [],
-          pii: [],
-          npmAudit,
-          skillMdLint: [],
-          summary: `${npmAudit.length} high/critical npm vulnerability(ies)`,
-        };
-        await updateSkillStatus(event.skillId, 'flagged', auditFindings);
-        await writeAuditLog(event.skillId, 'scan_flagged', event.actorUserId, {
-          findings: auditFindings.summary,
-        });
-
-        return {
-          status: 'flagged',
-          skillId: event.skillId,
-          findings: auditFindings,
-        };
-      }
-    }
-
-    // 5. Upload built skill to destination prefix
-    await uploadSkillToS3(workDir, event.destinationPrefix);
-
-    // 6. Update DB: mark as clean, update scope and s3_key
-    await updateSkillAfterPromotion(
-      event.skillId,
-      event.scope,
-      event.destinationPrefix,
+    const dependencyResult = await buildAndAuditDependencies(
+      event,
+      workDir,
+      log,
     );
-
-    // 7. Write audit log
-    const action = event.scope === 'shared' ? 'promoted_to_shared' : 'auto_promoted';
-    await writeAuditLog(event.skillId, action, event.actorUserId, {
-      destinationPrefix: event.destinationPrefix,
-    });
-
-    return {
-      status: 'promoted',
-      skillId: event.skillId,
-      scope: event.scope,
-      s3Key: event.destinationPrefix,
-    };
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    log.error('Skill build failed', { error: message });
-
-    await writeAuditLog(event.skillId, 'build_error', event.actorUserId, {
-      error: message.substring(0, 1000),
-    }).catch((auditErr: unknown) => {
-      const auditMsg = auditErr instanceof Error ? auditErr.message : String(auditErr);
-      log.error('Audit log failed (non-fatal)', { error: auditMsg });
-    });
-
-    throw err;
+    if (!dependencyResult.ok) return dependencyResult.result;
+    return promoteBuiltSkill(
+      event,
+      workDir,
+      dependencyResult.evidence,
+      state,
+    );
+  } catch (error) {
+    await handleSkillBuildError(event, state, error, log);
+    throw error;
   } finally {
-    // Cleanup /tmp
-    try {
-      fs.rmSync(workDir, { recursive: true, force: true });
-    } catch {
-      // Best-effort cleanup
-    }
+    await finishSkillBuild(event, state, workDir, log);
   }
 };
+
+async function downloadSkillObject(input: {
+  key: string;
+  size: number;
+  normalizedPrefix: string;
+  destDir: string;
+  destRoot: string;
+  downloadedBytes: number;
+  log: LambdaLogger;
+  s3Client: S3Client;
+}): Promise<number> {
+  const destPath = path.resolve(
+    input.destDir,
+    input.key.slice(input.normalizedPrefix.length),
+  );
+  if (!destPath.startsWith(input.destRoot)) {
+    input.log.warn("Skipping S3 object with path-traversing key", {
+      key: input.key,
+    });
+    return 0;
+  }
+  const response = await input.s3Client.send(
+    new GetObjectCommand({
+      Bucket: BUCKET,
+      Key: input.key,
+    }),
+  );
+  if (!response.Body) return 0;
+
+  const chunks: Buffer[] = [];
+  let objectBytes = 0;
+  for await (const chunk of response.Body as AsyncIterable<Buffer>) {
+    const safeChunk = Buffer.from(chunk);
+    objectBytes += safeChunk.byteLength;
+    if (
+      objectBytes > input.size ||
+      input.downloadedBytes + objectBytes > MAX_SKILL_INPUT_TOTAL_BYTES
+    ) {
+      throw new Error("Skill object exceeded its declared byte limit");
+    }
+    chunks.push(safeChunk);
+  }
+  if (objectBytes !== input.size) {
+    throw new Error("Skill object length did not match its S3 metadata");
+  }
+  validatedFs.mkdirSync(path.dirname(destPath), { recursive: true });
+  validatedFs.writeFileSync(destPath, Buffer.concat(chunks));
+  return objectBytes;
+}
 
 export async function downloadSkillFromS3(
   prefix: string,
@@ -256,49 +520,52 @@ export async function downloadSkillFromS3(
   log: LambdaLogger,
   s3Client: S3Client = s3,
 ): Promise<void> {
-  fs.mkdirSync(destDir, { recursive: true });
+  validatedFs.mkdirSync(destDir, { recursive: true });
 
   // H5 fix: Paginate ListObjectsV2 to handle skills with >1000 files
-  const normalizedPrefix = prefix.endsWith('/') ? prefix : `${prefix}/`;
+  const normalizedPrefix = prefix.endsWith("/") ? prefix : `${prefix}/`;
   let continuationToken: string | undefined;
+  let downloadedFiles = 0;
+  let downloadedBytes = 0;
   // Resolve the work-dir root once for the traversal containment check below.
   const destRoot = path.resolve(destDir) + path.sep;
 
   do {
-    const listResp = await s3Client.send(new ListObjectsV2Command({
-      Bucket: BUCKET,
-      Prefix: normalizedPrefix,
-      ContinuationToken: continuationToken,
-    }));
+    const listResp = await s3Client.send(
+      new ListObjectsV2Command({
+        Bucket: BUCKET,
+        Prefix: normalizedPrefix,
+        ContinuationToken: continuationToken,
+      }),
+    );
 
     for (const obj of listResp.Contents || []) {
-      if (!obj.Key || obj.Key.endsWith('/')) continue;
-
-      const relativePath = obj.Key.slice(normalizedPrefix.length);
-      // Path-traversal guard (REV-INFRA-063): S3 keys are user-influenced —
-      // draft filenames become key suffixes — and may contain `..` segments.
-      // path.join/resolve would normalize `../../x` to a path OUTSIDE destDir,
-      // a zip-slip write into /tmp (npm cache, another concurrent build's work
-      // dir) that undermines the scan. Reject any key whose resolved
-      // destination escapes the per-build work dir.
-      const destPath = path.resolve(destDir, relativePath);
-      if (!destPath.startsWith(destRoot)) {
-        log.warn('Skipping S3 object with path-traversing key', { key: obj.Key });
-        continue;
+      if (!obj.Key || obj.Key.endsWith("/")) continue;
+      if (downloadedFiles >= MAX_SKILL_INPUT_FILES) {
+        throw new Error("Skill input exceeds the file-count limit");
       }
-      fs.mkdirSync(path.dirname(destPath), { recursive: true });
+      if (
+        typeof obj.Size !== "number" ||
+        obj.Size < 0 ||
+        obj.Size > MAX_SKILL_INPUT_FILE_BYTES ||
+        downloadedBytes + obj.Size > MAX_SKILL_INPUT_TOTAL_BYTES
+      ) {
+        throw new Error("Skill input exceeds its declared byte limits");
+      }
 
-      const getResp = await s3Client.send(new GetObjectCommand({
-        Bucket: BUCKET,
-        Key: obj.Key,
-      }));
-
-      if (getResp.Body) {
-        const chunks: Buffer[] = [];
-        for await (const chunk of getResp.Body as AsyncIterable<Buffer>) {
-          chunks.push(chunk);
-        }
-        fs.writeFileSync(destPath, Buffer.concat(chunks));
+      const objectBytes = await downloadSkillObject({
+        key: obj.Key,
+        size: obj.Size,
+        normalizedPrefix,
+        destDir,
+        destRoot,
+        downloadedBytes,
+        log,
+        s3Client,
+      });
+      if (objectBytes > 0) {
+        downloadedFiles += 1;
+        downloadedBytes += objectBytes;
       }
     }
 
@@ -306,12 +573,124 @@ export async function downloadSkillFromS3(
   } while (continuationToken);
 }
 
-async function uploadSkillToS3(srcDir: string, destPrefix: string): Promise<void> {
-  const prefix = destPrefix.endsWith('/') ? destPrefix : `${destPrefix}/`;
+export async function claimSkillScan(
+  event: SkillBuildEvent,
+  rdsClient: RDSDataClient = rds,
+): Promise<boolean> {
+  const response = await rdsClient.send(
+    new ExecuteStatementCommand({
+      resourceArn: DATABASE_RESOURCE_ARN,
+      secretArn: DATABASE_SECRET_ARN,
+      database: DATABASE_NAME,
+      sql: `UPDATE psd_agent_skills AS skill
+          SET scan_lease_id = CAST(:lease AS UUID),
+              scan_started_at = NOW(),
+              updated_at = NOW()
+          FROM users AS owner, resource_admission_leases AS admission
+          WHERE skill.id = CAST(:id AS UUID)
+            AND skill.owner_user_id = owner.id
+            AND LOWER(owner.email) = :owner
+            AND skill.version = :version
+            AND skill.s3_key = :source
+            AND skill.scan_status = 'pending'
+            AND admission.id = CAST(:lease AS UUID)
+            AND admission.kind = 'skill-scan-events'
+            AND admission.owner_key = :owner
+            AND admission.context_key = :context
+            AND admission.idempotency_key = :idempotency
+            AND admission.status = 'active'
+            AND admission.expires_at > NOW()
+            AND (
+              skill.scan_lease_id IS NULL
+              OR (
+                skill.scan_lease_id = CAST(:lease AS UUID)
+                AND skill.scan_started_at < NOW() - INTERVAL '10 minutes'
+              )
+            )
+          RETURNING skill.id`,
+      parameters: [
+        { name: "lease", value: { stringValue: event.scanLeaseId } },
+        { name: "id", value: { stringValue: event.skillId } },
+        { name: "version", value: { longValue: event.version } },
+        { name: "source", value: { stringValue: event.s3Key } },
+        { name: "owner", value: { stringValue: event.ownerKey.toLowerCase() } },
+        {
+          name: "context",
+          value: { stringValue: `${event.skillId}:${event.version}` },
+        },
+        {
+          name: "idempotency",
+          value: { stringValue: event.idempotencyKey },
+        },
+      ],
+    }),
+  );
+  return (response.records?.length ?? 0) === 1;
+}
+
+async function clearFailedSkillClaim(event: SkillBuildEvent): Promise<void> {
+  await rds.send(
+    new ExecuteStatementCommand({
+      resourceArn: DATABASE_RESOURCE_ARN,
+      secretArn: DATABASE_SECRET_ARN,
+      database: DATABASE_NAME,
+      sql: `UPDATE psd_agent_skills
+          SET scan_lease_id = NULL,
+              scan_started_at = NULL,
+              updated_at = NOW()
+          WHERE id = CAST(:id AS UUID)
+            AND version = :version
+            AND scan_status = 'pending'
+            AND scan_lease_id = CAST(:lease AS UUID)`,
+      parameters: [
+        { name: "id", value: { stringValue: event.skillId } },
+        { name: "version", value: { longValue: event.version } },
+        { name: "lease", value: { stringValue: event.scanLeaseId } },
+      ],
+    }),
+  );
+}
+
+async function finishSkillAdmission(
+  event: SkillBuildEvent,
+  actualUnits: 1,
+): Promise<void> {
+  await rds.send(
+    new ExecuteStatementCommand({
+      resourceArn: DATABASE_RESOURCE_ARN,
+      secretArn: DATABASE_SECRET_ARN,
+      database: DATABASE_NAME,
+      sql: `UPDATE resource_admission_leases
+          SET status = 'completed',
+              actual_units = :actual,
+              finished_at = NOW()
+          WHERE id = CAST(:lease AS UUID)
+            AND kind = 'skill-scan-events'
+            AND owner_key = :owner
+            AND context_key = :context
+            AND status = 'active'`,
+      parameters: [
+        { name: "actual", value: { longValue: actualUnits } },
+        { name: "lease", value: { stringValue: event.scanLeaseId } },
+        { name: "owner", value: { stringValue: event.ownerKey.toLowerCase() } },
+        {
+          name: "context",
+          value: { stringValue: `${event.skillId}:${event.version}` },
+        },
+      ],
+    }),
+  );
+}
+
+async function uploadSkillToS3(
+  srcDir: string,
+  destPrefix: string,
+): Promise<void> {
+  const prefix = destPrefix.endsWith("/") ? destPrefix : `${destPrefix}/`;
 
   function walkDir(dir: string): string[] {
     const files: string[] = [];
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    for (const entry of validatedFs.readdirSync(dir, { withFileTypes: true })) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         files.push(...walkDir(fullPath));
@@ -333,15 +712,43 @@ async function uploadSkillToS3(srcDir: string, destPrefix: string): Promise<void
       batch.map((filePath) => {
         const relativePath = path.relative(srcDir, filePath);
         const key = `${prefix}${relativePath}`;
-        return s3.send(new PutObjectCommand({
-          Bucket: BUCKET,
-          Key: key,
-          Body: fs.readFileSync(filePath),
-          Tagging: `Environment=${ENVIRONMENT}&ManagedBy=cdk&Scope=skill`,
-        }));
+        return s3.send(
+          new PutObjectCommand({
+            Bucket: BUCKET,
+            Key: key,
+            Body: validatedFs.readFileSync(filePath),
+            Tagging: `Environment=${ENVIRONMENT}&ManagedBy=cdk&Scope=skill`,
+          }),
+        );
       }),
     );
   }
+}
+
+async function deleteSkillPrefix(prefix: string): Promise<void> {
+  const normalizedPrefix = prefix.endsWith("/") ? prefix : `${prefix}/`;
+  let continuationToken: string | undefined;
+  do {
+    const page = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: BUCKET,
+        Prefix: normalizedPrefix,
+        ContinuationToken: continuationToken,
+      }),
+    );
+    await Promise.all(
+      (page.Contents ?? [])
+        .filter(
+          (item): item is typeof item & { Key: string } =>
+            typeof item.Key === "string" &&
+            item.Key.startsWith(normalizedPrefix),
+        )
+        .map((item) =>
+          s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: item.Key })),
+        ),
+    );
+    continuationToken = page.NextContinuationToken;
+  } while (continuationToken);
 }
 
 async function scanSkill(skillDir: string): Promise<ScanFindings> {
@@ -350,52 +757,72 @@ async function scanSkill(skillDir: string): Promise<ScanFindings> {
     pii: [],
     npmAudit: [],
     skillMdLint: [],
-    summary: '',
+    summary: "",
   };
 
   // Scan all text files for secrets and PII
   function walkAndScan(dir: string): void {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    for (const entry of validatedFs.readdirSync(dir, { withFileTypes: true })) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name === 'node_modules' || entry.name === '.git') continue;
+        if (entry.name === "node_modules" || entry.name === ".git") continue;
         walkAndScan(fullPath);
       } else {
         const ext = path.extname(entry.name).toLowerCase();
-        if (['.js', '.ts', '.json', '.md', '.yaml', '.yml', '.env', '.txt'].includes(ext) || entry.name === '.env') {
+        if (
+          [
+            ".js",
+            ".ts",
+            ".json",
+            ".md",
+            ".yaml",
+            ".yml",
+            ".env",
+            ".txt",
+          ].includes(ext) ||
+          entry.name === ".env"
+        ) {
           try {
-            const content = fs.readFileSync(fullPath, 'utf-8');
+            const content = validatedFs.readFileSync(fullPath, "utf-8");
             const relativePath = path.relative(skillDir, fullPath);
 
             // Secret detection — skip comment lines to avoid false positives
             // on documentation examples like `// secret = 'example'`
             const nonCommentLines = content
-              .split('\n')
-              .filter(line => {
+              .split("\n")
+              .filter((line) => {
                 const trimmed = line.trim();
-                return !trimmed.startsWith('//') &&
-                       !trimmed.startsWith('#') &&
-                       !trimmed.startsWith('*') &&
-                       !trimmed.startsWith('/*');
+                return (
+                  !trimmed.startsWith("//") &&
+                  !trimmed.startsWith("#") &&
+                  !trimmed.startsWith("*") &&
+                  !trimmed.startsWith("/*")
+                );
               })
-              .join('\n');
+              .join("\n");
 
-            for (const pattern of SECRET_PATTERNS) {
-              pattern.lastIndex = 0;
-              if (pattern.test(nonCommentLines)) {
-                findings.secrets.push(`Potential secret in ${relativePath}`);
-              }
-            }
-
-            // PII detection (skip SKILL.md example sections)
-            if (!entry.name.endsWith('.md')) {
-              for (const pattern of PII_PATTERNS) {
+            const handleNestedBranch2 = () => {
+              for (const pattern of SECRET_PATTERNS) {
                 pattern.lastIndex = 0;
-                if (pattern.test(content)) {
-                  findings.pii.push(`Potential PII in ${relativePath}`);
+                if (pattern.test(nonCommentLines)) {
+                  findings.secrets.push(`Potential secret in ${relativePath}`);
                 }
               }
-            }
+            };
+            handleNestedBranch2();
+
+            // PII detection (skip SKILL.md example sections)
+            const handleNestedBranch3 = () => {
+              if (!entry.name.endsWith(".md")) {
+                for (const pattern of PII_PATTERNS) {
+                  pattern.lastIndex = 0;
+                  if (pattern.test(content)) {
+                    findings.pii.push(`Potential PII in ${relativePath}`);
+                  }
+                }
+              }
+            };
+            handleNestedBranch3();
           } catch {
             // Skip files that can't be read as text
           }
@@ -407,26 +834,32 @@ async function scanSkill(skillDir: string): Promise<ScanFindings> {
   walkAndScan(skillDir);
 
   // SKILL.md lint
-  const skillMdPath = path.join(skillDir, 'SKILL.md');
-  if (!fs.existsSync(skillMdPath)) {
-    findings.skillMdLint.push('SKILL.md is missing');
+  const skillMdPath = path.join(skillDir, "SKILL.md");
+  if (!validatedFs.existsSync(skillMdPath)) {
+    findings.skillMdLint.push("SKILL.md is missing");
   } else {
-    const content = fs.readFileSync(skillMdPath, 'utf-8');
+    const content = validatedFs.readFileSync(skillMdPath, "utf-8");
 
     // Check frontmatter
-    if (!content.startsWith('---')) {
-      findings.skillMdLint.push('SKILL.md missing frontmatter (must start with ---)');
+    if (!content.startsWith("---")) {
+      findings.skillMdLint.push(
+        "SKILL.md missing frontmatter (must start with ---)",
+      );
     } else {
-      const frontmatterEnd = content.indexOf('---', 3);
+      const frontmatterEnd = content.indexOf("---", 3);
       if (frontmatterEnd === -1) {
-        findings.skillMdLint.push('SKILL.md frontmatter not closed');
+        findings.skillMdLint.push("SKILL.md frontmatter not closed");
       } else {
         const frontmatter = content.slice(3, frontmatterEnd);
-        if (!frontmatter.includes('summary:')) {
-          findings.skillMdLint.push('SKILL.md frontmatter missing required "summary" field');
+        if (!frontmatter.includes("summary:")) {
+          findings.skillMdLint.push(
+            'SKILL.md frontmatter missing required "summary" field',
+          );
         }
-        if (!frontmatter.includes('name:')) {
-          findings.skillMdLint.push('SKILL.md frontmatter missing required "name" field');
+        if (!frontmatter.includes("name:")) {
+          findings.skillMdLint.push(
+            'SKILL.md frontmatter missing required "name" field',
+          );
         }
         // Validate versioned tool references in `allowed-tools` (Issue #927). A
         // pin of the form `identifier@version` must use a well-formed `vN`
@@ -435,7 +868,7 @@ async function scanSkill(skillDir: string): Promise<ScanFindings> {
         for (const badPin of findMalformedToolVersionPins(frontmatter)) {
           findings.skillMdLint.push(
             `SKILL.md allowed-tools has a malformed version pin "${badPin}" ` +
-              '(expected "identifier@vN", e.g. "documents.create@v2")'
+              '(expected "identifier@vN", e.g. "documents.create@v2")',
           );
         }
       }
@@ -451,11 +884,17 @@ async function scanSkill(skillDir: string): Promise<ScanFindings> {
 
   // Build summary
   const parts: string[] = [];
-  if (findings.secrets.length > 0) parts.push(`${findings.secrets.length} potential secret(s)`);
-  if (findings.pii.length > 0) parts.push(`${findings.pii.length} potential PII pattern(s)`);
-  if (findings.npmAudit.length > 0) parts.push(`${findings.npmAudit.length} high/critical npm vulnerability(ies)`);
-  if (findings.skillMdLint.length > 0) parts.push(`${findings.skillMdLint.length} SKILL.md issue(s)`);
-  findings.summary = parts.length > 0 ? parts.join(', ') : 'clean';
+  if (findings.secrets.length > 0)
+    parts.push(`${findings.secrets.length} potential secret(s)`);
+  if (findings.pii.length > 0)
+    parts.push(`${findings.pii.length} potential PII pattern(s)`);
+  if (findings.npmAudit.length > 0)
+    parts.push(
+      `${findings.npmAudit.length} high/critical npm vulnerability(ies)`,
+    );
+  if (findings.skillMdLint.length > 0)
+    parts.push(`${findings.skillMdLint.length} SKILL.md issue(s)`);
+  findings.summary = parts.length > 0 ? parts.join(", ") : "clean";
 
   return findings;
 }
@@ -472,18 +911,18 @@ async function scanSkill(skillDir: string): Promise<ScanFindings> {
  * otherwise run unchecked. See REV-INFRA-061.
  */
 export function installSkillDependencies(workDir: string): void {
-  execSync('npm install --production --ignore-scripts --no-audit --no-fund', {
+  execSync("npm install --production --ignore-scripts --no-audit --no-fund", {
     cwd: workDir,
     timeout: 120_000, // 2 min max for npm install
     // Only stderr is inspected on failure; piping stdout too risks exceeding
     // Node's default maxBuffer on a verbose install and throwing a
     // false-positive error.
-    stdio: ['ignore', 'ignore', 'pipe'],
+    stdio: ["ignore", "ignore", "pipe"],
     env: {
       ...process.env,
-      HOME: '/tmp',
-      npm_config_cache: '/tmp/.npm',
-      npm_config_ignore_scripts: 'true',
+      HOME: "/tmp",
+      npm_config_cache: "/tmp/.npm",
+      npm_config_ignore_scripts: "true",
     },
   });
 }
@@ -495,16 +934,16 @@ export function installSkillDependencies(workDir: string): void {
  * exist — `npm audit` is a no-op (ENOLOCK) without them, which is why the
  * pre-install scan could never see dependency vulns (REV-INFRA-062).
  *
- * Graceful degradation (documented behavior): if the audit tooling itself
- * cannot produce parseable JSON (npm/network error), we log a WARNING and
- * return []. A tooling error is therefore VISIBLE in logs, never a silent
- * "clean" — but it does not hard-block promotion, matching the best-effort
- * intent of the other scan steps. `exec` is injectable for testing.
+ * Audit tooling failures throw and block promotion. An unevaluated audit is not
+ * equivalent to a clean dependency tree. `exec` is injectable for testing.
  */
 export function auditInstalledDeps(
   dir: string,
   log: LambdaLogger,
-  exec: (command: string, options: ExecSyncOptionsWithStringEncoding) => string = execSync,
+  exec: (
+    command: string,
+    options: ExecSyncOptionsWithStringEncoding,
+  ) => string = execSync,
 ): { severity: string; title: string }[] {
   const results: { severity: string; title: string }[] = [];
 
@@ -515,35 +954,46 @@ export function auditInstalledDeps(
     // below instead of silencing the exit code, so a genuine tooling/network
     // failure (which also exits non-zero, with no usable stdout) is still
     // visible instead of masquerading as "no vulnerabilities".
-    auditOutput = exec('npm audit --json --production', {
+    auditOutput = exec("npm audit --json --production", {
       cwd: dir,
       timeout: 30_000,
-      encoding: 'utf-8',
+      encoding: "utf-8",
       env: {
         ...process.env,
-        HOME: '/tmp',
-        npm_config_cache: '/tmp/.npm',
+        HOME: "/tmp",
+        npm_config_cache: "/tmp/.npm",
       },
     });
   } catch (err: unknown) {
     const stdout = (err as { stdout?: string | Buffer } | undefined)?.stdout;
     if (stdout) {
-      auditOutput = typeof stdout === 'string' ? stdout : stdout.toString('utf-8');
+      auditOutput =
+        typeof stdout === "string" ? stdout : stdout.toString("utf-8");
     } else {
       const message = err instanceof Error ? err.message : String(err);
-      log.warn('npm audit could not run; dependency vulnerabilities were NOT evaluated', {
-        error: message.substring(0, 300),
+      log.warn(
+        "npm audit could not run; dependency vulnerabilities were NOT evaluated",
+        {
+          error: message.substring(0, 300),
+        },
+      );
+      throw new Error(`Dependency audit could not run: ${message}`, {
+        cause: err,
       });
-      return results;
     }
   }
 
-  let audit: { error?: unknown; vulnerabilities?: Record<string, { severity?: string; name?: string }> };
+  let audit: {
+    error?: unknown;
+    vulnerabilities?: Record<string, { severity?: string; name?: string }>;
+  };
   try {
     audit = JSON.parse(auditOutput);
   } catch {
-    log.warn('npm audit produced no parseable JSON; dependency vulnerabilities were NOT evaluated');
-    return results;
+    log.warn(
+      "npm audit produced no parseable JSON; dependency vulnerabilities were NOT evaluated",
+    );
+    throw new Error("Dependency audit produced no parseable JSON");
   }
 
   // A registry/auth failure can still exit with valid JSON that carries a
@@ -553,69 +1003,103 @@ export function auditInstalledDeps(
   // the whole point of this gate is that a failed audit must not look like
   // a passed one.
   if (audit.error || !audit.vulnerabilities) {
-    log.warn('npm audit did not evaluate dependencies; dependency vulnerabilities were NOT evaluated', {
-      error: audit.error ? JSON.stringify(audit.error).substring(0, 300) : undefined,
-    });
-    return results;
+    log.warn(
+      "npm audit did not evaluate dependencies; dependency vulnerabilities were NOT evaluated",
+      {
+        error: audit.error
+          ? JSON.stringify(audit.error).substring(0, 300)
+          : undefined,
+      },
+    );
+    throw new Error("Dependency audit did not evaluate dependencies");
   }
 
   const vulns = audit.vulnerabilities;
   for (const [, info] of Object.entries(vulns)) {
-    if (info.severity === 'high' || info.severity === 'critical') {
-      results.push({ severity: info.severity, title: info.name || 'unknown' });
+    if (info.severity === "high" || info.severity === "critical") {
+      results.push({ severity: info.severity, title: info.name || "unknown" });
     }
   }
   return results;
 }
 
+/** Return auditable evidence for the exact dependency graph that was scanned. */
+export function hashDependencyLockfile(dir: string): string {
+  const lockfilePath = path.join(dir, "package-lock.json");
+  if (!validatedFs.existsSync(lockfilePath)) {
+    throw new Error(
+      "Dependency audit completed without package-lock.json evidence",
+    );
+  }
+  return createHash("sha256")
+    .update(validatedFs.readFileSync(lockfilePath))
+    .digest("hex");
+}
+
 async function updateSkillStatus(
-  skillId: string,
+  event: SkillBuildEvent,
   scanStatus: string,
   findings: ScanFindings,
-): Promise<void> {
-  await rds.send(new ExecuteStatementCommand({
-    resourceArn: DATABASE_RESOURCE_ARN,
-    secretArn: DATABASE_SECRET_ARN,
-    database: DATABASE_NAME,
-    // scan_status is VARCHAR + CHECK (migration 070 — deliberately NOT an enum).
-    // Casting to agent_skill_scan_status fails outright on any database that
-    // never had the pre-070 partial state (the orphan enum types only exist
-    // where that leftover was cleaned up in place), so bind plain text.
-    sql: `UPDATE psd_agent_skills
+): Promise<boolean> {
+  const response = await rds.send(
+    new ExecuteStatementCommand({
+      resourceArn: DATABASE_RESOURCE_ARN,
+      secretArn: DATABASE_SECRET_ARN,
+      database: DATABASE_NAME,
+      // scan_status is VARCHAR + CHECK (migration 070 — deliberately NOT an enum).
+      // Casting to agent_skill_scan_status fails outright on any database that
+      // never had the pre-070 partial state (the orphan enum types only exist
+      // where that leftover was cleaned up in place), so bind plain text.
+      sql: `UPDATE psd_agent_skills
           SET scan_status = :status,
               scan_findings = CAST(:findings AS JSONB),
               updated_at = NOW()
-          WHERE id = CAST(:id AS UUID)`,
-    parameters: [
-      { name: 'status', value: { stringValue: scanStatus } },
-      { name: 'findings', value: { stringValue: JSON.stringify(findings) } },
-      { name: 'id', value: { stringValue: skillId } },
-    ],
-  }));
+          WHERE id = CAST(:id AS UUID)
+            AND version = :version
+            AND scan_lease_id = CAST(:lease AS UUID)
+          RETURNING id`,
+      parameters: [
+        { name: "status", value: { stringValue: scanStatus } },
+        { name: "findings", value: { stringValue: JSON.stringify(findings) } },
+        { name: "id", value: { stringValue: event.skillId } },
+        { name: "version", value: { longValue: event.version } },
+        { name: "lease", value: { stringValue: event.scanLeaseId } },
+      ],
+    }),
+  );
+  return (response.records?.length ?? 0) === 1;
 }
 
 async function updateSkillAfterPromotion(
-  skillId: string,
+  event: SkillBuildEvent,
   scope: string,
   s3Key: string,
-): Promise<void> {
-  await rds.send(new ExecuteStatementCommand({
-    resourceArn: DATABASE_RESOURCE_ARN,
-    secretArn: DATABASE_SECRET_ARN,
-    database: DATABASE_NAME,
-    // scope/scan_status are VARCHAR + CHECK, not enums — see updateSkillStatus.
-    sql: `UPDATE psd_agent_skills
+): Promise<boolean> {
+  const response = await rds.send(
+    new ExecuteStatementCommand({
+      resourceArn: DATABASE_RESOURCE_ARN,
+      secretArn: DATABASE_SECRET_ARN,
+      database: DATABASE_NAME,
+      // scope/scan_status are VARCHAR + CHECK, not enums — see updateSkillStatus.
+      sql: `UPDATE psd_agent_skills
           SET scope = :scope,
               scan_status = 'clean',
               s3_key = :s3key,
               updated_at = NOW()
-          WHERE id = CAST(:id AS UUID)`,
-    parameters: [
-      { name: 'scope', value: { stringValue: scope } },
-      { name: 's3key', value: { stringValue: s3Key } },
-      { name: 'id', value: { stringValue: skillId } },
-    ],
-  }));
+          WHERE id = CAST(:id AS UUID)
+            AND version = :version
+            AND scan_lease_id = CAST(:lease AS UUID)
+          RETURNING id`,
+      parameters: [
+        { name: "scope", value: { stringValue: scope } },
+        { name: "s3key", value: { stringValue: s3Key } },
+        { name: "id", value: { stringValue: event.skillId } },
+        { name: "version", value: { longValue: event.version } },
+        { name: "lease", value: { stringValue: event.scanLeaseId } },
+      ],
+    }),
+  );
+  return (response.records?.length ?? 0) === 1;
 }
 
 async function writeAuditLog(
@@ -624,17 +1108,23 @@ async function writeAuditLog(
   actorUserId: number | undefined,
   details: Record<string, unknown>,
 ): Promise<void> {
-  await rds.send(new ExecuteStatementCommand({
-    resourceArn: DATABASE_RESOURCE_ARN,
-    secretArn: DATABASE_SECRET_ARN,
-    database: DATABASE_NAME,
-    sql: `INSERT INTO psd_agent_skill_audit (skill_id, action, actor_user_id, details)
+  await rds.send(
+    new ExecuteStatementCommand({
+      resourceArn: DATABASE_RESOURCE_ARN,
+      secretArn: DATABASE_SECRET_ARN,
+      database: DATABASE_NAME,
+      sql: `INSERT INTO psd_agent_skill_audit (skill_id, action, actor_user_id, details)
           VALUES (CAST(:skill AS UUID), :action, :actor, CAST(:details AS JSONB))`,
-    parameters: [
-      { name: 'skill', value: { stringValue: skillId } },
-      { name: 'action', value: { stringValue: action } },
-      { name: 'actor', value: actorUserId != null ? { longValue: actorUserId } : { isNull: true } },
-      { name: 'details', value: { stringValue: JSON.stringify(details) } },
-    ],
-  }));
+      parameters: [
+        { name: "skill", value: { stringValue: skillId } },
+        { name: "action", value: { stringValue: action } },
+        {
+          name: "actor",
+          value:
+            actorUserId != null ? { longValue: actorUserId } : { isNull: true },
+        },
+        { name: "details", value: { stringValue: JSON.stringify(details) } },
+      ],
+    }),
+  );
 }

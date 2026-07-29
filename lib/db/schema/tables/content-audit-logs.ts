@@ -48,6 +48,21 @@ export interface ContentAuditDetails {
   clientSurface?: "browser" | "mac";
   /** Immutable authored asset correlation; never contains bytes or object keys. */
   assetId?: string;
+  /**
+   * Set on the admin-visible notification recorded when a NON-ADMIN author makes
+   * content publicly reachable through the in-app surface (#1336). The §26.4
+   * approval queue no longer blocks that action — it is allow-then-notify — and
+   * this flag is what the /admin/atrium Audit tab filters on to surface those
+   * events. No migration: `details` is an existing free-form JSONB column.
+   */
+  publicExposure?: boolean;
+  /** Short human-readable summary accompanying `publicExposure`. */
+  note?: string;
+  /** Collection mutation identity (#1438); object_id stays null for these rows. */
+  collectionId?: string;
+  collectionName?: string;
+  collectionScope?: "district" | "private";
+  parentId?: string | null;
 }
 
 export const contentAuditLogs = pgTable("content_audit_logs", {
@@ -56,7 +71,11 @@ export const contentAuditLogs = pgTable("content_audit_logs", {
   objectId: uuid("object_id"),
   /** create | update | create_version | set_visibility | publish | unpublish */
   action: varchar("action", { length: 40 }).notNull(),
-  /** mcp | rest (the surface the mutation arrived on) */
+  /**
+   * mcp | rest | ui — the surface the mutation arrived on. `ui` is the in-app
+   * authoring surface, added in #1336 for the public-exposure notification.
+   * Mirrors `ContentAuditSurface` in `lib/content/audit.ts`.
+   */
   surface: varchar("surface", { length: 16 }).notNull(),
   actorKind: actorKindEnum("actor_kind").notNull(),
   /** The human author, when there is one (null for autonomous agents). */

@@ -52,6 +52,8 @@ const mockRetrieveKnowledgeForPrompt = jest.fn()
 const mockFormatKnowledgeContext = jest.fn()
 const mockCreateRepositoryTools = jest.fn()
 const mockStream = jest.fn()
+const mockCreateCoordinatedAssistantExecution = jest.fn()
+const mockSettleCoordinatedAssistantExecution = jest.fn()
 
 jest.mock("@/lib/api", () => ({
   withApiAuth:
@@ -61,6 +63,7 @@ jest.mock("@/lib/api", () => ({
         auth: {
           userId: number
           cognitoSub: string
+          authType: "session" | "api_key" | "jwt"
           scopes: string[]
         },
         requestId: string
@@ -72,6 +75,7 @@ jest.mock("@/lib/api", () => ({
         {
           userId: 7,
           cognitoSub: "executor-sub",
+          authType: "api_key",
           scopes: ["assistants:execute", "assistants:list"],
         },
         "request-1"
@@ -141,6 +145,14 @@ jest.mock("@/lib/streaming/unified-streaming-service", () => ({
   },
 }))
 
+jest.mock("@/lib/assistant-architect/execution-coordinator", () => ({
+  createCoordinatedAssistantExecution: (...args: unknown[]) =>
+    mockCreateCoordinatedAssistantExecution(...args),
+  settleCoordinatedAssistantExecution: (...args: unknown[]) =>
+    mockSettleCoordinatedAssistantExecution(...args),
+  remainingAssistantExecutionTimeoutMs: jest.fn(() => 900000),
+}))
+
 jest.mock("@/lib/logger", () => ({
   createLogger: jest.fn(() => ({
     info: jest.fn(),
@@ -192,59 +204,68 @@ function createPostRequest() {
   )
 }
 
-describe("v1 assistant conversation follow-up repository boundaries", () => {
-  beforeEach(() => {
-    jest.clearAllMocks()
-    mockGetConversationById.mockResolvedValue(conversation)
-    mockGetAssistantArchitectByIdAction.mockResolvedValue({
-      isSuccess: true,
-      data: {
-        id: 5,
-        userId: 9,
-        prompts,
-      },
-    })
-    mockVerifyAssistantResourceGrants.mockResolvedValue(null)
-    mockPreflightAssistantRepositoryAccess.mockResolvedValue({
-      isAllowed: true,
-      repositoryIds: [11, 12, 77],
-    })
-    mockGetAIModelById.mockResolvedValue({
-      id: 3,
-      modelId: "model-3",
-      provider: "openai",
-    })
-    mockParseRequestBody.mockResolvedValue({
-      data: { message: "What changed?" },
-    })
-    mockGetMessagesByConversation.mockResolvedValue([
-      {
-        id: "existing-message",
-        role: "assistant",
-        content: "Previous answer",
-        parts: [{ type: "text", text: "Previous answer" }],
-      },
-    ])
-    mockRetrieveKnowledgeForPrompt.mockResolvedValue([
-      { content: "Repository evidence" },
-    ])
-    mockFormatKnowledgeContext.mockReturnValue(
-      "[bounded repository context]"
-    )
-    mockCreateRepositoryTools.mockReturnValue({
-      search_repository: { description: "Search repositories" },
-    })
-    mockCreateMessageWithStats.mockResolvedValue({ id: "new-message" })
-    mockStream.mockResolvedValue({
-      result: {
-        toUIMessageStreamResponse: () =>
-          new Response("stream", {
-            status: 200,
-            headers: { "content-type": "text/event-stream" },
-          }),
-      },
-    })
+function setupFollowUpMocks() {
+  jest.clearAllMocks()
+  mockGetConversationById.mockResolvedValue(conversation)
+  mockGetAssistantArchitectByIdAction.mockResolvedValue({
+    isSuccess: true,
+    data: {
+      id: 5,
+      userId: 9,
+      prompts,
+    },
   })
+  mockVerifyAssistantResourceGrants.mockResolvedValue(null)
+  mockPreflightAssistantRepositoryAccess.mockResolvedValue({
+    isAllowed: true,
+    repositoryIds: [11, 12, 77],
+  })
+  mockGetAIModelById.mockResolvedValue({
+    id: 3,
+    modelId: "model-3",
+    provider: "openai",
+  })
+  mockParseRequestBody.mockResolvedValue({
+    data: { message: "What changed?" },
+  })
+  mockGetMessagesByConversation.mockResolvedValue([
+    {
+      id: "existing-message",
+      role: "assistant",
+      content: "Previous answer",
+      parts: [{ type: "text", text: "Previous answer" }],
+    },
+  ])
+  mockRetrieveKnowledgeForPrompt.mockResolvedValue([
+    { content: "Repository evidence" },
+  ])
+  mockFormatKnowledgeContext.mockReturnValue(
+    "[bounded repository context]"
+  )
+  mockCreateRepositoryTools.mockReturnValue({
+    search_repository: { description: "Search repositories" },
+  })
+  mockCreateMessageWithStats.mockResolvedValue({ id: "new-message" })
+  mockCreateCoordinatedAssistantExecution.mockResolvedValue({
+    created: true,
+    executionId: 55,
+    startedAt: new Date("2026-07-28T12:00:00.000Z"),
+    deadlineAt: new Date("2026-07-28T12:15:00.000Z"),
+  })
+  mockSettleCoordinatedAssistantExecution.mockResolvedValue(undefined)
+  mockStream.mockResolvedValue({
+    result: {
+      toUIMessageStreamResponse: () =>
+        new Response("stream", {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }),
+    },
+  })
+}
+
+describe("v1 assistant conversation follow-up repository boundaries", () => {
+  beforeEach(setupFollowUpMocks)
 
   it("rejects an assistant/path metadata mismatch before loading or writing", async () => {
     mockGetConversationById.mockResolvedValue({
@@ -263,8 +284,12 @@ describe("v1 assistant conversation follow-up repository boundaries", () => {
     expect(mockCreateMessageWithStats).not.toHaveBeenCalled()
     expect(mockStream).not.toHaveBeenCalled()
   })
+})
 
-  it("returns a clean 403 for repository ACL drift before parsing or writes", async () => {
+describe("v1 assistant conversation follow-up coordination", () => {
+  beforeEach(setupFollowUpMocks)
+
+  it("returns a clean 403 for repository ACL drift before message writes", async () => {
     mockPreflightAssistantRepositoryAccess.mockResolvedValue({
       isAllowed: false,
       repositoryIds: [11, 12, 77],
@@ -279,9 +304,31 @@ describe("v1 assistant conversation follow-up repository boundaries", () => {
       [...prompts, { repositoryIds: [77] }],
       "executor-sub"
     )
-    expect(mockParseRequestBody).not.toHaveBeenCalled()
+    expect(mockParseRequestBody).toHaveBeenCalled()
+    expect(mockCreateCoordinatedAssistantExecution).toHaveBeenCalled()
+    expect(mockSettleCoordinatedAssistantExecution).toHaveBeenCalledWith({
+      executionId: 55,
+      status: "failed",
+      errorMessage: "Assistant follow-up setup rejected",
+    })
     expect(mockGetMessagesByConversation).not.toHaveBeenCalled()
     expect(mockRetrieveKnowledgeForPrompt).not.toHaveBeenCalled()
+    expect(mockCreateMessageWithStats).not.toHaveBeenCalled()
+    expect(mockStream).not.toHaveBeenCalled()
+  })
+
+  it("preserves a coordinator 404 when approval resets before the follow-up lock", async () => {
+    mockCreateCoordinatedAssistantExecution.mockRejectedValue({
+      statusCode: 404,
+      userMessage: "Assistant not found: 5",
+    })
+
+    const response = await POST(createPostRequest(), {
+      params: Promise.resolve({ id: "5", cid: "conversation-1" }),
+    })
+
+    expect(response.status).toBe(404)
+    expect(mockGetAssistantArchitectByIdAction).not.toHaveBeenCalled()
     expect(mockCreateMessageWithStats).not.toHaveBeenCalled()
     expect(mockStream).not.toHaveBeenCalled()
   })
@@ -300,7 +347,6 @@ describe("v1 assistant conversation follow-up repository boundaries", () => {
       "What changed?",
       [11, 12, 77],
       "executor-sub",
-      undefined,
       {
         maxChunks: 10,
         maxTokens: 4000,
@@ -329,6 +375,19 @@ describe("v1 assistant conversation follow-up repository boundaries", () => {
       }>
       tools?: Record<string, unknown>
       maxSteps?: number
+      executionId?: number
+      timeout?: number
+      callbacks?: {
+        onFinish?: (data: {
+          text: string
+          usage: {
+            promptTokens: number
+            completionTokens: number
+            totalTokens: number
+          }
+          finishReason: string
+        }) => void | Promise<void>
+      }
     }
     expect(streamRequest.messages.at(-1)).toEqual({
       id: expect.stringMatching(/^user-/),
@@ -344,6 +403,33 @@ describe("v1 assistant conversation follow-up repository boundaries", () => {
       search_repository: { description: "Search repositories" },
     })
     expect(streamRequest.maxSteps).toBe(5)
+    expect(streamRequest.executionId).toBe(55)
+    expect(streamRequest.timeout).toBe(900000)
+    expect(mockCreateCoordinatedAssistantExecution).toHaveBeenCalledWith({
+      assistantId: 5,
+      userId: 7,
+      inputs: { message: "What changed?" },
+      requireApproved: true,
+      modelAccessMode: "final_prompt",
+    })
+    expect(
+      mockCreateCoordinatedAssistantExecution.mock.invocationCallOrder[0]
+    ).toBeLessThan(
+      mockGetAssistantArchitectByIdAction.mock.invocationCallOrder[0]!
+    )
+    await streamRequest.callbacks?.onFinish?.({
+      text: "Current answer",
+      usage: {
+        promptTokens: 3,
+        completionTokens: 2,
+        totalTokens: 5,
+      },
+      finishReason: "stop",
+    })
+    expect(mockSettleCoordinatedAssistantExecution).toHaveBeenCalledWith({
+      executionId: 55,
+      status: "completed",
+    })
     expect(JSON.stringify(mockCreateMessageWithStats.mock.calls)).not.toContain(
       "[bounded repository context]"
     )

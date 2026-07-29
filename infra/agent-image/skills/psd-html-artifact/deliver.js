@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * deliver.js — psd-html-artifact.deliver
  * Usage:
@@ -25,24 +26,22 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
 
-const { randomUUID } = require('node:crypto');
-const fs = require('node:fs');
+
+
 const path = require('node:path');
 
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { publishArtifact } = require('../_shared/artifact-publisher');
 
 // Shared WCAG 2.2 AA gate — the single audit both this skill and
 // psd-learning-page run (Issue #1245).
 const { auditHtml } = require('./a11y-audit');
 
-const REGION = process.env.AWS_REGION || 'us-east-1';
-const WORKSPACE_BUCKET = process.env.WORKSPACE_BUCKET || '';
 // Keep this prefix in sync with the bucket policy (see psd-image-gen/generate.js
 // and agent-platform-stack.ts:PublicReadOnPublicImagesPrefix). The UUID in the
 // key makes the path unguessable — same security model as Google Drive
 // "anyone with the link" sharing.
-const PUBLIC_PREFIX = 'public-images';
 // HTML artifacts are text; even data-URI-heavy pages rarely exceed a few MB.
 // Cap at 25 MB so a runaway file fails fast instead of pushing a huge object.
 const MAX_HTML_BYTES = 25 * 1024 * 1024;
@@ -97,28 +96,8 @@ function validateEmail(email) {
 }
 
 async function uploadAndShare(bytes, userEmail) {
-  if (!WORKSPACE_BUCKET) {
-    fail('WORKSPACE_BUCKET env var not set — cannot upload HTML artifact', 'misconfigured');
-  }
-  const key = `${PUBLIC_PREFIX}/${userEmail}/${randomUUID()}.html`;
-  const s3 = new S3Client({ region: REGION });
-
-  await s3.send(new PutObjectCommand({
-    Bucket: WORKSPACE_BUCKET,
-    Key: key,
-    Body: bytes,
-    ContentType: 'text/html; charset=utf-8',
-    Metadata: {
-      generated_by: 'psd-html-artifact',
-    },
-  }));
-
-  // Path-style URL with each segment encoded so emails with reserved
-  // characters (`+`, `&`) survive the round-trip. randomUUID() is already
-  // URL-safe.
-  const encodedKey = key.split('/').map(encodeURIComponent).join('/');
-  const url = `https://${WORKSPACE_BUCKET}.s3.${REGION}.amazonaws.com/${encodedKey}`;
-  return { url, key };
+  void userEmail;
+  return publishArtifact(bytes, '.html', 'text/html; charset=utf-8');
 }
 
 // Refuse an inaccessible artifact. Exit 3 (distinct from bad_args=1) so callers
@@ -153,7 +132,7 @@ function readHtmlFile(args) {
   }
   let stat;
   try {
-    stat = fs.statSync(file);
+    stat = validatedFs.statSync(file);
   } catch (err) {
     fail(`--file not found or unreadable: ${file} (${err.message})`, 'bad_args');
   }
@@ -173,7 +152,7 @@ function readHtmlFile(args) {
   // with U+FFFD and re-encoding would upload DIFFERENT bytes than the file held
   // (and the reported size would be stale). The audit gets a utf8 view; the
   // upload uses the exact original bytes.
-  const buffer = fs.readFileSync(file);
+  const buffer = validatedFs.readFileSync(file);
   return { file, size: buffer.length, buffer };
 }
 
@@ -201,11 +180,6 @@ async function main() {
     fail('--user is required and must be a valid email', 'bad_args');
   }
   const { size, buffer } = readHtmlFile(args);
-  // Validate bucket before the (potentially slow) audit so we fail fast on misconfig.
-  if (!WORKSPACE_BUCKET) {
-    fail('WORKSPACE_BUCKET env var not set — cannot upload HTML artifact', 'misconfigured');
-  }
-
   // HARD GATE: never upload an artifact that fails the accessibility floor.
   const report = await auditHtml(buffer.toString('utf8'));
   if (!report.pass) failA11y(report);

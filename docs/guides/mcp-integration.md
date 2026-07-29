@@ -20,6 +20,9 @@ Connect external AI tools to AI Studio using the Model Context Protocol (MCP) se
    - `mcp:get_decision_graph` — View decision details
    - `mcp:capture_decision` — Create decisions (administrator only)
    - `mcp:execute_assistant` — Execute assistants (administrator only)
+   - `mcp:create_assistant` — Create pending-approval assistants
+   - `mcp:update_assistant` — Replace owned assistants and reset approval
+   - `mcp:fork_assistant` — Fork visible assistants into pending-approval copies
 7. Copy the key immediately — it won't be shown again
 
 ## Claude Code Configuration
@@ -57,6 +60,9 @@ In Cursor preferences, add a new MCP server:
 | `capture_decision` | Create a structured decision with context, evidence, and alternatives | `mcp:capture_decision` |
 | `list_assistants` | List AI assistants available to execute | `mcp:list_assistants` |
 | `execute_assistant` | Execute an AI assistant with given inputs | `mcp:execute_assistant` |
+| `create_assistant` | Create caller-owned assistants in pending approval | `mcp:create_assistant` |
+| `update_assistant` | Replace an owned assistant and reset its approval | `mcp:update_assistant` |
+| `fork_assistant` | Fork a visible assistant into a caller-owned pending-approval copy | `mcp:fork_assistant` |
 | `get_decision_graph` | Get a decision node and all its connections | `mcp:get_decision_graph` |
 
 ## Example Workflows

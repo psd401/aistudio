@@ -126,7 +126,7 @@ const noopLog: Logger = { info: () => {}, warn: () => {}, error: () => {} };
 // hash-wasm Argon2id is real WASM crypto (~tens of ms). Give jest headroom.
 jest.setTimeout(30_000);
 
-describe('pure helpers', () => {
+const definePureHelpersSuite1 = () => {
   it('generateRawKey produces sk- + 64 hex and validates', () => {
     const raw = generateRawKey();
     expect(raw).toMatch(/^sk-[0-9a-f]{64}$/);
@@ -157,13 +157,15 @@ describe('pure helpers', () => {
     // reductions to KEY_SCOPES must trigger a re-mint.
     expect(scopesMatch([...REQUIRED_SCOPES, 'content:publish_public'], REQUIRED_SCOPES)).toBe(false);
   });
-});
+};
 
-describe('cross-library Argon2 interop (the claim validateApiKey depends on)', () => {
+describe('pure helpers', definePureHelpersSuite1);
+
+const defineCrossLibraryArgon2InteropTheClaimValidateApiKeyDependsSuite2 = () => {
   it("the app's native argon2.verify() accepts a hash-wasm PHC string", async () => {
     // The exact library lib/api-keys/argon2-loader.ts loads at runtime,
     // resolved from the repo root node_modules.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+
     const nativeArgon2 = require('argon2') as {
       verify(hash: string, plain: string): Promise<boolean>;
     };
@@ -172,9 +174,11 @@ describe('cross-library Argon2 interop (the claim validateApiKey depends on)', (
     await expect(nativeArgon2.verify(wasmHash, raw)).resolves.toBe(true);
     await expect(nativeArgon2.verify(wasmHash, raw + 'x')).resolves.toBe(false);
   });
-});
+};
 
-describe('KEY_SCOPES drift guard (tethered to lib/api-keys/scopes.ts)', () => {
+describe('cross-library Argon2 interop (the claim validateApiKey depends on)', defineCrossLibraryArgon2InteropTheClaimValidateApiKeyDependsSuite2);
+
+const defineKEYSCOPESDriftGuardTetheredToLibApiSuite3 = () => {
   it('exactly matches the content:* subset of ROLE_SCOPES.staff', () => {
     const staffContent = ROLE_SCOPES.staff.filter((s: string) => s.startsWith('content:') && s !== 'content:publish_public');
     expect(new Set(KEY_SCOPES)).toEqual(new Set(staffContent));
@@ -189,9 +193,11 @@ describe('KEY_SCOPES drift guard (tethered to lib/api-keys/scopes.ts)', () => {
       expect(ROLE_SCOPES.staff).toContain(scope);
     }
   });
-});
+};
 
-describe('MCP_KEY_SCOPES drift guard (Issue #1100 — tethered to lib/api-keys/scopes.ts)', () => {
+describe('KEY_SCOPES drift guard (tethered to lib/api-keys/scopes.ts)', defineKEYSCOPESDriftGuardTetheredToLibApiSuite3);
+
+const defineMCPKEYSCOPESDriftGuardIssue1100TetheredSuite4 = () => {
   it('is exactly [platform:read]', () => {
     expect([...MCP_KEY_SCOPES]).toEqual(['platform:read']);
   });
@@ -214,9 +220,11 @@ describe('MCP_KEY_SCOPES drift guard (Issue #1100 — tethered to lib/api-keys/s
       expect(contentSet.has(scope)).toBe(false);
     }
   });
-});
+};
 
-describe('resolveKeyProfile (KEY_PROFILE selector)', () => {
+describe('MCP_KEY_SCOPES drift guard (Issue #1100 — tethered to lib/api-keys/scopes.ts)', defineMCPKEYSCOPESDriftGuardIssue1100TetheredSuite4);
+
+const defineResolveKeyProfileKEYPROFILESelectorSuite5 = () => {
   it('defaults to the atrium content profile when the env var is absent/empty/blank', () => {
     for (const input of [undefined, '', '   ']) {
       const profile = resolveKeyProfile(input);
@@ -242,9 +250,11 @@ describe('resolveKeyProfile (KEY_PROFILE selector)', () => {
   it('THROWS on an unknown profile (a misconfigured selector must fail the deploy loudly)', () => {
     expect(() => resolveKeyProfile('bogus')).toThrow(/Unknown KEY_PROFILE 'bogus'/);
   });
-});
+};
 
-describe('ensureContentKey idempotency', () => {
+describe('resolveKeyProfile (KEY_PROFILE selector)', defineResolveKeyProfileKEYPROFILESelectorSuite5);
+
+function defineEnsureContentKeyIdempotencySuite6Part1() {
   it('empty secret -> MINT (key stored, valid, correctly scoped)', async () => {
     const ops = makeOps({ secret: null });
     const outcome = await ensureContentKey(ops, CFG, noopLog);
@@ -348,7 +358,9 @@ describe('ensureContentKey idempotency', () => {
     expect(row.scopes).toEqual(REQUIRED_SCOPES);
   });
 
-  it('inactive key -> RE-MINT', async () => {
+  }
+
+function defineEnsureContentKeyIdempotencySuite6Part2() {it('inactive key -> RE-MINT', async () => {
     const raw = generateRawKey();
     const hash = await hashKey(raw);
     const ops = makeOps({
@@ -430,14 +442,21 @@ describe('ensureContentKey idempotency', () => {
       expect(line).not.toContain(plaintext);
     }
   });
-});
+}
+
+const defineEnsureContentKeyIdempotencySuite6 = () => {
+  defineEnsureContentKeyIdempotencySuite6Part1()
+  defineEnsureContentKeyIdempotencySuite6Part2()
+};
+
+describe('ensureContentKey idempotency', defineEnsureContentKeyIdempotencySuite6);
 
 // ---------------------------------------------------------------------------
 // MCP profile: the same ensureContentKey idempotency contract, driven with the
 // platform:read scope set + the psd-aistudio service user. Proves the generalized
 // core is scope-set-agnostic (the atrium content scopes are NOT baked in).
 // ---------------------------------------------------------------------------
-describe('ensureContentKey — mcp profile (platform:read)', () => {
+const defineEnsureContentKeyMcpProfilePlatformReadSuite7 = () => {
   const MCP_CFG: EnsureConfig = {
     serviceUserCognitoSub: 'service-account:psd-aistudio-agent',
     keyName: MCP_KEY_NAME,
@@ -529,7 +548,9 @@ describe('ensureContentKey — mcp profile (platform:read)', () => {
     expect(call.name).toBe(MCP_KEY_NAME);
     expect(call.name).not.toBe(KEY_NAME);
   });
-});
+};
+
+describe('ensureContentKey — mcp profile (platform:read)', defineEnsureContentKeyMcpProfilePlatformReadSuite7);
 
 // ---------------------------------------------------------------------------
 // buildRdsOps — the REAL field parsing, against realistic RDS Data API shapes
@@ -537,7 +558,7 @@ describe('ensureContentKey — mcp profile (platform:read)', () => {
 // ops bypassed the tagged-union parsing entirely).
 // ---------------------------------------------------------------------------
 
-describe('buildRdsOps field parsing (mocked AWS clients)', () => {
+const defineBuildRdsOpsFieldParsingMockedAWSClientsSuite8 = () => {
   const OPS_CFG = {
     clusterArn: 'arn:cluster',
     secretArn: 'arn:db-secret',
@@ -668,13 +689,15 @@ describe('buildRdsOps field parsing (mocked AWS clients)', () => {
     expect(calls).toContain('RollbackTransactionCommand');
     expect(calls).not.toContain('CommitTransactionCommand');
   });
-});
+};
+
+describe('buildRdsOps field parsing (mocked AWS clients)', defineBuildRdsOpsFieldParsingMockedAWSClientsSuite8);
 
 // ---------------------------------------------------------------------------
 // CloudFormation handler routing (correctness review P2: previously untested)
 // ---------------------------------------------------------------------------
 
-describe('handler (CloudFormation custom resource entry point)', () => {
+const defineHandlerCloudFormationCustomResourceEntryPointSuite9 = () => {
   const BASE_EVENT = {
     StackId: 'stack-1',
     RequestId: 'req-1',
@@ -819,4 +842,6 @@ describe('handler (CloudFormation custom resource entry point)', () => {
       handler({ ...BASE_EVENT, RequestType: 'Create' } as any)
     ).rejects.toThrow('rds throttled');
   });
-});
+};
+
+describe('handler (CloudFormation custom resource entry point)', defineHandlerCloudFormationCustomResourceEntryPointSuite9);

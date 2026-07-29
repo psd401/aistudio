@@ -2,9 +2,9 @@
  * Shared helpers for the psd-email-triage skill.
  *
  * Three concerns bundled here for simplicity:
- *   - DynamoDB I/O on the psd-agent-triage-<env> table
- *   - Gmail label management via the psd-workspace common.js token helper
- *     (we reuse, not duplicate, the per-user OAuth refresh)
+ *   - Owner-bound state I/O through the trusted web broker
+ *   - Gmail label management through that broker (tokens never enter this
+ *     model-facing runtime)
  *   - EventBridge Scheduler entries for the daily digest
  *
  * Kept in one file because the skill is small and the boundaries are
@@ -17,13 +17,6 @@
 
 'use strict';
 
-const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const {
-  DynamoDBDocumentClient,
-  GetCommand,
-  UpdateCommand,
-  DeleteCommand,
-} = require('@aws-sdk/lib-dynamodb');
 const {
   SchedulerClient,
   CreateScheduleCommand,
@@ -31,10 +24,7 @@ const {
   DeleteScheduleCommand,
 } = require('@aws-sdk/client-scheduler');
 
-// Reuse the per-user OAuth machinery from psd-workspace. Absolute
-// require path matches the pattern psd-data uses — avoids duplicating
-// refresh-token + Secrets Manager code in every skill.
-const WS = require('/opt/psd-skills/psd-workspace/common.js');
+const { requestAgentBroker } = require('../_shared/agent-broker');
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
@@ -45,10 +35,6 @@ const TRIAGE_DIGEST_LAMBDA_ARN =
   process.env.TRIAGE_DIGEST_LAMBDA_ARN ||
   `arn:aws:lambda:${REGION}:${process.env.AWS_ACCOUNT || ''}:function:psd-agent-triage-digest-${ENVIRONMENT}`;
 
-const ddb = DynamoDBDocumentClient.from(
-  new DynamoDBClient({ region: REGION }),
-  { marshallOptions: { removeUndefinedValues: true } },
-);
 const scheduler = new SchedulerClient({ region: REGION });
 
 // =====================================================================
@@ -87,156 +73,91 @@ const DEFAULT_ESCALATION = {
 };
 
 async function getRow(userEmail) {
-  const r = await ddb.send(
-    new GetCommand({ TableName: TRIAGE_TABLE, Key: { userEmail } }),
-  );
-  return r.Item || null;
+  void userEmail;
+  const response = await requestAgentBroker('/api/agent/email-triage', {
+    operation: 'get-state',
+  });
+  return response.state || null;
 }
 
 async function deleteRow(userEmail) {
-  await ddb.send(
-    new DeleteCommand({ TableName: TRIAGE_TABLE, Key: { userEmail } }),
-  );
+  void userEmail;
+  await requestAgentBroker('/api/agent/email-triage', {
+    operation: 'delete-state',
+  });
 }
 
 async function updateRow(userEmail, attrs) {
-  // attrs is a flat object {name: value}; we build SET key = :v entries.
-  // Strip the partition key if a caller accidentally includes it —
-  // DDB rejects UpdateItem expressions that touch key attributes
-  // (2026-05-21 incident: cmd_enable's newRow object included
-  // userEmail and the whole enable flow failed). Belt-and-suspenders
-  // with the cmd_enable comment.
-  const names = {};
-  const values = {};
-  const sets = [];
-  let i = 0;
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'userEmail') continue;
-    const ek = `#k${i}`;
-    const ev = `:v${i}`;
-    names[ek] = k;
-    values[ev] = v;
-    sets.push(`${ek} = ${ev}`);
-    i++;
-  }
-  if (sets.length === 0) {
-    // Nothing to set — bail rather than send a malformed UpdateExpression.
-    return;
-  }
-  await ddb.send(
-    new UpdateCommand({
-      TableName: TRIAGE_TABLE,
-      Key: { userEmail },
-      UpdateExpression: 'SET ' + sets.join(', '),
-      ExpressionAttributeNames: names,
-      ExpressionAttributeValues: values,
-    }),
-  );
+  void userEmail;
+  const safeAttrs = { ...attrs };
+  delete safeAttrs.userEmail;
+  if (Object.keys(safeAttrs).length === 0) return;
+  await requestAgentBroker('/api/agent/email-triage', {
+    operation: 'update-state',
+    attrs: safeAttrs,
+  });
 }
 
 // =====================================================================
 // Gmail label management
 // =====================================================================
 
-let _cachedOAuthClient = null;
-async function getOAuthClient() {
-  if (_cachedOAuthClient) return _cachedOAuthClient;
-  _cachedOAuthClient = await WS.getSecretJson(WS.GOOGLE_OAUTH_CLIENT_SECRET_ID);
-  return _cachedOAuthClient;
-}
-
 async function getUserAccessToken(userEmail) {
-  // Use the user_account slot — gmail.modify is in that scope set.
-  const token = await WS.getUserWorkspaceToken(userEmail, 'user_account');
-  if (!token) {
-    const err = new Error('User has not consented to workspace access yet');
-    err.code = 'needs-auth';
-    throw err;
-  }
-  const client = await getOAuthClient();
-  const refreshed = await WS.refreshAccessToken(
-    token.refresh_token,
-    client.client_id,
-    client.client_secret,
-  );
-  return refreshed.access_token;
-}
-
-async function gmailFetch(accessToken, path, init = {}) {
-  const resp = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me${path}`, {
-    ...init,
-    headers: {
-      ...(init.headers || {}),
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-  });
-  return resp;
+  void userEmail;
+  return 'owner-bound-broker';
 }
 
 async function getCurrentHistoryId(accessToken) {
-  const resp = await gmailFetch(accessToken, '/profile');
-  if (!resp.ok) {
-    throw new Error(`Gmail profile fetch failed: ${resp.status} ${await resp.text()}`);
-  }
-  const j = await resp.json();
-  return j.historyId;
+  void accessToken;
+  const response = await requestAgentBroker('/api/agent/email-triage', {
+    operation: 'gmail-profile',
+  });
+  return response.result.historyId;
 }
 
 async function listLabels(accessToken) {
-  const resp = await gmailFetch(accessToken, '/labels');
-  if (!resp.ok) {
-    throw new Error(`Gmail labels.list failed: ${resp.status} ${await resp.text()}`);
-  }
-  const j = await resp.json();
-  return j.labels || [];
+  void accessToken;
+  const response = await requestAgentBroker('/api/agent/email-triage', {
+    operation: 'list-labels',
+  });
+  return response.result.labels || [];
 }
 
 async function createLabel(accessToken, name) {
-  const resp = await gmailFetch(accessToken, '/labels', {
-    method: 'POST',
-    body: JSON.stringify({
-      name,
-      labelListVisibility: 'labelShow',
-      messageListVisibility: 'show',
-    }),
+  void accessToken;
+  const response = await requestAgentBroker('/api/agent/email-triage', {
+    operation: 'create-label',
+    name,
   });
-  if (!resp.ok) {
-    // 409 = already exists; find it and return.
-    const existing = await listLabels(accessToken);
-    const match = existing.find((l) => l.name === name);
-    if (match) return match;
-    throw new Error(`Gmail labels.create failed for "${name}": ${resp.status} ${await resp.text()}`);
-  }
-  return await resp.json();
+  return response.result;
 }
 
 async function renameLabel(accessToken, labelId, newName) {
-  const resp = await gmailFetch(accessToken, `/labels/${labelId}`, {
-    method: 'PATCH',
-    body: JSON.stringify({ name: newName }),
+  void accessToken;
+  const response = await requestAgentBroker('/api/agent/email-triage', {
+    operation: 'rename-label',
+    labelId,
+    name: newName,
   });
-  if (!resp.ok) {
-    throw new Error(`Gmail labels.patch failed: ${resp.status} ${await resp.text()}`);
-  }
-  return await resp.json();
+  return response.result;
 }
 
 async function deleteLabel(accessToken, labelId) {
-  const resp = await gmailFetch(accessToken, `/labels/${labelId}`, { method: 'DELETE' });
-  if (resp.status !== 204 && resp.status !== 404) {
-    throw new Error(`Gmail labels.delete failed: ${resp.status} ${await resp.text()}`);
-  }
+  void accessToken;
+  await requestAgentBroker('/api/agent/email-triage', {
+    operation: 'delete-label',
+    labelId,
+  });
 }
 
 async function modifyMessage(accessToken, messageId, addLabelIds, removeLabelIds = []) {
-  const resp = await gmailFetch(accessToken, `/messages/${messageId}/modify`, {
-    method: 'POST',
-    body: JSON.stringify({ addLabelIds, removeLabelIds }),
+  void accessToken;
+  await requestAgentBroker('/api/agent/email-triage', {
+    operation: 'modify-message',
+    messageId,
+    addLabelIds,
+    removeLabelIds,
   });
-  if (!resp.ok) {
-    throw new Error(`Gmail messages.modify failed: ${resp.status} ${await resp.text()}`);
-  }
 }
 
 /**
@@ -246,18 +167,12 @@ async function modifyMessage(accessToken, messageId, addLabelIds, removeLabelIds
  * Idempotent — if the label already exists, we keep the existing one.
  */
 async function ensureLabels(accessToken, labels) {
-  const existing = await listLabels(accessToken);
-  const byName = new Map(existing.map((l) => [l.name, l]));
-  const ids = {};
-  for (const [key, name] of Object.entries(labels)) {
-    if (byName.has(name)) {
-      ids[key] = byName.get(name).id;
-    } else {
-      const created = await createLabel(accessToken, name);
-      ids[key] = created.id;
-    }
-  }
-  return ids;
+  void accessToken;
+  void labels;
+  const response = await requestAgentBroker('/api/agent/email-triage', {
+    operation: 'ensure-labels',
+  });
+  return response.result.labelIdsByKey;
 }
 
 // =====================================================================
@@ -340,8 +255,18 @@ function wildcardMatch(pattern, value) {
   const p = String(pattern).toLowerCase();
   const v = String(value).toLowerCase();
   if (!p.includes('*')) return p === v;
-  const escaped = p.replace(/[-/\\^$+?.()|[\]{}]/g, '\\$&').replace(/\*/g, '.*');
-  return new RegExp('^' + escaped + '$').test(v);
+  const parts = p.split('*');
+  let position = 0;
+  for (const [index, part] of parts.entries()) {
+    if (part.length === 0) continue;
+    if (index === parts.length - 1 && !p.endsWith('*')) {
+      return v.endsWith(part) && v.length - part.length >= position;
+    }
+    const matchAt = v.indexOf(part, position);
+    if (matchAt < 0 || (index === 0 && matchAt !== 0)) return false;
+    position = matchAt + part.length;
+  }
+  return true;
 }
 
 function matchesKeywordRule(rule, features) {

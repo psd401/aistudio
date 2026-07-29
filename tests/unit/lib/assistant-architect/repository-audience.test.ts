@@ -46,7 +46,11 @@ describe("validateAssistantRepositoryAudience", () => {
       isCompatible: true,
       mismatches: [],
     })
-    expect(mockListResourceGrants).toHaveBeenCalledWith("assistant", 5)
+    expect(mockListResourceGrants).toHaveBeenCalledWith(
+      "assistant",
+      5,
+      undefined,
+    )
   })
 
   it("fails closed when a bound repository no longer exists", async () => {

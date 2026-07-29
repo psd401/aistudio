@@ -1,0 +1,28 @@
+[
+  {
+    "route": "/api/agent/atrium",
+    "method": "POST",
+    "request_body": {
+      "method": "GET",
+      "path": "",
+      "query": {"query": "EVAL-1426"}
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "httpStatus": 200,
+        "payload": {
+          "data": [
+            {
+              "id": "eval-1426-draft",
+              "title": "EVAL-1426 Private Draft",
+              "kind": "document",
+              "status": "draft",
+              "visibilityLevel": "private"
+            }
+          ]
+        }
+      }
+    }
+  }
+]

@@ -15,6 +15,8 @@ Usage (exactly one input source):
     --out /tmp/report.md         # default: /tmp/<stem>.md
     --pages "0,5-10"             # 0-based page selection
     --user name@psd401.net       # REQUIRED with --s3-key (scopes access to your own prefix)
+    --extract-images /tmp/imgs   # write embedded images as PNGs and KEEP their
+                                 # ![](path) references in the Markdown
 
 Output: a single JSON object on stdout. For small results the full Markdown is
 inlined under "markdown"; for large results only a "preview" is inlined and the
@@ -22,15 +24,21 @@ agent should Read the "output_path" file.
 
 Design notes:
 - No ML model download at runtime (pymupdf4llm ships a small aarch64 wheel).
-- No LLM image captioning in v1 — images are dropped (write_images=False) and
-  any residual image references are stripped, matching the "pure Markdown text,
-  no embedded images" contract.
+- No LLM image captioning — images are dropped by DEFAULT (write_images=False)
+  and any residual image references are stripped, matching the original "pure
+  Markdown text, no embedded images" contract. Pass --extract-images DIR to opt
+  IN to writing the embedded images to disk and keeping their ![](path)
+  references, for callers (e.g. psd-sop-creator) that must carry a source
+  document's screenshots into the document they produce rather than describing
+  them in prose. Extraction is bounded by MAX_EXTRACTED_IMAGES so a
+  figure-dense PDF cannot fill the container's disk.
 - --url is SSRF-guarded: only http/https, and the resolved host must not be a
   loopback/link-local/private address. The container holds IAM reach to
   secrets, so a prompt-injected fetch of an internal endpoint is a real risk.
 """
 
 import argparse
+import contextlib
 import ipaddress
 import json
 import os
@@ -50,6 +58,10 @@ INLINE_LIMIT = 24000
 PREVIEW_CHARS = 2000
 # Cap fetched/opened PDFs so a runaway download can't exhaust container disk.
 MAX_PDF_BYTES = 100 * 1024 * 1024
+# Ceiling on --extract-images output. A figure-dense PDF can carry hundreds of
+# embedded rasters; writing them all would fill the container's ephemeral disk
+# and hand the caller more images than any document should embed.
+MAX_EXTRACTED_IMAGES = 50
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -167,26 +179,13 @@ def _download_url(url: str, dest: Path) -> None:
 
 
 def _download_s3(key: str, dest: Path, user_email: str) -> None:
-    bucket = os.environ.get("WORKSPACE_BUCKET")
-    if not bucket:
-        _fail("WORKSPACE_BUCKET env var not set — cannot read --s3-key", "misconfigured")
-    # The shared AgentCore execution role can GetObject anywhere in the workspace
-    # bucket, so scope --s3-key to the caller's own public-images/<email>/ prefix
-    # to prevent reading another user's objects (IDOR). Reject path traversal too.
-    norm = key.lstrip("/")
-    allowed = f"public-images/{user_email}/"
-    if ".." in norm.split("/") or not norm.startswith(allowed):
-        _fail(f"--s3-key must be under {allowed} (the caller's own prefix)", "forbidden")
-    region = os.environ.get("AWS_REGION", "us-east-1")
     try:
-        import boto3  # baked into the container venv
-    except ImportError:
-        _fail("boto3 not available in the runtime", "misconfigured")
-    s3 = boto3.client("s3", region_name=region)
-    try:
-        s3.download_file(bucket, norm, str(dest))
-    except Exception as exc:  # botocore ClientError etc.
-        _fail(f"failed to download s3://{bucket}/{norm}: {exc}", "upstream_error")
+        sys.path.insert(0, "/app")
+        from artifact_publisher import download_public_artifact
+        _ = user_email
+        download_public_artifact(key.lstrip("/"), dest, MAX_PDF_BYTES)
+    except Exception as exc:
+        _fail(f"failed to download owner artifact: {exc}", "upstream_error")
 
 
 def parse_pages(spec: str):
@@ -198,22 +197,138 @@ def parse_pages(spec: str):
             continue
         if "-" in part:
             lo, hi = part.split("-", 1)
+            if int(lo) > int(hi):
+                # A reversed range yields an empty set, and an empty page list is
+                # falsy downstream — the whole document would convert silently.
+                _fail(f"--pages range '{part}' is reversed (start > end)", "bad_args")
             pages.update(range(int(lo), int(hi) + 1))
         else:
             pages.add(int(part))
-    return sorted(p for p in pages if p >= 0)
+    result = sorted(p for p in pages if p >= 0)
+    if not result:
+        _fail(f"--pages '{spec}' selects no pages", "bad_args")
+    return result
 
 
-def convert_to_markdown(pdf_path: Path, pages) -> str:
+@contextlib.contextmanager
+def _stdout_to_stderr():
+    """Point FILE DESCRIPTOR 1 at stderr for the duration of the block.
+
+    pymupdf4llm/PyMuPDF print parser and OCR progress ("=== Document parser
+    messages ===", "OCR on page.number=0/1") on stdout, and this script's
+    contract is a single JSON object on stdout — so a caller doing a strict
+    parse of our stdout gets a syntax error instead of a result.
+
+    `contextlib.redirect_stdout` is NOT sufficient: it only rebinds Python's
+    `sys.stdout` object, and the noise comes from the extension module writing
+    to fd 1 directly, which sails straight past it. Duplicating fd 2 over fd 1
+    catches both. The messages are preserved on stderr for debugging.
+    """
+    sys.stdout.flush()
+    saved = os.dup(1)
+    try:
+        os.dup2(2, 1)
+        with contextlib.redirect_stdout(sys.stderr):
+            yield
+    finally:
+        sys.stdout.flush()
+        os.dup2(saved, 1)
+        os.close(saved)
+
+
+def convert_to_markdown(pdf_path: Path, pages, image_dir: Path = None) -> str:
     """The one place the PDF engine is bound — swap here if PyMuPDF ever trips
-    the AgentCore overlay-mount snapshotter (fallback: pdfplumber/pypdf)."""
+    the AgentCore overlay-mount snapshotter (fallback: pdfplumber/pypdf).
+
+    With `image_dir`, embedded images are written there as PNGs and their
+    ![](path) references are KEPT; without it the historical text-only behavior
+    is unchanged (images dropped, residual references stripped).
+    """
     import pymupdf4llm
 
     kwargs = {"write_images": False, "embed_images": False}
+    if image_dir is not None:
+        # `embed_images` stays False on purpose: it would inline base64 data:
+        # URIs, and Atrium's sanitizer strips data: URIs, so an embedded image
+        # would silently vanish from any document built out of this markdown.
+        kwargs = {
+            "write_images": True,
+            "embed_images": False,
+            "image_path": str(image_dir),
+            "image_format": "png",
+        }
     if pages:
         kwargs["pages"] = pages
-    markdown = pymupdf4llm.to_markdown(str(pdf_path), **kwargs)
-    return strip_image_references(markdown)
+    with _stdout_to_stderr():
+        markdown = pymupdf4llm.to_markdown(str(pdf_path), **kwargs)
+    if image_dir is None:
+        return strip_image_references(markdown)
+    return absolutize_image_references(markdown, image_dir)
+
+
+def absolutize_image_references(markdown: str, image_dir: Path) -> str:
+    """Rewrite pymupdf4llm's image references to ABSOLUTE paths.
+
+    pymupdf4llm emits the `image_path` it was given verbatim, so a relative
+    --extract-images value produces `![](imgs/foo.png)` — resolvable only from
+    the CWD this process happened to run in. The caller (a different process,
+    with a different CWD) would silently fail to find the file and drop the
+    image. Anchoring the reference to the resolved directory removes the
+    ambiguity entirely.
+    """
+    resolved = image_dir.resolve()
+
+    def rewrite(match):
+        alt, target = match.group(1), match.group(2).strip()
+        if not target or "://" in target:
+            return match.group(0)
+        return f"![{alt}]({resolved / Path(target).name})"
+
+    return re.sub(r"!\[([^\]]*)\]\(([^)]*)\)", rewrite, markdown).strip()
+
+
+def collect_extracted_images(image_dir: Path):
+    """List the images pymupdf4llm just wrote, oldest first, bounded.
+
+    Returns (kept, dropped). Anything beyond MAX_EXTRACTED_IMAGES is deleted from
+    disk and reported as dropped, so the caller can say "3 images were not carried
+    over" instead of silently losing them.
+    """
+    # Digit-aware sort: pymupdf4llm names files with un-padded page/index
+    # numbers, and a plain name sort puts "input-10.png" before "input-2.png",
+    # so the MAX cutoff could drop an early page while keeping a later one.
+    files = sorted(
+        (p for p in image_dir.iterdir() if p.is_file()),
+        key=lambda p: [
+            (0, int(part)) if part.isdigit() else (1, part)
+            for part in re.split(r"(\d+)", p.name)
+        ],
+    )
+    kept = files[:MAX_EXTRACTED_IMAGES]
+    dropped = files[MAX_EXTRACTED_IMAGES:]
+    for extra in dropped:
+        try:
+            extra.unlink()
+        except OSError:
+            pass
+    return kept, dropped
+
+
+def drop_image_references(markdown: str, dropped) -> str:
+    """Remove the ![](...) references for images that were discarded.
+
+    Matched by BASENAME: the reference in the Markdown has already been
+    absolutized to the resolved directory, and matching on the filename keeps
+    this correct regardless of how the path was spelled.
+    """
+    names = {p.name for p in dropped}
+
+    def rewrite(match):
+        target = match.group(2).strip()
+        return "" if Path(target).name in names else match.group(0)
+
+    cleaned = re.sub(r"!\[([^\]]*)\]\(([^)]*)\)", rewrite, markdown)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
 def main():
@@ -225,12 +340,33 @@ def main():
     parser.add_argument("--out", help="Output .md path (default: /tmp/<stem>.md)")
     parser.add_argument("--pages", help='0-based page selection, e.g. "0,5-10"')
     parser.add_argument("--user", help="Caller email; REQUIRED with --s3-key (scopes S3 access to your own public-images/<email>/ prefix)")
+    parser.add_argument(
+        "--extract-images",
+        dest="extract_images",
+        help="Directory to write embedded images into; their ![](path) references are KEPT in the Markdown",
+    )
     args = parser.parse_args()
 
     try:
         pages = parse_pages(args.pages) if args.pages else None
     except ValueError:
         _fail('--pages must be integers or ranges like "0,5-10"', "bad_args")
+
+    image_dir = None
+    if args.extract_images:
+        image_dir = Path(args.extract_images).expanduser()
+        try:
+            image_dir.mkdir(parents=True, exist_ok=True)
+            # Resolve AFTER creating it so every path we hand back — the markdown
+            # references and the `images` list — is absolute and usable from a
+            # caller process with a different CWD.
+            image_dir = image_dir.resolve()
+        except OSError as exc:
+            _fail(f"--extract-images directory is not usable: {exc}", "bad_args")
+        if any(image_dir.iterdir()):
+            # A non-empty target would make collect_extracted_images report
+            # pre-existing files as though this PDF produced them.
+            _fail("--extract-images directory must be empty", "bad_args")
 
     with tempfile.TemporaryDirectory() as tmp:
         # Resolve the input PDF to a local path.
@@ -244,7 +380,7 @@ def main():
                 _fail("--s3-key requires --user (caller email) for access scoping", "bad_args")
             local = Path(tmp) / "input.pdf"
             _download_s3(args.s3_key, local, args.user)
-            source = f"s3://{os.environ.get('WORKSPACE_BUCKET', '')}/{args.s3_key}"
+            source = f"owner-artifact:{args.s3_key}"
             stem = Path(args.s3_key).stem or "document"
         else:
             local = Path(args.path).expanduser()
@@ -266,12 +402,23 @@ def main():
             _fail(f"cannot read input: {exc}", "bad_args")
 
         try:
-            markdown = convert_to_markdown(local, pages)
+            markdown = convert_to_markdown(local, pages, image_dir)
         except Exception as exc:
             _fail(f"conversion failed: {exc}", "convert_error")
 
     if not markdown.strip():
         _fail("conversion produced no text (scanned/image-only PDF? OCR is not enabled in v1)", "empty_output")
+
+    kept, dropped = ([], [])
+    if image_dir is not None:
+        # Apply the cap BEFORE the Markdown is written. Deleting the files but
+        # leaving their ![](path) references behind would emit `status: ok`
+        # alongside a document whose image links point at nothing — a broken
+        # result reported as a successful one. Dropping the references keeps the
+        # Markdown truthful about what actually survived.
+        kept, dropped = collect_extracted_images(image_dir)
+        if dropped:
+            markdown = drop_image_references(markdown, dropped)
 
     out_path = Path(args.out).expanduser() if args.out else Path("/tmp") / f"{stem}.md"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -283,6 +430,16 @@ def main():
         "output_path": str(out_path),
         "chars": len(markdown),
     }
+    if image_dir is not None:
+        result["images"] = [str(p) for p in kept]
+        result["image_dir"] = str(image_dir)
+        if dropped:
+            result["images_dropped"] = len(dropped)
+            result["image_note"] = (
+                f"{len(dropped)} image(s) beyond the {MAX_EXTRACTED_IMAGES}-image cap were "
+                "discarded, and their references were removed from the Markdown so no link "
+                "points at a missing file."
+            )
     if len(markdown) <= INLINE_LIMIT:
         result["markdown"] = markdown
     else:

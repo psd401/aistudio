@@ -1,7 +1,7 @@
 ---
 type: Platform Overview
 title: Agent Platform & Skills System
-description: Extensible agent skill system with 27+ domain-specific capabilities, Google Workspace integration, Cedar governance, and MCP tool exposure for K-12 AI assistants.
+description: Extensible agent skill system with 30 domain-specific capabilities, Google Workspace integration, Cedar governance, and MCP tool exposure for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
 ---
 
@@ -40,6 +40,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-html-artifact` — Accessible HTML artifact delivery with a11y audit
 - `psd-pdf-to-markdown` — Document conversion
 - `psd-image-gen` — Image generation
+- `psd-sop-creator` — PSD Standard Operating Procedure document creation
 
 **Data & Integration**
 - `psd-data` — District data queries (PowerSchool, spreadsheets)

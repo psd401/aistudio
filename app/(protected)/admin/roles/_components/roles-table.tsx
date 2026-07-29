@@ -13,6 +13,7 @@ import {
 import {
   ColumnDef,
   Column,
+  type Table as ReactTable,
   flexRender,
   getCoreRowModel,
   getSortedRowModel,
@@ -49,24 +50,16 @@ interface RolesTableProps {
   tools?: Tool[];
 }
 
-export function RolesTable({ roles, tools = [] }: RolesTableProps) {
-  const [sorting, setSorting] = useState<SortingState>([]);
-  const [editingRole, setEditingRole] = useState<Role | null>(null)
-  const [selectedRole, setSelectedRole] = useState<Role | null>(null)
-  const [showRoleForm, setShowRoleForm] = useState(false)
-  const [showToolAssignments, setShowToolAssignments] = useState(false)
-  const { toast } = useToast()
-  
-  // Memoized column header component to prevent recreation on each render
-  const SortableColumnHeader = useCallback(({
-    column,
-    title,
-    className = ""
-  }: {
-    column: Column<Role>;
-    title: string;
-    className?: string;
-  }) => (
+function SortableColumnHeader({
+  column,
+  title,
+  className = "",
+}: {
+  column: Column<Role>;
+  title: string;
+  className?: string;
+}) {
+  return (
     <Button
       variant="ghost"
       onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
@@ -81,7 +74,130 @@ export function RolesTable({ roles, tools = [] }: RolesTableProps) {
         <IconSelector className="ml-2 h-4 w-4" />
       )}
     </Button>
-  ), []);
+  )
+}
+
+interface RolesTableViewProps {
+  table: ReactTable<Role>
+  columnCount: number
+  sorting: SortingState
+  onResetSorting: () => void
+  onAddRole: () => void
+  showRoleForm: boolean
+  editingRole: Role | null
+  onCloseRoleForm: () => void
+  showToolAssignments: boolean
+  selectedRole: Role | null
+  tools: Tool[]
+  onCloseToolAssignments: () => void
+}
+
+function RolesTableView({
+  table,
+  columnCount,
+  sorting,
+  onResetSorting,
+  onAddRole,
+  showRoleForm,
+  editingRole,
+  onCloseRoleForm,
+  showToolAssignments,
+  selectedRole,
+  tools,
+  onCloseToolAssignments,
+}: RolesTableViewProps) {
+  return (
+    <div className="space-y-8">
+      <div className="flex justify-between items-center">
+        <div className="flex items-center space-x-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onResetSorting}
+            className="text-xs"
+            disabled={sorting.length === 0}
+          >
+            Reset Sort
+          </Button>
+          {sorting.length > 0 && (
+            <span className="text-sm text-muted-foreground">
+              Hold Shift to sort by multiple columns
+            </span>
+          )}
+        </div>
+        <Button onClick={onAddRole}>Add Role</Button>
+      </div>
+
+      <div className="rounded-md border">
+        <Table>
+          <TableHeader>
+            {table.getHeaderGroups().map((headerGroup) => (
+              <TableRow key={headerGroup.id} className="bg-muted hover:bg-muted">
+                {headerGroup.headers.map((header) => (
+                  <TableHead key={header.id} className="h-10">
+                    {header.isPlaceholder
+                      ? null
+                      : flexRender(
+                          header.column.columnDef.header,
+                          header.getContext()
+                        )}
+                  </TableHead>
+                ))}
+              </TableRow>
+            ))}
+          </TableHeader>
+          <TableBody>
+            {table.getRowModel().rows.length > 0 ? (
+              table.getRowModel().rows.map((row, index) => (
+                <TableRow
+                  key={row.id}
+                  className={index % 2 === 0 ? "bg-white" : "bg-gray-50"}
+                >
+                  {row.getVisibleCells().map((cell) => (
+                    <TableCell key={cell.id}>
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </TableCell>
+                  ))}
+                </TableRow>
+              ))
+            ) : (
+              <TableRow>
+                <TableCell colSpan={columnCount} className="h-24 text-center">
+                  No roles found.
+                </TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
+      </div>
+
+      {showRoleForm && (
+        <RoleForm role={editingRole} onClose={onCloseRoleForm} />
+      )}
+
+      {showToolAssignments && selectedRole && (
+        <div className="space-y-4">
+          <ToolAssignments
+            role={selectedRole}
+            allTools={tools}
+            assignedTools={[]}
+          />
+          <Button onClick={onCloseToolAssignments} variant="outline">
+            Close Tool Assignments
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function RolesTable({ roles, tools = [] }: RolesTableProps) {
+  const [sorting, setSorting] = useState<SortingState>([]);
+  const [editingRole, setEditingRole] = useState<Role | null>(null)
+  const [selectedRole, setSelectedRole] = useState<Role | null>(null)
+  const [showRoleForm, setShowRoleForm] = useState(false)
+  const [showToolAssignments, setShowToolAssignments] = useState(false)
+  const { toast } = useToast()
 
   const handleEdit = useCallback((role: Role) => {
     setEditingRole(role)
@@ -181,7 +297,7 @@ export function RolesTable({ roles, tools = [] }: RolesTableProps) {
         ),
       },
     ],
-    [SortableColumnHeader, handleEdit, handleManageTools, handleDelete]
+    [handleEdit, handleManageTools, handleDelete]
   );
 
   const table = useReactTable({
@@ -202,100 +318,25 @@ export function RolesTable({ roles, tools = [] }: RolesTableProps) {
   }, [])
 
   return (
-    <div className="space-y-8">
-      <div className="flex justify-between items-center">
-        <div className="flex items-center space-x-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setSorting([])}
-            className="text-xs"
-            disabled={sorting.length === 0}
-          >
-            Reset Sort
-          </Button>
-          {sorting.length > 0 && (
-            <span className="text-sm text-muted-foreground">
-              Hold Shift to sort by multiple columns
-            </span>
-          )}
-        </div>
-        <Button onClick={handleAddRole}>
-          Add Role
-        </Button>
-      </div>
-
-      <div className="rounded-md border">
-        <Table>
-          <TableHeader>
-            {table.getHeaderGroups().map((headerGroup) => (
-              <TableRow key={headerGroup.id} className="bg-muted hover:bg-muted">
-                {headerGroup.headers.map((header) => (
-                  <TableHead key={header.id} className="h-10">
-                    {header.isPlaceholder
-                      ? null
-                      : flexRender(
-                          header.column.columnDef.header,
-                          header.getContext()
-                        )}
-                  </TableHead>
-                ))}
-              </TableRow>
-            ))}
-          </TableHeader>
-          <TableBody>
-            {table.getRowModel().rows?.length ? (
-              table.getRowModel().rows.map((row, index) => (
-                <TableRow 
-                  key={row.id}
-                  className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id}>
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </TableCell>
-                  ))}
-                </TableRow>
-              ))
-            ) : (
-              <TableRow>
-                <TableCell colSpan={columns.length} className="h-24 text-center">
-                  No roles found.
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </div>
-
-      {showRoleForm && (
-        <RoleForm
-          role={editingRole}
-          onClose={() => {
-            setShowRoleForm(false)
-            setEditingRole(null)
-          }}
-        />
-      )}
-
-      {showToolAssignments && selectedRole && (
-        <div className="space-y-4">
-          <ToolAssignments
-            role={selectedRole}
-            allTools={tools}
-            assignedTools={[]}
-          />
-          <Button 
-            onClick={() => {
-              setShowToolAssignments(false)
-              setSelectedRole(null)
-            }}
-            variant="outline"
-          >
-            Close Tool Assignments
-          </Button>
-        </div>
-      )}
-    </div>
+    <RolesTableView
+      table={table}
+      columnCount={columns.length}
+      sorting={sorting}
+      onResetSorting={() => setSorting([])}
+      onAddRole={handleAddRole}
+      showRoleForm={showRoleForm}
+      editingRole={editingRole}
+      onCloseRoleForm={() => {
+        setShowRoleForm(false)
+        setEditingRole(null)
+      }}
+      showToolAssignments={showToolAssignments}
+      selectedRole={selectedRole}
+      tools={tools}
+      onCloseToolAssignments={() => {
+        setShowToolAssignments(false)
+        setSelectedRole(null)
+      }}
+    />
   )
-} 
+}

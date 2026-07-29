@@ -14,6 +14,7 @@ import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentEmbedLinks, contentObjects } from "@/lib/db/schema";
 import { visibilityService } from "./visibility-service";
 import { isArtifactId } from "./embed-directive";
+import { collectionAccessSnapshot } from "./collection-access";
 import type { Requester } from "./types";
 
 /** A document that embeds the artifact (viewer-visible, non-archived). */
@@ -43,6 +44,7 @@ export async function listEmbeddingDocuments(
           title: contentObjects.title,
           slug: contentObjects.slug,
           ownerUserId: contentObjects.ownerUserId,
+          collectionId: contentObjects.collectionId,
           visibilityLevel: contentObjects.visibilityLevel,
           status: contentObjects.status,
         })
@@ -55,14 +57,20 @@ export async function listEmbeddingDocuments(
     "atrium.embed.listEmbeddingDocuments"
   );
 
+  const candidates = rows.filter((row) => row.status !== "archived");
+  const collectionAccess = candidates.some(
+    (row) => row.collectionId != null
+  )
+    ? await collectionAccessSnapshot(requester)
+    : undefined;
   const out: EmbeddingDocument[] = [];
-  for (const r of rows) {
-    if (r.status === "archived") continue;
+  for (const r of candidates) {
     const viewable = await visibilityService.canView(requester, {
       id: r.id,
       ownerUserId: r.ownerUserId,
+      collectionId: r.collectionId,
       visibilityLevel: r.visibilityLevel,
-    });
+    }, collectionAccess);
     if (viewable) out.push({ id: r.id, title: r.title, slug: r.slug });
   }
   return out;

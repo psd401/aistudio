@@ -10,6 +10,15 @@ jest.mock("@/lib/db/drizzle-client", () => ({
 }));
 jest.mock("@/lib/settings-manager", () => ({ getSettings: mockGetSettings }));
 
+function createLockedItemTransaction(
+  forUpdate: jest.Mock,
+): Record<string, jest.Mock> {
+  const limit = jest.fn(() => ({ for: forUpdate }));
+  const where = jest.fn(() => ({ limit }));
+  const from = jest.fn(() => ({ where }));
+  return { select: jest.fn(() => ({ from })) };
+}
+
 describe("canonical upload registration rollout", () => {
   let registerCanonicalUpload: typeof import("@/lib/repositories/content-platform/ingestion-service").registerCanonicalUpload;
   let registerCanonicalUploadIfEnabled: typeof import("@/lib/repositories/content-platform/ingestion-service").registerCanonicalUploadIfEnabled;
@@ -77,19 +86,11 @@ describe("canonical upload registration rollout", () => {
     const forUpdate = jest.fn(() =>
       Promise.resolve([{ id: 1, repositoryId: 3 }])
     );
-    const tx = {
-      select: jest.fn(() => ({
-        from: jest.fn(() => ({
-          where: jest.fn(() => ({
-            limit: jest.fn(() => ({ for: forUpdate })),
-          })),
-        })),
-      })),
-    };
+    const tx = createLockedItemTransaction(forUpdate);
     mockExecuteTransaction.mockImplementation(async (...args: unknown[]) => {
       const operation = args[0];
       if (typeof operation !== "function") {
-        throw new Error("Expected a transaction callback");
+        throw new TypeError("Expected a transaction callback");
       }
       return (operation as (transaction: unknown) => Promise<unknown>)(tx);
     });

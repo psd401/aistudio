@@ -55,6 +55,15 @@ export function isExecutableTextModel(model: RoutableModel): boolean {
   )
 }
 
+export function modelSupportsFunctionCalling(
+  model: Pick<RoutableModel, "provider" | "providerMetadata">,
+): boolean {
+  // Latimer's custom adapter does not implement an AI SDK tool loop, even if
+  // an imported model row omitted or incorrectly enabled the metadata flag.
+  if (model.provider.toLowerCase() === "latimer") return false
+  return model.providerMetadata?.supports_function_calling !== false
+}
+
 /**
  * Mirror the provider adapters' current friendly-name support so routing never
  * selects a model whose adapter will silently filter an authored native tool.
@@ -96,7 +105,10 @@ export function modelMeetsCapabilityRequirements(
   model: RoutableModel,
   requirements: ModelCapabilityRequirements
 ): boolean {
-  if (requirements.requiresFunctionCalling && model.providerMetadata?.supports_function_calling === false) {
+  if (
+    requirements.requiresFunctionCalling &&
+    !modelSupportsFunctionCalling(model)
+  ) {
     return false
   }
   if (requirements.requiresVision && model.providerMetadata?.supports_vision === false) {

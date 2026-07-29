@@ -17,10 +17,13 @@ Instantiating OpenClawAdapter runs no subprocess/network — __init__ only sets
 plain attributes.
 """
 
+import json
 import os
 import pathlib
 import sys
+import time
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -32,6 +35,65 @@ from harness_adapter import OpenClawAdapter, _frame_failed_partial  # noqa: E402
 extract_text = OpenClawAdapter._extract_text
 
 OLD_LITERAL = "psd-agent-internal-gateway-token"
+
+
+class CatalogDiagnosticTests(unittest.TestCase):
+    def test_compacts_every_name_without_the_old_diagnostic_truncation(self):
+        tools = [
+            {
+                "name": f"tool.{index:02d}",
+                "description": "x" * 100,
+            }
+            for index in range(40)
+        ]
+
+        names = harness_adapter._catalog_tool_names(tools)
+        compact = json.dumps({"names": names}, separators=(",", ":"))
+
+        self.assertGreater(len(json.dumps(tools)), 1500)
+        self.assertLess(len(compact), 1500)
+        self.assertEqual(names[0], "tool.00")
+        self.assertEqual(names[-1], "tool.39")
+        self.assertEqual(len(names), 40)
+
+    def test_reads_names_from_grouped_catalogs_and_deduplicates(self):
+        names = harness_adapter._catalog_tool_names(
+            {
+                "workspace": [
+                    {"name": "workspace.execute"},
+                    {"name": "skills.search"},
+                ],
+                "core": [
+                    {"name": "skills.search"},
+                    {"name": "read"},
+                ],
+            }
+        )
+
+        self.assertEqual(
+            names,
+            ["workspace.execute", "skills.search", "read"],
+        )
+
+    def test_ignores_strings_and_name_fields_nested_inside_tool_schemas(self):
+        names = harness_adapter._catalog_tool_names(
+            [
+                {
+                    "name": "actual.tool",
+                    "inputSchema": {
+                        "required": ["phantom.required"],
+                        "properties": {
+                            "choice": {
+                                "enum": ["phantom.enum"],
+                                "name": "phantom.nested-name",
+                            }
+                        },
+                    },
+                }
+            ]
+        )
+
+        self.assertEqual(names, ["actual.tool"])
 
 
 class GatewayTokenTests(unittest.TestCase):
@@ -256,6 +318,302 @@ class TestEmptyTurnNudge(unittest.TestCase):
         self.assertIn("[system-nudge]", n)
         self.assertIn("NO reply", n)
         self.assertIn("Do not", n)
+
+
+def _assistant(ts_ms, *, inp=0, out=0, cr=0, cw=0, stop="stop"):
+    """One assistant transcript record in OpenClaw's on-disk JSONL shape."""
+    return {
+        "type": "message",
+        "timestamp": "2026-07-27T14:20:19.758Z",
+        "message": {
+            "role": "assistant",
+            "timestamp": ts_ms,
+            "stopReason": stop,
+            "model": "us.anthropic.claude-sonnet-5",
+            "usage": {
+                "input": inp, "output": out,
+                "cacheRead": cr, "cacheWrite": cw,
+            },
+        },
+    }
+
+
+class TranscriptUsageTests(unittest.TestCase):
+    """Per-turn token usage read back from the OpenClaw session transcript.
+
+    This is the only usage source on the post-#1384 SigV4 path: the gateway's
+    WS event stream carries none, so before this the wrapper logged
+    tokens_in=0 tokens_out=0 on every single invocation.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.adapter = OpenClawAdapter()
+        self.adapter.WORKSPACE_DIR = self.tmp.name
+        # Keep the settle loop from adding real seconds to the suite.
+        self.adapter.USAGE_SETTLE_INTERVAL_S = 0
+        self.sessions = pathlib.Path(self.tmp.name) / "agents" / "main" / "sessions"
+        self.sessions.mkdir(parents=True)
+
+    def _write(self, session_uuid, records):
+        path = self.sessions / f"{session_uuid}.jsonl"
+        path.write_text(
+            "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8",
+        )
+        return path
+
+    def test_sums_only_records_inside_the_turn_window(self):
+        # The transcript is append-only across the whole session, so a prior
+        # turn's model calls sit in the same file. Billing them again would
+        # inflate every turn by the entire session history.
+        self._write("s1", [
+            _assistant(1_000, inp=999, out=999),          # previous turn
+            _assistant(5_000, inp=10, out=1, stop="toolUse"),
+            _assistant(6_000, inp=20, out=2, cr=30, cw=40),
+        ])
+        usage = self.adapter._read_turn_usage("s1", "main", 5_000)
+        self.assertEqual(usage["input"], 30)
+        self.assertEqual(usage["output"], 3)
+        self.assertEqual(usage["cache_read"], 30)
+        self.assertEqual(usage["cache_write"], 40)
+        self.assertEqual(usage["model_calls"], 2)
+
+    def test_boundary_record_at_since_ms_is_included(self):
+        self._write("s1", [_assistant(5_000, inp=7, out=3)])
+        self.assertEqual(
+            self.adapter._read_turn_usage("s1", "main", 5_000)["input"], 7,
+        )
+
+    def test_tool_use_stop_reason_means_the_turn_is_still_running(self):
+        # `toolUse` is OpenClaw's "another model call is coming" marker; a read
+        # that stops there would drop the turn's final (largest) model call.
+        path = self._write("s1", [_assistant(5_000, inp=10, stop="toolUse")])
+        _, complete = self.adapter._sum_transcript_usage(str(path), 0)
+        self.assertFalse(complete)
+
+        path = self._write("s2", [
+            _assistant(5_000, inp=10, stop="toolUse"),
+            _assistant(6_000, inp=20, stop="stop"),
+        ])
+        totals, complete = self.adapter._sum_transcript_usage(str(path), 0)
+        self.assertTrue(complete)
+        self.assertEqual(totals["input"], 30)
+
+    def test_missing_transcript_returns_zeros_without_settling(self):
+        started = time.monotonic()
+        # Non-zero interval so a wrongly-taken settle path would be visible.
+        self.adapter.USAGE_SETTLE_INTERVAL_S = 0.05
+        usage = self.adapter._read_turn_usage("nope", "main", 0)
+        self.assertEqual(usage["model_calls"], 0)
+        self.assertLess(time.monotonic() - started, 0.05)
+
+    def test_torn_final_line_is_skipped_not_fatal(self):
+        # We read while the runtime may be mid-append; a half-written line must
+        # not lose the records before it.
+        path = self.sessions / "s1.jsonl"
+        path.write_text(
+            json.dumps(_assistant(5_000, inp=11, out=2)) + "\n{\"message\": {\"rol",
+            encoding="utf-8",
+        )
+        usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertEqual(usage["input"], 11)
+        self.assertEqual(usage["model_calls"], 1)
+
+    def test_non_assistant_and_usageless_records_ignored(self):
+        self._write("s1", [
+            {"type": "session", "timestamp": "2026-07-27T14:18:48.704Z"},
+            {"type": "message", "message": {"role": "user", "timestamp": 5_000}},
+            {"type": "message", "message": {"role": "toolResult", "timestamp": 5_100}},
+            {"type": "message", "message": {"role": "assistant", "timestamp": 5_200}},
+            _assistant(5_300, inp=4, out=1),
+        ])
+        usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertEqual(usage["model_calls"], 1)
+        self.assertEqual(usage["input"], 4)
+
+    def test_iso_timestamp_used_when_message_timestamp_absent(self):
+        record = _assistant(0, inp=5)
+        del record["message"]["timestamp"]
+        record["timestamp"] = "2026-07-27T14:20:19.758Z"
+        self._write("s1", [record])
+        since = int(
+            datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc).timestamp() * 1000
+        )
+        self.assertEqual(
+            self.adapter._read_turn_usage("s1", "main", since)["input"], 5,
+        )
+
+    def test_undatable_record_is_not_attributed_to_this_turn(self):
+        record = _assistant(0, inp=5)
+        del record["message"]["timestamp"]
+        del record["timestamp"]
+        self._write("s1", [record])
+        self.assertEqual(
+            self.adapter._read_turn_usage("s1", "main", 0)["model_calls"], 0,
+        )
+
+    def test_session_and_agent_ids_are_path_constrained(self):
+        # These ids arrive on the gateway event stream, so they are untrusted
+        # input to a filesystem path.
+        outside = pathlib.Path(self.tmp.name) / "escaped.jsonl"
+        outside.write_text(
+            json.dumps(_assistant(5_000, inp=123)) + "\n", encoding="utf-8",
+        )
+        for sid, aid in (
+            ("../../escaped", "main"),
+            ("s1", "../.."),
+            ("s1/../../escaped", "main"),
+        ):
+            self.assertEqual(
+                self.adapter._read_turn_usage(sid, aid, 0)["input"], 0,
+                f"unsafe ids must not read a file: {sid!r} {aid!r}",
+            )
+
+    def test_dot_dot_agent_id_cannot_climb_out_of_the_agent_directory(self):
+        # `.` is a legal id character, so ".." satisfies the charset regex —
+        # the one traversal a slash-free component can still perform. Plant a
+        # READABLE transcript at exactly the path it would reach
+        # (<workspace>/agents/../sessions/ == <workspace>/sessions/) so this
+        # fails loudly if the guard regresses, instead of passing because the
+        # file merely happened not to exist.
+        sibling = pathlib.Path(self.tmp.name) / "sessions"
+        sibling.mkdir(parents=True, exist_ok=True)
+        (sibling / "s1.jsonl").write_text(
+            json.dumps(_assistant(5_000, inp=4242)) + "\n", encoding="utf-8",
+        )
+        for aid in ("..", "."):
+            usage = self.adapter._read_turn_usage("s1", aid, 0)
+            self.assertEqual(
+                usage["input"], 0, f"agentId={aid!r} must not read a transcript",
+            )
+            self.assertEqual(usage["model_calls"], 0)
+
+    def test_symlinked_transcript_is_rejected_by_containment(self):
+        # realpath containment also covers a transcript symlinked in from
+        # elsewhere in the workspace.
+        outside = pathlib.Path(self.tmp.name) / "elsewhere.jsonl"
+        outside.write_text(
+            json.dumps(_assistant(5_000, inp=99)) + "\n", encoding="utf-8",
+        )
+        (self.sessions / "linked.jsonl").symlink_to(outside)
+        self.assertEqual(
+            self.adapter._read_turn_usage("linked", "main", 0)["input"], 0,
+        )
+
+    def test_dot_names_rejected_by_the_component_check(self):
+        self.assertFalse(harness_adapter._is_safe_path_component(".."))
+        self.assertFalse(harness_adapter._is_safe_path_component("."))
+        self.assertFalse(harness_adapter._is_safe_path_component("a/b"))
+        self.assertFalse(harness_adapter._is_safe_path_component(""))
+        # Dots remain legal INSIDE an id — only the dot-only names are banned.
+        self.assertTrue(harness_adapter._is_safe_path_component("..a"))
+        self.assertTrue(harness_adapter._is_safe_path_component("fc4b475b-65d9"))
+        self.assertTrue(harness_adapter._is_safe_path_component("main.v2"))
+
+    def test_missing_session_id_is_a_no_op(self):
+        self.assertEqual(
+            self.adapter._read_turn_usage(None, "main", 0)["model_calls"], 0,
+        )
+
+    def test_agent_id_defaults_to_main(self):
+        self._write("s1", [_assistant(5_000, inp=9)])
+        self.assertEqual(
+            self.adapter._read_turn_usage("s1", None, 0)["input"], 9,
+        )
+
+    def test_negative_and_non_int_usage_values_ignored(self):
+        record = _assistant(5_000, inp=10, out=5)
+        record["message"]["usage"]["cacheRead"] = -100
+        record["message"]["usage"]["cacheWrite"] = "lots"
+        self._write("s1", [record])
+        usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertEqual(usage["cache_read"], 0)
+        self.assertEqual(usage["cache_write"], 0)
+        self.assertEqual(usage["input"], 10)
+
+
+class TurnResultCacheFieldTests(unittest.TestCase):
+    def test_cache_fields_default_to_zero(self):
+        # The wrapper reads result.cache_read/.cache_write unconditionally on
+        # the non-proxy path; a missing default would be an AttributeError on
+        # every turn.
+        from harness_adapter import TurnResult
+        result = TurnResult(text="hi")
+        self.assertEqual(result.cache_read, 0)
+        self.assertEqual(result.cache_write, 0)
+
+
+class ChatErrorClassificationTests(unittest.TestCase):
+    """Context overflow must be distinguishable from a genuine crash.
+
+    Every chat-channel error used to arrive as the same OpenClawChatError, with
+    the distinguishing detail buried in free text. That conflation is why the
+    prod Morning Dispatch could not be recovered on 2026-07-27: an overflow —
+    which is fixable by starting a fresh session — looked exactly like a fault
+    that must not be auto-retried.
+
+    Downstream, agent-cron promotes ContextOverflow into a background RESTART
+    and leaves OpenClawChatError alone. Misclassifying in either direction is
+    costly: a missed overflow fails the task silently every morning, and an
+    over-eager match hands real crashes a two-hour retry budget.
+    """
+
+    def test_recognizes_the_message_prod_actually_emitted(self):
+        # Verbatim from the 2026-07-27 prod failure.
+        message = (
+            "Context overflow: prompt too large for the model. Try /reset "
+            "(or /new) to start a fresh session, or use a larger-context model."
+        )
+        self.assertEqual(
+            harness_adapter._classify_chat_error(message),
+            harness_adapter.CONTEXT_OVERFLOW_ERROR_CLASS,
+        )
+
+    def test_matches_either_stable_phrase_case_insensitively(self):
+        for message in (
+            "Context overflow",
+            "context overflow (mid-turn precheck)",
+            "prompt too large for the model",
+            "PROMPT TOO LARGE",
+        ):
+            self.assertEqual(
+                harness_adapter._classify_chat_error(message),
+                harness_adapter.CONTEXT_OVERFLOW_ERROR_CLASS,
+                f"should classify as overflow: {message!r}",
+            )
+
+    def test_leaves_every_other_failure_generic(self):
+        # These MUST NOT become promotable — each is a real fault where an
+        # automatic two-hour retry is the wrong answer.
+        for message in (
+            "reply session initialization conflicted",
+            "websocket closed unexpectedly",
+            "tool_search_code timed out",
+            "AccessDeniedException calling InvokeModel",
+            "",
+        ):
+            self.assertEqual(
+                harness_adapter._classify_chat_error(message),
+                "OpenClawChatError",
+                f"should stay generic: {message!r}",
+            )
+
+    def test_degrades_to_generic_rather_than_raising(self):
+        # A None/odd message must not take down error handling itself — this
+        # runs on the failure path, where raising would mask the real error.
+        self.assertEqual(
+            harness_adapter._classify_chat_error(None),
+            "OpenClawChatError",
+        )
+
+    def test_class_name_matches_the_typescript_consumer(self):
+        # agent-cron/job-promotion.ts keys promotion off this exact literal.
+        # A rename here silently stops every scheduled restart.
+        self.assertEqual(
+            harness_adapter.CONTEXT_OVERFLOW_ERROR_CLASS, "ContextOverflow"
+        )
 
 
 if __name__ == "__main__":

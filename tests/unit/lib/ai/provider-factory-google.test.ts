@@ -8,8 +8,8 @@
  *
  * Uses the global `jest` (not @jest/globals) so jest.mock hoisting works.
  */
-import * as fs from "fs";
-import * as path from "path";
+
+import * as path from "node:path";
 
 const googleSearchTool = { __googleSearch: true };
 const createGoogleGenerativeAIMock = jest.fn((_opts: unknown) =>
@@ -33,6 +33,7 @@ jest.mock("@/lib/settings-manager", () => ({
 
 import { createProviderModel } from "@/lib/ai/provider-factory";
 import { createProviderNativeTools } from "@/lib/tools/provider-native-tools";
+import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 const ENV_KEY = "GOOGLE_GENERATIVE_AI_API_KEY";
 
@@ -60,7 +61,7 @@ describe("Google client construction (REV-COR-505 / REV-REF-034)", () => {
     const root = path.join(__dirname, "..", "..", "..", "..");
     const assignRe = /process\.env\.GOOGLE_GENERATIVE_AI_API_KEY\s*=/;
     for (const rel of ["lib/ai/provider-factory.ts", "lib/tools/provider-native-tools.ts"]) {
-      const src = fs.readFileSync(path.join(root, rel), "utf8");
+      const src = validatedFs.readFileSync(path.join(root, rel), "utf8");
       expect(assignRe.test(src)).toBe(false);
     }
   });

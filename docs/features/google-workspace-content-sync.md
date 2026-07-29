@@ -1,0 +1,206 @@
+# Google Workspace Content Synchronization
+
+Issue [#1262](https://github.com/psd401/aistudio/issues/1262) adds Google Drive
+as a synchronized source for the unified repository platform in
+[ADR-007](../architecture/adr/ADR-007-unified-content-and-repositories.md).
+Repository ACLs remain authoritative: a Drive grant allows the connector to
+read source bytes, but it never grants an AI Studio user access to the target
+repository.
+
+## Authorization boundaries
+
+Personal Drive uses OAuth authorization-code flow with S256 PKCE and requests
+exactly:
+
+```text
+https://www.googleapis.com/auth/drive.readonly
+```
+
+The callback validates an encrypted, HTTP-only, five-minute state cookie before
+examining provider-controlled parameters. Refresh tokens are encrypted with the
+existing AES-256-GCM token DEK and stored separately from connector/source
+metadata. Picker access tokens are short lived, returned only to the connector
+owner, sent with `Cache-Control: no-store`, and never logged.
+
+The same user OAuth and Picker flow covers both My Drive and Shared Drives. A
+user may select only files, folders, and drives that Google reports as
+accessible to that user. AI Studio never asks a customer to grant access to an
+AI Studio service account or paste a Shared Drive ID. `supportsAllDrives` and
+`includeItemsFromAllDrives` are set on the Drive API calls used after selection.
+
+A repository owner or administrator with the `knowledge-repositories` UI
+capability may connect Google Drive, select accessible sources, retry, and
+disconnect. The repository management check is repeated on list, Picker,
+selection, retry, and disconnect routes. This is a human UI capability
+boundary, not an API key scope. The worker retains read support for legacy WIF
+connector records during migration, but Repository Manager no longer creates
+that connector type.
+
+## Synchronization model
+
+Migration 136 adds separate credential, connector, selection, source, and sync
+run records. A connector stores its durable Drive changes page token and watch
+channel health. A source maps one stable Drive file ID to one stable repository
+item. Each Drive revision creates a new immutable
+`repository_item_versions` row and canonical inspection job; the current item
+pointer advances without overwriting prior versions.
+
+Initial reconciliation records a start page token before walking the configured
+file, folder tree, or Shared Drive. Scheduled polling of `changes.list` is the
+authoritative log. Webhook notifications only move `next_sync_at` forward, so a
+missed or duplicated notification cannot lose a change. The webhook validates
+channel ID, resource ID, a constant-time token hash, and a monotonic arbitrary
+precision message number.
+
+Workers persist a page cursor only after every change in that page is durable.
+Duplicate delivery is safe because the source revision and processing job keys
+are idempotent, and a durable lease coalesces overlapping schedule, webhook, and
+manual requests. Replacing a selection increments a durable generation; source,
+version, cursor, watch, and completion writes that can publish stale work from an
+older in-flight generation fail closed without overwriting the reset cursor. An
+expired Drive cursor triggers a complete selection snapshot from a newly
+acquired start token. Folder changes also complete a selection snapshot before
+advancing the page cursor because Drive may not emit a separate change for every
+descendant moved with the folder.
+
+The five-minute EventBridge dispatcher only identifies due connectors and puts
+one message per connector on the isolated SQS queue. Synchronization therefore
+inherits the queue event source's bounded concurrency instead of starting up to
+25 Drive crawls inside one scheduler invocation. A snapshot is limited to
+10,000 unique files and 10,000 folder visits. Crossing either bound fails the
+run with `GOOGLE_DRIVE_SNAPSHOT_LIMIT_EXCEEDED` before a partial snapshot can
+advance the cursor or mark unseen sources missing; durable page-level traversal
+is required before raising these limits.
+
+A failed download or export degrades only that source; the remainder of the
+cursor page still commits and the failed source is retried on the next run.
+The worker rejects advertised source sizes and response lengths above
+`CONTENT_MAX_FILE_SIZE_GB`, and an authoritative byte-counting transform aborts
+multipart upload if an export exceeds that limit in flight. Oversized sources
+remain visible with `GOOGLE_DRIVE_SOURCE_SIZE_LIMIT_EXCEEDED` and never receive
+a repository version. Completed source uploads are initially tagged
+`aistudio-upload-state=temporary`; canonical inspection promotes registered
+versions to `permanent`, while the documents-bucket lifecycle removes an object
+left unregistered by a selection race or database failure.
+Files moved outside a selected folder, deleted files, and lost access enter a
+recoverable missing state. Their last immutable versions remain stored, but
+active retrieval is disabled after
+`CONTENT_DELETION_GRACE_DAYS`. Reappearance during the grace window reactivates
+the same stable item. If the administrator who configured a connector is
+deleted, a database cleanup trigger marks its retained repository items
+unavailable before connector/source cascades remove the reconciliation link.
+
+Google Docs, Sheets, Slides, and Drawings export to DOCX, XLSX, PPTX, and PDF.
+Drive blobs retain their supported MIME type except vendor text subtypes, which
+are processed as `text/plain` while their original MIME type remains in source
+and version metadata. This keeps files such as `text/x-python` inside the
+canonical text allowlist without changing their bytes or external identity.
+Google Vids and other Drive
+long-running downloads persist the operation name and resume later instead of
+holding a Lambda invocation open. Unsupported native types remain visible with
+an `unsupported` source status instead of silently disappearing.
+
+## Infrastructure and rollout
+
+Deploy in this order:
+
+1. apply additive migration `136-google-content-connectors.sql`;
+2. deploy the Auth stack so it creates the complete
+   `aistudio/{environment}/google-content-oauth` secret;
+3. deploy the Processing stack (queue, DLQ, isolated worker role, schedule,
+   alarms, and queue exports);
+4. deploy the Frontend stack so ECS receives
+   `GOOGLE_CONTENT_SYNC_QUEUE_URL`; and
+5. enable `CONTENT_PLATFORM_ENABLED` and
+   `GOOGLE_CONTENT_SYNC_ENABLED` for the intended environment.
+
+The scheduled next-run delay is controlled by
+`GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES`; deferred long-running downloads retry
+after one minute.
+
+`AuthStack` creates and retains
+`aistudio/{environment}/google-content-oauth` with this runtime contract:
+
+```json
+{
+  "clientId": "google-oauth-client-id",
+  "clientSecret": "google-oauth-client-secret",
+  "pickerApiKey": "browser-key-restricted-to-the-ai-studio-origin",
+  "appId": "google-cloud-project-number-derived-from-client-id"
+}
+```
+
+Deployment supplies the existing `GoogleClientId` and the browser-restricted
+`GooglePickerApiKey` CloudFormation parameters. The existing
+`aistudio-{environment}-google-oauth` secret remains the source of the client
+secret. CloudFormation assembles the content secret; operators must not create
+or edit it manually. `infra/deploy-dev.sh` requires `GOOGLE_PICKER_API_KEY` and
+passes both parameters to the Auth stack.
+
+Register this exact callback for each environment:
+
+```text
+https://<ai-studio-origin>/api/repositories/connectors/google/callback
+```
+
+Restrict the Picker browser key to the corresponding HTTPS origin and Google
+Picker/Drive APIs. The OAuth client, consent screen, domain verification, and
+callback registration remain Google Cloud configuration; no credential value
+belongs in source control, a connector row, or a worker message.
+
+The worker alarms on Lambda errors, messages older than 30 minutes, and any DLQ
+record. Repository Manager shows connector status, last success, last error,
+selection count, tracked source count, manual retry, and disconnect. Operational
+logs correlate connector, sync run, and request/trace IDs without source text,
+tokens, signed URLs, or downloaded bytes.
+
+Rollback is a settings change. Disable `GOOGLE_CONTENT_SYNC_ENABLED` to stop new
+authorization and synchronization while retaining additive schema and immutable
+versions. Do not remove migration 136 or delete connector records as a rollback.
+
+## Verification
+
+- `tests/unit/lib/repositories/google-drive-client.test.ts` covers exact scope,
+  valid Drive metadata/cursor field contracts, shortcut target resource-key
+  propagation, export mappings, and resumable Vids operations.
+- `tests/unit/lib/repositories/google-drive-oauth.test.ts` covers PKCE and
+  fail-closed scope validation plus sanitized missing/malformed deployment
+  configuration errors.
+- `tests/unit/lib/repositories/google-drive-route-access.test.ts` covers the
+  capability/repository authorization boundary and sanitized 503 response.
+- `tests/unit/lib/repositories/google-drive-selections-route.test.ts` and
+  `google-drive-bounded-concurrency.test.ts` prove per-user throttling, bounded
+  provider fanout, and stable selection ordering.
+- `tests/unit/lib/repositories/google-drive-callback.test.ts` proves forged or
+  mismatched callback state cannot select or consume another in-progress state
+  cookie while valid denial and PKCE success behavior remains intact.
+- `tests/smoke/google-content-connectors.smoke.ts` runs against real PostgreSQL
+  and verifies selection-generation fencing, isolated source failure/recovery,
+  cursor, immutable-version, sync-run, deletion-grace state, and fail-closed
+  creator-deletion cleanup.
+- `infra/lambdas/google-content-sync/__tests__/safety.test.ts` proves metadata,
+  response, and in-flight byte limits plus finite snapshot budgets.
+- `infra/test/unit/google-content-oauth-secret.test.ts` proves the Auth stack
+  requires the Picker key and creates the retained, complete runtime secret
+  from deployment-owned inputs.
+- `infra/test/unit/google-content-sync.test.ts` synthesizes the isolated worker
+  role, exact OAuth secret grant, least-privilege object/queue policies,
+  scheduled queue dispatch, queue/DLQ, and alarms.
+- `tests/e2e/unified-content-product-migration.functional.spec.ts` covers
+  unauthenticated route guards, public token-authenticated webhook reachability,
+  and the authenticated personal/Shared Drive Repository Manager UI without
+  requiring live Google credentials.
+
+After deployment, complete a labeled live matrix for create, edit, move into and
+out of a selected folder, delete/restore, Shared Drive permission loss/restore,
+notification loss followed by scheduled cursor resume, and one native export of
+each supported Workspace type.
+
+The 2026-07-27 dev readiness run verified the deployed personal OAuth connector,
+Picker selection, a 241-source initial reconciliation, and a later incremental
+sync with no queue or Lambda failure. It also classified five exported Google
+Docs with zero Word text characters as visible terminal “no searchable text”
+sources and repaired a `text/x-python` source through the canonical text
+compatibility path. This is operational evidence, not a substitute for the
+create/edit/move/delete/permission-loss matrix above; that matrix requires
+authorized mutations to external Drive content and remains a rollout gate.

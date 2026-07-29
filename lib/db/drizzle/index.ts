@@ -277,6 +277,7 @@ export {
   type AssistantArchitectUpdateData,
   type AssistantArchitectWithCreator,
   type ToolStatus,
+  AssistantApprovalValidationError,
   // Query operations
   getAssistantArchitects,
   getAssistantArchitectById,
@@ -487,6 +488,7 @@ export {
   type RepositoryWithAccess,
   // Repository query operations
   getRepositoryById,
+  getRepositoriesByIds,
   isSystemManagedRepository,
   getRepositoriesByOwnerId,
   getPublicRepositories,

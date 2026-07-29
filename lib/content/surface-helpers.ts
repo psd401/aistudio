@@ -10,7 +10,12 @@ import { eq } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentCollections } from "@/lib/db/schema";
 import { hasCapabilityAccess } from "@/utils/roles";
+import {
+  requesterMayCreateInCollection,
+  requesterMayViewCollection,
+} from "./collection-access";
 import { ForbiddenError, ValidationError } from "./errors";
+import type { Requester } from "./types";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -32,9 +37,11 @@ async function collectionIdByColumn(
 }
 
 /**
- * Resolve a `collection` argument (a slug OR a uuid) to a collection id, or
- * `undefined` when none is supplied. Throws a user-facing `ValidationError`
- * (→ 400) when it matches no collection.
+ * Resolve a `collection` argument (a slug OR a uuid) to a requester-admitted
+ * collection id, or `undefined` when none is supplied. Throws the same
+ * user-facing `ValidationError` (→ 400) when the collection is absent or the
+ * requester lacks the requested view/create access, so private names and ids
+ * cannot be confirmed through a filter or placement side channel.
  *
  * EXISTENCE is validated here — not deferred to the service. `contentService.create`
  * skips its own collection check when an explicit `visibility.level` is supplied
@@ -43,51 +50,59 @@ async function collectionIdByColumn(
  * uuid-shaped input is tried as an id first, then as a slug (a slug can itself be
  * uuid-shaped) — mirroring `loadByIdOrSlug`.
  *
- * Overloads: a REQUIRED (non-empty) argument always resolves to a `string` — the
- * function only returns `undefined` for a falsy input, and either resolves or
- * throws otherwise — so a caller passing a zod-validated `.min(1)` id needs no
- * `undefined` narrowing. Passing an optional/nullable value keeps the
+ * Overloads: a REQUIRED (non-empty) collection always resolves to a `string` —
+ * the function only returns `undefined` for a falsy input, and either resolves
+ * or throws otherwise — so a caller passing a zod-validated `.min(1)` id needs
+ * no `undefined` narrowing. Passing an optional/nullable value keeps the
  * `string | undefined` result.
  */
-export function resolveCollectionId(collection: string): Promise<string>;
+type CollectionResolutionAccess = "view" | "create";
+
 export function resolveCollectionId(
-  collection?: string | null
+  req: Requester,
+  collection: string,
+  access: CollectionResolutionAccess
+): Promise<string>;
+export function resolveCollectionId(
+  req: Requester,
+  collection: string | null | undefined,
+  access: CollectionResolutionAccess
 ): Promise<string | undefined>;
 export async function resolveCollectionId(
-  collection?: string | null
+  req: Requester,
+  collection: string | null | undefined,
+  access: CollectionResolutionAccess
 ): Promise<string | undefined> {
   if (!collection) return undefined;
+  let collectionId: string | undefined;
   if (UUID_RE.test(collection)) {
-    const byId = await collectionIdByColumn(contentCollections.id, collection);
-    if (byId) return byId;
+    collectionId = await collectionIdByColumn(
+      contentCollections.id,
+      collection
+    );
     // Fall through: the value may be a uuid-shaped slug rather than an id.
   }
-  const bySlug = await collectionIdByColumn(contentCollections.slug, collection);
-  if (!bySlug) {
+  if (!collectionId) {
+    collectionId = await collectionIdByColumn(
+      contentCollections.slug,
+      collection
+    );
+  }
+  const permitted =
+    collectionId != null &&
+    (access === "create"
+      ? await requesterMayCreateInCollection(req, collectionId)
+      : await requesterMayViewCollection(req, collectionId));
+  if (!collectionId || !permitted) {
     throw new ValidationError("Collection not found", { collection });
   }
-  return bySlug;
+  return collectionId;
 }
 
-/** The internal reader deep link for a content object, returned in results. */
-export function contentDeepLink(slug: string): string {
-  const base = process.env.ATRIUM_PUBLIC_BASE_URL?.replace(/\/$/, "") ?? "";
-  return `${base}/c/${slug}`;
-}
-
-/**
- * The PUBLIC (anonymous) reader link for a content object at `/p/[slug]` — the
- * `external_ref` the `public_web` publish adapter records and the URL a
- * public-web publication is served at (Phase 7, #1057). Built from
- * `ATRIUM_PUBLIC_BASE_URL` (the same base the internal deep link uses); the
- * §33 #7 decision serves `public_web` via the authenticated-but-anonymous Next
- * public route rather than a separate CloudFront/S3 static export, so the base is
- * the app origin and the path segment (`/p/` vs `/c/`) is the only difference.
- */
-export function publicReaderLink(slug: string): string {
-  const base = process.env.ATRIUM_PUBLIC_BASE_URL?.replace(/\/$/, "") ?? "";
-  return `${base}/p/${slug}`;
-}
+// The two reader-link builders moved to the dependency-free `./reader-links`
+// leaf (#1336) so services can import them without pulling in this module's
+// capability/DB graph. Re-exported here so every existing import path is unchanged.
+export { contentDeepLink, publicReaderLink } from "./reader-links";
 
 /** The capability every Atrium authoring entry point (UI actions + agent surfaces) gates on. */
 export const ATRIUM_CONTENT_CAPABILITY = "atrium-content";

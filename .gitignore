@@ -76,3 +76,19 @@ tests/e2e/.auth/
 
 # Agent-image build-time eval-gate probe artifacts (#1161)
 infra/agent-image/.build-probes/
+
+# Agent-image eval transcripts contain prompts, model output, tool details, and
+# broker request bodies. Only digest-named, transcript-free summaries and exact
+# generated digest-pair comparison reports belong in .eval-runs/; summarize.py
+# also validates the Git index so `git add -f` cannot bypass this guard in CI.
+/.eval-runs/**/*.jsonl
+/.eval-runs/*.jsonl
+/.eval-runs/**/*transcript*
+/.eval-runs/*transcript*
+/.eval-runs/**/*capture*
+/.eval-runs/*capture*
+/.eval-runs/**/*raw*
+/.eval-runs/*raw*
+
+# Staged into the agent-image build context by build-and-push.sh; canonical copy is infra/validated-fs.cjs
+infra/agent-image/skills/validated-fs.cjs

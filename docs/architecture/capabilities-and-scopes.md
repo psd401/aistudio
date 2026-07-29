@@ -58,6 +58,15 @@ Current capability identifiers (from the manifest):
 > with user authorization. Do not confuse the two; use `hasCapabilityAccess`
 > for role-gated access.
 
+Owner-bound internal agent operations still act with a human owner's authority.
+When such an operation resolves a district-wide *shared* credential rather than
+the caller's own per-user credential, the trusted broker
+(`app/api/agent/credentials/route.ts`) gates it on a `skill.*` capability held
+by the owner — for example the image-generation broker checks
+`skill.image-gen`. These remain human role capabilities; they are not API-key
+scopes. Operations backed by the caller's own credential (Freshservice) are
+deliberately ungated: the credential is the authorization.
+
 ---
 
 ## Scopes — permissions on a programmatic invocation surface

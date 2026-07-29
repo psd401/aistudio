@@ -56,8 +56,14 @@ export * from "./tables/nexus-cache-entries";
 export * from "./tables/nexus-shares";
 export * from "./tables/nexus-templates";
 export * from "./tables/nexus-user-preferences";
+export * from "./tables/nexus-user-memories";
 export * from "./tables/nexus-provider-metrics";
+export * from "./tables/deep-research-reservations";
+export * from "./tables/agentic-cost-reservations";
+export * from "./tables/resource-admission-leases";
+export * from "./tables/workspace-upload-reservations";
 export * from "./tables/nexus-repository-bindings";
+export * from "./tables/nexus-projects";
 
 // ============================================
 // Nexus MCP (Model Context Protocol)
@@ -82,10 +88,15 @@ export * from "./tables/repository-items";
 export * from "./tables/repository-item-chunks";
 export * from "./tables/repository-access";
 export * from "./tables/repository-item-versions";
+export * from "./tables/repository-connectors";
 export * from "./tables/repository-upload-sessions";
 export * from "./tables/repository-processing-jobs";
 export * from "./tables/repository-artifacts";
 export * from "./tables/repository-index-generations";
+export * from "./tables/skill-repository-bindings";
+export * from "./tables/repository-migration-runs";
+export * from "./tables/repository-migration-items";
+export * from "./tables/repository-retrieval-shadow-observations";
 
 // ============================================
 // Prompt Library
@@ -147,6 +158,7 @@ export * from "./tables/agent-feedback";
 export * from "./tables/agent-health-snapshots";
 export * from "./tables/agent-patterns";
 export * from "./tables/agent-failures";
+export * from "./tables/agent-scheduled-runs";
 export * from "./tables/agent-pattern-scan-runs";
 export * from "./tables/agent-health-scan-runs";
 export * from "./tables/agent-message-content";
@@ -166,12 +178,14 @@ export * from "./tables/agent-credential-requests";
 // ============================================
 export * from "./tables/agent-workspace-tokens";
 export * from "./tables/agent-workspace-consent-nonces";
+export * from "./tables/agent-request-nonces";
 
 // ============================================
 // API Keys (External API Platform)
 // ============================================
 export * from "./tables/api-keys";
 export * from "./tables/api-key-usage";
+export * from "./tables/api-rate-limit-reservations";
 
 // ============================================
 // OAuth2/OIDC Provider (#686)
@@ -189,6 +203,7 @@ export * from "./tables/oauth-consent-decisions";
 // Atrium Content Workspace (#1058, Epic #1059)
 // ============================================
 export * from "./tables/content-collections";
+export * from "./tables/content-collection-grants";
 export * from "./tables/content-objects";
 export * from "./tables/content-versions";
 export * from "./tables/content-visibility-grants";
@@ -218,6 +233,26 @@ export * from "./tables/group-role-mappings";
 // Phase 3 (#1206): per-resource role/group access grants on models,
 // assistants, and agent skills.
 export * from "./tables/resource-access-grants";
+
+// ============================================
+// OneRoster Core Schema (Epic #1308 / Issue #1309)
+// ============================================
+export * from "./tables/oneroster-orgs";
+export * from "./tables/oneroster-academic-sessions";
+export * from "./tables/oneroster-courses";
+export * from "./tables/oneroster-classes";
+export * from "./tables/oneroster-class-terms";
+export * from "./tables/oneroster-users";
+export * from "./tables/oneroster-user-roles";
+export * from "./tables/oneroster-enrollments";
+
+// ============================================
+// Teacher-managed Rooms (Epic #1308 / Issue #1313)
+// ============================================
+export * from "./tables/rooms";
+export * from "./tables/room-classes";
+export * from "./tables/room-members";
+export * from "./tables/room-resources";
 
 // ============================================
 // Relations

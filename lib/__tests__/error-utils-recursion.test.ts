@@ -5,8 +5,8 @@
 
 import { handleError } from '../error-utils'
 
-describe('Error Handler Recursion Prevention', () => {
-  describe('handleError - Recursion Guard', () => {
+function defineErrorHandlerRecursionPreventionSuite1Part1() {
+
     it('should prevent infinite recursion in error handling', () => {
       // Create an error that would trigger error handling recursively
       const error = new Error('Test error')
@@ -75,9 +75,9 @@ describe('Error Handler Recursion Prevention', () => {
       expect(result.isSuccess).toBe(false)
       expect(result).toBeDefined()
     })
-  })
 
-  describe('handleError - Error Serialization', () => {
+
+
     it('should handle AWS SDK errors with circular references', () => {
       const awsError = new Error('CredentialsProviderError')
       ;(awsError as unknown as Record<string, unknown>).name = 'CredentialsProviderError'
@@ -109,7 +109,9 @@ describe('Error Handler Recursion Prevention', () => {
       expect(() => handleError(undefined, 'Undefined error')).not.toThrow()
     })
 
-    it('should handle errors during high load (100 concurrent calls)', async () => {
+    }
+
+function defineErrorHandlerRecursionPreventionSuite1Part2() {it('should handle errors during high load (100 concurrent calls)', async () => {
       const errors = Array.from({ length: 100 }, (_, i) =>
         new Error(`Error ${i}`)
       )
@@ -119,9 +121,9 @@ describe('Error Handler Recursion Prevention', () => {
       )
 
       expect(results).toHaveLength(100)
-      results.forEach(result => {
+      for (const result of results) {
         expect(result.isSuccess).toBe(false)
-      })
+      }
     })
 
     it('should handle concurrent errors from multiple requests without race conditions', async () => {
@@ -137,16 +139,16 @@ describe('Error Handler Recursion Prevention', () => {
 
       expect(results).toHaveLength(50)
       // All requests should get proper error messages, not "System error occurred"
-      results.forEach((result, index) => {
+      for (const [index, result] of results.entries()) {
         expect(result.isSuccess).toBe(false)
         expect(result.message).toBe(`Error in request ${index}`)
         // Should NOT have triggered recursion guard
         expect(result.message).not.toBe('System error occurred')
-      })
+      }
     })
-  })
 
-  describe('handleError - Edge Cases', () => {
+
+
     it('should handle string errors', () => {
       const result = handleError('String error', 'Test message')
 
@@ -190,9 +192,9 @@ describe('Error Handler Recursion Prevention', () => {
 
       expect(result).not.toHaveProperty('error')
     })
-  })
 
-  describe('handleError - Performance', () => {
+
+
     it('should complete without recursive failure for large errors', () => {
       const error = new Error('Large error')
       ;(error as unknown as Record<string, unknown>).data = {
@@ -216,7 +218,9 @@ describe('Error Handler Recursion Prevention', () => {
       })
     })
 
-    it('should handle rapid successive error calls', () => {
+    }
+
+function defineErrorHandlerRecursionPreventionSuite1Part3() {it('should handle rapid successive error calls', () => {
       const results = []
       for (let i = 0; i < 1000; i++) {
         results.push(handleError(new Error(`Error ${i}`), 'Rapid test'))
@@ -227,5 +231,13 @@ describe('Error Handler Recursion Prevention', () => {
         result.isSuccess === false && result.message === 'Rapid test'
       )).toBe(true)
     })
-  })
-})
+
+}
+
+const defineErrorHandlerRecursionPreventionSuite1 = () => {
+  defineErrorHandlerRecursionPreventionSuite1Part1()
+  defineErrorHandlerRecursionPreventionSuite1Part2()
+  defineErrorHandlerRecursionPreventionSuite1Part3()
+};
+
+describe('Error Handler Recursion Prevention', defineErrorHandlerRecursionPreventionSuite1)

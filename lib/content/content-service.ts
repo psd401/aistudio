@@ -20,7 +20,6 @@ import {
 } from "@/lib/db/drizzle-client";
 import {
   contentAuditLogs,
-  contentCollections,
   contentObjects,
   contentPublications,
   contentVersions,
@@ -49,6 +48,11 @@ import {
 } from "./mappers";
 import { snapshotInTx, versionService } from "./version-service";
 import { visibilityService } from "./visibility-service";
+import {
+  collectionAccessSnapshot,
+  collectionAccessSnapshotInTx,
+  type CollectionAccessSnapshot,
+} from "./collection-access";
 import {
   ConflictError,
   ForbiddenError,
@@ -170,43 +174,110 @@ async function uniqueSlug(tx: DbTransaction, title: string): Promise<string> {
  * decision that might itself branch into other I/O).
  */
 async function collectionDefaultOutsideTx(
+  req: Requester,
   collectionId: string | undefined
-): Promise<VisibilityLevel | null> {
+): Promise<CollectionDefault | null> {
   if (!collectionId) return null;
-  const rows = await executeQuery(
-    (db) =>
-      db
-        .select({ level: contentCollections.defaultVisibilityLevel })
-        .from(contentCollections)
-        .where(eq(contentCollections.id, collectionId))
-        .limit(1),
-    "content.create.collectionDefault"
+  return collectionDefaultFromAccess(
+    await collectionAccessSnapshot(req),
+    collectionId,
+    "create content in"
   );
-  if (!rows[0]) {
-    throw new ValidationError("Collection not found", { collectionId });
-  }
-  return rows[0].level as VisibilityLevel;
 }
 
-/**
- * Validate that a collection exists, throwing a typed `ValidationError` (400) on
- * miss. Used by `update()` — which (unlike `create()`) does not call
- * `collectionDefault` — so an invalid `collectionId` surfaces as a user-facing
- * 400 rather than a raw Postgres FK violation (SQLSTATE 23503).
- */
-async function assertCollectionExists(collectionId: string): Promise<void> {
-  const rows = await executeQuery(
-    (db) =>
-      db
-        .select({ id: contentCollections.id })
-        .from(contentCollections)
-        .where(eq(contentCollections.id, collectionId))
-        .limit(1),
-    "content.assertCollectionExists"
-  );
-  if (!rows[0]) {
+interface CollectionDefault {
+  level: VisibilityLevel;
+  ownerUserId: number | null;
+  grants: VisibilityGrant[];
+}
+
+function collectionDefaultFromAccess(
+  access: CollectionAccessSnapshot,
+  collectionId: string,
+  operation: "create content in" | "move content into"
+): CollectionDefault {
+  const collection = access.byId.get(collectionId);
+  if (!collection) {
     throw new ValidationError("Collection not found", { collectionId });
   }
+  if (
+    collection.archivedAt ||
+    !access.selectableCollectionIds.has(collectionId)
+  ) {
+    throw new ForbiddenError(
+      `Not permitted to ${operation} this collection`,
+      { collectionId }
+    );
+  }
+  return {
+    level: collection.defaultVisibilityLevel,
+    ownerUserId: collection.ownerUserId,
+    grants: access
+      .effectiveGrants(collectionId, "view")
+      .map(({ kind, value }) => ({ kind, value })),
+  };
+}
+
+async function collectionDefaultInTx(
+  tx: DbTransaction,
+  req: Requester,
+  collectionId: string | undefined
+): Promise<CollectionDefault | null> {
+  if (!collectionId) return null;
+  return collectionDefaultFromAccess(
+    await collectionAccessSnapshotInTx(tx, req),
+    collectionId,
+    "create content in"
+  );
+}
+
+function createVisibilityGrants(
+  input: CreateObjectInput,
+  collection: CollectionDefault | null
+): VisibilityGrant[] {
+  if (input.visibility?.grants) return input.visibility.grants;
+  if (input.visibility?.level == null && collection?.level === "group") {
+    return collection.grants;
+  }
+  return [];
+}
+
+function assertPrivateCollectionVisibility(
+  collection: CollectionDefault | null,
+  level: VisibilityLevel,
+  grants: VisibilityGrant[]
+): void {
+  if (
+    collection?.ownerUserId != null &&
+    (level !== "private" || grants.length > 0)
+  ) {
+    throw new ValidationError(
+      "Content in a private collection must remain private and cannot carry grants"
+    );
+  }
+}
+
+async function assertCollectionWritableInTx(
+  tx: DbTransaction,
+  req: Requester,
+  collectionId: string,
+  objectOwnerUserId: number
+): Promise<{ ownerUserId: number | null }> {
+  const collection = collectionDefaultFromAccess(
+    await collectionAccessSnapshotInTx(tx, req),
+    collectionId,
+    "move content into"
+  );
+  if (
+    collection.ownerUserId != null &&
+    collection.ownerUserId !== objectOwnerUserId
+  ) {
+    throw new ForbiddenError(
+      "A private collection may contain only content owned by its collection owner",
+      { collectionId }
+    );
+  }
+  return { ownerUserId: collection.ownerUserId };
 }
 
 /**
@@ -309,17 +380,18 @@ async function queuePublicWidenForCreate(
  * `publicWidenRequested` is true when an unauthorized public create was
  * downgraded to private — the caller queues a `visibility_widen` post-commit.
  */
-async function resolveCreateVisibility(
+function resolveCreateVisibilityForCollection(
   req: Requester,
   input: CreateObjectInput,
-  mayPublishPublic: boolean
-): Promise<{
+  mayPublishPublic: boolean,
+  collection: CollectionDefault | null
+): {
   visibilityLevel: VisibilityLevel;
   grants: VisibilityGrant[];
   publicWidenRequested: boolean;
-}> {
+} {
   const explicitLevel = input.visibility?.level;
-  const grants = input.visibility?.grants ?? [];
+  const grants = createVisibilityGrants(input, collection);
 
   // A group object with no grants is invisible to everyone but the owner/admin
   // (equivalent to private without the semantics) — almost always a mistake.
@@ -333,24 +405,10 @@ async function resolveCreateVisibility(
     );
   }
 
-  let visibilityLevel: VisibilityLevel =
-    explicitLevel ??
-    (await collectionDefaultOutsideTx(input.collectionId)) ??
-    "private";
+  const visibilityLevel: VisibilityLevel =
+    explicitLevel ?? collection?.level ?? "private";
 
-  // A collection whose default is `group` can't be satisfied at create time:
-  // the create surface (library "New doc/artifact", the dialog takes only a
-  // title) authors no grants, and a grantless `group` is invisible to all but
-  // owner/admin. Rather than BLOCK creation from a group-default section
-  // (every seeded group collection would 400), fall back to `private`
-  // (owner-only) when the level was INHERITED from the collection default and
-  // no grants were supplied; the author then sets group visibility + grants
-  // via the Phase 3 visibility editor. An EXPLICIT grantless group still
-  // fails (the pre-transaction guard above + the assert below) — only the
-  // silent collection-default inheritance is softened here.
-  if (explicitLevel == null && visibilityLevel === "group" && grants.length === 0) {
-    visibilityLevel = "private";
-  }
+  assertPrivateCollectionVisibility(collection, visibilityLevel, grants);
 
   // Validate the RESOLVED level + grants BEFORE the transaction so an invalid
   // combination (e.g. an explicit `group` with no grants) fails without
@@ -371,6 +429,124 @@ async function resolveCreateVisibility(
   }
 
   return { visibilityLevel, grants, publicWidenRequested: false };
+}
+
+async function resolveCreateVisibilityOutsideTx(
+  req: Requester,
+  input: CreateObjectInput,
+  mayPublishPublic: boolean
+): Promise<ReturnType<typeof resolveCreateVisibilityForCollection>> {
+  // Resolve and authorize collection placement even when visibility is explicit.
+  // This is a fast-fail before agent screening/external I/O; create re-resolves
+  // the same policy under collection locks inside its write transaction.
+  const collection = await collectionDefaultOutsideTx(req, input.collectionId);
+  return resolveCreateVisibilityForCollection(
+    req,
+    input,
+    mayPublishPublic,
+    collection
+  );
+}
+
+async function resolveCreateVisibilityInTx(
+  tx: DbTransaction,
+  req: Requester,
+  input: CreateObjectInput,
+  mayPublishPublic: boolean
+): Promise<ReturnType<typeof resolveCreateVisibilityForCollection>> {
+  const collection = await collectionDefaultInTx(tx, req, input.collectionId);
+  return resolveCreateVisibilityForCollection(
+    req,
+    input,
+    mayPublishPublic,
+    collection
+  );
+}
+
+type ContentObjectSetValues = Partial<typeof contentObjects.$inferInsert>;
+
+function applyTitleAndTags(
+  patch: UpdatePatch,
+  setValues: ContentObjectSetValues
+): void {
+  if (patch.title !== undefined) {
+    if (!patch.title.trim()) throw new ValidationError("Title cannot be empty");
+    if (patch.title.trim().length > TITLE_MAX_LENGTH) {
+      throw new ValidationError(
+        `Title must be ${TITLE_MAX_LENGTH} characters or fewer`
+      );
+    }
+    setValues.title = patch.title;
+  }
+  if (patch.tags !== undefined) setValues.tags = patch.tags ?? [];
+}
+
+async function applyCollectionChangeInTx(
+  tx: DbTransaction,
+  req: Requester,
+  existing: ContentObjectDTO,
+  patch: UpdatePatch,
+  setValues: ContentObjectSetValues
+): Promise<void> {
+  if (patch.collectionId === undefined) return;
+  if (patch.collectionId != null) {
+    const collection = await assertCollectionWritableInTx(
+      tx,
+      req,
+      patch.collectionId,
+      existing.ownerUserId
+    );
+    if (
+      collection.ownerUserId != null &&
+      existing.visibilityLevel !== "private"
+    ) {
+      throw new ValidationError(
+        "Set content visibility to private before moving it into a private collection"
+      );
+    }
+  }
+  setValues.collectionId = patch.collectionId ?? null;
+}
+
+async function updateWithCollectionChange(
+  req: Requester,
+  existingId: string,
+  patch: UpdatePatch,
+  setValues: ContentObjectSetValues
+): Promise<ObjectRowAsText[]> {
+  return executeTransaction(async (tx) => {
+    const lockedRows = await tx
+      .select(objectSelectFields)
+      .from(contentObjects)
+      .where(eq(contentObjects.id, existingId))
+      .for("update")
+      .limit(1);
+    if (!lockedRows[0]) {
+      throw new NotFoundError("Content not found", { id: existingId });
+    }
+    const locked = rowToObjectDTO(lockedRows[0] as ObjectRowAsText);
+    assertCanEdit(req, locked.ownerUserId);
+    await applyCollectionChangeInTx(tx, req, locked, patch, setValues);
+    return (await tx
+      .update(contentObjects)
+      .set(setValues)
+      .where(eq(contentObjects.id, existingId))
+      .returning(objectSelectFields)) as ObjectRowAsText[];
+  }, "content.updateCollection");
+}
+
+function applyStatusChange(
+  patch: UpdatePatch,
+  setValues: ContentObjectSetValues
+): void {
+  if (patch.status === undefined) return;
+  if (patch.status === "published") {
+    throw new ValidationError(
+      "Cannot set status to 'published' via update — use the publish endpoint/tool instead",
+      { status: patch.status }
+    );
+  }
+  setValues.status = patch.status;
 }
 
 export const contentService = {
@@ -460,7 +636,15 @@ export const contentService = {
   async create(
     req: Requester,
     input: CreateObjectInput,
-    opts: { hasPublishPublicCapability?: boolean } = {}
+    opts: {
+      hasPublishPublicCapability?: boolean;
+      /**
+       * Trusted internal workflows may attribute a write to a machine while
+       * keeping ownership/authorization bound to `req` (OKF import). Never map a
+       * client-supplied value into this option.
+       */
+      attributionRequester?: Requester;
+    } = {}
   ): Promise<ContentObjectWithVersion> {
     assertCanCreate(req);
     assertValidCreateInput(input);
@@ -472,17 +656,17 @@ export const contentService = {
     );
 
     const ownerUserId = ownerFor(req);
+    const attributionRequester = opts.attributionRequester ?? req;
     // Use the shared resolvers so object-level provenance matches version-level
     // (snapshotInTx uses the same helpers): actor === 'agent' iff an agent id is
     // recorded (autonomous only); delegated agents record as 'human'.
-    const createdByActor = actorKindOf(req);
-    const createdByAgentId = agentIdOf(req);
+    const createdByActor = actorKindOf(attributionRequester);
+    const createdByAgentId = agentIdOf(attributionRequester);
 
-    // Resolve level + grants. An unauthorized public create is downgraded to
-    // private here (create-as-private, §26.4); `publicWidenRequested` then drives
-    // the post-commit `visibility_widen` queue below.
-    const { visibilityLevel, grants, publicWidenRequested } =
-      await resolveCreateVisibility(req, input, mayPublishPublic);
+    // Fast-fail invalid/inaccessible collection placement before screening.
+    // The result is deliberately not trusted for the write: the collection,
+    // grants, and default are re-resolved under locks inside the transaction.
+    await resolveCreateVisibilityOutsideTx(req, input, mayPublishPublic);
 
     // §28.3 — agent-authored bodies (a document's markdown AND an artifact's
     // code) are guardrails/PII-screened BEFORE any write, mirroring the agent
@@ -491,87 +675,112 @@ export const contentService = {
     // a pooled connection. Fail-closed: blocked or unscreenable content throws
     // ValidationError and nothing is created. The returned proof is asserted
     // inside `snapshotInTx` (issue #1118 item 3).
-    const screeningProof = await screenAgentBodyForWrite(req, input.body, null);
+    const screeningProof = await screenAgentBodyForWrite(
+      attributionRequester,
+      input.body,
+      null
+    );
 
-    const { object, version, s3Writes } = await executeTransaction(
-      async (tx) => {
-        const slug = await uniqueSlug(tx, input.title);
+    const { object, version, s3Writes, publicWidenRequested } =
+      await executeTransaction(
+        async (tx) => {
+          const { visibilityLevel, grants, publicWidenRequested } =
+            await resolveCreateVisibilityInTx(
+              tx,
+              req,
+              input,
+              mayPublishPublic
+            );
+          const slug = await uniqueSlug(tx, input.title);
 
-        // Translate a slug unique-violation that slips past uniqueSlug (a
-        // concurrent create racing the SELECT) into a typed ConflictError.
-        const inserted = await tx
-          .insert(contentObjects)
-          .values({
-            kind: input.kind,
-            title: input.title,
-            slug,
-            ownerUserId,
-            createdByActor,
-            createdByAgentId,
-            collectionId: input.collectionId ?? null,
-            visibilityLevel,
-            status: "draft",
-            // Typed JSONB must use the postgres.js cast pattern.
-            sourceRef: sql`${safeJsonbStringify(
-              input.sourceRef ?? { type: "none" }
-            )}::jsonb`,
-            tags: input.tags ?? [],
-          })
-          .returning(objectSelectFields)
-          .catch((e: unknown) => {
-            if (isUniqueViolation(e)) {
-              if (
-                uniqueConstraint(e) === "uq_content_capture_source" &&
-                input.sourceRef?.type === "capture"
-              ) {
+          // Translate a slug unique-violation that slips past uniqueSlug (a
+          // concurrent create racing the SELECT) into a typed ConflictError.
+          const inserted = await tx
+            .insert(contentObjects)
+            .values({
+              kind: input.kind,
+              title: input.title,
+              slug,
+              ownerUserId,
+              createdByActor,
+              createdByAgentId,
+              collectionId: input.collectionId ?? null,
+              visibilityLevel,
+              status: "draft",
+              // Typed JSONB must use the postgres.js cast pattern.
+              sourceRef: sql`${safeJsonbStringify(
+                input.sourceRef ?? { type: "none" }
+              )}::jsonb`,
+              tags: input.tags ?? [],
+            })
+            .returning(objectSelectFields)
+            .catch((e: unknown) => {
+              if (isUniqueViolation(e)) {
+                if (
+                  uniqueConstraint(e) === "uq_content_capture_source" &&
+                  input.sourceRef?.type === "capture"
+                ) {
+                  throw new ConflictError(
+                    "This capture session already created a content object",
+                    {
+                      provider: input.sourceRef.provider,
+                      externalId: input.sourceRef.externalId,
+                    }
+                  );
+                }
                 throw new ConflictError(
-                  "This capture session already created a content object",
-                  {
-                    provider: input.sourceRef.provider,
-                    externalId: input.sourceRef.externalId,
-                  }
+                  "A content object with this slug already exists",
+                  { slug }
                 );
               }
-              throw new ConflictError("A content object with this slug already exists", {
-                slug,
-              });
-            }
-            throw e;
-          });
+              throw e;
+            });
 
-        const row = inserted[0];
-        if (!row) {
-          throw new ConflictError("Failed to create content object", { slug });
-        }
+          const row = inserted[0];
+          if (!row) {
+            throw new ConflictError("Failed to create content object", {
+              slug,
+            });
+          }
 
-        // Reconcile grants against the RESOLVED level (enforces group-≥1-grant
-        // even when the level came from the collection default, and the
-        // non-group / private rules) — the same invariant `setLevelInTx` applies.
-        await visibilityService.applyGrantsForLevel(
-          tx,
-          row.id,
-          visibilityLevel,
-          grants
-        );
-
-        const dto = rowToObjectDTO(row as ObjectRowAsText);
-
-        if (input.body !== undefined) {
-          const snap = await snapshotInTx(
+          // Reconcile grants against the RESOLVED level (enforces group-≥1-grant
+          // even when the level came from the collection default, and the
+          // non-group / private rules) — the same invariant `setLevelInTx` applies.
+          await visibilityService.applyGrantsForLevel(
             tx,
-            req,
-            { id: dto.id, kind: input.kind },
-            { body: input.body, bodyFormat: input.bodyFormat },
-            { proof: screeningProof }
+            row.id,
+            visibilityLevel,
+            grants
           );
-          // Reflect the new head id without a re-select.
-          dto.currentVersionId = snap.version.id;
-          return { object: dto, version: snap.version, s3Writes: snap.s3Writes };
-        }
-        return { object: dto, version: null, s3Writes: [] };
-      },
-      "content.create"
-    );
+
+          const dto = rowToObjectDTO(row as ObjectRowAsText);
+
+          if (input.body !== undefined) {
+            const snap = await snapshotInTx(
+              tx,
+              attributionRequester,
+              { id: dto.id, kind: input.kind },
+              { body: input.body, bodyFormat: input.bodyFormat },
+              { proof: screeningProof }
+            );
+            // Reflect the new head id without a re-select.
+            dto.currentVersionId = snap.version.id;
+            return {
+              object: dto,
+              version: snap.version,
+              s3Writes: snap.s3Writes,
+              publicWidenRequested,
+            };
+          }
+          return {
+            object: dto,
+            version: null,
+            s3Writes: [],
+            publicWidenRequested,
+          };
+        },
+        "content.create"
+      );
 
     // §26.4 create-as-private (issue #1118 item 2): the object was created private
     // because the caller lacked public-publish authority — queue a durable widen
@@ -733,64 +942,32 @@ export const contentService = {
 
     // Typed against the table's insert shape so a column-name typo is a compile
     // error (a `Record<string, unknown>` would silently no-op an unknown key).
-    const setValues: Partial<typeof contentObjects.$inferInsert> = {
+    const setValues: ContentObjectSetValues = {
       updatedAt: new Date(),
     };
-    if (patch.title !== undefined) {
-      if (!patch.title.trim()) throw new ValidationError("Title cannot be empty");
-      // Mirror create()'s varchar(500) guard so an over-long title is a typed
-      // 400, not a raw Postgres 22001 error.
-      if (patch.title.trim().length > TITLE_MAX_LENGTH) {
-        throw new ValidationError(
-          `Title must be ${TITLE_MAX_LENGTH} characters or fewer`
-        );
-      }
-      setValues.title = patch.title;
-    }
-    // Coerce to `[]` (never NULL) so updated rows match the `create()` invariant
-    // (tags is always an array). Downstream `.length`/`.filter()` callers would
-    // otherwise throw a TypeError on a null tags column.
-    if (patch.tags !== undefined) setValues.tags = patch.tags ?? [];
-    if (patch.collectionId !== undefined) {
-      // Validate existence so an invalid id is a typed 400, not a raw FK
-      // violation. A null clears the collection (no existence check needed).
-      if (patch.collectionId != null) {
-        await assertCollectionExists(patch.collectionId);
-      }
-      setValues.collectionId = patch.collectionId ?? null;
-    }
-    if (patch.status !== undefined) {
-      // "published" is NOT a plain metadata transition — it must go through
-      // `publishService.publish()`, which creates the `content_publications`
-      // row, calls the destination adapter, emits `content.published`, and
-      // enforces the §26.4 public-publish gate. Writing it directly here
-      // (content:update alone, no content:publish_internal/publish_public)
-      // would leave `status: "published"` with none of that: a caller could
-      // mark content "published" while it was never actually published
-      // anywhere, and — for a caller who otherwise couldn't pass the gate —
-      // outside the audited/gated flow entirely. "draft" and "archived"
-      // remain plain metadata transitions.
-      if (patch.status === "published") {
-        throw new ValidationError(
-          "Cannot set status to 'published' via update — use the publish endpoint/tool instead",
-          { status: patch.status }
-        );
-      }
-      setValues.status = patch.status;
-    }
+    applyTitleAndTags(patch, setValues);
+    applyStatusChange(patch, setValues);
     // Slice-F presentation fields (cover gradient + emoji icon), validated at the
     // action boundary and merged as a typed partial (see presentationSetValues).
     Object.assign(setValues, presentationSetValues(patch));
 
-    const rows = await executeQuery(
-      (db) =>
-        db
-          .update(contentObjects)
-          .set(setValues)
-          .where(eq(contentObjects.id, existing.id))
-          .returning(objectSelectFields),
-      "content.update"
-    );
+    const rows =
+      patch.collectionId === undefined
+        ? await executeQuery(
+            (db) =>
+              db
+                .update(contentObjects)
+                .set(setValues)
+                .where(eq(contentObjects.id, existing.id))
+                .returning(objectSelectFields),
+            "content.update"
+          )
+        : await updateWithCollectionChange(
+            req,
+            existing.id,
+            patch,
+            setValues
+          );
     // Guard against a concurrent delete between load and update (TOCTOU): the
     // RETURNING yields no row, so surface a clean NotFoundError, not a TypeError.
     if (!rows[0]) throw new NotFoundError("Content not found", { id });
@@ -1058,6 +1235,7 @@ async function assertViewable(
   const viewable = await visibilityService.canView(req, {
     id: obj.id,
     ownerUserId: obj.ownerUserId,
+    collectionId: obj.collectionId,
     visibilityLevel: obj.visibilityLevel,
   });
   if (!viewable) throw new NotFoundError("Content not found", { ref });

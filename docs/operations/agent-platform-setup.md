@@ -112,6 +112,14 @@ cd infra/agent-image
 ENVIRONMENT=prod ./build-and-push.sh 2026-04-16-initial
 ```
 
+`build-and-push.sh` runs a build-time eval gate (#1161) and refuses to push an
+image it could not prove boots and answers a real turn. On a first deploy the
+web tier and router Lambda do not exist yet, so the runtime probe cannot run —
+pass `ALLOW_UNVERIFIED_IMAGE=1` for this bootstrap build only, and let the gate
+run normally on every build after it. See
+[Agent Image Build-Time Eval Gate](./agent-image-build-gate.md) for the checks,
+how the probe's signed broker context is minted, and the bypass flags.
+
 #### 2.4 Deploy AgentCore Runtime
 
 Re-deploy the stack with the image tag to create the AgentCore Runtime:
@@ -261,6 +269,8 @@ To update the agent (new model config, system prompt changes, etc.):
 ```bash
 cd infra/agent-image
 # Edit Dockerfile, openclaw.json, psd-system-prompt.md as needed
+# The eval gate boot-verifies the image before pushing — see
+# docs/operations/agent-image-build-gate.md
 ./build-and-push.sh 2026-04-17-update-models
 
 # Redeploy with new image tag
@@ -280,7 +290,8 @@ the Dockerfile (the enforcement gate that keeps these from regressing).
 
 | Artifact | Pin | Verification |
 |----------|-----|--------------|
-| OpenClaw base | `ghcr.io/openclaw/openclaw@sha256:3814fb…` (2026.6.11) | Immutable digest in `FROM` |
+| OpenClaw base | `ghcr.io/openclaw/openclaw@sha256:6a31d4…` (2026.7.1) | Immutable digest in `FROM` |
+| amazon-bedrock provider plugin | `2026.7.1` | `npm pack` pin; must stay ≥ the minimum in `check_config_consistency.py` or prompt caching silently turns off |
 | bun | `1.2.12` | `bun-linux-aarch64.zip` SHA256 vs `BUN_SHA256` ARG |
 | uv | `0.7.9` | `uv-aarch64-unknown-linux-gnu.tar.gz` SHA256 vs `UV_SHA256` ARG |
 | Google Workspace CLI (`gws`) | `0.22.5` | `.tar.gz` SHA256 vs `GWS_SHA256` ARG |
@@ -321,7 +332,7 @@ release (Morning Brief "chat deadline expired"; nested
 workspace double-nesting fix is present — no Docker required, just `curl`/`jq`/`gh`:
 
 ```bash
-REPO=openclaw/openclaw; TAG=2026.6.11        # target the latest stable release
+REPO=openclaw/openclaw; TAG=2026.7.1         # target the latest stable release
 TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:$REPO:pull&service=ghcr.io" | jq -r .token)
 
 # Multi-arch index digest (this is what goes in FROM):
@@ -343,6 +354,37 @@ gh api "repos/$REPO/compare/v$TAG...52280351bb53" --jq '{ahead_by, fix_present: 
 Then update the `FROM` digest and the header block in `infra/agent-image/Dockerfile`,
 and **always** finish with the Morning Brief smoke test (below) — a trivial
 "respond OK" prompt masks session-completion regressions.
+
+### Direct-AWS skill credential boundary
+
+The pinned OpenClaw release sanitizes the environment for every model-launched
+`exec` subprocess. In particular, it removes inherited `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and the ECS/AgentCore container-
+credential URI variables. This is intentional: forwarding those values would
+let arbitrary model-authored commands print or reuse the execution-role
+credentials.
+
+`psd-tts` and `psd-hyperframes` therefore do not instantiate AWS SDK clients in
+the model-facing subprocess. They call two fixed endpoints on the root-owned
+loopback relay in `mantle_proxy.py`. The relay inherits the AgentCore execution-
+role credential chain, validates bounded operation-specific payloads, and can
+only call Polly `SynthesizeSpeech` or the configured HyperFrames Lambda. It
+returns synthesized audio or the Lambda result, never credential values or a
+caller-selected AWS target. HyperFrames also rejects a model-supplied owner:
+the relay resolves `ownerEmail` through the signed
+`/api/agent/invocation-identity` web boundary and injects it only after
+verification. During a staggered rollout to an older web tier, it authenticates
+the installed token and proof through the existing model broker's fixed
+unsupported-path response before decoding the owner claim; any 403 or
+unexpected response fails closed. Owner resolution has one 30-second total
+budget across the dedicated and compatibility routes. The model-facing render
+client then allows 825 seconds for owner resolution, Lambda connection, its
+780-second response budget, and transport margin. Finalization gives active
+privileged requests a matching 830-second drain ceiling while retaining a
+separate 120-second workspace-flush budget, so a proxy restart cannot orphan
+an accepted Lambda render. Keep future direct-AWS skills behind the same kind
+of fixed-operation boundary; do not add AWS credential keys to OpenClaw's exec
+allowlist.
 
 ## Rich Chat output — cards, charts, button callbacks
 

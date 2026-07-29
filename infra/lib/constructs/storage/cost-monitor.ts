@@ -6,7 +6,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
-import * as path from 'path';
+import * as path from 'node:path';
 import { Construct } from 'constructs';
 import { ServiceRoleFactory } from '../security/service-role-factory';
 import { Environment } from '../security/types';

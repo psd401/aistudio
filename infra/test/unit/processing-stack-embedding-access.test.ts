@@ -1,5 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
-import { Template } from 'aws-cdk-lib/assertions';
+import { Match, Template } from 'aws-cdk-lib/assertions';
 import { ProcessingStack } from '../../lib/processing-stack';
 
 interface PolicyStatement {
@@ -41,14 +41,16 @@ function synthesizeProcessingStack(): Template {
       'arn:aws:rds:us-east-1:123456789012:cluster:aistudio-dev',
     databaseSecretArn:
       'arn:aws:secretsmanager:us-east-1:123456789012:secret:aistudio-dev',
+    googleContentOAuthSecretArn:
+      'arn:aws:secretsmanager:us-east-1:123456789012:secret:aistudio/dev/google-content-oauth-AbCdEf',
   });
   return Template.fromStack(stack);
 }
 
-describe('ProcessingStack embedding visual-artifact access', () => {
-  const template = synthesizeProcessingStack();
-  const statements = policyStatements(template.toJSON());
+const template = synthesizeProcessingStack();
+const statements = policyStatements(template.toJSON());
 
+describe('ProcessingStack embedding visual-artifact access', () => {
   it('grants read-only access to repository artifacts without the broken generic S3 condition', () => {
     const statement = statements.find(
       (candidate) => candidate.Sid === 'RepositoryVisualArtifactRead',
@@ -105,6 +107,23 @@ describe('ProcessingStack embedding visual-artifact access', () => {
     });
   });
 
+  it('bounds embedding concurrency at the Lambda and SQS poller boundaries', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      ReservedConcurrentExecutions: 5,
+      Role: Match.anyValue(),
+      VpcConfig: Match.objectLike({
+        SecurityGroupIds: Match.anyValue(),
+        SubnetIds: Match.anyValue(),
+      }),
+    });
+    template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
+      BatchSize: 1,
+      ScalingConfig: { MaximumConcurrency: 5 },
+    });
+  });
+});
+
+describe('ProcessingStack scheduled roster synchronization', () => {
   it('routes group-sync alarms through the shared monitoring topic', () => {
     const alarms = Object.values(
       template.findResources('AWS::CloudWatch::Alarm'),
@@ -115,7 +134,7 @@ describe('ProcessingStack embedding visual-artifact access', () => {
       'psd-group-sync-staleness-dev',
     ]) {
       const alarm = alarms.find((resource) =>
-        JSON.stringify(resource).includes(`\"AlarmName\":\"${alarmName}\"`),
+        JSON.stringify(resource).includes(`"AlarmName":"${alarmName}"`),
       );
       expect(alarm).toBeDefined();
       expect(JSON.stringify(alarm)).toContain(
@@ -128,5 +147,76 @@ describe('ProcessingStack embedding visual-artifact access', () => {
     expect(JSON.stringify(topics)).not.toContain('psd-group-sync-alarms-dev');
     const subscriptions = template.findResources('AWS::SNS::Subscription');
     expect(JSON.stringify(subscriptions)).not.toContain('"Protocol":"email"');
+  });
+
+  it('provisions a singleton nightly OneRoster sync with failure and staleness alarms', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      FunctionName: 'psd-oneroster-sync-dev',
+      ReservedConcurrentExecutions: 1,
+      Timeout: 900,
+      MemorySize: 1024,
+      Architectures: ['arm64'],
+      VpcConfig: {
+        SecurityGroupIds: Match.anyValue(),
+        SubnetIds: Match.anyValue(),
+      },
+      Tags: Match.arrayWith([
+        { Key: 'Environment', Value: 'dev' },
+        { Key: 'ManagedBy', Value: 'cdk' },
+      ]),
+    });
+    template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', {
+      MaximumRetryAttempts: 0,
+      MaximumEventAgeInSeconds: 1_800,
+    });
+    template.hasResourceProperties('AWS::Events::Rule', {
+      Description: 'Nightly ClassLink OneRoster full sync (#1310)',
+      ScheduleExpression: 'cron(0 10 * * ? *)',
+      State: 'ENABLED',
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'psd-oneroster-sync-failure-dev',
+      Threshold: 1,
+      TreatMissingData: 'notBreaching',
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'psd-oneroster-sync-staleness-dev',
+      Threshold: 1,
+      EvaluationPeriods: 2,
+      DatapointsToAlarm: 2,
+      TreatMissingData: 'breaching',
+    });
+  });
+
+  it('scopes OneRoster secret reads and conditions metric publication', () => {
+    const secretStatement = statements.find(
+      (candidate) => candidate.Sid === 'OneRosterCredentialSecretAccess',
+    );
+    expect(secretStatement).toMatchObject({
+      Effect: 'Allow',
+      Action: 'secretsmanager:GetSecretValue',
+      Condition: {
+        StringEquals: {
+          'aws:ResourceTag/Environment': 'dev',
+        },
+      },
+    });
+    expect(JSON.stringify(secretStatement?.Resource)).toContain(
+      ':secret:aistudio-dev-oneroster-*',
+    );
+
+    const metricsStatement = statements.find(
+      (candidate) => candidate.Sid === 'OneRosterSyncMetrics',
+    );
+    expect(metricsStatement).toMatchObject({
+      Effect: 'Allow',
+      Action: 'cloudwatch:PutMetricData',
+      Resource: '*',
+      Condition: {
+        StringEquals: {
+          'cloudwatch:namespace': 'AIStudio/RosterSync',
+        },
+      },
+    });
   });
 });

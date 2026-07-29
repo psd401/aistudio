@@ -1,0 +1,38 @@
+[
+  {
+    "route": "/api/agent/workspace-execute",
+    "method": "POST",
+    "request_body": {
+      "scope": "user",
+      "argv": {
+        "0": "gmail",
+        "1": "+draft",
+        "2": "--to",
+        "3": "principal@psd401.net",
+        "4": "--subject",
+        "5": "Projector follow-up",
+        "6": "--body",
+        "7": {
+          "$text_equals": "The library projector is working again."
+        }
+      }
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "stdout": "{\"id\":\"draft-projector-follow-up\",\"message\":{\"threadId\":\"thread-48291\"}}\n",
+        "stderr": ""
+      }
+    }
+  },
+  {
+    "route": "/api/agent/failures",
+    "method": "POST",
+    "response": {
+      "status": 200,
+      "body": {
+        "ok": true
+      }
+    }
+  }
+]

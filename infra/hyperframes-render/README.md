@@ -7,8 +7,9 @@ of the **`psd-hyperframes`** OpenClaw agent skill (issue #1175).
 
 The native render stack (Chromium/FFmpeg/`hyperframes` CLI) lives **only here** — never in the
 agent image, whose AgentCore Firecracker overlay-mount snapshotter cannot carry it. The thin
-agent skill (`infra/agent-image/skills/psd-hyperframes/`) invokes this function synchronously
-via the AWS SDK.
+agent skill (`infra/agent-image/skills/psd-hyperframes/`) asks the root-owned fixed-operation
+relay to invoke this function synchronously, so the model-facing subprocess never receives
+reusable execution-role credentials.
 
 ## Files
 
@@ -27,7 +28,7 @@ via the AWS SDK.
   "html": "<!doctype html>…",   // required — full composition
   "css": "…",                    // optional — injected before </head>
   "js": "…",                     // optional — injected before </body>
-  "durationSeconds": 3,          // required — cap-validated (<= 60)
+  "durationSeconds": 3,          // required — cap-validated (<= 180)
   "fps": 30,                     // optional — default 30, range 1..60
   "width": 1920, "height": 1080, // optional — metadata + cap check
   "userEmail": "person@psd401.net", // required — scopes the S3 key
@@ -47,22 +48,26 @@ cd infra/hyperframes-render && bun install && bun test
 ## Standalone render smoke (docker run + RIE) — pre-deploy
 
 Produces a playable MP4 from the sample scene with **no S3/AWS** (dryRun), writing it to a
-bind-mounted host directory. Run from `infra/hyperframes-render`:
+bind-mounted host directory. Run from `infra/` so the build context includes the canonical
+`validated-fs.cjs` used by the handler:
 
 ```bash
 # 1. Build the image (x86_64 to match the Lambda architecture).
-docker build --platform linux/amd64 -t hyperframes-render:smoke .
+docker build --platform linux/amd64 \
+  -f hyperframes-render/Dockerfile \
+  -t hyperframes-render:smoke .
 
 # 2. Run it with the RIE, mounting a host output dir the dryRun render writes into.
 mkdir -p /tmp/hf-out
 docker run --rm -p 9000:8080 \
+  -e LAMBDA_TASK_ROOT=/var/task \
   -e HYPERFRAMES_OUTPUT_DIR=/tmp/out -v /tmp/hf-out:/tmp/out \
   --name hyperframes-render-smoke hyperframes-render:smoke &
 
 # 3. Invoke with the sample event (dryRun:true).
 sleep 2
 curl -s -XPOST "http://localhost:9000/2015-03-31/functions/function/invocations" \
-  -d @sample-events/sample-scene.json | tee /tmp/hf-out/result.json
+  -d @hyperframes-render/sample-events/sample-scene.json | tee /tmp/hf-out/result.json
 
 # 4. Verify a playable MP4 was produced.
 ls -lh /tmp/hf-out/*.mp4

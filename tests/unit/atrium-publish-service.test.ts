@@ -329,7 +329,7 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-describe("publishService.publish", () => {
+function definePublishServicePublishSuite1Part1() {
   it("throws NotFoundError when the object does not exist", async () => {
     publishableRows = [];
     await expect(
@@ -408,6 +408,59 @@ describe("publishService.publish", () => {
     expect(setLevelInTxCalls).toBe(0);
   });
 
+  // --- `widenOnly` (#1336, Codex review round 2) -----------------------------
+  // PublishMenu re-reads visibility before confirming a widen, but a re-read is
+  // not a lock. `widenOnly` re-decides the same question INSIDE the transaction,
+  // against the FOR-UPDATE-locked level, so no race window remains.
+
+  it("widenOnly SKIPS the visibility write when the locked level is already broader", async () => {
+    // The doc was Private when the dialog opened (target: internal) but became
+    // Public before the transaction. Applying the level would silently NARROW a
+    // public object — the opposite of what the user confirmed.
+    txResults = [
+      [{ id: "o1", visibilityLevel: "public" }], // FOR UPDATE lock
+      [{ id: "pub1" }], // publication upsert RETURNING
+    ];
+    const result = await publishService.publish(admin, "o1", {
+      destination: "intranet",
+      visibility: { level: "internal", widenOnly: true },
+    });
+    expect(result.publicationId).toBe("pub1");
+    // No visibility write at all — and the publish still proceeds.
+    expect(setLevelInTxCalls).toBe(0);
+  });
+
+  it("widenOnly APPLIES the visibility write when it genuinely widens", async () => {
+    txResults = [[{ id: "o1", visibilityLevel: "private" }], [{ id: "pub1" }]];
+    await publishService.publish(admin, "o1", {
+      destination: "intranet",
+      visibility: { level: "internal", widenOnly: true },
+    });
+    expect(setLevelInTxCalls).toBe(1);
+    expect(lastSetLevelVisibility).toMatchObject({ level: "internal" });
+  });
+
+  }
+
+function definePublishServicePublishSuite1Part2() {it("widenOnly is a NO-OP at equal breadth (already exactly at the target)", async () => {
+    txResults = [[{ id: "o1", visibilityLevel: "internal" }], [{ id: "pub1" }]];
+    await publishService.publish(admin, "o1", {
+      destination: "intranet",
+      visibility: { level: "internal", widenOnly: true },
+    });
+    expect(setLevelInTxCalls).toBe(0);
+  });
+
+  it("WITHOUT widenOnly the supplied level is applied verbatim (REST/MCP + approval replay narrow deliberately)", async () => {
+    txResults = [[{ id: "o1", visibilityLevel: "public" }], [{ id: "pub1" }]];
+    await publishService.publish(admin, "o1", {
+      destination: "intranet",
+      visibility: { level: "internal" },
+    });
+    expect(setLevelInTxCalls).toBe(1);
+    expect(lastSetLevelVisibility).toMatchObject({ level: "internal" });
+  });
+
   it("does NOT gate a no-op re-publish of ALREADY-public content (idempotent, race-safe)", async () => {
     // The locked row is already public → re-publishing with visibility.level 'public'
     // changes nothing, so a non-admin owner without publish_public passes WITHOUT
@@ -421,7 +474,17 @@ describe("publishService.publish", () => {
         destination: "intranet",
         visibility: { level: "public" },
       })
-    ).resolves.toEqual({ publicationId: "pub1", publishedVersionId: "v1" });
+    ).resolves.toEqual({
+      publicationId: "pub1",
+      publishedVersionId: "v1",
+      // #1336 C3: the intranet reader link is DERIVED from the slug (that
+      // adapter records a null external_ref by design) and returned so surfaces
+      // can show the author where the content went.
+      readerUrl: "/c/s1",
+      // Already public → re-saving public is NOT a new exposure, so the
+      // allow-then-notify signal stays false.
+      becamePublic: false,
+    });
   });
 
   it("admin past the gate to an unimplemented (stub) public destination fails BEFORE any write (no visibility leak)", async () => {
@@ -480,7 +543,9 @@ describe("publishService.publish", () => {
     expect(adapterPublishCalls).toBe(0);
   });
 
-  it("publishes public_web LIVE for an admin, runs the adapter, and persists its external_ref (Phase 7)", async () => {
+  }
+
+function definePublishServicePublishSuite1Part3() {it("publishes public_web LIVE for an admin, runs the adapter, and persists its external_ref (Phase 7)", async () => {
     // public_web is now a live reader-backed adapter. An admin passes the gate;
     // the publish commits, the adapter returns the anonymous reader URL, and the
     // service persists it as external_ref via a follow-up UPDATE.
@@ -488,7 +553,15 @@ describe("publishService.publish", () => {
     const result = await publishService.publish(admin, "o1", {
       destination: "public_web",
     });
-    expect(result).toEqual({ publicationId: "pub1", publishedVersionId: "v1" });
+    expect(result).toEqual({
+      publicationId: "pub1",
+      publishedVersionId: "v1",
+      // #1336 C3: the adapter's external_ref is now also RETURNED, not merely
+      // persisted — previously the public URL was computed and then dropped.
+      readerUrl: PUBLIC_WEB_REF,
+      // No visibility supplied → no transition to report.
+      becamePublic: false,
+    });
     // The public_web adapter ran with the object's slug and returned the URL.
     expect(publicWebPublishCalls).toBe(1);
     expect(lastPublicWebSlug).toBe("s1");
@@ -527,7 +600,12 @@ describe("publishService.publish", () => {
     const result = await publishService.publish(owner, "o1", {
       destination: "intranet",
     });
-    expect(result).toEqual({ publicationId: "pub1", publishedVersionId: "v1" });
+    expect(result).toEqual({
+      publicationId: "pub1",
+      publishedVersionId: "v1",
+      readerUrl: "/c/s1",
+      becamePublic: false,
+    });
     expect(adapterPublishCalls).toBe(1);
     // No visibility provided -> setLevelInTx must NOT run (publish doesn't widen).
     expect(setLevelInTxCalls).toBe(0);
@@ -568,6 +646,8 @@ describe("publishService.publish", () => {
     expect(result).toEqual({
       publicationId: "pub1",
       publishedVersionId: "v-reviewed",
+      readerUrl: "/c/s1",
+      becamePublic: false,
     });
     expect(getVersionByIdMock).toHaveBeenCalled();
     // Retrieval must index the PUBLISHED (pinned) version, not the head — else it
@@ -575,7 +655,9 @@ describe("publishService.publish", () => {
     expect(indexObjectMock).toHaveBeenCalledWith("o1", "v-reviewed");
   });
 
-  it("throws ValidationError when the pinned versionId does not belong to the object", async () => {
+  }
+
+function definePublishServicePublishSuite1Part4() {it("throws ValidationError when the pinned versionId does not belong to the object", async () => {
     // getById scopes by object and returns null for a version of another object.
     getVersionByIdMock.mockResolvedValueOnce(null);
     await expect(
@@ -613,9 +695,18 @@ describe("publishService.publish", () => {
       publishService.publish(owner, "o1", { destination: "intranet" })
     ).rejects.toThrow(ValidationError);
   });
-});
+}
 
-describe("publishService.unpublish", () => {
+const definePublishServicePublishSuite1 = () => {
+  definePublishServicePublishSuite1Part1()
+  definePublishServicePublishSuite1Part2()
+  definePublishServicePublishSuite1Part3()
+  definePublishServicePublishSuite1Part4()
+};
+
+describe("publishService.publish", definePublishServicePublishSuite1);
+
+function definePublishServiceUnpublishSuite2Part1() {
   it("throws NotFoundError when the object does not exist", async () => {
     publishableRows = [];
     await expect(
@@ -720,7 +811,9 @@ describe("publishService.unpublish", () => {
     expect(result).toEqual({ unpublished: true });
   });
 
-  it("allows unpublishing public_web when the caller has an explicit publish_public capability", async () => {
+  }
+
+function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing public_web when the caller has an explicit publish_public capability", async () => {
     txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
     const result = await publishService.unpublish(owner, "o1", "public_web", {
       hasPublishPublicCapability: true,
@@ -797,4 +890,11 @@ describe("publishService.unpublish", () => {
     expect(statuses).toContain("unpublished");
     expect(statuses).toContain("draft");
   });
-});
+}
+
+const definePublishServiceUnpublishSuite2 = () => {
+  definePublishServiceUnpublishSuite2Part1()
+  definePublishServiceUnpublishSuite2Part2()
+};
+
+describe("publishService.unpublish", definePublishServiceUnpublishSuite2);

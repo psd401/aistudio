@@ -33,7 +33,7 @@ jest.mock("@/utils/roles", () => ({
 
 jest.mock("@/lib/repositories/content-platform/config", () => ({
   getContentPlatformConfig: jest.fn(async () => ({ enabled: false, readV2Enabled: false })),
-  isContentReadV2Active: jest.fn(() => false),
+  isCanonicalRepositoryUploadActive: jest.fn(() => false),
 }));
 
 jest.mock("@/lib/repositories/search-service", () => {

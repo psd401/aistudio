@@ -95,19 +95,22 @@ export interface AgentRunLimits {
   maxSteps: number;
   /** Wall-clock timeout in seconds. */
   timeoutSeconds: number;
-  /** Per-run cost cap in whole US cents, or null for no cap. */
-  costCapCents: number | null;
+  /** Mandatory server-owned per-run cost cap in whole US cents. */
+  costCapCents: number;
 }
 
 /** Hard ceilings the route clamps author-supplied limits to (defense in depth). */
 export const AGENT_LIMIT_CEILINGS = {
   maxSteps: 50,
   timeoutSeconds: 900,
+  costCapCents: 10_000,
+  maxOutputTokens: 32_768,
 } as const;
 
 /** Defaults applied when an assistant has no explicit limit configured. */
 export const AGENT_LIMIT_DEFAULTS = {
   maxSteps: 10,
   timeoutSeconds: 300,
-  costCapCents: null as number | null,
+  costCapCents: 500,
+  maxOutputTokens: 8_192,
 } as const;

@@ -41,7 +41,7 @@ const config = nexusRouterConfigSchema.parse({
   specialists: { instructionModels: ["gemini-flash"] },
 })
 
-describe("Assistant Architect model router", () => {
+const defineAssistantArchitectModelRouterSuite1 = () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockGetAIModelById.mockImplementation(async (id: number) => models.find(model => model.id === id) ?? null)
@@ -151,4 +151,6 @@ describe("Assistant Architect model router", () => {
     expect(result.modelId).toBe("nova-micro")
     expect(result.metadata.proposedModelId).toBe("claude-sonnet")
   })
-})
+};
+
+describe("Assistant Architect model router", defineAssistantArchitectModelRouterSuite1)

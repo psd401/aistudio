@@ -1,0 +1,10 @@
+id: canva-ideas-without-design
+skill: psd-canva
+level: L1
+workspace: pure
+suite: capability
+prompt: "Give me three short concept ideas for an EVAL-1426 staff flyer. Do not connect to Canva, list designs, create a design, upload an asset, or export anything."
+trials: 3
+graders:
+  - {"type":"no_route_called","route":"/api/agent/canva"}
+  - {"type":"output_match","pattern":"(?is)(?:1[.)].*2[.)].*3[.)]|three)"}

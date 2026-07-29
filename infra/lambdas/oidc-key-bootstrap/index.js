@@ -148,7 +148,7 @@ exports.handler = async (event, context) => {
     )
   } catch (error) {
     // This standalone Lambda cannot import the Next.js logger.
-    console.error("OIDC signing key bootstrap failed", error) // eslint-disable-line no-console
+    console.error("OIDC signing key bootstrap failed", error)
     await respond(
       event,
       context,

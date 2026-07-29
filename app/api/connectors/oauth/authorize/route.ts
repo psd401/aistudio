@@ -130,7 +130,7 @@ export async function GET(req: Request): Promise<Response> {
     }
 
     // 4. Load OAuth credentials from Secrets Manager
-    const credentials = await loadOAuthCredentials(server.credentialsKey)
+    const credentials = await loadOAuthCredentials(server.credentialsKey, server.url)
 
     if (!credentials.authorizationEndpointUrl) {
       log.error("OAuth credentials missing authorizationEndpointUrl", {

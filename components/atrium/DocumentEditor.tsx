@@ -28,10 +28,12 @@
  * stable conversation id.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useEditor, EditorContent, ReactNodeViewRenderer } from "@tiptap/react";
+import type { Editor } from "@tiptap/react";
 import { Collaboration } from "@tiptap/extension-collaboration";
+import type * as Y from "yjs";
 import { Markdown } from "tiptap-markdown";
 import type { Node as TiptapNode, Extensions } from "@tiptap/core";
 import { getSchemaExtensions } from "@/lib/content/collab/editor-extensions";
@@ -42,6 +44,7 @@ import { makeAuthorTag } from "@/lib/content/collab/provenance";
 import { useUser } from "@/components/auth/user-provider";
 import { EditorToolbar } from "./EditorToolbar";
 import { PublishMenu } from "./PublishMenu";
+import { CopyableLink } from "./CopyableLink";
 import { EditableSheetTitle } from "./EditableSheetTitle";
 import { EditorBubbleMenu } from "./EditorBubbleMenu";
 import { DocumentCover } from "./DocumentCover";
@@ -52,6 +55,7 @@ import { SuggestionMode, useSuggestionState } from "./suggestion-mode";
 import { CommentSidebar } from "./CommentSidebar";
 import { usePresence, type MarginAvatar, type LocalPresenceUser } from "./use-presence";
 import { useCollabSession, type CollabStatus } from "./use-collab-session";
+import { useProvenancePref } from "./use-provenance-pref";
 import { renderColorFor, initialsFromName, type PresenceUser } from "@/lib/atrium/presence";
 import { acceptAllSuggestions } from "@/lib/content/collab/suggestions";
 import "@/styles/atrium-content.css";
@@ -198,10 +202,13 @@ function buildLocalUser(
 /** The snapshot/publish feedback caption below the desk (amber for pending). */
 function StatusCaption({
   message,
+  messageUrl,
   actionError,
   pendingApproval,
 }: {
   message: string | null;
+  /** Reader URL for a successful publish (#1336 C3), shown as a copyable link. */
+  messageUrl: string | null;
   actionError: boolean;
   pendingApproval: boolean;
 }): React.JSX.Element | null {
@@ -218,6 +225,12 @@ function StatusCaption({
       data-tone={tone}
     >
       {message}
+      {messageUrl && (
+        <>
+          {" — "}
+          <CopyableLink url={messageUrl} testId="publish-reader-url" />
+        </>
+      )}
     </p>
   );
 }
@@ -292,6 +305,7 @@ function MeridianDesk({
   byline,
   body,
   comments,
+  commentsOpen,
 }: {
   sheetRef: React.RefObject<HTMLDivElement | null>;
   margins: MarginAvatar[];
@@ -302,6 +316,13 @@ function MeridianDesk({
   byline: string;
   body: React.ReactNode;
   comments: React.ReactNode;
+  /**
+   * Whether the 296px comment rail is expanded (#1336 B3). When collapsed the
+   * column is `display: none` — NOT unmounted — so `CommentSidebar` keeps
+   * feeding the topbar its open-comment count, and the desk's
+   * `justify-content` re-centers the sheet for free.
+   */
+  commentsOpen: boolean;
 }): React.JSX.Element {
   return (
     <div className="mer-editor-desk">
@@ -327,7 +348,13 @@ function MeridianDesk({
           {body}
         </div>
       </div>
-      <div className="mer-comments">{comments}</div>
+      <div
+        className="mer-comments"
+        data-open={commentsOpen ? "true" : "false"}
+        data-testid="comment-rail"
+      >
+        {comments}
+      </div>
     </div>
   );
 }
@@ -343,12 +370,15 @@ function PanelLayout({
   controls,
   editorBody,
   comments,
+  commentsOpen,
   statusCaption,
 }: {
   presence: React.ReactNode;
   controls: React.ReactNode;
   editorBody: React.ReactNode;
   comments: React.ReactNode;
+  /** Whether the comment block is expanded (#1336 B3). */
+  commentsOpen: boolean;
   statusCaption: React.ReactNode;
 }): React.JSX.Element {
   return (
@@ -358,7 +388,11 @@ function PanelLayout({
         <div className="mer-ectl-group">{controls}</div>
       </div>
       {editorBody}
-      <div className="w-full border-t pt-3">{comments}</div>
+      {/* Collapsed with `hidden`, NOT unmounted: CommentSidebar owns the thread
+          data and keeps feeding the toggle its open-comment count. */}
+      <div className="w-full border-t pt-3" hidden={!commentsOpen}>
+        {comments}
+      </div>
       {statusCaption}
     </div>
   );
@@ -384,6 +418,7 @@ function FullPageLayout({
   byline,
   editorBody,
   comments,
+  commentsOpen,
   statusCaption,
 }: {
   docTitle: string;
@@ -400,6 +435,8 @@ function FullPageLayout({
   byline: string;
   editorBody: React.ReactNode;
   comments: React.ReactNode;
+  /** Whether the comment rail is expanded (#1336 B3). */
+  commentsOpen: boolean;
   statusCaption: React.ReactNode;
 }): React.JSX.Element {
   return (
@@ -421,10 +458,107 @@ function FullPageLayout({
         byline={byline}
         body={editorBody}
         comments={comments}
+        commentsOpen={commentsOpen}
       />
       {statusCaption}
     </div>
   );
+}
+
+/**
+ * Topbar chip toggling the comment rail, badged with the open-comment count
+ * (#1336 B3). Mirrors the `mer-ectl` + `data-active` pattern the Suggesting
+ * control uses.
+ */
+function CommentsToggle({
+  open,
+  openCount,
+  onToggle,
+}: {
+  open: boolean;
+  openCount: number;
+  onToggle: () => void;
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      className="mer-ectl"
+      data-active={open ? "true" : "false"}
+      aria-pressed={open}
+      onClick={onToggle}
+      data-testid="comments-toggle"
+      title={open ? "Hide comments" : "Show comments"}
+    >
+      <span aria-hidden="true">💬</span>
+      <span data-testid="comments-open-count">{openCount}</span>
+      <span className="sr-only">
+        {openCount === 1 ? "1 open comment" : `${openCount} open comments`}
+      </span>
+    </button>
+  );
+}
+
+/**
+ * Topbar chip toggling the provenance rail (#1336 B7). Sits next to Suggesting
+ * and mirrors its `mer-ectl` + `data-active` pattern.
+ */
+function ProvenanceToggle({
+  on,
+  onToggle,
+}: {
+  on: boolean;
+  onToggle: () => void;
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      className="mer-ectl"
+      data-active={on ? "true" : "false"}
+      aria-pressed={on}
+      onClick={onToggle}
+      data-testid="provenance-toggle"
+      title={on ? "Hide who wrote what" : "Show who wrote what"}
+    >
+      <span aria-hidden="true">🎨</span> Authorship
+    </button>
+  );
+}
+
+/**
+ * Comment-rail visibility (#1336 B3). The rail used to occupy its full 296px
+ * unconditionally, even on a document with no comments at all. It now defaults
+ * to open ONLY when the document actually has open threads, and the topbar chip
+ * overrides that either way. `CommentSidebar` owns the thread data and reports
+ * the count up, so this never triggers a second fetch.
+ */
+function useCommentsRail() {
+  const [openCount, setOpenCount] = useState(0);
+  // `null` = the first count has not arrived yet, so no default has been picked.
+  const [userChoice, setUserChoice] = useState<boolean | null>(null);
+  const [autoOpen, setAutoOpen] = useState(false);
+
+  const handleOpenCountChange = useCallback((next: number) => {
+    setOpenCount(next);
+    // The auto-default is STICKY-ON, not first-count-only: once a document has
+    // had an open thread, the rail's default stays open. That is deliberate and
+    // covers the case where the user starts the document's first thread — the
+    // rail appears to show the thread they just created, rather than filing it
+    // somewhere invisible.
+    //
+    // This cannot reopen a rail the user deliberately closed: an explicit toggle
+    // sets `userChoice`, which takes precedence over `autoOpen` from then on
+    // (see `commentsOpen` below). `autoOpen` only ever supplies the default for
+    // a user who has not expressed a preference on this document.
+    setAutoOpen((prev) => prev || next > 0);
+  }, []);
+
+  const commentsOpen = userChoice ?? autoOpen;
+  const toggleComments = useCallback(
+    () => setUserChoice(!commentsOpen),
+    [commentsOpen]
+  );
+
+  return { openCount, commentsOpen, toggleComments, handleOpenCountChange };
 }
 
 /**
@@ -445,32 +579,60 @@ function useSyncedTitle(title?: string): [string, (next: string) => void] {
   return [docTitle, setDocTitle];
 }
 
-export function DocumentEditor({
-  idOrSlug,
-  userId,
-  layout = "page",
-  title,
-  eyebrow,
-  breadcrumb,
-  historyControl,
-  settingsControl,
+/**
+ * The editor surface: the ProseMirror content plus the floating bubble toolbar,
+ * wrapped in the `.atrium-editor` element that carries the two CSS-only display
+ * flags.
+ */
+function EditorSurface({
+  editor,
   askAgentHref,
-  coverGradient,
-  icon,
-}: DocumentEditorProps) {
-  // The collab session (Y.Doc + provider + status + canEdit) lives in a dedicated
-  // hook so this component stays focused on layout + presence composition.
-  const { ydoc, provider, status, canEdit, docNameRef } =
-    useCollabSession(idOrSlug);
-  // The sheet wrap — positioning context for the margin presence avatars.
-  const sheetRef = useRef<HTMLDivElement | null>(null);
+  provenanceOn,
+  suggesting,
+}: {
+  editor: Editor | null;
+  /** Where the bubble-menu "✦ Ask agent" navigates. */
+  askAgentHref?: string;
+  /** Provenance rail shown (#1336 B7). */
+  provenanceOn: boolean;
+  /** Suggesting mode active (#1336 B6) — drives the document-level mode cue. */
+  suggesting: boolean;
+}): React.JSX.Element {
+  return (
+    <div
+      className="atrium-editor min-w-0"
+      // CSS-only gating (#1336 B7 / B6): both attributes drive presentation
+      // rules in atrium-content.css. No plugin, schema, decoration or Yjs write
+      // is involved — the authorship marks and rail decorations stay in the
+      // document either way.
+      data-provenance={provenanceOn ? "on" : "off"}
+      data-suggesting={suggesting ? "true" : "false"}
+    >
+      <EditorContent editor={editor} className="atrium-content" />
+      {/* Mounted as soon as the editor exists — NOT gated on `canEdit` (#1336
+          B4). Gating the mount meant the plugin was registered only after the
+          collab token round-trip resolved, a window long enough that users
+          reliably selected text into a dead toolbar. `EditorBubbleMenu`'s own
+          `shouldShow` already returns false unless `e.isEditable`, so a
+          read-only viewer still never sees it — the permission gate is
+          unchanged, only its location. */}
+      {editor && (
+        <EditorBubbleMenu editor={editor} askAgentHref={askAgentHref ?? "#"} />
+      )}
+    </div>
+  );
+}
 
-  const { user } = useUser();
-
-  // The editor binds to the Y.Doc directly; the provider syncs that same doc, so
-  // the editor is created once (deps: []) and is unaffected by provider timing.
-  // The collaboration cursor is wired later against the ready provider via
-  // usePresence (editor.registerPlugin) so this single-creation invariant holds.
+/**
+ * Create the Atrium TipTap editor and keep its editability in sync.
+ *
+ * The editor binds to the Y.Doc directly; the provider syncs that same doc, so
+ * the editor is created ONCE (deps: []) and is unaffected by provider timing.
+ * The collaboration cursor is wired later against the ready provider via
+ * `usePresence` (`editor.registerPlugin`), so that single-creation invariant
+ * holds.
+ */
+function useAtriumEditor(ydoc: Y.Doc, userId: number, editable: boolean) {
   const editor = useEditor(
     {
       immediatelyRender: false,
@@ -498,14 +660,70 @@ export function DocumentEditor({
     []
   );
 
-  // Apply edit permission to the editor once the session resolves.
-  useEffect(() => {
-    editor?.setEditable(canEdit);
-  }, [editor, canEdit]);
+  // `useLayoutEffect`, not `useEffect` (#1336 B4): child passive effects run
+  // BEFORE the parent's, so when `editable` flipped true the BubbleMenu child
+  // registered its ProseMirror plugin first and its constructor-time
+  // `shouldShow` sampled `editor.isEditable === false`. `setEditable` does not
+  // re-evaluate `shouldShow` on its own (`updatePluginViews` early-returns when
+  // neither the selection nor the doc changed), so the toolbar stayed dead until
+  // some unrelated doc-changing transaction — e.g. adding a comment — forced a
+  // re-evaluation. Running this layout effect first means the plugin constructor
+  // observes the correct editability.
+  //
+  // DEPENDENCY (re-verify on @tiptap/react upgrades — checked at 3.27.1):
+  // this ordering argument holds because `@tiptap/react`'s BubbleMenu registers
+  // its plugin in a PASSIVE effect. If a future version moved that registration
+  // into a layout effect, child-before-parent ordering would apply within the
+  // layout tier too and this fix alone would not suffice. The user-visible
+  // invariant is pinned end-to-end by the `atrium-editor-sync-status` flow in
+  // tests/e2e/atrium-editor-polish.functional.spec.ts (bubble toolbar on the
+  // FIRST selection of a fresh session, mouse + keyboard, no comment added) —
+  // that spec, not this comment, is what catches a regression here. A unit test
+  // cannot cover it: TipTap is ESM-only (not jest-loadable, see
+  // docs/learnings/testing/2026-06-26-next-jest-cannot-transform-esm-node-modules.md)
+  // and a jsdom re-derivation of React's effect ordering would test the
+  // framework, not this code.
+  useLayoutEffect(() => {
+    editor?.setEditable(editable);
+  }, [editor, editable]);
+
+  return editor;
+}
+
+export function DocumentEditor({
+  idOrSlug,
+  userId,
+  layout = "page",
+  title,
+  eyebrow,
+  breadcrumb,
+  historyControl,
+  settingsControl,
+  askAgentHref,
+  coverGradient,
+  icon,
+}: DocumentEditorProps) {
+  // The collab session (Y.Doc + provider + status + canEdit) lives in a dedicated
+  // hook so this component stays focused on layout + presence composition.
+  const { ydoc, provider, status, canEdit, synced, docNameRef } =
+    useCollabSession(idOrSlug);
+  // Typing is enabled only once the persisted document state has actually
+  // arrived (#1336 B5). Before the first sync the Y.Doc is empty, so an editable
+  // sheet showed a blank body that accepted keystrokes which were then merged
+  // against the real content the moment it landed.
+  const editable = canEdit && synced;
+  // The sheet wrap — positioning context for the margin presence avatars.
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+
+  const { user } = useUser();
+
+  const editor = useAtriumEditor(ydoc, userId, editable);
 
   // Snapshot / publish / unpublish, with shared busy + success/error feedback.
   const {
     message,
+    messageUrl,
+    actionSeq,
     actionError,
     pendingApproval,
     busy,
@@ -516,6 +734,13 @@ export function DocumentEditor({
 
   // Live track-changes toggle state + pending-suggestion count for the toolbar.
   const { suggesting, count: suggestionCount } = useSuggestionState(editor);
+
+  // Comment-rail visibility + the topbar chip's open-comment badge (#1336 B3).
+  const { openCount, commentsOpen, toggleComments, handleOpenCountChange } =
+    useCommentsRail();
+
+  // Provenance-rail visibility, per viewer (#1336 B7).
+  const [provenanceOn, toggleProvenance] = useProvenancePref(userId);
 
   // Real presence — the awareness roster (topbar + margin avatars), inline remote
   // carets, and the live "agent is writing" signal. Memoized so the awareness /
@@ -535,52 +760,58 @@ export function DocumentEditor({
   const [docTitle, setDocTitle] = useSyncedTitle(title);
   const crumbs = breadcrumb ?? [];
 
-  const toolbar = (
-    <EditorToolbar
-      status={status}
-      canEdit={canEdit}
-      busy={busy}
-      suggesting={suggesting}
-      suggestionCount={suggestionCount}
-      onToggleSuggesting={() => editor?.commands.toggleSuggesting()}
-      onAcceptAll={() => {
-        if (editor) acceptAllSuggestions(editor);
-      }}
-    />
+  // The topbar control cluster common to both layouts: the Suggesting toolbar,
+  // the two #1336 view toggles, and — for editors only — the primary "Publish ▾"
+  // split control, rendered LAST per the spec topbar.
+  const coreControls = (
+    <>
+      <EditorToolbar
+        status={status}
+        canEdit={canEdit}
+        busy={busy}
+        suggesting={suggesting}
+        suggestionCount={suggestionCount}
+        onToggleSuggesting={() => editor?.commands.toggleSuggesting()}
+        onAcceptAll={() => {
+          if (editor) acceptAllSuggestions(editor);
+        }}
+      />
+      <ProvenanceToggle on={provenanceOn} onToggle={toggleProvenance} />
+      <CommentsToggle
+        open={commentsOpen}
+        openCount={openCount}
+        onToggle={toggleComments}
+      />
+    </>
   );
-
-  // The primary "Publish ▾" split control (destination + publish + unpublish +
-  // snapshot). Editors only; rendered LAST in the control row per the spec topbar.
   const publishControl = canEdit ? (
     <PublishMenu
+      idOrSlug={idOrSlug}
       busy={busy}
+      refreshKey={actionSeq}
       onSnapshot={handleSnapshot}
       onPublish={handlePublish}
       onUnpublish={handleUnpublish}
     />
   ) : null;
 
-  const bubble =
-    editor && canEdit ? (
-      <EditorBubbleMenu editor={editor} askAgentHref={askAgentHref ?? "#"} />
-    ) : null;
-
   const statusCaption = (
-    <StatusCaption
-      message={message}
-      actionError={actionError}
-      pendingApproval={pendingApproval}
-    />
+    <StatusCaption {...{ message, messageUrl, actionError, pendingApproval }} />
   );
 
   const editorBody = (
-    <div className="atrium-editor min-w-0">
-      <EditorContent editor={editor} className="atrium-content" />
-      {bubble}
-    </div>
+    <EditorSurface
+      editor={editor}
+      askAgentHref={askAgentHref}
+      provenanceOn={provenanceOn}
+      suggesting={suggesting}
+    />
   );
   const comments = (
-    <CommentSidebar idOrSlug={idOrSlug} editor={editor} canEdit={canEdit} />
+    <CommentSidebar
+      {...{ idOrSlug, editor, canEdit }}
+      onOpenCountChange={handleOpenCountChange}
+    />
   );
 
   const presence = (
@@ -592,9 +823,10 @@ export function DocumentEditor({
     return (
       <PanelLayout
         presence={presence}
-        controls={<>{toolbar}{publishControl}</>}
+        controls={<>{coreControls}{publishControl}</>}
         editorBody={editorBody}
         comments={comments}
+        commentsOpen={commentsOpen}
         statusCaption={statusCaption}
       />
     );
@@ -608,7 +840,14 @@ export function DocumentEditor({
       agentWriting={agentWriting}
       roster={roster}
       localUserId={userId}
-      controls={<>{toolbar}{historyControl}{settingsControl}{publishControl}</>}
+      controls={
+        <>
+          {coreControls}
+          {historyControl}
+          {settingsControl}
+          {publishControl}
+        </>
+      }
       sheetRef={sheetRef}
       margins={margins}
       cover={
@@ -631,6 +870,7 @@ export function DocumentEditor({
       byline={bylineText(roster, userId, agentWriting, status)}
       editorBody={editorBody}
       comments={comments}
+      commentsOpen={commentsOpen}
       statusCaption={statusCaption}
     />
   );

@@ -31,6 +31,10 @@ jest.mock("@/lib/db/drizzle/nexus-conversations", () => ({
   getConversationById: (...a: unknown[]) => mockGetConversationById(...a),
 }))
 
+jest.mock("@/lib/repositories/content-platform/legacy-retirement-response", () => ({
+  legacyContentRetirementResponse: jest.fn(async () => null),
+}))
+
 jest.mock("@/lib/logger", () => ({
   createLogger: jest.fn(() => ({
     info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),

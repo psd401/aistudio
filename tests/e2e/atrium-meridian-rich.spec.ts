@@ -39,7 +39,7 @@ const ARTIFACT_ID =
 const SHOT_DIR = "docs/verification/atrium-meridian";
 const EMOJI = "🎯";
 
-test.describe("Atrium Meridian rich content (authenticated)", () => {
+function defineAtriumMeridianRichContentAuthenticatedSuite1Part1() {
   test.skip(
     process.env.PLAYWRIGHT_AUTH_ENABLED !== "true",
     "Requires the authed host dev server (collab WS) + seeded doc — see tests/e2e/fixtures/atrium-editor-seed.sql"
@@ -67,18 +67,20 @@ test.describe("Atrium Meridian rich content (authenticated)", () => {
       });
 
       // --- Cover band + emoji (DB metadata, persisted via updateContentAction) ---
-      // Fresh doc → "Add cover"; a doc that already carries a cover (idempotent
-      // re-runs) → "Change cover". Handle both, then open the picker.
+      // Fresh doc → "Add cover" creates the band; a doc that already carries one
+      // (idempotent re-runs) already has it. Either way the "Change cover" pill
+      // is the ONLY way to open the picker — adding a cover deliberately no
+      // longer auto-opens it (#1336 B1, which used to show the clipped popover
+      // as the very first impression). Wait for the pill rather than racing a
+      // `count()` against the band's optimistic re-render.
       const addCover = page.locator('[data-testid="editor-add-cover"]');
       if (await addCover.count()) {
         await addCover.click();
-      } else {
-        await page.locator('[data-testid="editor-change-cover"]').click();
       }
+      const changeCover = page.locator('[data-testid="editor-change-cover"]');
+      await expect(changeCover).toBeVisible({ timeout: 30000 });
+      await changeCover.click();
       const picker = page.locator('[data-testid="editor-cover-picker"]');
-      if (!(await picker.count())) {
-        await page.locator('[data-testid="editor-change-cover"]').click();
-      }
       await expect(picker).toBeVisible({ timeout: 15000 });
 
       // Pick the "forest" preset gradient and set the emoji.
@@ -167,7 +169,9 @@ test.describe("Atrium Meridian rich content (authenticated)", () => {
     }
   });
 
-  test("artifact library cards render the live-thumbnail scaffold (gradient fallback; scaled frame when the sandbox origin is configured)", async ({
+  }
+
+function defineAtriumMeridianRichContentAuthenticatedSuite1Part2() {test("artifact library cards render the live-thumbnail scaffold (gradient fallback; scaled frame when the sandbox origin is configured)", async ({
     browser,
   }) => {
     const context = await browser.newContext({
@@ -237,4 +241,11 @@ test.describe("Atrium Meridian rich content (authenticated)", () => {
       await context.close();
     }
   });
-});
+}
+
+const defineAtriumMeridianRichContentAuthenticatedSuite1 = () => {
+  defineAtriumMeridianRichContentAuthenticatedSuite1Part1()
+  defineAtriumMeridianRichContentAuthenticatedSuite1Part2()
+};
+
+test.describe("Atrium Meridian rich content (authenticated)", defineAtriumMeridianRichContentAuthenticatedSuite1);

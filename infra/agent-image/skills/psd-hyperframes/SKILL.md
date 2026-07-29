@@ -20,8 +20,9 @@ Lambda synchronously, and returns the MP4 URL — same delivery + reply contract
 `public-images/<email>/` prefix and returned as an unsigned, public-by-link HTTPS URL (the
 UUID in the path makes it unguessable — same model as Google Drive "anyone with the link").
 
-**Identity.** Requires `--user <caller-email>`. Pass the email verbatim from the
-`[caller: Name <email>]` header of the user turn — it scopes the S3 upload path.
+**Identity.** Do not pass an email or owner selector. The root relay resolves
+the owner from the installed signed invocation context through the trusted web
+tier and injects it after the model-facing request has been validated.
 
 ## Limits (v1)
 
@@ -90,7 +91,6 @@ its path with `--file`. Small scenes can be passed inline with `--html`.
 
 ```bash
 node /opt/psd-skills/psd-hyperframes/render.js \
-  --user <email> \
   --file scene.html \
   --duration 3 \
   [--css-file extra.css] [--js-file extra.js] \
@@ -151,25 +151,25 @@ Notes:
 
 ## Errors
 
-- **`bad_args`** — missing/invalid `--user`, no composition, bad `--duration`/`--fps`/dimensions,
+- **`bad_args`** — no composition, bad `--duration`/`--fps`/dimensions,
   a valueless `--css-file`/`--js-file`, an `--audio-url` that isn't `https://` / `data:audio/`,
-  a combined html+css+js payload over the 4 MB cap, or a
-  composition whose declared `data-duration` exceeds the 60 s cap or whose root
+  a combined html+css+js payload over the 4 MiB cap, a JSON-escaped request over
+  Lambda's 6 MiB synchronous invocation cap, or a
+  composition whose declared `data-duration` exceeds the 180 s cap or whose root
   `data-width`/`data-height` exceeds the 3840 px cap. Fix and retry.
-- **`misconfigured`** — the render function name (`HYPERFRAMES_RENDER_FUNCTION`) is not injected.
-  Ask an administrator to redeploy the agent platform.
-- **`invoke_failed`** — the render Lambda could not be invoked (permissions/throttling). Retry
-  once; if it persists, report it.
+- **`invoke_failed`** — the fixed relay or render Lambda could not complete the invocation
+  (runtime configuration, permissions, throttling, or transport failure). Retry once; if it
+  persists, report it.
 - **`render_failed`** — the render Lambda ran but produced no video (composition error, Chromium
   crash, or a scene too heavy for the timeout). Simplify the scene or lower `--fps`, then retry.
 
 ## Operational Notes
 
-- Renders synchronously via the AWS SDK (`lambda:InvokeFunction` on the render function ARN
-  only) using the AgentCore execution-role credentials — no API key.
-- The MP4 lands at `s3://$WORKSPACE_BUCKET/public-images/<email>/<uuid>.mp4` with `video/mp4`
-  content type; the `public-images/` prefix has a bucket-policy ALLOW for `s3:GetObject` to
-  `Principal: *`. Other prefixes stay private.
+- Renders synchronously through a root-owned, fixed-operation loopback relay. The relay's
+  AWS SDK has `lambda:InvokeFunction` on the configured render function ARN only; the
+  model-facing subprocess receives neither reusable AgentCore credentials nor an API key.
+- The trusted render function publishes the MP4 under the signed caller's
+  public artifact prefix. The model role has no S3 authority.
 - The returned URL is unsigned and does not expire — anyone with the link can fetch until the
   object is deleted.
 - `--dry-run` is a diagnostic flag (renders without uploading, returns a local path + byte

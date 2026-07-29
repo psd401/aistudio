@@ -10,6 +10,9 @@
  */
 
 const mockCompleteMultipartUpload = jest.fn()
+jest.mock("@/lib/repositories/content-platform/legacy-retirement-response", () => ({
+  legacyContentRetirementResponse: jest.fn(async () => null),
+}))
 jest.mock("@/lib/aws/document-upload", () => {
   const actual = jest.requireActual("@/lib/aws/document-upload")
   return {

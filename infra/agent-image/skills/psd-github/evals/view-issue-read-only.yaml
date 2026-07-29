@@ -1,0 +1,12 @@
+id: github-view-issue-read-only
+skill: psd-github
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use GitHub read-only access to view issue 1426 in psd401/aistudio and report its title. Do not comment, edit, close, merge, or change anything."
+trials: 3
+fixtures:
+  - fixtures/view-issue-read-only.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/github-execute","method":"POST","body":{"argv.0":{"exact":"issue"},"argv.1":{"exact":"view"},"argv.2":{"exact":"1426"},"argv.3":{"exact":"--repo"},"argv.4":{"exact":"psd401/aistudio"}}}
+  - {"type":"output_match","pattern":"Task suite: all remaining skills"}

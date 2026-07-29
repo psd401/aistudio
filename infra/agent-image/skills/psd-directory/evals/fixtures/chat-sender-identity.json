@@ -1,0 +1,22 @@
+[
+  {
+    "route": "/api/agent/directory-lookup",
+    "method": "POST",
+    "request_body": {
+      "chatId": "users/100000000000000000001"
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "found": true,
+        "personId": "100000000000000000001",
+        "displayName": "Eval Directory User",
+        "email": "eval.directory.user@psd401.net",
+        "title": "Synthetic Fixture User",
+        "department": "Technology Services",
+        "organization": "Peninsula School District",
+        "cached": false
+      }
+    }
+  }
+]

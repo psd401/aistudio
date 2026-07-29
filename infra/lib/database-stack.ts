@@ -7,19 +7,92 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as cr from 'aws-cdk-lib/custom-resources';
-import * as path from 'path';
-import * as crypto from 'crypto';
-import * as fs from 'fs';
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
+import { execSync } from 'node:child_process';
 import {
   AuroraCostOptimizer,
   AuroraCostDashboard,
   VPCProvider,
   EnvironmentConfig,
+  ServiceRoleFactory,
 } from './constructs';
+import { validatedFs } from "./validated-fs";
 
 export interface DatabaseStackProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
+}
+
+/**
+ * Recursively collect the db-init Lambda's build inputs: TypeScript sources
+ * (excluding declaration files) plus package.json/tsconfig.json manifests,
+ * at any depth — the Lambda's tsconfig has no restrictive `include`, so a
+ * nested source like lambda/lib/helper.ts is a compilation input too.
+ * Generated and installed state (node_modules/, dist/) is skipped.
+ * Returns paths relative to the starting directory, sorted for
+ * deterministic hashing.
+ */
+function collectLambdaSourceFiles(dir: string, prefix = ''): { rel: string; abs: string }[] {
+  const out: { rel: string; abs: string }[] = [];
+  const entries = validatedFs.readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const entry of entries) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const abs = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+      out.push(...collectLambdaSourceFiles(abs, rel));
+    } else if (entry.isFile()
+      && ((entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts'))
+        || entry.name === 'package.json' || entry.name === 'tsconfig.json')) {
+      out.push({ rel, abs });
+    }
+  }
+  return out;
+}
+
+/**
+ * Compute the custom asset hash for the db-init Lambda.
+ *
+ * With assetHashType CUSTOM, CDK's default source hash is fully replaced, so
+ * any input left out of this hash can change without the asset ever being
+ * rebuilt or redeployed. It must therefore cover everything that shapes the
+ * bundled Lambda:
+ *  - Lambda sources (*.ts, recursively), package.json, tsconfig.json — the
+ *    bundler compiles these at synth time; omitting them meant a handler-only
+ *    fix kept the old asset hash and silently never reached deployed
+ *    environments
+ *  - migrations.json + schema files, which the bundler copies in from the
+ *    parent directory (outside the asset source path)
+ * Generated artifacts (*.js, *.d.ts, bun.lock, node_modules/, dist/) are
+ * intentionally excluded: they are not bundling inputs. Every file is hashed
+ * with its relative path, so renames change the hash too.
+ *
+ * @param databaseDir Absolute path to infra/database
+ */
+export function computeDbInitAssetHash(databaseDir: string): string {
+  const hash = crypto.createHash('sha256');
+  for (const f of collectLambdaSourceFiles(path.join(databaseDir, 'lambda'))) {
+    hash.update(`${f.rel}\0`);
+    hash.update(validatedFs.readFileSync(f.abs, 'utf8'));
+  }
+  hash.update(validatedFs.readFileSync(path.join(databaseDir, 'migrations.json'), 'utf8'));
+  const schemaDir = path.join(databaseDir, 'schema');
+  // isSymbolicLink() as well as isFile(): a Dirent reports the directory
+  // entry's own kind and does not follow links. Without the second test a
+  // symlinked schema file would drop silently out of the hash, and CDK would
+  // reuse a stale migration Lambda asset when only that file changed.
+  const schemaEntries = validatedFs.readdirSync(schemaDir, { withFileTypes: true })
+    .filter(e => e.isFile() || e.isSymbolicLink())
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const e of schemaEntries) {
+    hash.update(`${e.name}\0`);
+    hash.update(validatedFs.readFileSync(path.join(schemaDir, e.name), 'utf8'));
+  }
+  return hash.digest('hex').substring(0, 16);
 }
 
 export class DatabaseStack extends cdk.Stack {
@@ -190,6 +263,19 @@ export class DatabaseStack extends cdk.Stack {
     // connection pooling (max 20 connections, idle timeout 20s), making
     // RDS Proxy redundant. Saves ~$81/month. See issue #832.
 
+    this.costDashboard = this.configureCostOptimization(props, restoreFromSnapshot);
+
+    this.configureDatabaseInitialization(props, restoreFromSnapshot, dbSecret);
+
+    this.configureConversationRetention(props, restoreFromSnapshot, dbSecret, vpc);
+
+    this.configureOutputs(props, restoreFromSnapshot);
+  }
+
+  private configureCostOptimization(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean
+  ): AuroraCostDashboard | undefined {
     // Add cost optimization features (skip for snapshot restoration as AuroraCostOptimizer requires DatabaseCluster)
     if (!restoreFromSnapshot && this.cluster instanceof rds.DatabaseCluster) {
       new AuroraCostOptimizer(this, 'CostOptimizer', {
@@ -225,12 +311,20 @@ export class DatabaseStack extends cdk.Stack {
       });
 
       // Export Aurora metrics for consolidated monitoring dashboard
-      this.costDashboard = new AuroraCostDashboard(this, 'CostDashboard', {
+      return new AuroraCostDashboard(this, 'CostDashboard', {
         cluster: this.cluster,
         environment: props.environment,
       });
     }
 
+    return undefined;
+  }
+
+  private configureDatabaseInitialization(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean,
+    dbSecret: secretsmanager.ISecret
+  ): void {
     // Database initialization Lambda (SKIP when restoring from snapshot)
     // Note: Snapshot already contains schema and data, so no initialization needed
     if (!restoreFromSnapshot) {
@@ -253,22 +347,11 @@ export class DatabaseStack extends cdk.Stack {
         ],
       });
 
-      // Compute asset hash that includes migrations.json and schema files
-      // CDK's default hash only covers infra/database/lambda/, but the bundler
-      // copies in schema/ and migrations.json from the parent directory.
-      // Without this, CDK reuses stale Lambda assets when only migrations change.
-      const migrationsPath = path.join(__dirname, '../database/migrations.json');
-      const schemaDir = path.join(__dirname, '../database/schema');
-      const externalHash = crypto.createHash('sha256');
-      externalHash.update(fs.readFileSync(migrationsPath, 'utf8'));
-      const schemaFiles = fs.readdirSync(schemaDir).sort();
-      for (const f of schemaFiles) {
-        const filePath = path.join(schemaDir, f);
-        if (fs.statSync(filePath).isFile()) {
-          externalHash.update(fs.readFileSync(filePath, 'utf8'));
-        }
-      }
-      const migrationAssetHash = externalHash.digest('hex').substring(0, 16);
+      // Custom asset hash covering everything that shapes the bundled Lambda:
+      // sources + package.json/tsconfig (compiled at synth time) and the
+      // migrations.json/schema files the bundler copies in from the parent
+      // directory. See computeDbInitAssetHash for why nothing may be omitted.
+      const migrationAssetHash = computeDbInitAssetHash(path.join(__dirname, '../database'));
 
       // Database initialization Lambda
       // Note: Lambda doesn't need to be in VPC since it uses RDS Data API
@@ -291,7 +374,6 @@ export class DatabaseStack extends cdk.Stack {
             local: {
               tryBundle(outputDir: string) {
                 try {
-                  const execSync = require('child_process').execSync;
                   const lambdaDir = path.join(__dirname, '../database/lambda');
 
                   // Run npm install and build
@@ -372,6 +454,202 @@ export class DatabaseStack extends cdk.Stack {
       }
     }
 
+  }
+
+  private configureConversationRetention(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean,
+    dbSecret: secretsmanager.ISecret,
+    vpc: ec2.IVpc
+  ): void {
+    const config = EnvironmentConfig.get(props.environment);
+
+    // =====================================================================
+    // Nexus conversation retention sweep (Issue #1330)
+    // =====================================================================
+    // Nightly Lambda that hard-deletes Nexus conversations whose last message
+    // is older than the admin-configured NEXUS_CONVERSATION_RETENTION_DAYS
+    // setting, unless the user flagged them Keep (is_saved) or pinned them.
+    //
+    // Ships INERT: migration 137 seeds that setting empty, and the handler
+    // exits as a no-op for a missing/empty/zero/negative/non-numeric value.
+    // Enabling it is a settings change in /admin/settings — no deploy — and
+    // clearing the value disables it again just as immediately.
+    //
+    // Modelled on AgentTelemetryPrune in agent-platform-stack.ts. Skipped on
+    // the snapshot-restore path: those clusters are one-off restore
+    // experiments and must never get a scheduled destructive job.
+    if (!restoreFromSnapshot) {
+      // The documents bucket lives in StorageStack, which is created after
+      // this stack. Read its name from SSM (deploy-time resolution) rather
+      // than a cross-stack prop, mirroring processing-stack.ts and
+      // frontend-stack-ecs.ts — this avoids inverting the stack ordering.
+      const documentsBucketName = ssm.StringParameter.valueForStringParameter(
+        this, `/aistudio/${props.environment}/documents-bucket-name`
+      );
+
+      const retentionRole = ServiceRoleFactory.createLambdaRole(this, 'NexusConversationRetentionRole', {
+        functionName: 'psd-nexus-conversation-retention',
+        environment: props.environment,
+        region: this.region,
+        account: this.account,
+        // vpcEnabled:false + the managed VPC policy attached below, per the
+        // AgentTelemetryPrune pattern — the factory's VPC policy shape is not
+        // what the Lambda service requires for ENI management.
+        vpcEnabled: false,
+        additionalPolicies: [
+          new iam.PolicyDocument({
+            statements: [
+              new iam.PolicyStatement({
+                sid: 'AuroraConnect',
+                effect: iam.Effect.ALLOW,
+                actions: ['secretsmanager:GetSecretValue'],
+                resources: [dbSecret.secretArn],
+              }),
+              new iam.PolicyStatement({
+                // Bucket-level listing is required to enumerate object
+                // VERSIONS: the documents bucket is versioned, so a plain
+                // DeleteObject only writes a delete marker and would leave the
+                // real content recoverable after a "permanent" deletion.
+                sid: 'DocumentsBucketListVersions',
+                effect: iam.Effect.ALLOW,
+                actions: ['s3:ListBucket', 's3:ListBucketVersions'],
+                resources: [`arn:${this.partition}:s3:::${documentsBucketName}`],
+              }),
+              new iam.PolicyStatement({
+                // Object-level grant is written explicitly instead of via the
+                // factory's s3Buckets option: that path attaches an
+                // aws:ResourceTag condition which never resolves for object
+                // ARNs and denies every object operation at runtime.
+                //
+                // Scope note: this is bucket-wide because it genuinely has to
+                // be. Conversation-owned objects live under three deterministic
+                // prefixes (conversations/, v2/generated-images/,
+                // repositories/), but legacy `documents.url` rows — which the
+                // sweep must also clean up — use `<userId>/<timestamp>-<file>`,
+                // a shape no IAM resource pattern can express. The explicit
+                // Deny below is the backstop instead.
+                sid: 'DocumentsBucketDeleteVersions',
+                effect: iam.Effect.ALLOW,
+                actions: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
+                resources: [`arn:${this.partition}:s3:::${documentsBucketName}/*`],
+              }),
+              new iam.PolicyStatement({
+                // Hard backstop against a future key-derivation bug in the
+                // Lambda: namespaces this sweep has no business touching are
+                // denied outright, and an explicit Deny cannot be overridden.
+                // Without this, a regression in documentUrlToObjectKey or the
+                // eligibility predicate would have full-bucket blast radius.
+                sid: 'DenyForeignNamespaces',
+                effect: iam.Effect.DENY,
+                actions: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
+                resources: [
+                  `arn:${this.partition}:s3:::${documentsBucketName}/atrium/*`,
+                  `arn:${this.partition}:s3:::${documentsBucketName}/public-images/*`,
+                  `arn:${this.partition}:s3:::${documentsBucketName}/v2/uploads/*`,
+                  `arn:${this.partition}:s3:::${documentsBucketName}/v2/generated-documents/*`,
+                ],
+              }),
+            ],
+          }),
+        ],
+      });
+      retentionRole.addManagedPolicy(
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+      );
+
+      const retentionFunctionName = `psd-nexus-conversation-retention-${props.environment}`;
+
+      // Explicit LogGroup named exactly /aws/lambda/<functionName> so the
+      // retention policy applies to the group Lambda actually writes to.
+      const retentionLogGroup = new logs.LogGroup(this, 'NexusConversationRetentionLogGroup', {
+        logGroupName: `/aws/lambda/${retentionFunctionName}`,
+        retention: config.monitoring.logRetention,
+        removalPolicy: props.environment === 'prod'
+          ? cdk.RemovalPolicy.RETAIN
+          : cdk.RemovalPolicy.DESTROY,
+      });
+
+      const retentionLambdaDir = path.join(__dirname, '..', 'lambdas', 'nexus-conversation-retention');
+      const retentionLambda = new lambda.Function(this, 'NexusConversationRetentionLambda', {
+        functionName: retentionFunctionName,
+        // Singleton sweep: two concurrent runs could race on the same
+        // conversation's storage and rows.
+        reservedConcurrentExecutions: 1,
+        runtime: lambda.Runtime.NODEJS_20_X,
+        handler: 'index.handler',
+        code: lambda.Code.fromAsset(retentionLambdaDir, {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  execSync('bun install && bunx tsc', { cwd: retentionLambdaDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: retentionLambdaDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: retentionLambdaDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        }),
+        memorySize: 512,
+        timeout: cdk.Duration.minutes(15),
+        architecture: lambda.Architecture.ARM_64,
+        role: retentionRole,
+        logGroup: retentionLogGroup,
+        vpc,
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        environment: {
+          ENVIRONMENT: props.environment,
+          DATABASE_HOST: this.cluster.clusterEndpoint.hostname,
+          DATABASE_SECRET_ARN: dbSecret.secretArn,
+          DATABASE_NAME: 'aistudio',
+          DOCUMENTS_BUCKET_NAME: documentsBucketName,
+          // Per-run cap. Bounds the blast radius of a misconfigured retention
+          // window: the first night after enabling can delete at most this
+          // many conversations, and the backlog drains over subsequent runs.
+          SWEEP_BATCH_LIMIT: '500',
+        },
+      });
+      cdk.Tags.of(retentionLambda).add('Environment', props.environment);
+      cdk.Tags.of(retentionLambda).add('ManagedBy', 'cdk');
+
+      const retentionSchedule = new events.Rule(this, 'NexusConversationRetentionSchedule', {
+        description: 'Nightly 05:00 UTC - hard-delete stale, unkept, unpinned Nexus conversations (no-op unless NEXUS_CONVERSATION_RETENTION_DAYS is set)',
+        schedule: events.Schedule.cron({ minute: '0', hour: '5' }),
+        targets: [new eventsTargets.LambdaFunction(retentionLambda)],
+      });
+      cdk.Tags.of(retentionSchedule).add('Environment', props.environment);
+      cdk.Tags.of(retentionSchedule).add('ManagedBy', 'cdk');
+
+      new cdk.CfnOutput(this, 'NexusConversationRetentionFunctionName', {
+        value: retentionLambda.functionName,
+        description: 'Invoke with {"dryRun": true} to preview retention candidates without deleting',
+      });
+    }
+
+  }
+
+  private configureOutputs(
+    props: DatabaseStackProps,
+    restoreFromSnapshot: boolean
+  ): void {
     // Outputs
     if (!restoreFromSnapshot) {
       new cdk.CfnOutput(this, 'ClusterEndpoint', {

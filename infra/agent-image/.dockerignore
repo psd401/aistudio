@@ -27,6 +27,12 @@ node_modules/
 .idea/
 *.swp
 
+# Local environment files may contain credentials and must never enter the image
+.env
+.env.*
+**/.env
+**/.env.*
+
 # Build-time eval-gate probe artifacts (issue #1161) — trend data, not image content
 .build-probes/
 

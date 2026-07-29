@@ -121,6 +121,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId, pa
               id,
               destination: input.destination,
               publishedVersionId: result.publishedVersionId,
+              readerUrl: result.readerUrl,
             },
             meta: { requestId },
           },

@@ -3,6 +3,7 @@ import { createLogger } from '@/lib/logger';
 import type { UIMessage } from 'ai';
 import { generateUUID } from '@/lib/utils/uuid';
 import { Settings } from '@/lib/settings-manager';
+import { canonicalInlineAttachmentText } from '@/lib/nexus/inline-attachment-security';
 
 const s3Client = new S3Client({});
 const log = createLogger({ service: 'attachment-storage' });
@@ -33,8 +34,8 @@ export interface AttachmentContent {
   type: 'image' | 'document' | 'file';
   contentType?: string;
   image?: string; // base64 data for images
-  data?: string; // data for documents/files
-  content?: string; // alternative data field
+  data?: unknown; // canonical inline data for documents/files
+  content?: unknown; // legacy input; rejected if combined with data
 }
 
 export interface StoredAttachment {
@@ -42,6 +43,34 @@ export interface StoredAttachment {
   s3Key: string;
   originalContent: AttachmentContent;
   metadata: AttachmentMetadata;
+}
+
+export function buildAttachmentStoragePayload(
+  attachment: AttachmentContent
+): Record<string, unknown> {
+  if (attachment.type === 'image' && attachment.image) {
+    return {
+      type: 'image',
+      image: attachment.image,
+      name: attachment.name,
+      contentType: attachment.contentType,
+    };
+  }
+  if (attachment.type === 'document' || attachment.type === 'file') {
+    const canonicalText = canonicalInlineAttachmentText(
+      attachment as unknown as Record<string, unknown>
+    );
+    if (canonicalText === null) {
+      throw new Error('Inline attachment data is required for storage');
+    }
+    return {
+      type: attachment.type,
+      data: canonicalText,
+      name: attachment.name,
+      contentType: attachment.contentType,
+    };
+  }
+  throw new Error(`Unsupported attachment type: ${attachment.type}`);
 }
 
 /**
@@ -56,36 +85,13 @@ export async function storeAttachmentInS3(
   try {
     const attachmentId = attachment.id || generateUUID();
     const sanitizedName = sanitizeFileName(attachment.name || 'attachment');
-    
+
     // Create conversation-scoped S3 key
     const s3Key = `conversations/${conversationId}/attachments/${messageId}-${attachmentIndex}-${sanitizedName}`;
-    
-    // Determine content to store based on attachment type
-    let contentToStore: Record<string, unknown>;
-    let contentType: string;
-    
-    if (attachment.type === 'image' && attachment.image) {
-      // Store image data (base64)
-      contentToStore = {
-        type: 'image',
-        image: attachment.image,
-        name: attachment.name,
-        contentType: attachment.contentType
-      };
-      contentType = 'application/json';
-    } else if (attachment.type === 'document' || attachment.type === 'file') {
-      // Store document/file data
-      contentToStore = {
-        type: attachment.type,
-        data: attachment.data || attachment.content,
-        name: attachment.name,
-        contentType: attachment.contentType
-      };
-      contentType = 'application/json';
-    } else {
-      throw new Error(`Unsupported attachment type: ${attachment.type}`);
-    }
-    
+
+    const contentToStore = buildAttachmentStoragePayload(attachment);
+    const contentType = 'application/json';
+
     // Store in S3
     await s3Client.send(new PutObjectCommand({
       Bucket: await getDocumentsBucket(),
@@ -100,7 +106,7 @@ export async function storeAttachmentInS3(
         attachmentType: attachment.type,
       },
     }));
-    
+
     log.info('Attachment stored in S3', {
       conversationId,
       messageId,
@@ -108,7 +114,7 @@ export async function storeAttachmentInS3(
       s3Key,
       size: JSON.stringify(contentToStore).length
     });
-    
+
     return {
       s3Key,
       originalName: attachment.name || 'attachment',
@@ -116,14 +122,14 @@ export async function storeAttachmentInS3(
       size: JSON.stringify(contentToStore).length,
       attachmentId
     };
-    
+
   } catch (error) {
     log.error('Failed to store attachment in S3', {
       conversationId,
       messageId,
       error: error instanceof Error ? error.message : String(error)
     });
-    throw new Error(`Failed to store attachment: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to store attachment: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }
 
@@ -136,28 +142,28 @@ export async function getAttachmentFromS3(s3Key: string): Promise<AttachmentCont
       Bucket: await getDocumentsBucket(),
       Key: s3Key,
     }));
-    
+
     if (!response.Body) {
       throw new Error('No content returned from S3');
     }
-    
+
     const bodyText = await response.Body.transformToString();
     const attachmentData = JSON.parse(bodyText) as AttachmentContent;
-    
+
     log.info('Attachment retrieved from S3', {
       s3Key,
       type: attachmentData.type,
       size: bodyText.length
     });
-    
+
     return attachmentData;
-    
+
   } catch (error) {
     log.error('Failed to retrieve attachment from S3', {
       s3Key,
       error: error instanceof Error ? error.message : String(error)
     });
-    throw new Error(`Failed to retrieve attachment: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to retrieve attachment: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }
 
@@ -171,16 +177,23 @@ export async function processMessagesWithAttachments(
 ): Promise<{ lightweightMessages: UIMessage[], attachmentReferences: AttachmentMetadata[] }> {
   const lightweightMessages: UIMessage[] = [];
   const attachmentReferences: AttachmentMetadata[] = [];
-  
+
   for (const message of messages) {
     const messageId = generateUUID();
-    
+
     if (Array.isArray(message.parts)) {
-      const lightweightParts = [];
+      const lightweightParts: UIMessage['parts'] = [];
       let attachmentIndex = 0;
-      
+
       for (const part of message.parts) {
-        const partData = part as { type: string; image?: string; data?: string; content?: string; name?: string; [key: string]: unknown };
+        const partData = part as unknown as {
+          type: string;
+          image?: string;
+          data?: unknown;
+          content?: unknown;
+          name?: string;
+          [key: string]: unknown;
+        };
         if (partData.type === 'image' && partData.image) {
           // Store image in S3
           const metadata = await storeAttachmentInS3(
@@ -189,22 +202,37 @@ export async function processMessagesWithAttachments(
             partData as AttachmentContent,
             attachmentIndex++
           );
-          
+
           attachmentReferences.push(metadata);
-          
+
           // Replace with lightweight S3 reference for Lambda reconstruction
           lightweightParts.push({
             type: 'image' as const,
             image: `s3://${metadata.s3Key}`, // S3 reference that Lambda can reconstruct
             s3Key: metadata.s3Key,
             attachmentId: metadata.attachmentId
-          } as any); // eslint-disable-line @typescript-eslint/no-explicit-any
-        } else if ((partData.type === 'document' || partData.type === 'file') && (partData.data || partData.content)) {
+          } as unknown as UIMessage['parts'][number]);
+        } else if (
+          (partData.type === 'document' || partData.type === 'file') &&
+          (
+            Object.prototype.hasOwnProperty.call(partData, 'data') ||
+            Object.prototype.hasOwnProperty.call(partData, 'content')
+          )
+        ) {
+          const canonicalText = canonicalInlineAttachmentText(partData);
+          const handleNestedBranch1 = () => {
+            if (canonicalText === null) {
+            throw new Error('Inline attachment data is required for storage');
+          }
+          }
+          handleNestedBranch1()
+          const canonicalPart = { ...partData, data: canonicalText };
+          delete canonicalPart.content;
           // Store document in S3
           const metadata = await storeAttachmentInS3(
             conversationId,
             messageId,
-            partData as AttachmentContent,
+            canonicalPart as unknown as AttachmentContent,
             attachmentIndex++
           );
 
@@ -218,7 +246,7 @@ export async function processMessagesWithAttachments(
             filename: partData.name,
             s3Key: metadata.s3Key,
             attachmentId: metadata.attachmentId
-          } as any); // eslint-disable-line @typescript-eslint/no-explicit-any
+          } as unknown as UIMessage['parts'][number]);
         } else if (
           partData.type === 'file' &&
           typeof partData.url === 'string' &&
@@ -229,7 +257,8 @@ export async function processMessagesWithAttachments(
           // Extract the correct media type from the data URL prefix so providers receive the
           // right MIME type (e.g. image/jpeg for phone photos rather than image/png).
           const actualMediaType = extractDataUrlMediaType(partData.url);
-          if (actualMediaType && actualMediaType !== partData.mediaType) {
+          const handleNestedBranch2 = () => {
+            if (actualMediaType && actualMediaType !== partData.mediaType) {
             log.debug('Correcting mediaType for file part from data URL', {
               detected: actualMediaType,
               declared: partData.mediaType,
@@ -237,16 +266,18 @@ export async function processMessagesWithAttachments(
             lightweightParts.push({
               ...part,
               mediaType: actualMediaType,
-            } as any); // eslint-disable-line @typescript-eslint/no-explicit-any
+            } as UIMessage['parts'][number]);
           } else {
             lightweightParts.push(part);
           }
+          }
+          handleNestedBranch2()
         } else {
           // Keep text and other parts as-is
           lightweightParts.push(part);
         }
       }
-      
+
       lightweightMessages.push({
         ...message,
         parts: lightweightParts
@@ -256,7 +287,7 @@ export async function processMessagesWithAttachments(
       lightweightMessages.push(message);
     }
   }
-  
+
   return { lightweightMessages, attachmentReferences };
 }
 
@@ -268,29 +299,32 @@ export async function reconstructMessagesWithAttachments(
   attachmentReferences: AttachmentMetadata[]
 ): Promise<UIMessage[]> {
   const fullMessages: UIMessage[] = [];
-  
+
   for (const message of lightweightMessages) {
     if (Array.isArray(message.parts)) {
       const fullParts = [];
-      
+
       for (const part of message.parts) {
         if (part.type === 'text' && typeof part.text === 'string' && part.text.startsWith('[Image:') && part.text.includes('conversation context')) {
           // Find and restore image from S3
-          const matchingAttachment = attachmentReferences.find(ref => 
+          const matchingAttachment = attachmentReferences.find(ref =>
             part.text && part.text.includes(ref.originalName)
           );
-          
-          if (matchingAttachment) {
+
+          const handleNestedBranch3 = async () => {
+            if (matchingAttachment) {
             const attachmentData = await getAttachmentFromS3(matchingAttachment.s3Key);
             fullParts.push(attachmentData);
           } else {
             fullParts.push(part); // Keep as-is if not found
           }
+          }
+          await handleNestedBranch3()
         } else {
           fullParts.push(part);
         }
       }
-      
+
       fullMessages.push({
         ...message,
         parts: fullParts as UIMessage['parts']
@@ -299,7 +333,7 @@ export async function reconstructMessagesWithAttachments(
       fullMessages.push(message);
     }
   }
-  
+
   return fullMessages;
 }
 

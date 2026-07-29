@@ -35,8 +35,10 @@ jest.mock("../provider-factory", () => ({
 
 import { getVoiceAvailability } from "../availability"
 
-describe("getVoiceAvailability", () => {
-  const TEST_SUB = "user-cognito-sub-123"
+const TEST_SUB = "user-cognito-sub-123"
+
+function defineGetVoiceAvailabilitySuite1Part1() {
+
 
   beforeEach(() => {
     jest.clearAllMocks()
@@ -136,7 +138,9 @@ describe("getVoiceAvailability", () => {
     expect(result.type).toBe("config")
   })
 
-  it("should return config reason when provider is unsupported", async () => {
+  }
+
+function defineGetVoiceAvailabilitySuite1Part2() {it("should return config reason when provider is unsupported", async () => {
     mockIsSupportedVoiceProvider.mockReturnValue(false)
     mockGetVoice.mockResolvedValue({
       provider: "unsupported-provider",
@@ -229,4 +233,11 @@ describe("getVoiceAvailability", () => {
     expect(mockIsSupportedVoiceProvider).not.toHaveBeenCalled()
     expect(mockGetGoogleAI).not.toHaveBeenCalled()
   })
-})
+}
+
+const defineGetVoiceAvailabilitySuite1 = () => {
+  defineGetVoiceAvailabilitySuite1Part1()
+  defineGetVoiceAvailabilitySuite1Part2()
+};
+
+describe("getVoiceAvailability", defineGetVoiceAvailabilitySuite1)

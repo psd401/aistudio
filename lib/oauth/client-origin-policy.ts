@@ -10,7 +10,7 @@ export const ATRIUM_CAPTURE_BROWSER_CLIENT_ID =
   "ae781263-20c0-4b0c-8a34-8be01ab72fb1"
 
 export const ATRIUM_CAPTURE_EXTENSION_ORIGIN =
-  "chrome-extension://jldnpmcpimhabiphcglkbgmbffpoocpo"
+  "chrome-extension://eomlblaiglafndhplfhilmdcaofhkkbj"
 
 const ATRIUM_CAPTURE_TOKEN_GRANTS = new Set([
   "authorization_code",

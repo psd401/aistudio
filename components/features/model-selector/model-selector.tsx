@@ -15,50 +15,180 @@ import { IconRobot, IconChevronDown } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
 import { useFilteredModels } from "./use-filtered-models"
 import { ModelSelectorItem } from "./model-selector-item"
-import type { ModelSelectorProps } from "./model-selector-types"
+import { getModelSelectorButtonText } from "./model-selector-label"
+import type {
+  FilteredModel,
+  ModelSelectorProps,
+} from "./model-selector-types"
 import type { SelectAiModel } from "@/types"
 
-export function ModelSelector({
-  models = [],
-  value,
-  onChange,
-  requiredCapabilities = [],
-  anyOfCapabilities = [],
-  placeholder = "Select a model",
-  disabled = false,
-  className,
-  groupByProvider = true,
-  showDescription = true,
-  virtualizeThreshold = 50,
-  searchable = true,
-  loading = false,
-  error,
-  hideCapabilityMissing = false,
-  "aria-label": ariaLabel = "Select AI model",
-  "aria-describedby": ariaDescribedBy
-}: ModelSelectorProps) {
-  const [open, setOpen] = useState(false)
-  const [search, setSearch] = useState("")
+interface ModelListProps {
+  accessibleCount: number
+  error?: string
+  filteredModels: FilteredModel[]
+  groupedModels: Record<string, FilteredModel[]>
+  groupByProvider: boolean
+  handleSelect: (model: SelectAiModel) => void
+  loading: boolean
+  search: string
+  selectedId?: number
+  showDescription: boolean
+  sortedProviders: string[]
+  totalCount: number
+}
+
+function SelectorItem({
+  handleSelect,
+  model,
+  selectedId,
+  showDescription,
+}: {
+  handleSelect: (model: SelectAiModel) => void
+  model: FilteredModel
+  selectedId?: number
+  showDescription: boolean
+}) {
+  return (
+    <ModelSelectorItem
+      model={model}
+      isSelected={selectedId === model.id}
+      onSelect={() => handleSelect(model)}
+      showDescription={showDescription}
+      isDisabled={!model.isAccessible}
+      disabledReason={model.accessDeniedReason}
+    />
+  )
+}
+
+function GroupedModelList(props: ModelListProps) {
+  return props.sortedProviders.map((provider, index) => {
+    const providerModels = props.groupedModels[provider]
+    if (!providerModels?.length) return null
+
+    return (
+      <div key={provider}>
+        {index > 0 && <CommandSeparator />}
+        <CommandGroup
+          heading={provider}
+          className="[&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:text-muted-foreground"
+        >
+          {providerModels.map((model) => (
+            <SelectorItem
+              handleSelect={props.handleSelect}
+              key={model.id}
+              model={model}
+              selectedId={props.selectedId}
+              showDescription={props.showDescription}
+            />
+          ))}
+        </CommandGroup>
+      </div>
+    )
+  })
+}
+
+function ModelListContent(props: ModelListProps) {
+  if (props.loading) {
+    return (
+      <div className="py-6 text-center text-sm text-muted-foreground">
+        Loading models...
+      </div>
+    )
+  }
+  if (props.error) {
+    return (
+      <div className="py-6 text-center text-sm text-destructive">
+        {props.error}
+      </div>
+    )
+  }
+  if (props.totalCount === 0) {
+    return (
+      <CommandEmpty>
+        {props.search ? "No models found." : "No models available."}
+      </CommandEmpty>
+    )
+  }
+  if (props.accessibleCount === 0) {
+    return (
+      <div className="py-6 text-center text-sm text-muted-foreground">
+        No models match your access level or requirements.
+      </div>
+    )
+  }
+  if (props.groupByProvider) return <GroupedModelList {...props} />
+
+  return (
+    <CommandGroup>
+      {props.filteredModels.map((model) => (
+        <SelectorItem
+          handleSelect={props.handleSelect}
+          key={model.id}
+          model={model}
+          selectedId={props.selectedId}
+          showDescription={props.showDescription}
+        />
+      ))}
+    </CommandGroup>
+  )
+}
+
+type ResolvedModelSelectorProps = ModelSelectorProps & {
+  anyOfCapabilities: string[]
+  disabled: boolean
+  groupByProvider: boolean
+  hideCapabilityMissing: boolean
+  loading: boolean
+  models: SelectAiModel[]
+  placeholder: string
+  requiredCapabilities: string[]
+  searchable: boolean
+  showDescription: boolean
+  virtualizeThreshold: number
+}
+
+function useDebouncedSearch(search: string) {
   const [debouncedSearch, setDebouncedSearch] = useState("")
-  const commandListRef = useRef<HTMLDivElement>(null)
   const debounceTimerRef = useRef<NodeJS.Timeout | undefined>(undefined)
 
-  // Debounce search input
   useEffect(() => {
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current)
-    }
-    
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
+
     debounceTimerRef.current = setTimeout(() => {
       setDebouncedSearch(search)
-    }, 300) // 300ms delay
-    
+    }, 300)
+
     return () => {
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current)
-      }
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
     }
   }, [search])
+
+  return [debouncedSearch, setDebouncedSearch] as const
+}
+
+function ModelSelectorContent({
+  models,
+  value,
+  onChange,
+  requiredCapabilities,
+  anyOfCapabilities,
+  placeholder,
+  disabled,
+  className,
+  groupByProvider,
+  showDescription,
+  virtualizeThreshold,
+  searchable,
+  loading,
+  error,
+  hideCapabilityMissing,
+  "aria-label": ariaLabel,
+  "aria-describedby": ariaDescribedBy
+}: ResolvedModelSelectorProps) {
+  const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState("")
+  const [debouncedSearch, setDebouncedSearch] = useDebouncedSearch(search)
+  const commandListRef = useRef<HTMLDivElement>(null)
 
   // NOTE (#1207): the ModelSelector no longer fetches the user's roles. Per-model
   // role/group access is enforced server-side — GET /api/models filters the list
@@ -84,21 +214,22 @@ export function ModelSelector({
     setOpen(false)
     setSearch("")
     setDebouncedSearch("")
-  }, [onChange])
+  }, [onChange, setDebouncedSearch])
 
   // Determine if we should use virtualization
   const shouldVirtualize = totalCount > virtualizeThreshold
 
   // Get display text for button
-  const buttonText = useMemo(() => {
-    if (value) {
-      return value.name
-    }
-    if (accessibleCount === 0 && totalCount > 0) {
-      return "No accessible models"
-    }
-    return placeholder
-  }, [value, accessibleCount, totalCount, placeholder])
+  const buttonText = useMemo(
+    () =>
+      getModelSelectorButtonText(
+        value,
+        accessibleCount,
+        totalCount,
+        placeholder
+      ),
+    [value, accessibleCount, totalCount, placeholder]
+  )
 
   // Sort providers alphabetically
   const sortedProviders = useMemo(() => {
@@ -169,64 +300,20 @@ export function ModelSelector({
             // See: https://github.com/pacocoursey/cmdk/issues/159
             onWheel={(e) => e.stopPropagation()}
           >
-            {loading ? (
-              <div className="py-6 text-center text-sm text-muted-foreground">
-                Loading models...
-              </div>
-            ) : error ? (
-              <div className="py-6 text-center text-sm text-destructive">
-                {error}
-              </div>
-            ) : totalCount === 0 ? (
-              <CommandEmpty>
-                {search ? "No models found." : "No models available."}
-              </CommandEmpty>
-            ) : accessibleCount === 0 ? (
-              <div className="py-6 text-center text-sm text-muted-foreground">
-                No models match your access level or requirements.
-              </div>
-            ) : groupByProvider ? (
-              sortedProviders.map((provider, index) => {
-                const providerModels = groupedModels[provider]
-                if (!providerModels || providerModels.length === 0) return null
-
-                return (
-                  <div key={provider}>
-                    {index > 0 && <CommandSeparator />}
-                    <CommandGroup 
-                      heading={provider}
-                      className="[&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:text-muted-foreground"
-                    >
-                      {providerModels.map((model) => (
-                        <ModelSelectorItem
-                          key={model.id}
-                          model={model}
-                          isSelected={value?.id === model.id}
-                          onSelect={() => handleSelect(model)}
-                          showDescription={showDescription}
-                          isDisabled={!model.isAccessible}
-                          disabledReason={model.accessDeniedReason}
-                        />
-                      ))}
-                    </CommandGroup>
-                  </div>
-                )
-              })
-            ) : (
-              <CommandGroup>
-                {filteredModels.map((model) => (
-                  <ModelSelectorItem
-                    key={model.id}
-                    model={model}
-                    isSelected={value?.id === model.id}
-                    onSelect={() => handleSelect(model)}
-                    showDescription={showDescription}
-                    isDisabled={!model.isAccessible}
-                    disabledReason={model.accessDeniedReason}
-                  />
-                ))}
-              </CommandGroup>
-            )}
+            <ModelListContent
+              accessibleCount={accessibleCount}
+              error={error}
+              filteredModels={filteredModels}
+              groupedModels={groupedModels}
+              groupByProvider={groupByProvider}
+              handleSelect={handleSelect}
+              loading={loading}
+              search={search}
+              selectedId={value?.id}
+              showDescription={showDescription}
+              sortedProviders={sortedProviders}
+              totalCount={totalCount}
+            />
           </CommandList>
           
           {totalCount > 0 && (
@@ -237,5 +324,25 @@ export function ModelSelector({
         </Command>
       </PopoverContent>
     </Popover>
+  )
+}
+
+export function ModelSelector(props: ModelSelectorProps) {
+  return (
+    <ModelSelectorContent
+      {...props}
+      anyOfCapabilities={props.anyOfCapabilities ?? []}
+      disabled={props.disabled ?? false}
+      groupByProvider={props.groupByProvider ?? true}
+      hideCapabilityMissing={props.hideCapabilityMissing ?? false}
+      loading={props.loading ?? false}
+      models={props.models ?? []}
+      placeholder={props.placeholder ?? "Select a model"}
+      requiredCapabilities={props.requiredCapabilities ?? []}
+      searchable={props.searchable ?? true}
+      showDescription={props.showDescription ?? true}
+      virtualizeThreshold={props.virtualizeThreshold ?? 50}
+      aria-label={props["aria-label"] ?? "Select AI model"}
+    />
   )
 }

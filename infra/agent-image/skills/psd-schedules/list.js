@@ -1,37 +1,49 @@
 #!/usr/bin/env node
-/**
- * list.js — list_schedules
- * Usage: node list.js --user <email>
- */
 
 'use strict';
 
 const {
   fail,
-  validateEnv,
-  validateUserEmail,
+  rejectLegacyAuthorityArgs,
   parseArgs,
   emit,
-  querySchedules,
+  requestScheduleOperation,
 } = require('./common');
+
+function renderLastRunStatus(result) {
+  if (!result || !Array.isArray(result.schedules)) return result;
+  return {
+    ...result,
+    schedules: result.schedules.map((schedule) => {
+      if (!schedule || typeof schedule !== 'object') return schedule;
+      return {
+        ...schedule,
+        lastRunStatus:
+          typeof schedule.lastRunAt === 'string'
+            ? schedule.lastRunStatus || 'unknown'
+            : schedule.lastRunStatus === 'unknown'
+              ? 'unknown'
+              : 'never run',
+      };
+    }),
+  };
+}
 
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
-    console.log('Usage: list.js --user <email>');
-    process.exit(0);
+    process.stdout.write('Usage: list.js\n');
+    return;
   }
-  validateEnv();
-  validateUserEmail(args.user);
-
-  try {
-    const items = await querySchedules(args.user);
-    emit({ schedules: items, count: items.length });
-  } catch (err) {
-    fail(`DynamoDB Query failed: ${err.message}`);
-  }
+  rejectLegacyAuthorityArgs(args);
+  const result = await requestScheduleOperation({ operation: 'list' });
+  emit(renderLastRunStatus(result));
 }
 
-main().catch((err) => {
-  fail(err instanceof Error ? err.message : String(err));
-});
+module.exports = { renderLastRunStatus };
+
+if (require.main === module) {
+  main().catch((error) => {
+    fail(error instanceof Error ? error.message : String(error));
+  });
+}

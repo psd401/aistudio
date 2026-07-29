@@ -154,10 +154,12 @@ function DecisionRuntimeProvider({
       onProcessingComplete: handleAttachmentProcessingComplete,
       onError: handleAttachmentError,
     }, {
-      // Decision Capture continues to send the extracted transcript to its
-      // specialized route. Its repository migration is intentionally separate
-      // from the Nexus chat cutover so changing the shared factory cannot break it.
-      repositoryBacked: false,
+      // The adapter still sends the attachment marker to the specialized
+      // decision route, but source bytes and extraction now use the same
+      // private canonical repository lifecycle as the rest of Nexus. The
+      // temporary-attachment endpoint retains the legacy fallback until the
+      // independent Nexus cutover flag is enabled.
+      repositoryBacked: true,
     })
   }, [handleAttachmentProcessingStart, handleAttachmentProcessingComplete, handleAttachmentError])
 

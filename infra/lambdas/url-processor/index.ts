@@ -1,8 +1,8 @@
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 import { RDSDataClient, ExecuteStatementCommand, BatchExecuteStatementCommand, SqlParameter } from '@aws-sdk/client-rds-data';
 import { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';
-import { lookup } from 'dns/promises';
-import { isIP } from 'net';
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import * as cheerio from 'cheerio';
 import { marked } from 'marked';
 
@@ -45,7 +45,7 @@ interface URLProcessingJob {
 
 interface ChunkData {
   content: string;
-  metadata: Record<string, any>;
+  metadata: Record<string, unknown>;
   chunkIndex: number;
   tokens?: number;
 }
@@ -54,7 +54,7 @@ interface ChunkData {
 async function updateJobStatus(
   jobId: string,
   status: string,
-  details?: any,
+  details?: unknown,
   error?: string
 ) {
   const timestamp = Date.now();
@@ -82,12 +82,12 @@ async function updateItemStatus(
   error?: string
 ) {
   const sql = error
-    ? `UPDATE repository_items 
-       SET processing_status = :status, 
+    ? `UPDATE repository_items
+       SET processing_status = :status,
            processing_error = :error,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = :itemId`
-    : `UPDATE repository_items 
+    : `UPDATE repository_items
        SET processing_status = :status,
            processing_error = NULL,
            updated_at = CURRENT_TIMESTAMP
@@ -120,23 +120,27 @@ async function updateItemStatus(
 // internal one).
 const MAX_REDIRECTS = 5;
 
+const BLOCKED_IPV4_RANGES: ReadonlyArray<
+  (octets: readonly number[]) => boolean
+> = [
+  ([a]) => a === 0,
+  ([a]) => a === 10,
+  ([a]) => a === 127,
+  ([a, b]) => a === 169 && b === 254,
+  ([a, b]) => a === 172 && b >= 16 && b <= 31,
+  ([a, b]) => a === 192 && b === 168,
+  ([a, b, c]) => a === 192 && b === 0 && c === 0,
+  ([a, b]) => a === 198 && (b === 18 || b === 19),
+  ([a, b, c]) => a === 203 && b === 0 && c === 113,
+  ([a, b]) => a === 100 && b >= 64 && b <= 127,
+];
+
 function ipv4IsBlocked(ip: string): boolean {
   const parts = ip.split('.').map(Number);
   if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) {
     return true; // malformed → block
   }
-  const [a, b, c] = parts;
-  if (a === 0) return true;                           // 0.0.0.0/8 "this network"
-  if (a === 10) return true;                          // 10.0.0.0/8 private
-  if (a === 127) return true;                         // 127.0.0.0/8 loopback
-  if (a === 169 && b === 254) return true;            // 169.254.0.0/16 link-local + cloud metadata
-  if (a === 172 && b >= 16 && b <= 31) return true;   // 172.16.0.0/12 private
-  if (a === 192 && b === 168) return true;            // 192.168.0.0/16 private
-  if (a === 192 && b === 0 && c === 0) return true;   // 192.0.0.0/24 IETF protocol assignments
-  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmarking
-  if (a === 203 && b === 0 && c === 113) return true; // 203.0.113.0/24 documentation (TEST-NET-3)
-  if (a === 100 && b >= 64 && b <= 127) return true;  // 100.64.0.0/10 CGNAT
-  return false;
+  return BLOCKED_IPV4_RANGES.some((isBlocked) => isBlocked(parts));
 }
 
 function ipv6IsBlocked(ip: string): boolean {
@@ -151,9 +155,9 @@ function ipv6IsBlocked(ip: string): boolean {
   if (dotted) return ipv4IsBlocked(dotted[1]);
   const hex = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
   if (hex) {
-    const high = parseInt(hex[1], 16);
-    const low = parseInt(hex[2], 16);
-    const asIpv4 = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
+    const high = Number.parseInt(hex[1], 16);
+    const low = Number.parseInt(hex[2], 16);
+    const asIpv4 = `${(high >> 8) & 0xFF}.${high & 0xFF}.${(low >> 8) & 0xFF}.${low & 0xFF}`;
     return ipv4IsBlocked(asIpv4);
   }
   // Deprecated IPv4-compatible form (no "ffff:" marker), e.g. "::127.0.0.1".
@@ -247,6 +251,52 @@ export async function safeFetch(rawUrl: string, signal: AbortSignal): Promise<Re
   }
 }
 
+type LoadedHtml = ReturnType<typeof cheerio.load>;
+
+function extractPrimaryContent($: LoadedHtml): string {
+  const contentSelectors = [
+    'main',
+    'article',
+    '[role="main"]',
+    '.content',
+    '#content',
+    '.post',
+    '.entry-content',
+    '.article-content',
+  ];
+  for (const selector of contentSelectors) {
+    const element = $(selector);
+    if (element.length > 0) return element.text();
+  }
+  return $('body').text();
+}
+
+async function normalizeFetchedContent(
+  content: string,
+  contentType: string,
+  url: string,
+): Promise<string> {
+  const normalized = content
+    .replace(/\s+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!contentType.includes('markdown') && !url.endsWith('.md')) {
+    return normalized;
+  }
+  const htmlContent = await marked.parse(normalized);
+  return cheerio.load(htmlContent).root().text().trim();
+}
+
+function prependPageMetadata(content: string, $: LoadedHtml): string {
+  const title = $('title').text() || $('h1').first().text() || '';
+  const description = $('meta[name="description"]').attr('content') ||
+    $('meta[property="og:description"]').attr('content') || '';
+  const withTitle = title ? `Title: ${title}\n\n${content}` : content;
+  return description
+    ? `Description: ${description}\n\n${withTitle}`
+    : withTitle;
+}
+
 // Fetch and extract text content from URL
 async function fetchAndExtractContent(url: string): Promise<string> {
   try {
@@ -273,70 +323,22 @@ async function fetchAndExtractContent(url: string): Promise<string> {
       // Remove script and style elements
       $('script, style, noscript').remove();
 
-      // Try to find main content areas
-      let content = '';
-    
-      // Common content selectors
-      const contentSelectors = [
-      'main',
-      'article',
-      '[role="main"]',
-      '.content',
-      '#content',
-      '.post',
-      '.entry-content',
-      '.article-content',
-    ];
-
-      for (const selector of contentSelectors) {
-        const element = $(selector);
-        if (element.length > 0) {
-          content = element.text();
-          break;
-        }
-      }
-
-      // If no specific content area found, get all text
-      if (!content) {
-        content = $('body').text();
-      }
-
-      // Clean up the text
-      content = content
-      .replace(/\s+/g, ' ') // Replace multiple whitespace with single space
-      .replace(/\n{3,}/g, '\n\n') // Replace multiple newlines with double newline
-      .trim();
-
-      // If content is markdown or has markdown-like content, process it
-      if (contentType.includes('markdown') || url.endsWith('.md')) {
-        const htmlContent = await marked.parse(content);
-        content = htmlContent.replace(/<[^>]*>/g, '').trim();
-      }
-
-      // Extract metadata
-      const title = $('title').text() || $('h1').first().text() || '';
-      const description = $('meta[name="description"]').attr('content') || 
-                         $('meta[property="og:description"]').attr('content') || '';
-
-      // Prepend metadata to content
-      if (title) {
-        content = `Title: ${title}\n\n${content}`;
-      }
-      if (description) {
-        content = `Description: ${description}\n\n${content}`;
-      }
-
-      return content;
-    } catch (fetchError: any) {
+      const content = await normalizeFetchedContent(
+        extractPrimaryContent($),
+        contentType,
+        url,
+      );
+      return prependPageMetadata(content, $);
+    } catch (fetchError: unknown) {
       clearTimeout(timeout);
-      if (fetchError.name === 'AbortError') {
-        throw new Error('Request timeout after 30 seconds');
+      if (fetchError instanceof Error && fetchError.name === 'AbortError') {
+        throw new Error('Request timeout after 30 seconds', { cause: fetchError });
       }
       throw fetchError;
     }
   } catch (error) {
     console.error('Error fetching URL:', error);
-    throw new Error(`Failed to fetch URL: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(`Failed to fetch URL: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
   }
 }
 
@@ -396,7 +398,7 @@ export async function storeChunks(itemId: number, chunks: ChunkData[]) {
       parameters: [createSqlParameter('itemId', itemId)],
     })
   );
-  
+
   // Batch insert new chunks
   const parameterSets: SqlParameter[][] = chunks.map(chunk => [
     createSqlParameter('itemId', itemId),
@@ -405,12 +407,12 @@ export async function storeChunks(itemId: number, chunks: ChunkData[]) {
     createSqlParameter('chunkIndex', chunk.chunkIndex),
     createSqlParameter('tokens', chunk.tokens ?? null),
   ]);
-  
+
   // BatchExecuteStatement has a limit of 25 parameter sets
   const batchSize = 25;
   for (let i = 0; i < parameterSets.length; i += batchSize) {
     const batch = parameterSets.slice(i, i + batchSize);
-    
+
     await rdsClient.send(
       new BatchExecuteStatementCommand({
         resourceArn: DATABASE_RESOURCE_ARN,
@@ -428,26 +430,26 @@ export async function storeChunks(itemId: number, chunks: ChunkData[]) {
 // Process a URL
 async function processURL(job: URLProcessingJob) {
   console.log(`Processing URL: ${job.url} for item: ${job.itemName}`);
-  
+
   try {
     // Update status to processing
     await updateItemStatus(job.itemId, 'processing');
     await updateJobStatus(job.jobId, 'processing', { url: job.url });
-    
+
     // Fetch and extract content from URL
     const content = await fetchAndExtractContent(job.url);
-    
+
     if (!content || content.trim().length === 0) {
       throw new Error('No content extracted from URL');
     }
-    
+
     // Chunk text
     const chunks = chunkText(content);
     console.log(`Extracted ${chunks.length} chunks from ${job.url}`);
-    
+
     // Store chunks
     await storeChunks(job.itemId, chunks);
-    
+
     // Update status to completed
     await updateItemStatus(job.itemId, 'completed');
     await updateJobStatus(job.jobId, 'completed', {
@@ -455,14 +457,14 @@ async function processURL(job: URLProcessingJob) {
       chunksCreated: chunks.length,
       totalTokens: chunks.reduce((sum, chunk) => sum + (chunk.tokens || 0), 0),
     });
-    
+
   } catch (error) {
     console.error(`Error processing URL ${job.url}:`, error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    
+
     await updateItemStatus(job.itemId, 'failed', errorMessage);
     await updateJobStatus(job.jobId, 'failed', { url: job.url }, errorMessage);
-    
+
     throw error; // Re-throw to let Lambda handle retry logic
   }
 }

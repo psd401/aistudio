@@ -51,6 +51,7 @@ const listQuerySchema = z.object({
   // Case-insensitive title search (service-side ILIKE); bounded at 200 chars —
   // same contract as the MCP list_content tool.
   query: z.string().min(1).max(200).optional(),
+  since: z.string().datetime({ offset: true }).optional(),
 });
 
 const createBodySchema = z.object({
@@ -108,13 +109,18 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
 
   try {
     const req = await requesterFromApiAuth(auth);
-    const collectionId = await resolveCollectionId(parsed.data.collection);
+    const collectionId = await resolveCollectionId(
+      req,
+      parsed.data.collection,
+      "view"
+    );
     const items = await contentService.list(req, {
       kind: parsed.data.kind,
       collectionId,
       tag: parsed.data.tag,
       status: parsed.data.status,
       query: parsed.data.query,
+      since: parsed.data.since,
     });
     return createApiResponse(
       { data: items, meta: { requestId, count: items.length } },
@@ -157,7 +163,11 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     return {
       kind: input.kind,
       title: input.title,
-      collectionId: await resolveCollectionId(input.collectionId),
+      collectionId: await resolveCollectionId(
+        req,
+        input.collectionId,
+        "create"
+      ),
       // Decode before both the create path and recovery metadata comparison so
       // the two paths use the identical semantic service input.
       body: decodeContentBody(input.body, input.codeEncoding),

@@ -31,6 +31,45 @@ import { mkdirSync } from 'node:fs'
 
 const SHOT_DIR = 'docs/verification/atrium-meridian'
 
+/**
+ * Pin the grid to a single seeded probe via the library search box. The search
+ * is SERVER-side (#1336), so this scopes the query itself rather than filtering
+ * an already-loaded page — which is what makes the assertion independent of how
+ * much content the shared local database has accumulated.
+ *
+ * DETERMINISM: a bare `fill()` races the 300ms debounce → server-action round
+ * trip (the next assertion then runs against the PREVIOUS result set), and —
+ * right after a navigation — hydration, which can re-render the controlled
+ * input from empty React state and silently wipe the typed value, so the
+ * search never fires at all. So this awaits the library's `data-results-*`
+ * settle signal (stamped in the same React commit as the items it describes)
+ * until the committed grid is the one fetched for exactly this query in the
+ * expected view, retrying the fill inside `toPass` to recover a hydration
+ * wipe. Only then may callers assert card presence/absence — including
+ * `toHaveCount(0)`, which would otherwise false-pass against a stale grid.
+ */
+async function pinToProbe(
+  page: import('@playwright/test').Page,
+  title: string,
+  view: 'default' | 'archived'
+) {
+  const box = page.getByRole('textbox', {
+    name: 'Search content by title or tag',
+  })
+  const results = page.locator('section[data-results-query]')
+  await expect(async () => {
+    await box.fill(title)
+    await expect(results).toHaveAttribute('data-results-query', title, {
+      timeout: 3000,
+    })
+    await expect(results).toHaveAttribute(
+      'data-results-status',
+      view === 'archived' ? 'archived' : '',
+      { timeout: 3000 }
+    )
+  }).toPass({ timeout: 30_000 })
+}
+
 /** The chips group's "Archived" filter button. */
 function archivedChip(page: import('@playwright/test').Page) {
   return page
@@ -38,11 +77,33 @@ function archivedChip(page: import('@playwright/test').Page) {
     .getByRole('button', { name: 'Archived', exact: true })
 }
 
+/**
+ * Activate the "Archived" view and wait until React confirms it. A bare
+ * `click()` right after a navigation can land on the server-rendered button
+ * before hydration attaches its handler — the click is then silently swallowed
+ * and the view never changes. Clicking again is idempotent (single-select
+ * chips), so retry until `aria-pressed` flips.
+ */
+async function openArchivedView(page: import('@playwright/test').Page) {
+  await expect(async () => {
+    await archivedChip(page).click()
+    await expect(archivedChip(page)).toHaveAttribute('aria-pressed', 'true', {
+      timeout: 1500,
+    })
+  }).toPass({ timeout: 30_000 })
+}
+
 test.describe('Atrium archived-content view (authenticated)', () => {
   test.skip(
     process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
     'Requires an authenticated session — set PLAYWRIGHT_AUTH_ENABLED=true and run against the host :3100 dev server (see docs/guides/e2e-authenticated-testing.md)'
   )
+
+  // The lifecycle test below settles ~9 server-side search pins against a Next
+  // DEV server that compiles each action on first hit and slows further under
+  // the parallel full suite, so the default 60s per-test budget is too tight
+  // (same rationale as the sibling library-polish spec).
+  test.describe.configure({ timeout: 180_000 })
 
   test.beforeAll(() => {
     mkdirSync(SHOT_DIR, { recursive: true })
@@ -57,18 +118,28 @@ test.describe('Atrium archived-content view (authenticated)', () => {
       const page = await context.newPage()
       await page.goto('/atrium')
 
-      // Select "Archived", then pin an impossible tag so the archived result set
-      // is deterministically empty regardless of any archived seed data — the
-      // exact same empty-state component the zero-archived case renders.
-      await archivedChip(page).click()
-      await expect(archivedChip(page)).toHaveAttribute('aria-pressed', 'true')
-      await page
-        .getByRole('textbox', { name: 'Filter by tag' })
-        .fill('no-such-tag-zzz-e2e')
+      // Select "Archived", then pin an impossible tag so the archived result
+      // set is deterministically empty regardless of any archived data — seed
+      // OR a sibling spec's in-flight archive/restore (the bulk spec archives
+      // fixtures for a few seconds under parallel workers). With a tag filter
+      // active, a zero-result grid deliberately renders the ZERO-MATCH empty
+      // state, not "Nothing archived" (#1336: the filter that excluded the
+      // results explains itself), so that is the state this asserts. The old
+      // "Nothing archived" expectation only ever passed by racing the tag
+      // debounce while the archive list happened to be empty.
+      await openArchivedView(page)
 
-      await expect(page.getByText('Nothing archived')).toBeVisible({
-        timeout: 15000,
-      })
+      // Retry the fill: like the search box in `pinToProbe`, a value typed
+      // before hydration can be wiped, and the zero-match state only renders
+      // once the debounced tag commits — so assert it inside the retry.
+      const zeroMatch = page.getByTestId('library-search-empty')
+      await expect(async () => {
+        await page
+          .getByRole('textbox', { name: 'Filter by tag' })
+          .fill('no-such-tag-zzz-e2e')
+        await expect(zeroMatch).toBeVisible({ timeout: 3000 })
+      }).toPass({ timeout: 30_000 })
+      await expect(zeroMatch).toContainText('No matches for “no-such-tag-zzz-e2e”')
       // The create affordance is suppressed in the archived management view.
       await expect(
         page.getByRole('button', { name: /Create with the agent/i })
@@ -95,7 +166,10 @@ test.describe('Atrium archived-content view (authenticated)', () => {
       // Archive + delete both raise a window.confirm — auto-accept every dialog.
       page.on('dialog', (dialog) => void dialog.accept())
 
-      // A doc with a unique title so its card link is unambiguous across views.
+      // A doc with a unique title so its card link is unambiguous across views —
+      // and so the (server-side, #1336) search box can pin the list to exactly
+      // this row. Without that the archived view is an unbounded shared list and
+      // the probe can fall off page one as local runs accumulate.
       const title = `e2e archived probe ${Date.now()}`
       const created = await page.request.post('/api/v1/content', {
         data: { kind: 'document', title, body: '# hi', bodyFormat: 'markdown' },
@@ -107,8 +181,10 @@ test.describe('Atrium archived-content view (authenticated)', () => {
 
       // It starts as a draft: visible in the default library, absent from Archived.
       await page.goto('/atrium')
+      await pinToProbe(page, title, 'default')
       await expect(cardLink).toBeVisible({ timeout: 15000 })
-      await archivedChip(page).click()
+      await openArchivedView(page)
+      await pinToProbe(page, title, 'archived')
       await expect(cardLink).toHaveCount(0)
 
       // Archive it from the editor's content-settings dialog.
@@ -121,8 +197,10 @@ test.describe('Atrium archived-content view (authenticated)', () => {
       await page.waitForURL('**/atrium', { timeout: 15000 })
 
       // Now it is GONE from the default view and present ONLY under Archived.
+      await pinToProbe(page, title, 'default')
       await expect(cardLink).toHaveCount(0)
-      await archivedChip(page).click()
+      await openArchivedView(page)
+      await pinToProbe(page, title, 'archived')
       await expect(cardLink).toBeVisible({ timeout: 15000 })
       // Muted treatment + ARCHIVED pill on the card.
       await expect(cardLink).toHaveClass(/mer-card-archived/)
@@ -148,8 +226,10 @@ test.describe('Atrium archived-content view (authenticated)', () => {
 
       // Back in the library it is visible in the default view again, absent from Archived.
       await page.goto('/atrium')
+      await pinToProbe(page, title, 'default')
       await expect(cardLink).toBeVisible({ timeout: 15000 })
-      await archivedChip(page).click()
+      await openArchivedView(page)
+      await pinToProbe(page, title, 'archived')
       await expect(cardLink).toHaveCount(0)
 
       // Archive it a second time, then Delete permanently from the editor.
@@ -158,7 +238,8 @@ test.describe('Atrium archived-content view (authenticated)', () => {
       await page.getByRole('button', { name: 'Archive', exact: true }).click()
       await page.waitForURL('**/atrium', { timeout: 15000 })
 
-      await archivedChip(page).click()
+      await openArchivedView(page)
+      await pinToProbe(page, title, 'archived')
       await expect(cardLink).toBeVisible({ timeout: 15000 })
       await cardLink.click()
       await page.waitForURL(`**/atrium/${id}/edit`, { timeout: 15000 })
@@ -175,8 +256,10 @@ test.describe('Atrium archived-content view (authenticated)', () => {
       expect(editorResp?.status()).toBe(404)
 
       await page.goto('/atrium')
+      await pinToProbe(page, title, 'default')
       await expect(cardLink).toHaveCount(0)
-      await archivedChip(page).click()
+      await openArchivedView(page)
+      await pinToProbe(page, title, 'archived')
       await expect(cardLink).toHaveCount(0)
     } finally {
       await context.close()

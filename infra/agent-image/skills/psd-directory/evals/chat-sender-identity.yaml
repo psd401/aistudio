@@ -1,0 +1,14 @@
+id: directory-chat-sender-identity
+skill: psd-directory
+level: L1
+workspace: pure
+suite: capability
+prompt: "A Google Chat message came from users/100000000000000000001. Use psd-directory to identify the sender, then tell me their name, department, and canonical email."
+trials: 3
+fixtures:
+  - fixtures/chat-sender-identity.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/directory-lookup","method":"POST","body":{"chatId":{"exact":"users/100000000000000000001"}}}
+  - {"type":"output_match","pattern":"Eval Directory User"}
+  - {"type":"output_match","pattern":"Technology Services"}
+  - {"type":"output_match","pattern":"eval\\.directory\\.user@psd401\\.net"}

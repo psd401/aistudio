@@ -8,6 +8,7 @@ import { ErrorLevel } from '@/types/actions-types';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+import { legacyContentRetirementResponse } from '@/lib/repositories/content-platform/legacy-retirement-response';
 
 // Request validation schema
 // Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
@@ -34,6 +35,12 @@ export async function POST(request: NextRequest) {
     log.warn("User not found");
     timer({ status: "error", reason: "user_not_found" });
     return unauthorized('User not found');
+  }
+
+  const retired = await legacyContentRetirementResponse();
+  if (retired) {
+    timer({ status: "success", reason: "legacy_retired" });
+    return retired;
   }
   
   const userId = currentUser.data.user.id;

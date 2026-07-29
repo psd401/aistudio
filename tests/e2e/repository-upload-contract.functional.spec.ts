@@ -1,7 +1,7 @@
 import { test, expect } from './fixtures'
 import { authenticateContext } from './helpers/session-auth'
 
-test.describe('Unified repository upload contract (authenticated)', () => {
+function defineUnifiedRepositoryUploadContractAuthenticatedSuite1Part1() {
   test.skip(
     process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
     'Requires authenticated local E2E server and unified-content fixture'
@@ -112,7 +112,9 @@ test.describe('Unified repository upload contract (authenticated)', () => {
     })
   })
 
-  test('uploads and completes a canonical PDF without invoking the legacy action', async ({ page }) => {
+  }
+
+function defineUnifiedRepositoryUploadContractAuthenticatedSuite1Part2() {test('uploads and completes a canonical PDF without invoking the legacy action', async ({ page }) => {
     let initiation: Record<string, unknown> | null = null
     let completion: Record<string, unknown> | null = null
     const sessionId = '11111111-2222-4333-8444-555555555555'
@@ -194,7 +196,9 @@ test.describe('Unified repository upload contract (authenticated)', () => {
     expect(repositoryId).toBeGreaterThan(0)
   })
 
-  test('uses the canonical upload contract for an Office document', async ({ page }) => {
+  }
+
+function defineUnifiedRepositoryUploadContractAuthenticatedSuite1Part3() {test('uses the canonical upload contract for an Office document', async ({ page }) => {
     let initiation: Record<string, unknown> | null = null
     let completed = false
     const sessionId = '22222222-3333-4444-8555-666666666666'
@@ -267,7 +271,9 @@ test.describe('Unified repository upload contract (authenticated)', () => {
     })
   })
 
-  test('uses the canonical upload contract for an image', async ({ page }) => {
+  }
+
+function defineUnifiedRepositoryUploadContractAuthenticatedSuite1Part4() {test('uses the canonical upload contract for an image', async ({ page }) => {
     let initiation: Record<string, unknown> | null = null
     let completed = false
     const sessionId = '33333333-4444-4555-8666-777777777777'
@@ -341,7 +347,9 @@ test.describe('Unified repository upload contract (authenticated)', () => {
       contentType: 'image/png',
     })
   })
-  test('uses the canonical upload contract for audio and video', async ({ page }) => {
+  }
+
+function defineUnifiedRepositoryUploadContractAuthenticatedSuite1Part5() {test('uses the canonical upload contract for audio and video', async ({ page }) => {
     const initiations: Array<Record<string, unknown>> = []
     const completions: string[] = []
     const sessions = {
@@ -451,4 +459,14 @@ test.describe('Unified repository upload contract (authenticated)', () => {
     ])
     expect(completions).toHaveLength(2)
   })
-})
+}
+
+const defineUnifiedRepositoryUploadContractAuthenticatedSuite1 = () => {
+  defineUnifiedRepositoryUploadContractAuthenticatedSuite1Part1()
+  defineUnifiedRepositoryUploadContractAuthenticatedSuite1Part2()
+  defineUnifiedRepositoryUploadContractAuthenticatedSuite1Part3()
+  defineUnifiedRepositoryUploadContractAuthenticatedSuite1Part4()
+  defineUnifiedRepositoryUploadContractAuthenticatedSuite1Part5()
+};
+
+test.describe('Unified repository upload contract (authenticated)', defineUnifiedRepositoryUploadContractAuthenticatedSuite1)

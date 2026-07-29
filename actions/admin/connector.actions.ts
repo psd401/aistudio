@@ -22,6 +22,11 @@ import type { McpAuthType, McpToolSource } from "@/lib/mcp/connector-types"
 import type { OAuthCredentialsConfig } from "@/lib/db/schema/tables/nexus-mcp-servers"
 import { encryptToken } from "@/lib/crypto/token-encryption"
 import { sql } from "drizzle-orm"
+import { resolvePublicAddresses } from "@/lib/security/safe-fetch"
+import {
+  assertCredentialProfileUpdate,
+  resolveCredentialProfile,
+} from "@/lib/mcp/credential-profiles"
 
 // ============================================
 // Types
@@ -87,6 +92,70 @@ type McpServerUpdate = Partial<
   >
 >
 
+async function validateCredentialProfileChange(
+  input: UpdateMcpServerInput
+): Promise<void> {
+  if (input.url === undefined && input.credentialsKey === undefined) return
+
+  const [current] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          url: nexusMcpServers.url,
+          credentialsKey: nexusMcpServers.credentialsKey,
+        })
+        .from(nexusMcpServers)
+        .where(eq(nexusMcpServers.id, input.id))
+        .limit(1),
+    "updateMcpServer.credentialOrigin"
+  )
+  if (!current) {
+    throw ErrorFactories.dbRecordNotFound("nexus_mcp_servers", input.id)
+  }
+  assertCredentialProfileUpdate(
+    { url: current.url, profileId: current.credentialsKey },
+    { url: input.url, profileId: input.credentialsKey }
+  )
+}
+
+async function buildMcpServerUpdate(
+  input: UpdateMcpServerInput
+): Promise<McpServerUpdate> {
+  const { id: _, ...fields } = input
+  const updateData: McpServerUpdate = {}
+  if (fields.name !== undefined) updateData.name = fields.name
+  if (fields.url !== undefined) updateData.url = fields.url
+  if (fields.transport !== undefined) updateData.transport = fields.transport
+  if (fields.authType !== undefined) updateData.authType = fields.authType
+  if (fields.toolSource !== undefined) updateData.toolSource = fields.toolSource
+  if (fields.credentialsKey !== undefined) {
+    updateData.credentialsKey = fields.credentialsKey
+  }
+  if (fields.oauthCredentials === null) {
+    updateData.oauthCredentials = null
+  } else if (fields.oauthCredentials !== undefined) {
+    await validateOAuthCredentials(fields.oauthCredentials)
+    updateData.oauthCredentials = {
+      clientId: fields.oauthCredentials.clientId,
+      encryptedClientSecret: await encryptToken(
+        fields.oauthCredentials.clientSecret
+      ),
+      authorizationEndpointUrl:
+        fields.oauthCredentials.authorizationEndpointUrl,
+      tokenEndpointUrl: fields.oauthCredentials.tokenEndpointUrl,
+      scopes: fields.oauthCredentials.scopes,
+    }
+  }
+  if (fields.allowedUsers !== undefined) {
+    updateData.allowedUsers = fields.allowedUsers
+  }
+  if (fields.maxConnections !== undefined) {
+    updateData.maxConnections = fields.maxConnections
+  }
+  updateData.updatedAt = new Date()
+  return updateData
+}
+
 // ============================================
 // Validation
 // ============================================
@@ -99,12 +168,10 @@ const MAX_CONNECTIONS_LIMIT = 100
  * Block private/loopback IP ranges and non-HTTP(S)/WS(S) protocols.
  * Prevents SSRF when admin-configured URLs are later used to establish connections.
  *
- * Known limitation: hostname-only checks do not mitigate DNS rebinding attacks.
- * An attacker controlling DNS could register a public IP, then re-point to a
- * private range (e.g., 169.254.169.254) after validation. Connection-time IP
- * pinning would be needed to fully mitigate this — tracked for a future iteration.
+ * Hostnames are also resolved and every A/AAAA answer must be public. Outbound
+ * connection paths independently repeat this check and pin their socket.
  */
-function validateMcpUrl(rawUrl: string): void {
+async function validateMcpUrl(rawUrl: string): Promise<void> {
   let parsed: URL
   try {
     parsed = new URL(rawUrl)
@@ -154,13 +221,23 @@ function validateMcpUrl(rawUrl: string): void {
       "URL must not target internal network ranges"
     )
   }
+
+  try {
+    await resolvePublicAddresses(hostname)
+  } catch {
+    throw ErrorFactories.invalidInput(
+      "url",
+      "[redacted]",
+      "URL hostname must resolve only to public network addresses"
+    )
+  }
 }
 
 /**
  * Validates OAuth credential endpoint URLs and clientId.
  * Reuses validateMcpUrl for SSRF prevention on stored endpoint URLs.
  */
-function validateOAuthCredentials(creds: OAuthCredentialsInput): void {
+async function validateOAuthCredentials(creds: OAuthCredentialsInput): Promise<void> {
   const trimmedId = creds.clientId.trim()
   if (trimmedId.length === 0 || trimmedId.length > 255) {
     throw ErrorFactories.invalidInput("clientId", "[redacted]", "Client ID must be 1–255 characters")
@@ -169,10 +246,10 @@ function validateOAuthCredentials(creds: OAuthCredentialsInput): void {
     throw ErrorFactories.invalidInput("clientSecret", "[redacted]", "Client Secret must not be empty")
   }
   if (creds.authorizationEndpointUrl) {
-    validateMcpUrl(creds.authorizationEndpointUrl)
+    await validateMcpUrl(creds.authorizationEndpointUrl)
   }
   if (creds.tokenEndpointUrl) {
-    validateMcpUrl(creds.tokenEndpointUrl)
+    await validateMcpUrl(creds.tokenEndpointUrl)
   }
 }
 
@@ -319,13 +396,16 @@ export async function createMcpServer(
       hasCredentials: !!input.credentialsKey,
     })
 
-    validateMcpUrl(input.url)
+    await validateMcpUrl(input.url)
     validateServerInput(input)
+    if (input.credentialsKey) {
+      resolveCredentialProfile(input.credentialsKey, input.url)
+    }
 
     // Encrypt OAuth client secret if inline credentials are provided
     let oauthCredentialsValue: OAuthCredentialsConfig | null = null
     if (input.oauthCredentials) {
-      validateOAuthCredentials(input.oauthCredentials)
+      await validateOAuthCredentials(input.oauthCredentials)
       oauthCredentialsValue = {
         clientId: input.oauthCredentials.clientId,
         encryptedClientSecret: await encryptToken(input.oauthCredentials.clientSecret),
@@ -394,41 +474,10 @@ export async function updateMcpServer(
         : undefined,
     })
 
-    if (input.url !== undefined) validateMcpUrl(input.url)
+    if (input.url !== undefined) await validateMcpUrl(input.url)
     validateServerInput(input)
-
-    // Typed update payload — avoids Record<string, unknown>
-    const { id: _, ...fields } = input
-    const updateData: McpServerUpdate = {}
-    if (fields.name !== undefined) updateData.name = fields.name
-    if (fields.url !== undefined) updateData.url = fields.url
-    if (fields.transport !== undefined) updateData.transport = fields.transport
-    if (fields.authType !== undefined) updateData.authType = fields.authType
-    if (fields.toolSource !== undefined) updateData.toolSource = fields.toolSource
-    if (fields.credentialsKey !== undefined)
-      updateData.credentialsKey = fields.credentialsKey
-    if (fields.oauthCredentials !== undefined) {
-      if (fields.oauthCredentials === null) {
-        // null clears inline credentials
-        updateData.oauthCredentials = null
-      } else {
-        validateOAuthCredentials(fields.oauthCredentials)
-        updateData.oauthCredentials = {
-          clientId: fields.oauthCredentials.clientId,
-          encryptedClientSecret: await encryptToken(fields.oauthCredentials.clientSecret),
-          authorizationEndpointUrl: fields.oauthCredentials.authorizationEndpointUrl,
-          tokenEndpointUrl: fields.oauthCredentials.tokenEndpointUrl,
-          scopes: fields.oauthCredentials.scopes,
-        }
-      }
-    }
-    if (fields.allowedUsers !== undefined)
-      updateData.allowedUsers = fields.allowedUsers
-    if (fields.maxConnections !== undefined)
-      updateData.maxConnections = fields.maxConnections
-
-    // Drizzle does not auto-update timestamps — set explicitly
-    updateData.updatedAt = new Date()
+    await validateCredentialProfileChange(input)
+    const updateData = await buildMcpServerUpdate(input)
 
     if (Object.keys(updateData).length <= 1) {
       const [currentRow] = await executeQuery(
@@ -530,4 +579,3 @@ export async function deleteMcpServer(
     )
   }
 }
-

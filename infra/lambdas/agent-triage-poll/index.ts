@@ -28,11 +28,11 @@ import {
   getCurrentHistoryId,
   getMessageFullBody,
   getMessageMetadata,
+  listLabels,
   listHistory,
   modifyMessage,
   modifyThread,
   threadHasUserReply,
-  type HistoryEvent,
 } from "./gmail";
 import {
   classifyWithLLM,
@@ -43,7 +43,6 @@ import {
   applyRules,
   shouldEscalate,
   type EmailFeatures,
-  type Label,
 } from "./rules";
 import { postEscalation, postTaskOutcome, resolveDmSpace } from "./chat";
 import {
@@ -63,16 +62,24 @@ import type {
   DecisionRecord,
   TriageRow,
 } from "./types";
+import {
+  resolveTrustedTriageLabelMapping,
+  validateStoredTriageLabelMapping,
+} from "./label-mapping";
 
 const ENV = process.env.ENVIRONMENT ?? "dev";
 const REGION = process.env.AWS_REGION ?? "us-east-1";
+const validatedLabelMappings = new WeakMap<
+  TriageRow,
+  Promise<Record<"important" | "later" | "news" | "task", string> | null>
+>();
 
 export function log(
   level: "INFO" | "WARN" | "ERROR",
   evt: string,
   fields: Record<string, unknown>,
 ) {
-  // eslint-disable-next-line no-console
+
   console.log(
     JSON.stringify({
       level,
@@ -120,6 +127,138 @@ export async function acquireUserAccessToken(
   }
 }
 
+async function trustedLabelIdsForRow(
+  row: TriageRow,
+  accessToken: string,
+): Promise<Record<"important" | "later" | "news" | "task", string> | null> {
+  let pending = validatedLabelMappings.get(row);
+  if (!pending) {
+    const stored = validateStoredTriageLabelMapping(row);
+    if (!stored.valid) {
+      log("ERROR", "untrusted_label_mapping", {
+        user: row.userEmail,
+        reason: stored.reason,
+      });
+      return null;
+    }
+    pending = resolveTrustedTriageLabelMapping(
+      row,
+      () => listLabels(accessToken)
+    );
+    validatedLabelMappings.set(row, pending);
+  }
+  return pending;
+}
+
+type HistoryEvent = Awaited<
+  ReturnType<typeof listHistory>
+>["events"][number];
+
+async function collectMessageDecisions(
+  row: TriageRow,
+  accessToken: string,
+  event: HistoryEvent,
+  decisions: DecisionRecord[],
+): Promise<number> {
+  let escalated = 0;
+  for (const item of event.messagesAdded ?? []) {
+    try {
+      const result = await classifyAndLabel(
+        row,
+        accessToken,
+        item.message,
+      );
+      if (result) {
+        decisions.push(result.decision);
+        if (result.escalated) escalated += 1;
+      }
+    } catch (err) {
+      log("ERROR", "classify_failed", {
+        user: row.userEmail,
+        messageId: item.message.id,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return escalated;
+}
+
+function collectCorrections(
+  row: TriageRow,
+  event: HistoryEvent,
+  corrections: CorrectionRecord[],
+): void {
+  for (const item of event.labelsAdded ?? []) {
+    const correction = detectCorrection(row, item, "added");
+    if (correction) corrections.push(correction);
+  }
+  for (const item of event.labelsRemoved ?? []) {
+    const correction = detectCorrection(row, item, "removed");
+    if (correction) corrections.push(correction);
+  }
+}
+
+function collectTaskGestures(
+  row: TriageRow,
+  event: HistoryEvent,
+  taskGestures: Map<string, string>,
+): void {
+  const taskLabelId = row.labelIdsByKey?.task;
+  if (!taskLabelId) return;
+  for (const item of event.labelsAdded ?? []) {
+    if (
+      item.labelIds?.includes(taskLabelId) &&
+      !taskGestures.has(item.message.threadId)
+    ) {
+      taskGestures.set(item.message.threadId, item.message.id);
+    }
+  }
+}
+
+async function processTaskGesturesForTick(
+  row: TriageRow,
+  accessToken: string,
+  taskGestures: Map<string, string>,
+): Promise<void> {
+  if (taskGestures.size === 0) return;
+  if (row.tasksMode !== "invoke-agent") {
+    log("INFO", "task_gesture_ignored_mode_none", {
+      user: row.userEmail,
+      count: taskGestures.size,
+    });
+    return;
+  }
+
+  const gestureStart = Date.now();
+  const budgetMs = 180_000;
+  let processed = 0;
+  let deferred = 0;
+  for (const messageId of taskGestures.values()) {
+    if (Date.now() - gestureStart > budgetMs) {
+      deferred += 1;
+      continue;
+    }
+    try {
+      await processTaskGesture(row, accessToken, messageId);
+      processed += 1;
+    } catch (err) {
+      log("ERROR", "task_gesture_failed", {
+        user: row.userEmail,
+        messageId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  if (deferred > 0) {
+    log("WARN", "task_gestures_deferred", {
+      user: row.userEmail,
+      processed,
+      deferred,
+      elapsed_ms: Date.now() - gestureStart,
+    });
+  }
+}
+
 /**
  * Process one enabled user's live-triage tick. Exported for the SQS worker
  * (worker.ts) which invokes it once per `poll` message.
@@ -130,6 +269,9 @@ export async function processUser(row: TriageRow): Promise<void> {
   // Acquire access token.
   const accessToken = await acquireUserAccessToken(row.userEmail);
   if (!accessToken) return;
+  const trustedLabelIds = await trustedLabelIdsForRow(row, accessToken);
+  if (!trustedLabelIds) return;
+  row = { ...row, labelIdsByKey: trustedLabelIds };
 
   // Anchor cursor — when missing or on first run we capture "now" so we
   // only classify forward.
@@ -168,55 +310,14 @@ export async function processUser(row: TriageRow): Promise<void> {
   let escalated = 0;
 
   for (const event of events) {
-    // New messages → classify + label.
-    for (const m of event.messagesAdded ?? []) {
-      try {
-        const decision = await classifyAndLabel(row, accessToken, m.message);
-        if (decision) {
-          newDecisions.push(decision.decision);
-          if (decision.escalated) escalated++;
-        }
-      } catch (err) {
-        log("ERROR", "classify_failed", {
-          user: row.userEmail,
-          messageId: m.message.id,
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    // User-driven label changes → training signal. Iterate
-    // labelsAdded and labelsRemoved separately instead of combining
-    // into one array — avoids an O(N²) .includes() check and makes
-    // the direction unambiguous.
-    for (const evt of event.labelsAdded ?? []) {
-      const correction = detectCorrection(row, evt, "added");
-      if (correction) newCorrections.push(correction);
-    }
-    for (const evt of event.labelsRemoved ?? []) {
-      const correction = detectCorrection(row, evt, "removed");
-      if (correction) newCorrections.push(correction);
-    }
-
-    // @psd/Task user gesture — collect into a dedup set so re-labeled
-    // threads only fire once per tick. The classifier never assigns
-    // @psd/Task itself, so any labelsAdded event for it is user-driven
-    // (or programmatic from another tool — both count as "create a
-    // task").
-    const taskLabelId = row.labelIdsByKey?.task;
-    if (taskLabelId) {
-      for (const evt of event.labelsAdded ?? []) {
-        if (evt.labelIds?.includes(taskLabelId)) {
-          // Key by threadId — first message in this thread to fire
-          // wins as the representative. Subsequent labelsAdded events
-          // for the same thread (because Gmail fires one per message
-          // when a thread is labeled) are no-ops.
-          if (!taskGestures.has(evt.message.threadId)) {
-            taskGestures.set(evt.message.threadId, evt.message.id);
-          }
-        }
-      }
-    }
+    escalated += await collectMessageDecisions(
+      row,
+      accessToken,
+      event,
+      newDecisions,
+    );
+    collectCorrections(row, event, newCorrections);
+    collectTaskGestures(row, event, taskGestures);
   }
 
   // Advance cursor FIRST, before any expensive gesture processing.
@@ -236,47 +337,7 @@ export async function processUser(row: TriageRow): Promise<void> {
     newCorrections,
   );
 
-  // Process task gestures sequentially with a per-tick wall-clock
-  // budget. Each AgentCore call is hard-capped at ~90s; we cap the
-  // total at TASK_GESTURE_BUDGET_MS so a backlog can't starve other
-  // users (and so the Lambda timeout never bites). Any unprocessed
-  // gestures are logged — they'll be picked up next time the user
-  // re-applies the @psd/Task label (an intentional retry gesture).
-  const TASK_GESTURE_BUDGET_MS = 180_000;
-  if (taskGestures.size > 0 && row.tasksMode === "invoke-agent") {
-    const gestureStart = Date.now();
-    let processed = 0;
-    let deferred = 0;
-    for (const messageId of taskGestures.values()) {
-      if (Date.now() - gestureStart > TASK_GESTURE_BUDGET_MS) {
-        deferred++;
-        continue;
-      }
-      try {
-        await processTaskGesture(row, accessToken, messageId);
-        processed++;
-      } catch (err) {
-        log("ERROR", "task_gesture_failed", {
-          user: row.userEmail,
-          messageId,
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-    if (deferred > 0) {
-      log("WARN", "task_gestures_deferred", {
-        user: row.userEmail,
-        processed,
-        deferred,
-        elapsed_ms: Date.now() - gestureStart,
-      });
-    }
-  } else if (taskGestures.size > 0) {
-    log("INFO", "task_gesture_ignored_mode_none", {
-      user: row.userEmail,
-      count: taskGestures.size,
-    });
-  }
+  await processTaskGesturesForTick(row, accessToken, taskGestures);
 
   log("INFO", "user_processed", {
     user: row.userEmail,
@@ -351,12 +412,142 @@ function shouldSkipMessage(
   return { skip: false };
 }
 
+async function classifyMessage(
+  row: TriageRow,
+  accessToken: string,
+  messageId: string,
+  features: EmailFeatures,
+): Promise<ClassifierResult> {
+  const ruleDecision = applyRules(features, row.rules);
+  if ("label" in ruleDecision) {
+    return {
+      label: ruleDecision.label,
+      confidence: 1,
+      reason: ruleDecision.reason,
+      source: "rule",
+    };
+  }
+
+  const internalDomain =
+    row.internalDomain ?? row.userEmail.split("@")[1] ?? "";
+  let bodyExcerpt: string | undefined;
+  try {
+    const full = await getMessageFullBody(
+      accessToken,
+      messageId,
+      BODY_EXCERPT_MAX,
+    );
+    if (full?.trim()) bodyExcerpt = full;
+  } catch (err) {
+    log("WARN", "body_fetch_failed", {
+      user: row.userEmail,
+      messageId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+  const llm = await classifyWithLLM(features, row.rules, internalDomain, {
+    bodyExcerpt,
+    learnedPatterns: row.learnedPatterns ?? [],
+    recentCorrections: row.recentCorrections ?? [],
+  });
+  const finalized = finalizeLLMLabel(llm);
+  return {
+    label: finalized.label,
+    confidence: finalized.confidence,
+    reason: finalized.reason,
+    source: "llm",
+  };
+}
+
+async function resolveDmSpaceForRow(
+  row: TriageRow,
+  logEvent: string,
+): Promise<string | undefined> {
+  if (row.dmSpaceName) return row.dmSpaceName;
+  const googleIdentity = await getGoogleIdentityForEmail(row.userEmail);
+  if (!googleIdentity) return undefined;
+  const dmSpaceName = (await resolveDmSpace(googleIdentity)) ?? undefined;
+  if (dmSpaceName) {
+    await backfillDmSpaceName(row.userEmail, dmSpaceName);
+    log("INFO", logEvent, {
+      user: row.userEmail,
+      space: dmSpaceName,
+    });
+  }
+  return dmSpaceName;
+}
+
+interface EscalationContext {
+  features: EmailFeatures;
+  meta: NonNullable<Awaited<ReturnType<typeof getMessageMetadata>>>;
+  msgRef: { id: string; threadId: string };
+  result: ClassifierResult;
+  row: TriageRow;
+  suppressEscalation: boolean;
+}
+
+async function maybeEscalateMessage({
+  features,
+  meta,
+  msgRef,
+  result,
+  row,
+  suppressEscalation,
+}: EscalationContext): Promise<boolean> {
+  if (suppressEscalation) return false;
+  const escalation = shouldEscalate({
+    label: result.label,
+    source: result.source,
+    confidence: result.confidence,
+    features,
+    escalation: row.escalation,
+    mode: row.escalationMode,
+    confidenceThreshold: row.escalationConfidenceThreshold,
+  });
+  if (!escalation.escalate) return false;
+  const dmSpaceName = await resolveDmSpaceForRow(
+    row,
+    "dm_space_backfilled_escalation",
+  );
+  if (!dmSpaceName) return false;
+
+  try {
+    await postEscalation({
+      dmSpaceName,
+      userEmail: row.userEmail,
+      label: result.label,
+      message: {
+        id: msgRef.id,
+        threadId: msgRef.threadId,
+        fromEmail: features.fromEmail,
+        subject: features.subject,
+        snippet: meta.snippet ?? "",
+        internalDate: meta.internalDate ?? "",
+        labelIds: meta.labelIds ?? [],
+      },
+      reason: escalation.reason,
+    });
+    return true;
+  } catch (err) {
+    log("ERROR", "escalation_failed", {
+      user: row.userEmail,
+      messageId: msgRef.id,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
 export async function classifyAndLabel(
   row: TriageRow,
   accessToken: string,
   msgRef: { id: string; threadId: string; labelIds?: string[] },
   opts: { suppressEscalation?: boolean } = {},
 ): Promise<{ decision: DecisionRecord; escalated: boolean } | null> {
+  const trustedLabelIds = await trustedLabelIdsForRow(row, accessToken);
+  if (!trustedLabelIds) return null;
+  row = { ...row, labelIdsByKey: trustedLabelIds };
+
   // Fetch metadata — needed for sender + subject + snippet.
   const meta = await getMessageMetadata(accessToken, msgRef.id);
   if (!meta) return null;
@@ -376,48 +567,12 @@ export async function classifyAndLabel(
   }
 
   const features = await buildFeatures(row, accessToken, meta);
-
-  // Step 1: deterministic rules.
-  let result: ClassifierResult;
-  const ruleDecision = applyRules(features, row.rules);
-  if ("label" in ruleDecision) {
-    result = {
-      label: ruleDecision.label,
-      confidence: 1, // rule matches are certain
-      reason: ruleDecision.reason,
-      source: "rule",
-    };
-  } else {
-    // Step 2: LLM fallback. Fetch the fuller body excerpt (#1172) so the
-    // classifier sees more than the 200-char snippet; feed the learned
-    // patterns + recent corrections as soft hints.
-    const internalDomain = row.internalDomain ?? row.userEmail.split("@")[1] ?? "";
-    let bodyExcerpt: string | undefined;
-    try {
-      const full = await getMessageFullBody(accessToken, msgRef.id, BODY_EXCERPT_MAX);
-      if (full && full.trim()) bodyExcerpt = full;
-    } catch (err) {
-      log("WARN", "body_fetch_failed", {
-        user: row.userEmail,
-        messageId: msgRef.id,
-        err: err instanceof Error ? err.message : String(err),
-      });
-    }
-    const llm = await classifyWithLLM(features, row.rules, internalDomain, {
-      bodyExcerpt,
-      learnedPatterns: row.learnedPatterns ?? [],
-      recentCorrections: row.recentCorrections ?? [],
-    });
-    // Apply the confidence floors: global 0.6 floor + the higher 0.75 bar
-    // for LLM-sourced `important` ("important isn't always important").
-    const finalized = finalizeLLMLabel(llm);
-    result = {
-      label: finalized.label,
-      confidence: finalized.confidence,
-      reason: finalized.reason,
-      source: "llm",
-    };
-  }
+  const result = await classifyMessage(
+    row,
+    accessToken,
+    msgRef.id,
+    features,
+  );
 
   // Apply the label via Gmail.
   const labelId = row.labelIdsByKey?.[result.label];
@@ -425,15 +580,9 @@ export async function classifyAndLabel(
     log("WARN", "missing_label_id", { user: row.userEmail, key: result.label });
     return null;
   }
-  // Always archive — INBOX comes off for every classification, not
-  // just later/news. User treats labels as folders (each message lives
-  // in exactly one place), so Important goes to @psd/Important AND is
-  // removed from Inbox. Chat escalation is the "you need to look at
-  // this NOW" signal; the @psd/Important label is the home folder.
-  // Updated 2026-05-22 per user feedback — original design kept Important
-  // dual-labelled in Inbox, which doubled the user's review surface.
-  const removeLabelIds = ["INBOX"];
-  await modifyMessage(accessToken, msgRef.id, [labelId], removeLabelIds);
+  // The mapping has been provenance-checked and confirmed against live Gmail
+  // above, so preserving the product's folder semantics is safe here.
+  await modifyMessage(accessToken, msgRef.id, [labelId], ["INBOX"]);
 
   const record: DecisionRecord = {
     messageId: msgRef.id,
@@ -447,65 +596,14 @@ export async function classifyAndLabel(
     subject: features.subject,
   };
 
-  // Step 3: maybe escalate to Chat. Sweeps (bulk backfill) never escalate
-  // — a 1000-message backfill must not ping-storm the user (#1172).
-  let escalated = false;
-  const esc = opts.suppressEscalation
-    ? ({ escalate: false } as const)
-    : shouldEscalate({
-        label: result.label,
-        source: result.source,
-        confidence: result.confidence,
-        features,
-        escalation: row.escalation,
-        mode: row.escalationMode,
-        confidenceThreshold: row.escalationConfidenceThreshold,
-      });
-  if (esc.escalate) {
-    // Resolve the DM space lazily — enable flow doesn't populate it,
-    // so the first escalation for a new user triggers the lookup and
-    // backfills the row for subsequent calls.
-    let dmSpace = row.dmSpaceName;
-    if (!dmSpace) {
-      const gid = await getGoogleIdentityForEmail(row.userEmail);
-      if (gid) {
-        dmSpace = await resolveDmSpace(gid) ?? undefined;
-        if (dmSpace) {
-          await backfillDmSpaceName(row.userEmail, dmSpace);
-          log("INFO", "dm_space_backfilled_escalation", {
-            user: row.userEmail,
-            space: dmSpace,
-          });
-        }
-      }
-    }
-    if (dmSpace) {
-      try {
-        await postEscalation({
-          dmSpaceName: dmSpace,
-          userEmail: row.userEmail,
-          label: result.label,
-          message: {
-            id: msgRef.id,
-            threadId: msgRef.threadId,
-            fromEmail: features.fromEmail,
-            subject: features.subject,
-            snippet: meta.snippet ?? "",
-            internalDate: meta.internalDate ?? "",
-            labelIds: meta.labelIds ?? [],
-          },
-          reason: esc.reason,
-        });
-        escalated = true;
-      } catch (err) {
-        log("ERROR", "escalation_failed", {
-          user: row.userEmail,
-          messageId: msgRef.id,
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  }
+  const escalated = await maybeEscalateMessage({
+    features,
+    meta,
+    msgRef,
+    result,
+    row,
+    suppressEscalation: opts.suppressEscalation ?? false,
+  });
 
   return { decision: record, escalated };
 }
@@ -602,6 +700,172 @@ function detectCorrection(
 // Re-exported for unit tests outside the handler.
 export { detectCorrection };
 
+interface TaskGestureContext {
+  fromEmail: string;
+  meta: NonNullable<Awaited<ReturnType<typeof getMessageMetadata>>>;
+  result: Awaited<ReturnType<typeof requestTaskCreation>>;
+  subject: string;
+}
+
+async function loadTaskGestureContext(
+  row: TriageRow,
+  accessToken: string,
+  messageId: string,
+): Promise<TaskGestureContext | null> {
+  const meta = await getMessageMetadata(accessToken, messageId);
+  if (!meta) {
+    log("WARN", "task_gesture_meta_missing", {
+      user: row.userEmail,
+      messageId,
+    });
+    return null;
+  }
+  const taskLabelId = row.labelIdsByKey?.task;
+  if (taskLabelId && !(meta.labelIds ?? []).includes(taskLabelId)) {
+    log("INFO", "task_gesture_stale_label_removed", {
+      user: row.userEmail,
+      messageId,
+    });
+    return null;
+  }
+
+  const fromEmail = extractFromEmail(meta);
+  const subject = extractSubject(meta);
+  let bodyText = meta.snippet ?? "";
+  try {
+    const full = await getMessageFullBody(accessToken, messageId);
+    if (full?.trim()) bodyText = full;
+  } catch (err) {
+    log("WARN", "task_gesture_body_fetch_failed", {
+      user: row.userEmail,
+      messageId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  const profile = await getUserProfile(row.userEmail);
+  if (!profile?.workspacePrefix) {
+    log("ERROR", "task_gesture_no_workspace_prefix", {
+      user: row.userEmail,
+      messageId,
+    });
+    return null;
+  }
+  const result = await requestTaskCreation({
+    userEmail: row.userEmail,
+    workspacePrefix: profile.workspacePrefix,
+    agentcoreRuntimeId: row.agentcoreRuntimeId,
+    subject,
+    fromEmail,
+    snippet: bodyText,
+    threadId: meta.threadId,
+    messageId,
+  });
+  return { fromEmail, meta, result, subject };
+}
+
+interface TaskOutcomeContext {
+  accessToken: string;
+  context: TaskGestureContext;
+  dmSpaceName: string | undefined;
+  messageId: string;
+  row: TriageRow;
+  startedAt: number;
+}
+
+async function completeTaskGesture({
+  accessToken,
+  context,
+  dmSpaceName,
+  messageId,
+  row,
+  startedAt,
+}: TaskOutcomeContext): Promise<void> {
+  if (!context.result.ok) return;
+  const taskLabelId = row.labelIdsByKey?.task;
+  const removeLabelIds = taskLabelId
+    ? ["INBOX", taskLabelId]
+    : ["INBOX"];
+  try {
+    await modifyThread(
+      accessToken,
+      context.meta.threadId,
+      [],
+      removeLabelIds,
+    );
+  } catch (err) {
+    log("WARN", "task_archive_failed", {
+      user: row.userEmail,
+      messageId,
+      taskRef: context.result.taskRef,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+  await recordTaskCreated(
+    row.userEmail,
+    messageId,
+    context.result.taskRef,
+    new Date().toISOString(),
+  );
+  log("INFO", "task_gesture_ok", {
+    user: row.userEmail,
+    messageId,
+    taskRef: context.result.taskRef,
+    elapsed_ms: Date.now() - startedAt,
+  });
+  if (!row.tasksNotifySuccess || !dmSpaceName) return;
+  try {
+    await postTaskOutcome({
+      dmSpaceName,
+      subject: context.subject,
+      fromEmail: context.fromEmail,
+      messageId,
+      ok: true,
+      taskRef: context.result.taskRef,
+    });
+  } catch (err) {
+    log("WARN", "task_success_notify_failed", {
+      user: row.userEmail,
+      messageId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+async function failTaskGesture({
+  context,
+  dmSpaceName,
+  messageId,
+  row,
+  startedAt,
+}: TaskOutcomeContext): Promise<void> {
+  if (context.result.ok) return;
+  await releaseTaskGestureClaim(row.userEmail, messageId);
+  log("ERROR", "task_gesture_failed", {
+    user: row.userEmail,
+    messageId,
+    reason: context.result.reason,
+    elapsed_ms: Date.now() - startedAt,
+  });
+  if (!dmSpaceName) return;
+  try {
+    await postTaskOutcome({
+      dmSpaceName,
+      subject: context.subject,
+      fromEmail: context.fromEmail,
+      messageId,
+      ok: false,
+      reason: context.result.reason,
+    });
+  } catch (err) {
+    log("WARN", "task_failure_notify_failed", {
+      user: row.userEmail,
+      messageId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 /**
  * Handle a single @psd/Task user gesture.
  *
@@ -610,8 +874,7 @@ export { detectCorrection };
  *      create the task in their preferred system. We deliver metadata,
  *      the agent does the work.
  *   3. Parse the agent's terse reply for success/failure.
- *   4. On success: archive (remove INBOX + remove @psd/Task) so the
- *      message ends up in All Mail only — exactly one home.
+ *   4. On success: archive and remove @psd/Task.
  *   5. On success: record an audit trail entry (recentTaskCreations).
  *   6. On success: optional confirmation card if tasksNotifySuccess=true.
  *   7. On failure: leave the email as-is (still in Inbox + @psd/Task)
@@ -639,169 +902,27 @@ async function processTaskGesture(
     });
     return;
   }
-  const meta = await getMessageMetadata(accessToken, messageId);
-  if (!meta) {
-    log("WARN", "task_gesture_meta_missing", {
-      user: row.userEmail,
-      messageId,
-    });
-    return;
-  }
-  // If the @psd/Task label is no longer on the message, the gesture has
-  // either already been handled (label removed by a prior tick) or the
-  // user un-labeled it. Either way, don't re-process the stale
-  // labelsAdded event sitting in Gmail's 7-day history window.
-  const taskLabelId = row.labelIdsByKey?.task;
-  if (taskLabelId && !(meta.labelIds ?? []).includes(taskLabelId)) {
-    log("INFO", "task_gesture_stale_label_removed", {
-      user: row.userEmail,
-      messageId,
-    });
-    return;
-  }
-  const fromEmail = extractFromEmail(meta);
-  const subject = extractSubject(meta);
-  // Fetch the full body so the agent can apply urgency-detection rules
-  // (the 400-char snippet often cuts off "by Friday" or "EOD" markers).
-  // Falls back to snippet if the body fetch fails.
-  let bodyText = meta.snippet ?? "";
-  try {
-    const full = await getMessageFullBody(accessToken, messageId);
-    if (full && full.trim()) bodyText = full;
-  } catch (err) {
-    log("WARN", "task_gesture_body_fetch_failed", {
-      user: row.userEmail,
-      messageId,
-      err: err instanceof Error ? err.message : String(err),
-    });
-  }
-
-  // Resolve the user's actual S3 workspace prefix (e.g.
-  // `hagelk-db0f32b5`) from the users table. Don't derive it from the
-  // email's local-part — that loses the random suffix and the
-  // resulting S3 path won't exist (bug observed 2026-05-22).
-  const profile = await getUserProfile(row.userEmail);
-  const workspacePrefix = profile?.workspacePrefix;
-  if (!workspacePrefix) {
-    log("ERROR", "task_gesture_no_workspace_prefix", {
-      user: row.userEmail,
-      messageId,
-    });
-    return;
-  }
-
-  const result = await requestTaskCreation({
-    userEmail: row.userEmail,
-    workspacePrefix,
-    agentcoreRuntimeId: row.agentcoreRuntimeId,
-    subject,
-    fromEmail,
-    snippet: bodyText,
-    threadId: meta.threadId,
+  const context = await loadTaskGestureContext(
+    row,
+    accessToken,
     messageId,
-  });
-
-  // Resolve DM space lazily for the Chat outcome posts. The triage row
-  // doesn't always have it cached (users who haven't received a digest
-  // or escalation yet) — look it up via the bot's Chat API and persist
-  // back to the row for next time. Same pattern the cron Lambda uses.
-  let dmSpaceName = row.dmSpaceName;
-  if (!dmSpaceName) {
-    const gid = await getGoogleIdentityForEmail(row.userEmail);
-    if (gid) {
-      dmSpaceName = await resolveDmSpace(gid) ?? undefined;
-      if (dmSpaceName) {
-        await backfillDmSpaceName(row.userEmail, dmSpaceName);
-        log("INFO", "dm_space_backfilled", {
-          user: row.userEmail,
-          space: dmSpaceName,
-        });
-      }
-    }
-  }
-
-  if (result.ok) {
-    // Archive the WHOLE THREAD: drop INBOX + remove @psd/Task from
-    // every message in the thread. Modifying just the one message
-    // would leave other messages in the thread still tagged, which
-    // (a) confuses the user and (b) lets the next tick re-fire on
-    // those other messages' labelsAdded events.
-    const taskLabelId = row.labelIdsByKey?.task;
-    const removeLabelIds = ["INBOX"];
-    if (taskLabelId) removeLabelIds.push(taskLabelId);
-    try {
-      await modifyThread(accessToken, meta.threadId, [], removeLabelIds);
-    } catch (err) {
-      // Modify failed — task exists upstream but email isn't archived.
-      // Surface as a partial-success warning; user will see both the
-      // task in their system AND the email still in their @psd/Task
-      // label. Cleanup is manual but not catastrophic.
-      log("WARN", "task_archive_failed", {
-        user: row.userEmail,
-        messageId,
-        taskRef: result.taskRef,
-        err: err instanceof Error ? err.message : String(err),
-      });
-    }
-    await recordTaskCreated(
-      row.userEmail,
-      messageId,
-      result.taskRef,
-      new Date().toISOString(),
-    );
-    log("INFO", "task_gesture_ok", {
-      user: row.userEmail,
-      messageId,
-      taskRef: result.taskRef,
-      elapsed_ms: Date.now() - t0,
-    });
-    if (row.tasksNotifySuccess && dmSpaceName) {
-      try {
-        await postTaskOutcome({
-          dmSpaceName,
-          subject,
-          fromEmail,
-          messageId,
-          ok: true,
-          taskRef: result.taskRef,
-        });
-      } catch (err) {
-        log("WARN", "task_success_notify_failed", {
-          user: row.userEmail,
-          messageId,
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-    return;
-  }
-
-  // Failure path — log, release the claim so a retry (next tick or
-  // user re-label) isn't blocked, surface to Chat, leave email state
-  // untouched.
-  await releaseTaskGestureClaim(row.userEmail, messageId);
-  log("ERROR", "task_gesture_failed", {
-    user: row.userEmail,
+  );
+  if (!context) return;
+  const dmSpaceName = await resolveDmSpaceForRow(
+    row,
+    "dm_space_backfilled",
+  );
+  const outcomeContext = {
+    accessToken,
+    context,
+    dmSpaceName,
     messageId,
-    reason: result.reason,
-    elapsed_ms: Date.now() - t0,
-  });
-  if (dmSpaceName) {
-    try {
-      await postTaskOutcome({
-        dmSpaceName,
-        subject,
-        fromEmail,
-        messageId,
-        ok: false,
-        reason: result.reason,
-      });
-    } catch (err) {
-      log("WARN", "task_failure_notify_failed", {
-        user: row.userEmail,
-        messageId,
-        err: err instanceof Error ? err.message : String(err),
-      });
-    }
+    row,
+    startedAt: t0,
+  };
+  if (context.result.ok) {
+    await completeTaskGesture(outcomeContext);
+  } else {
+    await failTaskGesture(outcomeContext);
   }
 }

@@ -101,6 +101,76 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     requiredScope: "platform:read",
     internalScopes: ["platform:read"],
   },
+  repositories_list: {
+    identifier: "repositories.list",
+    requiredScope: "repositories:list",
+    internalScopes: ["repositories:list"],
+    rest: {
+      scopes: ["repositories:list"],
+      binding: {
+        method: "get",
+        path: "/api/v1/repositories",
+        summary: "List accessible repositories",
+        operationId: "listRepositories",
+      },
+    },
+  },
+  repositories_describe: {
+    identifier: "repositories.describe",
+    requiredScope: "repositories:list",
+    internalScopes: ["repositories:list"],
+    rest: {
+      scopes: ["repositories:list"],
+      binding: {
+        method: "get",
+        path: "/api/v1/repositories/{id}",
+        summary: "Describe an accessible repository",
+        operationId: "describeRepository",
+      },
+    },
+  },
+  repositories_search: {
+    identifier: "repositories.search",
+    requiredScope: "repositories:search",
+    internalScopes: ["repositories:search"],
+    rest: {
+      scopes: ["repositories:search"],
+      binding: {
+        method: "post",
+        path: "/api/v1/repositories/search",
+        summary: "Search accessible repositories",
+        operationId: "searchRepositories",
+      },
+    },
+  },
+  repositories_get_source: {
+    identifier: "repositories.get_source",
+    requiredScope: "repositories:read",
+    internalScopes: ["repositories:read"],
+    rest: {
+      scopes: ["repositories:read"],
+      binding: {
+        method: "get",
+        path: "/api/v1/repositories/{id}/source",
+        summary: "Get authorized repository source segments",
+        operationId: "getRepositorySource",
+      },
+    },
+  },
+  repositories_list_changes: {
+    identifier: "repositories.list_changes",
+    requiredScope: "repositories:changes",
+    internalScopes: ["repositories:changes"],
+    rest: {
+      scopes: ["repositories:changes"],
+      binding: {
+        method: "get",
+        path: "/api/v1/repositories/changes",
+        summary: "List authorized repository changes",
+        operationId: "listRepositoryChanges",
+      },
+    },
+  },
   search_decisions: {
     identifier: "decisions.search",
     requiredScope: "mcp:search_decisions",
@@ -139,6 +209,67 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
           "200": "SSE stream of execution events (default Accept: text/event-stream).",
           "202": "Async job accepted; poll for completion (Accept: application/json).",
         },
+      },
+    },
+  },
+  create_assistant: {
+    identifier: "assistants.create",
+    requiredScope: "mcp:create_assistant",
+    internalScopes: ["mcp:create_assistant"],
+    destructive: true,
+    // v2 publishes the complete recursive ExportFormat assistant schema.
+    version: "v2",
+    rest: {
+      scopes: ["assistants:write"],
+      binding: {
+        method: "post",
+        path: "/api/v1/assistants/import",
+        summary: "Create assistants from an ExportFormat envelope",
+        operationId: "createAssistants",
+        successResponses: {
+          "201": "Assistants created; individual results include pending-approval ids.",
+        },
+        errorResponses: ["400", "404", "413", "429"],
+      },
+    },
+  },
+  update_assistant: {
+    identifier: "assistants.update",
+    requiredScope: "mcp:update_assistant",
+    internalScopes: ["mcp:update_assistant"],
+    destructive: true,
+    // v2 publishes the complete recursive single-assistant schema.
+    version: "v2",
+    rest: {
+      scopes: ["assistants:write"],
+      binding: {
+        method: "put",
+        path: "/api/v1/assistants/{id}",
+        summary: "Replace an assistant from an ExportFormat envelope",
+        operationId: "updateAssistant",
+        successResponses: {
+          "200": "Assistant replaced and returned in pending-approval state.",
+        },
+        errorResponses: ["400", "404", "409", "413", "429"],
+      },
+    },
+  },
+  fork_assistant: {
+    identifier: "assistants.fork",
+    requiredScope: "mcp:fork_assistant",
+    internalScopes: ["mcp:fork_assistant"],
+    destructive: true,
+    rest: {
+      scopes: ["assistants:write"],
+      binding: {
+        method: "post",
+        path: "/api/v1/assistants/{id}/fork",
+        summary: "Fork a visible assistant",
+        operationId: "forkAssistant",
+        successResponses: {
+          "201": "Assistant fork created in pending-approval state.",
+        },
+        errorResponses: ["400", "404", "413", "429"],
       },
     },
   },
@@ -196,6 +327,8 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     identifier: "content.list",
     requiredScope: "content:read",
     internalScopes: ["content:read"],
+    // v2: #1414 added the optional ISO 8601 `since` lower-bound filter.
+    version: "v2",
   },
   update_content: {
     identifier: "content.update",
@@ -250,7 +383,7 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
 };
 
 /**
- * The 5 MCP tools, projected into catalog manifest entries. Schemas/descriptions
+ * MCP tools projected into catalog manifest entries. Schemas/descriptions
  * come straight from `MCP_TOOLS`. The in-process handler is deliberately NOT bound
  * here: `ToolCatalog` resolves it lazily at dispatch time (via a dynamic import of
  * `lib/mcp/tool-handlers`), keyed by the MCP wire `name`. Binding the handler in
@@ -300,6 +433,53 @@ const MCP_MANIFEST_ENTRIES: ToolManifestEntry[] = MCP_TOOLS.map(
     };
   }
 );
+
+/**
+ * Frozen MCP contracts that must remain addressable after a newer version ships.
+ *
+ * Keep these as explicit snapshots instead of deriving them from `MCP_TOOLS`:
+ * deriving a legacy entry from the live registry would silently mutate the old
+ * contract the next time its current schema changes. The boot sync owns every
+ * `(identifier, version)` listed here, so retaining the row also prevents
+ * `deactivateOrphans()` from breaking callers pinned to the earlier version.
+ */
+const LEGACY_MCP_MANIFEST_ENTRIES: readonly ToolManifestEntry[] = [
+  {
+    identifier: "content.list",
+    version: "v1",
+    name: "list_content",
+    description:
+      "List content the caller may view. Filterable by kind, collection, tag, status, and title text.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: {
+          type: "string",
+          enum: ["document", "artifact"],
+          description: "Filter by kind",
+        },
+        collection: {
+          type: "string",
+          description: "Collection slug or id",
+        },
+        tag: { type: "string", description: "Filter by tag" },
+        status: {
+          type: "string",
+          enum: ["draft", "published", "archived"],
+          description: "Filter by status",
+        },
+        query: {
+          type: "string",
+          description: "Case-insensitive title search (max 200 characters)",
+        },
+      },
+    },
+    surfaces: ["mcp", "internal"],
+    requiredScopes: ["content:read"],
+    surfaceScopes: { internal: ["content:read"] },
+    agentCallable: true,
+  },
+];
 
 /**
  * AI SDK tools exposed in chat / Nexus, projected from the single browser-safe
@@ -363,6 +543,7 @@ const AGENT_TOOL_MANIFEST_ENTRIES: ToolManifestEntry[] = AGENT_TOOL_DESCRIPTORS.
  */
 export const TOOL_MANIFEST: readonly ToolManifestEntry[] = [
   ...MCP_MANIFEST_ENTRIES,
+  ...LEGACY_MCP_MANIFEST_ENTRIES,
   ...AI_SDK_MANIFEST_ENTRIES,
   ...AGENT_TOOL_MANIFEST_ENTRIES,
 ];

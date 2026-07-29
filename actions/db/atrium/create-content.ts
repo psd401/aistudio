@@ -26,6 +26,10 @@ import type {
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getUserRequester } from "./requester";
+import {
+  IN_APP_PUBLISH_PUBLIC_CAPABILITY,
+  notifyPublicExposure,
+} from "@/lib/atrium/public-publish-policy";
 
 export async function createContentAction(
   input: CreateObjectInput
@@ -57,7 +61,29 @@ export async function createContentAction(
     if (!(await hasCapabilityAccess("atrium-content"))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
-    const result = await contentService.create(requester, input);
+    const result = await contentService.create(requester, input, {
+      // #1336: any author may publish publicly — the same allow-then-notify
+      // policy the publish / set-visibility actions apply. Without this the
+      // create path still ran the §26.4 "create-as-private" downgrade, so a
+      // non-admin creating content explicitly Public (or inside a collection
+      // whose admin-set default is Public) silently got a PRIVATE object plus a
+      // queued widen request — contradicting the policy and reproducing the
+      // "make public does nothing visible" symptom at creation time.
+      hasPublishPublicCapability: IN_APP_PUBLISH_PUBLIC_CAPABILITY,
+    });
+
+    // Allow-then-NOTIFY, on the same terms as publish/set-visibility: only when
+    // the object actually RESOLVED to public (an explicit Public input, or a
+    // public collection default), never merely because one was requested.
+    if (result.visibilityLevel === "public") {
+      await notifyPublicExposure({
+        req: requester,
+        action: "create",
+        objectId: result.id,
+        note: "Created with public visibility without administrator approval (allow-then-notify policy)",
+        requestId,
+      });
+    }
 
     timer({ status: "success" });
     log.info("Content created", {

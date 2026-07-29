@@ -10,6 +10,7 @@
 
 import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
+import { isValidationError } from "@/types/error-types"
 import {
   withApiAuth,
   requireScope,
@@ -32,6 +33,7 @@ import {
   type PreparedAssistantExecutionInputs,
 } from "@/lib/api/assistant-execution-service"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
+import { INTERNAL_ASSISTANT_LOOKUP } from "@/lib/assistant-architect/internal-access"
 import { jobManagementService } from "@/lib/streaming/job-management-service"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 import { createLogger, startTimer } from "@/lib/logger"
@@ -51,14 +53,14 @@ const executeBodySchema = z.object({
   inputs: z.record(z.string(), z.unknown()).default({}),
 })
 
-function isForbiddenExecutionError(
+function isExecutionHttpError(
   error: unknown
-): error is { statusCode: 403; userMessage?: string } {
+): error is { statusCode: 403 | 404; userMessage?: string } {
   return (
     error !== null &&
     typeof error === "object" &&
     "statusCode" in error &&
-    error.statusCode === 403
+    (error.statusCode === 403 || error.statusCode === 404)
   )
 }
 
@@ -114,68 +116,180 @@ async function requireExecuteScope(
   return null
 }
 
+type ExecutionAuthorization =
+  | { ok: true; assistantId: number }
+  | { ok: false; response: NextResponse }
+
+async function authorizeExecution(
+  request: NextRequest,
+  auth: ApiAuthContext,
+  requestId: string,
+  log: ReturnType<typeof createLogger>
+): Promise<ExecutionAuthorization> {
+  const assistantId = extractNumericParam(request.url, "assistants")
+  if (!assistantId) {
+    return {
+      ok: false,
+      response: createErrorResponse(
+        requestId,
+        400,
+        "VALIDATION_ERROR",
+        "Invalid assistant ID"
+      ),
+    }
+  }
+
+  const scopeError = await requireExecuteScope(auth, assistantId, requestId)
+  if (scopeError) return { ok: false, response: scopeError }
+  const requireApproved = auth.authType !== "session"
+  const accessError = await verifyAssistantAccess(
+    assistantId,
+    auth,
+    requestId,
+    { requireApproved }
+  )
+  if (accessError) return { ok: false, response: accessError }
+
+  const architectResult = await getAssistantArchitectByIdAction(
+    assistantId.toString(),
+    INTERNAL_ASSISTANT_LOOKUP
+  )
+  if (!architectResult.isSuccess || !architectResult.data) {
+    return {
+      ok: false,
+      response: createErrorResponse(
+        requestId,
+        404,
+        "NOT_FOUND",
+        `Assistant not found: ${assistantId}`
+      ),
+    }
+  }
+  const architect = architectResult.data
+  const prompts = (architect.prompts || []).sort(
+    (a, b) => a.position - b.position
+  )
+  if (!prompts[prompts.length - 1]?.modelId) {
+    return {
+      ok: false,
+      response: createErrorResponse(
+        requestId,
+        400,
+        "CONFIGURATION_ERROR",
+        "Assistant has no model configured"
+      ),
+    }
+  }
+
+  const grantsError = await verifyAssistantResourceGrants({
+    auth,
+    architectUserId: architect.userId,
+    architectId: architect.id,
+    modelDbIds:
+      (architect.modelRoutingMode ?? "legacy") === "legacy"
+        ? prompts
+            .map((prompt) => prompt.modelId)
+            .filter((modelId): modelId is number =>
+              typeof modelId === "number" && modelId > 0
+            )
+        : [],
+    assistantId,
+    requestId,
+    log,
+  })
+  if (grantsError) return { ok: false, response: grantsError }
+
+  const repositoryAccess = await preflightAssistantRepositoryAccess(
+    prompts,
+    auth.cognitoSub
+  )
+  if (!repositoryAccess.isAllowed) {
+    return {
+      ok: false,
+      response: createErrorResponse(
+        requestId,
+        403,
+        "FORBIDDEN",
+        REPOSITORY_ACCESS_CHANGED_MESSAGE
+      ),
+    }
+  }
+  return { ok: true, assistantId }
+}
+
+function assistantExecutionErrorResponse(
+  error: unknown,
+  requestId: string,
+  assistantId: number,
+  log: ReturnType<typeof createLogger>
+): NextResponse {
+  if (isAssistantRuntimeRepositoryInputError(error)) {
+    return createErrorResponse(
+      requestId,
+      400,
+      "VALIDATION_ERROR",
+      error.message
+    )
+  }
+  if (isContentSafetyBlocked(error)) {
+    return createErrorResponse(
+      requestId,
+      400,
+      "CONTENT_BLOCKED",
+      error.message,
+      { categories: error.blockedCategories, source: error.source }
+    )
+  }
+  if (isValidationError(error)) {
+    return createErrorResponse(
+      requestId,
+      400,
+      "CONFIGURATION_ERROR",
+      error.fields?.map(({ message }) => message).join("; ") ||
+        "Assistant configuration is invalid"
+    )
+  }
+  if (isExecutionHttpError(error)) {
+    const isNotFound = error.statusCode === 404
+    return createErrorResponse(
+      requestId,
+      error.statusCode,
+      isNotFound ? "NOT_FOUND" : "FORBIDDEN",
+      error.userMessage ||
+        (isNotFound
+          ? `Assistant not found: ${assistantId}`
+          : "You do not have access to repository content used by this assistant")
+    )
+  }
+  log.error("Assistant execution failed", {
+    error: error instanceof Error ? error.message : String(error),
+    assistantId,
+  })
+  return createErrorResponse(
+    requestId,
+    500,
+    "EXECUTION_ERROR",
+    "Assistant execution failed"
+  )
+}
+
 // ============================================
 // POST — Execute Assistant
 // ============================================
 
 export const POST = withApiAuth(async (request: NextRequest, auth, requestId) => {
   const log = createLogger({ requestId, route: "api.v1.assistants.execute" })
-
-  // 1. Extract assistant ID from URL
-  const assistantId = extractNumericParam(request.url, "assistants")
-  if (!assistantId) {
-    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid assistant ID")
-  }
-
-  // 2. Check scope (catalog-resolved REST scope or per-assistant variant).
-  const scopeError = await requireExecuteScope(auth, assistantId, requestId)
-  if (scopeError) return scopeError
-
-  // 3. Verify assistant exists and user has access
-  const accessError = await verifyAssistantAccess(assistantId, auth, requestId)
-  if (accessError) return accessError
-
-  // 3b. Per-resource grant enforcement (#1206) — beneath ownership/approval,
-  // covers the assistant AND every model in its prompt chain (execution runs
-  // ALL prompts, so a restricted model anywhere in the chain blocks the run).
-  // Shared with the conversations and follow-up-message v1 entry points so a
-  // caller can't bypass a resource grant by picking a different entry point
-  // into the same assistant.
-  const architectResult = await getAssistantArchitectByIdAction(assistantId.toString())
-  if (!architectResult.isSuccess || !architectResult.data) {
-    return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
-  }
-  const architect = architectResult.data
-  const prompts = (architect.prompts || []).sort((a, b) => a.position - b.position)
-  const lastPrompt = prompts[prompts.length - 1]
-  if (!lastPrompt?.modelId) {
-    return createErrorResponse(requestId, 400, "CONFIGURATION_ERROR", "Assistant has no model configured")
-  }
-  const grantsError = await verifyAssistantResourceGrants({
-    auth,
-    architectUserId: architect.userId,
-    architectId: architect.id,
-    modelDbIds: prompts.map((p) => p.modelId).filter((m): m is number => typeof m === "number" && m > 0),
-    assistantId,
-    requestId,
-    log,
-  })
-  if (grantsError) return grantsError
-  const repositoryAccess = await preflightAssistantRepositoryAccess(
-    prompts,
-    auth.cognitoSub
-  )
-  if (!repositoryAccess.isAllowed) {
-    return createErrorResponse(
-      requestId,
-      403,
-      "FORBIDDEN",
-      REPOSITORY_ACCESS_CHANGED_MESSAGE
-    )
-  }
+  const authorization = await authorizeExecution(request, auth, requestId, log)
+  if (!authorization.ok) return authorization.response
+  const { assistantId } = authorization
 
   // 4. Parse and validate request body
-  const result = await parseRequestBody(request, executeBodySchema, requestId)
+  const result = await parseRequestBody(
+    request,
+    executeBodySchema,
+    requestId,
+    { maximumBytes: 128 * 1024 }
+  )
   if (isErrorResponse(result)) return result
   const { inputs } = result.data
 
@@ -187,7 +301,9 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
 
   // 5. Determine response mode
   const acceptHeader = request.headers.get("accept") || ""
-  const wantsJson = acceptHeader.includes("application/json") && !acceptHeader.includes("text/event-stream")
+  const wantsJson =
+    acceptHeader.includes("application/json") &&
+    !acceptHeader.includes("text/event-stream")
 
   log.info("Executing assistant", {
     assistantId,
@@ -224,6 +340,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       cognitoSub: auth.cognitoSub,
       requestId,
       preparedInputs,
+      requireApproved: auth.authType !== "session",
     })
 
     // Cast to NextResponse — streaming Response is compatible at runtime
@@ -232,34 +349,12 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       headers: Object.fromEntries(execResult.streamResponse.headers.entries()),
     })
   } catch (error) {
-    if (isAssistantRuntimeRepositoryInputError(error)) {
-      return createErrorResponse(
-        requestId,
-        400,
-        "VALIDATION_ERROR",
-        error.message
-      )
-    }
-    if (isContentSafetyBlocked(error)) {
-      return createErrorResponse(requestId, 400, "CONTENT_BLOCKED", error.message, {
-        categories: error.blockedCategories,
-        source: error.source,
-      })
-    }
-    if (isForbiddenExecutionError(error)) {
-      return createErrorResponse(
-        requestId,
-        403,
-        "FORBIDDEN",
-        error.userMessage || "You do not have access to repository content used by this assistant"
-      )
-    }
-
-    log.error("Assistant execution failed", {
-      error: error instanceof Error ? error.message : String(error),
+    return assistantExecutionErrorResponse(
+      error,
+      requestId,
       assistantId,
-    })
-    return createErrorResponse(requestId, 500, "EXECUTION_ERROR", "Assistant execution failed")
+      log
+    )
   }
 })
 
@@ -270,7 +365,11 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
 async function handleAsyncExecution(
   assistantId: number,
   preparedInputs: PreparedAssistantExecutionInputs,
-  auth: { userId: number; cognitoSub: string },
+  auth: {
+    userId: number
+    cognitoSub: string
+    authType: "session" | "api_key" | "jwt"
+  },
   requestId: string,
   log: ReturnType<typeof createLogger>
 ) {
@@ -307,6 +406,7 @@ async function handleAsyncExecution(
         cognitoSub: auth.cognitoSub,
         requestId,
         preparedInputs,
+        requireApproved: auth.authType !== "session",
       })
 
       await jobManagementService.completeJob(jobId, {

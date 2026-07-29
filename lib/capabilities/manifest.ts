@@ -94,6 +94,13 @@ export const CAPABILITY_MANIFEST: readonly CapabilityManifestEntry[] = [
     defaultRoles: ["administrator"],
   },
   {
+    identifier: "nexus-memory",
+    name: "Nexus Memory",
+    description:
+      "Remember user-owned profile, preference, and working-context facts across Nexus conversations.",
+    defaultRoles: ["administrator", "staff", "student"],
+  },
+  {
     identifier: "internal-performance-monitoring",
     name: "Internal Performance Monitoring",
     description: "Access internal performance monitoring dashboards and metrics.",
@@ -110,6 +117,13 @@ export const CAPABILITY_MANIFEST: readonly CapabilityManifestEntry[] = [
     name: "Atrium Content",
     description:
       "Create and version Atrium content objects (documents and artifacts).",
+    defaultRoles: ["administrator", "staff"],
+  },
+  {
+    identifier: "rooms-manage",
+    name: "Room Management",
+    description:
+      "Compose class rooms from roster sections and assign approved assistants.",
     defaultRoles: ["administrator", "staff"],
   },
 ] as const;

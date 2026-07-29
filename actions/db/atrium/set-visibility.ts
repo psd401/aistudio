@@ -33,6 +33,10 @@ import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
 import { getUserRequester } from "./requester";
+import {
+  IN_APP_PUBLISH_PUBLIC_CAPABILITY,
+  notifyPublicExposure,
+} from "@/lib/atrium/public-publish-policy";
 
 export async function setVisibilityAction(
   // Accepts a UUID OR a slug — resolved via `loadByIdOrSlug` below. Named to
@@ -101,6 +105,7 @@ export async function setVisibilityAction(
     const viewable = await visibilityService.canView(requester, {
       id: obj.id,
       ownerUserId: obj.ownerUserId,
+      collectionId: obj.collectionId,
       visibilityLevel: obj.visibilityLevel,
     });
     if (!viewable) throw new NotFoundError("Content not found", { idOrSlug });
@@ -126,21 +131,48 @@ export async function setVisibilityAction(
     //
     // Target the resolved UUID (the input may be a slug) so a slug change between
     // load and write cannot retarget a different object. Widening to `public`
-    // is gated inside `setLevel` itself (§26.4); mirroring `publish-document`,
-    // no `hasPublishPublicCapability` is passed, so only an admin human passes
-    // (via `req.isAdmin`) — a non-admin widening to public gets the same
-    // `ApprovalRequiredError` `handleError` already surfaces generically.
-    const result = await visibilityService.setLevel(requester, obj.id, {
-      level,
-      grants,
-    });
+    // is still gated inside `setLevel` itself (§26.4) — unchanged — but #1336
+    // supplies the surface-resolved authority so any AUTHOR passes it, not only
+    // an admin. Before that change a non-admin's "make public" silently entered
+    // the approval queue: the chip flipped, no publication was created, and
+    // nobody was notified in either direction. See public-publish-policy.ts.
+    const { visibilityLevel, becamePublic } = await visibilityService.setLevel(
+      requester,
+      obj.id,
+      { level, grants },
+      { hasPublishPublicCapability: IN_APP_PUBLISH_PUBLIC_CAPABILITY }
+    );
+
+    // Allow-then-NOTIFY: a non-admin making content publicly visible records an
+    // admin-visible notification instead of blocking on approval. Best-effort
+    // and post-commit — it can never fail the author's change.
+    //
+    // Gated on the TRANSITION the service observed under its row lock, not on
+    // the requested `level`. The Share dialog permits unchanged saves, so an
+    // already-public object re-saved at Public keyed a fresh `publicExposure`
+    // audit row off `level === "public"` alone — routine edits flooding the
+    // admin feed with exposures that never occurred, while the service itself
+    // treats that same save as a no-op for the §26.4 gate. One judgement, made
+    // in the one place that holds the lock.
+    if (becamePublic) {
+      await notifyPublicExposure({
+        req: requester,
+        action: "set_visibility",
+        objectId: obj.id,
+        note: "Visibility set to public without administrator approval (allow-then-notify policy)",
+        requestId,
+      });
+    }
 
     timer({ status: "success" });
     log.info("Visibility updated", {
       objectId: obj.id,
-      visibilityLevel: result.visibilityLevel,
+      visibilityLevel,
+      becamePublic,
     });
-    return createSuccess(result, "Visibility updated");
+    // Re-wrap rather than returning the service result verbatim: `becamePublic`
+    // is an internal policy signal, not part of this action's response contract.
+    return createSuccess({ visibilityLevel }, "Visibility updated");
   } catch (error) {
     timer({ status: "error" });
     // The §26.4 public-publish gate is not a failure — it's a pending-approval

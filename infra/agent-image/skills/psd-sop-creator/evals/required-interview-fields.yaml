@@ -1,0 +1,9 @@
+id: sop-creator-required-interview-fields
+skill: psd-sop-creator
+level: L0
+workspace: pure
+suite: regression
+prompt: "I want an SOP for resetting classroom projectors, but I have not supplied its owner, department, or effective date. Use psd-sop-creator guidance to identify every required fact you must ask me for before drafting. Do not create an Atrium document."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"(?is)owner.*department.*effective date|effective date.*department.*owner"}

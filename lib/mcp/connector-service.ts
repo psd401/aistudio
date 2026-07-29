@@ -13,6 +13,10 @@
  */
 
 import { isIP } from "node:net"
+import {
+  safeFetch,
+  safeFetchAdapter,
+} from "@/lib/security/safe-fetch"
 import { createMCPClient } from "@ai-sdk/mcp"
 import { eq, and, or, sql } from "drizzle-orm"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
@@ -40,8 +44,7 @@ import type {
 } from "./connector-types"
 import type { McpToolSet } from "./connector-types"
 import { loadCustomTools } from "./custom-tools/registry"
-import { ServerSideOAuthProvider } from "./mcp-oauth-provider"
-import { getIssuerUrl } from "@/lib/oauth/issuer-config"
+import { resolveCredentialProfile } from "./credential-profiles"
 
 const log = createLogger({ action: "mcp-connector-service" })
 
@@ -193,24 +196,7 @@ export async function getConnectorTools(
   // 2b. Custom tool source — skip MCP client entirely, return built-in tool definitions
   const toolSource = (server.toolSource ?? "mcp") as McpToolSource
   if (toolSource === "custom") {
-    const accessToken = tokenRow?.encryptedAccessToken
-      ? await decryptToken(tokenRow.encryptedAccessToken)
-      : null
-    if (!accessToken) {
-      throw new Error("No OAuth token stored. Please connect to the service first.")
-    }
-    // Cast ToolSet → McpToolSet: both are Record<string, Tool> with compatible shapes.
-    // The AI SDK merges them as ToolSet in the chat route (Object.assign).
-    const tools = loadCustomTools(server.url, accessToken) as unknown as McpToolSet
-    const toolCount = Object.keys(tools).length
-    timer({ status: "success", toolCount, toolSource: "custom" })
-    log.info("Custom connector tools loaded", { requestId, serverId, serverName: server.name, toolCount })
-    return {
-      serverId,
-      serverName: server.name,
-      tools,
-      close: async () => {},
-    }
+    return loadCustomConnectorTools(server, tokenRow, requestId, timer)
   }
 
   // 3. Validate transport — @ai-sdk/mcp only supports "http" for server-to-server
@@ -220,116 +206,14 @@ export async function getConnectorTools(
   rejectUnsafeMcpUrl(server.url)
 
   // 5. Build transport config — OAuth uses authProvider, others use static headers
-  const authType = server.authType as McpAuthType
-  let transportConfig: Parameters<typeof createMCPClient>[0]["transport"]
+  const transportConfig = await buildConnectorTransport(server, tokenRow, options)
 
-  if (authType === "oauth") {
-    if (server.oauthCredentials || server.credentialsKey) {
-      // Pre-registered OAuth: inject stored token as static Bearer header.
-      // Don't use authProvider — it triggers MCP metadata discovery which
-      // would hit the host-restricted authorize endpoint.
-      const accessToken = tokenRow?.encryptedAccessToken
-        ? await decryptToken(tokenRow.encryptedAccessToken)
-        : null
-      if (!accessToken) {
-        throw new Error("No OAuth token stored. Please connect to the service first.")
-      }
-      transportConfig = {
-        type: "http",
-        url: server.url,
-        headers: { Authorization: `Bearer ${accessToken}` },
-      }
-    } else {
-      // MCP-native OAuth: let the SDK handle token injection via authProvider
-      const baseUrl = getIssuerUrl()
-      const redirectUrl = `${baseUrl}/api/connectors/mcp-auth/callback`
-      const authProvider = new ServerSideOAuthProvider({
-        serverId,
-        userId,
-        redirectUrl,
-      })
-      transportConfig = {
-        type: "http",
-        url: server.url,
-        authProvider,
-      }
-    }
-  } else if (authType === "cognito_passthrough") {
-    // Cognito passthrough: forward session idToken as Bearer header.
-    // idToken is populated in auth.ts jwt callback (account.id_token → token.idToken)
-    // and surfaced via session callback (session.idToken → CognitoSession.idToken).
-    if (!options?.idToken) {
-      throw new Error(
-        "Cognito passthrough requires an active session with an ID token. " +
-        "If this persists, reload the page to refresh your session."
-      )
-    }
-    // type: "http" is safe here — assertHttpTransport() above already rejects
-    // non-HTTP transports before this branch is reached.
-    transportConfig = {
-      type: "http",
-      url: server.url,
-      headers: { Authorization: `Bearer ${options.idToken}` },
-    }
-  } else {
-    // Static token auth (api_key, jwt, none)
-    const headers = await buildAuthHeaders(authType, tokenRow)
-    transportConfig = {
-      type: "http",
-      url: server.url,
-      headers,
-    }
-  }
-
-  // 6. Create MCP client and fetch tools with timeout + cleanup on failure.
-  // Both createMCPClient and client.tools() make outbound HTTP calls to
-  // user-controlled URLs, so they must be guarded against indefinite hangs.
-  const clientPromise = createMCPClient({
-    transport: transportConfig,
-    name: "aistudio-connector",
-  })
-
-  let client
-  try {
-    client = await withTimeout(clientPromise, MCP_CLIENT_TIMEOUT_MS, "MCP client creation timed out")
-  } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : String(err)
-    log.warn("Failed to create MCP client", {
-      requestId, serverId, serverName: server.name,
-      error: errorMessage,
-      isTimeout: errorMessage.includes("timed out"),
-    })
-    // If the timeout fires but createMCPClient resolves later, close the orphaned client
-    clientPromise.then(c => c.close().catch(() => {})).catch(() => {})
-    throw err
-  }
-
-  let tools
-  try {
-    tools = await withTimeout(
-      client.tools(),
-      MCP_CLIENT_TIMEOUT_MS,
-      "MCP tool fetch timed out"
-    )
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error)
-    // Extract Zod validation details from the cause chain — @ai-sdk/mcp wraps
-    // schema parse failures (e.g. ListToolsResultSchema) in MCPClientError.cause.
-    let causeDetail: string | undefined
-    if (error instanceof Error && error.cause) {
-      const cause = error.cause as Error
-      causeDetail = cause.message?.slice(0, 500)
-    }
-    log.warn("Failed to fetch tools from MCP server", {
-      requestId, serverId, serverName: server.name,
-      error: errorMessage,
-      causeDetail,
-      isTimeout: errorMessage.includes("timed out"),
-    })
-
-    try { await client.close() } catch { /* ignore cleanup errors */ }
-    throw error
-  }
+  // The connector hostname remains attacker-controlled after persistence.
+  // Pin every runtime MCP request to freshly approved public DNS answers and
+  // reject redirects so a later DNS change cannot reach an internal address.
+  const hardenedTransport = hardenMcpTransportConfig(transportConfig)
+  const client = await createConnectorClient(hardenedTransport, server, requestId)
+  const tools = await fetchConnectorTools(client, server, requestId)
 
   const toolCount = Object.keys(tools).length
   timer({ status: "success", toolCount })
@@ -340,6 +224,169 @@ export async function getConnectorTools(
     serverName: server.name,
     tools,
     close: () => client.close(),
+  }
+}
+
+async function loadCustomConnectorTools(
+  server: ServerRow,
+  tokenRow: TokenRow,
+  requestId: string,
+  timer: ReturnType<typeof startTimer>
+): Promise<McpConnectorToolsResult> {
+  const accessToken = tokenRow?.encryptedAccessToken
+    ? await decryptToken(tokenRow.encryptedAccessToken)
+    : null
+  if (!accessToken) {
+    throw new Error("No OAuth token stored. Please connect to the service first.")
+  }
+  // ToolSet and McpToolSet are compatible Record<string, Tool> shapes.
+  const tools = loadCustomTools(server.url, accessToken) as unknown as McpToolSet
+  const toolCount = Object.keys(tools).length
+  timer({ status: "success", toolCount, toolSource: "custom" })
+  log.info("Custom connector tools loaded", {
+    requestId,
+    serverId: server.id,
+    serverName: server.name,
+    toolCount,
+  })
+  return {
+    serverId: server.id,
+    serverName: server.name,
+    tools,
+    close: async () => {},
+  }
+}
+
+type McpTransportConfig = Parameters<typeof createMCPClient>[0]["transport"]
+type McpClient = Awaited<ReturnType<typeof createMCPClient>>
+
+async function buildConnectorTransport(
+  server: ServerRow,
+  tokenRow: TokenRow,
+  options?: { idToken?: string }
+): Promise<McpTransportConfig> {
+  const authType = server.authType as McpAuthType
+  if (authType === "oauth") {
+    return buildOAuthTransport(server, tokenRow)
+  }
+  if (authType === "cognito_passthrough") {
+    if (!options?.idToken) {
+      throw new Error(
+        "Cognito passthrough requires an active session with an ID token. " +
+        "If this persists, reload the page to refresh your session."
+      )
+    }
+    return {
+      type: "http",
+      url: server.url,
+      headers: { Authorization: `Bearer ${options.idToken}` },
+    }
+  }
+  return {
+    type: "http",
+    url: server.url,
+    headers: await buildAuthHeaders(authType, tokenRow),
+  }
+}
+
+async function buildOAuthTransport(
+  server: ServerRow,
+  tokenRow: TokenRow
+): Promise<McpTransportConfig> {
+  if (!server.oauthCredentials && !server.credentialsKey) {
+    throw new Error(
+      "MCP-native OAuth is disabled; configure a pre-registered credential profile"
+    )
+  }
+  const accessToken = tokenRow?.encryptedAccessToken
+    ? await decryptToken(tokenRow.encryptedAccessToken)
+    : null
+  if (!accessToken) {
+    throw new Error("No OAuth token stored. Please connect to the service first.")
+  }
+  return {
+    type: "http",
+    url: server.url,
+    headers: { Authorization: `Bearer ${accessToken}` },
+  }
+}
+
+async function createConnectorClient(
+  transport: McpTransportConfig,
+  server: ServerRow,
+  requestId: string
+): Promise<McpClient> {
+  const clientPromise = createMCPClient({
+    transport,
+    name: "aistudio-connector",
+  })
+  try {
+    return await withTimeout(
+      clientPromise,
+      MCP_CLIENT_TIMEOUT_MS,
+      "MCP client creation timed out"
+    )
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    log.warn("Failed to create MCP client", {
+      requestId,
+      serverId: server.id,
+      serverName: server.name,
+      error: errorMessage,
+      isTimeout: errorMessage.includes("timed out"),
+    })
+    clientPromise.then(client => client.close().catch(() => {})).catch(() => {})
+    throw error
+  }
+}
+
+async function fetchConnectorTools(
+  client: McpClient,
+  server: ServerRow,
+  requestId: string
+): Promise<McpToolSet> {
+  try {
+    return await withTimeout(
+      client.tools(),
+      MCP_CLIENT_TIMEOUT_MS,
+      "MCP tool fetch timed out"
+    )
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    const causeDetail =
+      error instanceof Error && error.cause instanceof Error
+        ? error.cause.message.slice(0, 500)
+        : undefined
+    log.warn("Failed to fetch tools from MCP server", {
+      requestId,
+      serverId: server.id,
+      serverName: server.name,
+      error: errorMessage,
+      causeDetail,
+      isTimeout: errorMessage.includes("timed out"),
+    })
+    try {
+      await client.close()
+    } catch {
+      // Ignore cleanup errors while preserving the original fetch failure.
+    }
+    throw error
+  }
+}
+
+export function hardenMcpTransportConfig(
+  config: Parameters<typeof createMCPClient>[0]["transport"]
+): Parameters<typeof createMCPClient>[0]["transport"] {
+  if (!config || typeof config !== "object" || !("type" in config)) {
+    throw new Error("A configured MCP transport is required")
+  }
+  if (config.type !== "http") {
+    throw new Error("Only HTTP MCP transports can be hardened")
+  }
+  return {
+    ...config,
+    redirect: "error",
+    fetch: safeFetchAdapter,
   }
 }
 
@@ -679,68 +726,82 @@ async function exchangeRefreshToken(
   // new URL("/oauth/token", base) intentionally strips the base path — OAuth token
   // endpoints are typically at the provider root, not relative to the MCP server path.
   // Providers with non-standard paths should set tokenEndpointUrl in their credentials.
-  const tokenEndpoint = credentials?.tokenEndpointUrl
-    ? credentials.tokenEndpointUrl
-    : new URL("/oauth/token", server.url).toString()
+  const tokenEndpoint =
+    credentials?.tokenEndpointUrl ?? new URL("/oauth/token", server.url).toString()
   rejectUnsafeMcpUrl(tokenEndpoint)
-
-  // Build request body with client credentials (RFC 6749 §6)
-  const body: Record<string, string> = {
-    grant_type: "refresh_token",
-    refresh_token: refreshToken,
-  }
-
-  // Build headers — use Basic auth when both clientId and clientSecret are
-  // available (required by Canva and many OAuth providers), otherwise fall
-  // back to client_secret_post (credentials in request body).
-  const headers: Record<string, string> = {
-    "Content-Type": "application/x-www-form-urlencoded",
-  }
-  if (credentials?.clientId && credentials?.clientSecret) {
-    headers["Authorization"] = `Basic ${Buffer.from(`${credentials.clientId}:${credentials.clientSecret}`).toString("base64")}`
-  } else {
-    if (credentials?.clientId) body.client_id = credentials.clientId
-    if (credentials?.clientSecret) body.client_secret = credentials.clientSecret
-  }
+  const request = createRefreshTokenRequest(refreshToken, credentials)
 
   try {
-    const resp = await fetch(tokenEndpoint, {
+    const resp = await safeFetch(tokenEndpoint, {
       method: "POST",
-      headers,
+      headers: request.headers,
       signal: AbortSignal.timeout(15_000),
-      body: new URLSearchParams(body),
+      body: new URLSearchParams(request.body).toString(),
     })
 
     if (!resp.ok) {
-      const reason = resp.status === 401 || resp.status === 403 ? "unauthorized" as const : "server_error" as const
-      log.warn("Token refresh request failed", {
-        status: resp.status,
-        reason,
-        serverId: server.id,
-        tokenEndpoint,
-      })
-      return {
-        kind: "failure",
-        reason,
-        detail: `Token endpoint returned HTTP ${resp.status}`,
-        httpStatus: resp.status,
-      }
+      return tokenRefreshHttpFailure(resp.status, server.id, tokenEndpoint)
     }
 
     const json = await resp.json()
     return parseOAuthTokenResponse(json)
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    const isTimeout = message.includes("timeout") || message.includes("aborted")
-    const reason = isTimeout ? "timeout" as const : "network_error" as const
-    log.warn("Token exchange failed", {
-      error: message,
-      reason,
-      serverId: server.id,
-      tokenEndpoint,
-    })
-    return { kind: "failure", reason, detail: message }
+    return tokenExchangeFailure(err, server.id, tokenEndpoint)
   }
+}
+
+function createRefreshTokenRequest(
+  refreshToken: string,
+  credentials: OAuthClientCredentials | null
+): { body: Record<string, string>; headers: Record<string, string> } {
+  const body: Record<string, string> = {
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+  }
+  const headers: Record<string, string> = {
+    "Content-Type": "application/x-www-form-urlencoded",
+  }
+  if (credentials?.clientId && credentials.clientSecret) {
+    headers.Authorization = `Basic ${Buffer.from(
+      `${credentials.clientId}:${credentials.clientSecret}`
+    ).toString("base64")}`
+  } else {
+    if (credentials?.clientId) body.client_id = credentials.clientId
+    if (credentials?.clientSecret) body.client_secret = credentials.clientSecret
+  }
+  return { body, headers }
+}
+
+function tokenRefreshHttpFailure(
+  status: number,
+  serverId: string,
+  tokenEndpoint: string
+): TokenRefreshFailure {
+  const reason = status === 401 || status === 403 ? "unauthorized" : "server_error"
+  log.warn("Token refresh request failed", { status, reason, serverId, tokenEndpoint })
+  return {
+    kind: "failure",
+    reason,
+    detail: `Token endpoint returned HTTP ${status}`,
+    httpStatus: status,
+  }
+}
+
+function tokenExchangeFailure(
+  error: unknown,
+  serverId: string,
+  tokenEndpoint: string
+): TokenRefreshFailure {
+  const message = error instanceof Error ? error.message : String(error)
+  const isTimeout = message.includes("timeout") || message.includes("aborted")
+  const reason = isTimeout ? "timeout" : "network_error"
+  log.warn("Token exchange failed", {
+    error: message,
+    reason,
+    serverId,
+    tokenEndpoint,
+  })
+  return { kind: "failure", reason, detail: message }
 }
 
 // ─── OAuth Credentials Helper ────────────────────────────────────────────────
@@ -764,7 +825,7 @@ export async function getOAuthCredentials(
     }
   }
   if (server.credentialsKey) {
-    return loadOAuthCredentials(server.credentialsKey)
+    return loadOAuthCredentials(server.credentialsKey, server.url)
   }
   return null
 }
@@ -803,18 +864,20 @@ const CREDENTIALS_CACHE_MAX = 100
  * { clientId, clientSecret, tokenEndpointUrl?, authorizationEndpointUrl?, scopes? }.
  */
 export async function loadOAuthCredentials(
-  credentialsKey: string
+  credentialsKey: string,
+  connectorUrl: string
 ): Promise<OAuthClientCredentials> {
+  const profile = resolveCredentialProfile(credentialsKey, connectorUrl)
   const cached = credentialsCache.get(credentialsKey)
   if (cached && Date.now() - cached.fetchedAt < CREDENTIALS_CACHE_TTL) {
     return cached.value
   }
 
   const result = await getSecretsClient().send(
-    new GetSecretValueCommand({ SecretId: credentialsKey })
+    new GetSecretValueCommand({ SecretId: profile.secretId })
   )
   if (!result.SecretString) {
-    throw new Error(`OAuth credentials secret is empty: ${credentialsKey}`)
+    throw new Error(`OAuth credential profile is empty: ${credentialsKey}`)
   }
   const parsed: unknown = JSON.parse(result.SecretString)
   if (
@@ -906,71 +969,12 @@ function truncateForAudit(
 // matching /^(is|has|check|verify|validate|auth|assert)/i as "sensitive actions"
 // and flags user-controlled conditions that guard them as "bypasses."
 export function rejectUnsafeMcpUrl(rawUrl: string): void {
-  let parsed: URL
-  try {
-    parsed = new URL(rawUrl)
-  } catch {
-    throw new Error("Invalid MCP server URL")
-  }
-
-  // Use ENVIRONMENT (set by ECS task def) not NODE_ENV — ECS sets NODE_ENV=production
-  // for all environments including dev. See docs/learnings/aws/2026-02-18-ecs-node-env-vs-environment.md
-  const environment = process.env.ENVIRONMENT || process.env.DEPLOYMENT_ENV
-  const isProduction = environment === "prod" || environment === "staging"
-
-  if (isProduction && parsed.protocol !== "https:") {
-    throw new Error("MCP server URL must use HTTPS in production")
-  }
-
-  if (!isProduction && !["https:", "http:"].includes(parsed.protocol)) {
-    throw new Error("MCP server URL must use HTTP or HTTPS")
-  }
-
-  // WHATWG URL brackets IPv6 hostnames (e.g. "[::1]", "[fe80::1]") per spec — strip
-  // them so the IPv6 private-range patterns below (anchored without brackets) match
-  // real IPv6 literal URLs instead of silently never firing.
-  const rawHostname = parsed.hostname.toLowerCase()
-  const hostname =
-    rawHostname.startsWith("[") && rawHostname.endsWith("]")
-      ? rawHostname.slice(1, -1)
-      : rawHostname
-
-  // Defense-in-depth against non-standard IPv4 encodings — decimal (2130706433),
-  // hex (0x7f000001), and octal (0177.0.0.1) all denote 127.0.0.1 (REV-COR-623).
-  // NOTE: for the http(s) URLs this validator accepts, `new URL()` above ALREADY
-  // canonicalizes these encodings to dotted-quad (e.g. `new URL("https://2130706433/")`
-  // yields hostname "127.0.0.1"), so the private-range patterns below block them in
-  // production even without this guard. This explicit check is therefore a redundant
-  // safety net that only bites if a future caller inspects a raw, non-normalized host.
-  // A canonical dotted-quad IPv4 (isIP === 4) is deferred to the private-range patterns;
-  // a numeric-looking host that is NOT canonical IPv4 is rejected outright.
-  const ipKind = isIP(hostname)
-  const isNumericEncoding =
-    /^0x[\da-f]+$/i.test(hostname) || // hex, e.g. 0x7f000001
-    /^\d+$/.test(hostname) || // bare decimal, e.g. 2130706433
-    (/^[\d.]+$/.test(hostname) && ipKind !== 4) // octal / short-dotted that is not a canonical IPv4
-  if (isNumericEncoding) {
-    throw new Error("MCP server URL must not use a non-standard IP address encoding")
-  }
-
-  const privatePatterns = [
-    /^127\./,
-    /^10\./,
-    /^172\.(1[6-9]|2\d|3[01])\./,
-    /^192\.168\./,
-    /^169\.254\./, // link-local / AWS IMDS
-    /^0\.0\.0\.0$/,
-    /^localhost$/,
-    /^::$/, // IPv6 unspecified address
-    /^::1$/,
-    /^fc[\da-f]{2}:/i, // IPv6 unique-local (fc00::/7)
-    /^fd[\da-f]{2}:/i,
-    /^fe80:/i, // IPv6 link-local (fe80::/10)
-    /^::ffff:/i, // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1)
-    /^metadata\.google\.internal$/,
-  ]
-
-  const isPrivate = privatePatterns.some((p) => p.test(hostname))
+  const parsed = parseMcpUrl(rawUrl)
+  const isProduction = isProductionEnvironment()
+  requireSupportedProtocol(parsed.protocol, isProduction)
+  const hostname = normalizeHostname(parsed.hostname)
+  rejectNonStandardIpEncoding(hostname)
+  const isPrivate = isPrivateHostname(hostname)
   if (isProduction && isPrivate) {
     throw new Error("MCP server URL must not target private/internal addresses")
   }
@@ -980,6 +984,66 @@ export function rejectUnsafeMcpUrl(rawUrl: string): void {
       url: rawUrl,
     })
   }
+}
+
+function parseMcpUrl(rawUrl: string): URL {
+  try {
+    return new URL(rawUrl)
+  } catch {
+    throw new Error("Invalid MCP server URL")
+  }
+}
+
+function isProductionEnvironment(): boolean {
+  const environment = process.env.ENVIRONMENT || process.env.DEPLOYMENT_ENV
+  return environment === "prod" || environment === "staging"
+}
+
+function requireSupportedProtocol(protocol: string, isProduction: boolean): void {
+  if (isProduction && protocol !== "https:") {
+    throw new Error("MCP server URL must use HTTPS in production")
+  }
+  if (!isProduction && protocol !== "https:" && protocol !== "http:") {
+    throw new Error("MCP server URL must use HTTP or HTTPS")
+  }
+}
+
+function normalizeHostname(hostname: string): string {
+  const normalized = hostname.toLowerCase()
+  return normalized.startsWith("[") && normalized.endsWith("]")
+    ? normalized.slice(1, -1)
+    : normalized
+}
+
+function rejectNonStandardIpEncoding(hostname: string): void {
+  const ipKind = isIP(hostname)
+  const isNumericEncoding =
+    /^0x[\da-f]+$/i.test(hostname) ||
+    /^\d+$/.test(hostname) ||
+    (/^[\d.]+$/.test(hostname) && ipKind !== 4)
+  if (isNumericEncoding) {
+    throw new Error("MCP server URL must not use a non-standard IP address encoding")
+  }
+}
+
+function isPrivateHostname(hostname: string): boolean {
+  const privatePatterns = [
+    /^127\./,
+    /^10\./,
+    /^172\.(1[6-9]|2\d|3[01])\./,
+    /^192\.168\./,
+    /^169\.254\./,
+    /^0\.0\.0\.0$/,
+    /^localhost$/,
+    /^::$/,
+    /^::1$/,
+    /^fc[\da-f]{2}:/i,
+    /^fd[\da-f]{2}:/i,
+    /^fe80:/i,
+    /^::ffff:/i,
+    /^metadata\.google\.internal$/,
+  ]
+  return privatePatterns.some(pattern => pattern.test(hostname))
 }
 
 /**
@@ -1038,4 +1102,3 @@ function toMcpConnector(row: typeof nexusMcpServers.$inferSelect): McpConnector 
     allowedUsers: row.allowedUsers ?? [],
   }
 }
-

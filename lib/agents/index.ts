@@ -9,6 +9,7 @@
 export {
   resolveAgentTools,
   closeAgentConnectorClients,
+  withAgentConnectorCleanupOnError,
 } from "./tool-resolver";
 export {
   resolveAgentRunLimits,

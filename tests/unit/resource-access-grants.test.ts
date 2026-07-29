@@ -8,8 +8,8 @@
  * hand-written enum that fell out of sync with the canonical set).
  */
 
-import fs from "fs";
-import path from "path";
+import fs from "node:fs";
+import path from "node:path";
 import {
   normalizeGrants,
   type ResourceGrant,
@@ -77,13 +77,19 @@ describe("TS constants match migration 111 CHECK constraints (drift guard)", () 
     ),
     "utf8"
   );
+  const checkConstraints = new Map(
+    [...migration.matchAll(
+      /CHECK\s*\(\s*(resource_type|grant_kind)\s+IN\s*\(([^)]*)\)/gi
+    )].map((match) => [
+      match[1].toLowerCase(),
+      [...match[2].matchAll(/'([^']+)'/g)].map((value) => value[1]),
+    ])
+  );
 
   function checkValues(column: string): string[] {
-    // Matches:  CHECK (<column> IN ('a', 'b', ...))
-    const re = new RegExp(`CHECK\\s*\\(\\s*${column}\\s+IN\\s*\\(([^)]*)\\)`, "i");
-    const m = migration.match(re);
-    if (!m) throw new Error(`no CHECK for ${column} in migration 111`);
-    return [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+    const values = checkConstraints.get(column);
+    if (!values) throw new Error(`no CHECK for ${column} in migration 111`);
+    return values;
   }
 
   it("resource_type CHECK equals RESOURCE_GRANT_TYPES", () => {

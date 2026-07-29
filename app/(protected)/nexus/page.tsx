@@ -34,6 +34,7 @@ import { useVoiceAvailability } from './_components/voice-mode/use-voice-availab
 import { useVoiceSession } from './_components/voice-mode/use-voice-session'
 import { getNexusChatPreferences, updateNexusChatPreferences } from '@/actions/settings/user-settings.actions'
 import type { NexusExperienceMode, NexusModelFamily } from '@/lib/nexus/model-router/types'
+import { createSynchronousValueAccessor } from '@/lib/nexus/synchronous-value-accessor'
 
 const log = createLogger({ moduleName: 'nexus-page' })
 const uuidSchema = z.string().uuid()
@@ -76,6 +77,8 @@ interface ConversationRuntimeProviderProps {
   routingMode: NexusExperienceMode
   modelFamily: NexusModelFamily
   skillId?: string
+  /** Nexus Project binding; server verifies membership and conversation linkage. */
+  projectId?: string
   /** The open workspace object id/slug (`?workspace=`); binds §1087 content tools server-side. */
   workspaceId?: string
   attachmentAdapter: AttachmentAdapter
@@ -86,10 +89,181 @@ interface ConversationRuntimeProviderProps {
   onConnectorToolsReceived?: (mapping: Record<string, { serverId: string; serverName: string }>) => void
 }
 
+interface RuntimeValues {
+  conversationId: string | null
+  modelFamily: NexusModelFamily
+  routingMode: NexusExperienceMode
+  selectedModel: SelectAiModel | null
+  sessionStatus: ReturnType<typeof useSession>['status']
+  workspaceId?: string
+}
+
 /** UUID format for validating X-Connector-Reconnect header values */
-// eslint-disable-next-line unicorn/better-regex -- expanded form avoids security/detect-unsafe-regex on grouped quantifier
 const UUID_RE = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i
 const MAX_RECONNECT_IDS = 10
+
+interface NexusFetchContext {
+  conversationId: string | null
+  onConversationIdChange?: (conversationId: string) => void
+  onConnectorReconnect?: (failedServerIds: string[]) => void
+  onConnectorToolsReceived?: (mapping: Record<string, { serverId: string; serverName: string }>) => void
+  runtimeValues: ReturnType<typeof createSynchronousValueAccessor<RuntimeValues>>
+}
+
+function throwSessionExpired(reason: string): never {
+  log.warn(reason)
+  toast.error('Session Expired', {
+    id: 'nexus-session-expired',
+    description: 'Your session has expired. Please sign in again to continue.',
+    duration: 0,
+    action: {
+      label: 'Sign In',
+      onClick: () => { window.location.href = '/api/auth/signin?callbackUrl=/nexus' },
+    },
+  })
+  throw new Error('Session expired - please sign in again')
+}
+
+async function fetchNexusResponse(
+  input: RequestInfo | URL,
+  init?: RequestInit
+): Promise<Response> {
+  try {
+    return await fetch(input, init)
+  } catch (networkError) {
+    if (networkError instanceof Error && networkError.name === 'AbortError') {
+      throw networkError
+    }
+    const isOffline = typeof navigator !== 'undefined' && !navigator.onLine
+    log.warn('Chat request failed at network level', {
+      error: networkError instanceof Error ? networkError.message : String(networkError),
+      offline: isOffline,
+    })
+    toast.error('Connection error', {
+      description: isOffline
+        ? 'You appear to be offline. Check your connection and try again.'
+        : 'The request could not reach the server. Check your connection or try again.',
+      duration: 8000,
+    })
+    throw networkError
+  }
+}
+
+async function handleServerError(response: Response): Promise<void> {
+  if (response.status < 500) return
+
+  let description = 'An error occurred. Please try again.'
+  try {
+    const errorData = await response.clone().json()
+    if (typeof errorData?.error === 'string') {
+      description = errorData.error.slice(0, 200)
+    }
+  } catch {
+    // Keep the generic description when the error body is not JSON.
+  }
+  toast.error('Chat request failed', { description, duration: 8000 })
+  throw new Error(description)
+}
+
+async function handleModelUnavailable(response: Response): Promise<void> {
+  if (response.status !== 404) return
+
+  try {
+    const rawData: unknown = await response.clone().json()
+    const parsed = ModelErrorSchema.safeParse(rawData)
+    toast.error('Model Unavailable', {
+      description: parsed.success
+        ? parsed.data.error
+        : 'The selected model is no longer available. Please choose a different model.',
+      duration: 8000,
+    })
+    log.warn('Selected model not found on server')
+  } catch {
+    log.debug('Could not parse 404 response as JSON, showing generic toast')
+    toast.error('Model Unavailable', {
+      description: 'The selected model is no longer available. Please choose a different model.',
+      duration: 8000,
+    })
+  }
+}
+
+async function handleNexusResponseErrors(response: Response): Promise<void> {
+  if (response.status === 413) {
+    log.warn('Chat request rejected — payload too large (413)')
+    toast.error('Message too large', {
+      description: 'The attached file or message content is too large to process. Try uploading a smaller file or splitting it into parts.',
+      duration: 10_000,
+    })
+    throw new Error('Request payload too large. Please reduce the size of attached files.')
+  }
+  if (response.status === 401) {
+    await response.body?.cancel().catch(() => {})
+    throwSessionExpired('Session expired during chat request — 401 from server')
+  }
+
+  await handleServerError(response)
+  await handleModelUnavailable(response)
+  await handleContentBlockedResponse(response, log)
+}
+
+function applyConversationHeader(response: Response, context: NexusFetchContext): void {
+  const newConversationId = response.headers.get('X-Conversation-Id')
+  if (!newConversationId || newConversationId === context.conversationId) return
+  if (!uuidSchema.safeParse(newConversationId).success) {
+    log.warn('Received malformed X-Conversation-Id header, ignoring', { newConversationId })
+    return
+  }
+
+  log.debug('Received new conversation ID from server', {
+    newConversationId,
+    currentConversationId: context.conversationId,
+  })
+  context.onConversationIdChange?.(newConversationId)
+}
+
+function applyConnectorToolsHeader(response: Response, context: NexusFetchContext): void {
+  const header = response.headers.get('X-Connector-Tools')
+  if (!header || !context.onConnectorToolsReceived) return
+
+  try {
+    const mapping = ConnectorToolsSchema.parse(JSON.parse(decodeURIComponent(header)))
+    context.onConnectorToolsReceived(mapping)
+  } catch {
+    log.warn('Failed to parse X-Connector-Tools header')
+  }
+}
+
+function applyConnectorReconnectHeader(response: Response, context: NexusFetchContext): void {
+  const header = response.headers.get('X-Connector-Reconnect')
+  if (!header) return
+
+  const failedIds = header
+    .split(',')
+    .map(id => id.trim())
+    .filter(id => UUID_RE.test(id))
+    .slice(0, MAX_RECONNECT_IDS)
+  if (failedIds.length === 0) return
+
+  log.warn('Connector reconnect signal received', { failedCount: failedIds.length })
+  context.onConnectorReconnect?.(failedIds)
+}
+
+async function fetchNexusChat(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  context: NexusFetchContext
+): Promise<Response> {
+  if (context.runtimeValues.get().sessionStatus === 'unauthenticated') {
+    throwSessionExpired('Pre-send check: session unauthenticated, blocking chat request')
+  }
+
+  const response = await fetchNexusResponse(input, init)
+  await handleNexusResponseErrors(response)
+  applyConversationHeader(response, context)
+  applyConnectorToolsHeader(response, context)
+  applyConnectorReconnectHeader(response, context)
+  return response
+}
 
 function ConversationRuntimeProvider({
   children,
@@ -100,6 +274,7 @@ function ConversationRuntimeProvider({
   routingMode,
   modelFamily,
   skillId,
+  projectId,
   workspaceId,
   attachmentAdapter,
   voiceAdapter,
@@ -108,214 +283,55 @@ function ConversationRuntimeProvider({
   onConnectorReconnect,
   onConnectorToolsReceived
 }: ConversationRuntimeProviderProps) {
-  // Use a ref so the adapter instance stays stable when conversationId transitions
-  // from null → UUID during a new conversation. Without this, the runtime re-calls
-  // load() on the recreated adapter and fetches already-displayed messages,
-  // causing duplicate message rendering. (Issue #868)
-  const conversationIdRef = useRef(conversationId)
-  conversationIdRef.current = conversationId
-
-  // Track the open workspace id via ref so the transport body always sends the
-  // CURRENT value: the runtime is created once (stable), but the user can open /
-  // close / switch the workspace panel mid-conversation (§1087). Reading a ref
-  // keeps the sent workspaceId fresh without recreating the transport.
-  const workspaceIdRef = useRef(workspaceId)
-  workspaceIdRef.current = workspaceId
-
-  // Track session status via ref for use inside customFetch without adding to deps.
-  // useSession is safe here — SessionProvider wraps this component tree.
   const { status: sessionStatus } = useSession()
-  const sessionStatusRef = useRef(sessionStatus)
-  sessionStatusRef.current = sessionStatus
-
-  // Track selectedModel via ref so the body() callback always reads the latest
-  // value without causing the transport to be recreated on every model change.
-  // Guards against the transient null state while models are loading from localStorage.
-  const selectedModelRef = useRef(selectedModel)
-  selectedModelRef.current = selectedModel
-
-  const routingModeRef = useRef(routingMode)
-  routingModeRef.current = routingMode
-  const modelFamilyRef = useRef(modelFamily)
-  modelFamilyRef.current = modelFamily
+  // The runtime and its adapters must keep stable identities across conversation,
+  // workspace, routing, and model changes. This closure-backed accessor updates
+  // synchronously during render without exposing React refs to render-time code.
+  const [runtimeValues] = useState(() =>
+    createSynchronousValueAccessor<RuntimeValues>({
+      conversationId,
+      modelFamily,
+      routingMode,
+      selectedModel,
+      sessionStatus,
+      workspaceId,
+    })
+  )
+  runtimeValues.set({
+    conversationId,
+    modelFamily,
+    routingMode,
+    selectedModel,
+    sessionStatus,
+    workspaceId,
+  })
 
   // Prevents the "Model not ready" toast from firing multiple times if body()
   // is called in rapid succession before models finish loading.
-  const modelNotReadyToastShownRef = useRef(false)
-
-  const historyAdapter = useMemo(
-    () => createNexusHistoryAdapter(() => conversationIdRef.current),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally stable; conversationId accessed via ref
-    []
+  const [modelNotReadyToastShown] = useState(() =>
+    createSynchronousValueAccessor(false)
   )
 
-  // Custom fetch to intercept X-Conversation-Id header for conversation continuity
-  // and handle content safety blocked errors with user-friendly messages
-  const customFetch = useCallback(async (input: RequestInfo | URL, init?: RequestInit) => {
-    // Extracted helper to show session-expired toast and throw. Used in both the
-    // pre-send check and the 401 response handler so the UX is identical regardless
-    // of which detection path fires first.
-    const throwSessionExpired = (reason: string): never => {
-      log.warn(reason)
-      toast.error('Session Expired', {
-        id: 'nexus-session-expired',
-        description: 'Your session has expired. Please sign in again to continue.',
-        duration: 0,
-        action: {
-          label: 'Sign In',
-          onClick: () => { window.location.href = '/api/auth/signin?callbackUrl=/nexus' },
-        },
-      })
-      throw new Error('Session expired - please sign in again')
-    }
+  const historyAdapter = useMemo(
+    () => createNexusHistoryAdapter(() => runtimeValues.get().conversationId),
+    [runtimeValues]
+  )
 
-    // Pre-send check: if NextAuth has already detected session expiry (via its 5-min
-    // poll), block the request immediately rather than letting the 401 come back from
-    // the server. This closes the gap between server-side token invalidation and client-
-    // side detection without changing the global poll interval (see session-provider.tsx).
-    if (sessionStatusRef.current === 'unauthenticated') {
-      throwSessionExpired('Pre-send check: session unauthenticated, blocking chat request')
-    }
-
-    let response: Response
-    try {
-      response = await fetch(input, init)
-    } catch (networkError) {
-      // Intentional cancellation (stop button, navigation) — don't toast.
-      if (networkError instanceof Error && networkError.name === 'AbortError') {
-        throw networkError
-      }
-      // TCP-level failures (connection drop, ALB timeout, offline) arrive here as
-      // TypeError("Failed to fetch"). Show a friendly message instead of letting
-      // the raw browser error string propagate to the output area.
-      const isOffline = typeof navigator !== 'undefined' && !navigator.onLine
-      log.warn('Chat request failed at network level', {
-        error: networkError instanceof Error ? networkError.message : String(networkError),
-        offline: isOffline,
-      })
-      toast.error('Connection error', {
-        description: isOffline
-          ? 'You appear to be offline. Check your connection and try again.'
-          : 'The request could not reach the server. Check your connection or try again.',
-        duration: 8000,
-      })
-      throw networkError
-    }
-
-    // Handle request-body-too-large errors (413)
-    if (response.status === 413) {
-      log.warn('Chat request rejected — payload too large (413)')
-      toast.error('Message too large', {
-        description: 'The attached file or message content is too large to process. Try uploading a smaller file or splitting it into parts.',
-        duration: 10_000,
-      })
-      throw new Error('Request payload too large. Please reduce the size of attached files.')
-    }
-
-    // Handle session expiry — 401 returned when JWT is invalid or Cognito token refresh
-    // failed overnight. Without this handler the AI SDK runtime tries to parse
-    // "Unauthorized" as an SSE stream, throws TypeError, and onFinish never fires, so
-    // messages are silently lost. Drain the body first to release the connection, then
-    // throw to abort cleanly and surface the error.
-    if (response.status === 401) {
-      await response.body?.cancel().catch(() => {})
-      throwSessionExpired('Session expired during chat request — 401 from server')
-    }
-
-    // Handle server errors (5xx) — throw so the AI SDK runtime can clean up.
-    // Without this, the SDK tries to parse a JSON error body as an SSE stream and
-    // crashes with an unhandled TypeError accessing .id on undefined message state.
-    if (response.status >= 500) {
-      let description = 'An error occurred. Please try again.'
-      try {
-        const errorData = await response.clone().json()
-        if (typeof errorData?.error === 'string') {
-          // Slice to prevent the server leaking internal details in long error messages
-          description = errorData.error.slice(0, 200)
-        }
-      } catch {
-        // ignore parse failures — use generic description
-      }
-      toast.error('Chat request failed', { description, duration: 8000 })
-      throw new Error(description)
-    }
-
-    // Handle model-not-found errors (404)
-    // Note: We show a toast but still return the 404 response to let the AI SDK runtime
-    // handle cleanup. This provides dual feedback: user-friendly toast + runtime error handling.
-    if (response.status === 404) {
-      try {
-        const clonedResponse = response.clone()
-        const rawData: unknown = await clonedResponse.json()
-        const parsed = ModelErrorSchema.safeParse(rawData)
-        toast.error('Model Unavailable', {
-          description: parsed.success
-            ? parsed.data.error
-            : 'The selected model is no longer available. Please choose a different model.',
-          duration: 8000
-        })
-        log.warn('Selected model not found on server')
-      } catch {
-        log.debug('Could not parse 404 response as JSON, showing generic toast')
-        // Show generic toast even if JSON parsing fails
-        toast.error('Model Unavailable', {
-          description: 'The selected model is no longer available. Please choose a different model.',
-          duration: 8000
-        })
-      }
-    }
-
-    // Issue #860: Handle CONTENT_BLOCKED 400 responses — shows toast and throws
-    // to prevent AI SDK runtime from parsing non-streaming JSON as a stream
-    await handleContentBlockedResponse(response, log)
-
-    // Extract conversation ID from response header (new conversations only)
-    const newConversationId = response.headers.get('X-Conversation-Id')
-    if (newConversationId && newConversationId !== conversationId) {
-      if (!uuidSchema.safeParse(newConversationId).success) {
-        log.warn('Received malformed X-Conversation-Id header, ignoring', { newConversationId })
-      } else {
-        log.debug('Received new conversation ID from server', {
-          newConversationId,
-          currentConversationId: conversationId
-        })
-        // Update parent state for URL and component updates
-        if (onConversationIdChange) {
-          onConversationIdChange(newConversationId)
-        }
-      }
-    }
-
-    // Parse connector tool mapping for branded UI rendering (Bug #2 fix)
-    const connectorToolsHeader = response.headers.get('X-Connector-Tools')
-    if (connectorToolsHeader && onConnectorToolsReceived) {
-      try {
-        const mapping = ConnectorToolsSchema.parse(JSON.parse(decodeURIComponent(connectorToolsHeader)))
-        onConnectorToolsReceived(mapping)
-      } catch {
-        log.warn('Failed to parse X-Connector-Tools header')
-      }
-    }
-
-    // Handle connector reconnect signal (from failed MCP connector auth)
-    const reconnectHeader = response.headers.get('X-Connector-Reconnect')
-    if (reconnectHeader) {
-      // Parse comma-separated server IDs — validate UUID format and cap count
-      const failedIds = reconnectHeader
-        .split(',')
-        .map(id => id.trim())
-        .filter(id => UUID_RE.test(id))
-        .slice(0, MAX_RECONNECT_IDS)
-      if (failedIds.length > 0) {
-        log.warn('Connector reconnect signal received', { failedCount: failedIds.length })
-        if (onConnectorReconnect) {
-          onConnectorReconnect(failedIds)
-        }
-      }
-    }
-
-    return response
-  }, [conversationId, onConversationIdChange, onConnectorReconnect, onConnectorToolsReceived])
+  const customFetch = useCallback((input: RequestInfo | URL, init?: RequestInit) => (
+    fetchNexusChat(input, init, {
+      conversationId,
+      onConversationIdChange,
+      onConnectorReconnect,
+      onConnectorToolsReceived,
+      runtimeValues,
+    })
+  ), [
+    conversationId,
+    onConversationIdChange,
+    onConnectorReconnect,
+    onConnectorToolsReceived,
+    runtimeValues,
+  ])
 
   // Use official useChatRuntime from @assistant-ui/react-ai-sdk
   // This natively understands AI SDK's streaming format
@@ -326,18 +342,19 @@ function ConversationRuntimeProvider({
       api: '/api/nexus/chat',
       fetch: customFetch as typeof fetch,
       body: () => {
-        const model = selectedModelRef.current
+        const values = runtimeValues.get()
+        const model = values.selectedModel
         if (!model) {
           // selectedModel is null — models haven't finished loading from localStorage.
           // Throwing here prevents the runtime from sending an empty body which the
           // server rejects with a 400 Zod validation error.
-          if (!modelNotReadyToastShownRef.current) {
-            modelNotReadyToastShownRef.current = true
+          if (!modelNotReadyToastShown.get()) {
+            modelNotReadyToastShown.set(true)
             toast.error('Model not ready', {
               description: 'Please wait a moment for models to load, then try again.',
               duration: 5000,
             })
-            setTimeout(() => { modelNotReadyToastShownRef.current = false }, 5000)
+            setTimeout(() => modelNotReadyToastShown.set(false), 5000)
           }
           throw new Error('No model selected — please wait for models to load')
         }
@@ -348,11 +365,12 @@ function ConversationRuntimeProvider({
           enabledConnectors,
           // Bind the session to a skill so the server enforces its allowed-tools pin (#925).
           skillId,
+          projectId,
           // Bind the open workspace object so the server offers §1087 read/edit tools.
-          workspaceId: workspaceIdRef.current || undefined,
-          conversationId: conversationIdRef.current || undefined,
-          nexusMode: routingModeRef.current,
-          modelFamily: routingModeRef.current === 'standard' ? 'auto' : modelFamilyRef.current,
+          workspaceId: values.workspaceId || undefined,
+          conversationId: values.conversationId || undefined,
+          nexusMode: values.routingMode,
+          modelFamily: values.routingMode === 'standard' ? 'auto' : values.modelFamily,
         }
       }
     }),
@@ -386,6 +404,7 @@ interface NexusRuntimeWrapperProps {
   onRoutingModeChange: (mode: NexusExperienceMode) => void
   onModelFamilyChange: (family: NexusModelFamily) => void
   skillId?: string
+  projectId?: string
   /** Open workspace object id/slug (`?workspace=`); passed to the runtime for §1087 tools. */
   workspaceId?: string
   attachmentAdapter: AttachmentAdapter
@@ -410,6 +429,7 @@ function NexusRuntimeWrapper({
   onRoutingModeChange,
   onModelFamilyChange,
   skillId,
+  projectId,
   workspaceId,
   attachmentAdapter,
   voiceAvailable,
@@ -492,6 +512,7 @@ function NexusRuntimeWrapper({
       routingMode={routingMode}
       modelFamily={modelFamily}
       skillId={skillId}
+      projectId={projectId}
       workspaceId={workspaceId}
       attachmentAdapter={attachmentAdapter}
       voiceAdapter={voiceAdapter}
@@ -570,36 +591,27 @@ function createConversationIdAccessor(
   }
 }
 
-function NexusPageContent() {
+function useNexusUrlConfiguration() {
   const router = useRouter()
   const searchParams = useSearchParams()
-  const { data: session, status: sessionStatus } = useSession()
-  const [hasRepositoryManagerCapability, setHasRepositoryManagerCapability] =
-    useState(false)
-  const canPromoteRepositoryAttachments =
-    sessionStatus === 'authenticated' && hasRepositoryManagerCapability
-  
-  // Get conversation ID from URL parameter with validation
   const urlConversationId = searchParams.get('id')
   const validatedConversationId = useMemo(() => {
-    if (validateConversationId(urlConversationId)) {
-      return urlConversationId
-    }
-
+    if (validateConversationId(urlConversationId)) return urlConversationId
     if (urlConversationId) {
       log.warn('Invalid conversation ID in URL parameter', { urlConversationId })
     }
-
     return null
   }, [urlConversationId])
 
-  // Parse URL configuration params — validate formats, cap at 50 entries
   const urlModelId = searchParams.get('model')
   const urlTools = useMemo(() => {
     const raw = searchParams.getAll('tool')
     const validated = raw.filter(t => toolNameSchema.safeParse(t).success).slice(0, 50)
     if (raw.length > validated.length) {
-      log.warn('URL tool params truncated or filtered', { rawCount: raw.length, validCount: validated.length })
+      log.warn('URL tool params truncated or filtered', {
+        rawCount: raw.length,
+        validCount: validated.length,
+      })
     }
     return validated
   }, [searchParams])
@@ -607,48 +619,48 @@ function NexusPageContent() {
     const raw = searchParams.getAll('connector')
     const validated = raw.filter(c => uuidSchema.safeParse(c).success).slice(0, 50)
     if (raw.length > validated.length) {
-      log.warn('URL connector params truncated or filtered', { rawCount: raw.length, validCount: validated.length })
+      log.warn('URL connector params truncated or filtered', {
+        rawCount: raw.length,
+        validCount: validated.length,
+      })
     }
     return validated
   }, [searchParams])
-
-  // Skill binding (#925): when arriving from a skill's "Use in chat" action, the
-  // session is bound to the skill so the server enforces its allowed-tools pin.
   const urlSkillId = useMemo(() => {
     const raw = searchParams.get('skillId')
     return raw && uuidSchema.safeParse(raw).success ? raw : undefined
   }, [searchParams])
-
-  // Atrium workspace panel (Epic #1059, spec §17): `?workspace=<id|slug>` opens
-  // the content editor BESIDE the chat as a pure layout sibling — the conversation
-  // tree (initializer/runtime/thread) never sees it. Loose validation only (the
-  // action canView-gates + 404-masks server-side); cap length like other params.
+  const urlProjectId = useMemo(() => {
+    const raw = searchParams.get('projectId')
+    return raw && uuidSchema.safeParse(raw).success ? raw : undefined
+  }, [searchParams])
   const urlWorkspaceId = useMemo(() => {
     const raw = searchParams.get('workspace')
     return raw && raw.length > 0 && raw.length <= 200 ? raw : null
   }, [searchParams])
   const closeWorkspace = useCallback(() => {
-    // Preserve every OTHER param (id/model/tool/...) — only `workspace` clears.
     const params = new URLSearchParams(window.location.search)
     params.delete('workspace')
-    const qs = params.toString()
-    router.replace(qs ? `/nexus?${qs}` : '/nexus', { scroll: false })
+    const query = params.toString()
+    router.replace(query ? `/nexus?${query}` : '/nexus', { scroll: false })
   }, [router])
 
-  // Load models and manage model selection
-  const [preferredModelId, setPreferredModelId] = useState<string | null>(urlModelId)
-  const {
-    models,
-    selectedModel,
-    setSelectedModel: originalSetSelectedModel,
-  } = useModelsWithPersistence('nexus-model', ['chat'], preferredModelId)
+  return {
+    closeWorkspace,
+    router,
+    urlConnectors,
+    urlConversationId,
+    urlModelId,
+    urlProjectId,
+    urlPromptId: searchParams.get('promptId'),
+    urlSkillId,
+    urlTools,
+    urlWorkspaceId,
+    validatedConversationId,
+  }
+}
 
-  // Tool management state — single source of truth from urlTools
-  const [enabledTools, setEnabledTools] = useState<string[]>(() => urlTools)
-
-  // Connector management state — single source of truth from urlConnectors
-  const [enabledConnectors, setEnabledConnectors] = useState<string[]>(() => urlConnectors)
-
+function useNexusRoutingPreferences(clearExtensions: () => void) {
   const [routingMode, setRoutingMode] = useState<NexusExperienceMode>('standard')
   const [modelFamily, setModelFamily] = useState<NexusModelFamily>('auto')
   const routingPreferenceTouchedRef = useRef(false)
@@ -668,7 +680,10 @@ function NexusPageContent() {
     return () => { cancelled = true }
   }, [])
 
-  const persistRouterPreferences = useCallback((mode: NexusExperienceMode, family: NexusModelFamily) => {
+  const persistPreferences = useCallback((
+    mode: NexusExperienceMode,
+    family: NexusModelFamily
+  ) => {
     routerPreferenceSaveQueueRef.current = routerPreferenceSaveQueueRef.current.then(async () => {
       try {
         const result = await updateNexusChatPreferences({ mode, family })
@@ -685,92 +700,406 @@ function NexusPageContent() {
   const handleRoutingModeChange = useCallback((mode: NexusExperienceMode) => {
     routingPreferenceTouchedRef.current = true
     setRoutingMode(mode)
-    if (mode === 'standard') {
-      setEnabledTools([])
-      setEnabledConnectors([])
-    }
-    persistRouterPreferences(mode, modelFamily)
-  }, [modelFamily, persistRouterPreferences])
+    if (mode === 'standard') clearExtensions()
+    persistPreferences(mode, modelFamily)
+  }, [clearExtensions, modelFamily, persistPreferences])
 
   const handleModelFamilyChange = useCallback((family: NexusModelFamily) => {
     routingPreferenceTouchedRef.current = true
     setRoutingMode('advanced')
     setModelFamily(family)
-    persistRouterPreferences('advanced', family)
-  }, [persistRouterPreferences])
+    persistPreferences('advanced', family)
+  }, [persistPreferences])
 
-  // Load prompt settings when promptId is present (lower priority than URL params)
-  // Uses getPromptSettings to avoid incrementing view count (PromptAutoLoader handles the full view)
-  const urlPromptId = searchParams.get('promptId')
-  // Tracks which promptId settings were last requested. Used both to prevent
-  // re-applying settings (which would override user changes after initial load)
-  // and to discard stale responses when the user rapidly switches prompts.
-  const promptSettingsRequestedRef = useRef<string | null>(null)
+  return {
+    handleModelFamilyChange,
+    handleRoutingModeChange,
+    modelFamily,
+    routingMode,
+  }
+}
+
+interface PromptSettingsSyncOptions {
+  setEnabledConnectors: (connectors: string[]) => void
+  setEnabledTools: (tools: string[]) => void
+  setPreferredModelId: (modelId: string) => void
+  urlConnectors: string[]
+  urlModelId: string | null
+  urlPromptId: string | null
+  urlTools: string[]
+}
+
+function usePromptSettingsSync({
+  setEnabledConnectors,
+  setEnabledTools,
+  setPreferredModelId,
+  urlConnectors,
+  urlModelId,
+  urlPromptId,
+  urlTools,
+}: PromptSettingsSyncOptions): void {
+  const requestedPromptIdRef = useRef<string | null>(null)
   useEffect(() => {
     if (!urlPromptId || !uuidSchema.safeParse(urlPromptId).success) return
-    if (promptSettingsRequestedRef.current === urlPromptId) return
-    promptSettingsRequestedRef.current = urlPromptId
+    if (requestedPromptIdRef.current === urlPromptId) return
+    requestedPromptIdRef.current = urlPromptId
     const requestedId = urlPromptId
+
     getPromptSettings(requestedId).then(result => {
-      // Discard stale response if user has already navigated to a different prompt
-      if (promptSettingsRequestedRef.current !== requestedId) return
+      if (requestedPromptIdRef.current !== requestedId) return
       if (!result.isSuccess || !result.data) return
       const settings = result.data
-
-      // URL params take priority over prompt settings
-      if (!urlModelId && settings.modelId) {
-        setPreferredModelId(settings.modelId)
-      }
+      if (!urlModelId && settings.modelId) setPreferredModelId(settings.modelId)
       if (urlTools.length === 0 && settings.tools?.length) {
         setEnabledTools(settings.tools)
       }
       if (urlConnectors.length === 0 && settings.connectors?.length) {
         setEnabledConnectors(settings.connectors)
       }
-    }).catch(err => {
+    }).catch(error => {
       log.warn('Failed to load prompt settings', {
         promptId: requestedId,
-        error: err instanceof Error ? err.message : String(err)
+        error: error instanceof Error ? error.message : String(error),
       })
     })
-  }, [urlPromptId, urlModelId, urlTools, urlConnectors])
+  }, [
+    setEnabledConnectors,
+    setEnabledTools,
+    setPreferredModelId,
+    urlConnectors,
+    urlModelId,
+    urlPromptId,
+    urlTools,
+  ])
+}
+
+function useNexusAttachments(initialConversationId: string | null) {
+  const [processingAttachments, setProcessingAttachments] = useState<Set<string>>(new Set())
+  const [attachmentConversationId] = useState(() =>
+    createConversationIdAccessor(initialConversationId)
+  )
+  const handleProcessingStart = useCallback((attachmentId: string) => {
+    setProcessingAttachments(previous => new Set([...previous, attachmentId]))
+    log.debug('Attachment processing started', { attachmentId })
+  }, [])
+  const handleProcessingComplete = useCallback((attachmentId: string) => {
+    setProcessingAttachments(previous => {
+      const next = new Set(previous)
+      next.delete(attachmentId)
+      return next
+    })
+    log.debug('Attachment processing completed', { attachmentId })
+  }, [])
+  const handleError = useCallback((
+    attachmentId: string,
+    error: UploadClassifiedError | Error
+  ) => {
+    log.warn('Attachment processing failed', {
+      attachmentId,
+      code: error instanceof UploadClassifiedError ? error.code : undefined,
+      error: error.message,
+    })
+    if (error instanceof UploadClassifiedError && error.code === 'UNAUTHORIZED') {
+      toast.error('Session expired', {
+        description: 'Your session expired during file upload. Please sign in again.',
+        duration: 8000,
+        action: {
+          label: 'Sign in',
+          onClick: () => {
+            const callbackUrl = encodeURIComponent(
+              window.location.pathname + window.location.search
+            )
+            window.location.href = `/api/auth/signin?callbackUrl=${callbackUrl}`
+          },
+        },
+      })
+      return
+    }
+    toast.error('File upload failed', {
+      description: error instanceof UploadClassifiedError
+        ? `Upload error: ${error.code.replace(/_/g, ' ').toLowerCase()}.`
+        : 'The file could not be uploaded. Please try again.',
+      duration: 6000,
+    })
+  }, [])
+  const attachmentAdapter = useMemo(() => createEnhancedNexusAttachmentAdapter({
+    onProcessingStart: handleProcessingStart,
+    onProcessingComplete: handleProcessingComplete,
+    onError: handleError,
+  }, {
+    repositoryBacked: true,
+    getConversationId: attachmentConversationId.get,
+  }), [
+    attachmentConversationId,
+    handleError,
+    handleProcessingComplete,
+    handleProcessingStart,
+  ])
+
+  return {
+    attachmentAdapter,
+    attachmentConversationId,
+    processingAttachments,
+  }
+}
+
+function useNexusAuthentication() {
+  const router = useRouter()
+  const { data: session, status: sessionStatus } = useSession()
+  const [hasRepositoryManagerCapability, setHasRepositoryManagerCapability] =
+    useState(false)
+
+  useEffect(() => {
+    if (sessionStatus === 'loading') return
+    if (sessionStatus === 'unauthenticated' || !session?.user) {
+      router.push('/api/auth/signin?callbackUrl=/nexus')
+    }
+  }, [router, session, sessionStatus])
+
+  useEffect(() => {
+    if (sessionStatus !== 'authenticated') return
+
+    let cancelled = false
+    void fetch('/api/auth/user-tools')
+      .then(async (response) => {
+        if (!response.ok) return null
+        const parsed = UserToolsResponseSchema.safeParse(
+          await response.json() as unknown
+        )
+        return parsed.success ? parsed.data.data : null
+      })
+      .then((capabilities) => {
+        if (!cancelled) {
+          setHasRepositoryManagerCapability(
+            capabilities?.includes('knowledge-repositories') ?? false
+          )
+        }
+      })
+      .catch((error: unknown) => {
+        log.warn('Failed to load repository promotion capability', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+        if (!cancelled) setHasRepositoryManagerCapability(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [sessionStatus])
+
+  return {
+    canPromoteRepositoryAttachments:
+      sessionStatus === 'authenticated' && hasRepositoryManagerCapability,
+    session,
+    sessionStatus,
+  }
+}
+
+interface NexusPageViewProps {
+  closeWorkspace: () => void
+  conversationId: string | null
+  modelFallbackInfo: {
+    fallbackModel: string
+    originalModel: string
+  } | null
+  onDismissModelFallback: () => void
+  onModelUsed: (modelId: string | null) => void
+  runtimeProps: Omit<NexusRuntimeWrapperProps, 'initialMessages'>
+  stableConversationId: string | null
+  urlWorkspaceId: string | null
+}
+
+function NexusPageView({
+  closeWorkspace,
+  conversationId,
+  modelFallbackInfo,
+  onDismissModelFallback,
+  onModelUsed,
+  runtimeProps,
+  stableConversationId,
+  urlWorkspaceId,
+}: NexusPageViewProps) {
+  return (
+    <ErrorBoundary>
+      <ConnectorToolProvider>
+        <NexusLayout conversationId={conversationId}>
+          <NexusShell>
+            <div className="flex h-full min-h-0">
+              <div className="relative h-full min-w-0 flex-1">
+                {runtimeProps.selectedModel ? (
+                  <>
+                    {modelFallbackInfo && (
+                      <div className="px-4 pt-2">
+                        <ModelFallbackBanner
+                          originalModel={modelFallbackInfo.originalModel}
+                          fallbackModel={modelFallbackInfo.fallbackModel}
+                          onDismiss={onDismissModelFallback}
+                        />
+                      </div>
+                    )}
+                    <ConversationInitializer
+                      conversationId={stableConversationId}
+                      onModelUsed={onModelUsed}
+                    >
+                      {(initialMessages) => (
+                        <NexusRuntimeWrapper
+                          conversationId={runtimeProps.conversationId}
+                          selectedModel={runtimeProps.selectedModel}
+                          enabledTools={runtimeProps.enabledTools}
+                          enabledConnectors={runtimeProps.enabledConnectors}
+                          routingMode={runtimeProps.routingMode}
+                          modelFamily={runtimeProps.modelFamily}
+                          onRoutingModeChange={runtimeProps.onRoutingModeChange}
+                          onModelFamilyChange={runtimeProps.onModelFamilyChange}
+                          skillId={runtimeProps.skillId}
+                          projectId={runtimeProps.projectId}
+                          workspaceId={runtimeProps.workspaceId}
+                          attachmentAdapter={runtimeProps.attachmentAdapter}
+                          voiceAvailable={runtimeProps.voiceAvailable}
+                          voiceUnavailableReason={runtimeProps.voiceUnavailableReason}
+                          initialMessages={initialMessages}
+                          onConversationIdChange={runtimeProps.onConversationIdChange}
+                          processingAttachments={runtimeProps.processingAttachments}
+                          onModelChange={runtimeProps.onModelChange}
+                          onToolsChange={runtimeProps.onToolsChange}
+                          onConnectorsChange={runtimeProps.onConnectorsChange}
+                          canPromoteRepositoryAttachments={
+                            runtimeProps.canPromoteRepositoryAttachments
+                          }
+                        />
+                      )}
+                    </ConversationInitializer>
+                  </>
+                ) : (
+                  <div className="flex h-full items-center justify-center">
+                    <div className="text-center">
+                      <div className="text-lg text-muted-foreground">
+                        Please select a model to start chatting
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+              {urlWorkspaceId && (
+                <WorkspacePanel idOrSlug={urlWorkspaceId} onClose={closeWorkspace} />
+              )}
+            </div>
+          </NexusShell>
+        </NexusLayout>
+      </ConnectorToolProvider>
+    </ErrorBoundary>
+  )
+}
+
+function useModelFallbackInfo(
+  conversationModelId: string | null,
+  models: Array<{ modelId: string }>,
+  selectedModelName?: string
+) {
+  return useMemo(() => {
+    if (!conversationModelId || models.length === 0) return null
+    if (models.some(model => model.modelId === conversationModelId)) return null
+    return {
+      originalModel: conversationModelId,
+      fallbackModel: selectedModelName || 'default model',
+    }
+  }, [conversationModelId, models, selectedModelName])
+}
+
+function useInvalidConversationRedirect(
+  urlConversationId: string | null,
+  validatedConversationId: string | null
+): void {
+  const router = useRouter()
+  useEffect(() => {
+    if (!urlConversationId || validatedConversationId) return
+    log.warn('Redirecting due to invalid conversation ID in URL', { urlConversationId })
+    router.replace('/nexus')
+  }, [router, urlConversationId, validatedConversationId])
+}
+
+function NexusPageContent() {
+  const {
+    closeWorkspace,
+    router,
+    urlConnectors,
+    urlConversationId,
+    urlModelId,
+    urlProjectId,
+    urlPromptId,
+    urlSkillId,
+    urlTools,
+    urlWorkspaceId,
+    validatedConversationId,
+  } = useNexusUrlConfiguration()
+  const {
+    canPromoteRepositoryAttachments,
+    session,
+    sessionStatus,
+  } = useNexusAuthentication()
+
+  // Load models and manage model selection
+  const [preferredModelId, setPreferredModelId] = useState<string | null>(urlModelId)
+  const {
+    models,
+    selectedModel,
+    setSelectedModel: originalSetSelectedModel,
+  } = useModelsWithPersistence('nexus-model', ['chat'], preferredModelId)
+
+  // Tool management state — single source of truth from urlTools
+  const [enabledTools, setEnabledTools] = useState<string[]>(() => urlTools)
+
+  // Connector management state — single source of truth from urlConnectors
+  const [enabledConnectors, setEnabledConnectors] = useState<string[]>(() => urlConnectors)
+
+  const clearExtensions = useCallback(() => {
+    setEnabledTools([])
+    setEnabledConnectors([])
+  }, [])
+  const {
+    handleModelFamilyChange,
+    handleRoutingModeChange,
+    modelFamily,
+    routingMode,
+  } = useNexusRoutingPreferences(clearExtensions)
+
+  usePromptSettingsSync({
+    setEnabledConnectors,
+    setEnabledTools,
+    setPreferredModelId,
+    urlConnectors,
+    urlModelId,
+    urlPromptId,
+    urlTools,
+  })
 
   // Model fallback for archived conversations — derived from conversationModelId + available models.
   // Setting conversationModelId to null (on dismiss or navigation) hides the banner.
   const [conversationModelId, setConversationModelId] = useState<string | null>(null)
-  const modelFallbackInfo = useMemo(() => {
-    if (!conversationModelId || models.length === 0) return null
-    const modelExists = models.some(m => m.modelId === conversationModelId)
-    if (!modelExists) {
-      return {
-        originalModel: conversationModelId,
-        fallbackModel: selectedModel?.name || 'default model'
-      }
-    }
-    return null
-  }, [conversationModelId, models, selectedModel?.name])
-
-  // Attachment processing state
-  const [processingAttachments, setProcessingAttachments] = useState<Set<string>>(new Set())
+  const modelFallbackInfo = useModelFallbackInfo(
+    conversationModelId,
+    models,
+    selectedModel?.name
+  )
 
   // Conversation continuity state - initialize from validated URL parameter
   const [conversationId, setConversationId] = useState<string | null>(validatedConversationId)
-  // The attachment adapter must remain stable while the first request assigns a
-  // conversation UUID. A closure-backed accessor updates synchronously without
-  // putting the changing ID in adapter memo dependencies (Nexus invariant).
-  const [attachmentConversationId] = useState(() =>
-    createConversationIdAccessor(validatedConversationId)
-  )
+  const {
+    attachmentAdapter,
+    attachmentConversationId,
+    processingAttachments,
+  } = useNexusAttachments(validatedConversationId)
 
   // Stable conversation ID for ConversationInitializer - only set on initial load from URL
   // This prevents remounting when ID is assigned during runtime
   const [stableConversationId] = useState<string | null>(validatedConversationId)
+  useInvalidConversationRedirect(urlConversationId, validatedConversationId)
 
   // Debug logging for enabled tools
   useEffect(() => {
     log.debug('Enabled tools changed', { enabledTools })
   }, [enabledTools])
-  
+
   // Wrap setSelectedModel to reload page on model change
   const setSelectedModel = useCallback((model: SelectAiModel | null) => {
     originalSetSelectedModel(model);
@@ -814,50 +1143,6 @@ function NexusPageContent() {
     setEnabledConnectors(connectors);
   }, [])
 
-  // Attachment processing callbacks
-  const handleAttachmentProcessingStart = useCallback((attachmentId: string) => {
-    setProcessingAttachments(prev => new Set([...prev, attachmentId]))
-    log.debug('Attachment processing started', { attachmentId })
-  }, [])
-
-  const handleAttachmentProcessingComplete = useCallback((attachmentId: string) => {
-    setProcessingAttachments(prev => {
-      const next = new Set(prev)
-      next.delete(attachmentId)
-      return next
-    })
-    log.debug('Attachment processing completed', { attachmentId })
-  }, [])
-
-  const handleAttachmentError = useCallback((attachmentId: string, error: UploadClassifiedError | Error) => {
-    log.warn('Attachment processing failed', {
-      attachmentId,
-      code: error instanceof UploadClassifiedError ? error.code : undefined,
-      error: error.message,
-    })
-
-    if (error instanceof UploadClassifiedError && error.code === 'UNAUTHORIZED') {
-      toast.error('Session expired', {
-        description: 'Your session expired during file upload. Please sign in again.',
-        duration: 8000,
-        action: {
-          label: 'Sign in',
-          onClick: () => {
-            const callbackUrl = encodeURIComponent(window.location.pathname + window.location.search)
-            window.location.href = `/api/auth/signin?callbackUrl=${callbackUrl}`
-          },
-        },
-      })
-    } else {
-      toast.error('File upload failed', {
-        description: error instanceof UploadClassifiedError
-          ? `Upload error: ${error.code.replace(/_/g, ' ').toLowerCase()}.`
-          : 'The file could not be uploaded. Please try again.',
-        duration: 6000,
-      })
-    }
-  }, [])
-
   // Conversation ID callback for maintaining conversation continuity
   const handleConversationIdChange = useCallback((newConversationId: string) => {
     attachmentConversationId.set(newConversationId)
@@ -880,81 +1165,12 @@ function NexusPageContent() {
 
     log.debug('Conversation ID updated', { newId: newConversationId })
   }, [attachmentConversationId, router])
-  
-  // Handle invalid conversation ID in URL - redirect to clean state
-  useEffect(() => {
-    if (urlConversationId && !validatedConversationId) {
-      // URL had conversation ID but it was invalid - redirect to clean nexus
-      log.warn('Redirecting due to invalid conversation ID in URL', { urlConversationId })
-      router.replace('/nexus')
-      return
-    }
-  }, [urlConversationId, validatedConversationId, router])
-
-  // Authentication verification for defense in depth
-  useEffect(() => {
-    if (sessionStatus === 'loading') return // Still loading, wait
-    
-    if (sessionStatus === 'unauthenticated' || !session?.user) {
-      // Not authenticated, redirect to sign in
-      router.push('/api/auth/signin?callbackUrl=/nexus')
-      return
-    }
-  }, [session, sessionStatus, router])
-
-  useEffect(() => {
-    if (sessionStatus !== 'authenticated') return
-
-    let cancelled = false
-    void fetch('/api/auth/user-tools')
-      .then(async (response) => {
-        if (!response.ok) return null
-        const parsed = UserToolsResponseSchema.safeParse(
-          await response.json() as unknown
-        )
-        return parsed.success ? parsed.data.data : null
-      })
-      .then((capabilities) => {
-        if (!cancelled) {
-          setHasRepositoryManagerCapability(
-            capabilities?.includes('knowledge-repositories') ?? false
-          )
-        }
-      })
-      .catch((error: unknown) => {
-        log.warn('Failed to load repository promotion capability', {
-          error: error instanceof Error ? error.message : String(error),
-        })
-        if (!cancelled) setHasRepositoryManagerCapability(false)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [sessionStatus])
-
-  // Create attachment adapter with processing callbacks
-  const attachmentAdapter = useMemo(() => {
-    return createEnhancedNexusAttachmentAdapter({
-      onProcessingStart: handleAttachmentProcessingStart,
-      onProcessingComplete: handleAttachmentProcessingComplete,
-      onError: handleAttachmentError,
-    }, {
-      repositoryBacked: true,
-      getConversationId: attachmentConversationId.get,
-    })
-  }, [
-    attachmentConversationId,
-    handleAttachmentProcessingStart,
-    handleAttachmentProcessingComplete,
-    handleAttachmentError,
-  ])
 
   // Voice mode — check availability (adapter created inside NexusRuntimeWrapper via useVoiceSession)
   const voiceAvailability = useVoiceAvailability()
 
 
-  
+
   // Show loading state while checking authentication
   if (sessionStatus === 'loading') {
     return (
@@ -972,73 +1188,43 @@ function NexusPageContent() {
     return null
   }
 
+  const runtimeProps: Omit<NexusRuntimeWrapperProps, 'initialMessages'> = {
+    attachmentAdapter,
+    canPromoteRepositoryAttachments,
+    conversationId,
+    enabledConnectors,
+    enabledTools,
+    modelFamily,
+    onConnectorsChange,
+    onConversationIdChange: handleConversationIdChange,
+    onModelChange: setSelectedModel,
+    onModelFamilyChange: handleModelFamilyChange,
+    onRoutingModeChange: handleRoutingModeChange,
+    onToolsChange,
+    processingAttachments,
+    projectId: urlProjectId,
+    routingMode,
+    selectedModel,
+    skillId: urlSkillId,
+    voiceAvailable: voiceAvailability.available,
+    voiceUnavailableReason:
+      !voiceAvailability.available && !voiceAvailability.loading
+        ? voiceAvailability.reason
+        : undefined,
+    workspaceId: urlWorkspaceId ?? undefined,
+  }
+
   return (
-    <ErrorBoundary>
-      <ConnectorToolProvider>
-        <NexusLayout conversationId={conversationId}>
-          <NexusShell>
-            {/* Workspace split (Epic #1059 §17): the chat column is the EXACT
-                pre-existing tree (initializer/runtime untouched); the Atrium
-                panel is a pure layout sibling keyed on ?workspace=. */}
-            <div className="flex h-full min-h-0">
-              <div className="relative h-full min-w-0 flex-1">
-                {selectedModel ? (
-                  <>
-                    {modelFallbackInfo && (
-                      <div className="px-4 pt-2">
-                        <ModelFallbackBanner
-                          originalModel={modelFallbackInfo.originalModel}
-                          fallbackModel={modelFallbackInfo.fallbackModel}
-                          onDismiss={() => setConversationModelId(null)}
-                        />
-                      </div>
-                    )}
-                    <ConversationInitializer
-                      conversationId={stableConversationId}
-                      onModelUsed={handleModelUsed}
-                    >
-                      {(initialMessages) => (
-                        <NexusRuntimeWrapper
-                          conversationId={conversationId}
-                          selectedModel={selectedModel}
-                          enabledTools={enabledTools}
-                          enabledConnectors={enabledConnectors}
-                          routingMode={routingMode}
-                          modelFamily={modelFamily}
-                          onRoutingModeChange={handleRoutingModeChange}
-                          onModelFamilyChange={handleModelFamilyChange}
-                          skillId={urlSkillId}
-                          workspaceId={urlWorkspaceId ?? undefined}
-                          attachmentAdapter={attachmentAdapter}
-                          voiceAvailable={voiceAvailability.available}
-                          voiceUnavailableReason={!voiceAvailability.available && !voiceAvailability.loading ? voiceAvailability.reason : undefined}
-                          initialMessages={initialMessages}
-                          onConversationIdChange={handleConversationIdChange}
-                          processingAttachments={processingAttachments}
-                          onModelChange={setSelectedModel}
-                          onToolsChange={onToolsChange}
-                          onConnectorsChange={onConnectorsChange}
-                          canPromoteRepositoryAttachments={canPromoteRepositoryAttachments}
-                        />
-                      )}
-                    </ConversationInitializer>
-                  </>
-                ) : (
-                  <div className="flex h-full items-center justify-center">
-                    <div className="text-center">
-                      <div className="text-lg text-muted-foreground">Please select a model to start chatting</div>
-                    </div>
-                  </div>
-                )}
-              </div>
-              {urlWorkspaceId && (
-                <WorkspacePanel idOrSlug={urlWorkspaceId} onClose={closeWorkspace} />
-              )}
-            </div>
-          </NexusShell>
-        </NexusLayout>
-      </ConnectorToolProvider>
-    </ErrorBoundary>
+    <NexusPageView
+      closeWorkspace={closeWorkspace}
+      conversationId={conversationId}
+      modelFallbackInfo={modelFallbackInfo}
+      onDismissModelFallback={() => setConversationModelId(null)}
+      onModelUsed={handleModelUsed}
+      runtimeProps={runtimeProps}
+      stableConversationId={stableConversationId}
+      urlWorkspaceId={urlWorkspaceId}
+    />
   )
 }
 

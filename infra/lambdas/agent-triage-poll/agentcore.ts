@@ -21,9 +21,17 @@ import {
   BedrockAgentCoreClient,
   InvokeAgentRuntimeCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
+import {
+  GetSecretValueCommand,
+  SecretsManagerClient,
+} from "@aws-sdk/client-secrets-manager";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 
 import { fetchTaskInstructions } from "./memory";
+import {
+  createEmailTaskInvocationContextToken,
+  deriveOwnerRequestProofKey,
+} from "./invocation-context";
 
 /**
  * Hard wall-clock budget for a single AgentCore invocation. Without this
@@ -36,6 +44,9 @@ const AGENTCORE_INVOKE_TIMEOUT_MS = 90_000;
 
 const REGION = process.env.AWS_REGION ?? "us-east-1";
 const ENVIRONMENT = process.env.ENVIRONMENT ?? "dev";
+const AGENT_INVOCATION_SIGNING_SECRET_ID =
+  process.env.AGENT_INVOCATION_SIGNING_SECRET_ID ?? "";
+const AUTHORITY_CACHE_TTL_MS = 5 * 60 * 1000;
 
 let cached: BedrockAgentCoreClient | null = null;
 function client(): BedrockAgentCoreClient {
@@ -46,6 +57,34 @@ function client(): BedrockAgentCoreClient {
 let cachedRuntimeId: string | null = null;
 let cachedAt = 0;
 const RUNTIME_ID_TTL_MS = 5 * 60 * 1000; // 5-minute cache; matches router pattern
+
+const secretsClient = new SecretsManagerClient({ region: REGION });
+let cachedInvocationSigningSecret: string | null = null;
+let invocationSigningSecretCachedAt = 0;
+
+async function getInvocationSigningSecret(): Promise<string> {
+  if (
+    cachedInvocationSigningSecret &&
+    Date.now() - invocationSigningSecretCachedAt < AUTHORITY_CACHE_TTL_MS
+  ) {
+    return cachedInvocationSigningSecret;
+  }
+  if (!AGENT_INVOCATION_SIGNING_SECRET_ID) {
+    throw new Error("AGENT_INVOCATION_SIGNING_SECRET_ID not configured");
+  }
+  const result = await secretsClient.send(
+    new GetSecretValueCommand({
+      SecretId: AGENT_INVOCATION_SIGNING_SECRET_ID,
+    }),
+  );
+  const secret = result.SecretString ?? "";
+  if (Buffer.byteLength(secret, "utf8") < 32) {
+    throw new Error("Agent invocation signing secret is missing or too short");
+  }
+  cachedInvocationSigningSecret = secret;
+  invocationSigningSecretCachedAt = Date.now();
+  return secret;
+}
 
 /**
  * Resolve the AgentCore Runtime ID. Tries (in order):
@@ -97,11 +136,51 @@ export type TaskCreationResult =
   | { ok: true; taskRef: string; rawReply: string }
   | { ok: false; reason: string; rawReply: string };
 
-const SUCCESS_PATTERN = /Created\s+([^\s#]+(?:\s+[^\s#]+)*?)\s+(?:issue|task)\s+(#?\w+[\w/-]*)\s*:?\s*(.+)?/i;
-// Looser fallback: "Created <anything>: <title>" with no id. Captures the
-// title as the taskRef so downstream still has something to display.
-const SUCCESS_FALLBACK_PATTERN = /Created\s+(.+?)\s*:\s*(.+)$/i;
-const FAILED_PATTERN = /FAILED:\s*(.+?)\s*$/im;
+function getFailureReason(line: string): string | null {
+  const marker = "FAILED:";
+  const markerIndex = line.toUpperCase().indexOf(marker);
+  if (markerIndex === -1) return null;
+  return line.slice(markerIndex + marker.length).trim().slice(0, 500) || null;
+}
+
+function isTaskReference(value: string): boolean {
+  if (value.length === 0 || value.length > 128) return false;
+  return [...value].every((character, index) => {
+    if (character === "#" && index === 0) return true;
+    return /^[A-Za-z0-9_/-]$/.test(character);
+  });
+}
+
+function getStructuredTaskReference(line: string): string | null {
+  const lower = line.toLowerCase();
+  const createdIndex = lower.indexOf("created ");
+  if (createdIndex === -1) return null;
+
+  const issueIndex = lower.indexOf(" issue ", createdIndex);
+  const taskIndex = lower.indexOf(" task ", createdIndex);
+  const markerIndex = [issueIndex, taskIndex]
+    .filter((index) => index !== -1)
+    .sort((left, right) => left - right)[0];
+  if (markerIndex === undefined) return null;
+
+  const markerLength = markerIndex === issueIndex ? " issue ".length : " task ".length;
+  const remainder = line.slice(markerIndex + markerLength).trimStart();
+  const separatorIndex = remainder.search(/[\s:]/);
+  const taskRef = separatorIndex === -1
+    ? remainder
+    : remainder.slice(0, separatorIndex);
+  return isTaskReference(taskRef) ? taskRef : null;
+}
+
+function getFallbackTaskReference(line: string): string | null {
+  const lower = line.toLowerCase();
+  const createdIndex = lower.indexOf("created ");
+  if (createdIndex === -1) return null;
+  const referenceStart = createdIndex + "created ".length;
+  const colonIndex = line.indexOf(":", referenceStart);
+  if (colonIndex === -1) return null;
+  return line.slice(referenceStart, colonIndex).trim().slice(0, 64) || null;
+}
 
 /**
  * Build the session ID for an AgentCore invocation.
@@ -175,6 +254,33 @@ function buildPrompt(ctx: TaskCreationContext, userInstructions: string): string
   ].join("\n");
 }
 
+export function buildTaskInvocationPayload(
+  ctx: Pick<TaskCreationContext, "userEmail">,
+  prompt: string,
+  sessionId: string,
+  signingSecret: string,
+): Record<string, string> {
+  // Email headers and bodies are sender-controlled. This invocation gets no
+  // persistent workspace and carries a distinct mode that only model access
+  // plus narrowly validated task-creation operations accept.
+  const invocationContext = createEmailTaskInvocationContextToken(signingSecret, {
+    ownerEmail: ctx.userEmail,
+    sessionId,
+    workspacePrefix: "",
+  });
+  return {
+    prompt,
+    user_email: ctx.userEmail,
+    workspace_prefix: "",
+    invocation_context: invocationContext,
+    invocation_request_proof_key: deriveOwnerRequestProofKey(
+      signingSecret,
+      invocationContext,
+    ),
+    source: "email-triage-task",
+  };
+}
+
 export async function requestTaskCreation(
   ctx: TaskCreationContext,
 ): Promise<TaskCreationResult> {
@@ -202,6 +308,21 @@ export async function requestTaskCreation(
 
   const sessionId = buildSessionId(ctx.workspacePrefix, ctx.messageId);
   const prompt = buildPrompt(ctx, userInstructions);
+  let payload: Record<string, string>;
+  try {
+    payload = buildTaskInvocationPayload(
+      ctx,
+      prompt,
+      sessionId,
+      await getInvocationSigningSecret(),
+    );
+  } catch {
+    return {
+      ok: false,
+      reason: "Agent invocation authority is unavailable",
+      rawReply: "",
+    };
+  }
 
   const cmd = new InvokeAgentRuntimeCommand({
     agentRuntimeArn: runtimeId.startsWith("arn:")
@@ -209,13 +330,7 @@ export async function requestTaskCreation(
       : `arn:aws:bedrock-agentcore:${REGION}:${process.env.AWS_ACCOUNT ?? ""}:runtime/${runtimeId}`,
     runtimeSessionId: sessionId,
     payload: new TextEncoder().encode(
-      JSON.stringify({
-        prompt,
-        // Field names match agentcore_wrapper.py's `invoke()` payload
-        // contract (see agent-image/agentcore_wrapper.py).
-        user_email: ctx.userEmail,
-        workspace_prefix: ctx.workspacePrefix,
-      }),
+      JSON.stringify(payload),
     ),
     qualifier: "DEFAULT",
   });
@@ -292,13 +407,12 @@ export function parseAgentReply(raw: string): TaskCreationResult {
   // discovery (which is the order AgentCore emitted them).
   for (const body of bodies) {
     for (const line of body.split(/\r?\n/)) {
-      const failMatch = line.match(FAILED_PATTERN);
-      if (failMatch) {
-        return { ok: false, reason: failMatch[1].trim(), rawReply: raw };
+      const failureReason = getFailureReason(line);
+      if (failureReason) {
+        return { ok: false, reason: failureReason, rawReply: raw };
       }
-      const okMatch = line.match(SUCCESS_PATTERN);
-      if (okMatch) {
-        const taskRef = (okMatch[2] ?? "").trim();
+      const taskRef = getStructuredTaskReference(line);
+      if (taskRef) {
         return { ok: true, taskRef, rawReply: raw };
       }
     }
@@ -306,9 +420,8 @@ export function parseAgentReply(raw: string): TaskCreationResult {
   // Second pass: loose "Created X: title" with no id.
   for (const body of bodies) {
     for (const line of body.split(/\r?\n/)) {
-      const okMatch = line.match(SUCCESS_FALLBACK_PATTERN);
-      if (okMatch) {
-        const taskRef = (okMatch[1] ?? "task").trim().slice(0, 64);
+      const taskRef = getFallbackTaskReference(line);
+      if (taskRef) {
         return { ok: true, taskRef, rawReply: raw };
       }
     }
@@ -333,50 +446,46 @@ export function parseAgentReply(raw: string): TaskCreationResult {
  *     extracted in order
  *   - Markdown code-fence wrappers stripped
  */
-function extractBodies(raw: string): string[] {
+function envelopeText(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const envelope = value as Record<string, unknown>;
+  const text = ["result", "message", "reply", "content"]
+    .map((key) => envelope[key])
+    .find((candidate): candidate is string => typeof candidate === "string");
+  return text;
+}
+
+function extractSseBodies(raw: string): string[] {
   const bodies: string[] = [];
-
-  // Detect SSE format: at least one line starts with `data: `.
-  const sseLines = raw.match(/^data:\s.+$/gm);
-  if (sseLines && sseLines.length > 0) {
-    for (const line of sseLines) {
-      const payload = line.replace(/^data:\s/, "").trim();
-      // The terminating `[DONE]` sentinel is from OpenAI-style streams;
-      // AgentCore doesn't use it but be safe.
-      if (payload === "[DONE]") continue;
-      try {
-        const obj = JSON.parse(payload);
-        const text =
-          (obj as { result?: string }).result ??
-          (obj as { message?: string }).message ??
-          (obj as { reply?: string }).reply ??
-          (obj as { content?: string }).content;
-        if (typeof text === "string" && text.trim()) {
-          bodies.push(stripFences(text));
-        }
-      } catch {
-        // Non-JSON SSE event; ignore.
+  for (const line of raw.match(/^data:\s.+$/gm) ?? []) {
+    const payload = line.replace(/^data:\s/, "").trim();
+    if (payload === "[DONE]") continue;
+    try {
+      const text = envelopeText(JSON.parse(payload));
+      if (text?.trim()) {
+        bodies.push(stripFences(text));
       }
+    } catch {
+      // Non-JSON SSE event; ignore.
     }
-    if (bodies.length > 0) return bodies;
   }
+  return bodies;
+}
 
-  // Try the whole thing as a single JSON envelope.
+function extractJsonEnvelope(raw: string): string | undefined {
   try {
-    const obj = JSON.parse(raw.trim());
-    if (obj && typeof obj === "object") {
-      const text =
-        (obj as { result?: string }).result ??
-        (obj as { message?: string }).message ??
-        (obj as { reply?: string }).reply ??
-        (obj as { content?: string }).content;
-      if (typeof text === "string") return [stripFences(text)];
-    }
+    const text = envelopeText(JSON.parse(raw.trim()));
+    return text === undefined ? undefined : stripFences(text);
   } catch {
-    /* not JSON */
+    return undefined;
   }
+}
 
-  // Plain text — return as-is, with any code-fence wrapping stripped.
+function extractBodies(raw: string): string[] {
+  const sseBodies = extractSseBodies(raw);
+  if (sseBodies.length > 0) return sseBodies;
+  const jsonBody = extractJsonEnvelope(raw);
+  if (jsonBody !== undefined) return [jsonBody];
   return [stripFences(raw)];
 }
 

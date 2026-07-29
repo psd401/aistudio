@@ -9,6 +9,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   buildContinuationPrompt,
   buildJobPayload,
+  formatJobChatResponse,
   JOB_DEADLINE_S,
   parseJobPayload,
   shouldPromoteToJob,
@@ -60,6 +61,37 @@ describe('buildJobPayload / parseJobPayload round-trip', () => {
     expect(parsed.threadName).toBeUndefined();
   });
 
+  test('round-trips an aside response marker for the background reply', () => {
+    const parsed = parseJobPayload(
+      buildJobPayload({ ...BASE, responsePrefix: '[aside] ' })
+    );
+    expect(parsed.responsePrefix).toBe('[aside] ');
+  });
+
+  test('round-trips optional scheduled-run context', () => {
+    const longestValidScheduleName = 'n'.repeat(120);
+    const parsed = parseJobPayload(
+      buildJobPayload({
+        ...BASE,
+        scheduleId: '36bb0456-1c51-4fb8-97d1-4e87d02765ce',
+        scheduleName: longestValidScheduleName,
+        scheduledRunId: '901',
+        fireKey:
+          'schedule-fire#36bb0456-1c51-4fb8-97d1-4e87d02765ce#' +
+          '2026-07-28T15:00:00.000Z',
+      })
+    );
+    expect(parsed.scheduleId).toBe(
+      '36bb0456-1c51-4fb8-97d1-4e87d02765ce'
+    );
+    expect(parsed.scheduleName).toBe(longestValidScheduleName);
+    expect(parsed.scheduledRunId).toBe('901');
+    expect(parsed.fireKey).toBe(
+      'schedule-fire#36bb0456-1c51-4fb8-97d1-4e87d02765ce#' +
+      '2026-07-28T15:00:00.000Z'
+    );
+  });
+
   test('prompt excerpt truncates to keep the payload under the RunTask 8KiB cap', () => {
     const parsed = parseJobPayload(
       buildJobPayload({ ...BASE, originalPrompt: 'x'.repeat(10_000) })
@@ -86,6 +118,36 @@ describe('buildContinuationPrompt', () => {
 
   test('no excerpt → no dangling excerpt block', () => {
     expect(buildContinuationPrompt('')).not.toContain('original request excerpt');
+  });
+});
+
+describe('formatJobChatResponse', () => {
+  test('uses the persisted aside marker on the final background reply', () => {
+    expect(
+      formatJobChatResponse(
+        {
+          isDM: true,
+          displayName: BASE.displayName,
+          responsePrefix: '[aside] ',
+        },
+        'background result'
+      )
+    ).toBe('[aside] background result');
+  });
+
+  test('retains the existing DM and shared-space defaults', () => {
+    expect(
+      formatJobChatResponse(
+        { isDM: true, displayName: BASE.displayName },
+        'DM result'
+      )
+    ).toBe('DM result');
+    expect(
+      formatJobChatResponse(
+        { isDM: false, displayName: BASE.displayName },
+        'room result'
+      )
+    ).toBe(`[${BASE.displayName}'s Agent] room result`);
   });
 });
 

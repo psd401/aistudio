@@ -43,7 +43,7 @@ describe("canonical image processing", () => {
       frameCount: 1,
     });
     expect(Buffer.from(result.thumbnail).subarray(0, 2)).toEqual(
-      Buffer.from([0xff, 0xd8])
+      Buffer.from([0xFF, 0xD8])
     );
     expect(result.captionImage.byteLength).toBeLessThanOrEqual(4_500_000);
     expect(result.ocrImage.byteLength).toBeLessThanOrEqual(9_500_000);

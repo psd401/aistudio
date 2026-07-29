@@ -14,22 +14,38 @@ import { sanitizeTextWithMetrics } from '../../../../lib/utils/text-sanitizer';
 // correct implementation.
 import { sanitizeHtml } from '../utils/html-sanitizer';
 
+interface ExtractedTextContent {
+  text: string;
+  method?: string;
+  markdown?: string;
+  metadata?: Record<string, unknown>;
+  rawData?: unknown;
+}
+
+async function reportProgress(
+  onProgress: ProcessingParams['onProgress'],
+  stage: string,
+  progress: number
+): Promise<void> {
+  await onProgress?.(stage, progress);
+}
+
 export class TextProcessor implements DocumentProcessor {
   constructor(private config: ProcessorConfig) {}
 
   async process(params: ProcessingParams): Promise<ProcessingResult> {
     const startTime = Date.now();
     const { buffer, fileName, fileType, onProgress } = params;
-    const logger = createLambdaLogger({ 
+    const logger = createLambdaLogger({
       operation: 'TextProcessor.process',
       fileName,
       fileType,
       fileSize: buffer.length
     });
-    
+
     logger.info('Starting text document processing', { fileName, fileType, bufferSize: buffer.length });
-    
-    await onProgress?.('parsing_text', 40);
+
+    await reportProgress(onProgress, 'parsing_text', 40);
 
     const textContent = buffer.toString('utf-8');
 
@@ -45,40 +61,18 @@ export class TextProcessor implements DocumentProcessor {
       });
     }
 
-    let extractedContent: any;
-    
-    try {
-      // Determine specific text format
-      const extension = fileName.split('.').pop()?.toLowerCase() || '';
-      
-      switch (extension) {
-        case 'csv':
-          extractedContent = await this.processCsv(sanitizationResult.sanitized);
-          break;
-        case 'md':
-        case 'markdown':
-          extractedContent = await this.processMarkdown(sanitizationResult.sanitized);
-          break;
-        case 'json':
-          extractedContent = await this.processJson(sanitizationResult.sanitized);
-          break;
-        case 'xml':
-          extractedContent = await this.processXml(sanitizationResult.sanitized);
-          break;
-        default:
-          extractedContent = await this.processPlainText(sanitizationResult.sanitized);
-      }
-    } catch (error) {
-      logger.error('Error processing text document', error);
-      throw new Error(`Failed to process text: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-    
+    const extractedContent = await this.extractTextContent(
+      fileName,
+      sanitizationResult.sanitized,
+      logger
+    );
+
     if (!extractedContent.text) {
       throw new Error('No text content extracted from document');
     }
-    
-    await onProgress?.('post_processing', 70);
-    
+
+    await reportProgress(onProgress, 'post_processing', 70);
+
     // Build result
     const result: ProcessingResult = {
       text: extractedContent.text,
@@ -90,23 +84,23 @@ export class TextProcessor implements DocumentProcessor {
         ...extractedContent.metadata,
       }
     };
-    
+
     // Convert to Markdown if requested (and not already markdown)
     if (this.config.convertToMarkdown && extractedContent.method !== 'markdown') {
-      await onProgress?.('converting_markdown', 80);
+      await reportProgress(onProgress, 'converting_markdown', 80);
       result.markdown = await this.convertToMarkdown(extractedContent);
     } else if (extractedContent.markdown) {
       result.markdown = extractedContent.markdown;
     }
-    
+
     // Generate chunks if requested
     if (this.config.generateEmbeddings) {
-      await onProgress?.('chunking_text', 90);
+      await reportProgress(onProgress, 'chunking_text', 90);
       result.chunks = await this.chunkText(extractedContent.text);
     }
-    
+
     result.metadata.processingTime = Date.now() - startTime;
-    
+
     logger.info('Text processing completed successfully', {
       processingTime: result.metadata.processingTime,
       textLength: result.text?.length || 0,
@@ -117,41 +111,69 @@ export class TextProcessor implements DocumentProcessor {
     return result;
   }
 
-  private async processCsv(content: string): Promise<any> {
+  private async extractTextContent(
+    fileName: string,
+    content: string,
+    logger: ReturnType<typeof createLambdaLogger>
+  ): Promise<ExtractedTextContent> {
+    try {
+      const extension = fileName.split('.').pop()?.toLowerCase() || '';
+      let extracted: unknown;
+      if (extension === 'csv') extracted = await this.processCsv(content);
+      else if (extension === 'md' || extension === 'markdown') {
+        extracted = await this.processMarkdown(content);
+      } else if (extension === 'json') {
+        extracted = await this.processJson(content);
+      } else if (extension === 'xml') {
+        extracted = await this.processXml(content);
+      } else {
+        extracted = await this.processPlainText(content);
+      }
+      return extracted as ExtractedTextContent;
+    } catch (error) {
+      logger.error('Error processing text document', error);
+      throw new Error(
+        `Failed to process text: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        { cause: error }
+      );
+    }
+  }
+
+  private async processCsv(content: string): Promise<unknown> {
     const logger = createLambdaLogger({ operation: 'TextProcessor.processCsv' });
     logger.info('Processing CSV content');
-    
+
     try {
       const records = csvParse(content, {
         columns: true,
         skip_empty_lines: true,
         trim: true,
-      });
-      
+      }) as Array<Record<string, string>>;
+
       // Convert CSV to readable text format
       let textOutput = '';
-      
+
       if (records.length > 0) {
         // Add header
         const headers = Object.keys(records[0]);
         textOutput += `CSV Data (${records.length} records)\n\n`;
         textOutput += `Columns: ${headers.join(', ')}\n\n`;
-        
+
         // Add sample records (limit to first 10)
         const sampleRecords = records.slice(0, 10);
-        sampleRecords.forEach((record: any, index: number) => {
+        for (const [index, record] of sampleRecords.entries()) {
           textOutput += `Record ${index + 1}:\n`;
-          headers.forEach(header => {
+          for (const header of headers) {
             textOutput += `  ${header}: ${record[header] || 'N/A'}\n`;
-          });
+          }
           textOutput += '\n';
-        });
-        
+        }
+
         if (records.length > 10) {
           textOutput += `... and ${records.length - 10} more records\n`;
         }
       }
-      
+
       return {
         text: textOutput.trim(),
         method: 'csv',
@@ -168,15 +190,15 @@ export class TextProcessor implements DocumentProcessor {
     }
   }
 
-  private async processMarkdown(content: string): Promise<any> {
+  private async processMarkdown(content: string): Promise<unknown> {
     const logger = createLambdaLogger({ operation: 'TextProcessor.processMarkdown' });
     logger.info('Processing Markdown content');
-    
+
     try {
       // Convert markdown to plain text for text field
       const html = await marked.parse(content);
       const plainText = sanitizeHtml(html).trim();
-      
+
       return {
         text: plainText,
         markdown: content,
@@ -193,16 +215,16 @@ export class TextProcessor implements DocumentProcessor {
     }
   }
 
-  private async processJson(content: string): Promise<any> {
+  private async processJson(content: string): Promise<unknown> {
     const logger = createLambdaLogger({ operation: 'TextProcessor.processJson' });
     logger.info('Processing JSON content');
-    
+
     try {
       const data = JSON.parse(content);
-      
+
       // Convert JSON to readable text format
       const textOutput = this.jsonToText(data);
-      
+
       return {
         text: textOutput,
         method: 'json',
@@ -219,16 +241,16 @@ export class TextProcessor implements DocumentProcessor {
     }
   }
 
-  private async processXml(content: string): Promise<any> {
+  private async processXml(content: string): Promise<unknown> {
     const logger = createLambdaLogger({ operation: 'TextProcessor.processXml' });
     logger.info('Processing XML content');
-    
+
     // Basic XML text extraction (strip tags)
     const textContent = content
       .replace(/<[^>]*>/g, ' ') // Remove XML tags
       .replace(/\s+/g, ' ') // Normalize whitespace
       .trim();
-    
+
     return {
       text: textContent,
       method: 'xml',
@@ -240,20 +262,20 @@ export class TextProcessor implements DocumentProcessor {
     };
   }
 
-  private async processPlainText(content: string): Promise<any> {
+  private async processPlainText(content: string): Promise<unknown> {
     const logger = createLambdaLogger({ operation: 'TextProcessor.processPlainText' });
     logger.info('Processing plain text content');
-    
+
     // Clean up the text
     const cleanedText = content
       .replace(/\r\n/g, '\n') // Normalize line endings
       .replace(/\r/g, '\n')
       .replace(/\t/g, '    ') // Replace tabs with spaces
       .trim();
-    
+
     const lines = cleanedText.split('\n');
     const words = cleanedText.split(/\s+/).filter(word => word.length > 0);
-    
+
     return {
       text: cleanedText,
       method: 'plain-text',
@@ -267,48 +289,48 @@ export class TextProcessor implements DocumentProcessor {
     };
   }
 
-  private jsonToText(data: any, indent: number = 0): string {
+  private jsonToText(data: unknown, indent: number = 0): string {
     const spaces = '  '.repeat(indent);
-    
+
     if (Array.isArray(data)) {
       if (data.length === 0) return 'Empty array';
-      
+
       let result = `Array with ${data.length} items:\n`;
-      data.slice(0, 5).forEach((item, index) => {
+      for (const [index, item] of data.slice(0, 5).entries()) {
         result += `${spaces}  ${index}: ${this.jsonToText(item, indent + 1)}\n`;
-      });
+      };
       if (data.length > 5) {
         result += `${spaces}  ... and ${data.length - 5} more items\n`;
       }
       return result;
     }
-    
+
     if (typeof data === 'object' && data !== null) {
       const keys = Object.keys(data);
       if (keys.length === 0) return 'Empty object';
-      
+
       let result = '';
-      keys.slice(0, 10).forEach(key => {
+      for (const key of keys.slice(0, 10)) {
         const value = data[key];
         if (typeof value === 'object') {
           result += `${spaces}${key}: ${this.jsonToText(value, indent + 1)}\n`;
         } else {
           result += `${spaces}${key}: ${String(value)}\n`;
         }
-      });
+      };
       if (keys.length > 10) {
         result += `${spaces}... and ${keys.length - 10} more properties\n`;
       }
       return result;
     }
-    
+
     return String(data);
   }
 
-  private async convertToMarkdown(extractedContent: any): Promise<string> {
+  private async convertToMarkdown(extractedContent: unknown): Promise<string> {
     const text = extractedContent.text;
     const method = extractedContent.method;
-    
+
     switch (method) {
       case 'csv':
         return this.csvToMarkdown(extractedContent);
@@ -321,41 +343,41 @@ export class TextProcessor implements DocumentProcessor {
     }
   }
 
-  private csvToMarkdown(content: any): string {
+  private csvToMarkdown(content: unknown): string {
     if (!content.rawData || content.rawData.length === 0) {
       return '# CSV Data\n\nNo data found.';
     }
-    
+
     const records = content.rawData;
     const headers = Object.keys(records[0]);
-    
+
     let markdown = `# CSV Data\n\n**${records.length} records** with columns: ${headers.join(', ')}\n\n`;
-    
+
     // Create table (limit to first 20 records)
     const displayRecords = records.slice(0, 20);
-    
+
     markdown += '| ' + headers.join(' | ') + ' |\n';
     markdown += '| ' + headers.map(() => '---').join(' | ') + ' |\n';
-    
-    displayRecords.forEach((record: any) => {
+
+    for (const record of displayRecords) {
       const row = headers.map(header => {
         const cellValue = String(record[header] || '');
         // Properly escape both backslashes and pipe characters for markdown table
         return cellValue.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
       });
       markdown += '| ' + row.join(' | ') + ' |\n';
-    });
-    
+    }
+
     if (records.length > 20) {
       markdown += `\n*... and ${records.length - 20} more records*\n`;
     }
-    
+
     return markdown;
   }
 
-  private jsonToMarkdown(content: any): string {
+  private jsonToMarkdown(content: unknown): string {
     let markdown = '# JSON Data\n\n';
-    
+
     if (content.rawData) {
       const data = content.rawData;
       if (Array.isArray(data)) {
@@ -373,23 +395,23 @@ export class TextProcessor implements DocumentProcessor {
         markdown += '\n```\n';
       }
     }
-    
+
     return markdown;
   }
 
-  private xmlToMarkdown(content: any): string {
+  private xmlToMarkdown(content: unknown): string {
     return `# XML Document\n\n${content.text}`;
   }
 
   private textToMarkdown(text: string): string {
     // Simple text to markdown conversion
     const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 0);
-    
+
     let markdown = '';
-    
+
     for (const paragraph of paragraphs) {
       const trimmed = paragraph.trim();
-      
+
       // Detect potential headers
       if (trimmed.length < 100 && !/[.!?]$/.test(trimmed) && /^[A-Z]/.test(trimmed)) {
         const words = trimmed.split(' ');
@@ -398,25 +420,25 @@ export class TextProcessor implements DocumentProcessor {
           continue;
         }
       }
-      
+
       // Regular paragraph
       markdown += `${trimmed}\n\n`;
     }
-    
+
     return markdown.trim() || text;
   }
 
-  private async chunkText(text: string): Promise<any[]> {
+  private async chunkText(text: string): Promise<unknown[]> {
     const chunkSize = 2000;
     const overlap = 200;
-    
+
     const chunks = [];
     let startIndex = 0;
     let chunkIndex = 0;
-    
+
     while (startIndex < text.length) {
       let endIndex = Math.min(startIndex + chunkSize, text.length);
-      
+
       // Try to break at a sentence or line boundary — but only when the break still
       // leaves a chunk larger than the overlap. Otherwise `endIndex - overlap` would
       // move the next window BACKWARD and the loop would never terminate (REV-COR-406).
@@ -457,7 +479,7 @@ export class TextProcessor implements DocumentProcessor {
       if (nextStart <= startIndex) break; // defensive; should be unreachable
       startIndex = nextStart;
     }
-    
+
     const logger = createLambdaLogger({ operation: 'TextProcessor.chunkText' });
     logger.info('Text chunking completed', { chunkCount: chunks.length });
     return chunks;

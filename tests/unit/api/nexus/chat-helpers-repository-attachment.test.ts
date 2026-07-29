@@ -2,6 +2,7 @@
 
 import {
   convertMessagesToPartsFormat,
+  extractLatestUserText,
   extractUserContent,
 } from "@/app/api/nexus/chat/chat-helpers";
 import { buildTemporaryAttachmentMarker } from "@/lib/repositories/temporary-attachment-contract";
@@ -23,6 +24,31 @@ const rawSearchResult = {
 };
 
 describe("extractUserContent repository attachment persistence", () => {
+  it("joins every text part from the latest user message", () => {
+    expect(
+      extractLatestUserText([
+        {
+          id: "message-1",
+          role: "user",
+          parts: [{ type: "text", text: "Earlier turn" }],
+        },
+        {
+          id: "message-2",
+          role: "assistant",
+          parts: [{ type: "text", text: "Assistant reply" }],
+        },
+        {
+          id: "message-3",
+          role: "user",
+          parts: [
+            { type: "text", text: "First durable fact" },
+            { type: "text", text: "Second durable fact" },
+          ],
+        },
+      ]),
+    ).toBe("First durable fact Second durable fact");
+  });
+
   it("stores safe text plus reload metadata without source bytes", () => {
     const reference = {
       bindingId: "123e4567-e89b-42d3-a456-426614174000",

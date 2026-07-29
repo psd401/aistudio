@@ -39,6 +39,7 @@ const rows = await executeQuery(
       .select({
         id: contentObjects.id,
         ownerUserId: contentObjects.ownerUserId,
+        collectionId: contentObjects.collectionId,
         visibilityLevel: contentObjects.visibilityLevel,
       })
       .from(contentObjects)

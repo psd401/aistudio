@@ -1,21 +1,32 @@
-import { NextRequest, NextResponse } from "next/server"
-import { requireAdmin } from "@/lib/auth/admin-check"
-import { getServerSession } from "@/lib/auth/server-session"
+import { NextRequest, NextResponse } from "next/server";
+import { requireAdmin } from "@/lib/auth/admin-check";
+import { getServerSession } from "@/lib/auth/server-session";
+import { resolveUserId } from "@/lib/auth/resolve-user";
 import {
-  createAssistantArchitect,
-  createChainPrompt,
-  createToolInputField,
-} from "@/lib/db/drizzle"
-import { resolveUserId } from "@/lib/auth/resolve-user"
-import { validateImportFile, mapModelsForImport, type ExportFormat } from "@/lib/assistant-export-import"
-import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
-import { decodeMdxEditorEscapes } from "@/lib/utils/text-sanitizer"
+  AssistantImportServiceError,
+  createAssistantsFromImport,
+  IMPORTED_ASSISTANT_STATUS,
+} from "@/lib/assistant-architect/import-service";
+import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
+
+interface AssistantImportResult {
+  name: string;
+  id?: number;
+  status: "success" | "error";
+  error?: string;
+}
+
+function isSupportedImportFile(file: File): boolean {
+  return (
+    !file.type || file.type === "application/json" || file.type === "text/json"
+  );
+}
 
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId();
   const timer = startTimer("api.admin.assistants.import");
   const log = createLogger({ requestId, route: "api.admin.assistants.import" });
-  
+
   log.info("POST /api/admin/assistants/import - Importing assistants");
 
   try {
@@ -32,181 +43,118 @@ export async function POST(request: NextRequest) {
     if (!session || !session.sub) {
       return NextResponse.json(
         { isSuccess: false, message: "Session error" },
-        { status: 500 }
-      )
+        { status: 500 },
+      );
     }
 
     // Parse form data to get the file
-    const formData = await request.formData()
-    const file = formData.get('file') as File
+    const formData = await request.formData();
+    const file = formData.get("file") as File;
 
     if (!file) {
       return NextResponse.json(
         { isSuccess: false, message: "No file provided" },
-        { status: 400 }
-      )
+        { status: 400 },
+      );
     }
 
     // Check file size (10MB limit)
     if (file.size > 10 * 1024 * 1024) {
       return NextResponse.json(
         { isSuccess: false, message: "File too large. Maximum size is 10MB" },
-        { status: 400 }
-      )
+        { status: 400 },
+      );
     }
 
     // Verify MIME type — only accept JSON files
-    if (file.type && file.type !== 'application/json' && file.type !== 'text/json') {
+    if (!isSupportedImportFile(file)) {
       return NextResponse.json(
-        { isSuccess: false, message: "Invalid file type. Only JSON files are accepted" },
-        { status: 400 }
-      )
+        {
+          isSuccess: false,
+          message: "Invalid file type. Only JSON files are accepted",
+        },
+        { status: 400 },
+      );
     }
 
     // Read and parse file
-    const fileContent = await file.text()
-    let importData: ExportFormat
+    const fileContent = await file.text();
+    let importData: unknown;
 
     try {
-      importData = JSON.parse(fileContent)
+      importData = JSON.parse(fileContent);
     } catch {
       return NextResponse.json(
         { isSuccess: false, message: "Invalid JSON file" },
-        { status: 400 }
-      )
+        { status: 400 },
+      );
     }
-
-    // Validate file structure
-    const validation = validateImportFile(importData)
-    if (!validation.valid) {
-      return NextResponse.json(
-        { isSuccess: false, message: validation.error },
-        { status: 400 }
-      )
-    }
-
-    log.info("Starting import", { assistantCount: importData.assistants.length })
 
     // Get user ID (provisions if missing)
-    const userId = await resolveUserId(session, requestId)
+    const userId = await resolveUserId(session, requestId);
 
-    // Collect all unique model names for mapping
-    const modelNames = new Set<string>()
-    for (const assistant of importData.assistants) {
-      for (const prompt of assistant.prompts) {
-        modelNames.add(prompt.model_name)
-      }
-    }
+    const serviceResult = await createAssistantsFromImport(importData, userId);
+    log.info("Import service completed", {
+      assistantCount: serviceResult.total,
+    });
+    const importResults: AssistantImportResult[] = serviceResult.results.map(
+      (result) =>
+        result.status === IMPORTED_ASSISTANT_STATUS
+          ? { name: result.name, id: result.id, status: "success" }
+          : result,
+    );
+    const successCount = serviceResult.successful;
 
-    // Map models
-    const modelMap = await mapModelsForImport(Array.from(modelNames))
-
-    const importResults = []
-
-    // Import each assistant
-    for (const assistant of importData.assistants) {
-      try {
-        // Create assistant and get the generated ID
-        const createdAssistant = await createAssistantArchitect({
-          name: assistant.name,
-          description: assistant.description || '',
-          status: 'pending_approval', // Always import as pending
-          imagePath: assistant.image_path,
-          isParallel: assistant.is_parallel || false,
-          timeoutSeconds: assistant.timeout_seconds,
-          userId,
-        })
-
-        const assistantId = createdAssistant.id
-
-        // Create prompts
-        for (const prompt of assistant.prompts) {
-          const modelId = modelMap.get(prompt.model_name)
-
-          if (!modelId) {
-            log.warn(`No model mapping found for ${prompt.model_name}, skipping prompt`)
-            continue
-          }
-
-          await createChainPrompt({
-            assistantArchitectId: assistantId,
-            name: prompt.name,
-            // Normalize MDXEditor escapes (\$ \{ \} \_ &#x24; &#36;) so imported content
-            // is stored in canonical form identical to what the UI produces.
-            content: decodeMdxEditorEscapes(prompt.content),
-            systemContext: prompt.system_context ? decodeMdxEditorEscapes(prompt.system_context) : prompt.system_context,
-            modelId,
-            position: prompt.position,
-            parallelGroup: prompt.parallel_group,
-            inputMapping: null, // Don't import source-system prompt IDs — they reference IDs that don't exist in this system and would silently resolve to wrong prompts
-            timeoutSeconds: prompt.timeout_seconds,
-          })
-        }
-
-        // Create input fields
-        for (const field of assistant.input_fields) {
-          await createToolInputField({
-            assistantArchitectId: assistantId,
-            name: field.name,
-            label: field.label,
-            fieldType: field.field_type as "short_text" | "long_text" | "select" | "multi_select" | "file_upload",
-            position: field.position,
-            options: field.options || undefined,
-          })
-        }
-
-        importResults.push({
-          name: assistant.name,
-          id: assistantId,
-          status: 'success'
-        })
-
-      } catch (error) {
-        log.error(`Error importing assistant ${assistant.name}:`, error)
-        importResults.push({
-          name: assistant.name,
-          status: 'error',
-          error: error instanceof Error ? error.message : 'Unknown error'
-        })
-      }
-    }
-
-    // Check if any imports succeeded
-    const successCount = importResults.filter(r => r.status === 'success').length
-    
     if (successCount === 0) {
       return NextResponse.json(
-        { 
-          isSuccess: false, 
+        {
+          isSuccess: false,
           message: "Failed to import any assistants",
-          details: importResults
+          details: importResults,
         },
-        { status: 500 }
-      )
+        { status: 500 },
+      );
     }
 
-    log.info(`Successfully imported ${successCount} out of ${importData.assistants.length} assistants`)
-    timer({ status: "success", successCount, totalCount: importData.assistants.length })
+    log.info(
+      `Successfully imported ${successCount} out of ${serviceResult.total} assistants`,
+    );
+    timer({
+      status: "success",
+      successCount,
+      totalCount: serviceResult.total,
+    });
 
     return NextResponse.json({
       isSuccess: true,
       message: `Successfully imported ${successCount} assistant(s)`,
       data: {
-        total: importData.assistants.length,
+        total: serviceResult.total,
         successful: successCount,
-        failed: importData.assistants.length - successCount,
+        failed: serviceResult.failed,
         results: importResults,
-        modelMappings: Array.from(modelMap.entries()).map(([name, id]) => ({ modelName: name, mappedToId: id }))
-      }
-    })
-
+        modelMappings: serviceResult.modelMappings,
+      },
+    });
   } catch (error) {
-    timer({ status: "error" })
-    log.error('Error importing assistants:', error)
+    timer({ status: "error" });
+    if (
+      error instanceof AssistantImportServiceError &&
+      error.code === "VALIDATION_ERROR"
+    ) {
+      log.warn("Assistant import validation failed", {
+        error: error.message,
+      });
+      return NextResponse.json(
+        { isSuccess: false, message: error.message },
+        { status: 400 },
+      );
+    }
+    log.error("Error importing assistants:", error);
 
     return NextResponse.json(
-      { isSuccess: false, message: 'Failed to import assistants' },
-      { status: 500 }
-    )
+      { isSuccess: false, message: "Failed to import assistants" },
+      { status: 500 },
+    );
   }
 }

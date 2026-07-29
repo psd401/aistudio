@@ -52,6 +52,7 @@ function synthTemplate(): Template {
 }
 
 interface Statement {
+  Sid?: string;
   Effect?: string;
   Action?: unknown;
   Resource?: unknown;
@@ -78,8 +79,10 @@ function allStatements(template: Template): Statement[] {
   return statements;
 }
 
-describe('ECS task role — mint Lambda invoke-only grant (#1232)', () => {
-  let template: Template;
+let template: Template;
+
+function defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1Part1() {
+
   beforeAll(() => {
     template = synthTemplate();
   });
@@ -124,6 +127,110 @@ describe('ECS task role — mint Lambda invoke-only grant (#1232)', () => {
     const mintEnv = envPairs.find((e) => e.Name === 'AGENT_MINT_LAMBDA_NAME');
     expect(mintEnv).toBeDefined();
     expect(mintEnv!.Value).toBe(MINT_FN);
+  });
+
+  it('sets the invocation-signing secret id on the trusted frontend verifier', () => {
+    const taskDefs = template.findResources('AWS::ECS::TaskDefinition');
+    const envPairs: Array<{ Name?: string; Value?: unknown }> = [];
+    for (const td of Object.values(taskDefs)) {
+      const containers = (
+        td as {
+          Properties?: {
+            ContainerDefinitions?: Array<{
+              Environment?: Array<{ Name?: string; Value?: unknown }>;
+            }>;
+          };
+        }
+      ).Properties?.ContainerDefinitions ?? [];
+      for (const container of containers) {
+        if (Array.isArray(container.Environment)) {
+          envPairs.push(...container.Environment);
+        }
+      }
+    }
+    expect(
+      envPairs.find(
+        (entry) => entry.Name === 'AGENT_INVOCATION_SIGNING_SECRET_ID'
+      )
+    ).toEqual({
+      Name: 'AGENT_INVOCATION_SIGNING_SECRET_ID',
+      Value: `psd-agent/${ENV}/invocation-signing-key`,
+    });
+  });
+
+  it('configures the frontend as the sole schedule broker', () => {
+    const statements = allStatements(template);
+    expect(
+      statements.find((statement) => statement.Sid === 'AgentScheduleTableWrite')
+    ).toMatchObject({
+      Effect: 'Allow',
+      Action: [
+        'dynamodb:PutItem',
+        'dynamodb:UpdateItem',
+        'dynamodb:DeleteItem',
+      ],
+    });
+    expect(
+      statements.find((statement) => statement.Sid === 'AgentScheduleBrokerCrud')
+    ).toMatchObject({
+      Effect: 'Allow',
+      Action: [
+        'scheduler:CreateSchedule',
+        'scheduler:UpdateSchedule',
+        'scheduler:DeleteSchedule',
+      ],
+    });
+    expect(
+      statements.find((statement) => statement.Sid === 'AgentScheduleBrokerPassRole')
+    ).toMatchObject({
+      Effect: 'Allow',
+      Action: 'iam:PassRole',
+      Condition: {
+        StringEquals: {
+          'iam:PassedToService': 'scheduler.amazonaws.com',
+        },
+      },
+    });
+  });
+
+  }
+
+function defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1Part2() {it('injects only server-side schedule broker coordinates', () => {
+    const taskDefs = template.findResources('AWS::ECS::TaskDefinition');
+    const environment: Array<{ Name?: string; Value?: unknown }> = [];
+    for (const taskDefinition of Object.values(taskDefs)) {
+      const containers = (
+        taskDefinition as {
+          Properties?: {
+            ContainerDefinitions?: Array<{
+              Environment?: Array<{ Name?: string; Value?: unknown }>;
+            }>;
+          };
+        }
+      ).Properties?.ContainerDefinitions ?? [];
+      for (const container of containers) {
+        if (Array.isArray(container.Environment)) {
+          environment.push(...container.Environment);
+        }
+      }
+    }
+    for (const variable of [
+      'AGENT_SCHEDULES_TABLE',
+      'AGENT_USERS_TABLE',
+      'AGENT_SCHEDULE_GROUP',
+      'AGENT_CRON_LAMBDA_ARN',
+      'AGENT_SCHEDULER_ROLE_ARN',
+      'AGENT_SCHEDULE_DLQ_ARN',
+    ]) {
+      expect(environment.find((entry) => entry.Name === variable)).toBeDefined();
+    }
+    expect(
+      environment.find((entry) => entry.Name === 'AGENT_SCHEDULE_DLQ_ARN')
+    ).toEqual({
+      Name: 'AGENT_SCHEDULE_DLQ_ARN',
+      Value:
+        'arn:aws:sqs:us-east-1:123456789012:psd-agent-async-dlq-dev',
+    });
   });
 
   it('injects the dedicated OIDC cookie secret into the frontend container', () => {
@@ -193,13 +300,20 @@ describe('ECS task role — mint Lambda invoke-only grant (#1232)', () => {
     );
   });
 
-  it('scopes permanent object-version deletion to repositories/*', () => {
+  }
+
+function defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1Part3() {it('scopes permanent object-version deletion to repositories/*', () => {
     const statements = allStatements(template);
     const versionDeletionStatements = statements.filter((statement) => {
       const actions = Array.isArray(statement.Action)
         ? statement.Action
         : [statement.Action];
-      return actions.includes('s3:DeleteObjectVersion');
+      return (
+        actions.includes('s3:DeleteObjectVersion') &&
+        JSON.stringify(statement.Resource ?? '').includes(
+          `aistudio-${ENV}-documents`
+        )
+      );
     });
 
     expect(versionDeletionStatements).toHaveLength(1);
@@ -246,6 +360,35 @@ describe('ECS task role — mint Lambda invoke-only grant (#1232)', () => {
     );
   });
 
+  it('grants the storage broker only the object actions required for verified promotion', () => {
+    const statements = allStatements(template);
+    const brokerObjects = statements.find(
+      (statement) => statement.Sid === 'AgentWorkspaceStorageBrokerObjects'
+    );
+
+    expect(brokerObjects).toMatchObject({
+      Effect: 'Allow',
+      Action: expect.arrayContaining([
+        's3:GetObject',
+        's3:GetObjectVersion',
+        's3:PutObject',
+        's3:PutObjectTagging',
+        's3:DeleteObjectVersion',
+      ]),
+    });
+    const actions = Array.isArray(brokerObjects!.Action)
+      ? brokerObjects!.Action
+      : [brokerObjects!.Action];
+    expect(actions).toHaveLength(5);
+    expect(actions).not.toEqual(expect.arrayContaining([
+      's3:DeleteObject',
+      's3:ListBucketVersions',
+    ]));
+    expect(JSON.stringify(brokerObjects!.Resource)).toContain(
+      `aistudio-${ENV}-agent-workspace/*`
+    );
+  });
+
   it('grants only bedrock:Rerank on wildcard while model invocation stays resource-scoped', () => {
     const statements = allStatements(template);
     const rerankStatement = statements.find((statement) => {
@@ -269,4 +412,12 @@ describe('ECS task role — mint Lambda invoke-only grant (#1232)', () => {
     expect(invokeStatement).toBeDefined();
     expect(invokeStatement!.Resource).not.toBe('*');
   });
-});
+}
+
+const defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1 = () => {
+  defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1Part1()
+  defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1Part2()
+  defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1Part3()
+};
+
+describe('ECS task role — mint Lambda invoke-only grant (#1232)', defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1);

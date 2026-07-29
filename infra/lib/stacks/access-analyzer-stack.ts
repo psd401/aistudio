@@ -44,7 +44,7 @@ export class AccessAnalyzerStack extends cdk.Stack {
     this.analyzer = new accessanalyzer.CfnAnalyzer(this, "AccessAnalyzer", {
       type: "ACCOUNT",
       analyzerName: `aistudio-${props.environment}-analyzer`,
-      archiveRules: this.createArchiveRules(props),
+      archiveRules: this.createArchiveRules(),
       tags: [
         {
           key: "Environment",
@@ -74,9 +74,7 @@ export class AccessAnalyzerStack extends cdk.Stack {
   /**
    * Create archive rules to filter out expected findings
    */
-  private createArchiveRules(
-    props: AccessAnalyzerStackProps
-  ): accessanalyzer.CfnAnalyzer.ArchiveRuleProperty[] {
+  private createArchiveRules(): accessanalyzer.CfnAnalyzer.ArchiveRuleProperty[] {
     return [
       {
         // Archives S3 findings for buckets that are NOT public (isPublic=false),
@@ -191,6 +189,21 @@ export class AccessAnalyzerStack extends cdk.Stack {
     // accidental modification of production resources.
     // Reference: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_actions-resources-contextkeys.html
     if (props.environment === "dev") {
+      remediationFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["iam:UpdateAssumeRolePolicy"],
+          resources: [
+            `arn:${cdk.Aws.PARTITION}:iam::${cdk.Aws.ACCOUNT_ID}:role/*`,
+          ],
+          conditions: {
+            StringEquals: {
+              "aws:ResourceTag/Environment": "dev",
+              "aws:ResourceTag/ManagedBy": "BaseIAMRole",
+            },
+          },
+        })
+      )
       remediationFunction.addToRolePolicy(
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,

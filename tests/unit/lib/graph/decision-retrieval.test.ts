@@ -40,10 +40,12 @@ function node(id: string, nodeType: string, name: string, extra: Record<string, 
 describe("decision-retrieval", () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    mockGenerateEmbedding.mockResolvedValue(new Array(GRAPH_EMBEDDING_DIMENSIONS).fill(0.01))
+    mockGenerateEmbedding.mockResolvedValue(
+      Array.from({ length: GRAPH_EMBEDDING_DIMENSIONS }, () => 0.01)
+    )
   })
 
-  describe("getDecisionPackage", () => {
+
     it("returns null when the seed is not found", async () => {
       mockExecuteQuery.mockResolvedValueOnce([] as never)
       const pkg = await getDecisionPackage(SEED)
@@ -115,9 +117,9 @@ describe("decision-retrieval", () => {
       const pkg = await getDecisionPackage(SEED, { maxDepth: 2.7 })
       expect(pkg!.depth).toBe(2)
     })
-  })
 
-  describe("semanticSearchNodes", () => {
+
+
     it("embeds the query and maps similarity rows", async () => {
       mockExecuteQuery.mockResolvedValueOnce([
         {
@@ -173,11 +175,11 @@ describe("decision-retrieval", () => {
 
       // Inspect the drizzle SQL object: the filter fragments and their bound
       // values must be present exactly when the options are provided.
-      const rendered = require("util").inspect(capturedQuery, { depth: 10 })
+      const rendered = require("node:util").inspect(capturedQuery, { depth: 10 })
       expect(rendered).toContain("node_class")
       expect(rendered).toContain("strategic")
       expect(rendered).toContain("status")
       expect(rendered).toContain("accepted")
     })
-  })
+
 })

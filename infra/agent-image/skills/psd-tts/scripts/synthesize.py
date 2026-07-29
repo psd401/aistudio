@@ -6,11 +6,11 @@ Convert text to a shareable MP3 with Amazon Polly, upload it to the workspace S3
 bucket under the public `public-images/` prefix, and return an unsigned HTTPS
 URL (same delivery model as psd-image-gen / psd-html-artifact).
 
-Polly is NOT Bedrock: it authenticates with the AgentCore execution role's
-SigV4 credential chain (the same role that does S3/Secrets), NOT the
-AWS_BEARER_TOKEN_BEDROCK token. boto3 needs an explicit region because
-AgentCore does not inject AWS_REGION into every SDK path — we read AWS_REGION
-(set on the runtime) and fall back to us-east-1.
+The root-owned loopback relay calls Polly with the AgentCore execution role's
+SigV4 credential chain. OpenClaw intentionally strips credential variables from
+model-launched exec subprocesses, so this script never receives or returns
+reusable AWS credentials. The resulting MP3 is uploaded through the owner-bound
+workspace broker; the model role has no S3 or Secrets Manager access.
 
 Usage (text from --text, --file, or stdin):
     python3 synthesize.py --user name@psd401.net --text "Hello there."
@@ -27,8 +27,8 @@ import json
 import os
 import re
 import sys
-import uuid
-from urllib.parse import quote
+import urllib.error
+import urllib.request
 
 # SynthesizeSpeech accepts up to 6,000 total / 3,000 billable chars per call.
 # Chunk well under the billable cap at sentence boundaries.
@@ -38,6 +38,8 @@ MAX_TEXT_CHARS = 200_000
 VALID_ENGINES = {"generative", "neural", "long-form", "standard"}
 DEFAULT_ENGINE = "generative"
 DEFAULT_VOICE = "Ruth"
+POLLY_RELAY_URL = "http://127.0.0.1:18791/aws-skill/polly/synthesize"
+MAX_RELAY_AUDIO_BYTES = 16 * 1024 * 1024
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -80,47 +82,53 @@ def chunk_text(text, max_chars=CHUNK_CHARS):
     return [c for c in chunks if c.strip()]
 
 
-def synthesize(text, voice, engine, region):
-    import boto3
+def _read_bounded_response(response, max_bytes):
+    body = bytearray()
+    while True:
+        chunk = response.read(min(64 * 1024, max_bytes - len(body) + 1))
+        if not chunk:
+            break
+        body.extend(chunk)
+        if len(body) > max_bytes:
+            raise RuntimeError("Polly relay response exceeded the configured limit")
+    return bytes(body)
 
-    polly = boto3.client("polly", region_name=region)
+
+def _synthesize_chunk(text, voice, engine):
+    request = urllib.request.Request(
+        POLLY_RELAY_URL,
+        data=json.dumps({
+            "text": text,
+            "voice": voice,
+            "engine": engine,
+        }).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            if response.headers.get_content_type() != "audio/mpeg":
+                raise RuntimeError("Polly relay returned an invalid content type")
+            return _read_bounded_response(response, MAX_RELAY_AUDIO_BYTES)
+    except urllib.error.HTTPError as exc:
+        exc.read(1024)
+        raise RuntimeError(f"Polly relay returned HTTP {exc.code}") from exc
+
+
+def synthesize(text, voice, engine, synthesize_chunk=None):
+    relay = synthesize_chunk or _synthesize_chunk
     audio = bytearray()
     chunks = chunk_text(text)
     for chunk in chunks:
-        # No explicit SampleRate: let Polly pick the engine default (24 kHz for
-        # generative/neural/long-form, 22.05 kHz for standard). Hardcoding 24000
-        # would reject --engine standard, which does not support that rate.
-        resp = polly.synthesize_speech(
-            Text=chunk,
-            OutputFormat="mp3",
-            VoiceId=voice,
-            Engine=engine,
-        )
-        stream = resp.get("AudioStream")
-        if stream is None:
-            _fail("Polly returned no AudioStream", "upstream_error")
-        audio.extend(stream.read())
+        audio.extend(relay(chunk, voice, engine))
     return bytes(audio), len(chunks)
 
 
 def upload_mp3(audio, user_email, region):
-    bucket = os.environ.get("WORKSPACE_BUCKET")
-    if not bucket:
-        _fail("WORKSPACE_BUCKET env var not set — cannot upload audio", "misconfigured")
-    import boto3
-
-    key = f"public-images/{user_email}/{uuid.uuid4()}.mp3"
-    s3 = boto3.client("s3", region_name=region)
-    s3.put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=audio,
-        ContentType="audio/mpeg",
-        Metadata={"generated_by": "psd-tts"},
-    )
-    encoded_key = "/".join(quote(seg) for seg in key.split("/"))
-    url = f"https://{bucket}.s3.{region}.amazonaws.com/{encoded_key}"
-    return url, key
+    sys.path.insert(0, "/app")
+    from artifact_publisher import publish_artifact
+    _ = (user_email, region)
+    return publish_artifact(audio, ".mp3", "audio/mpeg")
 
 
 def resolve_text(args):
@@ -159,8 +167,8 @@ def main():
     region = os.environ.get("AWS_REGION", "us-east-1")
 
     try:
-        audio, chunk_count = synthesize(text, args.voice, args.engine, region)
-    except Exception as exc:  # botocore ClientError (bad voice/engine, throttling, etc.)
+        audio, chunk_count = synthesize(text, args.voice, args.engine)
+    except Exception as exc:
         _fail(f"Polly synthesis failed: {exc}", "upstream_error")
 
     if not audio:

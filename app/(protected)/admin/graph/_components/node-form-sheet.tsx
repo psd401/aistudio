@@ -32,6 +32,85 @@ const emptyForm: NodeFormData = {
   metadata: "{}",
 }
 
+function NodeFormFields({
+  form,
+  metadataError,
+  firstInputRef,
+  onChange,
+  onMetadataChange,
+}: {
+  form: NodeFormData
+  metadataError: string | null
+  firstInputRef: React.RefObject<HTMLInputElement | null>
+  onChange: (updates: Partial<NodeFormData>) => void
+  onMetadataChange: (value: string) => void
+}) {
+  return (
+    <div className="space-y-4 pb-4">
+      <div className="space-y-2">
+        <Label htmlFor="node-name">
+          Name <span className="text-destructive">*</span>
+        </Label>
+        <Input
+          ref={firstInputRef}
+          id="node-name"
+          placeholder="e.g., AI Acceptable Use Policy"
+          value={form.name}
+          onChange={(event) => onChange({ name: event.target.value })}
+        />
+      </div>
+      <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <Label htmlFor="node-type">
+            Type <span className="text-destructive">*</span>
+          </Label>
+          <Input
+            id="node-type"
+            placeholder="e.g., policy, decision, system"
+            value={form.nodeType}
+            onChange={(event) => onChange({ nodeType: event.target.value })}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="node-class">
+            Class <span className="text-destructive">*</span>
+          </Label>
+          <Input
+            id="node-class"
+            placeholder="e.g., governance, technical"
+            value={form.nodeClass}
+            onChange={(event) => onChange({ nodeClass: event.target.value })}
+          />
+        </div>
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="node-description">Description</Label>
+        <Textarea
+          id="node-description"
+          placeholder="Optional description of this node..."
+          value={form.description}
+          onChange={(event) => onChange({ description: event.target.value })}
+          rows={3}
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="node-metadata">Metadata (JSON)</Label>
+        <Textarea
+          id="node-metadata"
+          placeholder='{"key": "value"}'
+          value={form.metadata}
+          onChange={(event) => onMetadataChange(event.target.value)}
+          rows={4}
+          className={metadataError ? "border-destructive" : "font-mono text-sm"}
+        />
+        {metadataError && (
+          <p className="text-xs text-destructive">{metadataError}</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function NodeFormSheet({
   open,
   onOpenChange,
@@ -139,93 +218,15 @@ export function NodeFormSheet({
 
           {/* Body */}
           <div className="flex-1 overflow-y-auto px-6">
-            <div className="space-y-4 pb-4">
-              <div className="space-y-2">
-                <Label htmlFor="node-name">
-                  Name <span className="text-destructive">*</span>
-                </Label>
-                <Input
-                  ref={firstInputRef}
-                  id="node-name"
-                  placeholder="e.g., AI Acceptable Use Policy"
-                  value={form.name}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, name: e.target.value }))
-                  }
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="node-type">
-                    Type <span className="text-destructive">*</span>
-                  </Label>
-                  <Input
-                    id="node-type"
-                    placeholder="e.g., policy, decision, system"
-                    value={form.nodeType}
-                    onChange={(e) =>
-                      setForm((prev) => ({
-                        ...prev,
-                        nodeType: e.target.value,
-                      }))
-                    }
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="node-class">
-                    Class <span className="text-destructive">*</span>
-                  </Label>
-                  <Input
-                    id="node-class"
-                    placeholder="e.g., governance, technical"
-                    value={form.nodeClass}
-                    onChange={(e) =>
-                      setForm((prev) => ({
-                        ...prev,
-                        nodeClass: e.target.value,
-                      }))
-                    }
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="node-description">Description</Label>
-                <Textarea
-                  id="node-description"
-                  placeholder="Optional description of this node..."
-                  value={form.description}
-                  onChange={(e) =>
-                    setForm((prev) => ({
-                      ...prev,
-                      description: e.target.value,
-                    }))
-                  }
-                  rows={3}
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="node-metadata">Metadata (JSON)</Label>
-                <Textarea
-                  id="node-metadata"
-                  placeholder='{"key": "value"}'
-                  value={form.metadata}
-                  onChange={(e) => handleMetadataChange(e.target.value)}
-                  rows={4}
-                  className={
-                    metadataError
-                      ? "border-destructive"
-                      : "font-mono text-sm"
-                  }
-                />
-                {metadataError && (
-                  <p className="text-xs text-destructive">{metadataError}</p>
-                )}
-              </div>
-            </div>
+            <NodeFormFields
+              form={form}
+              metadataError={metadataError}
+              firstInputRef={firstInputRef}
+              onChange={(updates) =>
+                setForm((previous) => ({ ...previous, ...updates }))
+              }
+              onMetadataChange={handleMetadataChange}
+            />
           </div>
 
           {/* Footer */}

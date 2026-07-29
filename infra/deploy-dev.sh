@@ -5,8 +5,14 @@ set -e
 
 # Check if Google Client ID is provided
 if [ -z "$1" ]; then
-    echo "Usage: ./deploy-dev.sh <GOOGLE_CLIENT_ID> [BASE_DOMAIN]"
-    echo "Example: ./deploy-dev.sh 905669698724-xxx.apps.googleusercontent.com aistudio.psd401.ai"
+    echo "Usage: GOOGLE_PICKER_API_KEY=<restricted-key> ./deploy-dev.sh <GOOGLE_CLIENT_ID> [BASE_DOMAIN]"
+    echo "Example: GOOGLE_PICKER_API_KEY=... ./deploy-dev.sh 905669698724-xxx.apps.googleusercontent.com aistudio.psd401.ai"
+    exit 1
+fi
+
+if [ -z "$GOOGLE_PICKER_API_KEY" ]; then
+    echo "GOOGLE_PICKER_API_KEY is required."
+    echo "Use a browser key restricted to the dev origin and Google Picker/Drive APIs."
     exit 1
 fi
 
@@ -23,7 +29,8 @@ bunx cdk deploy \
   AIStudio-AuthStack-Dev \
   AIStudio-StorageStack-Dev \
   AIStudio-ProcessingStack-Dev \
-  AIStudio-FrontendStack-Dev \
+  AIStudio-FrontendStack-ECS-Dev \
   --parameters AIStudio-AuthStack-Dev:GoogleClientId=$GOOGLE_CLIENT_ID \
+  --parameters AIStudio-AuthStack-Dev:GooglePickerApiKey=$GOOGLE_PICKER_API_KEY \
   --context baseDomain=$BASE_DOMAIN \
   --require-approval never

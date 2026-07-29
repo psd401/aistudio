@@ -1,14 +1,15 @@
 /**
- * CDK assertion test for the AI Studio MCP key zero-touch provisioning (#1100).
+ * CDK assertions for trusted broker credentials and the model-facing
+ * AgentCore execution boundary.
  *
- * Asserts the three pieces the psd-aistudio skill needs so its resolveApiKey()
- * stops exiting 11:
+ * Asserts the trusted web tier receives the provisioned credentials while the
+ * model-facing runtime receives neither secret selectors nor data-plane IAM:
  *   1. a NEW empty secret `psd-agent/<env>/aistudio-mcp-api-key`;
  *   2. a SECOND bootstrap Lambda + custom resource (distinct from the atrium
  *      content-key bootstrap — they must not share a service user), carrying a
  *      per-deploy Nonce and KEY_PROFILE=mcp;
- *   3. the `AISTUDIO_MCP_API_KEY_SECRET_ID` runtime env var pointing the runtime
- *      at that secret.
+ *   3. no service credential selector or direct S3/DynamoDB/RDS/Secrets Manager
+ *      permission reaches AgentCore.
  *
  * Synth notes: the AgentPlatformStack imports the shared VPC via
  * `Vpc.fromLookup(vpcName: aistudio-<env>-vpc)` and the AgentCore runtime pins
@@ -20,8 +21,8 @@
  * `bun install`/`tsc`; Docker image assets are only fingerprinted at synth, not
  * built. Lives in the `infra` jest project (roots: infra/test).
  */
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { AgentPlatformStack } from '../lib/agent-platform-stack';
@@ -80,8 +81,10 @@ function buildTemplate(): Template {
   return Template.fromStack(stack);
 }
 
-describe('AgentPlatformStack — AI Studio MCP key provisioning (#1100)', () => {
-  let template: Template;
+let template: Template;
+
+function defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1Part1() {
+
 
   beforeAll(() => {
     template = buildTemplate();
@@ -185,18 +188,134 @@ describe('AgentPlatformStack — AI Studio MCP key provisioning (#1100)', () => 
     expect(resourceJson).not.toContain('AtriumContentApiKeySecret');
   });
 
-  it('exposes AISTUDIO_MCP_API_KEY_SECRET_ID to the runtime pointing at the MCP secret', () => {
+  }
+
+function defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1Part2() {it('does not expose service credentials or data-plane selectors to the runtime', () => {
     const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
     expect(Object.keys(runtimes).length).toBe(1);
     const runtime = Object.values(runtimes)[0] as {
       Properties: { EnvironmentVariables: Record<string, unknown> };
     };
     const envVars = runtime.Properties.EnvironmentVariables;
-    // The env var must exist and resolve (via `.secretName`, a Fn::Split token) to
-    // a reference to the MCP key secret's logical id — NOT the atrium content one.
-    expect(envVars).toHaveProperty('AISTUDIO_MCP_API_KEY_SECRET_ID');
-    const value = JSON.stringify(envVars.AISTUDIO_MCP_API_KEY_SECRET_ID);
-    expect(value).toContain('AistudioMcpApiKeySecret');
-    expect(value).not.toContain('AtriumContentApiKeySecret');
+    const forbiddenVariables = [
+      'AISTUDIO_MCP_API_KEY_SECRET_ID',
+      'AISTUDIO_CONTENT_API_KEY_SECRET_ID',
+      'AGENT_GATEWAY_CONFIG_SECRET_ID',
+      'CANVA_OAUTH_SECRET_ID',
+      'AGENT_INTERNAL_API_KEY_SECRET_ID',
+      'AGENT_BEDROCK_API_KEY_SECRET_ID',
+      'GOOGLE_OAUTH_CLIENT_SECRET_ID',
+      'WORKSPACE_BUCKET',
+      'USERS_TABLE',
+      'SIGNALS_TABLE',
+      'TRIAGE_TABLE',
+      'DB_CLUSTER_ARN',
+      'DB_SECRET_ARN',
+    ];
+    for (const variable of forbiddenVariables) {
+      expect(envVars).not.toHaveProperty(variable);
+    }
   });
-});
+
+  it('denies AgentCore direct access to service secrets and application data planes', () => {
+    interface Statement {
+      Action?: string | string[];
+      Effect?: string;
+      Resource?: unknown;
+      Sid?: string;
+    }
+
+    const roles = template.findResources('AWS::IAM::Role');
+    const roleEntry = Object.entries(roles).find(
+      ([, role]) =>
+        (role as { Properties?: { RoleName?: string } }).Properties?.RoleName
+          === `psd-agentcore-execution-${ENV}`
+    );
+    expect(roleEntry).toBeDefined();
+    const [roleLogicalId, roleResource] = roleEntry!;
+    const statements: Statement[] = [];
+    const inlinePolicies = (
+      roleResource as {
+        Properties?: {
+          Policies?: Array<{ PolicyDocument?: { Statement?: Statement[] } }>;
+        };
+      }
+    ).Properties?.Policies ?? [];
+    for (const policy of inlinePolicies) {
+      if (Array.isArray(policy.PolicyDocument?.Statement)) {
+        statements.push(...policy.PolicyDocument.Statement);
+      }
+    }
+
+    for (const policy of Object.values(template.findResources('AWS::IAM::Policy'))) {
+      const properties = (
+        policy as {
+          Properties?: {
+            PolicyDocument?: { Statement?: Statement[] };
+            Roles?: unknown[];
+          };
+        }
+      ).Properties;
+      if (
+        (JSON.stringify(properties?.Roles) ?? '').includes(roleLogicalId)
+        && Array.isArray(properties?.PolicyDocument?.Statement)
+      ) {
+        statements.push(...properties.PolicyDocument.Statement);
+      }
+    }
+
+    const allowedActions = statements
+      .filter((statement) => statement.Effect === 'Allow')
+      .flatMap((statement) =>
+        Array.isArray(statement.Action) ? statement.Action : [statement.Action]
+      )
+      .filter((action): action is string => typeof action === 'string');
+
+    for (const servicePrefix of ['s3:', 'dynamodb:', 'rds-data:', 'secretsmanager:']) {
+      expect(allowedActions.some((action) => action.startsWith(servicePrefix))).toBe(false);
+    }
+
+    const directModelInvocations = statements.filter((statement) => {
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      return statement.Effect === 'Allow' && actions.includes('bedrock:InvokeModel');
+    });
+    expect(directModelInvocations).toHaveLength(1);
+    expect(directModelInvocations[0].Sid).toBe('BedrockMemoryEmbeddingOnly');
+    expect(JSON.stringify(directModelInvocations[0].Resource))
+      .toContain('amazon.titan-embed-text-v2:0');
+  });
+
+  }
+
+function defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1Part3() {it('keeps the signing-secret deny as defense in depth', () => {
+    interface Statement {
+      Action?: string | string[];
+      Effect?: string;
+      Sid?: string;
+    }
+    const policies = template.findResources('AWS::IAM::Policy');
+    const statements = Object.values(policies).flatMap((policy) => {
+      const document = (
+        policy as { Properties?: { PolicyDocument?: { Statement?: Statement[] } } }
+      ).Properties?.PolicyDocument;
+      return document?.Statement ?? [];
+    });
+    expect(statements).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        Sid: 'DenyInvocationSigningSecret',
+        Effect: 'Deny',
+        Action: 'secretsmanager:GetSecretValue',
+      }),
+    ]));
+  });
+}
+
+const defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1 = () => {
+  defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1Part1()
+  defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1Part2()
+  defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1Part3()
+};
+
+describe('AgentPlatformStack — AI Studio MCP key provisioning (#1100)', defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1);

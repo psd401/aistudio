@@ -1,7 +1,7 @@
 import "server-only"
 
 import { and, eq, gt, inArray, isNull, or, sql } from "drizzle-orm"
-import { executeQuery } from "@/lib/db/drizzle-client"
+import { executeQuery, type DbTransaction } from "@/lib/db/drizzle-client"
 import {
   chainPrompts,
   knowledgeRepositories,
@@ -24,16 +24,17 @@ function isValidRepositoryId(value: number): boolean {
 }
 
 async function getBoundRepositoryIds(
-  assistantId: number
+  assistantId: number,
+  transaction?: DbTransaction
 ): Promise<number[]> {
-  const prompts = await executeQuery(
-    (db) =>
+  const query = (db: Pick<DbTransaction, "select">) =>
       db
         .select({ repositoryIds: chainPrompts.repositoryIds })
         .from(chainPrompts)
-        .where(eq(chainPrompts.assistantArchitectId, assistantId)),
-    "getAssistantBoundRepositoryIdsForAudience"
-  )
+        .where(eq(chainPrompts.assistantArchitectId, assistantId))
+  const prompts = transaction
+    ? await query(transaction)
+    : await executeQuery(query, "getAssistantBoundRepositoryIdsForAudience")
 
   return [
     ...new Set(
@@ -45,12 +46,12 @@ async function getBoundRepositoryIds(
 }
 
 async function getRepositoryAudiences(
-  repositoryIds: number[]
+  repositoryIds: number[],
+  transaction?: DbTransaction
 ): Promise<BoundRepositoryAudience[]> {
   if (repositoryIds.length === 0) return []
 
-  const rows = await executeQuery(
-    (db) =>
+  const query = (db: Pick<DbTransaction, "select">) =>
       db
         .select({
           id: knowledgeRepositories.id,
@@ -74,9 +75,10 @@ async function getRepositoryAudiences(
             ),
             sql`(${knowledgeRepositories.metadata}->>'systemManaged') IS DISTINCT FROM 'true'`
           )
-        ),
-    "getRepositoryAudiencesForAssistant"
-  )
+        )
+  const rows = transaction
+    ? await query(transaction)
+    : await executeQuery(query, "getRepositoryAudiencesForAssistant")
 
   const repositories = new Map<number, BoundRepositoryAudience>()
   for (const row of rows) {
@@ -102,14 +104,15 @@ async function getRepositoryAudiences(
  */
 export async function validateAssistantRepositoryAudienceForGrants(
   assistantId: number,
-  assistantGrants: ResourceGrant[]
+  assistantGrants: ResourceGrant[],
+  transaction?: DbTransaction
 ): Promise<RepositoryAudienceCompatibility> {
-  const repositoryIds = await getBoundRepositoryIds(assistantId)
+  const repositoryIds = await getBoundRepositoryIds(assistantId, transaction)
   if (repositoryIds.length === 0) {
     return { isCompatible: true, mismatches: [] }
   }
 
-  const repositories = await getRepositoryAudiences(repositoryIds)
+  const repositories = await getRepositoryAudiences(repositoryIds, transaction)
   return evaluateRepositoryAudienceCompatibility(
     repositoryIds,
     assistantGrants,
@@ -150,11 +153,17 @@ export async function validateAssistantRepositoryAudienceForRepositoryIds(
  * whole binding set.
  */
 export async function validateAssistantRepositoryAudience(
-  assistantId: number
+  assistantId: number,
+  transaction?: DbTransaction
 ): Promise<RepositoryAudienceCompatibility> {
-  const assistantGrants = await listResourceGrants("assistant", assistantId)
+  const assistantGrants = await listResourceGrants(
+    "assistant",
+    assistantId,
+    transaction,
+  )
   return validateAssistantRepositoryAudienceForGrants(
     assistantId,
-    assistantGrants
+    assistantGrants,
+    transaction,
   )
 }

@@ -175,6 +175,7 @@ mcp__awslabs_postgres-mcp-server__run_query
 - Use `DATABASE_URL` for local dev (set in .env.local)
 - Use `DB_HOST/DB_USER/DB_PASSWORD` for ECS (auto-injected from Secrets Manager)
 - Connection pool auto-manages connections (max: 20 per container)
+- Bounded DB waits + wedged-pool self-heal: `DB_STATEMENT_TIMEOUT_MS` (60s dev / off prod), `DB_QUERY_DEADLINE_MS` (90s), `DB_TX_DEADLINE_MS` (300s); per-call `deadlineMs` override — see `docs/database/drizzle-patterns.md` (Timeouts section)
 - Graceful shutdown: Handled automatically via `instrumentation.ts`
 - Connection warmup: Pools are pre-initialized on server startup
 
@@ -366,6 +367,12 @@ tree, and anti-patterns.
 - **Don't** omit `state: 'output-available'` and `input` on tool-call UIMessage parts — `convertToModelMessages` silently skips the `tool_result` block, causing `AI_MissingToolResultsError` on replay
 - **Don't** consolidate multi-step MCP responses into a single DB row — persist each step separately inside `executeTransaction` or reload fails with consecutive user turns (see `chat-helpers.ts:saveConversationSteps`)
 
+### Edge Runtime (see `docs/guides/edge-runtime-boundaries.md`)
+- **Don't** import `@/lib/logger` (winston), `@aws-sdk/*`, or `node:*` from anything reachable from `middleware.ts` — that includes all of `auth.ts` and its callbacks. Use `@/lib/auth/edge-logger` and `fetch`
+- **Don't** treat `await import("…")` as a runtime boundary — a static specifier is still bundled into the *importing* runtime's chunk
+- **Don't** treat a `"use server"` action as a Node boundary — it is only an RPC call when a **client** component imports it; from server/Edge code the implementation is inlined and runs in the caller's runtime
+- To actually reach Node from Edge, make a real HTTP hop to a Route Handler with `export const runtime = "nodejs"`
+
 ### React (see `docs/guides/react-patterns.md`)
 - **Don't** put `key` on Provider/context wrapper components
 - **Don't** use boolean `useRef` for init guards on parameterized routes — use ID-tracking refs
@@ -376,6 +383,7 @@ tree, and anti-patterns.
 - **Don't** return internal state getters from hooks when the caller also supplies `fn` — use `onFailure(count)` event callbacks
 - **Don't** read a ref mutated inside a hook's `.catch()` without `+1` — use `onFailure(count)` callback instead (callers see pre-mutation value)
 - **Don't** pass unstable adapter references to `useChatRuntime` — use ref-based getters with empty dep arrays to prevent runtime re-initialization and duplicate messages
+- **Don't** `router.push()` away from a page that may still have server actions in flight (e.g. mount-time fetch bursts) — a straggler resolving after the push rebases the App Router back onto its origin route, silently yanking the user back. For leave-the-page mutations (archive/delete → library), use a document navigation (`window.location.assign`) so page teardown cancels the stragglers (see `ContentSettings.tsx`)
 
 ## 📖 Documentation
 

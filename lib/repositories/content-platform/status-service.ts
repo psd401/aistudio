@@ -38,6 +38,7 @@ interface CanonicalStatusRow {
   postDeployRecovery:
     | "unified-content-runtime-v2"
     | "unified-content-artifact-v3"
+    | "embedding-concurrency-v1"
     | null;
   active: boolean;
   buildingGeneration: boolean;
@@ -66,28 +67,11 @@ export function resolveCanonicalItemStatus(
     };
   }
 
-  const terminalFailure =
-    row.versionStatus === "failed" ||
-    row.versionStatus === "cancelled" ||
-    row.storageStatus === "blocked" ||
-    row.inspectionStatus === "blocked" ||
-    row.inspectionStatus === "error" ||
-    (row.failedGeneration &&
-      !row.buildingGeneration &&
-      row.versionStatus === "completed" &&
-      row.jobStatus === "succeeded") ||
-    row.jobStatus === "failed" ||
-    row.jobStatus === "cancelled";
-  if (terminalFailure) {
+  if (isTerminalCanonicalFailure(row)) {
     return {
       itemId: row.itemId,
       processingStatus: "failed",
-      processingError:
-        row.jobError ??
-        row.generationError ??
-        (row.inspectionStatus === "blocked"
-          ? "The file did not pass the required security inspection."
-          : "Content processing failed. Retry the item or contact support."),
+      processingError: canonicalFailureMessage(row),
       canRetry: row.storageStatus !== "blocked" && row.inspectionStatus !== "blocked",
     };
   }
@@ -123,6 +107,30 @@ export function resolveCanonicalItemStatus(
     processingError: null,
     canRetry: false,
   };
+}
+
+function isTerminalCanonicalFailure(row: CanonicalStatusRow): boolean {
+  const versionFailed =
+    row.versionStatus === "failed" || row.versionStatus === "cancelled";
+  const inspectionFailed =
+    row.storageStatus === "blocked" ||
+    row.inspectionStatus === "blocked" ||
+    row.inspectionStatus === "error";
+  const generationFailed =
+    row.failedGeneration &&
+    !row.buildingGeneration &&
+    row.versionStatus === "completed" &&
+    row.jobStatus === "succeeded";
+  const jobFailed = row.jobStatus === "failed" || row.jobStatus === "cancelled";
+  return versionFailed || inspectionFailed || generationFailed || jobFailed;
+}
+
+function canonicalFailureMessage(row: CanonicalStatusRow): string {
+  if (row.jobError) return row.jobError;
+  if (row.generationError) return row.generationError;
+  return row.inspectionStatus === "blocked"
+    ? "The file did not pass the required security inspection."
+    : "Content processing failed. Retry the item or contact support.";
 }
 
 /**

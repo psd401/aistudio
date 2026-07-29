@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Transparent logging proxy for Bedrock Mantle.
+Root-owned loopback relay for the AI Studio agent runtime.
 
-Why: we need ground-truth visibility into what OpenClaw actually sends to
-Mantle. OpenClaw's logs don't include request bodies, and the "!"-loop
-degeneracy we see isn't reproducible via direct curl calls with the same
-apparent payload. This proxy sits on 127.0.0.1:18791, logs request +
-response to stdout (CloudWatch), and forwards byte-for-byte to
-https://bedrock-mantle.us-east-1.api.aws.
+The primary path logs what OpenClaw sends to the owner-bound model broker and
+forwards it to the trusted web tier. Fixed agent-broker routes attach root-only
+invocation authority. Two direct-AWS endpoints also perform bounded Polly and
+HyperFrames operations with the root process's AgentCore execution-role
+credential chain. OpenClaw strips that chain from model-launched subprocesses,
+and these endpoints never return reusable credentials or accept arbitrary AWS
+targets.
 
 If this process dies, OpenClaw's requests also fail — so the entrypoint
 should (a) verify the proxy's /health before starting the gateway and
@@ -15,12 +16,17 @@ should (a) verify the proxy's /health before starting the gateway and
 error bodies.
 """
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import logging
+import math
 import os
 import re
 import sys
 import time
+import uuid
 from typing import Optional
 
 from aiohttp import web, ClientSession, ClientTimeout
@@ -41,7 +47,591 @@ def j(msg: str, **kw) -> str:
     return json.dumps(payload, default=str)
 
 
-UPSTREAM = "https://bedrock-mantle.us-east-1.api.aws"
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "").rstrip("/")
+UPSTREAM = APP_BASE_URL + "/api/agent/model-proxy"
+AUTHORITY_DIRECTORY = "/run/psd-agent-authority"
+INVOCATION_CONTEXT_PATH = f"{AUTHORITY_DIRECTORY}/invocation-context"
+REQUEST_PROOF_KEY_PATH = f"{AUTHORITY_DIRECTORY}/request-proof-key"
+WORKSPACE_FLUSH_TOKEN_PATH = f"{AUTHORITY_DIRECTORY}/workspace-flush-token"
+INVOCATION_IDENTITY_ROUTE = "/api/agent/invocation-identity"
+# Rolling-deploy compatibility: the existing model-broker route authenticates
+# all four invocation modes before rejecting an unsupported subpath. An exact
+# authenticated 404 therefore proves the installed token/key pair before this
+# relay decodes its root-only owner claim on an older web tier.
+INVOCATION_AUTHORITY_PROBE_ROUTE = (
+    "/api/agent/model-proxy/invocation-identity-probe"
+)
+ALLOWED_AGENT_BROKER_ROUTES = frozenset({
+    "/api/agent/account-request",
+    "/api/agent/aistudio",
+    "/api/agent/atrium",
+    "/api/agent/canva",
+    "/api/agent/classified-evaluation",
+    "/api/agent/workflow-gateway",
+    "/api/agent/consent-link",
+    "/api/agent/credentials",
+    "/api/agent/directory-lookup",
+    "/api/agent/email-triage",
+    "/api/agent/failures",
+    "/api/agent/github-execute",
+    "/api/agent/schedules",
+    "/api/agent/skills",
+    "/api/agent/workspace-execute",
+    "/api/agent/workspace-storage",
+})
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+POLLY_TEXT_MAX_CHARS = 3_000
+POLLY_HTTP_REQUEST_MAX_BYTES = 16 * 1024
+POLLY_AUDIO_MAX_BYTES = 16 * 1024 * 1024
+HYPERFRAMES_REQUEST_MAX_BYTES = 4 * 1024 * 1024
+# Lambda's synchronous Invoke payload is capped at 6 MiB. Keep the loopback
+# body at that same exact ceiling, then check the compact serialized payload
+# independently: JSON escaping can make a <=4 MiB composition exceed 6 MiB.
+HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES = 6 * 1024 * 1024
+HYPERFRAMES_OWNER_BINDING_RESERVE_BYTES = 512
+HYPERFRAMES_HTTP_REQUEST_MAX_BYTES = HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES
+HYPERFRAMES_RESPONSE_MAX_BYTES = 8 * 1024 * 1024
+# The renderer is capped at 720s. The Lambda read budget leaves another minute
+# for cleanup/upload/response. Owner resolution, Lambda connection, and the
+# response wait are separate sequential phases, so the model-facing relay
+# timeout must cover all three plus a small transport margin.
+HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS = 30
+HYPERFRAMES_LAMBDA_CONNECT_TIMEOUT_SECONDS = 10
+HYPERFRAMES_LAMBDA_READ_TIMEOUT_SECONDS = 780
+HYPERFRAMES_RELAY_TRANSPORT_MARGIN_SECONDS = 5
+HYPERFRAMES_RELAY_TIMEOUT_SECONDS = (
+    HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS
+    + HYPERFRAMES_LAMBDA_CONNECT_TIMEOUT_SECONDS
+    + HYPERFRAMES_LAMBDA_READ_TIMEOUT_SECONDS
+    + HYPERFRAMES_RELAY_TRANSPORT_MARGIN_SECONDS
+)
+# Finalization must never restart this proxy while an accepted synchronous
+# render can still be running in Lambda. Keep a small transport margin above
+# the relay ceiling; workspace flushing retains its separate 120-second budget
+# in agentcore_wrapper.py.
+FINALIZATION_DRAIN_TIMEOUT_SECONDS = HYPERFRAMES_RELAY_TIMEOUT_SECONDS + 5
+HYPERFRAMES_MAX_DURATION_SECONDS = 180
+HYPERFRAMES_MAX_FRAMES = 3_600
+HYPERFRAMES_MIN_DIMENSION = 16
+HYPERFRAMES_MAX_DIMENSION = 3_840
+POLLY_ENGINES = frozenset({"generative", "long-form", "neural", "standard"})
+POLLY_VOICE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+EMAIL_RE = re.compile(r"^[^\s@/]+@[^\s@/]+\.[^\s@/]+$")
+
+
+def _read_authority() -> tuple[str, bytes]:
+    """Read authority that is inaccessible to the model's node UID."""
+    with open(INVOCATION_CONTEXT_PATH, "r", encoding="ascii") as handle:
+        context = handle.read().strip()
+    with open(REQUEST_PROOF_KEY_PATH, "r", encoding="ascii") as handle:
+        encoded_key = handle.read().strip()
+    padded = encoded_key + ("=" * (-len(encoded_key) % 4))
+    return context, base64.urlsafe_b64decode(padded)
+
+
+def _invocation_authority_is_available() -> bool:
+    """Require an active, root-readable turn before privileged AWS work."""
+    try:
+        context, proof_key = _read_authority()
+    except (OSError, ValueError):
+        return False
+    return bool(context) and len(proof_key) == 32
+
+
+def _read_bounded_aws_stream(stream, max_bytes: int) -> bytes:
+    """Read and close an AWS StreamingBody without allowing memory exhaustion."""
+    body = bytearray()
+    try:
+        while True:
+            remaining = max_bytes - len(body)
+            chunk = stream.read(min(64 * 1024, remaining + 1))
+            if not chunk:
+                break
+            body.extend(chunk)
+            if len(body) > max_bytes:
+                raise ValueError("AWS response exceeds the configured limit")
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+    return bytes(body)
+
+
+def _validate_polly_payload(payload: object) -> dict:
+    """Validate the only Polly operation exposed to the model-facing UID."""
+    if not isinstance(payload, dict) or set(payload) != {"text", "voice", "engine"}:
+        raise ValueError("invalid Polly request")
+    text = payload.get("text")
+    voice = payload.get("voice")
+    engine = payload.get("engine")
+    if not isinstance(text, str) or not text.strip() or len(text) > POLLY_TEXT_MAX_CHARS:
+        raise ValueError("invalid Polly text")
+    if not isinstance(voice, str) or not POLLY_VOICE_RE.fullmatch(voice):
+        raise ValueError("invalid Polly voice")
+    if engine not in POLLY_ENGINES:
+        raise ValueError("invalid Polly engine")
+    return {"text": text, "voice": voice, "engine": engine}
+
+
+def _new_polly_client():
+    import boto3
+
+    return boto3.client("polly", region_name=AWS_REGION)
+
+
+def _synthesize_polly(payload: dict) -> bytes:
+    """Call Polly with the root relay's ambient AgentCore role credentials."""
+    response = _new_polly_client().synthesize_speech(
+        Text=payload["text"],
+        OutputFormat="mp3",
+        VoiceId=payload["voice"],
+        Engine=payload["engine"],
+    )
+    stream = response.get("AudioStream")
+    if stream is None:
+        raise RuntimeError("Polly returned no audio")
+    return _read_bounded_aws_stream(stream, POLLY_AUDIO_MAX_BYTES)
+
+
+def _validate_hyperframes_payload(payload: object) -> dict:
+    """Constrain the fixed Lambda relay independently of the skill and Lambda."""
+    if not isinstance(payload, dict):
+        raise ValueError("invalid HyperFrames request")
+    allowed = {
+        "html",
+        "css",
+        "js",
+        "durationSeconds",
+        "fps",
+        "width",
+        "height",
+        "dryRun",
+    }
+    if set(payload) - allowed:
+        raise ValueError("invalid HyperFrames fields")
+
+    html = payload.get("html")
+    css = payload.get("css")
+    javascript = payload.get("js")
+    if not isinstance(html, str) or not html.strip():
+        raise ValueError("invalid HyperFrames HTML")
+    if css is not None and not isinstance(css, str):
+        raise ValueError("invalid HyperFrames CSS")
+    if javascript is not None and not isinstance(javascript, str):
+        raise ValueError("invalid HyperFrames JavaScript")
+    composition_bytes = sum(
+        len(value.encode("utf-8"))
+        for value in (html, css, javascript)
+        if isinstance(value, str)
+    )
+    if composition_bytes > HYPERFRAMES_REQUEST_MAX_BYTES:
+        raise ValueError("HyperFrames composition exceeds the configured limit")
+
+    duration = payload.get("durationSeconds")
+    fps = payload.get("fps")
+    width = payload.get("width")
+    height = payload.get("height")
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, (int, float))
+        or not math.isfinite(duration)
+        or duration <= 0
+        or duration > HYPERFRAMES_MAX_DURATION_SECONDS
+    ):
+        raise ValueError("invalid HyperFrames duration")
+    if isinstance(fps, bool) or not isinstance(fps, int) or not 1 <= fps <= 60:
+        raise ValueError("invalid HyperFrames fps")
+    if math.ceil(duration * fps) > HYPERFRAMES_MAX_FRAMES:
+        raise ValueError("HyperFrames frame budget exceeded")
+    for value in (width, height):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not HYPERFRAMES_MIN_DIMENSION <= value <= HYPERFRAMES_MAX_DIMENSION
+        ):
+            raise ValueError("invalid HyperFrames dimensions")
+
+    if "dryRun" in payload and not isinstance(payload["dryRun"], bool):
+        raise ValueError("invalid HyperFrames dry-run flag")
+    _serialize_hyperframes_payload(
+        payload,
+        max_bytes=(
+            HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES
+            - HYPERFRAMES_OWNER_BINDING_RESERVE_BYTES
+        ),
+    )
+    return payload
+
+
+def _new_lambda_client():
+    import boto3
+    from botocore.config import Config
+
+    return boto3.client(
+        "lambda",
+        region_name=AWS_REGION,
+        config=Config(
+            connect_timeout=HYPERFRAMES_LAMBDA_CONNECT_TIMEOUT_SECONDS,
+            read_timeout=HYPERFRAMES_LAMBDA_READ_TIMEOUT_SECONDS,
+            # Retrying a timed-out synchronous invoke can start the same costly
+            # render twice. The caller can make an explicit retry after a
+            # definitive failure; the transport itself stays single-attempt.
+            retries={"total_max_attempts": 1, "mode": "standard"},
+        ),
+    )
+
+
+def _serialize_hyperframes_payload(
+    payload: dict,
+    *,
+    max_bytes: int = HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES,
+) -> bytes:
+    """Serialize exactly once within Lambda's synchronous invoke body limit."""
+    body = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(body) > max_bytes:
+        raise ValueError("HyperFrames serialized payload exceeds the configured limit")
+    return body
+
+
+def _bind_hyperframes_owner(payload: dict, owner_email: str) -> dict:
+    """Inject only the web-verified owner into the downstream Lambda payload."""
+    if (
+        not isinstance(owner_email, str)
+        or len(owner_email) > 320
+        or owner_email != owner_email.lower()
+        or not EMAIL_RE.fullmatch(owner_email)
+    ):
+        raise RuntimeError("HyperFrames invocation owner is invalid")
+    owner_bound_payload = {**payload, "userEmail": owner_email}
+    _serialize_hyperframes_payload(owner_bound_payload)
+    return owner_bound_payload
+
+
+def _invoke_hyperframes(payload: dict) -> dict:
+    """Invoke only the configured render Lambda with root-owned AWS authority."""
+    function_name = os.environ.get("HYPERFRAMES_RENDER_FUNCTION", "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", function_name):
+        raise RuntimeError("HyperFrames render function is not configured")
+    response = _new_lambda_client().invoke(
+        FunctionName=function_name,
+        InvocationType="RequestResponse",
+        Payload=_serialize_hyperframes_payload(payload),
+    )
+    stream = response.get("Payload")
+    if stream is None:
+        raise RuntimeError("HyperFrames returned no payload")
+    body = _read_bounded_aws_stream(stream, HYPERFRAMES_RESPONSE_MAX_BYTES)
+    if response.get("FunctionError"):
+        raise RuntimeError("HyperFrames Lambda reported a function error")
+    try:
+        result = json.loads(body)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("HyperFrames returned invalid JSON") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError("HyperFrames returned an invalid response")
+    return result
+
+
+def _authority_headers(method: str, route: str, body: bytes) -> dict:
+    context, proof_key = _read_authority()
+    timestamp = str(int(time.time()))
+    nonce = str(uuid.uuid4())
+    body_sha256 = hashlib.sha256(body).hexdigest()
+    canonical = "\n".join([
+        "v1",
+        timestamp,
+        nonce,
+        method.upper(),
+        route,
+        body_sha256,
+    ]).encode("utf-8")
+    signature = base64.urlsafe_b64encode(
+        hmac.new(proof_key, canonical, hashlib.sha256).digest()
+    ).rstrip(b"=").decode("ascii")
+    return {
+        "X-Agent-Invocation-Context": context,
+        "X-Agent-Request-Proof-Version": "v1",
+        "X-Agent-Request-Proof-Timestamp": timestamp,
+        "X-Agent-Request-Proof-Nonce": nonce,
+        "X-Agent-Request-Proof-Body-Sha256": body_sha256,
+        "X-Agent-Request-Proof-Signature": signature,
+    }
+
+
+async def _resolve_invocation_owner() -> str:
+    """Resolve one signed owner within a total budget across both web routes."""
+    try:
+        return await asyncio.wait_for(
+            _resolve_invocation_owner_within_budget(),
+            timeout=HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError("Invocation identity verification timed out") from exc
+
+
+async def _resolve_invocation_owner_within_budget() -> str:
+    """Use the dedicated route or one authenticated old-tier compatibility probe."""
+    status, response_body = await _post_signed_identity_request(
+        INVOCATION_IDENTITY_ROUTE,
+        skip_not_found_body=True,
+    )
+    if status == 200:
+        try:
+            result = json.loads(response_body)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Invocation identity response is invalid") from exc
+        return _validate_invocation_owner(
+            result.get("ownerEmail") if isinstance(result, dict) else None
+        )
+    if status != 404:
+        raise RuntimeError("Invocation identity verification failed")
+
+    # During a staggered rollout, the new web route may not exist yet. The
+    # already-deployed model broker validates the same signed context/proof
+    # before returning this exact unsupported-path response. Only after that
+    # cryptographic verification do we decode the owner from the root-only
+    # installed token.
+    probe_status, probe_body = await _post_signed_identity_request(
+        INVOCATION_AUTHORITY_PROBE_ROUTE
+    )
+    try:
+        probe_result = json.loads(probe_body)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Invocation authority probe is invalid") from exc
+    if (
+        probe_status != 404
+        or probe_result != {"error": "Unsupported model endpoint"}
+    ):
+        raise RuntimeError("Invocation authority verification failed")
+    context, _proof_key = _read_authority()
+    return _decode_invocation_owner(context)
+
+
+async def _post_signed_identity_request(
+    route: str,
+    *,
+    skip_not_found_body: bool = False,
+) -> tuple[int, bytes]:
+    """POST one bounded root-signed identity request to the trusted web tier."""
+    body = b"{}"
+    headers = {
+        "Content-Type": "application/json",
+        **_authority_headers("POST", route, body),
+    }
+    timeout = ClientTimeout(
+        total=HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS,
+        sock_read=HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS,
+        sock_connect=10,
+    )
+    async with ClientSession(timeout=timeout) as session:
+        async with session.post(
+            f"{APP_BASE_URL}{route}",
+            data=body,
+            headers=headers,
+            allow_redirects=False,
+        ) as upstream:
+            return await _read_signed_identity_response(
+                upstream,
+                skip_not_found_body=skip_not_found_body,
+            )
+
+
+async def _read_signed_identity_response(
+    response,
+    *,
+    skip_not_found_body: bool,
+) -> tuple[int, bytes]:
+    """Bound responses, except an unused framework 404 body during rollout."""
+    if skip_not_found_body and response.status == 404:
+        response.close()
+        return response.status, b""
+    response_body = await _read_bounded_agent_broker_response(
+        response,
+        max_bytes=4 * 1024,
+    )
+    return response.status, response_body
+
+
+def _validate_invocation_owner(owner_email: object) -> str:
+    """Return one normalized owner suitable for the fixed Lambda namespace."""
+    if (
+        not isinstance(owner_email, str)
+        or len(owner_email) > 320
+        or owner_email != owner_email.lower()
+        or not EMAIL_RE.fullmatch(owner_email)
+    ):
+        raise RuntimeError("Invocation identity response is invalid")
+    return owner_email
+
+
+def _decode_invocation_owner(context: str) -> str:
+    """Decode claims only after the trusted web tier authenticated the token."""
+    try:
+        version, encoded_claims, _signature = context.split(".")
+        if version != "v1":
+            raise ValueError("unsupported invocation context")
+        padded = encoded_claims + ("=" * (-len(encoded_claims) % 4))
+        claims = json.loads(base64.urlsafe_b64decode(padded))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise RuntimeError("Invocation identity response is invalid") from exc
+    if (
+        not isinstance(claims, dict)
+        or claims.get("version") != 1
+        or claims.get("audience") != "psd-agent-internal"
+    ):
+        raise RuntimeError("Invocation identity response is invalid")
+    return _validate_invocation_owner(claims.get("ownerEmail"))
+
+
+async def _owner_bound_hyperframes_payload(payload: dict) -> dict:
+    """Replace all model identity input with the freshly verified turn owner."""
+    return _bind_hyperframes_owner(
+        payload,
+        await _resolve_invocation_owner(),
+    )
+
+
+def _read_workspace_flush_token() -> str | None:
+    try:
+        with open(WORKSPACE_FLUSH_TOKEN_PATH, "r", encoding="ascii") as handle:
+            token = handle.read().strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return ""
+    return token if re.fullmatch(r"[A-Za-z0-9_-]{43}", token) else ""
+
+
+def _workspace_flush_request_allowed(
+    route: str,
+    payload: dict,
+    supplied_token: str | None,
+    flush_token: str | None,
+) -> bool:
+    if flush_token is None:
+        return True
+    return (
+        route == "/api/agent/workspace-storage"
+        and payload.get("operation") in {"upload", "complete-upload"}
+        and isinstance(supplied_token, str)
+        and bool(flush_token)
+        and hmac.compare_digest(supplied_token, flush_token)
+    )
+
+
+class _FinalizationGate:
+    """Drain privileged traffic before granting the root-only final flush."""
+
+    def __init__(self) -> None:
+        self._condition = asyncio.Condition()
+        self._state = "open"
+        self._active_requests = 0
+
+    async def enter(self, *, final_flush: bool = False) -> bool:
+        async with self._condition:
+            if self._state == "draining":
+                return False
+            if self._state == "flushing" and not final_flush:
+                return False
+            self._active_requests += 1
+            return True
+
+    async def leave(self) -> None:
+        async with self._condition:
+            if self._active_requests <= 0:
+                raise RuntimeError("finalization gate request count underflow")
+            self._active_requests -= 1
+            if self._active_requests == 0:
+                self._condition.notify_all()
+
+    async def begin(self) -> None:
+        async with self._condition:
+            self._state = "draining"
+            while self._active_requests:
+                await self._condition.wait()
+            self._state = "flushing"
+
+    async def end(self) -> None:
+        async with self._condition:
+            self._state = "open"
+            self._condition.notify_all()
+
+
+_finalization_gate = _FinalizationGate()
+
+
+def _valid_finalization_token(supplied_token: str | None) -> bool:
+    expected_token = _read_workspace_flush_token()
+    return (
+        isinstance(supplied_token, str)
+        and bool(expected_token)
+        and hmac.compare_digest(supplied_token, expected_token)
+    )
+
+
+async def handle_finalization_transition(
+    request: web.Request,
+) -> web.Response:
+    """Root-authenticated begin/end transition for the proxy-owned drain gate."""
+    if not _valid_finalization_token(
+        request.headers.get("X-Agent-Workspace-Flush")
+    ):
+        return web.json_response({"error": "Not found"}, status=404)
+    action = request.match_info.get("action", "")
+    if action == "begin":
+        try:
+            await asyncio.wait_for(
+                _finalization_gate.begin(),
+                timeout=FINALIZATION_DRAIN_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            # Stay closed. The wrapper will terminate this proxy, which cancels
+            # the stuck requests, start a fresh proxy, and retry the transition.
+            return web.json_response(
+                {"error": "Privileged request drain timed out"},
+                status=503,
+            )
+        return web.json_response({"finalizing": True})
+    if action == "end":
+        await _finalization_gate.end()
+        return web.json_response({"finalizing": False})
+    return web.json_response({"error": "Not found"}, status=404)
+
+
+@web.middleware
+async def finalization_gate_middleware(request, handler):
+    """Count every authority-bearing request for an atomic drain boundary."""
+    if request.path in {
+        "/internal/finalization/begin",
+        "/internal/finalization/end",
+    }:
+        return await handler(request)
+    if request.path in {"/health", "/usage"}:
+        return await handler(request)
+
+    final_flush = False
+    if request.path == "/agent-broker/api/agent/workspace-storage":
+        flush_token = _read_workspace_flush_token()
+        supplied_token = request.headers.get("X-Agent-Workspace-Flush")
+        # Classify before reading the potentially slow, attacker-controlled
+        # body. The unguessable root token is sufficient for gate admission;
+        # handle_agent_broker still validates the exact operation after read.
+        final_flush = (
+            isinstance(supplied_token, str)
+            and bool(flush_token)
+            and hmac.compare_digest(supplied_token, flush_token)
+        )
+
+    if not await _finalization_gate.enter(final_flush=final_flush):
+        return web.json_response({"error": "Turn is finalizing"}, status=503)
+    try:
+        return await handler(request)
+    finally:
+        await _finalization_gate.leave()
 
 # ---------------------------------------------------------------------------
 # Cumulative token-usage accounting (issue #1083)
@@ -877,7 +1467,166 @@ async def handle_usage(_request: web.Request) -> web.Response:
     return web.json_response(payload)
 
 
+async def _read_fixed_aws_request(
+    request: web.Request, *, max_bytes: int
+) -> dict:
+    """Read a small JSON request for one of the fixed direct-AWS operations."""
+    if request.content_length is not None and request.content_length > max_bytes:
+        raise ValueError("AWS skill request exceeds the configured limit")
+    body = bytearray()
+    async for chunk in request.content.iter_chunked(64 * 1024):
+        body.extend(chunk)
+        if len(body) > max_bytes:
+            raise ValueError("AWS skill request exceeds the configured limit")
+    try:
+        payload = json.loads(bytes(body))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid AWS skill request") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("invalid AWS skill request")
+    return payload
+
+
+async def handle_polly_synthesize(request: web.Request) -> web.Response:
+    """Run one bounded SynthesizeSpeech call without returning AWS credentials."""
+    if not _invocation_authority_is_available():
+        return web.json_response({"error": "Invocation authority is unavailable"}, status=503)
+    try:
+        payload = _validate_polly_payload(
+            await _read_fixed_aws_request(
+                request, max_bytes=POLLY_HTTP_REQUEST_MAX_BYTES
+            )
+        )
+    except ValueError:
+        return web.json_response({"error": "Invalid Polly request"}, status=400)
+    try:
+        audio = await asyncio.to_thread(_synthesize_polly, payload)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(j("polly_synthesize_failed", error=type(exc).__name__))
+        return web.json_response({"error": "Polly synthesis failed"}, status=502)
+    return web.Response(body=audio, content_type="audio/mpeg")
+
+
+async def handle_hyperframes_invoke(request: web.Request) -> web.Response:
+    """Invoke only the configured HyperFrames function; never accept an ARN."""
+    if not _invocation_authority_is_available():
+        return web.json_response({"error": "Invocation authority is unavailable"}, status=503)
+    try:
+        payload = _validate_hyperframes_payload(
+            await _read_fixed_aws_request(
+                request, max_bytes=HYPERFRAMES_HTTP_REQUEST_MAX_BYTES
+            )
+        )
+    except ValueError:
+        return web.json_response({"error": "Invalid HyperFrames request"}, status=400)
+    try:
+        owner_bound_payload = await _owner_bound_hyperframes_payload(payload)
+        result = await asyncio.to_thread(_invoke_hyperframes, owner_bound_payload)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(j("hyperframes_invoke_failed", error=type(exc).__name__))
+        return web.json_response({"error": "HyperFrames invocation failed"}, status=502)
+    return web.json_response(result)
+
+
+AGENT_BROKER_RESPONSE_MAX_BYTES = 64 * 1024 * 1024
+
+
+class AgentBrokerResponseTooLarge(RuntimeError):
+    """Raised when a privileged broker exceeds the root relay response cap."""
+
+
+def _resolve_agent_broker_route(relay_route: str) -> str | None:
+    """Map the fixed local relay path to one exact allowlisted app route."""
+    if not relay_route.startswith("api/agent/"):
+        return None
+    route = f"/{relay_route}"
+    return route if route in ALLOWED_AGENT_BROKER_ROUTES else None
+
+
+async def _read_bounded_agent_broker_response(
+    response,
+    max_bytes: int = AGENT_BROKER_RESPONSE_MAX_BYTES,
+) -> bytes:
+    """Read an upstream broker response without allowing root-memory exhaustion."""
+    content_length = response.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = None
+        if declared_length is not None and declared_length > max_bytes:
+            response.close()
+            raise AgentBrokerResponseTooLarge(
+                "agent broker response exceeds the configured limit"
+            )
+
+    body = bytearray()
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        if len(body) + len(chunk) > max_bytes:
+            response.close()
+            raise AgentBrokerResponseTooLarge(
+                "agent broker response exceeds the configured limit"
+            )
+        body.extend(chunk)
+    return bytes(body)
+
+
+async def handle_agent_broker(request: web.Request) -> web.StreamResponse:
+    """Relay only fixed, typed POST operations; never expose a signing oracle."""
+    route = _resolve_agent_broker_route(request.match_info.get("route", ""))
+    if request.method != "POST" or route is None:
+        return web.json_response({"error": "Unsupported agent operation"}, status=404)
+    body = await request.read()
+    try:
+        parsed = json.loads(body)
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+    if not isinstance(parsed, dict):
+        return web.json_response({"error": "Invalid request body"}, status=400)
+    if not _workspace_flush_request_allowed(
+        route,
+        parsed,
+        request.headers.get("X-Agent-Workspace-Flush"),
+        _read_workspace_flush_token(),
+    ):
+        return web.json_response({"error": "Unsupported agent operation"}, status=404)
+    try:
+        headers = {
+            "Content-Type": "application/json",
+            **_authority_headers("POST", route, body),
+        }
+        timeout = ClientTimeout(total=920, sock_read=920, sock_connect=30)
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{APP_BASE_URL}{route}",
+                data=body,
+                headers=headers,
+                allow_redirects=False,
+            ) as upstream:
+                response_body = await _read_bounded_agent_broker_response(upstream)
+                content_type = upstream.headers.get(
+                    "Content-Type", "application/json"
+                )
+                return web.Response(
+                    status=upstream.status,
+                    body=response_body,
+                    headers={"Content-Type": content_type},
+                )
+    except AgentBrokerResponseTooLarge:
+        return web.json_response({"error": "Agent operation failed"}, status=502)
+    except (OSError, ValueError):
+        return web.json_response(
+            {"error": "Invocation authority is unavailable"},
+            status=503,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(j("agent_broker_failed", route=route, error=str(exc)[:200]))
+        return web.json_response({"error": "Agent operation failed"}, status=502)
+
+
 async def handle_proxy(request: web.Request) -> web.StreamResponse:
+    if _read_workspace_flush_token() is not None:
+        return web.json_response({"error": "Turn is finalizing"}, status=503)
     path = request.match_info.get("path", "")
     url = f"{UPSTREAM}/{path}"
     req_id = f"{int(time.time()*1000)}-{id(request) % 100000}"
@@ -970,11 +1719,24 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
     _log_request_body(req_id, req_body, parsed)
 
-    # Forward — preserve auth + content-type, drop hop-by-hop headers
+    # Forward content headers but strip any model-supplied authority. The root
+    # relay signs the final rewritten body for each upstream attempt.
     fwd_headers = {}
     for k, v in request.headers.items():
         kl = k.lower()
-        if kl in {"host", "content-length", "connection", "transfer-encoding"}:
+        if kl in {
+            "host",
+            "content-length",
+            "connection",
+            "transfer-encoding",
+            "x-api-key",
+            "x-agent-invocation-context",
+            "x-agent-request-proof-version",
+            "x-agent-request-proof-timestamp",
+            "x-agent-request-proof-nonce",
+            "x-agent-request-proof-body-sha256",
+            "x-agent-request-proof-signature",
+        }:
             continue
         fwd_headers[k] = v
 
@@ -1007,9 +1769,17 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         `/usage` counters by the caller.
         """
         body_to_send = body_override if body_override is not None else req_body
+        proof_headers = _authority_headers(
+            request.method,
+            f"/api/agent/model-proxy/{path}",
+            body_to_send or b"",
+        )
         async with ClientSession(timeout=timeout) as session:
             async with session.request(
-                request.method, url, data=body_to_send, headers=fwd_headers,
+                request.method,
+                url,
+                data=body_to_send,
+                headers={**fwd_headers, **proof_headers},
                 allow_redirects=False,
             ) as upstream:
                 status = upstream.status
@@ -1359,9 +2129,21 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
 
 def main() -> None:
-    app = web.Application(client_max_size=50 * 1024 * 1024)
+    if not UPSTREAM.startswith(("https://", "http://127.0.0.1", "http://localhost")):
+        raise RuntimeError("APP_BASE_URL is not a trusted model broker URL")
+    app = web.Application(
+        client_max_size=50 * 1024 * 1024,
+        middlewares=[finalization_gate_middleware],
+    )
     app.router.add_get("/health", handle_health)
     app.router.add_get("/usage", handle_usage)
+    app.router.add_post(
+        "/internal/finalization/{action}",
+        handle_finalization_transition,
+    )
+    app.router.add_post("/aws-skill/polly/synthesize", handle_polly_synthesize)
+    app.router.add_post("/aws-skill/hyperframes/invoke", handle_hyperframes_invoke)
+    app.router.add_route("*", "/agent-broker/{route:.*}", handle_agent_broker)
     app.router.add_route("*", "/{path:.*}", handle_proxy)
     log.info(j("starting", host="127.0.0.1", port=18791, upstream=UPSTREAM))
     web.run_app(app, host="127.0.0.1", port=18791, access_log=None,

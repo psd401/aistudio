@@ -26,6 +26,10 @@ jest.mock("@/actions/db/get-current-user-action", () => ({
   getCurrentUserAction: (...a: unknown[]) => mockGetCurrentUserAction(...a),
 }))
 
+jest.mock("@/lib/repositories/content-platform/legacy-retirement-response", () => ({
+  legacyContentRetirementResponse: jest.fn(async () => null),
+}))
+
 jest.mock("@/lib/logger", () => ({
   createLogger: jest.fn(() => ({
     info: jest.fn(),

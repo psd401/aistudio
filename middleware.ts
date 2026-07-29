@@ -21,26 +21,18 @@ const PUBLIC_PATHS = [
   "/api/oauth", // OAuth2/OIDC endpoints handle their own auth (#686)
   "/.well-known", // OIDC discovery document (#686)
   "/auth/error",
-  // Agent Workspace OAuth bootstrap (#912) — all three endpoints authenticate
-  // via signed tokens in the URL or a Bearer shared-secret from the agent
-  // runtime. A PSD session is not required (and would be impossible on the
-  // first visit, since consent happens outside the PSD web session).
-  "/api/agent", // Agent-to-Next.js endpoints use Bearer shared-secret auth
+  // Agent Workspace bootstrap (#912). API calls verify router-signed invocation
+  // context. The original Google Workspace flow remains link-authenticated;
+  // provider-specific reusable grants are deliberately excluded below and
+  // require a same-owner AI Studio session.
+  "/api/agent", // Agent endpoints verify router-signed invocation context
   "/agent-connect", // Consent page and OAuth callback — signed JWT in URL
-  // Canva consent flow (#1176): the /agent-connect-canva page authenticates via
-  // the signed consent JWT in the URL and the callback via the one-time nonce +
-  // PKCE verifier — a PSD web session is not required (and the OAuth callback
-  // must stay reachable even if the user's session lapsed during the external
-  // Canva authorize step). The match is `=== path || startsWith(path + "/")`, so
-  // this single entry covers both /agent-connect-canva and …/callback while NOT
-  // matching the separate /agent-connect exact route.
-  "/agent-connect-canva",
-  // Sibling consent flows with the identical token-authenticated pattern.
-  // These entries were missing when Plaud (#1097) and the Cognito data-consent
-  // page shipped: `/agent-connect` only prefix-matches `/agent-connect/...`,
-  // so a session-less first visit to these suffixed routes bounced through
-  // sign-in before ever reaching the consent page (found during #1176 review).
-  "/agent-connect-plaud",
+  // Canva, Plaud, and AI Studio intentionally are NOT public. Their external
+  // OAuth grants are stored in a local owner's reusable credential slot, so
+  // both the start and callback must carry a live AI Studio session whose email
+  // matches that immutable owner. A signed link alone proves integrity, not who
+  // opened it. The Cognito data flow remains separate and has its own identity
+  // semantics.
   "/agent-connect-data",
   // Atrium public reader (#1057): /p/[slug] is the anonymous public_web reader
   // route (spec §20). It is world-readable by design — the page itself gates
@@ -55,6 +47,14 @@ const PUBLIC_PATHS = [
   "/sitemap.xml",
   "/robots.txt",
 ];
+
+// Unlike PUBLIC_PATHS, entries here do not expose descendant routes. Google
+// Drive push notifications authenticate with a high-entropy channel token plus
+// channel/resource identifiers inside the route, but future sibling handlers
+// must not silently inherit that browser-session exemption.
+const EXACT_PUBLIC_PATHS = new Set([
+  "/api/repositories/connectors/google/webhook",
+]);
 
 // Atrium artifact sandbox (#1052): the app embeds an <iframe> pointing at a
 // SEPARATE origin that runs untrusted artifact code (spec §19.2/§28.1). The app's
@@ -78,14 +78,19 @@ const PUBLIC_PATHS = [
 // only when configured (otherwise the artifact preview frame is simply blocked,
 // matching the component's fail-closed behavior).
 const SANDBOX_FRAME_ORIGIN = getArtifactSandboxOrigin();
-const FRAME_SRC = ["'self'", "https://www.canva.com", ...(SANDBOX_FRAME_ORIGIN ? [SANDBOX_FRAME_ORIGIN] : [])].join(" ");
+const FRAME_SRC = [
+  "'self'",
+  "https://www.canva.com",
+  "https://docs.google.com",
+  ...(SANDBOX_FRAME_ORIGIN ? [SANDBOX_FRAME_ORIGIN] : []),
+].join(" ");
 const CONTENT_SECURITY_POLICY =
   "default-src 'self'; " +
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.amazonaws.com; " +
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.amazonaws.com https://apis.google.com; " +
   "style-src 'self' 'unsafe-inline'; " +
   "img-src 'self' data: https: blob:; " +
   "font-src 'self' data:; " +
-  "connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com; " +
+  "connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com https://apis.google.com; " +
   `frame-src ${FRAME_SRC}; ` +
   "frame-ancestors 'none';";
 
@@ -94,9 +99,13 @@ export default authMiddleware((req) => {
   const isLoggedIn = !!auth;
 
   // Check if path is public
-  const isPublicPath = PUBLIC_PATHS.some(path => 
-    nextUrl.pathname === path || nextUrl.pathname.startsWith(path + "/")
-  ) || isOidcProviderResumePath(nextUrl.pathname);
+  const isPublicPath =
+    EXACT_PUBLIC_PATHS.has(nextUrl.pathname) ||
+    PUBLIC_PATHS.some(
+      (path) =>
+        nextUrl.pathname === path || nextUrl.pathname.startsWith(path + "/"),
+    ) ||
+    isOidcProviderResumePath(nextUrl.pathname);
 
   // Create response with security headers
   let response: NextResponse;

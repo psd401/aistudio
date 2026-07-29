@@ -40,7 +40,7 @@
  * See docs/features/atrium-design-spec.md §15.2 / §20 / §26.4 / §33 #7.
  */
 
-import { publicReaderLink } from "../surface-helpers";
+import { publicReaderLink } from "../reader-links";
 import type { PublishAdapter } from "./types";
 
 export const publicWebAdapter: PublishAdapter = {

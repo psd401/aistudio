@@ -586,7 +586,7 @@ describe('BedrockGuardrailsService - detection fingerprint (Issue #929)', () => 
       error: jest.fn(),
       debug: jest.fn(),
     };
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+
     createLoggerSpy = jest.spyOn(require('@/lib/logger'), 'createLogger').mockReturnValue(mockLogger);
   });
 

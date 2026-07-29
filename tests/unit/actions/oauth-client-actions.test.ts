@@ -39,9 +39,12 @@ jest.mock('@/lib/logger', () => ({
   getLogContext: () => ({}),
 }))
 
-describe('revokeOAuthClient (REV-COR-055)', () => {
-  let revokeOAuthClient: typeof import('@/actions/oauth/oauth-client.actions').revokeOAuthClient
-  let createOAuthClient: typeof import('@/actions/oauth/oauth-client.actions').createOAuthClient
+let revokeOAuthClient: typeof import('@/actions/oauth/oauth-client.actions').revokeOAuthClient
+let createOAuthClient: typeof import('@/actions/oauth/oauth-client.actions').createOAuthClient
+
+function defineRevokeOAuthClientREVCOR055Suite1Part1() {
+
+
   beforeAll(async () => {
     const actions = await import('@/actions/oauth/oauth-client.actions')
     revokeOAuthClient = actions.revokeOAuthClient
@@ -152,7 +155,9 @@ describe('revokeOAuthClient (REV-COR-055)', () => {
     expect(insertedValues?.allowedScopes).toEqual(createdRow.allowedScopes)
   })
 
-  it('rejects native localhost callbacks before touching the database', async () => {
+  }
+
+function defineRevokeOAuthClientREVCOR055Suite1Part2() {it('rejects native localhost callbacks before touching the database', async () => {
     const res = await createOAuthClient({
       clientName: 'Unsafe Desktop',
       applicationType: 'native',
@@ -204,4 +209,11 @@ describe('revokeOAuthClient (REV-COR-055)', () => {
     expect(result.isSuccess).toBe(false)
     expect(mockExecuteQuery).not.toHaveBeenCalled()
   })
-})
+}
+
+const defineRevokeOAuthClientREVCOR055Suite1 = () => {
+  defineRevokeOAuthClientREVCOR055Suite1Part1()
+  defineRevokeOAuthClientREVCOR055Suite1Part2()
+};
+
+describe('revokeOAuthClient (REV-COR-055)', defineRevokeOAuthClientREVCOR055Suite1)

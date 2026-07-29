@@ -16,10 +16,16 @@ Based on the test output:
 
 3. **ProcessingStack-Dev**:
    - ✅ Adds SSM parameter lookups (backward compatible)
+   - ✅ Reads the exact deployment-owned Google content OAuth secret ARN
    - ✅ IAM policy update (normal)
    - ❌ No resources deleted
 
-4. **FrontendStack-Dev**:
+4. **AuthStack-Dev**:
+   - ✅ Creates and retains `aistudio/dev/google-content-oauth`
+   - ✅ Requires the browser-restricted Picker API key at deploy time
+   - ❌ Does not require a manually created content OAuth secret
+
+5. **FrontendStack-Dev**:
    - ✅ Adds SSM parameter lookup (backward compatible)
    - ✅ IAM role update to reference SSM parameter
    - ❌ No resources deleted
@@ -27,7 +33,7 @@ Based on the test output:
 ### ✅ Safety Guarantees
 
 1. **No Breaking Changes**:
-   - All changes are additive (new SSM parameters)
+   - Infrastructure changes are additive (new SSM parameters and retained secret)
    - Existing CloudFormation exports remain
    - Props made optional for backward compatibility
 
@@ -38,32 +44,37 @@ Based on the test output:
 
 3. **Application Continuity**:
    - Running applications continue to work
-   - No environment variable changes
+   - No manually populated application secret
    - No database or storage changes
 
 ## Deployment Steps
 
 ### Option 1: Safe Full Deployment (Recommended)
 ```bash
-# Deploy all stacks together to ensure SSM parameters are created
-bunx cdk deploy --all --context baseDomain=aistudio.psd401.ai
+# Deploy all stacks together to ensure parameters and the OAuth secret are created
+GOOGLE_PICKER_API_KEY=YOUR_RESTRICTED_PICKER_KEY \
+  ./deploy-dev.sh YOUR_GOOGLE_CLIENT_ID aistudio.psd401.ai
 
 # This will:
 # 1. Create SSM parameters in Database and Storage stacks
-# 2. Update Processing and Frontend stacks to use them
-# 3. Maintain all existing functionality
+# 2. Create the complete Google content OAuth secret in AuthStack
+# 3. Update Processing and Frontend stacks to use those resources
+# 4. Maintain all existing functionality
 ```
 
 ### Option 2: Staged Deployment (More Control)
 ```bash
-# 1. Deploy stacks that create SSM parameters first
-bunx cdk deploy AIStudio-DatabaseStack-Dev AIStudio-StorageStack-Dev --context baseDomain=aistudio.psd401.ai
+# 1. Deploy stacks that create shared parameters and the OAuth secret first
+bunx cdk deploy AIStudio-DatabaseStack-Dev AIStudio-StorageStack-Dev AIStudio-AuthStack-Dev \
+  --parameters AIStudio-AuthStack-Dev:GoogleClientId=YOUR_GOOGLE_CLIENT_ID \
+  --parameters AIStudio-AuthStack-Dev:GooglePickerApiKey=YOUR_RESTRICTED_PICKER_KEY \
+  --context baseDomain=aistudio.psd401.ai
 
 # 2. Verify SSM parameters were created
 aws ssm get-parameters-by-path --path '/aistudio/dev' --recursive
 
 # 3. Deploy stacks that consume SSM parameters
-bunx cdk deploy AIStudio-ProcessingStack-Dev AIStudio-FrontendStack-Dev \
+bunx cdk deploy AIStudio-ProcessingStack-Dev AIStudio-FrontendStack-ECS-Dev \
   --context baseDomain=aistudio.psd401.ai
 ```
 
@@ -96,7 +107,18 @@ aws amplify get-app --app-id $(aws amplify list-apps --query 'apps[?name==`aistu
 aws lambda list-functions --query 'Functions[?starts_with(FunctionName, `AIStudio-ProcessingStack-Dev`)].FunctionName'
 ```
 
-### 3. Test Independent Stack Deployment
+### 3. Verify Deployment-Owned OAuth Configuration
+```bash
+aws secretsmanager describe-secret \
+  --secret-id aistudio/dev/google-content-oauth \
+  --query '{Name:Name,Arn:ARN,Tags:Tags}'
+```
+
+Do not print the secret value. Verify Google Drive connect reaches the Google
+consent screen, and Picker displays both My Drive and Shared Drives accessible
+to the signed-in user.
+
+### 4. Test Independent Stack Deployment
 ```bash
 # After initial deployment, test updating a single stack
 bunx cdk deploy AIStudio-DatabaseStack-Dev --exclusively --context baseDomain=aistudio.psd401.ai
@@ -131,6 +153,7 @@ bunx cdk deploy AIStudio-DatabaseStack-Dev --exclusively --context baseDomain=ai
 
 ✅ All stacks show UPDATE_COMPLETE status
 ✅ SSM parameters exist in Parameter Store  
+✅ `aistudio/dev/google-content-oauth` exists and is tagged as CDK-managed
 ✅ Application remains accessible
 ✅ No CloudFormation rollbacks
 ✅ Future deployments can use --exclusively flag

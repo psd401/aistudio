@@ -10,6 +10,22 @@
 
 set -e
 
+echo "[entrypoint] Preparing writable /tmp volume..."
+
+# ECS mounts the writable /tmp volume as root:root with mode 0755. The
+# application runs as nextjs, so leaving that default intact makes every
+# secure mkdtemp() call fail with EACCES even though the mount itself is
+# writable. Keep root ownership and apply the conventional sticky-bit mode:
+# all processes may create private entries, but may not remove one another's.
+if [ ! -d "/tmp" ]; then
+  echo "[entrypoint] ERROR: /tmp volume is not mounted"
+  exit 1
+fi
+if ! chmod 1777 /tmp; then
+  echo "[entrypoint] ERROR: Failed to make /tmp writable"
+  exit 1
+fi
+
 echo "[entrypoint] Setting correct ownership on /app/.next/cache volume..."
 
 # Ensure the cache directory exists and is owned by nextjs:nodejs

@@ -96,7 +96,7 @@ function context(action: string) {
   }
 }
 
-describe("OAuth interaction completion route", () => {
+function defineOAuthInteractionCompletionRouteSuite1Part1() {
   beforeEach(() => {
     jest.clearAllMocks()
     mockGetServerSession.mockResolvedValue({ sub: "cognito-user" })
@@ -181,7 +181,9 @@ describe("OAuth interaction completion route", () => {
     })
   })
 
-  it("fails closed when consent contains a scope absent from allowedScopes", async () => {
+  }
+
+function defineOAuthInteractionCompletionRouteSuite1Part2() {it("fails closed when consent contains a scope absent from allowedScopes", async () => {
     mockInteractionDetails.mockResolvedValue({
       uid: "interaction-1",
       session: { accountId: "42" },
@@ -278,4 +280,11 @@ describe("OAuth interaction completion route", () => {
     expect(response.status).toBe(400)
     expect(mockInteractionFinished).not.toHaveBeenCalled()
   })
-})
+}
+
+const defineOAuthInteractionCompletionRouteSuite1 = () => {
+  defineOAuthInteractionCompletionRouteSuite1Part1()
+  defineOAuthInteractionCompletionRouteSuite1Part2()
+};
+
+describe("OAuth interaction completion route", defineOAuthInteractionCompletionRouteSuite1)

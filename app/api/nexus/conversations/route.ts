@@ -1,23 +1,62 @@
-import { getServerSession } from '@/lib/auth/server-session';
-import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
-import { ErrorFactories } from '@/lib/error-utils';
-import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
+import { getServerSession } from "@/lib/auth/server-session";
+import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
+import { ErrorFactories } from "@/lib/error-utils";
+import { getCurrentUserAction } from "@/actions/db/get-current-user-action";
 import {
   getConversations,
   getConversationCount,
   createConversation,
   recordConversationEvent,
-} from '@/lib/db/drizzle/nexus-conversations';
+} from "@/lib/db/drizzle/nexus-conversations";
+import { resolveMemoryControlAvailability } from "@/lib/nexus/memory/memory-availability";
 
 // Valid provider values matching database schema constraints
 const VALID_PROVIDERS = [
-  'openai',
-  'google',
-  'bedrock',
-  'azure',
-  'assistant-architect',
-  'decision-capture',
+  "openai",
+  "google",
+  "bedrock",
+  "azure",
+  "assistant-architect",
+  "decision-capture",
 ] as const;
+
+type ValidProvider = (typeof VALID_PROVIDERS)[number];
+
+function validProvider(value: string): value is ValidProvider {
+  return VALID_PROVIDERS.includes(value as ValidProvider);
+}
+
+function paginationValue(
+  params: URLSearchParams,
+  name: "limit" | "offset",
+  fallback: number,
+): number {
+  const value = Number.parseInt(params.get(name) || String(fallback));
+  if (Number.isNaN(value) || value < (name === "limit" ? 1 : 0))
+    return fallback;
+  return name === "limit" ? Math.min(value, 500) : value;
+}
+
+function conversationQueryOptions(req: Request) {
+  const params = new URL(req.url).searchParams;
+  const rawProvider = params.get("provider")?.trim();
+  const provider =
+    rawProvider && validProvider(rawProvider) ? rawProvider : undefined;
+  const excluded = params.get("excludeProviders");
+  return {
+    limit: paginationValue(params, "limit", 20),
+    offset: paginationValue(params, "offset", 0),
+    includeArchived: params.get("includeArchived") === "true",
+    rawProvider,
+    provider,
+    excludeProviders: excluded
+      ? excluded
+          .split(",")
+          .map((item) => item.trim())
+          .filter(validProvider)
+      : undefined,
+  };
+}
 
 /**
  * GET /api/nexus/conversations - List user's conversations
@@ -26,63 +65,46 @@ const VALID_PROVIDERS = [
  */
 export async function GET(req: Request) {
   const requestId = generateRequestId();
-  const timer = startTimer('nexus.conversations.list');
-  const log = createLogger({ requestId, route: 'nexus.conversations.list' });
+  const timer = startTimer("nexus.conversations.list");
+  const log = createLogger({ requestId, route: "nexus.conversations.list" });
 
-  log.info('GET /api/nexus/conversations - Listing conversations');
+  log.info("GET /api/nexus/conversations - Listing conversations");
 
   try {
     // Authenticate user
     const session = await getServerSession();
     if (!session) {
-      log.warn('Unauthorized request');
-      timer({ status: 'error', reason: 'unauthorized' });
-      return new Response('Unauthorized', { status: 401 });
+      log.warn("Unauthorized request");
+      timer({ status: "error", reason: "unauthorized" });
+      return new Response("Unauthorized", { status: 401 });
     }
 
     // Get current user with integer ID
     const currentUser = await getCurrentUserAction();
     if (!currentUser.isSuccess) {
-      log.error('Failed to get current user');
-      timer({ status: 'error', reason: 'user_lookup_failed' });
-      return new Response('Unauthorized', { status: 401 });
+      log.error("Failed to get current user");
+      timer({ status: "error", reason: "user_lookup_failed" });
+      return new Response("Unauthorized", { status: 401 });
     }
 
     const userId = currentUser.data.user.id;
 
-    // Parse query parameters
-    const url = new URL(req.url);
-
-    // Validate and constrain limit/offset to prevent DoS (OWASP Input Validation)
-    const rawLimit = Number.parseInt(url.searchParams.get('limit') || '20');
-    const rawOffset = Number.parseInt(url.searchParams.get('offset') || '0');
-    const limit = Number.isNaN(rawLimit) || rawLimit < 1 ? 20 : Math.min(rawLimit, 500);
-    const offset = Number.isNaN(rawOffset) || rawOffset < 0 ? 0 : rawOffset;
-
-    const includeArchived = url.searchParams.get('includeArchived') === 'true';
-
-    // Validate provider filter against whitelist
-    const rawProvider = url.searchParams.get('provider')?.trim();
-    const provider = rawProvider && VALID_PROVIDERS.includes(rawProvider as typeof VALID_PROVIDERS[number])
-      ? rawProvider
-      : undefined;
+    const {
+      limit,
+      offset,
+      includeArchived,
+      rawProvider,
+      provider,
+      excludeProviders,
+    } = conversationQueryOptions(req);
 
     // Log invalid provider attempts for monitoring
     if (rawProvider && !provider) {
-      log.warn('Invalid provider filter attempted', {
+      log.warn("Invalid provider filter attempted", {
         provider: rawProvider.substring(0, 20), // Truncate to prevent log injection
-        userId
+        userId,
       });
     }
-
-    // Validate excludeProviders filter against whitelist
-    const excludeProvidersParam = url.searchParams.get('excludeProviders');
-    const excludeProviders = excludeProvidersParam
-      ? excludeProvidersParam
-          .split(',')
-          .map((p) => p.trim())
-          .filter((p) => VALID_PROVIDERS.includes(p as typeof VALID_PROVIDERS[number]))
-      : undefined;
 
     const queryOptions = {
       limit,
@@ -94,6 +116,10 @@ export async function GET(req: Request) {
 
     // Query conversations using Drizzle ORM
     const conversations = await getConversations(userId, queryOptions);
+    const memoryControlAvailable = await resolveMemoryControlAvailability({
+      userId,
+      cognitoSub: session.sub,
+    });
 
     // Get total count (same filters, no pagination)
     const total = await getConversationCount(userId, {
@@ -102,38 +128,38 @@ export async function GET(req: Request) {
       excludeProviders,
     });
 
-    timer({ status: 'success' });
-    log.info('Conversations retrieved', {
+    timer({ status: "success" });
+    log.info("Conversations retrieved", {
       requestId,
       userId,
       count: conversations.length,
-      total
+      total,
     });
 
     return Response.json({
       conversations,
+      memoryControlAvailable,
       pagination: {
         limit,
         offset,
         total,
-        hasMore: offset + limit < total
-      }
+        hasMore: offset + limit < total,
+      },
     });
-
   } catch (error) {
-    timer({ status: 'error' });
-    log.error('Failed to list conversations', {
-      error: error instanceof Error ? error.message : String(error)
+    timer({ status: "error" });
+    log.error("Failed to list conversations", {
+      error: error instanceof Error ? error.message : String(error),
     });
 
     return new Response(
       JSON.stringify({
-        error: 'Failed to retrieve conversations'
+        error: "Failed to retrieve conversations",
       }),
       {
         status: 500,
-        headers: { 'Content-Type': 'application/json' }
-      }
+        headers: { "Content-Type": "application/json" },
+      },
     );
   }
 }
@@ -145,26 +171,26 @@ export async function GET(req: Request) {
  */
 export async function POST(req: Request) {
   const requestId = generateRequestId();
-  const timer = startTimer('nexus.conversations.create');
-  const log = createLogger({ requestId, route: 'nexus.conversations.create' });
+  const timer = startTimer("nexus.conversations.create");
+  const log = createLogger({ requestId, route: "nexus.conversations.create" });
 
-  log.info('POST /api/nexus/conversations - Creating conversation');
+  log.info("POST /api/nexus/conversations - Creating conversation");
 
   try {
     // Authenticate user
     const session = await getServerSession();
     if (!session) {
-      log.warn('Unauthorized request');
-      timer({ status: 'error', reason: 'unauthorized' });
-      return new Response('Unauthorized', { status: 401 });
+      log.warn("Unauthorized request");
+      timer({ status: "error", reason: "unauthorized" });
+      return new Response("Unauthorized", { status: 401 });
     }
 
     // Get current user with integer ID
     const currentUser = await getCurrentUserAction();
     if (!currentUser.isSuccess) {
-      log.error('Failed to get current user');
-      timer({ status: 'error', reason: 'user_lookup_failed' });
-      return new Response('Unauthorized', { status: 401 });
+      log.error("Failed to get current user");
+      timer({ status: "error", reason: "user_lookup_failed" });
+      return new Response("Unauthorized", { status: 401 });
     }
 
     const userId = currentUser.data.user.id;
@@ -172,10 +198,10 @@ export async function POST(req: Request) {
     // Parse request body
     const body = await req.json();
     const {
-      title = 'New Conversation',
-      provider = 'openai',
+      title = "New Conversation",
+      provider = "openai",
       modelId,
-      metadata = {}
+      metadata = {},
     } = body;
 
     // Create conversation using Drizzle ORM
@@ -188,7 +214,7 @@ export async function POST(req: Request) {
     });
 
     if (!conversation) {
-      throw ErrorFactories.dbQueryFailed('createConversation');
+      throw ErrorFactories.dbQueryFailed("createConversation");
     }
 
     // Record creation event (non-blocking, errors are logged but don't fail creation)
@@ -196,51 +222,47 @@ export async function POST(req: Request) {
     // 1. startTimer emits CloudWatch metrics via @/lib/logger (nexus.conversation.event.record)
     // 2. ERROR-level logs are indexed for alerting via CloudWatch Logs metric filters
     // 3. Failures are acceptable for audit trail - conversation creation succeeds regardless
-    const eventTimer = startTimer('nexus.conversation.event.record');
-    recordConversationEvent(
-      conversation.id,
-      'conversation_created',
-      userId,
-      {
-        provider,
-        modelId,
-        title
-      }
-    ).then(() => {
-      eventTimer({ status: 'success', eventType: 'conversation_created' });
-    }).catch((error) => {
-      eventTimer({ status: 'error', eventType: 'conversation_created' });
-      log.error('Failed to record conversation event', {
-        conversationId: conversation.id,
-        error: error instanceof Error ? error.message : String(error),
+    const eventTimer = startTimer("nexus.conversation.event.record");
+    recordConversationEvent(conversation.id, "conversation_created", userId, {
+      provider,
+      modelId,
+      title,
+    })
+      .then(() => {
+        eventTimer({ status: "success", eventType: "conversation_created" });
       })
-    });
+      .catch((error) => {
+        eventTimer({ status: "error", eventType: "conversation_created" });
+        log.error("Failed to record conversation event", {
+          conversationId: conversation.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
 
-    timer({ status: 'success' });
-    log.info('Conversation created', {
+    timer({ status: "success" });
+    log.info("Conversation created", {
       requestId,
       userId,
       conversationId: conversation.id,
       provider,
-      modelId
+      modelId,
     });
 
     return Response.json(conversation);
-
   } catch (error) {
-    timer({ status: 'error' });
-    log.error('Failed to create conversation', {
-      error: error instanceof Error ? error.message : String(error)
+    timer({ status: "error" });
+    log.error("Failed to create conversation", {
+      error: error instanceof Error ? error.message : String(error),
     });
 
     return new Response(
       JSON.stringify({
-        error: 'Failed to create conversation'
+        error: "Failed to create conversation",
       }),
       {
         status: 500,
-        headers: { 'Content-Type': 'application/json' }
-      }
+        headers: { "Content-Type": "application/json" },
+      },
     );
   }
 }

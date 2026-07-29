@@ -53,6 +53,7 @@ async function getHandler(
     const viewable = await visibilityService.canView(req, {
       id: obj.id,
       ownerUserId: obj.ownerUserId,
+      collectionId: obj.collectionId,
       visibilityLevel: obj.visibilityLevel,
     });
     if (!viewable) {

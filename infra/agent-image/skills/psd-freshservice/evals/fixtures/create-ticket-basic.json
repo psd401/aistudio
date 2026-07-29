@@ -1,0 +1,31 @@
+[
+  {
+    "route": "/api/agent/credentials",
+    "method": "POST",
+    "request_body": {
+      "operation": "freshservice",
+      "path": "/tickets",
+      "method": "POST",
+      "body": {
+        "subject": "Harbor Ridge library projector offline",
+        "description": "The ceiling projector has no power.",
+        "email": "teacher@psd401.net",
+        "priority": 2
+      }
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "ok": true,
+        "status": 201,
+        "data": {
+          "id": 48291,
+          "subject": "Harbor Ridge library projector offline",
+          "status": 2,
+          "priority": 2,
+          "workspace_id": 2
+        }
+      }
+    }
+  }
+]

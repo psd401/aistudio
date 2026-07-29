@@ -12,6 +12,26 @@ interface LogoUploadProps {
   currentLogoUrl: string
 }
 
+function validateLogoFile(file: File): {
+  title: string
+  description: string
+} | null {
+  const allowedTypes = ["image/png", "image/jpeg", "image/webp"]
+  if (!allowedTypes.includes(file.type)) {
+    return {
+      title: "Invalid file type",
+      description: "Accepted formats: PNG, JPEG, WebP",
+    }
+  }
+  if (file.size > 2 * 1024 * 1024) {
+    return {
+      title: "File too large",
+      description: "Maximum logo size is 2MB",
+    }
+  }
+  return null
+}
+
 export function LogoUpload({ currentLogoUrl }: LogoUploadProps) {
   const [isUploading, setIsUploading] = useState(false)
   const [isResetting, setIsResetting] = useState(false)
@@ -27,21 +47,10 @@ export function LogoUpload({ currentLogoUrl }: LogoUploadProps) {
     const file = e.target.files?.[0]
     if (!file) return
 
-    // Client-side pre-validation (server re-validates with magic bytes)
-    const allowedTypes = ["image/png", "image/jpeg", "image/webp"]
-    if (!allowedTypes.includes(file.type)) {
+    const validationError = validateLogoFile(file)
+    if (validationError) {
       toast({
-        title: "Invalid file type",
-        description: "Accepted formats: PNG, JPEG, WebP",
-        variant: "destructive"
-      })
-      return
-    }
-
-    if (file.size > 2 * 1024 * 1024) {
-      toast({
-        title: "File too large",
-        description: "Maximum logo size is 2MB",
+        ...validationError,
         variant: "destructive"
       })
       return

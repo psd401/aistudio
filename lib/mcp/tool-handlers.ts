@@ -29,8 +29,15 @@ import {
   validateExecutionInputs,
 } from "@/lib/api/assistant-execution-service"
 import { listAccessibleAssistants } from "@/lib/api/assistant-service"
+import {
+  AssistantImportServiceError,
+  createAssistantsFromImport,
+  forkAssistant,
+  updateAssistantFromImport,
+} from "@/lib/assistant-architect/import-service"
 import { isAdminByUserId, checkAssistantResourceGrants } from "@/lib/api/route-helpers"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
+import { INTERNAL_ASSISTANT_LOOKUP } from "@/lib/assistant-architect/internal-access"
 import { AGENT_TOOL_HANDLERS } from "@/lib/agents/agent-tools"
 import { CONTENT_TOOL_HANDLERS } from "./content-tool-handlers"
 import {
@@ -38,6 +45,17 @@ import {
   type CapabilityCatalogSection,
 } from "@/lib/capabilities/capability-catalog"
 import type { ToolSurface } from "@/lib/tools/catalog/types"
+import {
+  describeRepository,
+  getRepositorySource,
+  listRepositoryCatalog,
+  listRepositoryChanges,
+  searchRepositoryCatalog,
+} from "@/lib/repositories/repository-catalog-service"
+import type {
+  RetrievalMode,
+  RetrievalModality,
+} from "@/lib/repositories/retrieval-v2/types"
 
 // ============================================
 // Handler Map
@@ -48,8 +66,16 @@ export const TOOL_HANDLERS: Record<string, McpToolHandler> = {
   search_decisions: handleSearchDecisions,
   capture_decision: handleCaptureDecision,
   execute_assistant: handleExecuteAssistant,
+  create_assistant: handleCreateAssistant,
+  update_assistant: handleUpdateAssistant,
+  fork_assistant: handleForkAssistant,
   list_assistants: handleListAssistants,
   get_decision_graph: handleGetDecisionGraph,
+  repositories_list: handleRepositoriesList,
+  repositories_describe: handleRepositoriesDescribe,
+  repositories_search: handleRepositoriesSearch,
+  repositories_get_source: handleRepositoriesGetSource,
+  repositories_list_changes: handleRepositoriesListChanges,
   // Agent platform tools (#926): image gen, web fetch, document gen. Exposed on
   // the `internal` surface only (see lib/tools/catalog/manifest.ts) so they are
   // callable from the agentic Assistant Architect runtime but not the external
@@ -58,6 +84,159 @@ export const TOOL_HANDLERS: Record<string, McpToolHandler> = {
   // Atrium content tools (Phase 5, Issue #1055): create/get/list/update/version/
   // visibility/publish over the §11–§15 services.
   ...CONTENT_TOOL_HANDLERS,
+}
+
+function positiveInteger(value: unknown): number | null {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0
+    ? value
+    : null
+}
+
+function positiveIntegerArray(value: unknown): number[] {
+  return Array.isArray(value)
+    ? value
+        .map(positiveInteger)
+        .filter((item): item is number => item != null)
+    : []
+}
+
+function jsonResult(value: unknown): McpToolResult {
+  return { content: [{ type: "text", text: JSON.stringify(value) }] }
+}
+
+function assistantExecutionFailureMessage(error: unknown): string {
+  if (isValidationError(error)) {
+    const details = error.fields?.map(({ message }) => message).join("; ")
+    return details
+      ? `Invalid assistant configuration: ${details}`
+      : "Invalid assistant configuration"
+  }
+  return `Assistant execution failed: ${
+    error instanceof Error ? error.message : "Unknown error"
+  }`
+}
+
+async function handleRepositoriesList(
+  args: Record<string, unknown>,
+  context: { cognitoSub: string }
+): Promise<McpToolResult> {
+  return jsonResult({
+    repositories: await listRepositoryCatalog(context.cognitoSub, {
+      query: typeof args.query === "string" ? args.query : undefined,
+      limit: typeof args.limit === "number" ? args.limit : undefined,
+    }),
+  })
+}
+
+async function handleRepositoriesDescribe(
+  args: Record<string, unknown>,
+  context: { cognitoSub: string }
+): Promise<McpToolResult> {
+  const repositoryId = positiveInteger(args.repositoryId)
+  if (!repositoryId) {
+    return {
+      content: [{ type: "text", text: "Invalid repositoryId" }],
+      isError: true,
+    }
+  }
+  const repository = await describeRepository(context.cognitoSub, repositoryId)
+  return repository
+    ? jsonResult({ repository })
+    : {
+        content: [{ type: "text", text: "Repository not found" }],
+        isError: true,
+      }
+}
+
+async function handleRepositoriesSearch(
+  args: Record<string, unknown>,
+  context: { cognitoSub: string }
+): Promise<McpToolResult> {
+  const query = typeof args.query === "string" ? args.query.trim() : ""
+  if (!query) {
+    return {
+      content: [{ type: "text", text: "query is required" }],
+      isError: true,
+    }
+  }
+  const allowedModes: RetrievalMode[] = ["keyword", "vector", "hybrid"]
+  const allowedModalities: RetrievalModality[] = [
+    "text",
+    "image",
+    "audio",
+    "video",
+    "table",
+  ]
+  const mode =
+    typeof args.mode === "string" &&
+    allowedModes.includes(args.mode as RetrievalMode)
+      ? (args.mode as RetrievalMode)
+      : undefined
+  const modalities = Array.isArray(args.modalities)
+    ? args.modalities.filter(
+        (value): value is RetrievalModality =>
+          typeof value === "string" &&
+          allowedModalities.includes(value as RetrievalModality)
+      )
+    : undefined
+  return jsonResult(
+    await searchRepositoryCatalog({
+      cognitoSub: context.cognitoSub,
+      query,
+      repositoryIds: positiveIntegerArray(args.repositoryIds),
+      mode,
+      modalities,
+      limit: typeof args.limit === "number" ? args.limit : undefined,
+    })
+  )
+}
+
+async function handleRepositoriesGetSource(
+  args: Record<string, unknown>,
+  context: { userId: number }
+): Promise<McpToolResult> {
+  const repositoryId = positiveInteger(args.repositoryId)
+  const itemId = positiveInteger(args.itemId)
+  if (!repositoryId || !itemId) {
+    return {
+      content: [
+        { type: "text", text: "Valid repositoryId and itemId are required" },
+      ],
+      isError: true,
+    }
+  }
+  return jsonResult({
+    segments: await getRepositorySource({
+      userId: context.userId,
+      repositoryId,
+      itemId,
+      chunkId: positiveInteger(args.chunkId) ?? undefined,
+      limit: typeof args.limit === "number" ? args.limit : undefined,
+    }),
+  })
+}
+
+async function handleRepositoriesListChanges(
+  args: Record<string, unknown>,
+  context: { userId: number }
+): Promise<McpToolResult> {
+  const repositoryIds = positiveIntegerArray(args.repositoryIds)
+  if (repositoryIds.length === 0) {
+    return {
+      content: [{ type: "text", text: "repositoryIds is required" }],
+      isError: true,
+    }
+  }
+  return jsonResult(
+    await listRepositoryChanges({
+      userId: context.userId,
+      repositoryIds,
+      cursor: typeof args.cursor === "string" ? args.cursor : undefined,
+      limit: typeof args.limit === "number" ? args.limit : undefined,
+    })
+  )
 }
 
 // ============================================
@@ -282,9 +461,47 @@ async function handleCaptureDecision(
   }
 }
 
+function assistantImportEnvelope(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    version: args.version,
+    exported_at: args.exported_at,
+    export_source: args.export_source,
+    assistants: args.assistants,
+  }
+}
+
+function assistantMutationError(
+  action: "create" | "update" | "fork",
+  error: unknown,
+): McpToolResult {
+  const message =
+    error instanceof AssistantImportServiceError
+      ? error.message
+      : `Failed to ${action} assistant`
+  return {
+    content: [{ type: "text", text: message }],
+    isError: true,
+  }
+}
+
 // ============================================
 // execute_assistant
 // ============================================
+
+function storedPromptModelGrantIds(architect: {
+  modelRoutingMode?: string | null
+  prompts?: Array<{ modelId?: number | null }> | null
+}): number[] {
+  if ((architect.modelRoutingMode ?? "legacy") !== "legacy") return []
+  return (architect.prompts ?? [])
+    .map((prompt) => prompt.modelId)
+    .filter(
+      (modelId): modelId is number =>
+        typeof modelId === "number" && modelId > 0
+    )
+}
 
 async function handleExecuteAssistant(
   args: Record<string, unknown>,
@@ -331,16 +548,17 @@ async function handleExecuteAssistant(
   // produces the canonical "Record not found in assistant_architects" error that
   // agent clients (psd-aistudio) map to a clean not_executable result, and that
   // wire contract must not change.
-  const architectResult = await getAssistantArchitectByIdAction(String(assistantId))
+  const architectResult = await getAssistantArchitectByIdAction(
+    String(assistantId),
+    INTERNAL_ASSISTANT_LOOKUP
+  )
   if (architectResult.isSuccess && architectResult.data) {
     const architect = architectResult.data
     const check = await checkAssistantResourceGrants({
       userId: context.userId,
       architectUserId: architect.userId,
       architectId: architect.id,
-      modelDbIds: (architect.prompts || [])
-        .map((p) => p.modelId)
-        .filter((m): m is number => typeof m === "number" && m > 0),
+      modelDbIds: storedPromptModelGrantIds(architect),
     })
     if (!check.granted) {
       log.warn("execute_assistant denied by per-resource grant", {
@@ -371,6 +589,7 @@ async function handleExecuteAssistant(
       userId: context.userId,
       cognitoSub: context.cognitoSub,
       requestId: context.requestId,
+      requireApproved: true,
     })
 
     log.info("Assistant executed via MCP", {
@@ -397,10 +616,163 @@ async function handleExecuteAssistant(
     })
     return {
       content: [
-        { type: "text", text: `Assistant execution failed: ${error instanceof Error ? error.message : "Unknown error"}` },
+        {
+          type: "text",
+          text: assistantExecutionFailureMessage(error),
+        },
       ],
       isError: true,
     }
+  }
+}
+
+// ============================================
+// create_assistant / update_assistant / fork_assistant
+// ============================================
+
+async function handleCreateAssistant(
+  args: Record<string, unknown>,
+  context: { userId: number; requestId: string },
+): Promise<McpToolResult> {
+  const log = createLogger({
+    requestId: context.requestId,
+    action: "mcp.create_assistant",
+  })
+  try {
+    const result = await createAssistantsFromImport(
+      assistantImportEnvelope(args),
+      context.userId,
+    )
+    if (result.successful === 0) {
+      log.error("Assistant import created no assistants via MCP", {
+        userId: context.userId,
+        failed: result.failed,
+      })
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ data: result }),
+          },
+        ],
+        isError: true,
+      }
+    }
+    log.info("Assistants created via MCP", {
+      userId: context.userId,
+      successful: result.successful,
+      failed: result.failed,
+    })
+    return jsonResult({ data: result })
+  } catch (error) {
+    log.warn("create_assistant failed", {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return assistantMutationError("create", error)
+  }
+}
+
+async function handleUpdateAssistant(
+  args: Record<string, unknown>,
+  context: { userId: number; requestId: string },
+): Promise<McpToolResult> {
+  const assistantId = positiveInteger(args.assistantId)
+  if (!assistantId) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: "Missing or invalid required field: assistantId (number)",
+        },
+      ],
+      isError: true,
+    }
+  }
+
+  const log = createLogger({
+    requestId: context.requestId,
+    action: "mcp.update_assistant",
+  })
+  try {
+    const result = await updateAssistantFromImport(
+      assistantId,
+      assistantImportEnvelope(args),
+      context.userId,
+    )
+    log.info("Assistant updated via MCP", {
+      assistantId,
+      userId: context.userId,
+    })
+    return jsonResult({ data: result })
+  } catch (error) {
+    log.warn("update_assistant failed", {
+      assistantId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return assistantMutationError("update", error)
+  }
+}
+
+async function handleForkAssistant(
+  args: Record<string, unknown>,
+  context: { userId: number; requestId: string },
+): Promise<McpToolResult> {
+  const assistantId = positiveInteger(args.assistantId)
+  if (!assistantId) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: "Missing or invalid required field: assistantId (number)",
+        },
+      ],
+      isError: true,
+    }
+  }
+  if (
+    args.name !== undefined &&
+    (typeof args.name !== "string" ||
+      args.name.length === 0 ||
+      args.name.length > 255)
+  ) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: "name must be a non-empty string up to 255 characters",
+        },
+      ],
+      isError: true,
+    }
+  }
+
+  const log = createLogger({
+    requestId: context.requestId,
+    action: "mcp.fork_assistant",
+  })
+  try {
+    const result = await forkAssistant(
+      assistantId,
+      context.userId,
+      typeof args.name === "string" ? args.name : undefined,
+    )
+    log.info("Assistant forked via MCP", {
+      sourceAssistantId: assistantId,
+      forkAssistantId: result.result.id,
+      userId: context.userId,
+    })
+    return jsonResult({
+      data: {
+        ...result,
+        sourceAssistantId: assistantId,
+      },
+    })
+  } catch (error) {
+    log.warn("fork_assistant failed", {
+      sourceAssistantId: assistantId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return assistantMutationError("fork", error)
   }
 }
 

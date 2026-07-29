@@ -209,6 +209,21 @@ export async function getRepositoryById(
   return result[0] || null;
 }
 
+/** Get a bounded set of repositories in one query. Authorization is external. */
+export async function getRepositoriesByIds(
+  repositoryIds: number[]
+): Promise<SelectKnowledgeRepository[]> {
+  if (repositoryIds.length === 0) return [];
+  return executeQuery(
+    (db) =>
+      db
+        .select()
+        .from(knowledgeRepositories)
+        .where(inArray(knowledgeRepositories.id, repositoryIds)),
+    "getRepositoriesByIds"
+  );
+}
+
 /**
  * Get repositories by owner ID
  */

@@ -23,11 +23,9 @@
 // --- mocks (hoisted above imports by jest) ---
 
 let executeTransactionCalls = 0;
-let executeQueryCalls = 0;
-// A queue of canned executeQuery results (e.g. the collection-default lookup);
-// each call shifts the next, falling back to [] — lets a test drive
-// `collectionDefaultOutsideTx` to a specific default_visibility_level.
-let executeQueryResults: unknown[] = [];
+// Canned rows for the collection access resolver. Label routing keeps its two
+// parallel reads deterministic.
+let collectionRowsResult: unknown[] = [];
 
 // A chainable tx proxy: awaited terminals `.limit()` / `.returning()` yield the
 // next queued result; every other builder method keeps the chain fluent. This
@@ -47,7 +45,7 @@ const txProxy: unknown = new Proxy(txChain, {
       return () => txProxy;
     }
     if (prop === "returning" || prop === "limit") {
-      return () => (txResults.length ? txResults.shift() : []);
+      return () => (txResults.length > 0 ? txResults.shift() : []);
     }
     return () => txProxy;
   },
@@ -62,9 +60,11 @@ jest.mock("@/lib/db/drizzle-client", () => ({
       return cb(txProxy);
     }
   ),
-  executeQuery: jest.fn(async () => {
-    executeQueryCalls += 1;
-    return executeQueryResults.length ? executeQueryResults.shift() : [];
+  executeQuery: jest.fn(async (_cb: unknown, label: string) => {
+    if (label === "collectionAccess.loadCollections") {
+      return collectionRowsResult;
+    }
+    return [];
   }),
 }));
 
@@ -141,11 +141,10 @@ const delegatedWithGrant: Requester = {
 
 beforeEach(() => {
   executeTransactionCalls = 0;
-  executeQueryCalls = 0;
   txUpdateCalls = 0;
   emitCalls = [];
   txResults = [];
-  executeQueryResults = [];
+  collectionRowsResult = [];
   // An autonomous agent owns content as the configured system user (§26.5). With
   // create-as-private (issue #1118), an autonomous public create now proceeds to
   // the write path (owner = system user) instead of short-circuiting at the old
@@ -196,7 +195,19 @@ describe("§26.4 create-as-private — contentService.create with visibility.lev
     // The seeded `public-site` collection has default_visibility_level = 'public',
     // so a create into it with NO explicit visibility resolves to "public" via the
     // collection default — the same create-as-private downgrade applies.
-    executeQueryResults = [[{ level: "public" }]]; // collection-default lookup -> public
+    collectionRowsResult = [
+      {
+        id: "col-public-site",
+        name: "Public site",
+        slug: "public-site",
+        parentId: null,
+        ownerUserId: null,
+        defaultVisibilityLevel: "public",
+        inheritGrants: true,
+        position: 0,
+        archivedAt: null,
+      },
+    ];
     await expect(
       contentService.create(staffUser, {
         kind: "document",
@@ -283,9 +294,13 @@ describe("§26.4 gate — visibilityService.setLevel to 'public'", () => {
     // non-admin owner without publish_public must pass WITHOUT approval (the exact
     // regression #1090 fixes), and the check reads the level UNDER the lock.
     txResults = [[{ id: "o1", visibilityLevel: "public" }]];
+    // ...and it reports `becamePublic: false`, so a surface cannot mistake this
+    // no-op re-save for a new public exposure. The gate and the notification now
+    // read the SAME locked judgement instead of disagreeing (the visibility
+    // dialog permits unchanged saves, which used to record a fresh exposure).
     await expect(
       visibilityService.setLevel(staffUser, "o1", { level: "public" })
-    ).resolves.toEqual({ visibilityLevel: "public" });
+    ).resolves.toEqual({ visibilityLevel: "public", becamePublic: false });
     expect(
       emitCalls.some((c) => c.type === "content.public_publish_requested")
     ).toBe(false);
@@ -297,7 +312,8 @@ describe("§26.4 gate — visibilityService.setLevel to 'public'", () => {
     txResults = [[{ id: "o1", visibilityLevel: "internal" }]];
     await expect(
       visibilityService.setLevel(adminUser, "o1", { level: "public" })
-    ).resolves.toEqual({ visibilityLevel: "public" });
+      // A genuine internal → public transition, so `becamePublic` is true.
+    ).resolves.toEqual({ visibilityLevel: "public", becamePublic: true });
     expect(executeTransactionCalls).toBeGreaterThan(0);
     // The gate did NOT emit an approval request for an authorized caller.
     expect(
@@ -314,14 +330,15 @@ describe("§26.4 gate — visibilityService.setLevel to 'public'", () => {
         { level: "public" },
         { hasPublishPublicCapability: true }
       )
-    ).resolves.toEqual({ visibilityLevel: "public" });
+    ).resolves.toEqual({ visibilityLevel: "public", becamePublic: true });
   });
 
   it("does NOT gate a non-public setLevel (group/internal pass the gate)", async () => {
     txResults = [[{ id: "o1", visibilityLevel: "private" }]];
     await expect(
       visibilityService.setLevel(staffUser, "o1", { level: "internal" })
-    ).resolves.toEqual({ visibilityLevel: "internal" });
+      // Not a public exposure at all — nothing to notify about.
+    ).resolves.toEqual({ visibilityLevel: "internal", becamePublic: false });
     expect(
       emitCalls.some((c) => c.type === "content.public_publish_requested")
     ).toBe(false);

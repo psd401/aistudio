@@ -4,7 +4,7 @@
  * server, authenticated per-user with an OAuth refresh token.
  *
  * Usage:
- *   node run.js --user <email> <subcommand> [flags]
+ *   node run.js <subcommand> [flags]
  *
  * Subcommands (map to Plaud MCP tools):
  *   list      [--page N] [--page-size N] [--query kw] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
@@ -32,8 +32,64 @@
 'use strict';
 
 const {
-  fail, validateUserEmail, parseArgs, callTool, digestRecording, listTools,
+  fail, rejectAuthorityArgs, parseArgs, callTool, digestRecording, listTools,
 } = require('./common');
+
+function requireRecordingId(args, command) {
+  if (!args.id || args.id === true) {
+    fail(`${command} requires --id <recording-id>`);
+  }
+  return args.id;
+}
+
+function listArguments(args, subcommand) {
+  const toolArgs = {};
+  const keyword = args.query || args.keyword;
+  if (keyword && keyword !== true) toolArgs.keyword = keyword;
+  if (args.page && args.page !== true) toolArgs.page = Number(args.page);
+  if (args.page_size && args.page_size !== true) {
+    toolArgs.page_size = Number(args.page_size);
+  }
+  if (args.from && args.from !== true) toolArgs.from = args.from;
+  if (args.to && args.to !== true) toolArgs.to = args.to;
+  if (subcommand === 'search' && !toolArgs.keyword) {
+    fail('search requires --query <keyword>');
+  }
+  return toolArgs;
+}
+
+async function runPlaudCommand(subcommand, args) {
+  if (subcommand === 'whoami') return callTool('get_current_user', {});
+  if (subcommand === 'tools') return listTools();
+  if (subcommand === 'list' || subcommand === 'search') {
+    return callTool('list_files', listArguments(args, subcommand));
+  }
+  if (subcommand === 'file') {
+    return callTool('get_file', {
+      file_id: requireRecordingId(args, subcommand),
+    });
+  }
+  if (subcommand === 'digest') {
+    return digestRecording(requireRecordingId(args, subcommand), {
+      profiles: typeof args.profiles === 'string' ? args.profiles : undefined,
+      output: typeof args.output === 'string' ? args.output : undefined,
+      length: typeof args.length === 'string' ? args.length : undefined,
+    });
+  }
+  if (subcommand === 'transcript') {
+    return callTool('get_transcript', {
+      file_id: requireRecordingId(args, subcommand),
+    });
+  }
+  if (subcommand === 'summary') {
+    return callTool('get_note', {
+      file_id: requireRecordingId(args, subcommand),
+    });
+  }
+  fail(
+    `Unknown subcommand "${subcommand}". Try: list, search, file, digest, transcript, summary, whoami, tools.`
+  );
+}
 
 async function main() {
   const args = parseArgs(process.argv);
@@ -43,68 +99,13 @@ async function main() {
 
   if (args.help || !sub) {
     process.stdout.write(
-      'Usage: run.js --user <email> <list|search|file|digest|transcript|summary|whoami|tools> [flags]\n'
+      'Usage: run.js <list|search|file|digest|transcript|summary|whoami|tools> [flags]\n'
     );
     process.exit(sub ? 0 : 1);
   }
 
-  const userEmail = args.user;
-  validateUserEmail(userEmail);
-
-  switch (sub) {
-    case 'whoami':
-      await callTool('get_current_user', {}, userEmail);
-      break;
-
-    case 'tools':
-      await listTools(userEmail);
-      break;
-
-    case 'list':
-    case 'search': {
-      const toolArgs = {};
-      const keyword = args.query || args.keyword;
-      if (keyword && keyword !== true) toolArgs.keyword = keyword;
-      if (args.page && args.page !== true) toolArgs.page = Number(args.page);
-      if (args.page_size && args.page_size !== true) toolArgs.page_size = Number(args.page_size);
-      if (args.from && args.from !== true) toolArgs.from = args.from;
-      if (args.to && args.to !== true) toolArgs.to = args.to;
-      if (sub === 'search' && !toolArgs.keyword) fail('search requires --query <keyword>');
-      await callTool('list_files', toolArgs, userEmail);
-      break;
-    }
-
-    case 'file': {
-      if (!args.id || args.id === true) fail('file requires --id <recording-id>');
-      await callTool('get_file', { file_id: args.id }, userEmail);
-      break;
-    }
-
-    case 'digest': {
-      if (!args.id || args.id === true) fail('digest requires --id <recording-id>');
-      await digestRecording(userEmail, args.id, {
-        profiles: typeof args.profiles === 'string' ? args.profiles : undefined,
-        output: typeof args.output === 'string' ? args.output : undefined,
-        length: typeof args.length === 'string' ? args.length : undefined,
-      });
-      break;
-    }
-
-    case 'transcript': {
-      if (!args.id || args.id === true) fail('transcript requires --id <recording-id>');
-      await callTool('get_transcript', { file_id: args.id }, userEmail);
-      break;
-    }
-
-    case 'summary': {
-      if (!args.id || args.id === true) fail('summary requires --id <recording-id>');
-      await callTool('get_note', { file_id: args.id }, userEmail);
-      break;
-    }
-
-    default:
-      fail(`Unknown subcommand "${sub}". Try: list, search, file, digest, transcript, summary, whoami, tools.`);
-  }
+  rejectAuthorityArgs(args);
+  await runPlaudCommand(sub, args);
 }
 
 if (require.main === module) {

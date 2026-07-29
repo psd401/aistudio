@@ -61,6 +61,103 @@ import {
   type CredentialAuditRow,
 } from "@/actions/admin/agent-credentials.actions"
 
+function ProvisionCredentialDialog({
+  request,
+  value,
+  scope,
+  busy,
+  onClose,
+  onValueChange,
+  onScopeChange,
+  onProvision,
+}: {
+  request: CredentialRequestRow | null
+  value: string
+  scope: "shared" | "user"
+  busy: boolean
+  onClose: () => void
+  onValueChange: (value: string) => void
+  onScopeChange: (scope: "shared" | "user") => void
+  onProvision: () => void
+}) {
+  return (
+    <Dialog
+      open={request !== null}
+      onOpenChange={(open) => {
+        if (!open) onClose()
+      }}
+    >
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Provision credential</DialogTitle>
+          <DialogDescription>
+            Pastes the secret value into AWS Secrets Manager and marks the
+            request fulfilled in one step. The value is never logged or
+            persisted in the database; only the audit metadata is.
+          </DialogDescription>
+        </DialogHeader>
+        {request && (
+          <div className="space-y-3 text-sm">
+            <div className="grid grid-cols-[120px_1fr] gap-y-1.5">
+              <div className="text-muted-foreground">Credential</div>
+              <div className="font-mono">{request.credentialName}</div>
+              <div className="text-muted-foreground">Requested by</div>
+              <div>{request.requestedBy}</div>
+              <div className="text-muted-foreground">Skill</div>
+              <div>{request.skillContext || "—"}</div>
+              <div className="text-muted-foreground">Reason</div>
+              <div className="text-xs">{request.reason}</div>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="provision-scope">Scope</Label>
+              <Select value={scope} onValueChange={onScopeChange}>
+                <SelectTrigger id="provision-scope">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="shared">
+                    shared — psd-agent-creds/&lt;env&gt;/shared/
+                    {request.credentialName}
+                  </SelectItem>
+                  <SelectItem value="user">
+                    user — psd-agent-creds/&lt;env&gt;/user/
+                    {request.requestedBy}/{request.credentialName}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="provision-value">Secret value</Label>
+              <Textarea
+                id="provision-value"
+                value={value}
+                onChange={(event) => onValueChange(event.target.value)}
+                rows={5}
+                placeholder="Paste the secret value here (will be written to AWS Secrets Manager)"
+                spellCheck={false}
+                autoComplete="off"
+                data-1p-ignore
+              />
+              <p className="text-xs text-muted-foreground">
+                The value is sent directly to AWS Secrets Manager. Don&apos;t
+                paste descriptions or labels — only the raw secret.
+              </p>
+            </div>
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button onClick={onProvision} disabled={busy}>
+            {busy ? "Provisioning…" : "Provision + mark fulfilled"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 export function CredentialsClient() {
   const { toast } = useToast()
   const [tab, setTab] = useState("requests")
@@ -207,81 +304,16 @@ export function CredentialsClient() {
         </TabsContent>
       </Tabs>
 
-      <Dialog
-        open={provisionRequest !== null}
-        onOpenChange={(open) => {
-          if (!open) closeProvisionDialog()
-        }}
-      >
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Provision credential</DialogTitle>
-            <DialogDescription>
-              Pastes the secret value into AWS Secrets Manager and marks the
-              request fulfilled in one step. The value is never logged or
-              persisted in the database; only the audit metadata is.
-            </DialogDescription>
-          </DialogHeader>
-          {provisionRequest && (
-            <div className="space-y-3 text-sm">
-              <div className="grid grid-cols-[120px_1fr] gap-y-1.5">
-                <div className="text-muted-foreground">Credential</div>
-                <div className="font-mono">{provisionRequest.credentialName}</div>
-                <div className="text-muted-foreground">Requested by</div>
-                <div>{provisionRequest.requestedBy}</div>
-                <div className="text-muted-foreground">Skill</div>
-                <div>{provisionRequest.skillContext || "—"}</div>
-                <div className="text-muted-foreground">Reason</div>
-                <div className="text-xs">{provisionRequest.reason}</div>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="provision-scope">Scope</Label>
-                <Select
-                  value={provisionScope}
-                  onValueChange={(v) => setProvisionScope(v as "shared" | "user")}
-                >
-                  <SelectTrigger id="provision-scope">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="shared">
-                      shared — psd-agent-creds/&lt;env&gt;/shared/{provisionRequest.credentialName}
-                    </SelectItem>
-                    <SelectItem value="user">
-                      user — psd-agent-creds/&lt;env&gt;/user/{provisionRequest.requestedBy}/{provisionRequest.credentialName}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="provision-value">Secret value</Label>
-                <Textarea
-                  id="provision-value"
-                  value={provisionValue}
-                  onChange={(e) => setProvisionValue(e.target.value)}
-                  rows={5}
-                  placeholder="Paste the secret value here (will be written to AWS Secrets Manager)"
-                  spellCheck={false}
-                  autoComplete="off"
-                  data-1p-ignore
-                />
-                <p className="text-xs text-muted-foreground">
-                  The value is sent directly to AWS Secrets Manager. Don&apos;t
-                  paste descriptions or labels — only the raw secret.
-                </p>
-              </div>
-            </div>
-          )}
-          <DialogFooter>
-            <Button variant="outline" onClick={closeProvisionDialog} disabled={provisionBusy}>
-              Cancel
-            </Button>
-            <Button onClick={handleProvisionFromRequest} disabled={provisionBusy}>
-              {provisionBusy ? "Provisioning…" : "Provision + mark fulfilled"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ProvisionCredentialDialog
+        request={provisionRequest}
+        value={provisionValue}
+        scope={provisionScope}
+        busy={provisionBusy}
+        onClose={closeProvisionDialog}
+        onValueChange={setProvisionValue}
+        onScopeChange={setProvisionScope}
+        onProvision={handleProvisionFromRequest}
+      />
     </div>
   )
 }

@@ -14,6 +14,7 @@ import {
   executeQuery,
   executeTransaction,
   toPgRows,
+  type DbTransaction,
 } from "@/lib/db/drizzle-client";
 import {
   knowledgeRepositories,
@@ -140,6 +141,31 @@ export class RepositoryUploadQuotaExceededError extends Error {
   constructor(readonly quota: RepositoryUploadQuota) {
     super("Repository upload quota exceeded");
     this.name = "RepositoryUploadQuotaExceededError";
+  }
+}
+
+export type RepositoryUploadCompletionFailure =
+  | "invalid-parts"
+  | "object-mismatch"
+  | "repository-inactive"
+  | "session-inactive"
+  | "session-not-found";
+
+/**
+ * Marks completion failures caused by caller-controlled input or an unavailable
+ * upload session. API routes may safely map these to a non-disclosing 400 while
+ * preserving unexpected database and storage failures as 5xx responses.
+ */
+export class RepositoryUploadCompletionError extends Error {
+  readonly code = "UPLOAD_COMPLETION_FAILED";
+  readonly httpStatus = 400;
+
+  constructor(
+    readonly failure: RepositoryUploadCompletionFailure,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RepositoryUploadCompletionError";
   }
 }
 
@@ -357,7 +383,7 @@ export async function createRepositoryUploadStorage(
         } catch (abortError) {
           throw new AggregateError(
             [signingError, abortError],
-            "Failed to sign and abort repository multipart upload"
+            "Failed to sign and abort repository multipart upload", { cause: abortError }
           );
         }
         throw signingError;
@@ -417,226 +443,252 @@ interface UploadSessionReservation {
   expiresAt: Date;
 }
 
+interface UploadRepositoryContext {
+  id: number;
+  nexus_managed: boolean;
+  owner_id: number;
+  repository_kind: "durable" | "ephemeral" | "system";
+}
+
+interface UploadQuotaRow {
+  active_upload_count: number | string;
+  active_upload_bytes: number | string;
+  ephemeral_storage_bytes: number | string;
+  ephemeral_storage_repository_count: number | string;
+  target_has_ephemeral_storage: boolean;
+}
+
+async function lockUploadRepository(
+  tx: DbTransaction,
+  repositoryId: number
+): Promise<UploadRepositoryContext> {
+  const rows = toPgRows<UploadRepositoryContext>(
+    await tx.execute(sql`
+      SELECT
+        repository.id,
+        repository.owner_id,
+        repository.repository_kind,
+        (
+          COALESCE(repository.metadata ->> 'nexusManaged', 'false') = 'true'
+          OR EXISTS (
+            SELECT 1
+            FROM nexus_repository_bindings binding
+            WHERE binding.repository_id = repository.id
+          )
+        ) AS nexus_managed
+      FROM knowledge_repositories repository
+      WHERE repository.id = ${repositoryId}
+        AND repository.lifecycle_status = 'active'
+        AND (
+          repository.expires_at IS NULL
+          OR repository.expires_at > NOW()
+        )
+      FOR UPDATE OF repository
+    `)
+  );
+  const repository = rows[0];
+  if (!repository) throw new Error("Repository is no longer active");
+  return repository;
+}
+
+async function lockUploadQuotaPrincipals(
+  tx: DbTransaction,
+  input: UploadSessionReservation,
+  repository: UploadRepositoryContext
+): Promise<void> {
+  const ownerQuotaApplies =
+    repository.repository_kind === "ephemeral" || repository.nexus_managed;
+  const quotaPrincipals = [
+    input.userId,
+    ...(ownerQuotaApplies ? [repository.owner_id] : []),
+  ]
+    .filter((principal, index, values) => values.indexOf(principal) === index)
+    .sort((left, right) => left - right);
+  for (const principal of quotaPrincipals) {
+    await tx.execute(sql`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${"repository-upload:"} || ${principal}::text, 0)
+      )
+    `);
+  }
+}
+
+async function loadUploadQuotaUsage(
+  tx: DbTransaction,
+  input: UploadSessionReservation,
+  repository: UploadRepositoryContext
+): Promise<UploadQuotaRow> {
+  const rows = toPgRows<UploadQuotaRow>(
+    await tx.execute(sql`
+      WITH active_nexus_managed_repositories AS MATERIALIZED (
+        SELECT repository.id
+        FROM knowledge_repositories repository
+        WHERE repository.owner_id = ${repository.owner_id}
+          AND repository.lifecycle_status = 'active'
+          AND (
+            repository.expires_at IS NULL
+            OR repository.expires_at > NOW()
+          )
+          AND (
+            repository.repository_kind = 'ephemeral'
+            OR COALESCE(repository.metadata ->> 'nexusManaged', 'false') = 'true'
+            OR EXISTS (
+              SELECT 1
+              FROM nexus_repository_bindings binding
+              WHERE binding.repository_id = repository.id
+            )
+          )
+      ),
+      current_versions AS MATERIALIZED (
+        SELECT
+          item.repository_id,
+          version.id,
+          COALESCE(version.byte_size, 0)::bigint AS byte_size
+        FROM active_nexus_managed_repositories repository
+        JOIN repository_items item ON item.repository_id = repository.id
+        JOIN repository_item_versions version
+          ON version.id = item.current_version_id
+      ),
+      counted_sessions AS MATERIALIZED (
+        SELECT
+          session.repository_id,
+          session.expected_byte_size::bigint AS byte_size
+        FROM active_nexus_managed_repositories repository
+        JOIN repository_upload_sessions session
+          ON session.repository_id = repository.id
+        WHERE (
+            session.status IN ('initiated', 'uploading', 'uploaded')
+            AND session.expires_at > NOW()
+          )
+          OR (
+            session.status = 'completed'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM current_versions current_version
+              WHERE current_version.id = session.item_version_id
+            )
+          )
+      )
+      SELECT
+        (
+          SELECT COUNT(session.id)::integer
+          FROM repository_upload_sessions session
+          WHERE session.created_by = ${input.userId}
+            AND session.status IN ('initiated', 'uploading', 'uploaded')
+            AND session.expires_at > NOW()
+        ) AS active_upload_count,
+        (
+          SELECT COALESCE(SUM(session.expected_byte_size), 0)::bigint
+          FROM repository_upload_sessions session
+          WHERE session.created_by = ${input.userId}
+            AND session.status IN ('initiated', 'uploading', 'uploaded')
+            AND session.expires_at > NOW()
+        ) AS active_upload_bytes,
+        (
+          SELECT
+            COALESCE(
+              (SELECT SUM(current_version.byte_size)
+               FROM current_versions current_version),
+              0
+            ) +
+            COALESCE(
+              (SELECT SUM(counted_session.byte_size)
+               FROM counted_sessions counted_session),
+              0
+            )
+        )::bigint AS ephemeral_storage_bytes,
+        (
+          SELECT COUNT(*)::integer
+          FROM active_nexus_managed_repositories
+        ) AS ephemeral_storage_repository_count,
+        EXISTS (
+          SELECT 1
+          FROM active_nexus_managed_repositories repository
+          WHERE repository.id = ${input.repositoryId}
+        ) AS target_has_ephemeral_storage
+    `)
+  );
+  const usage = rows[0];
+  if (!usage) throw new Error("Failed to evaluate repository upload quota");
+  return usage;
+}
+
+function assertUploadQuotaAvailable(
+  input: UploadSessionReservation,
+  maximumActiveBytes: number,
+  repository: UploadRepositoryContext,
+  usage: UploadQuotaRow
+): void {
+  const violation = repositoryUploadQuotaViolation({
+    usage: {
+      activeUploadCount: Number(usage.active_upload_count),
+      activeUploadBytes: Number(usage.active_upload_bytes),
+      nexusManagedStorageBytes: Number(usage.ephemeral_storage_bytes),
+      nexusManagedRepositoryCount: Number(
+        usage.ephemeral_storage_repository_count
+      ),
+      targetHasNexusManagedStorage: usage.target_has_ephemeral_storage,
+    },
+    requestedBytes: input.byteSize,
+    maximumActiveBytes,
+    repositoryKind: repository.repository_kind,
+    nexusManaged: repository.nexus_managed,
+  });
+  if (violation) throw new RepositoryUploadQuotaExceededError(violation);
+}
+
+async function insertUploadSession(
+  tx: DbTransaction,
+  input: UploadSessionReservation
+): Promise<void> {
+  const inserted = toPgRows<{ id: string }>(
+    await tx.execute(sql`
+      INSERT INTO repository_upload_sessions (
+        id, repository_id, created_by, object_key, upload_method,
+        part_size, part_count, item_name, original_file_name,
+        declared_content_type, expected_byte_size, status, expires_at
+      )
+      VALUES (
+        ${input.sessionId}::uuid,
+        ${input.repositoryId},
+        ${input.userId},
+        ${input.objectKey},
+        ${input.uploadMethod},
+        ${input.partSize ?? null},
+        ${input.partCount ?? null},
+        ${input.itemName},
+        ${input.originalFileName},
+        ${input.contentType},
+        ${input.byteSize},
+        'initiated',
+        ${input.expiresAt.toISOString()}::timestamptz
+      )
+      RETURNING id
+    `)
+  );
+  if (inserted.length !== 1) {
+    throw new Error("Failed to reserve repository upload session");
+  }
+}
+
+async function reserveUploadSessionInTransaction(
+  tx: DbTransaction,
+  input: UploadSessionReservation,
+  maximumActiveBytes: number
+): Promise<void> {
+  const repository = await lockUploadRepository(tx, input.repositoryId);
+  await lockUploadQuotaPrincipals(tx, input, repository);
+  const usage = await loadUploadQuotaUsage(tx, input, repository);
+  assertUploadQuotaAvailable(input, maximumActiveBytes, repository, usage);
+  await insertUploadSession(tx, input);
+}
+
 async function reserveUploadSession(
   input: UploadSessionReservation,
   maximumActiveBytes: number
 ): Promise<void> {
   await executeTransaction(
-    async (tx) => {
-      // Every producer starts with the repository row. A delete/purge that
-      // wins this lock prevents new signed URLs; a reservation that wins is
-      // durably visible before deletion evaluates its session fence.
-      const repositoryRows = toPgRows<{
-        id: number;
-        nexus_managed: boolean;
-        owner_id: number;
-        repository_kind: "durable" | "ephemeral" | "system";
-      }>(
-        await tx.execute(sql`
-          SELECT
-            repository.id,
-            repository.owner_id,
-            repository.repository_kind,
-            (
-              COALESCE(repository.metadata ->> 'nexusManaged', 'false') = 'true'
-              OR EXISTS (
-                SELECT 1
-                FROM nexus_repository_bindings binding
-                WHERE binding.repository_id = repository.id
-              )
-            ) AS nexus_managed
-          FROM knowledge_repositories repository
-          WHERE repository.id = ${input.repositoryId}
-            AND repository.lifecycle_status = 'active'
-            AND (
-              repository.expires_at IS NULL
-              OR repository.expires_at > NOW()
-            )
-          FOR UPDATE OF repository
-        `)
-      );
-      const repository = repositoryRows[0];
-      if (!repository) {
-        throw new Error("Repository is no longer active");
-      }
-
-      // This must be a separate statement after the repository lock. Under
-      // READ COMMITTED, the subsequent usage statement then receives a fresh
-      // snapshot after any previous owner reservation releases the advisory
-      // lock, making concurrent quota enforcement deterministic.
-      const quotaPrincipals = [
-        input.userId,
-        ...(repository.repository_kind === "ephemeral" ||
-        repository.nexus_managed
-          ? [repository.owner_id]
-          : []),
-      ]
-        .filter((principal, index, values) => values.indexOf(principal) === index)
-        .sort((left, right) => left - right);
-      for (const principal of quotaPrincipals) {
-        await tx.execute(sql`
-          SELECT pg_advisory_xact_lock(
-            hashtextextended(${"repository-upload:"} || ${principal}::text, 0)
-          )
-        `);
-      }
-
-      const usageRows = toPgRows<{
-        active_upload_count: number | string;
-        active_upload_bytes: number | string;
-        ephemeral_storage_bytes: number | string;
-        ephemeral_storage_repository_count: number | string;
-        target_has_ephemeral_storage: boolean;
-      }>(
-        await tx.execute(sql`
-          WITH active_nexus_managed_repositories AS MATERIALIZED (
-            SELECT repository.id
-            FROM knowledge_repositories repository
-            WHERE repository.owner_id = ${repository.owner_id}
-              AND repository.lifecycle_status = 'active'
-              AND (
-                repository.expires_at IS NULL
-                OR repository.expires_at > NOW()
-              )
-              AND (
-                repository.repository_kind = 'ephemeral'
-                OR COALESCE(
-                  repository.metadata ->> 'nexusManaged',
-                  'false'
-                ) = 'true'
-                OR EXISTS (
-                  SELECT 1
-                  FROM nexus_repository_bindings binding
-                  WHERE binding.repository_id = repository.id
-                )
-              )
-          ),
-          current_versions AS MATERIALIZED (
-            SELECT
-              item.repository_id,
-              version.id,
-              COALESCE(version.byte_size, 0)::bigint AS byte_size
-            FROM active_nexus_managed_repositories repository
-            JOIN repository_items item
-              ON item.repository_id = repository.id
-            JOIN repository_item_versions version
-              ON version.id = item.current_version_id
-          ),
-          counted_sessions AS MATERIALIZED (
-            SELECT
-              session.repository_id,
-              session.expected_byte_size::bigint AS byte_size
-            FROM active_nexus_managed_repositories repository
-            JOIN repository_upload_sessions session
-              ON session.repository_id = repository.id
-            WHERE (
-                session.status IN ('initiated', 'uploading', 'uploaded')
-                AND session.expires_at > NOW()
-              )
-              OR (
-                session.status = 'completed'
-                AND NOT EXISTS (
-                  SELECT 1
-                  FROM current_versions current_version
-                  WHERE current_version.id = session.item_version_id
-                )
-              )
-          )
-          SELECT
-            (
-              SELECT COUNT(session.id)::integer
-              FROM repository_upload_sessions session
-              WHERE session.created_by = ${input.userId}
-                AND session.status IN ('initiated', 'uploading', 'uploaded')
-                AND session.expires_at > NOW()
-            ) AS active_upload_count,
-            (
-              SELECT COALESCE(SUM(session.expected_byte_size), 0)::bigint
-              FROM repository_upload_sessions session
-              WHERE session.created_by = ${input.userId}
-                AND session.status IN ('initiated', 'uploading', 'uploaded')
-                AND session.expires_at > NOW()
-            ) AS active_upload_bytes,
-            (
-              SELECT
-                COALESCE(
-                  (SELECT SUM(current_version.byte_size) FROM current_versions current_version),
-                  0
-                ) +
-                COALESCE(
-                  (SELECT SUM(counted_session.byte_size) FROM counted_sessions counted_session),
-                  0
-                )
-            )::bigint AS ephemeral_storage_bytes,
-            (
-              SELECT COUNT(*)::integer
-              FROM active_nexus_managed_repositories
-            ) AS ephemeral_storage_repository_count,
-            EXISTS (
-              SELECT 1
-              FROM active_nexus_managed_repositories repository
-              WHERE repository.id = ${input.repositoryId}
-            ) AS target_has_ephemeral_storage
-        `)
-      );
-      const usage = usageRows[0];
-      if (!usage) throw new Error("Failed to evaluate repository upload quota");
-      const violation = repositoryUploadQuotaViolation({
-        usage: {
-          activeUploadCount: Number(usage.active_upload_count),
-          activeUploadBytes: Number(usage.active_upload_bytes),
-          nexusManagedStorageBytes: Number(usage.ephemeral_storage_bytes),
-          nexusManagedRepositoryCount: Number(
-            usage.ephemeral_storage_repository_count
-          ),
-          targetHasNexusManagedStorage: usage.target_has_ephemeral_storage,
-        },
-        requestedBytes: input.byteSize,
-        maximumActiveBytes,
-        repositoryKind: repository.repository_kind,
-        nexusManaged: repository.nexus_managed,
-      });
-      if (violation) throw new RepositoryUploadQuotaExceededError(violation);
-
-      const inserted = toPgRows<{ id: string }>(
-        await tx.execute(sql`
-          INSERT INTO repository_upload_sessions (
-            id,
-            repository_id,
-            created_by,
-            object_key,
-            upload_method,
-            part_size,
-            part_count,
-            item_name,
-            original_file_name,
-            declared_content_type,
-            expected_byte_size,
-            status,
-            expires_at
-          )
-          VALUES (
-            ${input.sessionId}::uuid,
-            ${input.repositoryId},
-            ${input.userId},
-            ${input.objectKey},
-            ${input.uploadMethod},
-            ${input.partSize ?? null},
-            ${input.partCount ?? null},
-            ${input.itemName},
-            ${input.originalFileName},
-            ${input.contentType},
-            ${input.byteSize},
-            'initiated',
-            ${input.expiresAt.toISOString()}::timestamptz
-          )
-          RETURNING id
-        `)
-      );
-      if (inserted.length !== 1) {
-        throw new Error("Failed to reserve repository upload session");
-      }
-    },
+    (tx) => reserveUploadSessionInTransaction(tx, input, maximumActiveBytes),
     "contentPlatform.reserveUploadSession"
   );
 }
@@ -775,7 +827,10 @@ function validateParts(
   expectedCount: number
 ): Array<{ ETag: string; PartNumber: number }> {
   if (!parts || parts.length !== expectedCount) {
-    throw new Error(`Multipart completion requires exactly ${expectedCount} parts`);
+    throw new RepositoryUploadCompletionError(
+      "invalid-parts",
+      `Multipart completion requires exactly ${expectedCount} parts`,
+    );
   }
   const numbers = new Set(parts.map((part) => part.PartNumber));
   if (
@@ -788,9 +843,43 @@ function validateParts(
         part.PartNumber > expectedCount
     )
   ) {
-    throw new Error("Multipart parts are invalid or duplicated");
+    throw new RepositoryUploadCompletionError(
+      "invalid-parts",
+      "Multipart parts are invalid or duplicated",
+    );
   }
-  return parts;
+  return [...parts].sort((left, right) => left.PartNumber - right.PartNumber);
+}
+
+function multipartCompletionRequestError(
+  error: unknown,
+): RepositoryUploadCompletionError | null {
+  if (typeof error !== "object" || error === null) return null;
+  const candidate = error as { name?: unknown; Code?: unknown };
+  const code =
+    typeof candidate.Code === "string"
+      ? candidate.Code
+      : typeof candidate.name === "string"
+        ? candidate.name
+        : undefined;
+
+  if (code === "NoSuchUpload") {
+    return new RepositoryUploadCompletionError(
+      "session-inactive",
+      "Multipart upload session is no longer available",
+    );
+  }
+  if (
+    code === "EntityTooSmall" ||
+    code === "InvalidPart" ||
+    code === "InvalidPartOrder"
+  ) {
+    return new RepositoryUploadCompletionError(
+      "invalid-parts",
+      "Multipart upload parts were rejected",
+    );
+  }
+  return null;
 }
 
 function getRepositoryUploadSession(input: CompleteRepositoryUploadInput) {
@@ -811,6 +900,20 @@ function getRepositoryUploadSession(input: CompleteRepositoryUploadInput) {
   );
 }
 
+async function requireActiveRepositoryUploadSession(
+  input: CompleteRepositoryUploadInput,
+) {
+  const [session] = await getRepositoryUploadSession(input);
+  if (!session) {
+    throw new RepositoryUploadCompletionError(
+      "session-not-found",
+      "Upload session was not found",
+    );
+  }
+  assertRepositoryUploadSessionActive(session);
+  return session;
+}
+
 export function assertRepositoryUploadSessionActive(
   session: Pick<
     typeof repositoryUploadSessions.$inferSelect,
@@ -819,11 +922,15 @@ export function assertRepositoryUploadSessionActive(
   now = new Date()
 ): void {
   if (
-    session.expiresAt.getTime() <= now.getTime() ||
+    (session.status !== "completed" &&
+      session.expiresAt.getTime() <= now.getTime()) ||
     session.status === "aborted" ||
     session.status === "expired"
   ) {
-    throw new Error("Upload session is no longer active");
+    throw new RepositoryUploadCompletionError(
+      "session-inactive",
+      "Upload session is no longer active",
+    );
   }
 }
 
@@ -843,7 +950,31 @@ export function assertRepositoryProducerActive(
     (expiresAt !== undefined &&
       (Number.isNaN(expiresAt) || expiresAt <= now.getTime()))
   ) {
-    throw new Error("Repository is no longer active");
+    throw new RepositoryUploadCompletionError(
+      "repository-inactive",
+      "Repository is no longer active",
+    );
+  }
+}
+
+function assertUploadedObjectMatchesSession(
+  object: StoredObjectMetadata,
+  session: Pick<
+    typeof repositoryUploadSessions.$inferSelect,
+    "declaredContentType" | "expectedByteSize"
+  >,
+): void {
+  if (object.byteSize !== session.expectedByteSize) {
+    throw new RepositoryUploadCompletionError(
+      "object-mismatch",
+      "Uploaded object size does not match the initiated upload",
+    );
+  }
+  if (object.contentType && object.contentType !== session.declaredContentType) {
+    throw new RepositoryUploadCompletionError(
+      "object-mismatch",
+      "Uploaded object type does not match the initiated upload",
+    );
   }
 }
 
@@ -852,9 +983,7 @@ export async function completeRepositoryUpload(
   storage?: RepositoryUploadStorage
 ): Promise<CompletedRepositoryUpload> {
   const resolvedStorage = storage ?? (await createRepositoryUploadStorage());
-  const [session] = await getRepositoryUploadSession(input);
-  if (!session) throw new Error("Upload session was not found");
-  assertRepositoryUploadSessionActive(session);
+  const session = await requireActiveRepositoryUploadSession(input);
 
   if (session.uploadMethod === "multipart" && session.status !== "completed") {
     if (!session.multipartUploadId || !session.partCount) {
@@ -871,18 +1000,13 @@ export async function completeRepositoryUpload(
       // HEAD below proves the object exists and makes completion safely
       // retryable; otherwise preserve the original, more useful S3 error.
       await resolvedStorage.headObject(session.objectKey).catch(() => {
-        throw completionError;
+        throw multipartCompletionRequestError(completionError) ?? completionError;
       });
     }
   }
 
   const object = await resolvedStorage.headObject(session.objectKey);
-  if (object.byteSize !== session.expectedByteSize) {
-    throw new Error("Uploaded object size does not match the initiated upload");
-  }
-  if (object.contentType && object.contentType !== session.declaredContentType) {
-    throw new Error("Uploaded object type does not match the initiated upload");
-  }
+  assertUploadedObjectMatchesSession(object, session);
 
   return executeTransaction(
     async (tx) => {
@@ -907,7 +1031,12 @@ export async function completeRepositoryUpload(
         .where(eq(repositoryUploadSessions.id, session.id))
         .limit(1)
         .for("update");
-      if (!locked) throw new Error("Upload session was not found");
+      if (!locked) {
+        throw new RepositoryUploadCompletionError(
+          "session-not-found",
+          "Upload session was not found",
+        );
+      }
       // Expiry cleanup claims the same row with FOR UPDATE. Re-check the locked
       // state after all S3 work so a completion that waited behind cleanup
       // cannot register an item whose canonical object was just deleted.

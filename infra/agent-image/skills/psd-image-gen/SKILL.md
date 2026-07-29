@@ -78,7 +78,8 @@ This skill enforces the `skill.image-gen` capability at invocation time. The cap
 
 ## Operational Notes
 
-- Always reads the OpenAI key via `psd-credentials/get.js --user <email> --shared --name openai_api_key`. The `--shared` flag skips user-scoped lookups to ensure the district-funded key is always used. Never reads from environment variables.
-- Uploads to `s3://$WORKSPACE_BUCKET/public-images/<email>/<uuid>.png` with `image/png` content type. The `public-images/` prefix has a bucket-policy ALLOW for `s3:GetObject` to `Principal: *`; other prefixes in the bucket remain private.
+- Always uses the fixed `openai-image` operation broker. The OpenAI key stays in the trusted web tier and is never returned to the model process.
+- Uploads through the owner-bound artifact broker, which derives the storage
+  prefix from the signed invocation and returns a public-by-link URL.
 - Returned URL is **unsigned** and does not embed any STS token. It does not expire — anyone who receives the link can fetch until the object is deleted.
 - This was a deliberate switch from presigned URLs (PR #934 dev rollout 2026-05-03): presigned URLs signed with AgentCore's STS session credentials produced intermittent `InvalidToken` failures when fetched through chat clients. Unsigned-public-by-link is the structural fix.

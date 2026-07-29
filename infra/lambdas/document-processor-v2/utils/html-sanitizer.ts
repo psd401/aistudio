@@ -37,7 +37,7 @@ export function sanitizeHtml(html: string, opts?: { preserveNewlines?: boolean }
   let sanitized = html.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*);/g, (match, body) => {
     if (body[0] === '#') {
       const isHex = body[1] === 'x' || body[1] === 'X';
-      const code = isHex ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+      const code = isHex ? Number.parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
       return Number.isNaN(code) ? match : String.fromCodePoint(code);
     }
     return NAMED_ENTITIES[body] ?? match;

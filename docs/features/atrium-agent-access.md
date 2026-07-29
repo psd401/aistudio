@@ -59,7 +59,7 @@ Consequences for external agents:
    | `publish_content` | `content:publish_internal` | Public destinations additionally require the human/admin-held `content:publish_public` — the tool surfaces a structured `approval_required` signal instead of publishing |
    | `unpublish_content` | `content:publish_internal` | Taking down a **public** destination is gated the same as putting it up (§26.4) |
    | `export_okf` | `content:read` | `--audience public` additionally needs `content:publish_public` |
-   | `import_okf` | `content:create` | Imports land private + draft |
+   | `import_okf` | `content:create` | Imports land private + draft; hierarchy creation follows collection ownership/admin rules |
 
 **Safety invariants:** all agent-created objects start **private + draft**
 (create → widen, never create-public), and every write is permission-gated by the
@@ -73,68 +73,54 @@ mint the key to an accountable staff/service identity. True agent-identity write
 
 ## Path 2 — PSD AI Agents (OpenClaw on AgentCore)
 
-**Today:** the deployed `psd-aistudio` skill
-(`infra/agent-image/skills/psd-aistudio/`) is **discovery-only**. It calls the
-`describe_capabilities` meta-tool over `/api/mcp` with a `platform:read`-scoped
-key (from `AISTUDIO_MCP_API_KEY` or Secrets Manager via
-`AISTUDIO_MCP_API_KEY_SECRET_ID`) so the agent always knows what AI Studio can
-do — it deliberately does not execute content actions. That `platform:read` key
-is **zero-touch provisioned** exactly like the content key (see below) — the two
-were previously conflated; the MCP key now has its own secret + service user.
+The deployed `psd-aistudio` skill
+(`infra/agent-image/skills/psd-aistudio/`) discovers platform capabilities and,
+after per-user AI Studio OAuth consent, lists, describes, searches, reads exact
+sources from, and polls changes in the repositories that user can access. The
+credential priority is delegated OAuth, the legacy per-user personal API key,
+then the shared `platform:read` discovery key. The shared key remains
+**discovery-only** and is zero-touch provisioned exactly like the content key
+(see below); it has its own secret and service user. Repository commands never
+borrow the shared identity's content access and instead prompt the user to run
+`psd-aistudio connect`.
 
 **Gotcha:** `AGENT_INTERNAL_API_KEY` is a pre-shared key for the internal agent
 endpoints — it is **not scope-aware and cannot authenticate to `/api/mcp`**.
-Content access needs its own `sk-` key.
+Content/repository access needs a scoped `sk-` key or the per-user OAuth grant.
 
 **The `psd-atrium` skill** (`infra/agent-image/skills/psd-atrium/`) gives the
-agents Atrium abilities. It wraps the `/api/v1/content/*` REST surface (which is
-1:1 with the MCP content tools but returns the saved body inline and a real HTTP
-202 for the approval gate), authenticated with a scoped `sk-` **content** key.
-Subcommands: `find`, `read`, `create-document`, `create-artifact`, `edit`
-(`--mode replace|append`), `set-visibility`, `publish`, `unpublish`. The agent
-works **version-based**, like any other `sk-` caller (create-as-private, permission
-gating), and acts as the **content key's owner identity** — a `user` requester, so
-its writes are trusted + attributed to the owner and are NOT §28.3-screened (that
-runs only for true agent-identity writes; see the Safety invariants above). Not the
-asking user, either; per-user delegation is the future phase below.
+agents Atrium abilities. It calls the fixed `/api/agent/atrium` broker surface,
+whose signed invocation proof identifies the workspace owner. The broker resolves
+that email to an active `users` row and `requesterForUserId`, then invokes the
+shared content services directly. No reusable content key enters the workspace
+and the route never falls back to the shared service principal.
+Subcommands include `find`, `read`, `create-document`, `create-artifact`, `edit`
+(`--mode replace|append`), `set-visibility`, `publish`, `unpublish`, plus
+`list-collections`, `create-collection`, `edit-collection`, `move-collection`,
+`archive-collection`, and `restore-collection`. Collection mutations use the same
+owner/admin hierarchy service as the UI and REST API: every owner can manage only
+their private tree, while district collection management requires administrator
+authority. `list-collections` combines active requester-visible collections
+(including accessible district/shared rows) with active and archived manageable
+rows. Manageable rows include grants and direct/subtree counts, so an owner can
+rediscover the UUID required to restore an archived subtree without losing
+district collection discovery.
+The agent
+works **version-based** (create-as-private, owner permission and capability
+gating) and acts as the **signed workspace owner** — a `user` requester. Writes
+are attributed to that owner; public publish/widen authority is never synthesized,
+so the existing approval gate remains in force.
 
-### Deployment — zero-touch (no manual credential steps)
+### Deployment — signed-owner broker
 
-The content key is **provisioned automatically at deploy time**. There is no
-"mint a key in the UI" or `put-secret-value` step. Two pieces do it:
+The `psd-atrium` runtime needs the internal agent broker origin and invocation
+proof configuration already used by the other owner-bound skills. It does **not**
+read `AISTUDIO_CONTENT_API_KEY` or
+`psd-agent/{env}/atrium-content-api-key`.
 
-1. **Migration `104-atrium-agent-service-user.sql`** seeds a dedicated service
-   user (`cognito_sub = service-account:psd-atrium-agent`, email
-   `atrium-agent-service@psd401.net`, display name **"PSD Agent (service)"**) and
-   grants it the **staff** role — the minimum role that grants internal Atrium
-   visibility and makes the `content:read/create/update/publish_internal` scopes
-   eligible.
-2. **The `AtriumContentKeyProvisioner` custom resource**
-   (`infra/lambdas/atrium-content-key-bootstrap/`, wired in
-   `infra/lib/agent-platform-stack.ts`) runs on every `cdk deploy` and
-   **idempotently** ensures `psd-agent/{env}/atrium-content-api-key` holds a
-   valid, active `sk-` key owned by that service user, scoped to
-   `content:read content:create content:update content:publish_internal`
-   (**not** `content:publish_public` — the §26.4 public-publish approval gate
-   stays; public publishes return `approval_required`). The DB stores only the
-   Argon2id hash; the plaintext is written to the secret and never logged.
-
-**Idempotency contract** (the custom resource re-runs each deploy — self-healing):
-
-| Secret state | Action |
-| --- | --- |
-| holds a valid, active, sufficiently-scoped key owned by the service user | **no-op** |
-| empty / malformed | **mint** |
-| points at a missing, inactive, revoked, or under-scoped key | **re-mint** (and revoke the service user's other active keys, so exactly one stays live) |
-
-**Rotation:** delete the secret value **or** revoke/delete the `api_keys` row →
-the next `cdk deploy` re-mints. (No dedicated rotation Lambda; a redeploy is the
-rotation trigger.)
-
-**Runtime env** (wired by `infra/lib/agent-platform-stack.ts`, no manual step):
-`AISTUDIO_CONTENT_API_KEY_SECRET_ID` points the skill at that secret;
-`APP_BASE_URL` supplies the `/api/v1/content` base. (`AISTUDIO_CONTENT_API_KEY`
-may be set directly for local/dev instead of the secret.)
+Migration 104 and the `AtriumContentKeyProvisioner` may remain for legacy
+service-principal clients, but that shared identity is not an authorization
+conduit for owner-bound workspace operations.
 
 #### The psd-aistudio MCP key (`platform:read`, Issue #1100)
 
@@ -166,19 +152,16 @@ The `psd-aistudio` discovery skill's `platform:read` key is provisioned by the
 
 **The only remaining human steps:**
 
-1. **`cdk deploy`** — applies migrations 104 (atrium content service user) and
-   108 (psd-aistudio MCP service user) and runs BOTH key-bootstrap custom
-   resources (DatabaseStack deploys before AgentPlatformStack, so the service
-   users exist before the keys are minted).
+1. **`cdk deploy`** — applies the current migrations, including migration 139
+   for repository OAuth and Nexus Projects, and provisions the `psd-aistudio`
+   discovery key. Atrium workspace operations use signed-owner broker authority
+   rather than the legacy content service key.
 2. **Rebuild + redeploy the agent image** — the agent discovers the skill only
    after `infra/agent-image` is rebuilt and the AgentCore runtime redeployed.
 
-Provenance & screening: writes land as the service user (a `user`/`kind:"user"`
-requester), attributed to **"PSD Agent (service)"** as a human `authorActor`, and
-are **not** §28.3-screened — platform guardrails run telemetry-only by product
-decision, and the `sk-`/owner path is the trusted-caller path (see the Safety
-invariants above). True agent-identity (delegated/autonomous) writes remain
-screened and attributed to the agent.
+Provenance: writes land as the signed workspace owner (`user` requester), with
+the same object ownership and capability checks as that human. A missing or
+inactive owner fails closed before any content service call.
 
 ## Acting on behalf of a specific user (delegated tokens)
 
@@ -219,8 +202,9 @@ Boot-log check: `Local: http://localhost:3000` = healthy;
 | Symptom | Likely cause |
 |---|---|
 | 401 from `/api/mcp` using `AGENT_INTERNAL_API_KEY` | Wrong credential class — mint an `sk-` key (see gotcha above) |
-| `psd-atrium` exits 11 (unauthorized / not configured) | The content key isn't in the secret. It is auto-provisioned by the `AtriumContentKeyProvisioner` custom resource on `cdk deploy` — check its CloudWatch logs (`/aws/lambda/psd-agent-atrium-key-bootstrap-<env>`). A re-deploy re-mints. (`AISTUDIO_CONTENT_API_KEY` may be set directly for local/dev.) |
+| `psd-atrium` exits 11 (unauthorized / not configured) | The signed invocation proof is missing/invalid, or its owner no longer resolves to an active Atrium requester. Check the agent broker proof configuration and the owner's user/capability records. |
 | `psd-aistudio` exits 11 (no credential configured) | The `platform:read` MCP key isn't in the secret. It is auto-provisioned by the `AistudioMcpKeyProvisioner` custom resource on `cdk deploy` — check its CloudWatch logs (`/aws/lambda/psd-agent-aistudio-mcp-key-bootstrap-<env>`); confirm migration 108 applied. A re-deploy re-mints. (`AISTUDIO_MCP_API_KEY` may be set directly for local/dev.) |
+| A `psd-aistudio repositories-*` command reports insufficient scope | Run `psd-aistudio connect --user <email>` and complete the one-time AI Studio consent. The shared discovery key intentionally has no repository scopes. |
 | `psd-atrium publish` returns `approval_required` | Public destination without `content:publish_public` — expected; relay the message so the user knows it's queued |
 | 403 `INSUFFICIENT_SCOPE` on a content tool | Key lacks the scope in the table above |
 | `publish_content` returns `approval_required` | Public destination — needs human/admin `content:publish_public`; internal destinations publish directly |

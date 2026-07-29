@@ -155,7 +155,7 @@ function input(
   };
 }
 
-describe("Atrium mutation idempotency", () => {
+function defineAtriumMutationIdempotencySuite1Part1() {
   it("replays the exact successful response without executing twice", async () => {
     const store = new MemoryStore();
     const testInput = input(store, "capture-123");
@@ -248,7 +248,9 @@ describe("Atrium mutation idempotency", () => {
     await first;
   });
 
-  it("keeps an interrupted operation reserved rather than risking a duplicate", async () => {
+  }
+
+function defineAtriumMutationIdempotencySuite1Part2() {it("keeps an interrupted operation reserved rather than risking a duplicate", async () => {
     const store = new MemoryStore();
     const testInput = input(store, "interrupted-key");
     const execute = jest.fn(async () => {
@@ -337,7 +339,9 @@ describe("Atrium mutation idempotency", () => {
     expect(committedObjects).toHaveLength(1);
   });
 
-  it("releases a returned 5xx so a same-key retry can execute again", async () => {
+  }
+
+function defineAtriumMutationIdempotencySuite1Part3() {it("releases a returned 5xx so a same-key retry can execute again", async () => {
     const store = new MemoryStore();
     const testInput = input(store, "retry-transient-500");
     const execute = jest
@@ -374,9 +378,17 @@ describe("Atrium mutation idempotency", () => {
     expect(record?.expiresAt.toISOString()).toBe("2026-07-30T12:00:00.000Z");
     expect(store.cleanupLimits.every((limit) => limit <= 500)).toBe(true);
   });
-});
+}
 
-describe("Atrium idempotency and ETag parsing", () => {
+const defineAtriumMutationIdempotencySuite1 = () => {
+  defineAtriumMutationIdempotencySuite1Part1()
+  defineAtriumMutationIdempotencySuite1Part2()
+  defineAtriumMutationIdempotencySuite1Part3()
+};
+
+describe("Atrium mutation idempotency", defineAtriumMutationIdempotencySuite1);
+
+const defineAtriumIdempotencyAndETagParsingSuite2 = () => {
   it("hashes object keys deterministically without storing source values", () => {
     expect(hashIdempotencyRequest({ b: 2, a: { d: 4, c: 3 } })).toBe(
       hashIdempotencyRequest({ a: { c: 3, d: 4 }, b: 2 })
@@ -409,4 +421,6 @@ describe("Atrium idempotency and ETag parsing", () => {
     });
     expect(parseContentIfMatch('"one", "two"')).toEqual({ ok: false });
   });
-});
+};
+
+describe("Atrium idempotency and ETag parsing", defineAtriumIdempotencyAndETagParsingSuite2);

@@ -1,0 +1,40 @@
+name: Agent Eval Upstream Inventory
+
+on:
+  pull_request:
+    branches: [ "main", "dev" ]
+    paths:
+      - ".github/workflows/agent-eval-upstream-inventory.yml"
+      - "infra/agent-image/Dockerfile"
+      - "infra/agent-image/check_eval_coverage.py"
+      - "infra/agent-image/eval/upstream-skill-inventory.json"
+  push:
+    branches: [ "main", "dev" ]
+    paths:
+      - ".github/workflows/agent-eval-upstream-inventory.yml"
+      - "infra/agent-image/Dockerfile"
+      - "infra/agent-image/check_eval_coverage.py"
+      - "infra/agent-image/eval/upstream-skill-inventory.json"
+  schedule:
+    - cron: "43 14 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify pinned upstream skill inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Compare manifest with pinned upstream release
+        run: python3 infra/agent-image/check_eval_coverage.py --verify-upstream

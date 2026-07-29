@@ -39,9 +39,16 @@ const customJestConfig = {
   transformIgnorePatterns: [
     'node_modules/(?!(lucide-react|next-auth|@next-auth|nanoid)/)'
   ],
+  // Git worktrees under .claude/worktrees/ are full repo checkouts. Left
+  // unignored, a run from the repo root crawls every worktree and multiplies
+  // the discovered suite (~450 -> ~3600) with duplicate haste modules.
+  // These MUST stay anchored to <rootDir>: an unanchored '/.claude/worktrees/'
+  // also matches when rootDir *is* a worktree, so jest silently discovers zero
+  // tests and exits "No tests found" instead of failing a check.
   modulePathIgnorePatterns: [
     '<rootDir>/infra/cdk.out/',
     '<rootDir>/.next/',
+    '<rootDir>/.claude/worktrees/',
   ],
   testPathIgnorePatterns: [
     '/node_modules/',
@@ -49,6 +56,7 @@ const customJestConfig = {
     '/.next/',
     '/infra/', // Infra has its own Jest config
     '/infra/cdk.out/',
+    '<rootDir>/.claude/worktrees/', // Nested worktrees only - see note above
     'mock-sse-factory.ts' // Utility file, not a test file
   ]
 };

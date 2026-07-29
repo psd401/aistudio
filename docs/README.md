@@ -152,6 +152,9 @@ ECS streaming infrastructure operations and monitoring.
 #### [operations/production-migration-checklist.md](./operations/production-migration-checklist.md)
 Comprehensive checklist for deploying to production.
 
+#### [operations/unified-content-migration-retirement.md](./operations/unified-content-migration-retirement.md)
+Inventory, backfill, reconciliation, cutover, rollback, and legacy-content retirement runbook.
+
 #### [operations/tool-management.md](./operations/tool-management.md)
 Managing Assistant Architect tools and permissions.
 
@@ -173,6 +176,12 @@ AI integration patterns using Vercel AI SDK v6, provider factory implementation,
 **[Assistant Architect model routing](./features/assistant-architect-model-routing.md)** — Standard/Advanced authoring, shared capability-aware tier routing, legacy compatibility, execution surfaces, and independent rollout controls.
 
 **[Unified repository product integration](./features/unified-repository-product-integration.md)** — Authoritative Repository Manager source/ACL/version UI, Assistant Architect repository-only knowledge, Nexus private ephemeral attachments, promotion, retention, and rollback boundaries.
+
+**[Unified content agents and Projects](./features/unified-content-agents-and-projects.md)** — Repository catalog MCP/REST scopes, per-user OpenClaw PKCE OAuth, live skill repository bindings, and durable Nexus Project membership/repository/chat boundaries.
+
+**[Google Workspace content synchronization](./features/google-workspace-content-sync.md)** — PKCE OAuth and Picker selection across My Drive and user-accessible Shared Drives, durable cursor/version reconciliation, deployment-owned configuration, deletion grace, and operations.
+
+**[ClassLink OneRoster synchronization](./features/oneroster-classlink-sync.md)** — Nightly full-collection roster ingestion, OAuth1 and static-bearer Proxy configuration, fail-safe reconciliation invariants, metrics, alarms, rollout, and rollback.
 
 #### [features/navigation.md](./features/navigation.md)
 Dynamic navigation system with role-based menu items.
@@ -203,6 +212,9 @@ Tool integration for Assistant Architect prompts.
 
 #### [features/atrium-agent-access.md](./features/atrium-agent-access.md)
 **Connecting agents to Atrium content** — how a local MCP client (Claude Code etc.) or the PSD AI Agents (OpenClaw) read/write Atrium documents: API-key setup, the MCP content tools + scope table, the version-based vs live-document distinction, delegated tokens, and the loopback binding hazard for the live bridge.
+
+#### [features/atrium-collection-management.md](./features/atrium-collection-management.md)
+**Atrium collection management** — district/shared and owner-bound private hierarchies, inherited view/create grants, lifecycle and conflict rules, explicit count/filter semantics, audit coverage, and the UI/REST/skill surfaces.
 
 #### [features/assistant-architect-json-import-spec.md](./features/assistant-architect-json-import-spec.md)
 **Complete JSON import specification** for generating valid assistant import files. Includes schema reference, field types, variable substitution, execution patterns, and comprehensive examples.

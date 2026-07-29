@@ -13,6 +13,18 @@ import {
   MAX_BYTES,
 } from "@/lib/agents/agent-tools/web-fetch";
 import type { McpToolContext } from "@/lib/mcp/types";
+import { setSafeFetchTransportForTests } from "@/lib/security/safe-fetch";
+
+let transportMock = jest.fn();
+setSafeFetchTransportForTests((input, init) => transportMock(input, init));
+
+beforeEach(() => {
+  transportMock = jest.fn();
+});
+
+afterAll(() => {
+  setSafeFetchTransportForTests(undefined);
+});
 
 const ctx: McpToolContext = {
   userId: 1,
@@ -34,7 +46,7 @@ function withNodeEnv(value: string, fn: () => void) {
   }
 }
 
-describe("assertSafeFetchUrl", () => {
+const defineAssertSafeFetchUrlSuite1 = () => {
   it("allows a public https URL", () => {
     expect(assertSafeFetchUrl("https://example.com/page").hostname).toBe(
       "example.com"
@@ -89,9 +101,11 @@ describe("assertSafeFetchUrl", () => {
       expect(assertSafeFetchUrl("http://example.com").protocol).toBe("http:");
     });
   });
-});
+};
 
-describe("htmlToText", () => {
+describe("assertSafeFetchUrl", defineAssertSafeFetchUrlSuite1);
+
+const defineHtmlToTextSuite2 = () => {
   it("strips script/style blocks and tags, decodes entities", () => {
     const html =
       "<html><head><style>.x{}</style></head><body>" +
@@ -112,9 +126,11 @@ describe("htmlToText", () => {
     expect(text).not.toMatch(/secret/);
     expect(text).not.toMatch(/leak/);
   });
-});
+};
 
-describe("handleWebFetch", () => {
+describe("htmlToText", defineHtmlToTextSuite2);
+
+const defineHandleWebFetchSuite3 = () => {
   afterEach(() => {
     jest.restoreAllMocks();
   });
@@ -132,7 +148,7 @@ describe("handleWebFetch", () => {
   });
 
   it("fetches and returns readable text for an html page", async () => {
-    global.fetch = jest.fn().mockResolvedValue({
+    transportMock = jest.fn().mockResolvedValue({
       ok: true,
       status: 200,
       statusText: "OK",
@@ -147,7 +163,7 @@ describe("handleWebFetch", () => {
   });
 
   it("returns an error for a non-OK HTTP status", async () => {
-    global.fetch = jest.fn().mockResolvedValue({
+    transportMock = jest.fn().mockResolvedValue({
       ok: false,
       status: 404,
       statusText: "Not Found",
@@ -161,7 +177,7 @@ describe("handleWebFetch", () => {
   });
 
   it("refuses non-text content types", async () => {
-    global.fetch = jest.fn().mockResolvedValue({
+    transportMock = jest.fn().mockResolvedValue({
       ok: true,
       status: 200,
       statusText: "OK",
@@ -175,7 +191,7 @@ describe("handleWebFetch", () => {
   });
 
   it("truncates output to maxChars", async () => {
-    global.fetch = jest.fn().mockResolvedValue({
+    transportMock = jest.fn().mockResolvedValue({
       ok: true,
       status: 200,
       statusText: "OK",
@@ -189,9 +205,11 @@ describe("handleWebFetch", () => {
     );
     expect(res.content[0].text).toMatch(/…\[truncated\]/);
   });
-});
+};
 
-describe("handleWebFetch redirect guard (REV-COR-496)", () => {
+describe("handleWebFetch", defineHandleWebFetchSuite3);
+
+const defineHandleWebFetchRedirectGuardREVCOR496Suite4 = () => {
   afterEach(() => {
     jest.restoreAllMocks();
   });
@@ -227,7 +245,7 @@ describe("handleWebFetch redirect guard (REV-COR-496)", () => {
         .fn()
         .mockResolvedValueOnce(redirectTo(target))
         .mockResolvedValueOnce(ok200Html("SECRET_INTERNAL_BODY_9c3f"));
-      global.fetch = fetchMock;
+      transportMock = fetchMock;
       const res = await handleWebFetch({ url: "https://example.com/start" }, ctx);
       expect(res.isError).toBe(true);
       expect(res.content[0].text).not.toContain("SECRET_INTERNAL_BODY_9c3f");
@@ -237,7 +255,7 @@ describe("handleWebFetch redirect guard (REV-COR-496)", () => {
   );
 
   it("follows a legitimate http→https redirect on a public host and returns text", async () => {
-    global.fetch = jest
+    transportMock = jest
       .fn()
       .mockResolvedValueOnce(redirectTo("https://example.com/final", 301))
       .mockResolvedValueOnce(ok200Html("<p>Final page</p>"));
@@ -250,16 +268,18 @@ describe("handleWebFetch redirect guard (REV-COR-496)", () => {
     const fetchMock = jest
       .fn()
       .mockResolvedValue(redirectTo("https://example.com/loop"));
-    global.fetch = fetchMock;
+    transportMock = fetchMock;
     const res = await handleWebFetch({ url: "https://example.com/loop" }, ctx);
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/too many redirects/i);
     // MAX_REDIRECTS = 5 → 6 fetches (hops 0..5) then bail.
     expect(fetchMock).toHaveBeenCalledTimes(6);
   });
-});
+};
 
-describe("readResponseText byte cap (REV-COR-500)", () => {
+describe("handleWebFetch redirect guard (REV-COR-496)", defineHandleWebFetchRedirectGuardREVCOR496Suite4);
+
+const defineReadResponseTextByteCapREVCOR500Suite5 = () => {
   it("stops reading at MAX_BYTES and cancels the stream", async () => {
     const CHUNK = 1_000_000;
     let enqueued = 0;
@@ -308,9 +328,11 @@ describe("readResponseText byte cap (REV-COR-500)", () => {
     );
     expect(readerCreated).toBe(false);
   });
-});
+};
 
-describe("htmlToText input bounding (REV-PERF-005)", () => {
+describe("readResponseText byte cap (REV-COR-500)", defineReadResponseTextByteCapREVCOR500Suite5);
+
+const defineHtmlToTextInputBoundingREVPERF005Suite6 = () => {
   afterEach(() => {
     jest.restoreAllMocks();
   });
@@ -323,7 +345,7 @@ describe("htmlToText input bounding (REV-PERF-005)", () => {
     // boundary, proving normalization ran on the bounded slice, not the full 5 MB.
     const filler = "<!-- x -->".repeat(900); // 9000 chars
     const html = `<p>START</p>${filler}<p>ENDMARKER</p>`;
-    global.fetch = jest.fn().mockResolvedValue({
+    transportMock = jest.fn().mockResolvedValue({
       ok: true,
       status: 200,
       statusText: "OK",
@@ -338,4 +360,6 @@ describe("htmlToText input bounding (REV-PERF-005)", () => {
     expect(res.content[0].text).toContain("START");
     expect(res.content[0].text).not.toContain("ENDMARKER");
   });
-});
+};
+
+describe("htmlToText input bounding (REV-PERF-005)", defineHtmlToTextInputBoundingREVPERF005Suite6);

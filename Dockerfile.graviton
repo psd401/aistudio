@@ -78,7 +78,43 @@ WORKDIR /app
 # Install runtime dependencies optimized for ARM64
 # curl for health checks, su-exec for user switching in entrypoint
 # (ECS provides init process via initProcessEnabled: true)
-RUN apk add --no-cache curl su-exec
+RUN apk add --no-cache curl su-exec libc6-compat
+
+# Google Workspace CLI lives only in the trusted web tier. The model-facing
+# AgentCore image has no raw binary or OAuth token; requests arrive here through
+# the owner-bound /api/agent/workspace-execute policy broker.
+ARG GWS_VERSION=0.22.5
+# MUSL build, not gnu. This stage is node:22-alpine, so the glibc artifact
+# installs fine and then dies at first exec with
+# "Error relocating /usr/local/bin/gws: __res_init: symbol not found" —
+# gcompat does not implement glibc's resolver symbols. Because the RUN ends in
+# `gws --version`, that failure surfaces at BUILD time, which is the one good
+# thing about it. When bumping the version, take the digest from the MUSL
+# sidecar:
+#   curl -sL "https://github.com/googleworkspace/cli/releases/download/v<VER>/google-workspace-cli-aarch64-unknown-linux-musl.tar.gz.sha256"
+ARG GWS_SHA256=e700fe63524932b10ec2130b47ece90aa850e66005fe52ccfc4cf8767bf9919a
+RUN set -eux; \
+    curl -fsSL -o /tmp/gws.tar.gz \
+      "https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/google-workspace-cli-aarch64-unknown-linux-musl.tar.gz"; \
+    echo "${GWS_SHA256}  /tmp/gws.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/gws.tar.gz -C /tmp ./gws; \
+    install -m 0755 /tmp/gws /usr/local/bin/gws; \
+    rm -f /tmp/gws.tar.gz /tmp/gws; \
+    /usr/local/bin/gws --version
+
+# GitHub CLI is likewise confined to the trusted web tier. The agent-side
+# compatibility command sends argv to /api/agent/github-execute and never sees
+# a PAT. The server applies a second strict allowlist before this binary runs.
+ARG GH_VERSION=2.92.0
+ARG GH_SHA256=c2248526dd0160c08d3fccca2332c3c1a07c15a78b23978e77735f1b5a18cfee
+RUN set -eux; \
+    curl -fsSL -o /tmp/gh.tar.gz \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_arm64.tar.gz"; \
+    echo "${GH_SHA256}  /tmp/gh.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/gh.tar.gz -C /tmp; \
+    install -m 0755 "/tmp/gh_${GH_VERSION}_linux_arm64/bin/gh" /usr/local/bin/gh; \
+    rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_arm64"; \
+    /usr/local/bin/gh --version
 
 # Create non-root user for security
 RUN addgroup --system --gid 1001 nodejs && \

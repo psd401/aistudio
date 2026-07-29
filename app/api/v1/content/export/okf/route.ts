@@ -59,7 +59,11 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     // slug/id — caught below and mapped consistently with every other content route.
     // The required overload guarantees a defined id for a zod-validated `.min(1)`
     // input, so no `undefined` narrowing is needed here.
-    const collectionId = await resolveCollectionId(input.collectionId);
+    const collectionId = await resolveCollectionId(
+      req,
+      input.collectionId,
+      "view"
+    );
     const result = await okfExportService.exportCollection(req, collectionId, {
       audience: input.audience,
       hasPublishPublicCapability,

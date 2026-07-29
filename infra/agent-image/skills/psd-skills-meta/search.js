@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * search.js — skills.search
- * Usage: node search.js --user <email> --query <search term>
+ * Usage: node search.js --query <search term>
  *
  * Searches the skill catalog by name or summary keyword.
  * Returns name + summary only (no full SKILL.md content).
@@ -11,29 +11,26 @@
 
 const {
   fail,
-  validateEnv,
-  validateUserEmail,
+  rejectAuthorityArgs,
   parseArgs,
   emit,
-  searchSkills,
+  skillBroker,
 } = require('./common');
 
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
-    console.log('Usage: search.js --user <email> --query <search term>');
+    console.log('Usage: search.js --query <search term>');
     process.exit(0);
   }
-  validateEnv();
-  validateUserEmail(args.user);
+  rejectAuthorityArgs(args);
 
   if (!args.query) {
     fail('--query is required (search term)');
   }
 
   try {
-    const results = await searchSkills(args.query, args.user);
-    emit({ skills: results, count: results.length });
+    emit(await skillBroker('search', { query: args.query }));
   } catch (err) {
     fail(`Search failed: ${err.message}`);
   }

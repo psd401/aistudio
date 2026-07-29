@@ -4,6 +4,13 @@ export const CONTENT_PLATFORM_SETTING_KEYS = {
   enabled: "CONTENT_PLATFORM_ENABLED",
   dualWriteEnabled: "CONTENT_DUAL_WRITE_ENABLED",
   readV2Enabled: "CONTENT_READ_V2_ENABLED",
+  repositoryCutoverEnabled: "CONTENT_REPOSITORY_CUTOVER_ENABLED",
+  nexusCutoverEnabled: "CONTENT_NEXUS_CUTOVER_ENABLED",
+  assistantArchitectCutoverEnabled:
+    "CONTENT_ASSISTANT_ARCHITECT_CUTOVER_ENABLED",
+  retrievalShadowEnabled: "CONTENT_RETRIEVAL_SHADOW_ENABLED",
+  legacyRetirementEnabled: "CONTENT_LEGACY_RETIREMENT_ENABLED",
+  migrationRecoveryDays: "CONTENT_MIGRATION_RECOVERY_DAYS",
   nexusAttachmentRetentionDays: "NEXUS_ATTACHMENT_RETENTION_DAYS",
   deletionGraceDays: "CONTENT_DELETION_GRACE_DAYS",
   maxFileSizeGb: "CONTENT_MAX_FILE_SIZE_GB",
@@ -34,6 +41,12 @@ export interface ContentPlatformConfig {
   enabled: boolean;
   dualWriteEnabled: boolean;
   readV2Enabled: boolean;
+  repositoryCutoverEnabled: boolean;
+  nexusCutoverEnabled: boolean;
+  assistantArchitectCutoverEnabled: boolean;
+  retrievalShadowEnabled: boolean;
+  legacyRetirementEnabled: boolean;
+  migrationRecoveryDays: number;
   nexusAttachmentRetentionDays: number;
   deletionGraceDays: number;
   maxFileSizeGb: number;
@@ -62,6 +75,12 @@ export const DEFAULT_CONTENT_PLATFORM_CONFIG: Readonly<ContentPlatformConfig> = 
   enabled: false,
   dualWriteEnabled: false,
   readV2Enabled: false,
+  repositoryCutoverEnabled: false,
+  nexusCutoverEnabled: false,
+  assistantArchitectCutoverEnabled: false,
+  retrievalShadowEnabled: false,
+  legacyRetirementEnabled: false,
+  migrationRecoveryDays: 7,
   nexusAttachmentRetentionDays: 30,
   deletionGraceDays: 7,
   maxFileSizeGb: 10,
@@ -153,6 +172,32 @@ export function parseContentPlatformConfig(
     readV2Enabled: parseBoolean(
       raw[keys.readV2Enabled],
       DEFAULT_CONTENT_PLATFORM_CONFIG.readV2Enabled
+    ),
+    repositoryCutoverEnabled: parseBoolean(
+      raw[keys.repositoryCutoverEnabled],
+      DEFAULT_CONTENT_PLATFORM_CONFIG.repositoryCutoverEnabled
+    ),
+    nexusCutoverEnabled: parseBoolean(
+      raw[keys.nexusCutoverEnabled],
+      DEFAULT_CONTENT_PLATFORM_CONFIG.nexusCutoverEnabled
+    ),
+    assistantArchitectCutoverEnabled: parseBoolean(
+      raw[keys.assistantArchitectCutoverEnabled],
+      DEFAULT_CONTENT_PLATFORM_CONFIG.assistantArchitectCutoverEnabled
+    ),
+    retrievalShadowEnabled: parseBoolean(
+      raw[keys.retrievalShadowEnabled],
+      DEFAULT_CONTENT_PLATFORM_CONFIG.retrievalShadowEnabled
+    ),
+    legacyRetirementEnabled: parseBoolean(
+      raw[keys.legacyRetirementEnabled],
+      DEFAULT_CONTENT_PLATFORM_CONFIG.legacyRetirementEnabled
+    ),
+    migrationRecoveryDays: parseBoundedInteger(
+      raw[keys.migrationRecoveryDays],
+      DEFAULT_CONTENT_PLATFORM_CONFIG.migrationRecoveryDays,
+      1,
+      90
     ),
     nexusAttachmentRetentionDays: parseBoundedInteger(
       raw[keys.nexusAttachmentRetentionDays],
@@ -290,5 +335,38 @@ export function isContentReadV2Active(config: ContentPlatformConfig): boolean {
 export function isCanonicalRepositoryUploadActive(
   config: ContentPlatformConfig
 ): boolean {
-  return config.enabled && config.dualWriteEnabled && config.readV2Enabled;
+  return (
+    config.enabled &&
+    config.readV2Enabled &&
+    config.repositoryCutoverEnabled
+  );
+}
+
+export function isCanonicalNexusAttachmentActive(
+  config: ContentPlatformConfig
+): boolean {
+  return config.enabled && config.readV2Enabled && config.nexusCutoverEnabled;
+}
+
+export function isCanonicalAssistantArchitectActive(
+  config: ContentPlatformConfig
+): boolean {
+  return (
+    config.enabled &&
+    config.readV2Enabled &&
+    config.assistantArchitectCutoverEnabled
+  );
+}
+
+export function isLegacyContentRetirementConfigured(
+  config: ContentPlatformConfig
+): boolean {
+  return (
+    config.enabled &&
+    config.readV2Enabled &&
+    config.repositoryCutoverEnabled &&
+    config.nexusCutoverEnabled &&
+    config.assistantArchitectCutoverEnabled &&
+    config.legacyRetirementEnabled
+  );
 }

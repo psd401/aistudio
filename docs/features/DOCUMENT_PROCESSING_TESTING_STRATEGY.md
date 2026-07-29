@@ -32,8 +32,8 @@ Based on commit analysis and code review:
    - Image: Vision-capable adapters for GPT-4V, Claude 3, Gemini
 
 3. **Test Coverage**
-   - Unit tests for API routes (`documents-v2.test.ts`)
-   - Service layer tests (`document-processing-v2.test.ts`) 
+   - Unit tests for API routes and service contracts (`documents-v2.test.ts`,
+     `documents-v2-server-upload.test.ts`)
    - Mock AWS service interactions
    - Integration workflow tests
 

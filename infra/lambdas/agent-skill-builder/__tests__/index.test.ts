@@ -11,72 +11,158 @@
  * and strips the type-only `aws-lambda` import at runtime.
  */
 
-import { test, expect, describe } from 'bun:test';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
-import { execSync } from 'child_process';
+import { test, expect, describe } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { execSync } from "node:child_process";
 
 import {
+  assertSkillScanPrefixes,
+  claimSkillScan,
+  shouldRollbackDestinationUpload,
   installSkillDependencies,
   auditInstalledDeps,
+  hashDependencyLockfile,
   downloadSkillFromS3,
-} from '../index';
+  isValidOwnerKey,
+} from "../index";
+import type { RDSDataClient } from "@aws-sdk/client-rds-data";
+import type { S3Client } from "@aws-sdk/client-s3";
+import { validatedFs } from "../validated-fs";
 
 type Warn = { message: string; meta?: Record<string, unknown> };
 function collectingLogger(warnings: Warn[]) {
   return {
     info: () => {},
-    warn: (message: string, meta?: Record<string, unknown>) => warnings.push({ message, meta }),
+    warn: (message: string, meta?: Record<string, unknown>) =>
+      warnings.push({ message, meta }),
     error: () => {},
   };
 }
 
 function makeSkillDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'skillbuild-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "skillbuild-"));
 }
+
+const VALID_SCAN_EVENT = {
+  skillId: "123e4567-e89b-42d3-a456-426614174000",
+  ownerKey: "owner@example.com",
+  version: 2,
+  scanLeaseId: "123e4567-e89b-42d3-a456-426614174001",
+  idempotencyKey: "skill-version-2",
+  s3Key:
+    "skills/user/owner@example.com/drafts/report/versions/" +
+    "123e4567-e89b-42d3-a456-426614174002",
+  destinationPrefix:
+    "skills/user/owner@example.com/approved/report/versions/" +
+    "123e4567-e89b-42d3-a456-426614174002",
+  scope: "user" as const,
+};
+
+describe("skill scan event binding", () => {
+  test("validates owner keys in bounded linear time", () => {
+    expect(isValidOwnerKey("owner@example.com")).toBe(true);
+    expect(isValidOwnerKey("owner/name@example.com")).toBe(false);
+    expect(isValidOwnerKey("owner @example.com")).toBe(false);
+    expect(isValidOwnerKey(`${"!.".repeat(200)}@example.com`)).toBe(false);
+  });
+
+  test("requires the exact deterministic draft-to-approved mapping", () => {
+    expect(() => assertSkillScanPrefixes(VALID_SCAN_EVENT)).not.toThrow();
+    expect(() =>
+      assertSkillScanPrefixes({
+        ...VALID_SCAN_EVENT,
+        destinationPrefix:
+          "skills/user/owner@example.com/approved/other/versions/" +
+          "123e4567-e89b-42d3-a456-426614174002",
+      }),
+    ).toThrow(/owner-bound/);
+  });
+
+  test("does not delete approved bytes when audit fails after DB promotion", () => {
+    expect(shouldRollbackDestinationUpload(true, true)).toBe(false);
+    expect(shouldRollbackDestinationUpload(true, false)).toBe(true);
+  });
+
+  test("binds a same-owner source substitution to the claimed database row", async () => {
+    const commands: Array<{
+      input?: {
+        sql?: string;
+        parameters?: Array<{ name?: string; value?: { stringValue?: string } }>;
+      };
+    }> = [];
+    const fakeRds = {
+      send: async (command: (typeof commands)[number]) => {
+        commands.push(command);
+        return { records: [] };
+      },
+    } as unknown as RDSDataClient;
+    await expect(
+      claimSkillScan(
+        {
+          ...VALID_SCAN_EVENT,
+          s3Key:
+            "skills/user/owner@example.com/drafts/other/versions/" +
+            "123e4567-e89b-42d3-a456-426614174003",
+          destinationPrefix:
+            "skills/user/owner@example.com/approved/other/versions/" +
+            "123e4567-e89b-42d3-a456-426614174003",
+        },
+        fakeRds,
+      ),
+    ).resolves.toBe(false);
+    expect(commands[0]?.input?.sql).toContain("skill.s3_key = :source");
+    expect(
+      commands[0]?.input?.parameters?.find(({ name }) => name === "source")
+        ?.value?.stringValue,
+    ).toContain("/drafts/other/");
+  });
+});
 
 // A postinstall that writes a sentinel file into the package cwd. If it runs,
 // the sentinel exists — i.e. arbitrary code executed during the build.
 const MALICIOUS_PKG = JSON.stringify({
-  name: 'evil-skill',
-  version: '1.0.0',
-  scripts: { postinstall: "node -e \"require('fs').writeFileSync('PWNED','x')\"" },
+  name: "evil-skill",
+  version: "1.0.0",
+  scripts: {
+    postinstall: "node -e \"require('fs').writeFileSync('PWNED','x')\"",
+  },
 });
 
-describe('installSkillDependencies (REV-INFRA-061)', () => {
-  test('does NOT execute a malicious postinstall lifecycle script', () => {
+describe("installSkillDependencies (REV-INFRA-061)", () => {
+  test("does NOT execute a malicious postinstall lifecycle script", () => {
     const dir = makeSkillDir();
     try {
-      fs.writeFileSync(path.join(dir, 'package.json'), MALICIOUS_PKG);
+      validatedFs.writeFileSync(path.join(dir, "package.json"), MALICIOUS_PKG);
       installSkillDependencies(dir);
-      expect(fs.existsSync(path.join(dir, 'PWNED'))).toBe(false);
+      expect(validatedFs.existsSync(path.join(dir, "PWNED"))).toBe(false);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test('control: the same postinstall DOES run without --ignore-scripts (fixture is valid)', () => {
+  test("control: the same postinstall DOES run without --ignore-scripts (fixture is valid)", () => {
     const dir = makeSkillDir();
     try {
-      fs.writeFileSync(path.join(dir, 'package.json'), MALICIOUS_PKG);
-      execSync('npm install --production --no-audit --no-fund', {
+      validatedFs.writeFileSync(path.join(dir, "package.json"), MALICIOUS_PKG);
+      execSync("npm install --production --no-audit --no-fund", {
         cwd: dir,
-        stdio: 'pipe',
-        env: { ...process.env, HOME: '/tmp', npm_config_cache: '/tmp/.npm' },
+        stdio: "pipe",
+        env: { ...process.env, HOME: "/tmp", npm_config_cache: "/tmp/.npm" },
       });
-      expect(fs.existsSync(path.join(dir, 'PWNED'))).toBe(true);
+      expect(validatedFs.existsSync(path.join(dir, "PWNED"))).toBe(true);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test('a benign skill (no scripts, no deps) installs without error', () => {
+  test("a benign skill (no scripts, no deps) installs without error", () => {
     const dir = makeSkillDir();
     try {
-      fs.writeFileSync(
-        path.join(dir, 'package.json'),
-        JSON.stringify({ name: 'good-skill', version: '1.0.0' }),
+      validatedFs.writeFileSync(
+        path.join(dir, "package.json"),
+        JSON.stringify({ name: "good-skill", version: "1.0.0" }),
       );
       expect(() => installSkillDependencies(dir)).not.toThrow();
     } finally {
@@ -85,80 +171,134 @@ describe('installSkillDependencies (REV-INFRA-061)', () => {
   });
 });
 
-describe('auditInstalledDeps (REV-INFRA-062)', () => {
-  test('returns high/critical advisories parsed from audit JSON', () => {
+describe("auditInstalledDeps (REV-INFRA-062)", () => {
+  test("returns high/critical advisories parsed from audit JSON", () => {
     const warnings: Warn[] = [];
     const fakeExec = () =>
       JSON.stringify({
         vulnerabilities: {
-          lodash: { severity: 'high', name: 'lodash' },
-          ms: { severity: 'critical', name: 'ms' },
-          chalk: { severity: 'low', name: 'chalk' }, // below threshold — ignored
+          lodash: { severity: "high", name: "lodash" },
+          ms: { severity: "critical", name: "ms" },
+          chalk: { severity: "low", name: "chalk" }, // below threshold — ignored
         },
       });
-    const out = auditInstalledDeps('/work', collectingLogger(warnings), fakeExec);
-    expect(out.map((o) => o.severity).sort()).toEqual(['critical', 'high']);
+    const out = auditInstalledDeps(
+      "/work",
+      collectingLogger(warnings),
+      fakeExec,
+    );
+    expect(out.map((o) => o.severity).sort()).toEqual(["critical", "high"]);
     expect(warnings.length).toBe(0);
   });
 
-  test('a clean dependency tree yields no advisories', () => {
+  test("a clean dependency tree yields no advisories", () => {
     const fakeExec = () => JSON.stringify({ vulnerabilities: {} });
-    expect(auditInstalledDeps('/work', collectingLogger([]), fakeExec)).toEqual([]);
+    expect(auditInstalledDeps("/work", collectingLogger([]), fakeExec)).toEqual(
+      [],
+    );
   });
 
-  test('unparseable audit output degrades gracefully with a WARNING (never a silent pass)', () => {
+  test("unparseable audit output blocks promotion", () => {
     const warnings: Warn[] = [];
-    const fakeExec = () => 'npm error code ENOLOCK\nThis is not JSON';
-    const out = auditInstalledDeps('/work', collectingLogger(warnings), fakeExec);
-    expect(out).toEqual([]);
+    const fakeExec = () => "npm error code ENOLOCK\nThis is not JSON";
+    expect(() =>
+      auditInstalledDeps("/work", collectingLogger(warnings), fakeExec),
+    ).toThrow(/parseable JSON/);
     expect(warnings.some((w) => /not evaluated/i.test(w.message))).toBe(true);
   });
 
-  test('audit tooling throwing (no stdout) degrades gracefully with a WARNING', () => {
+  test("audit tooling throwing without stdout blocks promotion", () => {
     const warnings: Warn[] = [];
     const fakeExec = () => {
-      throw new Error('spawn npm ENOENT');
+      throw new Error("spawn npm ENOENT");
     };
-    const out = auditInstalledDeps('/work', collectingLogger(warnings), fakeExec);
-    expect(out).toEqual([]);
+    expect(() =>
+      auditInstalledDeps("/work", collectingLogger(warnings), fakeExec),
+    ).toThrow(/could not run/);
     expect(warnings.some((w) => /not evaluated/i.test(w.message))).toBe(true);
   });
 
-  test('npm audit exiting non-zero for real vulnerabilities still parses stdout from the thrown error', () => {
+  test("npm audit exiting non-zero for real vulnerabilities still parses stdout from the thrown error", () => {
     const warnings: Warn[] = [];
     const fakeExec = () => {
-      const err = new Error('Command failed') as Error & { stdout: string };
+      const err = new Error("Command failed") as Error & { stdout: string };
       err.stdout = JSON.stringify({
-        vulnerabilities: { minimist: { severity: 'critical', name: 'minimist' } },
+        vulnerabilities: {
+          minimist: { severity: "critical", name: "minimist" },
+        },
       });
       throw err;
     };
-    const out = auditInstalledDeps('/work', collectingLogger(warnings), fakeExec);
-    expect(out).toEqual([{ severity: 'critical', title: 'minimist' }]);
+    const out = auditInstalledDeps(
+      "/work",
+      collectingLogger(warnings),
+      fakeExec,
+    );
+    expect(out).toEqual([{ severity: "critical", title: "minimist" }]);
     expect(warnings.length).toBe(0);
   });
 
-  test('a top-level `error` field (registry/auth failure) degrades gracefully with a WARNING, never a silent clean', () => {
+  test("a top-level registry/auth error blocks promotion", () => {
     const warnings: Warn[] = [];
-    const fakeExec = () => JSON.stringify({ error: { code: 'E401', summary: 'unauthorized' } });
-    const out = auditInstalledDeps('/work', collectingLogger(warnings), fakeExec);
-    expect(out).toEqual([]);
+    const fakeExec = () =>
+      JSON.stringify({ error: { code: "E401", summary: "unauthorized" } });
+    expect(() =>
+      auditInstalledDeps("/work", collectingLogger(warnings), fakeExec),
+    ).toThrow(/did not evaluate/);
     expect(warnings.some((w) => /not evaluated/i.test(w.message))).toBe(true);
+  });
+
+  test("records the exact installed lockfile digest as audit evidence", () => {
+    const dir = makeSkillDir();
+    try {
+      const lockfile = '{"lockfileVersion":3,"packages":{"":{"name":"clean"}}}';
+      validatedFs.writeFileSync(path.join(dir, "package-lock.json"), lockfile);
+      expect(hashDependencyLockfile(dir)).toBe(
+        "0db61f8d84ddaefa04349de1eade84a0493951e50c300610efc24d13c0fa1ecd",
+      );
+      validatedFs.writeFileSync(
+        path.join(dir, "package-lock.json"),
+        `${lockfile}\n`,
+      );
+      expect(hashDependencyLockfile(dir)).not.toBe(
+        "0db61f8d84ddaefa04349de1eade84a0493951e50c300610efc24d13c0fa1ecd",
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("blocks promotion evidence when npm produced no lockfile", () => {
+    const dir = makeSkillDir();
+    try {
+      expect(() => hashDependencyLockfile(dir)).toThrow(/package-lock\.json/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
-describe('downloadSkillFromS3 path-traversal guard (REV-INFRA-063)', () => {
+describe("downloadSkillFromS3 path-traversal guard (REV-INFRA-063)", () => {
   function fakeS3(keys: string[], getCalls: string[]) {
     return {
-      send: async (cmd: { constructor: { name: string }; input?: { Key?: string } }) => {
+      send: async (cmd: {
+        constructor: { name: string };
+        input?: { Key?: string };
+      }) => {
         const name = cmd.constructor.name;
-        if (name === 'ListObjectsV2Command') {
-          return { Contents: keys.map((Key) => ({ Key })), NextContinuationToken: undefined };
+        if (name === "ListObjectsV2Command") {
+          return {
+            Contents: keys.map((Key) => ({
+              Key,
+              Size: Buffer.byteLength("file-content"),
+            })),
+            NextContinuationToken: undefined,
+          };
         }
-        if (name === 'GetObjectCommand') {
-          getCalls.push(cmd.input?.Key ?? '');
+        if (name === "GetObjectCommand") {
+          getCalls.push(cmd.input?.Key ?? "");
           async function* body() {
-            yield Buffer.from('file-content');
+            yield Buffer.from("file-content");
           }
           return { Body: body() };
         }
@@ -167,11 +307,11 @@ describe('downloadSkillFromS3 path-traversal guard (REV-INFRA-063)', () => {
     };
   }
 
-  test('skips traversing keys, downloads only in-root keys, and warns', async () => {
+  test("skips traversing keys, downloads only in-root keys, and warns", async () => {
     const destDir = makeSkillDir();
     const warnings: Warn[] = [];
     const getCalls: string[] = [];
-    const prefix = 'drafts/skill-1/';
+    const prefix = "drafts/skill-1/";
     const keys = [
       `${prefix}src/index.js`, // benign nested
       `${prefix}../../evil.txt`, // zip-slip escape (resolves outside destDir)
@@ -182,29 +322,34 @@ describe('downloadSkillFromS3 path-traversal guard (REV-INFRA-063)', () => {
         prefix,
         destDir,
         collectingLogger(warnings),
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        fakeS3(keys, getCalls) as any,
+        fakeS3(keys, getCalls) as unknown as S3Client,
       );
 
       // benign files were written to the correct relative paths
-      expect(fs.existsSync(path.join(destDir, 'src', 'index.js'))).toBe(true);
-      expect(fs.existsSync(path.join(destDir, 'ok.md'))).toBe(true);
+      expect(
+        validatedFs.existsSync(path.join(destDir, "src", "index.js")),
+      ).toBe(true);
+      expect(validatedFs.existsSync(path.join(destDir, "ok.md"))).toBe(true);
       // the escaping object was never fetched or written
       expect(getCalls).toEqual([`${prefix}src/index.js`, `${prefix}ok.md`]);
-      expect(fs.existsSync(path.resolve(destDir, '..', '..', 'evil.txt'))).toBe(false);
+      expect(() =>
+        validatedFs.existsSync(path.resolve(destDir, "..", "..", "evil.txt")),
+      ).toThrow("Refusing read outside");
       // and it was logged
       expect(
-        warnings.some((w) => String(w.meta?.key ?? '').includes('../../evil.txt')),
+        warnings.some((w) =>
+          String(w.meta?.key ?? "").includes("../../evil.txt"),
+        ),
       ).toBe(true);
     } finally {
       fs.rmSync(destDir, { recursive: true, force: true });
     }
   });
 
-  test('normal nested keys still download to the correct relative path', async () => {
+  test("normal nested keys still download to the correct relative path", async () => {
     const destDir = makeSkillDir();
     const getCalls: string[] = [];
-    const prefix = 'drafts/skill-2/';
+    const prefix = "drafts/skill-2/";
     const keys = [`${prefix}a/b/c.ts`];
     try {
       await downloadSkillFromS3(
@@ -214,7 +359,9 @@ describe('downloadSkillFromS3 path-traversal guard (REV-INFRA-063)', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         fakeS3(keys, getCalls) as any,
       );
-      expect(fs.existsSync(path.join(destDir, 'a', 'b', 'c.ts'))).toBe(true);
+      expect(validatedFs.existsSync(path.join(destDir, "a", "b", "c.ts"))).toBe(
+        true,
+      );
     } finally {
       fs.rmSync(destDir, { recursive: true, force: true });
     }

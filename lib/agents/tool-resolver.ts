@@ -445,3 +445,20 @@ export async function closeAgentConnectorClients(
     });
   }
 }
+
+/**
+ * Keep resolved connector clients open on success, but close them if setup
+ * fails before the caller can install its normal stream lifecycle cleanup.
+ */
+export async function withAgentConnectorCleanupOnError<T>(
+  connectorResults: McpConnectorToolsResult[],
+  requestId: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    await closeAgentConnectorClients(connectorResults, requestId);
+    throw error;
+  }
+}

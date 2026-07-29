@@ -2,12 +2,23 @@
   "commands": {
     "lint": "bunx eslint .",
     "typecheck": "bun run typecheck",
-    "test": "cd infra/lambdas/group-sync && bun test"
+    "test": "(cd infra/lambdas/group-sync && bun test) && (cd infra/lambdas/nexus-conversation-retention && bun test)"
   },
   "e2e_required": false,
-  "e2e_flows": ["admin-groups"],
+  "e2e_flows": [
+    "admin-groups",
+    "nexus-keep-toggle",
+    "atrium-library-search",
+    "atrium-library-bulk",
+    "atrium-cover-picker",
+    "atrium-editor-sync-status",
+    "atrium-comments-toggle",
+    "atrium-publish-visibility",
+    "atrium-share-url",
+    "atrium-share-grants"
+  ],
   "strictness": "block",
-  "reviewers": ["chatgpt-codex-connector[bot]", "gemini-code-assist[bot]", "copilot-pull-request-reviewer[bot]"],
+  "reviewers": ["chatgpt-codex-connector[bot]", "copilot-pull-request-reviewer[bot]"],
   "commit_learnings": true,
   "auto_worktree": true,
   "screenshot_dir": ".verification",

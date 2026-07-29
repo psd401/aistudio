@@ -8,8 +8,8 @@ import {
   getSortedRowModel,
   getFilteredRowModel,
   SortingState,
-  useReactTable,
 } from "@tanstack/react-table"
+import { useUncompiledReactTable } from "@/components/ui/use-uncompiled-react-table"
 import {
   Table,
   TableBody,
@@ -91,6 +91,141 @@ function SortableHeader({
   )
 }
 
+function useModelColumns({
+  onViewModel,
+  onToggleActive,
+  onToggleNexus,
+  onToggleArchitect,
+  onDeleteModel,
+  loadingToggles,
+}: Pick<
+  ModelsDataTableProps,
+  | "onViewModel"
+  | "onToggleActive"
+  | "onToggleNexus"
+  | "onToggleArchitect"
+  | "onDeleteModel"
+  | "loadingToggles"
+>): ColumnDef<ModelTableRow>[] {
+  return useMemo(
+    () => [
+      {
+        accessorKey: "name",
+        header: ({ column }) => <SortableHeader column={column} title="Name" />,
+        cell: ({ row }) => (
+          <div className="font-medium">{row.original.name}</div>
+        ),
+        size: 200,
+      },
+      {
+        accessorKey: "provider",
+        header: ({ column }) => (
+          <SortableHeader column={column} title="Provider" />
+        ),
+        cell: ({ row }) => <ProviderBadge provider={row.original.provider} />,
+        size: 120,
+      },
+      {
+        accessorKey: "modelId",
+        header: ({ column }) => (
+          <SortableHeader column={column} title="Model ID" />
+        ),
+        cell: ({ row }) => (
+          <code className="rounded bg-muted px-2 py-1 text-xs text-muted-foreground">
+            {row.original.modelId}
+          </code>
+        ),
+        size: 200,
+      },
+      {
+        accessorKey: "active",
+        header: "Active",
+        cell: ({ row }) => (
+          <Switch
+            checked={row.original.active}
+            onCheckedChange={(checked) =>
+              onToggleActive(row.original.id, checked)
+            }
+            disabled={loadingToggles?.has(row.original.id)}
+            aria-label={`Toggle active for ${row.original.name}`}
+            aria-busy={loadingToggles?.has(row.original.id)}
+          />
+        ),
+        size: 80,
+      },
+      {
+        accessorKey: "nexusEnabled",
+        header: "Nexus",
+        cell: ({ row }) => (
+          <Switch
+            checked={row.original.nexusEnabled}
+            onCheckedChange={(checked) =>
+              onToggleNexus(row.original.id, checked)
+            }
+            disabled={loadingToggles?.has(row.original.id)}
+            aria-label={`Toggle Nexus for ${row.original.name}`}
+            aria-busy={loadingToggles?.has(row.original.id)}
+          />
+        ),
+        size: 80,
+      },
+      {
+        accessorKey: "architectEnabled",
+        header: "Architect",
+        cell: ({ row }) => (
+          <Switch
+            checked={row.original.architectEnabled}
+            onCheckedChange={(checked) =>
+              onToggleArchitect(row.original.id, checked)
+            }
+            disabled={loadingToggles?.has(row.original.id)}
+            aria-label={`Toggle Architect for ${row.original.name}`}
+            aria-busy={loadingToggles?.has(row.original.id)}
+          />
+        ),
+        size: 80,
+      },
+      {
+        id: "actions",
+        header: () => <span className="sr-only">Actions</span>,
+        cell: ({ row }) => (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-8 w-8">
+                <IconDotsVertical className="h-4 w-4" />
+                <span className="sr-only">Open menu</span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => onViewModel(row.original)}>
+                <IconEdit className="mr-2 h-4 w-4" />
+                Edit Model
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={() => onDeleteModel(row.original)}
+                className="text-destructive focus:text-destructive"
+              >
+                <IconTrash className="mr-2 h-4 w-4" />
+                Delete Model
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ),
+        size: 60,
+      },
+    ],
+    [
+      onViewModel,
+      onToggleActive,
+      onToggleNexus,
+      onToggleArchitect,
+      onDeleteModel,
+      loadingToggles,
+    ]
+  )
+}
+
 export function ModelsDataTable({
   models,
   onViewModel,
@@ -102,122 +237,19 @@ export function ModelsDataTable({
   loadingToggles,
   className,
 }: ModelsDataTableProps) {
+  "use no memo"
+
   const [sorting, setSorting] = useState<SortingState>([])
+  const columns = useModelColumns({
+    onViewModel,
+    onToggleActive,
+    onToggleNexus,
+    onToggleArchitect,
+    onDeleteModel,
+    loadingToggles,
+  })
 
-  // Create columns with actions
-  const columns = useMemo<ColumnDef<ModelTableRow>[]>(
-    () => [
-      // Name column
-      {
-        accessorKey: "name",
-        header: ({ column }) => <SortableHeader column={column} title="Name" />,
-        cell: ({ row }) => (
-          <div className="font-medium">{row.original.name}</div>
-        ),
-        size: 200,
-      },
-      // Provider column
-      {
-        accessorKey: "provider",
-        header: ({ column }) => <SortableHeader column={column} title="Provider" />,
-        cell: ({ row }) => <ProviderBadge provider={row.original.provider} />,
-        size: 120,
-      },
-      // Model ID column
-      {
-        accessorKey: "modelId",
-        header: ({ column }) => <SortableHeader column={column} title="Model ID" />,
-        cell: ({ row }) => (
-          <code className="text-xs text-muted-foreground bg-muted px-2 py-1 rounded">
-            {row.original.modelId}
-          </code>
-        ),
-        size: 200,
-      },
-      // Active column
-      {
-        accessorKey: "active",
-        header: "Active",
-        cell: ({ row }) => (
-          <Switch
-            checked={row.original.active}
-            onCheckedChange={(checked) => onToggleActive(row.original.id, checked)}
-            disabled={loadingToggles?.has(row.original.id)}
-            aria-label={`Toggle active for ${row.original.name}`}
-            aria-busy={loadingToggles?.has(row.original.id)}
-          />
-        ),
-        size: 80,
-      },
-      // Nexus Enabled column
-      {
-        accessorKey: "nexusEnabled",
-        header: "Nexus",
-        cell: ({ row }) => (
-          <Switch
-            checked={row.original.nexusEnabled}
-            onCheckedChange={(checked) => onToggleNexus(row.original.id, checked)}
-            disabled={loadingToggles?.has(row.original.id)}
-            aria-label={`Toggle Nexus for ${row.original.name}`}
-            aria-busy={loadingToggles?.has(row.original.id)}
-          />
-        ),
-        size: 80,
-      },
-      // Architect Enabled column
-      {
-        accessorKey: "architectEnabled",
-        header: "Architect",
-        cell: ({ row }) => (
-          <Switch
-            checked={row.original.architectEnabled}
-            onCheckedChange={(checked) => onToggleArchitect(row.original.id, checked)}
-            disabled={loadingToggles?.has(row.original.id)}
-            aria-label={`Toggle Architect for ${row.original.name}`}
-            aria-busy={loadingToggles?.has(row.original.id)}
-          />
-        ),
-        size: 80,
-      },
-      // Actions column
-      {
-        id: "actions",
-        header: () => <span className="sr-only">Actions</span>,
-        cell: ({ row }) => {
-          const model = row.original
-
-          return (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-8 w-8">
-                  <IconDotsVertical className="h-4 w-4" />
-                  <span className="sr-only">Open menu</span>
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => onViewModel(model)}>
-                  <IconEdit className="mr-2 h-4 w-4" />
-                  Edit Model
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onClick={() => onDeleteModel(model)}
-                  className="text-destructive focus:text-destructive"
-                >
-                  <IconTrash className="mr-2 h-4 w-4" />
-                  Delete Model
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )
-        },
-        size: 60,
-      },
-    ],
-    [onViewModel, onToggleActive, onToggleNexus, onToggleArchitect, onDeleteModel, loadingToggles]
-  )
-
-  const table = useReactTable({
+  const table = useUncompiledReactTable({
     data: models,
     columns,
     state: {

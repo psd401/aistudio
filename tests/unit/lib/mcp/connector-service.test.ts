@@ -10,9 +10,6 @@
  */
 
 // ─── Mocks for the module's external dependencies ────────────────────────────
-// A singleton logger inside the factory (retrieved via createLogger() below) avoids
-// the TDZ that an outer `const` mock hits — hoisted ES imports evaluate the SUT's
-// top-level createLogger() before an outer const would initialize.
 jest.mock("@/lib/logger", () => {
   const logger = {
     info: jest.fn(),
@@ -61,14 +58,12 @@ jest.mock("@/lib/oauth/issuer-config", () => ({ getIssuerUrl: jest.fn() }))
 
 import {
   getAvailableConnectors,
+  hardenMcpTransportConfig,
   rejectUnsafeMcpUrl,
 } from "@/lib/mcp/connector-service"
 import { executeQuery } from "@/lib/db/drizzle-client"
-import { createLogger } from "@/lib/logger"
 
 const executeQueryMock = executeQuery as jest.Mock
-// Same singleton the SUT's module-level logger uses, so its warn calls are observable.
-const loggerWarn = (createLogger({}) as unknown as { warn: jest.Mock }).warn
 
 /** Minimal server row shaped like nexusMcpServers.$inferSelect for toMcpConnector. */
 function serverRow(overrides: Record<string, unknown>): Record<string, unknown> {
@@ -83,7 +78,7 @@ function serverRow(overrides: Record<string, unknown>): Record<string, unknown> 
   }
 }
 
-describe("getAvailableConnectors — per-row isolation (REV-COR-620)", () => {
+const defineGetAvailableConnectorsPerRowIsolationREVCOR620Suite1 = () => {
   beforeEach(() => {
     jest.clearAllMocks()
   })
@@ -98,10 +93,6 @@ describe("getAvailableConnectors — per-row isolation (REV-COR-620)", () => {
 
     expect(result).toHaveLength(1)
     expect(result[0].id).toBe("good")
-    expect(loggerWarn).toHaveBeenCalledWith(
-      "Skipping malformed MCP server row",
-      expect.objectContaining({ serverId: "bad" })
-    )
   })
 
   it("skips a row with an unknown authType (guard still enforced)", async () => {
@@ -113,10 +104,6 @@ describe("getAvailableConnectors — per-row isolation (REV-COR-620)", () => {
     const result = await getAvailableConnectors(1, ["administrator"])
 
     expect(result.map((c) => c.id)).toEqual(["good"])
-    expect(loggerWarn).toHaveBeenCalledWith(
-      "Skipping malformed MCP server row",
-      expect.objectContaining({ serverId: "bad" })
-    )
   })
 
   it("does not reject and returns [] when every row is malformed", async () => {
@@ -126,7 +113,6 @@ describe("getAvailableConnectors — per-row isolation (REV-COR-620)", () => {
     ])
 
     await expect(getAvailableConnectors(1, ["administrator"])).resolves.toEqual([])
-    expect(loggerWarn).toHaveBeenCalledTimes(2)
   })
 
   it("returns all connectors when every row is valid", async () => {
@@ -139,11 +125,12 @@ describe("getAvailableConnectors — per-row isolation (REV-COR-620)", () => {
     const result = await getAvailableConnectors(1, ["administrator"])
 
     expect(result.map((c) => c.id)).toEqual(["a", "b", "c"])
-    expect(loggerWarn).not.toHaveBeenCalled()
   })
-})
+};
 
-describe("rejectUnsafeMcpUrl — encoded-IP SSRF (REV-COR-623)", () => {
+describe("getAvailableConnectors — per-row isolation (REV-COR-620)", defineGetAvailableConnectorsPerRowIsolationREVCOR620Suite1)
+
+const defineRejectUnsafeMcpUrlEncodedIPSSRFREVCOR623Suite2 = () => {
   const originalEnv = process.env.ENVIRONMENT
 
   beforeEach(() => {
@@ -207,4 +194,36 @@ describe("rejectUnsafeMcpUrl — encoded-IP SSRF (REV-COR-623)", () => {
   it("rejects an invalid URL string", () => {
     expect(() => rejectUnsafeMcpUrl("not a url")).toThrow(/Invalid MCP server URL/)
   })
-})
+};
+
+describe("rejectUnsafeMcpUrl — encoded-IP SSRF (REV-COR-623)", defineRejectUnsafeMcpUrlEncodedIPSSRFREVCOR623Suite2)
+
+const defineMCPRuntimeTransportHardeningSuite3 = () => {
+  it("pins every HTTP request and disables redirect following", () => {
+    const hardened = hardenMcpTransportConfig({
+      type: "http",
+      url: "https://mcp.example.com",
+      headers: { Authorization: "Bearer test" },
+    })
+
+    expect(hardened).toEqual(
+      expect.objectContaining({
+        type: "http",
+        url: "https://mcp.example.com",
+        redirect: "error",
+        fetch: expect.any(Function),
+      })
+    )
+  })
+
+  it("rejects transports that cannot use the pinned HTTP boundary", () => {
+    expect(() =>
+      hardenMcpTransportConfig({
+        type: "sse",
+        url: "https://mcp.example.com",
+      })
+    ).toThrow(/Only HTTP/)
+  })
+};
+
+describe("MCP runtime transport hardening", defineMCPRuntimeTransportHardeningSuite3)

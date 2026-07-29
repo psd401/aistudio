@@ -8,10 +8,9 @@
  * is the STANDARD place the district's "keep out of records" policy lives —
  * other skills (e.g. psd-plaud) pipe content through it.
  *
- * It calls Bedrock (Claude Haiku) DIRECTLY at the Mantle upstream — NOT the
- * local logging proxy — so the raw input text is never written to AI Studio's
- * request logs. The input also never enters the agent's own model context when
- * a caller (like psd-plaud) pipes to this skill internally.
+ * It calls the loopback Bedrock credential proxy. The model process never
+ * receives the upstream bearer; proxy request-body logging is disabled by
+ * default and tool/system content is redacted if explicitly enabled.
  *
  * Usage:
  *   echo "<text>" | node run.js [--profiles students,personnel,topics-only]
@@ -22,18 +21,18 @@
  * IMPORTANT: summarization REDUCES but does not GUARANTEE removal of sensitive
  * content. It is risk-reduction, not a legal/compliance guarantee.
  *
- * Env: AWS_BEARER_TOKEN_BEDROCK, MANTLE_ANTHROPIC_URL
- *      (default https://bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages),
- *      SUMMARIZE_MODEL_ID (default anthropic.claude-haiku-4-5).
+ * Env: MANTLE_ANTHROPIC_URL
+ *      (default http://127.0.0.1:18791/anthropic/v1/messages),
+ *      SUMMARIZE_MODEL_ID (default us.anthropic.claude-sonnet-5).
  */
 
 'use strict';
 
 const MANTLE_URL =
   process.env.MANTLE_ANTHROPIC_URL ||
-  'https://bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages';
-const MODEL_ID = process.env.SUMMARIZE_MODEL_ID || 'anthropic.claude-haiku-4-5';
-const BEARER = process.env.AWS_BEARER_TOKEN_BEDROCK || '';
+  'http://127.0.0.1:18791/anthropic/v1/messages';
+const MODEL_ID = process.env.SUMMARIZE_MODEL_ID || 'us.anthropic.claude-sonnet-5';
+const MAX_OUTPUT_TOKENS = 2000;
 
 function fail(message, code = 1) {
   process.stderr.write(`psd-summarize: ${message}\n`);
@@ -119,8 +118,6 @@ async function main() {
     process.stdout.write('Usage: <text on stdin> | run.js [--profiles a,b] [--output summary] [--length standard] [--context "..."]\n');
     process.exit(0);
   }
-  if (!BEARER) fail('AWS_BEARER_TOKEN_BEDROCK is not set — cannot call the model');
-
   const text = (await readStdin()).trim();
   if (!text) fail('No input text on stdin');
 
@@ -129,7 +126,7 @@ async function main() {
     ? args.profiles.split(',').map((s) => s.trim()).filter(Boolean)
     : ['students', 'personnel']; // conservative default
   const unknown = profiles.filter((p) => !validProfiles.includes(p));
-  if (unknown.length) fail(`Unknown --profiles: ${unknown.join(', ')}. Valid: ${validProfiles.join(', ')}`);
+  if (unknown.length > 0) fail(`Unknown --profiles: ${unknown.join(', ')}. Valid: ${validProfiles.join(', ')}`);
 
   const output = typeof args.output === 'string' ? args.output : 'summary';
   const length = typeof args.length === 'string' ? args.length : 'standard';
@@ -137,7 +134,7 @@ async function main() {
 
   const system = buildSystemPrompt(profiles, output, length, context);
 
-  // Guard against oversized inputs (Haiku context is large, but bound cost).
+  // Guard against oversized inputs (the model context is large, but bound cost).
   const MAX_CHARS = 400000;
   const clipped = text.length > MAX_CHARS ? text.slice(0, MAX_CHARS) : text;
 
@@ -148,12 +145,12 @@ async function main() {
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json',
-        Authorization: `Bearer ${BEARER}`,
+        'x-api-key': 'local-credential-proxy',
       },
       body: JSON.stringify({
         anthropic_version: 'bedrock-2023-05-31',
         model: MODEL_ID,
-        max_tokens: 2000,
+        max_tokens: MAX_OUTPUT_TOKENS,
         system,
         messages: [{ role: 'user', content: `Source text to summarize:\n\n${clipped}` }],
       }),

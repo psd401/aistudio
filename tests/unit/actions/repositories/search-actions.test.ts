@@ -16,7 +16,7 @@ const mockHybrid = jest.fn<(...a: unknown[]) => Promise<unknown[]>>(() => Promis
 const mockRetrieveV2 = jest.fn<(...a: unknown[]) => Promise<{ results: unknown[]; diagnostics: Record<string, unknown> }>>(
   () => Promise.resolve({ results: [], diagnostics: {} })
 )
-const mockIsContentReadV2Active = jest.fn(() => false)
+const mockIsCanonicalRepositoryUploadActive = jest.fn(() => false)
 
 jest.mock('@/lib/auth/server-session', () => ({ getServerSession: mockGetServerSession }))
 jest.mock('@/utils/roles', () => ({ hasCapabilityAccess: mockHasCapabilityAccess }))
@@ -25,7 +25,7 @@ jest.mock('@/lib/repositories/repository-access-guard', () => ({
 }))
 jest.mock('@/lib/repositories/content-platform/config', () => ({
   getContentPlatformConfig: jest.fn(async () => ({ enabled: false, readV2Enabled: false })),
-  isContentReadV2Active: mockIsContentReadV2Active,
+  isCanonicalRepositoryUploadActive: mockIsCanonicalRepositoryUploadActive,
 }))
 jest.mock('@/lib/repositories/retrieval-v2/service', () => ({
   retrieveRepositoryContent: mockRetrieveV2,
@@ -46,7 +46,7 @@ describe('searchRepository authorization (REV-COR-062 / REV-SEC-081)', () => {
     mockGetServerSession.mockResolvedValue({ sub: 'u' })
     mockHasCapabilityAccess.mockResolvedValue(true)
     mockAssertRepositoryReadAccess.mockResolvedValue(undefined)
-    mockIsContentReadV2Active.mockReturnValue(false)
+    mockIsCanonicalRepositoryUploadActive.mockReturnValue(false)
   })
 
   it('rejects a caller lacking the knowledge-repositories capability', async () => {
@@ -88,7 +88,7 @@ describe('searchRepository authorization (REV-COR-062 / REV-SEC-081)', () => {
   })
 
   it('uses shared generation-pinned retrieval when canonical reads are active', async () => {
-    mockIsContentReadV2Active.mockReturnValue(true)
+    mockIsCanonicalRepositoryUploadActive.mockReturnValue(true)
     mockRetrieveV2.mockResolvedValue({
       results: [
         {
@@ -123,6 +123,7 @@ describe('searchRepository authorization (REV-COR-062 / REV-SEC-081)', () => {
       mode: 'hybrid',
       limit: 10,
       denseWeight: 0.4,
+      includeLegacyCompatibility: false,
     })
     expect(mockHybrid).not.toHaveBeenCalled()
   })

@@ -109,7 +109,10 @@ async function main() {
         try {
           await sm.send(new DeleteSecretCommand({ SecretId: secretId, ForceDeleteWithoutRecovery: true }))
         } catch (err) {
-          if (!(err instanceof ResourceNotFoundException)) throw err
+          const handleNestedBranch1 = () => {
+            if (!(err instanceof ResourceNotFoundException)) throw err
+          }
+          handleNestedBranch1()
         }
         await executeQuery(
           (db) =>

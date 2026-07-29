@@ -150,13 +150,23 @@ function isAllowedByCapability(
  * when they have visible children or a direct link. Preserves source ordering.
  */
 function buildVisibleNavItems(
-  navItems: NavItem[],
-  navItemRolesMap: Map<number, string[]>,
-  userRoles: string[],
-  capabilitiesMap: Map<number, string>,
-  userCapabilitiesSet: Set<string>,
-  log: NavLogger
+  options: {
+    navItems: NavItem[];
+    navItemRolesMap: Map<number, string[]>;
+    userRoles: string[];
+    capabilitiesMap: Map<number, string>;
+    userCapabilitiesSet: Set<string>;
+    log: NavLogger;
+  }
 ): NavItem[] {
+  const {
+    navItems,
+    navItemRolesMap,
+    userRoles,
+    capabilitiesMap,
+    userCapabilitiesSet,
+    log,
+  } = options;
   const filteredNavItems: NavItem[] = [];
   const parentIds = new Set<NavItem["id"]>();
 
@@ -326,14 +336,14 @@ export async function GET() {
       const userCapabilitiesSet = new Set(userCapabilities);
 
       // Filter navigation items based on user permissions
-      const finalNavItems = buildVisibleNavItems(
+      const finalNavItems = buildVisibleNavItems({
         navItems,
         navItemRolesMap,
         userRoles,
         capabilitiesMap,
         userCapabilitiesSet,
-        log
-      );
+        log,
+      });
 
       // Format the navigation items
       const formattedNavItems = formatNavItems(finalNavItems)

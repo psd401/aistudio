@@ -1,0 +1,12 @@
+id: credentials-check-capability
+skill: psd-credentials
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-credentials to check whether I have the psd-workspace capability. Do not request, store, list, or reveal any credential value. Report granted or denied."
+trials: 3
+fixtures:
+  - fixtures/check-capability.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"check-skill-access"},"capability":{"exact":"psd-workspace"}}}
+  - {"type":"output_match","pattern":"(?i)granted|access.*yes"}

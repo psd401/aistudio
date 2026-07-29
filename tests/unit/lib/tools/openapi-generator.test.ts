@@ -78,6 +78,40 @@ describe("catalog → OpenAPI generator", () => {
     expect(op?.responses).toHaveProperty("429")
   })
 
+  it.each([
+    {
+      path: "/api/v1/assistants/import",
+      method: "post",
+      success: "201",
+      errors: ["400", "404", "413", "429"],
+    },
+    {
+      path: "/api/v1/assistants/{id}",
+      method: "put",
+      success: "200",
+      errors: ["400", "404", "409", "413", "429"],
+    },
+    {
+      path: "/api/v1/assistants/{id}/fork",
+      method: "post",
+      success: "201",
+      errors: ["400", "404", "413", "429"],
+    },
+  ])(
+    "emits the declared $method $path mutation responses",
+    ({ path, method, success, errors }) => {
+      const methods = buildSpec().paths[path]
+      const op = methods?.[method as keyof typeof methods]
+      expect(op?.responses).toHaveProperty(success)
+      for (const error of errors) {
+        expect(op?.responses).toHaveProperty(error)
+      }
+      if (success !== "200") {
+        expect(op?.responses).not.toHaveProperty("200")
+      }
+    }
+  )
+
   it("does not emit body/concurrency error codes on the GET list route", () => {
     const op = buildSpec().paths["/api/v1/assistants"]?.get
     expect(op).toBeDefined()

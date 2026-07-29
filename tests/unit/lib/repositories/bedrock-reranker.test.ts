@@ -3,7 +3,7 @@
 import { BedrockAgentRuntimeClient } from "@aws-sdk/client-bedrock-agent-runtime";
 import { BedrockRepositoryReranker } from "@/lib/repositories/retrieval-v2/bedrock-reranker";
 
-describe("Bedrock repository reranker", () => {
+const defineBedrockRepositoryRerankerSuite1 = () => {
   it("sends bounded inline text sources and maps provider scores", async () => {
     const send = jest.fn().mockResolvedValue({
       results: [
@@ -68,4 +68,6 @@ describe("Bedrock repository reranker", () => {
     await rejection;
     jest.useRealTimers();
   });
-});
+};
+
+describe("Bedrock repository reranker", defineBedrockRepositoryRerankerSuite1);

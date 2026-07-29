@@ -25,6 +25,14 @@ jobs:
       with:
         bun-version: "1.2.x"
 
+    - name: Setup Python for agent eval gates
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      with:
+        python-version: "3.12"
+
+    - name: Setup uv for agent-image unittest suites
+      uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+
     - name: Install dependencies
       run: bun install --frozen-lockfile
 
@@ -39,6 +47,45 @@ jobs:
 
     - name: Check generated capability catalog is in sync
       run: bun run capabilities:check
+
+    - name: Check agent eval coverage and committed artifacts
+      run: |
+        python3 infra/agent-image/check_eval_coverage.py
+        python3 infra/agent-image/eval/summarize.py --check-repository
+
+    - name: Ensure model UID test account exists
+      run: |
+        if ! id node >/dev/null 2>&1; then
+          sudo useradd --system --user-group --no-create-home node
+        fi
+
+    - name: Run all agent-image Python tests (unittest)
+      run: |
+        uv run --python 3.12 --no-project -m unittest \
+          infra/agent-image/test_harness_adapter.py \
+          infra/agent-image/test_agentcore_wrapper.py \
+          infra/agent-image/test_iteration_telemetry.py \
+          infra/agent-image/test_mantle_proxy.py \
+          infra/agent-image/test_mantle_proxy_logging.py \
+          infra/agent-image/test_check_bootstrap_budget.py \
+          infra/agent-image/test_check_config_consistency.py \
+          infra/agent-image/test_workspace_sync.py \
+          infra/agent-image/test_chat_format.py \
+          infra/agent-image/test_artifact_publisher.py \
+          infra/agent-image/test_eval_coverage.py \
+          infra/agent-image/test_broker_stub.py \
+          infra/agent-image/test_graders.py \
+          infra/agent-image/test_eval_runner.py \
+          infra/agent-image/test_eval_summary.py \
+          infra/agent-image/test_report.py \
+          infra/agent-image/test_tts_synthesize.py \
+          infra/agent-image/skills/psd-last30days/scripts/test_last30days.py
+
+    - name: Run model-UID isolation test as root
+      run: |
+        sudo "$(command -v python3)" -m unittest \
+          -k test_model_uid_cannot_read_authority_or_mutate_relay_source \
+          infra/agent-image/test_agentcore_wrapper.py
 
     - name: Run tests
       run: bun run test:ci
@@ -57,6 +104,132 @@ jobs:
         # Dedicated collab-token signing key (mirrors the smoke's own default).
         COLLAB_JWT_SECRET: ci-collab-secret-0123456789
     
+    # psd-workspace skill gate (Bun). infra/agent-image/skills/psd-workspace is
+    # plain CJS outside the Next.js/jest roots, so `test:ci` never saw it — the
+    # regex gate that is the ONLY barrier against the agent sending mail,
+    # deleting, or creating files as the user (#912 Phase 1, #1138, #1305) had
+    # no CI coverage at all. It does now.
+    - name: Run psd-workspace skill gate tests (Bun)
+      run: bun run test:skill:workspace
+      env:
+        CI: true
+
+    # psd-directory (#1239). Same story as psd-workspace above: plain CJS
+    # outside the jest roots, so `test:ci` cannot see it. What these tests
+    # guard is identity CORRECTNESS — the exact-address rule that stops a
+    # fuzzy search result being reported as the person, and the absence of any
+    # directory-enumeration entry point.
+    - name: Run psd-directory lookup tests (Bun)
+      run: bun run test:skill:directory
+      env:
+        CI: true
+
+    # psd-workflows (#1403). This CJS skill is outside Jest's roots; its Node
+    # suite proves dynamic roster discovery, generic list/describe/call parsing,
+    # caller-marker binding, payload handling, and the legacy-subcommand break.
+    - name: Run psd-workflows skill tests (Node)
+      run: bun run test:skill:workflows
+      env:
+        CI: true
+
+    # psd-schedules (Bun). Same reason as above: plain CJS outside the jest
+    # roots. Runs the whole directory, which covers two suites:
+    #   - skill-frontmatter: DISCOVERABILITY. agent-platform-stack.ts
+    #     substitutes "Bundled skill: <name>" when the frontmatter has no
+    #     `summary`, and psd-skills-meta's skills.search matches on name +
+    #     summary only. Without a summary the scheduling skill is reachable
+    #     only by searching the literal word "schedules", so "remind me",
+    #     "cron" and "follow up" all silently return nothing.
+    #   - authority: the request-authority binding added in 38c18aec, which
+    #     shipped with no runner and so had never actually executed in CI.
+    - name: Run psd-schedules skill tests (Bun)
+      run: bun run test:skill:schedules
+      env:
+        CI: true
+
+    # psd-atrium. Same story again — plain CJS outside the jest roots, so its
+    # suite has never run in CI despite guarding every agent write into the
+    # content workspace. It now also covers the authored-image upload flow
+    # (reserve -> presigned PUT -> complete), where a wrong call order or a
+    # mis-derived checksum produces an asset that is reserved but never `ready`.
+    - name: Run psd-atrium skill tests (Bun)
+      run: bun run test:skill:atrium
+      env:
+        CI: true
+
+    # psd-sop-creator. The template gate is the whole point of the skill: every
+    # rule in it exists because breaking it loses content SILENTLY in Atrium
+    # (raw HTML dropped, data: URIs stripped, inline images splitting
+    # paragraphs). A regression here ships malformed SOPs with no error.
+    - name: Run psd-sop-creator skill tests (Bun)
+      run: bun run test:skill:sop-creator
+      env:
+        CI: true
+
+    # psd-morning-brief (#1413). The three-stage CLI is plain CJS outside
+    # Jest's roots. This suite pins signed-owner authority boundaries, modular
+    # source omission, custom desks, private Atrium-only delivery, podcast
+    # defaults, retention, and fatal self-reporting.
+    - name: Run psd-morning-brief skill tests (Bun)
+      run: bun run test:skill:morning-brief
+      env:
+        CI: true
+
+    # Direct-AWS credential boundary (#1442). OpenClaw strips inherited AWS
+    # credentials from model-launched exec subprocesses; these tests prove TTS
+    # and HyperFrames use only the root-owned fixed-operation relay and that the
+    # relay constrains both AWS targets and payloads.
+    - name: Run direct-AWS skill relay tests
+      run: |
+        python3 -m unittest \
+          infra/agent-image/test_mantle_proxy.py \
+          infra/agent-image/test_tts_synthesize.py
+        bun run test:skill:hyperframes
+      env:
+        CI: true
+
+    # The remaining agent-image JavaScript suites are outside Jest's roots.
+    # Run from the repository root so validated-fs permits shared root
+    # dependencies (notably axe-core/jsdom) without broadening its runtime
+    # filesystem policy. Keep each test file in a fresh Bun process: several
+    # suites mock global fetch/module state and are not process-isolated when
+    # unrelated files are passed to one `bun test` invocation.
+    - name: Run remaining agent-image skill tests (Bun)
+      run: |
+        set -euo pipefail
+        test_files=(
+          infra/agent-image/skills/_shared/agent-broker.test.js
+          infra/agent-image/skills/chat-chart/run.test.js
+          infra/agent-image/skills/psd-aistudio/common.test.js
+          infra/agent-image/skills/psd-aistudio/run.test.js
+          infra/agent-image/skills/psd-brand-guidelines/brand.test.js
+          infra/agent-image/skills/psd-canva/common.test.js
+          infra/agent-image/skills/psd-canva/run.test.js
+          infra/agent-image/skills/psd-credentials/check_capability.test.js
+          infra/agent-image/skills/psd-data/common.test.js
+          infra/agent-image/skills/psd-data/run.test.js
+          infra/agent-image/skills/psd-html-artifact/a11y-audit.test.js
+          infra/agent-image/skills/psd-learning-page/run.test.js
+          infra/agent-image/skills/psd-plaud/common.test.js
+          infra/agent-image/skills/psd-plaud/run.test.js
+          infra/agent-image/skills/psd-skills-meta/authority.test.js
+          infra/agent-image/skills/psd-summarize/run.test.js
+        )
+        for test_file in "${test_files[@]}"; do
+          echo "::group::${test_file}"
+          bun test "${test_file}"
+          echo "::endgroup::"
+        done
+      env:
+        CI: true
+
+    # Freshservice's tests use node:test mock timing and intentionally run
+    # under Node rather than Bun's test runner.
+    - name: Run psd-freshservice skill tests (Node)
+      run: cd infra/agent-image/skills/psd-freshservice && bun run test
+      env:
+        CI: true
+
     # Optional: Upload test coverage if you generate it
     # - name: Upload coverage reports
     #   uses: codecov/codecov-action@v3
@@ -135,6 +308,51 @@ jobs:
       env:
         CI: true
 
+    - name: Run Google content connector lifecycle smoke
+      run: bun run test:smoke:google-content
+      env:
+        CI: true
+
+    - name: Run OneRoster email-match report smoke
+      run: bun run test:smoke:roster-email-match
+      env:
+        CI: true
+
+  # Production-build regression for #1297. Source-level import tests cannot
+  # prove how Next/Webpack packages middleware, so exercise the compiled bundle
+  # with Next's real Edge sandbox and a signed expired session on every PR/push.
+  auth-edge-production:
+    name: Auth Edge Production Artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      AUTH_SECRET: artifact-test-secret-at-least-32-characters
+      AUTH_URL: https://artifact.test
+      AUTH_COGNITO_CLIENT_ID: artifact-client
+      AUTH_COGNITO_ISSUER: https://cognito-idp.us-east-1.amazonaws.com/us-east-1_artifact
+      NEXT_PUBLIC_COGNITO_CLIENT_ID: artifact-client
+      NEXT_PUBLIC_COGNITO_DOMAIN: artifact.auth.us-east-1.amazoncognito.com
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v7
+
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+      with:
+        bun-version: "1.2.x"
+
+    - name: Install dependencies
+      run: bun install --frozen-lockfile
+
+    - name: Build production standalone application
+      run: bun run build
+
+    - name: Exercise compiled auth middleware in the Edge sandbox
+      run: bun run test:smoke:auth-edge-production
+
   # CDK validation job - checks infrastructure code
   cdk-validate:
     name: Validate CDK Infrastructure
@@ -148,9 +366,14 @@ jobs:
       uses: actions/checkout@v7
 
     - name: Setup Node.js
-      uses: actions/setup-node@v6
+      uses: actions/setup-node@v7
       with:
-        node-version: 20.x
+        # 22.x, not 20.x: argon2 >= 0.45 builds via `bunx node-gyp@latest`, and
+        # node-gyp 13's undici needs webidl.util.markAsUncloneable (Node >= 22.9)
+        # — under Node 20 the install dies with "markAsUncloneable is not a
+        # function". The Lambda runtime target is set by esbuild (target:
+        # node20), which does not require the build host to run Node 20.
+        node-version: 22.x
 
     - name: Setup Bun
       uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
@@ -166,7 +389,7 @@ jobs:
       run: bun install -g aws-cdk@2
 
     - name: Enable ARM64 Lambda artifact execution
-      uses: docker/setup-qemu-action@v3
+      uses: docker/setup-qemu-action@v4
       with:
         platforms: arm64
 

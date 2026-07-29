@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * generate.js — psd-image-gen.generate
  * Usage:
@@ -15,23 +16,22 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
 
 const { execFileSync } = require('node:child_process');
-const { randomUUID } = require('node:crypto');
-const fs = require('node:fs');
+
 const path = require('node:path');
 
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { publishArtifact } = require('../_shared/artifact-publisher');
+const { requestAgentBroker } = require('../_shared/agent-broker');
 
-const REGION = process.env.AWS_REGION || 'us-east-1';
-const WORKSPACE_BUCKET = process.env.WORKSPACE_BUCKET || '';
 // Skill output lives under `public-images/` which is granted public
 // `s3:GetObject` by the workspace bucket's resource policy (see
 // agent-platform-stack.ts:AgentWorkspaceBucket). Anyone who receives the
 // returned URL can fetch the image — same security model as Google
 // Drive "anyone with the link" sharing. The UUID in the key makes the
 // path unguessable. Keep this prefix in sync with the bucket policy.
-const PUBLIC_PREFIX = 'public-images';
 // The unversioned alias rather than a dated snapshot. The dated form
 // (`gpt-image-2-2026-04-21`) is gated by an OpenAI per-project allowlist
 // and silently 404s for projects that don't have that snapshot enabled —
@@ -60,12 +60,6 @@ const ALLOWED_IMAGE_EXTS = new Map([
 // JSON payload reasonable (base64 inflates 33%, so 8MB → ~11MB on the wire).
 const MAX_REFERENCE_IMAGE_BYTES = 8 * 1024 * 1024;
 
-const CREDENTIALS_GET = path.resolve(
-  __dirname,
-  '..',
-  'psd-credentials',
-  'get.js',
-);
 const CREDENTIALS_CHECK_CAPABILITY = path.resolve(
   __dirname,
   '..',
@@ -142,11 +136,10 @@ function validateEmail(email) {
  * Catalog-level filtering (so the skill is not even visible) is a
  * future change once OpenClaw exposes a per-session catalog hook.
  */
-function enforceCapability(userEmail) {
+function enforceCapability() {
   try {
     execFileSync('node', [
       CREDENTIALS_CHECK_CAPABILITY,
-      '--user', userEmail,
       '--capability', REQUIRED_CAPABILITY,
     ], {
       encoding: 'utf8',
@@ -162,46 +155,10 @@ function enforceCapability(userEmail) {
   // We do NOT trust stdout {granted: true} when the process exited non-zero
   // (e.g. signal, crash) — exit code is the sole source of truth for RBAC gates.
   fail(
-    `User ${userEmail} lacks the ${REQUIRED_CAPABILITY} capability. ` +
+    `The signed invocation owner lacks the ${REQUIRED_CAPABILITY} capability. ` +
     'Ask an administrator to grant it via the role assignments at /admin/roles.',
     'forbidden_capability',
   );
-}
-
-/**
- * Fetch the shared (district-funded) OpenAI API key from psd-credentials.
- * Uses --shared to skip user-scoped lookups — ensures a per-user key
- * cannot override the district-funded key. The skill is its own process
- * and cannot share the credential cache, so we shell out and parse one
- * JSON object from stdout. The value is held in a local variable and
- * never written elsewhere.
- */
-function readSharedOpenAIKey(userEmail) {
-  let stdout;
-  try {
-    stdout = execFileSync('node', [CREDENTIALS_GET, '--user', userEmail, '--shared', '--name', 'openai_api_key'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'inherit'],
-    });
-  } catch (err) {
-    fail(`psd-credentials/get.js failed: ${err.message}`, 'shared_key_missing');
-  }
-
-  const lines = stdout.split('\n').filter((l) => l.trim().length > 0);
-  if (lines.length === 0) {
-    fail('psd-credentials returned no output', 'shared_key_missing');
-  }
-  const last = lines[lines.length - 1];
-  let parsed;
-  try {
-    parsed = JSON.parse(last);
-  } catch (err) {
-    fail(`psd-credentials returned non-JSON: ${err.message}`, 'shared_key_missing');
-  }
-  if (parsed.error || !parsed.value) {
-    fail('Shared OpenAI key not provisioned. Ask an admin to bootstrap psd-agent-creds/{env}/shared/openai_api_key.', 'shared_key_missing');
-  }
-  return parsed.value;
 }
 
 /**
@@ -213,7 +170,7 @@ function readSharedOpenAIKey(userEmail) {
 function loadReferenceImage(imagePath) {
   let stat;
   try {
-    stat = fs.statSync(imagePath);
+    stat = validatedFs.statSync(imagePath);
   } catch (err) {
     fail(`--image file not found or unreadable: ${imagePath} (${err.message})`, 'bad_args');
   }
@@ -234,122 +191,52 @@ function loadReferenceImage(imagePath) {
       'bad_args',
     );
   }
-  const base64 = fs.readFileSync(imagePath).toString('base64');
+  const base64 = validatedFs.readFileSync(imagePath).toString('base64');
   return { dataUrl: `data:${mime};base64,${base64}`, mime };
 }
 
-async function editWithImage(apiKey, params, referenceDataUrl) {
-  const body = {
-    model: MODEL_ID,
-    images: [{ image_url: referenceDataUrl }],
-    prompt: params.prompt,
-  };
-  if (params.size && params.size !== 'auto') body.size = params.size;
-  if (params.quality && params.quality !== 'auto') body.quality = params.quality;
-  if (params.background && params.background !== 'auto') body.background = params.background;
-
-  const resp = await fetch('https://api.openai.com/v1/images/edits', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
+async function requestImage(params, referenceDataUrl) {
+  const result = await requestAgentBroker(
+    '/api/agent/credentials',
+    {
+      operation: 'openai-image',
+      ...params,
+      referenceDataUrl,
     },
-    body: JSON.stringify(body),
-  });
-
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    fail(`OpenAI API ${resp.status}: ${text.slice(0, 500)}`, 'upstream_error');
+    { timeoutMs: 130_000 },
+  );
+  if (
+    typeof result.imageBase64 !== 'string' ||
+    !/^[A-Za-z0-9+/=]+$/.test(result.imageBase64)
+  ) {
+    fail('Image broker returned invalid image data', 'upstream_error');
   }
-
-  const data = await resp.json();
-  const first = (data && Array.isArray(data.data)) ? data.data[0] : null;
-  if (!first || !first.b64_json) {
-    fail('OpenAI response missing b64_json image data', 'upstream_error');
-  }
-  return Buffer.from(first.b64_json, 'base64');
-}
-
-async function generateImage(apiKey, params) {
-  const body = { model: MODEL_ID, prompt: params.prompt };
-  if (params.size && params.size !== 'auto') body.size = params.size;
-  if (params.quality && params.quality !== 'auto') body.quality = params.quality;
-  if (params.background && params.background !== 'auto') body.background = params.background;
-
-  const resp = await fetch('https://api.openai.com/v1/images/generations', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    fail(`OpenAI API ${resp.status}: ${text.slice(0, 500)}`, 'upstream_error');
-  }
-
-  const data = await resp.json();
-  const first = (data && Array.isArray(data.data)) ? data.data[0] : null;
-  if (!first || !first.b64_json) {
-    fail('OpenAI response missing b64_json image data', 'upstream_error');
-  }
-  return Buffer.from(first.b64_json, 'base64');
+  return Buffer.from(result.imageBase64, 'base64');
 }
 
 async function uploadAndShare(bytes, userEmail) {
-  // Defense-in-depth guard — main() checks WORKSPACE_BUCKET before the OpenAI
-  // call, so this is only reachable if the function is called from a new path.
-  if (!WORKSPACE_BUCKET) {
-    fail('WORKSPACE_BUCKET env var not set — cannot upload generated image', 'misconfigured');
-  }
-  // Encode each path segment so emails with `+` (subaddressing) survive the
-  // URL round-trip. randomUUID() returns RFC4122 hex with hyphens — already
-  // URL-safe.
-  const key = `${PUBLIC_PREFIX}/${userEmail}/${randomUUID()}.png`;
-  const s3 = new S3Client({ region: REGION });
-
-  await s3.send(new PutObjectCommand({
-    Bucket: WORKSPACE_BUCKET,
-    Key: key,
-    Body: bytes,
-    ContentType: 'image/png',
-    Metadata: {
-      generated_by: 'psd-image-gen',
-      model: MODEL_ID,
-    },
-  }));
-
-  // Path-style URL: avoids any DNS-vs-virtual-hosted-style ambiguity for
-  // bucket names that contain dots. Path segments are URL-encoded so
-  // emails with reserved characters (`+`, `/`, `&`) survive intact.
-  const encodedKey = key.split('/').map(encodeURIComponent).join('/');
-  const url = `https://${WORKSPACE_BUCKET}.s3.${REGION}.amazonaws.com/${encodedKey}`;
-  return { url, key };
+  void userEmail;
+  return publishArtifact(bytes, '.png', 'image/png');
 }
 
-async function main() {
-  const args = parseArgs(process.argv);
-  if (args.help) {
-    console.log('Usage: generate.js --user <email> --prompt "<text>" [--image <path>] [--size auto|1024x1024|1024x1536|1536x1024] [--quality auto|low|medium|high] [--background auto|opaque|transparent]');
-    process.exit(0);
-  }
+function optionalString(value, fallback) {
+  return value && value !== true ? String(value) : fallback;
+}
+
+function validateGenerationOptions(args) {
   if (!validateEmail(args.user)) {
     fail('--user is required and must be a valid email', 'bad_args');
   }
   if (!args.prompt || args.prompt === true) {
     fail('--prompt is required', 'bad_args');
   }
-  // Cap prompt length to prevent sending excessively large payloads to OpenAI
-  // and to give a clear client-side error instead of a raw upstream_error.
   if (args.prompt.length > 4000) {
     fail('--prompt must be 4000 characters or fewer', 'bad_args');
   }
-  const size = args.size && args.size !== true ? String(args.size) : 'auto';
-  const quality = args.quality && args.quality !== true ? String(args.quality) : 'auto';
-  const background = args.background && args.background !== true ? String(args.background) : 'auto';
 
+  const size = args.size > 0 ? optionalString(args.size, 'auto') : 'auto';
+  const quality = optionalString(args.quality, 'auto');
+  const background = optionalString(args.background, 'auto');
   if (!ALLOWED_SIZES.has(size)) {
     fail(`Invalid --size. Allowed: ${[...ALLOWED_SIZES].join(', ')}`, 'bad_args');
   }
@@ -359,29 +246,33 @@ async function main() {
   if (!ALLOWED_BACKGROUNDS.has(background)) {
     fail(`Invalid --background. Allowed: ${[...ALLOWED_BACKGROUNDS].join(', ')}`, 'bad_args');
   }
+  const imagePath = optionalString(args.image, null);
+  return { size, quality, background, imagePath };
+}
 
-  // Validate WORKSPACE_BUCKET early — before capability checks or OpenAI calls —
-  // so we don't spend API quota only to fail on upload. (Review PR #934 feedback)
-  if (!WORKSPACE_BUCKET) {
-    fail('WORKSPACE_BUCKET env var not set — cannot upload generated image', 'misconfigured');
+async function main() {
+  const args = parseArgs(process.argv);
+  if (args.help) {
+    console.log('Usage: generate.js --user <email> --prompt "<text>" [--image <path>] [--size auto|1024x1024|1024x1536|1536x1024] [--quality auto|low|medium|high] [--background auto|opaque|transparent]');
+    process.exit(0);
   }
+  const { size, quality, background, imagePath } = validateGenerationOptions(args);
 
   // --image is optional. When present it must be a real path (no `--image`
   // followed by another flag) and selects the /v1/images/edits endpoint so
   // the model composes the output around the reference image. Validate the
   // path up front — same tier as size/quality checks — so we fail fast
   // before the RBAC shell-out + API-key fetch.
-  const imagePath = args.image && args.image !== true ? String(args.image) : null;
   // Load + validate the reference image up front so a bad path fails fast,
   // before the RBAC shell-out and API-key fetch.
   const referenceImage = imagePath ? loadReferenceImage(imagePath) : null;
 
-  enforceCapability(args.user);
-  const apiKey = readSharedOpenAIKey(args.user);
+  enforceCapability();
   const params = { prompt: args.prompt, size, quality, background };
-  const bytes = referenceImage
-    ? await editWithImage(apiKey, params, referenceImage.dataUrl)
-    : await generateImage(apiKey, params);
+  const bytes = await requestImage(
+    params,
+    referenceImage ? referenceImage.dataUrl : null,
+  );
   const { url, key } = await uploadAndShare(bytes, args.user);
 
   emit({

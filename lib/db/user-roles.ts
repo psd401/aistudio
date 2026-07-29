@@ -109,10 +109,10 @@ export async function updateUserRoles(userId: number, roleNames: string[]): Prom
     }
 
     // Execute transaction to update user roles atomically.
-    // Managed (source='group-sync') rows are INVISIBLE to this editor (#1204):
-    // never deleted (reconciliation would re-add them next pass — a silent
-    // no-op revocation) and never re-inserted as 'manual' (which would exempt
-    // them from auto-revocation forever). This editor owns manual rows only.
+    // Managed (source='group-sync' or 'oneroster') rows are INVISIBLE to this
+    // editor: never deleted (their reconciler would re-add them next pass — a
+    // silent no-op revocation) and never re-inserted as 'manual' (which would
+    // exempt them from auto-revocation forever). This editor owns manual rows.
     await executeTransaction(
       async (tx) => {
         const submittedIds = roleResult.map(role => role.id);

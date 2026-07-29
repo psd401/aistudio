@@ -152,6 +152,38 @@ class ResolveModelCallCountTests(unittest.TestCase):
         self.assertEqual(agentcore_wrapper.resolve_model_call_count(0, 0), 1)
 
 
+class ProxyDeltaPrecedenceTests(unittest.TestCase):
+    """Which usage source wins when the proxy is no longer serving chat.
+
+    Regression cover for the bug that made EVERY invocation on dev and prod
+    log tokens_in=0 tokens_out=0: after #1159/#1384 the proxy stayed healthy
+    but stopped seeing model traffic, so its /usage delta was a truthful 0 —
+    and "both reads succeeded" alone was enough to let that 0 overwrite the
+    harness's real numbers.
+    """
+
+    def test_healthy_proxy_with_no_traffic_does_not_win(self):
+        self.assertFalse(
+            agentcore_wrapper.proxy_delta_is_authoritative(True, 0, 0)
+        )
+
+    def test_proxy_wins_when_it_measured_the_turn(self):
+        self.assertTrue(
+            agentcore_wrapper.proxy_delta_is_authoritative(True, 1200, 340)
+        )
+
+    def test_output_only_delta_still_counts_as_measured(self):
+        self.assertTrue(
+            agentcore_wrapper.proxy_delta_is_authoritative(True, 0, 12)
+        )
+
+    def test_degraded_reads_never_win_even_with_a_delta(self):
+        # A failed baseline read makes `final - 0` a whole-microVM total.
+        self.assertFalse(
+            agentcore_wrapper.proxy_delta_is_authoritative(False, 5000, 900)
+        )
+
+
 class ReadProxyUsageTests(unittest.TestCase):
     def test_usage_events_threaded_from_proxy(self):
         payload = json.dumps({

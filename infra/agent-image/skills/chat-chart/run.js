@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * run.js — chat-chart
  *
@@ -23,12 +24,15 @@
  */
 
 'use strict';
+const { validatedFs } = require("../../../validated-fs.cjs");
+
 
 const { spawnSync } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { publishArtifact } = require('../_shared/artifact-publisher');
 
 // NOTE: @aws-sdk/client-s3 is imported lazily inside renderLocal() because:
 //   1. The local-engine path was disabled when matplotlib was removed from
@@ -44,11 +48,6 @@ const path = require('node:path');
 // renderLocal() can stay exactly as-is; just put matplotlib + the chat-chart
 // npm install back in the Dockerfile.
 
-const REGION = process.env.AWS_REGION || 'us-east-1';
-const WORKSPACE_BUCKET = process.env.WORKSPACE_BUCKET || '';
-// Mirrors psd-image-gen's prefix — granted public s3:GetObject by the
-// workspace bucket policy. Anyone with the URL can fetch.
-const PUBLIC_PREFIX = 'public-images';
 
 const RICH_ENVELOPE_OPEN = '<<<PSD_AGENT_RICH_V1>>>';
 const RICH_ENVELOPE_CLOSE = '<<<END_PSD_AGENT_RICH_V1>>>';
@@ -63,7 +62,10 @@ const ALLOWED_ENGINES = new Set(['auto', 'quickchart', 'local']);
 const PII_PATTERNS = [
   { name: 'email', re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/ },
   { name: 'ssn', re: /\b\d{3}-\d{2}-\d{4}\b/ },
-  { name: 'us-phone', re: /\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/ },
+  { name: 'us-phone', re: /\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/ },
+  { name: 'us-phone', re: /\(\d{3}\)\s\d{3}-\d{4}\b/ },
+  { name: 'us-phone', re: /\b1[-.\s]\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/ },
+  { name: 'us-phone', re: /\b1\d{10}\b/ },
   // PSD student IDs: 7 digits starting with 2. Matches the convention used
   // by lib/safety/types.ts in the Next.js app.
   { name: 'psd-student-id', re: /\b2\d{6}\b/ },
@@ -236,26 +238,6 @@ async function renderLocal(config, userEmail) {
   if (!validateEmail(userEmail)) {
     fail('--user is required (valid email) when using the local engine');
   }
-  if (!WORKSPACE_BUCKET) {
-    fail('WORKSPACE_BUCKET env var not set — cannot upload chart for local engine');
-  }
-
-  // Lazy import — the SDK is only available when the chat-chart npm
-  // install runs in the Dockerfile, which is currently disabled.
-  let S3Client;
-  let PutObjectCommand;
-  try {
-    ({ S3Client, PutObjectCommand } = require('@aws-sdk/client-s3'));
-  } catch (err) {
-    fail(
-      'local engine is not available in this build of the agent image — ' +
-        'use --engine=quickchart instead, or rebuild the image with ' +
-        'chat-chart npm install + matplotlib enabled. (cause: ' +
-        (err && err.message ? err.message : err) + ')',
-      3,
-    );
-  }
-
   // Hand the Chart.js config off to matplotlib via stdin. render_local.py
   // converts the (type, data) shape to a matplotlib plot and writes the
   // PNG to the path we provide.
@@ -272,29 +254,22 @@ async function renderLocal(config, userEmail) {
     const stderr = (py.stderr || '').slice(0, 1000);
     fail(`local renderer failed (exit ${py.status}): ${stderr}`, 3);
   }
-  if (!fs.existsSync(outPath)) {
+  if (!validatedFs.existsSync(outPath)) {
     fail(`local renderer claimed success but produced no file at ${outPath}`, 3);
   }
 
-  const bytes = fs.readFileSync(outPath);
+  const bytes = validatedFs.readFileSync(outPath);
   // Best-effort cleanup; the temp dir lives under /tmp which is also wiped
   // on container restart.
-  try { fs.unlinkSync(outPath); fs.rmdirSync(tmpDir); } catch (_) {}
+  try {
+    validatedFs.unlinkSync(outPath);
+    validatedFs.rmdirSync(tmpDir);
+  } catch {
+    // The renderer result is already in memory; /tmp cleanup is best-effort.
+  }
 
-  const key = `${PUBLIC_PREFIX}/${userEmail}/${randomUUID()}.png`;
-  const s3 = new S3Client({ region: REGION });
-  await s3.send(new PutObjectCommand({
-    Bucket: WORKSPACE_BUCKET,
-    Key: key,
-    Body: bytes,
-    ContentType: 'image/png',
-    Metadata: {
-      generated_by: 'chat-chart',
-      engine: 'local-matplotlib',
-    },
-  }));
-  const encodedKey = key.split('/').map(encodeURIComponent).join('/');
-  return `https://${WORKSPACE_BUCKET}.s3.${REGION}.amazonaws.com/${encodedKey}`;
+  const published = await publishArtifact(bytes, '.png', 'image/png');
+  return published.url;
 }
 
 function emitEnvelope(imageUrl, title, textFallback, type) {

@@ -1,0 +1,10 @@
+id: schedules-clarify-missing-time
+skill: psd-schedules
+level: L1
+workspace: pure
+suite: regression
+prompt: "Remind me to submit the EVAL-1426 report. I have not supplied a date, time, recurrence, or timezone. Do not schedule anything until I answer."
+trials: 3
+graders:
+  - {"type":"no_route_called","route":"/api/agent/schedules"}
+  - {"type":"output_match","pattern":"(?i)(when|date|time|timezone)"}

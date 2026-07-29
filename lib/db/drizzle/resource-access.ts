@@ -10,6 +10,8 @@
  *   - ZERO grant rows for a resource  = UNRESTRICTED (everyone may access).
  *   - ANY matching grant row          = allowed.
  *   - ADMINISTRATORS always pass.
+ *   - Active room assignment is an additional assistant grant.
+ *   - Student-only active room members are limited to room-assigned assistants.
  *
  * This is the resource-scoped authorization axis — NOT a Capability (role-gated
  * UI feature) and NOT a Scope (API-key permission). See
@@ -22,19 +24,39 @@
  */
 
 import { and, eq, sql } from "drizzle-orm";
-import { executeQuery, toPgRows, type DbTransaction } from "@/lib/db/drizzle-client";
+import {
+  executeQuery,
+  toPgRows,
+  type DbTransaction,
+} from "@/lib/db/drizzle-client";
 import {
   resourceAccessGrants,
   type ResourceGrantType,
   type ResourceGrantKind,
 } from "@/lib/db/schema";
 import { normalizeEmail } from "@/lib/groups/normalize";
+import { getRoomAssistantAccessContext } from "@/lib/rooms/membership";
 
 /** A single grant on a resource, reduced to what the editor reads/writes. */
 export interface ResourceGrant {
   grantKind: ResourceGrantKind;
   /** Role name (kind='role') or lowercased group email (kind='group'). */
   grantValue: string;
+}
+
+export interface ResourceAccessOptions {
+  /**
+   * Assistant ownership is an existing access path. It is supplied explicitly
+   * because ownership lives on assistant_architects rather than the grants
+   * table. A room-restricted student does not receive this bypass for an
+   * unassigned assistant.
+   */
+  ownerUserId?: number | null;
+}
+
+export interface ResourceBatchAccessOptions {
+  /** Assistant ids owned by the caller among `resourceIds`. */
+  ownedResourceIds?: Array<number | string>;
 }
 
 /**
@@ -50,7 +72,8 @@ function resourceIdText(resourceId: number | string): string {
  * Whether a user may access a single resource. The canonical per-resource gate
  * for execution paths (model resolution, assistant execute, skill invocation).
  *
- * One round-trip: a boolean-OR of four EXISTS predicates —
+ * For assistants, room assignment/restriction and explicit ownership are
+ * evaluated first. The ordinary grant query is a boolean-OR of four predicates —
  *   1. the resource has NO grants (unrestricted), OR
  *   2. the user is an administrator, OR
  *   3. a `role` grant matches one of the user's roles (by name, case-insensitive), OR
@@ -62,14 +85,29 @@ function resourceIdText(resourceId: number | string): string {
 export async function userCanAccessResource(
   userId: number,
   resourceType: ResourceGrantType,
-  resourceId: number | string
+  resourceId: number | string,
+  options: ResourceAccessOptions = {},
+  transaction?: DbTransaction
 ): Promise<boolean> {
   const idText = resourceIdText(resourceId);
   const validUser = Number.isInteger(userId) && userId > 0;
 
-  const result = await executeQuery(
-    (db) =>
-      db.execute(sql`
+  if (resourceType === "assistant") {
+    const roomAccess = await getRoomAssistantAccessContext(
+      userId,
+      [idText],
+      transaction
+    );
+    if (roomAccess.isAdministrator) return true;
+    if (roomAccess.assignedAssistantIds.has(idText)) return true;
+    if (roomAccess.isStudentOnly && roomAccess.hasActiveRoomMembership) {
+      return false;
+    }
+    if (validUser && options.ownerUserId === userId) return true;
+  }
+
+  const query = (db: Pick<DbTransaction, "execute">) =>
+    db.execute(sql`
         SELECT (
           NOT EXISTS (
             SELECT 1 FROM resource_access_grants g
@@ -108,12 +146,77 @@ export async function userCanAccessResource(
             )
           )
         ) AS allowed
-      `),
-    "userCanAccessResource"
-  );
+      `);
+  const result = transaction
+    ? await query(transaction)
+    : await executeQuery((db) => query(db), "userCanAccessResource");
 
   const [row] = toPgRows<{ allowed: boolean }>(result);
   return row?.allowed === true;
+}
+
+type BatchAccessSeed = {
+  accessible: Set<string>;
+  complete: boolean;
+};
+
+async function resolveAssistantBatchAccess(
+  userId: number,
+  resourceType: ResourceGrantType,
+  idTexts: string[],
+  validUser: boolean,
+  options: ResourceBatchAccessOptions
+): Promise<BatchAccessSeed> {
+  const accessible = new Set<string>();
+  if (resourceType !== "assistant") {
+    return { accessible, complete: false };
+  }
+
+  const roomAccess = await getRoomAssistantAccessContext(userId, idTexts);
+  if (roomAccess.isAdministrator) {
+    return { accessible: new Set(idTexts), complete: true };
+  }
+  if (roomAccess.isStudentOnly && roomAccess.hasActiveRoomMembership) {
+    return {
+      accessible: new Set(
+        idTexts.filter((id) => roomAccess.assignedAssistantIds.has(id))
+      ),
+      complete: true,
+    };
+  }
+
+  for (const id of idTexts) {
+    if (roomAccess.assignedAssistantIds.has(id)) accessible.add(id);
+  }
+  const candidateIds = new Set(idTexts);
+  for (const ownedId of options.ownedResourceIds ?? []) {
+    const id = resourceIdText(ownedId);
+    if (validUser && candidateIds.has(id)) accessible.add(id);
+  }
+  return { accessible, complete: false };
+}
+
+async function isBatchAdministrator(
+  userId: number,
+  resourceType: ResourceGrantType,
+  validUser: boolean
+): Promise<boolean> {
+  if (!validUser || resourceType === "assistant") return false;
+
+  const adminResult = await executeQuery(
+    (db) =>
+      db.execute(sql`
+        SELECT EXISTS (
+          SELECT 1 FROM user_roles ur
+            JOIN roles r ON r.id = ur.role_id
+           WHERE ur.user_id = ${userId}
+             AND lower(r.name) = 'administrator'
+        ) AS is_admin
+      `),
+    "filterAccessibleResourceIds.admin"
+  );
+  const [adminRow] = toPgRows<{ is_admin: boolean }>(adminResult);
+  return adminRow?.is_admin === true;
 }
 
 /**
@@ -121,46 +224,43 @@ export async function userCanAccessResource(
  * batch gate for list surfaces (e.g. GET /api/models), avoiding the N+1 of
  * calling `userCanAccessResource` per row.
  *
- * A candidate is accessible when it has NO grants (unrestricted) OR the user is
- * an administrator OR at least one of its grants matches the user. Returns the
- * accessible ids as TEXT (the storage form); compare with `resourceIdText(id)`.
+ * A candidate is accessible when it has NO grants (unrestricted), the user is
+ * an administrator, at least one grant matches, or an assistant-specific room
+ * assignment/ownership path matches. Student-only active room members receive
+ * only assigned assistant ids. Returns accessible ids as TEXT (the storage
+ * form); compare with `resourceIdText(id)`.
  */
 export async function filterAccessibleResourceIds(
   userId: number,
   resourceType: ResourceGrantType,
-  resourceIds: Array<number | string>
+  resourceIds: Array<number | string>,
+  options: ResourceBatchAccessOptions = {}
 ): Promise<Set<string>> {
   const idTexts = resourceIds.map(resourceIdText);
-  const accessible = new Set<string>();
-  if (idTexts.length === 0) return accessible;
+  if (idTexts.length === 0) return new Set<string>();
 
   const validUser = Number.isInteger(userId) && userId > 0;
-  // Parameterized IN-list (drizzle does NOT expand a raw array into an IN list).
-  const idList = sql.join(
-    idTexts.map((t) => sql`${t}`),
-    sql`, `
+  const assistantAccess = await resolveAssistantBatchAccess(
+    userId,
+    resourceType,
+    idTexts,
+    validUser,
+    options
   );
+  if (assistantAccess.complete) return assistantAccess.accessible;
+  const { accessible } = assistantAccess;
 
   // Administrators see everything — short-circuit before any grant lookup.
-  if (validUser) {
-    const adminResult = await executeQuery(
-      (db) =>
-        db.execute(sql`
-          SELECT EXISTS (
-            SELECT 1 FROM user_roles ur
-              JOIN roles r ON r.id = ur.role_id
-             WHERE ur.user_id = ${userId}
-               AND lower(r.name) = 'administrator'
-          ) AS is_admin
-        `),
-      "filterAccessibleResourceIds.admin"
-    );
-    const [adminRow] = toPgRows<{ is_admin: boolean }>(adminResult);
-    if (adminRow?.is_admin === true) {
-      for (const id of idTexts) accessible.add(id);
-      return accessible;
-    }
+  // Assistant administrator status was already loaded with room context above.
+  if (await isBatchAdministrator(userId, resourceType, validUser)) {
+    return new Set(idTexts);
   }
+
+  // Parameterized IN-list (drizzle does NOT expand a raw array into an IN list).
+  const idList = sql.join(
+    idTexts.map((id) => sql`${id}`),
+    sql`, `
+  );
 
   // For each CANDIDATE that has grants, decide whether the user matches any.
   // Candidates absent from this result have no grants → unrestricted.
@@ -217,11 +317,11 @@ export async function filterAccessibleResourceIds(
 /** List a resource's grants (role grants first, then group, each by value). */
 export async function listResourceGrants(
   resourceType: ResourceGrantType,
-  resourceId: number | string
+  resourceId: number | string,
+  transaction?: DbTransaction
 ): Promise<ResourceGrant[]> {
   const idText = resourceIdText(resourceId);
-  const rows = await executeQuery(
-    (db) =>
+  const query = (db: Pick<DbTransaction, "select">) =>
       db
         .select({
           grantKind: resourceAccessGrants.grantKind,
@@ -234,9 +334,10 @@ export async function listResourceGrants(
             eq(resourceAccessGrants.resourceId, idText)
           )
         )
-        .orderBy(resourceAccessGrants.grantKind, resourceAccessGrants.grantValue),
-    "listResourceGrants"
-  );
+        .orderBy(resourceAccessGrants.grantKind, resourceAccessGrants.grantValue);
+  const rows = transaction
+    ? await query(transaction)
+    : await executeQuery(query, "listResourceGrants");
   return rows;
 }
 

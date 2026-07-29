@@ -85,7 +85,7 @@ function request(url: string, body: unknown): NextRequest {
   });
 }
 
-describe("canonical repository upload routes", () => {
+function defineCanonicalRepositoryUploadRoutesSuite1Part1() {
   beforeEach(() => {
     jest.clearAllMocks();
     mockCreateLogger.mockReturnValue(
@@ -164,7 +164,9 @@ describe("canonical repository upload routes", () => {
     expect(mockInitiateRepositoryUpload).not.toHaveBeenCalled();
   });
 
-  test.each([
+  }
+
+function defineCanonicalRepositoryUploadRoutesSuite1Part2() {test.each([
     "absent",
     "foreign active",
     "ephemeral",
@@ -265,7 +267,9 @@ describe("canonical repository upload routes", () => {
     });
   });
 
-  test("keeps legacy behavior behind rollout gates and for non-PDF files", async () => {
+  }
+
+function defineCanonicalRepositoryUploadRoutesSuite1Part3() {test("keeps legacy behavior behind rollout gates and for non-PDF files", async () => {
     mockIsCanonicalRepositoryUploadActive.mockReturnValue(false);
     const gated = await initiateUpload(
       request("http://localhost/api/repositories/7/uploads", {
@@ -362,7 +366,9 @@ describe("canonical repository upload routes", () => {
     );
   });
 
-  test("completes and dispatches the durable processing job", async () => {
+  }
+
+function defineCanonicalRepositoryUploadRoutesSuite1Part4() {test("completes and dispatches the durable processing job", async () => {
     const response = await completeUpload(
       request(
         `http://localhost/api/repositories/7/uploads/${sessionId}/complete`,
@@ -398,4 +404,13 @@ describe("canonical repository upload routes", () => {
       expect.objectContaining({ error: "SQS unavailable" })
     );
   });
-});
+}
+
+const defineCanonicalRepositoryUploadRoutesSuite1 = () => {
+  defineCanonicalRepositoryUploadRoutesSuite1Part1()
+  defineCanonicalRepositoryUploadRoutesSuite1Part2()
+  defineCanonicalRepositoryUploadRoutesSuite1Part3()
+  defineCanonicalRepositoryUploadRoutesSuite1Part4()
+};
+
+describe("canonical repository upload routes", defineCanonicalRepositoryUploadRoutesSuite1);

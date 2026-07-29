@@ -78,6 +78,59 @@ function getUserStatus(lastSignInAt: Date | null): "active" | "inactive" | "pend
   return "inactive"
 }
 
+function searchCondition(search: string | undefined): SQL | undefined {
+  if (!search) return undefined
+  const searchInput = search.trim()
+  if (searchInput.length === 0) return undefined
+  if (searchInput.length > 100) {
+    throw ErrorFactories.invalidInput(
+      "search",
+      searchInput,
+      "Must be 100 characters or less"
+    )
+  }
+
+  const escapedInput = searchInput
+    .replace(/\\/g, "\\\\")
+    .replace(/%/g, "\\%")
+    .replace(/_/g, "\\_")
+  const searchTerm = `%${escapedInput}%`
+  return or(
+    ilike(users.firstName, searchTerm),
+    ilike(users.lastName, searchTerm),
+    ilike(users.email, searchTerm)
+  )
+}
+
+function statusCondition(
+  status: UserFilters["status"]
+): SQL | undefined {
+  if (!status || status === "all") return undefined
+  const validStatuses = ["active", "inactive", "pending"] as const
+  if (!validStatuses.includes(status)) {
+    throw ErrorFactories.invalidInput(
+      "status",
+      status,
+      `Invalid status. Must be one of: all, ${validStatuses.join(", ")}`
+    )
+  }
+  if (status === "pending") {
+    return sql`${users.lastSignInAt} IS NULL`
+  }
+
+  const threshold = getDateThreshold(ACTIVE_USER_THRESHOLD_DAYS)
+  return status === "active"
+    ? sql`${users.lastSignInAt} >= ${threshold}`
+    : sql`${users.lastSignInAt} IS NOT NULL AND ${users.lastSignInAt} < ${threshold}`
+}
+
+function userFilterConditions(filters: UserFilters | undefined): SQL[] {
+  return [
+    searchCondition(filters?.search),
+    statusCondition(filters?.status),
+  ].filter((condition): condition is SQL => condition !== undefined)
+}
+
 /**
  * Get user management statistics for the dashboard
  */
@@ -173,68 +226,7 @@ export async function getUsers(
     // Verify admin role - requireRole throws if unauthorized (validates session internally)
     await requireRole("administrator")
 
-    // Build dynamic WHERE conditions for database-level filtering
-    const conditions: SQL[] = []
-
-    // Search filter - case-insensitive search across firstName, lastName, email
-    if (filters?.search) {
-      // Validate search input (prevent DoS with excessively long strings)
-      const searchInput = filters.search.trim()
-
-      // Skip query if empty string after trim (performance optimization)
-      if (searchInput.length === 0) {
-        // Don't add search condition, effectively showing all users
-      } else if (searchInput.length > 100) {
-        throw ErrorFactories.invalidInput(
-          "search",
-          searchInput,
-          "Must be 100 characters or less"
-        )
-      } else {
-        // Escape ILIKE wildcard characters to prevent unintended matching
-        // User searching for "%" should not match all records
-        const escapedInput = searchInput
-          .replace(/\\/g, "\\\\") // Escape backslashes first
-          .replace(/%/g, "\\%")   // Escape % wildcard
-          .replace(/_/g, "\\_")   // Escape _ wildcard
-
-        const searchTerm = `%${escapedInput}%`
-
-        // Use Drizzle's ilike() for type safety instead of raw SQL
-        conditions.push(
-          or(
-            ilike(users.firstName, searchTerm),
-            ilike(users.lastName, searchTerm),
-            ilike(users.email, searchTerm)
-          )!
-        )
-      }
-    }
-
-    // Status filter - based on lastSignInAt
-    if (filters?.status && filters.status !== "all") {
-      // Runtime validation - TypeScript type doesn't enforce this at runtime
-      const VALID_STATUSES = ["all", "active", "inactive", "pending"] as const
-      if (!VALID_STATUSES.includes(filters.status)) {
-        throw ErrorFactories.invalidInput(
-          "status",
-          filters.status,
-          `Invalid status. Must be one of: ${VALID_STATUSES.join(", ")}`
-        )
-      }
-
-      if (filters.status === "pending") {
-        conditions.push(sql`${users.lastSignInAt} IS NULL`)
-      } else if (filters.status === "active") {
-        const threshold = getDateThreshold(ACTIVE_USER_THRESHOLD_DAYS)
-        conditions.push(sql`${users.lastSignInAt} >= ${threshold}`)
-      } else if (filters.status === "inactive") {
-        const threshold = getDateThreshold(ACTIVE_USER_THRESHOLD_DAYS)
-        conditions.push(
-          sql`${users.lastSignInAt} IS NOT NULL AND ${users.lastSignInAt} < ${threshold}`
-        )
-      }
-    }
+    const conditions = userFilterConditions(filters)
 
     // Get filtered users (without role filtering - that's done on the role query)
     const usersResult = await executeQuery(
@@ -579,8 +571,9 @@ export async function updateUser(
 
         // Delete+insert lives in the shared helper — this logic was
         // copy-pasted across three call sites and drifted once already
-        // (#1222 review). Managed (source='group-sync') rows stay invisible
-        // to this editor: never deleted, never re-inserted as 'manual'.
+        // (#1222 review). Managed (source='group-sync' or 'oneroster') rows
+        // stay invisible to this editor: never deleted, never re-inserted as
+        // 'manual'.
         const submittedRoleIds = roleList.map((role) => role.id)
         await syncManualUserRoles(tx, userId, submittedRoleIds)
 

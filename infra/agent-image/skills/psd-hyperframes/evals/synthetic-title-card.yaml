@@ -1,0 +1,9 @@
+id: hyperframes-synthetic-title-card
+skill: psd-hyperframes
+level: L2
+workspace: mutating
+suite: capability
+prompt: "Create a one-second synthetic motion title card reading \"EVAL 1426\" with a plain dark background and no external assets. Render it with psd-hyperframes and return the bare MP4 URL. This is clearly marked test data."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"https://[^\\s]+\\.mp4(?:\\?[^\\s]+)?"}

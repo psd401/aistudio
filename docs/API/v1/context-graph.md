@@ -31,6 +31,11 @@ All `/api/v1/graph/*` endpoints require authentication. Two modes are supported:
 |-------|--------|
 | `graph:read` | List nodes, get node, list edges, get connections |
 | `graph:write` | Create/update/delete nodes, create/delete edges |
+| `repositories:list` | List and describe repositories currently accessible to the principal |
+| `repositories:read` | Disclose current immutable source segments and citations |
+| `repositories:search` | Run retrieval v2 over currently authorized repositories |
+| `repositories:changes` | Poll the authorized repository item change feed |
+| `repositories:write` | Add uploaded items to repositories the principal can modify |
 
 API keys are created in **Settings > API Keys**. Administrators receive all scopes; staff receives `graph:read` by default.
 
@@ -489,6 +494,179 @@ Delete a single edge. Requires `graph:write`.
 
 ---
 
+### Repository catalog and retrieval — Issue #1266
+
+The repository API is the REST equivalent of the
+`repositories_list`, `repositories_describe`, `repositories_search`,
+`repositories_get_source`, and `repositories_list_changes` MCP tools. Each
+operation has its own API-key scope. Holding a scope never grants repository
+access: the executing user must also pass the live repository ACL, and
+source/search disclosure additionally enforces segment ACLs, current immutable
+item versions, and the active index generation.
+
+Inaccessible resources are omitted from lists/searches and masked as
+`404 NOT_FOUND` on direct reads. System-managed, ephemeral, expired, and
+non-active repositories are not part of the external catalog.
+
+#### `GET /api/v1/repositories`
+
+Requires `repositories:list`. Optional query parameters:
+
+| Name | Type | Description |
+|---|---|---|
+| `query` | string (max 200) | Case-insensitive name/description filter |
+| `limit` | integer (1-50) | Maximum entries; default 50 |
+
+```bash
+curl -H "Authorization: Bearer sk-your-key" \
+  "https://your-domain/api/v1/repositories?query=policy&limit=20"
+```
+
+Each entry includes `id`, `name`, `description`, `ownerName`, `visibility`,
+`itemCount`, `activeIndexGenerationId`, and update timestamps.
+
+#### `GET /api/v1/repositories/{id}`
+
+Requires `repositories:list`. Returns the same catalog projection for one
+currently accessible repository. Missing and inaccessible ids both return 404.
+
+#### `POST /api/v1/repositories/search`
+
+Requires `repositories:search`. Omit `repositoryIds` to search all accessible
+durable repositories.
+
+```json
+{
+  "query": "What is the current graduation policy?",
+  "repositoryIds": [42],
+  "mode": "hybrid",
+  "modalities": ["text", "table"],
+  "limit": 5,
+  "threshold": 0.2
+}
+```
+
+`mode` is `keyword`, `vector`, or `hybrid`; modalities are `text`, `image`,
+`audio`, `video`, or `table`. Results use retrieval v2 and include immutable
+source citations. Unauthorized requested ids produce no results from those
+repositories; they never disclose whether the id exists.
+
+#### `GET /api/v1/repositories/{id}/source`
+
+Requires `repositories:read`. `itemId` is required; `chunkId` and a 1-50
+`limit` are optional. This is the exact-source step after search:
+
+```bash
+curl -H "Authorization: Bearer sk-your-key" \
+  "https://your-domain/api/v1/repositories/42/source?itemId=87&chunkId=901"
+```
+
+The response contains `chunkId`, stable/current item and version identifiers,
+`versionNumber`, modality, content, context prefix, and exact source locator.
+The final SQL disclosure rechecks repository and segment access in the same
+statement. No accessible current segment returns 404.
+
+#### `GET /api/v1/repositories/changes`
+
+Requires `repositories:changes`. `repositoryIds` is a required comma-separated
+list of at most 50 ids. `limit` is 1-100; `cursor` is the opaque
+`meta.nextCursor` from the previous response.
+
+```bash
+curl -H "Authorization: Bearer sk-your-key" \
+  "https://your-domain/api/v1/repositories/changes?repositoryIds=42,51&limit=50"
+```
+
+Changes are ordered by `(updatedAt,itemId)`, which makes the cursor stable when
+timestamps tie. Each page rechecks current ACLs; access revocation therefore
+takes effect without rebuilding an agent. A malformed cursor returns
+`400 VALIDATION_ERROR`.
+
+Common errors are `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`/`INVALID_TOKEN`,
+`403 INSUFFICIENT_SCOPE`, `404 NOT_FOUND`, `429 RATE_LIMIT_EXCEEDED`, and
+`500 INTERNAL_ERROR`. Every response retains the standard request-id and
+rate-limit headers described above.
+
+#### `POST /api/v1/repositories/{id}/items/uploads`
+
+Requires `repositories:write`. The API key owner must be able to modify the
+active, user-managed durable repository. Missing, inaccessible, ephemeral,
+system-managed, expired, and inactive repositories all return `404 NOT_FOUND`.
+Canonical file-type, size, and quota validation is shared with the web upload
+flow.
+
+```bash
+curl -X POST -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"itemName":"Graduation policy","fileName":"policy.pdf",
+       "contentType":"application/pdf","byteSize":248731}' \
+  "https://your-domain/api/v1/repositories/42/items/uploads"
+```
+
+The `201` response contains `sessionId`, `objectKey`, `expiresAt`, and either:
+
+- `uploadMethod: "single"` with one `uploadUrl`; or
+- `uploadMethod: "multipart"` with `partSize` and numbered `partUrls`.
+
+```json
+{
+  "data": {
+    "sessionId": "11111111-2222-4333-8444-555555555555",
+    "objectKey": "repositories/42/11111111-2222-4333-8444-555555555555/policy.pdf",
+    "uploadMethod": "single",
+    "uploadUrl": "https://s3.example/presigned-put",
+    "expiresAt": "2026-07-29T01:00:00.000Z"
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+Upload the exact declared bytes with S3 `PUT` requests. Retain every multipart
+ETag. Invalid metadata returns `400 VALIDATION_ERROR`, exhausted upload quotas
+return `429 REPOSITORY_UPLOAD_QUOTA_EXCEEDED`, and a deployment where canonical
+uploads are disabled returns `503 UPLOAD_UNAVAILABLE`. JSON request bodies over
+128 KiB return `413 PAYLOAD_TOO_LARGE`.
+
+#### `POST /api/v1/repositories/{id}/items/uploads/{sessionId}/complete`
+
+Requires `repositories:write` and current modify access. Send `{}` for a
+single-part upload. For multipart, send every S3 ETag and part number:
+
+```json
+{
+  "parts": [
+    { "ETag": "\"9b2cf535f27731c974343645a3985328\"", "PartNumber": 1 }
+  ]
+}
+```
+
+Completion verifies the uploaded object, creates the immutable item version and
+durable processing job, and requests immediate dispatch. Scheduled dispatch
+retries a committed job if needed. The response contains `itemId`,
+`itemVersionId`, `processingJobId`, and `replayed`. Repeating a successful
+completion returns the same identifiers with `replayed: true` and the
+`Idempotency-Replayed: true` header. Invalid multipart input or an unavailable
+or foreign session returns `400 UPLOAD_COMPLETION_FAILED` without session
+details. Unexpected storage or database failures return
+`500 INTERNAL_ERROR`; callers can retry completion with the same session
+because registration is idempotent. Completed-session replays remain valid
+after the original presigned upload URL expires. JSON request bodies over
+128 KiB return `413 PAYLOAD_TOO_LARGE`.
+
+```json
+{
+  "data": {
+    "itemId": 87,
+    "itemVersionId": "33333333-4444-4555-8666-777777777777",
+    "processingJobId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "replayed": false
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+---
+
 ### Tools (catalog versioning — Issue #927)
 
 Inspect the unified tool catalog and its version history. Tools are versioned
@@ -681,6 +859,238 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 
 ---
 
+## Assistant Architect create, update, and fork
+
+Programmatic callers can create, replace, and fork Assistant Architects through
+the same portable ExportFormat v1.0 used by the admin export/import UI:
+
+- `POST /api/v1/assistants/import`
+- `PUT /api/v1/assistants/{id}`
+- `POST /api/v1/assistants/{id}/fork`
+
+All three require `assistants:write` on REST. Their MCP equivalents are
+`create_assistant` (`mcp:create_assistant`), `update_assistant`
+(`mcp:update_assistant`), and `fork_assistant` (`mcp:fork_assistant`). These
+scopes are available to staff and administrators. Catalog metadata is the scope
+source of truth on both surfaces; the REST routes use `assistants:write` as a
+fallback only when the catalog entry is unavailable. When an administrator
+disables a cataloged create, update, or fork operation, both MCP and REST reject
+it; REST uses a masked `404` before body parsing or mutation.
+
+The create and update catalog contracts are published as `v2` so existing
+deployments can install the complete recursive ExportFormat schema without
+mutating an already-published `v1` contract. Unpinned callers resolve to `v2`.
+
+Import envelopes must contain at least one assistant and are limited to 10 MB,
+100 assistants, 50 input fields per assistant (matching the execution-time
+input cap), and 500 prompt repository bindings across the admin, REST, and MCP
+surfaces. An empty batch is a `400 VALIDATION_ERROR`, not a retryable import
+failure. REST create/update count bytes while reading the request stream and
+cancel before buffering more than the limit, so a missing or understated
+`Content-Length` cannot bypass the pre-parse bound. An advertised oversized
+length is rejected immediately. The shared MCP transport has a separate 64 MiB
+ceiling so existing multi-file tools such as `import_okf` retain their larger
+request contract; shared import validation still rejects an Assistant Architect
+envelope above 10 MB before any write. The optional REST fork body is
+independently stream-bounded to 4 KiB before JSON decoding. Oversized REST
+create and update envelopes return `413 PAYLOAD_TOO_LARGE`.
+
+Every write preserves the existing human approval gate:
+
+- create: every assistant is owned by the authenticated caller and enters
+  `pending_approval`, regardless of the envelope's `status`;
+- update: staff may replace only their own assistants; administrators may
+  replace any assistant. Missing ids and assistants owned by another user both
+  return a masked `404 NOT_FOUND`. Prompts and input fields are
+  wholesale-replaced in the same transaction and status resets to
+  `pending_approval`. The assistant row is
+  locked for replacement, and a pending or running execution returns
+  `409 CONFLICT` before any graph mutation so its in-memory prompt ids remain
+  valid. Abandoned pending/running rows are marked failed only after the same
+  immutable per-execution wall-clock deadline the executor persists and enforces
+  (`agent_timeout_seconds` for agentic runs; `timeout_seconds`, or the
+  900-second platform ceiling when unset, for prompt chains) plus a one-minute
+  grace, so a crashed worker cannot block replacement forever without expiring
+  a legitimate long-running agent. Execution startup acquires the same
+  assistant-row lock, rechecks owner/admin/approved visibility plus the current
+  assistant and every prompt-model resource grant in that transaction, and
+  creates its active execution row before loading prompts, closing the
+  load-before-record and authorization-snapshot races. Prompts referenced
+  by earlier execution results are detached from the live graph rather than
+  deleted, preserving their outputs, errors, timings, feedback, and original
+  prompt configuration in execution history. Any linked UI capability is
+  deactivated atomically until the assistant is approved again. Reapproval
+  reuses that capability's stable identifier even when the import renamed the
+  assistant, and re-syncs the existing navigation item to it. Final repository
+  audience validation uses the approval transaction's existing connection and
+  holds the same assistant-row lock through the approval transition, so a
+  concurrent replacement cannot publish a graph that was not reviewed or
+  exhaust the connection pool with nested approval reads; and
+- fork: any assistant visible under the same owner/admin/approved plus
+  resource/room rules as the v1 detail endpoint may be copied. The source is
+  never modified, and the caller owns the new `pending_approval` copy. The
+  visibility/resource decision and source export are read in one
+  repeatable-read transaction. After authoring validation, current source
+  visibility is checked again under the source row lock in the destination
+  create transaction immediately before insert, so a grant or room revocation
+  committed during validation returns the same masked `404` without persisting
+  a fork. Missing and invisible sources both return `404`.
+
+ExportFormat v1.0 carries the complete executable configuration needed for a
+behavior-preserving fork: assistant mode, model routing, agent tools and
+connectors, agent limits, retrieval scope, prompt input mappings, repository
+ids, and prompt tools. These properties are optional for compatibility with
+older v1.0 files; missing values use the existing database defaults. Unsupported
+input field types and invalid configuration values fail envelope validation
+before any assistant transaction begins. Explicit `null` is also portable for
+nullable image, prompt context/group/mapping, prompt/assistant timeout, and
+input-field option properties; every non-null timeout must be a positive
+integer.
+Advanced model routing requires an OpenAI, Anthropic, or Google routing family,
+while legacy and standard routing reject a non-null family. Agent cost caps,
+when present, must be positive. An update cannot reverse an agentic assistant
+to prompt-chain mode; because omitted legacy fields use their v1.0 defaults, an
+agentic update must explicitly retain `mode: "agentic"`.
+
+Agent tool and connector identifiers are also checked against the importing
+author's role-derived scopes and connector visibility before any write starts.
+Every mapped prompt fallback model must be author-accessible, even when the
+prompt enables no tools. Every prompt repository must be author-accessible,
+active, and durable; ephemeral/system repositories cannot be persisted through
+an import. This is the author-side half of the existing dual authorization
+boundary; execution still rechecks the executing caller. An inaccessible
+tool, connector, model, or repository returns `400` without creating,
+replacing, or forking an assistant. Per-prompt enabled tools are validated at
+the same boundary using the editor's normal routing rules: legacy prompts must
+use tools supported by their mapped active model, while automatic routing must
+have an author-accessible eligible model that supports the complete selected
+tool set.
+
+Each assistant create runs in its own transaction, so a failed prompt or input
+field leaves no partial rows for that assistant while successful siblings in a
+multi-assistant import remain committed. Model names use the existing importer
+resolution order: exact active `modelId`, provider-family fallback
+(OpenAI/Anthropic/Google), then the first active model. Responses report every
+`modelName` → `mappedToId` choice. If no active model can be mapped for any
+prompt, validation fails before a create or replacement transaction starts.
+
+**Create example**
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "version": "1.0",
+    "exported_at": "2026-07-28T12:00:00.000Z",
+    "assistants": [{
+      "name": "Family newsletter helper",
+      "description": "Drafts a family-facing newsletter",
+      "status": "approved",
+      "prompts": [{
+        "name": "Draft",
+        "content": "Draft a newsletter about {{topic}}",
+        "model_name": "gpt-5",
+        "position": 0
+      }],
+      "input_fields": [{
+        "name": "topic",
+        "label": "Topic",
+        "field_type": "short_text",
+        "position": 0
+      }]
+    }]
+  }' \
+  "https://your-domain/api/v1/assistants/import"
+```
+
+**Create response `201`**
+
+```json
+{
+  "data": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0,
+    "results": [{
+      "name": "Family newsletter helper",
+      "id": 41,
+      "status": "pending_approval"
+    }],
+    "modelMappings": [{
+      "modelName": "gpt-5",
+      "mappedToId": 7
+    }]
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+**Update example**
+
+```bash
+curl -X PUT \
+  -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "version": "1.0",
+    "exported_at": "2026-07-28T12:30:00.000Z",
+    "assistants": [{
+      "name": "Updated family newsletter helper",
+      "description": "Updated by an agent",
+      "status": "approved",
+      "prompts": [{
+        "name": "Draft",
+        "content": "Draft three newsletter sections about {{topic}}",
+        "model_name": "gpt-5",
+        "position": 0
+      }],
+      "input_fields": [{
+        "name": "topic",
+        "label": "Topic",
+        "field_type": "short_text",
+        "position": 0
+      }]
+    }]
+  }' \
+  "https://your-domain/api/v1/assistants/41"
+```
+
+The update envelope must contain exactly one assistant. A successful response is
+`200` with `data.result` (`name`, `id`, `status`) plus `modelMappings`.
+
+**Fork example**
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"My family newsletter helper"}' \
+  "https://your-domain/api/v1/assistants/41/fork"
+```
+
+The optional body may be omitted. A successful `201` response contains
+`data.sourceAssistantId`, the new `data.result`, and `modelMappings`.
+
+**Errors**
+
+- `400` — Invalid JSON, unsupported export version/shape or collection limit, an
+  inaccessible agent tool/connector, mapped model, or durable repository, a
+  prompt with no active model mapping, an invalid routing/agent limit
+  combination, an unsupported agentic-to-prompt-chain update,
+  non-positive or partially numeric path ID, an update envelope containing
+  other than one assistant, or an invalid fork name.
+- `401` — Missing or invalid authentication.
+- `403` — Missing `assistants:write`.
+- `404` — A cataloged mutation is disabled, an update target is missing/owned
+  by another user, or a fork source is missing/not visible.
+- `409` — The assistant has an active execution and cannot be replaced.
+- `413` — The create or update import envelope exceeds 10 MiB.
+- `429` — API-key rate limit exceeded.
+- `500` — Import persistence or another internal failure.
+
+---
+
 ## Assistant execution runtime files
 
 `POST /api/v1/assistants/{id}/execute` and
@@ -716,8 +1126,26 @@ conversation message, the server:
    inside retrieval, and inside each repository tool.
 
 Assistant ownership never lends repository access. The synchronous REST path,
-the `Accept: application/json` async-job path, and MCP
-`execute_assistant` all use the same execution service and authorization rules.
+the `Accept: application/json` async-job path, MCP `execute_assistant`, and the
+browser Assistant Architect route all use the same assistant-lock execution
+coordinator. Its mode-specific deadline is also the enforced streaming timeout,
+so update reconciliation and live runtimes agree on when a row can be stale.
+Legacy routing rechecks every pinned prompt-model grant under that lock.
+Standard and advanced routing instead authorize the router's current selected
+model, not a stored fallback that may never be used. The coordinated execution
+row remains active until every prompt in a final parallel position has settled
+and persisted, so an import replacement cannot delete a sibling's prompt while
+it is still completing.
+API-key, JWT, and MCP execution accepts only `approved` assistants and repeats
+that status check under the assistant-row lock; authenticated browser sessions
+retain the owner/administrator draft-preview path.
+The browser route existence-masks private draft/pending assistants as `404`,
+preflights durable repository bindings before counting its optional
+assistant-wide agentic rate cap, then repeats repository validation after the
+coordinated row protects the executable graph. If connector/cost setup consumes
+the coordinated deadline before an agentic stream starts, or any post-resolution
+agent setup step fails, those acquired resources are released on that pre-stream
+failure path.
 The conversation endpoint reuses the exact server-prepared input for execution,
 so it does not persist raw marker data or resolve the source twice. It binds
 temporary references to the new owned conversation before the first message
@@ -728,14 +1156,42 @@ conversation is removed and the attachment remains retryable.
 `POST /api/v1/assistants/{id}/conversations/{cid}/messages` and the matching
 history route require the conversation's server-owned assistant ID to match
 `{id}`; a mismatched path returns the same `404` as a missing conversation.
-Before parsing or persisting a follow-up, the server unions all prompt-bound
-repositories with the conversation's runtime repositories and rechecks the
-executing principal's current ACL. The model receives tokenizer-bounded hybrid
-retrieval context and repository tools; durable history retains only the
-caller's original message text, not injected source content.
+After bounded body parsing, follow-up execution acquires the assistant-row lock,
+repeats programmatic approval and current grant checks, and creates an active
+execution row before loading the graph. Import replacement remains blocked until
+that row settles. The server then unions all prompt-bound repositories with the
+conversation's runtime repositories and rechecks the executing principal's
+current ACL. The model receives tokenizer-bounded hybrid retrieval context and
+repository tools; durable history retains only the caller's original message
+text, not injected source content.
 
-**Authentication and scopes:** Bearer API key or authenticated session.
-Requires `assistants:execute`, `assistants:*`,
+Assistant room access is evaluated in the shared resource gate before any
+provider call:
+
+- current membership in an active room grants an assistant assigned to that
+  room, even if its role/group resource grants would deny the caller;
+- a caller whose only AI Studio role is `student` and who has at least one
+  active room can list, inspect, and execute only room-assigned assistants;
+- administrators, callers with any non-student role, and students with no
+  active rooms keep the ordinary owner/resource-grant behavior; and
+- room assignment never grants a model or repository.
+
+For the browser Assistant Architect route, an assignment to the exact requested
+assistant is also a narrowly scoped alternative to the general
+`assistant-architect` human capability. That decision occurs only after session
+authentication and assistant visibility; it does not change API-key scope
+requirements. Direct browser server-action lookups apply the same session and
+resource gate before returning assistant prompts or input definitions.
+
+`GET /api/v1/assistants` and MCP `list_assistants` use the same batch filter.
+`GET /api/v1/assistants/{id}` masks an assistant excluded by the room rule as
+`404`. Execution, conversation start, and follow-up message routes first apply
+the existing assistant existence/status visibility check, then return `403` if
+the current shared assistant/model/resource decision denies the run.
+
+**Authentication and scopes:** Bearer API key/JWT or authenticated session.
+API-key/JWT callers can execute only `approved` assistants; session callers keep
+the owner/administrator draft-preview behavior. Requires `assistants:execute`, `assistants:*`,
 `assistant:{id}:execute`, or `*`, plus per-resource access to the assistant and
 every model/repository used by the run.
 
@@ -779,10 +1235,14 @@ and async job are not created.
 **Response `401`** — Missing or invalid authentication.
 
 **Response `403`** — Missing assistant execution scope or current
-assistant/model/repository access.
+assistant/model/repository access, including an assistant no longer assigned to
+the caller's active room.
 
 **Response `404`** — Assistant not found, assistant execution is disabled, or a
 conversation does not belong to the assistant ID in the path.
+
+**Response `413`** — Execute, conversation-start, or follow-up body exceeds the
+128 KiB transport limit.
 
 **Response `500`** — Provider, persistence, or other internal execution failure.
 
@@ -937,7 +1397,10 @@ applied or downgraded.
 Returns the same requester-visible hierarchy as `collectionService.tree(req)`.
 Requires `content:read`. Filtering and visible-object counts are permission-pushed
 on the server; a hidden collection is never loaded into the client or exposed
-through a secondary id/name lookup.
+through a secondary id/name lookup. If an accessible child exists below a denied
+ancestor, the denied node is omitted and the child is re-rooted beneath its
+nearest returned ancestor (or at the root); `parentId` and `path` reflect that
+permission-filtered projection.
 
 - `shape=tree` (default) retains nested `children`.
 - `shape=flat` walks that tree in stable Atrium position/name pre-order, omits
@@ -955,6 +1418,8 @@ through a secondary id/name lookup.
       "slug": "technology-guides",
       "parentId": null,
       "path": ["Technology Guides"],
+      "scope": "district",
+      "ownerUserId": null,
       "defaultVisibilityLevel": "internal",
       "visibleObjectCount": 42,
       "selectableForCreate": true,
@@ -970,6 +1435,98 @@ failures are `401`/`403`. A slug/UUID selected from this response is passed to
 `POST /content` unchanged. If it is deleted before create, the existing typed
 `400 CONTENT_VALIDATION` collection-not-found response is returned.
 
+#### `POST /api/v1/content/collections`
+
+Creates a collection. Requires `content:create`; REST authorization remains
+scope-based. `scope: "private"` creates an owner-bound hierarchy for the acting
+human. `scope: "district"` requires administrator
+authority.
+
+```json
+{
+  "name": "Human Resources",
+  "scope": "district",
+  "parentId": null,
+  "position": 2,
+  "defaultVisibilityLevel": "internal",
+  "inheritGrants": true,
+  "grants": [
+    { "access": "view", "kind": "role", "value": "staff" },
+    {
+      "access": "create",
+      "kind": "group",
+      "value": "hr-editors@psd401.net"
+    }
+  ]
+}
+```
+
+Grant `access` is independent: `view` controls collection/content discovery;
+`create` controls whether content may be placed there. Child collections inherit
+ancestor grants while `inheritGrants` is true. Zero effective grants preserve the
+legacy unrestricted district behavior. A `group` default uses effective
+collection `view` grants as the new object's group-visibility grants and is
+rejected when no such grant exists.
+
+Private collections are always `private`, never inherit or carry grants, and can
+nest only under private collections owned by the same user. An administrator can
+inspect private collection metadata/counts in the oversight UI but cannot enter,
+read, or mutate another user's private collection.
+
+**Response `201`**
+
+```json
+{
+  "data": {
+    "id": "c0ffee00-0000-4000-8000-000000000001",
+    "name": "Human Resources",
+    "slug": "human-resources",
+    "parentId": null,
+    "path": ["Human Resources"],
+    "scope": "district",
+    "ownerUserId": null,
+    "ownerName": null,
+    "defaultVisibilityLevel": "internal",
+    "inheritGrants": true,
+    "position": 2,
+    "archivedAt": null,
+    "directContentCount": 0,
+    "subtreeContentCount": 0,
+    "grants": [
+      { "access": "view", "kind": "role", "value": "staff" }
+    ],
+    "selectableForCreate": true
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+#### `PATCH /api/v1/content/collections/{id}`
+
+Requires `content:update`. Any subset of `name`, `parentId`, `position`,
+`defaultVisibilityLevel`, `inheritGrants`, `grants`, or `archived` may be sent.
+`parentId` + `position` implement move/reorder. `archived: true` archives the
+selected collection and its subtree; `false` restores the subtree. Content rows
+are retained.
+
+```json
+{ "parentId": "c0ffee00-0000-4000-8000-000000000001", "position": 0 }
+```
+
+Slugs remain stable on rename. Sibling names are case-insensitively unique within
+the district hierarchy or one private owner's hierarchy; different owners may
+use the same top-level name.
+Crossing district/private ownership boundaries, moving under a descendant,
+restoring under an archived parent, or conflicting concurrent hierarchy writes
+is rejected (`400`/`409`). A resulting `group` default without any effective
+`view` grant is also rejected. The response uses the same management shape as
+create.
+
+Content counts have explicit semantics: `directContentCount` counts only rows
+filed directly in the collection; `subtreeContentCount` includes all descendants.
+Content selection in the library/API remains **direct collection only**; subtree
+counts do not change list filtering semantics.
+
 ---
 
 ### Content objects
@@ -984,16 +1541,20 @@ List content objects the caller may view (permission-filtered server-side). Requ
 |------|------|-------------|
 | `kind` | `document` \| `artifact` | Filter by content kind |
 | `collection` | string (slug or UUID) | Scope to one collection |
-| `tag` | string | Filter by a single tag (exact match) |
+| `tag` | string | Filter by a single tag (whole-tag match, case-insensitive) |
 | `status` | `draft` \| `published` \| `archived` | Filter by lifecycle status |
-| `query` | string (1–200 chars) | Case-insensitive title substring search |
+| `query` | string (1–200 chars) | Case-insensitive substring search over the title **or any tag**. Unlike `tag` (whole-tag equality), this matches partial text anywhere in a tag; supplying both ANDs them |
+| `since` | ISO 8601 date-time | Return objects whose `updatedAt` is greater than or equal to this instant (inclusive) |
 
 **Example request:**
 
 ```bash
 curl -H "Authorization: Bearer sk-your-key" \
-  "https://your-domain/api/v1/content?kind=document&status=published&tag=policy&query=acceptable%20use"
+  "https://your-domain/api/v1/content?kind=document&status=published&tag=policy&query=acceptable%20use&since=2026-07-27T00%3A00%3A00Z"
 ```
+
+An invalid `since` value returns `400 VALIDATION_ERROR`; it is never ignored or
+interpreted client-side.
 
 **Response `200`** — `meta.count` is the number of items returned.
 
@@ -1043,6 +1604,11 @@ initial version (v1) is snapshotted. Requires `content:create`.
 | `visibility` | object | no | `{ level, grants? }` (see Visibility below). Defaults to the collection default, else `private` |
 | `tags` | string[] | no | — |
 | `sourceRef` | object | no | Create-only typed provenance; see Capture provenance below |
+
+Collection placement is re-authorized inside the object write transaction under
+collection locks. The persisted default visibility and inherited grants are the
+locked current values; a concurrent archive or grant revocation cannot commit a
+stale create.
 
 **Capture provenance (#1290):** Atrium Capture may send
 `sourceRef: { type: "capture", provider, externalId, clientSurface, clientVersion,
@@ -1177,6 +1743,10 @@ Requires `content:update`.
 | `tags` | string[] \| null | Replaces all tags; `null` clears them |
 | `collectionId` | string \| null | Collection slug or UUID; `null` clears the collection |
 | `status` | `draft` \| `published` \| `archived` | — |
+
+When `collectionId` changes, the target collection and its effective create
+grants are re-authorized under collection locks in the same transaction as the
+object update.
 
 **Example request:**
 
@@ -1514,11 +2084,16 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
   "data": {
     "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     "destination": "intranet",
-    "publishedVersionId": "11111111-2222-4333-8444-555555555555"
+    "publishedVersionId": "11111111-2222-4333-8444-555555555555",
+    "readerUrl": "https://your-domain/c/ai-acceptable-use-policy"
   },
   "meta": { "requestId": "req_abc123" }
 }
 ```
+
+`readerUrl` is the publish service's canonical link. It is an absolute `/c/{slug}`
+or `/p/{slug}` URL for deployed Atrium readers and `null` for destinations that
+do not provide a reader URL.
 
 **Response `202`** (approval required — public publish without `content:publish_public`)
 
@@ -1652,19 +2227,26 @@ Import an OKF bundle into content. Requires `content:create`.
 | Field | Type | Required | Constraints |
 |-------|------|----------|-------------|
 | `files` | array of `{ path, content }` | yes | ≥ 1 file |
-| `targetCollectionId` | string | no | Import the bundle root INTO this collection; a fresh root is created when omitted |
+| `targetCollectionId` | string | no | Import the bundle root INTO this selectable collection; a fresh owner-bound private root is created for human/delegated callers when omitted |
 
 **Provenance (§36.3):** imported objects are **agent-authored**
 (`actor_kind = 'agent'`, attributed to the seeded `atrium-importer` identity) and
 created **private + draft** — never fabricated human authorship, never pre-widened.
-The triggering caller is recorded in the audit trail.
+Object ownership and collection authorization remain bound to the triggering
+human/delegated caller, who is recorded in the audit trail.
+
+Reconstructed hierarchy uses the shared collection-management service. A
+human/delegated caller without a target gets a private hierarchy they own.
+Creating descendants beneath a district target requires administrator authority.
+Autonomous callers must supply an existing selectable target and cannot mint an
+ownerless/shared hierarchy.
 
 **Retry semantics (not transactional):** import is additive and not wrapped in a
 single transaction (`contentService.create` does its own tx + post-commit S3 IO
 per object). A run that fails partway leaves the already-created private/draft
-content in place, and a retry re-imports the whole bundle as **new** objects (no
-path/`sourceRef` dedup; slugs auto-suffix). For idempotency, import into a fresh
-`targetCollectionId` and, on failure, delete that partial collection before retrying.
+content in place. A blind retry can duplicate objects or meet a sibling-name
+conflict. For idempotency, use a fresh `targetCollectionId` and, on failure,
+archive the partial imported subtree before retrying into a new target.
 
 **Response `201`**
 

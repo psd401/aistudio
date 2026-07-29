@@ -35,26 +35,43 @@
 #     smoke test (docs/operations/agent-platform-setup.md) before trusting it.
 #
 # Multi-arch index digest (Docker picks arm64 at build time via --platform):
-#   ghcr.io/openclaw/openclaw:2026.7.1-beta.2
-#   index: sha256:0e5680d7d58d3b6c08afa0fc992f4ad319b5586f60923e1985b7c6f838c535d5
+#   ghcr.io/openclaw/openclaw:2026.7.1
+#   index: sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c
 #
-# Why a PRERELEASE pin (2026-07-08, #1138): 2026.6.11 (last stable) ships the
-# P1 packaging bug openclaw#99677 — "reconcile is not a function" after every
-# auto-compaction — which aborted a live production run (the 7/6 Plaud task).
-# The fix (openclaw PR #99678) landed in 2026.7.1-beta.2, alongside fixes for
-# empty-reply surfacing (#100456) and compaction prechecks/mid-stream
-# recovery, all of which match failure classes we observed. Move this pin to
-# 2026.7.1 STABLE as soon as it publishes.
+# Moved from the 2026.7.1-beta.2 PRERELEASE pin to 2026.7.1 STABLE (2026-07-27),
+# which is what the prerelease note below asked for. Two reasons:
+#   1. It is the release of the same line — it carries openclaw PR #99678
+#      ("reconcile is not a function" after auto-compaction, the P1 that
+#      aborted the 7/6 Plaud production run) plus the empty-reply and
+#      compaction-precheck fixes that motivated the prerelease pin.
+#   2. It is REQUIRED by the amazon-bedrock provider bump below. Plugin
+#      2026.7.1 is the first release whose prompt-caching allowlist knows
+#      `claude-sonnet-5`, and it declares `peerDependencies.openclaw >=2026.7.1`
+#      / `compat.pluginApi >=2026.7.1`. A prerelease sorts BELOW its release in
+#      semver (2026.7.1-beta.2 < 2026.7.1), so pairing plugin 2026.7.1 with the
+#      beta.2 host would violate the plugin's own host contract. Host and
+#      plugin move together or not at all.
 #
 # Rollback targets (previous pins):
-#   2026.6.11  index sha256:3814fb1f62f9cfc5944de088c5817c68c88b5d721feebe36420b666a90a61ce7
-#   2026.4.20  index sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
+#   2026.7.1-beta.2  index sha256:0e5680d7d58d3b6c08afa0fc992f4ad319b5586f60923e1985b7c6f838c535d5
+#   2026.6.11        index sha256:3814fb1f62f9cfc5944de088c5817c68c88b5d721feebe36420b666a90a61ce7
+#   2026.4.20        index sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
+# Rolling back the host REQUIRES rolling the plugin back to 2026.6.11 in the
+# same commit (see the host-contract note above) — at the cost of prompt
+# caching, which that plugin cannot do for this model.
 #
 # DO NOT revert to `:latest` or bump without (a) confirming the workspace
 # double-nesting fix by commit ancestry and (b) a clean end-to-end test that
 # includes the Morning Brief payload — a trivial "respond OK" prompt masks
 # session-completion regressions.
-FROM ghcr.io/openclaw/openclaw@sha256:0e5680d7d58d3b6c08afa0fc992f4ad319b5586f60923e1985b7c6f838c535d5
+FROM ghcr.io/openclaw/openclaw@sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c
+
+# Bind every pushed image to the exact clean AI Studio source revision used to
+# build it. The nightly evaluator reads this immutable config label instead of
+# attributing a deployed image to whichever commit happens to trigger the run.
+ARG AISTUDIO_SOURCE_COMMIT
+LABEL org.opencontainers.image.source="https://github.com/psd401/aistudio" \
+      org.opencontainers.image.revision="${AISTUDIO_SOURCE_COMMIT}"
 
 # Switch to root for installations
 USER root
@@ -72,6 +89,13 @@ RUN apt-get update && \
 # Pin versions for supply-chain safety. Update these as needed.
 ARG BUN_VERSION=1.2.12
 ARG UV_VERSION=0.7.9
+# gws tag for the upstream gws-* SKILL.md docs clone further down. The gws
+# BINARY is no longer installed in this image — #1353 moved gws execution to
+# the trusted web broker so the model runtime never holds a Google token — but
+# the per-API SKILL.md guidance is still copied in, and its clone needs a
+# pinned tag. Declared here with the other version pins so the reference at
+# the clone step cannot go out of scope again.
+ARG GWS_VERSION=0.22.5
 
 # bun (JS/TS runtime) and uv (Python package manager) install from their
 # official GitHub release artifacts with SHA256 verification — NOT via
@@ -105,74 +129,15 @@ RUN set -eux; \
     rm -rf /tmp/uv.tar.gz /tmp/uv-aarch64-unknown-linux-gnu; \
     uv --version
 
-# Google Workspace CLI (#912) — Rust single binary invoked by the psd-workspace
-# skill. ARM64 matches AgentCore runtime. run.js/common.js authenticate each
-# call by exporting the per-user OAuth access token as GOOGLE_WORKSPACE_CLI_TOKEN
-# (gws ignores GOOGLE_ACCESS_TOKEN — see common.js execGws).
-#
-# The real binary is installed as /usr/local/bin/gws.real and a refuse-by-default
-# wrapper is installed as /usr/local/bin/gws. Every `gws` from the agent's exec
-# tool resolves the wrapper first; run.js reaches gws.real directly. See
-# bin/gws-wrapper.sh for rationale (incident: 2026-07-01 — bare `gws chat spaces
-# list` → 401 → wrong "no credentials" answer + Phase 1 gate-bypass surface).
-#
-# Pinned version + SHA256 come from the official release's .sha256 sidecar.
-# When bumping, run:
-#   curl -sL "https://github.com/googleworkspace/cli/releases/download/v<VER>/google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz.sha256"
-# and paste the hex digest into GWS_SHA256 below.
-ARG GWS_VERSION=0.22.5
-ARG GWS_SHA256=94490295d9580e1e88574e715a0a162991747d12d62f8c7b8dcc8268b6c1cea0
-# COPY --chmod so the wrapper mode lands in one layer (layer count is
-# load-bearing for AgentCore's Firecracker snapshotter — see gh install below).
+# The model-facing image deliberately has no real Google Workspace CLI. The
+# psd-workspace skill sends an argv array to the owner-bound web broker, where
+# the token and executable live. Keep this refusal shim for old prompts.
 COPY --chmod=755 bin/gws-wrapper.sh /usr/local/bin/gws
-# Install the real gws binary as /usr/local/bin/gws.real. The final
-# `gws --version` verifies the wrapper delegates introspection to it.
-RUN set -eux; \
-    curl -fsSL -o /tmp/gws.tar.gz \
-      "https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz"; \
-    echo "${GWS_SHA256}  /tmp/gws.tar.gz" | sha256sum -c -; \
-    tar -xzf /tmp/gws.tar.gz -C /tmp --strip-components=0 ./gws; \
-    mv /tmp/gws /usr/local/bin/gws.real; \
-    rm /tmp/gws.tar.gz; \
-    chmod +x /usr/local/bin/gws.real; \
-    /usr/local/bin/gws.real --version; \
-    /usr/local/bin/gws --version
 
-# GitHub CLI (#965 follow-on) — single Go binary so the agent can read PRs,
-# issues, and run gh-api calls without us shipping a custom skill. ARM64
-# matches AgentCore runtime.
-#
-# Pinned version + SHA256. When bumping, run:
-#   curl -fsSL "https://github.com/cli/cli/releases/download/v<VER>/gh_<VER>_linux_arm64.tar.gz" \
-#     | shasum -a 256
-# and paste the hex digest into GH_SHA256 below.
-ARG GH_VERSION=2.92.0
-ARG GH_SHA256=c2248526dd0160c08d3fccca2332c3c1a07c15a78b23978e77735f1b5a18cfee
-# Install the destructive-operation wrapper as /usr/local/bin/gh. Every
-# `gh` invocation from skills, the agent's exec tool, or any subprocess
-# goes through this script first. See bin/gh-wrapper.sh for the
-# blocklist and rationale (incident: 2026-05-19, PR #995
-# autonomously merged by the agent).
-#
-# COPY is BuildKit's --chmod variant so the mode lands in one layer
-# with no follow-up chmod RUN — layer count is load-bearing for
-# AgentCore's Firecracker snapshotter (54+ layers consistently fail
-# overlay mount; see 2026-05-18 / 2026-05-19 incidents).
+# The model-facing image contains no real GitHub CLI or PAT. This compatibility
+# entrypoint forwards argv to the owner-bound web broker, which re-validates a
+# strict operation allowlist before executing the trusted web-tier gh binary.
 COPY --chmod=755 bin/gh-wrapper.sh /usr/local/bin/gh
-
-# Install real gh binary as /usr/local/bin/gh.real (the wrapper above
-# delegates to it). Combined into a single RUN so we don't burn an
-# extra layer on the wrapper verification step.
-RUN set -eux; \
-    curl -fsSL -o /tmp/gh.tar.gz \
-      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_arm64.tar.gz"; \
-    echo "${GH_SHA256}  /tmp/gh.tar.gz" | sha256sum -c -; \
-    tar -xzf /tmp/gh.tar.gz -C /tmp; \
-    mv "/tmp/gh_${GH_VERSION}_linux_arm64/bin/gh" /usr/local/bin/gh.real; \
-    rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_arm64"; \
-    chmod +x /usr/local/bin/gh.real; \
-    /usr/local/bin/gh.real --version; \
-    /usr/local/bin/gh --version
 
 # Install the bedrock-agentcore SDK in a virtual environment (avoids
 # --break-system-packages). Provenance is confirmed: this IS the official AWS
@@ -207,32 +172,12 @@ RUN mkdir -p /home/node/.openclaw/memory
 # openclaw.json tuning notes (keep here — JSON can't carry comments and
 # OpenClaw's config validator rejects "//" pseudo-keys):
 #
-#   providers.amazon-bedrock-mantle — DIRECT to bedrock-runtime's native
-#   anthropic-messages endpoint (https://bedrock-runtime.us-east-1.amazonaws.com/anthropic)
-#   with the us. inference-profile model id, since 2026-07-14: Mantle's
-#   anthropic route stopped serving anthropic.claude-sonnet-5 for this
-#   account (AWS-confirmed serving-plane defect, support case open; AWS
-#   suggested the runtime endpoint as the workaround). Same bearer token
-#   (bedrock:CallWithBearerToken), streaming + 1h prompt caching verified
-#   on this path. Revert baseUrl+model id to the Mantle form only after
-#   probing Mantle serves sonnet-5 again.
-#   NO local proxy in the path (#1138, 2026-07-08). History: our
-#   mantle_proxy added full-body logging overhead and a 300s upstream
-#   timeout that aborted a live background job; measured 17.7 tok/s median
-#   through the proxy vs 36-71 tok/s hitting Mantle directly (same prompt,
-#   same model). Auth: Mantle accepts the bearer token via the x-api-key
-#   header (verified live), which is what OpenClaw's anthropic-messages
-#   provider sends; the wrapper still INLINES the literal token into this
-#   provider's apiKey at boot because OpenClaw does not resolve the
-#   env:AWS_BEARER_TOKEN_BEDROCK indirection on this path (verified with a
-#   header-capture probe — the literal string "env:..." went on the wire).
-#   NOTE: the bedrock-converse-stream native provider was attempted first
-#   and ABANDONED: the amazon-bedrock extension exists in the OpenClaw repo
-#   at this tag but is NOT shipped in the distribution image, and vendoring
-#   it via plugins.load.paths loads but never registers its API handler on
-#   this build. Revisit when a stable release ships the extension.
-#   mantle_proxy.py is still launched by the wrapper but nothing points at
-#   it; remove after direct-Mantle has a clean week.
+#   providers.amazon-bedrock-mantle — points only to the loopback
+#   credential-isolating proxy. The proxy attaches a router-signed invocation
+#   context and forwards to the trusted web model broker. The model-facing
+#   process never receives the provider bearer or its Secrets Manager id.
+#   The web broker fixes the upstream endpoint/model, caps request/output size,
+#   disables redirects, and derives owner authority solely from the signature.
 #   contextWindow is set to the HONEST 200k Converse limit (the prior 1M
 #   claim caused a real "Context overflow" abort); contextTokens 180000
 #   leaves compaction margin below it. params.cacheRetention "long" +
@@ -264,18 +209,8 @@ RUN mkdir -p /home/node/.openclaw/memory
 #       vendored binary has no such fallback, so AWS_REGION/AWS_DEFAULT_REGION
 #       are set explicitly on the AgentCore Runtime (runtimeEnvVars in
 #       agent-platform-stack.ts) so this call can resolve an endpoint.
-#     • Auth: hydrate_bedrock_api_key() exports AWS_BEARER_TOKEN_BEDROCK
-#       process-wide (agentcore_wrapper.py). OpenClaw's memory_search relies on
-#       that hydrated Bedrock token (per the authoritative memory_search
-#       rationale comment at agent-platform-stack.ts:502-510), so this call is
-#       authorized by the shared BedrockApiUser's `bedrock:CallWithBearerToken`
-#       grant (`BedrockEmbeddingsViaBearerToken`), NOT the execution role. If a
-#       SigV4 path is used instead, the `InvokeModel` on foundation-model/*
-#       grants (BedrockApiUser `InvokeBedrockModels` and the execution role
-#       `BedrockModelInvocation`) cover the titan model. Either path is already
-#       granted. (Exact auth-selection internals are OpenClaw's; not asserted
-#       here beyond the token dependency the existing grant already documents.)
-#   No IAM change and no new Docker layer — the COPY below already ships it.
+#     • Auth: standard SigV4 from the AgentCore execution role, scoped to the
+#       single Titan embedding model. No bearer credential is present.
 #
 #   plugins.entries.active-memory — blocking memory sub-agent that runs before
 #   every main reply, shares the inherited session model, and its failure
@@ -391,9 +326,25 @@ COPY skills /opt/psd-skills
 # /opt (image-owned): ~/.openclaw is runtime-persistent storage that shadows
 # anything written there at build time. Loaded via openclaw.json
 # plugins.load.paths. Version-pinned to the same OpenClaw release this image
-# pins (2026.6.11); npm verifies the registry integrity hash on pack. The
+# pins (2026.7.1); npm verifies the registry integrity hash on pack. The
 # tarball is self-contained (bundleDependencies: @aws-sdk clients ship inside
 # it, with an npm-shrinkwrap.json), so no npm install runs after extraction.
+#
+# 2026.6.11 -> 2026.7.1 (2026-07-27) RESTORES PROMPT CACHING, which had been
+# silently off for every turn since #1384 moved chat to this provider. The
+# plugin only emits Bedrock Converse `cachePoint` blocks when
+# supportsBedrockPromptCaching() recognizes the model, and 2026.6.11's
+# allowlist predates Sonnet 5 — it matches only `-4-`, `claude-fable-5`,
+# `claude-3-7-sonnet` and `claude-3-5-haiku`, so `us.anthropic.claude-sonnet-5`
+# fell through to `return false`. Its fallback injector (onPayload ->
+# injectBedrockCachePoints) could not cover for that either: every path to it
+# is gated behind isBedrockAppInferenceProfile(), and ours is a SYSTEM-defined
+# profile, not an application-inference-profile ARN. So neither the shared
+# runtime nor the plugin ever added a cache point, and `cacheRetention: "long"`
+# in openclaw.json had nothing to act on. 2026.7.1 adds `claude-sonnet-5` to
+# that allowlist. Do not downgrade this plugin without also removing the
+# caching expectation — see check_config_consistency.py, which fails the build
+# if the two drift apart again.
 RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund && \
@@ -402,13 +353,13 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
     cd /opt/psd-skills/psd-html-artifact && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-email-triage && npm install --omit=dev --no-audit --no-fund && \
-    cd /opt/psd-skills/psd-hyperframes && npm install --omit=dev --no-audit --no-fund && \
     mkdir -p /opt/openclaw-plugins && cd /opt/openclaw-plugins && \
-    npm pack @openclaw/amazon-bedrock-provider@2026.6.11 && \
-    tar -xzf openclaw-amazon-bedrock-provider-2026.6.11.tgz && \
+    npm pack @openclaw/amazon-bedrock-provider@2026.7.1 && \
+    tar -xzf openclaw-amazon-bedrock-provider-2026.7.1.tgz && \
     mv package amazon-bedrock && \
-    rm openclaw-amazon-bedrock-provider-2026.6.11.tgz && \
-    test -f /opt/openclaw-plugins/amazon-bedrock/openclaw.plugin.json
+    rm openclaw-amazon-bedrock-provider-2026.7.1.tgz && \
+    test -f /opt/openclaw-plugins/amazon-bedrock/openclaw.plugin.json && \
+    grep -q "claude-sonnet-5" /opt/openclaw-plugins/amazon-bedrock/dist/bedrock-options.js
 # chat-card has zero npm deps. chat-chart's npm install is paired with the
 # matplotlib install above — both stay disabled until we figure out the
 # AgentCore overlay-mount failure. With both off the image boots cleanly
@@ -425,13 +376,13 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
 # psd-freshservice has zero npm dependencies (native fetch + child_process only).
 # psd-brand-guidelines has zero npm dependencies (config + static assets only).
 # psd-github has zero npm dependencies (wraps /usr/local/bin/gh).
-# psd-hyperframes (#1175) has ONE pure-JS dep (@aws-sdk/client-lambda) and NO
-# native renderer deps: Chromium/FFmpeg/Puppeteer live ONLY in the separate
-# hyperframes-render Lambda (infra/hyperframes-render/), never in this image —
-# the AgentCore Firecracker overlay-mount snapshotter cannot carry that native
-# stack (same reason matplotlib/pymupdf4llm were removed). The skill just shells
-# an InvokeFunction call. Its npm install joins the SINGLE RUN above, adding NO
-# new Docker layer (stays under the Firecracker 54-layer ceiling).
+# psd-hyperframes (#1175, #1442) has NO npm deps and NO native renderer deps:
+# Chromium/FFmpeg/Puppeteer live ONLY in the separate hyperframes-render Lambda
+# (infra/hyperframes-render/), never in this image. The model-facing script sends
+# a bounded request to the root-owned loopback relay, which invokes the one
+# configured Lambda with the AgentCore role. This is necessary because OpenClaw
+# strips inherited AWS credentials from every model-launched exec subprocess;
+# the relay never returns reusable credential material to the model UID.
 # psd-last30days (#1174) is pure Python (stdlib urllib + xml.etree only) with an
 # optional boto3 S3 upload — boto3 is already in /opt/agentcore-venv, so it needs
 # NO new pip dependency and NO npm install. It is installed solely by the
@@ -450,11 +401,25 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
 # a11y-audit.js (whose jsdom + axe-core resolve from psd-html-artifact's OWN
 # node_modules, installed by line ~402). Installed solely by `COPY skills` above —
 # NO npm install, NO new Docker layer.
+# psd-sop-creator is pure JS with ZERO npm deps of its own: it composes
+# psd-pdf-to-markdown / psd-workspace / psd-atrium via child_process and does its
+# own template validation with plain string/regex work. Installed solely by
+# `COPY skills` above — NO npm install, NO new RUN, NO new Docker layer, which
+# keeps this stage under the Firecracker overlay-mount 54-layer ceiling.
+# Its PDF path passes --extract-images to psd-pdf-to-markdown; that flag needs no
+# new Python dependency either (pymupdf4llm is already in /opt/agentcore-venv and
+# writes images itself), so the consolidated venv RUN above is untouched.
+# psd-morning-brief (#1413) is pure JS with ZERO npm deps. It composes brokered
+# platform skills and APIs, renders its private Atrium newspaper locally, and is
+# installed by `COPY skills` above — NO npm install, NO new RUN, NO new layer.
 
 # Upstream gws-* skills (#912) — per-API SKILL.md guidance for Gmail, Drive,
 # Docs, Sheets, Slides, Forms, Tasks, Calendar, Chat, Meet, Contacts, etc.
-# Pinned to the same tag as the gws binary above so skill instructions never
-# drift from the CLI surface actually installed.
+# Pinned via ARG GWS_VERSION (declared with the other version pins near the top
+# of this stage) so the guidance never drifts from the CLI surface the web
+# broker actually executes. NOTE: the gws binary itself is no longer installed
+# here — #1353 moved execution to the trusted web broker — so this clone is the
+# only remaining gws artifact in the image, and it ships documentation only.
 #
 # git is required for the shallow clone. apt-get already added
 # ca-certificates+curl above; git is not in the base image.
@@ -475,7 +440,14 @@ RUN apt-get update && \
 # observed 2026-05-03. User-authored draft skills go through
 # psd-skills-meta and are uploaded to S3 directly — no local-FS write
 # path is needed for legitimate work.
-RUN chown -R root:root /opt/psd-skills && chmod -R a-w /opt/psd-skills
+# The symlink makes `require("../../../validated-fs.cjs")` — which every
+# lint-hardened skill resolves to /validated-fs.cjs from /opt/psd-skills/<skill>/ —
+# find the copy build-and-push.sh stages into skills/ (shipped by the existing
+# COPY above; the image sits at the 53-layer Firecracker ceiling, so a dedicated
+# COPY layer is not an option). Appended here rather than a new RUN for the same
+# reason. Guarded by tests/unit/agent-image-validated-fs-ship.test.ts.
+RUN chown -R root:root /opt/psd-skills && chmod -R a-w /opt/psd-skills \
+  && ln -s /opt/psd-skills/validated-fs.cjs /validated-fs.cjs
 
 # Defense-in-depth: disable OpenClaw's cron subsystem via both config
 # (cron.enabled: false in openclaw.json) and env var (OPENCLAW_SKIP_CRON=1)
@@ -503,11 +475,14 @@ COPY *.py /app/
 # which passes the IANA name explicitly to zoneinfo.
 ENV TZ=America/Los_Angeles
 
-# Set ownership for the node user (OpenClaw runs as node)
-RUN chown -R node:node /home/node/.openclaw /app
+# OpenClaw is explicitly dropped to node by harness_adapter.py. The wrapper
+# and local relay remain root so model-launched processes cannot read request
+# signing authority under /run/psd-agent-authority.
+RUN chown -R node:node /home/node/.openclaw && \
+    chown -R root:root /app && \
+    chmod -R a-w /app
 
-# Switch back to the non-root user
-USER node
+USER root
 
 # AgentCore invokes the container on port 8080
 EXPOSE 8080

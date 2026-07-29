@@ -82,11 +82,22 @@ export interface McpToolDefinition {
 }
 
 export interface McpToolProperty {
-  type: string
-  description: string
-  enum?: string[]
-  items?: { type: string }
+  type: string | string[]
+  description?: string
+  format?: string
+  enum?: Array<string | number | boolean | null>
+  items?: McpToolProperty
+  properties?: Record<string, McpToolProperty>
+  required?: string[]
+  additionalProperties?: boolean | McpToolProperty
   default?: unknown
+  const?: unknown
+  minimum?: number
+  maximum?: number
+  minItems?: number
+  maxItems?: number
+  minLength?: number
+  maxLength?: number
 }
 
 export interface McpToolCallParams {

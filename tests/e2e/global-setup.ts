@@ -57,6 +57,8 @@ const WARM_ROUTES = [
   // Heavy dynamic routes for the seeded fixture architect (assistant-architect-seed.sql).
   "/utilities/assistant-architect/9000/edit/prompts", // ReactFlow editor
   "/tools/assistant-architect/9000", // execution/streaming page
+  "/atrium",
+  "/admin/atrium",
   "/atrium/a7100000-0000-4000-8000-000000004040/edit",
   "/c/board-procedure-4040",
 ];

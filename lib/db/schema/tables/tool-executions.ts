@@ -24,6 +24,11 @@ export const toolExecutions = pgTable("tool_executions", {
   status: executionStatusEnum("status").default("pending").notNull(),
   errorMessage: text("error_message"),
   startedAt: timestamp("started_at").defaultNow().notNull(),
+  /**
+   * Immutable wall-clock deadline assigned when an Assistant Architect run is
+   * coordinated. Nullable for non-assistant and pre-migration executions.
+   */
+  deadlineAt: timestamp("deadline_at"),
   completedAt: timestamp("completed_at"),
   assistantArchitectId: integer("assistant_architect_id").references(
     () => assistantArchitects.id

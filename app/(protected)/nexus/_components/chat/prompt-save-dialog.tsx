@@ -36,6 +36,132 @@ interface PromptSaveDialogProps {
   currentConnectors?: string[]
 }
 
+interface PromptSaveFieldsProps {
+  title: string
+  onTitleChange: (value: string) => void
+  description: string
+  onDescriptionChange: (value: string) => void
+  visibility: PromptVisibility
+  onVisibilityChange: (value: PromptVisibility) => void
+  tags: string[]
+  onTagsChange: (value: string[]) => void
+  settings?: PromptLibrarySettings
+  content: string
+  isValid: boolean
+}
+
+function PromptSaveFields({
+  title,
+  onTitleChange,
+  description,
+  onDescriptionChange,
+  visibility,
+  onVisibilityChange,
+  tags,
+  onTagsChange,
+  settings,
+  content,
+  isValid,
+}: PromptSaveFieldsProps) {
+  return (
+    <div className="grid gap-4 py-4">
+      <div className="grid gap-2">
+        <Label htmlFor="title">
+          Title <span className="text-destructive">*</span>
+        </Label>
+        <Input
+          id="title"
+          value={title}
+          onChange={(event) => onTitleChange(event.target.value)}
+          placeholder="Enter a descriptive title"
+          maxLength={255}
+          required
+        />
+        <div className="flex justify-between text-xs text-muted-foreground">
+          <span>{isValid ? "" : "Title is required"}</span>
+          <span>{title.length}/255</span>
+        </div>
+      </div>
+      <div className="grid gap-2">
+        <Label htmlFor="description">Description (optional)</Label>
+        <Textarea
+          id="description"
+          value={description}
+          onChange={(event) => onDescriptionChange(event.target.value)}
+          placeholder="What does this prompt do?"
+          rows={3}
+          maxLength={1000}
+        />
+        <div className="text-xs text-muted-foreground text-right">
+          {description.length}/1000
+        </div>
+      </div>
+      <div className="grid gap-2">
+        <Label htmlFor="visibility">Visibility</Label>
+        <Select value={visibility} onValueChange={(value) => onVisibilityChange(value as PromptVisibility)}>
+          <SelectTrigger id="visibility"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="private">
+              <div className="flex flex-col items-start">
+                <span className="font-medium">Private</span>
+                <span className="text-xs text-muted-foreground">Only you can see this prompt</span>
+              </div>
+            </SelectItem>
+            <SelectItem value="public">
+              <div className="flex flex-col items-start">
+                <span className="font-medium">Public</span>
+                <span className="text-xs text-muted-foreground">
+                  Share with the community (requires approval)
+                </span>
+              </div>
+            </SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="grid gap-2">
+        <Label htmlFor="tags">Tags (optional)</Label>
+        <TagInput
+          id="tags"
+          value={tags}
+          onChange={onTagsChange}
+          placeholder="Add tags (press Enter)"
+          maxTags={10}
+        />
+        <div className="text-xs text-muted-foreground">
+          Add up to 10 tags to help organize and find this prompt
+        </div>
+      </div>
+      {settings && <SavedConfiguration settings={settings} />}
+      <div className="grid gap-2">
+        <Label className="text-xs text-muted-foreground">Prompt Preview</Label>
+        <div className="rounded-md bg-muted p-3 max-h-32 overflow-auto">
+          <pre className="text-sm whitespace-pre-wrap break-words">
+            {content.slice(0, 500)}
+            {content.length > 500 && "..."}
+          </pre>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SavedConfiguration({ settings }: { settings: PromptLibrarySettings }) {
+  return (
+    <div className="grid gap-2">
+      <Label className="text-xs text-muted-foreground">Saved Configuration</Label>
+      <div className="rounded-md bg-muted p-3 text-sm text-muted-foreground space-y-1">
+        {settings.modelId && <div>Model: {settings.modelId}</div>}
+        {settings.tools && settings.tools.length > 0 && (
+          <div>Tools: {settings.tools.join(", ")}</div>
+        )}
+        {settings.connectors && settings.connectors.length > 0 && (
+          <div>Connectors: {settings.connectors.length} connected</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 /**
  * Dialog for saving a prompt with full metadata
  */
@@ -107,115 +233,19 @@ export function PromptSaveDialog({
         </DialogHeader>
 
         <ScrollArea className="max-h-[60vh] pr-4">
-          <div className="grid gap-4 py-4">
-            <div className="grid gap-2">
-              <Label htmlFor="title">
-                Title <span className="text-destructive">*</span>
-              </Label>
-              <Input
-                id="title"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Enter a descriptive title"
-                maxLength={255}
-                required
-              />
-              <div className="flex justify-between text-xs text-muted-foreground">
-                <span>{isValid ? "" : "Title is required"}</span>
-                <span>
-                  {title.length}/255
-                </span>
-              </div>
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="description">Description (optional)</Label>
-              <Textarea
-                id="description"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="What does this prompt do?"
-                rows={3}
-                maxLength={1000}
-              />
-              <div className="text-xs text-muted-foreground text-right">
-                {description.length}/1000
-              </div>
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="visibility">Visibility</Label>
-              <Select
-                value={visibility}
-                onValueChange={(value) => setVisibility(value as PromptVisibility)}
-              >
-                <SelectTrigger id="visibility">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="private">
-                    <div className="flex flex-col items-start">
-                      <span className="font-medium">Private</span>
-                      <span className="text-xs text-muted-foreground">
-                        Only you can see this prompt
-                      </span>
-                    </div>
-                  </SelectItem>
-                  <SelectItem value="public">
-                    <div className="flex flex-col items-start">
-                      <span className="font-medium">Public</span>
-                      <span className="text-xs text-muted-foreground">
-                        Share with the community (requires approval)
-                      </span>
-                    </div>
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="tags">Tags (optional)</Label>
-              <TagInput
-                id="tags"
-                value={tags}
-                onChange={setTags}
-                placeholder="Add tags (press Enter)"
-                maxTags={10}
-              />
-              <div className="text-xs text-muted-foreground">
-                Add up to 10 tags to help organize and find this prompt
-              </div>
-            </div>
-
-            {settings && (
-              <div className="grid gap-2">
-                <Label className="text-xs text-muted-foreground">
-                  Saved Configuration
-                </Label>
-                <div className="rounded-md bg-muted p-3 text-sm text-muted-foreground space-y-1">
-                  {settings.modelId && <div>Model: {settings.modelId}</div>}
-                  {settings.tools && settings.tools.length > 0 && (
-                    <div>Tools: {settings.tools.join(", ")}</div>
-                  )}
-                  {settings.connectors && settings.connectors.length > 0 && (
-                    <div>Connectors: {settings.connectors.length} connected</div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            <div className="grid gap-2">
-              <Label className="text-xs text-muted-foreground">
-                Prompt Preview
-              </Label>
-              <div className="rounded-md bg-muted p-3 max-h-32 overflow-auto">
-                <pre className="text-sm whitespace-pre-wrap break-words">
-                  {content.slice(0, 500)}
-                  {content.length > 500 && "..."}
-                </pre>
-              </div>
-            </div>
-          </div>
+          <PromptSaveFields
+            title={title}
+            onTitleChange={setTitle}
+            description={description}
+            onDescriptionChange={setDescription}
+            visibility={visibility}
+            onVisibilityChange={setVisibility}
+            tags={tags}
+            onTagsChange={setTags}
+            settings={settings}
+            content={content}
+            isValid={isValid}
+          />
         </ScrollArea>
 
         <DialogFooter>

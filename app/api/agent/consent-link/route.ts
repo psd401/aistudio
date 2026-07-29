@@ -2,7 +2,7 @@
  * Agent Consent Link Generator
  *
  * POST /api/agent/consent-link
- * Auth: Bearer {shared-secret} from psd-agent/{env}/internal-api-key
+ * Auth: short-lived router-signed invocation context
  *
  * Mints a signed, short-lived consent URL that the agent can give to a user
  * in Google Chat. The user clicks it to start the Google OAuth flow.
@@ -17,8 +17,7 @@ import { executeQuery } from "@/lib/db/drizzle-client"
 import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-workspace-consent-nonces"
 import { sql } from "drizzle-orm"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
-import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
-import { validateInternalSecret } from "@/lib/agent-workspace/internal-auth"
+import { verifyAgentInvocationContext } from "@/lib/agent-workspace/invocation-context"
 import { randomBytes } from "node:crypto"
 
 const log = createLogger({ module: "agent-consent-link" })
@@ -26,12 +25,17 @@ const log = createLogger({ module: "agent-consent-link" })
 /**
  * The credential slot a consent link is capturing.
  *
- * `agent_account` is RETIRED (#1232): the agent slot no longer uses a
- * user-facing consent flow — access tokens are minted on demand by the DWD
- * token broker (POST /api/agent/workspace-token). This route rejects it.
+ * `agent_account` is RETIRED (#1232): Workspace operations now execute only
+ * through the owner-bound operation broker. This route rejects the old slot.
  */
-type Kind = "user_account" | "cognito_data" | "plaud" | "canva"
-const ALLOWED_KINDS: Kind[] = ["user_account", "cognito_data", "plaud", "canva"]
+type Kind = "user_account" | "cognito_data" | "plaud" | "canva" | "aistudio"
+const ALLOWED_KINDS: Kind[] = [
+  "user_account",
+  "cognito_data",
+  "plaud",
+  "canva",
+  "aistudio",
+]
 
 /**
  * Map a consent kind to its public start page. cognito_data captures a
@@ -46,6 +50,8 @@ function resolveConsentPath(kind: Kind): string {
       return "/agent-connect-plaud"
     case "canva":
       return "/agent-connect-canva"
+    case "aistudio":
+      return "/agent-connect-aistudio"
     default:
       return "/agent-connect"
   }
@@ -84,63 +90,114 @@ async function checkRateLimit(ownerEmail: string): Promise<boolean> {
   return (result?.count ?? 0) < 20
 }
 
+async function readConsentBody(
+  request: NextRequest
+): Promise<{ body: Record<string, unknown> } | { response: NextResponse }> {
+  let value: unknown
+  try {
+    value = await request.json()
+  } catch {
+    return {
+      response: NextResponse.json({ error: "Invalid JSON body" }, { status: 400 }),
+    }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {
+      response: NextResponse.json(
+        { error: "Request body must be an object" },
+        { status: 400 }
+      ),
+    }
+  }
+  const body = value as Record<string, unknown>
+  const ownerSelector = ["ownerEmail", "userEmail", "userId"].some((field) =>
+    Object.prototype.hasOwnProperty.call(body, field)
+  )
+  return ownerSelector
+    ? {
+        response: NextResponse.json(
+          { error: "Owner selectors are not accepted" },
+          { status: 400 }
+        ),
+      }
+    : { body }
+}
+
+function resolveConsentKind(
+  body: Record<string, unknown>
+): { kind: Kind } | { response: NextResponse } {
+  if (body.kind === "agent_account") {
+    return {
+      response: NextResponse.json(
+        {
+          error:
+            "agent_account consent is retired. Workspace operations use the " +
+            "owner-bound operation broker; no consent link is issued for this slot.",
+        },
+        { status: 400 }
+      ),
+    }
+  }
+  if (
+    body.kind !== undefined &&
+    (typeof body.kind !== "string" ||
+      !(ALLOWED_KINDS as readonly string[]).includes(body.kind))
+  ) {
+    return {
+      response: NextResponse.json(
+        { error: "kind must be 'user_account', 'cognito_data', 'plaud', 'canva', or 'aistudio' if provided" },
+        { status: 400 }
+      ),
+    }
+  }
+  return {
+    kind: typeof body.kind === "string" ? body.kind as Kind : "user_account",
+  }
+}
+
+async function createConsentNonce(
+  ownerEmail: string,
+  agentEmail: string,
+  kind: Kind
+): Promise<string> {
+  const nonce = randomBytes(32).toString("hex")
+  const needsPkce = kind === "plaud" || kind === "canva" || kind === "aistudio"
+  const codeVerifier = needsPkce
+    ? randomBytes(32).toString("base64url")
+    : null
+  await executeQuery(
+    (db) =>
+      db
+        .insert(psdAgentWorkspaceConsentNonces)
+        .values({
+          nonce,
+          ownerEmail,
+          agentEmail,
+          tokenKind: kind,
+          codeVerifier,
+        }),
+    "insertConsentNonce"
+  )
+  return nonce
+}
+
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId()
 
-  // Auth
-  if (!(await validateInternalSecret(request))) {
-    log.warn("Unauthorized consent-link request", { requestId })
-    return NextResponse.json(
-      { error: "Unauthorized" },
-      { status: 401 }
-    )
+  const invocationContext = await verifyAgentInvocationContext(request, {
+    allowedModes: ["owner", "scheduled"],
+  })
+  if (!invocationContext) {
+    log.warn("Consent-link request has no authorized owner context", { requestId })
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   }
 
-  // Parse body
-  let body: { ownerEmail?: string; kind?: string }
-  try {
-    body = await request.json()
-  } catch {
-    return NextResponse.json(
-      { error: "Invalid JSON body" },
-      { status: 400 }
-    )
-  }
-
-  const { ownerEmail } = body
-  if (!ownerEmail || typeof ownerEmail !== "string" || !SAFE_EMAIL_RE.test(ownerEmail)) {
-    return NextResponse.json(
-      { error: "ownerEmail is required and must be a valid email" },
-      { status: 400 }
-    )
-  }
-
-  // The agent slot no longer has a consent flow (#1232) — reject it explicitly
-  // with a pointer to the broker so an un-updated skill fails loudly rather than
-  // minting a dead nonce.
-  if (body.kind === "agent_account") {
-    return NextResponse.json(
-      {
-        error:
-          "agent_account consent is retired. The agent slot now uses the DWD token broker " +
-          "(POST /api/agent/workspace-token) — no consent link is issued for it.",
-      },
-      { status: 400 }
-    )
-  }
-
-  // Validate kind. Default to 'user_account' (the only Google-Workspace consent
-  // slot that remains) for skills that don't pass kind explicitly.
-  if (body.kind !== undefined && !(ALLOWED_KINDS as readonly string[]).includes(body.kind)) {
-    return NextResponse.json(
-      { error: "kind must be 'user_account', 'cognito_data', 'plaud', or 'canva' if provided" },
-      { status: 400 }
-    )
-  }
-  const kind: Kind =
-    body.kind !== undefined && (ALLOWED_KINDS as readonly string[]).includes(body.kind)
-      ? (body.kind as Kind)
-      : "user_account"
+  const parsedBody = await readConsentBody(request)
+  if ("response" in parsedBody) return parsedBody.response
+  const ownerEmail = invocationContext.ownerEmail
+  const parsedKind = resolveConsentKind(parsedBody.body)
+  if ("response" in parsedKind) return parsedKind.response
+  const kind = parsedKind.kind
 
   // Rate limit
   const withinLimit = await checkRateLimit(ownerEmail)
@@ -160,27 +217,7 @@ export async function POST(request: NextRequest) {
   // row so the OAuth callback can recover identity AND target slot from the
   // nonce alone (the OAuth state parameter no longer carries the full JWT —
   // see migration 072).
-  const nonce = randomBytes(32).toString("hex")
-
-  // PKCE (S256) code_verifier for the PKCE-based flows (Plaud, Canva).
-  // base64url(32 bytes) = 43 chars, within RFC 7636's 43–128 range. Stored
-  // server-side; only the S256 challenge ever leaves in a URL.
-  const codeVerifier =
-    kind === "plaud" || kind === "canva" ? randomBytes(32).toString("base64url") : null
-
-  await executeQuery(
-    (db) =>
-      db
-        .insert(psdAgentWorkspaceConsentNonces)
-        .values({
-          nonce,
-          ownerEmail,
-          agentEmail,
-          tokenKind: kind,
-          codeVerifier,
-        }),
-    "insertConsentNonce"
-  )
+  const nonce = await createConsentNonce(ownerEmail, agentEmail, kind)
 
   // Sign the consent token. The JWT is the URL token (carried in chat) so a
   // forged URL can't redirect to Google for the wrong user. The OAuth state,

@@ -62,6 +62,8 @@ const ERROR_DESCRIPTIONS: Record<string, string> = {
   "401": "Missing or invalid API credentials.",
   "403": "Authenticated but missing a required scope.",
   "404": "Resource not found, or the tool is disabled in the catalog.",
+  "409": "Conflict with the resource's current execution or mutation state.",
+  "413": "Request payload exceeds the endpoint limit.",
   "429": "Concurrent-execution or rate limit exceeded.",
   "500": "Internal error.",
 }

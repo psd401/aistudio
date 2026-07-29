@@ -80,6 +80,8 @@ tags:
     description: High-level decision capture (creates nodes + edges in one call)
   - name: Assistants
     description: Assistant listing, execution, and multi-turn conversations
+  - name: Repositories
+    description: Permission-aware durable repository discovery, retrieval, source disclosure, and changes
   - name: Jobs
     description: Async job polling and cancellation
   - name: Voice
@@ -675,6 +677,507 @@ paths:
           $ref: "#/components/responses/InternalError"
 
   # ============================================
+  # Repositories
+  # ============================================
+
+  /repositories:
+    get:
+      operationId: listRepositories
+      tags: [Repositories]
+      summary: List accessible repositories
+      description: |
+        Lists active, unexpired, durable repositories the current principal can
+        access. System-managed repositories are never projected. Requires
+        `repositories:list`; repository ACLs are evaluated for every call.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: query
+          in: query
+          schema:
+            type: string
+            maxLength: 200
+          description: Case-insensitive name or description filter.
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 50
+      responses:
+        "200":
+          description: Accessible repository catalog.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RepositoryCatalogEntry"
+                  meta:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+                      count: { type: integer }
+              example:
+                data:
+                  - id: 42
+                    name: District policies
+                    description: Current board and administrative policies
+                    ownerName: Policy Office
+                    visibility: private
+                    itemCount: 18
+                    activeIndexGenerationId: 11111111-2222-4333-8444-555555555555
+                    lastUpdated: "2026-07-26T18:00:00.000Z"
+                meta: { requestId: req_abc123, count: 1 }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /repositories/{id}:
+    get:
+      operationId: describeRepository
+      tags: [Repositories]
+      summary: Describe an accessible repository
+      description: |
+        Returns one catalog entry after a current ACL check. Requires
+        `repositories:list`; inaccessible and missing repositories both return
+        `404 NOT_FOUND`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: Repository description.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RepositoryCatalogEntry"
+                  meta:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /repositories/{id}/items/uploads:
+    post:
+      operationId: initiateRepositoryItemUpload
+      tags: [Repositories]
+      summary: Initiate a repository item upload
+      description: |
+        Creates an owner-bound canonical upload session with presigned S3 URLs.
+        The API key owner must be able to modify the active, user-managed durable
+        repository. Other repository shapes are masked as `404 NOT_FOUND`.
+        Requires `repositories:write`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RepositoryUploadInitiateRequest"
+            example:
+              itemName: Graduation policy
+              fileName: graduation-policy.pdf
+              contentType: application/pdf
+              byteSize: 248731
+      responses:
+        "201":
+          description: Canonical upload session created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RepositoryUploadSession"
+                  meta:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+              example:
+                data:
+                  sessionId: 11111111-2222-4333-8444-555555555555
+                  objectKey: repositories/42/11111111-2222-4333-8444-555555555555/graduation-policy.pdf
+                  uploadMethod: single
+                  uploadUrl: https://s3.example/presigned-put
+                  expiresAt: "2026-07-29T01:00:00.000Z"
+                meta: { requestId: req_abc123 }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          description: JSON request body exceeds 128 KiB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: API-key rate limit or repository upload quota exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Canonical repository uploads are not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /repositories/{id}/items/uploads/{sessionId}/complete:
+    post:
+      operationId: completeRepositoryItemUpload
+      tags: [Repositories]
+      summary: Complete a repository item upload
+      description: |
+        Commits an owner-bound session, creates the immutable item version and
+        durable processing job, and requests dispatch. Successful completion is
+        idempotent. Requires `repositories:write` and current modify access.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RepositoryUploadCompleteRequest"
+            examples:
+              single:
+                summary: Complete a single-part upload
+                value: {}
+              multipart:
+                summary: Complete a multipart upload
+                value:
+                  parts:
+                    - ETag: '"9b2cf535f27731c974343645a3985328"'
+                      PartNumber: 1
+      responses:
+        "200":
+          description: Upload committed and processing queued.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/Idempotency-Replayed"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RepositoryUploadCompletion"
+                  meta:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+              example:
+                data:
+                  itemId: 87
+                  itemVersionId: 33333333-4444-4555-8666-777777777777
+                  processingJobId: aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee
+                  replayed: false
+                meta: { requestId: req_abc123 }
+        "400":
+          description: Invalid multipart parts or an unavailable upload session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          description: JSON request body exceeds 128 KiB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /repositories/search:
+    post:
+      operationId: searchRepositories
+      tags: [Repositories]
+      summary: Search accessible repositories
+      description: |
+        Runs retrieval v2 against the requested repositories, or every
+        accessible durable repository when `repositoryIds` is omitted. Current
+        repository and segment ACLs, immutable item versions, and the active
+        index generation are enforced before disclosure. Requires
+        `repositories:search`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RepositorySearchRequest"
+            example:
+              query: What is the current graduation policy?
+              repositoryIds: [42]
+              mode: hybrid
+              modalities: [text, table]
+              limit: 5
+      responses:
+        "200":
+          description: Ranked retrieval results with exact citations.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  meta:
+                    type: object
+                    additionalProperties: true
+              example:
+                data:
+                  - repositoryId: 42
+                    itemId: 87
+                    itemVersionId: 33333333-4444-4555-8666-777777777777
+                    context: [{ content: "Students must...", citation: { page: 4 } }]
+                meta:
+                  requestId: req_abc123
+                  repositoriesRequested: 1
+                  repositoriesAuthorized: 1
+                  returnedResults: 1
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /repositories/{id}/source:
+    get:
+      operationId: getRepositorySource
+      tags: [Repositories]
+      summary: Get authorized source segments
+      description: |
+        Returns exact source segments only from the item's current immutable
+        version and the repository's active index generation. Repository and
+        segment ACLs are re-evaluated in the disclosure query. Requires
+        `repositories:read`; inaccessible and missing sources both return
+        `404 NOT_FOUND`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+        - name: itemId
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+        - name: chunkId
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        "200":
+          description: Current authorized source segments.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RepositorySourceSegment"
+                  meta:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+                      count: { type: integer }
+              example:
+                data:
+                  - chunkId: 901
+                    itemId: 87
+                    itemStableId: 55555555-6666-4777-8888-999999999999
+                    itemName: Graduation policy
+                    itemVersionId: 33333333-4444-4555-8666-777777777777
+                    versionNumber: 4
+                    chunkIndex: 8
+                    modality: text
+                    content: Students must...
+                    contextPrefix: Page 4
+                    sourceLocator: { page: 4 }
+                meta: { requestId: req_abc123, count: 1 }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /repositories/changes:
+    get:
+      operationId: listRepositoryChanges
+      tags: [Repositories]
+      summary: List authorized repository changes
+      description: |
+        Lists changed repository items in stable `(updatedAt,itemId)` order.
+        Pass the opaque `nextCursor` unchanged to resume. Current repository
+        ACLs are evaluated in the change query, so revocation takes effect
+        without rebuilding or restarting an agent. Requires
+        `repositories:changes`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: repositoryIds
+          in: query
+          required: true
+          description: Comma-separated repository ids (maximum 50).
+          schema:
+            type: string
+            example: 42,51
+        - name: cursor
+          in: query
+          description: Opaque cursor returned in the previous response.
+          schema:
+            type: string
+            maxLength: 2048
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: Authorized change page.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RepositoryChange"
+                  meta:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+                      nextCursor:
+                        type: [string, "null"]
+              example:
+                data:
+                  - repositoryId: 42
+                    repositoryName: District policies
+                    itemId: 87
+                    itemStableId: 55555555-6666-4777-8888-999999999999
+                    itemName: Graduation policy
+                    lifecycleStatus: active
+                    currentVersionId: 33333333-4444-4555-8666-777777777777
+                    updatedAt: "2026-07-26T18:00:00.000Z"
+                meta:
+                  requestId: req_abc123
+                  nextCursor: eyJ1cGRhdGVkQXQiOi...
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ============================================
   # Assistants
   # ============================================
 
@@ -683,7 +1186,14 @@ paths:
       operationId: listAssistants
       tags: [Assistants]
       summary: List accessible assistants
-      description: Returns assistants the authenticated user can access (own, admin, or approved).
+      description: |
+        Returns assistants the authenticated user can access after base
+        owner/admin/approved visibility and shared resource filtering. Active
+        room assignment grants assistant access. A caller whose only AI Studio
+        role is `student` and who belongs to at least one active room receives
+        only room-assigned assistants; administrators, callers with any
+        non-student role, and students with no active rooms keep ordinary
+        visibility. The same list service backs MCP `list_assistants`.
       security:
         - BearerAuth: []
         - SessionAuth: []
@@ -746,12 +1256,118 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /assistants/import:
+    post:
+      operationId: createAssistants
+      tags: [Assistants]
+      summary: Create Assistant Architects from an export envelope
+      description: |
+        Imports one or more Assistant Architects from the portable ExportFormat
+        v1.0 JSON envelope. Each assistant (row + prompts + input fields) is
+        created atomically and owned by the authenticated caller. Caller-supplied
+        `status` is ignored: every created assistant enters `pending_approval`.
+        Agent tools, connectors, mapped prompt models, durable prompt
+        repositories, and per-prompt enabled tools are validated against the
+        importing author's permissions and the mapped/routed model's
+        capabilities before any assistant transaction starts.
+        Model names are resolved by exact model id, then provider-family
+        fallback, then the first active model; the applied mappings are returned.
+        Import envelopes must contain at least one assistant and are limited to
+        10 MB, 100 assistants, 50 input fields per assistant, and 500 prompt
+        repository bindings on every surface. The
+        REST transport enforces the byte limit while reading the request stream, including when
+        `Content-Length` is missing or understated.
+        A cataloged but administratively disabled create operation returns a
+        masked 404 and does not parse or persist the envelope.
+        Requires `assistants:write`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssistantImportEnvelope"
+            example:
+              version: "1.0"
+              exported_at: "2026-07-28T12:00:00.000Z"
+              export_source: District agent
+              assistants:
+                - name: Family newsletter helper
+                  description: Drafts a family-facing newsletter
+                  status: approved
+                  prompts:
+                    - name: Draft
+                      content: "Draft a newsletter about {{topic}}"
+                      model_name: gpt-5
+                      position: 0
+                  input_fields:
+                    - name: topic
+                      label: Topic
+                      field_type: short_text
+                      position: 0
+      responses:
+        "201":
+          description: At least one assistant was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantImportBatchResponse"
+              example:
+                data:
+                  total: 1
+                  successful: 1
+                  failed: 0
+                  results:
+                    - name: Family newsletter helper
+                      id: 41
+                      status: pending_approval
+                  modelMappings:
+                    - modelName: gpt-5
+                      mappedToId: 7
+                meta:
+                  requestId: req_abc123
+        "400":
+          description: Invalid JSON, ExportFormat/collection-limit validation failure, an agent tool/connector, mapped model, or durable repository unavailable to the author, or a prompt tool unsupported by its mapped/routed model.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The caller lacks `assistants:write`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: The cataloged create operation is administratively disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Import payload exceeds the 10 MB limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /assistants/{id}:
     get:
       operationId: getAssistant
       tags: [Assistants]
       summary: Get assistant details
-      description: Returns full assistant details including input fields.
+      description: |
+        Returns full assistant details including input fields after base and
+        shared resource/room visibility checks. An assistant hidden by the
+        caller's current room restriction returns 404, matching a missing ID.
       security:
         - BearerAuth: []
         - SessionAuth: []
@@ -783,6 +1399,222 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+    put:
+      operationId: updateAssistant
+      tags: [Assistants]
+      summary: Replace an Assistant Architect from an export envelope
+      description: |
+        Atomically replaces the assistant's import-controlled fields, prompts,
+        and input fields from a single-assistant ExportFormat v1.0 envelope.
+        Staff callers may update only assistants they own; administrators may
+        update any assistant. Missing assistants and assistants owned by another
+        user both return a masked `404 NOT_FOUND`. An update returns
+        `409 CONFLICT` while a non-stale pending or running execution can still
+        reference the live prompt rows. Abandoned rows expire only after the
+        same immutable, per-execution wall-clock deadline persisted and
+        enforced by execution
+        (`agent_timeout_seconds` for agentic runs; `timeout_seconds`, or the
+        900-second platform ceiling when unset, for prompt chains) plus a
+        one-minute grace. Every successful update resets status to
+        `pending_approval` and atomically deactivates its linked UI capability
+        until re-approval. Reapproval reuses the capability's stable identifier
+        even when the replacement renamed the assistant. Agent tools, connectors,
+        mapped prompt models, durable prompt repositories, and per-prompt enabled
+        tools are validated against the caller's authoring permissions and the
+        mapped/routed model's capabilities before writes.
+        A cataloged but administratively disabled update operation returns a
+        masked 404 before parsing or mutation.
+        Requires `assistants:write`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssistantImportEnvelope"
+            example:
+              version: "1.0"
+              exported_at: "2026-07-28T12:00:00.000Z"
+              assistants:
+                - name: Updated family newsletter helper
+                  description: Updated by an agent
+                  status: approved
+                  prompts:
+                    - name: Draft
+                      content: "Draft three newsletter sections about {{topic}}"
+                      model_name: gpt-5
+                      position: 0
+                  input_fields:
+                    - name: topic
+                      label: Topic
+                      field_type: short_text
+                      position: 0
+      responses:
+        "200":
+          description: Assistant replaced and returned to pending approval.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantMutationResponse"
+              example:
+                data:
+                  result:
+                    name: Updated family newsletter helper
+                    id: 41
+                    status: pending_approval
+                  modelMappings:
+                    - modelName: gpt-5
+                      mappedToId: 7
+                meta:
+                  requestId: req_abc123
+        "400":
+          description: Invalid ID, JSON, or envelope (including an envelope containing other than one assistant).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The caller lacks `assistants:write`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A pending or running execution is still using the assistant's prompt graph.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Assistant import envelope exceeds the 10 MB limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /assistants/{id}/fork:
+    post:
+      operationId: forkAssistant
+      tags: [Assistants]
+      summary: Fork a visible Assistant Architect
+      description: |
+        Copies an assistant visible to the caller through the same
+        owner/admin/approved and resource/room rules as assistant detail. The
+        source is unchanged. The fork is owned by the caller and enters
+        `pending_approval`; an optional `name` overrides the copied name.
+        The visibility/resource authorization decision and exported source graph
+        are read in one repeatable-read transaction. After authoring validation,
+        current source visibility is rechecked under the source row lock in the
+        destination create transaction immediately before the copied assistant
+        is inserted, so a grant or room revocation committed during validation
+        fails with the same masked 404 without persisting a fork.
+        The optional JSON body is stream-bounded to 4 KB before decoding.
+        Copied agent tools and connectors must be available to the caller as an
+        author, and copied prompt tools must be supported by their mapped/routed
+        models, before the fork is persisted.
+        A cataloged but administratively disabled fork operation returns a
+        masked 404 before parsing or mutation.
+        Invisible and missing sources both return 404. Requires
+        `assistants:write`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+            example:
+              name: My family newsletter helper
+      responses:
+        "201":
+          description: Caller-owned fork created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/AssistantMutationResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          sourceAssistantId:
+                            type: integer
+              example:
+                data:
+                  sourceAssistantId: 41
+                  result:
+                    name: My family newsletter helper
+                    id: 52
+                    status: pending_approval
+                  modelMappings:
+                    - modelName: gpt-5
+                      mappedToId: 7
+                meta:
+                  requestId: req_abc123
+        "400":
+          description: Invalid ID, JSON, or name override.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The caller lacks `assistants:write`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Source assistant is missing or not visible to the caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Fork request body exceeds the 4 KB limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /assistants/{id}/execute:
     post:
       operationId: executeAssistant
@@ -792,12 +1624,27 @@ paths:
         Execute an assistant with the given inputs.
         - `Accept: text/event-stream` (default) returns an SSE stream
         - `Accept: application/json` returns 202 with a jobId for async polling
+        - API-key and JWT callers may execute only `approved` assistants;
+          authenticated browser sessions retain owner/administrator draft preview
 
-        Beyond the assistant scope check, the caller must have per-resource access
-        (Epic #1202 Phase 3) to BOTH the assistant and the model its last prompt
-        uses: a resource restricted to specific roles/Google groups returns 403 to
-        a caller who matches no grant (the assistant owner and administrators
-        always pass; a resource with no grants is unrestricted).
+        Beyond the assistant scope check, the caller must have per-resource
+        access (Epic #1202 Phase 3) to the assistant and the model selected for
+        each prompt. For legacy routing, execution creation rechecks every
+        pinned prompt-model grant in the assistant-row lock transaction. For
+        standard and advanced routing, the router authorizes its current
+        selected model rather than the stored fallback. Execution creation takes
+        the same assistant-row lock as import replacement, rechecks the
+        applicable current grants, creates the active execution row, and only
+        then loads the executable prompt graph. The row remains active until
+        every prompt in a final parallel position has settled and persisted.
+        Active room assignment grants access to the assistant, even when
+        its role/Google-group grants would deny the caller. A caller whose only
+        AI Studio role is `student` and who has an active room may execute only
+        room-assigned assistants; assistant ownership and zero-grant
+        unrestricted status do not bypass that restriction. Administrators,
+        callers with any non-student role, and students with no active rooms
+        keep ordinary ownership/grant behavior. Room assignment never bypasses
+        model or repository access.
 
         Runtime `file_upload` values may include up to 10 opaque canonical
         temporary-attachment markers returned by the authenticated staging API.
@@ -806,7 +1653,9 @@ paths:
         executing user, rejects missing/foreign/expired sources, replaces
         caller-carried names with authoritative item names, and adds the resolved
         repositories to retrieval and repository tools for every prompt. Current
-        repository ACLs are rechecked at execution and retrieval time.
+        repository ACLs are rechecked at execution and retrieval time. The
+        coordinated execution deadline is persisted with the execution and
+        enforced as the streaming abort timeout on every prompt or agent run.
 
         Required scope: `assistants:execute` (or the narrower
         `assistant:{id}:execute`; administrators may hold `*`).
@@ -901,6 +1750,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "413":
+          description: Execution request body exceeds the 128 KiB transport limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /assistants/{id}/conversations:
     post:
@@ -912,9 +1767,12 @@ paths:
         stream. Beyond the assistant scope check, the caller must have
         per-resource access (Epic #1202 Phase 3) to BOTH the assistant and the
         model its last prompt uses: a resource restricted to specific
-        roles/Google groups returns 403 to a caller who matches no grant (the
-        assistant owner and administrators always pass; a resource with no
-        grants is unrestricted).
+        roles/Google groups returns 403 to a caller who matches no grant. Active
+        room assignment grants assistant access; student-only active room
+        members are restricted to assigned assistants even when they own an
+        unassigned assistant or it has no grants. Administrators, callers with
+        any non-student role, and students with no active rooms keep ordinary
+        behavior. Model and repository checks are unchanged.
 
         Runtime canonical file markers follow the same owner-bound rules as
         `/assistants/{id}/execute`. Every marker is resolved and sanitized before
@@ -987,6 +1845,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "413":
+          description: Conversation request body exceeds the 128 KiB transport limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /assistants/{id}/conversations/{cid}/messages:
     post:
@@ -999,10 +1863,17 @@ paths:
         Beyond the assistant scope check, the caller must have per-resource
         access (Epic #1202 Phase 3) to BOTH the assistant and the model it uses:
         a resource restricted to specific roles/Google groups returns 403 to a
-        caller who matches no grant (the assistant owner and administrators
-        always pass; a resource with no grants is unrestricted).
+        caller who matches no grant. Active room assignment grants assistant
+        access; student-only active room members are restricted to assigned
+        assistants even when they own an unassigned assistant or it has no
+        grants. Administrators, callers with any non-student role, and students
+        with no active rooms keep ordinary behavior. Model and repository checks
+        are unchanged.
 
-        Before the body is parsed or a message is written, the server unions
+        After bounded body parsing, the server creates an active execution while
+        holding the assistant-row lock and repeats approved-status and current
+        grant checks before loading the graph. That row blocks import
+        replacement until streaming finishes or fails. The server then unions
         every prompt-bound repository with the conversation's bounded runtime
         repository IDs and rechecks the executing principal's current ACL. The
         model receives bounded hybrid retrieval context and vector, keyword, and
@@ -1046,6 +1917,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Conversation not found or not bound to this assistant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Follow-up request body exceeds the 128 KiB transport limit.
           content:
             application/json:
               schema:
@@ -1311,7 +2188,7 @@ paths:
             maxLength: 200
         - name: tag
           in: query
-          description: Filter by a single tag (exact match)
+          description: Filter by a single tag (whole-tag match, case-insensitive)
           schema:
             type: string
             maxLength: 100
@@ -1323,11 +2200,24 @@ paths:
             enum: [draft, published, archived]
         - name: query
           in: query
-          description: Case-insensitive title substring search
+          description: >-
+            Case-insensitive substring search over the title OR any tag. An
+            object matches when the text appears anywhere in its title or
+            anywhere within one of its tags. Distinct from the `tag` parameter,
+            which is a whole-tag equality filter; combining the two ANDs them.
           schema:
             type: string
             minLength: 1
             maxLength: 200
+        - name: since
+          in: query
+          description: >-
+            Return objects whose updatedAt is greater than or equal to this
+            ISO 8601 timestamp. Invalid timestamps return 400 VALIDATION_ERROR.
+          schema:
+            type: string
+            format: date-time
+          example: "2026-07-27T00:00:00Z"
       responses:
         "200":
           description: List of visible content objects
@@ -1363,6 +2253,9 @@ paths:
         Creates a document or artifact. Does NOT publish it. When `body` is
         supplied, an initial version (v1) is snapshotted. Mirrors the MCP
         `create_document` / `create_artifact` tools. Requires `content:create`.
+        Collection placement is re-authorized under collection locks in the
+        object write transaction, which also resolves the current default and
+        inherited grants.
 
         **Public create-as-private (§26.4, issue #1118):** creating directly at
         `visibility.level: "public"` (explicitly, or via a collection whose default
@@ -1442,7 +2335,10 @@ paths:
         same stable pre-order without `children`, retaining each node's display
         `path`. When the caller also holds `content:create`,
         `selectableForCreate` is included so an external picker can select a
-        destination without hard-coded slugs or ids.
+        destination without hard-coded slugs or ids. If an accessible child is
+        below a denied ancestor, the denied node is omitted and the child is
+        re-rooted beneath its nearest returned ancestor (or at the root);
+        `parentId` and `path` reflect this permission-filtered projection.
       security:
         - BearerAuth: []
       parameters:
@@ -1475,6 +2371,121 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: createContentCollection
+      tags: [Content]
+      summary: Create an Atrium collection
+      description: |
+        Creates an owner-bound `private` collection for the calling human, or a
+        district/shared collection when the caller is an administrator. Requires
+        `content:create`. Private collections are always private, never inherit
+        grants, and may nest only under collections owned by the same user. A
+        `group` default requires at least one effective `view` grant.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCollectionRequest"
+            examples:
+              private:
+                value:
+                  name: My Projects
+                  scope: private
+                  parentId: null
+              district:
+                value:
+                  name: Human Resources
+                  scope: district
+                  defaultVisibilityLevel: internal
+                  inheritGrants: true
+                  grants:
+                    - access: view
+                      kind: role
+                      value: staff
+                    - access: create
+                      kind: group
+                      value: hr-editors@psd401.net
+      responses:
+        "201":
+          description: Collection created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionManagementResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/ContentConflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /content/collections/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Collection UUID returned by collection discovery or creation.
+        schema:
+          type: string
+          format: uuid
+    patch:
+      operationId: updateContentCollection
+      tags: [Content]
+      summary: Rename, reorder, move, archive, or restore an Atrium collection
+      description: |
+        Applies a partial collection update. `parentId` and `position` move/reorder
+        the collection; `archived=true|false` recursively archives/restores its
+        subtree without deleting content. Requires `content:update`. District
+        collections require administrator authority; private collections remain
+        owner-bound and cannot be managed or read by district administrators. A
+        resulting `group` default requires at least one effective `view` grant.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCollectionRequest"
+            examples:
+              move:
+                value:
+                  parentId: c0ffee00-0000-4000-8000-000000000001
+                  position: 0
+              archiveSubtree:
+                value:
+                  archived: true
+      responses:
+        "200":
+          description: Updated collection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionManagementResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/ContentConflict"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -1534,7 +2545,9 @@ paths:
         Updates object metadata only — `title`, `tags`, `collectionId`, and
         `status`. Body changes go through the versions endpoint. `collectionId`
         accepts a slug or UUID; `null` clears the collection, `null` tags clears
-        all tags. Mirrors the MCP `update_content` tool. Requires `content:update`.
+        all tags. A collection move re-authorizes the target under collection
+        locks in the same transaction as the update. Mirrors the MCP
+        `update_content` tool. Requires `content:update`.
       security:
         - BearerAuth: []
       requestBody:
@@ -2416,14 +3429,19 @@ paths:
         **Provenance:** imported objects are **agent-authored**
         (`actor_kind = 'agent'`, attributed to the seeded `atrium-importer`
         identity) and created **private + draft** — never fabricated human
-        authorship, never pre-widened. The triggering caller is recorded in the
-        audit trail.
+        authorship, never pre-widened. Ownership and collection authorization
+        remain bound to the triggering human/delegated caller.
+
+        Reconstructed hierarchy uses the shared collection-management service.
+        Without a target, human/delegated callers receive a private root they
+        own. Descendants beneath a district target require administrator
+        authority. Autonomous callers must supply an existing selectable target.
 
         **Retry semantics:** import is additive and NOT transactional. A run that
-        fails partway leaves the already-created private/draft content in place, and
-        a retry re-imports the whole bundle as new objects (no dedup). For
-        idempotency, import into a fresh `targetCollectionId` and delete that partial
-        collection before retrying.
+        fails partway leaves already-created private/draft content in place. A
+        blind retry can duplicate objects or meet a sibling-name conflict. For
+        idempotency, use a fresh target and archive the partial imported subtree
+        before retrying into a new target.
       security:
         - BearerAuth: []
       requestBody:
@@ -2791,7 +3809,386 @@ components:
 
   # ---- Schemas ----
   schemas:
+    # -- Repository catalog --
+    RepositoryCatalogEntry:
+      type: object
+      required: [id, name, visibility, itemCount]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        description: { type: [string, "null"] }
+        ownerName: { type: [string, "null"] }
+        visibility:
+          type: string
+          enum: [public, private]
+        itemCount: { type: integer }
+        activeIndexGenerationId: { type: [string, "null"], format: uuid }
+        lastUpdated: { type: [string, "null"], format: date-time }
+        createdAt: { type: [string, "null"], format: date-time }
+        updatedAt: { type: [string, "null"], format: date-time }
+
+    RepositoryUploadInitiateRequest:
+      type: object
+      additionalProperties: false
+      required: [itemName, fileName, contentType, byteSize]
+      properties:
+        itemName: { type: string, minLength: 1, maxLength: 500 }
+        fileName: { type: string, minLength: 1, maxLength: 500 }
+        contentType:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Canonical MIME type for a supported file.
+        byteSize:
+          type: integer
+          minimum: 1
+          description: Exact number of bytes to upload.
+
+    RepositoryUploadPartUrl:
+      type: object
+      required: [partNumber, uploadUrl]
+      properties:
+        partNumber: { type: integer, minimum: 1 }
+        uploadUrl: { type: string, format: uri }
+
+    RepositoryUploadSession:
+      type: object
+      required: [sessionId, objectKey, uploadMethod, expiresAt]
+      properties:
+        sessionId: { type: string, format: uuid }
+        objectKey: { type: string }
+        uploadMethod:
+          type: string
+          enum: [single, multipart]
+        uploadUrl:
+          type: string
+          format: uri
+          description: Present for single-part uploads.
+        partSize:
+          type: integer
+          minimum: 1
+        partUrls:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/RepositoryUploadPartUrl"
+        expiresAt: { type: string, format: date-time }
+
+    RepositoryUploadCompleteRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        parts:
+          type: array
+          maxItems: 10000
+          description: Required only for multipart uploads.
+          items:
+            type: object
+            additionalProperties: false
+            required: [ETag, PartNumber]
+            properties:
+              ETag: { type: string, minLength: 1, maxLength: 512 }
+              PartNumber: { type: integer, minimum: 1, maximum: 10000 }
+
+    RepositoryUploadCompletion:
+      type: object
+      required: [itemId, itemVersionId, processingJobId, replayed]
+      properties:
+        itemId: { type: integer, minimum: 1 }
+        itemVersionId: { type: string, format: uuid }
+        processingJobId: { type: string, format: uuid }
+        replayed: { type: boolean }
+
+    RepositorySearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        repositoryIds:
+          type: array
+          maxItems: 50
+          items: { type: integer, minimum: 1 }
+        mode:
+          type: string
+          enum: [keyword, vector, hybrid]
+          default: hybrid
+        modalities:
+          type: array
+          maxItems: 5
+          items:
+            type: string
+            enum: [text, image, audio, video, table]
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+        threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+
+    RepositorySourceSegment:
+      type: object
+      required:
+        - chunkId
+        - itemId
+        - itemStableId
+        - itemName
+        - itemVersionId
+        - versionNumber
+        - chunkIndex
+        - modality
+        - content
+        - contextPrefix
+        - sourceLocator
+      properties:
+        chunkId: { type: integer }
+        itemId: { type: integer }
+        itemStableId: { type: string, format: uuid }
+        itemName: { type: string }
+        itemVersionId: { type: string, format: uuid }
+        versionNumber: { type: integer }
+        chunkIndex: { type: integer }
+        modality:
+          type: string
+          enum: [text, image, audio, video, table]
+        content: { type: string }
+        contextPrefix: { type: string }
+        sourceLocator:
+          type: object
+          additionalProperties: true
+
+    RepositoryChange:
+      type: object
+      properties:
+        repositoryId: { type: integer }
+        repositoryName: { type: string }
+        activeIndexGenerationId: { type: [string, "null"], format: uuid }
+        itemId: { type: integer }
+        itemStableId: { type: string, format: uuid }
+        itemName: { type: string }
+        lifecycleStatus: { type: string }
+        currentVersionId: { type: [string, "null"], format: uuid }
+        updatedAt: { type: [string, "null"], format: date-time }
+
     # -- Assistants --
+    AssistantImportPrompt:
+      type: object
+      required: [name, content, model_name, position]
+      properties:
+        name: { type: string }
+        content:
+          type: string
+          maxLength: 10000000
+        system_context:
+          type: [string, "null"]
+          maxLength: 10000000
+        model_name:
+          type: string
+          description: Portable model id/name resolved against active models.
+        position: { type: integer }
+        parallel_group: { type: [integer, "null"] }
+        input_mapping:
+          type: [object, "null"]
+          additionalProperties: { type: string }
+        timeout_seconds:
+          type: [integer, "null"]
+          minimum: 1
+        repository_ids:
+          type: array
+          maxItems: 500
+          items: { type: integer, minimum: 1 }
+          description: Durable repository ids configured for this prompt. An import envelope may contain at most 500 repository bindings in aggregate.
+        enabled_tools:
+          type: array
+          items: { type: string }
+          description: Tool identifiers configured for this prompt.
+
+    AssistantImportField:
+      type: object
+      required: [name, label, field_type, position]
+      properties:
+        name: { type: string }
+        label: { type: string }
+        field_type:
+          type: string
+          enum: [short_text, long_text, select, multi_select, file_upload]
+        position: { type: integer }
+        options:
+          type: [object, "null"]
+          additionalProperties: true
+
+    AssistantImportDefinition:
+      type: object
+      required: [name, prompts, input_fields]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description: { type: string }
+        status:
+          type: string
+          description: Accepted for format compatibility but ignored; writes always use pending_approval.
+        image_path: { type: [string, "null"] }
+        is_parallel: { type: boolean }
+        timeout_seconds:
+          type: [integer, "null"]
+          minimum: 1
+        mode:
+          type: string
+          enum: [prompt_chain, agentic]
+          default: prompt_chain
+        model_routing_mode:
+          type: string
+          enum: [legacy, standard, advanced]
+          default: legacy
+          description: Advanced routing requires model_routing_family; other modes reject a non-null family.
+        model_routing_family:
+          type: [string, "null"]
+          enum: [openai, anthropic, google, null]
+          description: Required when model_routing_mode is advanced and otherwise must be null or omitted.
+        agent_enabled_tools:
+          type: array
+          description: Internal agent-callable tool identifiers available under the author's role-derived scopes.
+          items: { type: string }
+        agent_enabled_connectors:
+          type: array
+          description: Connector identifiers visible to the author at import time.
+          items: { type: string }
+        agent_max_steps:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+        agent_timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 900
+          default: 300
+        agent_cost_cap_cents:
+          type: [integer, "null"]
+          minimum: 1
+        agent_max_requests_per_hour:
+          type: [integer, "null"]
+          minimum: 1
+        retrieval_scope:
+          type: [object, "null"]
+          properties:
+            collectionId: { type: [string, "null"] }
+            tags:
+              type: array
+              items: { type: string }
+            maxVisibilityLevel:
+              type: string
+              enum: [private, group, internal, public]
+        prompts:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/AssistantImportPrompt"
+        input_fields:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/AssistantImportField"
+
+    AssistantImportEnvelope:
+      type: object
+      required: [version, assistants]
+      properties:
+        version:
+          type: string
+          const: "1.0"
+        exported_at:
+          type: string
+          format: date-time
+        export_source:
+          type: string
+        assistants:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/AssistantImportDefinition"
+
+    AssistantModelMapping:
+      type: object
+      required: [modelName, mappedToId]
+      properties:
+        modelName: { type: string }
+        mappedToId:
+          type: integer
+          minimum: 1
+
+    AssistantImportResult:
+      oneOf:
+        - type: object
+          required: [name, id, status]
+          properties:
+            name: { type: string }
+            id:
+              type: integer
+              minimum: 1
+            status:
+              type: string
+              const: pending_approval
+        - type: object
+          required: [name, status, error]
+          properties:
+            name: { type: string }
+            status:
+              type: string
+              const: error
+            error: { type: string }
+
+    AssistantImportBatchResult:
+      type: object
+      required: [total, successful, failed, results, modelMappings]
+      properties:
+        total: { type: integer, minimum: 0 }
+        successful: { type: integer, minimum: 0 }
+        failed: { type: integer, minimum: 0 }
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssistantImportResult"
+        modelMappings:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssistantModelMapping"
+
+    AssistantImportBatchResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/AssistantImportBatchResult"
+        meta:
+          type: object
+          properties:
+            requestId: { type: string }
+
+    AssistantMutationResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            result:
+              $ref: "#/components/schemas/AssistantImportResult"
+            modelMappings:
+              type: array
+              items:
+                $ref: "#/components/schemas/AssistantModelMapping"
+        meta:
+          type: object
+          properties:
+            requestId: { type: string }
+
     AssistantListItem:
       type: object
       properties:
@@ -3485,6 +4882,8 @@ components:
         - slug
         - parentId
         - path
+        - scope
+        - ownerUserId
         - defaultVisibilityLevel
         - visibleObjectCount
       properties:
@@ -3499,11 +4898,19 @@ components:
           type: string
           format: uuid
           nullable: true
+          description: Nearest returned ancestor; null when no admitted ancestor is returned.
         path:
           type: array
           minItems: 1
           items:
             type: string
+        scope:
+          type: string
+          enum: [district, private]
+        ownerUserId:
+          type: integer
+          nullable: true
+          description: Present for owner-bound private collections.
         defaultVisibilityLevel:
           type: string
           enum: [private, group, internal, public]
@@ -3540,6 +4947,166 @@ components:
             count:
               type: integer
               minimum: 0
+
+    CollectionGrant:
+      type: object
+      additionalProperties: false
+      required: [access, kind, value]
+      properties:
+        access:
+          type: string
+          enum: [view, create]
+        kind:
+          type: string
+          enum: [role, building, department, grade, user, group]
+        value:
+          type: string
+          minLength: 1
+          maxLength: 255
+
+    CreateCollectionRequest:
+      type: object
+      additionalProperties: false
+      required: [name, scope]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        scope:
+          type: string
+          enum: [district, private]
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+        position:
+          type: integer
+          minimum: 0
+        defaultVisibilityLevel:
+          type: string
+          enum: [private, group, internal, public]
+        inheritGrants:
+          type: boolean
+        grants:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/CollectionGrant"
+
+    UpdateCollectionRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: |
+        A collection cannot change between district and private ownership.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+        position:
+          type: integer
+          minimum: 0
+        defaultVisibilityLevel:
+          type: string
+          enum: [private, group, internal, public]
+        inheritGrants:
+          type: boolean
+        grants:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/CollectionGrant"
+        archived:
+          type: boolean
+
+    CollectionManagement:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - slug
+        - parentId
+        - path
+        - scope
+        - ownerUserId
+        - ownerName
+        - defaultVisibilityLevel
+        - inheritGrants
+        - position
+        - archivedAt
+        - directContentCount
+        - subtreeContentCount
+        - grants
+        - selectableForCreate
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+        path:
+          type: array
+          items:
+            type: string
+        scope:
+          type: string
+          enum: [district, private]
+        ownerUserId:
+          type: integer
+          nullable: true
+        ownerName:
+          type: string
+          nullable: true
+        defaultVisibilityLevel:
+          type: string
+          enum: [private, group, internal, public]
+        inheritGrants:
+          type: boolean
+        position:
+          type: integer
+          minimum: 0
+        archivedAt:
+          type: string
+          format: date-time
+          nullable: true
+        directContentCount:
+          type: integer
+          minimum: 0
+        subtreeContentCount:
+          type: integer
+          minimum: 0
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/CollectionGrant"
+        selectableForCreate:
+          type: boolean
+
+    CollectionManagementResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/CollectionManagement"
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
 
     ContentObject:
       type: object
@@ -4146,7 +5713,7 @@ components:
       properties:
         data:
           type: object
-          required: [id, destination, publishedVersionId]
+          required: [id, destination, publishedVersionId, readerUrl]
           properties:
             id:
               type: string
@@ -4157,6 +5724,15 @@ components:
             publishedVersionId:
               type: string
               format: uuid
+            readerUrl:
+              type: string
+              format: uri-reference
+              nullable: true
+              description: >-
+                Canonical reader URL returned by the publish service. Deployed
+                intranet/public readers are absolute; destinations without a
+                reader URL return null.
+              example: "https://aistudio.example.edu/c/ai-acceptable-use-policy"
         meta:
           type: object
           required: [requestId]
@@ -4295,7 +5871,7 @@ components:
             $ref: "#/components/schemas/OkfFile"
         targetCollectionId:
           type: string
-          description: Existing collection slug or id to import the bundle root INTO (a fresh root collection is created when omitted).
+          description: Existing selectable collection slug or id to import the bundle root INTO. When omitted, a human/delegated caller gets a fresh owner-bound private root; autonomous callers must supply a target.
 
     OkfImportResponse:
       type: object

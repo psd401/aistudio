@@ -36,6 +36,12 @@ export interface MessageResponse {
   payload?: MessagePart;
 }
 
+export interface GmailLabel {
+  id: string;
+  name: string;
+  type: "system" | "user";
+}
+
 interface MessagePart {
   mimeType?: string;
   headers?: { name: string; value: string }[];
@@ -73,6 +79,15 @@ export async function getCurrentHistoryId(accessToken: string): Promise<string> 
   }
   const profile = (await resp.json()) as { historyId: string };
   return profile.historyId;
+}
+
+export async function listLabels(accessToken: string): Promise<GmailLabel[]> {
+  const resp = await gmailFetch(accessToken, "/labels");
+  if (!resp.ok) {
+    throw new Error(`Gmail label fetch failed: ${resp.status} ${await resp.text()}`);
+  }
+  const result = (await resp.json()) as { labels?: GmailLabel[] };
+  return result.labels ?? [];
 }
 
 /**

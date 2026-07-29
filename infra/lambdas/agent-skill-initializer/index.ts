@@ -15,8 +15,8 @@
  *
  * Idempotent: re-running with the same manifest is a no-op (UPSERT only
  * bumps the version when the source hash changes). Skills removed from
- * the image manifest are NOT auto-deleted from the DB — that's an
- * explicit admin action via the Skills tab.
+ * the image manifest are NOT auto-deleted from the DB. Explicit entries
+ * in retiredSkills are soft-retired for safe bundled-skill renames.
  *
  * Env vars:
  *   DATABASE_HOST         — Aurora host
@@ -31,6 +31,7 @@ import {
   GetSecretValueCommand,
 } from "@aws-sdk/client-secrets-manager"
 import postgres from "postgres"
+import { retirementCandidates } from "./retirement"
 
 const DATABASE_HOST = process.env.DATABASE_HOST || ""
 const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || ""
@@ -77,6 +78,7 @@ interface CustomResourceEvent {
   ResourceProperties: {
     ServiceToken?: string
     skills?: SkillManifestEntry[]
+    retiredSkills?: readonly string[]
     imageTag?: string
     /** Trigger string forces CDK to invoke this Custom Resource on every deploy. */
     trigger?: string
@@ -85,7 +87,31 @@ interface CustomResourceEvent {
 
 interface CustomResourceResponse {
   PhysicalResourceId: string
-  Data: { upserted: number; skipped: number; imageTag: string }
+  Data: {
+    upserted: number
+    skipped: number
+    retired: number
+    imageTag: string
+  }
+}
+
+async function retireSkills(names: readonly string[]): Promise<number> {
+  if (names.length === 0) return 0
+  const sql = await getSql()
+  let retired = 0
+  for (const name of names) {
+    const result = await sql<{ id: string }[]>`
+      UPDATE psd_agent_skills
+      SET
+        scope = 'rejected',
+        scan_status = 'flagged',
+        updated_at = NOW()
+      WHERE name = ${name} AND scope = 'shared'
+      RETURNING id
+    `
+    retired += result.length
+  }
+  return retired
 }
 
 async function upsertSkills(
@@ -134,7 +160,7 @@ async function upsertSkills(
 export const handler = async (
   event: CustomResourceEvent,
 ): Promise<CustomResourceResponse> => {
-  // eslint-disable-next-line no-console
+
   console.log(
     JSON.stringify({
       level: "INFO",
@@ -152,15 +178,20 @@ export const handler = async (
   if (event.RequestType === "Delete") {
     return {
       PhysicalResourceId: "agent-skill-initializer",
-      Data: { upserted: 0, skipped: 0, imageTag: "n/a" },
+      Data: { upserted: 0, skipped: 0, retired: 0, imageTag: "n/a" },
     }
   }
 
   const skills = event.ResourceProperties.skills ?? []
+  const candidates = retirementCandidates(
+    skills.map((skill) => skill.name),
+    event.ResourceProperties.retiredSkills ?? [],
+  )
   const imageTag = event.ResourceProperties.imageTag ?? "unknown"
+  const retired = await retireSkills(candidates)
   const { upserted, skipped } = await upsertSkills(skills, imageTag)
 
-  // eslint-disable-next-line no-console
+
   console.log(
     JSON.stringify({
       level: "INFO",
@@ -168,12 +199,13 @@ export const handler = async (
       evt: "complete",
       upserted,
       skipped,
+      retired,
       imageTag,
     }),
   )
 
   return {
     PhysicalResourceId: "agent-skill-initializer",
-    Data: { upserted, skipped, imageTag },
+    Data: { upserted, skipped, retired, imageTag },
   }
 }

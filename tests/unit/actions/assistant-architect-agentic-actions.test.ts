@@ -39,6 +39,7 @@ jest.mock("@/lib/tools/tool-registry", () => ({
 
 // The drizzle module is a large import; mock only the exports the action uses.
 jest.mock("@/lib/db/drizzle", () => ({
+  AssistantApprovalValidationError: class extends Error {},
   getAssistantArchitects: jest.fn(() => Promise.resolve([])),
   getAssistantArchitectById: jest.fn(() => Promise.resolve(null)),
   createAssistantArchitect: jest.fn(),
@@ -190,6 +191,21 @@ describe("validateAgentTools — via updateAssistantArchitectAction", () => {
 
     expect(result.isSuccess).toBe(false)
     expect(result.message).toMatch(/not available for agentic use/i)
+  })
+
+  it("does not expose catalog dependency errors to the caller", async () => {
+    listMock.mockRejectedValue(
+      new Error("postgres connection failed for internal-host:5432"),
+    )
+
+    const result = await updateAssistantArchitectAction("1", {
+      agentEnabledTools: ["decisions.search"],
+    })
+
+    expect(result.isSuccess).toBe(false)
+    expect(result.message).toContain("Unable to validate agent tools")
+    expect(result.message).not.toContain("internal-host")
+    expect(result.message).not.toContain("postgres")
   })
 
   it("rejects a mix where some tools are valid and at least one is not", async () => {

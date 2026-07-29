@@ -1,6 +1,7 @@
 /** @jest-environment node */
 
 import {
+  RepositoryUploadCompletionError,
   assertRepositoryUploadSessionActive,
 } from "@/lib/repositories/content-platform/upload-service";
 import type { RepositoryUploadStatus } from "@/lib/db/schema";
@@ -16,6 +17,15 @@ describe("canonical upload completion lifecycle race", () => {
         { status: "uploading", expiresAt: FUTURE },
         NOW
       )
+    ).not.toThrow();
+  });
+
+  it("allows an idempotent completed-session replay after URL expiry", () => {
+    expect(() =>
+      assertRepositoryUploadSessionActive(
+        { status: "completed", expiresAt: PAST },
+        NOW,
+      ),
     ).not.toThrow();
   });
 
@@ -37,8 +47,10 @@ describe("canonical upload completion lifecycle race", () => {
   ];
 
   it.each(inactiveSessions)("rejects registration when %s", (_caseName, session) => {
-    expect(() =>
-      assertRepositoryUploadSessionActive(session, NOW)
-    ).toThrow("Upload session is no longer active");
+    const assertActive = () =>
+      assertRepositoryUploadSessionActive(session, NOW);
+
+    expect(assertActive).toThrow(RepositoryUploadCompletionError);
+    expect(assertActive).toThrow("Upload session is no longer active");
   });
 });

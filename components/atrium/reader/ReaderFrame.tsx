@@ -92,7 +92,11 @@ function ReaderCover({
   const gradClass = coverGradientClass(coverGradient);
   if (!gradClass && !trimmedIcon) return null;
   return (
-    <>
+    // `.mer-cover-block` mirrors the editor (#1336): it owns the bleed margins
+    // and the gap to the title below. The gap must live on the BLOCK, not the
+    // band — the emoji tile overlaps the band by a negative margin, which would
+    // cancel any bottom margin put on the band itself.
+    <div className="mer-cover-block">
       <div
         className={`mer-cover ${gradClass ?? "mer-cover--default"}`}
         data-testid="reader-cover"
@@ -103,7 +107,7 @@ function ReaderCover({
           {trimmedIcon}
         </div>
       )}
-    </>
+    </div>
   );
 }
 

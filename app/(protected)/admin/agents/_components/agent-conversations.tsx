@@ -55,6 +55,94 @@ const DAYS_OPTIONS = [
   { value: "90", label: "Last 90 days" },
 ]
 
+function ConversationsTable({
+  items,
+  loading,
+  onOpen,
+}: {
+  items: ConversationListItem[]
+  loading: boolean
+  onOpen: (sessionId: string) => void
+}) {
+  if (loading) return <Skeleton className="h-48 w-full" />
+  if (items.length === 0) {
+    return (
+      <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
+        No conversations in the selected window.
+      </div>
+    )
+  }
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Last turn</TableHead>
+          <TableHead>User</TableHead>
+          <TableHead className="text-right">Turns</TableHead>
+          <TableHead className="text-right">Tools</TableHead>
+          <TableHead className="text-right">Tokens (in/out)</TableHead>
+          <TableHead>Models</TableHead>
+          <TableHead>Status</TableHead>
+          <TableHead />
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {items.map((session) => (
+          <TableRow key={session.sessionId}>
+            <TableCell className="text-xs">
+              {formatDate(session.lastTurnAt, true)}
+            </TableCell>
+            <TableCell className="font-mono text-xs">
+              {session.userId}
+            </TableCell>
+            <TableCell className="text-right">{session.turnCount}</TableCell>
+            <TableCell className="text-right">
+              {session.toolCallCount}
+            </TableCell>
+            <TableCell className="text-right text-xs text-muted-foreground">
+              {session.totalInputTokens.toLocaleString()} /{" "}
+              {session.totalOutputTokens.toLocaleString()}
+            </TableCell>
+            <TableCell className="text-xs">
+              {session.models.length === 0 ? (
+                <span className="text-muted-foreground">—</span>
+              ) : (
+                session.models.map((model) => (
+                  <Badge
+                    key={model}
+                    variant="outline"
+                    className="mr-1 py-0 text-[10px]"
+                  >
+                    {model}
+                  </Badge>
+                ))
+              )}
+            </TableCell>
+            <TableCell>
+              <Badge
+                variant={
+                  session.hasGuardrailBlock ? "destructive" : "secondary"
+                }
+              >
+                {session.hasGuardrailBlock ? "guardrail" : "ok"}
+              </Badge>
+            </TableCell>
+            <TableCell>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => onOpen(session.sessionId)}
+              >
+                View
+              </Button>
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  )
+}
+
 export function AgentConversationsTab() {
   const { toast } = useToast()
   const [items, setItems] = useState<ConversationListItem[]>([])
@@ -155,77 +243,11 @@ export function AgentConversationsTab() {
           </div>
         </CardHeader>
         <CardContent>
-          {loading ? (
-            <Skeleton className="h-48 w-full" />
-          ) : items.length === 0 ? (
-            <div className="h-32 flex items-center justify-center text-sm text-muted-foreground">
-              No conversations in the selected window.
-            </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Last turn</TableHead>
-                  <TableHead>User</TableHead>
-                  <TableHead className="text-right">Turns</TableHead>
-                  <TableHead className="text-right">Tools</TableHead>
-                  <TableHead className="text-right">Tokens (in/out)</TableHead>
-                  <TableHead>Models</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {items.map((s) => (
-                  <TableRow key={s.sessionId}>
-                    <TableCell className="text-xs">
-                      {formatDate(s.lastTurnAt, true)}
-                    </TableCell>
-                    <TableCell className="font-mono text-xs">{s.userId}</TableCell>
-                    <TableCell className="text-right">{s.turnCount}</TableCell>
-                    <TableCell className="text-right">
-                      {s.toolCallCount}
-                    </TableCell>
-                    <TableCell className="text-right text-muted-foreground text-xs">
-                      {s.totalInputTokens.toLocaleString()} /{" "}
-                      {s.totalOutputTokens.toLocaleString()}
-                    </TableCell>
-                    <TableCell className="text-xs">
-                      {s.models.length === 0 ? (
-                        <span className="text-muted-foreground">—</span>
-                      ) : (
-                        s.models.map((m) => (
-                          <Badge
-                            key={m}
-                            variant="outline"
-                            className="text-[10px] py-0 mr-1"
-                          >
-                            {m}
-                          </Badge>
-                        ))
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      {s.hasGuardrailBlock ? (
-                        <Badge variant="destructive">guardrail</Badge>
-                      ) : (
-                        <Badge variant="secondary">ok</Badge>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => openSession(s.sessionId)}
-                      >
-                        View
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
+          <ConversationsTable
+            items={items}
+            loading={loading}
+            onOpen={openSession}
+          />
         </CardContent>
       </Card>
 

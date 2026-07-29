@@ -3,6 +3,7 @@ import {
   executeQuery,
   executeTransaction,
   toPgRows,
+  type DbTransaction,
 } from "@/lib/db/drizzle-client";
 import {
   knowledgeRepositories,
@@ -273,6 +274,289 @@ export async function recordRepositorySecurityBlock(
 
 const DEFAULT_LEASE_DURATION_MS = 16 * 60 * 1_000;
 
+interface ClaimContext {
+  coordinates: RepositoryProcessingMutationCoordinates;
+  repository: {
+    lifecycleStatus: RepositoryProcessingTargetLifecycle["repositoryLifecycleStatus"];
+    expiresAt: Date | null;
+  } | undefined;
+  item: {
+    lifecycleStatus: RepositoryProcessingTargetLifecycle["itemLifecycleStatus"];
+    currentVersionId: string | null;
+  } | undefined;
+  job: RepositoryProcessingJobRow;
+}
+
+interface ActiveVersionContext {
+  itemId: number;
+  active: boolean;
+}
+
+async function lockClaimContext(
+  tx: DbTransaction,
+  message: RepositoryProcessingJobMessage
+): Promise<ClaimContext> {
+  const [coordinates] = await tx
+    .select({
+      itemId: repositoryItemVersions.itemId,
+      repositoryId: repositoryItems.repositoryId,
+    })
+    .from(repositoryItemVersions)
+    .innerJoin(
+      repositoryItems,
+      eq(repositoryItems.id, repositoryItemVersions.itemId)
+    )
+    .where(eq(repositoryItemVersions.id, message.itemVersionId))
+    .limit(1);
+  if (!coordinates) {
+    throw new Error("Processing job does not match its item version");
+  }
+  const [repository] = await tx
+    .select({
+      lifecycleStatus: knowledgeRepositories.lifecycleStatus,
+      expiresAt: knowledgeRepositories.expiresAt,
+    })
+    .from(knowledgeRepositories)
+    .where(eq(knowledgeRepositories.id, coordinates.repositoryId))
+    .limit(1)
+    .for("update");
+  const [item] = await tx
+    .select({
+      lifecycleStatus: repositoryItems.lifecycleStatus,
+      currentVersionId: repositoryItems.currentVersionId,
+    })
+    .from(repositoryItems)
+    .where(
+      and(
+        eq(repositoryItems.id, coordinates.itemId),
+        eq(repositoryItems.repositoryId, coordinates.repositoryId)
+      )
+    )
+    .limit(1)
+    .for("update");
+  const [job] = await tx
+    .select()
+    .from(repositoryProcessingJobs)
+    .where(eq(repositoryProcessingJobs.id, message.jobId))
+    .limit(1)
+    .for("update");
+  if (!job || job.itemVersionId !== message.itemVersionId) {
+    throw new Error("Processing job does not match its item version");
+  }
+  return { coordinates, repository, item, job };
+}
+
+async function cancelInactiveClaim(
+  tx: DbTransaction,
+  job: RepositoryProcessingJobRow,
+  now: Date
+): Promise<void> {
+  if (job.status !== "pending" && job.status !== "queued") return;
+  await tx
+    .update(repositoryProcessingJobs)
+    .set({
+      status: "cancelled",
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      lastErrorCode: "CONTENT_TARGET_INACTIVE",
+      lastErrorMessage: "Repository processing target is no longer active",
+      finishedAt: now,
+      updatedAt: now,
+    })
+    .where(eq(repositoryProcessingJobs.id, job.id));
+}
+
+function isClaimUnavailable(
+  job: RepositoryProcessingJobRow,
+  now: Date
+): boolean {
+  if (
+    job.status === "succeeded" ||
+    job.status === "failed" ||
+    job.status === "cancelled"
+  ) {
+    return true;
+  }
+  if (
+    job.status === "running" &&
+    job.leaseExpiresAt &&
+    job.leaseExpiresAt.getTime() > now.getTime()
+  ) {
+    return true;
+  }
+  return (
+    job.status === "pending" &&
+    job.availableAt.getTime() > now.getTime()
+  );
+}
+
+async function loadActiveVersionContext(
+  tx: DbTransaction,
+  job: RepositoryProcessingJobRow,
+  itemVersionId: string
+): Promise<ActiveVersionContext | undefined> {
+  if (job.stage !== "inspect") return undefined;
+  const [context] = await tx
+    .select({
+      itemId: repositoryItemVersions.itemId,
+      active: sql<boolean>`EXISTS (
+        SELECT 1
+        FROM ${repositoryItemChunks} active_chunk
+        JOIN ${repositoryItems} active_item
+          ON active_item.id = active_chunk.item_id
+        JOIN ${knowledgeRepositories} active_repository
+          ON active_repository.id = active_item.repository_id
+        WHERE active_chunk.item_version_id = repository_item_versions.id
+          AND active_chunk.index_generation_id = active_repository.active_index_generation_id
+          AND active_item.current_version_id = repository_item_versions.id
+          AND active_item.lifecycle_status = 'active'
+      )`,
+    })
+    .from(repositoryItemVersions)
+    .where(eq(repositoryItemVersions.id, itemVersionId))
+    .limit(1);
+  return context;
+}
+
+async function failExhaustedClaim(params: {
+  tx: DbTransaction;
+  job: RepositoryProcessingJobRow;
+  context?: ActiveVersionContext;
+  itemVersionId: string;
+  now: Date;
+}): Promise<void> {
+  const errorMessage = "Processing job exhausted its retry budget";
+  if (!params.context?.active) {
+    await params.tx
+      .update(repositoryItemVersions)
+      .set({ inspectionStatus: "error", processingStatus: "failed" })
+      .where(eq(repositoryItemVersions.id, params.itemVersionId));
+  }
+  if (params.context && !params.context.active) {
+    await params.tx
+      .update(repositoryItems)
+      .set({
+        processingStatus: "failed",
+        processingError: errorMessage,
+        updatedAt: params.now,
+      })
+      .where(
+        and(
+          eq(repositoryItems.id, params.context.itemId),
+          eq(repositoryItems.currentVersionId, params.itemVersionId)
+        )
+      );
+  }
+  await params.tx
+    .update(repositoryProcessingJobs)
+    .set({
+      status: "failed",
+      lastErrorCode: "RETRY_BUDGET_EXHAUSTED",
+      lastErrorMessage: errorMessage,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      finishedAt: params.now,
+      updatedAt: params.now,
+    })
+    .where(eq(repositoryProcessingJobs.id, params.job.id));
+}
+
+async function markClaimedVersionProcessing(params: {
+  tx: DbTransaction;
+  claimed: RepositoryProcessingJobRow | undefined;
+  job: RepositoryProcessingJobRow;
+  context?: ActiveVersionContext;
+  itemVersionId: string;
+  now: Date;
+}): Promise<void> {
+  if (!params.claimed || params.job.stage !== "inspect" || params.context?.active) {
+    return;
+  }
+  await params.tx
+    .update(repositoryItemVersions)
+    .set({ processingStatus: "processing" })
+    .where(eq(repositoryItemVersions.id, params.itemVersionId));
+  if (!params.context) return;
+  await params.tx
+    .update(repositoryItems)
+    .set({
+      processingStatus: "processing",
+      processingError: null,
+      updatedAt: params.now,
+    })
+    .where(
+      and(
+        eq(repositoryItems.id, params.context.itemId),
+        eq(repositoryItems.currentVersionId, params.itemVersionId)
+      )
+    );
+}
+
+async function claimRepositoryProcessingJobInTransaction(params: {
+  tx: DbTransaction;
+  message: RepositoryProcessingJobMessage;
+  workerId: string;
+  now: Date;
+  leaseDurationMs: number;
+}): Promise<RepositoryProcessingJobRow | null> {
+  const claim = await lockClaimContext(params.tx, params.message);
+  const targetActive =
+    claim.repository &&
+    claim.item &&
+    isRepositoryProcessingTargetActive(
+      {
+        repositoryLifecycleStatus: claim.repository.lifecycleStatus,
+        repositoryExpiresAt: claim.repository.expiresAt,
+        itemLifecycleStatus: claim.item.lifecycleStatus,
+        currentVersionId: claim.item.currentVersionId,
+      },
+      params.message.itemVersionId,
+      params.now
+    );
+  if (!targetActive) {
+    await cancelInactiveClaim(params.tx, claim.job, params.now);
+    return null;
+  }
+  if (isClaimUnavailable(claim.job, params.now)) return null;
+  const context = await loadActiveVersionContext(
+    params.tx,
+    claim.job,
+    params.message.itemVersionId
+  );
+  if (claim.job.attempt >= claim.job.maxAttempts) {
+    await failExhaustedClaim({
+      tx: params.tx,
+      job: claim.job,
+      context,
+      itemVersionId: params.message.itemVersionId,
+      now: params.now,
+    });
+    return null;
+  }
+  const [claimed] = await params.tx
+    .update(repositoryProcessingJobs)
+    .set({
+      status: "running",
+      attempt: claim.job.attempt + 1,
+      leaseOwner: params.workerId,
+      leaseExpiresAt: new Date(params.now.getTime() + params.leaseDurationMs),
+      startedAt: claim.job.startedAt ?? params.now,
+      finishedAt: null,
+      updatedAt: params.now,
+    })
+    .where(eq(repositoryProcessingJobs.id, claim.job.id))
+    .returning();
+  await markClaimedVersionProcessing({
+    tx: params.tx,
+    claimed,
+    job: claim.job,
+    context,
+    itemVersionId: params.message.itemVersionId,
+    now: params.now,
+  });
+  return claimed ?? null;
+}
+
 /**
  * Check whether a valid DLQ delivery already has another durable recovery
  * owner. Queued rows first require `reconcileRepositoryProcessingDlqMessage`;
@@ -374,209 +658,181 @@ export async function claimRepositoryProcessingJob(
   const now = options.now ?? new Date();
   const leaseDurationMs =
     options.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS;
-
   return executeTransaction(
-    async (tx) => {
-      const [coordinates] = await tx
-        .select({
-          itemId: repositoryItemVersions.itemId,
-          repositoryId: repositoryItems.repositoryId,
-        })
-        .from(repositoryItemVersions)
-        .innerJoin(
-          repositoryItems,
-          eq(repositoryItems.id, repositoryItemVersions.itemId)
-        )
-        .where(eq(repositoryItemVersions.id, message.itemVersionId))
-        .limit(1);
-      if (!coordinates) {
-        throw new Error("Processing job does not match its item version");
-      }
-
-      // All canonical producers lock repository -> item -> job. Deletion uses
-      // the same order, so a worker either becomes durably running before a
-      // delete (which then waits) or observes the deleting fence and no-ops.
-      const [repository] = await tx
-        .select({
-          lifecycleStatus: knowledgeRepositories.lifecycleStatus,
-          expiresAt: knowledgeRepositories.expiresAt,
-        })
-        .from(knowledgeRepositories)
-        .where(eq(knowledgeRepositories.id, coordinates.repositoryId))
-        .limit(1)
-        .for("update");
-      const [item] = await tx
-        .select({
-          lifecycleStatus: repositoryItems.lifecycleStatus,
-          currentVersionId: repositoryItems.currentVersionId,
-        })
-        .from(repositoryItems)
-        .where(
-          and(
-            eq(repositoryItems.id, coordinates.itemId),
-            eq(repositoryItems.repositoryId, coordinates.repositoryId)
-          )
-        )
-        .limit(1)
-        .for("update");
-      const [job] = await tx
-        .select()
-        .from(repositoryProcessingJobs)
-        .where(eq(repositoryProcessingJobs.id, message.jobId))
-        .limit(1)
-        .for("update");
-      if (!job || job.itemVersionId !== message.itemVersionId) {
-        throw new Error("Processing job does not match its item version");
-      }
-      if (
-        !repository ||
-        !item ||
-        !isRepositoryProcessingTargetActive(
-          {
-            repositoryLifecycleStatus: repository.lifecycleStatus,
-            repositoryExpiresAt: repository.expiresAt,
-            itemLifecycleStatus: item.lifecycleStatus,
-            currentVersionId: item.currentVersionId,
-          },
-          message.itemVersionId,
-          now
-        )
-      ) {
-        if (job.status === "pending" || job.status === "queued") {
-          await tx
-            .update(repositoryProcessingJobs)
-            .set({
-              status: "cancelled",
-              leaseOwner: null,
-              leaseExpiresAt: null,
-              lastErrorCode: "CONTENT_TARGET_INACTIVE",
-              lastErrorMessage:
-                "Repository processing target is no longer active",
-              finishedAt: now,
-              updatedAt: now,
-            })
-            .where(eq(repositoryProcessingJobs.id, job.id));
-        }
-        return null;
-      }
-      if (
-        job.status === "succeeded" ||
-        job.status === "failed" ||
-        job.status === "cancelled"
-      ) {
-        return null;
-      }
-      if (
-        job.status === "running" &&
-        job.leaseExpiresAt &&
-        job.leaseExpiresAt.getTime() > now.getTime()
-      ) {
-        return null;
-      }
-      if (
-        job.status === "pending" &&
-        job.availableAt.getTime() > now.getTime()
-      ) {
-        return null;
-      }
-      const [context] =
-        job.stage === "inspect"
-          ? await tx
-              .select({
-                itemId: repositoryItemVersions.itemId,
-                active: sql<boolean>`EXISTS (
-                  SELECT 1
-                  FROM ${repositoryItemChunks} active_chunk
-                  JOIN ${repositoryItems} active_item
-                    ON active_item.id = active_chunk.item_id
-                  JOIN ${knowledgeRepositories} active_repository
-                    ON active_repository.id = active_item.repository_id
-                  WHERE active_chunk.item_version_id = repository_item_versions.id
-                    AND active_chunk.index_generation_id = active_repository.active_index_generation_id
-                    AND active_item.current_version_id = repository_item_versions.id
-                    AND active_item.lifecycle_status = 'active'
-                )`,
-              })
-              .from(repositoryItemVersions)
-              .where(eq(repositoryItemVersions.id, message.itemVersionId))
-              .limit(1)
-          : [];
-      if (job.attempt >= job.maxAttempts) {
-        const errorMessage = "Processing job exhausted its retry budget";
-        if (!context?.active) {
-          await tx
-            .update(repositoryItemVersions)
-            .set({ inspectionStatus: "error", processingStatus: "failed" })
-            .where(eq(repositoryItemVersions.id, message.itemVersionId));
-        }
-        if (context && !context.active) {
-          await tx
-            .update(repositoryItems)
-            .set({
-              processingStatus: "failed",
-              processingError: errorMessage,
-              updatedAt: now,
-            })
-            .where(
-              and(
-                eq(repositoryItems.id, context.itemId),
-                eq(repositoryItems.currentVersionId, message.itemVersionId)
-              )
-            );
-        }
-        await tx
-          .update(repositoryProcessingJobs)
-          .set({
-            status: "failed",
-            lastErrorCode: "RETRY_BUDGET_EXHAUSTED",
-            lastErrorMessage: errorMessage,
-            leaseOwner: null,
-            leaseExpiresAt: null,
-            finishedAt: now,
-            updatedAt: now,
-          })
-          .where(eq(repositoryProcessingJobs.id, job.id));
-        return null;
-      }
-
-      const [claimed] = await tx
-        .update(repositoryProcessingJobs)
-        .set({
-          status: "running",
-          attempt: job.attempt + 1,
-          leaseOwner: workerId,
-          leaseExpiresAt: new Date(now.getTime() + leaseDurationMs),
-          startedAt: job.startedAt ?? now,
-          finishedAt: null,
-          updatedAt: now,
-        })
-        .where(eq(repositoryProcessingJobs.id, job.id))
-        .returning();
-      if (claimed && job.stage === "inspect" && !context?.active) {
-        await tx
-          .update(repositoryItemVersions)
-          .set({ processingStatus: "processing" })
-          .where(eq(repositoryItemVersions.id, message.itemVersionId));
-        if (context) {
-          await tx
-            .update(repositoryItems)
-            .set({
-              processingStatus: "processing",
-              processingError: null,
-              updatedAt: now,
-            })
-            .where(
-              and(
-                eq(repositoryItems.id, context.itemId),
-                eq(repositoryItems.currentVersionId, message.itemVersionId)
-              )
-            );
-        }
-      }
-      return claimed ?? null;
-    },
+    (tx) =>
+      claimRepositoryProcessingJobInTransaction({
+        tx,
+        message,
+        workerId,
+        now,
+        leaseDurationMs,
+      }),
     "contentProcessor.claimJob"
   );
+}
+
+async function recordTerminalFailure(params: {
+  tx: DbTransaction;
+  message: RepositoryProcessingJobMessage;
+  decision: RepositoryProcessingFailureDecision;
+  coordinates: RepositoryProcessingMutationCoordinates;
+  job: RepositoryProcessingJobRow;
+  now: Date;
+}): Promise<RepositoryProcessingFailureResult> {
+  const code = params.decision.terminal
+    ? params.decision.code
+    : "RETRY_BUDGET_EXHAUSTED";
+  const terminalMetrics =
+    params.job.metrics.bdaInvocationArn &&
+    params.job.metrics.bdaInvocationState === "terminal"
+      ? resetManagedServiceMetrics(
+          params.job.metrics,
+          "bedrock-data-automation"
+        )
+      : params.job.metrics;
+  await params.tx
+    .update(repositoryProcessingJobs)
+    .set({
+      status: "failed",
+      attempt: params.job.maxAttempts,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      lastErrorCode: code,
+      lastErrorMessage: params.decision.message,
+      metrics: terminalMetrics,
+      finishedAt: params.now,
+      updatedAt: params.now,
+    })
+    .where(eq(repositoryProcessingJobs.id, params.job.id));
+  const [version] = await params.tx
+    .select({
+      active: sql<boolean>`EXISTS (
+        SELECT 1
+        FROM ${repositoryItemChunks} active_chunk
+        JOIN ${repositoryItems} active_item
+          ON active_item.id = active_chunk.item_id
+        JOIN ${knowledgeRepositories} active_repository
+          ON active_repository.id = active_item.repository_id
+        WHERE active_chunk.item_version_id = repository_item_versions.id
+          AND active_chunk.index_generation_id = active_repository.active_index_generation_id
+          AND active_item.current_version_id = repository_item_versions.id
+          AND active_item.lifecycle_status = 'active'
+      )`,
+    })
+    .from(repositoryItemVersions)
+    .where(eq(repositoryItemVersions.id, params.message.itemVersionId))
+    .limit(1);
+  if (!version?.active) {
+    await params.tx
+      .update(repositoryItemVersions)
+      .set({ inspectionStatus: "error", processingStatus: "failed" })
+      .where(eq(repositoryItemVersions.id, params.message.itemVersionId));
+  }
+  if (version && !version.active) {
+    await params.tx
+      .update(repositoryItems)
+      .set({
+        processingStatus: "failed",
+        processingError: params.decision.message,
+        updatedAt: params.now,
+      })
+      .where(
+        and(
+          eq(repositoryItems.id, params.coordinates.itemId),
+          eq(repositoryItems.currentVersionId, params.message.itemVersionId)
+        )
+      );
+  }
+  return { action: "terminal", code };
+}
+
+async function recordRetryFailure(params: {
+  tx: DbTransaction;
+  decision: RepositoryProcessingFailureDecision;
+  job: RepositoryProcessingJobRow;
+  now: Date;
+  retryDelaySeconds: (attempt: number) => number;
+  activeBdaInvocation: boolean;
+}): Promise<RepositoryProcessingFailureResult> {
+  const delaySeconds = params.retryDelaySeconds(params.job.attempt);
+  const restartManagedService = params.activeBdaInvocation
+    ? undefined
+    : params.decision.resetManagedService;
+  await params.tx
+    .update(repositoryProcessingJobs)
+    .set({
+      status: "pending",
+      ...(params.activeBdaInvocation
+        ? { attempt: Math.max(0, params.job.attempt - 1) }
+        : {}),
+      availableAt: new Date(params.now.getTime() + delaySeconds * 1_000),
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      lastErrorCode: params.decision.code,
+      lastErrorMessage: params.decision.message,
+      ...(restartManagedService
+        ? {
+            metrics: resetManagedServiceMetrics(
+              params.job.metrics,
+              restartManagedService
+            ),
+            startedAt: params.now,
+          }
+        : {}),
+      finishedAt: null,
+      updatedAt: params.now,
+    })
+    .where(eq(repositoryProcessingJobs.id, params.job.id));
+  return { action: "retry", delaySeconds };
+}
+
+async function recordRepositoryProcessingFailureInTransaction(params: {
+  tx: DbTransaction;
+  message: RepositoryProcessingJobMessage;
+  decision: RepositoryProcessingFailureDecision;
+  options: RecordRepositoryProcessingFailureOptions;
+  now: Date;
+}): Promise<RepositoryProcessingFailureResult> {
+  const coordinates = await lockRepositoryProcessingMutationTarget(
+    params.tx,
+    params.message
+  );
+  if (!coordinates) return { action: "ignore" };
+  const [job] = await params.tx
+    .select()
+    .from(repositoryProcessingJobs)
+    .where(eq(repositoryProcessingJobs.id, params.message.jobId))
+    .limit(1);
+  if (
+    !job ||
+    job.itemVersionId !== params.message.itemVersionId ||
+    job.status === "succeeded" ||
+    job.status === "cancelled"
+  ) {
+    return { action: "ignore" };
+  }
+  const activeBdaInvocation = isBdaInvocationExternallyActive(job.metrics);
+  const terminal =
+    !activeBdaInvocation &&
+    (params.decision.terminal || job.attempt >= job.maxAttempts);
+  if (terminal) {
+    return recordTerminalFailure({
+      tx: params.tx,
+      message: params.message,
+      decision: params.decision,
+      coordinates,
+      job,
+      now: params.now,
+    });
+  }
+  return recordRetryFailure({
+    tx: params.tx,
+    decision: params.decision,
+    job,
+    now: params.now,
+    retryDelaySeconds: params.options.retryDelaySeconds,
+    activeBdaInvocation,
+  });
 }
 
 /**
@@ -590,133 +846,15 @@ export async function recordRepositoryProcessingFailure(
   options: RecordRepositoryProcessingFailureOptions
 ): Promise<RepositoryProcessingFailureResult> {
   const now = options.now ?? new Date();
-  return executeTransaction(async (tx) => {
-    const coordinates = await lockRepositoryProcessingMutationTarget(
-      tx,
-      message
-    );
-    if (!coordinates) return { action: "ignore" };
-
-    const [job] = await tx
-      .select()
-      .from(repositoryProcessingJobs)
-      .where(eq(repositoryProcessingJobs.id, message.jobId))
-      .limit(1);
-    if (
-      !job ||
-      job.itemVersionId !== message.itemVersionId ||
-      job.status === "succeeded" ||
-      job.status === "cancelled"
-    ) {
-      return { action: "ignore" };
-    }
-
-    // A BDA invocation without an explicit terminal status may still publish
-    // S3 output. Never abandon that external writer because a status request
-    // failed or the normal processing retry budget elapsed. Returning the
-    // claimed attempt keeps the durable job sweep eligible to reconcile it.
-    const activeBdaInvocation = isBdaInvocationExternallyActive(job.metrics);
-    const terminal =
-      !activeBdaInvocation &&
-      (decision.terminal || job.attempt >= job.maxAttempts);
-    if (terminal) {
-      const code = decision.terminal
-        ? decision.code
-        : "RETRY_BUDGET_EXHAUSTED";
-      const terminalMetrics =
-        job.metrics.bdaInvocationArn &&
-        job.metrics.bdaInvocationState === "terminal"
-          ? resetManagedServiceMetrics(
-              job.metrics,
-              "bedrock-data-automation"
-            )
-          : job.metrics;
-      await tx
-        .update(repositoryProcessingJobs)
-        .set({
-          status: "failed",
-          attempt: job.maxAttempts,
-          leaseOwner: null,
-          leaseExpiresAt: null,
-          lastErrorCode: code,
-          lastErrorMessage: decision.message,
-          metrics: terminalMetrics,
-          finishedAt: now,
-          updatedAt: now,
-        })
-        .where(eq(repositoryProcessingJobs.id, job.id));
-
-      const [version] = await tx
-        .select({
-          active: sql<boolean>`EXISTS (
-            SELECT 1
-            FROM ${repositoryItemChunks} active_chunk
-            JOIN ${repositoryItems} active_item
-              ON active_item.id = active_chunk.item_id
-            JOIN ${knowledgeRepositories} active_repository
-              ON active_repository.id = active_item.repository_id
-            WHERE active_chunk.item_version_id = repository_item_versions.id
-              AND active_chunk.index_generation_id = active_repository.active_index_generation_id
-              AND active_item.current_version_id = repository_item_versions.id
-              AND active_item.lifecycle_status = 'active'
-          )`,
-        })
-        .from(repositoryItemVersions)
-        .where(eq(repositoryItemVersions.id, message.itemVersionId))
-        .limit(1);
-      if (!version?.active) {
-        await tx
-          .update(repositoryItemVersions)
-          .set({ inspectionStatus: "error", processingStatus: "failed" })
-          .where(eq(repositoryItemVersions.id, message.itemVersionId));
-      }
-      if (version && !version.active) {
-        await tx
-          .update(repositoryItems)
-          .set({
-            processingStatus: "failed",
-            processingError: decision.message,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(repositoryItems.id, coordinates.itemId),
-              eq(repositoryItems.currentVersionId, message.itemVersionId)
-            )
-          );
-      }
-      return { action: "terminal", code };
-    }
-
-    const delaySeconds = options.retryDelaySeconds(job.attempt);
-    const restartManagedService = activeBdaInvocation
-      ? undefined
-      : decision.resetManagedService;
-    await tx
-      .update(repositoryProcessingJobs)
-      .set({
-        status: "pending",
-        ...(activeBdaInvocation
-          ? { attempt: Math.max(0, job.attempt - 1) }
-          : {}),
-        availableAt: new Date(now.getTime() + delaySeconds * 1_000),
-        leaseOwner: null,
-        leaseExpiresAt: null,
-        lastErrorCode: decision.code,
-        lastErrorMessage: decision.message,
-        ...(restartManagedService
-          ? {
-              metrics: resetManagedServiceMetrics(
-                job.metrics,
-                restartManagedService
-              ),
-              startedAt: now,
-            }
-          : {}),
-        finishedAt: null,
-        updatedAt: now,
-      })
-      .where(eq(repositoryProcessingJobs.id, job.id));
-    return { action: "retry", delaySeconds };
-  }, "contentProcessor.recordFailure");
+  return executeTransaction(
+    (tx) =>
+      recordRepositoryProcessingFailureInTransaction({
+        tx,
+        message,
+        decision,
+        options,
+        now,
+      }),
+    "contentProcessor.recordFailure"
+  );
 }

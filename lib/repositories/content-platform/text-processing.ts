@@ -15,6 +15,12 @@ export const TEXT_CONTENT_TYPES = [
 
 export type CanonicalTextContentType = (typeof TEXT_CONTENT_TYPES)[number];
 
+const TEXT_CONTENT_TYPE_ALIASES: Readonly<
+  Record<string, CanonicalTextContentType>
+> = {
+  "text/x-python": "text/plain",
+};
+
 export interface CanonicalTextSegment {
   content: string;
   contentHash: string;
@@ -45,11 +51,14 @@ interface TextSection {
 
 export function isCanonicalTextContentType(
   contentType: string
-): contentType is CanonicalTextContentType {
-  return (TEXT_CONTENT_TYPES as readonly string[]).includes(contentType);
+): boolean {
+  return (
+    (TEXT_CONTENT_TYPES as readonly string[]).includes(contentType) ||
+    TEXT_CONTENT_TYPE_ALIASES[contentType] !== undefined
+  );
 }
 
-function normalizeText(source: Uint8Array): string {
+export function normalizeCanonicalTextSource(source: Uint8Array): string {
   let decoded: string;
   try {
     decoded = new TextDecoder("utf-8", { fatal: true }).decode(source);
@@ -104,9 +113,12 @@ export function extractCanonicalTextDocument(
   if (!isCanonicalTextContentType(contentType)) {
     throw new Error("Unsupported canonical text content type");
   }
-  const canonicalText = normalizeText(source);
+  const canonicalContentType =
+    TEXT_CONTENT_TYPE_ALIASES[contentType] ??
+    (contentType as CanonicalTextContentType);
+  const canonicalText = normalizeCanonicalTextSource(source);
   const sections =
-    contentType === "text/markdown"
+    canonicalContentType === "text/markdown"
       ? markdownSections(canonicalText)
       : [{ heading: null, content: canonicalText }];
   const label = sourceLabel(fileName);
@@ -138,7 +150,7 @@ export function extractCanonicalTextDocument(
 
   return {
     canonicalText,
-    detectedContentType: contentType,
+    detectedContentType: canonicalContentType,
     processorVersion: TEXT_PROCESSOR_VERSION,
     segments,
     metadata: {

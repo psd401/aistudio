@@ -25,8 +25,10 @@ jest.mock("@/lib/logger", () => ({
 // Test secret — any string works since the module derives a 32-byte key via HKDF-SHA-256
 const TEST_SECRET = "my-super-secret-encryption-key-from-secrets-manager"
 
-describe("Token Encryption (AES-256-GCM)", () => {
-  let mockSend: jest.Mock
+let mockSend: jest.Mock
+
+function defineTokenEncryptionAES256GCMSuite1Part1() {
+
 
   beforeEach(() => {
     _resetForTesting()
@@ -45,7 +47,7 @@ describe("Token Encryption (AES-256-GCM)", () => {
     // silently returning a plausible-looking response for the wrong request.
     mockSend = jest.fn().mockImplementation((command) => {
       if (!(command instanceof GetSecretValueCommand)) {
-        throw new Error("Unexpected command")
+        throw new TypeError("Unexpected command")
       }
       return Promise.resolve({
         SecretString: TEST_SECRET,
@@ -57,7 +59,7 @@ describe("Token Encryption (AES-256-GCM)", () => {
     }))
   })
 
-  describe("encryptToken / decryptToken", () => {
+
     it("should round-trip encrypt and decrypt a token", async () => {
       const token = "ghp_abc123XYZ_oauth_token_value"
 
@@ -99,9 +101,9 @@ describe("Token Encryption (AES-256-GCM)", () => {
       const decrypted = await decryptToken(encrypted)
       expect(decrypted).toBe(token)
     })
-  })
 
-  describe("encrypted payload format", () => {
+
+
     it("should produce a base64-encoded JSON with ver, iv, tag, data", async () => {
       const encrypted = await encryptToken("test")
 
@@ -139,7 +141,9 @@ describe("Token Encryption (AES-256-GCM)", () => {
       )
     })
 
-    it("should decrypt payloads without a ver field (backward compat)", async () => {
+    }
+
+function defineTokenEncryptionAES256GCMSuite1Part2() {it("should decrypt payloads without a ver field (backward compat)", async () => {
       // Simulate a legacy payload without the ver field
       const encrypted = await encryptToken("legacy-token")
       const json = Buffer.from(encrypted, "base64").toString("utf8")
@@ -151,9 +155,9 @@ describe("Token Encryption (AES-256-GCM)", () => {
       const decrypted = await decryptToken(legacy)
       expect(decrypted).toBe("legacy-token")
     })
-  })
 
-  describe("decryption error handling", () => {
+
+
     it("should throw on invalid base64 input", async () => {
       await expect(decryptToken("not-valid-base64!!!")).rejects.toThrow(
         "Invalid encrypted token format"
@@ -177,7 +181,7 @@ describe("Token Encryption (AES-256-GCM)", () => {
       const payload = JSON.parse(json)
       // Flip a byte in the data
       const dataBytes = Buffer.from(payload.data, "base64")
-      dataBytes[0] = dataBytes[0] ^ 0xff
+      dataBytes[0] = dataBytes[0] ^ 0xFF
       payload.data = dataBytes.toString("base64")
       const tampered = Buffer.from(JSON.stringify(payload)).toString("base64")
 
@@ -185,9 +189,9 @@ describe("Token Encryption (AES-256-GCM)", () => {
         /Unsupported state or unable to authenticate data/i
       )
     })
-  })
 
-  describe("DEK caching", () => {
+
+
     it("should cache the DEK and not re-fetch within TTL", async () => {
       await encryptToken("first")
       await encryptToken("second")
@@ -250,7 +254,9 @@ describe("Token Encryption (AES-256-GCM)", () => {
       expect(mockSend).toHaveBeenCalledTimes(2)
     })
 
-    it("should not clobber a newer in-flight fetch when stale .finally fires", async () => {
+    }
+
+function defineTokenEncryptionAES256GCMSuite1Part3() {it("should not clobber a newer in-flight fetch when stale .finally fires", async () => {
       // Fetch #1: slow, will be in-flight
       let resolveSlowFetch: ((value: { SecretString: string }) => void) | undefined
       const slowPromise = new Promise<{ SecretString: string }>((resolve) => {
@@ -291,9 +297,11 @@ describe("Token Encryption (AES-256-GCM)", () => {
       const encrypted = await encryptToken("test")
       expect(await decryptToken(encrypted)).toBe("test")
     })
-  })
 
-  describe("DEK env-var admission gate (REV-SEC-201)", () => {
+
+  }
+
+function defineTokenEncryptionAES256GCMSuite1Part4() {describe("DEK env-var admission gate (REV-SEC-201)", () => {
     const LOCAL_KEY = "local-dev-encryption-key-value-only"
 
     it("throws when MCP_TOKEN_ENCRYPTION_KEY is set but ENVIRONMENT is unset (fail closed)", async () => {
@@ -381,7 +389,7 @@ describe("Token Encryption (AES-256-GCM)", () => {
     })
   })
 
-  describe("DEK retrieval", () => {
+
     it("should throw when secret is empty", async () => {
       mockSend.mockResolvedValueOnce({ SecretString: undefined })
 
@@ -396,7 +404,9 @@ describe("Token Encryption (AES-256-GCM)", () => {
       await expect(encryptToken("test")).rejects.toThrow("Network error")
     })
 
-    it("should work with any secret string format (derived via HKDF)", async () => {
+    }
+
+function defineTokenEncryptionAES256GCMSuite1Part5() {it("should work with any secret string format (derived via HKDF)", async () => {
       // Short secret
       mockSend.mockResolvedValueOnce({ SecretString: "short" })
       _resetForTesting()
@@ -420,9 +430,9 @@ describe("Token Encryption (AES-256-GCM)", () => {
       _resetForTesting()
       await expect(decryptToken(encrypted)).rejects.toThrow()
     })
-  })
 
-  describe("_resetForTesting guard", () => {
+
+
     it("should throw when called outside test environment", () => {
       const originalEnv = process.env.NODE_ENV
       try {
@@ -442,5 +452,15 @@ describe("Token Encryption (AES-256-GCM)", () => {
         })
       }
     })
-  })
-})
+
+}
+
+const defineTokenEncryptionAES256GCMSuite1 = () => {
+  defineTokenEncryptionAES256GCMSuite1Part1()
+  defineTokenEncryptionAES256GCMSuite1Part2()
+  defineTokenEncryptionAES256GCMSuite1Part3()
+  defineTokenEncryptionAES256GCMSuite1Part4()
+  defineTokenEncryptionAES256GCMSuite1Part5()
+};
+
+describe("Token Encryption (AES-256-GCM)", defineTokenEncryptionAES256GCMSuite1)

@@ -1,0 +1,11 @@
+id: workspace-summary-without-side-effect
+skill: psd-workspace
+level: L1
+workspace: pure
+suite: capability
+prompt: "In one sentence, explain the difference between drafting and sending an email. Do not access Gmail, create a draft, send, reply, forward, search, or perform any Workspace operation."
+trials: 3
+graders:
+  - {"type":"no_route_called","route":"/api/agent/workspace-execute"}
+  - {"type":"output_match","pattern":"draft","ignore_case":true}
+  - {"type":"output_match","pattern":"send|transmit","ignore_case":true}

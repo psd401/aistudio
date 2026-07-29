@@ -1,0 +1,20 @@
+# Harder routing, judgment, and generation tasks used for model comparisons.
+tasks:
+  - ../../skills/chat-card/evals/morning-brief-card.yaml
+  - ../../skills/psd-aistudio/evals/explain-without-call.yaml
+  - ../../skills/psd-atrium/evals/draft-without-publish.yaml
+  - ../../skills/psd-brand-guidelines/evals/logo-variant-choice.yaml
+  - ../../skills/psd-canva/evals/ideas-without-design.yaml
+  - ../../skills/psd-directory/evals/chat-sender-identity.yaml
+  - ../../skills/psd-email-triage/evals/generic-inbox-no-config.yaml
+  - ../../skills/psd-freshservice/evals/search-open-urgent-tickets.yaml
+  - ../../skills/psd-hyperframes/evals/synthetic-title-card.yaml
+  - ../../skills/psd-image-gen/evals/capability-denied.yaml
+  - ../../skills/psd-last30days/evals/keyless-eval-reliability-brief.yaml
+  - ../../skills/psd-learning-page/evals/accessibility-contract.yaml
+  - ../../skills/psd-open-adaptive-district/evals/decommission-vs-continuation.yaml
+  - ../../skills/psd-skills-meta/evals/search-without-author.yaml
+  - ../../skills/psd-summarize/evals/records-safe-projector-summary.yaml
+  - ../../skills/psd-tts/evals/synthetic-short-audio.yaml
+  - ../../skills/psd-workspace/evals/create-calendar-event.yaml
+  - ../../skills/psd-workspace/evals/summary-without-side-effect.yaml

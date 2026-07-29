@@ -1,14 +1,14 @@
 ---
 name: psd-pdf-to-markdown
-summary: Convert a PDF (from a URL, workspace S3 key, or container path) into clean Markdown with tables preserved — no image files, no model download.
-description: Convert a PDF to clean Markdown with tables preserved and images dropped. Use when the user wants to turn a PDF into Markdown or extract a PDF's text/tables for further processing. Input is a public URL, a workspace S3 key, or a container file path.
+summary: Convert a PDF (from a URL, workspace S3 key, or container path) into clean Markdown with tables preserved — text-only by default, or with the embedded images extracted to disk on request. No model download.
+description: Convert a PDF to clean Markdown with tables preserved. Images are dropped by default; pass --extract-images DIR to write them out as PNGs and keep their references, which is what you want when the images must survive into whatever you build next. Use when the user wants to turn a PDF into Markdown or extract a PDF's text/tables/figures for further processing. Input is a public URL, a workspace S3 key, or a container file path.
 allowed-tools: Bash(/opt/agentcore-venv/bin/python3:*)
 ---
 
 # psd-pdf-to-markdown
 
 Convert a PDF into clean, well-structured Markdown. Tables become Markdown tables;
-images and graphics are dropped (no image files are written). Runs entirely inside the
+images and graphics are dropped unless you ask for them with `--extract-images`. Runs entirely inside the
 container against the pre-installed `pymupdf4llm` engine — there is **no ML model download
 at runtime** and no external API key.
 
@@ -43,6 +43,7 @@ Options:
 |------|-------------|
 | `--out <path>` | Output `.md` path (default `/tmp/<stem>.md`) |
 | `--pages "0,5-10"` | Convert specific **0-based** pages only |
+| `--extract-images <dir>` | Write embedded images into `<dir>` as PNGs and **keep** their `![](abs/path)` references in the Markdown. The directory must be empty. Capped at 50 images. |
 
 ## Output
 
@@ -54,6 +55,16 @@ A single JSON object on stdout:
 
 - For results **≤ 24,000 chars**, the full Markdown is inlined under `markdown` — use it directly.
 - For larger results, only a `preview` is inlined; **Read the `output_path` file** for the full document.
+
+With `--extract-images` the result also carries `image_dir` and an `images` array of
+**absolute** paths, and the Markdown keeps an `![alt](/abs/path.png)` reference for each
+one. (References are absolutized on purpose — a relative path would only resolve from the
+CWD this converter ran in, not from yours.) If the PDF held more than 50 images the extra
+files are deleted and `images_dropped` + `image_note` say so, so you never silently ship a
+document whose image links point at nothing.
+
+Use `--extract-images` whenever the pictures matter downstream — a procedure's screenshots
+belong in the document you build, not summarized as "a screenshot of the control panel".
 
 ## Notes & limits
 
@@ -67,9 +78,10 @@ A single JSON object on stdout:
 ## Errors
 
 - **`bad_args`** — missing/invalid input flag, non-PDF file, or a refused `--url`.
-- **`forbidden`** — `--url` resolved to a non-public address (SSRF guard), or `--s3-key` was outside the caller's own `public-images/<email>/` prefix.
-- **`misconfigured`** — `WORKSPACE_BUCKET` unset for an `--s3-key` request.
-- **`upstream_error`** — the URL fetch or S3 download failed.
+- **`forbidden`** — `--url` resolved to a non-public address (SSRF guard), or
+  an artifact key was outside the signed caller's public prefix.
+- **`misconfigured`** — the trusted artifact broker is unavailable.
+- **`upstream_error`** — the URL fetch or brokered artifact download failed.
 - **`convert_error`** — the PDF could not be parsed (corrupt or unsupported).
 - **`too_large`** — the input exceeds 100 MB.
 - **`empty_output`** — no extractable text (likely a scanned PDF needing OCR).

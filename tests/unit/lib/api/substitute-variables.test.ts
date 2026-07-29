@@ -13,21 +13,42 @@ describe("substituteVariables prototype safety (REV-COR-517)", () => {
 
   it("leaves ${constructor} / ${toString} / ${hasOwnProperty} as literals when unsupplied", () => {
     for (const name of ["constructor", "toString", "hasOwnProperty", "valueOf"]) {
-      const out = substituteVariables(`\${${name}}`, {}, new Map(), {}, NO_PROMPTS, 0)
+      const out = substituteVariables({
+        content: `\${${name}}`,
+        inputs: {},
+        previousOutputs: new Map(),
+        mapping: {},
+        allPrompts: NO_PROMPTS,
+        currentPromptPosition: 0,
+      })
       expect(out).toBe(`\${${name}}`)
     }
   })
 
   it("still substitutes a real supplied input", () => {
-    expect(substituteVariables("${topic}", { topic: "cats" }, new Map(), {}, NO_PROMPTS, 0)).toBe(
-      "cats"
-    )
+    expect(
+      substituteVariables({
+        content: "${topic}",
+        inputs: { topic: "cats" },
+        previousOutputs: new Map(),
+        mapping: {},
+        allPrompts: NO_PROMPTS,
+        currentPromptPosition: 0,
+      })
+    ).toBe("cats")
   })
 
   it("substitutes an own-property input even if its name shadows a prototype member", () => {
     // A caller who *does* supply { toString: "x" } gets it — own property wins.
     expect(
-      substituteVariables("${toString}", { toString: "x" }, new Map(), {}, NO_PROMPTS, 0)
+      substituteVariables({
+        content: "${toString}",
+        inputs: { toString: "x" },
+        previousOutputs: new Map(),
+        mapping: {},
+        allPrompts: NO_PROMPTS,
+        currentPromptPosition: 0,
+      })
     ).toBe("x")
   })
 })

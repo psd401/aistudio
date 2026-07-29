@@ -39,7 +39,12 @@ mint it.
 For the complete local suite, prefer `bun run test:e2e:local`. The runner starts
 or reuses the host development server, seeds the test users and every committed
 authenticated fixture (including Atrium visibility/group content and resource
-grant rows), warms the routes, and then runs Playwright serially. This makes a
+grant rows), warms the routes, and then runs Playwright serially. A server on
+`:3100` is reused **only when it belongs to the same worktree** the runner is
+invoked from (the listener's cwd must match the repo root) — a healthy server
+from another worktree serves different code and a different `node_modules`, so
+the runner instead scans `E2E_PORT+1..+9` for a free port and starts its own,
+after syncing dependencies with `bun install --frozen-lockfile`. This makes a
 freshly reset local database sufficient without manually applying individual SQL
 files from `tests/e2e/fixtures/`. A runner-started server also sets
 `ATRIUM_LOCAL_STORAGE_DIR` to a port-scoped directory under `/tmp`, so Atrium
@@ -78,6 +83,25 @@ PLAYWRIGHT_AUTH_ENABLED=true PLAYWRIGHT_BASE_URL=http://localhost:3100 \
   bunx playwright test tests/e2e/capability-functional.spec.ts
 ```
 
+## Running the live workflow-gateway E2E
+
+`tests/e2e/workflow-gateway.spec.ts` always exercises the unsigned guard on the
+new and legacy broker routes. Its live case drives the complete signed
+Next.js-broker → SSE MCP `tools/list` → schema-tool call and is gated because it
+requires a deployed dev gateway plus a fresh router-issued invocation context:
+
+```bash
+WORKFLOW_GATEWAY_E2E_CONTEXT='<fresh compact invocation token>' \
+WORKFLOW_GATEWAY_E2E_PROOF_KEY='<proof key derived for that token>' \
+WORKFLOW_GATEWAY_E2E_SCHEMA_TOOL='get_counselor_evaluation_schema' \
+PLAYWRIGHT_BASE_URL='https://<dev-host>' \
+bunx playwright test tests/e2e/workflow-gateway.spec.ts
+```
+
+Do not persist the context or proof key. Both are scoped to one short-lived
+router invocation; the test creates a fresh request nonce and body-bound
+signature for each broker request.
+
 ## The auth helper
 
 `tests/e2e/helpers/session-auth.ts` exports:
@@ -106,3 +130,4 @@ Two non-obvious requirements (both encoded in the helper):
 | `401` despite matching secret | token missing `tokenLifetimeMs` / near expiry | use `mintSessionToken()` (sets a 12h lifetime) |
 | Empty navigation / page errors | local DB behind on migrations | run `scripts/db/run-migrations.ts` (step 1) |
 | `/api/auth/session` → `200 null` | cookie not reaching server | use `authenticateContext()` (addCookies), not raw fetch |
+| List/search specs degrade over weeks of runs | E2E probe rows accumulating in the shared local DB | `bun run db:cleanup:e2e` (dry run), then `-- --yes` to prune |

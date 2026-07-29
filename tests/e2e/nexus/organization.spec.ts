@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures'
+import type { Page } from '@playwright/test'
 import { gotoNexus, sendMessage, waitForStreamingComplete, getConversationIdFromUrl } from './utils'
 
 // Nexus conversation management E2E tests — CRUD, archive/pin, sidebar, pagination.
@@ -7,9 +8,65 @@ import { gotoNexus, sendMessage, waitForStreamingComplete, getConversationIdFrom
 // tests/e2e/global-setup.ts. The "Unauthenticated" describe deliberately omits it.
 const AUTH_A = 'tests/e2e/.auth/user-a.json'
 
+interface ListedConversation {
+  id: string
+  isArchived: boolean
+}
+
+interface ConversationListPage {
+  conversations: ListedConversation[]
+  pagination: {
+    limit: number
+    offset: number
+    hasMore: boolean
+  }
+}
+
+async function fetchConversationPage(
+  page: Page,
+  includeArchived: boolean,
+  offset: number
+): Promise<ConversationListPage> {
+  return page.evaluate(
+    async ({ includeArchived: shouldIncludeArchived, offset: pageOffset }) => {
+      const params = new URLSearchParams({
+        limit: '500',
+        offset: String(pageOffset),
+      })
+      if (shouldIncludeArchived) params.set('includeArchived', 'true')
+
+      const response = await fetch(`/api/nexus/conversations?${params}`)
+      if (!response.ok) {
+        throw new Error(`Conversation listing failed with status ${response.status}`)
+      }
+      return response.json()
+    },
+    { includeArchived, offset }
+  )
+}
+
+async function listAllConversations(
+  page: Page,
+  includeArchived: boolean,
+  offset = 0,
+  collected: ListedConversation[] = []
+): Promise<ListedConversation[]> {
+  const result = await fetchConversationPage(page, includeArchived, offset)
+  const conversations = [...collected, ...result.conversations]
+
+  if (!result.pagination.hasMore) return conversations
+
+  return listAllConversations(
+    page,
+    includeArchived,
+    result.pagination.offset + result.pagination.limit,
+    conversations
+  )
+}
+
 // ── Conversations API — Auth-independent ─────────────────────────────────────
 
-test.describe('Nexus Conversations API — Unauthenticated', () => {
+const defineNexusConversationsAPIUnauthenticatedSuite1 = () => {
   test('GET /api/nexus/conversations returns 401', async ({ request }) => {
     const res = await request.get('/api/nexus/conversations')
     expect(res.status()).toBe(401)
@@ -40,11 +97,13 @@ test.describe('Nexus Conversations API — Unauthenticated', () => {
     })
     expect(res.status()).toBe(401)
   })
-})
+};
+
+test.describe('Nexus Conversations API — Unauthenticated', defineNexusConversationsAPIUnauthenticatedSuite1)
 
 // ── Conversations API — Authenticated ────────────────────────────────────────
 
-test.describe('Nexus Conversations API — Authenticated', () => {
+function defineNexusConversationsAPIAuthenticatedSuite2Part1() {
   test.use({ storageState: AUTH_A })
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
@@ -129,7 +188,9 @@ test.describe('Nexus Conversations API — Authenticated', () => {
     expect(updateResult.body.title).toBe('Updated Title')
   })
 
-  test('PATCH /api/nexus/conversations/<id> archives a conversation', async ({ page }) => {
+  }
+
+function defineNexusConversationsAPIAuthenticatedSuite2Part2() {test('PATCH /api/nexus/conversations/<id> archives a conversation', async ({ page }) => {
     await page.goto('/nexus')
     await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 10_000 })
 
@@ -221,7 +282,9 @@ test.describe('Nexus Conversations API — Authenticated', () => {
     expect(messagesResult.body.messages.length).toBe(0)
   })
 
-  test('archived conversations are excluded from default listing', async ({ page }) => {
+  }
+
+function defineNexusConversationsAPIAuthenticatedSuite2Part3() {test('archived conversations are excluded from default listing', async ({ page }) => {
     await page.goto('/nexus')
     await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 10_000 })
 
@@ -248,28 +311,16 @@ test.describe('Nexus Conversations API — Authenticated', () => {
       { id }
     )
 
-    // Default listing should not include archived conversations
-    const listResult = await page.evaluate(async () => {
-      const res = await fetch('/api/nexus/conversations?limit=100&offset=0')
-      return res.json()
-    })
-
-    const archivedInList = listResult.conversations.find(
-      (c: { id: string; isArchived: boolean }) => c.id === id
-    )
+    // Default listing should not include archived conversations, even when the
+    // persistent test database contains more than one page of conversations.
+    const activeConversations = await listAllConversations(page, false)
+    const archivedInList = activeConversations.find((conversation) => conversation.id === id)
     expect(archivedInList).toBeUndefined()
 
     // But includeArchived=true should include it
-    const archivedListResult = await page.evaluate(async () => {
-      const res = await fetch('/api/nexus/conversations?limit=100&offset=0&includeArchived=true')
-      return res.json()
-    })
-
-    const archivedInList2 = archivedListResult.conversations.find(
-      (c: { id: string; isArchived: boolean }) => c.id === id
-    )
-    expect(archivedInList2).toBeDefined()
-    expect(archivedInList2.isArchived).toBe(true)
+    const allConversations = await listAllConversations(page, true)
+    const archivedInList2 = allConversations.find((conversation) => conversation.id === id)
+    expect(archivedInList2).toMatchObject({ id, isArchived: true })
   })
 
   test('pagination hasMore reflects when more conversations exist', async ({ page }) => {
@@ -288,11 +339,19 @@ test.describe('Nexus Conversations API — Authenticated', () => {
       expect(result.pagination.hasMore).toBe(false)
     }
   })
-})
+}
+
+const defineNexusConversationsAPIAuthenticatedSuite2 = () => {
+  defineNexusConversationsAPIAuthenticatedSuite2Part1()
+  defineNexusConversationsAPIAuthenticatedSuite2Part2()
+  defineNexusConversationsAPIAuthenticatedSuite2Part3()
+};
+
+test.describe('Nexus Conversations API — Authenticated', defineNexusConversationsAPIAuthenticatedSuite2)
 
 // ── Sidebar UI — Authenticated ────────────────────────────────────────────────
 
-test.describe('Nexus Sidebar — Authenticated', () => {
+const defineNexusSidebarAuthenticatedSuite3 = () => {
   test.use({ storageState: AUTH_A })
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
@@ -324,6 +383,14 @@ test.describe('Nexus Sidebar — Authenticated', () => {
   })
 
   test('new conversation URL resolves on /nexus', async ({ page }) => {
+    // Same live-model dependency as the two gated siblings above/below: the
+    // conversation id only appears once a streamed turn creates the row, so a
+    // keyless environment 500s the send and this can never pass. This was the
+    // only ungated sendMessage() test in the file.
+    test.skip(
+      process.env.E2E_RUN_EXTERNAL !== '1',
+      'Creating a conversation via chat needs a live model — set E2E_RUN_EXTERNAL=1'
+    )
     await gotoNexus(page)
 
     await sendMessage(page, 'Create conversation for direct URL navigation test')
@@ -364,11 +431,13 @@ test.describe('Nexus Sidebar — Authenticated', () => {
     await expect(userBubbles).toHaveCount(2)
     await expect(assistantBubbles).toHaveCount(2)
   })
-})
+};
+
+test.describe('Nexus Sidebar — Authenticated', defineNexusSidebarAuthenticatedSuite3)
 
 // ── Input Validation ──────────────────────────────────────────────────────────
 
-test.describe('Nexus Conversations API — Input Validation', () => {
+const defineNexusConversationsAPIInputValidationSuite4 = () => {
   test.use({ storageState: AUTH_A })
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
@@ -418,4 +487,6 @@ test.describe('Nexus Conversations API — Input Validation', () => {
     expect(result.status).toBe(200)
     expect(result.body.pagination.offset).toBe(0)
   })
-})
+};
+
+test.describe('Nexus Conversations API — Input Validation', defineNexusConversationsAPIInputValidationSuite4)

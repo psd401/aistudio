@@ -42,10 +42,11 @@ echo ""
 # 2. Check what will change in each stack
 echo "2️⃣ Checking changes for each stack..."
 STACKS=(
+    "AIStudio-AuthStack-Dev"
     "AIStudio-DatabaseStack-Dev"
     "AIStudio-StorageStack-Dev"
     "AIStudio-ProcessingStack-Dev"
-    "AIStudio-FrontendStack-Dev"
+    "AIStudio-FrontendStack-ECS-Dev"
 )
 
 for STACK in "${STACKS[@]}"; do
@@ -64,10 +65,10 @@ echo ""
 # 4. Test deployment order simulation
 echo "4️⃣ Simulating deployment order (dry run)..."
 echo "   Order for initial deployment:"
-echo "   1. AuthStack (no dependencies)"
+echo "   1. AuthStack (creates the deployment-owned Google content OAuth secret)"
 echo "   2. DatabaseStack (no dependencies)"
 echo "   3. StorageStack (no dependencies)"
-echo "   4. ProcessingStack (depends on SSM from Database & Storage)"
+echo "   4. ProcessingStack (depends on SSM from Database & Storage and AuthStack)"
 echo "   5. FrontendStack (depends on SSM from Storage)"
 echo ""
 
@@ -81,14 +82,14 @@ echo ""
 # 6. Deployment commands
 echo "6️⃣ Deployment commands to run:"
 echo ""
-echo "   First deployment (all stacks together to create SSM parameters):"
-echo "   bunx cdk deploy --all --context baseDomain=$BASEDOMAIN"
+echo "   First deployment (all stacks together to create SSM parameters and OAuth secret):"
+echo "   GOOGLE_PICKER_API_KEY=<restricted-key> ./deploy-dev.sh <google-client-id> $BASEDOMAIN"
 echo ""
 echo "   Future deployments (individual stacks):"
 echo "   bunx cdk deploy AIStudio-DatabaseStack-Dev --exclusively --context baseDomain=$BASEDOMAIN"
 echo "   bunx cdk deploy AIStudio-StorageStack-Dev --exclusively --context baseDomain=$BASEDOMAIN"
 echo "   bunx cdk deploy AIStudio-ProcessingStack-Dev --exclusively --context baseDomain=$BASEDOMAIN"
-echo "   bunx cdk deploy AIStudio-FrontendStack-Dev --exclusively --context baseDomain=$BASEDOMAIN"
+echo "   bunx cdk deploy AIStudio-FrontendStack-ECS-Dev --exclusively --context baseDomain=$BASEDOMAIN"
 echo ""
 
 # 7. Post-deployment verification
@@ -99,7 +100,7 @@ echo ""
 echo "✅ Pre-deployment tests completed successfully!"
 echo ""
 echo "⚠️  IMPORTANT: For the first deployment after this change:"
-echo "   1. Deploy all stacks together: bunx cdk deploy --all --context baseDomain=$BASEDOMAIN"
-echo "   2. This creates SSM parameters while maintaining existing exports"
+echo "   1. Deploy all stacks with deploy-dev.sh and its required OAuth/Picker inputs"
+echo "   2. This creates SSM parameters and the Google content OAuth secret"
 echo "   3. Future deployments can use --exclusively for individual stacks"
 echo ""

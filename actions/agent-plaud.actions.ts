@@ -1,4 +1,4 @@
-"use server"
+"use server";
 
 /**
  * Plaud OAuth consent actions (chat → browser → server-captured refresh token).
@@ -15,25 +15,39 @@
  * and read back here; only the S256 challenge ever appears in a URL.
  */
 
-import { createHash } from "node:crypto"
-import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
-import { handleError, createSuccess } from "@/lib/error-utils"
-import type { ActionState } from "@/types"
-import { executeQuery } from "@/lib/db/drizzle-client"
-import { and, eq, isNull, sql } from "drizzle-orm"
-import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-workspace-consent-nonces"
-import { verifyConsentToken } from "@/lib/agent-workspace/consent-token"
-import { getSecretJson, putSecretString, storePlaudRefreshToken } from "@/lib/agent-workspace/secrets-manager"
-import { getIssuerUrl } from "@/lib/oauth/issuer-config"
+import { createHash } from "node:crypto";
+import {
+  createLogger,
+  generateRequestId,
+  startTimer,
+  sanitizeForLogging,
+} from "@/lib/logger";
+import { handleError, createSuccess } from "@/lib/error-utils";
+import type { ActionState } from "@/types";
+import { executeQuery } from "@/lib/db/drizzle-client";
+import { and, eq, isNull, sql } from "drizzle-orm";
+import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-workspace-consent-nonces";
+import { verifyConsentToken } from "@/lib/agent-workspace/consent-token";
+import {
+  getSecretJson,
+  putSecretString,
+  storePlaudRefreshToken,
+} from "@/lib/agent-workspace/secrets-manager";
+import { getIssuerUrl } from "@/lib/oauth/issuer-config";
+import { getServerSession } from "@/lib/auth/server-session";
 
-const PLAUD_AUTHORIZE_URL = process.env.PLAUD_AUTHORIZE_URL ?? "https://mcp.plaud.ai/authorize"
-const PLAUD_TOKEN_URL = process.env.PLAUD_TOKEN_URL ?? "https://mcp.plaud.ai/token"
-const PLAUD_REGISTER_URL = process.env.PLAUD_REGISTER_URL ?? "https://mcp.plaud.ai/register"
+const PLAUD_AUTHORIZE_URL =
+  process.env.PLAUD_AUTHORIZE_URL ?? "https://mcp.plaud.ai/authorize";
+const PLAUD_TOKEN_URL =
+  process.env.PLAUD_TOKEN_URL ?? "https://mcp.plaud.ai/token";
+const PLAUD_REGISTER_URL =
+  process.env.PLAUD_REGISTER_URL ?? "https://mcp.plaud.ai/register";
 const PLAUD_OAUTH_SECRET_ID =
-  process.env.PLAUD_OAUTH_SECRET_ID ?? `psd-agent/${process.env.ENVIRONMENT ?? "dev"}/plaud-oauth-client`
+  process.env.PLAUD_OAUTH_SECRET_ID ??
+  `psd-agent/${process.env.ENVIRONMENT ?? "dev"}/plaud-oauth-client`;
 
 function plaudRedirectUri(): string {
-  return `${getIssuerUrl()}/agent-connect-plaud/callback`
+  return `${getIssuerUrl()}/agent-connect-plaud/callback`;
 }
 
 /**
@@ -45,24 +59,60 @@ function plaudRedirectUri(): string {
  * consent flow already uses to store tokens.
  */
 async function ensurePlaudClientId(
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
 ): Promise<string | null> {
+  const stored = await readPlaudClientId(log);
+  if (stored.status === "error") return null;
+  if (stored.clientId) return stored.clientId;
+  return registerPlaudClientId(log);
+}
+
+function usablePlaudClientId(value: unknown): value is string {
+  return typeof value === "string" && value !== "" && value !== "PLACEHOLDER";
+}
+
+async function readPlaudClientId(
+  log: ReturnType<typeof createLogger>,
+): Promise<{ status: "ok" | "error"; clientId?: string }> {
   try {
-    const creds = await getSecretJson<{ client_id?: string }>(PLAUD_OAUTH_SECRET_ID)
-    if (creds) {
-      const existing = creds.client_id
-      if (typeof existing === "string" && existing && existing !== "PLACEHOLDER") {
-        return existing
-      }
-    }
+    const creds = await getSecretJson<{ client_id?: string }>(
+      PLAUD_OAUTH_SECRET_ID,
+    );
+    return {
+      status: "ok",
+      ...(usablePlaudClientId(creds?.client_id)
+        ? { clientId: creds.client_id }
+        : {}),
+    };
   } catch (err) {
     // A transient/permission error is NOT the same as "secret is empty" — proceeding
     // to register here could overwrite a valid client_id for existing users. Bail out.
-    log.error("Failed to read Plaud OAuth secret — not registering a new client", {
-      error: err instanceof Error ? err.message : String(err),
-    })
-    return null
+    log.error(
+      "Failed to read Plaud OAuth secret — not registering a new client",
+      {
+        error: err instanceof Error ? err.message : String(err),
+      },
+    );
+    return { status: "error" };
   }
+}
+
+async function concurrentPlaudClientId(): Promise<string | undefined> {
+  try {
+    const raceCreds = await getSecretJson<{ client_id?: string }>(
+      PLAUD_OAUTH_SECRET_ID,
+    );
+    return usablePlaudClientId(raceCreds?.client_id)
+      ? raceCreds.client_id
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function registerPlaudClientId(
+  log: ReturnType<typeof createLogger>,
+): Promise<string | null> {
   try {
     const resp = await fetch(PLAUD_REGISTER_URL, {
       method: "POST",
@@ -75,34 +125,32 @@ async function ensurePlaudClientId(
         token_endpoint_auth_method: "none",
       }),
       signal: AbortSignal.timeout(10000),
-    })
+    });
     const data = (await resp.json().catch(() => ({}))) as {
-      client_id?: string
-      error?: string
-      error_description?: string
-    }
+      client_id?: string;
+      error?: string;
+      error_description?: string;
+    };
     if (!resp.ok || !data.client_id) {
       log.error("Plaud Dynamic Client Registration failed", {
         status: resp.status,
         error: data.error,
         errorDescription: data.error_description,
-      })
-      return null
+      });
+      return null;
     }
 
     // Guard against a concurrent first-time consent racing us to register+store a
     // different client: if the secret now holds a client_id we didn't just write,
     // defer to it instead of overwriting — keeps every in-flight authorize URL
     // consistent with what the callback will read back.
-    try {
-      const raceCreds = await getSecretJson<{ client_id?: string }>(PLAUD_OAUTH_SECRET_ID)
-      const winner = raceCreds?.client_id
-      if (typeof winner === "string" && winner && winner !== "PLACEHOLDER") {
-        log.info("Plaud OAuth client registered concurrently by another request — using it", {})
-        return winner
-      }
-    } catch {
-      // ignore — fall through and store our own registration
+    const winner = await concurrentPlaudClientId();
+    if (winner) {
+      log.info(
+        "Plaud OAuth client registered concurrently by another request — using it",
+        {},
+      );
+      return winner;
     }
 
     await putSecretString(
@@ -111,28 +159,38 @@ async function ensurePlaudClientId(
         client_id: data.client_id,
         redirect_uri: plaudRedirectUri(),
         registered_at: new Date().toISOString(),
-      })
-    )
-    log.info("Plaud OAuth client auto-registered", { redirectUri: plaudRedirectUri() })
-    return data.client_id
+      }),
+    );
+    log.info("Plaud OAuth client auto-registered", {
+      redirectUri: plaudRedirectUri(),
+    });
+    return data.client_id;
   } catch (err) {
     log.error("Plaud Dynamic Client Registration error", {
       error: err instanceof Error ? err.message : String(err),
-    })
-    return null
+    });
+    return null;
   }
 }
 
 /** RFC 7636 S256: base64url(sha256(verifier)). */
 function s256Challenge(verifier: string): string {
-  return createHash("sha256").update(verifier).digest("base64url")
+  return createHash("sha256").update(verifier).digest("base64url");
+}
+
+async function isAuthenticatedOwner(ownerEmail: string): Promise<boolean> {
+  const session = await getServerSession();
+  return (
+    typeof session?.email === "string" &&
+    session.email.trim().toLowerCase() === ownerEmail.trim().toLowerCase()
+  );
 }
 
 export interface PlaudConsentVerifyResult {
-  valid: boolean
-  ownerEmail?: string
-  plaudOAuthUrl?: string
-  error?: string
+  valid: boolean;
+  ownerEmail?: string;
+  plaudOAuthUrl?: string;
+  error?: string;
 }
 
 /**
@@ -141,44 +199,72 @@ export interface PlaudConsentVerifyResult {
  * landing page before the user clicks "Connect").
  */
 export async function verifyPlaudConsentAndGetOAuthUrl(
-  token: string
+  token: string,
 ): Promise<ActionState<PlaudConsentVerifyResult>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("verifyPlaudConsent")
-  const log = createLogger({ requestId, action: "verifyPlaudConsent" })
+  const requestId = generateRequestId();
+  const timer = startTimer("verifyPlaudConsent");
+  const log = createLogger({ requestId, action: "verifyPlaudConsent" });
 
   try {
-    const payload = await verifyConsentToken(token)
+    const payload = await verifyConsentToken(token);
     if (!payload || payload.kind !== "plaud") {
-      timer({ status: "error" })
-      return createSuccess({ valid: false, error: "This consent link is invalid or for a different flow." })
+      timer({ status: "error" });
+      return createSuccess({
+        valid: false,
+        error: "This consent link is invalid or for a different flow.",
+      });
+    }
+    if (!(await isAuthenticatedOwner(payload.sub))) {
+      timer({ status: "error" });
+      return createSuccess({
+        valid: false,
+        error:
+          "Sign in as the AI Studio owner named in this link to connect Plaud.",
+      });
     }
 
-    const clientId = await ensurePlaudClientId(log)
+    const clientId = await ensurePlaudClientId(log);
     if (!clientId) {
-      timer({ status: "error" })
-      log.error("Plaud OAuth client_id not configured")
-      return createSuccess({ valid: false, error: "Plaud integration is not configured yet. Contact an administrator." })
+      timer({ status: "error" });
+      log.error("Plaud OAuth client_id not configured");
+      return createSuccess({
+        valid: false,
+        error:
+          "Plaud integration is not configured yet. Contact an administrator.",
+      });
     }
 
     // Read the PKCE verifier from the nonce row (must still be unconsumed and fresh).
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     const [row] = await executeQuery(
       (db) =>
         db
-          .select({ codeVerifier: psdAgentWorkspaceConsentNonces.codeVerifier })
+          .select({
+            ownerEmail: psdAgentWorkspaceConsentNonces.ownerEmail,
+            tokenKind: psdAgentWorkspaceConsentNonces.tokenKind,
+            codeVerifier: psdAgentWorkspaceConsentNonces.codeVerifier,
+          })
           .from(psdAgentWorkspaceConsentNonces)
           .where(
             sql`${psdAgentWorkspaceConsentNonces.nonce} = ${payload.nonce}
                 AND ${psdAgentWorkspaceConsentNonces.consumedAt} IS NULL
-                AND ${psdAgentWorkspaceConsentNonces.createdAt} > ${oneHourAgo}::timestamptz`
+                AND ${psdAgentWorkspaceConsentNonces.createdAt} > ${oneHourAgo}::timestamptz`,
           )
           .limit(1),
-      "lookupPlaudNonce"
-    )
-    if (!row || !row.codeVerifier) {
-      timer({ status: "error" })
-      return createSuccess({ valid: false, error: "This consent link has expired or was already used. Ask your agent for a new one." })
+      "lookupPlaudNonce",
+    );
+    if (
+      !row ||
+      row.tokenKind !== "plaud" ||
+      row.ownerEmail.toLowerCase() !== payload.sub.toLowerCase() ||
+      !row.codeVerifier
+    ) {
+      timer({ status: "error" });
+      return createSuccess({
+        valid: false,
+        error:
+          "This consent link has expired or was already used. Ask your agent for a new one.",
+      });
     }
 
     const params = new URLSearchParams({
@@ -188,29 +274,32 @@ export async function verifyPlaudConsentAndGetOAuthUrl(
       state: payload.nonce,
       code_challenge: s256Challenge(row.codeVerifier),
       code_challenge_method: "S256",
-    })
+    });
 
-    timer({ status: "success" })
-    log.info("Plaud consent verified, authorize URL generated", sanitizeForLogging({ ownerEmail: payload.sub }))
+    timer({ status: "success" });
+    log.info(
+      "Plaud consent verified, authorize URL generated",
+      sanitizeForLogging({ ownerEmail: payload.sub }),
+    );
     return createSuccess({
       valid: true,
       ownerEmail: payload.sub,
       plaudOAuthUrl: `${PLAUD_AUTHORIZE_URL}?${params.toString()}`,
-    })
+    });
   } catch (error) {
-    timer({ status: "error" })
+    timer({ status: "error" });
     return handleError(error, "Failed to verify Plaud consent link", {
       context: "verifyPlaudConsent",
       requestId,
       operation: "verifyPlaudConsent",
-    })
+    });
   }
 }
 
 export interface PlaudCallbackResult {
-  success: boolean
-  ownerEmail?: string
-  error?: string
+  success: boolean;
+  ownerEmail?: string;
+  error?: string;
 }
 
 /**
@@ -220,23 +309,29 @@ export interface PlaudCallbackResult {
  */
 export async function handlePlaudCallback(
   code: string,
-  state: string
+  state: string,
 ): Promise<ActionState<PlaudCallbackResult>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("handlePlaudCallback")
-  const log = createLogger({ requestId, action: "handlePlaudCallback" })
+  const requestId = generateRequestId();
+  const timer = startTimer("handlePlaudCallback");
+  const log = createLogger({ requestId, action: "handlePlaudCallback" });
 
   try {
     if (!/^[\da-f]{64}$/.test(state)) {
-      timer({ status: "error" })
-      return createSuccess({ success: false, error: "Invalid consent state. Ask your agent for a new consent link." })
+      timer({ status: "error" });
+      return createSuccess({
+        success: false,
+        error: "Invalid consent state. Ask your agent for a new consent link.",
+      });
     }
     if (!code || typeof code !== "string") {
-      timer({ status: "error" })
-      return createSuccess({ success: false, error: "Missing authorization code." })
+      timer({ status: "error" });
+      return createSuccess({
+        success: false,
+        error: "Missing authorization code.",
+      });
     }
 
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     const [row] = await executeQuery(
       (db) =>
         db
@@ -249,20 +344,34 @@ export async function handlePlaudCallback(
           .where(
             sql`${psdAgentWorkspaceConsentNonces.nonce} = ${state}
                 AND ${psdAgentWorkspaceConsentNonces.consumedAt} IS NULL
-                AND ${psdAgentWorkspaceConsentNonces.createdAt} > ${oneHourAgo}::timestamptz`
+                AND ${psdAgentWorkspaceConsentNonces.createdAt} > ${oneHourAgo}::timestamptz`,
           )
           .limit(1),
-      "lookupPlaudCallbackNonce"
-    )
+      "lookupPlaudCallbackNonce",
+    );
     if (!row || row.tokenKind !== "plaud" || !row.codeVerifier) {
-      timer({ status: "error" })
-      return createSuccess({ success: false, error: "This consent link has already been used or has expired. Ask your agent for a new one." })
+      timer({ status: "error" });
+      return createSuccess({
+        success: false,
+        error:
+          "This consent link has already been used or has expired. Ask your agent for a new one.",
+      });
+    }
+    if (!(await isAuthenticatedOwner(row.ownerEmail))) {
+      timer({ status: "error" });
+      return createSuccess({
+        success: false,
+        error: "This Plaud consent link belongs to a different AI Studio user.",
+      });
     }
 
-    const clientId = await ensurePlaudClientId(log)
+    const clientId = await ensurePlaudClientId(log);
     if (!clientId) {
-      timer({ status: "error" })
-      return createSuccess({ success: false, error: "Plaud integration is not configured yet." })
+      timer({ status: "error" });
+      return createSuccess({
+        success: false,
+        error: "Plaud integration is not configured yet.",
+      });
     }
 
     // Exchange the code (public client + PKCE).
@@ -272,25 +381,31 @@ export async function handlePlaudCallback(
       redirect_uri: plaudRedirectUri(),
       client_id: clientId,
       code_verifier: row.codeVerifier,
-    })
+    });
     const resp = await fetch(PLAUD_TOKEN_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
       body: body.toString(),
-    })
+    });
     const data = (await resp.json().catch(() => ({}))) as {
-      refresh_token?: string
-      scope?: string
-      error?: string
-      error_description?: string
-    }
+      refresh_token?: string;
+      scope?: string;
+      error?: string;
+      error_description?: string;
+    };
     if (!resp.ok || !data.refresh_token) {
-      log.warn("Plaud token exchange failed", { status: resp.status, error: data.error })
-      timer({ status: "error" })
+      log.warn("Plaud token exchange failed", {
+        status: resp.status,
+        error: data.error,
+      });
+      timer({ status: "error" });
       return createSuccess({
         success: false,
         error: "Plaud rejected the authorization. Please try the link again.",
-      })
+      });
     }
 
     // Store the per-user refresh token.
@@ -299,7 +414,7 @@ export async function handlePlaudCallback(
       client_id: clientId,
       scope: data.scope,
       obtained_at: new Date().toISOString(),
-    })
+    });
 
     // Consume the nonce (atomic, only-if-unconsumed).
     await executeQuery(
@@ -310,21 +425,24 @@ export async function handlePlaudCallback(
           .where(
             and(
               eq(psdAgentWorkspaceConsentNonces.nonce, state),
-              isNull(psdAgentWorkspaceConsentNonces.consumedAt)
-            )
+              isNull(psdAgentWorkspaceConsentNonces.consumedAt),
+            ),
           ),
-      "consumePlaudNonce"
-    )
+      "consumePlaudNonce",
+    );
 
-    timer({ status: "success" })
-    log.info("Plaud account connected", sanitizeForLogging({ ownerEmail: row.ownerEmail }))
-    return createSuccess({ success: true, ownerEmail: row.ownerEmail })
+    timer({ status: "success" });
+    log.info(
+      "Plaud account connected",
+      sanitizeForLogging({ ownerEmail: row.ownerEmail }),
+    );
+    return createSuccess({ success: true, ownerEmail: row.ownerEmail });
   } catch (error) {
-    timer({ status: "error" })
+    timer({ status: "error" });
     return handleError(error, "Failed to complete Plaud connection", {
       context: "handlePlaudCallback",
       requestId,
       operation: "handlePlaudCallback",
-    })
+    });
   }
 }

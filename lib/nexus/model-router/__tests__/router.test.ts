@@ -45,7 +45,7 @@ const config = nexusRouterConfigSchema.parse({
   },
 })
 
-describe("Nexus model router", () => {
+function defineNexusModelRouterSuite1Part1() {
   beforeEach(() => {
     jest.clearAllMocks()
     mockGetNexusEnabledModels.mockResolvedValue(models)
@@ -156,7 +156,9 @@ describe("Nexus model router", () => {
     expect(result.modelId).toBe("gpt-terra")
   })
 
-  it("enforces attachment tools when legacy routing is off", async () => {
+  }
+
+function defineNexusModelRouterSuite1Part2() {it("enforces attachment tools when legacy routing is off", async () => {
     mockGetConfig.mockResolvedValue({ config, mode: "off" })
 
     const result = await routeNexusRequest({
@@ -262,7 +264,9 @@ describe("Nexus model router", () => {
     expect(result.metadata.proposedModelId).toBe("us.anthropic.claude-sonnet")
   })
 
-  it("stays in the Advanced family when the requested tier is unavailable", async () => {
+  }
+
+function defineNexusModelRouterSuite1Part3() {it("stays in the Advanced family when the requested tier is unavailable", async () => {
     mockClassify.mockResolvedValue({
       intent: "general", tier: "high", confidence: 0.9,
       reasonCodes: ["complex"], source: "classifier",
@@ -330,4 +334,12 @@ describe("Nexus model router", () => {
       requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
     })).rejects.toThrow("PSD Data is not configured")
   })
-})
+}
+
+const defineNexusModelRouterSuite1 = () => {
+  defineNexusModelRouterSuite1Part1()
+  defineNexusModelRouterSuite1Part2()
+  defineNexusModelRouterSuite1Part3()
+};
+
+describe("Nexus model router", defineNexusModelRouterSuite1)

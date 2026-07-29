@@ -44,39 +44,26 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { TagInput } from "@/components/ui/tag-input";
 import { updateContentAction } from "@/actions/db/atrium/update-content";
 import { deleteContentAction } from "@/actions/db/atrium/delete-content";
 import { collectionTreeAction } from "@/actions/db/atrium/collection-tree";
 import { meridianPortalClassName } from "@/lib/atrium/meridian-fonts";
-import type { CollectionTreeNode } from "@/lib/content";
+import {
+  flattenTree,
+  NO_COLLECTION,
+  type CollectionOption,
+} from "@/lib/atrium/collection-options";
 import { createLogger } from "@/lib/client-logger";
 
 const log = createLogger({ component: "ContentSettings" });
 
 /**
- * Radix Select items cannot carry an empty-string value, so "no section" is a
- * sentinel mapped to `null` at save time. Not a plausible collection UUID.
+ * Upper bound on tags in the settings dialog. Presentation-only — the service
+ * imposes no count limit, so this is purely to stop the pill field growing
+ * without end. Deliberately generous.
  */
-const NO_COLLECTION = "__none__";
-
-/** One flattened collection option (depth drives the indent prefix). */
-interface CollectionOption {
-  id: string;
-  label: string;
-}
-
-/** Depth-first flatten of the visibility-filtered tree into select options. */
-function flattenTree(
-  nodes: CollectionTreeNode[],
-  depth = 0,
-  out: CollectionOption[] = []
-): CollectionOption[] {
-  for (const node of nodes) {
-    out.push({ id: node.id, label: `${"— ".repeat(depth)}${node.name}` });
-    flattenTree(node.children, depth + 1, out);
-  }
-  return out;
-}
+const MAX_CONTENT_TAGS = 30;
 
 /**
  * Persist a settings patch and apply the resulting local/navigation state.
@@ -106,7 +93,14 @@ async function runUpdate(
     if (res.isSuccess) {
       setOpen(false);
       if (patch.status === "archived") {
-        router.push("/atrium");
+        // FULL document navigation, deliberately not router.push: the editor
+        // mounts a burst of server-action fetches (session, collection tree,
+        // versions, comments, …), and a client-side push that lands while one
+        // is still in flight gets rolled back when the straggler resolves —
+        // the App Router rebases onto the action's origin route and yanks the
+        // user back into the editor they just archived. A document navigation
+        // tears the editor down, so no straggler can rebase it.
+        window.location.assign("/atrium");
       } else {
         router.refresh();
       }
@@ -135,13 +129,12 @@ async function runUpdate(
 async function runDelete(
   objectId: string,
   ctx: {
-    router: ReturnType<typeof useRouter>;
     setDeleting: (v: boolean) => void;
     setError: (v: string | null) => void;
     setOpen: (v: boolean) => void;
   }
 ): Promise<void> {
-  const { router, setDeleting, setError, setOpen } = ctx;
+  const { setDeleting, setError, setOpen } = ctx;
   if (
     typeof window !== "undefined" &&
     !window.confirm(
@@ -158,7 +151,9 @@ async function runDelete(
     const res = await deleteContentAction(objectId);
     if (res.isSuccess) {
       setOpen(false);
-      router.push("/atrium");
+      // Full document navigation for the same straggling-server-action reason
+      // as the archive branch in `runUpdate` above.
+      window.location.assign("/atrium");
     } else {
       setError(res.message ?? "Could not delete this content");
       log.warn("deleteContentAction failed", { message: res.message });
@@ -217,19 +212,6 @@ function DangerZone({
   );
 }
 
-/** Parse the comma-separated tags input into trimmed, deduped tags. */
-function parseTags(raw: string): string[] {
-  const seen = new Set<string>();
-  const tags: string[] = [];
-  for (const part of raw.split(",")) {
-    const tag = part.trim();
-    if (tag.length === 0 || seen.has(tag)) continue;
-    seen.add(tag);
-    tags.push(tag);
-  }
-  return tags;
-}
-
 export interface ContentSettingsProps {
   /** The object's stable UUID (the server page passes `obj.id`). */
   objectId: string;
@@ -258,8 +240,8 @@ function SettingsFields({
 }: {
   draftTitle: string;
   onTitle: (v: string) => void;
-  draftTags: string;
-  onTags: (v: string) => void;
+  draftTags: string[];
+  onTags: (v: string[]) => void;
   draftCollection: string;
   onCollection: (v: string) => void;
   options: CollectionOption[];
@@ -282,12 +264,17 @@ function SettingsFields({
 
       <div className="space-y-1.5">
         <Label htmlFor="content-settings-tags">Tags</Label>
-        <Input
+        <TagInput
           id="content-settings-tags"
           value={draftTags}
-          onChange={(e) => onTags(e.target.value)}
-          placeholder="Comma-separated, e.g. policy, handbook"
+          onChange={onTags}
+          placeholder="Add a tag and press Enter"
           disabled={saving}
+          // Explicit, and higher than TagInput's default of 10: the previous
+          // comma-separated field imposed no cap at all, so an existing object
+          // may already carry more than the default would allow — silently
+          // refusing to re-add them on the next save would drop metadata.
+          maxTags={MAX_CONTENT_TAGS}
         />
       </div>
 
@@ -355,7 +342,7 @@ export function ContentSettings({
   // Draft state, re-seeded from props each time the dialog opens (the server
   // page re-renders after router.refresh(), so props are the persisted truth).
   const [draftTitle, setDraftTitle] = useState(title);
-  const [draftTags, setDraftTags] = useState(tags.join(", "));
+  const [draftTags, setDraftTags] = useState<string[]>(tags);
   const [draftCollection, setDraftCollection] = useState(
     collectionId ?? NO_COLLECTION
   );
@@ -399,7 +386,7 @@ export function ContentSettings({
     (next: boolean) => {
       if (next) {
         setDraftTitle(title);
-        setDraftTags(tags.join(", "));
+        setDraftTags(tags);
         setDraftCollection(collectionId ?? NO_COLLECTION);
         setError(null);
       }
@@ -416,7 +403,7 @@ export function ContentSettings({
     await runUpdate(
       {
         title: draftTitle.trim(),
-        tags: parseTags(draftTags),
+        tags: draftTags,
         collectionId: draftCollection === NO_COLLECTION ? null : draftCollection,
       },
       { objectId, router, setSaving, setError, setOpen }
@@ -450,8 +437,8 @@ export function ContentSettings({
   // Extracted to the module-level `runDelete` to keep this component under the
   // max-lines-per-function lint.
   const deleteContent = useCallback(
-    () => runDelete(objectId, { router, setDeleting, setError, setOpen }),
-    [objectId, router]
+    () => runDelete(objectId, { setDeleting, setError, setOpen }),
+    [objectId]
   );
 
   const busy = saving || deleting;

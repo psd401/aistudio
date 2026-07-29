@@ -1,5 +1,5 @@
 {
-  "app": "bunx ts-node --prefer-ts-exts bin/infra.ts",
+  "app": "bunx tsx bin/infra.ts",
   "watch": {
     "include": [
       "**"
@@ -91,6 +91,21 @@
     "@aws-cdk/aws-stepfunctions:useDistributedMapResultWriterV2": true,
     "@aws-cdk/s3-notifications:addS3TrustKeyPolicyForSnsSubscriptions": true,
     "@aws-cdk/aws-ec2:requirePrivateSubnetsForEgressOnlyInternetGateway": true,
-    "@aws-cdk/aws-s3:publicAccessBlockedByDefault": true
+    "@aws-cdk/aws-s3:publicAccessBlockedByDefault": true,
+    "chatIngress": {
+      "_comment": "Google Chat Pub/Sub ingress identifiers per environment. NOT secrets. These gate creation of the /chat route, its integration, the JWT authorizer and the Lambda invoke permission \u2014 they live here so a deploy that forgets a --context flag cannot silently delete live ingress (incident 2026-07-27). --context flags still override. Values come from psd401/psd-gcp-infra (chat-ingress.tf = prod, chat-dev-clone.tf = dev); the subject is the service account's numeric uniqueId from `gcloud iam service-accounts describe`.",
+      "dev": {
+        "gcpPubsubAudience": "https://twdwqcb822.execute-api.us-east-1.amazonaws.com/chat",
+        "gcpPubsubServiceAccountEmail": "psd-agent-chat-dev@psd-aistudio-dev.iam.gserviceaccount.com",
+        "gcpPubsubServiceAccountSubject": "113223227650359591172",
+        "gcpPubsubSubscription": "projects/psd-aistudio-dev/subscriptions/agent-chat-to-aws-bridge"
+      },
+      "prod": {
+        "gcpPubsubAudience": "https://hhjh4gssm6.execute-api.us-east-1.amazonaws.com/chat",
+        "gcpPubsubServiceAccountEmail": "psd-agent-chat@aistudio-462612.iam.gserviceaccount.com",
+        "gcpPubsubServiceAccountSubject": "105465329886887805514",
+        "gcpPubsubSubscription": "projects/aistudio-462612/subscriptions/agent-chat-to-aws-bridge"
+      }
+    }
   }
 }

@@ -445,16 +445,13 @@ export interface EditorBubbleMenuProps {
   askAgentHref: string;
 }
 
-export function EditorBubbleMenu({
-  editor,
-  askAgentHref,
-}: EditorBubbleMenuProps): React.JSX.Element {
-  const router = useRouter();
-  const [pop, setPop] = useState<BubblePop>("none");
-
-  // Re-render the toolbar when the active-mark state changes so B/I/U/S and the
-  // Text ▾ label reflect the current selection.
-  const marks = useEditorState({
+/**
+ * Re-render the toolbar when the active-mark state changes so B/I/U/S and the
+ * Text ▾ label reflect the current selection. Extracted so `EditorBubbleMenu`
+ * stays under the max-lines-per-function lint.
+ */
+function useActiveMarks(editor: EditorBubbleMenuProps["editor"]) {
+  return useEditorState({
     editor,
     selector: ({ editor: e }) => ({
       bold: e.isActive("bold"),
@@ -462,12 +459,99 @@ export function EditorBubbleMenu({
       underline: e.isActive("underline"),
       strike: e.isActive("strike"),
       bulletList: e.isActive("bulletList"),
-      blockLabel:
-        BLOCK_STYLES.find((b) => b.isActive(e))?.label ?? "Text",
+      blockLabel: BLOCK_STYLES.find((b) => b.isActive(e))?.label ?? "Text",
     }),
   });
+}
+
+function MarkButtons({
+  editor,
+  marks,
+}: {
+  editor: Editor;
+  marks: ReturnType<typeof useActiveMarks>;
+}): React.JSX.Element {
+  const buttons = [
+    {
+      key: "bold",
+      label: "Bold",
+      text: "B",
+      className: "mer-bubble-btn-b",
+      toggle: () => editor.chain().focus().toggleBold().run(),
+    },
+    {
+      key: "italic",
+      label: "Italic",
+      text: "I",
+      className: "mer-bubble-btn-i",
+      toggle: () => editor.chain().focus().toggleItalic().run(),
+    },
+    {
+      key: "underline",
+      label: "Underline",
+      text: "U",
+      className: "mer-bubble-btn-u",
+      toggle: () => editor.chain().focus().toggleUnderline().run(),
+    },
+    {
+      key: "strike",
+      label: "Strikethrough",
+      text: "S",
+      className: "mer-bubble-btn-s",
+      toggle: () => editor.chain().focus().toggleStrike().run(),
+    },
+  ] as const;
+
+  return (
+    <>
+      {buttons.map((button) => {
+        const active = marks[button.key];
+        return (
+          <button
+            key={button.key}
+            type="button"
+            className={`mer-bubble-btn ${button.className}`}
+            data-active={active ? "true" : "false"}
+            aria-label={button.label}
+            aria-pressed={active}
+            onClick={button.toggle}
+          >
+            {button.text}
+          </button>
+        );
+      })}
+    </>
+  );
+}
+
+export function EditorBubbleMenu({
+  editor,
+  askAgentHref,
+}: EditorBubbleMenuProps): React.JSX.Element {
+  const router = useRouter();
+  const [pop, setPop] = useState<BubblePop>("none");
+
+  const marks = useActiveMarks(editor);
 
   const closePops = () => setPop("none");
+
+  // Escape closes an open sub-popover (block style / color / callout / media)
+  // without collapsing the text selection — matching DocumentCover's dismissal
+  // pattern. Outside interactions already close everything for free: clicking
+  // elsewhere in the document moves the selection and clicking outside the
+  // editor blurs it, and the bubble plugin hides this whole menu (state resets
+  // with it) in both cases.
+  useEffect(() => {
+    if (pop === "none") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation(); // dismiss the popover only, not the selection
+        setPop("none");
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [pop]);
 
   return (
     <BubbleMenu
@@ -475,6 +559,9 @@ export function EditorBubbleMenu({
       // Only over a real, non-empty text selection, and only for editors (a
       // read-only viewer never gets the formatting UI).
       shouldShow={({ editor: e, from, to }) => e.isEditable && to > from}
+      // The default 250ms debounce made every selection feel laggy — the
+      // toolbar appeared a beat after the user finished dragging (#1336 B4).
+      updateDelay={0}
       options={{ placement: "top", offset: 8 }}
     >
       <div
@@ -503,46 +590,7 @@ export function EditorBubbleMenu({
         {pop === "text" && <BlockStylePopover editor={editor} onPick={closePops} />}
 
         <span className="mer-bubble-sep" aria-hidden="true" />
-        <button
-          type="button"
-          className="mer-bubble-btn mer-bubble-btn-b"
-          data-active={marks.bold ? "true" : "false"}
-          aria-label="Bold"
-          aria-pressed={marks.bold}
-          onClick={() => editor.chain().focus().toggleBold().run()}
-        >
-          B
-        </button>
-        <button
-          type="button"
-          className="mer-bubble-btn mer-bubble-btn-i"
-          data-active={marks.italic ? "true" : "false"}
-          aria-label="Italic"
-          aria-pressed={marks.italic}
-          onClick={() => editor.chain().focus().toggleItalic().run()}
-        >
-          I
-        </button>
-        <button
-          type="button"
-          className="mer-bubble-btn mer-bubble-btn-u"
-          data-active={marks.underline ? "true" : "false"}
-          aria-label="Underline"
-          aria-pressed={marks.underline}
-          onClick={() => editor.chain().focus().toggleUnderline().run()}
-        >
-          U
-        </button>
-        <button
-          type="button"
-          className="mer-bubble-btn mer-bubble-btn-s"
-          data-active={marks.strike ? "true" : "false"}
-          aria-label="Strikethrough"
-          aria-pressed={marks.strike}
-          onClick={() => editor.chain().focus().toggleStrike().run()}
-        >
-          S
-        </button>
+        <MarkButtons editor={editor} marks={marks} />
 
         <span className="mer-bubble-sep" aria-hidden="true" />
         <button

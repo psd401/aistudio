@@ -41,33 +41,55 @@ export function parseCanonicalEmbeddingDlqMessage(
 ): CanonicalEmbeddingDlqMessage | null {
   try {
     const value = JSON.parse(body) as Record<string, unknown>;
-    const itemId = value.itemId;
-    const generationId = value.generationId;
-    const chunkIds = value.chunkIds;
-    const texts = value.texts;
     const activationOnly = value.activationOnly === true;
-    if (
-      !Number.isSafeInteger(itemId) ||
-      Number(itemId) <= 0 ||
-      typeof generationId !== "string" ||
-      !UUID_PATTERN.test(generationId) ||
-      !Array.isArray(chunkIds) ||
-      (!activationOnly && chunkIds.length === 0) ||
-      (activationOnly && chunkIds.length !== 0) ||
-      !chunkIds.every(
-        (chunkId) => Number.isSafeInteger(chunkId) && Number(chunkId) > 0
-      ) ||
-      !Array.isArray(texts) ||
-      (activationOnly && texts.length !== 0) ||
-      texts.length !== chunkIds.length ||
-      !texts.every((text) => typeof text === "string")
-    ) {
+    if (!isCanonicalEmbeddingEnvelope(value)) {
       return null;
     }
-    return { generationId };
+    if (!hasCanonicalChunkIds(value.chunkIds, activationOnly)) {
+      return null;
+    }
+    if (!hasCanonicalTexts(value.texts, value.chunkIds.length, activationOnly)) {
+      return null;
+    }
+    return { generationId: value.generationId };
   } catch {
     return null;
   }
+}
+
+function isCanonicalEmbeddingEnvelope(
+  value: Record<string, unknown>
+): value is Record<string, unknown> & { generationId: string } {
+  return (
+    Number.isSafeInteger(value.itemId) &&
+    Number(value.itemId) > 0 &&
+    typeof value.generationId === "string" &&
+    UUID_PATTERN.test(value.generationId)
+  );
+}
+
+function hasCanonicalChunkIds(
+  value: unknown,
+  activationOnly: boolean
+): value is number[] {
+  if (!Array.isArray(value)) return false;
+  if (activationOnly ? value.length > 0 : value.length === 0) return false;
+  return value.every(
+    (chunkId) => Number.isSafeInteger(chunkId) && Number(chunkId) > 0
+  );
+}
+
+function hasCanonicalTexts(
+  value: unknown,
+  chunkCount: number,
+  activationOnly: boolean
+): value is string[] {
+  return (
+    Array.isArray(value) &&
+    (!activationOnly || value.length === 0) &&
+    value.length === chunkCount &&
+    value.every((text) => typeof text === "string")
+  );
 }
 
 /**

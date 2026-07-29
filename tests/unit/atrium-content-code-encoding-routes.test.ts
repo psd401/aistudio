@@ -25,6 +25,7 @@ const mockCreateApiResponse = jest.fn();
 const mockResolveCollectionId = jest.fn();
 const mockParseContentIfMatch = jest.fn();
 const mockRunIdempotentMutation = jest.fn();
+const mockPublish = jest.fn();
 
 jest.mock("@/lib/api", () => ({
   withApiAuth: (handler: unknown) => handler,
@@ -43,6 +44,9 @@ jest.mock("@/lib/content", () => {
       recoverCaptureCreate: (...a: unknown[]) => mockRecoverCaptureCreate(...a),
       createVersion: (...a: unknown[]) => mockCreateVersion(...a),
     },
+    publishService: {
+      publish: (...a: unknown[]) => mockPublish(...a),
+    },
     versionService: { list: jest.fn() },
     hasPublishPublicScope: jest.fn(() => false),
     recordContentAudit: jest.fn(),
@@ -54,7 +58,7 @@ jest.mock("@/lib/content", () => {
 });
 
 jest.mock("@/lib/content/rest", () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+
   const { z } = require("zod") as typeof import("zod");
   return {
     contentErrorToResponse: (...a: unknown[]) => mockContentErrorToResponse(...a),
@@ -76,6 +80,7 @@ jest.mock("@/lib/content/surface-helpers", () => ({
 import type { NextRequest } from "next/server";
 import { POST as CREATE } from "@/app/api/v1/content/route";
 import { POST as CREATE_VERSION } from "@/app/api/v1/content/[id]/versions/route";
+import { POST as PUBLISH } from "@/app/api/v1/content/[id]/publish/route";
 import { ValidationError } from "@/lib/content/errors";
 
 const REQ = { kind: "user", userId: 7, roles: ["staff"], isAdmin: false };
@@ -96,6 +101,7 @@ type VersionHandler = (
 
 const createHandler = CREATE as unknown as CreateHandler;
 const versionHandler = CREATE_VERSION as unknown as VersionHandler;
+const publishHandler = PUBLISH as unknown as VersionHandler;
 
 const request = {
   url: "https://app.test/api/v1/content",
@@ -118,10 +124,37 @@ beforeEach(() => {
   });
   mockCreate.mockResolvedValue({ id: "obj-1", slug: "art", visibilityLevel: "private" });
   mockCreateVersion.mockResolvedValue({ id: "obj-1", slug: "art", version: { id: "v2" } });
+  mockPublish.mockResolvedValue({
+    publishedVersionId: "v7",
+    readerUrl: "https://app.example/c/art",
+  });
   mockContentErrorToResponse.mockReturnValue({ __marker: "content-error" });
   mockCreateApiResponse.mockReturnValue({
     __marker: "ok",
     headers: { set: jest.fn() },
+  });
+});
+
+describe("POST /api/v1/content/:id/publish — readerUrl response", () => {
+  it("passes through the readerUrl returned by publishService", async () => {
+    mockParseRequestBody.mockResolvedValue({
+      data: { destination: "intranet" },
+    });
+
+    await publishHandler(request, AUTH, "req-publish", { id: "obj-1" });
+
+    expect(mockCreateApiResponse).toHaveBeenCalledWith(
+      {
+        data: {
+          id: "obj-1",
+          destination: "intranet",
+          publishedVersionId: "v7",
+          readerUrl: "https://app.example/c/art",
+        },
+        meta: { requestId: "req-publish" },
+      },
+      "req-publish"
+    );
   });
 });
 

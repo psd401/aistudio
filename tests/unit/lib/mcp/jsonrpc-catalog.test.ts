@@ -58,18 +58,20 @@ import type { McpToolContext } from "@/lib/mcp/types"
 import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 
-// Derive the expected MCP tool count from the manifest so this test self-updates
-// when an MCP tool is added/removed, rather than asserting a hardcoded length.
-// (PR #1032 review finding #10.)
-const MCP_TOOL_COUNT = TOOL_MANIFEST.filter((t) =>
-  t.surfaces.includes("mcp")
-).length
+// Default tools/list collapses multiple versions to the latest entry for each
+// identifier. Count unique identifiers rather than raw manifest rows so a frozen
+// legacy version remains pinned-callable without being double-advertised.
+const MCP_TOOL_COUNT = new Set(
+  TOOL_MANIFEST.filter((tool) => tool.surfaces.includes("mcp")).map(
+    (tool) => tool.identifier
+  )
+).size
 
 function ctx(scopes: string[]): McpToolContext {
   return { userId: 1, cognitoSub: "sub", scopes, requestId: "req" }
 }
 
-describe("MCP JSON-RPC via catalog", () => {
+function defineMCPJSONRPCViaCatalogSuite1Part1() {
   beforeEach(() => {
     dbRows = []
     searchHandler.mockClear()
@@ -141,7 +143,9 @@ describe("MCP JSON-RPC via catalog", () => {
 
   // Versioning (#927): tools/list hides deprecated versions by default and
   // collapses to the latest version per identifier; include:"all" returns all.
-  describe("version filtering (#927)", () => {
+  }
+
+function defineMCPJSONRPCViaCatalogSuite1Part2() {describe("version filtering (#927)", () => {
     // A deprecated v1 + a live v2 of the same identifier as DB (assistant) rows.
     function multiVersionRows() {
       return [
@@ -281,9 +285,16 @@ describe("MCP JSON-RPC via catalog", () => {
       expect(v2?.deprecated).toBeUndefined()
     })
   })
-})
+}
 
-describe("selectListedTools (#927)", () => {
+const defineMCPJSONRPCViaCatalogSuite1 = () => {
+  defineMCPJSONRPCViaCatalogSuite1Part1()
+  defineMCPJSONRPCViaCatalogSuite1Part2()
+};
+
+describe("MCP JSON-RPC via catalog", defineMCPJSONRPCViaCatalogSuite1)
+
+const defineSelectListedTools927Suite2 = () => {
   const tools = [
     { identifier: "a.x", version: "v1", name: "ax1" },
     { identifier: "a.x", version: "v2", name: "ax2" },
@@ -338,12 +349,14 @@ describe("selectListedTools (#927)", () => {
     // Latest NON-deprecated wins even though v2 is a higher version.
     expect(result[0].version).toBe("v1")
   })
-})
+};
+
+describe("selectListedTools (#927)", defineSelectListedTools927Suite2)
 
 // Prototype-pollution hardening at the tools/call boundary (REV-SEC-190): the
 // user-controlled `arguments` object is rebuilt with a null prototype and without
 // __proto__/constructor/prototype keys before it reaches the dispatcher.
-describe("MCP tools/call argument hardening (REV-SEC-190)", () => {
+const defineMCPToolsCallArgumentHardeningREVSEC190Suite3 = () => {
   beforeEach(() => {
     dbRows = []
     searchHandler.mockClear()
@@ -402,4 +415,6 @@ describe("MCP tools/call argument hardening (REV-SEC-190)", () => {
     expect(Object.getPrototypeOf(received)).toBeNull()
     expect(Object.keys(received)).toEqual([])
   })
-})
+};
+
+describe("MCP tools/call argument hardening (REV-SEC-190)", defineMCPToolsCallArgumentHardeningREVSEC190Suite3)

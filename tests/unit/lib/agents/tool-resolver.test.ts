@@ -27,7 +27,11 @@ jest.mock("@/lib/logger", () => {
   return { createLogger: () => singleton }
 })
 
-import { resolveAgentTools, closeAgentConnectorClients } from "@/lib/agents/tool-resolver"
+import {
+  resolveAgentTools,
+  closeAgentConnectorClients,
+  withAgentConnectorCleanupOnError,
+} from "@/lib/agents/tool-resolver"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 
 const listMock = toolCatalogInstance.list as jest.Mock
@@ -71,7 +75,7 @@ const caller = {
   roleNames: ["staff"],
 }
 
-describe("resolveAgentTools", () => {
+function defineResolveAgentToolsSuite1Part1() {
   beforeEach(() => {
     listMock.mockReset().mockResolvedValue([])
     dispatchMock
@@ -174,7 +178,9 @@ describe("resolveAgentTools", () => {
     expect(out).toContain("scope_denied")
   })
 
-  it("merges connector tools and records failed connector ids", async () => {
+  }
+
+function defineResolveAgentToolsSuite1Part2() {it("merges connector tools and records failed connector ids", async () => {
     listMock.mockResolvedValue([])
     getConnectorToolsMock.mockImplementation((serverId: string) =>
       serverId === "srv-ok"
@@ -271,7 +277,9 @@ describe("resolveAgentTools", () => {
     expect(audits[0].error).toContain("remote boom")
   })
 
-  describe("destructive-tool confirmation gate (#926)", () => {
+  }
+
+function defineResolveAgentToolsSuite1Part3() {describe("destructive-tool confirmation gate (#926)", () => {
     const destructiveEntry = entry({
       identifier: "decisions.capture",
       name: "capture_decision",
@@ -336,9 +344,17 @@ describe("resolveAgentTools", () => {
       expect(result).toBe("ok")
     })
   })
-})
+}
 
-describe("closeAgentConnectorClients", () => {
+const defineResolveAgentToolsSuite1 = () => {
+  defineResolveAgentToolsSuite1Part1()
+  defineResolveAgentToolsSuite1Part2()
+  defineResolveAgentToolsSuite1Part3()
+};
+
+describe("resolveAgentTools", defineResolveAgentToolsSuite1)
+
+const defineCloseAgentConnectorClientsSuite2 = () => {
   it("counts a hung close() as a failure (and does not stall)", async () => {
     jest.useFakeTimers()
     try {
@@ -370,5 +386,48 @@ describe("closeAgentConnectorClients", () => {
     } finally {
       jest.useRealTimers()
     }
+  })
+};
+
+describe("closeAgentConnectorClients", defineCloseAgentConnectorClientsSuite2)
+
+describe("withAgentConnectorCleanupOnError", () => {
+  it("closes resolved connector clients when later model setup fails", async () => {
+    const routingError = new Error("fallback model unavailable")
+    const connector = {
+      serverId: "connector-1",
+      serverName: "Connector",
+      tools: {},
+      close: jest.fn(async () => undefined),
+    }
+
+    await expect(
+      withAgentConnectorCleanupOnError(
+        [connector],
+        "req-routing-failure",
+        async () => {
+          throw routingError
+        }
+      )
+    ).rejects.toBe(routingError)
+    expect(connector.close).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps connector clients open when setup succeeds", async () => {
+    const connector = {
+      serverId: "connector-1",
+      serverName: "Connector",
+      tools: {},
+      close: jest.fn(async () => undefined),
+    }
+
+    await expect(
+      withAgentConnectorCleanupOnError(
+        [connector],
+        "req-routing-success",
+        async () => "prepared"
+      )
+    ).resolves.toBe("prepared")
+    expect(connector.close).not.toHaveBeenCalled()
   })
 })

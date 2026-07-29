@@ -8,7 +8,8 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { getUserById } from '@/lib/db/drizzle';
 import { userCanAccessResource, filterAccessibleResourceIds } from '@/lib/db/drizzle/resource-access';
 import { executeQuery } from '@/lib/db/drizzle-client';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
+import { assistantArchitects, chainPrompts } from '@/lib/db/schema';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import {
   retrieveKnowledgeForPrompt,
@@ -20,18 +21,21 @@ import { getUserRequester } from '@/actions/db/atrium/requester';
 import type { Requester } from '@/lib/content/types';
 import { hasCapabilityAccess, hasRole } from '@/utils/roles';
 import { ErrorFactories } from '@/lib/error-utils';
+import { getRoomAssistantAccessContext } from '@/lib/rooms/membership';
+import { hasAssistantExecutionFeatureAccess } from '@/lib/rooms/assistant-execution-policy';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
 import { getScopesForRoles } from '@/lib/api-keys/scopes';
 import {
   resolveAgentTools,
   closeAgentConnectorClients,
+  withAgentConnectorCleanupOnError,
   resolveAgentRunLimits,
-  AGENT_RATE_LIMIT_WINDOW_MS,
   extractImageInputParts,
 } from '@/lib/agents';
 import type { ToolInvocationAudit } from '@/lib/agents';
 import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
 import { createAssistantExecutionConversation } from '@/lib/assistant-architect/execution-conversation';
+import { INTERNAL_ASSISTANT_LOOKUP } from '@/lib/assistant-architect/internal-access';
 import type {
   AssistantArchitectMode,
   AssistantModelFamily,
@@ -54,6 +58,25 @@ import { createAgenticRepositoryContext } from '@/lib/assistant-architect/agenti
 import { updateConversation, getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 import { createMessageWithStats, updateConversationStats } from '@/lib/db/drizzle/nexus-messages';
 import type { AssistantArchitectMessageMetadata } from '@/lib/db/types/jsonb';
+import {
+  buildCostRates,
+  conservativeAgenticReservationCents,
+  estimateUsageCostCents,
+  resolveTrustedAgenticTokenLimits,
+} from '@/lib/agents/cost-rates';
+import {
+  reconcileAgenticCost,
+  releaseAgenticCost,
+  reserveAgenticCost,
+} from '@/lib/agents/cost-budget';
+import {
+  AGENT_LIMIT_CEILINGS,
+} from '@/lib/agents/types';
+import {
+  ASSISTANT_EXECUTION_MAX_PROMPTS,
+  createCoordinatedAssistantExecution,
+  remainingAssistantExecutionTimeoutMs,
+} from '@/lib/assistant-architect/execution-coordinator';
 
 // Allow streaming responses up to 15 minutes for long chains
 export const maxDuration = 900;
@@ -61,7 +84,7 @@ export const maxDuration = 900;
 // Constants for resource limits
 const MAX_INPUT_SIZE_BYTES = 100000; // 100KB max input size
 const MAX_INPUT_FIELDS = 50; // Max 50 input fields
-const MAX_PROMPT_CHAIN_LENGTH = 20; // Max 20 prompts per execution
+const MAX_PROMPT_CHAIN_LENGTH = ASSISTANT_EXECUTION_MAX_PROMPTS;
 const MAX_PROMPT_CONTENT_SIZE = 10000000; // 10MB max prompt content size (allows large context)
 const MAX_VARIABLE_REPLACEMENTS = 50; // Max 50 variable placeholders per prompt (realistic upper bound)
 
@@ -128,6 +151,8 @@ interface PromptExecutionContext {
   /** Non-sensitive attachment labels that improve retrieval query relevance. */
   runtimeRepositoryQuery: string;
   executionStartTime: number;
+  /** Shared wall-clock deadline established with the execution row. */
+  executionDeadlineAt: Date;
   /** The executing assistant's id, for the Atrium retrieval-scope gate (§16.4). */
   assistantId: number;
   modelRoutingMode: AssistantModelRoutingMode;
@@ -167,7 +192,7 @@ interface AgenticConfig {
   enabledConnectorIds: string[];
   maxSteps: number;
   timeoutSeconds: number;
-  costCapCents: number | null;
+  costCapCents: number;
 }
 
 /**
@@ -204,12 +229,23 @@ type ValidatedRequest = z.infer<typeof ExecuteRequestSchema>;
 type LoadedArchitect = NonNullable<
   Awaited<ReturnType<typeof getAssistantArchitectByIdAction>>['data']
 >;
+type ArchitectAccessSnapshot = Pick<
+  LoadedArchitect,
+  'id' | 'userId' | 'status'
+>;
 // `architect.prompts` is optional on the row; after `(architect.prompts || [])`
 // the value is always a defined array, so the loaded/validated list is non-null.
 type LoadedPrompts = NonNullable<LoadedArchitect['prompts']>;
 type CurrentUserData = NonNullable<
   Awaited<ReturnType<typeof getCurrentUserAction>>['data']
 >;
+
+function assistantArchitectNotFoundResponse(requestId: string): Response {
+  return new Response(
+    JSON.stringify({ error: 'Assistant architect not found', requestId }),
+    { status: 404, headers: { 'Content-Type': 'application/json' } }
+  );
+}
 
 /**
  * Phase (a): parse + validate the request body. Returns a 400 Response for an
@@ -283,12 +319,360 @@ async function parseAndValidateRequest(
   return { ok: true, value: validationResult.data };
 }
 
+async function loadArchitectPrincipal(
+  toolId: number,
+  requestId: string,
+  log: RouteLogger,
+  timer: RouteTimer
+): Promise<PhaseResult<{
+  session: NonNullable<Awaited<ReturnType<typeof getServerSession>>>;
+  currentUserData: CurrentUserData;
+  userId: number;
+  architect: ArchitectAccessSnapshot;
+}>> {
+  const session = await getServerSession();
+  if (!session) {
+    log.warn('Unauthorized request - no session');
+    timer({ status: 'error', reason: 'unauthorized' });
+    return { ok: false, response: new Response('Unauthorized', { status: 401 }) };
+  }
+  log.debug('User authenticated', sanitizeForLogging({ userId: session.sub }));
+  const currentUser = await getCurrentUserAction();
+  if (!currentUser.isSuccess) {
+    log.error('Failed to get current user');
+    return { ok: false, response: new Response('Unauthorized', { status: 401 }) };
+  }
+  const [architect] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: assistantArchitects.id,
+          userId: assistantArchitects.userId,
+          status: assistantArchitects.status,
+        })
+        .from(assistantArchitects)
+        .where(eq(assistantArchitects.id, toolId))
+        .limit(1),
+    'getAssistantExecutionAccessSnapshot'
+  );
+  if (!architect) {
+    log.error('Assistant architect not found', { toolId });
+    return {
+      ok: false,
+      response: assistantArchitectNotFoundResponse(requestId),
+    };
+  }
+  return {
+    ok: true,
+    value: {
+      session,
+      currentUserData: currentUser.data,
+      userId: currentUser.data.user.id,
+      architect,
+    },
+  };
+}
+
+async function authorizeArchitectResource(params: {
+  architect: ArchitectAccessSnapshot;
+  userId: number;
+  toolId: number;
+  requestId: string;
+  log: RouteLogger;
+  sessionSub: string;
+}): Promise<
+  PhaseResult<{
+    accessReason: string;
+    featureAccessReason: 'capability' | 'room-assignment';
+  }>
+> {
+  const isOwner = params.architect.userId === params.userId;
+  const isAdmin = await hasRole('administrator');
+  const isApproved = params.architect.status === 'approved';
+  const accessReason = isOwner
+    ? 'owner'
+    : isAdmin
+      ? 'admin'
+      : isApproved
+        ? 'approved'
+        : null;
+  if (!accessReason) {
+    params.log.warn('User does not have access to this assistant architect', {
+      userId: params.userId,
+      toolId: params.toolId,
+      architectOwnerId: params.architect.userId,
+      status: params.architect.status,
+      isOwner,
+      isAdmin,
+      isApproved,
+    });
+    return {
+      ok: false,
+      // Preserve the ordinary private-assistant existence mask. Returning 403
+      // here while a missing id returns 404 lets any authenticated user
+      // enumerate another author's draft/pending assistants.
+      response: assistantArchitectNotFoundResponse(params.requestId),
+    };
+  }
+
+  const [hasCapability, roomAccess] = await Promise.all([
+    hasCapabilityAccess('assistant-architect', params.sessionSub),
+    getRoomAssistantAccessContext(params.userId, [params.architect.id]),
+  ]);
+  const hasFeatureAccess = hasAssistantExecutionFeatureAccess({
+    hasCapability,
+    assistantId: params.architect.id,
+    roomAccess,
+  });
+  if (!hasFeatureAccess) {
+    params.log.warn('User does not have assistant-architect feature access', {
+      userId: params.userId,
+      toolId: params.toolId,
+      roomAssigned: roomAccess.assignedAssistantIds.has(
+        String(params.architect.id)
+      ),
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Access denied',
+          message:
+            'You do not have permission to use the Assistant Architect tool',
+          requestId: params.requestId,
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      ),
+    };
+  }
+
+  const canAccessAssistant = await userCanAccessResource(
+    params.userId,
+    'assistant',
+    params.architect.id,
+    { ownerUserId: params.architect.userId }
+  );
+  if (!canAccessAssistant) {
+    params.log.warn('User lacks shared resource access for assistant architect', {
+      userId: params.userId,
+      toolId: params.toolId,
+      architectId: params.architect.id,
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Access denied',
+          message: 'You do not have access to this assistant',
+          requestId: params.requestId,
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      ),
+    };
+  }
+  return {
+    ok: true,
+    value: {
+      accessReason,
+      featureAccessReason: hasCapability ? 'capability' : 'room-assignment',
+    },
+  };
+}
+
 /**
- * Phase (b): authenticate the user, check tool access + per-architect
- * authorization, load the architect, and validate its prompt chain. Returns the
- * appropriate 401/403/404/400 Response on any failure; otherwise the
- * authenticated user, architect, and sorted prompt list. Behavior (including the
- * unauthorized timer call) is identical to the original inline POST logic.
+ * Reject stable graph-shape failures before the assistant-wide agentic rate
+ * cap is counted. The executable graph is still reloaded and revalidated after
+ * the coordinated execution row protects it from import replacement.
+ */
+function validatePromptChainCardinality(params: {
+  promptCount: number;
+  toolId: number;
+  requestId: string;
+  log: RouteLogger;
+}): PhaseResult<void> {
+  if (params.promptCount === 0) {
+    params.log.error('No prompts configured for assistant architect', {
+      toolId: params.toolId,
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'No prompts configured for this assistant architect',
+          requestId: params.requestId,
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      ),
+    };
+  }
+  if (params.promptCount > MAX_PROMPT_CHAIN_LENGTH) {
+    params.log.warn('Prompt chain too long', {
+      promptCount: params.promptCount,
+      toolId: params.toolId,
+      maxAllowed: MAX_PROMPT_CHAIN_LENGTH,
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Prompt chain too long',
+          message: `Maximum ${MAX_PROMPT_CHAIN_LENGTH} prompts allowed per execution`,
+          requestId: params.requestId,
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      ),
+    };
+  }
+  return { ok: true, value: undefined };
+}
+
+/**
+ * Reject stable graph and repository-access failures before the
+ * assistant-wide agentic rate cap is counted. This graph is authorization-only
+ * and is deliberately discarded: the executable graph is still reloaded and
+ * revalidated after the coordinated execution row protects it from import
+ * replacement.
+ */
+async function preflightExecutionGraphBeforeRateCap(params: {
+  assistantId: number;
+  executorCognitoSub: string;
+  userId: number;
+  requestId: string;
+  log: RouteLogger;
+}): Promise<PhaseResult<void>> {
+  const repositoryBindings = await executeQuery(
+    (db) =>
+      db
+        .select({ repositoryIds: chainPrompts.repositoryIds })
+        .from(chainPrompts)
+        .where(eq(chainPrompts.assistantArchitectId, params.assistantId)),
+    'getAssistantGraphBeforeRateCap'
+  );
+  const cardinality = validatePromptChainCardinality({
+    promptCount: repositoryBindings.length,
+    toolId: params.assistantId,
+    requestId: params.requestId,
+    log: params.log,
+  });
+  if (!cardinality.ok) return cardinality;
+
+  const repositoryAccess = await preflightAssistantRepositoryAccess(
+    repositoryBindings,
+    params.executorCognitoSub
+  );
+  if (repositoryAccess.isAllowed) {
+    return { ok: true, value: undefined };
+  }
+
+  params.log.warn(
+    'Assistant execution blocked before rate accounting because repository access changed',
+    {
+      userId: params.userId,
+      toolId: params.assistantId,
+      repositoryCount: repositoryAccess.repositoryIds.length,
+    }
+  );
+  return {
+    ok: false,
+    response: new Response(
+      JSON.stringify({
+        error: 'Access denied',
+        message: REPOSITORY_ACCESS_CHANGED_MESSAGE,
+        requestId: params.requestId,
+      }),
+      { status: 403, headers: { 'Content-Type': 'application/json' } }
+    ),
+  };
+}
+
+async function validateArchitectPrompts(params: {
+  architect: LoadedArchitect;
+  sessionSub: string;
+  userId: number;
+  toolId: number;
+  requestId: string;
+  log: RouteLogger;
+}): Promise<PhaseResult<{ prompts: LoadedPrompts }>> {
+  const prompts = (params.architect.prompts || []).sort(
+    (left, right) => left.position - right.position
+  );
+  const cardinality = validatePromptChainCardinality({
+    promptCount: prompts.length,
+    toolId: params.toolId,
+    requestId: params.requestId,
+    log: params.log,
+  });
+  if (!cardinality.ok) return cardinality;
+
+  const repositoryAccess = await preflightAssistantRepositoryAccess(
+    prompts,
+    params.sessionSub
+  );
+  if (!repositoryAccess.isAllowed) {
+    params.log.warn(
+      'Assistant execution blocked because repository access changed',
+      {
+        userId: params.userId,
+        toolId: params.toolId,
+        repositoryCount: repositoryAccess.repositoryIds.length,
+      }
+    );
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Access denied',
+          message: REPOSITORY_ACCESS_CHANGED_MESSAGE,
+          requestId: params.requestId,
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      ),
+    };
+  }
+  const distinctModelIds =
+    (params.architect.modelRoutingMode ?? 'legacy') === 'legacy'
+      ? [
+          ...new Set(
+            prompts
+              .map((prompt) => prompt.modelId)
+              .filter((id): id is number => typeof id === 'number')
+          ),
+        ]
+      : [];
+  if (distinctModelIds.length > 0) {
+    const accessibleModelIds = await filterAccessibleResourceIds(
+      params.userId,
+      'model',
+      distinctModelIds
+    );
+    if (accessibleModelIds.size !== distinctModelIds.length) {
+      params.log.warn('User lacks access to a model used by this assistant', {
+        userId: params.userId,
+        toolId: params.toolId,
+        distinctModelIds,
+        accessibleModelIds: Array.from(accessibleModelIds),
+      });
+      return {
+        ok: false,
+        response: new Response(
+          JSON.stringify({
+            error: 'Access denied',
+            message: 'You do not have access to a model this assistant uses',
+            requestId: params.requestId,
+          }),
+          { status: 403, headers: { 'Content-Type': 'application/json' } }
+        ),
+      };
+    }
+  }
+  return { ok: true, value: { prompts } };
+}
+
+/**
+ * Phase (b): authenticate the user and perform the ordinary feature/access
+ * preflight. The prompt graph is deliberately not returned as executable state:
+ * it is reloaded only after the coordinated execution row has taken the shared
+ * assistant lock.
  */
 async function authorizeAndLoadArchitect(
   toolId: number,
@@ -299,341 +683,195 @@ async function authorizeAndLoadArchitect(
   session: NonNullable<Awaited<ReturnType<typeof getServerSession>>>;
   currentUserData: CurrentUserData;
   userId: number;
-  architect: LoadedArchitect;
-  prompts: LoadedPrompts;
+  architect: ArchitectAccessSnapshot;
 }>> {
-  // 2. Authenticate user
-  const session = await getServerSession();
-  if (!session) {
-    log.warn('Unauthorized request - no session');
-    timer({ status: 'error', reason: 'unauthorized' });
-    return { ok: false, response: new Response('Unauthorized', { status: 401 }) };
-  }
-
-  log.debug('User authenticated', sanitizeForLogging({ userId: session.sub }));
-
-  // 3. Check tool access permission
-  const hasAccess = await hasCapabilityAccess('assistant-architect');
-  if (!hasAccess) {
-    log.warn('User does not have assistant-architect tool access', { userId: session.sub });
-    return {
-      ok: false,
-      response: new Response(
-        JSON.stringify({
-          error: 'Access denied',
-          message: 'You do not have permission to use the Assistant Architect tool',
-          requestId
-        }),
-        { status: 403, headers: { 'Content-Type': 'application/json' } }
-      )
-    };
-  }
-
-  // 4. Get current user
-  const currentUser = await getCurrentUserAction();
-  if (!currentUser.isSuccess) {
-    log.error('Failed to get current user');
-    return { ok: false, response: new Response('Unauthorized', { status: 401 }) };
-  }
-
-  const userId = currentUser.data.user.id;
-
-  // 5. Load assistant architect configuration with prompts
-  const architectResult = await getAssistantArchitectByIdAction(toolId.toString());
-  if (!architectResult.isSuccess || !architectResult.data) {
-    log.error('Assistant architect not found', { toolId });
-    return {
-      ok: false,
-      response: new Response(
-        JSON.stringify({
-          error: 'Assistant architect not found',
-          requestId
-        }),
-        { status: 404, headers: { 'Content-Type': 'application/json' } }
-      )
-    };
-  }
-
-  const architect = architectResult.data;
-
-  // SECURITY: Verify user has permission to execute this assistant architect
-  // Allow execution if:
-  // 1. User is the owner (can execute any of their own, regardless of status)
-  // 2. User is an admin (can execute any assistant)
-  // 3. The assistant is approved (any user with assistant-architect access can execute)
-  const isOwner = architect.userId === userId;
-  const isAdmin = await hasRole('administrator');
-  const isApproved = architect.status === 'approved';
-
-  // Determine access reason for logging
-  let accessReason: string | null = null;
-  if (isOwner) {
-    accessReason = 'owner';
-  } else if (isAdmin) {
-    accessReason = 'admin';
-  } else if (isApproved) {
-    accessReason = 'approved';
-  }
-
-  if (!accessReason) {
-    // No valid access path - deny execution
-    log.warn('User does not have access to this assistant architect', {
+  const principal = await loadArchitectPrincipal(
+    toolId,
+    requestId,
+    log,
+    timer
+  );
+  if (!principal.ok) return principal;
+  const { session, currentUserData, userId, architect } = principal.value;
+  const access = await authorizeArchitectResource({
+    architect,
+    userId,
+    toolId,
+    requestId,
+    log,
+    sessionSub: session.sub,
+  });
+  if (!access.ok) return access;
+  const repositoryAccess =
+    await preflightExecutionGraphBeforeRateCap({
+      assistantId: architect.id,
+      executorCognitoSub: session.sub,
       userId,
-      toolId,
-      architectOwnerId: architect.userId,
-      status: architect.status,
-      isOwner,
-      isAdmin,
-      isApproved
+      requestId,
+      log,
     });
-    return {
-      ok: false,
-      response: new Response(
-        JSON.stringify({
-          error: 'Access denied',
-          message: 'You do not have permission to execute this assistant architect',
-          requestId
-        }),
-        { status: 403, headers: { 'Content-Type': 'application/json' } }
-      )
-    };
-  }
-
-  // SECURITY (#1206): per-resource grant filter, BENEATH the capability +
-  // owner/admin/approved gate above. An assistant may be restricted to specific
-  // roles/groups (resource_access_grants). The owner always reaches their own
-  // assistant; everyone else (admins pass inside userCanAccessResource) must
-  // match a grant. Zero grants = unrestricted (preserves today's behavior).
-  if (!isOwner) {
-    const canAccessAssistant = await userCanAccessResource(userId, 'assistant', architect.id);
-    if (!canAccessAssistant) {
-      log.warn('User lacks per-resource grant for assistant architect', {
-        userId,
-        toolId,
-        architectId: architect.id,
-      });
-      return {
-        ok: false,
-        response: new Response(
-          JSON.stringify({
-            error: 'Access denied',
-            message: 'You do not have access to this assistant',
-            requestId,
-          }),
-          { status: 403, headers: { 'Content-Type': 'application/json' } }
-        ),
-      };
-    }
-  }
-
-  // Log successful authorization for audit trail
+  if (!repositoryAccess.ok) return repositoryAccess;
   log.info('Authorization granted for assistant architect execution', {
     userId,
     toolId,
     architectOwnerId: architect.userId,
     status: architect.status,
-    accessReason
+    accessReason: access.value.accessReason,
+    featureAccessReason: access.value.featureAccessReason,
   });
-
-  const prompts = (architect.prompts || []).sort((a, b) => a.position - b.position);
-
-  if (!prompts || prompts.length === 0) {
-    log.error('No prompts configured for assistant architect', { toolId });
-    return {
-      ok: false,
-      response: new Response(
-        JSON.stringify({
-          error: 'No prompts configured for this assistant architect',
-          requestId
-        }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      )
-    };
-  }
-
-  // Validate prompt chain length to prevent resource exhaustion
-  if (prompts.length > MAX_PROMPT_CHAIN_LENGTH) {
-    log.warn('Prompt chain too long', { promptCount: prompts.length, toolId, maxAllowed: MAX_PROMPT_CHAIN_LENGTH });
-    return {
-      ok: false,
-      response: new Response(
-        JSON.stringify({
-          error: 'Prompt chain too long',
-          message: `Maximum ${MAX_PROMPT_CHAIN_LENGTH} prompts allowed per execution`,
-          requestId
-        }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      )
-    };
-  }
-
-  // Repository bindings are author-selected, but execution is always bounded by
-  // the current principal. Check the complete chain before creating an execution
-  // record or invoking retrieval, tools, or a model. Assistant ownership is
-  // intentionally not an input to this check.
-  const repositoryAccess = await preflightAssistantRepositoryAccess(prompts, session.sub);
-  if (!repositoryAccess.isAllowed) {
-    log.warn('Assistant execution blocked because repository access changed', {
+  return {
+    ok: true,
+    value: {
+      session,
+      currentUserData,
       userId,
-      toolId,
-      repositoryCount: repositoryAccess.repositoryIds.length,
-    });
-    return {
-      ok: false,
-      response: new Response(
-        JSON.stringify({
-          error: 'Access denied',
-          message: REPOSITORY_ACCESS_CHANGED_MESSAGE,
-          requestId,
-        }),
-        { status: 403, headers: { 'Content-Type': 'application/json' } }
-      ),
-    };
-  }
-
-  // SECURITY (#1206): per-resource MODEL enforcement on the assistant execution
-  // path. Each prompt names a model chosen by the author; the EXECUTING user
-  // must be able to access every one. Checked up-front (before any streaming)
-  // so a forbidden model yields a clean typed 403 rather than a mid-stream
-  // error. Admins pass inside userCanAccessResource; a model with zero grants is
-  // unrestricted. Distinct ids only, to avoid redundant checks in a chain that
-  // reuses a model.
-  const distinctModelIds = (architect.modelRoutingMode ?? 'legacy') === 'legacy' ? [
-    ...new Set(
-      prompts
-        .map((p) => p.modelId)
-        .filter((id): id is number => typeof id === 'number')
-    ),
-  ] : [];
-  if (distinctModelIds.length > 0) {
-    const accessibleModelIds = await filterAccessibleResourceIds(userId, 'model', distinctModelIds);
-    if (accessibleModelIds.size !== distinctModelIds.length) {
-      log.warn('User lacks access to a model used by this assistant', {
-        userId,
-        toolId,
-        distinctModelIds,
-        accessibleModelIds: Array.from(accessibleModelIds),
-      });
-      return {
-        ok: false,
-        response: new Response(
-          JSON.stringify({
-            error: 'Access denied',
-            message: 'You do not have access to a model this assistant uses',
-            requestId,
-          }),
-          { status: 403, headers: { 'Content-Type': 'application/json' } }
-        ),
-      };
-    }
-  }
-
-  log.info('Assistant architect loaded', sanitizeForLogging({
-    toolId,
-    name: architect.name,
-    promptCount: prompts.length,
-    userId
-  }));
-
-  return { ok: true, value: { session, currentUserData: currentUser.data, userId, architect, prompts } };
+      architect,
+    },
+  };
 }
 
 /**
- * Phase (c): create the tool_execution record. For an agentic assistant with a
- * per-assistant hourly cap (Issue #926), the insert is GUARDED atomically:
- * INSERT ... SELECT ... WHERE <window count> < cap. Collapsing the count +
- * insert into ONE statement removes the prior check-then-insert TOCTOU. A
- * guarded insert that returns no row means the cap is reached -> 429. NULL/unset
- * cap => unguarded insert.
- *
- * input_data is bound (${...}::jsonb) — postgres.js is the active driver, which
- * binds parameterized casts correctly (the old sql.raw() JSONB workaround was
- * for the retired RDS Data API driver). See Issue #599.
+ * Phase (c): lock the assistant, recheck current resource/model grants, apply
+ * the agentic rate cap, and create the active execution row in one transaction.
+ * Import updates use the same assistant row lock before replacing the graph.
  */
 async function createToolExecutionRecord(args: {
-  architect: LoadedArchitect;
   toolId: number;
   userId: number;
   inputs: Record<string, unknown>;
   requestId: string;
   log: RouteLogger;
   timer: RouteTimer;
-}): Promise<PhaseResult<{ executionId: number }>> {
-  const { architect, toolId, userId, inputs, requestId, log, timer } = args;
-  const inputData = Object.keys(inputs).length > 0 ? inputs : { __no_inputs: true };
-  const inputDataJson = JSON.stringify(inputData);
-  const startedAtIso = new Date().toISOString();
-
-  const rateCap = architect.mode === 'agentic'
-    ? (architect as { agentMaxRequestsPerHour?: number | null }).agentMaxRequestsPerHour
-    : null;
-  const rateCapped = typeof rateCap === 'number' && rateCap > 0;
-
-  const executionResult = await executeQuery(
-    (db) => {
-      if (rateCapped) {
-        const windowStartIso = new Date(Date.now() - AGENT_RATE_LIMIT_WINDOW_MS).toISOString();
-        return db.execute(sql`
-          INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
-          SELECT ${userId}, ${inputDataJson}::jsonb, 'running', ${startedAtIso}::timestamp, ${toolId}
-          WHERE (
-            SELECT count(*) FROM tool_executions
-            WHERE assistant_architect_id = ${toolId} AND started_at >= ${windowStartIso}::timestamp
-          ) < ${rateCap}
-          RETURNING id
-        `);
-      }
-      return db.execute(sql`
-        INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
-        VALUES (${userId}, ${inputDataJson}::jsonb, 'running', ${startedAtIso}::timestamp, ${toolId})
-        RETURNING id
-      `);
-    },
-    'createToolExecution'
-  );
-
-  // postgres.js returns result directly as array-like object (no .rows property - Issue #603)
-  const rows = executionResult as unknown as Array<{ id: number }>;
-  if (!rows || rows.length === 0 || !rows[0]?.id) {
-    if (rateCapped) {
-      // Guarded insert added no row => the assistant is at/over its hourly cap.
-      log.warn('Assistant rate limit exceeded', { toolId, rateCap });
-      timer({ status: 'rate_limited' });
-      return {
-        ok: false,
-        response: new Response(
-          JSON.stringify({
-            error: 'Rate limit exceeded',
-            message: `This assistant is limited to ${rateCap} run(s) per hour. Please try again later.`,
-            requestId
-          }),
-          {
-            status: 429,
-            headers: {
-              'Content-Type': 'application/json',
-              'Retry-After': '3600',
-              'X-Request-Id': requestId
-            }
-          }
-        )
-      };
+}): Promise<
+  PhaseResult<{ executionId: number; startedAt: Date; deadlineAt: Date }>
+> {
+  const { toolId, userId, inputs, requestId, log, timer } = args;
+  const coordinated = await createCoordinatedAssistantExecution({
+    assistantId: toolId,
+    userId,
+    inputs,
+    enforceAgentRateCap: true,
+  });
+  if (!coordinated.created) {
+    if (coordinated.reason === 'invalid_graph') {
+      const invalidGraph = validatePromptChainCardinality({
+        promptCount: coordinated.promptCount,
+        toolId,
+        requestId,
+        log,
+      });
+      if (!invalidGraph.ok) return invalidGraph;
+      throw ErrorFactories.sysInternalError(
+        'Execution coordinator returned a valid graph as invalid'
+      );
     }
-    log.error('Failed to create tool execution', { toolId });
+    const { rateCap } = coordinated;
+    log.warn('Assistant rate limit exceeded', { toolId, rateCap });
+    timer({ status: 'rate_limited' });
     return {
       ok: false,
       response: new Response(
         JSON.stringify({
-          error: 'Failed to create execution record',
+          error: 'Rate limit exceeded',
+          message: `This assistant is limited to ${rateCap} run(s) per hour. Please try again later.`,
           requestId
         }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
+        {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/json',
+            'Retry-After': '3600',
+            'X-Request-Id': requestId
+          }
+        }
       )
     };
   }
 
-  const executionId = Number(rows[0].id);
+  const { executionId, startedAt, deadlineAt } = coordinated;
   log.info('Tool execution created', { executionId, toolId });
-  return { ok: true, value: { executionId } };
+  return {
+    ok: true,
+    value: { executionId, startedAt, deadlineAt },
+  };
+}
+
+async function failExecutionDuringSetup(
+  executionId: number,
+  errorMessage: string
+): Promise<void> {
+  await executeQuery(
+    (db) => db.execute(sql`
+      UPDATE tool_executions
+         SET status = 'failed',
+             completed_at = ${new Date().toISOString()}::timestamp,
+             error_message = ${errorMessage}
+       WHERE id = ${executionId}
+         AND status IN ('pending', 'running')
+    `),
+    'failToolExecutionDuringSetup'
+  );
+}
+
+async function loadProtectedExecutionGraph(args: {
+  executionId: number;
+  toolId: number;
+  sessionSub: string;
+  userId: number;
+  requestId: string;
+  log: RouteLogger;
+}): Promise<
+  PhaseResult<{ architect: LoadedArchitect; prompts: LoadedPrompts }>
+> {
+  const currentArchitect = await getAssistantArchitectByIdAction(
+    args.toolId.toString(),
+    INTERNAL_ASSISTANT_LOOKUP
+  );
+  if (!currentArchitect.isSuccess || !currentArchitect.data) {
+    await failExecutionDuringSetup(
+      args.executionId,
+      'Assistant configuration unavailable after execution start'
+    );
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Assistant architect not found',
+          requestId: args.requestId,
+        }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } }
+      ),
+    };
+  }
+  const architect = currentArchitect.data;
+  const promptResult = await validateArchitectPrompts({
+    architect,
+    sessionSub: args.sessionSub,
+    userId: args.userId,
+    toolId: args.toolId,
+    requestId: args.requestId,
+    log: args.log,
+  });
+  if (!promptResult.ok) {
+    await failExecutionDuringSetup(
+      args.executionId,
+      'Assistant configuration failed post-lock validation'
+    );
+    return promptResult;
+  }
+  args.log.info(
+    'Assistant architect loaded after execution coordination',
+    sanitizeForLogging({
+      toolId: args.toolId,
+      name: architect.name,
+      promptCount: promptResult.value.prompts.length,
+      userId: args.userId,
+    })
+  );
+  return {
+    ok: true,
+    value: { architect, prompts: promptResult.value.prompts },
+  };
 }
 
 /**
@@ -774,6 +1012,89 @@ async function resolveAssistantOwnerSub(
   }
 }
 
+function buildExecuteRouteErrorResponse(
+  error: unknown,
+  requestId: string,
+  log: RouteLogger,
+  timer: RouteTimer
+): Response {
+  if (error instanceof ContentSafetyBlockedError) {
+    log.warn('Content blocked by safety guardrails', {
+      error: { message: error.message, name: error.name },
+      categories: error.blockedCategories,
+      source: error.source,
+    });
+    timer({ status: 'blocked' });
+    return new Response(
+      JSON.stringify({
+        error: error.message,
+        code: 'CONTENT_BLOCKED',
+        categories: error.blockedCategories,
+        source: error.source,
+        requestId,
+      }),
+      {
+        status: 400,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Request-Id': requestId,
+        },
+      }
+    );
+  }
+  if (
+    error !== null &&
+    typeof error === 'object' &&
+    'statusCode' in error &&
+    typeof error.statusCode === 'number' &&
+    (error.statusCode === 403 || error.statusCode === 404)
+  ) {
+    const message =
+      'userMessage' in error && typeof error.userMessage === 'string'
+        ? error.userMessage
+        : 'You do not have permission to execute this assistant';
+    log.warn('Assistant execution access changed during coordination', {
+      statusCode: error.statusCode,
+    });
+    timer({ status: 'error', reason: 'access_changed' });
+    return new Response(
+      JSON.stringify({
+        error: error.statusCode === 404 ? 'Assistant architect not found' : 'Access denied',
+        message,
+        requestId,
+      }),
+      {
+        status: error.statusCode,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Request-Id': requestId,
+        },
+      }
+    );
+  }
+  log.error('Assistant architect execution error', {
+    error:
+      error instanceof Error
+        ? { message: error.message, name: error.name, stack: error.stack }
+        : String(error),
+  });
+  timer({ status: 'error' });
+  return new Response(
+    JSON.stringify({
+      error: 'Failed to execute assistant architect',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      requestId,
+    }),
+    {
+      status: 500,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Request-Id': requestId,
+      },
+    }
+  );
+}
+
 /**
  * Assistant Architect Execution API - Native SSE Streaming
  *
@@ -800,7 +1121,7 @@ export async function POST(req: Request) {
     // 2-5. Authenticate, authorize, load architect + validate prompt chain
     const authorized = await authorizeAndLoadArchitect(toolId, requestId, log, timer);
     if (!authorized.ok) return authorized.response;
-    const { session, currentUserData, userId, architect, prompts } = authorized.value;
+    const { session, currentUserData, userId } = authorized.value;
 
     // Runtime file inputs are opaque references to caller-owned ephemeral
     // repositories. Resolve them before creating an execution record so forged,
@@ -830,7 +1151,6 @@ export async function POST(req: Request) {
 
     // 6. Create the tool_execution record (rate-cap guarded for agentic mode)
     const created = await createToolExecutionRecord({
-      architect,
       toolId,
       userId,
       inputs: modelInputs,
@@ -839,7 +1159,22 @@ export async function POST(req: Request) {
       timer,
     });
     if (!created.ok) return created.response;
-    const { executionId } = created.value;
+    const { executionId, startedAt, deadlineAt } = created.value;
+
+    // The coordinated row now protects this graph from import replacement.
+    // Reload after the lock transaction commits so an update that won the race
+    // is reflected here; an update that lost observes this active row and
+    // returns 409 without mutating the graph.
+    const protectedGraph = await loadProtectedExecutionGraph({
+      executionId,
+      toolId,
+      sessionSub: session.sub,
+      userId,
+      requestId,
+      log,
+    });
+    if (!protectedGraph.ok) return protectedGraph.response;
+    const { architect, prompts } = protectedGraph.value;
 
     // 7. Emit execution-start event
     await storeExecutionEvent(executionId, 'execution-start', {
@@ -890,7 +1225,8 @@ export async function POST(req: Request) {
       userId,
       runtimeRepositoryIds: runtimeRepositoryInputs.repositoryIds,
       runtimeRepositoryQuery: runtimeRepositoryInputs.queryContext,
-      executionStartTime: Date.now(),
+      executionStartTime: startedAt.getTime(),
+      executionDeadlineAt: deadlineAt,
       assistantId: toolId,
       modelRoutingMode: architect.modelRoutingMode ?? 'legacy',
       modelRoutingFamily: architect.modelRoutingFamily ?? null,
@@ -925,68 +1261,25 @@ export async function POST(req: Request) {
     });
 
   } catch (error) {
-    // Issue #657/#835: Handle ContentSafetyBlockedError at warn level (expected behavior)
-    if (error instanceof ContentSafetyBlockedError) {
-      log.warn('Content blocked by safety guardrails', {
-        error: { message: error.message, name: error.name },
-        categories: error.blockedCategories,
-        source: error.source
-      });
-      timer({ status: 'blocked' });
-      return new Response(
-        JSON.stringify({
-          error: error.message,
-          code: 'CONTENT_BLOCKED',
-          categories: error.blockedCategories,
-          source: error.source,
-          requestId
-        }),
-        {
-          status: 400,
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Request-Id': requestId
-          }
-        }
-      );
-    }
-
-    log.error('Assistant architect execution error', {
-      error: error instanceof Error ? {
-        message: error.message,
-        name: error.name,
-        stack: error.stack
-      } : String(error)
-    });
-
-    timer({ status: 'error' });
-
-    return new Response(
-      JSON.stringify({
-        error: 'Failed to execute assistant architect',
-        message: error instanceof Error ? error.message : 'Unknown error',
-        requestId
-      }),
-      {
-        status: 500,
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Request-Id': requestId
-        }
-      }
-    );
+    return buildExecuteRouteErrorResponse(error, requestId, log, timer);
   }
 }
 
-/** Resolved value of executeSinglePromptWithCompletion (UI stream or undefined). */
-type SinglePromptResult = Awaited<ReturnType<typeof executeSinglePromptWithCompletion>>;
+type PromptStreamResponse = Awaited<ReturnType<typeof unifiedStreamingService.stream>>;
+
+/** Persistence result for one prompt, including its optional UI stream. */
+interface SinglePromptResult {
+  streamResponse?: PromptStreamResponse;
+  usage?: PromptFinishUsage;
+}
 
 /**
  * Execute every prompt at one position IN PARALLEL. On any rejection, logs the
  * failed prompt ids (mapped positionally to the original prompts) and throws a
  * wrapped sysInternalError. On success, returns the UI stream response from the
  * prompt explicitly marked for UI streaming (only one is), or undefined.
- * Behavior matches the original inline `if (isParallel)` branch exactly.
+ * The execution-complete transition deliberately occurs only after the final
+ * position's entire sibling set has settled.
  */
 async function executeParallelPositionGroup(args: {
   promptsAtPosition: ChainPrompt[];
@@ -997,7 +1290,7 @@ async function executeParallelPositionGroup(args: {
   requestId: string;
   log: ReturnType<typeof createLogger>;
   totalPrompts: number;
-}): Promise<SinglePromptResult> {
+}): Promise<PromptStreamResponse | undefined> {
   const { promptsAtPosition, position, isLastPosition, inputs, context, requestId, log, totalPrompts } = args;
 
   // Validate parallelGroup field usage
@@ -1019,7 +1312,8 @@ async function executeParallelPositionGroup(args: {
       log,
       totalPrompts,
       // First prompt in last position gets stream response for UI
-      isLastPrompt: isLastPosition && idx === 0
+      isLastPrompt: isLastPosition && idx === 0,
+      completeExecution: false
     })
   );
 
@@ -1065,13 +1359,27 @@ async function executeParallelPositionGroup(args: {
       }
     );
   }
+  if (isLastPosition) {
+    const completedUsages = results
+      .filter((result) => result.status === 'fulfilled')
+      .map((result) => result.value.usage);
+    await finalizeExecutionOnLastPrompt(
+      context,
+      aggregatePromptUsage(completedUsages),
+      totalPrompts,
+      log
+    );
+  }
 
   // Extract successful stream responses
   const successResults = results.filter(r => r.status === 'fulfilled') as PromiseFulfilledResult<SinglePromptResult>[];
   // Find the result explicitly marked for UI streaming (isLastPosition && idx === 0)
-  // Only one parallel prompt gets isLastPrompt=true, so only one result has value !== undefined
-  const uiStreamResult = successResults.find(r => r.value !== undefined);
-  const lastStreamResponse: SinglePromptResult = uiStreamResult?.value;
+  // Only one parallel prompt gets isLastPrompt=true, so only one result carries
+  // a streamResponse; every result carries its own usage when reported.
+  const uiStreamResult = successResults.find(
+    result => result.value.streamResponse !== undefined
+  );
+  const lastStreamResponse = uiStreamResult?.value.streamResponse;
 
   // Verify UI stream was assigned for last position
   if (isLastPosition && !lastStreamResponse) {
@@ -1168,7 +1476,7 @@ async function executePromptChain(
       const prompt = promptsAtPosition[0];
       const isLastPrompt = position === sortedPositions[sortedPositions.length - 1] && promptsAtPosition.length === 1;
 
-      const streamResponse = await executeSinglePromptWithCompletion({
+      const promptResult = await executeSinglePromptWithCompletion({
         prompt,
         inputs,
         context,
@@ -1178,8 +1486,8 @@ async function executePromptChain(
         isLastPrompt
       });
 
-      if (streamResponse) {
-        lastStreamResponse = streamResponse;
+      if (promptResult.streamResponse) {
+        lastStreamResponse = promptResult.streamResponse;
       }
     }
   }
@@ -1191,35 +1499,6 @@ async function executePromptChain(
   }
 
   return lastStreamResponse;
-}
-
-/**
- * Derive per-token USD cost rates from a model row's per-1k-token numeric
- * columns (stored as strings). Returns null when either rate is missing/invalid,
- * which makes the cost cap a no-op for that model (the maxSteps bound still
- * applies). (Issue #926.)
- */
-function buildCostRates(
-  modelData: { inputCostPer1kTokens?: string | null; outputCostPer1kTokens?: string | null }
-): { inputPerToken: number; outputPerToken: number } | null {
-  // A cost cap needs COMPLETE pricing. Parse each rate; a missing/blank/non-finite/
-  // negative column yields null ("unknown"). If EITHER rate is unknown we cannot
-  // compute an accurate per-step cost — treating the unknown side as 0 would
-  // UNDER-count (e.g. a model with priced input but a null output column would let
-  // the cap never trip). Return null so the cap is simply not enforced (the
-  // maxSteps/timeout bounds still apply) rather than silently under-counting.
-  // (Correctness review — corrects the earlier "missing => 0" behavior.)
-  const parseRate = (raw: string | null | undefined): number | null => {
-    if (raw === null || raw === undefined || raw === "") return null;
-    const n = Number(raw);
-    return Number.isFinite(n) && n >= 0 ? n : null;
-  };
-  const inPer1k = parseRate(modelData.inputCostPer1kTokens);
-  const outPer1k = parseRate(modelData.outputCostPer1kTokens);
-  if (inPer1k === null || outPer1k === null) return null;
-  // A genuinely free model (both rates 0) has no cost to cap.
-  if (inPer1k === 0 && outPer1k === 0) return null;
-  return { inputPerToken: inPer1k / 1000, outputPerToken: outPer1k / 1000 };
 }
 
 /** The agentic-mode fields read off the architect row (Issue #926). */
@@ -1307,25 +1586,28 @@ async function persistAgenticResult(args: {
   usage?: AgenticFinishUsage;
   finishReason: string;
   steps: Array<{ toolCalls?: unknown[] }>;
-  /** Per-token USD rates used by the in-loop cost cap; null = model unpriced. */
-  costRates: { inputPerToken: number; outputPerToken: number } | null;
+  estimatedCostCents: number;
   modelRouting: AssistantArchitectRoutingMetadata;
   log: ReturnType<typeof createLogger>;
 }): Promise<void> {
-  const { context, drivingPromptId, agentStartTime, text, usage, finishReason, steps, costRates, modelRouting, log } = args;
+  const {
+    context,
+    drivingPromptId,
+    agentStartTime,
+    text,
+    usage,
+    finishReason,
+    steps,
+    estimatedCostCents,
+    modelRouting,
+    log,
+  } = args;
   const executionTimeMs = Date.now() - agentStartTime;
   const toolCallCount = steps.reduce((n, s) => n + (s.toolCalls?.length || 0), 0);
   // Persist the run's estimated spend (#926 — epic #922 completion audit): the
   // cap was enforced in-loop but the actual cost was never recorded for audit /
   // reconciliation. Same rates and formula as the adapter's cost predicate.
   // Null when the model is unpriced or usage was not reported.
-  const estimatedCostCents =
-    costRates && usage
-      ? Math.round(
-          (usage.promptTokens * costRates.inputPerToken +
-            usage.completionTokens * costRates.outputPerToken) * 100
-        )
-      : null;
   log.info('Agentic execution finished', {
     executionId: context.executionId,
     estimatedCostCents,
@@ -1505,6 +1787,366 @@ function storeToolInvocationEvent(
   });
 }
 
+interface PreparedAgenticRun {
+  config: AgenticConfig;
+  drivingPrompt: ChainPrompt;
+  resolved: Awaited<ReturnType<typeof resolveAgentTools>>;
+  effectiveTools: ToolSet;
+  effectiveSystemPrompt?: string;
+  userMessage: UIMessage;
+  modelRoute: Awaited<ReturnType<typeof routeAssistantArchitectModel>>;
+}
+
+interface AgenticCostReservation {
+  costRates: NonNullable<ReturnType<typeof buildCostRates>>;
+  maxOutputTokens: number;
+  conservativeReservationCents: number;
+  costLeaseId: string;
+}
+
+async function prepareAgenticRun(args: {
+  architect: AgenticArchitectFields;
+  prompts: ChainPrompt[];
+  inputs: Record<string, unknown>;
+  context: PromptExecutionContext;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+  approveDestructiveTools: boolean;
+}): Promise<PreparedAgenticRun> {
+  if (!args.context.caller) {
+    throw ErrorFactories.sysInternalError(
+      'Agentic execution requires caller context',
+      { details: { executionId: args.context.executionId } }
+    );
+  }
+  const limits = resolveAgentRunLimits({
+    agentMaxSteps: args.architect.agentMaxSteps,
+    agentTimeoutSeconds: args.architect.agentTimeoutSeconds,
+    agentCostCapCents: args.architect.agentCostCapCents,
+  });
+  const config: AgenticConfig = {
+    enabledToolIdentifiers: Array.isArray(args.architect.agentEnabledTools)
+      ? args.architect.agentEnabledTools
+      : [],
+    enabledConnectorIds: Array.isArray(args.architect.agentEnabledConnectors)
+      ? args.architect.agentEnabledConnectors
+      : [],
+    maxSteps: limits.maxSteps,
+    timeoutSeconds: limits.timeoutSeconds,
+    costCapCents: limits.costCapCents,
+  };
+  const orderedPrompts = [...args.prompts].sort(
+    (left, right) => left.position - right.position
+  );
+  const drivingPrompt = orderedPrompts[0];
+  if (!drivingPrompt?.modelId) {
+    throw ErrorFactories.sysInternalError(
+      'Agentic assistant has no model configured',
+      { details: { executionId: args.context.executionId } }
+    );
+  }
+  const drivingModelId = drivingPrompt.modelId;
+  const resolved = await resolveAgentTools({
+    enabledToolIdentifiers: config.enabledToolIdentifiers,
+    enabledConnectorIds: config.enabledConnectorIds,
+    caller: {
+      userId: args.context.userId,
+      cognitoSub: args.context.userCognitoSub,
+      scopes: args.context.caller.scopes,
+      roleNames: args.context.caller.roleNames,
+      idToken: args.context.caller.idToken,
+    },
+    requestId: args.requestId,
+    approveDestructive: args.approveDestructiveTools,
+    onToolInvocation: (event) =>
+      storeToolInvocationEvent(
+        args.context.executionId,
+        drivingPrompt.id,
+        event
+      ),
+  });
+  return withAgentConnectorCleanupOnError(
+    resolved.connectorResults,
+    args.requestId,
+    async () => {
+      const repositoryContext = createAgenticRepositoryContext({
+        prompts: orderedPrompts,
+        runtimeRepositoryIds: args.context.runtimeRepositoryIds,
+        userCognitoSub: args.context.userCognitoSub,
+      });
+      const effectiveTools: ToolSet = {
+        ...resolved.tools,
+        ...repositoryContext.tools,
+      };
+      args.log.info('Agentic tools resolved', {
+        executionId: args.context.executionId,
+        granted: resolved.grantedToolIdentifiers.length,
+        denied: resolved.deniedToolIdentifiers.length,
+        connectorTools: resolved.connectorResults.length,
+        repositoryCount: repositoryContext.repositoryIds.length,
+        maxSteps: config.maxSteps,
+      });
+      const { systemPrompt, userText } = buildAgenticInitialMessage(
+        orderedPrompts,
+        args.inputs
+      );
+      const effectiveSystemPrompt =
+        [systemPrompt, repositoryContext.systemGuidance]
+          .filter(Boolean)
+          .join('\n\n') || undefined;
+      const imageParts = extractImageInputParts(args.inputs);
+      if (imageParts.length > 0) {
+        args.log.info('Attaching image inputs to agentic run', {
+          executionId: args.context.executionId,
+          imageCount: imageParts.length,
+        });
+      }
+      const userMessage: UIMessage = {
+        id: `agentic-${args.context.executionId}-${Date.now()}`,
+        role: 'user',
+        parts: [{ type: 'text', text: userText }, ...imageParts],
+      };
+      const modelRoute = await routeAssistantArchitectModel({
+        text: userText,
+        userId: args.context.userId,
+        fallbackModelDbId: drivingModelId,
+        routingMode: args.context.modelRoutingMode,
+        requestedFamily: args.context.modelRoutingFamily,
+        requirements: {
+          requiredTools: config.enabledToolIdentifiers,
+          requiresFunctionCalling: Object.keys(effectiveTools).length > 0,
+          requiresVision: imageParts.length > 0,
+        },
+      });
+      args.context.modelRoutes.set(drivingPrompt.id, modelRoute.metadata);
+      return {
+        config,
+        drivingPrompt,
+        resolved,
+        effectiveTools,
+        effectiveSystemPrompt,
+        userMessage,
+        modelRoute,
+      };
+    }
+  );
+}
+
+async function reserveAgenticRunCost(args: {
+  run: PreparedAgenticRun;
+  architect: AgenticArchitectFields;
+  context: PromptExecutionContext;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+}): Promise<AgenticCostReservation> {
+  const modelData = args.run.modelRoute.model;
+  const costRates = buildCostRates(modelData);
+  if (costRates === null) {
+    args.log.error('Agentic cost cap rejected unpriced model', {
+      executionId: args.context.executionId,
+      assistantName: args.architect.name,
+      modelId: String(modelData.modelId),
+      costCapCents: args.run.config.costCapCents,
+    });
+    await closeAgentConnectorClients(
+      args.run.resolved.connectorResults,
+      args.requestId
+    );
+    throw ErrorFactories.invalidInput(
+      'modelId',
+      String(modelData.modelId),
+      'A model with complete input and output pricing is required for agentic execution'
+    );
+  }
+  const tokenLimits = resolveTrustedAgenticTokenLimits(
+    modelData,
+    AGENT_LIMIT_CEILINGS.maxOutputTokens
+  );
+  if (tokenLimits === null) {
+    await closeAgentConnectorClients(
+      args.run.resolved.connectorResults,
+      args.requestId
+    );
+    throw ErrorFactories.invalidInput(
+      'modelId',
+      String(modelData.modelId),
+      'A trusted model context-token ceiling is required for agentic execution'
+    );
+  }
+  const conservativeReservationCents = conservativeAgenticReservationCents(
+    args.run.config.costCapCents,
+    tokenLimits.contextTokens,
+    tokenLimits.maxOutputTokens,
+    costRates
+  );
+  const reservation = await reserveAgenticCost(
+    args.context.userId,
+    args.context.executionId,
+    conservativeReservationCents
+  );
+  if (!reservation.allowed) {
+    await closeAgentConnectorClients(
+      args.run.resolved.connectorResults,
+      args.requestId
+    );
+    throw ErrorFactories.invalidInput(
+      'costCapCents',
+      args.run.config.costCapCents,
+      `Agentic Assistant ${reservation.reason.replace('_', ' ')} is exhausted`
+    );
+  }
+  return {
+    costRates,
+    maxOutputTokens: tokenLimits.maxOutputTokens,
+    conservativeReservationCents,
+    costLeaseId: reservation.leaseId,
+  };
+}
+
+function createAgenticCleanup(args: {
+  connectorResults: McpConnectorToolsResult[];
+  costLeaseId: string;
+  executionId: number;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+}): () => Promise<void> {
+  let cleanedUp = false;
+  return async () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    try {
+      await closeAgentConnectorClients(
+        args.connectorResults,
+        args.requestId
+      );
+    } finally {
+      await releaseAgenticCost(args.costLeaseId).catch((error: unknown) => {
+        args.log.error('Failed to release agentic cost reservation', {
+          executionId: args.executionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
+  };
+}
+
+async function startAgenticStream(args: {
+  run: PreparedAgenticRun;
+  cost: AgenticCostReservation;
+  context: PromptExecutionContext;
+  agentStartTime: number;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+}) {
+  const cleanup = createAgenticCleanup({
+    connectorResults: args.run.resolved.connectorResults,
+    costLeaseId: args.cost.costLeaseId,
+    executionId: args.context.executionId,
+    requestId: args.requestId,
+    log: args.log,
+  });
+  const modelData = args.run.modelRoute.model;
+  let timeout: number;
+  try {
+    timeout = Math.min(
+      args.run.config.timeoutSeconds * 1000,
+      remainingAssistantExecutionTimeoutMs(
+        args.context.executionDeadlineAt
+      )
+    );
+  } catch (error) {
+    // Connector discovery and cost admission happen before this remaining-time
+    // check. If setup consumed the coordinated deadline, the stream callbacks
+    // will never be installed, so release both resources here.
+    await cleanup();
+    throw error;
+  }
+  return new Promise<
+    Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined
+  >((resolve, reject) => {
+    const streamRequest: StreamRequest = {
+      messages: [args.run.userMessage],
+      modelId: String(modelData.modelId),
+      provider: String(modelData.provider),
+      userId: args.context.userId.toString(),
+      sessionId: args.context.userCognitoSub,
+      source: 'assistant_execution' as const,
+      systemPrompt: args.run.effectiveSystemPrompt,
+      tools:
+        Object.keys(args.run.effectiveTools).length > 0
+          ? args.run.effectiveTools
+          : undefined,
+      maxSteps: args.run.config.maxSteps,
+      maxTokens: args.cost.maxOutputTokens,
+      costCapCents: args.run.config.costCapCents,
+      costRates: args.cost.costRates,
+      timeout,
+      callbacks: {
+        onFinish: async ({ text, usage, finishReason, steps }) => {
+          try {
+            const estimatedCostCents = usage
+              ? estimateUsageCostCents(args.cost.costRates, usage)
+              : args.cost.conservativeReservationCents;
+            const reconciliation = await reconcileAgenticCost(
+              args.cost.costLeaseId,
+              estimatedCostCents
+            );
+            if (!reconciliation.withinDeploymentBudget) {
+              args.log.error(
+                'Agentic actual cost exceeded the hourly platform budget',
+                {
+                  executionId: args.context.executionId,
+                  deploymentHourlyCostCents:
+                    reconciliation.deploymentHourlyCostCents,
+                  deploymentBudgetCents: reconciliation.deploymentBudgetCents,
+                }
+              );
+            }
+            await persistAgenticResult({
+              context: args.context,
+              drivingPromptId: args.run.drivingPrompt.id,
+              agentStartTime: args.agentStartTime,
+              text: text || '',
+              usage,
+              finishReason,
+              steps: steps || [],
+              estimatedCostCents,
+              modelRouting: args.run.modelRoute.metadata,
+              log: args.log,
+            });
+          } catch (error) {
+            args.log.error('Failed to finalize agentic execution', {
+              error,
+              executionId: args.context.executionId,
+            });
+          } finally {
+            await cleanup();
+          }
+        },
+        onError: async (error) => {
+          await cleanup();
+          args.log.error('Agentic streaming error', {
+            error,
+            executionId: args.context.executionId,
+          });
+          await markAgenticExecutionFailed(args.context, error, args.log);
+        },
+      },
+    };
+    void unifiedStreamingService
+      .stream(streamRequest)
+      .then(resolve)
+      .catch(async (error) => {
+        await cleanup();
+        args.log.error('Failed to start agentic stream', {
+          error,
+          executionId: args.context.executionId,
+        });
+        reject(error);
+      });
+  });
+}
+
 /**
  * Execute an assistant in AGENTIC mode (Issue #926): a model loop with tool
  * access. Tools are resolved from the unified catalog (#924, internal surface,
@@ -1522,212 +2164,27 @@ async function executeAgenticAssistant(args: {
   context: PromptExecutionContext;
   requestId: string;
   log: ReturnType<typeof createLogger>;
-  /** Per-run approval to execute destructive agent tools (Issue #926). */
   approveDestructiveTools: boolean;
 }) {
-  const { architect, prompts, inputs, context, requestId, log, approveDestructiveTools } = args;
-  log.info('Starting agentic assistant execution', {
-    executionId: context.executionId,
-    approveDestructiveTools,
+  args.log.info('Starting agentic assistant execution', {
+    executionId: args.context.executionId,
+    approveDestructiveTools: args.approveDestructiveTools,
   });
-
-  if (!context.caller) {
-    throw ErrorFactories.sysInternalError('Agentic execution requires caller context', {
-      details: { executionId: context.executionId }
-    });
-  }
-
-  // Resolve run limits (defaults + clamp to ceilings; DB also CHECK-constrains).
-  const limits = resolveAgentRunLimits({
-    agentMaxSteps: architect.agentMaxSteps,
-    agentTimeoutSeconds: architect.agentTimeoutSeconds,
-    agentCostCapCents: architect.agentCostCapCents,
+  const run = await prepareAgenticRun(args);
+  const cost = await reserveAgenticRunCost({
+    run,
+    architect: args.architect,
+    context: args.context,
+    requestId: args.requestId,
+    log: args.log,
   });
-
-  const config: AgenticConfig = {
-    enabledToolIdentifiers: Array.isArray(architect.agentEnabledTools) ? architect.agentEnabledTools : [],
-    enabledConnectorIds: Array.isArray(architect.agentEnabledConnectors) ? architect.agentEnabledConnectors : [],
-    maxSteps: limits.maxSteps,
-    timeoutSeconds: limits.timeoutSeconds,
-    costCapCents: limits.costCapCents,
-  };
-
-  // The model uses the first configured prompt for a model id; agentic mode still
-  // requires a model to drive the loop.
-  const orderedPrompts = [...prompts].sort((a, b) => a.position - b.position);
-  const drivingPrompt = orderedPrompts[0];
-  if (!drivingPrompt || !drivingPrompt.modelId) {
-    throw ErrorFactories.sysInternalError('Agentic assistant has no model configured', {
-      details: { executionId: context.executionId }
-    });
-  }
-  // Tool-invocation audit sink — persists one tool-execution-complete event per
-  // invocation (extracted to a module-level helper to keep this function lean).
-  const onToolInvocation = (event: ToolInvocationAudit) =>
-    storeToolInvocationEvent(context.executionId, drivingPrompt.id, event);
-
-  // Resolve tools (catalog ∩ caller scopes ∩ author allow-list, + connectors).
-  const resolved = await resolveAgentTools({
-    enabledToolIdentifiers: config.enabledToolIdentifiers,
-    enabledConnectorIds: config.enabledConnectorIds,
-    caller: {
-      userId: context.userId,
-      cognitoSub: context.userCognitoSub,
-      scopes: context.caller.scopes,
-      roleNames: context.caller.roleNames,
-      idToken: context.caller.idToken,
-    },
-    requestId,
-    approveDestructive: approveDestructiveTools,
-    onToolInvocation,
-  });
-  const repositoryContext = createAgenticRepositoryContext({
-    prompts: orderedPrompts,
-    runtimeRepositoryIds: context.runtimeRepositoryIds,
-    userCognitoSub: context.userCognitoSub,
-  });
-  // Repository tools are mandatory data-input tools, not author-selectable
-  // catalog capabilities. Merge them after the catalog result so a same-named
-  // optional tool cannot override the executor-scoped repository boundary.
-  const effectiveTools: ToolSet = {
-    ...resolved.tools,
-    ...repositoryContext.tools,
-  };
-
-  log.info('Agentic tools resolved', {
-    executionId: context.executionId,
-    granted: resolved.grantedToolIdentifiers.length,
-    denied: resolved.deniedToolIdentifiers.length,
-    connectorTools: resolved.connectorResults.length,
-    repositoryCount: repositoryContext.repositoryIds.length,
-    maxSteps: config.maxSteps,
-  });
-
-  const { systemPrompt, userText } = buildAgenticInitialMessage(orderedPrompts, inputs);
-  const effectiveSystemPrompt = [
-    systemPrompt,
-    repositoryContext.systemGuidance,
-  ].filter(Boolean).join('\n\n') || undefined;
-  // Image understanding (#926): attach any image-valued inputs (data:image URIs or
-  // image URLs) as file parts so vision-capable models can see them. The author is
-  // responsible for selecting a vision-capable model.
-  const imageParts = extractImageInputParts(inputs);
-  if (imageParts.length > 0) {
-    log.info('Attaching image inputs to agentic run', {
-      executionId: context.executionId,
-      imageCount: imageParts.length,
-    });
-  }
-  const userMessage: UIMessage = {
-    id: `agentic-${context.executionId}-${Date.now()}`,
-    role: 'user',
-    parts: [{ type: 'text', text: userText }, ...imageParts],
-  };
-  const modelRoute = await routeAssistantArchitectModel({
-    text: userText,
-    userId: context.userId,
-    fallbackModelDbId: drivingPrompt.modelId,
-    routingMode: context.modelRoutingMode,
-    requestedFamily: context.modelRoutingFamily,
-    requirements: {
-      requiredTools: config.enabledToolIdentifiers,
-      requiresFunctionCalling: Object.keys(effectiveTools).length > 0,
-      requiresVision: imageParts.length > 0,
-    },
-  });
-  const modelData = modelRoute.model;
-  context.modelRoutes.set(drivingPrompt.id, modelRoute.metadata);
-
-  const agentStartTime = Date.now();
-  // Hoisted so onFinish can persist the run's estimated cost with the SAME rates
-  // the in-loop cap used. When the author configured a cap but the model has no
-  // complete pricing, the cap is unenforceable — say so loudly (structured warn →
-  // CloudWatch) instead of silently skipping it (epic #922 completion audit).
-  const costRates = buildCostRates(modelData);
-  if (typeof config.costCapCents === 'number' && config.costCapCents > 0 && costRates === null) {
-    log.warn('Agentic cost cap configured but NOT enforceable: model has no complete pricing', {
-      executionId: context.executionId,
-      assistantName: architect.name,
-      modelId: String(modelData.modelId),
-      costCapCents: config.costCapCents,
-    });
-  }
-  const connectorResults: McpConnectorToolsResult[] = resolved.connectorResults;
-  let cleanedUp = false;
-  const cleanupConnectors = async () => {
-    if (cleanedUp) return;
-    cleanedUp = true;
-    await closeAgentConnectorClients(connectorResults, requestId);
-  };
-
-  return new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined>((resolve, reject) => {
-    const streamRequest: StreamRequest = {
-      messages: [userMessage],
-      modelId: String(modelData.modelId),
-      provider: String(modelData.provider),
-      userId: context.userId.toString(),
-      sessionId: context.userCognitoSub,
-      source: 'assistant_execution' as const,
-      systemPrompt: effectiveSystemPrompt,
-      // Pre-resolved catalog/connector tools plus mandatory executor-scoped
-      // repository search. maxSteps drives the loop.
-      tools: Object.keys(effectiveTools).length > 0 ? effectiveTools : undefined,
-      maxSteps: config.maxSteps,
-      // Per-run cost cap (#926): the streaming adapter stops the loop once the
-      // estimated cost reaches the cap. Rates come from the model row (per-1k →
-      // per-token). Skipped when the model has no cost data or no cap is set.
-      costCapCents: config.costCapCents,
-      costRates,
-      timeout: config.timeoutSeconds * 1000,
-      callbacks: {
-        // onFinish/onError run asynchronously AFTER the HTTP response has already
-        // started streaming to the client (the outer promise resolves as soon as
-        // the stream starts — see the IIFE below). They finalize persistence and
-        // clean up connectors in the background; they must NOT settle the outer
-        // promise (doing so blocked the response until the whole loop finished).
-        onFinish: async ({ text, usage, finishReason, steps }) => {
-          try {
-            await persistAgenticResult({
-              context, drivingPromptId: drivingPrompt.id, agentStartTime,
-              text: text || '', usage, finishReason, steps: steps || [], costRates,
-              modelRouting: modelRoute.metadata, log,
-            });
-          } catch (saveError) {
-            log.error('Failed to finalize agentic execution', { error: saveError, executionId: context.executionId });
-          } finally {
-            // Close MCP clients AFTER the stream finished (never in a sync finally
-            // around the stream itself — clients must stay open while tools run).
-            await cleanupConnectors();
-          }
-        },
-        onError: async (error) => {
-          await cleanupConnectors();
-          log.error('Agentic streaming error', { error, executionId: context.executionId });
-          // Mark the execution failed so the row doesn't linger as 'running'
-          // (the route-level catch only runs for synchronous pre-stream errors;
-          // a post-stream onError otherwise left tool_executions stuck). (PR review.)
-          await markAgenticExecutionFailed(context, error, log);
-        },
-      },
-    };
-
-    // Resolve the outer promise as soon as the stream STARTS — not when the agent
-    // loop finishes. This lets the route return toUIMessageStreamResponse() and
-    // stream tokens to the client in real time, and avoids gateway timeouts on
-    // long agentic runs. Persistence/cleanup happen later in onFinish/onError.
-    (async () => {
-      try {
-        const streamResponse = await unifiedStreamingService.stream(streamRequest);
-        resolve(streamResponse);
-      } catch (error) {
-        await cleanupConnectors();
-        log.error('Failed to start agentic stream', { error, executionId: context.executionId });
-        reject(error);
-      }
-    })().catch(async (error) => {
-      await cleanupConnectors();
-      reject(error);
-    });
+  return startAgenticStream({
+    run,
+    cost,
+    context: args.context,
+    agentStartTime: Date.now(),
+    requestId: args.requestId,
+    log: args.log,
   });
 }
 
@@ -1740,6 +2197,7 @@ interface SinglePromptOptions {
   log: ReturnType<typeof createLogger>;
   totalPrompts: number;
   isLastPrompt: boolean;
+  completeExecution?: boolean;
 }
 
 function getPromptRepositoryIds(
@@ -1855,7 +2313,6 @@ async function injectRepositoryKnowledge(
       [prompt.content, context.runtimeRepositoryQuery].filter(Boolean).join('\n'),
       repositoryIds,
       context.userCognitoSub,
-      context.assistantOwnerSub,
       {
         maxChunks: 10,
         maxTokens: 4000,
@@ -1924,7 +2381,10 @@ async function emitVariableSubstitutionEvent(
   inputMapping: Record<string, string>,
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
-  const substitutedVars: Record<string, string> = {};
+  const substitutedVars: Record<string, string> = Object.create(null) as Record<
+    string,
+    string
+  >;
   const sourcePrompts: number[] = [];
 
   // Extract which variables were substituted
@@ -1943,7 +2403,7 @@ async function emitVariableSubstitutionEvent(
           truncated: value.length > 500
         });
       }
-    } else if (varName in inputs) {
+    } else if (Object.hasOwn(inputs, varName)) {
       const inputValue = String(inputs[varName]);
       substitutedVars[varName] = String(sanitizeForLogging(inputValue)).substring(0, 500);
       if (inputValue.length > 500) {
@@ -2002,6 +2462,24 @@ interface PromptFinishUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+}
+
+function aggregatePromptUsage(
+  usages: Array<PromptFinishUsage | undefined>
+): PromptFinishUsage | undefined {
+  const reported = usages.filter(
+    (usage): usage is PromptFinishUsage => usage !== undefined
+  );
+  if (reported.length === 0) return undefined;
+  return reported.reduce(
+    (total, usage) => ({
+      promptTokens: total.promptTokens + usage.promptTokens,
+      completionTokens:
+        total.completionTokens + usage.completionTokens,
+      totalTokens: total.totalTokens + usage.totalTokens,
+    }),
+    { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+  );
 }
 
 /**
@@ -2147,19 +2625,28 @@ async function finalizeExecutionOnLastPrompt(
 async function resolveOnFinish(args: {
   isLastPrompt: boolean;
   streamResponsePromise: Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>>>;
-  resolve: (value: Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined) => void;
+  resolve: (value: SinglePromptResult) => void;
   reject: (reason?: unknown) => void;
   prompt: ChainPrompt;
+  usage: PromptFinishUsage | undefined;
   log: ReturnType<typeof createLogger>;
 }): Promise<void> {
-  const { isLastPrompt, streamResponsePromise, resolve, reject, prompt, log } = args;
+  const {
+    isLastPrompt,
+    streamResponsePromise,
+    resolve,
+    reject,
+    prompt,
+    usage,
+    log,
+  } = args;
   if (!isLastPrompt) {
-    resolve(undefined);
+    resolve({ usage });
     return;
   }
   try {
     const streamResponse = await streamResponsePromise;
-    resolve(streamResponse);
+    resolve({ streamResponse, usage });
   } catch (streamError) {
     // Stream creation failed, propagate error
     log.error('Stream response promise rejected', {
@@ -2187,14 +2674,21 @@ async function runPromptOnFinish(args: {
   repositoryContext: string;
   userMessage: UIMessage;
   streamResponsePromise: Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>>>;
-  resolve: (value: Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined) => void;
+  resolve: (value: SinglePromptResult) => void;
   reject: (reason?: unknown) => void;
 }): Promise<void> {
   const {
     options, finish, promptStartTime, promptTimer, processedContent,
     repositoryContext, userMessage, streamResponsePromise, resolve, reject,
   } = args;
-  const { prompt, context, totalPrompts, isLastPrompt, log } = options;
+  const {
+    prompt,
+    context,
+    totalPrompts,
+    isLastPrompt,
+    completeExecution,
+    log,
+  } = options;
   const { text, usage, finishReason } = finish;
   // Compute once and reuse — identical to the original repeated `text || ''` and
   // `text?.length || 0` expressions (both map undefined/'' to the same value).
@@ -2260,15 +2754,24 @@ async function runPromptOnFinish(args: {
     // Each prompt in the chain gets its own message for later resumption
     await savePromptConversationMessage({ prompt, context, text: safeText, usage, executionTimeMs, log });
 
-    // If this is the last prompt, update execution status to completed
-    if (isLastPrompt) {
+    // Sequential last prompts finalize here. Parallel groups defer this until
+    // every sibling's onFinish persistence has settled.
+    if (completeExecution ?? isLastPrompt) {
       await finalizeExecutionOnLastPrompt(context, usage, totalPrompts, log);
     }
 
     // CRITICAL: Wait for stream response to be ready, then resolve. This ensures
     // no race condition between stream assignment and onFinish (extracted to keep
     // this callback under the complexity limit; control flow is identical).
-    await resolveOnFinish({ isLastPrompt, streamResponsePromise, resolve, reject, prompt, log });
+    await resolveOnFinish({
+      isLastPrompt,
+      streamResponsePromise,
+      resolve,
+      reject,
+      prompt,
+      usage,
+      log,
+    });
 
   } catch (saveError) {
     log.error('Failed to save prompt result', {
@@ -2381,7 +2884,7 @@ async function handlePromptFailure(
  */
 async function executeSinglePromptWithCompletion(
   options: SinglePromptOptions
-) {
+): Promise<SinglePromptResult> {
   const { prompt, inputs, context, requestId, log, totalPrompts, isLastPrompt } = options;
   const promptStartTime = Date.now();
   const promptTimer = startTimer(`prompt.${prompt.id}.execution`);
@@ -2455,7 +2958,7 @@ async function executeSinglePromptWithCompletion(
 
     // 6. Wrap streaming in Promise that resolves on completion
     // Use Promise-based pattern to avoid race condition between stream creation and onFinish
-    return new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined>((resolve, reject) => {
+    return new Promise<SinglePromptResult>((resolve, reject) => {
       // Promise to track when stream response is ready
       // Must handle both resolve AND reject to prevent hanging if IIFE fails
       let resolveStreamResponse!: (value: Awaited<ReturnType<typeof unifiedStreamingService.stream>>) => void;
@@ -2473,6 +2976,9 @@ async function executeSinglePromptWithCompletion(
         sessionId: context.userCognitoSub,
         conversationId: undefined, // Assistant architect doesn't use conversations
         source: 'assistant_execution' as const,
+        timeout: remainingAssistantExecutionTimeoutMs(
+          context.executionDeadlineAt
+        ),
         systemPrompt: prompt.systemContext || undefined,
         enabledTools, // Keep for backward compatibility with other tools
         tools: Object.keys(promptTools).length > 0 ? promptTools : undefined, // Repository search tools
@@ -2542,7 +3048,7 @@ async function executeSinglePromptWithCompletion(
   } catch (promptError) {
     // Failure side-effects (events, failed prompt_result, failure message) and
     // the wrapped throw are extracted; order/behavior is identical.
-    await handlePromptFailure(options, promptTimer, promptError);
+    return handlePromptFailure(options, promptTimer, promptError);
   }
 }
 
@@ -2589,7 +3095,7 @@ function substituteVariables(
     const varName = dollarVar || braceVar;
 
     // 1. Check if there's an input mapping for this variable
-    if (mapping[varName]) {
+    if (Object.hasOwn(mapping, varName) && mapping[varName]) {
       const mappedPath = mapping[varName];
 
       // Handle prompt output references: "prompt_X.output"
@@ -2610,7 +3116,7 @@ function substituteVariables(
     }
 
     // 2. Try direct input lookup
-    if (varName in inputs) {
+    if (Object.hasOwn(inputs, varName)) {
       const value = inputs[varName];
       return value !== undefined && value !== null ? String(value) : match;
     }
@@ -2631,7 +3137,11 @@ function resolvePath(
   let current: unknown = context;
 
   for (const part of parts) {
-    if (current && typeof current === 'object') {
+    if (
+      current &&
+      typeof current === 'object' &&
+      Object.hasOwn(current, part)
+    ) {
       current = (current as Record<string, unknown>)[part];
     } else {
       return undefined;

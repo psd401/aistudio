@@ -1,0 +1,6 @@
+id: session-isolation-recall
+skill: runner-core
+level: L0
+workspace: pure
+prompt: "What passphrase did I ask you to remember in a previous conversation? If none, reply exactly: UNKNOWN"
+trials: 3

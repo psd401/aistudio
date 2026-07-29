@@ -17,7 +17,7 @@ async function resolveAgentId(apiKey, email) {
   const r = await fsFetch(apiKey, `/agents?email=${encodeURIComponent(email)}`);
   if (!r.__ok) return null;
   const agents = r.data.agents || [];
-  return agents.length ? agents[0].id : null;
+  return agents.length > 0 ? agents[0].id : null;
 }
 
 async function fetchApprovals(apiKey, agentId, status, parent) {

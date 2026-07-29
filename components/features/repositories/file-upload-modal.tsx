@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react"
-import { useForm } from "react-hook-form"
+import { useForm, type UseFormReturn } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import {
@@ -23,14 +23,13 @@ import {
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Button } from "@/components/ui/button"
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAction } from "@/lib/hooks/use-action"
 import {
-  addDocumentItem,
   addDocumentWithPresignedUrl,
   addUrlItem,
   addTextItem,
+  type AddDocumentWithPresignedUrlInput,
 } from "@/actions/repositories/repository-items.actions"
 import {
   Cloud,
@@ -45,6 +44,7 @@ import {
   uploadFileToRepositoryStorage,
   type BrowserRepositoryUpload,
 } from "@/lib/repositories/content-platform/browser-upload"
+import { GoogleDriveConnectorPanel } from "./google-drive-connector-panel"
 
 // File size limits - will be loaded from environment
 const ACCEPTED_FILE_TYPES = [
@@ -135,224 +135,445 @@ interface FileUploadModalProps {
   onSuccess: () => void
 }
 
-export function FileUploadModal({
+type AddDocumentExecution = (
+  input: AddDocumentWithPresignedUrlInput
+) => ReturnType<typeof addDocumentWithPresignedUrl>
+
+async function uploadRepositoryDocument(options: {
+  repositoryId: number
+  itemName: string
+  file: File
+  contentType: string
+  executeLegacyUpload: AddDocumentExecution
+}) {
+  const {
+    repositoryId,
+    itemName,
+    file,
+    contentType,
+    executeLegacyUpload,
+  } = options
+  const canonicalResponse = await fetch(
+    `/api/repositories/${repositoryId}/uploads`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        itemName,
+        fileName: file.name,
+        contentType,
+        byteSize: file.size,
+      }),
+    }
+  )
+  if (!canonicalResponse.ok) {
+    const error = await canonicalResponse.json()
+    throw new Error(error.error || "Failed to initiate upload")
+  }
+  const canonical = await canonicalResponse.json()
+  if (canonical.mode === "canonical") {
+    const upload = canonical.upload as BrowserRepositoryUpload
+    const completedParts = await uploadFileToRepositoryStorage(
+      file,
+      upload,
+      contentType
+    )
+    const completionResponse = await fetch(
+      `/api/repositories/${repositoryId}/uploads/${upload.sessionId}/complete`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          parts:
+            upload.uploadMethod === "multipart" ? completedParts : undefined,
+        }),
+      }
+    )
+    if (!completionResponse.ok) {
+      const error = await completionResponse.json()
+      throw new Error(error.error || "Failed to complete upload")
+    }
+    return { isSuccess: true, message: "File uploaded successfully" }
+  }
+
+  const presignedResponse = await fetch("/api/documents/presigned-url", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fileName: file.name,
+      fileType: contentType,
+      fileSize: file.size,
+      repositoryId,
+    }),
+  })
+  if (!presignedResponse.ok) {
+    const error = await presignedResponse.json()
+    throw new Error(error.error || "Failed to get upload URL")
+  }
+  const response = await presignedResponse.json()
+  const { url, key } = response.data || response
+  const uploadResponse = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": contentType },
+    body: file,
+  })
+  if (!uploadResponse.ok) {
+    throw new Error("Failed to upload file to storage")
+  }
+  return executeLegacyUpload({
+    repository_id: repositoryId,
+    name: itemName,
+    s3Key: key,
+    metadata: {
+      contentType,
+      size: file.size,
+      originalFileName: file.name,
+    },
+  })
+}
+
+type DocumentValues = {
+  name: string
+  file: FileList
+}
+type UrlValues = z.infer<typeof urlSchema>
+type TextValues = z.infer<typeof textSchema>
+
+interface DocumentUploadTabProps {
+  documentForm: UseFormReturn<DocumentValues>
+  onDocumentSubmit: (data: DocumentValues) => Promise<void>
+  isDocumentUploadPending: boolean
+  isLoading: boolean
+  isAddingDocument: boolean
+  maxFileSizeGB: number
+  onClose: () => void
+}
+
+function DocumentUploadTab({
+  documentForm,
+  onDocumentSubmit,
+  isDocumentUploadPending,
+  isLoading,
+  isAddingDocument,
+  maxFileSizeGB,
+  onClose,
+}: DocumentUploadTabProps) {
+  return (
+          <TabsContent value="document">
+            <Form {...documentForm}>
+              <form
+                onSubmit={documentForm.handleSubmit(onDocumentSubmit)}
+                className="space-y-4"
+              >
+                <FormField
+                  control={documentForm.control}
+                  name="name"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Name</FormLabel>
+                      <FormControl>
+                        <Input
+                          {...field}
+                          placeholder="e.g., User Manual"
+                          disabled={isDocumentUploadPending}
+                        />
+                      </FormControl>
+                      <FormDescription>
+                        A descriptive name for the document
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={documentForm.control}
+                  name="file"
+                  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                  render={({ field: { onChange, value, ...field } }) => (
+                    <FormItem>
+                      <FormLabel>File</FormLabel>
+                      <FormControl>
+                        <Input
+                          {...field}
+                          value={undefined}
+                          type="file"
+                          disabled={isDocumentUploadPending}
+                          accept=".pdf,.docx,.xlsx,.pptx,.jpg,.jpeg,.png,.webp,.gif,.tif,.tiff,.amr,.flac,.m4a,.mp3,.ogg,.wav,.mp4,.mov,.avi,.mkv,.webm,.txt,.md,.csv"
+                          onChange={(e) => onChange(e.target.files)}
+                        />
+                      </FormControl>
+                      <FormDescription>
+                        Supported: PDF, Word, Excel, PowerPoint, JPEG, PNG,
+                        WebP, GIF, TIFF, MP3, M4A, WAV, FLAC, Ogg, AMR, MP4,
+                        MOV, AVI, MKV, WebM, Text, Markdown, CSV (max server
+                        policy; browser ceiling {maxFileSizeGB} GB)
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <div className="flex justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={onClose}
+                    disabled={isDocumentUploadPending}
+                  >
+                    Cancel
+                  </Button>
+                  <Button type="submit" disabled={isLoading}>
+                    {isAddingDocument && (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    )}
+                    <Upload className="mr-2 h-4 w-4" />
+                    Upload File
+                  </Button>
+                </div>
+              </form>
+            </Form>
+          </TabsContent>
+  )
+}
+
+interface UrlUploadTabProps {
+  urlForm: UseFormReturn<UrlValues>
+  onUrlSubmit: (data: UrlValues) => Promise<void>
+  isLoading: boolean
+  isAddingUrl: boolean
+  onClose: () => void
+}
+
+function UrlUploadTab({
+  urlForm,
+  onUrlSubmit,
+  isLoading,
+  isAddingUrl,
+  onClose,
+}: UrlUploadTabProps) {
+  return (
+          <TabsContent value="url">
+            <Form {...urlForm}>
+              <form
+                onSubmit={urlForm.handleSubmit(onUrlSubmit)}
+                className="space-y-4"
+              >
+                <FormField
+                  control={urlForm.control}
+                  name="name"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Name</FormLabel>
+                      <FormControl>
+                        <Input
+                          {...field}
+                          placeholder="e.g., API Documentation"
+                        />
+                      </FormControl>
+                      <FormDescription>
+                        A descriptive name for the URL content
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={urlForm.control}
+                  name="url"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>URL</FormLabel>
+                      <FormControl>
+                        <Input
+                          {...field}
+                          type="url"
+                          placeholder="https://example.com/docs"
+                        />
+                      </FormControl>
+                      <FormDescription>
+                        The URL to fetch content from
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <div className="flex justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={onClose}
+                  >
+                    Cancel
+                  </Button>
+                  <Button type="submit" disabled={isLoading}>
+                    {isAddingUrl && (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    )}
+                    Add URL
+                  </Button>
+                </div>
+              </form>
+            </Form>
+          </TabsContent>
+  )
+}
+
+interface TextUploadTabProps {
+  textForm: UseFormReturn<TextValues>
+  onTextSubmit: (data: TextValues) => Promise<void>
+  isLoading: boolean
+  isAddingText: boolean
+  onClose: () => void
+}
+
+function TextUploadTab({
+  textForm,
+  onTextSubmit,
+  isLoading,
+  isAddingText,
+  onClose,
+}: TextUploadTabProps) {
+  return (
+          <TabsContent value="text">
+            <Form {...textForm}>
+              <form
+                onSubmit={textForm.handleSubmit(onTextSubmit)}
+                className="space-y-4"
+              >
+                <FormField
+                  control={textForm.control}
+                  name="name"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Name</FormLabel>
+                      <FormControl>
+                        <Input {...field} placeholder="e.g., Quick Reference" />
+                      </FormControl>
+                      <FormDescription>
+                        A descriptive name for the text content
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={textForm.control}
+                  name="content"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Content</FormLabel>
+                      <FormControl>
+                        <Textarea
+                          {...field}
+                          placeholder="Enter your text content here..."
+                          rows={6}
+                        />
+                      </FormControl>
+                      <FormDescription>
+                        The text content to add to the repository
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <div className="flex justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={onClose}
+                  >
+                    Cancel
+                  </Button>
+                  <Button type="submit" disabled={isLoading}>
+                    {isAddingText && (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    )}
+                    Add Text
+                  </Button>
+                </div>
+              </form>
+            </Form>
+          </TabsContent>
+  )
+}
+
+function GoogleDriveUploadTab({
   repositoryId,
-  open,
-  onOpenChange,
   onSuccess,
-}: FileUploadModalProps) {
+  onClose,
+}: {
+  repositoryId: number
+  onSuccess: () => void
+  onClose: () => void
+}) {
+  return (
+          <TabsContent value="google-drive">
+            <GoogleDriveConnectorPanel
+              repositoryId={repositoryId}
+              onSourcesChanged={onSuccess}
+            />
+            <div className="mt-4 flex justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={onClose}
+              >
+                Close
+              </Button>
+            </div>
+          </TabsContent>
+  )
+}
+
+function useDocumentUpload(
+  repositoryId: number,
+  onOpenChange: (open: boolean) => void,
+  onSuccess: () => void
+) {
   const { toast } = useToast()
-  const [activeTab, setActiveTab] = useState("document")
   const [isDocumentUploadPending, setIsDocumentUploadPending] = useState(false)
-  
-  // Get max file size from environment variable or use default
-  // Note: MAX_FILE_SIZE_MB is a server-side env var, so we need to hardcode or pass it from server
-  // The server applies the administrator-configured limit (default 10 GiB,
-  // hard configuration ceiling 50 GiB). Keep the browser guard at that ceiling
-  // so it never contradicts a valid admin policy.
   const maxFileSizeGB = 50
   const maxFileSize = maxFileSizeGB * 1024 * 1024 * 1024
-
-  // Use presigned URL method to bypass Amplify 1MB limit
-  const USE_PRESIGNED_URL = true // Always use presigned URL for repository uploads for consistency
-  // Always use the max file size from environment - the server will handle the actual limits
-  const MAX_FILE_SIZE = maxFileSize
-  
-  const dynamicDocumentSchema = z.object({
+  const documentSchema = z.object({
     name: z.string().min(1, "Name is required"),
     file: z
       .custom<FileList>()
       .refine((files) => files?.length === 1, "File is required")
       .refine(
-        (files) => {
-          const file = files?.[0]
-          if (!file) return false
-          return file.size <= MAX_FILE_SIZE
-        },
-        `File size must be less than ${USE_PRESIGNED_URL ? `${maxFileSizeGB} GB` : `${MAX_FILE_SIZE / 1024}KB`}`
+        (files) => Boolean(files?.[0] && files[0].size <= maxFileSize),
+        `File size must be less than ${maxFileSizeGB} GB`
       )
       .refine(
-        (files) => {
-          const file = files?.[0]
-          if (!file) return false
-          return isValidFileType(file)
-        },
+        (files) => Boolean(files?.[0] && isValidFileType(files[0])),
         "File type not supported"
       ),
   })
-  
-  const documentForm = useForm<z.infer<typeof dynamicDocumentSchema>>({
-    resolver: zodResolver(dynamicDocumentSchema),
-    defaultValues: {
-      name: "",
-    },
+  const documentForm = useForm<DocumentValues>({
+    resolver: zodResolver(documentSchema),
+    defaultValues: { name: "" },
   })
-
-  const urlForm = useForm<z.infer<typeof urlSchema>>({
-    resolver: zodResolver(urlSchema),
-    defaultValues: {
-      name: "",
-      url: "",
-    },
-  })
-
-  const textForm = useForm<z.infer<typeof textSchema>>({
-    resolver: zodResolver(textSchema),
-    defaultValues: {
-      name: "",
-      content: "",
-    },
-  })
-
-  // Use separate hooks for each upload method to avoid type issues
-  const { execute: executeAddDocumentOld, isPending: isAddingDocumentOld } =
-    useAction(addDocumentItem)
-  const { execute: executeAddDocumentNew, isPending: isAddingDocumentNew } =
+  const { execute: executeLegacyUpload, isPending: isAddingDocumentAction } =
     useAction(addDocumentWithPresignedUrl)
-  const { execute: executeAddUrl, isPending: isAddingUrl } = useAction(addUrlItem)
-  const { execute: executeAddText, isPending: isAddingText } = useAction(addTextItem)
-  
-  // Select the appropriate loading state based on the flag
   const isAddingDocument =
-    isDocumentUploadPending ||
-    (USE_PRESIGNED_URL ? isAddingDocumentNew : isAddingDocumentOld)
+    isDocumentUploadPending || isAddingDocumentAction
 
-  const isLoading = isAddingDocument || isAddingUrl || isAddingText
-  
-
-  async function onDocumentSubmit(data: z.infer<typeof dynamicDocumentSchema>) {
+  async function onDocumentSubmit(data: DocumentValues) {
     if (isDocumentUploadPending) return
-
     const file = data.file[0]
-    const contentType = contentTypeForFile(file)
     setIsDocumentUploadPending(true)
-    
     try {
-      let result
-      
-      if (USE_PRESIGNED_URL) {
-        // Ask the unified repository endpoint first. With rollout flags off (or
-        // for a file type not migrated yet) it explicitly returns legacy mode.
-        const canonicalResponse = await fetch(
-          `/api/repositories/${repositoryId}/uploads`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              itemName: data.name,
-              fileName: file.name,
-              contentType,
-              byteSize: file.size,
-            }),
-          }
-        )
-        if (!canonicalResponse.ok) {
-          const error = await canonicalResponse.json()
-          throw new Error(error.error || 'Failed to initiate upload')
-        }
-        const canonical = await canonicalResponse.json()
-
-        if (canonical.mode === 'canonical') {
-          const upload = canonical.upload as BrowserRepositoryUpload
-          const completedParts = await uploadFileToRepositoryStorage(
-            file,
-            upload,
-            contentType
-          )
-
-          const completionResponse = await fetch(
-            `/api/repositories/${repositoryId}/uploads/${upload.sessionId}/complete`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                parts:
-                  upload.uploadMethod === 'multipart'
-                    ? completedParts
-                    : undefined,
-              }),
-            }
-          )
-          if (!completionResponse.ok) {
-            const error = await completionResponse.json()
-            throw new Error(error.error || 'Failed to complete upload')
-          }
-          result = { isSuccess: true, message: 'File uploaded successfully' }
-        } else {
-        // Existing single-object flow remains unchanged until canonical cutover.
-        // Step 1: Get presigned URL
-        const presignedResponse = await fetch('/api/documents/presigned-url', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            fileName: file.name,
-            fileType: contentType,
-            fileSize: file.size,
-            repositoryId,
-          }),
-        })
-
-        if (!presignedResponse.ok) {
-          const error = await presignedResponse.json()
-          throw new Error(error.error || 'Failed to get upload URL')
-        }
-
-        const response = await presignedResponse.json()
-        const { url, key } = response.data || response
-
-        // Step 2: Upload file directly to S3
-        const uploadResponse = await fetch(url, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': contentType,
-          },
-          body: file,
-        })
-
-        if (!uploadResponse.ok) {
-          throw new Error('Failed to upload file to storage')
-        }
-
-        // Step 3: Create repository item with S3 key
-        result = await executeAddDocumentNew({
-          repository_id: repositoryId,
-          name: data.name,
-          s3Key: key,
-          metadata: {
-            contentType,
-            size: file.size,
-            originalFileName: file.name,
-          },
-        })
-        }
-      } else {
-        // Old method: Upload through server
-        const buffer = await file.arrayBuffer()
-        
-        // Convert to base64 string for serialization
-        const uint8Array = new Uint8Array(buffer)
-        let binary = ''
-        const chunkSize = 0x8000 // Process in 32KB chunks to avoid call stack issues
-        for (let i = 0; i < uint8Array.length; i += chunkSize) {
-          const chunk = uint8Array.subarray(i, i + chunkSize)
-          binary += String.fromCharCode.apply(null, Array.from(chunk))
-        }
-        const base64 = btoa(binary)
-
-        result = await executeAddDocumentOld({
-          repository_id: repositoryId,
-          name: data.name,
-          file: {
-            content: base64,
-            contentType,
-            size: file.size,
-            fileName: file.name,
-          },
-        })
-      }
-
+      const result = await uploadRepositoryDocument({
+        repositoryId,
+        itemName: data.name,
+        file,
+        contentType: contentTypeForFile(file),
+        executeLegacyUpload,
+      })
       if (result.isSuccess) {
         toast({
           title: "File uploaded",
@@ -371,13 +592,61 @@ export function FileUploadModal({
     } catch (error) {
       toast({
         title: "Error",
-        description: error instanceof Error ? error.message : "Failed to upload document",
+        description:
+          error instanceof Error ? error.message : "Failed to upload document",
         variant: "destructive",
       })
     } finally {
       setIsDocumentUploadPending(false)
     }
   }
+
+  return {
+    documentForm,
+    isDocumentUploadPending,
+    isAddingDocument,
+    maxFileSizeGB,
+    onDocumentSubmit,
+  }
+}
+
+export function FileUploadModal({
+  repositoryId,
+  open,
+  onOpenChange,
+  onSuccess,
+}: FileUploadModalProps) {
+  const { toast } = useToast()
+  const [activeTab, setActiveTab] = useState("document")
+  const {
+    documentForm,
+    isDocumentUploadPending,
+    isAddingDocument,
+    maxFileSizeGB,
+    onDocumentSubmit,
+  } = useDocumentUpload(repositoryId, onOpenChange, onSuccess)
+  const urlForm = useForm<z.infer<typeof urlSchema>>({
+    resolver: zodResolver(urlSchema),
+    defaultValues: {
+      name: "",
+      url: "",
+    },
+  })
+
+  const textForm = useForm<z.infer<typeof textSchema>>({
+    resolver: zodResolver(textSchema),
+    defaultValues: {
+      name: "",
+      content: "",
+    },
+  })
+
+  const { execute: executeAddUrl, isPending: isAddingUrl } =
+    useAction(addUrlItem)
+  const { execute: executeAddText, isPending: isAddingText } =
+    useAction(addTextItem)
+
+  const isLoading = isAddingDocument || isAddingUrl || isAddingText
 
   async function onUrlSubmit(data: z.infer<typeof urlSchema>) {
     const result = await executeAddUrl({
@@ -463,237 +732,37 @@ export function FileUploadModal({
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="document">
-            <Form {...documentForm}>
-              <form
-                onSubmit={documentForm.handleSubmit(onDocumentSubmit)}
-                className="space-y-4"
-              >
-                <FormField
-                  control={documentForm.control}
-                  name="name"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Name</FormLabel>
-                      <FormControl>
-                        <Input
-                          {...field}
-                          placeholder="e.g., User Manual"
-                          disabled={isDocumentUploadPending}
-                        />
-                      </FormControl>
-                      <FormDescription>
-                        A descriptive name for the document
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+          <DocumentUploadTab
+            documentForm={documentForm}
+            onDocumentSubmit={onDocumentSubmit}
+            isDocumentUploadPending={isDocumentUploadPending}
+            isLoading={isLoading}
+            isAddingDocument={isAddingDocument}
+            maxFileSizeGB={maxFileSizeGB}
+            onClose={() => onOpenChange(false)}
+          />
 
-                <FormField
-                  control={documentForm.control}
-                  name="file"
-                  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-                  render={({ field: { onChange, value, ...field } }) => (
-                    <FormItem>
-                      <FormLabel>File</FormLabel>
-                      <FormControl>
-                        <Input
-                          {...field}
-                          value={undefined}
-                          type="file"
-                          disabled={isDocumentUploadPending}
-                          accept=".pdf,.docx,.xlsx,.pptx,.jpg,.jpeg,.png,.webp,.gif,.tif,.tiff,.amr,.flac,.m4a,.mp3,.ogg,.wav,.mp4,.mov,.avi,.mkv,.webm,.txt,.md,.csv"
-                          onChange={(e) => onChange(e.target.files)}
-                        />
-                      </FormControl>
-                      <FormDescription>
-                        Supported: PDF, Word, Excel, PowerPoint, JPEG, PNG,
-                        WebP, GIF, TIFF, MP3, M4A, WAV, FLAC, Ogg, AMR, MP4,
-                        MOV, AVI, MKV, WebM, Text, Markdown, CSV (max server
-                        policy; browser ceiling {maxFileSizeGB} GB)
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+          <UrlUploadTab
+            urlForm={urlForm}
+            onUrlSubmit={onUrlSubmit}
+            isLoading={isLoading}
+            isAddingUrl={isAddingUrl}
+            onClose={() => onOpenChange(false)}
+          />
 
-                <div className="flex justify-end gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => onOpenChange(false)}
-                    disabled={isDocumentUploadPending}
-                  >
-                    Cancel
-                  </Button>
-                  <Button type="submit" disabled={isLoading}>
-                    {isAddingDocument && (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    )}
-                    <Upload className="mr-2 h-4 w-4" />
-                    Upload File
-                  </Button>
-                </div>
-              </form>
-            </Form>
-          </TabsContent>
+          <TextUploadTab
+            textForm={textForm}
+            onTextSubmit={onTextSubmit}
+            isLoading={isLoading}
+            isAddingText={isAddingText}
+            onClose={() => onOpenChange(false)}
+          />
 
-          <TabsContent value="url">
-            <Form {...urlForm}>
-              <form
-                onSubmit={urlForm.handleSubmit(onUrlSubmit)}
-                className="space-y-4"
-              >
-                <FormField
-                  control={urlForm.control}
-                  name="name"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Name</FormLabel>
-                      <FormControl>
-                        <Input
-                          {...field}
-                          placeholder="e.g., API Documentation"
-                        />
-                      </FormControl>
-                      <FormDescription>
-                        A descriptive name for the URL content
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-
-                <FormField
-                  control={urlForm.control}
-                  name="url"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>URL</FormLabel>
-                      <FormControl>
-                        <Input
-                          {...field}
-                          type="url"
-                          placeholder="https://example.com/docs"
-                        />
-                      </FormControl>
-                      <FormDescription>
-                        The URL to fetch content from
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-
-                <div className="flex justify-end gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => onOpenChange(false)}
-                  >
-                    Cancel
-                  </Button>
-                  <Button type="submit" disabled={isLoading}>
-                    {isAddingUrl && (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    )}
-                    Add URL
-                  </Button>
-                </div>
-              </form>
-            </Form>
-          </TabsContent>
-
-          <TabsContent value="text">
-            <Form {...textForm}>
-              <form
-                onSubmit={textForm.handleSubmit(onTextSubmit)}
-                className="space-y-4"
-              >
-                <FormField
-                  control={textForm.control}
-                  name="name"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Name</FormLabel>
-                      <FormControl>
-                        <Input {...field} placeholder="e.g., Quick Reference" />
-                      </FormControl>
-                      <FormDescription>
-                        A descriptive name for the text content
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-
-                <FormField
-                  control={textForm.control}
-                  name="content"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Content</FormLabel>
-                      <FormControl>
-                        <Textarea
-                          {...field}
-                          placeholder="Enter your text content here..."
-                          rows={6}
-                        />
-                      </FormControl>
-                      <FormDescription>
-                        The text content to add to the repository
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-
-                <div className="flex justify-end gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => onOpenChange(false)}
-                  >
-                    Cancel
-                  </Button>
-                  <Button type="submit" disabled={isLoading}>
-                    {isAddingText && (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    )}
-                    Add Text
-                  </Button>
-                </div>
-              </form>
-            </Form>
-          </TabsContent>
-
-          <TabsContent value="google-drive">
-            <Alert>
-              <Cloud className="h-4 w-4" />
-              <AlertTitle>Google Drive is not available yet</AlertTitle>
-              <AlertDescription className="space-y-2">
-                <p>
-                  Drive import and synchronization remain disabled until the
-                  connector boundary tracked in issue #1262 is implemented.
-                </p>
-                <p>
-                  Download the file from Drive and use the File tab in the
-                  meantime. No Drive permissions or credentials are requested
-                  by this screen.
-                </p>
-              </AlertDescription>
-            </Alert>
-            <div className="mt-4 flex justify-end">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => onOpenChange(false)}
-              >
-                Close
-              </Button>
-            </div>
-          </TabsContent>
+          <GoogleDriveUploadTab
+            repositoryId={repositoryId}
+            onSuccess={onSuccess}
+            onClose={() => onOpenChange(false)}
+          />
         </Tabs>
       </DialogContent>
     </Dialog>

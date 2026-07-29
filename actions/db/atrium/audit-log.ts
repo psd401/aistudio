@@ -14,7 +14,7 @@
  * trail).
  */
 
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, or, sql } from "drizzle-orm";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import {
   createSuccess,
@@ -46,6 +46,8 @@ export interface ContentAuditFilter {
 export interface ContentAuditRowDTO {
   id: string;
   objectId: string | null;
+  collectionId: string | null;
+  collectionName: string | null;
   action: string;
   surface: string;
   actorKind: "human" | "agent";
@@ -56,6 +58,15 @@ export interface ContentAuditRowDTO {
   error: string | null;
   requestId: string | null;
   createdAt: string | null;
+  /**
+   * True on the admin-visible notification recorded when a non-admin author
+   * makes content publicly reachable (#1336). The §26.4 approval queue no
+   * longer blocks that action — it is allow-then-notify — so this row IS the
+   * notification, and the table flags it distinctly.
+   */
+  publicExposure: boolean;
+  /** Short human-readable note accompanying `publicExposure`. */
+  note: string | null;
 }
 
 export interface ContentAuditPage {
@@ -83,14 +94,22 @@ function buildAuditWhere(filter: ContentAuditFilter) {
   const objectQuery = filter.objectId?.trim();
   if (objectQuery) {
     if (UUID_RE.test(objectQuery)) {
-      conditions.push(eq(contentAuditLogs.objectId, objectQuery));
+      conditions.push(
+        or(
+          eq(contentAuditLogs.objectId, objectQuery),
+          sql`${contentAuditLogs.details}->>'collectionId' = ${objectQuery}`
+        )
+      );
     } else {
       // Substring match against the uuid's text form. Escape LIKE wildcards
       // so a pasted `%`/`_` is treated literally (drizzle parameterizes the
       // value itself, so there is no injection surface here).
       const escaped = objectQuery.replace(/[\\%_]/g, (m) => `\\${m}`);
       conditions.push(
-        sql`${contentAuditLogs.objectId}::text ILIKE ${`%${escaped}%`}`
+        or(
+          sql`${contentAuditLogs.objectId}::text ILIKE ${`%${escaped}%`}`,
+          sql`${contentAuditLogs.details}->>'collectionId' ILIKE ${`%${escaped}%`}`
+        )
       );
     }
   }
@@ -146,6 +165,8 @@ export async function listContentAuditAction(
       rows: rows.map((row) => ({
         id: row.id,
         objectId: row.objectId,
+        collectionId: row.details?.collectionId ?? null,
+        collectionName: row.details?.collectionName ?? null,
         action: row.action,
         surface: row.surface,
         actorKind: row.actorKind,
@@ -156,6 +177,8 @@ export async function listContentAuditAction(
         error: row.error,
         requestId: row.requestId,
         createdAt: row.createdAt ? row.createdAt.toISOString() : null,
+        publicExposure: row.details?.publicExposure === true,
+        note: row.details?.note ?? null,
       })),
       total: Number(totalRows[0]?.count ?? 0),
       page,

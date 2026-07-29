@@ -206,7 +206,11 @@ async function createContent(
     // Decode a base64 (WAF-opaque) body BEFORE the service's §28.3 screening +
     // size caps — screening always sees the real, decoded content.
     const decodedBody = decodeContentBody(body.body, body.codeEncoding);
-    const collectionId = await resolveCollectionId(common.collection);
+    const collectionId = await resolveCollectionId(
+      req,
+      common.collection,
+      "create"
+    );
     const hasPublishPublicCapability = hasPublishPublicScope(context.scopes);
     const created = await contentService.create(
       req,
@@ -344,6 +348,7 @@ const listContentSchema = z.object({
   // Case-insensitive title search; the 200-char bound mirrors the REST
   // listQuerySchema so both surfaces reject oversized input at the boundary.
   query: z.string().min(1).max(200).optional(),
+  since: z.string().datetime({ offset: true }).optional(),
 });
 
 async function handleListContent(
@@ -356,13 +361,18 @@ async function handleListContent(
   if ("result" in resolved) return resolved.result;
   const { req } = resolved;
   try {
-    const collectionId = await resolveCollectionId(parsed.data.collection);
+    const collectionId = await resolveCollectionId(
+      req,
+      parsed.data.collection,
+      "view"
+    );
     const items = await contentService.list(req, {
       kind: parsed.data.kind,
       collectionId,
       tag: parsed.data.tag,
       status: parsed.data.status,
       query: parsed.data.query,
+      since: parsed.data.since,
     });
     return ok({
       items: items.map((o) => ({
@@ -407,7 +417,7 @@ async function handleUpdateContent(
         ? undefined
         : parsed.data.collection === null
           ? null
-          : await resolveCollectionId(parsed.data.collection);
+          : await resolveCollectionId(req, parsed.data.collection, "create");
     const updated = await contentService.update(req, parsed.data.id, {
       title: parsed.data.title,
       tags: parsed.data.tags,
@@ -672,7 +682,11 @@ async function handleExportOkf(
     // `resolveCollectionId` THROWS for an unresolvable id (caught by `fail` below →
     // structured error); its required overload guarantees a defined id for the
     // zod-validated `.min(1)` input, so no `undefined` narrowing is needed.
-    const collectionId = await resolveCollectionId(parsed.data.collectionId);
+    const collectionId = await resolveCollectionId(
+      req,
+      parsed.data.collectionId,
+      "view"
+    );
     const hasPublishPublicCapability = hasPublishPublicScope(context.scopes);
     const result = await okfExportService.exportCollection(req, collectionId, {
       audience: parsed.data.audience,
@@ -725,12 +739,20 @@ async function handleImportOkf(
     // capability (like create); sk-/agent callers are scope-gated at dispatch.
     await assertContentAuthoringCapability(context);
     const targetCollectionId = parsed.data.targetCollectionId
-      ? await resolveCollectionId(parsed.data.targetCollectionId)
+      ? await resolveCollectionId(
+          req,
+          parsed.data.targetCollectionId,
+          "create"
+        )
       : undefined;
-    const result = await okfImportService.importBundle(req, {
-      files: parsed.data.files,
-      targetCollectionId,
-    });
+    const result = await okfImportService.importBundle(
+      req,
+      {
+        files: parsed.data.files,
+        targetCollectionId,
+      },
+      { surface: "mcp", requestId: context.requestId }
+    );
     void recordContentAudit({
       req,
       action: "import_okf",

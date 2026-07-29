@@ -1,6 +1,6 @@
 /**
  * Behavior tests for the `unpublish_content` MCP tool handler and the
- * `list_content` `query` pass-through (Epic #1059 completion).
+ * `list_content` `query` + `since` pass-through.
  *
  * `unpublish_content` must mirror the REST DELETE
  * /api/v1/content/{id}/publish/{destination} semantics exactly:
@@ -67,7 +67,7 @@ jest.mock("@/lib/content/surface-helpers", () => ({
 // The handlers import the REST-shared zod schemas at module scope; supply real
 // (minimal) zod schemas so the module loads without pulling the full REST layer.
 jest.mock("@/lib/content/rest", () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+
   const { z } = require("zod") as typeof import("zod");
   const grant = z.object({ kind: z.string(), value: z.string() });
   return {
@@ -290,6 +290,28 @@ describe("list_content `query` filter", () => {
 
   it("rejects a query over 200 chars at the zod boundary — service never called", async () => {
     const result = await handler({ query: "x".repeat(201) }, context());
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Validation failed");
+    expect(mockList).not.toHaveBeenCalled();
+  });
+
+  it("passes a valid ISO since lower bound through to contentService.list", async () => {
+    const since = "2026-07-27T12:34:56.789Z";
+    mockResolveCollectionId.mockResolvedValue(undefined);
+    mockList.mockResolvedValue([]);
+
+    const result = await handler({ since }, context());
+
+    expect(result.isError).toBeUndefined();
+    expect(mockList).toHaveBeenCalledWith(
+      REQ,
+      expect.objectContaining({ since })
+    );
+  });
+
+  it("rejects an invalid since at the zod boundary", async () => {
+    const result = await handler({ since: "not-a-timestamp" }, context());
 
     expect(result.isError).toBe(true);
     expect(result.content[0]?.text).toContain("Validation failed");

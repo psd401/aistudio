@@ -9,14 +9,18 @@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ApprovalsQueue } from "./approvals-queue"
 import { AuditLogTable } from "./audit-log-table"
+import { CollectionManagementPanel } from "@/components/atrium/CollectionManagementPanel"
 import type { PendingApprovalDTO } from "@/actions/db/atrium/approvals"
 import type { ContentAuditPage } from "@/actions/db/atrium/audit-log"
+import type { CollectionDTO } from "@/lib/content"
 
 interface AtriumAdminTabsProps {
   initialApprovals: PendingApprovalDTO[]
   approvalsError: string | null
   initialAudit: ContentAuditPage
   auditError: string | null
+  initialCollections: CollectionDTO[]
+  collectionsError: string | null
 }
 
 export function AtriumAdminTabs({
@@ -24,6 +28,8 @@ export function AtriumAdminTabs({
   approvalsError,
   initialAudit,
   auditError,
+  initialCollections,
+  collectionsError,
 }: AtriumAdminTabsProps) {
   return (
     <Tabs defaultValue="approvals">
@@ -32,12 +38,20 @@ export function AtriumAdminTabs({
           Approvals
           {initialApprovals.length > 0 ? ` (${initialApprovals.length})` : ""}
         </TabsTrigger>
+        <TabsTrigger value="collections">Collections</TabsTrigger>
         <TabsTrigger value="audit">Audit</TabsTrigger>
       </TabsList>
       <TabsContent value="approvals">
         <ApprovalsQueue
           initialRequests={initialApprovals}
           initialError={approvalsError}
+        />
+      </TabsContent>
+      <TabsContent value="collections">
+        <CollectionManagementPanel
+          mode="admin"
+          initialCollections={initialCollections}
+          initialError={collectionsError}
         />
       </TabsContent>
       <TabsContent value="audit">

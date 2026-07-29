@@ -9,10 +9,11 @@
 
 import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals'
 import { SSEMonitor, createSSEMonitor } from '@/lib/streaming/sse-monitoring'
-import type { SSEEvent } from '@/lib/streaming/sse-event-types'
 
-describe('SSEMonitor', () => {
-  let monitor: SSEMonitor
+let monitor: SSEMonitor
+
+function defineSSEMonitorSuite1Part1() {
+
 
   beforeEach(() => {
     jest.useFakeTimers()
@@ -110,7 +111,9 @@ describe('SSEMonitor', () => {
     })
   })
 
-  describe('Field Mismatch Detection', () => {
+  }
+
+function defineSSEMonitorSuite1Part2() {describe('Field Mismatch Detection', () => {
     it('should detect missing expected fields', () => {
       const receivedFields = ['type', 'textDelta', 'id'] // Wrong field name!
       monitor.recordFieldMismatch('delta', receivedFields, 'text-delta')
@@ -216,7 +219,9 @@ describe('SSEMonitor', () => {
     })
   })
 
-  describe('Reset Functionality', () => {
+  }
+
+function defineSSEMonitorSuite1Part3() {describe('Reset Functionality', () => {
     it('should reset all metrics', () => {
       monitor.recordEvent('text-delta')
       monitor.recordParseError(new Error('test'), 'data')
@@ -234,4 +239,12 @@ describe('SSEMonitor', () => {
       expect(metrics.hasErrors).toBe(false)
     })
   })
-})
+}
+
+const defineSSEMonitorSuite1 = () => {
+  defineSSEMonitorSuite1Part1()
+  defineSSEMonitorSuite1Part2()
+  defineSSEMonitorSuite1Part3()
+};
+
+describe('SSEMonitor', defineSSEMonitorSuite1)

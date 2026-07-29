@@ -53,12 +53,16 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     // callers are gated by the content:create scope above.
     await assertContentAuthoringCapability(auth);
     const targetCollectionId = input.targetCollectionId
-      ? await resolveCollectionId(input.targetCollectionId)
+      ? await resolveCollectionId(req, input.targetCollectionId, "create")
       : undefined;
-    const result = await okfImportService.importBundle(req, {
-      files: input.files,
-      targetCollectionId,
-    });
+    const result = await okfImportService.importBundle(
+      req,
+      {
+        files: input.files,
+        targetCollectionId,
+      },
+      { surface: "rest", requestId }
+    );
     void recordContentAudit({
       req,
       action: "import_okf",

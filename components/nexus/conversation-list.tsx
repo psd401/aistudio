@@ -1,10 +1,17 @@
 'use client'
 
-import { useState, useEffect, useCallback, memo } from 'react'
+import { useState, useEffect, useCallback, useRef, memo } from 'react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
-import { Trash2Icon, MessageSquareIcon, BotIcon } from 'lucide-react'
+import {
+  Trash2Icon,
+  MessageSquareIcon,
+  BotIcon,
+  BookmarkIcon,
+  BookmarkCheckIcon,
+  BrainIcon,
+} from 'lucide-react'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -34,6 +41,8 @@ interface ConversationItem {
   createdAt: string
   isArchived: boolean
   isPinned: boolean
+  /** "Keep" flag — kept conversations are never auto-deleted by retention (#1330) */
+  isSaved: boolean
   metadata?: NexusConversationMetadata | AssistantArchitectConversationMetadata | null
 }
 
@@ -104,27 +113,152 @@ function ExecutionStatusBadge({ status }: { status: ExecutionStatus }) {
   )
 }
 
+function ConversationSummary({
+  conversation,
+  isSaved,
+  showMemoryStatus,
+}: {
+  conversation: ConversationItem
+  isSaved: boolean
+  showMemoryStatus: boolean
+}) {
+  const memoryDisabled = conversation.metadata?.memoryDisabled === true
+  const assistantMetadata =
+    conversation.provider === 'assistant-architect' &&
+    isAssistantArchitectMetadata(conversation.metadata)
+      ? conversation.metadata
+      : undefined
+
+  return (
+    <div className="flex-grow px-3 py-2 min-w-0">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium truncate">{conversation.title}</p>
+          {assistantMetadata?.assistantName && (
+            <p className="text-xs text-muted-foreground truncate mt-0.5">
+              {String(assistantMetadata.assistantName).slice(0, 200)}
+            </p>
+          )}
+          <div className="flex items-center gap-2 mt-1">
+            <span className="text-xs text-muted-foreground">
+              {conversation.messageCount} message
+              {conversation.messageCount !== 1 ? 's' : ''}
+            </span>
+            <span className="text-xs text-muted-foreground">
+              {formatRelativeTime(
+                conversation.lastMessageAt || conversation.createdAt,
+              )}
+            </span>
+            {assistantMetadata &&
+              isValidExecutionStatus(assistantMetadata.executionStatus) && (
+                <ExecutionStatusBadge
+                  status={assistantMetadata.executionStatus}
+                />
+              )}
+            {isSaved && (
+              <Badge
+                variant="secondary"
+                size="sm"
+                data-testid="conversation-kept-indicator"
+              >
+                Kept
+              </Badge>
+            )}
+            {showMemoryStatus && memoryDisabled && (
+              <Badge
+                variant="secondary"
+                size="sm"
+                data-testid="conversation-memory-off-indicator"
+              >
+                Memory off
+              </Badge>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ConversationMemoryButton({
+  conversation,
+  isTogglingMemory,
+  visible,
+  onToggleMemory,
+}: {
+  conversation: ConversationItem
+  isTogglingMemory: boolean
+  visible: boolean
+  onToggleMemory: (id: string, nextMemoryDisabled: boolean) => void
+}) {
+  const memoryDisabled = conversation.metadata?.memoryDisabled === true
+  const handleClick = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation()
+    onToggleMemory(conversation.id, !memoryDisabled)
+  }, [conversation.id, memoryDisabled, onToggleMemory])
+
+  if (!visible) return null
+  return (
+    <TooltipIconButton
+      className={`size-8 ${memoryDisabled ? 'text-muted-foreground hover:text-foreground' : 'text-primary hover:text-primary/80'}`}
+      variant="ghost"
+      tooltip={
+        memoryDisabled
+          ? 'Enable memory for this conversation'
+          : 'Disable memory for this conversation'
+      }
+      aria-pressed={!memoryDisabled}
+      aria-label={
+        memoryDisabled
+          ? 'Enable memory for conversation'
+          : 'Disable memory for conversation'
+      }
+      data-testid="conversation-memory-toggle"
+      disabled={isTogglingMemory}
+      onClick={handleClick}
+    >
+      <BrainIcon className="h-4 w-4" />
+    </TooltipIconButton>
+  )
+}
+
 // Extracted component for conversation row to avoid inline functions
 interface ConversationItemRowProps {
   conversation: ConversationItem
   isSelected: boolean
   isDeleting: boolean
+  isTogglingKeep: boolean
+  isTogglingMemory: boolean
+  memoryControlAvailable: boolean
   onSelect: (id: string) => void
   onDelete: (id: string) => void
+  onToggleKeep: (id: string, nextIsSaved: boolean) => void
+  onToggleMemory: (id: string, nextMemoryDisabled: boolean) => void
 }
 
 const ConversationItemRow = memo(function ConversationItemRow({
   conversation,
   isSelected,
   isDeleting,
+  isTogglingKeep,
+  isTogglingMemory,
+  memoryControlAvailable,
   onSelect,
   onDelete,
+  onToggleKeep,
+  onToggleMemory,
 }: ConversationItemRowProps) {
   const handleClick = useCallback(() => {
     onSelect(conversation.id)
   }, [conversation.id, onSelect])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // Only act on keys aimed at the row ITSELF. Enter/Space on a nested
+    // control (Keep, Delete) bubbles up here, and without this guard the row
+    // would navigate into the conversation at the same time as the button
+    // fired — so a keyboard user toggling Keep also got yanked into the chat,
+    // and Enter on Delete opened the confirm dialog on top of a navigation.
+    if (e.target !== e.currentTarget) return
     if (e.key === 'Enter' || e.key === ' ') {
       onSelect(conversation.id)
     }
@@ -139,6 +273,18 @@ const ConversationItemRow = memo(function ConversationItemRow({
     onDelete(conversation.id)
   }, [conversation.id, onDelete])
 
+  const isSaved = conversation.isSaved === true
+
+  const handleToggleKeepClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation()
+    onToggleKeep(conversation.id, !isSaved)
+  }, [conversation.id, isSaved, onToggleKeep])
+  const memoryControlVisible =
+    memoryControlAvailable &&
+    !NON_CHAT_PROVIDERS.includes(
+      conversation.provider as (typeof NON_CHAT_PROVIDERS)[number],
+    )
+
   return (
     <div
       className={`
@@ -150,82 +296,121 @@ const ConversationItemRow = memo(function ConversationItemRow({
       role="button"
       tabIndex={0}
       onKeyDown={handleKeyDown}
+      data-testid={`conversation-item-${conversation.id}`}
     >
-      <div className="flex-grow px-3 py-2 min-w-0">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium truncate">
-              {conversation.title}
-            </p>
-            {conversation.provider === 'assistant-architect' && isAssistantArchitectMetadata(conversation.metadata) && conversation.metadata.assistantName && (
-              <p className="text-xs text-muted-foreground truncate mt-0.5">
-                {String(conversation.metadata.assistantName).slice(0, 200)}
-              </p>
-            )}
-            <div className="flex items-center gap-2 mt-1">
-              <span className="text-xs text-muted-foreground">
-                {conversation.messageCount} message{conversation.messageCount !== 1 ? 's' : ''}
-              </span>
-              <span className="text-xs text-muted-foreground">
-                {formatRelativeTime(conversation.lastMessageAt || conversation.createdAt)}
-              </span>
-              {conversation.provider === 'assistant-architect' && isAssistantArchitectMetadata(conversation.metadata) && isValidExecutionStatus(conversation.metadata.executionStatus) && (
-                <ExecutionStatusBadge status={conversation.metadata.executionStatus} />
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
+      <ConversationSummary
+        conversation={conversation}
+        isSaved={isSaved}
+        showMemoryStatus={memoryControlVisible}
+      />
 
-      {/* Delete Button */}
-      <AlertDialog>
-        <AlertDialogTrigger asChild>
-          <TooltipIconButton
-            className="text-destructive hover:text-destructive/80 ml-auto mr-1 size-4 p-4"
-            variant="ghost"
-            tooltip="Delete conversation"
-            onClick={handleStopPropagation}
-          >
-            <Trash2Icon className="h-4 w-4" />
-          </TooltipIconButton>
-        </AlertDialogTrigger>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete conversation?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This action cannot be undone. This will permanently delete this conversation and all its messages.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={handleDeleteClick}
-              disabled={isDeleting}
+      {/* Row actions. Gapped and sized deliberately: `size-4 p-4` (the previous
+          Delete styling) renders a 16px hit target — size-* and p-* are
+          different twMerge groups, so the padding does not enlarge the box it
+          is clamped inside. That is below the 24px WCAG 2.5.8 minimum, and it
+          puts a protective control flush against a destructive one. */}
+      <div className="ml-auto mr-1 flex items-center gap-1">
+        <ConversationMemoryButton
+          conversation={conversation}
+          isTogglingMemory={isTogglingMemory}
+          visible={memoryControlVisible}
+          onToggleMemory={onToggleMemory}
+        />
+
+        {/* Keep toggle — kept conversations are exempt from retention auto-deletion (#1330) */}
+        <TooltipIconButton
+          className={`size-8 ${isSaved ? 'text-primary hover:text-primary/80' : 'text-muted-foreground hover:text-foreground'}`}
+          variant="ghost"
+          tooltip={isSaved ? 'Stop keeping — no longer protected from automatic cleanup' : 'Keep — protect from automatic cleanup'}
+          aria-pressed={isSaved}
+          data-testid="conversation-keep-toggle"
+          disabled={isTogglingKeep}
+          onClick={handleToggleKeepClick}
+        >
+          {isSaved
+            ? <BookmarkCheckIcon className="h-4 w-4" />
+            : <BookmarkIcon className="h-4 w-4" />}
+        </TooltipIconButton>
+
+        {/* Delete Button */}
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <TooltipIconButton
+              className="text-destructive hover:text-destructive/80 size-8"
+              variant="ghost"
+              tooltip="Delete conversation"
+              onClick={handleStopPropagation}
             >
-              {isDeleting ? 'Deleting...' : 'Delete'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+              <Trash2Icon className="h-4 w-4" />
+            </TooltipIconButton>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete conversation?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This action cannot be undone. This will permanently delete this conversation and all its messages.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                onClick={handleDeleteClick}
+                disabled={isDeleting}
+              >
+                {isDeleting ? 'Deleting...' : 'Delete'}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </div>
     </div>
   )
 })
 
-export function ConversationList({ selectedConversationId, provider, onConversationSelect: onConversationSelectProp, onNewConversation }: ConversationListProps) {
+/** Maps a non-ok conversation-list response to a user-facing message. */
+function describeResponseError(status: number): string {
+  if (status === 401) return 'Authentication required. Please sign in again.'
+  if (status === 403) return 'Access denied. You do not have permission to view conversations.'
+  if (status >= 500) return 'Server error. Please try again later.'
+  return `Failed to load conversations: ${status}`
+}
+
+/** Maps a thrown load failure to a user-facing message. */
+function describeLoadError(err: unknown): string {
+  if (!(err instanceof Error)) return 'Failed to load conversations'
+  if (err.name === 'AbortError') return 'Request timed out. Please check your connection and try again.'
+  if (err instanceof TypeError) return 'Network error. Please check your internet connection.'
+  return err.message
+}
+
+/**
+ * Fetches and validates the conversation list for the active tab / provider.
+ *
+ * Extracted from ConversationList so neither the component nor
+ * useConversationListState carries the whole fetch-and-validate body.
+ */
+function useConversationLoader(
+  activeTab: ConversationFilterTab,
+  provider: ConversationProvider | undefined
+) {
   const [conversations, setConversations] = useState<ConversationItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState<ConversationFilterTab>('chat')
-  const router = useRouter()
+  const [memoryControlAvailable, setMemoryControlAvailable] = useState(false)
 
-  const handleTabChat = useCallback(() => setActiveTab('chat'), [])
-  const handleTabAssistants = useCallback(() => setActiveTab('assistants'), [])
+  // Monotonic request id. `conversations` is shared across tabs, so if a slow
+  // request for one tab resolves AFTER a newer request for another, committing
+  // it would leave the list showing the wrong tab's conversations until the
+  // next reload. Only the most recent request is allowed to commit state.
+  const requestIdRef = useRef(0)
 
   // Load conversations from database with comprehensive error handling
   // Server-side filtering based on active tab to avoid missing items with >500 conversations
   const loadConversations = useCallback(async () => {
+    const requestId = ++requestIdRef.current
+    const isStale = () => requestIdRef.current !== requestId
+
     try {
       setLoading(true)
       setError(null)
@@ -258,19 +443,14 @@ export function ConversationList({ selectedConversationId, provider, onConversat
       clearTimeout(timeoutId)
       
       if (!response.ok) {
-        if (response.status === 401) {
-          throw new Error('Authentication required. Please sign in again.')
-        } else if (response.status === 403) {
-          throw new Error('Access denied. You do not have permission to view conversations.')
-        } else if (response.status >= 500) {
-          throw new Error('Server error. Please try again later.')
-        } else {
-          throw new Error(`Failed to load conversations: ${response.status}`)
-        }
+        throw new Error(describeResponseError(response.status))
       }
       
       const data = await response.json()
-      const { conversations: loadedConversations = [] } = data
+      const {
+        conversations: loadedConversations = [],
+        memoryControlAvailable: loadedMemoryControlAvailable = false,
+      } = data
       
       // Validate conversation data structure
       const validConversations = loadedConversations.filter((conv: unknown): conv is ConversationItem => {
@@ -290,26 +470,19 @@ export function ConversationList({ selectedConversationId, provider, onConversat
         })
       }
       
+      if (isStale()) return
       setConversations(validConversations)
+      setMemoryControlAvailable(loadedMemoryControlAvailable === true)
       log.debug('Conversations loaded', { count: validConversations.length })
       
     } catch (err) {
-      let errorMessage = 'Failed to load conversations'
-
-      if (err instanceof Error) {
-        if (err.name === 'AbortError') {
-          errorMessage = 'Request timed out. Please check your connection and try again.'
-        } else if (err instanceof TypeError) {
-          errorMessage = 'Network error. Please check your internet connection.'
-        } else {
-          errorMessage = err.message
-        }
-      }
+      const errorMessage = describeLoadError(err)
 
       log.error('Failed to load conversations', { error: errorMessage, activeTab })
+      if (isStale()) return
       setError(errorMessage)
     } finally {
-      setLoading(false)
+      if (!isStale()) setLoading(false)
     }
   }, [activeTab, provider])
 
@@ -318,6 +491,134 @@ export function ConversationList({ selectedConversationId, provider, onConversat
     loadConversations()
   }, [loadConversations])
 
+  return {
+    conversations,
+    setConversations,
+    loading,
+    error,
+    setError,
+    loadConversations,
+    memoryControlAvailable,
+  }
+}
+
+function useMemoryToggle({
+  setConversations,
+  setActionError,
+}: {
+  setConversations: React.Dispatch<React.SetStateAction<ConversationItem[]>>
+  setActionError: React.Dispatch<React.SetStateAction<string | null>>
+}) {
+  const [togglingMemoryIds, setTogglingMemoryIds] =
+    useState<ReadonlySet<string>>(new Set())
+  const handleToggleMemory = useCallback(async (
+    conversationId: string,
+    nextMemoryDisabled: boolean,
+  ) => {
+    setTogglingMemoryIds((prev) => new Set(prev).add(conversationId))
+    setConversations((prev) => prev.map((conversation) =>
+      conversation.id === conversationId
+        ? {
+            ...conversation,
+            metadata: {
+              ...(conversation.metadata ?? {}),
+              memoryDisabled: nextMemoryDisabled,
+            },
+          }
+        : conversation
+    ))
+
+    try {
+      const response = await fetch(
+        `/api/nexus/conversations/${encodeURIComponent(conversationId)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ memoryDisabled: nextMemoryDisabled }),
+        },
+      )
+      if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`)
+      }
+      log.debug('Conversation memory flag updated', {
+        conversationId,
+        memoryDisabled: nextMemoryDisabled,
+      })
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Failed to update conversation memory'
+      log.error('Failed to update conversation memory flag', {
+        conversationId,
+        error: message,
+      })
+      setConversations((prev) => prev.map((conversation) =>
+        conversation.id === conversationId
+          ? {
+              ...conversation,
+              metadata: {
+                ...(conversation.metadata ?? {}),
+                memoryDisabled: !nextMemoryDisabled,
+              },
+            }
+          : conversation
+      ))
+      setActionError(`Memory toggle failed: ${message}`)
+      setTimeout(() => setActionError(null), 5000)
+    } finally {
+      setTogglingMemoryIds((prev) => {
+        const next = new Set(prev)
+        next.delete(conversationId)
+        return next
+      })
+    }
+  }, [setActionError, setConversations])
+
+  return { togglingMemoryIds, handleToggleMemory }
+}
+
+/**
+ * All list state + side effects for ConversationList.
+ *
+ * Extracted from the component body so the component stays a render function.
+ * Nothing here is component-specific beyond the props it is handed.
+ */
+function useConversationListState({
+  selectedConversationId,
+  provider,
+  onConversationSelect: onConversationSelectProp,
+  onNewConversation,
+}: ConversationListProps) {
+  const [activeTab, setActiveTab] = useState<ConversationFilterTab>('chat')
+  const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null)
+  // A SET, not a single id: Keep requests on different rows overlap. With one
+  // id, starting B re-enabled A's button, and whichever request settled first
+  // cleared the id while the other was still in flight — letting a second
+  // toggle start whose PATCH and optimistic rollback could then resolve out of
+  // order, leaving the UI disagreeing with the persisted protection state.
+  const [togglingKeepIds, setTogglingKeepIds] = useState<ReadonlySet<string>>(new Set())
+  /** Transient, non-blocking error for row-level actions (does not hide the list) */
+  const [actionError, setActionError] = useState<string | null>(null)
+  const router = useRouter()
+
+  const {
+    conversations,
+    setConversations,
+    loading,
+    error,
+    setError,
+    loadConversations,
+    memoryControlAvailable,
+  } =
+    useConversationLoader(activeTab, provider)
+  const { togglingMemoryIds, handleToggleMemory } = useMemoryToggle({
+    setConversations,
+    setActionError,
+  })
+
+  const handleTabChat = useCallback(() => setActiveTab('chat'), [])
+  const handleTabAssistants = useCallback(() => setActiveTab('assistants'), [])
 
   // Handle conversation selection with secure navigation
   const handleConversationSelect = useCallback((conversationId: string) => {
@@ -328,6 +629,53 @@ export function ConversationList({ selectedConversationId, provider, onConversat
       navigateToConversation(conversationId)
     }
   }, [onConversationSelectProp])
+
+  // Toggle the "Keep" flag (#1330). Kept conversations are permanently exempt
+  // from the nightly retention sweep, so the optimistic update is rolled back
+  // on any failure — the UI must never claim a conversation is protected when
+  // the server did not record it.
+  const handleToggleKeep = useCallback(async (conversationId: string, nextIsSaved: boolean) => {
+    setTogglingKeepIds((prev) => new Set(prev).add(conversationId))
+    setConversations(prev => prev.map(conv =>
+      conv.id === conversationId ? { ...conv, isSaved: nextIsSaved } : conv
+    ))
+
+    try {
+      const response = await fetch(`/api/nexus/conversations/${encodeURIComponent(conversationId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isSaved: nextIsSaved })
+      })
+
+      if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`)
+      }
+
+      log.debug('Conversation keep flag updated', { conversationId, isSaved: nextIsSaved })
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to update Keep'
+      log.error('Failed to update conversation keep flag', { conversationId, error: errorMessage })
+
+      // Roll the optimistic flip back to its previous value
+      setConversations(prev => prev.map(conv =>
+        conv.id === conversationId ? { ...conv, isSaved: !nextIsSaved } : conv
+      ))
+
+      // Deliberately NOT the `error` state: that state replaces the entire
+      // list with a retry panel, which would be a disproportionate response to
+      // a failed toggle. This renders a non-blocking inline notice instead.
+      setActionError(`Keep failed: ${errorMessage}`)
+      setTimeout(() => setActionError(null), 5000)
+    } finally {
+      setTogglingKeepIds((prev) => {
+        const next = new Set(prev)
+        next.delete(conversationId)
+        return next
+      })
+    }
+    // setConversations is a useState setter (stable identity); listed to satisfy
+    // exhaustive-deps now that it arrives via the loader hook's return value.
+  }, [setConversations])
 
   // Handle deleting a conversation using server action with comprehensive error handling
   const handleDeleteConversation = useCallback(async (conversationId: string) => {
@@ -381,7 +729,49 @@ export function ConversationList({ selectedConversationId, provider, onConversat
     } finally {
       setDeletingConversationId(null)
     }
-  }, [selectedConversationId, router, onNewConversation])
+    // setConversations / setError are useState setters (stable identities).
+  }, [selectedConversationId, router, onNewConversation, setConversations, setError])
+
+  return {
+    conversations,
+    loading,
+    error,
+    actionError,
+    activeTab,
+    deletingConversationId,
+    togglingKeepIds,
+    togglingMemoryIds,
+    memoryControlAvailable,
+    handleTabChat,
+    handleTabAssistants,
+    loadConversations,
+    handleConversationSelect,
+    handleDeleteConversation,
+    handleToggleKeep,
+    handleToggleMemory,
+  }
+}
+
+export function ConversationList(props: ConversationListProps) {
+  const { provider, selectedConversationId } = props
+  const {
+    conversations,
+    loading,
+    error,
+    actionError,
+    activeTab,
+    deletingConversationId,
+    togglingKeepIds,
+    togglingMemoryIds,
+    memoryControlAvailable,
+    handleTabChat,
+    handleTabAssistants,
+    loadConversations,
+    handleConversationSelect,
+    handleDeleteConversation,
+    handleToggleKeep,
+    handleToggleMemory,
+  } = useConversationListState(props)
 
   if (loading) {
     return (
@@ -404,6 +794,12 @@ export function ConversationList({ selectedConversationId, provider, onConversat
 
   return (
     <div className="flex flex-col items-stretch gap-1.5 text-foreground">
+      {actionError && (
+        <p className="px-3 py-1 text-xs text-destructive" role="status">
+          {actionError}
+        </p>
+      )}
+
       {/* Filter Tabs - hidden when provider is explicitly set */}
       {!provider && (
         <div className="flex gap-1 px-1 pb-1" role="tablist" aria-label="Conversation type filter">
@@ -458,8 +854,13 @@ export function ConversationList({ selectedConversationId, provider, onConversat
               conversation={conversation}
               isSelected={selectedConversationId === conversation.id}
               isDeleting={deletingConversationId === conversation.id}
+              isTogglingKeep={togglingKeepIds.has(conversation.id)}
+              isTogglingMemory={togglingMemoryIds.has(conversation.id)}
+              memoryControlAvailable={memoryControlAvailable}
               onSelect={handleConversationSelect}
               onDelete={handleDeleteConversation}
+              onToggleKeep={handleToggleKeep}
+              onToggleMemory={handleToggleMemory}
             />
           ))}
         </>

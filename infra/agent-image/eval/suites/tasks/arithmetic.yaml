@@ -1,0 +1,6 @@
+id: arithmetic-no-tools
+skill: runner-core
+level: L0
+workspace: pure
+prompt: "Without using tools, calculate 17 times 19. Reply only with the integer."
+trials: 3

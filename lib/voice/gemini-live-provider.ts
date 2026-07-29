@@ -152,7 +152,7 @@ export class GeminiLiveProvider implements VoiceProvider {
       // Log full error internally but throw a generic message to prevent
       // leaking SDK internals (API keys, URLs) to the client
       this.log.error("Failed to connect to Gemini Live", { error: sanitizeForLogging(message) })
-      throw new Error("Failed to connect to Gemini Live API")
+      throw new Error("Failed to connect to Gemini Live API", { cause: error })
     }
   }
 

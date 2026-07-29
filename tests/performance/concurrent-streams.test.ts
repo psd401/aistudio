@@ -21,9 +21,12 @@ import { getAuthToken } from './lib/auth-helper';
 // Extended timeout for concurrent tests
 jest.setTimeout(15 * 60 * 1000); // 15 minutes
 
-describe('Concurrent Streaming Performance', () => {
-  let authToken: string | undefined;
-  let baseUrl: string;
+let authToken: string | undefined;
+let baseUrl: string;
+
+function defineConcurrentStreamingPerformanceSuite1Part1() {
+
+
 
   beforeAll(async () => {
     const env = getTestEnvironment();
@@ -33,7 +36,9 @@ describe('Concurrent Streaming Performance', () => {
     console.log(`Running concurrent streaming tests against: ${baseUrl}`);
   });
 
-  test('100 concurrent streams with acceptable error rate (<0.5%)', async () => {
+  }
+
+function defineConcurrentStreamingPerformanceSuite1Part2() {test('100 concurrent streams with acceptable error rate (<0.5%)', async () => {
     const collector = new MetricsCollector();
     const targets = getPerformanceTargets();
     const concurrentCount = TEST_CONFIG.concurrent.streamCount;
@@ -142,7 +147,9 @@ describe('Concurrent Streaming Performance', () => {
     );
   });
 
-  test('200 concurrent streams stress test', async () => {
+  }
+
+function defineConcurrentStreamingPerformanceSuite1Part3() {test('200 concurrent streams stress test', async () => {
     const collector = new MetricsCollector();
     const concurrentCount = 200;
     const model = TEST_MODELS[0];
@@ -225,7 +232,9 @@ describe('Concurrent Streaming Performance', () => {
     expect(aggregated.successfulRequests).toBeGreaterThanOrEqual(Math.floor(concurrentCount * 0.8));
   });
 
-  test('Sustained concurrent load for 1 minute', async () => {
+  }
+
+function defineConcurrentStreamingPerformanceSuite1Part4() {test('Sustained concurrent load for 1 minute', async () => {
     const collector = new MetricsCollector();
     const duration = 60000; // 1 minute
     const concurrentStreams = 50;
@@ -329,4 +338,13 @@ describe('Concurrent Streaming Performance', () => {
     const targets = getPerformanceTargets();
     expect(aggregated.errorRate).toBeLessThanOrEqual(targets.maxErrorRate);
   });
-});
+}
+
+const defineConcurrentStreamingPerformanceSuite1 = () => {
+  defineConcurrentStreamingPerformanceSuite1Part1()
+  defineConcurrentStreamingPerformanceSuite1Part2()
+  defineConcurrentStreamingPerformanceSuite1Part3()
+  defineConcurrentStreamingPerformanceSuite1Part4()
+};
+
+describe('Concurrent Streaming Performance', defineConcurrentStreamingPerformanceSuite1);

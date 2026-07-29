@@ -89,17 +89,17 @@ object from that source, with a recorded provenance link.
 The first additive migration extends the current repository tables rather than
 introducing another top-level asset system.
 
-| Record | Responsibility |
-|---|---|
-| `knowledge_repositories` | Durable or ephemeral container, ownership, policy, and lifecycle |
-| `repository_items` | Stable logical item identity across source revisions |
-| `repository_item_versions` | Immutable source version, checksum, object location, detected media, and source revision |
-| `repository_processing_jobs` | Idempotent stage state, attempt history, lease, timing, and failure classification |
-| `repository_artifacts` | Derived text, Markdown, layout, tables, images, thumbnails, transcript, captions, and other modalities |
-| `repository_item_chunks` | Search segment linked to the exact item version and artifact, with page/time/region citation metadata |
-| `repository_index_generations` | Atomic index publication and rollback boundary |
-| `repository_connectors` | External source configuration, encrypted-credential reference, cursor, and sync health |
-| `content_index_links` | Existing Atrium content-to-repository bridge |
+| Record                         | Responsibility                                                                                         |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `knowledge_repositories`       | Durable or ephemeral container, ownership, policy, and lifecycle                                       |
+| `repository_items`             | Stable logical item identity across source revisions                                                   |
+| `repository_item_versions`     | Immutable source version, checksum, object location, detected media, and source revision               |
+| `repository_processing_jobs`   | Idempotent stage state, attempt history, lease, timing, and failure classification                     |
+| `repository_artifacts`         | Derived text, Markdown, layout, tables, images, thumbnails, transcript, captions, and other modalities |
+| `repository_item_chunks`       | Search segment linked to the exact item version and artifact, with page/time/region citation metadata  |
+| `repository_index_generations` | Atomic index publication and rollback boundary                                                         |
+| `repository_connectors`        | External source configuration, encrypted-credential reference, cursor, and sync health                 |
+| `content_index_links`          | Existing Atrium content-to-repository bridge                                                           |
 
 All new tables use additive migrations. Existing migrations 001-005 and every
 previous numbered migration remain immutable. During rollout, old readers can
@@ -222,34 +222,40 @@ by one-click per-user delegated OAuth when the consent flow is ready.
 
 The settings UI will validate and explain these database-first settings:
 
-| Key | Default | Purpose |
-|---|---:|---|
-| `CONTENT_PLATFORM_ENABLED` | `false` | Global controlled-rollout flag |
-| `CONTENT_DUAL_WRITE_ENABLED` | `false` | Write canonical records alongside a legacy path |
-| `CONTENT_READ_V2_ENABLED` | `false` | Read from the canonical retrieval path |
-| `NEXUS_ATTACHMENT_RETENTION_DAYS` | `30` | One-off Nexus source retention |
-| `CONTENT_DELETION_GRACE_DAYS` | `7` | Recovery window before physical deletion |
-| `CONTENT_MAX_FILE_SIZE_GB` | `10` | Maximum single-source upload |
-| `CONTENT_MAX_PDF_SIZE_MB` | `500` | Canonical PDF/Textract ceiling |
-| `CONTENT_MAX_OFFICE_SIZE_MB` | `100` | In-memory DOCX/XLSX/PPTX processor ceiling |
-| `CONTENT_MAX_IMAGE_SIZE_MB` | `50` | In-memory image normalizer ceiling |
-| `CONTENT_MAX_MEDIA_HOURS` | `4` | Maximum audio/video duration |
-| `CONTENT_ALLOWED_MIME_TYPES` | managed allowlist | Accepted source formats |
-| `CONTENT_MALWARE_SCAN_REQUIRED` | `true` | Quarantine release policy |
-| `CONTENT_OCR_STRATEGY` | `auto` | Managed/fallback OCR policy |
-| `CONTENT_IMAGE_CAPTION_MODEL_ID` | `us.amazon.nova-2-lite-v1:0` | Bedrock Nova image-description model |
-| `CONTENT_VISUAL_INDEX_ENABLED` | `false` | Visual embeddings rollout |
-| `CONTENT_RETRIEVAL_RERANK_ENABLED` | `true` | Bedrock reranking after deterministic rank fusion; fails open to fusion |
-| `CONTENT_RETRIEVAL_RERANK_MODEL_ID` | `cohere.rerank-v3-5:0` | Bedrock reranking model |
-| `CONTENT_RETRIEVAL_CANDIDATE_LIMIT` | `40` | Lexical/dense/visual candidates considered before reranking |
-| `CONTENT_RETRIEVAL_NEIGHBOR_COUNT` | `1` | Adjacent segments expanded on each side of a selected result |
-| `CONTENT_RETRIEVAL_CONTEXT_TOKENS` | `4000` | Tokenizer-counted context budget per retrieval request |
-| `CONTENT_RETRIEVAL_RRF_K` | `60` | Reciprocal-rank-fusion smoothing constant |
-| `CONTENT_RETRIEVAL_MAX_PER_SOURCE` | `3` | Selected segments allowed per immutable source version |
-| `CONTENT_VISUAL_EMBEDDING_MODEL_ID` | `cohere.embed-v4:0` | Bedrock Cohere multimodal embedding model |
-| `CONTENT_VISUAL_EMBEDDING_DIMENSIONS` | `1536` | Visual vector width, fixed to the database schema |
-| `GOOGLE_CONTENT_SYNC_ENABLED` | `false` | Workspace connector rollout |
-| `GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES` | `15` | Reconciliation cadence |
+| Key                                           |                      Default | Purpose                                                                          |
+| --------------------------------------------- | ---------------------------: | -------------------------------------------------------------------------------- |
+| `CONTENT_PLATFORM_ENABLED`                    |                      `false` | Global controlled-rollout flag                                                   |
+| `CONTENT_DUAL_WRITE_ENABLED`                  |                      `false` | Write canonical records alongside a legacy path                                  |
+| `CONTENT_READ_V2_ENABLED`                     |                      `false` | Read from the canonical retrieval path                                           |
+| `CONTENT_REPOSITORY_CUTOVER_ENABLED`          |                      `false` | Route Repository Manager writes and reads exclusively through canonical content  |
+| `CONTENT_NEXUS_CUTOVER_ENABLED`               |                      `false` | Route Nexus attachments exclusively through private canonical repositories       |
+| `CONTENT_ASSISTANT_ARCHITECT_CUTOVER_ENABLED` |                      `false` | Route Assistant Architect knowledge exclusively through repositories             |
+| `CONTENT_RETRIEVAL_SHADOW_ENABLED`            |                      `false` | Compare authoritative legacy and canonical retrieval without changing responses  |
+| `CONTENT_LEGACY_RETIREMENT_ENABLED`           |                      `false` | Permit legacy route and infrastructure retirement after all readiness gates pass |
+| `CONTENT_MIGRATION_RECOVERY_DAYS`             |                          `7` | Minimum observed recovery window before destructive finalization                 |
+| `NEXUS_ATTACHMENT_RETENTION_DAYS`             |                         `30` | One-off Nexus source retention                                                   |
+| `CONTENT_DELETION_GRACE_DAYS`                 |                          `7` | Recovery window before physical deletion                                         |
+| `CONTENT_MAX_FILE_SIZE_GB`                    |                         `10` | Maximum single-source upload                                                     |
+| `CONTENT_MAX_PDF_SIZE_MB`                     |                        `500` | Canonical PDF/Textract ceiling                                                   |
+| `CONTENT_MAX_OFFICE_SIZE_MB`                  |                        `100` | In-memory DOCX/XLSX/PPTX processor ceiling                                       |
+| `CONTENT_MAX_IMAGE_SIZE_MB`                   |                         `50` | In-memory image normalizer ceiling                                               |
+| `CONTENT_MAX_MEDIA_HOURS`                     |                          `4` | Maximum audio/video duration                                                     |
+| `CONTENT_ALLOWED_MIME_TYPES`                  |            managed allowlist | Accepted source formats                                                          |
+| `CONTENT_MALWARE_SCAN_REQUIRED`               |                       `true` | Quarantine release policy                                                        |
+| `CONTENT_OCR_STRATEGY`                        |                       `auto` | Managed/fallback OCR policy                                                      |
+| `CONTENT_IMAGE_CAPTION_MODEL_ID`              | `us.amazon.nova-2-lite-v1:0` | Bedrock Nova image-description model                                             |
+| `CONTENT_VISUAL_INDEX_ENABLED`                |                      `false` | Visual embeddings rollout                                                        |
+| `CONTENT_RETRIEVAL_RERANK_ENABLED`            |                       `true` | Bedrock reranking after deterministic rank fusion; fails open to fusion          |
+| `CONTENT_RETRIEVAL_RERANK_MODEL_ID`           |       `cohere.rerank-v3-5:0` | Bedrock reranking model                                                          |
+| `CONTENT_RETRIEVAL_CANDIDATE_LIMIT`           |                         `40` | Lexical/dense/visual candidates considered before reranking                      |
+| `CONTENT_RETRIEVAL_NEIGHBOR_COUNT`            |                          `1` | Adjacent segments expanded on each side of a selected result                     |
+| `CONTENT_RETRIEVAL_CONTEXT_TOKENS`            |                       `4000` | Tokenizer-counted context budget per retrieval request                           |
+| `CONTENT_RETRIEVAL_RRF_K`                     |                         `60` | Reciprocal-rank-fusion smoothing constant                                        |
+| `CONTENT_RETRIEVAL_MAX_PER_SOURCE`            |                          `3` | Selected segments allowed per immutable source version                           |
+| `CONTENT_VISUAL_EMBEDDING_MODEL_ID`           |          `cohere.embed-v4:0` | Bedrock Cohere multimodal embedding model                                        |
+| `CONTENT_VISUAL_EMBEDDING_DIMENSIONS`         |                       `1536` | Visual vector width, fixed to the database schema                                |
+| `GOOGLE_CONTENT_SYNC_ENABLED`                 |                      `false` | Workspace connector rollout                                                      |
+| `GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES`        |                         `15` | Reconciliation cadence                                                           |
 
 Values are bounded and fail closed. Feature flags can be enabled by environment,
 repository, or allowlisted users during rollout; the database setting is never
@@ -331,16 +337,16 @@ and old processors/routes/tables are removed only after an observed quiet period
 Every implementation PR must identify which cells it changes and include the
 matching automated evidence.
 
-| Layer | Required coverage |
-|---|---|
-| Pure domain | Unit tests for state machine, policy parsing, checksums, source identity, segmentation, citations, and retry keys |
-| Database | Migration smoke test plus integration tests for constraints, transactions, current-version changes, generation publication, expiry, and access revocation |
-| Processor | Contract fixtures and a checked-in golden corpus with text, scanned, malformed, encrypted, complex-layout, and oversized samples |
-| API/actions | Authentication, capability/scope distinction, ACL enforcement, validation, idempotency, and non-disclosing errors |
-| UI | Component tests for state/error/progress and focused authenticated Playwright workflows |
-| Retrieval | Offline quality evaluation plus explicit cross-user/role/group leakage tests |
-| Infrastructure | CDK synth/assertions, Terraform validate/plan, IAM least-privilege review, alarms, queue/DLQ and lifecycle assertions |
-| Regression | Entire `bun run lint`, `bun run typecheck`, unit suite, relevant integration suite, and existing E2E tier per repository guidance |
+| Layer          | Required coverage                                                                                                                                         |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pure domain    | Unit tests for state machine, policy parsing, checksums, source identity, segmentation, citations, and retry keys                                         |
+| Database       | Migration smoke test plus integration tests for constraints, transactions, current-version changes, generation publication, expiry, and access revocation |
+| Processor      | Contract fixtures and a checked-in golden corpus with text, scanned, malformed, encrypted, complex-layout, and oversized samples                          |
+| API/actions    | Authentication, capability/scope distinction, ACL enforcement, validation, idempotency, and non-disclosing errors                                         |
+| UI             | Component tests for state/error/progress and focused authenticated Playwright workflows                                                                   |
+| Retrieval      | Offline quality evaluation plus explicit cross-user/role/group leakage tests                                                                              |
+| Infrastructure | CDK synth/assertions, Terraform validate/plan, IAM least-privilege review, alarms, queue/DLQ and lifecycle assertions                                     |
+| Regression     | Entire `bun run lint`, `bun run typecheck`, unit suite, relevant integration suite, and existing E2E tier per repository guidance                         |
 
 Authenticated E2E tests use the established `:3100` local server and
 `tests/e2e/helpers/session-auth.ts`. Guard specs remain unauthenticated and
@@ -366,17 +372,16 @@ scheduled dev-environment suite validates the real services.
 
 ## Worktree and branch model
 
-The active Retrieval v2 branch is `codex/unified-content-retrieval-v2` in the
-isolated worktree:
+The active migration and retirement branch is
+`codex/unified-content-migration-retirement` in a dedicated isolated worktree:
 
 ```text
-/private/tmp/aistudio-unified-content-retrieval-v2
+/private/tmp/aistudio-1267-worktree
 ```
 
-The main checkout stays on `dev`, so other agents or projects can use separate
-branches/worktrees without touching this work. PRs target `dev`. Each workstream
-may split into its own `codex/` branch after the foundation contracts merge; no
-two worktrees should edit the same migration or contract file concurrently.
+The branch was created from current `origin/dev`, and its PR targets `dev`.
+Other agents or projects should use separate branches/worktrees; no two
+worktrees should edit the same migration or contract file concurrently.
 
 ## Progress ledger
 
@@ -391,10 +396,10 @@ two worktrees should edit the same migration or contract file concurrently.
 - [x] Multimodal processing (Office, image, audio, and video deployed; real dev
       managed-service validation passed)
 - [x] Retrieval v2 and visual search
-- [ ] Google Workspace sync
+- [x] Google Workspace sync
 - [x] Universal product UI migration
-- [ ] OpenClaw and Projects integration
-- [ ] Backfill, cutover, and legacy retirement
+- [x] OpenClaw and Projects integration
+- [x] Backfill, cutover, and legacy retirement
 
 Update this checklist and the linked GitHub issues at every delivery boundary.
 Do not mark a workstream complete solely because code exists: its exit gate and
@@ -655,8 +660,10 @@ Verification evidence:
   Next.js build, complete infrastructure build, and all-stack synthesis of 29
   dev/prod templates passed.
 
-The remaining rollout check is a dev deployment followed by real Bedrock Cohere
-rerank/visual-embedding validation before visual indexing is enabled broadly.
+At this checkpoint, the remaining rollout check was a dev deployment followed
+by real Bedrock Cohere rerank/visual-embedding validation before visual indexing
+could be enabled broadly. The live provider gate is closed in the later
+retrieval-provider checkpoint.
 
 ### Retrieval v2 live-hardening checkpoint (2026-07-22)
 
@@ -953,6 +960,29 @@ v4 reported missing Marketplace entitlement. The previously active generation
 remained serving throughout, and this provider-enablement item does not affect
 the text-embedding or BDA media exit gate.
 
+### Retrieval v2 live-provider checkpoint (2026-07-27)
+
+The apparent manual Marketplace-approval blocker was incorrect. Bedrock
+automatically established the third-party model access on authorized first use,
+and both exact production model paths now pass in `us-east-1`:
+
+- `cohere.embed-v4:0` returned valid 1,536-dimensional text-query and
+  multimodal image-plus-text document vectors. The live visual check ranked the
+  relevant district-logo query above an unrelated cafeteria query with cosine
+  similarities `0.7028` and `0.0955`, respectively.
+- `cohere.rerank-v3-5:0` returned the expected top result for all three bounded
+  emergency-procedure, logo-identification, and video-timestamp cases
+  (`recall@1 = 1.0`, `MRR = 1.0`).
+- The checked-in Retrieval v2 quality/security gate and focused provider,
+  ranking, citation, ACL/service, and repository-tool coverage pass as seven
+  suites and 26 tests. The golden corpus continues to meet recall, MRR, nDCG,
+  citation-validity, authorization-leakage, latency, and estimated-cost
+  thresholds.
+
+This closes Retrieval v2 workstream #1263. Visual indexing remains independently
+flagged so operators can stage generation construction and rollback without
+coupling it to the text-retrieval cutover.
+
 The deployment also exposed a notification-ownership defect: ProcessingStack
 created a second group-sync SNS topic and email subscription even though each
 environment already has a confirmed central MonitoringStack alarm topic. The
@@ -1055,3 +1085,342 @@ fail closed to the documented legacy response while canonical cutover is off;
 already-issued canonical uploads may still complete safely. The remaining live
 environment check is deployment observability and cleanup behavior under real
 GuardDuty/S3 events, not an unresolved product or architecture decision.
+
+### Google Workspace synchronization checkpoint (2026-07-24)
+
+Issue #1262 was selected because the foundation, multimodal, Retrieval v2, and
+product-consolidation workstreams were delivered; the issue's Google-side
+coordination comment records the fixed WIF identity and explicitly says no
+remaining Google dependency blocks implementation. It was therefore the
+earliest incomplete, unblocked item in this plan. The open pull-request set was
+inspected before selection and contained no overlapping connector work.
+
+Implemented on `codex/unified-content-google-sync`, ready for dev review:
+
+- Additive migration 136 introduces encrypted credential references, personal
+  and Shared Drive connectors, verified file/folder/drive selections, stable
+  external-source identity, cursor/watch health, and per-run reconciliation
+  evidence. Stable repository items receive immutable `google_drive` versions;
+  each new source revision atomically creates the canonical inspection job.
+- Personal Drive uses authorization code plus S256 PKCE, an encrypted
+  short-lived state cookie, exactly `drive.readonly`, owner-only Picker tokens,
+  encrypted refresh-token persistence, Google revocation on disconnect, and
+  no-store token responses. Every route reuses the Repository Manager
+  capability plus exact owner/admin repository boundary.
+- Shared Drives use the fixed
+  `unified-content-sync@psd-aistudio-broker.iam.gserviceaccount.com` service
+  account through the exact `aws-agent-broker/content-sync` WIF provider. The
+  isolated Lambda role is named
+  `unified-content-sync-execution-role-{dev|prod}` to match the external trust;
+  no key or domain-wide delegation path exists.
+- Initial file/folder/Shared Drive discovery records the change token first.
+  Scheduled `changes.list` polling is authoritative; validated watch
+  notifications accelerate it. Page cursors advance only after durable work,
+  duplicate revisions are idempotent, overlapping triggers are lease-coalesced,
+  selection generations prevent an older in-flight run from overwriting a new
+  selection/reset cursor, the configured global interval controls scheduling,
+  expired cursors rebuild from a new snapshot, and folder moves reconcile the
+  complete selection before the cursor advances. Downloads stream through
+  bounded multipart S3 upload, per-source failures do not discard a successful
+  page, and long-running Google Vids operations resume from persisted state.
+- Docs, Sheets, Slides, Drawings, supported blobs, images, audio, video, and
+  Google Vids enter the existing canonical processing pipeline. Unsupported
+  native types remain visible. Move/delete/unshare state uses a configurable
+  grace window, preserves immutable history, and reactivates the stable item if
+  access returns before expiry. Connector-creator deletion marks retained items
+  unavailable before connector/source cascades remove their reconciliation
+  rows.
+- Repository Manager now provides personal connection/selection, Shared Drive
+  setup, connector health, last error/success, source counts, retry, and
+  disconnect. Queue/DLQ, schedule, least-privilege source-prefix/dispatch IAM,
+  worker/DLQ/staleness alarms, and correlated credential-free logs complete the
+  operational boundary.
+- Delivery-boundary security review tightened the common-identity and resource
+  ceilings: Shared Drive WIF setup is application-administrator-only; personal
+  selection verification has a per-user five-per-minute budget and five-call
+  provider concurrency; source metadata, HTTP length, and streamed bytes all
+  enforce `CONTENT_MAX_FILE_SIZE_GB`; uploads remain temporary until canonical
+  inspection promotes them; snapshot traversal fails closed above 10,000 files
+  or folder visits; and the scheduler fans due connectors into the existing SQS
+  queue rather than executing 25 synchronizations in one invocation. Google
+  notification delivery is explicitly public only to its route-local
+  channel/resource/token validation, and CSP permits the exact Picker script
+  and frame origins.
+
+Verification at this checkpoint includes exact Drive/OAuth unit contracts, a
+real PostgreSQL migration/lifecycle smoke, CDK synthesis assertions for the WIF
+role and least-privilege policies, unauthenticated connector guards, and an
+authenticated Repository Manager Playwright workflow with deterministic Google
+API substitution. The final local gate passed whole-repository typecheck and
+lint (zero errors; 411 existing warnings), all 353 Jest suites with 3,492 tests
+passing (3 suites/26 tests skipped), 7 focused Drive/OAuth/security suites with
+57 tests, 2 focused Lambda/CDK suites with 8 tests, the real-PostgreSQL
+connector smoke, and all 11 affected authenticated/guard Playwright cases. The
+production Next.js build, infrastructure build, full CDK synthesis, clean
+isolated migration application, and final diff checks also passed. The
+deployment runbook records migration-first ordering, OAuth secret
+shape/callback registration, flags, rollback, alarms, and the labeled live
+create/edit/move/delete/access-loss/notification-resume matrix required after
+dev deployment.
+
+#### Deployment remediation checkpoint (2026-07-25)
+
+Dev verification exposed two delivery defects after the original #1262 merge:
+the application depended on an operator-created
+`aistudio/dev/google-content-oauth` secret that the CDK deployment did not
+create, and Repository Manager presented Shared Drive WIF as a separate setup
+that required customers to grant an AI Studio service account access. Both
+contradicted the intended deployable, user-authorized connector boundary.
+
+The remediation moves the complete Google content OAuth secret into AuthStack.
+Deployment now requires the browser-restricted Picker key alongside the
+existing Google client ID, reads the client secret from the existing
+environment OAuth secret, derives Picker's app ID from the client ID's owning
+Google Cloud project, and creates the exact retained secret consumed by the web
+app and worker. ProcessingStack depends on AuthStack and grants the worker only
+that exact secret ARN. Missing or malformed runtime configuration returns a
+sanitized service-unavailable response without leaking AWS provider details.
+
+Repository Manager now exposes one Google Drive OAuth/Picker flow for My Drive
+and Shared Drives already accessible to the connecting user. The service-account
+email/Drive-ID form and its POST route were removed. Legacy WIF connector rows
+remain readable by the worker for backward compatibility, but no new WIF
+connector can be created through the product. Focused OAuth and CDK regression
+tests cover sanitized failure handling, required deployment inputs, secret
+shape, retention, app-ID derivation, exact IAM scope, and the updated
+authenticated UI. The remediation gate passed whole-repository typecheck and
+lint (zero errors; 411 existing warnings), all 353 application Jest suites with
+3,494 tests passing (3 suites/26 tests skipped), all 43 infrastructure suites
+with 406 tests, both production builds, full CDK synthesis, deploy-script
+preflight, the authenticated Repository Manager Playwright case, final diff
+checks, and a complete diff-scoped security review with no reportable findings.
+
+Live Dev verification then completed the real Google authorization flow and
+opened Picker against both personal and Shared Drive content. Selecting a source
+exposed an invalid Drive metadata field projection:
+`shortcutDetails.resourceKey` is not a Drive API v3 field; the provider contract
+uses `shortcutDetails.targetResourceKey`. The post-deployment hotfix corrects
+that field across metadata, change, and traversal requests and forwards the
+target resource key through `X-Goog-Drive-Resource-Keys` when resolving a
+link-shared shortcut. Focused client and selection-route tests now assert the
+exact provider field projection and resource-key propagation.
+
+### Agents and Projects checkpoint (2026-07-26)
+
+Issue #1266 was selected because this ledger names OpenClaw and Projects as the
+first unchecked workstream and explicitly sequences backfill/cutover work
+afterward in #1267. The epic, all linked workstreams, current open and merged
+pull requests, ADR-007, repository guidance, and relevant feature/API
+documentation were inspected before selection; no active pull request
+overlapped this work.
+
+Implemented on `codex/unified-content-agents-projects`, ready for dev review:
+
+- Five catalog-backed operations list, describe, search, disclose exact source,
+  and stream repository changes through the shared internal catalog, MCP, and
+  documented v1 REST surfaces. Granular API scopes authorize each operation;
+  current durable-repository, item, role/user, and segment ACLs authorize every
+  resource. Search and source resolve only the current immutable item version
+  in the repository's active generation.
+- OpenClaw uses an owner-bound AI Studio authorization-code flow with S256 PKCE,
+  one-time state, an exact same-owner AI Studio session, exact registered
+  scopes, short-lived access tokens, rotating refresh tokens, identity
+  verification, revocation, and per-user Secrets Manager storage. The
+  model-facing psd-aistudio skill sends no owner selector and sees no provider
+  token or signing material; the router-signed invocation context (landed in
+  prerequisite PR #1353) is the sole credential-owner authority. The trusted
+  broker refreshes grants and provides repository list, describe, search,
+  source, and change commands; a manually stored personal key remains a
+  compatibility fallback.
+- Published Assistant Architect skills persist normalized repository bindings.
+  Nexus reloads those bindings, checks the executing user's current ACLs, and
+  searches the active generation on every turn, so repository publication and
+  revocation take effect without republishing the skill.
+- Nexus Projects provide a private durable project repository, connected
+  durable repositories, owner/editor/viewer membership, exact member grants,
+  project instructions, and durable user-owned project conversations. Project
+  and conversation bindings are server-derived, and every chat turn filters
+  connected repositories against the executing member's current access.
+- Additive migration 139 introduces the first-party native OAuth client,
+  `aistudio` consent nonces, skill bindings, project/membership/repository
+  records, and a nullable project reference on existing conversations. Existing
+  chats remain backward-compatible, and deployment/rollback ordering is
+  documented.
+
+Verification at this checkpoint passed whole-repository typecheck and lint,
+the production Next.js build, OpenAPI generation/drift checking, 365 application
+Jest suites with 3,584 tests passing (3 suites/26 tests skipped), all 43
+infrastructure suites with 406 tests, the infrastructure build and all-stack
+dev/prod CDK synthesis, and all 51 OpenClaw adapter tests. The real PostgreSQL
+migration/authorization smoke passed schema replay, current-generation source
+disclosure, skill binding, project membership/grant/revocation, durable chat,
+OAuth-client, and cleanup checks. Seven focused Playwright cases passed,
+including authenticated project persistence and member removal plus a real
+staff-scoped API key exercising REST, MCP, the live change feed, exact
+repository ACL exclusion, UI revocation, and post-revocation denial.
+
+The 2026-07-26 dev deployment was checked before delivery. CloudFormation
+reported the database stack and migration custom resource `UPDATE_COMPLETE`;
+the migration Lambda and live `migration_log` showed only the already-merged
+`141-oneroster-core.sql` running successfully. Neither migration 139 nor its
+tables were present in dev. The runner tracks completion by exact filename
+rather than by a highest numeric watermark, so deploying 139 after 141 remains
+supported; the PostgreSQL smoke replayed that exact manifest order. A refreshed
+parallel-work audit found only the expected manifest overlap with open PR
+#1344, whose migration 140 deliberately reserved its number around this
+in-flight migration and has no schema dependency on it.
+
+Rollout is migration-first: deploy migration 139 before the application and
+agent image. The new OAuth client is public/PKCE-only and limited to the three
+registered callback origins; production token storage continues to use the
+existing `psd-agent-creds/<environment>/user/*` encrypted secret boundary. No
+legacy route or table is removed here; inventory, backfill, cutover, and legacy
+retirement remain exclusively in #1267.
+
+### Migration and retirement checkpoint (2026-07-27)
+
+Issue #1267 was selected because #1266 and this ledger explicitly named
+backfill, cutover, and retirement as the next workstream. It was the only
+unchecked epic item, all prerequisite workstreams were complete, and the audit
+of the epic, every linked issue, current open and merged pull requests, ADR-007,
+repository guidance, and relevant architecture/operations documentation found
+no overlapping active implementation.
+
+Implemented on `codex/unified-content-migration-retirement`, ready for dev
+review:
+
+- Additive migration 155 records resumable runs, source-to-canonical mappings,
+  immutable reconciliation and approval evidence, retrieval-shadow
+  observations, retirement events, independent product cutovers, and the
+  recovery window. Repository Manager items, Nexus documents, and recoverable
+  Assistant Architect PDF jobs can be inventoried, dry-run, backfilled,
+  reconciled by record counts and hashes, retried, reprocessed, approved with
+  attribution, rollback-drilled, and safely rolled back.
+- Repository Manager, Nexus, Assistant Architect, and Decision Capture now
+  converge on canonical repositories behind independent database-first flags.
+  Direct text, uploads, and SSRF-safe URL snapshots use the canonical ingestion
+  path. Retrieval shadowing records overlap, counts, latency, and errors without
+  changing the authoritative response.
+- The administrator migration panel and CloudWatch dashboard expose source
+  coverage, runs, mismatches, retry/reprocess/recovery controls, pipeline cost,
+  queues/DLQs, connectors, retrieval parity, and stale indexes. Legacy routes
+  authenticate before returning the guarded `410` response and remain available
+  unless every durable retirement predicate succeeds.
+- Retirement-mode CDK templates remove the old document/file/URL/Textract
+  workers, queues, roles, tables, exports, frontend imports, and the temporary
+  broad migration-read grant while keeping canonical processing and an
+  deployable empty legacy stack so CloudFormation can delete existing
+  resources. The finalizer acquires the shared advisory lock, rechecks every
+  gate transactionally, refuses unknown dependencies, and records exact final
+  counts before removing legacy PostgreSQL storage.
+- The operations runbook defines migration-first deployment, progressive
+  cutover, rollback, the quiet recovery window, the required two-phase
+  CloudFormation retirement order, exact finalizer confirmation, and
+  post-retirement recovery.
+
+Verification at this checkpoint passed repository-wide lint with zero errors,
+whole-repository typecheck, the production Next.js build, 422 application Jest
+suites with 4,013 tests (3 suites/26 tests skipped), all 47 infrastructure
+suites with 433 tests, the infrastructure and Lambda build, and full dev/prod
+CDK synthesis in both migration-active and retirement modes. Focused
+authenticated Playwright coverage passed the real administrator migration
+workflow and unauthenticated guard. A disposable PostgreSQL database applied
+and replayed migration 155, exercised dry-run/backfill/rollback evidence,
+proved that a recent cutover extends the recovery window, rejected missing
+finalizer confirmation, completed the exact-confirmation finalization, and
+replayed the evidenced retired state without duplicating its audit event.
+
+Rollout remains deliberately gated: deploy migration 155 before application
+and worker changes; keep cutover and retirement settings disabled through
+inventory, backfill, reconciliation, shadow observation, and rollback drill;
+observe the full quiet window after the latest verification or cutover; deploy
+retirement frontend templates before the Processing and DocumentProcessing
+templates; and run the irreversible database finalizer only after the
+post-deployment checks. Until that boundary, disabling a single product flag
+restores its legacy read path without deleting canonical evidence.
+
+### Epic readiness audit continuation (2026-07-27)
+
+The post-merge audit selected #1267 again as the next actionable workstream
+because this plan explicitly makes live migration, shadowing, rollback, and
+retirement the next dependency. PR #1350 addressed only #1297's expired
+edge-session refresh proof; it did not satisfy the unified-content rollout
+gates.
+
+The dev execution exposed and corrected issues that pre-production tests did
+not model:
+
+- embedding concurrency could exhaust Aurora connection establishment, and SQS
+  load could consume every unified-worker reservation before scheduled recovery
+  ran;
+- a failed backfill lost retry-run metrics, large repository publication used
+  the default transaction deadline, and genuinely missing legacy S3 objects had
+  no deterministic segment fallback;
+- connector sources already classified unsupported and migration-created
+  canonical targets could re-enter inventory;
+- reconciliation omitted `section` segments, treated intentional canonical
+  resegmentation as a count mismatch, and stopped after the first batch of
+  previously mismatched rows;
+- Google vendor text MIME types could be accepted by Drive sync but rejected by
+  the canonical processor.
+
+Migrations 159 and 160, bounded Lambda/SQS concurrency, a reserved maintenance
+slot, exact retry metrics, extended publication deadlines, deterministic
+missing-object recovery, explicit eligibility, complete artifact hashing,
+per-run reconciliation bookkeeping, and Google text normalization address
+those defects with unit, PostgreSQL smoke, and CDK assertions.
+
+A requested full Claude review of the review-ready diff then found three
+additional recovery defects before merge: migration 159 omitted generations
+that had written every vector but failed during atomic activation; replaying a
+preexisting object-backed canonical artifact did not backfill its missing
+SHA-256; and full rollback counted explicitly excluded sources as unfinished
+while never selecting them. The corrected implementation fences and releases
+activation-only failures, conditionally backfills only null artifact hashes,
+and completes rollback with excluded-source metrics. The real PostgreSQL smoke
+now applies migrations 159 and 160 twice, exercises the activation-only handoff,
+replays a legacy object-backed artifact, and completes an excluded-only rollback
+without invoking object storage.
+
+The follow-up security pass found that the first SHA repair bound a digest only
+to an artifact row, not its immutable payload coordinates, and that the route
+gate/finalizer still counted explicitly excluded connectors in their
+verification denominator. Publication replay now rejects item, processor,
+object-key, inline-text, or existing-hash drift; object-backed writes carry an
+S3 SHA-256 checksum; and both retirement entry points share the dashboard's
+fail-closed exclusion rules. PostgreSQL smoke covers mismatched object-key
+rejection before hash repair, while unit guards keep both retirement queries
+aligned.
+
+Live dev evidence now records 45 eligible sources, 44 migrated and verified,
+zero failed or unapproved mismatches, three explicitly excluded unsupported
+connector rows, and one Nexus row whose own object and chunks are missing. A
+reversible rollback drill passed and restored the exact current version
+transactionally. The Google infrastructure and connector are deployed and
+incremental sync succeeds; the external mutation matrix remains outstanding.
+
+The post-merge read-only recovery audit proved that the remaining Nexus row is
+an exact metadata twin of a verified source owned by the same user: filename,
+declared 79,052-byte size, PDF metadata, and page count match, and the uploads
+are three minutes apart. The verified twin's three legacy chunks already
+reconcile to its canonical version. The focused follow-up therefore recovers a
+missing Nexus source only from an already verified exact twin with matching
+owner, conversation, filename, type, size, and JSON metadata. It recomputes the
+segments against the recorded verified hash, limits matches to a ten-minute
+upload window, rejects inconsistent or ambiguous twins, and persists the
+duplicate source ID in both S3 and migration evidence.
+Unit coverage exercises valid, corrupt, empty, and ambiguous evidence; the real
+PostgreSQL lifecycle smoke proves the missing-object retry, reconstructed bytes,
+provenance, metrics, and cleanup while stale, cross-owner, and
+cross-conversation verified poison controls prove those SQL fences fail closed.
+Recovered text and its persisted evidence share the canonical text processor's
+normalization contract, including bounded consecutive-newline normalization, so
+successful recovery cannot manufacture a later reconciliation mismatch.
+
+The epic is not ready for retirement. The verified-duplicate recovery must be
+deployed and the live row retried/reconciled; retrieval shadowing and the three
+independent product cutovers still require authenticated observation; the full
+quiet/recovery window must then elapse. The Cohere Embed v4/Rerank 3.5 live
+provider gate is complete, so #1263 can close. #1267's implementation is also
+complete; the epic remains open for its deployment-owned, external, and
+time-based rollout gates until they have durable evidence.

@@ -24,6 +24,10 @@ process.env.AISTUDIO_MCP_API_KEY = '';
 process.env.AISTUDIO_MCP_API_KEY_SECRET_ID = 'psd-agent/dev/aistudio-mcp-api-key';
 
 const { test, expect, beforeEach, afterEach } = require('bun:test');
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const common = require('./common');
 
@@ -241,6 +245,149 @@ test('execute-assistant on a genuine tool error → tool-error, exit 12', async 
   expect(emitted[0].status).toBe('tool-error');
 });
 
+// ── create/update/fork assistant ─────────────────────────────────────────────
+
+test('create-assistant sends the ExportFormat envelope from --json', async () => {
+  const envelope = {
+    version: '1.0',
+    exported_at: '2026-07-28T00:00:00.000Z',
+    assistants: [],
+  };
+  await run('create-assistant', '--json', JSON.stringify(envelope));
+  expect(toolCalls[0]).toMatchObject({
+    toolName: 'create_assistant',
+    toolArgs: envelope,
+  });
+});
+
+test('update-assistant adds numeric assistantId to the envelope', async () => {
+  const envelope = {
+    version: '1.0',
+    exported_at: '2026-07-28T00:00:00.000Z',
+    assistants: [],
+  };
+  await run(
+    'update-assistant',
+    '--id',
+    '17',
+    '--json',
+    JSON.stringify(envelope),
+  );
+  expect(toolCalls[0]).toMatchObject({
+    toolName: 'update_assistant',
+    toolArgs: { assistantId: 17, ...envelope },
+  });
+});
+
+test('update-assistant keeps --id authoritative over an envelope assistantId', async () => {
+  const envelope = {
+    version: '1.0',
+    exported_at: '2026-07-28T00:00:00.000Z',
+    assistants: [],
+    assistantId: 999,
+  };
+  await run(
+    'update-assistant',
+    '--id',
+    '17',
+    '--json',
+    JSON.stringify(envelope),
+  );
+  expect(toolCalls[0]).toMatchObject({
+    toolName: 'update_assistant',
+    toolArgs: { ...envelope, assistantId: 17 },
+  });
+});
+
+test('fork-assistant sends assistantId and optional name', async () => {
+  await run('fork-assistant', '--id', '17', '--name', 'My copy');
+  expect(toolCalls[0]).toMatchObject({
+    toolName: 'fork_assistant',
+    toolArgs: { assistantId: 17, name: 'My copy' },
+  });
+});
+
+test('create-assistant requires exactly one envelope source', async () => {
+  let code;
+  try {
+    await run('create-assistant');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+});
+
+test('create-assistant rejects an oversized local file before reading it', async () => {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'psd-aistudio-import-'),
+  );
+  const file = path.join(directory, 'oversized.json');
+  try {
+    // Test-owned path created immediately above.
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    fs.writeFileSync(file, Buffer.alloc(10 * 1024 * 1024 + 1));
+
+    let code;
+    try {
+      await run('create-assistant', '--file', file);
+    } catch (err) {
+      code = err.code;
+    }
+
+    expect(code).toBe(1);
+    expect(toolCalls).toHaveLength(0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('create-assistant rejects non-regular import paths', async () => {
+  let code;
+  try {
+    await run('create-assistant', '--file', os.tmpdir());
+  } catch (err) {
+    code = err.code;
+  }
+
+  expect(code).toBe(1);
+  expect(toolCalls).toHaveLength(0);
+});
+
+test('create-assistant rejects a FIFO without blocking in open', () => {
+  if (process.platform === 'win32') return;
+
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'psd-aistudio-import-fifo-'),
+  );
+  const fifo = path.join(directory, 'import.json');
+  try {
+    const mkfifo = spawnSync('mkfifo', [fifo], { encoding: 'utf8' });
+    expect(mkfifo.status).toBe(0);
+
+    const child = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run.js'), 'create-assistant', '--file', fifo],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          AISTUDIO_MCP_URL: 'https://app.test/api/mcp',
+          AISTUDIO_MCP_API_KEY_SECRET_ID:
+            'psd-agent/dev/aistudio-mcp-api-key',
+        },
+        timeout: 1_000,
+      },
+    );
+
+    expect(child.error).toBeUndefined();
+    expect(child.signal).toBeNull();
+    expect(child.status).toBe(1);
+    expect(child.stderr).toContain('--file must refer to a regular file');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 // ── insufficient-scope hint (never retried / key-swapped) ──────────────────────
 
 test('insufficient scope on the SHARED key → verbatim error + "store your own key" hint, exit 12', async () => {
@@ -351,6 +498,102 @@ test('get-decision-graph requires --node-id (exit 1)', async () => {
     await run('get-decision-graph');
   } catch (err) {
     code = err.code;
+  }
+  expect(code).toBe(1);
+});
+
+test('repositories-list maps filters to repositories_list', async () => {
+  await run(
+    'repositories-list',
+    '--user',
+    'a@b.co',
+    '--query',
+    'policy',
+    '--limit',
+    '7'
+  );
+  expect(toolCalls[0]).toEqual({
+    toolName: 'repositories_list',
+    toolArgs: { query: 'policy', limit: 7 },
+    callerEmail: 'a@b.co',
+  });
+});
+
+test('repositories-search maps ids, mode, modalities, and limit', async () => {
+  await run(
+    'repositories-search',
+    '--user',
+    'a@b.co',
+    '--query',
+    'graduation',
+    '--repository-ids',
+    '4,9',
+    '--mode',
+    'hybrid',
+    '--modalities',
+    'text,table',
+    '--limit',
+    '8'
+  );
+  expect(toolCalls[0]).toEqual({
+    toolName: 'repositories_search',
+    toolArgs: {
+      query: 'graduation',
+      repositoryIds: [4, 9],
+      mode: 'hybrid',
+      modalities: ['text', 'table'],
+      limit: 8,
+    },
+    callerEmail: 'a@b.co',
+  });
+});
+
+test('repositories-source and changes use numeric ids and cursor', async () => {
+  await run(
+    'repositories-source',
+    '--repository-id',
+    '4',
+    '--item-id',
+    '11',
+    '--chunk-id',
+    '22'
+  );
+  expect(toolCalls[0].toolName).toBe('repositories_get_source');
+  expect(toolCalls[0].toolArgs).toEqual({
+    repositoryId: 4,
+    itemId: 11,
+    chunkId: 22,
+  });
+
+  await run(
+    'repositories-changes',
+    '--repository-ids',
+    '4,9',
+    '--cursor',
+    'opaque',
+    '--limit',
+    '5'
+  );
+  expect(toolCalls[1].toolName).toBe('repositories_list_changes');
+  expect(toolCalls[1].toolArgs).toEqual({
+    repositoryIds: [4, 9],
+    cursor: 'opaque',
+    limit: 5,
+  });
+});
+
+test('repository ids reject non-positive and non-integer values', async () => {
+  let code;
+  try {
+    await run(
+      'repositories-search',
+      '--query',
+      'x',
+      '--repository-ids',
+      '1,nope'
+    );
+  } catch (error) {
+    code = error.code;
   }
   expect(code).toBe(1);
 });

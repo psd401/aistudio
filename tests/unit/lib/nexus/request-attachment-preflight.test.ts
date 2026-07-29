@@ -9,6 +9,7 @@ import {
   NexusAttachmentTurnLimitError,
   preflightNexusAttachmentReferences,
 } from "@/lib/nexus/request-attachment-preflight";
+import { canonicalizeInlineAttachmentMessages } from "@/lib/nexus/inline-attachment-security";
 
 const BINDING_ID = "123e4567-e89b-42d3-a456-426614174000";
 
@@ -130,6 +131,44 @@ describe("preflightNexusAttachmentReferences", () => {
       preflightNexusAttachmentReferences({
         ownerId: 7,
         messages: [{ role: "user", parts }],
+      })
+    ).rejects.toBeInstanceOf(NexusAttachmentTurnLimitError);
+    expect(mockResolveNexusAttachmentReference).not.toHaveBeenCalled();
+  });
+
+  it("applies one combined limit to repository and inline attachments", async () => {
+    const parts = Array.from({ length: 19 }, (_, index) => ({
+      type: "text",
+      text: marker(index + 1, `source-${index + 1}.pdf`),
+    }));
+
+    await expect(
+      preflightNexusAttachmentReferences({
+        ownerId: 7,
+        messages: [{ role: "user", parts }],
+        additionalAttachmentCount: 2,
+      })
+    ).rejects.toBeInstanceOf(NexusAttachmentTurnLimitError);
+    expect(mockResolveNexusAttachmentReference).not.toHaveBeenCalled();
+  });
+
+  it("counts inline attachments normalized from legacy message content", async () => {
+    const canonical = canonicalizeInlineAttachmentMessages([
+      {
+        role: "user",
+        content: Array.from({ length: 21 }, (_, index) => ({
+          type: "document",
+          data: `attachment-${index}`,
+        })),
+      },
+    ]);
+
+    expect(canonical.inlineAttachmentCount).toBe(21);
+    await expect(
+      preflightNexusAttachmentReferences({
+        ownerId: 7,
+        messages: canonical.messages,
+        additionalAttachmentCount: canonical.inlineAttachmentCount,
       })
     ).rejects.toBeInstanceOf(NexusAttachmentTurnLimitError);
     expect(mockResolveNexusAttachmentReference).not.toHaveBeenCalled();

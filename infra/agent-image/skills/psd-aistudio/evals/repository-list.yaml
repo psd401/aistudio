@@ -1,0 +1,12 @@
+id: aistudio-repository-list
+skill: psd-aistudio
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-aistudio to list repositories matching the exact query EVAL-1426. Report the matching repository name."
+trials: 3
+fixtures:
+  - fixtures/repository-list.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_list"},"params.arguments.query":{"exact":"EVAL-1426"}}}
+  - {"type":"output_match","pattern":"EVAL-1426 Canary Repository"}

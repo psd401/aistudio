@@ -1,0 +1,13 @@
+id: workspace-list-unread-mail
+skill: psd-workspace
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-workspace with `--scope user` and its documented `gmail users messages list` command. Set `userId` to `me`, `q` to `is:unread`, and `maxResults` to 20. Summarize the sender and subject of each result."
+trials: 3
+fixtures:
+  - fixtures/list-unread-mail.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/workspace-execute","method":"POST","body":{"scope":{"exact":"user"},"argv.0":{"exact":"gmail"},"argv.1":{"exact":"users"},"argv.2":{"exact":"messages"},"argv.3":{"exact":"list"},"argv.4":{"exact":"--params"},"argv.5":{"json_contains":{"userId":"me","q":"is:unread","maxResults":20}}}}
+  - {"type":"output_match","pattern":"Alex Rivera"}
+  - {"type":"output_match","pattern":"Library projector follow-up"}

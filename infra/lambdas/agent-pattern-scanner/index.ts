@@ -26,13 +26,13 @@
  *   ROLLING_WEEKS         — weeks in rolling-average window, default 4
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import {
   SecretsManagerClient,
   GetSecretValueCommand,
-} from '@aws-sdk/client-secrets-manager';
-import postgres from 'postgres';
+} from "@aws-sdk/client-secrets-manager";
+import postgres from "postgres";
 
 /**
  * ISO 8601 week utilities.
@@ -43,7 +43,9 @@ import postgres from 'postgres';
  * infra/lambdas/shared/iso-week.ts — keep all copies in sync.
  */
 function isoWeek(date: Date = new Date()): string {
-  const target = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const target = new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
+  );
   const dayNr = (target.getUTCDay() + 6) % 7;
   target.setUTCDate(target.getUTCDate() - dayNr + 3);
   const firstThursday = new Date(Date.UTC(target.getUTCFullYear(), 0, 4));
@@ -53,13 +55,13 @@ function isoWeek(date: Date = new Date()): string {
       ((target.getTime() - firstThursday.getTime()) / 86400000 -
         3 +
         ((firstThursday.getUTCDay() + 6) % 7)) /
-        7
+        7,
     );
-  return `${target.getUTCFullYear()}-W${String(weekNr).padStart(2, '0')}`;
+  return `${target.getUTCFullYear()}-W${String(weekNr).padStart(2, "0")}`;
 }
 
 function priorWeek(week: string, stepsBack: number): string {
-  const [y, w] = week.split('-W').map(Number);
+  const [y, w] = week.split("-W").map(Number);
   const base = new Date(Date.UTC(y, 0, 4));
   const baseDayNr = (base.getUTCDay() + 6) % 7;
   const weekStart = new Date(base);
@@ -71,20 +73,30 @@ function priorWeek(week: string, stepsBack: number): string {
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const secrets = new SecretsManagerClient({});
 
-const SIGNALS_TABLE = process.env.SIGNALS_TABLE || '';
-const DATABASE_HOST = process.env.DATABASE_HOST || '';
-const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || '';
-const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
-const DATABASE_PORT = parseInt(process.env.DATABASE_PORT || '5432', 10);
-const MIN_SIGNALS = parseInt(process.env.MIN_SIGNALS || '3', 10);
-const MIN_BUILDINGS = parseInt(process.env.MIN_BUILDINGS || '2', 10);
-const SPIKE_RATIO = parseFloat(process.env.SPIKE_RATIO || '2.0');
-const ROLLING_WEEKS = parseInt(process.env.ROLLING_WEEKS || '4', 10);
+const SIGNALS_TABLE = process.env.SIGNALS_TABLE || "";
+const DATABASE_HOST = process.env.DATABASE_HOST || "";
+const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || "";
+const DATABASE_NAME = process.env.DATABASE_NAME || "aistudio";
+const DATABASE_PORT = parseInt(process.env.DATABASE_PORT || "5432", 10);
+const MIN_SIGNALS = parseInt(process.env.MIN_SIGNALS || "3", 10);
+const MIN_BUILDINGS = parseInt(process.env.MIN_BUILDINGS || "2", 10);
+const SPIKE_RATIO = Number.parseFloat(process.env.SPIKE_RATIO || "2.0");
+const ROLLING_WEEKS = parseInt(process.env.ROLLING_WEEKS || "4", 10);
 
-function log(level: 'INFO' | 'WARN' | 'ERROR', message: string, meta: Record<string, unknown> = {}) {
-  const stream = level === 'ERROR' ? process.stderr : process.stdout;
+function log(
+  level: "INFO" | "WARN" | "ERROR",
+  message: string,
+  meta: Record<string, unknown> = {},
+) {
+  const stream = level === "ERROR" ? process.stderr : process.stdout;
   stream.write(
-    JSON.stringify({ level, message, service: 'agent-pattern-scanner', timestamp: new Date().toISOString(), ...meta }) + '\n'
+    JSON.stringify({
+      level,
+      message,
+      service: "agent-pattern-scanner",
+      timestamp: new Date().toISOString(),
+      ...meta,
+    }) + "\n",
   );
 }
 
@@ -104,7 +116,7 @@ async function scanAllSignals(): Promise<SignalItem[]> {
       new ScanCommand({
         TableName: SIGNALS_TABLE,
         ExclusiveStartKey: lastKey,
-      })
+      }),
     );
     for (const item of res.Items ?? []) {
       if (item.building && item.weekTopic && item.topic && item.week) {
@@ -125,16 +137,22 @@ async function scanAllSignals(): Promise<SignalItem[]> {
 let sqlClient: postgres.Sql | null = null;
 async function getSql(): Promise<postgres.Sql> {
   if (sqlClient) return sqlClient;
-  const res = await secrets.send(new GetSecretValueCommand({ SecretId: DATABASE_SECRET_ARN }));
-  if (!res.SecretString) throw new Error('Database secret missing SecretString');
-  const creds = JSON.parse(res.SecretString) as { username: string; password: string };
+  const res = await secrets.send(
+    new GetSecretValueCommand({ SecretId: DATABASE_SECRET_ARN }),
+  );
+  if (!res.SecretString)
+    throw new Error("Database secret missing SecretString");
+  const creds = JSON.parse(res.SecretString) as {
+    username: string;
+    password: string;
+  };
   sqlClient = postgres({
     host: DATABASE_HOST,
     port: DATABASE_PORT,
     database: DATABASE_NAME,
     username: creds.username,
     password: creds.password,
-    ssl: 'require',
+    ssl: "require",
     max: 2,
     idle_timeout: 20,
     connect_timeout: 10,
@@ -149,42 +167,45 @@ interface ScanEvent {
   backfillWeeks?: number;
 }
 
+function validatedScanWeek(week: string): string {
+  if (!/^\d{4}-W\d{2}$/.test(week)) {
+    log("ERROR", "Invalid week format", { week, expected: "YYYY-WNN" });
+    throw new Error(
+      `Invalid week format: "${week}" — expected YYYY-WNN (e.g. "2026-W18")`,
+    );
+  }
+  const weekNum = parseInt(week.split("-W")[1], 10);
+  if (weekNum < 1 || weekNum > 53) {
+    log("ERROR", "Week number out of range", { week, weekNum });
+    throw new Error(`Week number out of range: "${week}" — must be W01–W53`);
+  }
+  return week;
+}
+
+function weeksForScan(
+  event: ScanEvent | undefined,
+  currentWeek: string,
+): string[] {
+  if (event?.week) return [validatedScanWeek(event.week)];
+  if (!event?.backfillWeeks || event.backfillWeeks <= 0) return [currentWeek];
+  const count = Math.min(Math.floor(event.backfillWeeks), 52);
+  return Array.from({ length: count }, (_, index) =>
+    index === 0 ? currentWeek : priorWeek(currentWeek, index),
+  );
+}
+
 export const handler = async (
   event?: ScanEvent,
 ): Promise<{ detected: number; weeks: string[] }> => {
   if (!SIGNALS_TABLE || !DATABASE_HOST || !DATABASE_SECRET_ARN) {
-    log('ERROR', 'Missing required environment variables');
-    throw new Error('Pattern scanner misconfigured');
+    log("ERROR", "Missing required environment variables");
+    throw new Error("Pattern scanner misconfigured");
   }
 
   // Build the list of weeks to scan. Default = current. Manual invocations
   // can override with `{ week: "2026-W18" }` or backfill with
   // `{ backfillWeeks: 12 }` to populate the last 12 weeks at once.
-  const today = new Date();
-  const currentWeek = isoWeek(today);
-  const weeksToScan: string[] = [];
-  if (event?.week) {
-    if (!/^\d{4}-W\d{2}$/.test(event.week)) {
-      log('ERROR', 'Invalid week format', { week: event.week, expected: 'YYYY-WNN' });
-      throw new Error(`Invalid week format: "${event.week}" — expected YYYY-WNN (e.g. "2026-W18")`);
-    }
-    // Validate week number is in range (W01–W53)
-    const weekNum = parseInt(event.week.split('-W')[1], 10);
-    if (weekNum < 1 || weekNum > 53) {
-      log('ERROR', 'Week number out of range', { week: event.week, weekNum });
-      throw new Error(`Week number out of range: "${event.week}" — must be W01–W53`);
-    }
-    weeksToScan.push(event.week);
-  } else if (event?.backfillWeeks && event.backfillWeeks > 0) {
-    // n weeks total: currentWeek + (n-1) prior weeks
-    const n = Math.min(Math.floor(event.backfillWeeks), 52);
-    weeksToScan.push(currentWeek);
-    for (let i = 1; i < n; i++) {
-      weeksToScan.push(priorWeek(currentWeek, i));
-    }
-  } else {
-    weeksToScan.push(currentWeek);
-  }
+  const weeksToScan = weeksForScan(event, isoWeek(new Date()));
 
   // Scan DynamoDB once and reuse the signal set across all weeks to avoid
   // O(N * table_size) reads during multi-week backfills.
@@ -194,7 +215,10 @@ export const handler = async (
   // intentional — backfills populate the dashboard "last scan ran" banner
   // rather than reconstructing exact historical pattern detection.
   const signals = await scanAllSignals();
-  log('INFO', 'Scanned signals for backfill', { total: signals.length, weeks: weeksToScan.length });
+  log("INFO", "Scanned signals for backfill", {
+    total: signals.length,
+    weeks: weeksToScan.length,
+  });
 
   let totalDetected = 0;
   const failedWeeks: string[] = [];
@@ -205,7 +229,7 @@ export const handler = async (
       // Log but continue — a single week's failure should not abort the
       // entire backfill. The skipped week will have no scan-run marker,
       // making it retryable via `{ week: "YYYY-WNN" }`.
-      log('ERROR', 'scanForWeek failed, continuing with remaining weeks', {
+      log("ERROR", "scanForWeek failed, continuing with remaining weeks", {
         week: targetWeek,
         error: err instanceof Error ? err.message : String(err),
       });
@@ -213,7 +237,7 @@ export const handler = async (
     }
   }
   if (failedWeeks.length > 0) {
-    log('WARN', 'Backfill completed with partial failures', {
+    log("WARN", "Backfill completed with partial failures", {
       failedWeeks,
       succeeded: weeksToScan.length - failedWeeks.length,
     });
@@ -221,27 +245,18 @@ export const handler = async (
   return { detected: totalDetected, weeks: weeksToScan };
 };
 
-async function scanForWeek(currentWeek: string, prefetchedSignals?: SignalItem[]): Promise<number> {
-  const rollingWeeks = new Set<string>();
-  for (let i = 1; i <= ROLLING_WEEKS; i++) {
-    rollingWeeks.add(priorWeek(currentWeek, i));
-  }
+interface WeekAggregate {
+  currentCount: number;
+  buildings: Set<string>;
+  priorTotals: Map<string, number>;
+}
 
-  const signals = prefetchedSignals ?? await scanAllSignals();
-  log('INFO', 'Processing signals', {
-    total: signals.length,
-    currentWeek,
-    rollingWeeks: Array.from(rollingWeeks),
-    prefetched: !!prefetchedSignals,
-  });
-
-  // Aggregate: topic → { currentCount, buildings: Set, priorCounts: number[] }
-  interface Agg {
-    currentCount: number;
-    buildings: Set<string>;
-    priorTotals: Map<string, number>;
-  }
-  const byTopic = new Map<string, Agg>();
+function aggregateSignalsForWeek(
+  signals: SignalItem[],
+  currentWeek: string,
+  rollingWeeks: Set<string>,
+): { byTopic: Map<string, WeekAggregate>; weekRelevantSignals: number } {
+  const byTopic = new Map<string, WeekAggregate>();
   // Count signals that are relevant to this week (current or rolling window)
   // rather than using the total DynamoDB signal count which includes all weeks.
   let weekRelevantSignals = 0;
@@ -260,6 +275,30 @@ async function scanForWeek(currentWeek: string, prefetchedSignals?: SignalItem[]
       agg.priorTotals.set(s.week, (agg.priorTotals.get(s.week) ?? 0) + s.count);
     }
   }
+  return { byTopic, weekRelevantSignals };
+}
+
+async function scanForWeek(
+  currentWeek: string,
+  prefetchedSignals?: SignalItem[],
+): Promise<number> {
+  const rollingWeeks = new Set<string>();
+  for (let i = 1; i <= ROLLING_WEEKS; i++) {
+    rollingWeeks.add(priorWeek(currentWeek, i));
+  }
+
+  const signals = prefetchedSignals ?? (await scanAllSignals());
+  log("INFO", "Processing signals", {
+    total: signals.length,
+    currentWeek,
+    rollingWeeks: Array.from(rollingWeeks),
+    prefetched: !!prefetchedSignals,
+  });
+  const { byTopic, weekRelevantSignals } = aggregateSignalsForWeek(
+    signals,
+    currentWeek,
+    rollingWeeks,
+  );
 
   const sql = await getSql();
   let detected = 0;
@@ -287,7 +326,7 @@ async function scanForWeek(currentWeek: string, prefetchedSignals?: SignalItem[]
       continue;
     }
 
-    const buildings = Array.from(agg.buildings).sort().join(',');
+    const buildings = Array.from(agg.buildings).sort().join(",");
     await sql`
       INSERT INTO agent_patterns
         (week, topic, signal_count, building_count, rolling_avg, spike_ratio, is_emerging, buildings)
@@ -318,12 +357,12 @@ async function scanForWeek(currentWeek: string, prefetchedSignals?: SignalItem[]
               ${suppressed})
     `;
   } catch (err) {
-    log('WARN', 'Failed to record scan_runs marker', {
+    log("WARN", "Failed to record scan_runs marker", {
       error: err instanceof Error ? err.message : String(err),
     });
   }
 
-  log('INFO', 'Pattern scan complete', {
+  log("INFO", "Pattern scan complete", {
     detected,
     currentWeek,
     signalsRelevant: weekRelevantSignals,

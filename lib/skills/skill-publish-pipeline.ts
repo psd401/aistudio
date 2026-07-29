@@ -21,8 +21,14 @@ import {
   ListObjectsV2Command,
 } from "@aws-sdk/client-s3"
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda"
+import { randomUUID } from "node:crypto"
 import { createLogger } from "@/lib/logger"
 import { getSetting } from "@/lib/settings-manager"
+import {
+  acquireResourceAdmission,
+  isCapacityDenial,
+  releaseResourceAdmission,
+} from "@/lib/resource-admission"
 
 const log = createLogger({ service: "skill-publish-pipeline" })
 
@@ -54,8 +60,8 @@ export async function getSkillBuilderLambdaArn(): Promise<string | null> {
 export interface SkillFile {
   /** Relative path within the skill folder, e.g. "SKILL.md". */
   path: string
-  /** UTF-8 text content. */
-  content: string
+  /** Text or binary content. */
+  content: string | Uint8Array
   contentType?: string
 }
 
@@ -128,8 +134,9 @@ export async function uploadSkillDraft(
 
   const { ownerEmail, slug, files } = params
   assertSafeKeyParts(ownerEmail, slug)
-  const draftPrefix = `skills/user/${ownerEmail}/drafts/${slug}`
-  const destinationPrefix = `skills/user/${ownerEmail}/approved/${slug}`
+  const generation = randomUUID()
+  const draftPrefix = `skills/user/${ownerEmail}/drafts/${slug}/versions/${generation}`
+  const destinationPrefix = `skills/user/${ownerEmail}/approved/${slug}/versions/${generation}`
   const safeOwnerEmail = ownerEmail.replace(/[^a-zA-Z0-9\s+=\-._ :/@]/g, "_")
   const tagging = `Environment=${ENVIRONMENT}&ManagedBy=cdk&Scope=draft&Owner=${encodeURIComponent(
     safeOwnerEmail
@@ -159,9 +166,22 @@ export async function uploadSkillDraft(
 
 export interface InvokeScanParams {
   skillId: string
+  ownerKey: string
+  version: number
   draftPrefix: string
   destinationPrefix: string
+  idempotencyKey: string
 }
+
+const SKILL_SCAN_LIMITS = {
+  contextActive: 1,
+  ownerActive: 2,
+  globalActive: 100,
+  contextHourlyUnits: 2,
+  ownerHourlyUnits: 10,
+  globalHourlyUnits: 200,
+  leaseMs: 10 * 60 * 1000,
+} as const
 
 /**
  * Best-effort invocation of the skill-builder Lambda for scanning + promotion.
@@ -180,6 +200,33 @@ export async function invokeSkillScan(
     return false
   }
 
+  const admission = await acquireResourceAdmission({
+    kind: "skill-scan-events",
+    ownerKey: params.ownerKey,
+    contextKey: `${params.skillId}:${params.version}`,
+    idempotencyKey: params.idempotencyKey,
+    units: 1,
+    limits: SKILL_SCAN_LIMITS,
+  })
+  // OBSERVE-ONLY (2026-07-27, Hagel): a scan-rate threshold must not silently
+  // refuse to publish a skill. Measure it, log it, carry on.
+  if (!admission.allowed && !isCapacityDenial(admission)) {
+    // Replayed idempotency key — the scan was already dispatched.
+    log.warn("Skill scan already dispatched (duplicate)", {
+      skillId: params.skillId,
+      reason: admission.reason,
+    })
+    return false
+  }
+  if (!admission.allowed) {
+    log.warn("Skill scan over threshold (observe-only — scan proceeding)", {
+      skillId: params.skillId,
+      reason: admission.reason,
+    })
+  }
+  // No leaseId on a denial; the scan still runs, it just is not lease-bound.
+  const scanLeaseId = admission.allowed ? admission.leaseId : null
+
   try {
     const client = getLambda()
     await client.send(
@@ -189,6 +236,10 @@ export async function invokeSkillScan(
         Payload: Buffer.from(
           JSON.stringify({
             skillId: params.skillId,
+            ownerKey: params.ownerKey.toLowerCase(),
+            version: params.version,
+            scanLeaseId,
+            idempotencyKey: params.idempotencyKey,
             s3Key: params.draftPrefix,
             destinationPrefix: params.destinationPrefix,
             scope: "user",
@@ -200,6 +251,7 @@ export async function invokeSkillScan(
     log.info("Dispatched skill-builder scan", { skillId: params.skillId })
     return true
   } catch (error) {
+    if (scanLeaseId) await releaseResourceAdmission(scanLeaseId)
     log.error("Skill-builder invoke failed (non-fatal)", {
       skillId: params.skillId,
       error: error instanceof Error ? error.message : String(error),

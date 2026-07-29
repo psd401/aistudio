@@ -9,6 +9,7 @@ import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as targets from 'aws-cdk-lib/aws-route53-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as customResources from 'aws-cdk-lib/custom-resources';
 import { EcsServiceConstruct } from './constructs/ecs-service';
 import { VPCProvider, EnvironmentConfig } from './constructs';
 import { ServiceRoleFactory } from './constructs/security';
@@ -26,6 +27,11 @@ export interface FrontendStackEcsProps extends cdk.StackProps {
   agentWorkspaceBucketName?: string; // Optional for backward compatibility (#925)
   atriumSandboxOrigin?: string; // Optional; falls back to SSM (#1052)
   atriumEventsTopicArn?: string; // Optional; SNS topic for content events (#1055)
+  /**
+   * Agent-platform migration Lambda. When supplied, this stack invokes it only
+   * after the lock-aware frontend ECS service has completed its deployment.
+   */
+  scheduleTargetBackfillFunction?: lambda.IFunction;
   /**
    * If true, will look up existing VPC from database stack.
    * If false, will create a new VPC for ECS (not recommended - prefer VPC sharing)
@@ -105,6 +111,74 @@ export class FrontendStackEcs extends cdk.Stack {
       ? `${props.customSubdomain}.${baseDomain}`
       : (environment === 'dev' ? `dev.${baseDomain}` : baseDomain);
 
+    const { collabJwtSecret, guardrailHashSecret, oidcCookieSecret } =
+      this.createApplicationSecrets(environment);
+
+    const { oidcSigningJwksSecret, oidcKeyBootstrapResource } =
+      this.createOidcSigningResources(environment);
+
+    this.createMcpTokenEncryptionKey(environment);
+
+    // ============================================================================
+    // Create ECS Service with ALB
+    // ============================================================================
+    this.ecsService = new EcsServiceConstruct(this, 'EcsService', {
+      vpc,
+      environment,
+      documentsBucketName,
+      agentWorkspaceBucketName,
+      atriumSandboxOrigin,
+      atriumEventsTopicArn,
+      enableContainerInsights: true,
+      enableFargateSpot: true, // Enable Fargate Spot for cost optimization
+      spotRatio: environment === 'prod' ? 50 : 100, // 50% Spot in prod, 100% in dev
+      enableScheduledScaling: environment === 'prod', // Scheduled scaling for production
+      createHttpListener: false, // We'll create HTTP listener with redirect below
+      // Docker image configuration
+      dockerImageSource: 'fromAsset', // CDK builds and pushes image automatically
+      dockerfilePath: '../', // Dockerfile in project root
+      // Auth configuration from Cognito stack outputs
+      authUrl: `https://${subdomain}`,
+      cognitoClientId: cdk.Fn.importValue(`${environment}-CognitoUserPoolClientId`),
+      cognitoIssuer: `https://cognito-idp.${this.region}.amazonaws.com/${cdk.Fn.importValue(`${environment}-CognitoUserPoolId`)}`,
+      // Database configuration from SSM parameters
+      rdsResourceArn: ssm.StringParameter.valueForStringParameter(this, `/aistudio/${environment}/db-cluster-arn`),
+      rdsSecretArn: ssm.StringParameter.valueForStringParameter(this, `/aistudio/${environment}/db-secret-arn`),
+      // Auth secret from Secrets Manager
+      authSecretArn: cdk.Fn.importValue(`${environment}-AuthSecretArn`),
+      // Atrium collab token signing secret (#1051, created above)
+      collabJwtSecretArn: collabJwtSecret.secretArn,
+      // Guardrail violation-log hash secret (#727, created above)
+      guardrailHashSecretArn: guardrailHashSecret.secretArn,
+      // Dedicated oidc-provider cookie key (created above)
+      oidcCookieSecretArn: oidcCookieSecret.secretArn,
+      // OIDC-only signing key set (#1285, created and bootstrapped above)
+      oidcSigningJwksSecretArn: oidcSigningJwksSecret.secretArn,
+      // K-12 Content Safety: Guardrails resources from GuardrailsStack
+      // These enable precise IAM scoping and DynamoDB access for PII tokenization
+      guardrailArn: cdk.Fn.importValue(`${environment}-GuardrailArn`),
+      piiTokenTableArn: cdk.Fn.importValue(`${environment}-PIITokenTableArn`),
+      violationTopicArn: cdk.Fn.importValue(`${environment}-ViolationTopicArn`),
+    });
+    this.ecsService.node.addDependency(oidcKeyBootstrapResource);
+    if (props.scheduleTargetBackfillFunction) {
+      this.createScheduleTargetBackfillTrigger(
+        props.scheduleTargetBackfillFunction,
+      );
+    }
+
+    this.configureDns(props, baseDomain, subdomain);
+
+    const webAcl = this.configureWebApplicationFirewall(environment);
+
+    this.configureOutputs(environment, subdomain, webAcl);
+
+  }
+  private createApplicationSecrets(environment: 'dev' | 'prod'): {
+    collabJwtSecret: secretsmanager.Secret;
+    guardrailHashSecret: secretsmanager.Secret;
+    oidcCookieSecret: secretsmanager.Secret;
+  } {
     // ============================================================================
     // Atrium Collab Token Signing Secret (#1051)
     // ============================================================================
@@ -171,6 +245,13 @@ export class FrontendStackEcs extends cdk.Stack {
     cdk.Tags.of(oidcCookieSecret).add('Environment', environment);
     cdk.Tags.of(oidcCookieSecret).add('ManagedBy', 'cdk');
 
+    return { collabJwtSecret, guardrailHashSecret, oidcCookieSecret };
+  }
+
+  private createOidcSigningResources(environment: 'dev' | 'prod'): {
+    oidcSigningJwksSecret: secretsmanager.Secret;
+    oidcKeyBootstrapResource: cdk.CustomResource;
+  } {
     // ============================================================================
     // OIDC Signing JWK Set (#1285)
     // ============================================================================
@@ -257,6 +338,10 @@ export class FrontendStackEcs extends cdk.Stack {
     cdk.Tags.of(oidcKeyBootstrap).add('ManagedBy', 'cdk');
     oidcKeyBootstrapResource.node.addDependency(oidcSigningJwksSecret);
 
+    return { oidcSigningJwksSecret, oidcKeyBootstrapResource };
+  }
+
+  private createMcpTokenEncryptionKey(environment: 'dev' | 'prod'): void {
     // ============================================================================
     // MCP Token Encryption Key (AES-256-GCM DEK)
     // ============================================================================
@@ -280,50 +365,13 @@ export class FrontendStackEcs extends cdk.Stack {
       },
       removalPolicy: environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
+  }
 
-    // ============================================================================
-    // Create ECS Service with ALB
-    // ============================================================================
-    this.ecsService = new EcsServiceConstruct(this, 'EcsService', {
-      vpc,
-      environment,
-      documentsBucketName,
-      agentWorkspaceBucketName,
-      atriumSandboxOrigin,
-      atriumEventsTopicArn,
-      enableContainerInsights: true,
-      enableFargateSpot: true, // Enable Fargate Spot for cost optimization
-      spotRatio: environment === 'prod' ? 50 : 100, // 50% Spot in prod, 100% in dev
-      enableScheduledScaling: environment === 'prod', // Scheduled scaling for production
-      createHttpListener: false, // We'll create HTTP listener with redirect below
-      // Docker image configuration
-      dockerImageSource: 'fromAsset', // CDK builds and pushes image automatically
-      dockerfilePath: '../', // Dockerfile in project root
-      // Auth configuration from Cognito stack outputs
-      authUrl: `https://${subdomain}`,
-      cognitoClientId: cdk.Fn.importValue(`${environment}-CognitoUserPoolClientId`),
-      cognitoIssuer: `https://cognito-idp.${this.region}.amazonaws.com/${cdk.Fn.importValue(`${environment}-CognitoUserPoolId`)}`,
-      // Database configuration from SSM parameters
-      rdsResourceArn: ssm.StringParameter.valueForStringParameter(this, `/aistudio/${environment}/db-cluster-arn`),
-      rdsSecretArn: ssm.StringParameter.valueForStringParameter(this, `/aistudio/${environment}/db-secret-arn`),
-      // Auth secret from Secrets Manager
-      authSecretArn: cdk.Fn.importValue(`${environment}-AuthSecretArn`),
-      // Atrium collab token signing secret (#1051, created above)
-      collabJwtSecretArn: collabJwtSecret.secretArn,
-      // Guardrail violation-log hash secret (#727, created above)
-      guardrailHashSecretArn: guardrailHashSecret.secretArn,
-      // Dedicated oidc-provider cookie key (created above)
-      oidcCookieSecretArn: oidcCookieSecret.secretArn,
-      // OIDC-only signing key set (#1285, created and bootstrapped above)
-      oidcSigningJwksSecretArn: oidcSigningJwksSecret.secretArn,
-      // K-12 Content Safety: Guardrails resources from GuardrailsStack
-      // These enable precise IAM scoping and DynamoDB access for PII tokenization
-      guardrailArn: cdk.Fn.importValue(`${environment}-GuardrailArn`),
-      piiTokenTableArn: cdk.Fn.importValue(`${environment}-PIITokenTableArn`),
-      violationTopicArn: cdk.Fn.importValue(`${environment}-ViolationTopicArn`),
-    });
-    this.ecsService.node.addDependency(oidcKeyBootstrapResource);
-
+  private configureDns(
+    props: FrontendStackEcsProps,
+    baseDomain: string,
+    subdomain: string
+  ): void {
     // ============================================================================
     // DNS and SSL Certificate
     // ============================================================================
@@ -347,7 +395,7 @@ export class FrontendStackEcs extends cdk.Stack {
       });
 
       // Add HTTPS listener with certificate
-      const httpsListener = this.ecsService.loadBalancer.addListener('HttpsListener', {
+      this.ecsService.loadBalancer.addListener('HttpsListener', {
         port: 443,
         protocol: elbv2.ApplicationProtocol.HTTPS,
         certificates: [certificate],
@@ -381,7 +429,53 @@ export class FrontendStackEcs extends cdk.Stack {
         defaultTargetGroups: [this.ecsService.targetGroup],
       });
     }
+  }
 
+  /**
+   * Phase two of the schedule-target rollout. AgentPlatformStack deploys the
+   * migration Lambda first; this trigger is created only after CloudFormation
+   * has brought the new lock-aware frontend service to steady state.
+   */
+  private createScheduleTargetBackfillTrigger(
+    backfill: lambda.IFunction,
+  ): void {
+    const trigger = new customResources.AwsCustomResource(
+      this,
+      'ScheduleTargetBackfillAfterFrontend',
+      {
+        onCreate: {
+          service: 'Lambda',
+          action: 'invoke',
+          parameters: {
+            FunctionName: backfill.functionName,
+            // A full group can take longer than the custom-resource provider's
+            // synchronous SDK timeout. Let Lambda's configured async retries,
+            // DLQ, and alarm supervise the migration after acceptance.
+            InvocationType: 'Event',
+            Payload: JSON.stringify({
+              RequestType: 'Create',
+              migrationVersion: 'scheduled-time-delivery-policy-v3',
+            }),
+          },
+          physicalResourceId: customResources.PhysicalResourceId.of(
+            'agent-schedule-target-backfill-scheduled-time-delivery-policy-v3',
+          ),
+        },
+        policy: customResources.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ['lambda:InvokeFunction'],
+            resources: [backfill.functionArn],
+          }),
+        ]),
+        installLatestAwsSdk: false,
+      },
+    );
+    trigger.node.addDependency(this.ecsService.service);
+  }
+
+  private configureWebApplicationFirewall(
+    environment: 'dev' | 'prod'
+  ): wafv2.CfnWebACL {
     // ============================================================================
     // AWS WAF for Application Protection
     // ============================================================================
@@ -390,7 +484,22 @@ export class FrontendStackEcs extends cdk.Stack {
       defaultAction: { allow: {} },
       description: `WAF for AIStudio ${environment} environment`,
       rules: [
-        // Rate limiting rule
+        // Per-IP rate limiting for BROWSER traffic.
+        //
+        // scopeDownStatement excludes /api/agent/* — server-to-server calls
+        // from the agent runtime. Those arrive from a handful of NAT egress
+        // IPs, so a per-IP browser budget counts an entire fleet as one
+        // client. #1353 routed every agent LLM call through
+        // /api/agent/model-proxy, and an agentic turn makes many calls per
+        // user message; on 2026-07-27 that produced 4,849 blocked requests in
+        // a single 5-minute window and the dev agent could not answer at all.
+        // The rule itself (added #306, 2025-10-03) is unchanged and still
+        // correct for the browser traffic it was written for.
+        //
+        // Excluding this prefix does not remove authentication: /api/agent/*
+        // is gated by a proxy-signed invocation context
+        // (verifyAgentInvocationContext) and, in the deployed runtime, by the
+        // Cedar egress allowlist. The WAF was never what protected it.
         {
           name: 'RateLimitRule',
           priority: 1,
@@ -398,6 +507,20 @@ export class FrontendStackEcs extends cdk.Stack {
             rateBasedStatement: {
               limit: 2000, // 2000 requests per 5 minutes per IP
               aggregateKeyType: 'IP',
+              scopeDownStatement: {
+                notStatement: {
+                  statement: {
+                    byteMatchStatement: {
+                      fieldToMatch: { uriPath: {} },
+                      positionalConstraint: 'STARTS_WITH',
+                      searchString: '/api/agent/',
+                      textTransformations: [
+                        { priority: 0, type: 'NONE' },
+                      ],
+                    },
+                  },
+                },
+              },
             },
           },
           action: {
@@ -489,7 +612,14 @@ export class FrontendStackEcs extends cdk.Stack {
       webAclArn: webAcl.attrArn,
     });
 
+    return webAcl;
+  }
 
+  private configureOutputs(
+    environment: 'dev' | 'prod',
+    subdomain: string,
+    webAcl: wafv2.CfnWebACL
+  ): void {
     // ============================================================================
     // Outputs (ECS-related outputs are in the construct, only add stack-specific ones here)
     // ============================================================================
@@ -531,4 +661,5 @@ export class FrontendStackEcs extends cdk.Stack {
       description: 'ECS deployment information',
     });
   }
+
 }

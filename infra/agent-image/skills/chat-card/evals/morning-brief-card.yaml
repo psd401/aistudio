@@ -1,0 +1,14 @@
+id: chat-card-morning-brief
+skill: chat-card
+level: L0
+workspace: pure
+suite: capability
+prompt: "Use the chat-card skill to create a rich card titled \"Morning Brief — Harbor Ridge\" with these three facts: 3 meetings today, 7 unread messages, and 1 follow-up due. Include the text fallback \"Harbor Ridge morning brief\". Do not call external services."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"<<<PSD_AGENT_RICH_V1>>>[\\s\\S]*<<<END_PSD_AGENT_RICH_V1>>>"}
+  - {"type":"output_match","pattern":"Morning Brief"}
+  - {"type":"output_match","pattern":"\"topLabel\":\"Meetings today\",\"text\":\"3\""}
+  - {"type":"output_match","pattern":"\"topLabel\":\"Unread messages\",\"text\":\"7\""}
+  - {"type":"output_match","pattern":"\"topLabel\":\"Follow-up(?:s)? due\",\"text\":\"1\""}
+  - {"type":"output_match","pattern":"\"textFallback\":\"Harbor Ridge morning brief\""}
