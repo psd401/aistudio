@@ -370,9 +370,18 @@ loopback relay in `mantle_proxy.py`. The relay inherits the AgentCore execution-
 role credential chain, validates bounded operation-specific payloads, and can
 only call Polly `SynthesizeSpeech` or the configured HyperFrames Lambda. It
 returns synthesized audio or the Lambda result, never credential values or a
-caller-selected AWS target. Keep future direct-AWS skills behind the same kind
-of fixed-operation boundary; do not add AWS credential keys to OpenClaw's exec
-allowlist.
+caller-selected AWS target. HyperFrames also rejects a model-supplied owner:
+the relay resolves `ownerEmail` through the signed
+`/api/agent/invocation-identity` web boundary and injects it only after
+verification. During a staggered rollout to an older web tier, it authenticates
+the installed token and proof through the existing model broker's fixed
+unsupported-path response before decoding the owner claim; any 403 or
+unexpected response fails closed. Finalization gives active privileged requests
+a 795-second drain ceiling (above the 780-second render relay ceiling) while
+retaining a separate 120-second workspace-flush budget, so a proxy restart
+cannot orphan an accepted Lambda render. Keep future direct-AWS skills behind
+the same kind of fixed-operation boundary; do not add AWS credential keys to
+OpenClaw's exec allowlist.
 
 ## Rich Chat output — cards, charts, button callbacks
 

@@ -20,8 +20,9 @@ Lambda synchronously, and returns the MP4 URL — same delivery + reply contract
 `public-images/<email>/` prefix and returned as an unsigned, public-by-link HTTPS URL (the
 UUID in the path makes it unguessable — same model as Google Drive "anyone with the link").
 
-**Identity.** Requires `--user <caller-email>`. Pass the email verbatim from the
-`[caller: Name <email>]` header of the user turn — it scopes the S3 upload path.
+**Identity.** Do not pass an email or owner selector. The root relay resolves
+the owner from the installed signed invocation context through the trusted web
+tier and injects it after the model-facing request has been validated.
 
 ## Limits (v1)
 
@@ -90,7 +91,6 @@ its path with `--file`. Small scenes can be passed inline with `--html`.
 
 ```bash
 node /opt/psd-skills/psd-hyperframes/render.js \
-  --user <email> \
   --file scene.html \
   --duration 3 \
   [--css-file extra.css] [--js-file extra.js] \
@@ -151,7 +151,7 @@ Notes:
 
 ## Errors
 
-- **`bad_args`** — missing/invalid `--user`, no composition, bad `--duration`/`--fps`/dimensions,
+- **`bad_args`** — no composition, bad `--duration`/`--fps`/dimensions,
   a valueless `--css-file`/`--js-file`, an `--audio-url` that isn't `https://` / `data:audio/`,
   a combined html+css+js payload over the 4 MiB cap, a JSON-escaped request over
   Lambda's 6 MiB synchronous invocation cap, or a

@@ -53,7 +53,14 @@ AUTHORITY_DIRECTORY = "/run/psd-agent-authority"
 INVOCATION_CONTEXT_PATH = f"{AUTHORITY_DIRECTORY}/invocation-context"
 REQUEST_PROOF_KEY_PATH = f"{AUTHORITY_DIRECTORY}/request-proof-key"
 WORKSPACE_FLUSH_TOKEN_PATH = f"{AUTHORITY_DIRECTORY}/workspace-flush-token"
-FINALIZATION_DRAIN_TIMEOUT_SECONDS = 120
+INVOCATION_IDENTITY_ROUTE = "/api/agent/invocation-identity"
+# Rolling-deploy compatibility: the existing model-broker route authenticates
+# all four invocation modes before rejecting an unsupported subpath. An exact
+# authenticated 404 therefore proves the installed token/key pair before this
+# relay decodes its root-only owner claim on an older web tier.
+INVOCATION_AUTHORITY_PROBE_ROUTE = (
+    "/api/agent/model-proxy/invocation-identity-probe"
+)
 ALLOWED_AGENT_BROKER_ROUTES = frozenset({
     "/api/agent/account-request",
     "/api/agent/aistudio",
@@ -81,6 +88,7 @@ HYPERFRAMES_REQUEST_MAX_BYTES = 4 * 1024 * 1024
 # body at that same exact ceiling, then check the compact serialized payload
 # independently: JSON escaping can make a <=4 MiB composition exceed 6 MiB.
 HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES = 6 * 1024 * 1024
+HYPERFRAMES_OWNER_BINDING_RESERVE_BYTES = 512
 HYPERFRAMES_HTTP_REQUEST_MAX_BYTES = HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES
 HYPERFRAMES_RESPONSE_MAX_BYTES = 8 * 1024 * 1024
 # 13 minutes leaves 60 seconds under the interactive turn's 840-second budget.
@@ -88,6 +96,11 @@ HYPERFRAMES_RESPONSE_MAX_BYTES = 8 * 1024 * 1024
 # for Lambda cleanup/upload/response. Both the AWS client and Node relay client
 # use this value so neither disconnects while a supported render is still live.
 HYPERFRAMES_RELAY_TIMEOUT_SECONDS = 780
+# Finalization must never restart this proxy while an accepted synchronous
+# render can still be running in Lambda. Keep a small transport margin above
+# the relay ceiling; workspace flushing retains its separate 120-second budget
+# in agentcore_wrapper.py.
+FINALIZATION_DRAIN_TIMEOUT_SECONDS = HYPERFRAMES_RELAY_TIMEOUT_SECONDS + 15
 HYPERFRAMES_MAX_DURATION_SECONDS = 180
 HYPERFRAMES_MAX_FRAMES = 3_600
 HYPERFRAMES_MIN_DIMENSION = 16
@@ -183,7 +196,6 @@ def _validate_hyperframes_payload(payload: object) -> dict:
         "fps",
         "width",
         "height",
-        "userEmail",
         "dryRun",
     }
     if set(payload) - allowed:
@@ -230,16 +242,15 @@ def _validate_hyperframes_payload(payload: object) -> dict:
         ):
             raise ValueError("invalid HyperFrames dimensions")
 
-    email = payload.get("userEmail")
-    if (
-        not isinstance(email, str)
-        or len(email) > 320
-        or not EMAIL_RE.fullmatch(email)
-    ):
-        raise ValueError("invalid HyperFrames user")
     if "dryRun" in payload and not isinstance(payload["dryRun"], bool):
         raise ValueError("invalid HyperFrames dry-run flag")
-    _serialize_hyperframes_payload(payload)
+    _serialize_hyperframes_payload(
+        payload,
+        max_bytes=(
+            HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES
+            - HYPERFRAMES_OWNER_BINDING_RESERVE_BYTES
+        ),
+    )
     return payload
 
 
@@ -261,16 +272,34 @@ def _new_lambda_client():
     )
 
 
-def _serialize_hyperframes_payload(payload: dict) -> bytes:
+def _serialize_hyperframes_payload(
+    payload: dict,
+    *,
+    max_bytes: int = HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES,
+) -> bytes:
     """Serialize exactly once within Lambda's synchronous invoke body limit."""
     body = json.dumps(
         payload,
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
-    if len(body) > HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES:
+    if len(body) > max_bytes:
         raise ValueError("HyperFrames serialized payload exceeds the configured limit")
     return body
+
+
+def _bind_hyperframes_owner(payload: dict, owner_email: str) -> dict:
+    """Inject only the web-verified owner into the downstream Lambda payload."""
+    if (
+        not isinstance(owner_email, str)
+        or len(owner_email) > 320
+        or owner_email != owner_email.lower()
+        or not EMAIL_RE.fullmatch(owner_email)
+    ):
+        raise RuntimeError("HyperFrames invocation owner is invalid")
+    owner_bound_payload = {**payload, "userEmail": owner_email}
+    _serialize_hyperframes_payload(owner_bound_payload)
+    return owner_bound_payload
 
 
 def _invoke_hyperframes(payload: dict) -> dict:
@@ -322,6 +351,124 @@ def _authority_headers(method: str, route: str, body: bytes) -> dict:
         "X-Agent-Request-Proof-Body-Sha256": body_sha256,
         "X-Agent-Request-Proof-Signature": signature,
     }
+
+
+async def _resolve_invocation_owner() -> str:
+    """Resolve the signed turn owner in the trusted web tier before AWS work."""
+    status, response_body = await _post_signed_identity_request(
+        INVOCATION_IDENTITY_ROUTE,
+        skip_not_found_body=True,
+    )
+    if status == 200:
+        try:
+            result = json.loads(response_body)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Invocation identity response is invalid") from exc
+        return _validate_invocation_owner(
+            result.get("ownerEmail") if isinstance(result, dict) else None
+        )
+    if status != 404:
+        raise RuntimeError("Invocation identity verification failed")
+
+    # During a staggered rollout, the new web route may not exist yet. The
+    # already-deployed model broker validates the same signed context/proof
+    # before returning this exact unsupported-path response. Only after that
+    # cryptographic verification do we decode the owner from the root-only
+    # installed token.
+    probe_status, probe_body = await _post_signed_identity_request(
+        INVOCATION_AUTHORITY_PROBE_ROUTE
+    )
+    try:
+        probe_result = json.loads(probe_body)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Invocation authority probe is invalid") from exc
+    if (
+        probe_status != 404
+        or probe_result != {"error": "Unsupported model endpoint"}
+    ):
+        raise RuntimeError("Invocation authority verification failed")
+    context, _proof_key = _read_authority()
+    return _decode_invocation_owner(context)
+
+
+async def _post_signed_identity_request(
+    route: str,
+    *,
+    skip_not_found_body: bool = False,
+) -> tuple[int, bytes]:
+    """POST one bounded root-signed identity request to the trusted web tier."""
+    body = b"{}"
+    headers = {
+        "Content-Type": "application/json",
+        **_authority_headers("POST", route, body),
+    }
+    timeout = ClientTimeout(total=30, sock_read=30, sock_connect=10)
+    async with ClientSession(timeout=timeout) as session:
+        async with session.post(
+            f"{APP_BASE_URL}{route}",
+            data=body,
+            headers=headers,
+            allow_redirects=False,
+        ) as upstream:
+            return await _read_signed_identity_response(
+                upstream,
+                skip_not_found_body=skip_not_found_body,
+            )
+
+
+async def _read_signed_identity_response(
+    response,
+    *,
+    skip_not_found_body: bool,
+) -> tuple[int, bytes]:
+    """Bound responses, except an unused framework 404 body during rollout."""
+    if skip_not_found_body and response.status == 404:
+        response.close()
+        return response.status, b""
+    response_body = await _read_bounded_agent_broker_response(
+        response,
+        max_bytes=4 * 1024,
+    )
+    return response.status, response_body
+
+
+def _validate_invocation_owner(owner_email: object) -> str:
+    """Return one normalized owner suitable for the fixed Lambda namespace."""
+    if (
+        not isinstance(owner_email, str)
+        or len(owner_email) > 320
+        or owner_email != owner_email.lower()
+        or not EMAIL_RE.fullmatch(owner_email)
+    ):
+        raise RuntimeError("Invocation identity response is invalid")
+    return owner_email
+
+
+def _decode_invocation_owner(context: str) -> str:
+    """Decode claims only after the trusted web tier authenticated the token."""
+    try:
+        version, encoded_claims, _signature = context.split(".")
+        if version != "v1":
+            raise ValueError("unsupported invocation context")
+        padded = encoded_claims + ("=" * (-len(encoded_claims) % 4))
+        claims = json.loads(base64.urlsafe_b64decode(padded))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise RuntimeError("Invocation identity response is invalid") from exc
+    if (
+        not isinstance(claims, dict)
+        or claims.get("version") != 1
+        or claims.get("audience") != "psd-agent-internal"
+    ):
+        raise RuntimeError("Invocation identity response is invalid")
+    return _validate_invocation_owner(claims.get("ownerEmail"))
+
+
+async def _owner_bound_hyperframes_payload(payload: dict) -> dict:
+    """Replace all model identity input with the freshly verified turn owner."""
+    return _bind_hyperframes_owner(
+        payload,
+        await _resolve_invocation_owner(),
+    )
 
 
 def _read_workspace_flush_token() -> str | None:
@@ -1349,7 +1496,8 @@ async def handle_hyperframes_invoke(request: web.Request) -> web.Response:
     except ValueError:
         return web.json_response({"error": "Invalid HyperFrames request"}, status=400)
     try:
-        result = await asyncio.to_thread(_invoke_hyperframes, payload)
+        owner_bound_payload = await _owner_bound_hyperframes_payload(payload)
+        result = await asyncio.to_thread(_invoke_hyperframes, owner_bound_payload)
     except Exception as exc:  # noqa: BLE001
         log.warning(j("hyperframes_invoke_failed", error=type(exc).__name__))
         return web.json_response({"error": "HyperFrames invocation failed"}, status=502)

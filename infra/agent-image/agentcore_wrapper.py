@@ -88,6 +88,10 @@ _INVOCATION_CONTEXT_RE = re.compile(
 _REQUEST_PROOF_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _invocation_lock = asyncio.Lock()
 FINAL_WORKSPACE_FLUSH_SECONDS = 120
+# HyperFrames may legitimately hold a synchronous relay request for 780s.
+# Finalization must keep the gate closed and wait longer than that ceiling
+# instead of restarting the proxy and orphaning an accepted Lambda render.
+PROXY_FINALIZATION_DRAIN_SECONDS = 795
 
 
 def _install_invocation_authority(token, request_proof_key) -> bool:
@@ -175,7 +179,7 @@ def _set_proxy_finalization(action: str, token: str) -> None:
         method="POST",
         headers={"X-Agent-Workspace-Flush": token},
     )
-    timeout = FINAL_WORKSPACE_FLUSH_SECONDS + 5 if action == "begin" else 5
+    timeout = PROXY_FINALIZATION_DRAIN_SECONDS + 5 if action == "begin" else 5
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             if response.status != 200:

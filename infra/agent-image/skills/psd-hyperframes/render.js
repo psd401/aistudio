@@ -10,7 +10,7 @@
  * psd-image-gen / psd-tts (issue #1175).
  *
  * Usage:
- *   node render.js --user <email> --file <composition.html> --duration <sec>
+ *   node render.js --file <composition.html> --duration <sec>
  *                  [--html "<inline composition>"]
  *                  [--css-file <path>] [--js-file <path>]
  *                  [--fps 30] [--width 1920] [--height 1080] [--dry-run]
@@ -28,6 +28,11 @@ const AWS_RELAY_PORT = 18791;
 const AWS_RELAY_PATH = '/aws-skill/hyperframes/invoke';
 const MAX_RELAY_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_INVOKE_PAYLOAD_BYTES = 6 * 1024 * 1024;
+// The root relay injects the web-verified owner after receiving this body.
+// Reserve more than the maximum serialized ownerEmail field can consume.
+const OWNER_BINDING_RESERVE_BYTES = 512;
+const MAX_RELAY_PAYLOAD_BYTES =
+  MAX_INVOKE_PAYLOAD_BYTES - OWNER_BINDING_RESERVE_BYTES;
 // The renderer is capped at 720s. Leave 60s for Lambda cleanup/upload and
 // another 60s under the interactive turn's 840s ceiling.
 const RELAY_TIMEOUT_MS = 780_000;
@@ -58,7 +63,7 @@ function emit(obj) {
   process.stdout.write(JSON.stringify(obj, null, 2) + '\n');
 }
 
-// parseArgs/fail/emit/validateEmail are intentionally duplicated from
+// parseArgs/fail/emit are intentionally duplicated from
 // psd-image-gen/generate.js — skills are standalone packages with no
 // cross-skill require(). Keep behavior in sync with that file.
 function parseArgs(argv) {
@@ -82,21 +87,6 @@ function parseArgs(argv) {
     }
   }
   return args;
-}
-
-function validateEmail(email) {
-  // Linear, non-backtracking validation. A regex with overlapping `[^\s@]+`
-  // groups around the dot trips CodeQL's js/polynomial-redos (ReDoS). The email
-  // is interpolated into the S3 key by the render Lambda, so a `/` (or any
-  // whitespace) is rejected explicitly.
-  if (typeof email !== 'string' || email.length === 0 || email.length > 320) return false;
-  if (email.includes('/') || /\s/.test(email)) return false;
-  const at = email.indexOf('@');
-  if (at <= 0 || email.includes('@', at + 1)) return false;
-  const domain = email.slice(at + 1);
-  const dot = domain.lastIndexOf('.');
-  if (dot <= 0 || dot === domain.length - 1) return false;
-  return true;
 }
 
 function readFileOrFail(filePath, flag) {
@@ -336,9 +326,6 @@ function resolveDimensions(args) {
  * Every invalid input fails fast with an actionable message.
  */
 function buildPayload(args) {
-  if (!validateEmail(args.user)) {
-    fail('--user is required and must be a valid email', 'bad_args');
-  }
   let html = resolveCompositionHtml(args);
   const css = resolveOptionalSource(args, 'css', 'css_file');
   const js = resolveOptionalSource(args, 'js', 'js_file');
@@ -352,13 +339,16 @@ function buildPayload(args) {
   }
   if (audioUrl) html = injectAudioElement(html, audioUrl, durationSeconds);
 
-  const payload = { html, durationSeconds, fps, width, height, userEmail: args.user };
+  // Identity is deliberately absent. The root relay resolves the owner from
+  // the installed signed invocation context and injects userEmail only after
+  // the trusted web tier verifies that context.
+  const payload = { html, durationSeconds, fps, width, height };
   if (css) payload.css = css;
   if (js) payload.js = js;
   if (args.dry_run === true) payload.dryRun = true;
-  if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > MAX_INVOKE_PAYLOAD_BYTES) {
+  if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > MAX_RELAY_PAYLOAD_BYTES) {
     fail(
-      'Serialized render request exceeds the 6 MiB Lambda invocation limit. ' +
+      'Serialized render request exceeds the 6 MiB Lambda invocation limit after reserving trusted owner metadata. ' +
         'Reduce escaped control characters or split the composition.',
       'bad_args'
     );
@@ -436,7 +426,7 @@ async function main(argv = process.argv, deps = {}) {
   const args = parseArgs(argv);
   if (args.help) {
     process.stdout.write(
-      'Usage: render.js --user <email> --file <composition.html> --duration <sec> ' +
+      'Usage: render.js --file <composition.html> --duration <sec> ' +
         '[--html "<inline>"] [--css-file <path>] [--js-file <path>] ' +
         '[--audio-url <https-mp3-url>] ' +
         '[--fps 30] [--width 1920] [--height 1080] [--dry-run]\n',
@@ -474,8 +464,8 @@ module.exports = {
   injectAudioElement,
   invokeRender,
   requestRenderRelay,
-  validateEmail,
   MAX_DURATION_SECONDS,
   MAX_INVOKE_PAYLOAD_BYTES,
+  MAX_RELAY_PAYLOAD_BYTES,
   RELAY_TIMEOUT_MS,
 };
