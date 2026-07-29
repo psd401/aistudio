@@ -6,4 +6,6 @@ suite: regression
 prompt: "Create a bar chart titled \"EVAL-1426 Synthetic Volume\" from clearly synthetic public data: Monday 2, Tuesday 5, Wednesday 3. Use the quickchart engine and include the chart card envelope in the reply."
 trials: 3
 graders:
-  - {"type":"output_match","pattern":"(?is)<<<PSD_AGENT_RICH_V1>>>.*https://.*<<<END_PSD_AGENT_RICH_V1>>>"}
+  - {"type":"tool_call_succeeded","tool":"exec","args_pattern":"chat-chart/run\\.js"}
+  - {"type":"quickchart_image","chart_type":"bar","title":"EVAL-1426 Synthetic Volume","labels":["Monday","Tuesday","Wednesday"],"values":[2,5,3]}
+  - {"type":"output_match","pattern":"(?is)<<<PSD_AGENT_RICH_V1>>>.*https://quickchart\\.io/chart\\?.*<<<END_PSD_AGENT_RICH_V1>>>"}

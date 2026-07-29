@@ -101,6 +101,7 @@ REQUIRED_METADATA_FIELDS = frozenset(
 BROKER_CAPTURE_GRADER_TYPES = frozenset(
     {"broker_request", "no_route_called"}
 )
+NETWORK_PROBE_GRADER_TYPES = frozenset({"quickchart_image"})
 BROKER_CONTROL_TMPFS_OPTIONS = (
     f"{DEFAULT_CONTROL_DIRECTORY}:"
     "rw,noexec,nosuid,nodev,size=268435456,mode=0700,uid=0,gid=0"
@@ -1239,6 +1240,18 @@ def _task_from_mapping(value: Mapping[str, object], source: Path) -> Task:
         raise EvalRunnerError(
             f"{source}: broker graders require level L1: "
             + ", ".join(broker_graders)
+        )
+    network_probe_graders = sorted(
+        {
+            str(spec["type"])
+            for spec in task.graders
+            if spec.get("type") in NETWORK_PROBE_GRADER_TYPES
+        }
+    )
+    if task.level != "L2" and network_probe_graders:
+        raise EvalRunnerError(
+            f"{source}: network-probe graders require level L2: "
+            + ", ".join(network_probe_graders)
         )
     if task.level != "L1" and task.fixture_paths:
         raise EvalRunnerError(f"{source}: fixtures require level L1")

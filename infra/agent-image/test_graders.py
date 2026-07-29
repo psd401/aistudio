@@ -7,15 +7,54 @@ Run:
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
+import urllib.parse
 from pathlib import Path
+from unittest import mock
 
 
 AGENT_IMAGE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(AGENT_IMAGE_DIR / "eval"))
 
 import graders  # noqa: E402
+
+
+def quickchart_result(
+    *,
+    labels=None,
+    values=None,
+    title="EVAL-1426 Synthetic Volume",
+):
+    config = {
+        "type": "bar",
+        "data": {
+            "labels": labels or ["Monday", "Tuesday", "Wednesday"],
+            "datasets": [
+                {
+                    "label": title,
+                    "data": values or [2, 5, 3],
+                }
+            ],
+        },
+        "options": {
+            "plugins": {
+                "title": {
+                    "display": True,
+                    "text": title,
+                }
+            }
+        },
+    }
+    query = urllib.parse.urlencode(
+        {
+            "c": json.dumps(config, separators=(",", ":")),
+            "format": "png",
+            "backgroundColor": "white",
+        }
+    )
+    return f"https://quickchart.io/chart?{query}"
 
 
 def grade(
@@ -243,6 +282,109 @@ class BrokerRequestGraderTests(unittest.TestCase):
         decision = grade([spec], requests=[safe_draft, forbidden_send])
         self.assertFalse(decision["passed"])
         self.assertIn("matching body", decision["results"][0]["reason"])
+
+
+class QuickChartImageGraderTests(unittest.TestCase):
+    SPEC = {
+        "type": "quickchart_image",
+        "chart_type": "bar",
+        "title": "EVAL-1426 Synthetic Volume",
+        "labels": ["Monday", "Tuesday", "Wednesday"],
+        "values": [2, 5, 3],
+    }
+
+    class Response:
+        def __init__(
+            self,
+            *,
+            status=200,
+            content_type="image/png",
+            body=graders._PNG_SIGNATURE,
+        ):
+            self.status = status
+            self.headers = {"Content-Type": content_type}
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def getcode(self):
+            return self.status
+
+        def read(self, size):
+            return self.body[:size]
+
+    class Opener:
+        def __init__(self, response):
+            self.response = response
+            self.requests = []
+
+        def open(self, request, timeout):
+            self.requests.append((request, timeout))
+            return self.response
+
+    def test_exact_config_requires_a_live_png_response(self):
+        opener = self.Opener(self.Response())
+        with mock.patch.object(
+            graders.urllib_request,
+            "build_opener",
+            return_value=opener,
+        ):
+            decision = grade(
+                [self.SPEC],
+                result=(
+                    "<<<PSD_AGENT_RICH_V1>>>\n"
+                    f"{quickchart_result()}\n"
+                    "<<<END_PSD_AGENT_RICH_V1>>>"
+                ),
+            )
+
+        self.assertTrue(decision["passed"])
+        self.assertEqual(len(opener.requests), 1)
+        request, timeout = opener.requests[0]
+        self.assertEqual(request.full_url.split("?", 1)[0], "https://quickchart.io/chart")
+        self.assertEqual(request.get_header("Accept"), "image/png")
+        self.assertEqual(timeout, 15)
+
+    def test_wrong_data_fails_before_any_network_probe(self):
+        with mock.patch.object(
+            graders.urllib_request,
+            "build_opener",
+        ) as build_opener:
+            decision = grade(
+                [self.SPEC],
+                result=quickchart_result(values=[2, 5, 99]),
+            )
+
+        self.assertFalse(decision["passed"])
+        self.assertIn("wrong values", decision["results"][0]["reason"])
+        build_opener.assert_not_called()
+
+    def test_non_png_response_fails_closed(self):
+        opener = self.Opener(
+            self.Response(content_type="text/html", body=b"<html>")
+        )
+        with mock.patch.object(
+            graders.urllib_request,
+            "build_opener",
+            return_value=opener,
+        ):
+            decision = grade([self.SPEC], result=quickchart_result())
+
+        self.assertFalse(decision["passed"])
+        self.assertIn("not image/png", decision["results"][0]["reason"])
+
+    def test_labels_and_values_must_have_equal_length(self):
+        invalid = {
+            **self.SPEC,
+            "values": [2, 5],
+        }
+
+        with self.assertRaises(graders.GraderConfigurationError):
+            graders.validate_grader_specs([invalid])
 
 
 class OutputAndTrajectoryGraderTests(unittest.TestCase):

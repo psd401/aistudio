@@ -217,8 +217,12 @@ class SuiteLoadingTests(unittest.TestCase):
             )
 
         successful_tool_requirements = {
+            "chat-chart-synthetic-bar-chart": r"chat-chart/run\.js",
             "failure-report-synthetic-missing-data": (
                 r"psd-failure-report/report\.js"
+            ),
+            "last30days-keyless-eval-reliability-brief": (
+                r"psd-last30days/scripts/last30days\.py"
             ),
             "summarize-records-safe-projector-summary": (
                 r"psd-summarize/run\.js"
@@ -235,6 +239,24 @@ class SuiteLoadingTests(unittest.TestCase):
                 ),
                 f"{task_id} does not prove its executable succeeded",
             )
+
+        chart_probe = next(
+            grader
+            for grader in tasks_by_id[
+                "chat-chart-synthetic-bar-chart"
+            ].graders
+            if grader.get("type") == "quickchart_image"
+        )
+        self.assertEqual(chart_probe.get("chart_type"), "bar")
+        self.assertEqual(
+            chart_probe.get("title"),
+            "EVAL-1426 Synthetic Volume",
+        )
+        self.assertEqual(
+            chart_probe.get("labels"),
+            ["Monday", "Tuesday", "Wednesday"],
+        )
+        self.assertEqual(chart_probe.get("values"), [2, 5, 3])
 
         def broker_body(task_id: str) -> dict[str, object]:
             spec = next(
@@ -693,6 +715,31 @@ class SuiteLoadingTests(unittest.TestCase):
                             },
                             Path("inline.yaml"),
                         )
+
+    def test_quickchart_probe_requires_l2(self):
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "network-probe graders require level L2",
+        ):
+            runner._task_from_mapping(
+                {
+                    "id": "invalid-network-probe",
+                    "skill": "chat-chart",
+                    "level": "L0",
+                    "workspace": "pure",
+                    "prompt": "hello",
+                    "graders": [
+                        {
+                            "type": "quickchart_image",
+                            "chart_type": "bar",
+                            "title": "Example",
+                            "labels": ["Monday"],
+                            "values": [1],
+                        }
+                    ],
+                },
+                Path("inline.yaml"),
+            )
 
     def test_live_tasks_reject_ignored_fixture_files(self):
         with tempfile.TemporaryDirectory() as directory:

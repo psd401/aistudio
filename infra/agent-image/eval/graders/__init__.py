@@ -1,13 +1,18 @@
-"""Deterministic graders for local agent-image evaluations.
+"""Graders for local agent-image evaluations.
 
-The graders deliberately operate on recorded outputs, telemetry, and broker
-requests. They never call a model or a live service.
+Most graders deliberately operate only on recorded outputs, telemetry, and
+broker requests. The ``quickchart_image`` L2 grader is the narrow exception: it
+probes an exact ``https://quickchart.io/chart`` URL after validating its encoded
+chart configuration, content type, and PNG signature. No grader calls a model.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import urllib.error as urllib_error
+import urllib.parse as urllib_parse
+import urllib.request as urllib_request
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -24,6 +29,7 @@ SUPPORTED_GRADERS = frozenset(
         "broker_request",
         "no_route_called",
         "output_match",
+        "quickchart_image",
         "tool_call_succeeded",
         "tools_catalog",
         "trajectory_in_order",
@@ -169,6 +175,13 @@ def validate_grader_specs(
         "broker_request": {"type", "route", "method", "body"},
         "no_route_called": {"type", "route", "method", "body"},
         "output_match": {"type", "pattern", "ignore_case"},
+        "quickchart_image": {
+            "type",
+            "chart_type",
+            "title",
+            "labels",
+            "values",
+        },
         "tool_call_succeeded": {"type", "tool", "args_pattern"},
         "trajectory_in_order": {"type", "tools"},
         "tools_catalog": {"type", "expected"},
@@ -208,6 +221,49 @@ def validate_grader_specs(
             if not isinstance(ignore_case, bool):
                 raise GraderConfigurationError(
                     "output_match grader ignore_case must be a boolean"
+                )
+        elif grader == "quickchart_image":
+            chart_type = _require_nonempty_string(
+                raw_spec.get("chart_type"),
+                grader=grader,
+                field="chart_type",
+            )
+            if chart_type not in {"bar", "line", "pie"}:
+                raise GraderConfigurationError(
+                    "quickchart_image grader chart_type must be "
+                    "bar, line, or pie"
+                )
+            _require_nonempty_string(
+                raw_spec.get("title"),
+                grader=grader,
+                field="title",
+            )
+            labels = raw_spec.get("labels")
+            if (
+                not isinstance(labels, Sequence)
+                or isinstance(labels, (str, bytes))
+                or not labels
+                or any(not isinstance(label, str) or not label for label in labels)
+            ):
+                raise GraderConfigurationError(
+                    "quickchart_image grader labels must be a non-empty string list"
+                )
+            values = raw_spec.get("values")
+            if (
+                not isinstance(values, Sequence)
+                or isinstance(values, (str, bytes))
+                or not values
+                or any(
+                    isinstance(value, bool) or not isinstance(value, Real)
+                    for value in values
+                )
+            ):
+                raise GraderConfigurationError(
+                    "quickchart_image grader values must be a non-empty number list"
+                )
+            if len(labels) != len(values):
+                raise GraderConfigurationError(
+                    "quickchart_image grader labels and values must have equal length"
                 )
         elif grader == "tool_call_succeeded":
             _require_nonempty_string(
@@ -444,6 +500,170 @@ def _grade_output_match(
             else f"output did not match /{spec['pattern']}/"
         ),
     )
+
+
+_QUICKCHART_URL_RE = re.compile(
+    r"https://quickchart\.io/chart\?[^\s\"'<>\\)\],}]+"
+)
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+class _RejectRedirects(urllib_request.HTTPRedirectHandler):
+    """Keep an output-controlled URL from redirecting off the pinned host."""
+
+    def redirect_request(
+        self,
+        request: urllib_request.Request,
+        file_pointer: object,
+        code: int,
+        message: str,
+        headers: Mapping[str, str],
+        new_url: str,
+    ) -> None:
+        _ = (request, file_pointer, code, message, headers, new_url)
+        return None
+
+
+def _quickchart_config_error(
+    spec: Mapping[str, object],
+    url: str,
+) -> str | None:
+    """Return why a QuickChart URL is unsafe/wrong, or ``None`` when exact."""
+
+    try:
+        parsed = urllib_parse.urlsplit(url)
+        port = parsed.port
+    except ValueError as error:
+        return f"invalid QuickChart URL: {error}"
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "quickchart.io"
+        or port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != "/chart"
+        or parsed.fragment
+    ):
+        return "QuickChart URL did not use the pinned https host and /chart path"
+    try:
+        query = urllib_parse.parse_qs(
+            parsed.query,
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+    except ValueError as error:
+        return f"QuickChart URL query was invalid: {error}"
+    if query.get("format") != ["png"]:
+        return "QuickChart URL did not request format=png"
+    encoded_configs = query.get("c")
+    if not isinstance(encoded_configs, list) or len(encoded_configs) != 1:
+        return "QuickChart URL did not contain exactly one encoded config"
+    try:
+        config = json.loads(encoded_configs[0])
+    except (TypeError, json.JSONDecodeError) as error:
+        return f"QuickChart config was not valid JSON: {error}"
+    if not isinstance(config, Mapping):
+        return "QuickChart config was not an object"
+    if config.get("type") != spec["chart_type"]:
+        return "QuickChart config used the wrong chart type"
+    data = config.get("data")
+    if not isinstance(data, Mapping):
+        return "QuickChart config omitted data"
+    if data.get("labels") != list(spec["labels"]):
+        return "QuickChart config used the wrong labels"
+    datasets = data.get("datasets")
+    if (
+        not isinstance(datasets, list)
+        or len(datasets) != 1
+        or not isinstance(datasets[0], Mapping)
+    ):
+        return "QuickChart config did not contain exactly one dataset"
+    dataset = datasets[0]
+    if dataset.get("label") != spec["title"]:
+        return "QuickChart dataset used the wrong label"
+    if dataset.get("data") != list(spec["values"]):
+        return "QuickChart config used the wrong values"
+    options = config.get("options")
+    title = (
+        options.get("plugins", {}).get("title")
+        if isinstance(options, Mapping)
+        and isinstance(options.get("plugins"), Mapping)
+        else None
+    )
+    if (
+        not isinstance(title, Mapping)
+        or title.get("display") is not True
+        or title.get("text") != spec["title"]
+    ):
+        return "QuickChart config used the wrong visible title"
+    return None
+
+
+def _grade_quickchart_image(
+    spec: Mapping[str, object],
+    result: str,
+) -> GraderResult:
+    """Validate exact chart semantics, then prove QuickChart returned a PNG."""
+
+    urls = list(dict.fromkeys(_QUICKCHART_URL_RE.findall(result)))
+    if not urls:
+        return GraderResult(
+            "quickchart_image",
+            False,
+            "output contained no https://quickchart.io/chart URL",
+        )
+    config_errors: list[str] = []
+    for url in urls:
+        config_error = _quickchart_config_error(spec, url)
+        if config_error is not None:
+            config_errors.append(config_error)
+            continue
+        request = urllib_request.Request(
+            url,
+            headers={
+                "Accept": "image/png",
+                "User-Agent": "psd-agent-eval/1.0",
+            },
+        )
+        try:
+            opener = urllib_request.build_opener(_RejectRedirects)
+            with opener.open(request, timeout=15) as response:
+                status = getattr(response, "status", None)
+                if status is None:
+                    status = response.getcode()
+                content_type = response.headers.get("Content-Type", "")
+                signature = response.read(len(_PNG_SIGNATURE))
+        except (OSError, urllib_error.URLError, ValueError) as error:
+            return GraderResult(
+                "quickchart_image",
+                False,
+                f"QuickChart image probe failed: {error}",
+            )
+        if status != 200:
+            return GraderResult(
+                "quickchart_image",
+                False,
+                f"QuickChart image probe returned HTTP {status}",
+            )
+        if content_type.split(";", 1)[0].strip().lower() != "image/png":
+            return GraderResult(
+                "quickchart_image",
+                False,
+                f"QuickChart image probe returned {content_type!r}, not image/png",
+            )
+        if signature != _PNG_SIGNATURE:
+            return GraderResult(
+                "quickchart_image",
+                False,
+                "QuickChart image response did not start with the PNG signature",
+            )
+        return GraderResult(
+            "quickchart_image",
+            True,
+            "exact QuickChart configuration returned HTTP 200 image/png",
+        )
+    detail = config_errors[-1] if config_errors else "no usable chart URL"
+    return GraderResult("quickchart_image", False, detail)
 
 
 def _tool_name(call: object) -> str | None:
@@ -695,6 +915,8 @@ def grade_trial(
             grader_results.append(_grade_no_route_called(spec, artifacts))
         elif grader == "output_match":
             grader_results.append(_grade_output_match(spec, result))
+        elif grader == "quickchart_image":
+            grader_results.append(_grade_quickchart_image(spec, result))
         elif grader == "tool_call_succeeded":
             grader_results.append(_grade_tool_call_succeeded(spec, metadata))
         elif grader == "trajectory_in_order":
