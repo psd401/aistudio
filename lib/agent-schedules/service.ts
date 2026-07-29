@@ -29,11 +29,25 @@ import {
   validateSchedulePrompt,
   validateScheduleTimezone,
 } from "@/lib/agent-schedules/validation";
+import {
+  DrizzleAgentScheduleRunReader,
+  type AgentScheduleLastRun,
+  type AgentScheduleRunReader,
+} from "@/lib/agent-schedules/run-reader";
+import {
+  SCHEDULE_MUTATION_LOCK_LEASE_SECONDS,
+  scheduleMutationLockKey,
+} from "./mutation-lock";
+import { createLogger } from "@/lib/logger";
 
 const DEFAULT_TIMEZONE = "America/Los_Angeles";
 const DEFAULT_MAX_SCHEDULES_PER_OWNER = 50;
+const LAST_RUN_ERROR_MAX_LENGTH = 500;
+const SCHEDULE_MAXIMUM_EVENT_AGE_SECONDS = 60 * 60;
+const SCHEDULE_MAXIMUM_RETRY_ATTEMPTS = 5;
 const GOOGLE_IDENTITY_RE = /^users\/\d+$/;
 const DM_SPACE_RE = /^spaces\/[\w-]{1,256}$/;
+const log = createLogger({ module: "agent-schedules-service" });
 type ScheduleTransactItems = NonNullable<
   ConstructorParameters<typeof TransactWriteCommand>[0]["TransactItems"]
 >;
@@ -68,7 +82,11 @@ export type PublicAgentSchedule = Pick<
   | "enabled"
   | "createdAt"
   | "updatedAt"
->;
+> & {
+  lastRunAt: string | null;
+  lastRunStatus: string | null;
+  lastRunError: string | null;
+};
 
 export interface CreateAgentScheduleInput {
   name: unknown;
@@ -166,6 +184,7 @@ export interface AgentScheduleServiceConfig {
   scheduleGroup: string;
   cronLambdaArn: string;
   schedulerRoleArn: string;
+  scheduleDlqArn: string;
   maxSchedulesPerOwner: number;
 }
 
@@ -230,7 +249,11 @@ export function scheduleTransactionToken(
     .slice(0, 36);
 }
 
-function publicSchedule(record: AgentScheduleRecord): PublicAgentSchedule {
+function publicSchedule(
+  record: AgentScheduleRecord,
+  lastRun?: AgentScheduleLastRun,
+  runEnrichmentAvailable = true,
+): PublicAgentSchedule {
   return {
     scheduleId: record.scheduleId,
     version: record.version,
@@ -241,6 +264,13 @@ function publicSchedule(record: AgentScheduleRecord): PublicAgentSchedule {
     enabled: record.enabled,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+    lastRunAt: lastRun?.createdAt.toISOString() ?? null,
+    lastRunStatus: runEnrichmentAvailable
+      ? lastRun?.status ?? null
+      : "unknown",
+    lastRunError: lastRun?.errorMessage
+      ? lastRun.errorMessage.slice(0, LAST_RUN_ERROR_MAX_LENGTH)
+      : null,
   };
 }
 
@@ -385,6 +415,7 @@ export class AgentScheduleService {
     private readonly config: AgentScheduleServiceConfig,
     private readonly dynamo: AgentScheduleDynamoClient,
     private readonly scheduler: SchedulerClient,
+    private readonly runReader: AgentScheduleRunReader,
   ) {}
 
   private scheduleName(scheduleId: string): string {
@@ -417,7 +448,12 @@ export class AgentScheduleService {
     scheduleId: string,
     version: number,
   ): string {
-    return JSON.stringify({ ownerEmail, scheduleId, version });
+    return JSON.stringify({
+      ownerEmail,
+      scheduleId,
+      version,
+      scheduledTime: "<aws.scheduler.scheduled-time>",
+    });
   }
 
   private async trustedOwnerProfile(
@@ -509,6 +545,67 @@ export class AgentScheduleService {
       exclusiveStartKey = response.LastEvaluatedKey;
     } while (exclusiveStartKey);
     return items;
+  }
+
+  private async withScheduleMutationLock<T>(
+    ownerEmail: string,
+    scheduleId: string,
+    execute: () => Promise<T>,
+  ): Promise<T> {
+    const lockToken = randomUUID();
+    const key = scheduleMutationLockKey({ ownerEmail, scheduleId });
+    const nowS = Math.floor(Date.now() / 1000);
+    try {
+      await this.dynamo.send(
+        new PutCommand({
+          TableName: this.config.schedulesTable,
+          Item: {
+            ...key,
+            kind: "schedule-mutation-lock",
+            lockToken,
+            expiresAt: nowS + SCHEDULE_MUTATION_LOCK_LEASE_SECONDS,
+          },
+          ConditionExpression:
+            "attribute_not_exists(userId) OR expiresAt < :now",
+          ExpressionAttributeValues: { ":now": nowS },
+        }),
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.name === "ConditionalCheckFailedException"
+      ) {
+        throw new AgentScheduleConflictError(
+          "Schedule is being updated; retry the request",
+        );
+      }
+      throw error;
+    }
+
+    try {
+      return await execute();
+    } finally {
+      try {
+        await this.dynamo.send(
+          new DeleteCommand({
+            TableName: this.config.schedulesTable,
+            Key: key,
+            ConditionExpression: "lockToken = :lockToken",
+            ExpressionAttributeValues: { ":lockToken": lockToken },
+          }),
+        );
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          error.name !== "ConditionalCheckFailedException"
+        ) {
+          log.warn("Schedule mutation lock release failed", {
+            scheduleId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
   }
 
   /**
@@ -641,15 +738,35 @@ export class AgentScheduleService {
 
   async list(owner: string): Promise<PublicAgentSchedule[]> {
     const ownerEmail = normalizeOwnerEmail(owner);
-    return (await this.ownerItems(ownerEmail))
+    const records = (await this.ownerItems(ownerEmail))
       .filter(
         (item) =>
           typeof item.scheduleId === "string" &&
           !item.scheduleId.startsWith("__"),
       )
       .map((item) => parseRecord(item, ownerEmail))
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-      .map(publicSchedule);
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    let lastRuns = new Map<string, AgentScheduleLastRun>();
+    let runEnrichmentAvailable = true;
+    try {
+      lastRuns = await this.runReader.latestBySchedule(
+        ownerEmail,
+        records.map((record) => record.scheduleId),
+      );
+    } catch (error) {
+      runEnrichmentAvailable = false;
+      log.warn("Latest schedule run enrichment unavailable", {
+        scheduleCount: records.length,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return records.map((record) =>
+      publicSchedule(
+        record,
+        lastRuns.get(record.scheduleId),
+        runEnrichmentAvailable,
+      ),
+    );
   }
 
   async create(
@@ -702,6 +819,11 @@ export class AgentScheduleService {
           Arn: this.config.cronLambdaArn,
           RoleArn: this.config.schedulerRoleArn,
           Input: this.targetInput(ownerEmail, scheduleId, version),
+          DeadLetterConfig: { Arn: this.config.scheduleDlqArn },
+          RetryPolicy: {
+            MaximumEventAgeInSeconds: SCHEDULE_MAXIMUM_EVENT_AGE_SECONDS,
+            MaximumRetryAttempts: SCHEDULE_MAXIMUM_RETRY_ATTEMPTS,
+          },
         },
         Description: `PSD agent schedule ${scheduleId}`,
       }),
@@ -784,6 +906,18 @@ export class AgentScheduleService {
     const ownerEmail = normalizeOwnerEmail(owner);
     const scheduleId = validateScheduleId(input.scheduleId);
     await this.ensureOwnerMetadata(ownerEmail);
+    return this.withScheduleMutationLock(
+      ownerEmail,
+      scheduleId,
+      () => this.updateWhileLocked(ownerEmail, scheduleId, input),
+    );
+  }
+
+  private async updateWhileLocked(
+    ownerEmail: string,
+    scheduleId: string,
+    input: UpdateAgentScheduleInput,
+  ): Promise<PublicAgentSchedule> {
     const current = await this.getRecord(ownerEmail, scheduleId);
     const fields = resolvedScheduleFields(current, input);
     const profile = await this.trustedOwnerProfile(ownerEmail);
@@ -863,6 +997,11 @@ export class AgentScheduleService {
             Arn: this.config.cronLambdaArn,
             RoleArn: this.config.schedulerRoleArn,
             Input: this.targetInput(ownerEmail, scheduleId, updated.version),
+            DeadLetterConfig: { Arn: this.config.scheduleDlqArn },
+            RetryPolicy: {
+              MaximumEventAgeInSeconds: SCHEDULE_MAXIMUM_EVENT_AGE_SECONDS,
+              MaximumRetryAttempts: SCHEDULE_MAXIMUM_RETRY_ATTEMPTS,
+            },
           },
           Description: `PSD agent schedule ${scheduleId}`,
         }),
@@ -879,6 +1018,17 @@ export class AgentScheduleService {
     const ownerEmail = normalizeOwnerEmail(owner);
     const scheduleId = validateScheduleId(rawScheduleId);
     await this.ensureOwnerMetadata(ownerEmail);
+    return this.withScheduleMutationLock(
+      ownerEmail,
+      scheduleId,
+      () => this.deleteWhileLocked(ownerEmail, scheduleId),
+    );
+  }
+
+  private async deleteWhileLocked(
+    ownerEmail: string,
+    scheduleId: string,
+  ): Promise<string> {
     const current = await this.getRecord(ownerEmail, scheduleId);
     try {
       await this.scheduler.send(
@@ -954,6 +1104,7 @@ export function createAgentScheduleService(): AgentScheduleService {
     scheduleGroup: requiredEnvironment("AGENT_SCHEDULE_GROUP"),
     cronLambdaArn: requiredEnvironment("AGENT_CRON_LAMBDA_ARN"),
     schedulerRoleArn: requiredEnvironment("AGENT_SCHEDULER_ROLE_ARN"),
+    scheduleDlqArn: requiredEnvironment("AGENT_SCHEDULE_DLQ_ARN"),
     maxSchedulesPerOwner:
       Number.isInteger(maximum) && maximum > 0
         ? maximum
@@ -965,5 +1116,6 @@ export function createAgentScheduleService(): AgentScheduleService {
       new DynamoDBClient({ region }),
     ) as unknown as AgentScheduleDynamoClient,
     new SchedulerClient({ region }),
+    new DrizzleAgentScheduleRunReader(),
   );
 }

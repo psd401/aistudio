@@ -146,8 +146,10 @@ class AgentPlatformBuildResources {
   agentInternalApiKeySecret!: secretsmanager.Secret;
   agentInvocationSigningSecret!: secretsmanager.Secret;
   agentAsyncDlq!: sqs.Queue;
+  cronReconciliationQueue!: sqs.Queue;
   cronLogGroup!: logs.LogGroup;
   cronLambda!: lambda.Function;
+  scheduleTargetBackfillLambda!: lambda.Function;
   scheduleGroup!: scheduler.CfnScheduleGroup;
   schedulerInvokeRole!: iam.Role;
   routerDlq!: sqs.Queue;
@@ -196,6 +198,11 @@ export class AgentPlatformStack extends cdk.Stack {
   /** Router Lambda function */
   public readonly routerLambda: lambda.Function;
   /**
+   * Deployment migration function. The frontend stack invokes it only after
+   * the lock-aware ECS service has reached steady state.
+   */
+  public readonly scheduleTargetBackfillFunction: lambda.Function;
+  /**
    * Isolated mint Lambda (#1232) — the SOLE AWS principal the GCP WIF provider
    * trusts. Houses the DWD token broker + provisioning-sheet writer so a frontend
    * compromise can never reach the WIF credential / signJwt an arbitrary sub.
@@ -236,6 +243,8 @@ export class AgentPlatformStack extends cdk.Stack {
     this.createAgentRuntimeAndPolicies(props, resources);
     this.createSkillBuilder(props, resources);
     this.createCronAndScheduler(props, resources);
+    resources.scheduleTargetBackfillLambda =
+      this.createScheduleTargetBackfill(props, resources);
     this.createTriageFoundation(props, resources);
     this.createTriageWorker(props, resources);
     this.createTriageDispatcher(props, resources);
@@ -271,6 +280,8 @@ export class AgentPlatformStack extends cdk.Stack {
     this.routerLambdaRole = resources.routerLambdaRole;
     this.cronLambdaRole = resources.cronLambdaRole;
     this.routerLambda = resources.routerLambda;
+    this.scheduleTargetBackfillFunction =
+      resources.scheduleTargetBackfillLambda;
     this.mintLambda = resources.mintLambda;
     this.mintLambdaRole = resources.mintLambdaRole;
     this.routerQueue = resources.routerQueue;
@@ -610,6 +621,7 @@ export class AgentPlatformStack extends cdk.Stack {
       sortKey: { name: 'scheduleId', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      timeToLiveAttribute: 'expiresAt',
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: environment === 'prod'
         ? cdk.RemovalPolicy.RETAIN
@@ -2081,9 +2093,39 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(resources.cronLogGroup).add('Environment', environment);
     cdk.Tags.of(resources.cronLogGroup).add('ManagedBy', 'cdk');
 
+    // A promotion writes this delayed resolver before calling ECS RunTask.
+    // The eight-minute delay exceeds ECS's eventual-consistency window, so a
+    // lost RunTask response cannot leave the promoted row non-terminal forever.
+    resources.cronReconciliationQueue = new sqs.Queue(
+      this,
+      'CronReconciliationQueue',
+      {
+        queueName: `psd-agent-cron-reconciliation-${environment}`,
+        encryption: sqs.QueueEncryption.SQS_MANAGED,
+        retentionPeriod: cdk.Duration.days(2),
+        // Six times the 15-minute Lambda timeout, per SQS/Lambda guidance.
+        visibilityTimeout: cdk.Duration.minutes(90),
+        deadLetterQueue: {
+          queue: resources.agentAsyncDlq,
+          maxReceiveCount: 3,
+        },
+      },
+    );
+    cdk.Tags.of(resources.cronReconciliationQueue)
+      .add('Environment', environment);
+    cdk.Tags.of(resources.cronReconciliationQueue)
+      .add('ManagedBy', 'cdk');
+
     resources.cronLambda = new lambda.Function(this, 'CronLambda', {
       deadLetterQueue: resources.agentAsyncDlq, // async-invoke failures → DLQ + alarm (REV-INFRA-128)
-      reservedConcurrentExecutions: 1, // prevent overlapping scheduled runs (REV-INFRA-128)
+      // Explicitly bound Lambda's accepted-event queue to one hour. The fire
+      // marker spans this horizon plus Scheduler's separate one-hour delivery
+      // horizon and a five-minute margin.
+      maxEventAge: cdk.Duration.hours(1),
+      retryAttempts: 2,
+      // Fleet-level capacity. Per-schedule overlap is guarded by the
+      // conditional session-lock put in lambdas/agent-cron/job-lock.ts.
+      reservedConcurrentExecutions: 10,
       functionName: resources.cronFunctionName,
       runtime: AGENT_LAMBDA_RUNTIME,
       handler: 'index.handler',
@@ -2158,6 +2200,8 @@ export class AgentPlatformStack extends cdk.Stack {
         DATABASE_NAME: props.databaseName ?? 'aistudio',
         AWS_ACCOUNT_ID: this.account,
         AGENT_INVOCATION_SIGNING_SECRET_ID: resources.agentInvocationSigningSecret.secretName,
+        SCHEDULE_RECONCILIATION_QUEUE_URL:
+          resources.cronReconciliationQueue.queueUrl,
       },
     });
 
@@ -2167,6 +2211,20 @@ export class AgentPlatformStack extends cdk.Stack {
     // Grant Cron Lambda access to Google credentials secret
     resources.googleCredentialsSecret.grantRead(resources.cronLambdaRole);
     resources.agentInvocationSigningSecret.grantRead(resources.cronLambdaRole);
+    resources.cronReconciliationQueue.grantSendMessages(
+      resources.cronLambdaRole,
+    );
+    resources.cronLambda.addEventSource(
+      new lambdaEventSources.SqsEventSource(
+        resources.cronReconciliationQueue,
+        {
+          batchSize: 1,
+          maxBatchingWindow: cdk.Duration.seconds(0),
+          // Preserve most of cron's reserved concurrency for live schedules.
+          maxConcurrency: 2,
+        },
+      ),
+    );
 
     // CloudWatch Logs permissions are granted automatically by CDK when the
     // function is constructed with a managed logGroup prop (see CronLambda
@@ -2199,6 +2257,190 @@ export class AgentPlatformStack extends cdk.Stack {
       description: 'Assumed by EventBridge Scheduler to invoke the agent cron Lambda',
     });
     resources.cronLambda.grantInvoke(resources.schedulerInvokeRole);
+    resources.agentAsyncDlq.grantSendMessages(resources.schedulerInvokeRole);
+  }
+
+  /**
+   * Existing EventBridge Scheduler targets retain their original Input and
+   * delivery policy across deployments. Backfill the immutable scheduled-time
+   * context, alarmed DLQ, and bounded retry policy during rollout. A shared
+   * DynamoDB mutation lock prevents the full Scheduler replacement request
+   * from overwriting a concurrent owner update.
+   */
+  private createScheduleTargetBackfill(
+    props: AgentPlatformStackProps,
+    resources: AgentPlatformBuildResources,
+  ): lambda.Function {
+    const { environment } = props;
+    const functionName = `psd-agent-schedule-target-backfill-${environment}`;
+    const groupName = `psd-agent-${environment}`;
+    const scheduleArn =
+      `arn:aws:scheduler:${this.region}:${this.account}:schedule/${groupName}/*`;
+    const role = ServiceRoleFactory.createLambdaRole(
+      this,
+      'ScheduleTargetBackfillRole',
+      {
+        functionName,
+        environment,
+        region: this.region,
+        account: this.account,
+        vpcEnabled: false,
+        dynamodbTables: [],
+        additionalPolicies: [
+          new iam.PolicyDocument({
+            statements: [
+              new iam.PolicyStatement({
+                sid: 'ScheduleTargetBackfillUpdateTargets',
+                effect: iam.Effect.ALLOW,
+                actions: [
+                  'scheduler:GetSchedule',
+                  'scheduler:UpdateSchedule',
+                ],
+                resources: [scheduleArn],
+              }),
+              new iam.PolicyStatement({
+                sid: 'ScheduleTargetBackfillPassInvokeRole',
+                effect: iam.Effect.ALLOW,
+                actions: ['iam:PassRole'],
+                resources: [resources.schedulerInvokeRole.roleArn],
+                conditions: {
+                  StringEquals: {
+                    'iam:PassedToService': 'scheduler.amazonaws.com',
+                  },
+                },
+              }),
+              new iam.PolicyStatement({
+                sid: 'ScheduleTargetBackfillMutationLock',
+                effect: iam.Effect.ALLOW,
+                actions: [
+                  'dynamodb:PutItem',
+                  'dynamodb:DeleteItem',
+                  'dynamodb:UpdateItem',
+                ],
+                resources: [resources.schedulesTable.tableArn],
+                conditions: {
+                  StringEquals: {
+                    'aws:ResourceTag/Environment': environment,
+                    'aws:ResourceTag/ManagedBy': 'cdk',
+                  },
+                },
+              }),
+            ],
+          }),
+        ],
+      },
+    );
+    // AWS does not support resource-level authorization for ListSchedules.
+    // Keep the required wildcard outside the factory validator; runtime always
+    // supplies the fixed GroupName and all mutating actions remain ARN-scoped.
+    role.addToPolicy(new iam.PolicyStatement({
+      sid: 'ScheduleTargetBackfillReadGroup',
+      effect: iam.Effect.ALLOW,
+      actions: ['scheduler:ListSchedules'],
+      resources: ['*'],
+    }));
+    const logGroup = new logs.LogGroup(
+      this,
+      'ScheduleTargetBackfillLogGroup',
+      {
+        logGroupName: `/aws/lambda/${functionName}`,
+        retention: props.config.monitoring.logRetention,
+        removalPolicy: environment === 'prod'
+          ? cdk.RemovalPolicy.RETAIN
+          : cdk.RemovalPolicy.DESTROY,
+      },
+    );
+    cdk.Tags.of(logGroup).add('Environment', environment);
+    cdk.Tags.of(logGroup).add('ManagedBy', 'cdk');
+
+    const backfill = new lambda.Function(
+      this,
+      'ScheduleTargetBackfillLambda',
+      {
+        functionName,
+        runtime: AGENT_LAMBDA_RUNTIME,
+        handler: 'index.handler',
+        code: this.scheduleTargetBackfillCode(),
+        memorySize: 512,
+        timeout: cdk.Duration.minutes(10),
+        architecture: lambda.Architecture.ARM_64,
+        role,
+        logGroup,
+        deadLetterQueue: resources.agentAsyncDlq,
+        retryAttempts: 2,
+        environment: {
+          SCHEDULE_GROUP: groupName,
+          SCHEDULES_TABLE: resources.schedulesTable.tableName,
+          SCHEDULE_DLQ_ARN: resources.agentAsyncDlq.queueArn,
+        },
+      },
+    );
+    cdk.Tags.of(backfill).add('Environment', environment);
+    cdk.Tags.of(backfill).add('ManagedBy', 'cdk');
+    role.addToPolicy(new iam.PolicyStatement({
+      sid: 'ScheduleTargetBackfillContinue',
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: [backfill.functionArn],
+    }));
+
+    // The invocation deliberately lives in FrontendStackEcs. That stack
+    // deploys after AgentPlatformStack and makes the trigger depend on the ECS
+    // service update, guaranteeing every live owner-mutation path understands
+    // the shared DynamoDB lock before this full Scheduler-target replacement
+    // can start.
+    return backfill;
+  }
+
+  private scheduleTargetBackfillCode(): lambda.Code {
+    const inputDir = path.join(
+      __dirname,
+      '..',
+      'lambdas',
+      'agent-schedule-target-backfill',
+    );
+    return lambda.Code.fromAsset(inputDir, {
+      assetHashType: cdk.AssetHashType.SOURCE,
+      bundling: {
+        image: AGENT_LAMBDA_RUNTIME.bundlingImage,
+        local: {
+          tryBundle(outputDir: string): boolean {
+            try {
+              execSync('bun install && bunx tsc', {
+                cwd: inputDir,
+                stdio: 'inherit',
+              });
+              execSync(`cp -r dist/* ${outputDir}/`, {
+                cwd: inputDir,
+                stdio: 'inherit',
+              });
+              execSync(`cp package.json ${outputDir}/`, {
+                cwd: inputDir,
+                stdio: 'inherit',
+              });
+              execSync('bun install --production', {
+                cwd: outputDir,
+                stdio: 'inherit',
+              });
+              return true;
+            } catch {
+              return false;
+            }
+          },
+        },
+        command: [
+          'bash',
+          '-c',
+          [
+            'npm install',
+            'npm run build',
+            'cp -r dist/* /asset-output/',
+            'cp package.json /asset-output/',
+            'cd /asset-output && npm install --production',
+          ].join(' && '),
+        ],
+      },
+    });
   }
 
   private createTriageFoundation(
@@ -3213,10 +3455,18 @@ export class AgentPlatformStack extends cdk.Stack {
       },
     }));
 
+    const jobRunnerStoppedRule = this.createJobRunnerStoppedRule(
+      resources,
+      jobCluster,
+      jobTaskDef,
+    );
+
     cdk.Tags.of(jobCluster).add('Environment', environment);
     cdk.Tags.of(jobCluster).add('ManagedBy', 'cdk');
     cdk.Tags.of(resources.jobLogGroup).add('Environment', environment);
     cdk.Tags.of(resources.jobLogGroup).add('ManagedBy', 'cdk');
+    cdk.Tags.of(jobRunnerStoppedRule).add('Environment', environment);
+    cdk.Tags.of(jobRunnerStoppedRule).add('ManagedBy', 'cdk');
 
     // Wire SQS → Lambda trigger
     // NOTE on duplicate processing: With batchSize=1 and 18-min visibility timeout
@@ -3235,6 +3485,55 @@ export class AgentPlatformStack extends cdk.Stack {
         reportBatchItemFailures: true,
       }),
     );
+  }
+
+  private createJobRunnerStoppedRule(
+    resources: AgentPlatformBuildResources,
+    jobCluster: ecs.Cluster,
+    jobTaskDef: ecs.FargateTaskDefinition,
+  ): events.Rule {
+    resources.cronLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'JobRunnerTaskRead',
+      effect: iam.Effect.ALLOW,
+      actions: ['ecs:DescribeTasks', 'ecs:ListTasks'],
+      // Neither DescribeTasks nor ListTasks supports resource-level IAM
+      // permissions. Scope the wildcard grant to the one job cluster with
+      // ECS's request condition; runtime lookups additionally bind the exact
+      // per-fire startedBy value.
+      resources: ['*'],
+      conditions: {
+        ArnEquals: {
+          'ecs:cluster': jobCluster.clusterArn,
+        },
+      },
+    }));
+
+    // RunTask acceptance is not a terminal guarantee: image pulls,
+    // provisioning, OOM, and hard process exits can stop the task before the
+    // runner writes telemetry. Feed every STOPPED task in this one family back
+    // to the cron handler, which recovers JOB_PAYLOAD via DescribeTasks and
+    // appends an authoritative terminal schedule row. Its strict DB write
+    // rejects on failure so Lambda's async retry policy runs, then uses the
+    // existing agent DLQ instead of leaving the schedule "promoted".
+    return new events.Rule(this, 'JobRunnerStoppedRule', {
+      description: 'Persist terminal scheduled-run state for stopped agent jobs',
+      eventPattern: {
+        source: ['aws.ecs'],
+        detailType: ['ECS Task State Change'],
+        detail: {
+          clusterArn: [jobCluster.clusterArn],
+          group: [`family:${jobTaskDef.family}`],
+          lastStatus: ['STOPPED'],
+        },
+      },
+      targets: [
+        new eventsTargets.LambdaFunction(resources.cronLambda, {
+          deadLetterQueue: resources.agentAsyncDlq,
+          maxEventAge: cdk.Duration.hours(1),
+          retryAttempts: 12,
+        }),
+      ],
+    });
   }
 
   private createChatIngress(
@@ -3471,6 +3770,40 @@ export class AgentPlatformStack extends cdk.Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+
+    const cronErrorAlarm = new cloudwatch.Alarm(this, 'CronLambdaErrorAlarm', {
+      alarmName: `psd-agent-cron-errors-${environment}`,
+      alarmDescription:
+        'Agent cron Lambda errors detected — scheduled work may be retrying or headed to the DLQ',
+      metric: resources.cronLambda.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    const cronThrottleAlarm = new cloudwatch.Alarm(this, 'CronLambdaThrottleAlarm', {
+      alarmName: `psd-agent-cron-throttles-${environment}`,
+      alarmDescription:
+        'Agent cron Lambda throttled — fleet-sized schedule bursts are exceeding reserved capacity',
+      metric: resources.cronLambda.metricThrottles({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    if (resources.agentAlarmTopic) {
+      const alarmAction = new cloudwatchActions.SnsAction(resources.agentAlarmTopic);
+      cronErrorAlarm.addAlarmAction(alarmAction);
+      cronThrottleAlarm.addAlarmAction(alarmAction);
+    }
 
     // CloudWatch metric filter — emit a metric every time an
     // AGENT_FAILURE_RECORD line lands in the router Lambda log. Combined with

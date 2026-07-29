@@ -425,6 +425,8 @@ if (baseDomain) {
     customSubdomain: 'dev', // Creates dev.<baseDomain>
     documentsBucketName: devStorageStack.documentsBucketName,
     agentWorkspaceBucketName: devAgentPlatformStack.workspaceBucket.bucketName, // #925
+    scheduleTargetBackfillFunction:
+      devAgentPlatformStack.scheduleTargetBackfillFunction,
     atriumSandboxOrigin: devAtriumSandboxStack.sandboxOrigin, // #1052
     atriumEventsTopicArn: devAtriumEventsStack.topicArn, // #1055
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation
@@ -451,6 +453,8 @@ if (baseDomain) {
     // No customSubdomain for prod - uses root baseDomain
     documentsBucketName: prodStorageStack.documentsBucketName,
     agentWorkspaceBucketName: prodAgentPlatformStack.workspaceBucket.bucketName, // #925
+    scheduleTargetBackfillFunction:
+      prodAgentPlatformStack.scheduleTargetBackfillFunction,
     atriumSandboxOrigin: prodAtriumSandboxStack.sandboxOrigin, // #1052
     atriumEventsTopicArn: prodAtriumEventsStack.topicArn, // #1055
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation

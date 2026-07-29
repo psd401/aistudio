@@ -67,9 +67,37 @@ describe("job runner restart handling", () => {
     expect(source).not.toContain("releaseSessionLock(invokeSessionId")
   })
 
+  it("renews before half the lease so one transient failure cannot expose it", () => {
+    expect(source).toContain("const RENEW_INTERVAL_MS = 5 * 60 * 1000")
+    const immediateRenewal = source.indexOf(
+      "const ownsLock = await renewSessionLock(",
+    )
+    const interval = source.indexOf("renewTimer = setInterval(")
+    const invocation = source.indexOf("const agentResult = await invokeAgentCore(")
+    expect(immediateRenewal).toBeGreaterThan(-1)
+    expect(interval).toBeGreaterThan(immediateRenewal)
+    expect(invocation).toBeGreaterThan(interval)
+    expect(source).toContain("if (!ownsLock)")
+    expect(source.slice(immediateRenewal, interval)).toContain(
+      "job.lockToken,\n      log,\n      true,",
+    )
+  })
+
   it("still delivers to Chat on the restart path", () => {
     // A restart that finishes silently is indistinguishable from one that
     // died. The runner's "always post something" contract must survive.
     expect(source).toContain("sendGoogleChatResponse")
+  })
+
+  it("records the terminal result of a cron-promoted job", () => {
+    expect(source).toContain("recordScheduledJobTerminal(")
+    expect(source).toContain("writeScheduledRun,")
+    expect(source).toContain(
+      "status: agentResult.failed ? 'error' : 'success'",
+    )
+  })
+
+  it("exits nonzero after delivering an agent failure for ECS supervision", () => {
+    expect(source).toContain("return agentResult.failed ? 2 : 0")
   })
 })

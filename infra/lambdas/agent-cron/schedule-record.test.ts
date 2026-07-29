@@ -1,5 +1,4 @@
 import { describe, expect, it, mock } from 'bun:test';
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import {
   loadAuthorizedSchedule,
   type ScheduleReferenceEvent,
@@ -29,18 +28,18 @@ async function load(
   event: ScheduleReferenceEvent,
   item: Record<string, unknown> | undefined,
 ) {
-  const send = mock(async () => ({ Item: item }));
+  const get = mock(async () => ({ Item: item }));
   const result = await loadAuthorizedSchedule(
     event,
-    { send } as unknown as DynamoDBDocumentClient,
+    { get },
     'schedules',
   );
-  return { result, send };
+  return { result, get };
 }
 
 describe('authoritative cron schedule loading', () => {
   it('ignores forged prompt and destination fields in the trigger', async () => {
-    const { result, send } = await load(
+    const { result, get } = await load(
       {
         ownerEmail: OWNER,
         scheduleId: SCHEDULE_ID,
@@ -54,14 +53,12 @@ describe('authoritative cron schedule loading', () => {
       authorized: true,
       schedule: record(),
     });
-    const command = send.mock.calls[0][0] as {
-      input: { Key: Record<string, unknown>; ConsistentRead: boolean };
-    };
-    expect(command.input.Key).toEqual({
+    const input = get.mock.calls[0][0];
+    expect(input.Key).toEqual({
       userId: OWNER,
       scheduleId: SCHEDULE_ID,
     });
-    expect(command.input.ConsistentRead).toBe(true);
+    expect(input.ConsistentRead).toBe(true);
   });
 
   it.each([
@@ -87,20 +84,20 @@ describe('authoritative cron schedule loading', () => {
   });
 
   it('rejects malformed references without touching DynamoDB', async () => {
-    const send = mock(async () => ({ Item: record() }));
+    const get = mock(async () => ({ Item: record() }));
     const result = await loadAuthorizedSchedule(
       {
         ownerEmail: 'Victim@psd401.net',
         scheduleId: SCHEDULE_ID,
         version: 3,
       },
-      { send } as unknown as DynamoDBDocumentClient,
+      { get },
       'schedules',
     );
     expect(result).toEqual({
       authorized: false,
       reason: 'invalid-reference',
     });
-    expect(send).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
   });
 });

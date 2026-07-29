@@ -39,6 +39,12 @@ const stackSource = stripComments(
     "utf8",
   ),
 )
+const cronSource = stripComments(
+  fs.readFileSync(
+    path.join(process.cwd(), "infra/lambdas/agent-cron/index.ts"),
+    "utf8",
+  ),
+)
 
 const baseInput = {
   sessionId: "hagelk-db0f32b5-sched-5123b45b-2026-07-27",
@@ -48,6 +54,12 @@ const baseInput = {
   displayName: "Kris Hagel",
   workspacePrefix: "hagelk-db0f32b5",
   spaceName: "spaces/AAAA1111",
+  scheduleId: "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
+  scheduleName: "Morning dispatch",
+  scheduledRunId: "901",
+  fireKey:
+    "schedule-fire#36bb0456-1c51-4fb8-97d1-4e87d02765ce#" +
+    "2026-07-28T15:00:00.000Z",
   isDM: true,
   originalPrompt: "Assemble the morning dispatch.",
 }
@@ -64,6 +76,10 @@ const baseInput = {
       expect(parsed.displayName).toBe(baseInput.displayName)
       expect(parsed.workspacePrefix).toBe(baseInput.workspacePrefix)
       expect(parsed.spaceName).toBe(baseInput.spaceName)
+      expect(parsed.scheduleId).toBe(baseInput.scheduleId)
+      expect(parsed.scheduleName).toBe(baseInput.scheduleName)
+      expect(parsed.scheduledRunId).toBe(baseInput.scheduledRunId)
+      expect(parsed.fireKey).toBe(baseInput.fireKey)
       expect(parsed.isDM).toBe(true)
       expect(parsed.promptExcerpt).toBe(baseInput.originalPrompt)
     })
@@ -361,6 +377,103 @@ const baseInput = {
       expect(payload).not.toContain("threadName")
       expect(parseJobPayload(payload).threadName).toBeUndefined()
     })
+
+    it("queues recovery before persisting and launching the promoted task", () => {
+      const promotion = cronSource.slice(
+        cronSource.indexOf("async function tryPromoteScheduledResult("),
+        cronSource.indexOf("async function deliverScheduledResult("),
+      )
+      expect(promotion.indexOf("persistRun: (scheduledRunId) =>")).toBeLessThan(
+        promotion.indexOf("await sendPromotionAcknowledgement(context, reason)"),
+      )
+      const launch = cronSource.slice(
+        cronSource.indexOf("async function promoteScheduledTurnToJob("),
+        cronSource.indexOf("async function sendChatMessage("),
+      )
+      const preparation = cronSource.slice(
+        cronSource.indexOf("async function prepareScheduledJobPromotion("),
+        cronSource.indexOf("function readJobRunnerConfig("),
+      )
+      expect(preparation.indexOf("await reserveRun()")).toBeLessThan(
+        preparation.indexOf("await prepareLaunch("),
+      )
+      expect(preparation.indexOf("await prepareLaunch(")).toBeLessThan(
+        preparation.indexOf("await persistRun("),
+      )
+      expect(launch.indexOf("await prepareScheduledJobPromotion(")).toBeLessThan(
+        launch.indexOf("await launchScheduledJob("),
+      )
+      expect(launch.indexOf("await afterLaunchFailure(")).toBeLessThan(
+        launch.indexOf("phase: 'run-task'"),
+      )
+      const rejectedLaunch = cronSource.slice(
+        cronSource.indexOf("async function recordPromotionLaunchFailure("),
+        cronSource.indexOf("async function enqueuePromotionReconciliation("),
+      )
+      expect(
+        rejectedLaunch.indexOf("recordCronFailureStrict("),
+      ).toBeLessThan(
+        rejectedLaunch.indexOf("updatePromotedRunTerminal("),
+      )
+      expect(cronSource).toContain("scheduleFireLaunchIdentity(fireIdentity)")
+      expect(cronSource).toContain(
+        "fireKey: options.fireIdentity?.key",
+      )
+      expect(cronSource).toContain(
+        "clientToken: launchIdentity.clientToken",
+      )
+      expect(cronSource).toContain(
+        "startedBy: launchIdentity.startedBy",
+      )
+      expect(cronSource).toContain(
+        "startedBy: scheduledRunStartedBy(digest)",
+      )
+      expect(cronSource).toContain(
+        "reconcileRunTaskLaunch({",
+      )
+      expect(cronSource).toContain(
+        "listRunningTasks: async () =>",
+      )
+      expect(cronSource).toContain(
+        "listStoppedTasks: async (nextToken) =>",
+      )
+      expect(cronSource).toContain(
+        "describeTasks: async (taskArns) =>",
+      )
+      const runningLookup = cronSource.slice(
+        cronSource.indexOf("listRunningTasks: async () =>"),
+        cronSource.indexOf("listStoppedTasks: async (nextToken) =>"),
+      )
+      expect(runningLookup).toContain("startedBy,")
+      expect(runningLookup).not.toContain("desiredStatus")
+      const stoppedLookup = cronSource.slice(
+        cronSource.indexOf("listStoppedTasks: async (nextToken) =>"),
+        cronSource.indexOf("describeTasks: async (taskArns) =>"),
+      )
+      expect(stoppedLookup).toContain("desiredStatus: 'STOPPED'")
+      expect(stoppedLookup).not.toContain("startedBy")
+      expect(launch).toContain(
+        "if (error instanceof AmbiguousRunTaskError)",
+      )
+      expect(launch).toContain(
+        "return { promoted: true, ambiguity: detail }",
+      )
+      expect(cronSource).toContain(
+        "return sanitizeDiagnostic(",
+      )
+      const fireClaimAcquisition = cronSource.slice(
+        cronSource.indexOf("async function acquireScheduleFireClaim("),
+        cronSource.indexOf("function isHandlerResult("),
+      )
+      expect(fireClaimAcquisition).toContain(
+        "if (!claim.failure.recordRun)",
+      )
+      expect(
+        fireClaimAcquisition.indexOf("if (!claim.failure.recordRun)"),
+      ).toBeLessThan(
+        fireClaimAcquisition.indexOf("recordScheduleGuardFailure("),
+      )
+    })
   })
 
   describe("CDK wiring", () => {
@@ -402,6 +515,38 @@ const baseInput = {
       )
     })
 
+    it("durably delays ambiguous-launch reconciliation before RunTask", () => {
+      expect(stackSource).toContain("'CronReconciliationQueue'")
+      expect(stackSource).toContain(
+        "SCHEDULE_RECONCILIATION_QUEUE_URL:",
+      )
+      expect(stackSource).toContain(
+        "resources.cronReconciliationQueue.grantSendMessages(",
+      )
+      expect(stackSource).toContain(
+        "new lambdaEventSources.SqsEventSource(",
+      )
+      expect(cronSource).toContain(
+        "new SendMessageCommand({",
+      )
+      expect(cronSource).toContain(
+        "DelaySeconds: SCHEDULED_RUN_RECONCILIATION_DELAY_SECONDS",
+      )
+      expect(cronSource).toContain(
+        "abortSignal: AbortSignal.timeout(RUN_TASK_ATTEMPT_TIMEOUT_MS)",
+      )
+      const preparation = cronSource.slice(
+        cronSource.indexOf("async function prepareScheduledJobPromotion("),
+        cronSource.indexOf("function readJobRunnerConfig("),
+      )
+      expect(preparation.indexOf("await prepareLaunch(")).toBeLessThan(
+        preparation.indexOf("await persistRun("),
+      )
+      expect(cronSource).toContain(
+        "Delayed promotion reconciliation terminalized ambiguity",
+      )
+    })
+
     it("grants RunTask and PassRole on BOTH task roles", () => {
       // PassRole on only the task role fails at launch with an opaque
       // AccessDenied — ECS assumes the execution role too.
@@ -426,6 +571,24 @@ const baseInput = {
       )
       expect(stackSource).toContain(
         "resources.routerLambda.addEnvironment('JOB_TASK_DEF_ARN'",
+      )
+    })
+
+    it("supervises every stopped job through the cron telemetry handler", () => {
+      expect(stackSource).toContain("'JobRunnerStoppedRule'")
+      expect(stackSource).toContain("'ECS Task State Change'")
+      expect(stackSource).toContain("lastStatus: ['STOPPED']")
+      expect(stackSource).toContain(
+        "actions: ['ecs:DescribeTasks', 'ecs:ListTasks']",
+      )
+      expect(stackSource).toContain(
+        "'ecs:cluster': jobCluster.clusterArn",
+      )
+      expect(stackSource).toContain(
+        "new eventsTargets.LambdaFunction(resources.cronLambda",
+      )
+      expect(stackSource).toContain(
+        "deadLetterQueue: resources.agentAsyncDlq",
       )
     })
   })

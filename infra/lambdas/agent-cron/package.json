@@ -11,6 +11,7 @@
     "@aws-crypto/sha256-js": "^5.0.0",
     "@aws-sdk/client-dynamodb": "^3.0.0",
     "@aws-sdk/client-ecs": "^3.0.0",
+    "@aws-sdk/client-sqs": "^3.0.0",
     "@aws-sdk/client-secrets-manager": "^3.0.0",
     "@aws-sdk/client-ssm": "^3.0.0",
     "@aws-sdk/credential-provider-node": "^3.0.0",

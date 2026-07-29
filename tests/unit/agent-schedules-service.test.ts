@@ -34,7 +34,7 @@ import {
   UpdateScheduleCommand,
 } from "@aws-sdk/client-scheduler"
 import {
-
+  DeleteCommand,
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
@@ -45,6 +45,10 @@ import {
   type AgentScheduleDynamoClient,
   type AgentScheduleRecord,
 } from "@/lib/agent-schedules/service"
+import type {
+  AgentScheduleLastRun,
+  AgentScheduleRunReader,
+} from "@/lib/agent-schedules/run-reader"
 import {
   AgentScheduleInputError,
   toSchedulerExpression,
@@ -61,6 +65,7 @@ const config = {
   scheduleGroup: "psd-agent-dev",
   cronLambdaArn: "arn:aws:lambda:us-east-1:123:function:cron",
   schedulerRoleArn: "arn:aws:iam::123:role/scheduler",
+  scheduleDlqArn: "arn:aws:sqs:us-east-1:123:schedule-dlq",
   maxSchedulesPerOwner: 50,
 }
 
@@ -88,19 +93,23 @@ function scheduleRecord(
   }
 }
 
-function harness() {
+function harness(
+  latestRuns: Map<string, AgentScheduleLastRun> = new Map(),
+) {
   const dynamoSend = jest.fn()
   const schedulerSend = jest.fn()
+  const latestBySchedule = jest.fn().mockResolvedValue(latestRuns)
   const service = new AgentScheduleService(
     config,
     { send: dynamoSend } as unknown as AgentScheduleDynamoClient,
-    { send: schedulerSend } as unknown as SchedulerClient
+    { send: schedulerSend } as unknown as SchedulerClient,
+    { latestBySchedule } as AgentScheduleRunReader,
   )
-  return { service, dynamoSend, schedulerSend }
+  return { service, dynamoSend, schedulerSend, latestBySchedule }
 }
 
 function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
-  it("creates a target containing only owner, schedule id, and version", async () => {
+  it("creates a target with a reference and Scheduler fire identity", async () => {
     const { service, dynamoSend, schedulerSend } = harness()
     dynamoSend
       .mockResolvedValueOnce({ Items: [] })
@@ -133,9 +142,17 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
       ownerEmail: OWNER,
       scheduleId: created.scheduleId,
       version: 1,
+      scheduledTime: "<aws.scheduler.scheduled-time>",
     })
     expect(target?.Input).not.toContain("prompt")
     expect(target?.Input).not.toContain("dmSpaceName")
+    expect(target?.DeadLetterConfig).toEqual({
+      Arn: config.scheduleDlqArn,
+    })
+    expect(target?.RetryPolicy).toEqual({
+      MaximumEventAgeInSeconds: 3600,
+      MaximumRetryAttempts: 5,
+    })
 
     const transaction = dynamoSend.mock.calls[3][0]
     expect(transaction).toBeInstanceOf(TransactWriteCommand)
@@ -156,6 +173,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
     dynamoSend
       .mockResolvedValueOnce({ Items: [scheduleRecord()] })
       .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ Item: scheduleRecord() })
       .mockResolvedValueOnce({
         Items: [
@@ -167,6 +185,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
           },
         ],
       })
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
     schedulerSend.mockResolvedValueOnce({})
 
@@ -185,13 +204,28 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
       ownerEmail: OWNER,
       scheduleId: SCHEDULE_ID,
       version: 2,
+      scheduledTime: "<aws.scheduler.scheduled-time>",
     })
-    const putCommand = dynamoSend.mock.calls[4][0] as PutCommand
+    expect((updateCommand as UpdateScheduleCommand).input.Target).toMatchObject({
+      DeadLetterConfig: { Arn: config.scheduleDlqArn },
+      RetryPolicy: {
+        MaximumEventAgeInSeconds: 3600,
+        MaximumRetryAttempts: 5,
+      },
+    })
+    const putCommand = dynamoSend.mock.calls[5][0] as PutCommand
     expect(putCommand.input.Item).toMatchObject({
       dmSpaceName: "spaces/new-trusted-dm",
       googleIdentity: "users/67890",
       version: 2,
     })
+    const lockPut = dynamoSend.mock.calls[2][0] as PutCommand
+    expect(lockPut.input.Item).toMatchObject({
+      userId: OWNER,
+      scheduleId: `__mutation__${SCHEDULE_ID}`,
+      kind: "schedule-mutation-lock",
+    })
+    expect(dynamoSend.mock.calls[6][0]).toBeInstanceOf(DeleteCommand)
   })
 
   }
@@ -255,6 +289,65 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part2() {it("rolls bac
     ).toEqual({ userId: OWNER, scheduleId: SCHEDULE_ID })
   })
 
+  it("joins each schedule to its latest run and truncates the error", async () => {
+    const latestRunAt = new Date("2026-07-28T15:30:00.000Z")
+    const longError = "failure ".repeat(100)
+    const { service, dynamoSend, latestBySchedule } = harness(
+      new Map([
+        [
+          SCHEDULE_ID,
+          {
+            createdAt: latestRunAt,
+            status: "error",
+            errorMessage: longError,
+          },
+        ],
+      ]),
+    )
+    dynamoSend.mockResolvedValueOnce({
+      Items: [
+        scheduleRecord(),
+        scheduleRecord({
+          scheduleId: "a273413f-7a93-4e43-9b49-1bc8880be024",
+          name: "Never run",
+          createdAt: "2026-07-26T00:00:00.000Z",
+        }),
+      ],
+    })
+
+    const schedules = await service.list(OWNER)
+
+    expect(latestBySchedule).toHaveBeenCalledWith(OWNER, [
+      SCHEDULE_ID,
+      "a273413f-7a93-4e43-9b49-1bc8880be024",
+    ])
+    expect(schedules[0]).toMatchObject({
+      lastRunAt: latestRunAt.toISOString(),
+      lastRunStatus: "error",
+      lastRunError: longError.slice(0, 500),
+    })
+    expect(schedules[1]).toMatchObject({
+      lastRunAt: null,
+      lastRunStatus: null,
+      lastRunError: null,
+    })
+  })
+
+  it("marks run status unknown when telemetry is unavailable", async () => {
+    const { service, dynamoSend, latestBySchedule } = harness()
+    dynamoSend.mockResolvedValueOnce({ Items: [scheduleRecord()] })
+    latestBySchedule.mockRejectedValueOnce(new Error("Aurora unavailable"))
+
+    await expect(service.list(OWNER)).resolves.toEqual([
+      expect.objectContaining({
+        scheduleId: SCHEDULE_ID,
+        lastRunAt: null,
+        lastRunStatus: "unknown",
+        lastRunError: null,
+      }),
+    ])
+  })
+
   it("seeds legacy quota from all existing rows before admitting a create", async () => {
     const { service, dynamoSend, schedulerSend } = harness()
     const legacy = Array.from({ length: config.maxSchedulesPerOwner }, (_, i) =>
@@ -301,10 +394,12 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
     dynamoSend
       .mockResolvedValueOnce({ Items: [scheduleRecord(), quota] })
       .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ Item: scheduleRecord() })
       .mockResolvedValueOnce({
         Items: [{ email: OWNER, dmSpaceName: "spaces/trusted-owner-dm" }],
       })
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
     schedulerSend.mockResolvedValueOnce({})
 
@@ -329,7 +424,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
       const index = events.filter((event) => event === "dynamo").length
       if (index === 1) return { Items: [scheduleRecord()] }
       if (index === 2) return {}
-      if (index === 3) return { Item: scheduleRecord() }
+      if (index === 4) return { Item: scheduleRecord() }
       return {}
     })
     const schedulerSend = jest.fn(async () => {
@@ -340,13 +435,18 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
       config,
       { send: dynamoSend } as unknown as AgentScheduleDynamoClient,
       { send: schedulerSend } as unknown as SchedulerClient,
+      {
+        latestBySchedule: jest.fn().mockResolvedValue(new Map()),
+      },
     )
     await expect(service.delete(OWNER, SCHEDULE_ID)).resolves.toBe(SCHEDULE_ID)
     expect(events).toEqual([
       "dynamo",
       "dynamo",
       "dynamo",
+      "dynamo",
       "scheduler",
+      "dynamo",
       "dynamo",
     ])
   })
@@ -356,13 +456,34 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
     dynamoSend
       .mockResolvedValueOnce({ Items: [scheduleRecord()] })
       .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ Item: scheduleRecord() })
+      .mockResolvedValueOnce({})
     schedulerSend.mockRejectedValueOnce(new Error("scheduler unavailable"))
 
     await expect(service.delete(OWNER, SCHEDULE_ID)).rejects.toThrow(
       "retry the delete",
     )
-    expect(dynamoSend).toHaveBeenCalledTimes(3)
+    expect(dynamoSend).toHaveBeenCalledTimes(5)
+  })
+
+  it("rejects a user mutation while the deployment backfill owns its lock", async () => {
+    const { service, dynamoSend, schedulerSend } = harness()
+    const contention = Object.assign(new Error("locked"), {
+      name: "ConditionalCheckFailedException",
+    })
+    dynamoSend
+      .mockResolvedValueOnce({ Items: [scheduleRecord()] })
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(contention)
+
+    await expect(
+      service.update(OWNER, {
+        scheduleId: SCHEDULE_ID,
+        prompt: "Concurrent edit",
+      }),
+    ).rejects.toThrow("being updated")
+    expect(schedulerSend).not.toHaveBeenCalled()
   })
 
   it("uses deterministic DynamoDB idempotency tokens within the 36-char limit", () => {

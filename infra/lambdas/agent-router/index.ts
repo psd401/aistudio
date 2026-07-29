@@ -75,6 +75,7 @@ import {
   buildJobPayload,
   shouldPromoteToJob,
 } from './job-promotion';
+import type { ScheduledRunWrite } from './scheduled-run-telemetry';
 import {
   createAgentRequestProof,
   createInvocationContextToken,
@@ -83,6 +84,10 @@ import {
 } from './invocation-context';
 import { buildAccountRequestBody } from './account-request-payload';
 import { canInvokeOwnerAgent } from './delegation-policy';
+import {
+  sanitizeDiagnostic,
+  sanitizeEmailForLog,
+} from './log-sanitization';
 
 // ---------------------------------------------------------------------------
 // Structured logging (Lambda-compatible, no console.* per CLAUDE.md exception)
@@ -606,7 +611,8 @@ async function tryAcquireSessionLock(
         // `kind: 'job'` marks a lock held by the async job-runner (#1138) —
         // the router replies "still working on your earlier task" instantly
         // instead of making the user wait out the 13-min lock poll. The
-        // runner renews expiresAt every ~10 min (renewSessionLock).
+        // runner renews expiresAt every ~5 min (renewSessionLock), leaving
+        // enough lease margin for a full missed renewal.
         Item: { sessionId, expiresAt, lockToken, kind, claimedAt: new Date().toISOString() },
         ConditionExpression: 'attribute_not_exists(sessionId) OR expiresAt < :now',
         ExpressionAttributeValues: { ':now': Math.floor(Date.now() / 1000) },
@@ -664,16 +670,19 @@ async function releaseSessionLock(
 /**
  * Renew a held session lock by extending expiresAt another 14 minutes,
  * conditioned on still owning it (lockToken match). The async job-runner
- * (#1138) calls this every ~10 min for up to the 2h job ceiling so the
+ * (#1138) calls this every ~5 min for up to the 2h job ceiling so the
  * `kind='job'` marker stays live while the job runs. Returns false when the
- * lock was lost (expired + re-acquired by someone else) — the runner keeps
- * going regardless (losing the lock affects messaging UX, not correctness;
- * OpenClaw serializes the session itself).
+ * lock was lost (expired + re-acquired by someone else), and in confirmation
+ * mode when a transient error prevents proving the startup extension. The
+ * runner refuses to start external work without that proof; later losses
+ * remain advisory because work may already have side effects and OpenClaw
+ * serializes the session itself.
  */
 async function renewSessionLock(
   sessionId: string,
   lockToken: string,
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
+  requireConfirmation = false,
 ): Promise<boolean> {
   const tableName = process.env.SESSION_LOCKS_TABLE;
   if (!tableName || lockToken === LOCK_PASS_THROUGH) return true;
@@ -700,7 +709,10 @@ async function renewSessionLock(
     log.warn('Session lock renewal failed; will retry on next interval', {
       error: error instanceof Error ? error.message : String(error),
     });
-    return true; // Transient DDB error — keep renewing.
+    // Once external work is underway, a transient error is advisory and the
+    // interval keeps trying. At startup there is no work to preserve, so
+    // require an actually confirmed extension before invoking AgentCore.
+    return !requireConfirmation;
   }
 }
 
@@ -2445,7 +2457,9 @@ async function writeDeepTelemetry(
     await Promise.all(writes);
   } catch (error) {
     log.error('Failed to write deep telemetry rows', {
-      error: error instanceof Error ? error.message : String(error),
+      error: sanitizeDiagnostic(
+        error instanceof Error ? error.message : String(error),
+      ),
       messageId,
       contentCount: params.messages?.length ?? 0,
       toolCount: params.toolCalls?.length ?? 0,
@@ -2470,9 +2484,51 @@ async function logTelemetry(
   } catch (error) {
     // Telemetry failure should not affect user experience
     log.error('Failed to write telemetry', {
-      error: error instanceof Error ? error.message : String(error),
+      error: sanitizeDiagnostic(
+        error instanceof Error ? error.message : String(error),
+      ),
     });
   }
+}
+
+async function writeScheduledRun(params: ScheduledRunWrite): Promise<void> {
+  if (!DATABASE_HOST || !DATABASE_SECRET_ARN) {
+    throw new Error('Database not configured for scheduled run telemetry');
+  }
+  const sql = await getDbClient();
+  const errorMessage = params.errorMessage
+    ? sanitizeDiagnostic(params.errorMessage, 4000)
+    : null;
+  if (params.scheduledRunId) {
+    const updated = await sql`UPDATE agent_scheduled_runs
+      SET schedule_name = ${params.scheduleName ?? null},
+          fire_key = COALESCE(fire_key, ${params.fireKey ?? null}),
+          input_tokens = input_tokens + ${params.inputTokens},
+          output_tokens = output_tokens + ${params.outputTokens},
+          latency_ms = latency_ms + ${params.latencyMs},
+          status = ${params.status},
+          error_message = ${errorMessage}
+      WHERE id = CAST(${params.scheduledRunId} AS bigint)
+        AND user_id = ${params.userEmail}
+        AND schedule_id = ${params.scheduleId}
+        AND session_id = ${params.sessionId}
+        AND status = 'promoted'
+      RETURNING id`;
+    if (updated.length !== 1) {
+      throw new Error(
+        `Promoted scheduled run ${params.scheduledRunId} was not updateable`,
+      );
+    }
+    return;
+  }
+  await sql`INSERT INTO agent_scheduled_runs
+      (user_id, schedule_id, schedule_name, session_id,
+       input_tokens, output_tokens, latency_ms, status, error_message, fire_key)
+    VALUES (${params.userEmail}, ${params.scheduleId},
+            ${params.scheduleName ?? null}, ${params.sessionId},
+            ${params.inputTokens}, ${params.outputTokens},
+            ${params.latencyMs}, ${params.status},
+            ${errorMessage}, ${params.fireKey ?? null})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2505,7 +2561,7 @@ async function recordFailure(
   log.error('AGENT_FAILURE_RECORD', {
     source: params.source,
     severity: params.severity,
-    userId: params.userId ?? null,
+    userId: params.userId ? sanitizeEmailForLog(params.userId) : null,
     sessionId: params.sessionId ?? null,
     errorClass: params.errorClass ?? null,
   });
@@ -2530,7 +2586,9 @@ async function recordFailure(
                 ${ctx}::jsonb, NOW())`;
   } catch (error) {
     log.error('Failed to record agent failure', {
-      error: error instanceof Error ? error.message : String(error),
+      error: sanitizeDiagnostic(
+        error instanceof Error ? error.message : String(error),
+      ),
       originalSource: params.source,
       originalSeverity: params.severity,
     });
@@ -3957,6 +4015,7 @@ export {
   invokeAgentCore,
   sendGoogleChatResponse,
   logTelemetry,
+  writeScheduledRun,
   recordFailure,
   renewSessionLock,
   releaseSessionLock,

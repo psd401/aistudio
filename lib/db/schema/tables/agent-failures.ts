@@ -15,6 +15,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
   varchar,
 } from "drizzle-orm/pg-core";
 
@@ -67,6 +68,7 @@ export const agentFailures = pgTable(
     acknowledgedBy: varchar("acknowledged_by", { length: 255 }),
     acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
     notes: text("notes"),
+    fireKey: varchar("fire_key", { length: 192 }),
   },
   (table) => [
     // DESC matches the SQL migration (076) — all dashboard queries order by
@@ -77,6 +79,9 @@ export const agentFailures = pgTable(
     index("idx_agent_failures_unack").on(desc(table.occurredAt)).where(sql`acknowledged = false`),
     index("idx_agent_failures_severity").on(table.severity, desc(table.occurredAt)),
     index("idx_agent_failures_acked_at").on(desc(table.acknowledgedAt)).where(sql`acknowledged = true`),
+    uniqueIndex("uq_agent_failures_source_fire")
+      .on(table.source, table.fireKey)
+      .where(sql`fire_key IS NOT NULL`),
   ],
 );
 

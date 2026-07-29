@@ -14,7 +14,7 @@
  *   - AGENTCORE_TIMEOUT_MS_OVERRIDE is set on the task definition so the
  *     undici dispatcher in index.ts outlives the 2h invocation.
  *   - The router pre-acquired the kind='job' session lock; this process
- *     renews it every 10 minutes and releases it on exit.
+ *     renews it at startup and every 5 minutes, then releases it on exit.
  *   - ALWAYS posts something to the originating space: the final answer,
  *     the harness's failure frame, or a runner-error message. No silent
  *     deaths.
@@ -34,9 +34,21 @@ import {
   releaseSessionLock,
   renewSessionLock,
   sendGoogleChatResponse,
+  writeScheduledRun,
 } from './index';
+import { recordScheduledJobTerminal } from './scheduled-run-telemetry';
+import {
+  sanitizeDiagnostic,
+  sanitizeEmailForLog,
+} from './log-sanitization';
 
-const RENEW_INTERVAL_MS = 10 * 60 * 1000;
+// The renewed lease is 14 minutes. A five-minute cadence leaves enough margin
+// for one complete transient renewal failure: the next attempt occurs around
+// minute ten, before the existing lease can expire.
+const RENEW_INTERVAL_MS = 5 * 60 * 1000;
+type JobPayload = ReturnType<typeof parseJobPayload>;
+type AgentResult = Awaited<ReturnType<typeof invokeAgentCore>>;
+type JobLogger = ReturnType<typeof createLogger>;
 
 /**
  * Best-effort lock release when JOB_PAYLOAD fails full validation (review,
@@ -48,7 +60,7 @@ const RENEW_INTERVAL_MS = 10 * 60 * 1000;
  */
 async function releaseLockFromRawPayload(
   raw: string | undefined,
-  log: ReturnType<typeof createLogger>
+  log: JobLogger
 ): Promise<void> {
   if (!raw) return;
   try {
@@ -65,13 +77,145 @@ async function releaseLockFromRawPayload(
   }
 }
 
+function scheduledFailureContext(job: JobPayload) {
+  return {
+    phase: 'job_runner',
+    ...(job.scheduleId ? { scheduleId: job.scheduleId } : {}),
+  };
+}
+
+async function recordDeliveredJobResult(
+  job: JobPayload,
+  agentResult: AgentResult,
+  latencyMs: number,
+  log: JobLogger
+): Promise<void> {
+  await logTelemetry(
+    {
+      userId: job.userEmail,
+      sessionId: job.sessionId,
+      model: agentResult.model,
+      inputTokens: agentResult.inputTokens,
+      outputTokens: agentResult.outputTokens,
+      cacheReadInputTokens: agentResult.cacheReadInputTokens,
+      cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
+      latencyMs,
+      modelCallCount: agentResult.modelCallCount,
+      durationMs: agentResult.durationMs,
+      nudged: agentResult.nudged,
+      guardrailBlocked: false,
+      spaceName: job.spaceName,
+      messages: agentResult.messages,
+      toolCalls: agentResult.toolCalls,
+    },
+    log
+  );
+  await recordScheduledJobTerminal(
+    job,
+    {
+      status: agentResult.failed ? 'error' : 'success',
+      inputTokens: agentResult.inputTokens,
+      outputTokens: agentResult.outputTokens,
+      latencyMs,
+      ...(agentResult.failed
+        ? { errorMessage: agentResult.response }
+        : {}),
+    },
+    writeScheduledRun,
+    log
+  );
+
+  if (!agentResult.failed) {
+    log.info('Background job completed', {
+      sessionId: job.sessionId,
+      latencyMs,
+      outputTokens: agentResult.outputTokens,
+    });
+    return;
+  }
+  if (agentResult.errorSource === 'router') {
+    await recordFailure(
+      {
+        source: 'router',
+        severity: 'error',
+        userId: job.userEmail,
+        sessionId: job.sessionId,
+        scheduleName: job.scheduleName,
+        model: agentResult.model,
+        errorClass: agentResult.errorClass ?? 'JobLegError',
+        errorMessage: agentResult.response,
+        context: scheduledFailureContext(job),
+      },
+      log
+    );
+  }
+  log.warn('Background job finished with a failed turn', {
+    marker: 'JOB_RUNNER_FAILED_TURN',
+    errorClass: agentResult.errorClass ?? 'unknown',
+    latencyMs,
+  });
+}
+
+async function handleJobRunnerError(
+  job: JobPayload,
+  error: unknown,
+  startTime: number,
+  log: JobLogger
+): Promise<number> {
+  const message = error instanceof Error ? error.message : String(error);
+  try {
+    await sendGoogleChatResponse(
+      job.spaceName,
+      job.threadName,
+      '⚠️ The background job hit an internal error and could not finish. ' +
+        'Some steps may have already completed — ask me to check before ' +
+        'retrying.',
+      log
+    );
+  } catch (sendError) {
+    log.error('Failed to post job-error message to Chat', {
+      error: sanitizeDiagnostic(
+        sendError instanceof Error
+          ? sendError.message
+          : String(sendError),
+      ),
+    });
+  }
+  await recordFailure(
+    {
+      source: 'router',
+      severity: 'error',
+      userId: job.userEmail,
+      sessionId: job.sessionId,
+      scheduleName: job.scheduleName,
+      errorClass: 'JobRunnerError',
+      errorMessage: message,
+      context: scheduledFailureContext(job),
+    },
+    log
+  );
+  await recordScheduledJobTerminal(
+    job,
+    {
+      status: 'error',
+      inputTokens: 0,
+      outputTokens: 0,
+      latencyMs: Date.now() - startTime,
+      errorMessage: message,
+    },
+    writeScheduledRun,
+    log
+  );
+  return 1;
+}
+
 async function main(): Promise<number> {
   const log = createLogger({ service: 'agent-job-runner' });
 
   // A broken payload means there is no Chat destination to post to —
   // log loudly, release the pre-acquired lock if recoverable, and exit
   // nonzero (CloudWatch is the record).
-  let job: ReturnType<typeof parseJobPayload>;
+  let job: JobPayload;
   try {
     job = parseJobPayload(process.env.JOB_PAYLOAD);
   } catch (error) {
@@ -99,19 +243,33 @@ async function main(): Promise<number> {
     invokeSessionId,
     reason: job.reason ?? 'deadline',
     restart: isRestart,
-    userEmail: job.userEmail,
+    userEmail: sanitizeEmailForLog(job.userEmail),
     space: job.spaceName,
     deadlineS: JOB_DEADLINE_S,
   });
 
-  // Keep the kind='job' lock alive for the duration — the router uses it to
-  // answer mid-job user messages instantly with "still working".
-  const renewTimer = setInterval(() => {
-    void renewSessionLock(job.sessionId, job.lockToken, log);
-  }, RENEW_INTERVAL_MS);
-
   const startTime = Date.now();
+  let renewTimer: ReturnType<typeof setInterval> | undefined;
   try {
+    // The inherited lease started before RunTask, so Fargate startup already
+    // consumed part of it. Renew once before any external work, then start the
+    // cadence; otherwise a slow start plus one missed interval can expose the
+    // session before the second attempt.
+    const ownsLock = await renewSessionLock(
+      job.sessionId,
+      job.lockToken,
+      log,
+      true,
+    );
+    if (!ownsLock) {
+      throw new Error(
+        'Background job lost its session lock before execution',
+      );
+    }
+    renewTimer = setInterval(() => {
+      void renewSessionLock(job.sessionId, job.lockToken, log);
+    }, RENEW_INTERVAL_MS);
+
     const agentResult = await invokeAgentCore(
       prompt,
       job.userEmail,
@@ -137,94 +295,16 @@ async function main(): Promise<number> {
 
     const latencyMs =
       agentResult.latencyMs > 0 ? agentResult.latencyMs : Date.now() - startTime;
-    await logTelemetry(
-      {
-        userId: job.userEmail,
-        sessionId: job.sessionId,
-        model: agentResult.model,
-        inputTokens: agentResult.inputTokens,
-        outputTokens: agentResult.outputTokens,
-        cacheReadInputTokens: agentResult.cacheReadInputTokens,
-        cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
-        latencyMs,
-        modelCallCount: agentResult.modelCallCount,
-        durationMs: agentResult.durationMs,
-        nudged: agentResult.nudged,
-        // Guardrails ran on the original message in the first leg.
-        guardrailBlocked: false,
-        spaceName: job.spaceName,
-        messages: agentResult.messages,
-        toolCalls: agentResult.toolCalls,
-      },
-      log
-    );
-
-    if (agentResult.failed) {
-      // Harness-side failures were already recorded by the container; a
-      // router-source failure (e.g. HTTP error) gets recorded here so the
-      // job leg is visible in agent_failures.
-      if (agentResult.errorSource === 'router') {
-        await recordFailure(
-          {
-            source: 'router',
-            severity: 'error',
-            userId: job.userEmail,
-            sessionId: job.sessionId,
-            model: agentResult.model,
-            errorClass: agentResult.errorClass ?? 'JobLegError',
-            errorMessage: agentResult.response,
-            context: { phase: 'job_runner' },
-          },
-          log
-        );
-      }
-      log.warn('Background job finished with a failed turn', {
-        // Stable marker for the JobRunnerFailure metric filter (#1161).
-        marker: 'JOB_RUNNER_FAILED_TURN',
-        errorClass: agentResult.errorClass ?? 'unknown',
-        latencyMs,
-      });
-    } else {
-      log.info('Background job completed', {
-        sessionId: job.sessionId,
-        latencyMs,
-        outputTokens: agentResult.outputTokens,
-      });
-    }
-    return 0;
+    await recordDeliveredJobResult(job, agentResult, latencyMs, log);
+    // The ECS STOPPED-state supervisor uses the process exit code as its
+    // authoritative terminal signal. A delivered agent failure is not a clean
+    // job even though Chat delivery itself succeeded.
+    return agentResult.failed ? 2 : 0;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    // Best-effort user notification — the job must never die silently.
-    try {
-      await sendGoogleChatResponse(
-        job.spaceName,
-        job.threadName,
-        '⚠️ The background job hit an internal error and could not finish. ' +
-          'Some steps may have already completed — ask me to check before ' +
-          'retrying.',
-        log
-      );
-    } catch (sendError) {
-      log.error('Failed to post job-error message to Chat', {
-        error:
-          sendError instanceof Error ? sendError.message : String(sendError),
-      });
-    }
-    await recordFailure(
-      {
-        source: 'router',
-        severity: 'error',
-        userId: job.userEmail,
-        sessionId: job.sessionId,
-        errorClass: 'JobRunnerError',
-        errorMessage: message,
-        context: { phase: 'job_runner' },
-      },
-      log
-    );
-    return 1;
+    const exitCode = await handleJobRunnerError(job, error, startTime, log);
+    return exitCode;
   } finally {
-    clearInterval(renewTimer);
+    if (renewTimer) clearInterval(renewTimer);
     await releaseSessionLock(job.sessionId, job.lockToken, log);
   }
 }
@@ -233,8 +313,12 @@ async function main(): Promise<number> {
 main()
   .then((code) => process.exit(code))
   .catch((error) => {
+    const detail = sanitizeDiagnostic(
+      error instanceof Error ? error.stack ?? error.message : String(error),
+      4000,
+    );
     process.stderr.write(
-      `job-runner fatal: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`
+      `job-runner fatal: ${detail}\n`
     );
     process.exit(1);
   });

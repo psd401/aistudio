@@ -64,6 +64,13 @@ export interface JobPayload {
   displayName: string;
   workspacePrefix: string;
   spaceName: string;
+  /** Present only for cron-promoted turns; enables terminal run telemetry. */
+  scheduleId?: string;
+  scheduleName?: string;
+  /** Per-fire agent_scheduled_runs primary key created before RunTask. */
+  scheduledRunId?: string;
+  /** Immutable Scheduler occurrence identity for retry-safe failure repair. */
+  fireKey?: string;
   threadName?: string;
   /** In shared spaces the reply is prefixed [Name's Agent]; DMs are not. */
   isDM: boolean;
@@ -130,6 +137,9 @@ export function resolveJobInvocation(
 }
 
 const PROMPT_EXCERPT_MAX = 2000;
+// Mirrors lib/agent-schedules/validation.ts; the router bundle cannot import
+// application code at runtime.
+const SCHEDULE_NAME_MAX_LENGTH = 120;
 
 /**
  * RunTask caps the ENTIRE container-override payload at 8 KiB. Enforced here so
@@ -147,6 +157,10 @@ export function buildJobPayload(input: {
   displayName: string;
   workspacePrefix: string;
   spaceName: string;
+  scheduleId?: string;
+  scheduleName?: string;
+  scheduledRunId?: string;
+  fireKey?: string;
   threadName?: string;
   isDM: boolean;
   originalPrompt: string;
@@ -161,6 +175,12 @@ export function buildJobPayload(input: {
     displayName: input.displayName,
     workspacePrefix: input.workspacePrefix,
     spaceName: input.spaceName,
+    ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
+    ...(input.scheduleName ? { scheduleName: input.scheduleName } : {}),
+    ...(input.scheduledRunId
+      ? { scheduledRunId: input.scheduledRunId }
+      : {}),
+    ...(input.fireKey ? { fireKey: input.fireKey } : {}),
     ...(input.threadName ? { threadName: input.threadName } : {}),
     isDM: input.isDM,
     ...(input.responsePrefix
@@ -188,6 +208,26 @@ export function buildJobPayload(input: {
   return serialized;
 }
 
+function boundedOptionalString(
+  obj: Record<string, unknown>,
+  field: string,
+  maxLength: number
+): string | undefined {
+  const value = obj[field];
+  return typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= maxLength
+    ? value
+    : undefined;
+}
+
+function readScheduledRunId(
+  obj: Record<string, unknown>,
+): string | undefined {
+  const value = boundedOptionalString(obj, 'scheduledRunId', 20);
+  return value && /^\d{1,20}$/.test(value) ? value : undefined;
+}
+
 /**
  * Parse + validate a JOB_PAYLOAD env value in the runner. Throws with a
  * field-specific message on anything missing — the runner catches, logs,
@@ -210,6 +250,14 @@ export function parseJobPayload(raw: string | undefined): JobPayload {
     }
     return v;
   };
+  const scheduleId = boundedOptionalString(obj, 'scheduleId', 64);
+  const scheduleName = boundedOptionalString(
+    obj,
+    'scheduleName',
+    SCHEDULE_NAME_MAX_LENGTH
+  );
+  const scheduledRunId = readScheduledRunId(obj);
+  const fireKey = boundedOptionalString(obj, 'fireKey', 192);
   return {
     sessionId: requireString('sessionId'),
     // Unknown/absent -> 'deadline'. A payload from an older cron build must
@@ -223,6 +271,10 @@ export function parseJobPayload(raw: string | undefined): JobPayload {
     displayName: typeof obj.displayName === 'string' ? obj.displayName : '',
     workspacePrefix: requireString('workspacePrefix'),
     spaceName: requireString('spaceName'),
+    ...(scheduleId ? { scheduleId } : {}),
+    ...(scheduleName ? { scheduleName } : {}),
+    ...(scheduledRunId ? { scheduledRunId } : {}),
+    ...(fireKey ? { fireKey } : {}),
     ...(typeof obj.threadName === 'string' && obj.threadName
       ? { threadName: obj.threadName }
       : {}),

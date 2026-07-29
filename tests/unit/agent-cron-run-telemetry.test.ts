@@ -1,0 +1,612 @@
+import {
+  createPromotedRun,
+  createRunTelemetry,
+  isPromotedRunPending,
+  reservePromotedRunId,
+  updatePromotedRunTerminal,
+  type CronTelemetryLogger,
+} from "../../infra/lambdas/agent-cron/run-telemetry"
+
+const config = {
+  databaseResourceArn: "arn:aws:rds:us-east-1:123:cluster:test",
+  databaseSecretArn: "arn:aws:secretsmanager:us-east-1:123:secret:test",
+  databaseName: "aistudio",
+}
+
+function harness(overrides: Partial<typeof config> = {}) {
+  const execute = jest.fn().mockResolvedValue({})
+  const warn = jest.fn()
+  const error = jest.fn()
+  const telemetry = createRunTelemetry(
+    { ...config, ...overrides },
+    { execute },
+  )
+  const log = { warn, error } satisfies CronTelemetryLogger
+  return { telemetry, execute, warn, error, log }
+}
+
+describe("agent-cron run telemetry", () => {
+  it("reserves a promoted row ID without creating the row", async () => {
+    const execute = jest.fn().mockResolvedValue({
+      records: [[{ stringValue: "900" }]],
+    })
+
+    await expect(
+      reservePromotedRunId(config, { execute }),
+    ).resolves.toBe("900")
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sql: expect.stringContaining("pg_get_serial_sequence"),
+      }),
+    )
+    expect(execute.mock.calls[0][0].sql).not.toContain("INSERT INTO")
+  })
+
+  it("creates a promoted row and returns its per-fire primary key", async () => {
+    const execute = jest.fn().mockResolvedValue({
+      records: [[{ stringValue: "901" }]],
+    })
+
+    await expect(
+      createPromotedRun(
+        config,
+        { execute },
+        {
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          scheduleName: "Morning brief",
+          sessionId: "shared-daily-session",
+          inputTokens: 1,
+          outputTokens: 2,
+          latencyMs: 3,
+          status: "promoted",
+        },
+      ),
+    ).resolves.toBe("901")
+
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sql: expect.stringContaining("RETURNING CAST(id AS TEXT)"),
+      }),
+    )
+  })
+
+  it("inserts a pre-reserved ID only after the resolver can carry it", async () => {
+    const execute = jest.fn().mockResolvedValue({
+      records: [[{ stringValue: "901" }]],
+    })
+
+    await expect(
+      createPromotedRun(
+        config,
+        { execute },
+        {
+          scheduledRunId: "901",
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          sessionId: "shared-daily-session",
+          inputTokens: 1,
+          outputTokens: 2,
+          latencyMs: 3,
+          status: "promoted",
+        },
+      ),
+    ).resolves.toBe("901")
+
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sql: expect.stringMatching(
+          /INSERT INTO agent_scheduled_runs[\s\S]+OVERRIDING SYSTEM VALUE/,
+        ),
+        parameters: expect.arrayContaining([{
+          name: "scheduled_run_id",
+          value: { stringValue: "901" },
+        }]),
+      }),
+    )
+  })
+
+  it("recognizes whether the exact reserved row is still promoted", async () => {
+    const execute = jest.fn().mockResolvedValue({
+      records: [[{ stringValue: "promoted" }]],
+    })
+
+    await expect(
+      isPromotedRunPending(
+        config,
+        { execute },
+        {
+          scheduledRunId: "901",
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          sessionId: "shared-daily-session",
+        },
+      ),
+    ).resolves.toBe(true)
+  })
+})
+
+describe("agent-cron promoted run terminal repair", () => {
+  it("keys the STOPPED terminal repair by the promoted row ID", async () => {
+    const execute = jest.fn().mockResolvedValue({ numberOfRecordsUpdated: 1 })
+
+    await expect(
+      updatePromotedRunTerminal(
+        config,
+        { execute },
+        {
+          scheduledRunId: "902",
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          scheduleName: "Morning brief",
+          sessionId: "shared-daily-session",
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 10_000,
+          status: "success",
+        },
+      ),
+    ).resolves.toBe(true)
+
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sql: expect.stringMatching(
+          /WHERE id = CAST\(:scheduled_run_id AS bigint\)[\s\S]+status = 'promoted'/,
+        ),
+        parameters: expect.arrayContaining([
+          {
+            name: "scheduled_run_id",
+            value: { stringValue: "902" },
+          },
+        ]),
+      }),
+    )
+  })
+
+  it("verifies an exact terminal row when the supervisor update is a no-op", async () => {
+    const execute = jest
+      .fn()
+      .mockResolvedValueOnce({ numberOfRecordsUpdated: 0 })
+      .mockResolvedValueOnce({
+        records: [[{ stringValue: "success" }]],
+      })
+
+    await expect(
+      updatePromotedRunTerminal(
+        config,
+        { execute },
+        {
+          scheduledRunId: "902",
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          sessionId: "shared-daily-session",
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 10_000,
+          status: "success",
+        },
+      ),
+    ).resolves.toBe(false)
+    expect(execute).toHaveBeenCalledTimes(2)
+  })
+
+  it("rejects a missing per-fire row instead of acknowledging false durability", async () => {
+    const execute = jest
+      .fn()
+      .mockResolvedValueOnce({ numberOfRecordsUpdated: 0 })
+      .mockResolvedValueOnce({ records: [] })
+
+    await expect(
+      updatePromotedRunTerminal(
+        config,
+        { execute },
+        {
+          scheduledRunId: "902",
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          sessionId: "shared-daily-session",
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 10_000,
+          status: "error",
+        },
+      ),
+    ).rejects.toThrow("has no terminal state")
+  })
+})
+
+describe("agent-cron preflight run telemetry", () => {
+  it("never overwrites an existing fire with stale preflight telemetry", async () => {
+    const execute = jest.fn().mockResolvedValue({
+      records: [[{ stringValue: "promoted" }]],
+    })
+    const telemetry = createRunTelemetry(config, { execute })
+    const log = {
+      warn: jest.fn(),
+      error: jest.fn(),
+    } satisfies CronTelemetryLogger
+
+    await telemetry.recordPreflightRun(
+      {
+        fireKey: "schedule-fire#schedule-id#2026-07-28T15:00:00.000Z",
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        sessionId: "reference-session",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 12,
+        status: "skipped",
+        errorMessage: "Schedule reference rejected: version-mismatch",
+      },
+      log,
+    )
+
+    expect(execute).toHaveBeenCalledTimes(1)
+    const input = execute.mock.calls[0][0]
+    expect(input.sql).toContain("DO NOTHING")
+    expect(input.sql).not.toContain("DO UPDATE")
+    expect(input.sql).toContain("existing.fire_key = :fire_key")
+  })
+})
+
+describe("agent-cron ordinary run telemetry", () => {
+  it("propagates a strict run write failure at acknowledgement boundaries", async () => {
+    const execute = jest.fn().mockRejectedValue(new Error("RDS unavailable"))
+    const telemetry = createRunTelemetry(config, { execute })
+    const log = {
+      warn: jest.fn(),
+      error: jest.fn(),
+    } satisfies CronTelemetryLogger
+
+    await expect(
+      telemetry.recordRunStrict(
+        {
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          sessionId: "schedule-session",
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 1,
+          status: "skipped",
+        },
+        log,
+      ),
+    ).rejects.toThrow("RDS unavailable")
+  })
+
+  it("records a rejected reference as a skipped scheduled run", async () => {
+    const { telemetry, execute, log } = harness()
+
+    await telemetry.recordRun(
+      {
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        sessionId: "reference-session",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 12,
+        status: "skipped",
+        errorMessage: "Schedule reference rejected: version-mismatch",
+      },
+      log,
+    )
+
+    expect(execute).toHaveBeenCalledTimes(1)
+    const input = execute.mock.calls[0][0]
+    expect(input.sql).toContain(
+      "INSERT INTO agent_scheduled_runs",
+    )
+    expect(input.parameters).toEqual(
+      expect.arrayContaining([
+        { name: "status", value: { stringValue: "skipped" } },
+        {
+          name: "error_message",
+          value: {
+            stringValue: "Schedule reference rejected: version-mismatch",
+          },
+        },
+      ]),
+    )
+  })
+
+  it("mirrors a contended pre-invocation lock with its phase", async () => {
+    const { telemetry, execute, error, log } = harness()
+
+    await telemetry.recordRun(
+      {
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        scheduleName: "Morning brief",
+        sessionId: "schedule-session",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 3,
+        status: "skipped",
+        errorMessage: "Session lock contended",
+        failure: {
+          severity: "warn",
+          context: { phase: "lock-contention" },
+        },
+      },
+      log,
+    )
+
+    expect(execute).toHaveBeenCalledTimes(2)
+    expect(error).toHaveBeenCalledWith(
+      "AGENT_FAILURE_RECORD",
+      expect.objectContaining({
+        userId: "o***@psd401.net",
+      }),
+    )
+    expect(execute.mock.calls[0][0].parameters).toEqual(
+      expect.arrayContaining([
+        { name: "severity", value: { stringValue: "warn" } },
+        {
+          name: "user_id",
+          value: { stringValue: "owner@psd401.net" },
+        },
+        {
+          name: "context",
+          value: {
+            stringValue: JSON.stringify({
+              scheduleId: "schedule-id",
+              phase: "lock-contention",
+            }),
+          },
+        },
+      ]),
+    )
+  })
+
+  it("sanitizes scheduled-run errors before database persistence", async () => {
+    const { telemetry, execute, log } = harness()
+
+    await telemetry.recordRun(
+      {
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        sessionId: "reference-session",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 20,
+        status: "error",
+        errorMessage:
+          "Chat failed for student@psd401.net token=top-secret " +
+          "https://login.example.test/callback?code=secret-code",
+      },
+      log,
+    )
+
+    const scheduledRunInput = execute.mock.calls[1][0]
+    const errorParameter = scheduledRunInput.parameters.find(
+      (parameter: { name: string }) => parameter.name === "error_message",
+    )
+    expect(errorParameter.value.stringValue).toContain("[REDACTED_EMAIL]")
+    expect(errorParameter.value.stringValue).toContain("[REDACTED_URL]")
+    expect(errorParameter.value.stringValue).not.toContain("top-secret")
+    expect(errorParameter.value.stringValue).not.toContain("secret-code")
+  })
+})
+
+describe("agent-cron fire-idempotent telemetry", () => {
+  it("upserts run and failure telemetry by immutable fire identity", async () => {
+    const { telemetry, execute, log } = harness()
+    const fireKey =
+      "schedule-fire#schedule-id#2026-07-28T15:00:00.000Z"
+
+    await telemetry.recordRunStrict(
+      {
+        fireKey,
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        sessionId: "schedule-session",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 3,
+        status: "skipped",
+        errorMessage: "Session lock contended",
+        failure: {
+          severity: "warn",
+          context: { phase: "lock-contention" },
+        },
+      },
+      log,
+    )
+
+    expect(execute).toHaveBeenCalledTimes(2)
+    expect(execute.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        sql: expect.stringMatching(
+          /ON CONFLICT \(source, fire_key\)[\s\S]+DO UPDATE SET/,
+        ),
+        parameters: expect.arrayContaining([{
+          name: "fire_key",
+          value: { stringValue: fireKey },
+        }]),
+      }),
+    )
+    expect(execute.mock.calls[1][0]).toEqual(
+      expect.objectContaining({
+        sql: expect.stringMatching(
+          /ON CONFLICT \(fire_key\)[\s\S]+DO UPDATE SET/,
+        ),
+        parameters: expect.arrayContaining([{
+          name: "fire_key",
+          value: { stringValue: fireKey },
+        }]),
+      }),
+    )
+  })
+
+  it("propagates a strict failure-mirror outage for Lambda retry", async () => {
+    const { telemetry, execute, log } = harness()
+    execute.mockRejectedValueOnce(new Error("failure mirror unavailable"))
+
+    await expect(
+      telemetry.recordRunStrict(
+        {
+          fireKey:
+            "schedule-fire#schedule-id#2026-07-28T15:00:00.000Z",
+          userEmail: "owner@psd401.net",
+          scheduleId: "schedule-id",
+          sessionId: "schedule-session",
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 3,
+          status: "error",
+          errorMessage: "Task stopped",
+        },
+        log,
+      ),
+    ).rejects.toThrow("failure mirror unavailable")
+    expect(execute).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("agent-cron failure telemetry", () => {
+  it("mirrors a lookup error into the cron failure stream", async () => {
+    const { telemetry, execute, error, log } = harness()
+
+    await telemetry.recordRun(
+      {
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        sessionId: "reference-session",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 20,
+        status: "error",
+        errorMessage: "Authoritative schedule lookup failed: unavailable",
+      },
+      log,
+    )
+
+    expect(execute).toHaveBeenCalledTimes(2)
+    const failureInput = execute.mock.calls[0][0]
+    expect(failureInput.sql).toContain("INSERT INTO agent_failures")
+    expect(failureInput.parameters).toEqual(
+      expect.arrayContaining([
+        { name: "severity", value: { stringValue: "error" } },
+        {
+          name: "context",
+          value: {
+            stringValue: JSON.stringify({
+              scheduleId: "schedule-id",
+              phase: "scheduled-run",
+            }),
+          },
+        },
+      ]),
+    )
+    expect(error).toHaveBeenCalledWith(
+      "AGENT_FAILURE_RECORD",
+      expect.objectContaining({
+        source: "cron",
+        scheduleId: "schedule-id",
+      }),
+    )
+  })
+
+  it("records promotion abort phase and severity", async () => {
+    const { telemetry, execute, log } = harness()
+
+    await telemetry.recordCronFailure(
+      {
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        scheduleName: "Morning brief",
+        sessionId: "session-id",
+        errorMessage: "RunTask failed",
+        severity: "error",
+        context: {
+          phase: "run-task",
+          promotionReason: "deadline",
+        },
+      },
+      log,
+    )
+
+    const failureInput = execute.mock.calls[0][0]
+    expect(failureInput.parameters).toEqual(
+      expect.arrayContaining([
+        { name: "severity", value: { stringValue: "error" } },
+        {
+          name: "context",
+          value: {
+            stringValue: JSON.stringify({
+              scheduleId: "schedule-id",
+              phase: "run-task",
+              promotionReason: "deadline",
+            }),
+          },
+        },
+      ]),
+    )
+  })
+
+  it("still emits the failure marker when database telemetry is unavailable", async () => {
+    const { telemetry, execute, error, log } = harness({
+      databaseResourceArn: "",
+      databaseSecretArn: "",
+    })
+
+    await telemetry.recordRun(
+      {
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        sessionId: "reference-session",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 1,
+        status: "error",
+        errorMessage: "lookup failed",
+      },
+      log,
+    )
+
+    expect(execute).not.toHaveBeenCalled()
+    expect(error).toHaveBeenCalledWith(
+      "AGENT_FAILURE_RECORD",
+      expect.objectContaining({ source: "cron" }),
+    )
+  })
+
+  it("redacts downstream diagnostics before logging or persistence", async () => {
+    const { telemetry, execute, error, log } = harness()
+
+    await telemetry.recordCronFailure(
+      {
+        userEmail: "owner@psd401.net",
+        scheduleId: "schedule-id",
+        sessionId: "session-id",
+        errorMessage:
+          "DB failed for student@psd401.net " +
+          "Authorization: Bearer abc.def token=top-secret " +
+          "https://login.example.test/callback?code=secret-code",
+      },
+      log,
+    )
+
+    expect(error).toHaveBeenCalledWith(
+      "AGENT_FAILURE_RECORD",
+      expect.objectContaining({
+        errorMessage: expect.stringContaining("[REDACTED_EMAIL]"),
+      }),
+    )
+    const logged = error.mock.calls[0][1].errorMessage
+    expect(logged).not.toContain("student@psd401.net")
+    expect(logged).not.toContain("abc.def")
+    expect(logged).not.toContain("top-secret")
+    expect(logged).not.toContain("secret-code")
+    expect(logged).toContain("[REDACTED_URL]")
+
+    const failureInput = execute.mock.calls[0][0]
+    const errorParameter = failureInput.parameters.find(
+      (parameter: { name: string }) => parameter.name === "error_message",
+    )
+    expect(errorParameter.value.stringValue).toContain("[REDACTED_EMAIL]")
+    expect(errorParameter.value.stringValue).not.toContain("student@psd401.net")
+    expect(errorParameter.value.stringValue).not.toContain("top-secret")
+    expect(errorParameter.value.stringValue).not.toContain("secret-code")
+  })
+})

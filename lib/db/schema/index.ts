@@ -158,6 +158,7 @@ export * from "./tables/agent-feedback";
 export * from "./tables/agent-health-snapshots";
 export * from "./tables/agent-patterns";
 export * from "./tables/agent-failures";
+export * from "./tables/agent-scheduled-runs";
 export * from "./tables/agent-pattern-scan-runs";
 export * from "./tables/agent-health-scan-runs";
 export * from "./tables/agent-message-content";
