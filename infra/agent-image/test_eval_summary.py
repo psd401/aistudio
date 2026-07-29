@@ -655,6 +655,25 @@ class CommittedArtifactGuardTests(unittest.TestCase):
 
 
 class EvalAutomationContractTests(unittest.TestCase):
+    def test_ci_creates_model_uid_before_agent_image_python_suites(self):
+        workflow = (
+            AGENT_IMAGE_DIR.parent.parent / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+
+        account_setup = workflow.index(
+            "- name: Ensure model UID test account exists"
+        )
+        python_suites = workflow.index(
+            "- name: Run all agent-image Python tests (unittest)"
+        )
+        root_isolation = workflow.index(
+            "- name: Run model-UID isolation test as root"
+        )
+
+        self.assertLess(account_setup, python_suites)
+        self.assertLess(python_suites, root_isolation)
+        self.assertEqual(workflow.count("sudo useradd --system"), 1)
+
     def test_image_build_stamps_clean_aistudio_source_revision(self):
         dockerfile = (AGENT_IMAGE_DIR / "Dockerfile").read_text(encoding="utf-8")
         build_script = (AGENT_IMAGE_DIR / "build-and-push.sh").read_text(

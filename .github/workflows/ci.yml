@@ -53,6 +53,12 @@ jobs:
         python3 infra/agent-image/check_eval_coverage.py
         python3 infra/agent-image/eval/summarize.py --check-repository
 
+    - name: Ensure model UID test account exists
+      run: |
+        if ! id node >/dev/null 2>&1; then
+          sudo useradd --system --user-group --no-create-home node
+        fi
+
     - name: Run all agent-image Python tests (unittest)
       run: |
         uv run --python 3.12 --no-project -m unittest \
@@ -75,9 +81,6 @@ jobs:
 
     - name: Run model-UID isolation test as root
       run: |
-        if ! id node >/dev/null 2>&1; then
-          sudo useradd --system --user-group --no-create-home node
-        fi
         sudo "$(command -v python3)" -m unittest \
           -k test_model_uid_cannot_read_authority_or_mutate_relay_source \
           infra/agent-image/test_agentcore_wrapper.py
