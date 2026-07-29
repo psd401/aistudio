@@ -43,7 +43,9 @@ jobs:
     - name: Check agent skill eval coverage
       run: |
         python3 infra/agent-image/check_eval_coverage.py
-        python3 -m unittest infra/agent-image/test_eval_coverage.py
+        python3 -m unittest \
+          infra/agent-image/test_eval_coverage.py \
+          infra/agent-image/test_eval_runner.py
 
     - name: Run tests
       run: bun run test:ci

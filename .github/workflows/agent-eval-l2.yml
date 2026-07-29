@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       image:
-        description: "Optional candidate image tag or digest; defaults to the deployed dev runtime image"
+        description: "Optional candidate ECR digest; defaults to the digest exposed by the deployed dev runtime"
         required: false
         type: string
 
@@ -48,11 +48,14 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Configure AWS credentials
+        id: aws-credentials
         uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ secrets.AGENT_EVAL_AWS_ROLE_ARN }}
           role-session-name: agent-eval-l2-${{ github.run_id }}
+          role-duration-seconds: 10800
           aws-region: ${{ env.AWS_REGION }}
+          output-credentials: true
 
       - name: Resolve deployed dev image
         id: image
@@ -72,13 +75,11 @@ jobs:
               --query "agentRuntimeArtifact.containerConfiguration.containerUri" \
               --output text)"
           fi
-          case "${image}" in
-            *.dkr.ecr.*.amazonaws.com/*@sha256:*|*.dkr.ecr.*.amazonaws.com/*:*) ;;
-            *)
-              echo "Resolved image is not an ECR tag or digest" >&2
-              exit 1
-              ;;
-          esac
+          if [[ ! "${image}" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/[^:@[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "Resolved image is not an immutable ECR digest." >&2
+            echo "Redeploy dev with agentImageDigest or dispatch with the exact deployment-time digest." >&2
+            exit 1
+          fi
           echo "image=${image}" >> "${GITHUB_OUTPUT}"
           echo "runtime_id=${runtime_id}" >> "${GITHUB_OUTPUT}"
 
@@ -88,6 +89,7 @@ jobs:
       - name: Run the live-dev drift subset
         env:
           CANDIDATE_IMAGE: ${{ steps.image.outputs.image }}
+          AGENT_EVAL_AWS_CREDENTIAL_EXPIRATION: ${{ steps.aws-credentials.outputs.aws-expiration }}
         run: |
           python3 infra/agent-image/eval/runner.py \
             --image "${CANDIDATE_IMAGE}" \

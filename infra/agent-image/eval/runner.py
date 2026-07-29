@@ -70,6 +70,7 @@ LOGGER = logging.getLogger("agent_eval")
 DEFAULT_OWNER_EMAIL = "canary@build-gate.invalid"
 DEFAULT_CONTEXT_TTL_SECONDS = 900
 AWS_CREDENTIAL_EXPIRY_MARGIN_SECONDS = 60
+AWS_CREDENTIAL_EXPIRATION_ENV = "AGENT_EVAL_AWS_CREDENTIAL_EXPIRATION"
 INVOCATION_AUTHORITY_EXPIRY_MARGIN_SECONDS = 60
 CONTEXT_MINT_ROUNDING_SECONDS = 5
 MAX_CONTEXT_TTL_SECONDS = 7200
@@ -1431,6 +1432,18 @@ def _resolve_aws_credentials(executor: CommandExecutor) -> AwsCredentials:
         raise EvalRunnerError(
             "could not resolve AWS credentials for the candidate container"
         )
+    explicit_expiration = os.environ.get(AWS_CREDENTIAL_EXPIRATION_ENV)
+    if expires_at is None and explicit_expiration:
+        try:
+            expires_at = datetime.fromisoformat(
+                explicit_expiration.replace("Z", "+00:00")
+            )
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+        except ValueError as error:
+            raise EvalRunnerError(
+                f"{AWS_CREDENTIAL_EXPIRATION_ENV} is not an ISO 8601 timestamp"
+            ) from error
     return AwsCredentials(environment=credentials, expires_at=expires_at)
 
 

@@ -41,6 +41,10 @@ cannot outlive the configured invocation timeout fail closed before the trial
 starts. Temporary credentials carrying a session token must also report their
 expiration; manually exported temporary triples with unknown lifetime are
 rejected rather than risking a mid-trial expiry.
+Automation providers that export temporary credentials without provider-chain
+expiration metadata must set `AGENT_EVAL_AWS_CREDENTIAL_EXPIRATION` to their
+ISO 8601 expiry. The weekly workflow obtains that value directly from the OIDC
+credential action's `aws-expiration` output.
 When a post-mint credential check recycles the runtime, the runner discards
 that authority and remints it for the ready container before invoking.
 
@@ -182,9 +186,11 @@ when the current baseline should reliably pass it 3/3.
 ### Weekly live-dev fixture-drift run
 
 `.github/workflows/agent-eval-l2.yml` runs `l2-live.yaml` every Tuesday and on
-manual dispatch. It resolves the image digest currently deployed to the dev
-AgentCore runtime (or accepts an explicit ECR image for manual runs), executes
+manual dispatch. It requires the immutable image digest exposed by the dev
+AgentCore runtime (or accepts an explicit ECR digest for manual runs), executes
 three trials per task on an ARM64 runner, and fails unless every trial passes.
+Mutable tags are rejected because AgentCore does not expose which digest a tag
+resolved to at deployment time.
 
 The workflow uses `canary@build-gate.invalid`, the existing RFC 2606 disposable
 owner identity. Every live prompt is labeled `EVAL-1426` or synthetic. The
@@ -198,6 +204,8 @@ subset is intentionally small:
 Repository secret `AGENT_EVAL_AWS_ROLE_ARN` must name a least-privilege OIDC
 role able to read the deployed runtime and ECR image, pull that image, discover
 the dev broker, mint signed probe authority, and perform the listed L2 calls.
+The role must permit a three-hour session, matching the workflow's requested
+duration.
 The workflow never uploads or commits JSONL transcripts. It prints only task
 IDs and failure reasons, then deletes the owner-only run file even on failure.
 

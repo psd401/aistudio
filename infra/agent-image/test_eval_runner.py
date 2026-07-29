@@ -1422,6 +1422,57 @@ class DockerRuntimeTests(unittest.TestCase):
             timeout=30,
         )
 
+    def test_explicit_provider_expiration_completes_environment_credentials(self):
+        expiration = "2026-07-28T21:00:00Z"
+        executor = mock.Mock()
+        executor.run.return_value = runner.CommandResult(
+            0,
+            json.dumps(
+                {
+                    "Version": 1,
+                    "AccessKeyId": "access",
+                    "SecretAccessKey": "secret",
+                    "SessionToken": "token",
+                }
+            ),
+            "",
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {runner.AWS_CREDENTIAL_EXPIRATION_ENV: expiration},
+        ):
+            credentials = runner._resolve_aws_credentials(executor)
+
+        self.assertEqual(
+            credentials.expires_at,
+            datetime(2026, 7, 28, 21, tzinfo=timezone.utc),
+        )
+
+    def test_invalid_explicit_provider_expiration_fails_closed(self):
+        executor = mock.Mock()
+        executor.run.return_value = runner.CommandResult(
+            0,
+            json.dumps(
+                {
+                    "Version": 1,
+                    "AccessKeyId": "access",
+                    "SecretAccessKey": "secret",
+                    "SessionToken": "token",
+                }
+            ),
+            "",
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {runner.AWS_CREDENTIAL_EXPIRATION_ENV: "not-a-timestamp"},
+        ), self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "is not an ISO 8601 timestamp",
+        ):
+            runner._resolve_aws_credentials(executor)
+
     def test_timeout_error_never_echoes_secret_arguments(self):
         executor = runner.CommandExecutor()
         secret = "secret-session-token"
