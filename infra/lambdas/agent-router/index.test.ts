@@ -453,6 +453,28 @@ describe("Google Chat response fallback failures", () => {
 })
 
 describe("AgentCore audience context", () => {
+  test("uses the current sender name for owner turns and the target name for cross-user turns", () => {
+    const human = ownerHuman()
+    human.senderDisplayName = "Current Owner Name"
+    const staleOwner = {
+      ...OWNER_USER,
+      displayName: "Persisted Owner Name",
+    }
+
+    const ownerContext = buildAgentInvocationContext(human, staleOwner)
+    const crossUserContext = buildAgentInvocationContext(
+      human,
+      staleOwner,
+      {
+        email: "caller@psd401.net",
+        displayName: "Caller",
+      }
+    )
+
+    expect(ownerContext.displayName).toBe("Current Owner Name")
+    expect(crossUserContext.displayName).toBe("Persisted Owner Name")
+  })
+
   test("adds shared-space audience to owner and cross-user payloads", () => {
     const roomHuman = ownerHuman({ spaceType: "ROOM" })
     const ownerContext = buildAgentInvocationContext(roomHuman, OWNER_USER)

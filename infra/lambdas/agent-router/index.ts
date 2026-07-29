@@ -3540,7 +3540,7 @@ function buildAgentInvocationContext(
   invokedBy?: { email: string; displayName: string }
 ): AgentInvocationContext {
   return {
-    displayName: owner.displayName,
+    displayName: invokedBy ? owner.displayName : human.senderDisplayName,
     workspacePrefix: owner.workspacePrefix,
     ...(invokedBy ? { invokedBy, threadContext: '' } : {}),
     ...(human.isSharedSpace
