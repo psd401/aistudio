@@ -325,6 +325,17 @@ export function extractUserContent(message: MessageWithContent): {
   return { content: contentParts.join(" "), parts: serializableParts };
 }
 
+export function extractLatestUserText(
+  messages: MessageWithContent[],
+): string {
+  const latestUserMessage = messages.findLast(
+    (message) => message.role === "user",
+  );
+  return latestUserMessage
+    ? extractUserContent(latestUserMessage).content
+    : "";
+}
+
 /**
  * Save user message to database.
  *

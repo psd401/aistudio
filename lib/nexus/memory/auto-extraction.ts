@@ -411,64 +411,74 @@ export function createNexusMemoryAutoExtractionRunner(
     })
     counts.extracted = candidates.length
 
-    for (const candidate of candidates) {
-      const neighbors = await dependencies.findSimilar({
-        userId: input.userId,
-        content: candidate.content,
-        limit: MAX_CONSOLIDATION_NEIGHBORS,
-      })
-      const decision = await model.consolidate({
-        candidate,
-        neighbors,
-      })
+    for (const [candidateIndex, candidate] of candidates.entries()) {
+      try {
+        const neighbors = await dependencies.findSimilar({
+          userId: input.userId,
+          content: candidate.content,
+          limit: MAX_CONSOLIDATION_NEIGHBORS,
+        })
+        const decision = await model.consolidate({
+          candidate,
+          neighbors,
+        })
 
-      if (decision.action === "NOOP") {
-        counts.noop += 1
-        continue
-      }
-      if (decision.action === "ADD") {
-        const result = await dependencies.service.save({
-          userId: input.userId,
-          sessionId: input.cognitoSub,
-          content: decision.content,
-          category: decision.category,
-          source: "auto",
-          sourceConversationId: input.conversationId,
-        })
-        if (result.action === "inserted") {
-          counts.added += 1
-        } else {
-          counts.updated += 1
+        if (decision.action === "NOOP") {
+          counts.noop += 1
+          continue
         }
-        continue
-      }
-      if (!hasNeighbor(neighbors, decision.memoryId)) {
-        counts.noop += 1
-        continue
-      }
-      if (decision.action === "UPDATE") {
-        const updated = await dependencies.service.update({
-          memoryId: decision.memoryId,
-          userId: input.userId,
-          sessionId: input.cognitoSub,
-          content: decision.content,
-          category: decision.category,
-        })
-        if (updated) {
-          counts.updated += 1
+        if (decision.action === "ADD") {
+          const result = await dependencies.service.save({
+            userId: input.userId,
+            sessionId: input.cognitoSub,
+            content: decision.content,
+            category: decision.category,
+            source: "auto",
+            sourceConversationId: input.conversationId,
+          })
+          if (result.action === "inserted") {
+            counts.added += 1
+          } else {
+            counts.updated += 1
+          }
+          continue
+        }
+        if (!hasNeighbor(neighbors, decision.memoryId)) {
+          counts.noop += 1
+          continue
+        }
+        if (decision.action === "UPDATE") {
+          const updated = await dependencies.service.update({
+            memoryId: decision.memoryId,
+            userId: input.userId,
+            sessionId: input.cognitoSub,
+            content: decision.content,
+            category: decision.category,
+          })
+          if (updated) {
+            counts.updated += 1
+          } else {
+            counts.noop += 1
+          }
+          continue
+        }
+        const deleted = await dependencies.service.forget(
+          decision.memoryId,
+          input.userId,
+        )
+        if (deleted) {
+          counts.deleted += 1
         } else {
           counts.noop += 1
         }
-        continue
-      }
-      const deleted = await dependencies.service.forget(
-        decision.memoryId,
-        input.userId,
-      )
-      if (deleted) {
-        counts.deleted += 1
-      } else {
+      } catch (error) {
         counts.noop += 1
+        log.error("Nexus memory auto-extraction candidate failed", {
+          conversationId: input.conversationId,
+          candidateIndex,
+          category: candidate.category,
+          error: error instanceof Error ? error.message : String(error),
+        })
       }
     }
 
@@ -491,17 +501,31 @@ const DEFAULT_SCHEDULER_DEPENDENCIES: AutoExtractionSchedulerDependencies = {
   createLog: DEFAULT_DEPENDENCIES.createLog,
 }
 
+const pendingExtractions = new Map<string, Promise<void>>()
+
 export function scheduleNexusMemoryAutoExtraction(
   input: NexusMemoryAutoExtractionInput,
   dependencies: AutoExtractionSchedulerDependencies =
     DEFAULT_SCHEDULER_DEPENDENCIES,
 ): void {
-  void dependencies.run(input).catch((error) => {
-    dependencies
-      .createLog(input)
-      .error("Nexus memory auto-extraction failed", {
-        conversationId: input.conversationId,
-        error: error instanceof Error ? error.message : String(error),
-      })
+  const queueKey = `${input.userId}:${input.conversationId}`
+  const previous = pendingExtractions.get(queueKey) ?? Promise.resolve()
+  const current = previous
+    .then(async () => {
+      await dependencies.run(input)
+    })
+    .catch((error) => {
+      dependencies
+        .createLog(input)
+        .error("Nexus memory auto-extraction failed", {
+          conversationId: input.conversationId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+    })
+  pendingExtractions.set(queueKey, current)
+  void current.then(() => {
+    if (pendingExtractions.get(queueKey) === current) {
+      pendingExtractions.delete(queueKey)
+    }
   })
 }

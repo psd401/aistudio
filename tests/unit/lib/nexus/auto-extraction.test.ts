@@ -32,6 +32,12 @@ const INPUT: NexusMemoryAutoExtractionInput = {
 
 const NOW = new Date("2026-07-28T12:00:00.000Z")
 
+async function flushScheduler(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 0)
+  })
+}
+
 function storedMemory(
   overrides: Partial<StoredNexusMemory> = {},
 ): StoredNexusMemory {
@@ -82,7 +88,7 @@ function createRunner(options: {
     | "conversation-not-found"
     | "gate-error"
   candidates?: AutoMemoryCandidate[]
-  decisions?: AutoMemoryConsolidationDecision[]
+  decisions?: Array<AutoMemoryConsolidationDecision | Error>
   neighbors?: SimilarNexusMemory[]
   service?: jest.Mocked<
     Pick<NexusMemoryService, "save" | "update" | "forget">
@@ -95,9 +101,11 @@ function createRunner(options: {
   const consolidate = jest.fn().mockImplementation(async () => {
     const decision = decisions.shift()
     if (!decision) throw new Error("Missing test consolidation decision")
+    if (decision instanceof Error) throw decision
     return decision
   })
   const info = options.info ?? jest.fn()
+  const error = jest.fn()
   const runner = createNexusMemoryAutoExtractionRunner({
     resolveAvailability: jest.fn().mockResolvedValue({
       enabled: options.enabled ?? true,
@@ -109,9 +117,9 @@ function createRunner(options: {
     }),
     findSimilar: jest.fn().mockResolvedValue(options.neighbors ?? []),
     service,
-    createLog: () => ({ info, error: jest.fn() }),
+    createLog: () => ({ info, error }),
   })
-  return { runner, service, extract, consolidate, info }
+  return { runner, service, extract, consolidate, info, error }
 }
 
 describe("Nexus automatic memory model output", () => {
@@ -321,6 +329,41 @@ describe("Nexus automatic memory consolidation", () => {
       expect(service.forget).not.toHaveBeenCalled()
     },
   )
+
+  it("isolates a failed candidate and completes later valid writes", async () => {
+    const { runner, service, error } = createRunner({
+      candidates: [
+        { content: "Unsafe candidate", category: "context" },
+        { content: "Valid preference", category: "preference" },
+      ],
+      decisions: [
+        new Error("candidate safety failed"),
+        {
+          action: "ADD",
+          content: "Prefers concise answers",
+          category: "preference",
+        },
+      ],
+    })
+
+    await expect(runner(INPUT)).resolves.toEqual({
+      extracted: 2,
+      added: 1,
+      updated: 0,
+      deleted: 0,
+      noop: 1,
+    })
+    expect(service.save).toHaveBeenCalledTimes(1)
+    expect(error).toHaveBeenCalledWith(
+      "Nexus memory auto-extraction candidate failed",
+      expect.objectContaining({
+        conversationId: INPUT.conversationId,
+        candidateIndex: 0,
+        category: "context",
+        error: "candidate safety failed",
+      }),
+    )
+  })
 })
 
 describe("Nexus automatic memory scheduling", () => {
@@ -340,11 +383,11 @@ describe("Nexus automatic memory scheduling", () => {
         createLog: () => ({ info: jest.fn(), error }),
       }),
     ).toBeUndefined()
+    await Promise.resolve()
     expect(run).toHaveBeenCalledWith(INPUT)
 
     rejectRun?.(new Error("extraction provider failed"))
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushScheduler()
 
     expect(error).toHaveBeenCalledWith(
       "Nexus memory auto-extraction failed",
@@ -353,5 +396,59 @@ describe("Nexus automatic memory scheduling", () => {
         error: "extraction provider failed",
       }),
     )
+  })
+
+  it("serializes background jobs for the same owner conversation", async () => {
+    const completions: Array<
+      (result: NexusMemoryAutoExtractionResult) => void
+    > = []
+    const run = jest.fn(
+      () =>
+        new Promise<NexusMemoryAutoExtractionResult>((resolve) => {
+          completions.push(resolve)
+        }),
+    )
+    const dependencies = {
+      run,
+      createLog: () => ({ info: jest.fn(), error: jest.fn() }),
+    }
+    const input = {
+      ...INPUT,
+      conversationId: "33333333-3333-4333-8333-333333333333",
+    }
+
+    scheduleNexusMemoryAutoExtraction(
+      { ...input, requestId: "turn-1" },
+      dependencies,
+    )
+    scheduleNexusMemoryAutoExtraction(
+      { ...input, requestId: "turn-2" },
+      dependencies,
+    )
+    await Promise.resolve()
+
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(run).toHaveBeenLastCalledWith({
+      ...input,
+      requestId: "turn-1",
+    })
+
+    const result = {
+      extracted: 0,
+      added: 0,
+      updated: 0,
+      deleted: 0,
+      noop: 0,
+    }
+    completions[0](result)
+    await flushScheduler()
+
+    expect(run).toHaveBeenCalledTimes(2)
+    expect(run).toHaveBeenLastCalledWith({
+      ...input,
+      requestId: "turn-2",
+    })
+    completions[1](result)
+    await flushScheduler()
   })
 })

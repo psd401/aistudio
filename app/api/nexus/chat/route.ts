@@ -69,6 +69,7 @@ import {
 import {
   generateConversationTitle,
   createConversation,
+  extractLatestUserText,
   extractUserContent,
   saveUserMessage,
   convertMessagesToPartsFormat,
@@ -1329,7 +1330,9 @@ async function resolveRequestRouting(args: {
   specialRouteMessages: z.infer<typeof ChatRequestSchema>['messages'];
   protectedLatestUserText: string;
 }> {
-  const rawRoutingText = extractImagePrompt(args.messages);
+  const rawRoutingText = extractLatestUserText(
+    args.messages as UIMessage[],
+  );
   const protectedRoutingInput = await prepareRoutingText(rawRoutingText, args.sessionId);
   const imageContext = await getImageRoutingContext({
     messages: args.messages,
