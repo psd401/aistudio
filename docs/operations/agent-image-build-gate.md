@@ -123,8 +123,10 @@ python3 infra/agent-image/eval/runner.py \
   --out /tmp/agent-eval-core.jsonl
 ```
 
-The finalized sidecar makes provider authentication fail closed:
-`--image` must be its immutable digest (the matching mutable tag is rejected);
+Every runner invocation requires an immutable `repository@sha256:...` image,
+including runs without candidate metadata. The finalized sidecar additionally
+makes provider authentication fail closed: `--image` must match its immutable
+digest (the matching mutable tag is rejected);
 native SigV4 candidates receive no provider secret; Mantle candidates resolve
 the environment stack's `BedrockApiKeySecretArn` and pass only that ARN to the
 short-lived eval container's root relay.

@@ -2112,7 +2112,7 @@ class MainWiringTests(unittest.TestCase):
                 runner._resolve_candidate_runtime_environment(
                     mock.Mock(),
                     metadata_path,
-                    "example.invalid/agent:other",
+                    "example.invalid/agent@sha256:" + "e" * 64,
                     "dev",
                     "us-east-1",
                 )
@@ -2137,7 +2137,7 @@ class MainWiringTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 runner.EvalRunnerError,
-                "--image must be the immutable digest",
+                "--image must be an immutable repository",
             ):
                 runner._resolve_candidate_runtime_environment(
                     mock.Mock(),
@@ -2146,6 +2146,33 @@ class MainWiringTests(unittest.TestCase):
                     "dev",
                     "us-east-1",
                 )
+
+    def test_image_is_immutable_even_without_candidate_metadata(self):
+        executor = mock.Mock()
+        digest_image = "example.invalid/agent@sha256:" + "f" * 64
+
+        self.assertEqual(
+            runner._resolve_candidate_runtime_environment(
+                executor,
+                None,
+                digest_image,
+                "dev",
+                "us-east-1",
+            ),
+            {},
+        )
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "--image must be an immutable repository",
+        ):
+            runner._resolve_candidate_runtime_environment(
+                executor,
+                None,
+                "example.invalid/agent:mutable",
+                "dev",
+                "us-east-1",
+            )
+        executor.run.assert_not_called()
 
     def test_main_passes_candidate_auth_environment_to_docker_factory(self):
         provider = mock.Mock()
@@ -2182,7 +2209,7 @@ class MainWiringTests(unittest.TestCase):
             status = runner.main(
                 [
                     "--image",
-                    "candidate@sha256:digest",
+                    "candidate@sha256:" + "0" * 64,
                     "--candidate-metadata",
                     str(metadata_path),
                     "--suite",
@@ -2277,7 +2304,7 @@ class MainWiringTests(unittest.TestCase):
             status = runner.main(
                 [
                     "--image",
-                    "candidate@sha256:digest",
+                    "candidate@sha256:" + "0" * 64,
                     "--suite",
                     "suite.yaml",
                     "--out",

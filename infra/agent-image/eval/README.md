@@ -49,6 +49,9 @@ credential action's `aws-expiration` output.
 When a post-mint credential check recycles the runtime, the runner discards
 that authority and remints it for the ready container before invoking.
 
+Every run requires an immutable `repository@sha256:...` image reference, even
+when `--candidate-metadata` is omitted. Mutable local or ECR tags are rejected
+before Docker starts so results cannot be attributed to moving image bytes.
 Candidate-matrix runs must pass the finalized `.candidate-builds/<tag>.json`
 sidecar. The runner requires the sidecar's immutable digest as `--image` and
 rejects even its matching mutable tag. Native SigV4 metadata causes no

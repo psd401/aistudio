@@ -213,6 +213,14 @@ def _resolve_candidate_mantle_request(
     return f"{base_url}/{relative_path}"
 
 
+def _candidate_mantle_authority_required(method: str, path: str) -> bool:
+    """Require turn authority for paid candidate inference, not startup discovery."""
+    return (
+        path.startswith(f"{CANDIDATE_MANTLE_PREFIX}/")
+        and method != "GET"
+    )
+
+
 def _read_authority() -> tuple[str, bytes]:
     """Read authority that is inaccessible to the model's node UID."""
     with open(INVOCATION_CONTEXT_PATH, "r", encoding="ascii") as handle:
@@ -745,8 +753,8 @@ async def finalization_gate_middleware(request, handler):
 # per-container = per-microVM = per-session and turns are serial, so no
 # concurrent turn can interleave its usage into another turn's delta window.
 #
-# Only the FINAL adopted upstream response (post-retry, post-rescue) is counted,
-# so a retried/degenerate first attempt does not double-count.
+# Every upstream response with usage is counted, including discarded retries,
+# because each model call is billable even when its response is not adopted.
 # ---------------------------------------------------------------------------
 _usage_lock = asyncio.Lock()
 _cumulative_input_tokens = 0
@@ -758,6 +766,40 @@ _cumulative_cache_read_tokens = 0
 _cumulative_cache_write_tokens = 0
 _last_model: Optional[str] = None
 _usage_events = 0  # count of upstream responses that carried a usage object
+
+
+class _UsageAccumulator:
+    """Sum billable usage across every upstream attempt for one proxy request."""
+
+    def __init__(self) -> None:
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.cache_read_tokens = 0
+        self.cache_write_tokens = 0
+        self.events = 0
+        self.model: Optional[str] = None
+
+    def add(
+        self,
+        usage_in: Optional[int],
+        usage_out: Optional[int],
+        cache_read: int,
+        cache_write: int,
+        model: Optional[str],
+    ) -> None:
+        has_usage = usage_in is not None or usage_out is not None
+        if isinstance(usage_in, int):
+            self.input_tokens += usage_in
+        if isinstance(usage_out, int):
+            self.output_tokens += usage_out
+        if has_usage:
+            if isinstance(cache_read, int):
+                self.cache_read_tokens += cache_read
+            if isinstance(cache_write, int):
+                self.cache_write_tokens += cache_write
+            self.events += 1
+        if model:
+            self.model = model
 
 
 def _extract_usage(
@@ -1722,6 +1764,14 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     if _read_workspace_flush_token() is not None:
         return web.json_response({"error": "Turn is finalizing"}, status=503)
     path = request.match_info.get("path", "")
+    if (
+        _candidate_mantle_authority_required(request.method, path)
+        and not _invocation_authority_is_available()
+    ):
+        return web.json_response(
+            {"error": "Invocation authority is unavailable"},
+            status=503,
+        )
     req_id = f"{int(time.time()*1000)}-{id(request) % 100000}"
     t0 = time.time()
 
@@ -2088,6 +2138,14 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         # First attempt.
         (status, headers, chunks, content, finish,
          usage_in, usage_out, cache_read, cache_write, resp_model) = await fetch_upstream("first")
+        attempt_usage = _UsageAccumulator()
+        attempt_usage.add(
+            usage_in,
+            usage_out,
+            cache_read,
+            cache_write,
+            resp_model,
+        )
         # The native Anthropic path (Sonnet 5) does not use the OpenAI-shaped
         # empty-relay/degeneracy retry+rescue — that was a GLM-5/Kimi workaround
         # and its detectors assume the OpenAI response shape. We forward the
@@ -2118,6 +2176,13 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
              resp_model_r) = await fetch_upstream(
                 f"retry{retry_attempts}", body_override=retry_body
             )
+            attempt_usage.add(
+                usage_in_r,
+                usage_out_r,
+                cache_read_r,
+                cache_write_r,
+                resp_model_r,
+            )
             reason_r = is_retryable_failure(status_r, content_r, finish_r)
             # Always adopt the latest attempt's response body — if it succeeds
             # we use it directly; if it fails we still prefer it as the most
@@ -2125,25 +2190,6 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             status, headers, chunks, content, finish = (
                 status_r, headers_r, chunks_r, content_r, finish_r
             )
-            # Usage carry-forward: adopt the retry's usage ONLY when it actually
-            # reported usage — a retry whose response was differently-shaped (no
-            # `usage` object) must NOT discard the real, already-generated token
-            # count from the prior attempt (that would undercount cost). We take
-            # the latest NON-None value per field so the final billed usage is
-            # the freshest real number, not a null overwrite (review round 2).
-            if usage_in_r is not None:
-                usage_in = usage_in_r
-            if usage_out_r is not None:
-                usage_out = usage_out_r
-            # Cache tokens ride the same carry-forward rule: adopt the retry's
-            # split ONLY when the retry actually carried a usage object, so a
-            # usage-less retry response doesn't zero out the real cache numbers
-            # from the prior attempt.
-            if usage_in_r is not None or usage_out_r is not None:
-                cache_read = cache_read_r
-                cache_write = cache_write_r
-            if resp_model_r:
-                resp_model = resp_model_r
             if reason_r is None:
                 log.info(j("retry_succeeded", req_id=req_id,
                            attempt=retry_attempts,
@@ -2187,28 +2233,21 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                           synth_text_len=len(rescue_text),
                           retries_attempted=retry_attempts))
 
-        # Account the FINAL adopted response's usage into the cumulative
-        # counters so agentcore_wrapper's before/after `/usage` delta captures
-        # this turn's tokens. Rescue synthesis replaces the chunks but keeps the
-        # usage from the last real upstream attempt (usage_in/out unchanged),
-        # which is the right number to bill for the turn.
-        if usage_in is not None or usage_out is not None or resp_model:
+        # Account every paid attempt, including responses discarded by the
+        # retry/rescue policy. The before/after `/usage` delta must measure
+        # actual candidate cost rather than only the adopted response.
+        if attempt_usage.events or attempt_usage.model:
             global _cumulative_input_tokens, _cumulative_output_tokens
             global _cumulative_cache_read_tokens, _cumulative_cache_write_tokens
             global _last_model, _usage_events
             async with _usage_lock:
-                if isinstance(usage_in, int):
-                    _cumulative_input_tokens += usage_in
-                if isinstance(usage_out, int):
-                    _cumulative_output_tokens += usage_out
-                if isinstance(cache_read, int):
-                    _cumulative_cache_read_tokens += cache_read
-                if isinstance(cache_write, int):
-                    _cumulative_cache_write_tokens += cache_write
-                if resp_model:
-                    _last_model = resp_model
-                if usage_in is not None or usage_out is not None:
-                    _usage_events += 1
+                _cumulative_input_tokens += attempt_usage.input_tokens
+                _cumulative_output_tokens += attempt_usage.output_tokens
+                _cumulative_cache_read_tokens += attempt_usage.cache_read_tokens
+                _cumulative_cache_write_tokens += attempt_usage.cache_write_tokens
+                if attempt_usage.model:
+                    _last_model = attempt_usage.model
+                _usage_events += attempt_usage.events
 
         # Forward the (possibly retried) response to the client.
         resp = web.StreamResponse(status=status, headers=headers)

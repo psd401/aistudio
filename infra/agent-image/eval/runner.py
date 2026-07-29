@@ -2,7 +2,7 @@
 """Run a repeated task suite against a local PSD Agent Docker image.
 
 Example:
-    python3 runner.py --image <tag-or-digest> --suite suites/core.yaml \
+    python3 runner.py --image <repository@sha256:digest> --suite suites/core.yaml \
         --trials 3 --out /tmp/issue-1425-run.jsonl \
         --name-prefix psd-agent-eval-issue-1425
 """
@@ -124,6 +124,7 @@ MANTLE_CANDIDATE_PROVIDER_PATHS = frozenset(
         "mantle-anthropic-messages",
     }
 )
+IMMUTABLE_IMAGE_RE = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$")
 
 
 class EvalRunnerError(RuntimeError):
@@ -1380,6 +1381,10 @@ def _resolve_candidate_runtime_environment(
     Mantle candidates receive only the secret ARN and resolve its value inside
     the short-lived container using the already-supplied AWS credentials.
     """
+    if not IMMUTABLE_IMAGE_RE.fullmatch(image):
+        raise EvalRunnerError(
+            "--image must be an immutable repository@sha256:<64 hex> reference"
+        )
     if metadata_path is None:
         return {}
     try:
@@ -1640,7 +1645,11 @@ def _open_output(path: Path, overwrite: bool) -> TextIO:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", required=True, help="candidate image tag or digest")
+    parser.add_argument(
+        "--image",
+        required=True,
+        help="immutable repository@sha256:digest image reference",
+    )
     parser.add_argument(
         "--candidate-metadata",
         type=Path,

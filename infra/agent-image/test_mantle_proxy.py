@@ -33,8 +33,9 @@ if "aiohttp" not in sys.modules:
         """Minimal stand-in for aiohttp.web.json_response — records the payload
         so tests can assert on the /usage body."""
 
-        def __init__(self, payload):
+        def __init__(self, payload, status=200):
             self.payload = payload
+            self.status = status
 
     def _middleware(function):
         function.__middleware_version__ = 1
@@ -43,7 +44,9 @@ if "aiohttp" not in sys.modules:
     _aiohttp.web = types.SimpleNamespace(
         Request=object, Response=object, StreamResponse=object,
         Application=object,
-        json_response=lambda payload, *a, **k: _FakeJsonResponse(payload),
+        json_response=lambda payload, *a, **k: _FakeJsonResponse(
+            payload, status=k.get("status", 200)
+        ),
         run_app=lambda *a, **k: None,
         middleware=_middleware,
     )
@@ -76,8 +79,10 @@ from mantle_proxy import (  # noqa: E402
     _read_bounded_agent_broker_response,
     _read_signed_identity_response,
     _resolve_candidate_mantle_request,
+    _candidate_mantle_authority_required,
     _resolve_agent_broker_route,
     _synthesize_polly,
+    _UsageAccumulator,
     _validate_hyperframes_payload,
     _validate_polly_payload,
     _workspace_flush_request_allowed,
@@ -93,6 +98,7 @@ from mantle_proxy import (  # noqa: E402
     inject_anthropic_cache_breakpoints,
     _parse_anthropic_stream,
     _parse_anthropic_response,
+    handle_proxy,
 )
 
 
@@ -165,6 +171,56 @@ class TestCandidateMantleRelay(unittest.TestCase):
             )
         ), self.assertRaisesRegex(RuntimeError, "exact AWS endpoint"):
             _candidate_mantle_configuration()
+
+    def test_only_paid_candidate_operations_require_turn_authority(self):
+        self.assertTrue(
+            _candidate_mantle_authority_required(
+                "POST", "candidate-mantle/chat/completions"
+            )
+        )
+        self.assertFalse(
+            _candidate_mantle_authority_required(
+                "GET", "candidate-mantle/models"
+            )
+        )
+        self.assertFalse(
+            _candidate_mantle_authority_required(
+                "POST", "v1/chat/completions"
+            )
+        )
+
+    def test_candidate_inference_without_authority_fails_before_body_read(self):
+        class Request:
+            method = "POST"
+            match_info = {"path": "candidate-mantle/chat/completions"}
+
+            def __init__(self):
+                self.read_called = False
+
+            async def read(self):
+                self.read_called = True
+                return json.dumps(
+                    {"model": "zai.glm-5", "messages": []}
+                ).encode()
+
+        request = Request()
+        with self._configuration(), mock.patch.object(
+            mantle_proxy,
+            "_read_workspace_flush_token",
+            return_value=None,
+        ), mock.patch.object(
+            mantle_proxy,
+            "_invocation_authority_is_available",
+            return_value=False,
+        ):
+            response = asyncio.run(handle_proxy(request))
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            response.payload,
+            {"error": "Invocation authority is unavailable"},
+        )
+        self.assertFalse(request.read_called)
 
 
 class _FakeAwsStream:
@@ -1084,6 +1140,19 @@ class TestUsageEndpoint(unittest.TestCase):
             final["cache_read_input_tokens"] - baseline["cache_read_input_tokens"],
             32000,
         )
+
+    def test_retry_accumulator_counts_every_paid_attempt(self):
+        usage = _UsageAccumulator()
+        usage.add(100, 10, 20, 5, "zai.glm-5")
+        usage.add(120, 12, 0, 0, "zai.glm-5")
+        usage.add(None, None, 0, 0, None)
+
+        self.assertEqual(usage.input_tokens, 220)
+        self.assertEqual(usage.output_tokens, 22)
+        self.assertEqual(usage.cache_read_tokens, 20)
+        self.assertEqual(usage.cache_write_tokens, 5)
+        self.assertEqual(usage.events, 2)
+        self.assertEqual(usage.model, "zai.glm-5")
 
 
 class TestAnthropicPathDetection(unittest.TestCase):
