@@ -848,7 +848,38 @@ function validateParts(
       "Multipart parts are invalid or duplicated",
     );
   }
-  return parts;
+  return [...parts].sort((left, right) => left.PartNumber - right.PartNumber);
+}
+
+function multipartCompletionRequestError(
+  error: unknown,
+): RepositoryUploadCompletionError | null {
+  if (typeof error !== "object" || error === null) return null;
+  const candidate = error as { name?: unknown; Code?: unknown };
+  const code =
+    typeof candidate.Code === "string"
+      ? candidate.Code
+      : typeof candidate.name === "string"
+        ? candidate.name
+        : undefined;
+
+  if (code === "NoSuchUpload") {
+    return new RepositoryUploadCompletionError(
+      "session-inactive",
+      "Multipart upload session is no longer available",
+    );
+  }
+  if (
+    code === "EntityTooSmall" ||
+    code === "InvalidPart" ||
+    code === "InvalidPartOrder"
+  ) {
+    return new RepositoryUploadCompletionError(
+      "invalid-parts",
+      "Multipart upload parts were rejected",
+    );
+  }
+  return null;
 }
 
 function getRepositoryUploadSession(input: CompleteRepositoryUploadInput) {
@@ -969,7 +1000,7 @@ export async function completeRepositoryUpload(
       // HEAD below proves the object exists and makes completion safely
       // retryable; otherwise preserve the original, more useful S3 error.
       await resolvedStorage.headObject(session.objectKey).catch(() => {
-        throw completionError;
+        throw multipartCompletionRequestError(completionError) ?? completionError;
       });
     }
   }
