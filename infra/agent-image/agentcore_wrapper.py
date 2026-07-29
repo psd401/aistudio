@@ -466,6 +466,7 @@ def _configure_candidate_mantle_relay(
     provider["baseUrl"] = CANDIDATE_MANTLE_RELAY_BASE_URL
     provider["apiKey"] = CANDIDATE_MANTLE_RELAY_API_KEY
     directory = os.path.dirname(config_path)
+    config_metadata = os.stat(config_path)
     descriptor, temporary_path = tempfile.mkstemp(
         prefix=".openclaw.candidate.", dir=directory
     )
@@ -475,7 +476,15 @@ def _configure_candidate_mantle_relay(
             output.write("\n")
             output.flush()
             os.fsync(output.fileno())
-        os.chmod(temporary_path, os.stat(config_path).st_mode & 0o777)
+            # The wrapper is root while OpenClaw runs as node. An atomic
+            # replacement must preserve the original node ownership as well as
+            # its mode or the gateway cannot read the rewritten config.
+            os.fchown(
+                output.fileno(),
+                config_metadata.st_uid,
+                config_metadata.st_gid,
+            )
+            os.fchmod(output.fileno(), config_metadata.st_mode & 0o777)
         os.replace(temporary_path, config_path)
     except Exception:
         try:

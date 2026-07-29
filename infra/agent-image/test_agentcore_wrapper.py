@@ -110,11 +110,16 @@ class TestCandidateProviderHydration(unittest.TestCase):
                     "models": [{"id": "qwen.qwen3-coder-next"}],
                 },
             )
+            original_metadata = path.stat()
             with mock.patch.dict(
                 agentcore_wrapper.os.environ,
                 {"AWS_BEARER_TOKEN_BEDROCK": "candidate-secret"},
                 clear=True,
-            ):
+            ), mock.patch.object(
+                agentcore_wrapper.os,
+                "fchown",
+                wraps=agentcore_wrapper.os.fchown,
+            ) as fchown:
                 relay_environment = (
                     agentcore_wrapper.hydrate_configured_provider_api_keys(
                         str(path)
@@ -124,7 +129,19 @@ class TestCandidateProviderHydration(unittest.TestCase):
                     "AWS_BEARER_TOKEN_BEDROCK",
                     agentcore_wrapper.os.environ,
                 )
+            fchown.assert_called_once_with(
+                mock.ANY,
+                original_metadata.st_uid,
+                original_metadata.st_gid,
+            )
             config = json.loads(path.read_text(encoding="utf-8"))
+            rewritten_metadata = path.stat()
+            self.assertEqual(rewritten_metadata.st_uid, original_metadata.st_uid)
+            self.assertEqual(rewritten_metadata.st_gid, original_metadata.st_gid)
+            self.assertEqual(
+                rewritten_metadata.st_mode & 0o777,
+                original_metadata.st_mode & 0o777,
+            )
             self.assertEqual(
                 config["models"]["providers"]["candidate"]["apiKey"],
                 agentcore_wrapper.CANDIDATE_MANTLE_RELAY_API_KEY,
