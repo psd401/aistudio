@@ -1,4 +1,7 @@
-import { AgentCredentialBroker } from "@/lib/agent-credentials/broker";
+import {
+  AgentCredentialBroker,
+  AgentCredentialInputError,
+} from "@/lib/agent-credentials/broker";
 import { createLogger, sanitizeForLogging } from "@/lib/logger";
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
@@ -724,6 +727,11 @@ const FRESHSERVICE_ROUTES: ReadonlyArray<{
 }> = [
   { method: "GET", pattern: /^\/tickets$/, build: () => "/tickets" },
   { method: "POST", pattern: /^\/tickets$/, build: () => "/tickets" },
+  {
+    method: "GET",
+    pattern: /^\/tickets\/filter$/,
+    build: () => "/tickets/filter",
+  },
   { method: "GET", pattern: /^\/tickets\/(\d+)$/, build: (id) => `/tickets/${id}` },
   { method: "PUT", pattern: /^\/tickets\/(\d+)$/, build: (id) => `/tickets/${id}` },
   {
@@ -764,17 +772,43 @@ const FRESHSERVICE_QUERY_KEYS = new Set([
   "updated_since",
   "order_type",
   "workspace_id",
+  "filter",
   "query",
 ])
 const FRESHSERVICE_VALUE_CHARS = /^[A-Za-z0-9_.,:+@ -]*$/
+const FRESHSERVICE_FILTER_QUERY_CHARS = /^[A-Za-z0-9_.,:+@()'<>"= -]*$/
+const FRESHSERVICE_PRESET_FILTERS = new Set([
+  "new_and_my_open",
+  "watching",
+  "spam",
+  "deleted",
+  "archived",
+])
+
+function isAllowedFreshserviceQueryValue(
+  pathname: string,
+  key: string,
+  value: string
+): boolean {
+  if (key === "filter") {
+    return pathname === "/tickets" && FRESHSERVICE_PRESET_FILTERS.has(value)
+  }
+  if (key === "query") {
+    return (
+      pathname === "/tickets/filter" &&
+      FRESHSERVICE_FILTER_QUERY_CHARS.test(value)
+    )
+  }
+  return FRESHSERVICE_VALUE_CHARS.test(value)
+}
 
 /**
  * Canonicalize one request, or return null if it is not allowlisted.
  *
  * Returns a NEWLY BUILT path string: literal segments, numeric ids passed
  * through Number(), and a query re-serialized from an allowlisted key set with
- * a value charset that excludes "/", ":"-schemes and "@", so a query can
- * neither smuggle path segments nor an alternate host.
+ * a key-specific value grammar that excludes "/", so a query can neither
+ * smuggle path segments nor alter the fixed upstream host.
  *
  * Splitting the query off BEFORE matching also keeps every pattern a static
  * anchored literal. Folding an optional query group into each pattern is the
@@ -799,7 +833,7 @@ function canonicalFreshservicePath(method: string, path: string): string | null 
 
   if (rawQuery.length === 0) return canonicalPath
 
-  const query = canonicalFreshserviceQuery(rawQuery)
+  const query = canonicalFreshserviceQuery(canonicalPath, rawQuery)
   if (query === null) return null
   return query.length > 0 ? `${canonicalPath}?${query}` : canonicalPath
 }
@@ -809,7 +843,10 @@ function canonicalFreshservicePath(method: string, path: string): string | null 
  * is unrecognized. Split out from the path canonicalizer to keep each half
  * under the complexity ceiling and independently readable.
  */
-function canonicalFreshserviceQuery(rawQuery: string): string | null {
+function canonicalFreshserviceQuery(
+  canonicalPath: string,
+  rawQuery: string
+): string | null {
   const rebuilt = new URLSearchParams()
   for (const pair of rawQuery.split("&")) {
     if (pair.length === 0) continue
@@ -823,7 +860,7 @@ function canonicalFreshserviceQuery(rawQuery: string): string | null {
     } catch {
       return null
     }
-    if (!FRESHSERVICE_VALUE_CHARS.test(value)) return null
+    if (!isAllowedFreshserviceQueryValue(canonicalPath, key, value)) return null
     rebuilt.append(key, value)
   }
   return rebuilt.toString()
@@ -849,7 +886,7 @@ function validatedFreshserviceRequest(
 ): { path: string; method: "GET" | "POST" | "PUT" } {
   const method = rawMethod === undefined ? "GET" : rawMethod
   if (method !== "GET" && method !== "POST" && method !== "PUT") {
-    throw new Error("Invalid Freshservice method")
+    throw new AgentCredentialInputError("Invalid Freshservice method")
   }
   if (
     typeof rawPath !== "string" ||
@@ -857,13 +894,15 @@ function validatedFreshserviceRequest(
     rawPath.length > 512 ||
     hasAsciiControl(rawPath)
   ) {
-    throw new Error("Invalid Freshservice path")
+    throw new AgentCredentialInputError("Invalid Freshservice path")
   }
   const canonical = canonicalFreshservicePath(method, rawPath)
   if (canonical === null) {
     // Named explicitly: an unlisted endpoint is a skill change that needs a
     // route added, not a transient failure the agent should retry.
-    throw new Error(`Freshservice route not allowed: ${method} ${rawPath}`)
+    throw new AgentCredentialInputError(
+      `Freshservice route not allowed: ${method} ${rawPath}`
+    )
   }
   // The REBUILT path, never rawPath — this is what keeps caller-supplied
   // characters out of the URL that gets fetched.

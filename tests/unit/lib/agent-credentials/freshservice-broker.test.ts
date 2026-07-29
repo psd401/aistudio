@@ -20,9 +20,18 @@ import { stripComments } from "../../../helpers/strip-ts-comments"
 const getUserOnly = jest.fn()
 const fetchMock = jest.fn()
 
-jest.mock("@/lib/agent-credentials/broker", () => ({
-  AgentCredentialBroker: jest.fn().mockImplementation(() => ({ getUserOnly })),
-}))
+jest.mock("@/lib/agent-credentials/broker", () => {
+  class AgentCredentialInputError extends Error {
+    constructor(message: string) {
+      super(message)
+      this.name = "AgentCredentialInputError"
+    }
+  }
+  return {
+    AgentCredentialBroker: jest.fn().mockImplementation(() => ({ getUserOnly })),
+    AgentCredentialInputError,
+  }
+})
 
 import { executeFreshserviceOperation } from "@/lib/agent-credentials/owner-operation-broker"
 
@@ -72,6 +81,13 @@ describe("Freshservice broker allowlist", () => {
   it.each([
     ["GET", "/tickets"],
     ["GET", "/tickets?per_page=30&page=1"],
+    ["GET", "/tickets?filter=new_and_my_open&per_page=5"],
+    ["GET", "/tickets?workspace_id=2&filter=watching"],
+    ["GET", '/tickets/filter?query="status:2"&workspace_id=2'],
+    [
+      "GET",
+      '/tickets/filter?query="%28status%3A4%20OR%20status%3A5%29%20AND%20updated_at%3A%3E%272026-07-26%27%20AND%20updated_at%3A%3C%272026-07-30%27"&workspace_id=2&page=1&per_page=100',
+    ],
     ["POST", "/tickets"],
     ["GET", "/tickets/12345"],
     ["GET", "/tickets/12345?include=conversations,requester"],
@@ -98,6 +114,7 @@ describe("Freshservice broker allowlist", () => {
     ["GET", "/products"],
     // Method/path mismatches: read routes must not become write routes.
     ["PUT", "/tickets"],
+    ["POST", "/tickets/filter"],
     ["POST", "/workspaces"],
     ["PUT", "/agents/99"],
     // Traversal and smuggling.
@@ -113,9 +130,12 @@ describe("Freshservice broker allowlist", () => {
   })
 
   it("rejects a non-relative path outright", async () => {
-    await expect(call("https://evil.example/tickets", "GET")).rejects.toThrow(
-      "Invalid Freshservice path"
-    )
+    await expect(
+      call("https://evil.example/tickets", "GET")
+    ).rejects.toMatchObject({
+      name: "AgentCredentialInputError",
+      message: "Invalid Freshservice path",
+    })
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
@@ -206,6 +226,16 @@ describe("Freshservice broker behaviour", () => {
     )
   })
 
+  it("canonicalizes the filter endpoint and its documented query grammar", async () => {
+    await call(
+      '/tickets/filter?query="priority%3A4%20AND%20created_at%3A%3E%272026-07-28%27"&workspace_id=2'
+    )
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://psd401.freshservice.com/api/v2/tickets/filter?query=%22priority%3A4+AND+created_at%3A%3E%272026-07-28%27%22&workspace_id=2"
+    )
+  })
+
   it.each([
     // Unknown keys cannot ride along into the upstream request.
     "/tickets?evil=1",
@@ -213,6 +243,13 @@ describe("Freshservice broker behaviour", () => {
     "/tickets?include=a/b",
     // Malformed pairs are rejected rather than silently dropped.
     "/tickets?noequals",
+    // Preset filters are a closed Freshservice-defined list.
+    "/tickets?filter=all",
+    // The two filter-only keys cannot ride along on sibling endpoints.
+    '/agents?query="status:2"',
+    "/workspaces?filter=watching",
+    // Filter expressions may not smuggle path separators.
+    '/tickets/filter?query="status:2/admin"',
   ])("rejects query %s", async (path) => {
     await expect(call(path)).rejects.toThrow("not allowed")
     expect(fetchMock).not.toHaveBeenCalled()
