@@ -66,6 +66,13 @@
 # session-completion regressions.
 FROM ghcr.io/openclaw/openclaw@sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c
 
+# Bind every pushed image to the exact clean AI Studio source revision used to
+# build it. The nightly evaluator reads this immutable config label instead of
+# attributing a deployed image to whichever commit happens to trigger the run.
+ARG AISTUDIO_SOURCE_COMMIT
+LABEL org.opencontainers.image.source="https://github.com/psd401/aistudio" \
+      org.opencontainers.image.revision="${AISTUDIO_SOURCE_COMMIT}"
+
 # Switch to root for installations
 USER root
 

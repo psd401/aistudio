@@ -30,6 +30,9 @@ jobs:
       with:
         python-version: "3.12"
 
+    - name: Setup uv for agent-image unittest suites
+      uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+
     - name: Install dependencies
       run: bun install --frozen-lockfile
 
@@ -45,14 +48,43 @@ jobs:
     - name: Check generated capability catalog is in sync
       run: bun run capabilities:check
 
-    - name: Check agent skill eval coverage
+    - name: Check agent eval coverage and committed artifacts
       run: |
         python3 infra/agent-image/check_eval_coverage.py
-        python3 -m unittest \
+        python3 infra/agent-image/eval/summarize.py --check-repository
+
+    - name: Ensure model UID test account exists
+      run: |
+        if ! id node >/dev/null 2>&1; then
+          sudo useradd --system --user-group --no-create-home node
+        fi
+
+    - name: Run all agent-image Python tests (unittest)
+      run: |
+        uv run --python 3.12 --no-project -m unittest \
+          infra/agent-image/test_harness_adapter.py \
+          infra/agent-image/test_agentcore_wrapper.py \
+          infra/agent-image/test_iteration_telemetry.py \
+          infra/agent-image/test_mantle_proxy.py \
+          infra/agent-image/test_mantle_proxy_logging.py \
+          infra/agent-image/test_check_bootstrap_budget.py \
+          infra/agent-image/test_check_config_consistency.py \
+          infra/agent-image/test_workspace_sync.py \
+          infra/agent-image/test_chat_format.py \
+          infra/agent-image/test_artifact_publisher.py \
           infra/agent-image/test_eval_coverage.py \
           infra/agent-image/test_broker_stub.py \
           infra/agent-image/test_graders.py \
-          infra/agent-image/test_eval_runner.py
+          infra/agent-image/test_eval_runner.py \
+          infra/agent-image/test_eval_summary.py \
+          infra/agent-image/test_tts_synthesize.py \
+          infra/agent-image/skills/psd-last30days/scripts/test_last30days.py
+
+    - name: Run model-UID isolation test as root
+      run: |
+        sudo "$(command -v python3)" -m unittest \
+          -k test_model_uid_cannot_read_authority_or_mutate_relay_source \
+          infra/agent-image/test_agentcore_wrapper.py
 
     - name: Run tests
       run: bun run test:ci
@@ -152,6 +184,48 @@ jobs:
           infra/agent-image/test_mantle_proxy.py \
           infra/agent-image/test_tts_synthesize.py
         bun run test:skill:hyperframes
+      env:
+        CI: true
+
+    # The remaining agent-image JavaScript suites are outside Jest's roots.
+    # Run from the repository root so validated-fs permits shared root
+    # dependencies (notably axe-core/jsdom) without broadening its runtime
+    # filesystem policy. Keep each test file in a fresh Bun process: several
+    # suites mock global fetch/module state and are not process-isolated when
+    # unrelated files are passed to one `bun test` invocation.
+    - name: Run remaining agent-image skill tests (Bun)
+      run: |
+        set -euo pipefail
+        test_files=(
+          infra/agent-image/skills/_shared/agent-broker.test.js
+          infra/agent-image/skills/chat-chart/run.test.js
+          infra/agent-image/skills/psd-aistudio/common.test.js
+          infra/agent-image/skills/psd-aistudio/run.test.js
+          infra/agent-image/skills/psd-brand-guidelines/brand.test.js
+          infra/agent-image/skills/psd-canva/common.test.js
+          infra/agent-image/skills/psd-canva/run.test.js
+          infra/agent-image/skills/psd-credentials/check_capability.test.js
+          infra/agent-image/skills/psd-data/common.test.js
+          infra/agent-image/skills/psd-data/run.test.js
+          infra/agent-image/skills/psd-html-artifact/a11y-audit.test.js
+          infra/agent-image/skills/psd-learning-page/run.test.js
+          infra/agent-image/skills/psd-plaud/common.test.js
+          infra/agent-image/skills/psd-plaud/run.test.js
+          infra/agent-image/skills/psd-skills-meta/authority.test.js
+          infra/agent-image/skills/psd-summarize/run.test.js
+        )
+        for test_file in "${test_files[@]}"; do
+          echo "::group::${test_file}"
+          bun test "${test_file}"
+          echo "::endgroup::"
+        done
+      env:
+        CI: true
+
+    # Freshservice's tests use node:test mock timing and intentionally run
+    # under Node rather than Bun's test runner.
+    - name: Run psd-freshservice skill tests (Node)
+      run: cd infra/agent-image/skills/psd-freshservice && bun run test
       env:
         CI: true
 

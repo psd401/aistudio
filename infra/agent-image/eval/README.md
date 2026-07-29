@@ -60,6 +60,92 @@ JSONL output is created with owner-only (`0600`) permissions because complete
 metadata can contain prompts, messages, and tool details. Keep it in an
 issue-specific temporary path; do not commit run transcripts.
 
+## Transcript-free summaries
+
+After both production suites finish, convert their JSONL records into the only
+run artifact that is safe to commit:
+
+```bash
+docker run --rm --platform linux/arm64 \
+  --name psd-agent-eval-issue-1427-config \
+  --entrypoint cat \
+  <immutable-ecr-uri@sha256:digest> \
+  /home/node/.openclaw/openclaw.json \
+  > /tmp/issue-1427-openclaw.json
+
+IMAGE_SOURCE_COMMIT="$(docker image inspect \
+  --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+  <immutable-ecr-uri@sha256:digest>)"
+
+python3 infra/agent-image/eval/summarize.py \
+  --records /tmp/issue-1427-regression.jsonl \
+  --records /tmp/issue-1427-capability.jsonl \
+  --image <immutable-ecr-uri@sha256:digest> \
+  --source-commit "${IMAGE_SOURCE_COMMIT}" \
+  --source-commit-provenance image-label \
+  --eval-harness-commit "$(git rev-parse HEAD)" \
+  --model-config /tmp/issue-1427-openclaw.json \
+  --out .eval-runs/sha256-<digest>.json \
+  --require-all-pass
+```
+
+`source_commit` is the evaluated image's AI Studio revision, read from the
+immutable image config; `eval_harness_commit` is the checkout that supplied the
+runner, suites, graders, and summarizer. `build-and-push.sh` refuses dirty
+agent-image sources and stamps both the AI Studio source repository and full
+revision into the image. This keeps a delayed deployment from being attributed
+to the workflow's newer checkout. The initial baseline predates those labels;
+its `legacy-image-tag` provenance records the full revision embedded in the
+image's build tag rather than pretending the inherited OpenClaw revision label
+describes AI Studio.
+
+The summary contains per-task and per-skill `pass^3`, aggregate token cost,
+duration and latency distributions, model-call counts, nudge rate, failure
+classes, failed-grader counts, and caching status. Cost uses the primary model's
+`openclaw.json` price block; automation extracts that file from the exact
+immutable image so a repo/image skew cannot silently misprice a run. Caching is
+derived from observed telemetry: zero `cache_read_input_tokens` across the
+summarized trials means `uncached`.
+
+New runner records capture the actual invocation start before any container or
+trial work. The first baseline predates that field, so its summary explicitly
+marks `started_at` unavailable and separately reports the first trial-record
+timestamp instead of presenting that completion timestamp as the run start.
+
+It never retains prompts, results, messages, tool-call arguments, session IDs,
+broker requests, or grader reasons. `.gitignore` blocks JSONL/capture/raw files
+under `.eval-runs/`, and CI additionally validates every field against a
+recursive allowlisted schema from the Git index. Unknown keys are rejected, so
+a forced `git add` or a newly named transcript/secret field cannot bypass the
+guard:
+
+```bash
+python3 infra/agent-image/eval/summarize.py --check-repository
+```
+
+Committed summary filenames use `sha256-<64 lowercase hex>.json`; the file
+itself records the full immutable ECR URI and digest.
+
+## Nightly and on-demand runs
+
+`.github/workflows/agent-eval-nightly.yml` runs all 50 regression and capability
+tasks at three trials nightly on an ARM64 runner. It resolves the immutable
+image currently exposed by the dev AgentCore runtime, verifies its AI Studio
+source labels, uploads only the safe summary, removes both JSONL transcripts
+even on failure, and fails when any task misses `pass^3`. It has no
+`pull_request` or `push` trigger and therefore is not part of the PR gate.
+
+Dispatch the same run on demand from GitHub Actions:
+
+```bash
+gh workflow run agent-eval-nightly.yml --ref dev
+```
+
+The workflow uses the repository's `AGENT_EVAL_AWS_ROLE_ARN` OIDC role and the
+dedicated synthetic owner `eval.nightly@psd401.net`. Both scheduled and manual
+runs resolve the exact immutable digest exposed by the deployed dev runtime;
+mutable tags fail before Docker starts.
+
 Resolved short-lived AWS credentials are passed into the candidate container's
 environment and are therefore visible to users with access to the local Docker
 daemon (for example through `docker inspect`). They are also briefly present in
@@ -344,10 +430,21 @@ the per-grader boolean and human-readable reason. Task reliability uses
 ```bash
 UV_CACHE_DIR=/tmp/issue-1426-uv-cache \
   uv run --python 3.12 --no-project -m unittest \
+  infra/agent-image/test_harness_adapter.py \
+  infra/agent-image/test_agentcore_wrapper.py \
+  infra/agent-image/test_iteration_telemetry.py \
+  infra/agent-image/test_mantle_proxy.py \
+  infra/agent-image/test_mantle_proxy_logging.py \
+  infra/agent-image/test_check_bootstrap_budget.py \
+  infra/agent-image/test_check_config_consistency.py \
+  infra/agent-image/test_workspace_sync.py \
+  infra/agent-image/test_chat_format.py \
+  infra/agent-image/test_artifact_publisher.py \
   infra/agent-image/test_eval_coverage.py \
   infra/agent-image/test_broker_stub.py \
   infra/agent-image/test_graders.py \
-  infra/agent-image/test_eval_runner.py
+  infra/agent-image/test_eval_runner.py \
+  infra/agent-image/test_eval_summary.py
 ```
 
 The tests make no AWS, model, Docker, or external-network calls. Broker HTTP

@@ -1,0 +1,170 @@
+name: Agent Eval Nightly Baseline
+
+on:
+  schedule:
+    # Nightly, outside the main CI traffic window.
+    - cron: "43 13 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: agent-eval-nightly-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  ENVIRONMENT: dev
+  AGENT_EVAL_OWNER_EMAIL: eval.nightly@psd401.net
+
+jobs:
+  baseline:
+    name: Full regression and capability baseline
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: dev
+
+      - name: Capture eval harness commit
+        id: harness
+        run: |
+          harness_commit="$(git rev-parse HEAD)"
+          if [[ ! "${harness_commit}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Checked-out dev harness is not a full Git revision." >&2
+            exit 1
+          fi
+          echo "commit=${harness_commit}" >> "${GITHUB_OUTPUT}"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+        with:
+          bun-version: "1.2.x"
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install repository dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Configure AWS credentials
+        id: aws-credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AGENT_EVAL_AWS_ROLE_ARN }}
+          role-session-name: agent-eval-nightly-${{ github.run_id }}
+          role-duration-seconds: 10800
+          aws-region: ${{ env.AWS_REGION }}
+          output-credentials: true
+
+      - name: Resolve deployed dev image
+        id: image
+        run: |
+          stack_name="AIStudio-AgentPlatformStack-Dev"
+          runtime_id="$(aws cloudformation describe-stacks \
+            --stack-name "${stack_name}" \
+            --query "Stacks[0].Outputs[?OutputKey=='AgentCoreRuntimeId'].OutputValue" \
+            --output text)"
+          image="$(aws bedrock-agentcore-control get-agent-runtime \
+            --agent-runtime-id "${runtime_id}" \
+            --query "agentRuntimeArtifact.containerConfiguration.containerUri" \
+            --output text)"
+          if [[ ! "${image}" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/[^:@[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "Resolved image is not an immutable ECR digest." >&2
+            echo "Redeploy dev with the exact deployment-time digest." >&2
+            exit 1
+          fi
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+          echo "runtime_id=${runtime_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Read candidate provenance and model pricing
+        id: candidate
+        env:
+          CANDIDATE_IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          docker pull --platform linux/arm64 "${CANDIDATE_IMAGE}"
+          source_repository="$(docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' \
+            "${CANDIDATE_IMAGE}")"
+          source_commit="$(docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "${CANDIDATE_IMAGE}")"
+          if [ "${source_repository}" != "https://github.com/psd401/aistudio" ]; then
+            echo "Candidate image has no trusted AI Studio source label." >&2
+            exit 1
+          fi
+          if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Candidate image has no full source revision label." >&2
+            exit 1
+          fi
+          echo "source_commit=${source_commit}" >> "${GITHUB_OUTPUT}"
+          docker run --rm \
+            --platform linux/arm64 \
+            --name "psd-agent-eval-nightly-config-${GITHUB_RUN_ID}" \
+            --entrypoint cat \
+            "${CANDIDATE_IMAGE}" \
+            /home/node/.openclaw/openclaw.json \
+            > "${RUNNER_TEMP}/agent-eval-openclaw.json"
+
+      - name: Run the full three-trial suite
+        env:
+          CANDIDATE_IMAGE: ${{ steps.image.outputs.image }}
+          AGENT_EVAL_AWS_CREDENTIAL_EXPIRATION: ${{ steps.aws-credentials.outputs.aws-expiration }}
+        run: |
+          python3 infra/agent-image/eval/runner.py \
+            --image "${CANDIDATE_IMAGE}" \
+            --suite infra/agent-image/eval/suites/regression.yaml \
+            --trials 3 \
+            --out "${RUNNER_TEMP}/agent-eval-regression-${GITHUB_RUN_ID}.jsonl" \
+            --agent-runtime-id "${{ steps.image.outputs.runtime_id }}" \
+            --owner-email "${AGENT_EVAL_OWNER_EMAIL}" \
+            --name-prefix "psd-agent-eval-nightly-regression-${GITHUB_RUN_ID}"
+          python3 infra/agent-image/eval/runner.py \
+            --image "${CANDIDATE_IMAGE}" \
+            --suite infra/agent-image/eval/suites/capability.yaml \
+            --trials 3 \
+            --out "${RUNNER_TEMP}/agent-eval-capability-${GITHUB_RUN_ID}.jsonl" \
+            --agent-runtime-id "${{ steps.image.outputs.runtime_id }}" \
+            --owner-email "${AGENT_EVAL_OWNER_EMAIL}" \
+            --name-prefix "psd-agent-eval-nightly-capability-${GITHUB_RUN_ID}"
+
+      - name: Create transcript-free summary and enforce pass^3
+        env:
+          CANDIDATE_IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          python3 infra/agent-image/eval/summarize.py \
+            --records "${RUNNER_TEMP}/agent-eval-regression-${GITHUB_RUN_ID}.jsonl" \
+            --records "${RUNNER_TEMP}/agent-eval-capability-${GITHUB_RUN_ID}.jsonl" \
+            --image "${CANDIDATE_IMAGE}" \
+            --source-commit "${{ steps.candidate.outputs.source_commit }}" \
+            --source-commit-provenance image-label \
+            --eval-harness-commit "${{ steps.harness.outputs.commit }}" \
+            --model-config "${RUNNER_TEMP}/agent-eval-openclaw.json" \
+            --out "${RUNNER_TEMP}/agent-eval-summary.json" \
+            --require-all-pass
+
+      - name: Upload safe run summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: agent-eval-summary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/agent-eval-summary.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove sensitive trial transcripts
+        if: always()
+        run: |
+          rm -f "${RUNNER_TEMP}/agent-eval-regression-${GITHUB_RUN_ID}.jsonl"
+          rm -f "${RUNNER_TEMP}/agent-eval-capability-${GITHUB_RUN_ID}.jsonl"
+          rm -f "${RUNNER_TEMP}/agent-eval-openclaw.json"

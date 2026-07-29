@@ -28,10 +28,24 @@ STACK_NAME="AIStudio-AgentPlatformStack-${ENV_CAPITALIZED}"
 REGION="${AWS_REGION:-us-east-1}"
 TAG="${1:-$(date +%Y-%m-%d)-initial}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+if ! [[ "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "ERROR: could not resolve a full Git commit for image provenance." >&2
+  exit 1
+fi
+if [ -n "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=all -- \
+    infra/agent-image infra/validated-fs.cjs)" ]; then
+  echo "ERROR: agent-image sources are dirty; commit them before building." >&2
+  echo "       Image provenance must identify the exact source content." >&2
+  exit 1
+fi
 
 echo "=== PSD Agent Image Build & Push ==="
 echo "Environment: ${ENVIRONMENT}"
 echo "Tag: ${TAG}"
+echo "Source commit: ${SOURCE_COMMIT}"
 echo ""
 
 # Supply-chain enforcement gate (SEC-009): the agent image must ship no
@@ -149,6 +163,7 @@ echo "Building image (ARM64)..."
 cp "${SCRIPT_DIR}/../validated-fs.cjs" "${SCRIPT_DIR}/skills/validated-fs.cjs"
 docker build \
   --platform linux/arm64 \
+  --build-arg "AISTUDIO_SOURCE_COMMIT=${SOURCE_COMMIT}" \
   -t "${ECR_URI}:${TAG}" \
   "${SCRIPT_DIR}"
 rm -f "${SCRIPT_DIR}/skills/validated-fs.cjs"
@@ -207,7 +222,6 @@ else
   # psd-agent/<env>/invocation-signing-key — a developer has them, the AgentCore
   # execution role deliberately does not.
   if [ -z "${PROBE_INVOCATION_CONTEXT}" ] || [ -z "${PROBE_REQUEST_PROOF_KEY}" ]; then
-    REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
     MINT_SCRIPT="${REPO_ROOT}/scripts/agent-workspace/mint-agent-probe-context.ts"
     if command -v bun >/dev/null 2>&1 && [ -r "${MINT_SCRIPT}" ]; then
       echo "  Minting a probe invocation context (bun run agent:probe-context)..."
