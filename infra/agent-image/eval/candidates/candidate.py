@@ -34,6 +34,7 @@ AGENT_IMAGE_DIR = SCRIPT_PATH.parents[2]
 CANONICAL_CONFIG = AGENT_IMAGE_DIR / "openclaw.json"
 CANONICAL_DOCKERFILE = AGENT_IMAGE_DIR / "Dockerfile"
 AXES = ("model", "harness", "prompt")
+UNCHANGED_BOOTSTRAP_FILES = ("IDENTITY.md", "USER.md", "MEMORY.md")
 PROVIDER_PATH_CONTRACTS: Mapping[str, tuple[str, str, str]] = {
     "native-bedrock-sigv4": (
         "bedrock-converse-stream",
@@ -541,6 +542,11 @@ def prepare(manifest_path: Path, output_dir: Path, source_commit: str) -> dict[s
     shutil.copyfile(soul_path, soul_output)
     rules_output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(rules_path, rules_output)
+    # The build still copies these non-prompt-axis bootstrap files from the
+    # canonical context. Mirror them into staging so the candidate budget gate
+    # measures the complete effective prompt instead of SOUL.md alone.
+    for filename in UNCHANGED_BOOTSTRAP_FILES:
+        shutil.copyfile(AGENT_IMAGE_DIR / filename, output_dir / filename)
 
     provider = _mapping(template["provider"], "provider")
     model = _mapping(provider["models"][0], "model")  # type: ignore[index]

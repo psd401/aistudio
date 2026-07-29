@@ -12,6 +12,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "eval" / "candidates"))
 
+import check_bootstrap_budget as budget  # noqa: E402
 import check_config_consistency as consistency  # noqa: E402
 import candidate  # noqa: E402
 
@@ -83,6 +84,10 @@ class CandidateMatrixTests(unittest.TestCase):
             self.assertFalse(plan["requiresBearerToken"])
             self.assertTrue(
                 (Path(directory) / "skills" / "psd-rules" / "SKILL.md").is_file()
+            )
+            self.assertEqual(
+                budget.effective_bootstrap_sizes(directory),
+                budget.effective_bootstrap_sizes(str(HERE)),
             )
             self.assertEqual(
                 consistency.run_checks(
