@@ -35,6 +35,7 @@ All `/api/v1/graph/*` endpoints require authentication. Two modes are supported:
 | `repositories:read` | Disclose current immutable source segments and citations |
 | `repositories:search` | Run retrieval v2 over currently authorized repositories |
 | `repositories:changes` | Poll the authorized repository item change feed |
+| `repositories:write` | Add uploaded items to repositories the principal can modify |
 
 API keys are created in **Settings > API Keys**. Administrators receive all scopes; staff receives `graph:read` by default.
 
@@ -585,6 +586,84 @@ Common errors are `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`/`INVALID_TOKEN`,
 `403 INSUFFICIENT_SCOPE`, `404 NOT_FOUND`, `429 RATE_LIMIT_EXCEEDED`, and
 `500 INTERNAL_ERROR`. Every response retains the standard request-id and
 rate-limit headers described above.
+
+#### `POST /api/v1/repositories/{id}/items/uploads`
+
+Requires `repositories:write`. The API key owner must be able to modify the
+active, user-managed durable repository. Missing, inaccessible, ephemeral,
+system-managed, expired, and inactive repositories all return `404 NOT_FOUND`.
+Canonical file-type, size, and quota validation is shared with the web upload
+flow.
+
+```bash
+curl -X POST -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"itemName":"Graduation policy","fileName":"policy.pdf",
+       "contentType":"application/pdf","byteSize":248731}' \
+  "https://your-domain/api/v1/repositories/42/items/uploads"
+```
+
+The `201` response contains `sessionId`, `objectKey`, `expiresAt`, and either:
+
+- `uploadMethod: "single"` with one `uploadUrl`; or
+- `uploadMethod: "multipart"` with `partSize` and numbered `partUrls`.
+
+```json
+{
+  "data": {
+    "sessionId": "11111111-2222-4333-8444-555555555555",
+    "objectKey": "repositories/42/11111111-2222-4333-8444-555555555555/policy.pdf",
+    "uploadMethod": "single",
+    "uploadUrl": "https://s3.example/presigned-put",
+    "expiresAt": "2026-07-29T01:00:00.000Z"
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+Upload the exact declared bytes with S3 `PUT` requests. Retain every multipart
+ETag. Invalid metadata returns `400 VALIDATION_ERROR`, exhausted upload quotas
+return `429 REPOSITORY_UPLOAD_QUOTA_EXCEEDED`, and a deployment where canonical
+uploads are disabled returns `503 UPLOAD_UNAVAILABLE`. JSON request bodies over
+128 KiB return `413 PAYLOAD_TOO_LARGE`.
+
+#### `POST /api/v1/repositories/{id}/items/uploads/{sessionId}/complete`
+
+Requires `repositories:write` and current modify access. Send `{}` for a
+single-part upload. For multipart, send every S3 ETag and part number:
+
+```json
+{
+  "parts": [
+    { "ETag": "\"9b2cf535f27731c974343645a3985328\"", "PartNumber": 1 }
+  ]
+}
+```
+
+Completion verifies the uploaded object, creates the immutable item version and
+durable processing job, and requests immediate dispatch. Scheduled dispatch
+retries a committed job if needed. The response contains `itemId`,
+`itemVersionId`, `processingJobId`, and `replayed`. Repeating a successful
+completion returns the same identifiers with `replayed: true` and the
+`Idempotency-Replayed: true` header. Invalid multipart input or an unavailable
+or foreign session returns `400 UPLOAD_COMPLETION_FAILED` without session
+details. Unexpected storage or database failures return
+`500 INTERNAL_ERROR`; callers can retry completion with the same session
+because registration is idempotent. Completed-session replays remain valid
+after the original presigned upload URL expires. JSON request bodies over
+128 KiB return `413 PAYLOAD_TOO_LARGE`.
+
+```json
+{
+  "data": {
+    "itemId": 87,
+    "itemVersionId": "33333333-4444-4555-8666-777777777777",
+    "processingJobId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "replayed": false
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
 
 ---
 

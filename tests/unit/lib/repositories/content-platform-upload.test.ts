@@ -10,8 +10,10 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import { DEFAULT_CONTENT_PLATFORM_CONFIG } from "@/lib/repositories/content-platform/config";
 import {
+  completeRepositoryUpload,
   initiateRepositoryUpload,
   MAX_ACTIVE_EPHEMERAL_BYTES_PER_OWNER,
+  RepositoryUploadCompletionError,
   RepositoryUploadQuotaExceededError,
   type RepositoryUploadStorage,
 } from "@/lib/repositories/content-platform/upload-service";
@@ -119,6 +121,19 @@ const baseInput = {
   byteSize: 1024,
 } as const;
 
+const multipartSession = {
+  id: "11111111-2222-4333-8444-555555555555",
+  repositoryId: 7,
+  createdBy: 11,
+  uploadMethod: "multipart",
+  multipartUploadId: "upload-1",
+  partCount: 2,
+  status: "uploading",
+  objectKey:
+    "repositories/7/11111111-2222-4333-8444-555555555555/handbook.pdf",
+  expiresAt: new Date("2099-01-01T00:00:00.000Z"),
+};
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockExecuteQuery.mockResolvedValue([{ id: "activated-session" }]);
@@ -195,6 +210,78 @@ it("bounds the maximum 500 MiB PDF to at most 100 signed parts", async () => {
   expect(storage.requestedPartCount).toBeLessThanOrEqual(100);
   expect(result.partUrls).toHaveLength(storage.requestedPartCount);
   expect(result.partSize).toBeGreaterThanOrEqual(5 * 1024 ** 2);
+});
+
+it.each([
+  ["EntityTooSmall", "invalid-parts"],
+  ["InvalidPart", "invalid-parts"],
+  ["InvalidPartOrder", "invalid-parts"],
+  ["NoSuchUpload", "session-inactive"],
+] as const)(
+  "sorts multipart parts and maps S3 %s to %s",
+  async (errorCode, failure) => {
+    const storage = createStorage();
+    const s3Error = Object.assign(new Error("Multipart request rejected"), {
+      name: errorCode,
+    });
+    mockExecuteQuery.mockResolvedValueOnce([multipartSession]);
+    jest.mocked(storage.completeMultipartUpload).mockRejectedValue(s3Error);
+    jest
+      .mocked(storage.headObject)
+      .mockRejectedValue(new Error("Object does not exist"));
+
+    const completion = completeRepositoryUpload(
+      {
+        repositoryId: 7,
+        userId: 11,
+        sessionId: multipartSession.id,
+        parts: [
+          { ETag: "part-two", PartNumber: 2 },
+          { ETag: "part-one", PartNumber: 1 },
+        ],
+      },
+      storage,
+    );
+
+    await expect(completion).rejects.toBeInstanceOf(
+      RepositoryUploadCompletionError,
+    );
+    await expect(completion).rejects.toMatchObject({
+      failure,
+      httpStatus: 400,
+    });
+    expect(storage.completeMultipartUpload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        parts: [
+          { ETag: "part-one", PartNumber: 1 },
+          { ETag: "part-two", PartNumber: 2 },
+        ],
+      }),
+    );
+  },
+);
+
+it("preserves unknown multipart completion failures as infrastructure errors", async () => {
+  const storage = createStorage();
+  const s3Error = new Error("S3 unavailable");
+  mockExecuteQuery.mockResolvedValueOnce([multipartSession]);
+  jest.mocked(storage.completeMultipartUpload).mockRejectedValue(s3Error);
+  jest.mocked(storage.headObject).mockRejectedValue(new Error("HEAD timeout"));
+
+  await expect(
+    completeRepositoryUpload(
+      {
+        repositoryId: 7,
+        userId: 11,
+        sessionId: multipartSession.id,
+        parts: [
+          { ETag: "part-one", PartNumber: 1 },
+          { ETag: "part-two", PartNumber: 2 },
+        ],
+      },
+      storage,
+    ),
+  ).rejects.toBe(s3Error);
 });
 
 it("aborts S3 multipart state when session persistence fails", async () => {

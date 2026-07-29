@@ -789,6 +789,172 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /repositories/{id}/items/uploads:
+    post:
+      operationId: initiateRepositoryItemUpload
+      tags: [Repositories]
+      summary: Initiate a repository item upload
+      description: |
+        Creates an owner-bound canonical upload session with presigned S3 URLs.
+        The API key owner must be able to modify the active, user-managed durable
+        repository. Other repository shapes are masked as `404 NOT_FOUND`.
+        Requires `repositories:write`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RepositoryUploadInitiateRequest"
+            example:
+              itemName: Graduation policy
+              fileName: graduation-policy.pdf
+              contentType: application/pdf
+              byteSize: 248731
+      responses:
+        "201":
+          description: Canonical upload session created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RepositoryUploadSession"
+                  meta:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+              example:
+                data:
+                  sessionId: 11111111-2222-4333-8444-555555555555
+                  objectKey: repositories/42/11111111-2222-4333-8444-555555555555/graduation-policy.pdf
+                  uploadMethod: single
+                  uploadUrl: https://s3.example/presigned-put
+                  expiresAt: "2026-07-29T01:00:00.000Z"
+                meta: { requestId: req_abc123 }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          description: JSON request body exceeds 128 KiB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: API-key rate limit or repository upload quota exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Canonical repository uploads are not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /repositories/{id}/items/uploads/{sessionId}/complete:
+    post:
+      operationId: completeRepositoryItemUpload
+      tags: [Repositories]
+      summary: Complete a repository item upload
+      description: |
+        Commits an owner-bound session, creates the immutable item version and
+        durable processing job, and requests dispatch. Successful completion is
+        idempotent. Requires `repositories:write` and current modify access.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RepositoryUploadCompleteRequest"
+            examples:
+              single:
+                summary: Complete a single-part upload
+                value: {}
+              multipart:
+                summary: Complete a multipart upload
+                value:
+                  parts:
+                    - ETag: '"9b2cf535f27731c974343645a3985328"'
+                      PartNumber: 1
+      responses:
+        "200":
+          description: Upload committed and processing queued.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/Idempotency-Replayed"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RepositoryUploadCompletion"
+                  meta:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+              example:
+                data:
+                  itemId: 87
+                  itemVersionId: 33333333-4444-4555-8666-777777777777
+                  processingJobId: aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee
+                  replayed: false
+                meta: { requestId: req_abc123 }
+        "400":
+          description: Invalid multipart parts or an unavailable upload session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          description: JSON request body exceeds 128 KiB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /repositories/search:
     post:
       operationId: searchRepositories
@@ -3532,6 +3698,78 @@ components:
         lastUpdated: { type: [string, "null"], format: date-time }
         createdAt: { type: [string, "null"], format: date-time }
         updatedAt: { type: [string, "null"], format: date-time }
+
+    RepositoryUploadInitiateRequest:
+      type: object
+      additionalProperties: false
+      required: [itemName, fileName, contentType, byteSize]
+      properties:
+        itemName: { type: string, minLength: 1, maxLength: 500 }
+        fileName: { type: string, minLength: 1, maxLength: 500 }
+        contentType:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Canonical MIME type for a supported file.
+        byteSize:
+          type: integer
+          minimum: 1
+          description: Exact number of bytes to upload.
+
+    RepositoryUploadPartUrl:
+      type: object
+      required: [partNumber, uploadUrl]
+      properties:
+        partNumber: { type: integer, minimum: 1 }
+        uploadUrl: { type: string, format: uri }
+
+    RepositoryUploadSession:
+      type: object
+      required: [sessionId, objectKey, uploadMethod, expiresAt]
+      properties:
+        sessionId: { type: string, format: uuid }
+        objectKey: { type: string }
+        uploadMethod:
+          type: string
+          enum: [single, multipart]
+        uploadUrl:
+          type: string
+          format: uri
+          description: Present for single-part uploads.
+        partSize:
+          type: integer
+          minimum: 1
+        partUrls:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/RepositoryUploadPartUrl"
+        expiresAt: { type: string, format: date-time }
+
+    RepositoryUploadCompleteRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        parts:
+          type: array
+          maxItems: 10000
+          description: Required only for multipart uploads.
+          items:
+            type: object
+            additionalProperties: false
+            required: [ETag, PartNumber]
+            properties:
+              ETag: { type: string, minLength: 1, maxLength: 512 }
+              PartNumber: { type: integer, minimum: 1, maximum: 10000 }
+
+    RepositoryUploadCompletion:
+      type: object
+      required: [itemId, itemVersionId, processingJobId, replayed]
+      properties:
+        itemId: { type: integer, minimum: 1 }
+        itemVersionId: { type: string, format: uuid }
+        processingJobId: { type: string, format: uuid }
+        replayed: { type: boolean }
 
     RepositorySearchRequest:
       type: object
