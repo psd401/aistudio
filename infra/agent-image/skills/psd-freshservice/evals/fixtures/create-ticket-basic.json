@@ -8,6 +8,7 @@
       "method": "POST",
       "body": {
         "subject": "Harbor Ridge library projector offline",
+        "description": "The ceiling projector has no power.",
         "email": "teacher@psd401.net",
         "priority": 2
       }

@@ -186,6 +186,28 @@ class SuiteLoadingTests(unittest.TestCase):
         tasks_by_id = {task.id: task for task in tasks}
         self.assertTrue(negative_task_ids.issubset(tasks_by_id))
 
+        def broker_body(task_id: str) -> dict[str, object]:
+            spec = next(
+                grader
+                for grader in tasks_by_id[task_id].graders
+                if grader.get("type") == "broker_request"
+            )
+            body = spec.get("body")
+            self.assertIsInstance(body, dict)
+            return body
+
+        def fixture_request_body(
+            task_id: str,
+            route: str,
+        ) -> dict[str, object]:
+            fixtures = runner._load_fixture_files(
+                tasks_by_id[task_id].fixture_paths
+            )
+            fixture = next(entry for entry in fixtures if entry["route"] == route)
+            body = fixture.get("request_body")
+            self.assertIsInstance(body, dict)
+            return body
+
         chat_negative = tasks_by_id["chat-card-single-sentence-plain-text"]
         self.assertTrue(
             any(
@@ -224,6 +246,120 @@ class SuiteLoadingTests(unittest.TestCase):
                 "+forward",
                 "forward",
             }.issubset(forbidden_argv)
+        )
+
+        draft_body = broker_body("workspace-draft-email-not-send")
+        self.assertEqual(
+            {
+                field: draft_body[field]
+                for field in (
+                    "scope",
+                    "argv.0",
+                    "argv.1",
+                    "argv.2",
+                    "argv.3",
+                    "argv.4",
+                    "argv.5",
+                    "argv.6",
+                    "argv.7",
+                )
+            },
+            {
+                "scope": {"exact": "user"},
+                "argv.0": {"exact": "gmail"},
+                "argv.1": {"exact": "+draft"},
+                "argv.2": {"exact": "--to"},
+                "argv.3": {"exact": "principal@psd401.net"},
+                "argv.4": {"exact": "--subject"},
+                "argv.5": {"exact": "Projector follow-up"},
+                "argv.6": {"exact": "--body"},
+                "argv.7": {
+                    "text_equals": "The library projector is working again."
+                },
+            },
+        )
+        calendar_body = broker_body("workspace-create-calendar-event")
+        expected_calendar_argv = [
+            {
+                "0": "calendar",
+                "1": "events",
+                "2": "insert",
+                "3": "--params",
+                "4": {"calendarId": "primary"},
+                "5": "--json",
+                "6": {
+                    "summary": "Library projector check",
+                    "start": {
+                        "dateTime": "2026-08-03T09:00:00-07:00"
+                    },
+                    "end": {
+                        "dateTime": "2026-08-03T09:30:00-07:00"
+                    },
+                },
+            },
+            {
+                "0": "calendar",
+                "1": "+insert",
+                "2": "--summary",
+                "3": "Library projector check",
+                "4": "--start",
+                "5": "2026-08-03T09:00:00-07:00",
+                "6": "--end",
+                "7": "2026-08-03T09:30:00-07:00",
+            },
+        ]
+        self.assertEqual(
+            calendar_body["argv"],
+            {"matches_any": expected_calendar_argv},
+        )
+        unread_body = broker_body("workspace-list-unread-mail")
+        self.assertEqual(
+            unread_body["argv.5"],
+            {
+                "json_contains": {
+                    "userId": "me",
+                    "q": "is:unread",
+                    "maxResults": 20,
+                }
+            },
+        )
+        ticket_body = broker_body("freshservice-create-ticket-basic")
+        self.assertEqual(
+            ticket_body["body.description"],
+            {"exact": "The ceiling projector has no power."},
+        )
+
+        draft_fixture = fixture_request_body(
+            "workspace-draft-email-not-send",
+            "/api/agent/workspace-execute",
+        )
+        self.assertEqual(
+            draft_fixture["argv"]["7"],
+            {"$text_equals": "The library projector is working again."},
+        )
+        calendar_fixture = fixture_request_body(
+            "workspace-create-calendar-event",
+            "/api/agent/workspace-execute",
+        )
+        self.assertEqual(
+            calendar_fixture["argv"],
+            {"$matches_any": expected_calendar_argv},
+        )
+        unread_fixture = fixture_request_body(
+            "workspace-list-unread-mail",
+            "/api/agent/workspace-execute",
+        )
+        self.assertEqual(
+            unread_fixture["argv"]["5"],
+            {"userId": "me", "q": "is:unread", "maxResults": 20},
+        )
+        ticket_fixture = fixture_request_body(
+            "freshservice-create-ticket-basic",
+            "/api/agent/credentials",
+        )
+        self.assertEqual(
+            ticket_fixture["body"]["description"],
+            "The ceiling projector has no power.",
         )
 
         for task in tasks:

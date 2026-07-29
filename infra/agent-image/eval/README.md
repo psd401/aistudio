@@ -162,8 +162,13 @@ A fixture file is a list (or an object containing a `fixtures` list):
 ]
 ```
 
-`request_body` is an optional partial-object selector. A request to an
-allowlisted route without a matching fixture returns a named
+`request_body` is an optional recursive partial-object selector. Mapping keys
+may address list positions (for example, `"argv": {"4": "--params"}`), and a
+mapping selector applied to a JSON-string value matches its decoded fields.
+Use `{"$text_equals": "..."}` when plain text must match exactly after trimming
+transport whitespace. Use `{"$matches_any": [{...}, {...}]}` to enumerate
+fully specified alternate request shapes. A request to an allowlisted route
+without a matching fixture returns a named
 `EvalFixtureMissing` response and automatically fails the trial; it never
 falls through to a live service or a silent empty response.
 Broker operations mirror production: fixtures and requests must use `POST`,
@@ -175,8 +180,12 @@ tasks reject them instead of grading an empty capture.
 Available graders:
 
 - `broker_request` matches route/method and optional body fields. Body matchers
-  are `exact`, `contains_any`, and `numeric_equals`; dot paths address nested
-  fields.
+  are `exact`, `contains_any`, `json_contains`, `matches_any`,
+  `numeric_equals`, and `text_equals`; dot paths address nested fields.
+  `json_contains` parses a JSON string and recursively matches the declared
+  subset. `matches_any` accepts a non-empty list of recursive selectors for
+  explicitly supported request shapes. `text_equals` ignores leading/trailing
+  transport whitespace but otherwise requires exact text.
 - `no_route_called` asserts the selected route/method received no request. It
   accepts the same optional `body` matchers as `broker_request`, which lets a
   task forbid a send operation while permitting a draft on the shared

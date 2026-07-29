@@ -14,9 +14,9 @@ from dataclasses import dataclass
 from numbers import Real
 
 try:
-    from ..broker_stub import ALLOWED_AGENT_BROKER_ROUTES
+    from ..broker_stub import ALLOWED_AGENT_BROKER_ROUTES, mapping_contains
 except ImportError:
-    from broker_stub import ALLOWED_AGENT_BROKER_ROUTES
+    from broker_stub import ALLOWED_AGENT_BROKER_ROUTES, mapping_contains
 
 
 SUPPORTED_GRADERS = frozenset(
@@ -28,7 +28,16 @@ SUPPORTED_GRADERS = frozenset(
         "trajectory_in_order",
     }
 )
-BODY_MATCHERS = frozenset({"exact", "contains_any", "numeric_equals"})
+BODY_MATCHERS = frozenset(
+    {
+        "exact",
+        "contains_any",
+        "json_contains",
+        "matches_any",
+        "numeric_equals",
+        "text_equals",
+    }
+)
 
 
 class GraderConfigurationError(ValueError):
@@ -120,14 +129,14 @@ def _validate_body_matchers(value: object) -> None:
                 f"broker_request body matcher for {field} uses unsupported operator "
                 f"{operator}"
             )
-        if operator == "contains_any":
+        if operator in {"contains_any", "matches_any"}:
             if (
                 not isinstance(expected, Sequence)
                 or isinstance(expected, (str, bytes))
                 or not expected
             ):
                 raise GraderConfigurationError(
-                    f"broker_request contains_any matcher for {field} "
+                    f"broker_request {operator} matcher for {field} "
                     "must contain a non-empty list"
                 )
         if operator == "numeric_equals" and (
@@ -136,6 +145,16 @@ def _validate_body_matchers(value: object) -> None:
             raise GraderConfigurationError(
                 f"broker_request numeric_equals matcher for {field} "
                 "must contain a number"
+            )
+        if operator == "json_contains" and not isinstance(expected, Mapping):
+            raise GraderConfigurationError(
+                f"broker_request json_contains matcher for {field} "
+                "must contain an object"
+            )
+        if operator == "text_equals" and not isinstance(expected, str):
+            raise GraderConfigurationError(
+                f"broker_request text_equals matcher for {field} "
+                "must contain a string"
             )
 
 
@@ -275,6 +294,31 @@ def _match_body(
                 return (
                     False,
                     f"body field {field} contained none of {candidates!r}",
+                )
+            continue
+        if operator == "json_contains":
+            if not mapping_contains(actual, expected):
+                return (
+                    False,
+                    f"body field {field} did not contain JSON {expected!r}",
+                )
+            continue
+        if operator == "matches_any":
+            alternatives = list(expected)
+            if not any(
+                mapping_contains(actual, alternative)
+                for alternative in alternatives
+            ):
+                return (
+                    False,
+                    f"body field {field} matched none of {alternatives!r}",
+                )
+            continue
+        if operator == "text_equals":
+            if not isinstance(actual, str) or actual.strip() != expected.strip():
+                return (
+                    False,
+                    f"body field {field} expected text {expected!r}, got {actual!r}",
                 )
     return True, "body matched"
 

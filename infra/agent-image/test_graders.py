@@ -52,6 +52,27 @@ class BrokerRequestGraderTests(unittest.TestCase):
                         "operation": {"exact": "calendar.events.create"},
                         "attendees": {"contains_any": ["staff@example.com"]},
                         "durationMinutes": {"numeric_equals": 30.0},
+                        "params": {
+                            "json_contains": {
+                                "calendarId": "primary",
+                                "maxResults": 20,
+                            }
+                        },
+                        "note": {"text_equals": "requested text"},
+                        "argv": {
+                            "matches_any": [
+                                {
+                                    "0": "calendar",
+                                    "1": "events",
+                                    "2": "insert",
+                                },
+                                {
+                                    "0": "calendar",
+                                    "1": "+insert",
+                                    "2": "--summary",
+                                },
+                            ]
+                        },
                     },
                 }
             ],
@@ -63,6 +84,12 @@ class BrokerRequestGraderTests(unittest.TestCase):
                         "operation": "calendar.events.create",
                         "attendees": ["owner@example.com", "staff@example.com"],
                         "durationMinutes": 30,
+                        "params": (
+                            '{"calendarId":"primary","maxResults":20,'
+                            '"singleEvents":true}'
+                        ),
+                        "note": " requested text\n",
+                        "argv": ["calendar", "+insert", "--summary", "Standup"],
                     },
                 }
             ],
@@ -93,6 +120,74 @@ class BrokerRequestGraderTests(unittest.TestCase):
 
         self.assertFalse(decision["passed"])
         self.assertIn("expected exact", decision["results"][0]["reason"])
+
+    def test_json_contains_rejects_missing_fields_and_malformed_json(self):
+        spec = {
+            "type": "broker_request",
+            "route": "/api/agent/workspace-execute",
+            "body": {
+                "params": {
+                    "json_contains": {
+                        "q": "is:unread",
+                        "maxResults": 20,
+                    }
+                }
+            },
+        }
+        for params in ('{"q":"is:unread"}', "not-json"):
+            with self.subTest(params=params):
+                decision = grade(
+                    [spec],
+                    requests=[
+                        {
+                            "route": "/api/agent/workspace-execute",
+                            "method": "POST",
+                            "body": {"params": params},
+                        }
+                    ],
+                )
+
+                self.assertFalse(decision["passed"])
+                self.assertIn(
+                    "did not contain JSON",
+                    decision["results"][0]["reason"],
+                )
+
+    def test_matches_any_rejects_when_no_structured_alternative_matches(self):
+        decision = grade(
+            [
+                {
+                    "type": "broker_request",
+                    "route": "/api/agent/workspace-execute",
+                    "body": {
+                        "argv": {
+                            "matches_any": [
+                                {
+                                    "0": "calendar",
+                                    "1": "events",
+                                    "2": "insert",
+                                },
+                                {
+                                    "0": "calendar",
+                                    "1": "+insert",
+                                    "2": "--summary",
+                                },
+                            ]
+                        }
+                    },
+                }
+            ],
+            requests=[
+                {
+                    "route": "/api/agent/workspace-execute",
+                    "method": "POST",
+                    "body": {"argv": ["calendar", "events", "list"]},
+                }
+            ],
+        )
+
+        self.assertFalse(decision["passed"])
+        self.assertIn("matched none", decision["results"][0]["reason"])
 
     def test_no_route_called_rejects_a_forbidden_side_effect(self):
         decision = grade(
@@ -372,6 +467,36 @@ class GraderValidationTests(unittest.TestCase):
                         "type": "no_route_called",
                         "route": "/api/agent/workspace-execute",
                         "body": {"argv": {"contains_any": ["+send"], "exact": []}},
+                    }
+                ]
+            )
+
+    def test_json_contains_requires_an_object_selector(self):
+        with self.assertRaisesRegex(
+            graders.GraderConfigurationError,
+            "must contain an object",
+        ):
+            graders.validate_grader_specs(
+                [
+                    {
+                        "type": "broker_request",
+                        "route": "/api/agent/workspace-execute",
+                        "body": {"argv.5": {"json_contains": "is:unread"}},
+                    }
+                ]
+            )
+
+    def test_matches_any_requires_non_empty_alternatives(self):
+        with self.assertRaisesRegex(
+            graders.GraderConfigurationError,
+            "must contain a non-empty list",
+        ):
+            graders.validate_grader_specs(
+                [
+                    {
+                        "type": "broker_request",
+                        "route": "/api/agent/workspace-execute",
+                        "body": {"argv": {"matches_any": []}},
                     }
                 ]
             )

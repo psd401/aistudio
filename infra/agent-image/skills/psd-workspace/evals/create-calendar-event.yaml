@@ -8,6 +8,5 @@ trials: 3
 fixtures:
   - fixtures/create-calendar-event.json
 graders:
-  - {"type":"broker_request","route":"/api/agent/workspace-execute","method":"POST","body":{"scope":{"exact":"user"},"argv.0":{"exact":"calendar"},"argv.1":{"exact":"events"},"argv.2":{"exact":"insert"}}}
-  - {"type":"output_match","pattern":"Library projector check"}
+  - {"type":"broker_request","route":"/api/agent/workspace-execute","method":"POST","body":{"scope":{"exact":"user"},"argv":{"matches_any":[{"0":"calendar","1":"events","2":"insert","3":"--params","4":{"calendarId":"primary"},"5":"--json","6":{"summary":"Library projector check","start":{"dateTime":"2026-08-03T09:00:00-07:00"},"end":{"dateTime":"2026-08-03T09:30:00-07:00"}}},{"0":"calendar","1":"+insert","2":"--summary","3":"Library projector check","4":"--start","5":"2026-08-03T09:00:00-07:00","6":"--end","7":"2026-08-03T09:30:00-07:00"}]}}}
   - {"type":"output_match","pattern":"created|scheduled","ignore_case":true}

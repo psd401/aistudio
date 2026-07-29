@@ -8,5 +8,5 @@ trials: 3
 fixtures:
   - fixtures/create-ticket-basic.json
 graders:
-  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"freshservice"},"path":{"exact":"/tickets"},"method":{"exact":"POST"},"body.subject":{"exact":"Harbor Ridge library projector offline"},"body.email":{"exact":"teacher@psd401.net"},"body.priority":{"numeric_equals":2}}}
+  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"freshservice"},"path":{"exact":"/tickets"},"method":{"exact":"POST"},"body.subject":{"exact":"Harbor Ridge library projector offline"},"body.description":{"exact":"The ceiling projector has no power."},"body.email":{"exact":"teacher@psd401.net"},"body.priority":{"numeric_equals":2}}}
   - {"type":"output_match","pattern":"48291"}

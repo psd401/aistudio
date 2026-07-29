@@ -3,7 +3,19 @@
     "route": "/api/agent/workspace-execute",
     "method": "POST",
     "request_body": {
-      "scope": "user"
+      "scope": "user",
+      "argv": {
+        "0": "gmail",
+        "1": "users",
+        "2": "messages",
+        "3": "list",
+        "4": "--params",
+        "5": {
+          "userId": "me",
+          "q": "is:unread",
+          "maxResults": 20
+        }
+      }
     },
     "response": {
       "status": 200,
