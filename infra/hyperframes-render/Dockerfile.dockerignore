@@ -1,0 +1,8 @@
+**
+!validated-fs.cjs
+!hyperframes-render/
+!hyperframes-render/Dockerfile
+!hyperframes-render/Dockerfile.dockerignore
+!hyperframes-render/entrypoint.sh
+!hyperframes-render/handler.js
+!hyperframes-render/package.json
