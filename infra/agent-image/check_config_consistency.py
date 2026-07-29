@@ -10,9 +10,9 @@ build (no Docker):
      table it must match. A fat-fingered contextWindow (20_000 instead of
      200_000, or 2_000_000) silently changes pruning behavior and cost.
 
-  2. apiKey hydration path — every provider whose apiKey is an `env:VAR`
-     placeholder must have VAR actually hydrated in agentcore_wrapper.py. A
-     provider that points at an env var nothing sets boots with no credential
+  2. apiKey credential path — every provider whose apiKey is an `env:VAR`
+     placeholder must have VAR hydrated or confined to the root-owned relay in
+     agentcore_wrapper.py. An unresolved placeholder boots with no credential
      and every model call 401s (the r11-class "missing provider" failure).
 
   3. prompt-caching reachability — if openclaw.json asks for prompt caching
@@ -50,6 +50,7 @@ KNOWN_CONTEXT_WINDOWS: Dict[str, int] = {
     "anthropic.claude-sonnet-5": 200000,
     "us.anthropic.claude-sonnet-5": 200000,
     "claude-sonnet-5": 200000,
+    "zai.glm-5": 200000,
 }
 
 # Generic sanity band for models not in the known table (catches order-of-
@@ -87,6 +88,13 @@ _CACHE_CAPABLE_PLUGIN_MIN: Dict[str, str] = {
 _PLUGIN_PACK_RE = re.compile(
     r"npm pack @openclaw/amazon-bedrock-provider@([0-9A-Za-z.\-]+)"
 )
+_PLUGIN_VERSION_ARG_RE = re.compile(
+    r"^ARG\s+BEDROCK_PLUGIN_VERSION=([0-9A-Za-z.\-]+)\s*$", re.MULTILINE,
+)
+_PLUGIN_PACK_ARG_RE = re.compile(
+    r'npm pack ["\']?@openclaw/amazon-bedrock-provider@'
+    r'\$\{BEDROCK_PLUGIN_VERSION\}["\']?'
+)
 
 # The base image is pinned by immutable digest, with the human-readable tag
 # recorded directly above it. Parsing both lets us cross-check them AND compare
@@ -98,6 +106,14 @@ _HOST_TAG_RE = re.compile(
 )
 _HOST_FROM_RE = re.compile(
     r"^FROM\s+ghcr\.io/openclaw/openclaw@(sha256:[0-9a-f]{64})", re.MULTILINE,
+)
+_HOST_IMAGE_ARG_RE = re.compile(
+    r"^ARG\s+OPENCLAW_BASE_IMAGE="
+    r"ghcr\.io/openclaw/openclaw@(sha256:[0-9a-f]{64})\s*$",
+    re.MULTILINE,
+)
+_HOST_FROM_ARG_RE = re.compile(
+    r"^FROM\s+\$\{OPENCLAW_BASE_IMAGE\}\s*$", re.MULTILINE,
 )
 
 
@@ -166,6 +182,9 @@ def parse_pinned_plugin_version(dockerfile_path: str) -> Tuple[Optional[str], Li
         return None, [f"cannot read Dockerfile {dockerfile_path}: {exc}"]
 
     matches = _PLUGIN_PACK_RE.findall(source)
+    argument_match = _PLUGIN_VERSION_ARG_RE.search(source)
+    if argument_match and _PLUGIN_PACK_ARG_RE.search(source):
+        matches.append(argument_match.group(1))
     if not matches:
         return None, [
             "Dockerfile has no `npm pack @openclaw/amazon-bedrock-provider@<version>` "
@@ -178,17 +197,20 @@ def parse_pinned_plugin_version(dockerfile_path: str) -> Tuple[Optional[str], Li
         ]
     version = matches[0]
     violations: List[str] = []
-    # The same version appears in the tar/rm filenames right after npm pack; a
-    # copy-paste slip there fails the build deep in the RUN with a confusing
-    # "No such file" instead of a clear version mismatch.
-    for filename in (
-        f"openclaw-amazon-bedrock-provider-{version}.tgz",
+    # The tar/rm filenames must use the same literal version or the same
+    # parameter. A copy-paste slip otherwise fails deep in the RUN.
+    literal_filename = f"openclaw-amazon-bedrock-provider-{version}.tgz"
+    parameter_filename = (
+        "openclaw-amazon-bedrock-provider-${BEDROCK_PLUGIN_VERSION}.tgz"
+    )
+    if (
+        source.count(literal_filename) < 2
+        and source.count(parameter_filename) < 2
     ):
-        if source.count(filename) < 2:
-            violations.append(
-                f"Dockerfile pins plugin {version} but its tar/rm filenames do "
-                f"not both reference {filename}"
-            )
+        violations.append(
+            f"Dockerfile pins plugin {version} but its tar/rm filenames do "
+            "not both reference the same version parameter"
+        )
     return version, violations
 
 
@@ -279,6 +301,9 @@ def check_upstream_pins(dockerfile_path: str) -> List[str]:
 
     tag_match = _HOST_TAG_RE.search(source)
     from_match = _HOST_FROM_RE.search(source)
+    host_argument_match = _HOST_IMAGE_ARG_RE.search(source)
+    if not from_match and host_argument_match and _HOST_FROM_ARG_RE.search(source):
+        from_match = host_argument_match
     plugin_version, _ = parse_pinned_plugin_version(dockerfile_path)
     if not tag_match or not from_match:
         return ["cannot verify upstream pins — Dockerfile tag/FROM lines unreadable"]
@@ -351,6 +376,9 @@ def check_host_plugin_compatibility(dockerfile_path: str) -> List[str]:
 
     tag_match = _HOST_TAG_RE.search(source)
     from_match = _HOST_FROM_RE.search(source)
+    host_argument_match = _HOST_IMAGE_ARG_RE.search(source)
+    if not from_match and host_argument_match and _HOST_FROM_ARG_RE.search(source):
+        from_match = host_argument_match
     if not tag_match:
         return violations + [
             "Dockerfile has no `# ghcr.io/openclaw/openclaw:<tag>` + `# index: "
@@ -502,20 +530,31 @@ def check_apikey_hydration(config: dict, wrapper_path: str) -> List[str]:
         if not env_var:
             violations.append(f"{provider_name}: apiKey 'env:' has no variable name")
             continue
-        # The wrapper must actually SET this env var (hydration), i.e. contain an
-        # `os.environ["VAR"]` reference — not merely the bare name as a substring.
-        # A bare-name match false-passes when the var is a substring of another
-        # name (e.g. `TOKEN` inside `AWS_BEARER_TOKEN_BEDROCK`) or appears only in
-        # a comment, exactly the r11 "missing provider" class this gate exists to
-        # catch. Accept single- or double-quoted subscript.
+        # The wrapper must either hydrate this exact env var or route the
+        # Bedrock candidate placeholder through the root-only relay. Bare-name
+        # matches false-pass when a variable is only a substring/comment, so
+        # require the complete source contract for the relay path.
         hydration_markers = (
             f'os.environ["{env_var}"]',
             f"os.environ['{env_var}']",
         )
-        if not any(marker in wrapper_src for marker in hydration_markers):
+        candidate_relay_markers = (
+            f'BEDROCK_BEARER_ENV = "{env_var}"',
+            "os.environ.get(BEDROCK_BEARER_ENV",
+            "CANDIDATE_MANTLE_RELAY_API_KEY",
+            '"CANDIDATE_MANTLE_BEARER_TOKEN": value',
+            "os.environ.pop(BEDROCK_BEARER_ENV",
+        )
+        has_direct_hydration = any(
+            marker in wrapper_src for marker in hydration_markers
+        )
+        has_candidate_relay = env_var == "AWS_BEARER_TOKEN_BEDROCK" and all(
+            marker in wrapper_src for marker in candidate_relay_markers
+        )
+        if not has_direct_hydration and not has_candidate_relay:
             violations.append(
                 f"{provider_name}: apiKey env:{env_var} has no hydration path "
-                f'(os.environ["{env_var}"]) in {os.path.basename(wrapper_path)}'
+                f"or root-only relay in {os.path.basename(wrapper_path)}"
             )
     return violations
 

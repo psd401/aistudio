@@ -42,6 +42,251 @@ for _m in _stubbed_by_us:
 _safe = agentcore_wrapper._safe_header_value
 
 
+class TestCandidateProviderHydration(unittest.TestCase):
+    def _config(self, directory, provider):
+        import json
+        from pathlib import Path
+
+        provider = dict(provider)
+        if provider.get("apiKey") == "env:AWS_BEARER_TOKEN_BEDROCK":
+            provider.setdefault("api", "openai-completions")
+            provider.setdefault("auth", "api-key")
+            provider.setdefault(
+                "baseUrl",
+                "https://bedrock-mantle.us-east-1.api.aws/v1",
+            )
+        path = Path(directory) / "openclaw.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "models": {"providers": {"candidate": provider}},
+                    "agents": {
+                        "defaults": {
+                            "model": {
+                                "primary": (
+                                    "candidate/"
+                                    + provider.get("models", [{"id": "model"}])[0]["id"]
+                                )
+                            }
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_native_sigv4_config_is_a_strict_noop(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._config(
+                directory,
+                {"auth": "aws-sdk", "models": [{"id": "zai.glm-5"}]},
+            )
+            before = path.read_bytes()
+            with mock.patch.dict(
+                agentcore_wrapper.os.environ,
+                {},
+                clear=True,
+            ):
+                self.assertEqual(
+                    agentcore_wrapper.hydrate_configured_provider_api_keys(
+                        str(path)
+                    ),
+                    {},
+                )
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_existing_bearer_is_confined_to_the_root_relay(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._config(
+                directory,
+                {
+                    "auth": "api-key",
+                    "apiKey": "env:AWS_BEARER_TOKEN_BEDROCK",
+                    "models": [{"id": "qwen.qwen3-coder-next"}],
+                },
+            )
+            original_metadata = path.stat()
+            with mock.patch.dict(
+                agentcore_wrapper.os.environ,
+                {"AWS_BEARER_TOKEN_BEDROCK": "candidate-secret"},
+                clear=True,
+            ), mock.patch.object(
+                agentcore_wrapper.os,
+                "fchown",
+                wraps=agentcore_wrapper.os.fchown,
+            ) as fchown:
+                relay_environment = (
+                    agentcore_wrapper.hydrate_configured_provider_api_keys(
+                        str(path)
+                    )
+                )
+                self.assertNotIn(
+                    "AWS_BEARER_TOKEN_BEDROCK",
+                    agentcore_wrapper.os.environ,
+                )
+            fchown.assert_called_once_with(
+                mock.ANY,
+                original_metadata.st_uid,
+                original_metadata.st_gid,
+            )
+            config = json.loads(path.read_text(encoding="utf-8"))
+            rewritten_metadata = path.stat()
+            self.assertEqual(rewritten_metadata.st_uid, original_metadata.st_uid)
+            self.assertEqual(rewritten_metadata.st_gid, original_metadata.st_gid)
+            self.assertEqual(
+                rewritten_metadata.st_mode & 0o777,
+                original_metadata.st_mode & 0o777,
+            )
+            self.assertEqual(
+                config["models"]["providers"]["candidate"]["apiKey"],
+                agentcore_wrapper.CANDIDATE_MANTLE_RELAY_API_KEY,
+            )
+            self.assertEqual(
+                config["models"]["providers"]["candidate"]["baseUrl"],
+                agentcore_wrapper.CANDIDATE_MANTLE_RELAY_BASE_URL,
+            )
+            self.assertNotIn("candidate-secret", path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                relay_environment["CANDIDATE_MANTLE_BEARER_TOKEN"],
+                "candidate-secret",
+            )
+
+    def test_secret_arn_configures_only_the_root_relay(self):
+        import json
+        import tempfile
+
+        boto3 = mock.MagicMock()
+        boto3.client.return_value.get_secret_value.return_value = {
+            "SecretString": " fetched-secret ",
+            "VersionId": "version-1",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._config(
+                directory,
+                {
+                    "auth": "api-key",
+                    "apiKey": "env:AWS_BEARER_TOKEN_BEDROCK",
+                    "models": [{"id": "moonshotai.kimi-k2.5"}],
+                },
+            )
+            with mock.patch.dict(sys.modules, {"boto3": boto3}), mock.patch.dict(
+                agentcore_wrapper.os.environ,
+                {
+                    "BEDROCK_API_KEY_SECRET_ARN": "arn:aws:secretsmanager:example",
+                    "AWS_REGION": "us-east-1",
+                },
+                clear=True,
+            ):
+                relay_environment = (
+                    agentcore_wrapper.hydrate_configured_provider_api_keys(
+                        str(path)
+                    )
+                )
+                self.assertNotIn(
+                    "AWS_BEARER_TOKEN_BEDROCK",
+                    agentcore_wrapper.os.environ,
+                )
+                self.assertNotIn(
+                    "BEDROCK_API_KEY_SECRET_ARN",
+                    agentcore_wrapper.os.environ,
+                )
+            config = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                config["models"]["providers"]["candidate"]["apiKey"],
+                agentcore_wrapper.CANDIDATE_MANTLE_RELAY_API_KEY,
+            )
+            self.assertNotIn("fetched-secret", path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                relay_environment["CANDIDATE_MANTLE_BEARER_TOKEN"],
+                "fetched-secret",
+            )
+            self.assertEqual(
+                relay_environment["CANDIDATE_MANTLE_BASE_URL"],
+                "https://bedrock-mantle.us-east-1.api.aws/v1",
+            )
+
+    def test_token_provider_without_credential_fails_before_boot(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._config(
+                directory,
+                {
+                    "auth": "api-key",
+                    "apiKey": "env:AWS_BEARER_TOKEN_BEDROCK",
+                    "models": [{"id": "openai.gpt-oss-120b"}],
+                },
+            )
+            with mock.patch.dict(
+                agentcore_wrapper.os.environ,
+                {},
+                clear=True,
+            ), self.assertRaisesRegex(RuntimeError, "neither"):
+                agentcore_wrapper.hydrate_configured_provider_api_keys(str(path))
+
+    def test_proxy_child_alone_receives_candidate_bearer(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        response = mock.MagicMock()
+        response.__enter__.return_value.status = 200
+        relay_environment = {
+            "CANDIDATE_MANTLE_API": "openai-completions",
+            "CANDIDATE_MANTLE_BASE_URL": (
+                "https://bedrock-mantle.us-east-1.api.aws/v1"
+            ),
+            "CANDIDATE_MANTLE_BEARER_TOKEN": "candidate-secret",
+            "CANDIDATE_MANTLE_MODEL_ID": "zai.glm-5",
+        }
+        with mock.patch.object(
+            agentcore_wrapper.subprocess,
+            "Popen",
+            return_value=process,
+        ) as popen, mock.patch(
+            "urllib.request.urlopen",
+            return_value=response,
+        ), mock.patch.dict(
+            agentcore_wrapper.os.environ,
+            {"APP_BASE_URL": "https://dev.example.invalid"},
+            clear=True,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_mantle_proxy_process",
+            None,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_candidate_relay_environment",
+            {},
+        ):
+            agentcore_wrapper.start_mantle_proxy(relay_environment)
+
+        child_environment = popen.call_args.kwargs["env"]
+        self.assertEqual(
+            child_environment["CANDIDATE_MANTLE_BEARER_TOKEN"],
+            "candidate-secret",
+        )
+        self.assertNotIn("AWS_BEARER_TOKEN_BEDROCK", child_environment)
+        self.assertNotIn("BEDROCK_API_KEY_SECRET_ARN", child_environment)
+
+    def test_telemetry_fallback_uses_configured_candidate_model(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._config(
+                directory,
+                {"auth": "aws-sdk", "models": [{"id": "zai.glm-5"}]},
+            )
+            self.assertEqual(
+                agentcore_wrapper._configured_primary_model_id(str(path)),
+                "zai.glm-5",
+            )
+
+
 class TestInvocationContextInstaller(unittest.TestCase):
     def test_installs_authority_atomically_with_root_only_modes(self):
         import os

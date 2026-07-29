@@ -11,7 +11,8 @@ From the repository root:
 
 ```bash
 python3 infra/agent-image/eval/runner.py \
-  --image <tag-or-digest> \
+  --image <immutable-ecr-uri@sha256:digest> \
+  --candidate-metadata infra/agent-image/.candidate-builds/<tag>.json \
   --suite infra/agent-image/eval/suites/regression.yaml \
   --trials 3 \
   --out /tmp/issue-1426-regression.jsonl \
@@ -48,6 +49,20 @@ credential action's `aws-expiration` output.
 When a post-mint credential check recycles the runtime, the runner discards
 that authority and remints it for the ready container before invoking.
 
+Every run requires an immutable `repository@sha256:...` image reference, even
+when `--candidate-metadata` is omitted. Mutable local or ECR tags are rejected
+before Docker starts so results cannot be attributed to moving image bytes.
+Candidate-matrix runs must pass the finalized `.candidate-builds/<tag>.json`
+sidecar. The runner requires the sidecar's immutable digest as `--image` and
+rejects even its matching mutable tag. Native SigV4 metadata causes no
+provider-secret lookup. For Mantle OpenAI/Anthropic metadata, the runner resolves
+`BedrockApiKeySecretArn` from the selected environment's agent-platform stack
+and passes only that ARN into each short-lived container. The root-owned relay
+reads the value with the same refreshed AWS credential chain and injects it
+only into the fixed AWS model request; the node gateway cannot read it. The
+caller therefore needs `secretsmanager:GetSecretValue` on that environment
+secret for Mantle evaluations.
+
 Owner-bound skill tasks must pass an eval-only address on the real PSD domain
 with `--owner-email` (or `AGENT_EVAL_OWNER_EMAIL`). The signed context makes
 that address the trial's actor and owner, so the model exercises the same
@@ -59,6 +74,33 @@ used.
 JSONL output is created with owner-only (`0600`) permissions because complete
 metadata can contain prompts, messages, and tool details. Keep it in an
 issue-specific temporary path; do not commit run transcripts.
+
+## Build a reproducible candidate image
+
+The one-axis candidate matrix lives under `eval/candidates/`. From
+`infra/agent-image`, build and push a selected candidate with:
+
+```bash
+./build-and-push.sh \
+  --candidate eval/candidates/manifests/glm-5-native.json \
+  2026-07-29-glm-5-native
+```
+
+`candidate.py` compares the full model/provider, harness, and prompt axes to
+`manifests/baseline.json` and requires exactly the declared axis to differ. It
+then materializes the config and prompt, validates the effective host/plugin
+pins and cache behavior with the existing consistency gate, and leaves the
+Dockerfile's default Sonnet/native-SigV4 behavior unchanged.
+
+Before push, the candidate must boot and pass one exact-output graded turn.
+After push, `.candidate-builds/<tag>.json` binds the immutable digest to its
+model ID, provider path, harness and plugin pins, prompt variant, cache mode,
+axis delta, cost sources, and source commit. That local sidecar is comparison
+evidence and the runner's provider-auth contract, not a deployment instruction.
+
+See [`candidates/README.md`](./candidates/README.md) for the complete
+OpenAI/GLM/Kimi/Qwen/Claude manifest matrix and the verified native Bedrock,
+Mantle OpenAI-compatible, and Mantle Anthropic Messages contracts.
 
 ## Transcript-free summaries
 
@@ -497,6 +539,7 @@ UV_CACHE_DIR=/tmp/issue-1426-uv-cache \
   infra/agent-image/test_mantle_proxy_logging.py \
   infra/agent-image/test_check_bootstrap_budget.py \
   infra/agent-image/test_check_config_consistency.py \
+  infra/agent-image/test_candidate_matrix.py \
   infra/agent-image/test_workspace_sync.py \
   infra/agent-image/test_chat_format.py \
   infra/agent-image/test_artifact_publisher.py \

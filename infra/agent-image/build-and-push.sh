@@ -4,6 +4,7 @@
 # Usage:
 #   ./build-and-push.sh                    # Uses default tag: YYYY-MM-DD-initial
 #   ./build-and-push.sh my-custom-tag      # Uses custom tag
+#   ./build-and-push.sh --candidate eval/candidates/manifests/glm-5-native.json [tag]
 #
 # Prerequisites:
 #   - AWS CLI configured with appropriate credentials
@@ -21,6 +22,20 @@
 
 set -euo pipefail
 
+CANDIDATE_MANIFEST=""
+if [ "${1:-}" = "--candidate" ]; then
+  if [ -z "${2:-}" ]; then
+    echo "ERROR: --candidate requires a manifest path." >&2
+    exit 2
+  fi
+  CANDIDATE_MANIFEST="${2}"
+  shift 2
+fi
+if [ "$#" -gt 1 ]; then
+  echo "ERROR: unexpected extra arguments." >&2
+  exit 2
+fi
+
 ENVIRONMENT="${ENVIRONMENT:-dev}"
 # Capitalize first letter for stack name (portable — no bashisms or GNU sed)
 ENV_CAPITALIZED="$(echo "${ENVIRONMENT}" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
@@ -29,6 +44,39 @@ REGION="${AWS_REGION:-us-east-1}"
 TAG="${1:-$(date +%Y-%m-%d)-initial}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+if ! [[ "${TAG}" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+  echo "ERROR: image tag must contain only letters, digits, dot, underscore, or hyphen." >&2
+  exit 2
+fi
+
+BUILD_CONFIG="${SCRIPT_DIR}/openclaw.json"
+BUILD_DOCKERFILE="${SCRIPT_DIR}/Dockerfile"
+BOOTSTRAP_SOURCE_DIR="${SCRIPT_DIR}"
+CANDIDATE_STAGING=""
+CANDIDATE_METADATA=""
+CANDIDATE_ID=""
+CANDIDATE_PROVIDER_PATH=""
+CANDIDATE_REQUIRES_BEARER="false"
+OPENCLAW_CONFIG_BUILD_PATH="openclaw.json"
+SOUL_PREAMBLE_BUILD_PATH="SOUL.md"
+PSD_RULES_BUILD_PATH="skills/psd-rules/SKILL.md"
+OPENCLAW_BASE_IMAGE=""
+BEDROCK_PLUGIN_VERSION=""
+BEDROCK_PLUGIN_ASSERTION=""
+CID=""
+
+cleanup_build() {
+  if [ -n "${CID}" ]; then
+    docker rm -f "${CID}" >/dev/null 2>&1 || true
+  fi
+  rm -f "${SCRIPT_DIR}/skills/validated-fs.cjs"
+  case "${CANDIDATE_STAGING}" in
+    "${SCRIPT_DIR}"/.candidate-staging.*)
+      rm -rf -- "${CANDIDATE_STAGING}"
+      ;;
+  esac
+}
+trap cleanup_build EXIT
 
 SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 if ! [[ "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -42,10 +90,42 @@ if [ -n "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=all -- \
   exit 1
 fi
 
+PYTHON="${PYTHON:-python3}"
+if [ -n "${CANDIDATE_MANIFEST}" ]; then
+  CANDIDATE_STAGING="$(mktemp -d "${SCRIPT_DIR}/.candidate-staging.XXXXXX")"
+  CANDIDATE_PLAN="${CANDIDATE_STAGING}/plan.json"
+  "${PYTHON}" "${SCRIPT_DIR}/eval/candidates/candidate.py" prepare \
+    --manifest "${CANDIDATE_MANIFEST}" \
+    --output-dir "${CANDIDATE_STAGING}" \
+    --source-commit "${SOURCE_COMMIT}" >/dev/null
+
+  candidate_plan_value() {
+    "${PYTHON}" -c \
+      'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))[sys.argv[2]])' \
+      "${CANDIDATE_PLAN}" "$1"
+  }
+  CANDIDATE_ID="$(candidate_plan_value candidateId)"
+  CANDIDATE_PROVIDER_PATH="$(candidate_plan_value providerPath)"
+  CANDIDATE_REQUIRES_BEARER="$(candidate_plan_value requiresBearerToken | tr '[:upper:]' '[:lower:]')"
+  OPENCLAW_CONFIG_BUILD_PATH="$(candidate_plan_value openclawConfig)"
+  BUILD_CONFIG="${SCRIPT_DIR}/${OPENCLAW_CONFIG_BUILD_PATH}"
+  BUILD_DOCKERFILE="$(candidate_plan_value dockerfile)"
+  BOOTSTRAP_SOURCE_DIR="${CANDIDATE_STAGING}"
+  SOUL_PREAMBLE_BUILD_PATH="$(candidate_plan_value soulPreamble)"
+  PSD_RULES_BUILD_PATH="$(candidate_plan_value psdRulesSkill)"
+  OPENCLAW_BASE_IMAGE="$(candidate_plan_value baseImage)"
+  BEDROCK_PLUGIN_VERSION="$(candidate_plan_value bedrockPluginVersion)"
+  BEDROCK_PLUGIN_ASSERTION="$(candidate_plan_value expectedPluginToken)"
+  CANDIDATE_METADATA="$(candidate_plan_value metadata)"
+fi
+
 echo "=== PSD Agent Image Build & Push ==="
 echo "Environment: ${ENVIRONMENT}"
 echo "Tag: ${TAG}"
 echo "Source commit: ${SOURCE_COMMIT}"
+if [ -n "${CANDIDATE_ID}" ]; then
+  echo "Candidate: ${CANDIDATE_ID} (${CANDIDATE_PROVIDER_PATH})"
+fi
 echo ""
 
 # Supply-chain enforcement gate (SEC-009): the agent image must ship no
@@ -93,8 +173,6 @@ echo ""
 #                       config-consistency gates that guard the #1138 class.
 # Static gates run fail-fast here (before the expensive ECR/build steps); the
 # runtime probe runs after the image is built, before push.
-PYTHON="${PYTHON:-python3}"
-
 if [ "${SKIP_STATIC_GATE:-0}" = "1" ]; then
   echo "WARNING: SKIP_STATIC_GATE=1 — static eval gates BYPASSED (emergency only)."
   echo ""
@@ -102,7 +180,9 @@ else
   echo "=== Build-time eval gate (1161): static checks ==="
 
   echo "1. Instruction-budget gate (bootstrap files vs openclaw.json limits)..."
-  if ! "${PYTHON}" "${SCRIPT_DIR}/check_bootstrap_budget.py" --source-dir "${SCRIPT_DIR}"; then
+  if ! "${PYTHON}" "${SCRIPT_DIR}/check_bootstrap_budget.py" \
+        --config "${BUILD_CONFIG}" \
+        --source-dir "${BOOTSTRAP_SOURCE_DIR}"; then
     echo "ERROR: instruction-budget gate FAILED — a bootstrap file would be" >&2
     echo "       silently truncated at boot. Trim it before building." >&2
     exit 1
@@ -117,8 +197,9 @@ else
   # never enforces peerDependencies.
   echo "2. Config self-consistency (contextWindow + apiKey hydration + pins)..."
   if ! "${PYTHON}" "${SCRIPT_DIR}/check_config_consistency.py" \
-        --config "${SCRIPT_DIR}/openclaw.json" \
+        --config "${BUILD_CONFIG}" \
         --wrapper "${SCRIPT_DIR}/agentcore_wrapper.py" \
+        --dockerfile "${BUILD_DOCKERFILE}" \
         --verify-upstream; then
     echo "ERROR: config self-consistency gate FAILED (see above)." >&2
     exit 1
@@ -161,20 +242,34 @@ echo "Building image (ARM64)..."
 # Staged (gitignored) rather than checked in twice, so it can never drift from
 # infra/validated-fs.cjs.
 cp "${SCRIPT_DIR}/../validated-fs.cjs" "${SCRIPT_DIR}/skills/validated-fs.cjs"
-docker build \
-  --platform linux/arm64 \
-  --build-arg "AISTUDIO_SOURCE_COMMIT=${SOURCE_COMMIT}" \
-  -t "${ECR_URI}:${TAG}" \
-  "${SCRIPT_DIR}"
+DOCKER_BUILD_ARGS=(
+  --platform linux/arm64
+  --build-arg "AISTUDIO_SOURCE_COMMIT=${SOURCE_COMMIT}"
+  -f "${SCRIPT_DIR}/Dockerfile"
+  -t "${ECR_URI}:${TAG}"
+)
+if [ -n "${CANDIDATE_ID}" ]; then
+  DOCKER_BUILD_ARGS+=(
+    --build-arg "OPENCLAW_CONFIG=${OPENCLAW_CONFIG_BUILD_PATH}"
+    --build-arg "SOUL_PREAMBLE=${SOUL_PREAMBLE_BUILD_PATH}"
+    --build-arg "PSD_RULES_SKILL=${PSD_RULES_BUILD_PATH}"
+    --build-arg "OPENCLAW_BASE_IMAGE=${OPENCLAW_BASE_IMAGE}"
+    --build-arg "BEDROCK_PLUGIN_VERSION=${BEDROCK_PLUGIN_VERSION}"
+    --build-arg "BEDROCK_PLUGIN_ASSERTION=${BEDROCK_PLUGIN_ASSERTION}"
+  )
+fi
+docker build "${DOCKER_BUILD_ARGS[@]}" "${SCRIPT_DIR}"
 rm -f "${SCRIPT_DIR}/skills/validated-fs.cjs"
 
 # ---------------------------------------------------------------------------
 # Build-time eval gate (issue #1161): runtime boot probe + signed canary turn.
-# The image never receives a provider credential. A canary can run only when
-# the caller supplies the trusted web origin plus a short-lived router-signed
-# invocation context AND its derived request-proof key — the web broker
-# (/api/agent/model-proxy) authorizes on all three, and agentcore_wrapper.py
-# refuses to install authority when either half of the pair is missing.
+# The default native-SigV4 image never receives a provider secret. A Mantle
+# candidate receives only the environment's secret ARN and resolves it inside
+# the short-lived probe container. Every canary also requires the trusted web
+# origin plus a short-lived router-signed invocation context AND its derived
+# request-proof key — the web broker (/api/agent/model-proxy) authorizes on all
+# three, and agentcore_wrapper.py refuses to install authority when either half
+# of the pair is missing.
 #
 # Both halves are minted by scripts/agent-workspace/mint-agent-probe-context.ts
 # (`bun run agent:probe-context`), which signs with the same HMAC key the router
@@ -279,23 +374,36 @@ except Exception:
   else
     PROBE_RAN="true"
     PROBE_TIMEOUT="${PROBE_BOOT_TIMEOUT:-120}"
-    CANARY_MESSAGE="${CANARY_MESSAGE:-Reply with exactly: OK}"
+    if [ -n "${CANDIDATE_ID}" ]; then
+      CANARY_MESSAGE="${CANARY_MESSAGE:-Reply with exactly: CANDIDATE_OK}"
+    else
+      CANARY_MESSAGE="${CANARY_MESSAGE:-Reply with exactly: OK}"
+    fi
     # The payload's user_email is identity metadata only — the broker derives
     # the real owner from the signed claims. Read it back OUT of the token so
     # the two can never disagree in logs, whoever minted the context.
     CANARY_OWNER_EMAIL=$("${PYTHON}" "${SCRIPT_DIR}/eval/probe.py" owner-email \
       "${PROBE_INVOCATION_CONTEXT}")
-    CID=""
-    # Always reap the probe container, even on failure/exit.
-    cleanup_probe() { [ -n "${CID}" ] && docker rm -f "${CID}" >/dev/null 2>&1 || true; }
-    trap cleanup_probe EXIT
-
     echo "Starting probe container against the signed web broker..."
     # Pass through host AWS creds. Build an array (rather than unquoted
     # ${VAR:+...} word-splitting) so the args are robust regardless of the
     # credential alphabet / IFS.
     PROBE_ENV_ARGS=(-e "ENVIRONMENT=${ENVIRONMENT}" -e "AWS_REGION=${REGION}"
       -e "BUILD_MARKER=${TAG}@probe" -e "APP_BASE_URL=${PROBE_APP_BASE_URL}")
+    if [ "${CANDIDATE_REQUIRES_BEARER}" = "true" ]; then
+      BEDROCK_API_KEY_SECRET_ARN=$(aws cloudformation describe-stacks \
+        --stack-name "${STACK_NAME}" \
+        --query "Stacks[0].Outputs[?OutputKey=='BedrockApiKeySecretArn'].OutputValue" \
+        --output text --region "${REGION}")
+      if [ -z "${BEDROCK_API_KEY_SECRET_ARN}" ] \
+         || [ "${BEDROCK_API_KEY_SECRET_ARN}" = "None" ]; then
+        echo "ERROR: candidate uses Mantle but BedrockApiKeySecretArn is unavailable." >&2
+        exit 1
+      fi
+      PROBE_ENV_ARGS+=(
+        -e "BEDROCK_API_KEY_SECRET_ARN=${BEDROCK_API_KEY_SECRET_ARN}"
+      )
+    fi
 
     # The agent signs its own Bedrock calls with SigV4 from the AgentCore
     # execution role, so the probe container needs REAL credentials or the
@@ -410,21 +518,41 @@ except Exception:
     # Match the extracted answer with a word-bounded, case-SENSITIVE 'OK' — a
     # bare `grep -qi ok` false-passes on strings that merely CONTAIN the
     # substring ("token", "broken", "ExpiredTokenException", "look").
-    if [ "${CANARY_STATUS}" -eq 0 ] \
-       && printf '%s' "${CANARY_ANSWER}" | grep -Eq '(^|[^A-Za-z])OK([^A-Za-z]|$)'; then
+    if [ -n "${CANDIDATE_ID}" ]; then
+      if [ "${CANARY_STATUS}" -eq 0 ] \
+         && printf '%s' "${CANARY_ANSWER}" | grep -Eq '^CANDIDATE_OK[[:space:]]*$'; then
+        CANARY_GRADED="true"
+      else
+        CANARY_GRADED="false"
+      fi
+    elif [ "${CANARY_STATUS}" -eq 0 ] \
+         && printf '%s' "${CANARY_ANSWER}" | grep -Eq '(^|[^A-Za-z])OK([^A-Za-z]|$)'; then
+      CANARY_GRADED="true"
+    else
+      CANARY_GRADED="false"
+    fi
+    if [ "${CANARY_GRADED}" = "true" ]; then
       echo "  Canary turn PASSED (answered in ${CANARY_ELAPSED}s)."
       CANARY_OK="true"
     else
-      echo "ERROR: canary turn failed (exit=${CANARY_STATUS}) or produced no 'OK' answer." >&2
+      echo "ERROR: canary turn failed (exit=${CANARY_STATUS}) or missed the expected output." >&2
       printf '%s\n' "${CANARY_OUT}" | tail -5 | sed 's/^/    [canary-raw] /' >&2
       CANARY_OK="false"
     fi
 
-    printf '{"tag":"%s","boot_ok":true,"boot_elapsed_s":%s,"canary_ok":%s,"canary_elapsed_s":%s}\n' \
-      "${TAG}" "${BOOT_ELAPSED}" "${CANARY_OK}" "${CANARY_ELAPSED}" > "${PROBE_ARTIFACT}"
+    if [ -n "${CANDIDATE_ID}" ]; then
+      printf '{"tag":"%s","candidate_id":"%s","boot_ok":true,"boot_elapsed_s":%s,"canary_ok":%s,"canary_elapsed_s":%s,"grader":"output_match","grade_passed":%s}\n' \
+        "${TAG}" "${CANDIDATE_ID}" "${BOOT_ELAPSED}" "${CANARY_OK}" \
+        "${CANARY_ELAPSED}" "${CANARY_GRADED}" > "${PROBE_ARTIFACT}"
+    else
+      printf '{"tag":"%s","boot_ok":true,"boot_elapsed_s":%s,"canary_ok":%s,"canary_elapsed_s":%s}\n' \
+        "${TAG}" "${BOOT_ELAPSED}" "${CANARY_OK}" "${CANARY_ELAPSED}" \
+        > "${PROBE_ARTIFACT}"
+    fi
     echo "  Probe artifact: ${PROBE_ARTIFACT}"
 
-    cleanup_probe; CID=""; trap - EXIT
+    docker rm -f "${CID}" >/dev/null 2>&1 || true
+    CID=""
     if [ "${CANARY_OK}" != "true" ]; then
       exit 1
     fi
@@ -454,6 +582,16 @@ DIGEST=$(aws ecr describe-images \
   --image-ids "imageTag=${TAG}" \
   --query 'imageDetails[0].imageDigest' \
   --output text)
+
+if [ -n "${CANDIDATE_ID}" ]; then
+  CANDIDATE_SIDECAR="${SCRIPT_DIR}/.candidate-builds/${TAG}.json"
+  "${PYTHON}" "${SCRIPT_DIR}/eval/candidates/candidate.py" finalize \
+    --metadata "${CANDIDATE_METADATA}" \
+    --out "${CANDIDATE_SIDECAR}" \
+    --image "${ECR_URI}:${TAG}" \
+    --digest "${DIGEST}" >/dev/null
+  echo "Candidate metadata: ${CANDIDATE_SIDECAR}"
+fi
 
 echo ""
 echo "=== Done ==="

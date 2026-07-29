@@ -23,11 +23,12 @@ built image, before `docker push`.
 
 ## Why the runtime half needs a signed context
 
-Before PR #1353 the probe handed the container a Bedrock API key secret and let
-it call the model directly. It no longer can: **the image never receives a
-provider credential.** Model calls are brokered by the web tier at
-`APP_BASE_URL/api/agent/model-proxy`, which authorizes each request from two
-things the router Lambda normally supplies:
+Before PR #1353 the production probe handed the container a Bedrock API key
+secret and let it call the model directly. The default production image no
+longer does: **its native Bedrock provider receives no provider secret** and
+signs direct Bedrock calls with the probe/execution role. Privileged broker
+calls go through `APP_BASE_URL/api/agent/model-proxy`, which authorizes each
+request from two things the router Lambda normally supplies:
 
 - **`invocation_context`** — a short-lived HMAC-signed token binding
   actor / owner / mode / session / workspace-prefix / expiry
@@ -67,6 +68,45 @@ That is usually all you need. When `AGENT_PROBE_APP_BASE_URL` and
 Both steps need AWS credentials for the target environment. If either fails,
 the build **stops** — it does not push an unverified image.
 
+### Building a one-axis candidate
+
+Candidate manifests use the same command and all four gates:
+
+```bash
+cd infra/agent-image
+./build-and-push.sh \
+  --candidate eval/candidates/manifests/glm-5-native.json \
+  2026-07-29-glm-5-native
+```
+
+The candidate path validates that exactly one of model/provider, harness, or
+prompt differs from the committed baseline. The Dockerfile defaults are still
+the production Sonnet/native-SigV4 inputs; the selected config, immutable host
+digest, provider-plugin version/assertion, and prompt paths arrive only as
+candidate build arguments.
+
+Candidate canaries are deterministic graded turns: the prompt requests exactly
+`CANDIDATE_OK`, the extracted final result must fully match, and the probe
+artifact records `"grader":"output_match"` plus `grade_passed`. After push, the
+command resolves the ECR digest and writes
+`infra/agent-image/.candidate-builds/<tag>.json`, binding that digest to the
+model/provider path, harness pin, prompt variant, cache mode, varied axis,
+source commit, and cited costs.
+
+Native candidates use the active AWS credential chain. Mantle candidates
+explicitly opt into the stack's `BedrockApiKeySecretArn`; the root-owned
+loopback relay fetches and injects that API key only into the fixed AWS model
+request. OpenClaw receives a non-secret sentinel and cannot read either the
+bearer or secret ARN. The checked-in native production config contains no
+API-key placeholder, so this relay configuration is a strict no-op on the
+default build.
+
+See
+[`infra/agent-image/eval/candidates/README.md`](../../infra/agent-image/eval/candidates/README.md)
+for the complete OpenAI/GLM/Kimi/Qwen/Claude matrix, provider API/auth/base URL
+contracts, IAM and cross-region ARN requirements, caching rules, and official
+cost sources.
+
 ## Running the repeated local eval
 
 The build gate's SSE/payload helpers are also used by
@@ -76,11 +116,20 @@ schema unchanged:
 
 ```bash
 python3 infra/agent-image/eval/runner.py \
-  --image <tag-or-digest> \
+  --image <immutable-ecr-uri@sha256:digest> \
+  --candidate-metadata infra/agent-image/.candidate-builds/<tag>.json \
   --suite infra/agent-image/eval/suites/core.yaml \
   --trials 3 \
   --out /tmp/agent-eval-core.jsonl
 ```
+
+Every runner invocation requires an immutable `repository@sha256:...` image,
+including runs without candidate metadata. The finalized sidecar additionally
+makes provider authentication fail closed: `--image` must match its immutable
+digest (the matching mutable tag is rejected);
+native SigV4 candidates receive no provider secret; Mantle candidates resolve
+the environment stack's `BedrockApiKeySecretArn` and pass only that ARN to the
+short-lived eval container's root relay.
 
 Pure tasks share a booted container but receive a fresh AgentCore session UUID
 and freshly minted signed context on every trial. Workspace-mutating tasks get
@@ -150,7 +199,7 @@ trusted-broker check.
 | `AGENT_PROBE_REQUEST_PROOF_KEY` | Derived request-proof key. Auto-minted alongside the token. |
 | `PROBE_BOOT_TIMEOUT` | Seconds to wait for `BOOT_OK` (default 120). |
 | `PROBE_CANARY_TIMEOUT` | Seconds to wait for the canary answer (default 120). |
-| `CANARY_MESSAGE` | Canary prompt (default `Reply with exactly: OK`). |
+| `CANARY_MESSAGE` | Canary prompt (default `Reply with exactly: OK`; candidate default `Reply with exactly: CANDIDATE_OK`). |
 | `PROBE_ARTIFACT_DIR` | Where probe result JSON is written (default `infra/agent-image/.build-probes`). |
 
 ### Bypasses
@@ -181,6 +230,8 @@ Each build writes `infra/agent-image/.build-probes/<tag>.json`:
 ```jsonc
 // verified
 {"tag":"2026-07-27-x","boot_ok":true,"boot_elapsed_s":24,"canary_ok":true,"canary_elapsed_s":11}
+// verified candidate
+{"tag":"2026-07-29-glm","candidate_id":"glm-5-native","boot_ok":true,"boot_elapsed_s":24,"canary_ok":true,"canary_elapsed_s":11,"grader":"output_match","grade_passed":true}
 // waived
 {"tag":"2026-07-27-x","skipped":true,"reason":"missing_signed_broker_context","allow_unverified":true}
 ```

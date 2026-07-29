@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "verifiedAt": "2026-07-29",
+  "id": "mantle-openai-gpt-oss-120b",
+  "providerPath": "mantle-openai-compatible",
+  "providerName": "amazon-bedrock-mantle-openai",
+  "primaryModelId": "openai.gpt-oss-120b",
+  "cacheRetention": "none",
+  "contextTokens": 110000,
+  "provider": {
+    "baseUrl": "https://bedrock-mantle.us-east-1.api.aws/v1",
+    "api": "openai-completions",
+    "auth": "api-key",
+    "apiKey": "env:AWS_BEARER_TOKEN_BEDROCK",
+    "timeoutSeconds": 300,
+    "models": [
+      {
+        "id": "openai.gpt-oss-120b",
+        "name": "OpenAI GPT OSS 120B (Bedrock Mantle)",
+        "reasoning": false,
+        "input": ["text"],
+        "contextWindow": 128000,
+        "maxTokens": 16384,
+        "cost": {
+          "input": 0.15,
+          "output": 0.6,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        }
+      }
+    ]
+  },
+  "costSources": {
+    "input": "https://aws.amazon.com/bedrock/pricing/",
+    "output": "https://aws.amazon.com/bedrock/pricing/",
+    "cacheRead": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-oss-120b.html",
+    "cacheWrite": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-oss-120b.html"
+  },
+  "sources": {
+    "api": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-oss-120b.html",
+    "auth": "https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html",
+    "baseUrl": "https://docs.aws.amazon.com/bedrock/latest/userguide/endpoints.html",
+    "iam": "https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-permissions.html",
+    "model": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-oss-120b.html",
+    "pricing": "https://aws.amazon.com/bedrock/pricing/"
+  },
+  "iam": {
+    "authMechanism": "Bedrock API key loaded from Secrets Manager and sent as a Bearer token",
+    "actions": ["bedrock-mantle:CallWithBearerToken"],
+    "resources": ["*"],
+    "inferenceProfileId": null,
+    "crossRegionFoundationModelArns": [],
+    "note": "bedrock-mantle:CallWithBearerToken requires Resource '*'. The secret reader additionally needs secretsmanager:GetSecretValue on the environment's Bedrock API-key secret."
+  }
+}

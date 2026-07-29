@@ -64,7 +64,8 @@
 # double-nesting fix by commit ancestry and (b) a clean end-to-end test that
 # includes the Morning Brief payload — a trivial "respond OK" prompt masks
 # session-completion regressions.
-FROM ghcr.io/openclaw/openclaw@sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c
+ARG OPENCLAW_BASE_IMAGE=ghcr.io/openclaw/openclaw@sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c
+FROM ${OPENCLAW_BASE_IMAGE}
 
 # Bind every pushed image to the exact clean AI Studio source revision used to
 # build it. The nightly evaluator reads this immutable config label instead of
@@ -251,7 +252,8 @@ RUN mkdir -p /home/node/.openclaw/memory
 #   it would have yielded. 60s is a ceiling, not a delay: fast calls return
 #   as before. Pair with psd-rules guidance to use SHORT yieldMs (≤10s) so
 #   long commands suspend early instead of racing this timeout.
-COPY openclaw.json /home/node/.openclaw/openclaw.json
+ARG OPENCLAW_CONFIG=openclaw.json
+COPY ${OPENCLAW_CONFIG} /home/node/.openclaw/openclaw.json
 # Build-time config sanity check (post-2026-07-02 config-risk hardening): surface
 # any openclaw.json schema/key errors at BUILD time instead of at runtime (a
 # rejected config would stop the gateway from starting = an outage). Non-fatal
@@ -278,8 +280,10 @@ RUN HOME=/home/node openclaw config validate >/tmp/config-validate.log 2>&1; \
 # At build time we strip psd-rules' YAML frontmatter and append the body
 # to SOUL.md so the rules ARE in the system prompt every turn. The
 # canonical edit point stays `skills/psd-rules/SKILL.md`.
-COPY SOUL.md /tmp/SOUL.preamble.md
-COPY skills/psd-rules/SKILL.md /tmp/psd-rules.SKILL.md
+ARG SOUL_PREAMBLE=SOUL.md
+ARG PSD_RULES_SKILL=skills/psd-rules/SKILL.md
+COPY ${SOUL_PREAMBLE} /tmp/SOUL.preamble.md
+COPY ${PSD_RULES_SKILL} /tmp/psd-rules.SKILL.md
 RUN awk 'BEGIN{f=0} /^---[[:space:]]*$/{f++; next} f>=2{print}' /tmp/psd-rules.SKILL.md > /tmp/psd-rules.body.md && \
     cat /tmp/SOUL.preamble.md > /home/node/.openclaw/SOUL.md && \
     printf '\n\n---\n\n# Operating Rules (from psd-rules)\n\n_The following rules are concatenated from `skills/psd-rules/SKILL.md` at container build time so they are guaranteed to appear in every turn\xe2\x80\x99s system prompt. Edit them in that file, not here._\n\n' >> /home/node/.openclaw/SOUL.md && \
@@ -345,6 +349,8 @@ COPY skills /opt/psd-skills
 # that allowlist. Do not downgrade this plugin without also removing the
 # caching expectation — see check_config_consistency.py, which fails the build
 # if the two drift apart again.
+ARG BEDROCK_PLUGIN_VERSION=2026.7.1
+ARG BEDROCK_PLUGIN_ASSERTION=claude-sonnet-5
 RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund && \
@@ -354,12 +360,13 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
     cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-email-triage && npm install --omit=dev --no-audit --no-fund && \
     mkdir -p /opt/openclaw-plugins && cd /opt/openclaw-plugins && \
-    npm pack @openclaw/amazon-bedrock-provider@2026.7.1 && \
-    tar -xzf openclaw-amazon-bedrock-provider-2026.7.1.tgz && \
+    npm pack "@openclaw/amazon-bedrock-provider@${BEDROCK_PLUGIN_VERSION}" && \
+    tar -xzf "openclaw-amazon-bedrock-provider-${BEDROCK_PLUGIN_VERSION}.tgz" && \
     mv package amazon-bedrock && \
-    rm openclaw-amazon-bedrock-provider-2026.7.1.tgz && \
+    rm "openclaw-amazon-bedrock-provider-${BEDROCK_PLUGIN_VERSION}.tgz" && \
     test -f /opt/openclaw-plugins/amazon-bedrock/openclaw.plugin.json && \
-    grep -q "claude-sonnet-5" /opt/openclaw-plugins/amazon-bedrock/dist/bedrock-options.js
+    grep -Fq -- "${BEDROCK_PLUGIN_ASSERTION}" \
+      /opt/openclaw-plugins/amazon-bedrock/dist/bedrock-options.js
 # chat-card has zero npm deps. chat-chart's npm install is paired with the
 # matplotlib install above — both stay disabled until we figure out the
 # AgentCore overlay-mount failure. With both off the image boots cleanly

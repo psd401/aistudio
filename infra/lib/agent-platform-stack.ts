@@ -4910,11 +4910,12 @@ export class AgentPlatformStack extends cdk.Stack {
       description: 'Router Lambda function ARN',
     });
 
-    // Bedrock API key secret ARN — consumed by build-and-push.sh (#1161) to run
-    // the build-time boot probe + canary turn with canary credentials.
+    // Bedrock API key secret ARN — consumed only when build-and-push.sh runs a
+    // token-authenticated Mantle candidate. The default native-SigV4 build
+    // probe does not read or receive this provider secret.
     new cdk.CfnOutput(this, 'BedrockApiKeySecretArn', {
       value: resources.bedrockApiKeySecret.secretArn,
-      description: 'Bedrock API key secret ARN (build-time canary probe credential)',
+      description: 'Bedrock API key secret ARN (Mantle candidate probe only)',
     });
 
     new cdk.CfnOutput(this, 'RouterQueueUrl', {

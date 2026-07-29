@@ -124,7 +124,15 @@ class GatewayTokenTests(unittest.TestCase):
         # connect envelope reads (harness_adapter.py: `gateway_token =
         # self._gateway_token`), so launcher and client cannot diverge.
         a = harness_adapter.OpenClawAdapter()
-        with mock.patch.object(harness_adapter.subprocess, "Popen") as popen, \
+        with mock.patch.dict(
+                harness_adapter.os.environ,
+                {
+                    "AWS_BEARER_TOKEN_BEDROCK": "secret",
+                    "BEDROCK_API_KEY_SECRET_ARN": "secret-arn",
+                    "CANDIDATE_MANTLE_BEARER_TOKEN": "relay-secret",
+                },
+                clear=False,
+            ), mock.patch.object(harness_adapter.subprocess, "Popen") as popen, \
                 mock.patch.object(harness_adapter.OpenClawAdapter, "_wait_for_ready"), \
                 mock.patch.object(harness_adapter.time, "sleep"):
             a.configure({"gateway_port": 3100})
@@ -135,6 +143,10 @@ class GatewayTokenTests(unittest.TestCase):
         token_value = argv[argv.index("--token") + 1]
         self.assertEqual(token_value, a._gateway_token)
         self.assertNotEqual(token_value, OLD_LITERAL)
+        child_environment = popen.call_args.kwargs["env"]
+        self.assertNotIn("AWS_BEARER_TOKEN_BEDROCK", child_environment)
+        self.assertNotIn("BEDROCK_API_KEY_SECRET_ARN", child_environment)
+        self.assertNotIn("CANDIDATE_MANTLE_BEARER_TOKEN", child_environment)
 
 
 # Bound staticmethod for readability.

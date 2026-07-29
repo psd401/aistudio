@@ -2014,6 +2014,221 @@ class DockerRuntimeTests(unittest.TestCase):
 
 
 class MainWiringTests(unittest.TestCase):
+    def test_mantle_candidate_metadata_resolves_only_the_secret_arn(self):
+        executor = mock.Mock()
+        executor.run.return_value = runner.CommandResult(
+            0,
+            "arn:aws:secretsmanager:us-east-1:123456789012:secret:bedrock\n",
+            "",
+        )
+        digest = "sha256:" + "a" * 64
+        image = "example.dkr.ecr.us-east-1.amazonaws.com/agent:test"
+        with tempfile.TemporaryDirectory() as directory:
+            metadata_path = Path(directory) / "candidate.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "providerPath": "mantle-openai-compatible",
+                        "providerAuth": "api-key",
+                        "image": image,
+                        "imageDigest": digest,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            environment = runner._resolve_candidate_runtime_environment(
+                executor,
+                metadata_path,
+                f"{image.rsplit(':', 1)[0]}@{digest}",
+                "dev",
+                "us-east-1",
+            )
+
+        self.assertEqual(
+            environment,
+            {
+                "BEDROCK_API_KEY_SECRET_ARN": (
+                    "arn:aws:secretsmanager:us-east-1:123456789012:secret:bedrock"
+                )
+            },
+        )
+        command = executor.run.call_args.args[0]
+        self.assertIn("BedrockApiKeySecretArn", " ".join(command))
+        self.assertNotIn("get-secret-value", command)
+
+    def test_native_candidate_metadata_never_resolves_a_secret(self):
+        executor = mock.Mock()
+        digest = "sha256:" + "b" * 64
+        image = "example.dkr.ecr.us-east-1.amazonaws.com/agent:native"
+        with tempfile.TemporaryDirectory() as directory:
+            metadata_path = Path(directory) / "candidate.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "providerPath": "native-bedrock-sigv4",
+                        "providerAuth": "aws-sdk",
+                        "image": image,
+                        "imageDigest": digest,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            environment = runner._resolve_candidate_runtime_environment(
+                executor,
+                metadata_path,
+                f"{image.rsplit(':', 1)[0]}@{digest}",
+                "dev",
+                "us-east-1",
+            )
+
+        self.assertEqual(environment, {})
+        executor.run.assert_not_called()
+
+    def test_candidate_metadata_must_match_the_evaluated_image(self):
+        digest = "sha256:" + "c" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            metadata_path = Path(directory) / "candidate.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "providerPath": "mantle-anthropic-messages",
+                        "providerAuth": "api-key",
+                        "image": "example.invalid/agent:expected",
+                        "imageDigest": digest,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                runner.EvalRunnerError,
+                "--image must be the immutable digest",
+            ):
+                runner._resolve_candidate_runtime_environment(
+                    mock.Mock(),
+                    metadata_path,
+                    "example.invalid/agent@sha256:" + "e" * 64,
+                    "dev",
+                    "us-east-1",
+                )
+
+    def test_candidate_metadata_rejects_its_matching_mutable_tag(self):
+        digest = "sha256:" + "d" * 64
+        image = "example.invalid/agent:mutable"
+        with tempfile.TemporaryDirectory() as directory:
+            metadata_path = Path(directory) / "candidate.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "providerPath": "native-bedrock-sigv4",
+                        "providerAuth": "aws-sdk",
+                        "image": image,
+                        "imageDigest": digest,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                runner.EvalRunnerError,
+                "--image must be an immutable repository",
+            ):
+                runner._resolve_candidate_runtime_environment(
+                    mock.Mock(),
+                    metadata_path,
+                    image,
+                    "dev",
+                    "us-east-1",
+                )
+
+    def test_image_is_immutable_even_without_candidate_metadata(self):
+        executor = mock.Mock()
+        digest_image = "example.invalid/agent@sha256:" + "f" * 64
+
+        self.assertEqual(
+            runner._resolve_candidate_runtime_environment(
+                executor,
+                None,
+                digest_image,
+                "dev",
+                "us-east-1",
+            ),
+            {},
+        )
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "--image must be an immutable repository",
+        ):
+            runner._resolve_candidate_runtime_environment(
+                executor,
+                None,
+                "example.invalid/agent:mutable",
+                "dev",
+                "us-east-1",
+            )
+        executor.run.assert_not_called()
+
+    def test_main_passes_candidate_auth_environment_to_docker_factory(self):
+        provider = mock.Mock()
+        evaluation = mock.Mock()
+        evaluation.run.return_value = []
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            runner,
+            "load_suite",
+            return_value=[],
+        ), mock.patch.object(
+            runner,
+            "_resolve_app_base_url",
+            return_value="https://dev.example.invalid",
+        ), mock.patch.object(
+            runner,
+            "_resolve_candidate_runtime_environment",
+            return_value={"BEDROCK_API_KEY_SECRET_ARN": "secret-arn"},
+        ) as candidate_environment, mock.patch.object(
+            runner,
+            "ActiveAwsCredentialProvider",
+            return_value=provider,
+        ), mock.patch.object(
+            runner,
+            "DockerRuntimeFactory",
+        ) as runtime_factory, mock.patch.object(
+            runner,
+            "ProbeContextMinter",
+        ), mock.patch.object(
+            runner,
+            "EvaluationRunner",
+            return_value=evaluation,
+        ):
+            metadata_path = Path(directory) / "candidate.json"
+            status = runner.main(
+                [
+                    "--image",
+                    "candidate@sha256:" + "0" * 64,
+                    "--candidate-metadata",
+                    str(metadata_path),
+                    "--suite",
+                    "suite.yaml",
+                    "--out",
+                    str(Path(directory) / "results.jsonl"),
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            runtime_factory.call_args.args[3]["BEDROCK_API_KEY_SECRET_ARN"],
+            "secret-arn",
+        )
+        self.assertEqual(
+            candidate_environment.call_args.args[1],
+            metadata_path.resolve(),
+        )
+
     def test_deployed_runtime_environment_is_allowlisted(self):
         executor = mock.Mock()
         executor.run.return_value = runner.CommandResult(
@@ -2089,7 +2304,7 @@ class MainWiringTests(unittest.TestCase):
             status = runner.main(
                 [
                     "--image",
-                    "candidate@sha256:digest",
+                    "candidate@sha256:" + "0" * 64,
                     "--suite",
                     "suite.yaml",
                     "--out",

@@ -26,6 +26,13 @@ class ContextWindowTests(unittest.TestCase):
         self.assertEqual(len(v), 1)
         self.assertIn("!= known value 200000", v[0])
 
+    def test_glm_5_known_window_and_wrong_window(self):
+        cfg = {"models": {"providers": {"p": {"models": [
+            {"id": "zai.glm-5", "contextWindow": 200000}]}}}}
+        self.assertEqual(ccc.check_context_windows(cfg), [])
+        cfg["models"]["providers"]["p"]["models"][0]["contextWindow"] = 203000
+        self.assertIn("!= known value 200000", ccc.check_context_windows(cfg)[0])
+
     def test_unknown_model_out_of_band_flagged(self):
         cfg = {"models": {"providers": {"p": {"models": [
             {"id": "mystery", "contextWindow": 5_000_000}]}}}}
@@ -52,6 +59,18 @@ class ApiKeyHydrationTests(unittest.TestCase):
     def test_hydrated_env_var_ok(self):
         cfg = {"models": {"providers": {"mantle": {"apiKey": "env:MY_TOKEN"}}}}
         wrapper = self._wrapper('os.environ["MY_TOKEN"] = value')
+        self.assertEqual(ccc.check_apikey_hydration(cfg, wrapper), [])
+
+    def test_bedrock_placeholder_accepts_complete_root_relay_contract(self):
+        cfg = {"models": {"providers": {"mantle": {
+            "apiKey": "env:AWS_BEARER_TOKEN_BEDROCK"}}}}
+        wrapper = self._wrapper(
+            'BEDROCK_BEARER_ENV = "AWS_BEARER_TOKEN_BEDROCK"\n'
+            "value = os.environ.get(BEDROCK_BEARER_ENV, '')\n"
+            "CANDIDATE_MANTLE_RELAY_API_KEY = 'sentinel'\n"
+            'relay = {"CANDIDATE_MANTLE_BEARER_TOKEN": value}\n'
+            "os.environ.pop(BEDROCK_BEARER_ENV, None)\n"
+        )
         self.assertEqual(ccc.check_apikey_hydration(cfg, wrapper), [])
 
     def test_unhydrated_env_var_flagged(self):
@@ -329,6 +348,14 @@ class HostPluginCompatibilityTests(unittest.TestCase):
             ccc.check_host_plugin_compatibility(os.path.join(here, "Dockerfile")),
             [],
         )
+
+    def test_parameterized_repo_dockerfile_resolves_default_plugin_pin(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        version, violations = ccc.parse_pinned_plugin_version(
+            os.path.join(here, "Dockerfile")
+        )
+        self.assertEqual(version, "2026.7.1")
+        self.assertEqual(violations, [])
 
 
 class RealFilesTests(unittest.TestCase):
