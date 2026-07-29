@@ -147,18 +147,20 @@ The image build also adds 44 pinned `gws-*` guidance skills from
 execution is disabled by `gws-wrapper.sh`, and the executable behavior is
 covered through `psd-workspace`. Their names and shared opt-out reason live in
 `eval/upstream-skill-inventory.json`. The drift gate requires the manifest's
-version to match Dockerfile `GWS_VERSION`; CI also shallow-clones that exact
-release and compares its `gws-*/SKILL.md` directory set with the manifest.
-Changing the pinned upstream release therefore requires reviewing the actual
-shipped skill inventory rather than only updating version strings.
+version to match Dockerfile `GWS_VERSION`. A dedicated path-filtered and weekly
+CI workflow shallow-clones that exact release and compares its
+`gws-*/SKILL.md` directory set with the manifest, without adding a network
+dependency to unrelated application PRs. Changing the pinned upstream release
+therefore requires reviewing the actual shipped skill inventory rather than
+only updating version strings.
 Together, the final image inventory is 75 skills: 30 directly evaluated and
 45 explicitly opted out (`psd-rules` plus the 44 documentation-only `gws-*`
 skills).
 
-Run the same inventory check CI runs:
+Run the offline inventory check used by the main CI job:
 
 ```bash
-python3 infra/agent-image/check_eval_coverage.py --verify-upstream
+python3 infra/agent-image/check_eval_coverage.py
 python3 -m unittest infra/agent-image/test_eval_coverage.py
 ```
 
@@ -167,6 +169,12 @@ when any build-added skill is absent from the documented upstream opt-out
 inventory. The test suite also creates a fixture skill without `evals/` and
 proves that the failure fires. Stale or reasonless opt-outs and upstream pin
 drift fail as configuration errors.
+
+Run the path-filtered/scheduled upstream release comparison locally with:
+
+```bash
+python3 infra/agent-image/check_eval_coverage.py --verify-upstream
+```
 
 The regression and capability manifests contain 50 tasks total. At least 25%
 are explicit negative cases: they prove that a route or side effect is not
