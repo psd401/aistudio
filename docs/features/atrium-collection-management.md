@@ -46,7 +46,9 @@ the existing Atrium grant kinds (`role`, `group`, `building`, `department`,
 `grade`, and `user`). District children inherit ancestor grants while
 `inherit_grants` is true; turning it off makes the child a new grant boundary.
 Matching is additive. Zero effective grants preserve the legacy unrestricted
-district behavior.
+district behavior. A `group` default is valid only when the collection has at
+least one effective `view` grant; create/update rejects configurations that
+would make every content creation attempt fail.
 
 Collection access is enforced in both point reads and permission-pushed content
 listing/count queries. An archived collection admits neither reads nor creates.

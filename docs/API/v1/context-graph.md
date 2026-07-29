@@ -1386,7 +1386,8 @@ Grant `access` is independent: `view` controls collection/content discovery;
 `create` controls whether content may be placed there. Child collections inherit
 ancestor grants while `inheritGrants` is true. Zero effective grants preserve the
 legacy unrestricted district behavior. A `group` default uses effective
-collection `view` grants as the new object's group-visibility grants.
+collection `view` grants as the new object's group-visibility grants and is
+rejected when no such grant exists.
 
 Private collections are always `private`, never inherit or carry grants, and can
 nest only under private collections owned by the same user. An administrator can
@@ -1438,7 +1439,9 @@ the district hierarchy or one private owner's hierarchy; different owners may
 use the same top-level name.
 Crossing district/private ownership boundaries, moving under a descendant,
 restoring under an archived parent, or conflicting concurrent hierarchy writes
-is rejected (`400`/`409`). The response uses the same management shape as create.
+is rejected (`400`/`409`). A resulting `group` default without any effective
+`view` grant is also rejected. The response uses the same management shape as
+create.
 
 Content counts have explicit semantics: `directContentCount` counts only rows
 filed directly in the collection; `subtreeContentCount` includes all descendants.

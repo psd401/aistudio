@@ -40,8 +40,16 @@ jest.mock("@/lib/content/visibility-service", () => ({
   visibilityService: { canView: jest.fn(async () => canViewResult) },
 }));
 let mayViewCollection = true;
+const sharedCollectionAccess = {
+  allowedCollectionIds: new Set(["public-collection"]),
+};
+const collectionAccessSnapshotMock = jest.fn(
+  async () => sharedCollectionAccess
+);
 jest.mock("@/lib/content/collection-access", () => ({
   requesterMayViewCollection: jest.fn(async () => mayViewCollection),
+  collectionAccessSnapshot: (...args: unknown[]) =>
+    collectionAccessSnapshotMock(...(args as [])),
 }));
 
 // A viewable artifact loads its current head code; default to a version + code so the
@@ -72,11 +80,19 @@ jest.mock("@/lib/content/artifact-sandbox-config", () => ({
 }));
 // document-parts pulls the heavy unified/rehype render pipeline (ESM, not needed for
 // resolveEmbedForReader); stub it so the module loads cheaply under jest.
+let mockRenderedDocumentParts: Array<
+  | { kind: "html"; html: string }
+  | { kind: "embed"; artifactId: string }
+> = [];
 jest.mock("@/lib/content/render/document-parts", () => ({
-  renderDocumentToParts: () => [],
+  renderDocumentToParts: () => mockRenderedDocumentParts,
 }));
 
-import { resolveEmbedForReader, type ResolvedEmbed } from "@/lib/content/embed-resolver";
+import {
+  resolveDocumentParts,
+  resolveEmbedForReader,
+  type ResolvedEmbed,
+} from "@/lib/content/embed-resolver";
 import type { Requester } from "@/lib/content/types";
 
 const ARTIFACT_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
@@ -95,6 +111,7 @@ beforeEach(() => {
   currentVersion = { id: "v1" };
   publishedVersion = { id: "pv1" };
   artifactCode = "<h1>live</h1>";
+  mockRenderedDocumentParts = [];
   jest.clearAllMocks();
 });
 
@@ -178,11 +195,17 @@ describe("resolveEmbedForReader resolves a viewable artifact", () => {
     queuedRows = [artifactRow];
     canViewResult = true;
     const res = await resolveEmbedForReader(ARTIFACT_ID, { audience: "internal", requester });
+    const { requesterMayViewCollection } = jest.requireMock(
+      "@/lib/content/collection-access"
+    ) as {
+      requesterMayViewCollection: jest.Mock;
+    };
     expect(res.available).toBe(true);
     expect(res.title).toBe("Metrics");
     expect(res.href).toBe("/c/metrics");
     expect(res.code).toBe("<h1>live</h1>");
     expect(res.sandboxSrc).toBe("https://sandbox.example");
+    expect(requesterMayViewCollection).not.toHaveBeenCalled();
   });
 
   it("public: a public artifact resolves with a /p/ href and consults NO session gate", async () => {
@@ -199,6 +222,17 @@ describe("resolveEmbedForReader resolves a viewable artifact", () => {
     const res = await resolveEmbedForReader(ARTIFACT_ID, {
       audience: "public",
     });
+    expect(res).toEqual(expectedMask(ARTIFACT_ID));
+  });
+
+  it("public: ignores a caller-supplied authenticated collection snapshot", async () => {
+    queuedRows = [artifactRow];
+    mayViewCollection = false;
+    const res = await resolveEmbedForReader(ARTIFACT_ID, {
+      audience: "public",
+      collectionAccess: sharedCollectionAccess as never,
+    });
+
     expect(res).toEqual(expectedMask(ARTIFACT_ID));
   });
 
@@ -248,5 +282,35 @@ describe("resolveEmbedForReader resolves a viewable artifact", () => {
     const res = await resolveEmbedForReader(ARTIFACT_ID, { audience: "internal", requester });
     expect(res.available).toBe(true);
     expect(res.code).toBe("");
+  });
+
+  it("shares one collection snapshot across every embed in a document", async () => {
+    queuedRows = [artifactRow];
+    canViewResult = true;
+    mockRenderedDocumentParts = [
+      { kind: "embed", artifactId: ARTIFACT_ID },
+      { kind: "embed", artifactId: ARTIFACT_ID },
+    ];
+
+    const parts = await resolveDocumentParts("unused", {
+      audience: "internal",
+      requester,
+    });
+    const { visibilityService } = jest.requireMock(
+      "@/lib/content/visibility-service"
+    ) as {
+      visibilityService: { canView: jest.Mock };
+    };
+
+    expect(parts).toHaveLength(2);
+    expect(collectionAccessSnapshotMock).toHaveBeenCalledTimes(1);
+    expect(collectionAccessSnapshotMock).toHaveBeenCalledWith(requester);
+    expect(visibilityService.canView).toHaveBeenCalledTimes(2);
+    expect(visibilityService.canView.mock.calls[0][2]).toBe(
+      sharedCollectionAccess
+    );
+    expect(visibilityService.canView.mock.calls[1][2]).toBe(
+      sharedCollectionAccess
+    );
   });
 });

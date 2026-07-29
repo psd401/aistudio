@@ -242,3 +242,141 @@ describe("collection management naming and grants", () => {
     ).toThrow(/group email/);
   });
 });
+
+describe("collection management group defaults", () => {
+  it("requires a direct or inherited effective view grant", () => {
+    const parent = row("parent");
+    const byId = new Map([[parent.id, parent]]);
+    const parentViewGrant = new Map([
+      [
+        parent.id,
+        [
+          {
+            access: "view" as const,
+            kind: "role" as const,
+            value: "staff",
+          },
+        ],
+      ],
+    ]);
+
+    expect(() =>
+      collectionManagementInternals.assertGroupDefaultHasEffectiveViewGrant(
+        {
+          level: "group",
+          parentId: null,
+          inheritGrants: true,
+          ownGrants: [],
+          byId,
+          directGrants: new Map(),
+        }
+      )
+    ).toThrow(/effective view grant/);
+    expect(() =>
+      collectionManagementInternals.assertGroupDefaultHasEffectiveViewGrant(
+        {
+          level: "group",
+          parentId: parent.id,
+          inheritGrants: true,
+          ownGrants: [],
+          byId,
+          directGrants: parentViewGrant,
+        }
+      )
+    ).not.toThrow();
+    expect(() =>
+      collectionManagementInternals.assertGroupDefaultHasEffectiveViewGrant(
+        {
+          level: "group",
+          parentId: parent.id,
+          inheritGrants: false,
+          ownGrants: [],
+          byId,
+          directGrants: parentViewGrant,
+        }
+      )
+    ).toThrow(/effective view grant/);
+    expect(() =>
+      collectionManagementInternals.assertGroupDefaultHasEffectiveViewGrant(
+        {
+          level: "group",
+          parentId: null,
+          inheritGrants: false,
+          ownGrants: [
+            { access: "create", kind: "role", value: "staff" },
+          ],
+          byId,
+          directGrants: new Map(),
+        }
+      )
+    ).toThrow(/effective view grant/);
+    expect(() =>
+      collectionManagementInternals.assertGroupDefaultHasEffectiveViewGrant(
+        {
+          level: "group",
+          parentId: null,
+          inheritGrants: false,
+          ownGrants: [{ access: "view", kind: "role", value: "staff" }],
+          byId,
+          directGrants: new Map(),
+        }
+      )
+    ).not.toThrow();
+  });
+
+  it("protects inherited group defaults throughout an updated subtree", () => {
+    const root = row("root");
+    const branch = row("branch", { parentId: root.id });
+    const groupChild = row("group-child", {
+      parentId: branch.id,
+      defaultVisibilityLevel: "group",
+    });
+    const rows = [root, branch, groupChild];
+    const rootViewGrant = new Map([
+      [
+        root.id,
+        [
+          {
+            access: "view" as const,
+            kind: "role" as const,
+            value: "staff",
+          },
+        ],
+      ],
+    ]);
+
+    expect(() =>
+      collectionManagementInternals.assertUpdatedSubtreeGroupDefaults({
+        rows,
+        collectionId: root.id,
+        parentId: null,
+        inheritGrants: true,
+        level: "internal",
+        ownGrants: [],
+        directGrants: rootViewGrant,
+      })
+    ).toThrow(/effective view grant/);
+    expect(() =>
+      collectionManagementInternals.assertUpdatedSubtreeGroupDefaults({
+        rows,
+        collectionId: branch.id,
+        parentId: root.id,
+        inheritGrants: false,
+        level: "internal",
+        ownGrants: [],
+        directGrants: rootViewGrant,
+      })
+    ).toThrow(/effective view grant/);
+    expect(() =>
+      collectionManagementInternals.assertUpdatedSubtreeGroupDefaults({
+        rows,
+        collectionId: branch.id,
+        parentId: root.id,
+        inheritGrants: true,
+        level: "internal",
+        ownGrants: [],
+        directGrants: rootViewGrant,
+      })
+    ).not.toThrow();
+  });
+});

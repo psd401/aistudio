@@ -27,6 +27,7 @@ import {
 import {
   collectionAccessSnapshot,
   requesterMayViewCollection,
+  type CollectionAccessSnapshot,
 } from "./collection-access";
 import {
   canPublishPublic,
@@ -500,8 +501,19 @@ export const visibilityService = {
    * disagree and leak (the mocked unit tests cannot catch a SQL-only divergence).
    * When you edit one, edit the other in the same commit.
    */
-  async canView(req: Requester, obj: ViewableObject): Promise<boolean> {
-    if (!(await requesterMayViewCollection(req, obj.collectionId))) {
+  async canView(
+    req: Requester,
+    obj: ViewableObject,
+    collectionAccess?: CollectionAccessSnapshot
+  ): Promise<boolean> {
+    // Batch callers pass one request-scoped snapshot so N concurrent object
+    // checks do not each reload the complete collection/grant hierarchy.
+    const collectionVisible =
+      obj.collectionId == null ||
+      (collectionAccess
+        ? collectionAccess.allowedCollectionIds.has(obj.collectionId)
+        : await requesterMayViewCollection(req, obj.collectionId));
+    if (!collectionVisible) {
       return false;
     }
     if (obj.visibilityLevel === "public") return true;

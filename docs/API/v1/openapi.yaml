@@ -2215,7 +2215,8 @@ paths:
         Creates an owner-bound `private` collection for the calling human, or a
         district/shared collection when the caller is an administrator. Requires
         `content:create`. Private collections are always private, never inherit
-        grants, and may nest only under collections owned by the same user.
+        grants, and may nest only under collections owned by the same user. A
+        `group` default requires at least one effective `view` grant.
       security:
         - BearerAuth: []
       requestBody:
@@ -2281,7 +2282,8 @@ paths:
         the collection; `archived=true|false` recursively archives/restores its
         subtree without deleting content. Requires `content:update`. District
         collections require administrator authority; private collections remain
-        owner-bound and cannot be managed or read by district administrators.
+        owner-bound and cannot be managed or read by district administrators. A
+        resulting `group` default requires at least one effective `view` grant.
       security:
         - BearerAuth: []
       requestBody:

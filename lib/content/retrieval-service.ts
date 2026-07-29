@@ -39,6 +39,7 @@ import { createLogger } from "@/lib/logger";
 import { contentService } from "./content-service";
 import { versionService } from "./version-service";
 import { visibilityService } from "./visibility-service";
+import { collectionAccessSnapshot } from "./collection-access";
 import { s3Store } from "./storage/s3-store";
 import { systemUserId } from "./helpers";
 import type { ContentObjectDTO, Requester, VisibilityLevel } from "./types";
@@ -402,11 +403,19 @@ async function search(
     candidates.push({ hit, obj });
   }
 
-  // The safety boundary: never return what the requester can't see. The per-hit
-  // checks are independent DB round trips (up to `limit` of them on the hot
-  // assistant-retrieval path), so run them CONCURRENTLY — `Promise.all` preserves
-  // input order, and the index-aligned filter below keeps the returned hits in
-  // the original vector-search (similarity) order, never completion order.
+  // Resolve the collection boundary ONCE for this search. Without this snapshot,
+  // every concurrent canView call reloads the entire collection/grant hierarchy
+  // and a ten-hit search can consume the configured connection pool.
+  const collectionAccess = candidates.some(
+    ({ obj }) => obj.collectionId != null
+  )
+    ? await collectionAccessSnapshot(req)
+    : undefined;
+
+  // The safety boundary: never return what the requester can't see. Object-level
+  // grant checks remain independent DB round trips, so run them concurrently.
+  // `Promise.all` preserves input order, and the index-aligned filter below keeps
+  // vector-search (similarity) order, never completion order.
   const visibility = await Promise.all(
     candidates.map(({ obj }) =>
       visibilityService.canView(req, {
@@ -414,7 +423,7 @@ async function search(
         ownerUserId: obj.ownerUserId,
         collectionId: obj.collectionId,
         visibilityLevel: obj.visibilityLevel,
-      })
+      }, collectionAccess)
     )
   );
   return candidates

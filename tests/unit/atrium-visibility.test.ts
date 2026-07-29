@@ -7,6 +7,7 @@
  */
 
 const executeQueryMock = jest.fn();
+const requesterMayViewCollectionMock = jest.fn(async () => true);
 jest.mock("@/lib/db/drizzle-client", () => ({
   executeQuery: (...args: unknown[]) => executeQueryMock(...args),
   // listVisible references these types only; provide inert stand-ins.
@@ -20,7 +21,8 @@ jest.mock("@/lib/db/schema", () => ({
   users: { id: {}, firstName: {}, lastName: {}, email: {} },
 }));
 jest.mock("@/lib/content/collection-access", () => ({
-  requesterMayViewCollection: jest.fn(async () => true),
+  requesterMayViewCollection: (...args: unknown[]) =>
+    requesterMayViewCollectionMock(...(args as [])),
   collectionAccessSnapshot: jest.fn(async () => ({
     allowedCollectionIds: new Set<string>(),
   })),
@@ -98,6 +100,8 @@ const roledAgent: Requester = {
 
 beforeEach(() => {
   executeQueryMock.mockReset();
+  requesterMayViewCollectionMock.mockClear();
+  requesterMayViewCollectionMock.mockResolvedValue(true);
 });
 
 describe("canView — public", () => {
@@ -106,6 +110,20 @@ describe("canView — public", () => {
     expect(await visibilityService.canView(staffUser, obj("public"))).toBe(true);
     // No grant lookup needed for public.
     expect(executeQueryMock).not.toHaveBeenCalled();
+  });
+
+  it("uses a supplied collection snapshot without reloading collection access", async () => {
+    const collectionAccess = {
+      allowedCollectionIds: new Set(["collection-1"]),
+    };
+    const visible = await visibilityService.canView(
+      staffUser,
+      { ...obj("public"), collectionId: "collection-1" },
+      collectionAccess as never
+    );
+
+    expect(visible).toBe(true);
+    expect(requesterMayViewCollectionMock).not.toHaveBeenCalled();
   });
 });
 

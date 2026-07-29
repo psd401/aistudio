@@ -147,6 +147,94 @@ function assertVisibilityLevel(level: VisibilityLevel): void {
   }
 }
 
+interface GroupDefaultGrantCheck {
+  level: VisibilityLevel;
+  parentId: string | null;
+  inheritGrants: boolean;
+  ownGrants: CollectionGrant[];
+  byId: Map<string, CollectionAccessRow>;
+  directGrants: Map<string, CollectionGrant[]>;
+}
+
+function assertGroupDefaultHasEffectiveViewGrant(
+  check: GroupDefaultGrantCheck
+): void {
+  const {
+    level,
+    parentId,
+    inheritGrants,
+    ownGrants,
+    byId,
+    directGrants,
+  } = check;
+  if (level !== "group") return;
+  if (ownGrants.some((grant) => grant.access === "view")) return;
+
+  let cursor = inheritGrants ? parentId : null;
+  const seen = new Set<string>();
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor);
+    const row = byId.get(cursor);
+    if (!row || row.ownerUserId != null) break;
+    if (
+      (directGrants.get(cursor) ?? []).some(
+        (grant) => grant.access === "view"
+      )
+    ) {
+      return;
+    }
+    if (!row.inheritGrants) break;
+    cursor = row.parentId;
+  }
+
+  throw new ValidationError(
+    "A group-default collection requires at least one effective view grant"
+  );
+}
+
+interface UpdatedSubtreeGrantCheck {
+  rows: CollectionAccessRow[];
+  collectionId: string;
+  parentId: string | null;
+  inheritGrants: boolean;
+  level: VisibilityLevel;
+  ownGrants: CollectionGrant[];
+  directGrants: Map<string, CollectionGrant[]>;
+}
+
+function assertUpdatedSubtreeGroupDefaults(
+  check: UpdatedSubtreeGrantCheck
+): void {
+  const existing = check.rows.find((row) => row.id === check.collectionId);
+  if (!existing) {
+    throw new NotFoundError("Collection not found", {
+      collectionId: check.collectionId,
+    });
+  }
+  const byId = new Map(check.rows.map((row) => [row.id, row]));
+  byId.set(check.collectionId, {
+    ...existing,
+    parentId: check.parentId,
+    inheritGrants: check.inheritGrants,
+    defaultVisibilityLevel: check.level,
+  });
+  const directGrants = new Map(check.directGrants);
+  directGrants.set(check.collectionId, check.ownGrants);
+
+  for (const collectionId of descendantIds(check.rows, check.collectionId)) {
+    const row = byId.get(collectionId);
+    if (!row) continue;
+    assertGroupDefaultHasEffectiveViewGrant({
+      level: row.defaultVisibilityLevel,
+      parentId: row.parentId,
+      inheritGrants: row.inheritGrants,
+      ownGrants: directGrants.get(collectionId) ?? [],
+      byId,
+      directGrants,
+    });
+  }
+}
+
 function scopeOf(row: CollectionAccessRow): CollectionScope {
   return row.ownerUserId == null ? "district" : "private";
 }
@@ -354,6 +442,8 @@ function descendantIds(
  */
 export const collectionManagementInternals = {
   assertCollectionId,
+  assertGroupDefaultHasEffectiveViewGrant,
+  assertUpdatedSubtreeGroupDefaults,
   assertMayCreateScope,
   assertMayManage,
   assertParent,
@@ -535,6 +625,30 @@ async function loadCollectionRows(
     .from(contentCollections)) as CollectionAccessRow[];
 }
 
+async function loadDirectCollectionGrants(
+  tx: DbTransaction
+): Promise<Map<string, CollectionGrant[]>> {
+  const rows = await tx
+    .select({
+      collectionId: contentCollectionGrants.collectionId,
+      access: contentCollectionGrants.access,
+      kind: contentCollectionGrants.grantKind,
+      value: contentCollectionGrants.grantValue,
+    })
+    .from(contentCollectionGrants);
+  const directGrants = new Map<string, CollectionGrant[]>();
+  for (const row of rows) {
+    const grants = directGrants.get(row.collectionId) ?? [];
+    grants.push({
+      access: row.access,
+      kind: row.kind,
+      value: row.value,
+    });
+    directGrants.set(row.collectionId, grants);
+  }
+  return directGrants;
+}
+
 function assertRestorableBelowParent(
   input: UpdateCollectionInput,
   parentId: string | null,
@@ -607,6 +721,7 @@ async function updateCollectionInTx(
 ): Promise<void> {
   const { req, collectionId, input, normalized, audit } = update;
   const rows = await loadCollectionRows(tx);
+  const directGrants = await loadDirectCollectionGrants(tx);
   const byId = new Map(rows.map((row) => [row.id, row]));
   const existing = byId.get(collectionId);
   if (!existing) {
@@ -631,6 +746,15 @@ async function updateCollectionInTx(
   );
   assertRestorableBelowParent(input, parentId, byId);
   assertPrivateUpdate(scope, input, normalized.grants);
+  assertUpdatedSubtreeGroupDefaults({
+    rows,
+    collectionId,
+    level: input.defaultVisibilityLevel ?? existing.defaultVisibilityLevel,
+    parentId,
+    inheritGrants: input.inheritGrants ?? existing.inheritGrants,
+    ownGrants: normalized.grants ?? directGrants.get(collectionId) ?? [],
+    directGrants,
+  });
 
   await tx
     .update(contentCollections)
@@ -689,24 +813,20 @@ export const collectionManagementService = {
     let createdId: string | undefined;
     try {
       createdId = await executeTransaction(async (tx) => {
-        const rows = (await tx
-          .select({
-            id: contentCollections.id,
-            name: contentCollections.name,
-            slug: contentCollections.slug,
-            parentId: contentCollections.parentId,
-            ownerUserId: contentCollections.ownerUserId,
-            defaultVisibilityLevel:
-              contentCollections.defaultVisibilityLevel,
-            inheritGrants: contentCollections.inheritGrants,
-            position: contentCollections.position,
-            archivedAt: contentCollections.archivedAt,
-          })
-          .from(contentCollections)) as CollectionAccessRow[];
+        const rows = await loadCollectionRows(tx);
+        const directGrants = await loadDirectCollectionGrants(tx);
         const byId = new Map(rows.map((row) => [row.id, row]));
         const parentId = input.parentId ?? null;
         assertParent(byId, parentId, input.scope, ownerUserId);
         assertSiblingNameAvailable(rows, name, parentId, ownerUserId);
+        assertGroupDefaultHasEffectiveViewGrant({
+          level,
+          parentId,
+          inheritGrants,
+          ownGrants: grants,
+          byId,
+          directGrants,
+        });
         const inserted = await tx
           .insert(contentCollections)
           .values({
