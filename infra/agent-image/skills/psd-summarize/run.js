@@ -23,7 +23,7 @@
  *
  * Env: MANTLE_ANTHROPIC_URL
  *      (default http://127.0.0.1:18791/anthropic/v1/messages),
- *      SUMMARIZE_MODEL_ID (default anthropic.claude-haiku-4-5).
+ *      SUMMARIZE_MODEL_ID (default us.anthropic.claude-sonnet-5).
  */
 
 'use strict';
@@ -31,7 +31,8 @@
 const MANTLE_URL =
   process.env.MANTLE_ANTHROPIC_URL ||
   'http://127.0.0.1:18791/anthropic/v1/messages';
-const MODEL_ID = process.env.SUMMARIZE_MODEL_ID || 'anthropic.claude-haiku-4-5';
+const MODEL_ID = process.env.SUMMARIZE_MODEL_ID || 'us.anthropic.claude-sonnet-5';
+const MAX_OUTPUT_TOKENS = 2000;
 
 function fail(message, code = 1) {
   process.stderr.write(`psd-summarize: ${message}\n`);
@@ -133,7 +134,7 @@ async function main() {
 
   const system = buildSystemPrompt(profiles, output, length, context);
 
-  // Guard against oversized inputs (Haiku context is large, but bound cost).
+  // Guard against oversized inputs (the model context is large, but bound cost).
   const MAX_CHARS = 400000;
   const clipped = text.length > MAX_CHARS ? text.slice(0, MAX_CHARS) : text;
 
@@ -149,7 +150,7 @@ async function main() {
       body: JSON.stringify({
         anthropic_version: 'bedrock-2023-05-31',
         model: MODEL_ID,
-        max_tokens: 2000,
+        max_tokens: MAX_OUTPUT_TOKENS,
         system,
         messages: [{ role: 'user', content: `Source text to summarize:\n\n${clipped}` }],
       }),
