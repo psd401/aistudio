@@ -304,6 +304,9 @@ class OpenClawAdapter(HarnessAdapter):
                                 "AGENT_INVOCATION_SIGNING_SECRET_ID",
                                 "PSD_INVOCATION_CONTEXT_FILE",
                                 "PSD_INVOCATION_REQUEST_PROOF_KEY_FILE",
+                                "AWS_BEARER_TOKEN_BEDROCK",
+                                "BEDROCK_API_KEY_SECRET_ARN",
+                                "CANDIDATE_MANTLE_BEARER_TOKEN",
                             }
                         },
                         "HOME": "/home/node",

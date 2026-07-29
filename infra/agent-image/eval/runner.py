@@ -1409,9 +1409,11 @@ def _resolve_candidate_runtime_environment(
             f"candidate metadata {metadata_path} is not finalized"
         )
     repository = metadata_image.rsplit(":", 1)[0]
-    if image not in {metadata_image, f"{repository}@{image_digest}"}:
+    immutable_image = f"{repository}@{image_digest}"
+    if image != immutable_image:
         raise EvalRunnerError(
-            f"--image does not match finalized candidate metadata {metadata_path}"
+            f"--image must be the immutable digest from finalized candidate "
+            f"metadata {metadata_path}: {immutable_image}"
         )
     if provider_path not in MANTLE_CANDIDATE_PROVIDER_PATHS:
         return {}

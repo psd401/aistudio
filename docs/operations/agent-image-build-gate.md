@@ -94,10 +94,12 @@ model/provider path, harness pin, prompt variant, cache mode, varied axis,
 source commit, and cited costs.
 
 Native candidates use the active AWS credential chain. Mantle candidates
-explicitly opt into the stack's `BedrockApiKeySecretArn`; the wrapper fetches
-and atomically inlines that API key before OpenClaw starts. The checked-in
-native production config contains no API-key placeholder, so this hydration is
-a strict no-op on the default build.
+explicitly opt into the stack's `BedrockApiKeySecretArn`; the root-owned
+loopback relay fetches and injects that API key only into the fixed AWS model
+request. OpenClaw receives a non-secret sentinel and cannot read either the
+bearer or secret ARN. The checked-in native production config contains no
+API-key placeholder, so this relay configuration is a strict no-op on the
+default build.
 
 See
 [`infra/agent-image/eval/candidates/README.md`](../../infra/agent-image/eval/candidates/README.md)
@@ -114,18 +116,18 @@ schema unchanged:
 
 ```bash
 python3 infra/agent-image/eval/runner.py \
-  --image <tag-or-digest> \
+  --image <immutable-ecr-uri@sha256:digest> \
   --candidate-metadata infra/agent-image/.candidate-builds/<tag>.json \
   --suite infra/agent-image/eval/suites/core.yaml \
   --trials 3 \
   --out /tmp/agent-eval-core.jsonl
 ```
 
-The finalized sidecar makes provider authentication fail closed: its
-tag/digest must match `--image`; native SigV4 candidates receive no provider
-secret; Mantle candidates resolve the environment stack's
-`BedrockApiKeySecretArn` and pass only that ARN to the short-lived eval
-container.
+The finalized sidecar makes provider authentication fail closed:
+`--image` must be its immutable digest (the matching mutable tag is rejected);
+native SigV4 candidates receive no provider secret; Mantle candidates resolve
+the environment stack's `BedrockApiKeySecretArn` and pass only that ARN to the
+short-lived eval container's root relay.
 
 Pure tasks share a booted container but receive a fresh AgentCore session UUID
 and freshly minted signed context on every trial. Workspace-mutating tasks get

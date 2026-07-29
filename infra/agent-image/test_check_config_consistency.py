@@ -61,6 +61,18 @@ class ApiKeyHydrationTests(unittest.TestCase):
         wrapper = self._wrapper('os.environ["MY_TOKEN"] = value')
         self.assertEqual(ccc.check_apikey_hydration(cfg, wrapper), [])
 
+    def test_bedrock_placeholder_accepts_complete_root_relay_contract(self):
+        cfg = {"models": {"providers": {"mantle": {
+            "apiKey": "env:AWS_BEARER_TOKEN_BEDROCK"}}}}
+        wrapper = self._wrapper(
+            'BEDROCK_BEARER_ENV = "AWS_BEARER_TOKEN_BEDROCK"\n'
+            "value = os.environ.get(BEDROCK_BEARER_ENV, '')\n"
+            "CANDIDATE_MANTLE_RELAY_API_KEY = 'sentinel'\n"
+            'relay = {"CANDIDATE_MANTLE_BEARER_TOKEN": value}\n'
+            "os.environ.pop(BEDROCK_BEARER_ENV, None)\n"
+        )
+        self.assertEqual(ccc.check_apikey_hydration(cfg, wrapper), [])
+
     def test_unhydrated_env_var_flagged(self):
         cfg = {"models": {"providers": {"mantle": {"apiKey": "env:GHOST_TOKEN"}}}}
         wrapper = self._wrapper("nothing here sets it")

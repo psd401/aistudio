@@ -40,13 +40,13 @@
     "api": "https://docs.aws.amazon.com/bedrock/latest/userguide/inference-messages-api.html",
     "auth": "https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html",
     "baseUrl": "https://docs.aws.amazon.com/bedrock/latest/userguide/endpoints.html",
-    "iam": "https://docs.aws.amazon.com/bedrock/latest/userguide/security-iam-projects.html",
+    "iam": "https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-permissions.html",
     "model": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5.html",
     "pricing": "https://aws.amazon.com/bedrock/pricing/"
   },
   "iam": {
     "authMechanism": "Bedrock API key loaded from Secrets Manager and sent as x-api-key",
-    "actions": ["bedrock:CallWithBearerToken"],
+    "actions": ["bedrock-mantle:CallWithBearerToken"],
     "resources": ["*"],
     "inferenceProfileId": "us.anthropic.claude-sonnet-5",
     "crossRegionFoundationModelArns": [
@@ -54,6 +54,6 @@
       "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-5*",
       "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-5*"
     ],
-    "note": "The bearer-token call itself requires Resource '*'. The listed profile destinations document the equivalent SigV4 grant and the regions that organization SCPs must not deny."
+    "note": "bedrock-mantle:CallWithBearerToken requires Resource '*'. The listed profile destinations document the equivalent SigV4 grant and the regions that organization SCPs must not deny."
   }
 }

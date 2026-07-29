@@ -46,6 +46,14 @@ class TestCandidateProviderHydration(unittest.TestCase):
         import json
         from pathlib import Path
 
+        provider = dict(provider)
+        if provider.get("apiKey") == "env:AWS_BEARER_TOKEN_BEDROCK":
+            provider.setdefault("api", "openai-completions")
+            provider.setdefault("auth", "api-key")
+            provider.setdefault(
+                "baseUrl",
+                "https://bedrock-mantle.us-east-1.api.aws/v1",
+            )
         path = Path(directory) / "openclaw.json"
         path.write_text(
             json.dumps(
@@ -85,11 +93,11 @@ class TestCandidateProviderHydration(unittest.TestCase):
                     agentcore_wrapper.hydrate_configured_provider_api_keys(
                         str(path)
                     ),
-                    [],
+                    {},
                 )
             self.assertEqual(path.read_bytes(), before)
 
-    def test_existing_bearer_is_inlined_for_any_named_provider(self):
+    def test_existing_bearer_is_confined_to_the_root_relay(self):
         import json
         import tempfile
 
@@ -107,19 +115,31 @@ class TestCandidateProviderHydration(unittest.TestCase):
                 {"AWS_BEARER_TOKEN_BEDROCK": "candidate-secret"},
                 clear=True,
             ):
-                hydrated = (
+                relay_environment = (
                     agentcore_wrapper.hydrate_configured_provider_api_keys(
                         str(path)
                     )
                 )
-            self.assertEqual(hydrated, ["candidate"])
+                self.assertNotIn(
+                    "AWS_BEARER_TOKEN_BEDROCK",
+                    agentcore_wrapper.os.environ,
+                )
             config = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(
                 config["models"]["providers"]["candidate"]["apiKey"],
+                agentcore_wrapper.CANDIDATE_MANTLE_RELAY_API_KEY,
+            )
+            self.assertEqual(
+                config["models"]["providers"]["candidate"]["baseUrl"],
+                agentcore_wrapper.CANDIDATE_MANTLE_RELAY_BASE_URL,
+            )
+            self.assertNotIn("candidate-secret", path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                relay_environment["CANDIDATE_MANTLE_BEARER_TOKEN"],
                 "candidate-secret",
             )
 
-    def test_secret_arn_hydrates_when_bearer_env_is_absent(self):
+    def test_secret_arn_configures_only_the_root_relay(self):
         import json
         import tempfile
 
@@ -145,22 +165,32 @@ class TestCandidateProviderHydration(unittest.TestCase):
                 },
                 clear=True,
             ):
-                hydrated = (
+                relay_environment = (
                     agentcore_wrapper.hydrate_configured_provider_api_keys(
                         str(path)
                     )
                 )
-                self.assertEqual(
-                    agentcore_wrapper.os.environ[
-                        "AWS_BEARER_TOKEN_BEDROCK"
-                    ],
-                    "fetched-secret",
+                self.assertNotIn(
+                    "AWS_BEARER_TOKEN_BEDROCK",
+                    agentcore_wrapper.os.environ,
                 )
-            self.assertEqual(hydrated, ["candidate"])
+                self.assertNotIn(
+                    "BEDROCK_API_KEY_SECRET_ARN",
+                    agentcore_wrapper.os.environ,
+                )
             config = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(
                 config["models"]["providers"]["candidate"]["apiKey"],
+                agentcore_wrapper.CANDIDATE_MANTLE_RELAY_API_KEY,
+            )
+            self.assertNotIn("fetched-secret", path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                relay_environment["CANDIDATE_MANTLE_BEARER_TOKEN"],
                 "fetched-secret",
+            )
+            self.assertEqual(
+                relay_environment["CANDIDATE_MANTLE_BASE_URL"],
+                "https://bedrock-mantle.us-east-1.api.aws/v1",
             )
 
     def test_token_provider_without_credential_fails_before_boot(self):
@@ -181,6 +211,49 @@ class TestCandidateProviderHydration(unittest.TestCase):
                 clear=True,
             ), self.assertRaisesRegex(RuntimeError, "neither"):
                 agentcore_wrapper.hydrate_configured_provider_api_keys(str(path))
+
+    def test_proxy_child_alone_receives_candidate_bearer(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        response = mock.MagicMock()
+        response.__enter__.return_value.status = 200
+        relay_environment = {
+            "CANDIDATE_MANTLE_API": "openai-completions",
+            "CANDIDATE_MANTLE_BASE_URL": (
+                "https://bedrock-mantle.us-east-1.api.aws/v1"
+            ),
+            "CANDIDATE_MANTLE_BEARER_TOKEN": "candidate-secret",
+            "CANDIDATE_MANTLE_MODEL_ID": "zai.glm-5",
+        }
+        with mock.patch.object(
+            agentcore_wrapper.subprocess,
+            "Popen",
+            return_value=process,
+        ) as popen, mock.patch(
+            "urllib.request.urlopen",
+            return_value=response,
+        ), mock.patch.dict(
+            agentcore_wrapper.os.environ,
+            {"APP_BASE_URL": "https://dev.example.invalid"},
+            clear=True,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_mantle_proxy_process",
+            None,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_candidate_relay_environment",
+            {},
+        ):
+            agentcore_wrapper.start_mantle_proxy(relay_environment)
+
+        child_environment = popen.call_args.kwargs["env"]
+        self.assertEqual(
+            child_environment["CANDIDATE_MANTLE_BEARER_TOKEN"],
+            "candidate-secret",
+        )
+        self.assertNotIn("AWS_BEARER_TOKEN_BEDROCK", child_environment)
+        self.assertNotIn("BEDROCK_API_KEY_SECRET_ARN", child_environment)
 
     def test_telemetry_fallback_uses_configured_candidate_model(self):
         import tempfile

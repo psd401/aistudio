@@ -316,11 +316,12 @@ def _provider_template(
     ):
         raise CandidateError(f"{template_path}: iam actions/resources must be lists")
     if provider_path.startswith("mantle-") and (
-        "bedrock:CallWithBearerToken" not in actions or "*" not in resources
+        "bedrock-mantle:CallWithBearerToken" not in actions
+        or "*" not in resources
     ):
         raise CandidateError(
             f"{template_path}: Mantle IAM must include "
-            "bedrock:CallWithBearerToken on Resource '*'"
+            "bedrock-mantle:CallWithBearerToken on Resource '*'"
         )
     inference_profile = iam.get("inferenceProfileId")
     member_models = iam.get("crossRegionFoundationModelArns")

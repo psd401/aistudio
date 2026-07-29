@@ -82,9 +82,11 @@ and [supported cross-region profiles](https://docs.aws.amazon.com/bedrock/latest
 - `auth`: `api-key`
 - `baseUrl`: `https://bedrock-mantle.us-east-1.api.aws/v1`
 - Credential: `AWS_BEARER_TOKEN_BEDROCK`, loaded from the stack's
-  `BedrockApiKeySecretArn` for the candidate probe and atomically inlined
-  before OpenClaw starts.
-- IAM for the key-backed API: `bedrock:CallWithBearerToken` requires
+  `BedrockApiKeySecretArn` for the candidate probe. The root-owned loopback
+  relay injects it into the fixed AWS request; the node gateway receives only
+  a non-secret sentinel and cannot read the bearer or secret ARN.
+- IAM for the key-backed Mantle API:
+  `bedrock-mantle:CallWithBearerToken` requires
   resource `*`; the probe principal also needs `secretsmanager:GetSecretValue`
   on that one environment secret. Model access should be constrained with a
   Bedrock project/API-key policy when this path is used beyond a local
@@ -92,7 +94,7 @@ and [supported cross-region profiles](https://docs.aws.amazon.com/bedrock/latest
 
 Sources: [Mantle APIs](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html),
 [API-key authentication](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html),
-and [Mantle IAM projects](https://docs.aws.amazon.com/bedrock/latest/userguide/security-iam-projects.html).
+and [API-key permissions](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-permissions.html).
 
 ### Mantle Anthropic Messages
 
@@ -100,7 +102,8 @@ and [Mantle IAM projects](https://docs.aws.amazon.com/bedrock/latest/userguide/s
 - `auth`: `api-key`
 - `baseUrl`: `https://bedrock-mantle.us-east-1.api.aws/anthropic`; OpenClaw
   appends `/v1/messages`.
-- Credential/IAM: the same API-key and `bedrock:CallWithBearerToken`
+- Credential/IAM: the same root-relayed API key and
+  `bedrock-mantle:CallWithBearerToken`
   contract as the OpenAI-compatible path.
 
 Source: [Bedrock Mantle Messages API](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-messages-api.html).
@@ -158,8 +161,9 @@ python3 infra/agent-image/eval/runner.py \
   --out /tmp/candidate-regression.jsonl
 ```
 
-The runner verifies that the sidecar tag/digest matches the image. Native
-SigV4 remains a no-secret path. For either Mantle path, it resolves the
+The runner requires `--image` in immutable `repository@sha256:...` form and
+verifies that digest against the sidecar; the mutable tag is evidence only.
+Native SigV4 remains a no-secret path. For either Mantle path, it resolves the
 environment's `BedrockApiKeySecretArn` stack output and gives the container
-only that ARN; the container retrieves the key using the active, refreshed AWS
-credential chain.
+only that ARN. The root-owned relay retrieves and injects the key using the
+active, refreshed AWS credential chain; the node gateway receives neither.

@@ -40,16 +40,16 @@
     "api": "https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html",
     "auth": "https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html",
     "baseUrl": "https://docs.aws.amazon.com/bedrock/latest/userguide/endpoints.html",
-    "iam": "https://docs.aws.amazon.com/bedrock/latest/userguide/security-iam-projects.html",
+    "iam": "https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-permissions.html",
     "model": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-zai-glm-5.html",
     "pricing": "https://aws.amazon.com/bedrock/pricing/"
   },
   "iam": {
     "authMechanism": "Bedrock API key loaded from Secrets Manager and sent as a Bearer token",
-    "actions": ["bedrock:CallWithBearerToken"],
+    "actions": ["bedrock-mantle:CallWithBearerToken"],
     "resources": ["*"],
     "inferenceProfileId": null,
     "crossRegionFoundationModelArns": [],
-    "note": "CallWithBearerToken requires Resource '*'. The secret reader additionally needs secretsmanager:GetSecretValue on the environment's Bedrock API-key secret."
+    "note": "bedrock-mantle:CallWithBearerToken requires Resource '*'. The secret reader additionally needs secretsmanager:GetSecretValue on the environment's Bedrock API-key secret."
   }
 }

@@ -331,14 +331,14 @@ class CandidateMatrixTests(unittest.TestCase):
                 ):
                     candidate.validate(temporary_manifest)
 
-    def test_mantle_templates_use_the_bedrock_iam_service_prefix(self):
+    def test_mantle_templates_use_the_mantle_iam_service_prefix(self):
         providers_dir = self.manifests_dir.parent / "providers"
         for template_path in providers_dir.glob("mantle-*.json"):
             with self.subTest(template=template_path.name):
                 template = json.loads(template_path.read_text(encoding="utf-8"))
                 self.assertEqual(
                     template["iam"]["actions"],
-                    ["bedrock:CallWithBearerToken"],
+                    ["bedrock-mantle:CallWithBearerToken"],
                 )
                 self.assertEqual(template["iam"]["resources"], ["*"])
 

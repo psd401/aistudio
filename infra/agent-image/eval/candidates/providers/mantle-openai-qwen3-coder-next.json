@@ -40,16 +40,16 @@
     "api": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-qwen-qwen3-coder-next.html",
     "auth": "https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html",
     "baseUrl": "https://docs.aws.amazon.com/bedrock/latest/userguide/endpoints.html",
-    "iam": "https://docs.aws.amazon.com/bedrock/latest/userguide/security-iam-projects.html",
+    "iam": "https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-permissions.html",
     "model": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-qwen-qwen3-coder-next.html",
     "pricing": "https://aws.amazon.com/bedrock/pricing/"
   },
   "iam": {
     "authMechanism": "Bedrock API key loaded from Secrets Manager and sent as a Bearer token",
-    "actions": ["bedrock:CallWithBearerToken"],
+    "actions": ["bedrock-mantle:CallWithBearerToken"],
     "resources": ["*"],
     "inferenceProfileId": null,
     "crossRegionFoundationModelArns": [],
-    "note": "CallWithBearerToken requires Resource '*'. Qwen3 Coder Next uses its regional model ID and no cross-region inference profile."
+    "note": "bedrock-mantle:CallWithBearerToken requires Resource '*'. Qwen3 Coder Next uses its regional model ID and no cross-region inference profile."
   }
 }

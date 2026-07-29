@@ -2080,7 +2080,7 @@ class MainWiringTests(unittest.TestCase):
             environment = runner._resolve_candidate_runtime_environment(
                 executor,
                 metadata_path,
-                image,
+                f"{image.rsplit(':', 1)[0]}@{digest}",
                 "dev",
                 "us-east-1",
             )
@@ -2107,12 +2107,42 @@ class MainWiringTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 runner.EvalRunnerError,
-                "--image does not match",
+                "--image must be the immutable digest",
             ):
                 runner._resolve_candidate_runtime_environment(
                     mock.Mock(),
                     metadata_path,
                     "example.invalid/agent:other",
+                    "dev",
+                    "us-east-1",
+                )
+
+    def test_candidate_metadata_rejects_its_matching_mutable_tag(self):
+        digest = "sha256:" + "d" * 64
+        image = "example.invalid/agent:mutable"
+        with tempfile.TemporaryDirectory() as directory:
+            metadata_path = Path(directory) / "candidate.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "providerPath": "native-bedrock-sigv4",
+                        "providerAuth": "aws-sdk",
+                        "image": image,
+                        "imageDigest": digest,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                runner.EvalRunnerError,
+                "--image must be the immutable digest",
+            ):
+                runner._resolve_candidate_runtime_environment(
+                    mock.Mock(),
+                    metadata_path,
+                    image,
                     "dev",
                     "us-east-1",
                 )

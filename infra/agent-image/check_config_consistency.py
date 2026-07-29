@@ -10,9 +10,9 @@ build (no Docker):
      table it must match. A fat-fingered contextWindow (20_000 instead of
      200_000, or 2_000_000) silently changes pruning behavior and cost.
 
-  2. apiKey hydration path — every provider whose apiKey is an `env:VAR`
-     placeholder must have VAR actually hydrated in agentcore_wrapper.py. A
-     provider that points at an env var nothing sets boots with no credential
+  2. apiKey credential path — every provider whose apiKey is an `env:VAR`
+     placeholder must have VAR hydrated or confined to the root-owned relay in
+     agentcore_wrapper.py. An unresolved placeholder boots with no credential
      and every model call 401s (the r11-class "missing provider" failure).
 
   3. prompt-caching reachability — if openclaw.json asks for prompt caching
@@ -530,20 +530,31 @@ def check_apikey_hydration(config: dict, wrapper_path: str) -> List[str]:
         if not env_var:
             violations.append(f"{provider_name}: apiKey 'env:' has no variable name")
             continue
-        # The wrapper must actually SET this env var (hydration), i.e. contain an
-        # `os.environ["VAR"]` reference — not merely the bare name as a substring.
-        # A bare-name match false-passes when the var is a substring of another
-        # name (e.g. `TOKEN` inside `AWS_BEARER_TOKEN_BEDROCK`) or appears only in
-        # a comment, exactly the r11 "missing provider" class this gate exists to
-        # catch. Accept single- or double-quoted subscript.
+        # The wrapper must either hydrate this exact env var or route the
+        # Bedrock candidate placeholder through the root-only relay. Bare-name
+        # matches false-pass when a variable is only a substring/comment, so
+        # require the complete source contract for the relay path.
         hydration_markers = (
             f'os.environ["{env_var}"]',
             f"os.environ['{env_var}']",
         )
-        if not any(marker in wrapper_src for marker in hydration_markers):
+        candidate_relay_markers = (
+            f'BEDROCK_BEARER_ENV = "{env_var}"',
+            "os.environ.get(BEDROCK_BEARER_ENV",
+            "CANDIDATE_MANTLE_RELAY_API_KEY",
+            '"CANDIDATE_MANTLE_BEARER_TOKEN": value',
+            "os.environ.pop(BEDROCK_BEARER_ENV",
+        )
+        has_direct_hydration = any(
+            marker in wrapper_src for marker in hydration_markers
+        )
+        has_candidate_relay = env_var == "AWS_BEARER_TOKEN_BEDROCK" and all(
+            marker in wrapper_src for marker in candidate_relay_markers
+        )
+        if not has_direct_hydration and not has_candidate_relay:
             violations.append(
                 f"{provider_name}: apiKey env:{env_var} has no hydration path "
-                f'(os.environ["{env_var}"]) in {os.path.basename(wrapper_path)}'
+                f"or root-only relay in {os.path.basename(wrapper_path)}"
             )
     return violations
 

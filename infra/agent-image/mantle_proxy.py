@@ -28,6 +28,7 @@ import sys
 import time
 import uuid
 from typing import Optional
+from urllib.parse import urlparse
 
 from aiohttp import web, ClientSession, ClientTimeout
 
@@ -49,6 +50,30 @@ def j(msg: str, **kw) -> str:
 
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "").rstrip("/")
 UPSTREAM = APP_BASE_URL + "/api/agent/model-proxy"
+CANDIDATE_MANTLE_API = os.environ.pop("CANDIDATE_MANTLE_API", "").strip()
+CANDIDATE_MANTLE_BASE_URL = os.environ.pop(
+    "CANDIDATE_MANTLE_BASE_URL", ""
+).strip()
+CANDIDATE_MANTLE_BEARER_TOKEN = os.environ.pop(
+    "CANDIDATE_MANTLE_BEARER_TOKEN", ""
+).strip()
+CANDIDATE_MANTLE_MODEL_ID = os.environ.pop(
+    "CANDIDATE_MANTLE_MODEL_ID", ""
+).strip()
+CANDIDATE_MANTLE_PREFIX = "candidate-mantle"
+CANDIDATE_MANTLE_OPERATIONS = {
+    "openai-completions": (
+        frozenset({("GET", "models"), ("POST", "chat/completions")}),
+        "/v1",
+    ),
+    "anthropic-messages": (
+        frozenset({("POST", "v1/messages")}),
+        "/anthropic",
+    ),
+}
+CANDIDATE_MANTLE_HOST_RE = re.compile(
+    r"bedrock-mantle\.[a-z0-9-]+\.api\.aws"
+)
 AUTHORITY_DIRECTORY = "/run/psd-agent-authority"
 INVOCATION_CONTEXT_PATH = f"{AUTHORITY_DIRECTORY}/invocation-context"
 REQUEST_PROOF_KEY_PATH = f"{AUTHORITY_DIRECTORY}/request-proof-key"
@@ -117,6 +142,75 @@ HYPERFRAMES_MAX_DIMENSION = 3_840
 POLLY_ENGINES = frozenset({"generative", "long-form", "neural", "standard"})
 POLLY_VOICE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 EMAIL_RE = re.compile(r"^[^\s@/]+@[^\s@/]+\.[^\s@/]+$")
+
+
+def _candidate_mantle_configuration() -> tuple[str, str, str, str] | None:
+    """Validate the root-only direct-Mantle relay environment."""
+    values = (
+        CANDIDATE_MANTLE_API,
+        CANDIDATE_MANTLE_BASE_URL,
+        CANDIDATE_MANTLE_BEARER_TOKEN,
+        CANDIDATE_MANTLE_MODEL_ID,
+    )
+    if not any(values):
+        return None
+    if (
+        not all(values)
+        or CANDIDATE_MANTLE_API not in CANDIDATE_MANTLE_OPERATIONS
+    ):
+        raise RuntimeError("candidate Mantle relay configuration is incomplete")
+    _, expected_base_path = CANDIDATE_MANTLE_OPERATIONS[
+        CANDIDATE_MANTLE_API
+    ]
+    parsed = urlparse(CANDIDATE_MANTLE_BASE_URL)
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise RuntimeError("candidate Mantle base URL has an invalid port") from error
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname is None
+        or not CANDIDATE_MANTLE_HOST_RE.fullmatch(parsed.hostname)
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.path != expected_base_path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError(
+            "candidate Mantle base URL is not an exact AWS endpoint"
+        )
+    return values
+
+
+def _resolve_candidate_mantle_request(
+    method: str,
+    path: str,
+    body: bytes | None,
+) -> str | None:
+    """Map one fixed model operation to the configured AWS endpoint."""
+    prefix = f"{CANDIDATE_MANTLE_PREFIX}/"
+    if not path.startswith(prefix):
+        return None
+    configuration = _candidate_mantle_configuration()
+    if configuration is None:
+        raise ValueError("candidate Mantle relay is disabled")
+    provider_api, base_url, _, model_id = configuration
+    allowed_operations, _ = CANDIDATE_MANTLE_OPERATIONS[provider_api]
+    relative_path = path[len(prefix) :]
+    if (method, relative_path) not in allowed_operations:
+        raise ValueError("unsupported candidate Mantle operation")
+    if method == "GET":
+        return f"{base_url}/{relative_path}"
+    try:
+        payload = json.loads(body) if body else None
+    except (TypeError, ValueError) as error:
+        raise ValueError("candidate Mantle request must be JSON") from error
+    if not isinstance(payload, dict) or payload.get("model") != model_id:
+        raise ValueError("candidate Mantle request model does not match")
+    return f"{base_url}/{relative_path}"
 
 
 def _read_authority() -> tuple[str, bytes]:
@@ -1628,13 +1722,25 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     if _read_workspace_flush_token() is not None:
         return web.json_response({"error": "Turn is finalizing"}, status=503)
     path = request.match_info.get("path", "")
-    url = f"{UPSTREAM}/{path}"
     req_id = f"{int(time.time()*1000)}-{id(request) % 100000}"
     t0 = time.time()
 
     req_body: Optional[bytes] = None
     if request.method in ("POST", "PUT", "PATCH"):
         req_body = await request.read()
+    try:
+        candidate_url = _resolve_candidate_mantle_request(
+            request.method, path, req_body
+        )
+    except (RuntimeError, ValueError) as error:
+        log.warning(
+            j("candidate_mantle_rejected", path=path, error=str(error)[:200])
+        )
+        return web.json_response(
+            {"error": "Unsupported candidate model operation"}, status=404
+        )
+    is_candidate_mantle = candidate_url is not None
+    url = candidate_url or f"{UPSTREAM}/{path}"
 
     # Log request summary + truncated body
     try:
@@ -1738,6 +1844,8 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             "x-agent-request-proof-signature",
         }:
             continue
+        if is_candidate_mantle and kl == "authorization":
+            continue
         fwd_headers[k] = v
 
     timeout = ClientTimeout(total=300, sock_read=300, sock_connect=30)
@@ -1769,11 +1877,18 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         `/usage` counters by the caller.
         """
         body_to_send = body_override if body_override is not None else req_body
-        proof_headers = _authority_headers(
-            request.method,
-            f"/api/agent/model-proxy/{path}",
-            body_to_send or b"",
-        )
+        if is_candidate_mantle:
+            proof_headers = {
+                "Authorization": (
+                    f"Bearer {CANDIDATE_MANTLE_BEARER_TOKEN}"
+                )
+            }
+        else:
+            proof_headers = _authority_headers(
+                request.method,
+                f"/api/agent/model-proxy/{path}",
+                body_to_send or b"",
+            )
         async with ClientSession(timeout=timeout) as session:
             async with session.request(
                 request.method,
@@ -2131,6 +2246,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 def main() -> None:
     if not UPSTREAM.startswith(("https://", "http://127.0.0.1", "http://localhost")):
         raise RuntimeError("APP_BASE_URL is not a trusted model broker URL")
+    candidate_mantle = _candidate_mantle_configuration() is not None
     app = web.Application(
         client_max_size=50 * 1024 * 1024,
         middlewares=[finalization_gate_middleware],
@@ -2145,7 +2261,15 @@ def main() -> None:
     app.router.add_post("/aws-skill/hyperframes/invoke", handle_hyperframes_invoke)
     app.router.add_route("*", "/agent-broker/{route:.*}", handle_agent_broker)
     app.router.add_route("*", "/{path:.*}", handle_proxy)
-    log.info(j("starting", host="127.0.0.1", port=18791, upstream=UPSTREAM))
+    log.info(
+        j(
+            "starting",
+            host="127.0.0.1",
+            port=18791,
+            upstream=UPSTREAM,
+            candidate_mantle=candidate_mantle,
+        )
+    )
     web.run_app(app, host="127.0.0.1", port=18791, access_log=None,
                 print=lambda *a, **k: None)
 

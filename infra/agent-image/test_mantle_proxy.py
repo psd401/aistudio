@@ -67,6 +67,7 @@ from mantle_proxy import (  # noqa: E402
     HYPERFRAMES_RELAY_TIMEOUT_SECONDS,
     POLLY_TEXT_MAX_CHARS,
     _bind_hyperframes_owner,
+    _candidate_mantle_configuration,
     _decode_invocation_owner,
     _invoke_hyperframes,
     _new_lambda_client,
@@ -74,6 +75,7 @@ from mantle_proxy import (  # noqa: E402
     _resolve_invocation_owner,
     _read_bounded_agent_broker_response,
     _read_signed_identity_response,
+    _resolve_candidate_mantle_request,
     _resolve_agent_broker_route,
     _synthesize_polly,
     _validate_hyperframes_payload,
@@ -92,6 +94,77 @@ from mantle_proxy import (  # noqa: E402
     _parse_anthropic_stream,
     _parse_anthropic_response,
 )
+
+
+class TestCandidateMantleRelay(unittest.TestCase):
+    def _configuration(self, *, api="openai-completions", base_url=None):
+        if base_url is None:
+            base_url = (
+                "https://bedrock-mantle.us-east-1.api.aws/v1"
+                if api == "openai-completions"
+                else "https://bedrock-mantle.us-east-1.api.aws/anthropic"
+            )
+        return mock.patch.multiple(
+            mantle_proxy,
+            CANDIDATE_MANTLE_API=api,
+            CANDIDATE_MANTLE_BASE_URL=base_url,
+            CANDIDATE_MANTLE_BEARER_TOKEN="root-only-secret",
+            CANDIDATE_MANTLE_MODEL_ID="zai.glm-5",
+        )
+
+    def test_maps_only_the_configured_model_operation(self):
+        body = json.dumps({"model": "zai.glm-5", "messages": []}).encode()
+        with self._configuration():
+            self.assertEqual(
+                _resolve_candidate_mantle_request(
+                    "POST", "candidate-mantle/chat/completions", body
+                ),
+                (
+                    "https://bedrock-mantle.us-east-1.api.aws/v1"
+                    "/chat/completions"
+                ),
+            )
+            self.assertEqual(
+                _resolve_candidate_mantle_request(
+                    "GET", "candidate-mantle/models", None
+                ),
+                "https://bedrock-mantle.us-east-1.api.aws/v1/models",
+            )
+            with self.assertRaisesRegex(ValueError, "model does not match"):
+                _resolve_candidate_mantle_request(
+                    "POST",
+                    "candidate-mantle/chat/completions",
+                    json.dumps({"model": "other"}).encode(),
+                )
+            with self.assertRaisesRegex(ValueError, "unsupported"):
+                _resolve_candidate_mantle_request(
+                    "POST", "candidate-mantle/models", body
+                )
+
+    def test_maps_anthropic_messages_without_exposing_the_bearer(self):
+        body = json.dumps({"model": "zai.glm-5", "messages": []}).encode()
+        with self._configuration(api="anthropic-messages"):
+            configuration = _candidate_mantle_configuration()
+            self.assertIsNotNone(configuration)
+            upstream = _resolve_candidate_mantle_request(
+                "POST", "candidate-mantle/v1/messages", body
+            )
+            self.assertEqual(
+                upstream,
+                (
+                    "https://bedrock-mantle.us-east-1.api.aws/anthropic"
+                    "/v1/messages"
+                ),
+            )
+            self.assertNotIn("root-only-secret", upstream)
+
+    def test_rejects_lookalike_mantle_origin(self):
+        with self._configuration(
+            base_url=(
+                "https://bedrock-mantle.us-east-1.api.aws.attacker.example/v1"
+            )
+        ), self.assertRaisesRegex(RuntimeError, "exact AWS endpoint"):
+            _candidate_mantle_configuration()
 
 
 class _FakeAwsStream:

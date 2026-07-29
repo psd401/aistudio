@@ -58,12 +58,20 @@ OPENCLAW_WORKSPACE_DIR = "/home/node/.openclaw"
 # merely because neither the proxy nor transcript returned a model id.
 DEFAULT_AGENT_MODEL_ID = "claude-sonnet-5"
 BEDROCK_BEARER_ENV = "AWS_BEARER_TOKEN_BEDROCK"
+CANDIDATE_MANTLE_RELAY_BASE_URL = (
+    "http://127.0.0.1:18791/candidate-mantle"
+)
+CANDIDATE_MANTLE_RELAY_API_KEY = "candidate-relay-managed"
+CANDIDATE_MANTLE_APIS = frozenset(
+    {"openai-completions", "anthropic-messages"}
+)
 
 adapter = OpenClawAdapter()
 
 # Credential-isolating logging proxy sitting between OpenClaw and the web broker.
 # Track the process so we can reap it on shutdown and log if it crashes.
 _mantle_proxy_process: subprocess.Popen | None = None
+_candidate_relay_environment: dict[str, str] = {}
 
 
 def _safe_header_value(value: str, limit: int = 100) -> str:
@@ -345,28 +353,34 @@ def _serialize_invocations(function):
     return serialized
 
 
-def start_mantle_proxy() -> None:
+def start_mantle_proxy(
+    candidate_relay_environment: dict[str, str] | None = None,
+) -> None:
     """
     Launch the root-owned model/direct-AWS relay on 127.0.0.1:18791 and block
     until /health returns 200. If it can't come up, exit — OpenClaw's
     openclaw.json points its baseUrl at the relay, so no relay means no model
     calls or direct-AWS skills.
     """
-    global _mantle_proxy_process
+    global _mantle_proxy_process, _candidate_relay_environment
     import urllib.request
     import urllib.error
 
     logger.info("Starting Mantle logging proxy on 127.0.0.1:18791")
+    if candidate_relay_environment is not None:
+        _candidate_relay_environment = dict(candidate_relay_environment)
+    proxy_environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("AWS_BEARER_TOKEN_BEDROCK", "BEDROCK_API_KEY_SECRET_ARN")
+    }
+    proxy_environment.update(_candidate_relay_environment)
     _mantle_proxy_process = subprocess.Popen(
         [sys.executable, "/app/mantle_proxy.py"],
         stdout=sys.stdout,
         stderr=sys.stderr,
         stdin=subprocess.DEVNULL,
-        env={
-            key: value
-            for key, value in os.environ.items()
-            if key not in ("AWS_BEARER_TOKEN_BEDROCK", "BEDROCK_API_KEY_SECRET_ARN")
-        },
+        env=proxy_environment,
     )
     deadline = time.time() + 20
     while time.time() < deadline:
@@ -408,23 +422,49 @@ def _configured_primary_model_id(
     return DEFAULT_AGENT_MODEL_ID
 
 
-def _inline_configured_bearer_token(config_path: str, value: str) -> list[str]:
-    """Replace only the explicit Bedrock bearer placeholders, atomically."""
+def _configure_candidate_mantle_relay(
+    config_path: str,
+    value: str,
+) -> tuple[list[str], dict[str, str]]:
+    """Point one candidate provider at the root relay without persisting its key."""
     with open(config_path, "r", encoding="utf-8") as config_file:
         config = json.load(config_file)
     providers = (config.get("models") or {}).get("providers") or {}
-    hydrated: list[str] = []
-    for provider_name, provider in providers.items():
+    targets = [
+        (provider_name, provider)
+        for provider_name, provider in providers.items()
         if (
             isinstance(provider_name, str)
             and isinstance(provider, dict)
             and provider.get("apiKey") == f"env:{BEDROCK_BEARER_ENV}"
-        ):
-            provider["apiKey"] = value
-            hydrated.append(provider_name)
-    if not hydrated:
-        return []
+        )
+    ]
+    if not targets:
+        return [], {}
+    if len(targets) != 1:
+        raise RuntimeError(
+            "candidate Mantle relay requires exactly one token-auth provider"
+        )
 
+    provider_name, provider = targets[0]
+    provider_api = provider.get("api")
+    upstream_base_url = provider.get("baseUrl")
+    models = provider.get("models")
+    if (
+        provider.get("auth") != "api-key"
+        or provider_api not in CANDIDATE_MANTLE_APIS
+        or not isinstance(upstream_base_url, str)
+        or not upstream_base_url
+        or not isinstance(models, list)
+        or len(models) != 1
+        or not isinstance(models[0], dict)
+        or not isinstance(models[0].get("id"), str)
+        or not models[0]["id"]
+    ):
+        raise RuntimeError("candidate Mantle provider contract is malformed")
+
+    provider["baseUrl"] = CANDIDATE_MANTLE_RELAY_BASE_URL
+    provider["apiKey"] = CANDIDATE_MANTLE_RELAY_API_KEY
     directory = os.path.dirname(config_path)
     descriptor, temporary_path = tempfile.mkstemp(
         prefix=".openclaw.candidate.", dir=directory
@@ -443,18 +483,26 @@ def _inline_configured_bearer_token(config_path: str, value: str) -> list[str]:
         except OSError:
             pass
         raise
-    return hydrated
+    relay_environment = {
+        "CANDIDATE_MANTLE_API": provider_api,
+        "CANDIDATE_MANTLE_BASE_URL": upstream_base_url,
+        "CANDIDATE_MANTLE_BEARER_TOKEN": value,
+        "CANDIDATE_MANTLE_MODEL_ID": models[0]["id"],
+    }
+    return [provider_name], relay_environment
 
 
 def hydrate_configured_provider_api_keys(
     config_path: str = OPENCLAW_CONFIG_PATH,
-) -> list[str]:
-    """Hydrate candidate Mantle providers; native SigV4 remains a strict no-op.
+) -> dict[str, str]:
+    """Configure a root-only candidate relay; native SigV4 is a strict no-op.
 
     The checked-in production config has no apiKey and therefore performs no
     secret read. A candidate that explicitly declares
     ``env:AWS_BEARER_TOKEN_BEDROCK`` must receive either that environment value
-    or ``BEDROCK_API_KEY_SECRET_ARN``. Failure is fatal before BOOT_OK.
+    or ``BEDROCK_API_KEY_SECRET_ARN``. The bearer is passed only to the
+    root-owned relay; OpenClaw receives a non-secret sentinel and loopback URL.
+    Failure is fatal before BOOT_OK.
     """
     with open(config_path, "r", encoding="utf-8") as config_file:
         config = json.load(config_file)
@@ -469,7 +517,7 @@ def hydrate_configured_provider_api_keys(
         )
     ]
     if not targets:
-        return []
+        return {}
 
     value = os.environ.get(BEDROCK_BEARER_ENV, "").strip()
     secret_version = "environment"
@@ -500,18 +548,25 @@ def hydrate_configured_provider_api_keys(
         value = raw_value.strip()
         secret_version = str(response.get("VersionId", "unknown"))
 
-    # Keep the env value for OpenClaw discovery and inline it because all
-    # OpenClaw call paths do not consistently resolve env: placeholders.
-    os.environ["AWS_BEARER_TOKEN_BEDROCK"] = value
-    hydrated = _inline_configured_bearer_token(config_path, value)
+    try:
+        hydrated, relay_environment = _configure_candidate_mantle_relay(
+            config_path, value
+        )
+    finally:
+        # The node gateway inherits the wrapper environment. Remove both the
+        # bearer and its secret identifier before that process can start.
+        os.environ.pop(BEDROCK_BEARER_ENV, None)
+        os.environ.pop("BEDROCK_API_KEY_SECRET_ARN", None)
     if sorted(hydrated) != sorted(targets):
-        raise RuntimeError("provider apiKey hydration did not update every target")
+        raise RuntimeError(
+            "candidate relay configuration did not update every target"
+        )
     logger.info(
-        "Hydrated Bedrock bearer for candidate provider(s)=%s version=%s",
+        "Configured root-only candidate relay for provider(s)=%s version=%s",
         ",".join(sorted(hydrated)),
         secret_version,
     )
-    return hydrated
+    return relay_environment
 
 
 def resolve_model_call_count(proxy_model_calls: int, tool_call_count: int) -> int:
@@ -853,11 +908,11 @@ def main():
 
     # Native production config is a no-op. Candidate Mantle configs fail
     # closed here if their explicit bearer placeholder cannot be hydrated.
-    hydrate_configured_provider_api_keys()
+    candidate_relay_environment = hydrate_configured_provider_api_keys()
 
-    # Start the local request-shaping proxy before OpenClaw. It forwards only
-    # to the owner-bound web broker and never receives a provider credential.
-    start_mantle_proxy()
+    # Start the root-owned request relay before OpenClaw. A candidate Mantle
+    # bearer is passed only to this process, never to the node gateway.
+    start_mantle_proxy(candidate_relay_environment)
 
     # Step 2: start the OpenClaw gateway
     logger.info("Configuring OpenClaw adapter")
