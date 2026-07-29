@@ -2254,10 +2254,10 @@ async function sendGoogleChatResponse(
   text: string,
   log: ReturnType<typeof createLogger>,
   deliveryContext: ChatResponseDeliveryContext = {}
-): Promise<void> {
+): Promise<ChatResponseDeliveryOutcome> {
   const chatClient = await getChatClient();
   const chatAuth = await getChatAuth();
-  await sendGoogleChatResponseWithDependencies(
+  return sendGoogleChatResponseWithDependencies(
     {
       spaceName,
       threadName,
@@ -2289,6 +2289,11 @@ interface ChatResponseInput {
   text: string;
   deliveryContext: ChatResponseDeliveryContext;
 }
+
+type ChatResponseDeliveryOutcome =
+  | 'delivered'
+  | 'dm-fallback-delivered'
+  | 'failed';
 
 interface ChatMessageCreateRequest {
   parent: string;
@@ -2413,7 +2418,7 @@ async function handleChatPostPermissionDenied(
     log: ReturnType<typeof createLogger>;
   },
   dependencies: ChatResponseDependencies
-): Promise<void> {
+): Promise<Exclude<ChatResponseDeliveryOutcome, 'delivered'>> {
   const {
     error,
     spaceName,
@@ -2457,7 +2462,7 @@ async function handleChatPostPermissionDenied(
         log,
         dependencies
       );
-      return;
+      return 'failed';
     }
 
     await dependencies.createMessage({
@@ -2469,6 +2474,7 @@ async function handleChatPostPermissionDenied(
       dmSpace: dmSpaceName,
       errorClass: 'ChatPostPermissionDenied',
     });
+    return 'dm-fallback-delivered';
   } catch (fallbackError) {
     log.error('Shared-space Chat reply and DM fallback both failed', {
       space: spaceName,
@@ -2482,6 +2488,7 @@ async function handleChatPostPermissionDenied(
       log,
       dependencies
     );
+    return 'failed';
   }
 }
 
@@ -2530,7 +2537,7 @@ async function sendGoogleChatResponseWithDependencies(
   input: ChatResponseInput,
   log: ReturnType<typeof createLogger>,
   dependencies: ChatResponseDependencies
-): Promise<void> {
+): Promise<ChatResponseDeliveryOutcome> {
   const { spaceName, threadName, text, deliveryContext } = input;
   const prepared = prepareGoogleChatMessage(spaceName, text, log);
   const messageBody: Record<string, unknown> = {
@@ -2555,7 +2562,7 @@ async function sendGoogleChatResponseWithDependencies(
       Boolean(deliveryContext.senderGoogleIdentity) &&
       isChatPostPermissionDenied(error);
     if (!canFallbackToDm) throw error;
-    await handleChatPostPermissionDenied(
+    return handleChatPostPermissionDenied(
       {
         error,
         spaceName,
@@ -2566,7 +2573,6 @@ async function sendGoogleChatResponseWithDependencies(
       },
       dependencies
     );
-    return;
   }
 
   log.info('Response sent to Google Chat', {
@@ -2575,6 +2581,7 @@ async function sendGoogleChatResponseWithDependencies(
     hasCards: prepared.hasCards,
     hasAccessoryWidgets: prepared.hasAccessoryWidgets,
   });
+  return 'delivered';
 }
 
 // ---------------------------------------------------------------------------

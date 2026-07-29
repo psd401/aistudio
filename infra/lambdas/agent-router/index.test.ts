@@ -309,7 +309,7 @@ describe("Google Chat response delivery", () => {
       Parameters<ChatResponseDependencies["createMessage"]>[0]
     > = []
 
-    await sendGoogleChatResponseWithDependencies(
+    const outcome = await sendGoogleChatResponseWithDependencies(
       {
         spaceName: "spaces/room",
         threadName: "spaces/room/threads/thread-1",
@@ -325,6 +325,7 @@ describe("Google Chat response delivery", () => {
     )
 
     expect(requests).toHaveLength(1)
+    expect(outcome).toBe("delivered")
     expect(requests[0]).toEqual({
       parent: "spaces/room",
       requestBody: {
@@ -380,7 +381,7 @@ describe("Google Chat response delivery", () => {
           },
         })
       )
-    ).resolves.toBeUndefined()
+    ).resolves.toBe("dm-fallback-delivered")
 
     expect(requests).toHaveLength(2)
     expect(requests[1]?.parent).toBe("spaces/owner-dm")
@@ -430,7 +431,7 @@ describe("Google Chat response fallback failures", () => {
           },
         })
       )
-    ).resolves.toBeUndefined()
+    ).resolves.toBe("failed")
 
     expect(requests).toHaveLength(1)
     expect(failures.map(failure => failure.errorClass)).toEqual([
@@ -479,7 +480,7 @@ describe("Google Chat response fallback failures", () => {
           },
         })
       )
-    ).resolves.toBeUndefined()
+    ).resolves.toBe("failed")
 
     expect(requests).toHaveLength(2)
     expect(requests[1]?.parent).toBe("spaces/owner-dm")

@@ -93,11 +93,18 @@ describe("job runner restart handling", () => {
     expect(source).toContain("recordScheduledJobTerminal(")
     expect(source).toContain("writeScheduledRun,")
     expect(source).toContain(
-      "status: agentResult.failed ? 'error' : 'success'",
+      "status: agentResult.failed || deliveryFailed ? 'error' : 'success'",
     )
   })
 
+  it("exits nonzero when both room and DM delivery fail", () => {
+    expect(source).toContain(
+      "return deliveryOutcome === 'failed' ? 3 : agentResult.failed ? 2 : 0",
+    )
+    expect(source).toContain("JOB_RUNNER_DELIVERY_FAILED")
+  })
+
   it("exits nonzero after delivering an agent failure for ECS supervision", () => {
-    expect(source).toContain("return agentResult.failed ? 2 : 0")
+    expect(source).toContain("agentResult.failed ? 2 : 0")
   })
 })

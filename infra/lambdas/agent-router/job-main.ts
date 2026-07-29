@@ -86,12 +86,14 @@ function scheduledFailureContext(job: JobPayload) {
   };
 }
 
-async function recordDeliveredJobResult(
+async function recordCompletedJobResult(
   job: JobPayload,
   agentResult: AgentResult,
   latencyMs: number,
+  deliveryOutcome: Awaited<ReturnType<typeof sendGoogleChatResponse>>,
   log: JobLogger
 ): Promise<void> {
+  const deliveryFailed = deliveryOutcome === 'failed';
   await logTelemetry(
     {
       userId: job.userEmail,
@@ -115,17 +117,31 @@ async function recordDeliveredJobResult(
   await recordScheduledJobTerminal(
     job,
     {
-      status: agentResult.failed ? 'error' : 'success',
+      status: agentResult.failed || deliveryFailed ? 'error' : 'success',
       inputTokens: agentResult.inputTokens,
       outputTokens: agentResult.outputTokens,
       latencyMs,
-      ...(agentResult.failed
-        ? { errorMessage: agentResult.response }
+      ...(deliveryFailed
+        ? {
+            errorMessage:
+              'Google Chat room post and private DM fallback both failed',
+          }
+        : agentResult.failed
+          ? { errorMessage: agentResult.response }
         : {}),
     },
     writeScheduledRun,
     log
   );
+
+  if (deliveryFailed) {
+    log.warn('Background job completed but no Chat response was delivered', {
+      marker: 'JOB_RUNNER_DELIVERY_FAILED',
+      sessionId: job.sessionId,
+      latencyMs,
+    });
+    return;
+  }
 
   if (!agentResult.failed) {
     log.info('Background job completed', {
@@ -290,7 +306,7 @@ async function main(): Promise<number> {
     // Deliver exactly like the router's Step 6: truncate the raw response,
     // then prefix in shared spaces. A failed turn's response is already the
     // harness's failure frame — posting it satisfies "always post something".
-    await sendGoogleChatResponse(
+    const deliveryOutcome = await sendGoogleChatResponse(
       job.spaceName,
       job.threadName,
       formatJobChatResponse(job, agentResult.response),
@@ -300,11 +316,17 @@ async function main(): Promise<number> {
 
     const latencyMs =
       agentResult.latencyMs > 0 ? agentResult.latencyMs : Date.now() - startTime;
-    await recordDeliveredJobResult(job, agentResult, latencyMs, log);
+    await recordCompletedJobResult(
+      job,
+      agentResult,
+      latencyMs,
+      deliveryOutcome,
+      log
+    );
     // The ECS STOPPED-state supervisor uses the process exit code as its
     // authoritative terminal signal. A delivered agent failure is not a clean
     // job even though Chat delivery itself succeeded.
-    return agentResult.failed ? 2 : 0;
+    return deliveryOutcome === 'failed' ? 3 : agentResult.failed ? 2 : 0;
   } catch (error) {
     const exitCode = await handleJobRunnerError(job, error, startTime, log);
     return exitCode;
