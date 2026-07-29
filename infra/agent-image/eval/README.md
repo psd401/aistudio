@@ -129,8 +129,9 @@ itself records the full immutable ECR URI and digest.
 ## Compare two summaries
 
 `report.py` compares two schema-valid, digest-named summaries. It requires the
-same task IDs, skill ownership, suite classification, and trial count in both
-arms so a task-set change cannot masquerade as a model or harness improvement:
+same `eval_harness_commit`, task IDs, skill ownership, suite classification, and
+trial count in both arms so a harness or task-set change cannot masquerade as a
+model improvement:
 
 ```bash
 python3 infra/agent-image/eval/report.py \

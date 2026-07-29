@@ -232,6 +232,20 @@ def _validate_comparison_identity(
     baseline: Mapping[str, object],
     candidate: Mapping[str, object],
 ) -> None:
+    baseline_harness = _string(
+        baseline.get("eval_harness_commit"),
+        "baseline.eval_harness_commit",
+    )
+    candidate_harness = _string(
+        candidate.get("eval_harness_commit"),
+        "candidate.eval_harness_commit",
+    )
+    if baseline_harness != candidate_harness:
+        raise EvalReportError(
+            "summaries must use the same eval_harness_commit "
+            f"(baseline {baseline_harness}; candidate {candidate_harness})"
+        )
+
     baseline_tasks = _tasks(baseline, "baseline")
     candidate_tasks = _tasks(candidate, "candidate")
     if set(baseline_tasks) != set(candidate_tasks):

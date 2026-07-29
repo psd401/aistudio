@@ -404,6 +404,21 @@ class ReportRenderingTests(unittest.TestCase):
 
 
 class InputAndCliTests(unittest.TestCase):
+    def test_harness_commit_changes_are_rejected(self):
+        specs = {
+            "reg-a": ("skill-a", "regression", 3),
+            "cap-a": ("skill-a", "capability", 2),
+        }
+        baseline = build_summary(specs, digest_character="a")
+        candidate = build_summary(specs, digest_character="b")
+        candidate["eval_harness_commit"] = "e" * 40
+
+        with self.assertRaisesRegex(
+            eval_report.EvalReportError,
+            "same eval_harness_commit",
+        ):
+            eval_report.compare_summaries(baseline, candidate)
+
     def test_task_identity_changes_are_rejected(self):
         baseline = build_summary(
             {
