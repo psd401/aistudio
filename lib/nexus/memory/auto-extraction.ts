@@ -401,8 +401,13 @@ export function createNexusMemoryAutoExtractionRunner(
 
     const model = await dependencies.createModel()
     const candidates = await model.extract({
-      userMessage,
-      assistantMessage: input.assistantMessage.trim(),
+      userMessage: userMessage.slice(
+        0,
+        MAX_NEXUS_MEMORY_CONTENT_CHARS,
+      ),
+      assistantMessage: input.assistantMessage
+        .trim()
+        .slice(0, MAX_NEXUS_MEMORY_CONTENT_CHARS),
     })
     counts.extracted = candidates.length
 

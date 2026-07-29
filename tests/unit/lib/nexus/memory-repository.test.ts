@@ -32,13 +32,16 @@ const MEMORY: StoredNexusMemory = {
 function transactionDouble() {
   const updateReturning = jest.fn().mockResolvedValue([MEMORY])
   const updateWhere = jest.fn(() => ({ returning: updateReturning }))
-  const updateSet = jest.fn(() => ({ where: updateWhere }))
+  const updateSet = jest.fn((_values: unknown) => ({
+    where: updateWhere,
+  }))
   const insertReturning = jest.fn().mockResolvedValue([MEMORY])
   const insertValues = jest.fn(() => ({ returning: insertReturning }))
   return {
     execute: jest.fn().mockResolvedValue({}),
     update: jest.fn(() => ({ set: updateSet })),
     insert: jest.fn(() => ({ values: insertValues })),
+    updateSet,
   }
 }
 
@@ -186,6 +189,54 @@ describe("Nexus memory repository deduplication", () => {
     expect(rendered.params).toContain(
       "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     )
+  })
+})
+
+describe("Nexus automatic memory deduplication", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it("stays inside its category without replacing provenance", async () => {
+    const tx = transactionDouble()
+    mockToPgRows.mockReturnValue([
+      { id: MEMORY.id, similarity: "0.9500" },
+    ])
+    mockExecuteTransaction.mockImplementation(
+      async (operation: (value: typeof tx) => Promise<unknown>) =>
+        operation(tx),
+    )
+
+    await drizzleMemoryRepository.saveWithDedup(
+      {
+        userId: 7,
+        content: "Prefers concise explanations",
+        category: "preference",
+        source: "auto",
+        sourceConversationId:
+          "22222222-2222-4222-8222-222222222222",
+        embedding: [0.1, 0.2],
+      },
+      0.9,
+    )
+
+    const nearestStatement = tx.execute.mock.calls[1]?.[0]
+    if (!(nearestStatement instanceof SQL)) {
+      throw new TypeError("Expected the nearest-memory query to be SQL")
+    }
+    const renderedNearest = new PgDialect().sqlToQuery(nearestStatement)
+    expect(renderedNearest.sql).toContain("category =")
+    expect(renderedNearest.params).toContain("preference")
+    expect(tx.updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: "Prefers concise explanations",
+        embedding: [0.1, 0.2],
+      }),
+    )
+    const updateRecord = tx.updateSet.mock.calls[0]?.[0]
+    expect(updateRecord).not.toHaveProperty("category")
+    expect(updateRecord).not.toHaveProperty("source")
+    expect(updateRecord).not.toHaveProperty("sourceConversationId")
   })
 })
 

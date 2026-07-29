@@ -17,6 +17,9 @@ import type {
 import type {
   NexusMemoryService,
 } from "@/lib/nexus/memory/memory-service"
+import {
+  MAX_NEXUS_MEMORY_CONTENT_CHARS,
+} from "@/lib/nexus/memory/memory-constants"
 
 const INPUT: NexusMemoryAutoExtractionInput = {
   userId: 7,
@@ -214,6 +217,26 @@ describe("Nexus automatic memory gates", () => {
     ).resolves.toMatchObject({ skippedReason: "short-message" })
     expect(extract).not.toHaveBeenCalled()
     expect(service.save).not.toHaveBeenCalled()
+  })
+
+  it("bounds each exchange side before recurring model extraction", async () => {
+    const { runner, extract } = createRunner({})
+    const oversized = "x".repeat(
+      MAX_NEXUS_MEMORY_CONTENT_CHARS + 1_000,
+    )
+
+    await runner({
+      ...INPUT,
+      userMessage: oversized,
+      assistantMessage: oversized,
+    })
+
+    expect(extract).toHaveBeenCalledWith({
+      userMessage: "x".repeat(MAX_NEXUS_MEMORY_CONTENT_CHARS),
+      assistantMessage: "x".repeat(
+        MAX_NEXUS_MEMORY_CONTENT_CHARS,
+      ),
+    })
   })
 })
 

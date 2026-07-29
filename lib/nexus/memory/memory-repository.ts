@@ -163,6 +163,10 @@ export const drizzleMemoryRepository: MemoryRepository = {
           )`,
         )
         const literal = vectorLiteral(record.embedding)
+        const automaticCategoryScope =
+          record.source === "auto"
+            ? sql`AND category = ${record.category}`
+            : sql``
         const nearestResult = await tx.execute(sql`
           WITH owner_memories AS MATERIALIZED (
             SELECT id, embedding
@@ -170,6 +174,7 @@ export const drizzleMemoryRepository: MemoryRepository = {
             WHERE user_id = ${record.userId}
               AND deleted_at IS NULL
               AND embedding IS NOT NULL
+              ${automaticCategoryScope}
             FOR UPDATE
           )
           SELECT id, 1 - (embedding <=> ${literal}::vector) AS similarity
@@ -184,16 +189,25 @@ export const drizzleMemoryRepository: MemoryRepository = {
         )
 
         if (shouldUpdate) {
+          const updateRecord =
+            record.source === "auto"
+              ? {
+                  content: record.content,
+                  embedding: record.embedding,
+                  updatedAt: new Date(),
+                }
+              : {
+                  content: record.content,
+                  category: record.category,
+                  source: record.source,
+                  sourceConversationId:
+                    record.sourceConversationId ?? null,
+                  embedding: record.embedding,
+                  updatedAt: new Date(),
+                }
           const [updated] = await tx
             .update(nexusUserMemories)
-            .set({
-              content: record.content,
-              category: record.category,
-              source: record.source,
-              sourceConversationId: record.sourceConversationId ?? null,
-              embedding: record.embedding,
-              updatedAt: new Date(),
-            })
+            .set(updateRecord)
             .where(
               and(
                 eq(nexusUserMemories.id, nearest.id),
