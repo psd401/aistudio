@@ -559,6 +559,17 @@ const CREDENTIALS_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 // Cached Google Chat API client — reuses OAuth token across warm invocations.
 // Invalidated when credentials are refreshed (TTL expiry or parse error).
+function createGoogleChatAuth(
+  credentials: Record<string, unknown>
+) {
+  return new chatPkg.auth.GoogleAuth({
+    credentials,
+    scopes: ['https://www.googleapis.com/auth/chat.bot'],
+  });
+}
+
+type GoogleChatAuth = ReturnType<typeof createGoogleChatAuth>;
+let cachedChatAuth: GoogleChatAuth | null = null;
 let cachedChatClient: ReturnType<typeof chatPkg.chat> | null = null;
 
 // Cache SSM lookups at module scope to avoid redundant API calls on every invocation.
@@ -880,6 +891,7 @@ async function getGoogleCredentials(): Promise<string> {
   cachedGoogleCredentials = result.SecretString || '';
   credentialsCachedAt = Date.now();
   // Invalidate the Chat API client so it picks up fresh credentials
+  cachedChatAuth = null;
   cachedChatClient = null;
   return cachedGoogleCredentials;
 }
@@ -1944,7 +1956,7 @@ async function invokeAgentCore(
  * Cached across warm invocations to avoid an OAuth token round-trip; the
  * cache is invalidated when credentials refresh (TTL expiry or parse error).
  */
-async function getChatClient(): Promise<NonNullable<typeof cachedChatClient>> {
+async function getChatAuth(): Promise<GoogleChatAuth> {
   const credentialsJson = await getGoogleCredentials();
   let credentials: Record<string, unknown>;
   try {
@@ -1954,18 +1966,23 @@ async function getChatClient(): Promise<NonNullable<typeof cachedChatClient>> {
     // Secrets Manager in case the secret was recently updated/fixed.
     cachedGoogleCredentials = null;
     credentialsCachedAt = null;
+    cachedChatAuth = null;
     cachedChatClient = null;
     throw new Error('Google credentials secret contains invalid JSON');
   }
 
-  if (!cachedChatClient) {
-    const googleAuth = new chatPkg.auth.GoogleAuth({
-      credentials,
-      scopes: ['https://www.googleapis.com/auth/chat.bot'],
-    });
-    cachedChatClient = chatPkg.chat({ version: 'v1', auth: googleAuth });
+  if (!cachedChatAuth) {
+    cachedChatAuth = createGoogleChatAuth(credentials);
   }
 
+  return cachedChatAuth;
+}
+
+async function getChatClient(): Promise<NonNullable<typeof cachedChatClient>> {
+  const googleAuth = await getChatAuth();
+  if (!cachedChatClient) {
+    cachedChatClient = chatPkg.chat({ version: 'v1', auth: googleAuth });
+  }
   return cachedChatClient;
 }
 
@@ -2239,6 +2256,7 @@ async function sendGoogleChatResponse(
   deliveryContext: ChatResponseDeliveryContext = {}
 ): Promise<void> {
   const chatClient = await getChatClient();
+  const chatAuth = await getChatAuth();
   await sendGoogleChatResponseWithDependencies(
     {
       spaceName,
@@ -2252,7 +2270,7 @@ async function sendGoogleChatResponse(
         await chatClient.spaces.messages.create(request);
       },
       resolveDmSpace: googleIdentity =>
-        resolveDmSpace(chatClient, googleIdentity),
+        resolveDmSpace(chatAuth, googleIdentity),
       recordFailure,
     }
   );
@@ -2346,31 +2364,22 @@ function dmFallbackMessageBody(
 }
 
 async function resolveDmSpace(
-  chatClient: NonNullable<typeof cachedChatClient>,
+  chatAuth: GoogleChatAuth,
   googleIdentity: string
 ): Promise<string | null> {
-  let pageToken: string | undefined;
-  do {
-    const response = await chatClient.spaces.list({
-      pageToken,
-      pageSize: 100,
+  try {
+    const response = await chatAuth.request<{ name?: string }>({
+      url: 'https://chat.googleapis.com/v1/spaces:findDirectMessage',
+      method: 'GET',
+      params: {
+        name: googleIdentity,
+      },
     });
-    for (const space of response.data.spaces ?? []) {
-      if (!space.name || !space.singleUserBotDm) continue;
-      const members = await chatClient.spaces.members.list({
-        parent: space.name,
-        pageSize: 10,
-      });
-      const containsSender = (members.data.memberships ?? []).some(
-        membership =>
-          membership.member?.type === 'HUMAN' &&
-          membership.member?.name === googleIdentity
-      );
-      if (containsSender) return space.name;
-    }
-    pageToken = response.data.nextPageToken ?? undefined;
-  } while (pageToken);
-  return null;
+    return response.data.name ?? null;
+  } catch (error) {
+    if (errorStatusCode(error) === 404) return null;
+    throw error;
+  }
 }
 
 async function recordDmFallbackFailure(
