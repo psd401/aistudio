@@ -722,7 +722,29 @@ def _grade_tool_call_succeeded(
     spec: Mapping[str, object],
     metadata: Mapping[str, object],
 ) -> GraderResult:
-    """Require a named invocation and its matching completion to succeed."""
+    """Require a named invocation and its matching completion to succeed.
+
+    Two telemetry shapes are reconciled here, because a task may be graded
+    against either the current harness or an already-deployed image:
+
+    1. Current (`harness_adapter.py`): one record per completed call, carrying
+       both the rendered ``args`` and the authoritative ``status``::
+
+           [{"name": "exec", "args": {...}, "status": "success"}]
+
+    2. Legacy (older deployed images): the call is split across two records --
+       an args-bearing invocation, immediately followed by an args-less record
+       holding the authoritative ``status``::
+
+           [{"name": "exec", "args": {...}, "status": "running"},
+            {"name": "exec", "args": None,  "status": "error"}]
+
+    The scan below therefore starts from the matched args-bearing record's own
+    status, then looks ahead for an immediately-following args-less record of
+    the same tool and lets that record's status win. The look-ahead stops at the
+    next args-bearing call of the same tool, since that is a new invocation
+    rather than this one's completion.
+    """
 
     raw_calls = metadata.get("tool_calls")
     calls = (

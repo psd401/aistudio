@@ -113,12 +113,20 @@ def load_upstream_skill_inventory(
         raise ValueError(
             "upstream skill manifest source does not match the Dockerfile clone"
         )
+    # Intentionally an exact substring match rather than a tolerant regex: this
+    # gate exists to force a human to re-check the manifest whenever the gws-*
+    # install changes at all. Reformatting the RUN line (line continuations,
+    # quoting, extra flags) will therefore fail this check even though the
+    # install is still correct -- that is by design. When that happens, confirm
+    # the inventory is still accurate and update this literal to match.
     if (
         "cp -r /tmp/gws-repo/skills/gws-* /opt/psd-skills/"
         not in dockerfile
     ):
         raise ValueError(
-            "Dockerfile no longer installs the declared gws-* skill inventory"
+            "Dockerfile no longer installs the declared gws-* skill inventory; "
+            "if the install line was only reformatted, update the expected "
+            "literal in check_eval_coverage.py after re-verifying the manifest"
         )
 
     if verify_upstream and upstream_skills_root is not None:
@@ -315,7 +323,10 @@ def main(argv: list[str] | None = None) -> int:
         for error in errors:
             print(f"- {error}", file=sys.stderr)
         return 1
-    skill_count = len(discover_skills(skills_root)) + len(upstream_skills)
+    # Union rather than sum so the summary can never over-count if a build-added
+    # skill is ever also committed locally. coverage_gaps() unions the same two
+    # sets, so this keeps the reported totals consistent with the pass/fail gate.
+    skill_count = len(discover_skills(skills_root) | upstream_skills)
     covered_count = skill_count - len(opt_outs)
     print(
         "agent eval coverage check passed: "
