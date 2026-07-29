@@ -908,6 +908,145 @@ def _validate_scope_telemetry_consistency(
         )
 
 
+def _validate_partition_telemetry_consistency(
+    root: Mapping[str, object],
+    partition_field: str,
+    description: str,
+) -> None:
+    """Reconcile additive telemetry from a complete scope partition."""
+
+    overall = _mapping(root.get("overall"), f"{description}.overall")
+    overall_telemetry = _mapping(
+        overall.get("telemetry"),
+        f"{description}.overall.telemetry",
+    )
+    partitions = _mapping(
+        root.get(partition_field),
+        f"{description}.{partition_field}",
+    )
+    partition_telemetries = {
+        key: _mapping(
+            _mapping(scope, f"{description}.{partition_field}.{key}").get(
+                "telemetry"
+            ),
+            f"{description}.{partition_field}.{key}.telemetry",
+        )
+        for key, scope in partitions.items()
+    }
+
+    overall_tokens = _mapping(
+        overall_telemetry.get("tokens"),
+        f"{description}.overall.telemetry.tokens",
+    )
+    for field in TOKEN_PRICE_KEYS:
+        actual = _nonnegative_integer(
+            overall_tokens.get(field),
+            f"{description}.overall.telemetry.tokens.{field}",
+        )
+        expected = sum(
+            _nonnegative_integer(
+                _mapping(
+                    telemetry.get("tokens"),
+                    f"{description}.{partition_field}.{key}.telemetry.tokens",
+                ).get(field),
+                f"{description}.{partition_field}.{key}.telemetry.tokens.{field}",
+            )
+            for key, telemetry in partition_telemetries.items()
+        )
+        if actual != expected:
+            raise EvalSummaryError(
+                f"{description}.overall.telemetry.tokens.{field} is "
+                f"inconsistent with {partition_field} partitions"
+            )
+
+    for field in ("duration_ms", "latency_ms", "model_call_count"):
+        actual = _nonnegative_integer(
+            _mapping(
+                overall_telemetry.get(field),
+                f"{description}.overall.telemetry.{field}",
+            ).get("total"),
+            f"{description}.overall.telemetry.{field}.total",
+        )
+        expected = sum(
+            _nonnegative_integer(
+                _mapping(
+                    telemetry.get(field),
+                    f"{description}.{partition_field}.{key}.telemetry.{field}",
+                ).get("total"),
+                f"{description}.{partition_field}.{key}.telemetry."
+                f"{field}.total",
+            )
+            for key, telemetry in partition_telemetries.items()
+        )
+        if actual != expected:
+            raise EvalSummaryError(
+                f"{description}.overall.telemetry.{field}.total is "
+                f"inconsistent with {partition_field} partitions"
+            )
+
+    additive_counters = (
+        ("nudged", "trials"),
+        ("failures", "trials"),
+        ("failures", "graded_trials"),
+    )
+    for group, field in additive_counters:
+        actual = _nonnegative_integer(
+            _mapping(
+                overall_telemetry.get(group),
+                f"{description}.overall.telemetry.{group}",
+            ).get(field),
+            f"{description}.overall.telemetry.{group}.{field}",
+        )
+        expected = sum(
+            _nonnegative_integer(
+                _mapping(
+                    telemetry.get(group),
+                    f"{description}.{partition_field}.{key}.telemetry.{group}",
+                ).get(field),
+                f"{description}.{partition_field}.{key}.telemetry."
+                f"{group}.{field}",
+            )
+            for key, telemetry in partition_telemetries.items()
+        )
+        if actual != expected:
+            raise EvalSummaryError(
+                f"{description}.overall.telemetry.{group}.{field} is "
+                f"inconsistent with {partition_field} partitions"
+            )
+
+    overall_failures = _mapping(
+        overall_telemetry.get("failures"),
+        f"{description}.overall.telemetry.failures",
+    )
+    for field in ("by_error_class", "by_failed_grader"):
+        actual_mapping = _mapping(
+            overall_failures.get(field),
+            f"{description}.overall.telemetry.failures.{field}",
+        )
+        actual = Counter(
+            {str(key): int(count) for key, count in actual_mapping.items()}
+        )
+        expected: Counter[str] = Counter()
+        for key, telemetry in partition_telemetries.items():
+            failures = _mapping(
+                telemetry.get("failures"),
+                f"{description}.{partition_field}.{key}.telemetry.failures",
+            )
+            counters = _mapping(
+                failures.get(field),
+                f"{description}.{partition_field}.{key}.telemetry."
+                f"failures.{field}",
+            )
+            expected.update(
+                {str(counter): int(count) for counter, count in counters.items()}
+            )
+        if actual != expected:
+            raise EvalSummaryError(
+                f"{description}.overall.telemetry.failures.{field} is "
+                f"inconsistent with {partition_field} partitions"
+            )
+
+
 def _validate_scope(
     value: object,
     description: str,
@@ -1209,6 +1348,12 @@ def _validate_summary_schema(root: Mapping[str, object], description: str) -> No
             validated_tasks,
             f"{description}.skills.{skill}",
             pricing,
+        )
+    for partition_field in ("suites", "skills"):
+        _validate_partition_telemetry_consistency(
+            root,
+            partition_field,
+            description,
         )
 
 

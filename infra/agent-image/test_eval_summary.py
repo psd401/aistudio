@@ -511,6 +511,93 @@ class CommittedArtifactGuardTests(unittest.TestCase):
 
                 self.assert_rejected(value, pattern)
 
+    def test_scope_telemetry_partitions_must_reconcile_with_overall(self):
+        def mutate_suite_tokens(value):
+            telemetry = value["suites"]["regression"]["telemetry"]
+            telemetry["tokens"]["output_tokens"] = 1600
+            telemetry["cost"] = {
+                "total_usd": 0.03399,
+                "per_trial_usd": 0.01133,
+                "per_task_usd": 0.03399,
+            }
+
+        def mutate_suite_duration(value):
+            duration = value["suites"]["regression"]["telemetry"]["duration_ms"]
+            duration["total"] = 6003
+            duration["mean"] = 2001
+
+        def mutate_suite_model_calls(value):
+            calls = value["suites"]["regression"]["telemetry"][
+                "model_call_count"
+            ]
+            calls["total"] = 9
+            calls["mean"] = 3
+
+        def mutate_suite_nudges(value):
+            nudged = value["suites"]["regression"]["telemetry"]["nudged"]
+            nudged["trials"] = 2
+            nudged["rate"] = 0.666667
+
+        def mutate_suite_failures(value):
+            failures = value["suites"]["regression"]["telemetry"]["failures"]
+            failures["trials"] = 1
+            failures["rate"] = 0.333333
+            failures["by_error_class"] = {"SyntheticFailure": 1}
+
+        def mutate_suite_failed_graders(value):
+            failures = value["suites"]["capability"]["telemetry"]["failures"]
+            failures["by_failed_grader"] = {"unknown": 2}
+
+        def mutate_skill_duration(value):
+            duration = value["skills"]["skill-a"]["telemetry"]["duration_ms"]
+            duration["total"] = 12006
+            duration["mean"] = 2001
+
+        mutations = (
+            (
+                "suite tokens",
+                mutate_suite_tokens,
+                r"tokens\.output_tokens.*suites partitions",
+            ),
+            (
+                "suite duration",
+                mutate_suite_duration,
+                r"duration_ms\.total.*suites partitions",
+            ),
+            (
+                "suite model calls",
+                mutate_suite_model_calls,
+                r"model_call_count\.total.*suites partitions",
+            ),
+            (
+                "suite nudges",
+                mutate_suite_nudges,
+                r"nudged\.trials.*suites partitions",
+            ),
+            (
+                "suite failures",
+                mutate_suite_failures,
+                r"failures\.trials.*suites partitions",
+            ),
+            (
+                "suite failed graders",
+                mutate_suite_failed_graders,
+                r"by_failed_grader.*suites partitions",
+            ),
+            (
+                "skill duration",
+                mutate_skill_duration,
+                r"duration_ms\.total.*skills partitions",
+            ),
+        )
+
+        for name, mutate, pattern in mutations:
+            with self.subTest(name=name):
+                value = json.loads(self.safe_summary_bytes())
+                mutate(value)
+
+                self.assert_rejected(value, pattern)
+
     def test_skill_membership_must_match_task_summaries(self):
         value = json.loads(self.safe_summary_bytes())
         value["skills"]["skill-a"]["task_ids"] = ["task-a"]
