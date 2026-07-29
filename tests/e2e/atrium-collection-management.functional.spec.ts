@@ -14,6 +14,10 @@ test.describe("Atrium collection management (authenticated)", () => {
   test("owner manages a private hierarchy and receives conflict feedback", async ({
     browser,
   }) => {
+    // This workflow deliberately exercises five sequential server mutations.
+    // Give a cold local dev compiler the same headroom as other multi-step E2E
+    // flows; the production-build gate still runs this test with retries disabled.
+    test.slow();
     const context = await browser.newContext();
     await authenticateContext(context, SEEDED_STAFF_EMAIL, SEEDED_STAFF_SUB);
     const suffix = Date.now().toString(36);
@@ -75,6 +79,7 @@ test.describe("Atrium collection management (authenticated)", () => {
   test("administrator creates and archives a district collection", async ({
     browser,
   }) => {
+    test.slow();
     const context = await browser.newContext();
     await authenticateContext(context);
     const name = `E2E District ${Date.now().toString(36)}`;
