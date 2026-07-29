@@ -119,6 +119,15 @@ jobs:
       env:
         CI: true
 
+    # psd-morning-brief (#1413). The three-stage CLI is plain CJS outside
+    # Jest's roots. This suite pins signed-owner authority boundaries, modular
+    # source omission, custom desks, private Atrium-only delivery, podcast
+    # defaults, retention, and fatal self-reporting.
+    - name: Run psd-morning-brief skill tests (Bun)
+      run: bun run test:skill:morning-brief
+      env:
+        CI: true
+
     # Optional: Upload test coverage if you generate it
     # - name: Upload coverage reports
     #   uses: codecov/codecov-action@v3

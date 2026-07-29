@@ -403,6 +403,9 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
 # Its PDF path passes --extract-images to psd-pdf-to-markdown; that flag needs no
 # new Python dependency either (pymupdf4llm is already in /opt/agentcore-venv and
 # writes images itself), so the consolidated venv RUN above is untouched.
+# psd-morning-brief (#1413) is pure JS with ZERO npm deps. It composes brokered
+# platform skills and APIs, renders its private Atrium newspaper locally, and is
+# installed by `COPY skills` above — NO npm install, NO new RUN, NO new layer.
 
 # Upstream gws-* skills (#912) — per-API SKILL.md guidance for Gmail, Drive,
 # Docs, Sheets, Slides, Forms, Tasks, Calendar, Chat, Meet, Contacts, etc.
