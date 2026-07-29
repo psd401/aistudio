@@ -279,10 +279,10 @@ def _observed_caching_status(
     return "uncached" if cache_reads == 0 else "cached"
 
 
-def _scope_cost_per_task(
+def _scope_costs(
     summary: Mapping[str, object],
     label: str,
-) -> Decimal:
+) -> tuple[Decimal, Decimal]:
     telemetry = _telemetry(summary, label)
     tokens = _mapping(
         telemetry.get("tokens"),
@@ -317,7 +317,7 @@ def _scope_cost_per_task(
     )
     if task_count <= 0:
         raise EvalReportError(f"{label}.overall.task_count must be positive")
-    return total_cost / Decimal(task_count)
+    return total_cost, total_cost / Decimal(task_count)
 
 
 def _percent_change(baseline: Decimal, candidate: Decimal) -> Decimal | None:
@@ -469,8 +469,8 @@ def _promotion_clauses(
         ),
     )
 
-    baseline_cost = _scope_cost_per_task(baseline, "baseline")
-    candidate_cost = _scope_cost_per_task(candidate, "candidate")
+    _, baseline_cost = _scope_costs(baseline, "baseline")
+    _, candidate_cost = _scope_costs(candidate, "candidate")
     if baseline_caching_status != candidate_caching_status:
         cost_clause = ClauseResult(
             key="c",
@@ -628,9 +628,27 @@ def _metric_rows(comparison: Comparison) -> list[list[str]]:
         candidate_telemetry.get("cost"),
         "candidate.overall.telemetry.cost",
     )
-    for field, title in (
-        ("per_task_usd", "Cost / task"),
-        ("total_usd", "Cost total"),
+    baseline_total_exact, baseline_per_task_exact = _scope_costs(
+        comparison.baseline,
+        "baseline",
+    )
+    candidate_total_exact, candidate_per_task_exact = _scope_costs(
+        comparison.candidate,
+        "candidate",
+    )
+    for field, title, baseline_exact, candidate_exact in (
+        (
+            "per_task_usd",
+            "Cost / task",
+            baseline_per_task_exact,
+            candidate_per_task_exact,
+        ),
+        (
+            "total_usd",
+            "Cost total",
+            baseline_total_exact,
+            candidate_total_exact,
+        ),
     ):
         baseline_value = _decimal(
             baseline_cost.get(field),
@@ -640,7 +658,7 @@ def _metric_rows(comparison: Comparison) -> list[list[str]]:
             candidate_cost.get(field),
             f"candidate.overall.telemetry.cost.{field}",
         )
-        change = _percent_change(baseline_value, candidate_value)
+        change = _percent_change(baseline_exact, candidate_exact)
         if not caching_matches:
             delta = "declined: caching mismatch"
         elif change is None:

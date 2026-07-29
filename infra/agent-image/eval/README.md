@@ -151,10 +151,11 @@ The promotion verdict implements the epic's three clauses independently:
 2. overall capability-suite `pass^3` strictly improves; and
 3. cost per task increases by no more than 20%.
 
-Clause (3) reconstructs unrounded Decimal costs from each arm's stored token
-totals and model price block. The six-decimal summary cost remains a display
-value only, so two tiny real costs that both round to zero cannot accidentally
-pass the promotion gate.
+Clause (3) and the report's total/per-task cost deltas reconstruct unrounded
+Decimal costs from each arm's stored token totals and model price block. The
+six-decimal summary cost remains a display value only, so two tiny real costs
+that both round to zero cannot accidentally pass the promotion gate or produce
+a contradictory `0.00%` report delta.
 
 Caching status is re-derived from each summary's observed
 `cache_read_input_tokens`, not from candidate configuration or the summary's

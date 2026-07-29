@@ -254,6 +254,10 @@ class PromotionRuleTests(unittest.TestCase):
 
         self.assertFalse(clause(comparison, "c").passed)
         self.assertIn("200.00%", clause(comparison, "c").detail)
+        self.assertEqual(
+            [row[3] for row in eval_report._metric_rows(comparison)[:2]],
+            ["200.00%", "200.00%"],
+        )
         self.assertEqual(comparison.verdict, "REJECT")
 
     def test_caching_mismatch_declines_cost_clause(self):
