@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "verifiedAt": "2026-07-29",
+  "id": "native-bedrock-glm-5",
+  "providerPath": "native-bedrock-sigv4",
+  "providerName": "amazon-bedrock",
+  "primaryModelId": "zai.glm-5",
+  "cacheRetention": "none",
+  "contextTokens": 180000,
+  "provider": {
+    "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+    "api": "bedrock-converse-stream",
+    "auth": "aws-sdk",
+    "timeoutSeconds": 300,
+    "models": [
+      {
+        "id": "zai.glm-5",
+        "name": "GLM-5 (Bedrock, SigV4 via execution role)",
+        "reasoning": false,
+        "input": ["text"],
+        "contextWindow": 200000,
+        "maxTokens": 131072,
+        "cost": {
+          "input": 1,
+          "output": 3.2,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        }
+      }
+    ]
+  },
+  "costSources": {
+    "input": "https://aws.amazon.com/bedrock/pricing/",
+    "output": "https://aws.amazon.com/bedrock/pricing/",
+    "cacheRead": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-zai-glm-5.html",
+    "cacheWrite": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-zai-glm-5.html"
+  },
+  "sources": {
+    "api": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-zai-glm-5.html",
+    "auth": "https://docs.aws.amazon.com/bedrock/latest/userguide/security-iam.html",
+    "baseUrl": "https://docs.aws.amazon.com/bedrock/latest/userguide/endpoints.html",
+    "iam": "https://docs.aws.amazon.com/bedrock/latest/userguide/security-iam-id-based-policy-examples.html",
+    "model": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-zai-glm-5.html",
+    "pricing": "https://aws.amazon.com/bedrock/pricing/"
+  },
+  "iam": {
+    "authMechanism": "AWS SigV4 execution-role credentials",
+    "actions": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+    "resources": [
+      "arn:aws:bedrock:us-east-1::foundation-model/zai.glm-5"
+    ],
+    "inferenceProfileId": null,
+    "crossRegionFoundationModelArns": [],
+    "note": "GLM-5 is invoked as the regional foundation-model ID in us-east-1; no cross-region profile is used by this template."
+  }
+}

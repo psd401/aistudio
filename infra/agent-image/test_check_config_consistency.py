@@ -26,6 +26,13 @@ class ContextWindowTests(unittest.TestCase):
         self.assertEqual(len(v), 1)
         self.assertIn("!= known value 200000", v[0])
 
+    def test_glm_5_known_window_and_wrong_window(self):
+        cfg = {"models": {"providers": {"p": {"models": [
+            {"id": "zai.glm-5", "contextWindow": 200000}]}}}}
+        self.assertEqual(ccc.check_context_windows(cfg), [])
+        cfg["models"]["providers"]["p"]["models"][0]["contextWindow"] = 203000
+        self.assertIn("!= known value 200000", ccc.check_context_windows(cfg)[0])
+
     def test_unknown_model_out_of_band_flagged(self):
         cfg = {"models": {"providers": {"p": {"models": [
             {"id": "mystery", "contextWindow": 5_000_000}]}}}}
@@ -329,6 +336,14 @@ class HostPluginCompatibilityTests(unittest.TestCase):
             ccc.check_host_plugin_compatibility(os.path.join(here, "Dockerfile")),
             [],
         )
+
+    def test_parameterized_repo_dockerfile_resolves_default_plugin_pin(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        version, violations = ccc.parse_pinned_plugin_version(
+            os.path.join(here, "Dockerfile")
+        )
+        self.assertEqual(version, "2026.7.1")
+        self.assertEqual(violations, [])
 
 
 class RealFilesTests(unittest.TestCase):

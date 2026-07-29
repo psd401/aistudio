@@ -76,6 +76,7 @@ tests/e2e/.auth/
 
 # Agent-image build-time eval-gate probe artifacts (#1161)
 infra/agent-image/.build-probes/
+infra/agent-image/.candidate-builds/
 
 # Agent-image eval transcripts contain prompts, model output, tool details, and
 # broker request bodies. Only digest-named, transcript-free summaries and exact

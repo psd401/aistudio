@@ -1,0 +1,200 @@
+"""Hermetic tests for the one-axis candidate-image matrix (#1423)."""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE / "eval" / "candidates"))
+
+import check_config_consistency as consistency  # noqa: E402
+import candidate  # noqa: E402
+
+
+class CandidateMatrixTests(unittest.TestCase):
+    manifests_dir = HERE / "eval" / "candidates" / "manifests"
+
+    def test_committed_matrix_covers_models_and_provider_paths(self):
+        manifest_paths = [
+            path
+            for path in sorted(self.manifests_dir.glob("*.json"))
+            if path.name != "baseline.json"
+        ]
+        summaries = [candidate.validate(path) for path in manifest_paths]
+        self.assertEqual(
+            {summary["candidateId"] for summary in summaries},
+            {
+                "glm-5-mantle-openai",
+                "glm-5-native",
+                "kimi-k2-5",
+                "openai-gpt-oss-120b",
+                "qwen3-coder-next",
+                "sonnet-5-mantle-anthropic",
+            },
+        )
+        for manifest_path in manifest_paths:
+            with self.subTest(manifest=manifest_path.name), tempfile.TemporaryDirectory(
+                dir=HERE, prefix=".candidate-test."
+            ) as directory:
+                plan = candidate.prepare(
+                    manifest_path,
+                    Path(directory),
+                    "d" * 40,
+                )
+                violations, _ = consistency.run_checks(
+                    str(Path(directory) / "openclaw.json"),
+                    str(HERE / "agentcore_wrapper.py"),
+                    str(plan["dockerfile"]),
+                )
+                self.assertEqual(violations, [])
+        self.assertEqual(
+            {summary["providerPath"] for summary in summaries},
+            {
+                "native-bedrock-sigv4",
+                "mantle-openai-compatible",
+                "mantle-anthropic-messages",
+            },
+        )
+
+    def test_glm_native_prepares_reproducible_build_inputs_and_metadata(self):
+        manifest = self.manifests_dir / "glm-5-native.json"
+        with tempfile.TemporaryDirectory(
+            dir=HERE, prefix=".candidate-test."
+        ) as directory:
+            plan = candidate.prepare(
+                manifest,
+                Path(directory),
+                "a" * 40,
+            )
+            config = json.loads(
+                (Path(directory) / "openclaw.json").read_text(encoding="utf-8")
+            )
+            provider = config["models"]["providers"]["amazon-bedrock"]
+            self.assertEqual(provider["models"][0]["id"], "zai.glm-5")
+            self.assertEqual(
+                config["agents"]["defaults"]["params"]["cacheRetention"], "none"
+            )
+            self.assertEqual(plan["providerPath"], "native-bedrock-sigv4")
+            self.assertFalse(plan["requiresBearerToken"])
+            self.assertTrue(
+                (Path(directory) / "skills" / "psd-rules" / "SKILL.md").is_file()
+            )
+            self.assertEqual(
+                consistency.run_checks(
+                    str(Path(directory) / "openclaw.json"),
+                    str(HERE / "agentcore_wrapper.py"),
+                    str(Path(directory) / "pin-contract.Dockerfile"),
+                )[0],
+                [],
+            )
+            metadata = json.loads(
+                Path(plan["metadata"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["variedAxis"], "model")
+            self.assertEqual(metadata["modelId"], "zai.glm-5")
+            self.assertEqual(metadata["cacheRetention"], "none")
+            self.assertEqual(metadata["contextTokens"], 180000)
+            self.assertIsNone(metadata["imageDigest"])
+            self.assertEqual(set(metadata["cost"]), set(metadata["costSources"]))
+
+    def test_finalize_binds_metadata_to_immutable_digest(self):
+        manifest = self.manifests_dir / "glm-5-native.json"
+        with tempfile.TemporaryDirectory(
+            dir=HERE, prefix=".candidate-test."
+        ) as directory:
+            output_dir = Path(directory)
+            plan = candidate.prepare(manifest, output_dir, "b" * 40)
+            finalized = output_dir / "final.json"
+            candidate.finalize(
+                Path(plan["metadata"]),
+                finalized,
+                "example.dkr.ecr.us-east-1.amazonaws.com/agent:test",
+                "sha256:" + "c" * 64,
+            )
+            metadata = json.loads(finalized.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["imageDigest"], "sha256:" + "c" * 64)
+            self.assertTrue(metadata["finalizedAt"].endswith("Z"))
+
+    def test_rejects_candidate_that_changes_more_than_declared_axis(self):
+        source = json.loads(
+            (self.manifests_dir / "glm-5-native.json").read_text(encoding="utf-8")
+        )
+        source["axes"]["harness"]["hostVersion"] = "2099.1.1"
+        with tempfile.TemporaryDirectory(
+            dir=self.manifests_dir.parent, prefix=".candidate-contract-test."
+        ) as directory:
+            temporary_manifest = Path(directory) / "invalid.json"
+            # The temporary manifest lives one directory above manifests, so
+            # make its committed references relative to that location.
+            source["baseline"] = "../manifests/baseline.json"
+            source["axes"]["model"]["providerTemplate"] = (
+                "../providers/native-bedrock-glm-5.json"
+            )
+            temporary_manifest.write_text(json.dumps(source), encoding="utf-8")
+            with self.assertRaisesRegex(
+                candidate.CandidateError, "must vary exactly one axis"
+            ):
+                candidate.validate(temporary_manifest)
+
+    def test_accepts_harness_only_and_prompt_only_candidates(self):
+        baseline = json.loads(
+            (self.manifests_dir / "baseline.json").read_text(encoding="utf-8")
+        )
+        for declared_axis in ("harness", "prompt"):
+            with self.subTest(axis=declared_axis), tempfile.TemporaryDirectory(
+                dir=self.manifests_dir.parent, prefix=".candidate-contract-test."
+            ) as directory:
+                source = json.loads(json.dumps(baseline))
+                source["id"] = f"{declared_axis}-only"
+                source["baseline"] = "../manifests/baseline.json"
+                source["declaredAxis"] = declared_axis
+                source["axes"]["model"]["providerTemplate"] = (
+                    "../providers/native-bedrock-sonnet-5.json"
+                )
+                if declared_axis == "harness":
+                    source["axes"]["harness"]["hostVersion"] = "2026.7.2"
+                else:
+                    source["axes"]["prompt"]["variant"] = "alternate"
+                temporary_manifest = Path(directory) / "candidate.json"
+                temporary_manifest.write_text(json.dumps(source), encoding="utf-8")
+
+                summary = candidate.validate(temporary_manifest)
+
+                self.assertEqual(summary["variedAxis"], declared_axis)
+
+    def test_dockerfile_defaults_keep_production_pins_and_assertion(self):
+        dockerfile = (HERE / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn(
+            "ARG OPENCLAW_BASE_IMAGE=ghcr.io/openclaw/openclaw@sha256:"
+            "6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c",
+            dockerfile,
+        )
+        self.assertIn("ARG BEDROCK_PLUGIN_VERSION=2026.7.1", dockerfile)
+        self.assertIn(
+            "ARG BEDROCK_PLUGIN_EXPECTED_TOKEN=claude-sonnet-5", dockerfile
+        )
+        self.assertIn(
+            'grep -Fq -- "${BEDROCK_PLUGIN_EXPECTED_TOKEN}"', dockerfile
+        )
+
+    def test_build_command_wires_manifest_inputs_and_digest_sidecar(self):
+        script = (HERE / "build-and-push.sh").read_text(encoding="utf-8")
+        for token in (
+            "--candidate",
+            "OPENCLAW_CONFIG=",
+            "OPENCLAW_BASE_IMAGE=",
+            "BEDROCK_PLUGIN_VERSION=",
+            "BEDROCK_PLUGIN_EXPECTED_TOKEN=",
+            "candidate.py\" finalize",
+            '"grader":"output_match"',
+        ):
+            self.assertIn(token, script)
+
+
+if __name__ == "__main__":
+    unittest.main()

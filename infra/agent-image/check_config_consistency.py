@@ -50,6 +50,7 @@ KNOWN_CONTEXT_WINDOWS: Dict[str, int] = {
     "anthropic.claude-sonnet-5": 200000,
     "us.anthropic.claude-sonnet-5": 200000,
     "claude-sonnet-5": 200000,
+    "zai.glm-5": 200000,
 }
 
 # Generic sanity band for models not in the known table (catches order-of-
@@ -87,6 +88,13 @@ _CACHE_CAPABLE_PLUGIN_MIN: Dict[str, str] = {
 _PLUGIN_PACK_RE = re.compile(
     r"npm pack @openclaw/amazon-bedrock-provider@([0-9A-Za-z.\-]+)"
 )
+_PLUGIN_VERSION_ARG_RE = re.compile(
+    r"^ARG\s+BEDROCK_PLUGIN_VERSION=([0-9A-Za-z.\-]+)\s*$", re.MULTILINE,
+)
+_PLUGIN_PACK_ARG_RE = re.compile(
+    r'npm pack ["\']?@openclaw/amazon-bedrock-provider@'
+    r'\$\{BEDROCK_PLUGIN_VERSION\}["\']?'
+)
 
 # The base image is pinned by immutable digest, with the human-readable tag
 # recorded directly above it. Parsing both lets us cross-check them AND compare
@@ -98,6 +106,14 @@ _HOST_TAG_RE = re.compile(
 )
 _HOST_FROM_RE = re.compile(
     r"^FROM\s+ghcr\.io/openclaw/openclaw@(sha256:[0-9a-f]{64})", re.MULTILINE,
+)
+_HOST_IMAGE_ARG_RE = re.compile(
+    r"^ARG\s+OPENCLAW_BASE_IMAGE="
+    r"ghcr\.io/openclaw/openclaw@(sha256:[0-9a-f]{64})\s*$",
+    re.MULTILINE,
+)
+_HOST_FROM_ARG_RE = re.compile(
+    r"^FROM\s+\$\{OPENCLAW_BASE_IMAGE\}\s*$", re.MULTILINE,
 )
 
 
@@ -166,6 +182,9 @@ def parse_pinned_plugin_version(dockerfile_path: str) -> Tuple[Optional[str], Li
         return None, [f"cannot read Dockerfile {dockerfile_path}: {exc}"]
 
     matches = _PLUGIN_PACK_RE.findall(source)
+    argument_match = _PLUGIN_VERSION_ARG_RE.search(source)
+    if argument_match and _PLUGIN_PACK_ARG_RE.search(source):
+        matches.append(argument_match.group(1))
     if not matches:
         return None, [
             "Dockerfile has no `npm pack @openclaw/amazon-bedrock-provider@<version>` "
@@ -178,17 +197,20 @@ def parse_pinned_plugin_version(dockerfile_path: str) -> Tuple[Optional[str], Li
         ]
     version = matches[0]
     violations: List[str] = []
-    # The same version appears in the tar/rm filenames right after npm pack; a
-    # copy-paste slip there fails the build deep in the RUN with a confusing
-    # "No such file" instead of a clear version mismatch.
-    for filename in (
-        f"openclaw-amazon-bedrock-provider-{version}.tgz",
+    # The tar/rm filenames must use the same literal version or the same
+    # parameter. A copy-paste slip otherwise fails deep in the RUN.
+    literal_filename = f"openclaw-amazon-bedrock-provider-{version}.tgz"
+    parameter_filename = (
+        "openclaw-amazon-bedrock-provider-${BEDROCK_PLUGIN_VERSION}.tgz"
+    )
+    if (
+        source.count(literal_filename) < 2
+        and source.count(parameter_filename) < 2
     ):
-        if source.count(filename) < 2:
-            violations.append(
-                f"Dockerfile pins plugin {version} but its tar/rm filenames do "
-                f"not both reference {filename}"
-            )
+        violations.append(
+            f"Dockerfile pins plugin {version} but its tar/rm filenames do "
+            "not both reference the same version parameter"
+        )
     return version, violations
 
 
@@ -279,6 +301,9 @@ def check_upstream_pins(dockerfile_path: str) -> List[str]:
 
     tag_match = _HOST_TAG_RE.search(source)
     from_match = _HOST_FROM_RE.search(source)
+    host_argument_match = _HOST_IMAGE_ARG_RE.search(source)
+    if not from_match and host_argument_match and _HOST_FROM_ARG_RE.search(source):
+        from_match = host_argument_match
     plugin_version, _ = parse_pinned_plugin_version(dockerfile_path)
     if not tag_match or not from_match:
         return ["cannot verify upstream pins — Dockerfile tag/FROM lines unreadable"]
@@ -351,6 +376,9 @@ def check_host_plugin_compatibility(dockerfile_path: str) -> List[str]:
 
     tag_match = _HOST_TAG_RE.search(source)
     from_match = _HOST_FROM_RE.search(source)
+    host_argument_match = _HOST_IMAGE_ARG_RE.search(source)
+    if not from_match and host_argument_match and _HOST_FROM_ARG_RE.search(source):
+        from_match = host_argument_match
     if not tag_match:
         return violations + [
             "Dockerfile has no `# ghcr.io/openclaw/openclaw:<tag>` + `# index: "

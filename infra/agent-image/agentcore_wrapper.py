@@ -30,6 +30,7 @@ import secrets
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -52,15 +53,11 @@ from check_bootstrap_budget import check_runtime_bootstrap
 OPENCLAW_CONFIG_PATH = "/home/node/.openclaw/openclaw.json"
 OPENCLAW_WORKSPACE_DIR = "/home/node/.openclaw"
 
-# The model the agent platform runs on today — used as the last-resort model-id
-# fallback for telemetry when neither the proxy, harness, nor caller supplied
-# one. Must match the id the proxy records + an ai_models pricing row
-# (migration 092); a mismatch silently yields $0 cost. Single source of truth so
-# the two fallbacks below don't drift (issue #1083, review round 2).
-# Switched GLM-5 -> Claude Sonnet 5 for #1089. Bedrock Mantle's Anthropic
-# Messages endpoint echoes the bare `claude-sonnet-5` on the response (verified),
-# so that is the id the proxy records — use it here too so the fallback matches.
+# Emergency fallback only. Candidate images read their actual primary model
+# from openclaw.json so a GLM/Kimi/Qwen/OpenAI turn is never mislabeled Claude
+# merely because neither the proxy nor transcript returned a model id.
 DEFAULT_AGENT_MODEL_ID = "claude-sonnet-5"
+BEDROCK_BEARER_ENV = "AWS_BEARER_TOKEN_BEDROCK"
 
 adapter = OpenClawAdapter()
 
@@ -390,6 +387,132 @@ def start_mantle_proxy() -> None:
         time.sleep(0.5)
 
     raise RuntimeError("Mantle proxy did not become ready within 20s")
+
+
+def _configured_primary_model_id(
+    config_path: str = OPENCLAW_CONFIG_PATH,
+) -> str:
+    """Return the configured primary model id, with a safe legacy fallback."""
+    try:
+        with open(config_path, "r", encoding="utf-8") as config_file:
+            config = json.load(config_file)
+        primary = (
+            ((config.get("agents") or {}).get("defaults") or {}).get("model") or {}
+        ).get("primary")
+        if isinstance(primary, str) and "/" in primary:
+            _, model_id = primary.split("/", 1)
+            if model_id:
+                return model_id
+    except (OSError, ValueError):
+        pass
+    return DEFAULT_AGENT_MODEL_ID
+
+
+def _inline_configured_bearer_token(config_path: str, value: str) -> list[str]:
+    """Replace only the explicit Bedrock bearer placeholders, atomically."""
+    with open(config_path, "r", encoding="utf-8") as config_file:
+        config = json.load(config_file)
+    providers = (config.get("models") or {}).get("providers") or {}
+    hydrated: list[str] = []
+    for provider_name, provider in providers.items():
+        if (
+            isinstance(provider_name, str)
+            and isinstance(provider, dict)
+            and provider.get("apiKey") == f"env:{BEDROCK_BEARER_ENV}"
+        ):
+            provider["apiKey"] = value
+            hydrated.append(provider_name)
+    if not hydrated:
+        return []
+
+    directory = os.path.dirname(config_path)
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=".openclaw.candidate.", dir=directory
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(config, output, indent=2)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary_path, os.stat(config_path).st_mode & 0o777)
+        os.replace(temporary_path, config_path)
+    except Exception:
+        try:
+            os.unlink(temporary_path)
+        except OSError:
+            pass
+        raise
+    return hydrated
+
+
+def hydrate_configured_provider_api_keys(
+    config_path: str = OPENCLAW_CONFIG_PATH,
+) -> list[str]:
+    """Hydrate candidate Mantle providers; native SigV4 remains a strict no-op.
+
+    The checked-in production config has no apiKey and therefore performs no
+    secret read. A candidate that explicitly declares
+    ``env:AWS_BEARER_TOKEN_BEDROCK`` must receive either that environment value
+    or ``BEDROCK_API_KEY_SECRET_ARN``. Failure is fatal before BOOT_OK.
+    """
+    with open(config_path, "r", encoding="utf-8") as config_file:
+        config = json.load(config_file)
+    providers = (config.get("models") or {}).get("providers") or {}
+    targets = [
+        provider_name
+        for provider_name, provider in providers.items()
+        if (
+            isinstance(provider_name, str)
+            and isinstance(provider, dict)
+            and provider.get("apiKey") == f"env:{BEDROCK_BEARER_ENV}"
+        )
+    ]
+    if not targets:
+        return []
+
+    value = os.environ.get(BEDROCK_BEARER_ENV, "").strip()
+    secret_version = "environment"
+    if not value:
+        secret_arn = os.environ.get("BEDROCK_API_KEY_SECRET_ARN", "").strip()
+        if not secret_arn:
+            raise RuntimeError(
+                "token-auth provider configured but neither "
+                "AWS_BEARER_TOKEN_BEDROCK nor BEDROCK_API_KEY_SECRET_ARN is set"
+            )
+        import boto3
+
+        region = (
+            os.environ.get("AWS_REGION")
+            or os.environ.get("AWS_DEFAULT_REGION")
+            or "us-east-1"
+        )
+        saved_profile = os.environ.pop("AWS_PROFILE", None)
+        try:
+            secrets_client = boto3.client("secretsmanager", region_name=region)
+        finally:
+            if saved_profile is not None:
+                os.environ["AWS_PROFILE"] = saved_profile
+        response = secrets_client.get_secret_value(SecretId=secret_arn)
+        raw_value = response.get("SecretString")
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            raise RuntimeError("Bedrock API-key secret has an empty SecretString")
+        value = raw_value.strip()
+        secret_version = str(response.get("VersionId", "unknown"))
+
+    # Keep the env value for OpenClaw discovery and inline it because all
+    # OpenClaw call paths do not consistently resolve env: placeholders.
+    os.environ["AWS_BEARER_TOKEN_BEDROCK"] = value
+    hydrated = _inline_configured_bearer_token(config_path, value)
+    if sorted(hydrated) != sorted(targets):
+        raise RuntimeError("provider apiKey hydration did not update every target")
+    logger.info(
+        "Hydrated Bedrock bearer for candidate provider(s)=%s version=%s",
+        ",".join(sorted(hydrated)),
+        secret_version,
+    )
+    return hydrated
+
 
 def resolve_model_call_count(proxy_model_calls: int, tool_call_count: int) -> int:
     """Resolve a per-turn model-call count from broker telemetry or events."""
@@ -727,6 +850,10 @@ def main():
             "Install via: pip install bedrock-agentcore"
         )
         sys.exit(1)
+
+    # Native production config is a no-op. Candidate Mantle configs fail
+    # closed here if their explicit bearer placeholder cannot be hydrated.
+    hydrate_configured_provider_api_keys()
 
     # Start the local request-shaping proxy before OpenClaw. It forwards only
     # to the owner-bound web broker and never receives a provider credential.
@@ -1116,7 +1243,11 @@ def main():
             metadata: dict = {
                 "session_id": session_id,
                 "user_id": user_email,
-                "model": proxy_model or model_override or DEFAULT_AGENT_MODEL_ID,
+                "model": (
+                    proxy_model
+                    or model_override
+                    or _configured_primary_model_id()
+                ),
                 "input_tokens": proxy_in,
                 "output_tokens": proxy_out,
                 # Cache tokens come only from the proxy delta (the harness has
@@ -1146,7 +1277,12 @@ def main():
                 # Real model id, in priority order: proxy-observed > harness-
                 # observed > caller override > the known default model. We
                 # never emit the literal "default" anymore (issue #1083).
-                "model": proxy_model or result.model or model_override or DEFAULT_AGENT_MODEL_ID,
+                "model": (
+                    proxy_model
+                    or result.model
+                    or model_override
+                    or _configured_primary_model_id()
+                ),
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 # Bedrock prompt-caching split (issue #1089). Same precedence as

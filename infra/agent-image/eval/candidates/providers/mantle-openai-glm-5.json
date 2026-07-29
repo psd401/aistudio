@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "verifiedAt": "2026-07-29",
+  "id": "mantle-openai-glm-5",
+  "providerPath": "mantle-openai-compatible",
+  "providerName": "amazon-bedrock-mantle-openai",
+  "primaryModelId": "zai.glm-5",
+  "cacheRetention": "none",
+  "contextTokens": 180000,
+  "provider": {
+    "baseUrl": "https://bedrock-mantle.us-east-1.api.aws/v1",
+    "api": "openai-completions",
+    "auth": "api-key",
+    "apiKey": "env:AWS_BEARER_TOKEN_BEDROCK",
+    "timeoutSeconds": 300,
+    "models": [
+      {
+        "id": "zai.glm-5",
+        "name": "GLM-5 (Bedrock Mantle OpenAI-compatible)",
+        "reasoning": false,
+        "input": ["text"],
+        "contextWindow": 200000,
+        "maxTokens": 131072,
+        "cost": {
+          "input": 1,
+          "output": 3.2,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        }
+      }
+    ]
+  },
+  "costSources": {
+    "input": "https://aws.amazon.com/bedrock/pricing/",
+    "output": "https://aws.amazon.com/bedrock/pricing/",
+    "cacheRead": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-zai-glm-5.html",
+    "cacheWrite": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-zai-glm-5.html"
+  },
+  "sources": {
+    "api": "https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html",
+    "auth": "https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html",
+    "baseUrl": "https://docs.aws.amazon.com/bedrock/latest/userguide/endpoints.html",
+    "iam": "https://docs.aws.amazon.com/bedrock/latest/userguide/security-iam-projects.html",
+    "model": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-zai-glm-5.html",
+    "pricing": "https://aws.amazon.com/bedrock/pricing/"
+  },
+  "iam": {
+    "authMechanism": "Bedrock API key loaded from Secrets Manager and sent as a Bearer token",
+    "actions": ["bedrock-mantle:CallWithBearerToken"],
+    "resources": ["*"],
+    "inferenceProfileId": null,
+    "crossRegionFoundationModelArns": [],
+    "note": "CallWithBearerToken requires Resource '*'. The secret reader additionally needs secretsmanager:GetSecretValue on the environment's Bedrock API-key secret."
+  }
+}

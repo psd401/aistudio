@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "verifiedAt": "2026-07-29",
+  "id": "native-bedrock-sonnet-5",
+  "providerPath": "native-bedrock-sigv4",
+  "providerName": "amazon-bedrock",
+  "primaryModelId": "us.anthropic.claude-sonnet-5",
+  "cacheRetention": "long",
+  "contextTokens": 180000,
+  "provider": {
+    "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+    "api": "bedrock-converse-stream",
+    "auth": "aws-sdk",
+    "timeoutSeconds": 300,
+    "models": [
+      {
+        "id": "us.anthropic.claude-sonnet-5",
+        "name": "Claude Sonnet 5 (Bedrock, SigV4 via execution role)",
+        "reasoning": false,
+        "input": ["text"],
+        "contextWindow": 200000,
+        "maxTokens": 32768,
+        "cost": {
+          "input": 3,
+          "output": 15,
+          "cacheRead": 0.3,
+          "cacheWrite": 6
+        }
+      }
+    ]
+  },
+  "costSources": {
+    "input": "https://aws.amazon.com/bedrock/pricing/",
+    "output": "https://aws.amazon.com/bedrock/pricing/",
+    "cacheRead": "https://aws.amazon.com/bedrock/pricing/",
+    "cacheWrite": "https://aws.amazon.com/bedrock/pricing/"
+  },
+  "sources": {
+    "api": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5.html",
+    "auth": "https://docs.aws.amazon.com/bedrock/latest/userguide/security-iam.html",
+    "baseUrl": "https://docs.aws.amazon.com/bedrock/latest/userguide/endpoints.html",
+    "iam": "https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html",
+    "model": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5.html",
+    "pricing": "https://aws.amazon.com/bedrock/pricing/"
+  },
+  "iam": {
+    "authMechanism": "AWS SigV4 execution-role credentials",
+    "actions": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+    "resources": [
+      "arn:aws:bedrock:*:<account-id>:inference-profile/us.anthropic.claude-sonnet-5*",
+      "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-5*",
+      "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-5*",
+      "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-5*"
+    ],
+    "inferenceProfileId": "us.anthropic.claude-sonnet-5",
+    "crossRegionFoundationModelArns": [
+      "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-5*",
+      "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-5*",
+      "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-5*"
+    ],
+    "note": "Grant the profile ARN and every destination-region foundation-model ARN; SCPs must also allow every destination region."
+  }
+}

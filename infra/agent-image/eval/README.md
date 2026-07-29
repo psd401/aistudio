@@ -60,6 +60,33 @@ JSONL output is created with owner-only (`0600`) permissions because complete
 metadata can contain prompts, messages, and tool details. Keep it in an
 issue-specific temporary path; do not commit run transcripts.
 
+## Build a reproducible candidate image
+
+The one-axis candidate matrix lives under `eval/candidates/`. From
+`infra/agent-image`, build and push a selected candidate with:
+
+```bash
+./build-and-push.sh \
+  --candidate eval/candidates/manifests/glm-5-native.json \
+  2026-07-29-glm-5-native
+```
+
+`candidate.py` compares the full model/provider, harness, and prompt axes to
+`manifests/baseline.json` and requires exactly the declared axis to differ. It
+then materializes the config and prompt, validates the effective host/plugin
+pins and cache behavior with the existing consistency gate, and leaves the
+Dockerfile's default Sonnet/native-SigV4 behavior unchanged.
+
+Before push, the candidate must boot and pass one exact-output graded turn.
+After push, `.candidate-builds/<tag>.json` binds the immutable digest to its
+model ID, provider path, harness and plugin pins, prompt variant, cache mode,
+axis delta, cost sources, and source commit. That local sidecar is comparison
+evidence, not a deployment instruction.
+
+See [`candidates/README.md`](./candidates/README.md) for the complete
+OpenAI/GLM/Kimi/Qwen/Claude manifest matrix and the verified native Bedrock,
+Mantle OpenAI-compatible, and Mantle Anthropic Messages contracts.
+
 ## Transcript-free summaries
 
 After both production suites finish, convert their JSONL records into the only
@@ -497,6 +524,7 @@ UV_CACHE_DIR=/tmp/issue-1426-uv-cache \
   infra/agent-image/test_mantle_proxy_logging.py \
   infra/agent-image/test_check_bootstrap_budget.py \
   infra/agent-image/test_check_config_consistency.py \
+  infra/agent-image/test_candidate_matrix.py \
   infra/agent-image/test_workspace_sync.py \
   infra/agent-image/test_chat_format.py \
   infra/agent-image/test_artifact_publisher.py \
