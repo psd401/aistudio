@@ -394,6 +394,14 @@ describe("Google Chat response delivery", () => {
     expect(failures.map(failure => failure.errorClass)).toEqual([
       "ChatPostPermissionDenied",
     ])
+    expect(failures[0]).toMatchObject({
+      severity: "warn",
+      alert: false,
+      context: {
+        dmFallbackAttempted: true,
+        dmFallbackOutcome: "delivered",
+      },
+    })
   })
 })
 
@@ -438,6 +446,8 @@ describe("Google Chat response fallback failures", () => {
       "ChatPostPermissionDenied",
       "ChatDmFallbackFailed",
     ])
+    expect(failures[0]?.severity).toBe("error")
+    expect(failures[0]?.alert).toBeUndefined()
     expect(failures[1]?.context).toMatchObject({
       dmFallbackAttempted: true,
       dmFallbackOutcome: "dm-space-not-found",
@@ -488,6 +498,8 @@ describe("Google Chat response fallback failures", () => {
       "ChatPostPermissionDenied",
       "ChatDmFallbackFailed",
     ])
+    expect(failures[0]?.severity).toBe("error")
+    expect(failures[0]?.alert).toBeUndefined()
     expect(failures[1]?.errorMessage).toBe("DM post failed")
     expect(failures[1]?.context).toMatchObject({
       dmFallbackAttempted: true,

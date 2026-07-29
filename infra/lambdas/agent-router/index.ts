@@ -1645,6 +1645,8 @@ interface AgentCoreResult {
 interface FailureRecordParams {
   source: 'router' | 'harness' | 'cron' | 'agent_self_report' | 'tool';
   severity: 'error' | 'warn' | 'empty_response';
+  /** False persists a diagnostic without incrementing the failure pager. */
+  alert?: boolean;
   userId?: string | null;
   sessionId?: string | null;
   scheduleName?: string | null;
@@ -2408,6 +2410,32 @@ async function recordDmFallbackFailure(
   );
 }
 
+async function recordChatPostPermissionOutcome(
+  input: {
+    error: unknown;
+    deliveryContext: ChatResponseDeliveryContext;
+    context: Record<string, unknown>;
+    recovered: boolean;
+    log: ReturnType<typeof createLogger>;
+  },
+  dependencies: ChatResponseDependencies
+): Promise<void> {
+  const { error, deliveryContext, context, recovered, log } = input;
+  await dependencies.recordFailure(
+    {
+      source: 'router',
+      severity: recovered ? 'warn' : 'error',
+      ...(recovered ? { alert: false } : {}),
+      userId: deliveryContext.userId,
+      sessionId: deliveryContext.sessionId,
+      errorClass: 'ChatPostPermissionDenied',
+      errorMessage: sanitizeDiagnostic(errorMessage(error)),
+      context,
+    },
+    log
+  );
+}
+
 async function handleChatPostPermissionDenied(
   input: {
     error: unknown;
@@ -2433,18 +2461,6 @@ async function handleChatPostPermissionDenied(
     ...(threadName ? { threadName } : {}),
     dmFallbackAttempted: true,
   };
-  await dependencies.recordFailure(
-    {
-      source: 'router',
-      severity: 'error',
-      userId: deliveryContext.userId,
-      sessionId: deliveryContext.sessionId,
-      errorClass: 'ChatPostPermissionDenied',
-      errorMessage: sanitizeDiagnostic(errorMessage(error)),
-      context: failureContext,
-    },
-    log
-  );
 
   try {
     const dmSpaceName = await dependencies.resolveDmSpace(
@@ -2455,10 +2471,24 @@ async function handleChatPostPermissionDenied(
         space: spaceName,
         errorClass: 'ChatPostPermissionDenied',
       });
+      const outcomeContext = {
+        ...failureContext,
+        dmFallbackOutcome: 'dm-space-not-found',
+      };
+      await recordChatPostPermissionOutcome(
+        {
+          error,
+          deliveryContext,
+          context: outcomeContext,
+          recovered: false,
+          log,
+        },
+        dependencies
+      );
       await recordDmFallbackFailure(
         new Error('No existing Google Chat DM space found for sender'),
         deliveryContext,
-        { ...failureContext, dmFallbackOutcome: 'dm-space-not-found' },
+        outcomeContext,
         log,
         dependencies
       );
@@ -2469,6 +2499,16 @@ async function handleChatPostPermissionDenied(
       parent: dmSpaceName,
       requestBody: dmFallbackMessageBody(messageBody),
     });
+    await recordChatPostPermissionOutcome(
+      {
+        error,
+        deliveryContext,
+        context: { ...failureContext, dmFallbackOutcome: 'delivered' },
+        recovered: true,
+        log,
+      },
+      dependencies
+    );
     log.warn('Shared-space Chat reply delivered by DM fallback', {
       space: spaceName,
       dmSpace: dmSpaceName,
@@ -2481,10 +2521,24 @@ async function handleChatPostPermissionDenied(
       error: sanitizeDiagnostic(errorMessage(fallbackError)),
       errorClass: 'ChatDmFallbackFailed',
     });
+    const outcomeContext = {
+      ...failureContext,
+      dmFallbackOutcome: 'failed',
+    };
+    await recordChatPostPermissionOutcome(
+      {
+        error,
+        deliveryContext,
+        context: outcomeContext,
+        recovered: false,
+        log,
+      },
+      dependencies
+    );
     await recordDmFallbackFailure(
       fallbackError,
       deliveryContext,
-      { ...failureContext, dmFallbackOutcome: 'failed' },
+      outcomeContext,
       log,
       dependencies
     );
@@ -2870,16 +2924,22 @@ async function recordFailure(
   params: FailureRecordParams,
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
-  // Emit a structured CloudWatch line first so the metric filter ticks even
-  // when the DB write fails. The string AGENT_FAILURE_RECORD is matched by a
-  // CloudWatch MetricFilter — keep it stable.
-  log.error('AGENT_FAILURE_RECORD', {
+  const logContext = {
     source: params.source,
     severity: params.severity,
     userId: params.userId ? sanitizeEmailForLog(params.userId) : null,
     sessionId: params.sessionId ?? null,
     errorClass: params.errorClass ?? null,
-  });
+  };
+  if (params.alert === false) {
+    // Persist recovered policy outcomes for diagnostics without ticking the
+    // AGENT_FAILURE_RECORD metric filter and production failure pager.
+    log.warn('AGENT_DIAGNOSTIC_RECORD', logContext);
+  } else {
+    // Emit a structured CloudWatch line first so the metric filter ticks even
+    // when the DB write fails. Keep AGENT_FAILURE_RECORD stable.
+    log.error('AGENT_FAILURE_RECORD', logContext);
+  }
   if (!DATABASE_HOST || !DATABASE_SECRET_ARN) {
     log.warn('Database not configured, skipping failure record');
     return;

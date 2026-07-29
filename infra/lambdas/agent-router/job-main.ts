@@ -114,6 +114,22 @@ async function recordCompletedJobResult(
     },
     log
   );
+  if (agentResult.failed && agentResult.errorSource === 'router') {
+    await recordFailure(
+      {
+        source: 'router',
+        severity: 'error',
+        userId: job.userEmail,
+        sessionId: job.sessionId,
+        scheduleName: job.scheduleName,
+        model: agentResult.model,
+        errorClass: agentResult.errorClass ?? 'JobLegError',
+        errorMessage: agentResult.response,
+        context: scheduledFailureContext(job),
+      },
+      log
+    );
+  }
   await recordScheduledJobTerminal(
     job,
     {
@@ -124,7 +140,10 @@ async function recordCompletedJobResult(
       ...(deliveryFailed
         ? {
             errorMessage:
-              'Google Chat room post and private DM fallback both failed',
+              'Google Chat room post and private DM fallback both failed' +
+              (agentResult.failed
+                ? ` after agent error: ${agentResult.response}`
+                : ''),
           }
         : agentResult.failed
           ? { errorMessage: agentResult.response }
@@ -154,22 +173,6 @@ async function recordCompletedJobResult(
       outputTokens: agentResult.outputTokens,
     });
     return;
-  }
-  if (agentResult.errorSource === 'router') {
-    await recordFailure(
-      {
-        source: 'router',
-        severity: 'error',
-        userId: job.userEmail,
-        sessionId: job.sessionId,
-        scheduleName: job.scheduleName,
-        model: agentResult.model,
-        errorClass: agentResult.errorClass ?? 'JobLegError',
-        errorMessage: agentResult.response,
-        context: scheduledFailureContext(job),
-      },
-      log
-    );
   }
   log.warn('Background job finished with a failed turn', {
     marker: 'JOB_RUNNER_FAILED_TURN',

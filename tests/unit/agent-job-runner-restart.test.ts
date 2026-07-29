@@ -101,8 +101,24 @@ describe("job runner restart handling", () => {
     expect(source).toContain(
       "return deliveryOutcome === 'failed' ? 3 : agentResult.failed ? 2 : 0",
     )
-    expect(source).toContain("marker: 'JOB_RUNNER_FAILED_TURN'")
-    expect(source).toContain("JOB_RUNNER_DELIVERY_FAILED")
+    const deliveryFailureBranch = source.slice(
+      source.indexOf("if (deliveryFailed)"),
+      source.indexOf("if (!agentResult.failed)"),
+    )
+    expect(deliveryFailureBranch).toContain(
+      "marker: 'JOB_RUNNER_FAILED_TURN'",
+    )
+    expect(deliveryFailureBranch).toContain("failureKind: 'delivery'")
+    expect(deliveryFailureBranch).toContain("JOB_RUNNER_DELIVERY_FAILED")
+  })
+
+  it("records a router invocation failure before handling delivery failure", () => {
+    const invocationFailure = source.indexOf(
+      "if (agentResult.failed && agentResult.errorSource === 'router')",
+    )
+    const deliveryFailure = source.indexOf("if (deliveryFailed)")
+    expect(invocationFailure).toBeGreaterThan(-1)
+    expect(deliveryFailure).toBeGreaterThan(invocationFailure)
   })
 
   it("exits nonzero after delivering an agent failure for ECS supervision", () => {
