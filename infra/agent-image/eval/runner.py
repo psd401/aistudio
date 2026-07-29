@@ -939,6 +939,7 @@ class EvaluationRunner:
         *,
         trials_override: int | None = None,
     ) -> list[dict[str, object]]:
+        run_started_at = self._now().isoformat()
         records: list[dict[str, object]] = []
         pure_runtimes: dict[str, Runtime] = {}
         try:
@@ -1006,6 +1007,7 @@ class EvaluationRunner:
                             session_id,
                             event,
                             artifacts,
+                            run_started_at,
                         )
                         output.write(json.dumps(record, separators=(",", ":")) + "\n")
                         output.flush()
@@ -1026,6 +1028,7 @@ class EvaluationRunner:
         session_id: str,
         event: Mapping[str, object],
         artifacts: TrialArtifacts,
+        run_started_at: str,
     ) -> dict[str, object]:
         result = event.get("result")
         metadata = event.get("metadata")
@@ -1073,6 +1076,7 @@ class EvaluationRunner:
             "metadata": metadata,
             "broker_requests": list(artifacts.broker_requests),
             "grade": grade,
+            "run_started_at": run_started_at,
             "recorded_at": self._now().isoformat(),
         }
 

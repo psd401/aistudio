@@ -75,10 +75,27 @@ jobs:
       - name: Log in to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Read the candidate model pricing from the immutable image
+      - name: Read candidate provenance and model pricing
+        id: candidate
         env:
           CANDIDATE_IMAGE: ${{ steps.image.outputs.image }}
         run: |
+          docker pull --platform linux/arm64 "${CANDIDATE_IMAGE}"
+          source_repository="$(docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' \
+            "${CANDIDATE_IMAGE}")"
+          source_commit="$(docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "${CANDIDATE_IMAGE}")"
+          if [ "${source_repository}" != "https://github.com/psd401/aistudio" ]; then
+            echo "Candidate image has no trusted AI Studio source label." >&2
+            exit 1
+          fi
+          if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Candidate image has no full source revision label." >&2
+            exit 1
+          fi
+          echo "source_commit=${source_commit}" >> "${GITHUB_OUTPUT}"
           docker run --rm \
             --platform linux/arm64 \
             --name "psd-agent-eval-nightly-config-${GITHUB_RUN_ID}" \
@@ -117,7 +134,9 @@ jobs:
             --records "${RUNNER_TEMP}/agent-eval-regression-${GITHUB_RUN_ID}.jsonl" \
             --records "${RUNNER_TEMP}/agent-eval-capability-${GITHUB_RUN_ID}.jsonl" \
             --image "${CANDIDATE_IMAGE}" \
-            --source-commit "${GITHUB_SHA}" \
+            --source-commit "${{ steps.candidate.outputs.source_commit }}" \
+            --source-commit-provenance image-label \
+            --eval-harness-commit "${GITHUB_SHA}" \
             --model-config "${RUNNER_TEMP}/agent-eval-openclaw.json" \
             --out "${RUNNER_TEMP}/agent-eval-summary.json" \
             --require-all-pass

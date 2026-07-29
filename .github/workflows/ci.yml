@@ -72,6 +72,15 @@ jobs:
           infra/agent-image/test_eval_runner.py \
           infra/agent-image/test_eval_summary.py
 
+    - name: Run model-UID isolation test as root
+      run: |
+        if ! id node >/dev/null 2>&1; then
+          sudo useradd --system --user-group --no-create-home node
+        fi
+        sudo "$(command -v python3)" -m unittest \
+          -k test_model_uid_cannot_read_authority_or_mutate_relay_source \
+          infra/agent-image/test_agentcore_wrapper.py
+
     - name: Run tests
       run: bun run test:ci
       env:

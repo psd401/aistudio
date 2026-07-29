@@ -84,6 +84,7 @@ def trial_record(
             "reason": "sensitive grader reason",
             "results": [],
         },
+        "run_started_at": "2026-07-28T23:59:59+00:00",
         "recorded_at": f"2026-07-29T00:00:0{trial}+00:00",
     }
 
@@ -130,12 +131,22 @@ class SummaryAggregationTests(unittest.TestCase):
             pricing(),
             expected_image=IMAGE,
             source_commit="b" * 40,
+            source_commit_provenance="image-label",
+            eval_harness_commit="c" * 40,
         )
 
-        self.assertEqual(summary["schema_version"], 1)
+        self.assertEqual(summary["schema_version"], 2)
         self.assertEqual(summary["summary_kind"], "agent-eval-run")
         self.assertEqual(summary["image_digest"], IMAGE_DIGEST)
         self.assertEqual(summary["source_commit"], "b" * 40)
+        self.assertEqual(summary["source_commit_provenance"], "image-label")
+        self.assertEqual(summary["eval_harness_commit"], "c" * 40)
+        self.assertEqual(summary["run"]["started_at"], "2026-07-28T23:59:59+00:00")
+        self.assertEqual(summary["run"]["start_time_status"], "captured")
+        self.assertEqual(
+            summary["run"]["first_trial_recorded_at"],
+            "2026-07-29T00:00:01+00:00",
+        )
         self.assertEqual(summary["run"]["task_count"], 2)
         self.assertEqual(summary["run"]["trial_count"], 6)
         self.assertTrue(summary["tasks"]["task-a"]["pass^3"])
@@ -231,6 +242,23 @@ class SummaryAggregationTests(unittest.TestCase):
         with self.assertRaisesRegex(summarize.EvalSummaryError, "ISO 8601"):
             summarize.summarize_records(records, pricing())
 
+    def test_legacy_records_report_missing_start_instead_of_guessing(self):
+        records = complete_records()
+        for record in records:
+            record.pop("run_started_at")
+
+        summary = summarize.summarize_records(records, pricing())
+
+        self.assertIsNone(summary["run"]["started_at"])
+        self.assertEqual(
+            summary["run"]["start_time_status"],
+            "unavailable-legacy-records",
+        )
+        self.assertEqual(
+            summary["run"]["first_trial_recorded_at"],
+            "2026-07-29T00:00:01+00:00",
+        )
+
 
 class ModelPricingTests(unittest.TestCase):
     def test_primary_model_pricing_is_loaded_from_openclaw_config(self):
@@ -290,6 +318,8 @@ class CommittedArtifactGuardTests(unittest.TestCase):
             complete_records(),
             pricing(),
             source_commit="b" * 40,
+            source_commit_provenance="image-label",
+            eval_harness_commit="c" * 40,
         )
         return json.dumps(summary).encode("utf-8")
 
@@ -370,30 +400,33 @@ class CommittedArtifactGuardTests(unittest.TestCase):
 
     def test_summary_missing_a_required_field_is_rejected(self):
         value = json.loads(self.safe_summary_bytes())
-        del value["run"]["first_record_at"]
+        del value["run"]["first_trial_recorded_at"]
 
-        self.assert_rejected(value, "missing required field")
+        self.assert_rejected(value, "missing fields")
 
     def test_summary_field_of_the_wrong_type_is_rejected(self):
         value = json.loads(self.safe_summary_bytes())
         value["overall"]["telemetry"]["caching_status"] = {"prompt": "private"}
 
-        self.assert_rejected(value, r"\$\.overall\.telemetry\.caching_status")
+        self.assert_rejected(value, r"overall\.telemetry\.caching_status")
 
     def test_transcript_smuggled_as_a_free_form_key_is_rejected(self):
         value = json.loads(self.safe_summary_bytes())
         failures = value["overall"]["telemetry"]["failures"]
         failures["by_error_class"] = {"x" * 400: 1}
 
-        self.assert_rejected(value, "not a plain identifier")
+        self.assert_rejected(value, "not a safe identifier")
 
-    def test_run_bounds_are_named_for_the_record_times_they_derive_from(self):
+    def test_run_bounds_distinguish_start_from_trial_record_times(self):
         value = json.loads(self.safe_summary_bytes())
 
-        self.assertIn("first_record_at", value["run"])
-        self.assertIn("last_record_at", value["run"])
-        self.assertNotIn("started_at", value["run"])
-        self.assertNotIn("completed_at", value["run"])
+        self.assertIn("started_at", value["run"])
+        self.assertIn("first_trial_recorded_at", value["run"])
+        self.assertIn("completed_at", value["run"])
+        self.assertLessEqual(
+            value["run"]["started_at"],
+            value["run"]["first_trial_recorded_at"],
+        )
 
     def test_filename_must_match_the_summarized_image_digest(self):
         with self.assertRaisesRegex(summarize.EvalSummaryError, "filename"):
@@ -424,6 +457,45 @@ class CommittedArtifactGuardTests(unittest.TestCase):
                 summarize.check_repository(repo)
 
 
+class EvalAutomationContractTests(unittest.TestCase):
+    def test_image_build_stamps_clean_aistudio_source_revision(self):
+        dockerfile = (AGENT_IMAGE_DIR / "Dockerfile").read_text(encoding="utf-8")
+        build_script = (AGENT_IMAGE_DIR / "build-and-push.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("ARG AISTUDIO_SOURCE_COMMIT", dockerfile)
+        self.assertIn(
+            'org.opencontainers.image.source="https://github.com/psd401/aistudio"',
+            dockerfile,
+        )
+        self.assertIn(
+            'org.opencontainers.image.revision="${AISTUDIO_SOURCE_COMMIT}"',
+            dockerfile,
+        )
+        self.assertIn("status --porcelain --untracked-files=all", build_script)
+        self.assertIn(
+            '--build-arg "AISTUDIO_SOURCE_COMMIT=${SOURCE_COMMIT}"',
+            build_script,
+        )
+
+    def test_nightly_binds_image_and_harness_commits_separately(self):
+        workflow = (
+            AGENT_IMAGE_DIR.parent.parent
+            / ".github"
+            / "workflows"
+            / "agent-eval-nightly.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("org.opencontainers.image.revision", workflow)
+        self.assertIn(
+            "--source-commit \"${{ steps.candidate.outputs.source_commit }}\"",
+            workflow,
+        )
+        self.assertIn('--eval-harness-commit "${GITHUB_SHA}"', workflow)
+        self.assertNotIn('--source-commit "${GITHUB_SHA}"', workflow)
+
+
 class SummaryCliTests(unittest.TestCase):
     def test_cli_writes_safe_summary_and_can_enforce_pass_three(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -446,6 +518,10 @@ class SummaryCliTests(unittest.TestCase):
                         IMAGE,
                         "--source-commit",
                         "b" * 40,
+                        "--source-commit-provenance",
+                        "image-label",
+                        "--eval-harness-commit",
+                        "c" * 40,
                         "--model-config",
                         str(AGENT_IMAGE_DIR / "openclaw.json"),
                         "--require-all-pass",

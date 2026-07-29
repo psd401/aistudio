@@ -1,4 +1,5 @@
 {
+  "eval_harness_commit": "36d81a839518b0c4135216657f732848ab0efad0",
   "image": "390844780692.dkr.ecr.us-east-1.amazonaws.com/psd-agent-base-dev@sha256:0e4f2387ea48b5342b1be95dd580b9d5a76b4f02560e8281cecfaa5734fd40ce",
   "image_digest": "sha256:0e4f2387ea48b5342b1be95dd580b9d5a76b4f02560e8281cecfaa5734fd40ce",
   "model": {
@@ -71,13 +72,15 @@
     "trial_count": 150
   },
   "run": {
-    "first_record_at": "2026-07-29T14:30:18.577947+00:00",
-    "last_record_at": "2026-07-29T15:14:25.597252+00:00",
+    "completed_at": "2026-07-29T15:14:25.597252+00:00",
+    "first_trial_recorded_at": "2026-07-29T14:30:18.577947+00:00",
+    "start_time_status": "unavailable-legacy-records",
+    "started_at": null,
     "task_count": 50,
     "trial_count": 150,
     "trials_per_task": 3
   },
-  "schema_version": 1,
+  "schema_version": 2,
   "skills": {
     "chat-card": {
       "pass^3": {
@@ -1797,7 +1800,8 @@
       "trial_count": 12
     }
   },
-  "source_commit": "36d81a839518b0c4135216657f732848ab0efad0",
+  "source_commit": "21a7269e3707da018471c6146d4efbeb38d91a99",
+  "source_commit_provenance": "legacy-image-tag",
   "suites": {
     "capability": {
       "pass^3": {

@@ -968,6 +968,13 @@ class EvaluationRunnerTests(unittest.TestCase):
             {record["suite"] for record in records},
             {"unclassified"},
         )
+        self.assertEqual(len({record["run_started_at"] for record in records}), 1)
+        self.assertTrue(
+            all(
+                record["run_started_at"] <= record["recorded_at"]
+                for record in records
+            )
+        )
 
     def test_fresh_sessions_prevent_conversation_recall(self):
         clock = AdvancingClock()

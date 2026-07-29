@@ -73,15 +73,31 @@ docker run --rm --platform linux/arm64 \
   /home/node/.openclaw/openclaw.json \
   > /tmp/issue-1427-openclaw.json
 
+IMAGE_SOURCE_COMMIT="$(docker image inspect \
+  --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+  <immutable-ecr-uri@sha256:digest>)"
+
 python3 infra/agent-image/eval/summarize.py \
   --records /tmp/issue-1427-regression.jsonl \
   --records /tmp/issue-1427-capability.jsonl \
   --image <immutable-ecr-uri@sha256:digest> \
-  --source-commit "$(git rev-parse HEAD)" \
+  --source-commit "${IMAGE_SOURCE_COMMIT}" \
+  --source-commit-provenance image-label \
+  --eval-harness-commit "$(git rev-parse HEAD)" \
   --model-config /tmp/issue-1427-openclaw.json \
   --out .eval-runs/sha256-<digest>.json \
   --require-all-pass
 ```
+
+`source_commit` is the evaluated image's AI Studio revision, read from the
+immutable image config; `eval_harness_commit` is the checkout that supplied the
+runner, suites, graders, and summarizer. `build-and-push.sh` refuses dirty
+agent-image sources and stamps both the AI Studio source repository and full
+revision into the image. This keeps a delayed deployment from being attributed
+to the workflow's newer checkout. The initial baseline predates those labels;
+its `legacy-image-tag` provenance records the full revision embedded in the
+image's build tag rather than pretending the inherited OpenClaw revision label
+describes AI Studio.
 
 The summary contains per-task and per-skill `pass^3`, aggregate token cost,
 duration and latency distributions, model-call counts, nudge rate, failure
@@ -91,10 +107,17 @@ immutable image so a repo/image skew cannot silently misprice a run. Caching is
 derived from observed telemetry: zero `cache_read_input_tokens` across the
 summarized trials means `uncached`.
 
+New runner records capture the actual invocation start before any container or
+trial work. The first baseline predates that field, so its summary explicitly
+marks `started_at` unavailable and separately reports the first trial-record
+timestamp instead of presenting that completion timestamp as the run start.
+
 It never retains prompts, results, messages, tool-call arguments, session IDs,
 broker requests, or grader reasons. `.gitignore` blocks JSONL/capture/raw files
-under `.eval-runs/`, and CI additionally validates the Git index so a forced
-`git add` cannot bypass the guard:
+under `.eval-runs/`, and CI additionally validates every field against a
+recursive allowlisted schema from the Git index. Unknown keys are rejected, so
+a forced `git add` or a newly named transcript/secret field cannot bypass the
+guard:
 
 ```bash
 python3 infra/agent-image/eval/summarize.py --check-repository
@@ -107,10 +130,10 @@ itself records the full immutable ECR URI and digest.
 
 `.github/workflows/agent-eval-nightly.yml` runs all 50 regression and capability
 tasks at three trials nightly on an ARM64 runner. It resolves the immutable
-image currently exposed by the dev AgentCore runtime, uploads only the safe
-summary, removes both JSONL transcripts even on failure, and fails when any
-task misses `pass^3`. It has no `pull_request` or `push` trigger and therefore
-is not part of the PR gate.
+image currently exposed by the dev AgentCore runtime, verifies its AI Studio
+source labels, uploads only the safe summary, removes both JSONL transcripts
+even on failure, and fails when any task misses `pass^3`. It has no
+`pull_request` or `push` trigger and therefore is not part of the PR gate.
 
 Dispatch the same run on demand from GitHub Actions:
 

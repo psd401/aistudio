@@ -20,11 +20,13 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SUMMARY_KIND = "agent-eval-run"
 IMMUTABLE_DIGEST_RE = re.compile(r"(?:^|@)(sha256:[0-9a-f]{64})$")
 SAFE_SUMMARY_NAME_RE = re.compile(r"^sha256-[0-9a-f]{64}\.json$")
 GIT_OID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$")
+SOURCE_COMMIT_PROVENANCE = frozenset({"image-label", "legacy-image-tag"})
 FORBIDDEN_SUMMARY_KEYS = frozenset(
     {
         "broker_requests",
@@ -54,121 +56,10 @@ TELEMETRY_INTEGER_FIELDS = (
     "latency_ms",
 )
 USD_QUANTUM = Decimal("0.000001")
-MAX_SUMMARY_KEY_LENGTH = 200
 
 
 class EvalSummaryError(RuntimeError):
     """Trial records could not be converted into a trustworthy summary."""
-
-
-class _MapOf:
-    """An object with free-form string keys whose values share one shape."""
-
-    __slots__ = ("value",)
-
-    def __init__(self, value: object) -> None:
-        self.value = value
-
-
-class _ListOf:
-    """An array whose items share one shape."""
-
-    __slots__ = ("item",)
-
-    def __init__(self, item: object) -> None:
-        self.item = item
-
-
-class _Nullable:
-    """A field that may be null before it is bound for a committed summary."""
-
-    __slots__ = ("inner",)
-
-    def __init__(self, inner: object) -> None:
-        self.inner = inner
-
-
-_STRING = "string"
-_INTEGER = "integer"
-_NUMBER = "number"
-_BOOLEAN = "boolean"
-
-_DISTRIBUTION_SCHEMA = {
-    "total": _NUMBER,
-    "mean": _NUMBER,
-    "p50": _NUMBER,
-    "p95": _NUMBER,
-}
-_TELEMETRY_SCHEMA = {
-    "tokens": {field: _INTEGER for field in TOKEN_PRICE_KEYS},
-    "cost": {
-        "total_usd": _NUMBER,
-        "per_trial_usd": _NUMBER,
-        "per_task_usd": _NUMBER,
-    },
-    "duration_ms": _DISTRIBUTION_SCHEMA,
-    "latency_ms": _DISTRIBUTION_SCHEMA,
-    "model_call_count": _DISTRIBUTION_SCHEMA,
-    "nudged": {"trials": _INTEGER, "rate": _NUMBER},
-    "failures": {
-        "trials": _INTEGER,
-        "rate": _NUMBER,
-        "by_error_class": _MapOf(_INTEGER),
-        "graded_trials": _INTEGER,
-        "graded_rate": _NUMBER,
-        "by_failed_grader": _MapOf(_INTEGER),
-    },
-    "caching_status": _STRING,
-}
-_SCOPE_SCHEMA = {
-    "task_count": _INTEGER,
-    "trial_count": _INTEGER,
-    "pass^3": {
-        "passed_tasks": _INTEGER,
-        "total_tasks": _INTEGER,
-        "rate": _NUMBER,
-    },
-    "telemetry": _TELEMETRY_SCHEMA,
-}
-# The complete, closed shape of a committed run summary. Anything not named
-# here — including a differently cased or newly invented key — is rejected, so
-# transcript text cannot ride along under a name the denylist never anticipated.
-SUMMARY_SCHEMA = {
-    "schema_version": _INTEGER,
-    "summary_kind": _STRING,
-    "image": _STRING,
-    "image_digest": _STRING,
-    # Null only for uncommitted, ad-hoc runs; validate_committed_summary()
-    # separately requires a full Git object ID before an artifact may land.
-    "source_commit": _Nullable(_STRING),
-    "run": {
-        "first_record_at": _STRING,
-        "last_record_at": _STRING,
-        "task_count": _INTEGER,
-        "trial_count": _INTEGER,
-        "trials_per_task": _INTEGER,
-    },
-    "model": {
-        "primary": _STRING,
-        "provider": _STRING,
-        "model_id": _STRING,
-        "pricing_usd_per_million_tokens": {
-            price_key: _NUMBER for price_key in TOKEN_PRICE_KEYS.values()
-        },
-    },
-    "overall": _SCOPE_SCHEMA,
-    "suites": _MapOf(_SCOPE_SCHEMA),
-    "skills": _MapOf({**_SCOPE_SCHEMA, "task_ids": _ListOf(_STRING)}),
-    "tasks": _MapOf(
-        {
-            "skill": _STRING,
-            "suite": _STRING,
-            "trials": _INTEGER,
-            "passed_trials": _INTEGER,
-            "pass^3": _BOOLEAN,
-        }
-    ),
-}
 
 
 def _mapping(value: object, description: str) -> Mapping[str, object]:
@@ -314,7 +205,7 @@ def load_model_pricing(path: Path) -> dict[str, object]:
 def _validate_record(
     record: Mapping[str, object],
     index: int,
-) -> tuple[str, str, str, int, int, str, datetime]:
+) -> tuple[str, str, str, int, int, str, datetime, datetime | None]:
     label = f"trial record {index}"
     task_id = _nonempty_string(record.get("task_id"), f"{label} task_id")
     skill = _nonempty_string(record.get("skill"), f"{label} skill")
@@ -329,6 +220,14 @@ def _validate_record(
         record.get("recorded_at"),
         f"{label} recorded_at",
     )
+    raw_run_started_at = record.get("run_started_at")
+    run_started_at = (
+        None
+        if raw_run_started_at is None
+        else _timestamp(raw_run_started_at, f"{label} run_started_at")
+    )
+    if run_started_at is not None and run_started_at > recorded_at:
+        raise EvalSummaryError(f"{label} run_started_at is after recorded_at")
     grade = _mapping(record.get("grade"), f"{label} grade")
     if not isinstance(grade.get("passed"), bool):
         raise EvalSummaryError(f"{label} grade.passed must be a boolean")
@@ -341,7 +240,7 @@ def _validate_record(
     error_class = metadata.get("error_class")
     if error_class is not None and not isinstance(error_class, str):
         raise EvalSummaryError(f"{label} metadata.error_class must be a string or null")
-    return task_id, skill, suite, trial, trials, image, recorded_at
+    return task_id, skill, suite, trial, trials, image, recorded_at, run_started_at
 
 
 def _rounded_usd(value: Decimal) -> float:
@@ -495,6 +394,8 @@ def summarize_records(
     *,
     expected_image: str | None = None,
     source_commit: str | None = None,
+    source_commit_provenance: str | None = None,
+    eval_harness_commit: str | None = None,
 ) -> dict[str, object]:
     """Validate complete trials and return a transcript-free run summary."""
 
@@ -502,17 +403,35 @@ def summarize_records(
         raise EvalSummaryError("cannot summarize zero records")
     if source_commit is not None and GIT_OID_RE.fullmatch(source_commit) is None:
         raise EvalSummaryError("source_commit must be a full Git object ID")
+    if (
+        source_commit_provenance is not None
+        and source_commit_provenance not in SOURCE_COMMIT_PROVENANCE
+    ):
+        raise EvalSummaryError("source_commit_provenance is invalid")
+    if (
+        eval_harness_commit is not None
+        and GIT_OID_RE.fullmatch(eval_harness_commit) is None
+    ):
+        raise EvalSummaryError("eval_harness_commit must be a full Git object ID")
     seen_trials: set[tuple[str, int]] = set()
     grouped_tasks: dict[str, list[Mapping[str, object]]] = defaultdict(list)
     task_identity: dict[str, tuple[str, str, int]] = {}
     images: set[str] = set()
     digests: set[str] = set()
     recorded_times: list[datetime] = []
+    run_started_times: list[datetime] = []
+    missing_run_started_at = False
     for index, record in enumerate(records, start=1):
-        task_id, skill, suite, trial, trials, image, recorded_at = _validate_record(
-            record,
-            index,
-        )
+        (
+            task_id,
+            skill,
+            suite,
+            trial,
+            trials,
+            image,
+            recorded_at,
+            run_started_at,
+        ) = _validate_record(record, index)
         key = (task_id, trial)
         if key in seen_trials:
             raise EvalSummaryError(f"duplicate trial record for {task_id} trial {trial}")
@@ -525,6 +444,10 @@ def summarize_records(
         images.add(image)
         digests.add(_digest_from_image(image))
         recorded_times.append(recorded_at)
+        if run_started_at is None:
+            missing_run_started_at = True
+        else:
+            run_started_times.append(run_started_at)
     if len(images) != 1 or len(digests) != 1:
         raise EvalSummaryError("all trial records must use the same immutable image")
     image = next(iter(images))
@@ -599,13 +522,21 @@ def summarize_records(
         "image": image,
         "image_digest": digest,
         "source_commit": source_commit,
+        "source_commit_provenance": source_commit_provenance,
+        "eval_harness_commit": eval_harness_commit,
         "run": {
-            # Both bounds come from `recorded_at`, which runner.py stamps only
-            # after a trial has been graded — so these are the first and last
-            # *completion* times, not container start or run end. Named for what
-            # they are so elapsed-time math is not silently wrong.
-            "first_record_at": min(recorded_times).isoformat(),
-            "last_record_at": max(recorded_times).isoformat(),
+            "started_at": (
+                None
+                if missing_run_started_at
+                else min(run_started_times).isoformat()
+            ),
+            "start_time_status": (
+                "unavailable-legacy-records"
+                if missing_run_started_at
+                else "captured"
+            ),
+            "first_trial_recorded_at": min(recorded_times).isoformat(),
+            "completed_at": max(recorded_times).isoformat(),
             "task_count": len(task_summaries),
             "trial_count": len(records),
             "trials_per_task": 3,
@@ -630,7 +561,7 @@ def summarize_records(
         "tasks": task_summaries,
     }
     _assert_no_transcript_fields(summary)
-    _assert_summary_schema(summary, SUMMARY_SCHEMA)
+    _validate_summary_schema(summary, "summary")
     return summary
 
 
@@ -647,66 +578,302 @@ def _assert_no_transcript_fields(value: object, path: str = "$") -> None:
             _assert_no_transcript_fields(child, f"{path}[{index}]")
 
 
-def _assert_summary_key(key: object, path: str) -> str:
-    if not isinstance(key, str) or not key:
-        raise EvalSummaryError(f"summary {path} keys must be non-empty strings")
-    if len(key) > MAX_SUMMARY_KEY_LENGTH or key.strip() != key or "\n" in key:
-        raise EvalSummaryError(f"summary {path}.{key[:40]!r} is not a plain identifier")
-    return key
-
-
-def _assert_summary_scalar(value: object, spec: str, path: str) -> None:
-    if spec == _BOOLEAN:
-        if not isinstance(value, bool):
-            raise EvalSummaryError(f"summary {path} must be a boolean")
-        return
-    if isinstance(value, bool):
-        raise EvalSummaryError(f"summary {path} must not be a boolean")
-    if spec == _STRING:
-        _nonempty_string(value, f"summary {path}")
-        return
-    if spec == _INTEGER:
-        _nonnegative_integer(value, f"summary {path}")
-        return
-    _finite_decimal(value, f"summary {path}")
-
-
-def _assert_summary_schema(value: object, spec: object, path: str = "$") -> None:
-    """Reject anything the committed summary schema does not explicitly allow."""
-
-    if isinstance(spec, _Nullable):
-        if value is None:
-            return
-        _assert_summary_schema(value, spec.inner, path)
-        return
-    if isinstance(spec, _MapOf):
-        mapping = _mapping(value, f"summary {path}")
-        for key, child in mapping.items():
-            _assert_summary_key(key, path)
-            _assert_summary_schema(child, spec.value, f"{path}.{key}")
-        return
-    if isinstance(spec, _ListOf):
-        if not isinstance(value, list):
-            raise EvalSummaryError(f"summary {path} must be an array")
-        for index, child in enumerate(value):
-            _assert_summary_schema(child, spec.item, f"{path}[{index}]")
-        return
-    if isinstance(spec, Mapping):
-        mapping = _mapping(value, f"summary {path}")
-        unexpected = sorted(str(key) for key in set(mapping) - set(spec))
+def _exact_keys(
+    value: Mapping[str, object],
+    expected: set[str],
+    description: str,
+) -> None:
+    actual = set(value)
+    if actual != expected:
+        unexpected = sorted(actual - expected)
+        missing = sorted(expected - actual)
+        details = []
         if unexpected:
-            raise EvalSummaryError(
-                f"summary {path} contains unexpected field(s): {', '.join(unexpected)}"
-            )
-        missing = sorted(set(spec) - set(mapping))
+            details.append(f"unexpected fields: {', '.join(unexpected)}")
         if missing:
-            raise EvalSummaryError(
-                f"summary {path} is missing required field(s): {', '.join(missing)}"
+            details.append(f"missing fields: {', '.join(missing)}")
+        raise EvalSummaryError(f"{description} has {'; '.join(details)}")
+
+
+def _safe_identifier(value: object, description: str) -> str:
+    parsed = _nonempty_string(value, description)
+    if SAFE_IDENTIFIER_RE.fullmatch(parsed) is None:
+        raise EvalSummaryError(f"{description} is not a safe identifier")
+    return parsed
+
+
+def _rate_value(value: object, description: str) -> None:
+    parsed = _finite_decimal(value, description)
+    if parsed > 1:
+        raise EvalSummaryError(f"{description} must be between zero and one")
+
+
+def _validate_counter_map(value: object, description: str) -> None:
+    counters = _mapping(value, description)
+    for key, count in counters.items():
+        _safe_identifier(key, f"{description} key")
+        _nonnegative_integer(count, f"{description}.{key}")
+
+
+def _validate_pass_three(value: object, description: str) -> None:
+    pass_three = _mapping(value, description)
+    _exact_keys(
+        pass_three,
+        {"passed_tasks", "total_tasks", "rate"},
+        description,
+    )
+    passed = _nonnegative_integer(
+        pass_three.get("passed_tasks"),
+        f"{description}.passed_tasks",
+    )
+    total = _nonnegative_integer(
+        pass_three.get("total_tasks"),
+        f"{description}.total_tasks",
+    )
+    if passed > total:
+        raise EvalSummaryError(f"{description}.passed_tasks exceeds total_tasks")
+    _rate_value(pass_three.get("rate"), f"{description}.rate")
+
+
+def _validate_distribution(value: object, description: str) -> None:
+    distribution = _mapping(value, description)
+    _exact_keys(distribution, {"total", "mean", "p50", "p95"}, description)
+    _nonnegative_integer(distribution.get("total"), f"{description}.total")
+    _finite_decimal(distribution.get("mean"), f"{description}.mean")
+    _nonnegative_integer(distribution.get("p50"), f"{description}.p50")
+    _nonnegative_integer(distribution.get("p95"), f"{description}.p95")
+
+
+def _validate_telemetry(value: object, description: str) -> None:
+    telemetry = _mapping(value, description)
+    _exact_keys(
+        telemetry,
+        {
+            "tokens",
+            "cost",
+            "duration_ms",
+            "latency_ms",
+            "model_call_count",
+            "nudged",
+            "failures",
+            "caching_status",
+        },
+        description,
+    )
+    tokens = _mapping(telemetry.get("tokens"), f"{description}.tokens")
+    _exact_keys(tokens, set(TOKEN_PRICE_KEYS), f"{description}.tokens")
+    for field in TOKEN_PRICE_KEYS:
+        _nonnegative_integer(
+            tokens.get(field),
+            f"{description}.tokens.{field}",
+        )
+    cost = _mapping(telemetry.get("cost"), f"{description}.cost")
+    _exact_keys(
+        cost,
+        {"total_usd", "per_trial_usd", "per_task_usd"},
+        f"{description}.cost",
+    )
+    for field in ("total_usd", "per_trial_usd", "per_task_usd"):
+        _finite_decimal(cost.get(field), f"{description}.cost.{field}")
+    for field in ("duration_ms", "latency_ms", "model_call_count"):
+        _validate_distribution(
+            telemetry.get(field),
+            f"{description}.{field}",
+        )
+    nudged = _mapping(telemetry.get("nudged"), f"{description}.nudged")
+    _exact_keys(nudged, {"trials", "rate"}, f"{description}.nudged")
+    _nonnegative_integer(nudged.get("trials"), f"{description}.nudged.trials")
+    _rate_value(nudged.get("rate"), f"{description}.nudged.rate")
+    failures = _mapping(telemetry.get("failures"), f"{description}.failures")
+    _exact_keys(
+        failures,
+        {
+            "trials",
+            "rate",
+            "by_error_class",
+            "graded_trials",
+            "graded_rate",
+            "by_failed_grader",
+        },
+        f"{description}.failures",
+    )
+    _nonnegative_integer(
+        failures.get("trials"),
+        f"{description}.failures.trials",
+    )
+    _rate_value(failures.get("rate"), f"{description}.failures.rate")
+    _nonnegative_integer(
+        failures.get("graded_trials"),
+        f"{description}.failures.graded_trials",
+    )
+    _rate_value(
+        failures.get("graded_rate"),
+        f"{description}.failures.graded_rate",
+    )
+    _validate_counter_map(
+        failures.get("by_error_class"),
+        f"{description}.failures.by_error_class",
+    )
+    _validate_counter_map(
+        failures.get("by_failed_grader"),
+        f"{description}.failures.by_failed_grader",
+    )
+    if telemetry.get("caching_status") not in {"cached", "uncached"}:
+        raise EvalSummaryError(
+            f"{description}.caching_status must be cached or uncached"
+        )
+
+
+def _validate_scope(
+    value: object,
+    description: str,
+    *,
+    includes_task_ids: bool = False,
+) -> None:
+    scope = _mapping(value, description)
+    expected = {"task_count", "trial_count", "pass^3", "telemetry"}
+    if includes_task_ids:
+        expected.add("task_ids")
+    _exact_keys(scope, expected, description)
+    _nonnegative_integer(scope.get("task_count"), f"{description}.task_count")
+    _nonnegative_integer(scope.get("trial_count"), f"{description}.trial_count")
+    _validate_pass_three(scope.get("pass^3"), f"{description}.pass^3")
+    _validate_telemetry(scope.get("telemetry"), f"{description}.telemetry")
+    if includes_task_ids:
+        task_ids = scope.get("task_ids")
+        if not isinstance(task_ids, list):
+            raise EvalSummaryError(f"{description}.task_ids must be a list")
+        for index, task_id in enumerate(task_ids):
+            _safe_identifier(task_id, f"{description}.task_ids[{index}]")
+
+
+def _validate_summary_schema(root: Mapping[str, object], description: str) -> None:
+    """Validate the complete allowlisted committed-summary schema."""
+
+    _exact_keys(
+        root,
+        {
+            "schema_version",
+            "summary_kind",
+            "image",
+            "image_digest",
+            "source_commit",
+            "source_commit_provenance",
+            "eval_harness_commit",
+            "run",
+            "model",
+            "overall",
+            "suites",
+            "skills",
+            "tasks",
+        },
+        description,
+    )
+    run = _mapping(root.get("run"), f"{description}.run")
+    _exact_keys(
+        run,
+        {
+            "started_at",
+            "start_time_status",
+            "first_trial_recorded_at",
+            "completed_at",
+            "task_count",
+            "trial_count",
+            "trials_per_task",
+        },
+        f"{description}.run",
+    )
+    status = run.get("start_time_status")
+    if status not in {"captured", "unavailable-legacy-records"}:
+        raise EvalSummaryError(f"{description}.run has invalid start_time_status")
+    started_at = run.get("started_at")
+    if status == "captured":
+        started = _timestamp(started_at, f"{description}.run.started_at")
+    elif started_at is not None:
+        raise EvalSummaryError(
+            f"{description}.run.started_at must be null for legacy records"
+        )
+    else:
+        started = None
+    first_recorded = _timestamp(
+        run.get("first_trial_recorded_at"),
+        f"{description}.run.first_trial_recorded_at",
+    )
+    completed = _timestamp(
+        run.get("completed_at"),
+        f"{description}.run.completed_at",
+    )
+    if started is not None and started > first_recorded:
+        raise EvalSummaryError(f"{description}.run started after its first trial")
+    if first_recorded > completed:
+        raise EvalSummaryError(f"{description}.run completed before its first trial")
+    _nonnegative_integer(run.get("task_count"), f"{description}.run.task_count")
+    _nonnegative_integer(run.get("trial_count"), f"{description}.run.trial_count")
+    _positive_integer(
+        run.get("trials_per_task"),
+        f"{description}.run.trials_per_task",
+    )
+
+    model = _mapping(root.get("model"), f"{description}.model")
+    _exact_keys(
+        model,
+        {"primary", "provider", "model_id", "pricing_usd_per_million_tokens"},
+        f"{description}.model",
+    )
+    for field in ("primary", "provider", "model_id"):
+        _safe_identifier(model.get(field), f"{description}.model.{field}")
+    pricing = _mapping(
+        model.get("pricing_usd_per_million_tokens"),
+        f"{description}.model.pricing_usd_per_million_tokens",
+    )
+    _exact_keys(
+        pricing,
+        set(TOKEN_PRICE_KEYS.values()),
+        f"{description}.model.pricing_usd_per_million_tokens",
+    )
+    for field in TOKEN_PRICE_KEYS.values():
+        _finite_decimal(
+            pricing.get(field),
+            f"{description}.model.pricing_usd_per_million_tokens.{field}",
+        )
+
+    _validate_scope(root.get("overall"), f"{description}.overall")
+    for field, includes_task_ids in (("suites", False), ("skills", True)):
+        scopes = _mapping(root.get(field), f"{description}.{field}")
+        for key, scope in scopes.items():
+            _safe_identifier(key, f"{description}.{field} key")
+            _validate_scope(
+                scope,
+                f"{description}.{field}.{key}",
+                includes_task_ids=includes_task_ids,
             )
-        for key, child_spec in spec.items():
-            _assert_summary_schema(mapping[key], child_spec, f"{path}.{key}")
-        return
-    _assert_summary_scalar(value, spec, path)
+    tasks = _mapping(root.get("tasks"), f"{description}.tasks")
+    for task_id, task_value in tasks.items():
+        _safe_identifier(task_id, f"{description}.tasks key")
+        task = _mapping(task_value, f"{description}.tasks.{task_id}")
+        _exact_keys(
+            task,
+            {"skill", "suite", "trials", "passed_trials", "pass^3"},
+            f"{description}.tasks.{task_id}",
+        )
+        _safe_identifier(task.get("skill"), f"{description}.tasks.{task_id}.skill")
+        _safe_identifier(task.get("suite"), f"{description}.tasks.{task_id}.suite")
+        trials = _positive_integer(
+            task.get("trials"),
+            f"{description}.tasks.{task_id}.trials",
+        )
+        passed_trials = _nonnegative_integer(
+            task.get("passed_trials"),
+            f"{description}.tasks.{task_id}.passed_trials",
+        )
+        if passed_trials > trials:
+            raise EvalSummaryError(
+                f"{description}.tasks.{task_id}.passed_trials exceeds trials"
+            )
+        if not isinstance(task.get("pass^3"), bool):
+            raise EvalSummaryError(
+                f"{description}.tasks.{task_id}.pass^3 must be a boolean"
+            )
 
 
 def validate_committed_summary(path: Path, content: bytes) -> None:
@@ -740,8 +907,18 @@ def validate_committed_summary(path: Path, content: bytes) -> None:
     source_commit = root.get("source_commit")
     if not isinstance(source_commit, str) or GIT_OID_RE.fullmatch(source_commit) is None:
         raise EvalSummaryError(f"{path} source_commit must be a full Git object ID")
+    eval_harness_commit = root.get("eval_harness_commit")
+    if (
+        not isinstance(eval_harness_commit, str)
+        or GIT_OID_RE.fullmatch(eval_harness_commit) is None
+    ):
+        raise EvalSummaryError(
+            f"{path} eval_harness_commit must be a full Git object ID"
+        )
+    if root.get("source_commit_provenance") not in SOURCE_COMMIT_PROVENANCE:
+        raise EvalSummaryError(f"{path} has invalid source_commit_provenance")
     _assert_no_transcript_fields(root)
-    _assert_summary_schema(root, SUMMARY_SCHEMA)
+    _validate_summary_schema(root, f"{path} summary")
 
 
 def check_repository(repo_root: Path) -> list[Path]:
@@ -795,6 +972,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--image")
     parser.add_argument("--source-commit")
     parser.add_argument(
+        "--source-commit-provenance",
+        choices=sorted(SOURCE_COMMIT_PROVENANCE),
+    )
+    parser.add_argument("--eval-harness-commit")
+    parser.add_argument(
         "--model-config",
         type=Path,
         default=Path(__file__).resolve().parents[1] / "openclaw.json",
@@ -819,12 +1001,22 @@ def main(argv: list[str] | None = None) -> int:
             raise EvalSummaryError("--image is required with --records")
         if args.source_commit is None:
             raise EvalSummaryError("--source-commit is required with --records")
+        if args.source_commit_provenance is None:
+            raise EvalSummaryError(
+                "--source-commit-provenance is required with --records"
+            )
+        if args.eval_harness_commit is None:
+            raise EvalSummaryError(
+                "--eval-harness-commit is required with --records"
+            )
         records = load_records(args.records)
         summary = summarize_records(
             records,
             load_model_pricing(args.model_config),
             expected_image=args.image,
             source_commit=args.source_commit,
+            source_commit_provenance=args.source_commit_provenance,
+            eval_harness_commit=args.eval_harness_commit,
         )
         write_summary(args.out, summary)
         print(
