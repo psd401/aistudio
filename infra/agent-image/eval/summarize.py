@@ -22,7 +22,10 @@ from pathlib import Path
 
 SCHEMA_VERSION = 2
 SUMMARY_KIND = "agent-eval-run"
-IMMUTABLE_DIGEST_RE = re.compile(r"(?:^|@)(sha256:[0-9a-f]{64})$")
+IMMUTABLE_ECR_IMAGE_RE = re.compile(
+    r"^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?/"
+    r"[a-z0-9]+(?:[._/-][a-z0-9]+)*@(?P<digest>sha256:[0-9a-f]{64})$"
+)
 SAFE_SUMMARY_NAME_RE = re.compile(r"^sha256-[0-9a-f]{64}\.json$")
 GIT_OID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$")
@@ -100,12 +103,12 @@ def _finite_decimal(value: object, description: str) -> Decimal:
 
 
 def _digest_from_image(image: str) -> str:
-    match = IMMUTABLE_DIGEST_RE.search(image)
+    match = IMMUTABLE_ECR_IMAGE_RE.fullmatch(image)
     if match is None:
         raise EvalSummaryError(
-            "trial image must be an immutable sha256 digest, not a mutable tag"
+            "trial image must be a complete immutable ECR sha256 URI"
         )
-    return match.group(1)
+    return match.group("digest")
 
 
 def _timestamp(value: object, description: str) -> datetime:
@@ -747,6 +750,55 @@ def _validate_scope(
             _safe_identifier(task_id, f"{description}.task_ids[{index}]")
 
 
+def _validate_scope_consistency(
+    value: object,
+    task_ids: Sequence[str],
+    tasks: Mapping[str, Mapping[str, object]],
+    description: str,
+) -> None:
+    """Ensure a scope's pass^3 headline is derived from its task summaries."""
+
+    scope = _mapping(value, description)
+    expected_task_count = len(task_ids)
+    expected_trial_count = sum(
+        _positive_integer(
+            tasks[task_id].get("trials"),
+            f"{description} task {task_id} trials",
+        )
+        for task_id in task_ids
+    )
+    expected_passed_tasks = sum(
+        tasks[task_id].get("pass^3") is True for task_id in task_ids
+    )
+    if scope.get("task_count") != expected_task_count:
+        raise EvalSummaryError(
+            f"{description}.task_count is inconsistent with tasks"
+        )
+    if scope.get("trial_count") != expected_trial_count:
+        raise EvalSummaryError(
+            f"{description}.trial_count is inconsistent with tasks"
+        )
+
+    pass_three = _mapping(scope.get("pass^3"), f"{description}.pass^3")
+    if pass_three.get("passed_tasks") != expected_passed_tasks:
+        raise EvalSummaryError(
+            f"{description}.pass^3.passed_tasks is inconsistent with tasks"
+        )
+    if pass_three.get("total_tasks") != expected_task_count:
+        raise EvalSummaryError(
+            f"{description}.pass^3.total_tasks is inconsistent with tasks"
+        )
+    expected_rate = Decimal(str(_rate(expected_passed_tasks, expected_task_count)))
+    actual_rate = _finite_decimal(
+        pass_three.get("rate"),
+        f"{description}.pass^3.rate",
+    )
+    if actual_rate != expected_rate:
+        raise EvalSummaryError(
+            f"{description}.pass^3.rate is inconsistent with tasks"
+        )
+
+
 def _validate_summary_schema(root: Mapping[str, object], description: str) -> None:
     """Validate the complete allowlisted committed-summary schema."""
 
@@ -848,6 +900,7 @@ def _validate_summary_schema(root: Mapping[str, object], description: str) -> No
                 includes_task_ids=includes_task_ids,
             )
     tasks = _mapping(root.get("tasks"), f"{description}.tasks")
+    validated_tasks: dict[str, Mapping[str, object]] = {}
     for task_id, task_value in tasks.items():
         _safe_identifier(task_id, f"{description}.tasks key")
         task = _mapping(task_value, f"{description}.tasks.{task_id}")
@@ -874,6 +927,95 @@ def _validate_summary_schema(root: Mapping[str, object], description: str) -> No
             raise EvalSummaryError(
                 f"{description}.tasks.{task_id}.pass^3 must be a boolean"
             )
+        if trials != 3:
+            raise EvalSummaryError(
+                f"{description}.tasks.{task_id}.trials must be three for pass^3"
+            )
+        if task.get("pass^3") is not (passed_trials == trials):
+            raise EvalSummaryError(
+                f"{description}.tasks.{task_id}.pass^3 is inconsistent "
+                "with passed_trials"
+            )
+        validated_tasks[task_id] = task
+
+    task_ids = sorted(validated_tasks)
+    if run.get("trials_per_task") != 3:
+        raise EvalSummaryError(
+            f"{description}.run.trials_per_task must be three for pass^3"
+        )
+    if run.get("task_count") != len(task_ids):
+        raise EvalSummaryError(
+            f"{description}.run.task_count is inconsistent with tasks"
+        )
+    expected_trial_count = sum(
+        _positive_integer(
+            task.get("trials"),
+            f"{description}.tasks.{task_id}.trials",
+        )
+        for task_id, task in validated_tasks.items()
+    )
+    if run.get("trial_count") != expected_trial_count:
+        raise EvalSummaryError(
+            f"{description}.run.trial_count is inconsistent with tasks"
+        )
+
+    _validate_scope_consistency(
+        root.get("overall"),
+        task_ids,
+        validated_tasks,
+        f"{description}.overall",
+    )
+
+    suites = _mapping(root.get("suites"), f"{description}.suites")
+    expected_suites = {
+        _safe_identifier(
+            task.get("suite"),
+            f"{description}.tasks.{task_id}.suite",
+        )
+        for task_id, task in validated_tasks.items()
+    }
+    if set(suites) != expected_suites:
+        raise EvalSummaryError(f"{description}.suites is inconsistent with tasks")
+    for suite, scope in suites.items():
+        suite_task_ids = sorted(
+            task_id
+            for task_id, task in validated_tasks.items()
+            if task.get("suite") == suite
+        )
+        _validate_scope_consistency(
+            scope,
+            suite_task_ids,
+            validated_tasks,
+            f"{description}.suites.{suite}",
+        )
+
+    skills = _mapping(root.get("skills"), f"{description}.skills")
+    expected_skills = {
+        _safe_identifier(
+            task.get("skill"),
+            f"{description}.tasks.{task_id}.skill",
+        )
+        for task_id, task in validated_tasks.items()
+    }
+    if set(skills) != expected_skills:
+        raise EvalSummaryError(f"{description}.skills is inconsistent with tasks")
+    for skill, scope_value in skills.items():
+        skill_task_ids = sorted(
+            task_id
+            for task_id, task in validated_tasks.items()
+            if task.get("skill") == skill
+        )
+        scope = _mapping(scope_value, f"{description}.skills.{skill}")
+        if scope.get("task_ids") != skill_task_ids:
+            raise EvalSummaryError(
+                f"{description}.skills.{skill}.task_ids is inconsistent with tasks"
+            )
+        _validate_scope_consistency(
+            scope,
+            skill_task_ids,
+            validated_tasks,
+            f"{description}.skills.{skill}",
+        )
 
 
 def validate_committed_summary(path: Path, content: bytes) -> None:

@@ -435,6 +435,34 @@ class CommittedArtifactGuardTests(unittest.TestCase):
                 self.safe_summary_bytes(),
             )
 
+    def test_image_with_sensitive_prefix_before_digest_is_rejected(self):
+        value = json.loads(self.safe_summary_bytes())
+        value["image"] = f"private prompt\n@{IMAGE_DIGEST}"
+
+        self.assert_rejected(value, "complete immutable ECR sha256 URI")
+
+    def test_task_pass_three_must_match_passed_trial_count(self):
+        value = json.loads(self.safe_summary_bytes())
+        value["tasks"]["task-a"]["pass^3"] = False
+
+        self.assert_rejected(value, r"task-a\.pass\^3 is inconsistent")
+
+    def test_scope_pass_three_must_match_its_tasks(self):
+        value = json.loads(self.safe_summary_bytes())
+        value["overall"]["pass^3"]["passed_tasks"] = 2
+        value["overall"]["pass^3"]["rate"] = 1.0
+
+        self.assert_rejected(
+            value,
+            r"overall\.pass\^3\.passed_tasks is inconsistent",
+        )
+
+    def test_skill_membership_must_match_task_summaries(self):
+        value = json.loads(self.safe_summary_bytes())
+        value["skills"]["skill-a"]["task_ids"] = ["task-a"]
+
+        self.assert_rejected(value, r"task_ids is inconsistent")
+
     def test_repository_check_reads_the_git_index_not_only_gitignore(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
