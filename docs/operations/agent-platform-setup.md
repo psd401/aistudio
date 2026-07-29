@@ -60,13 +60,17 @@ All GCP steps are done in the web console. No `gcloud` CLI required.
 
 1. Go to **APIs & Services** → **Enabled APIs** → click **Google Chat API** → **Configuration** tab
 2. Fill in:
-   - App name: `PSD Agent` (or your district name)
+   - App name and visibility:
+     - **Dev — `psd-aistudio-dev`:** app name **PSD Agent Dev**; visibility
+       limited to the named testers who will use the dev app.
+     - **Prod — `aistudio-462612`:** app name **PSD AI Agent**; visibility
+       set to the intended domain audience.
    - Avatar URL: (optional, leave blank for now)
    - Description: "Personal AI agent for district staff"
    - Enable **Interactive features**
+   - Functionality: **Join spaces and group conversations**
    - Connection settings: **Cloud Pub/Sub**
    - Pub/Sub topic: `projects/<your-project-id>/topics/agent-chat-messages`
-   - Visibility: **Make this Chat app available to everyone in [your domain]** (the Router Lambda's `ALLOWED_DOMAINS` handles access control on the AWS side)
    - Logs: **Log errors to Logging**
 3. Click **Save**
 
