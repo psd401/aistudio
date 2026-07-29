@@ -457,6 +457,60 @@ class CommittedArtifactGuardTests(unittest.TestCase):
             r"overall\.pass\^3\.passed_tasks is inconsistent",
         )
 
+    def test_scope_telemetry_must_match_counts_rates_and_pricing(self):
+        mutations = (
+            (
+                ("overall", "telemetry", "failures", "trials"),
+                7,
+                r"failures\.trials exceeds trial_count",
+            ),
+            (
+                ("overall", "telemetry", "failures", "rate"),
+                0.5,
+                r"failures\.rate is inconsistent",
+            ),
+            (
+                ("overall", "telemetry", "failures", "by_error_class"),
+                {"ModelFailure": 2},
+                r"by_error_class is inconsistent",
+            ),
+            (
+                ("overall", "telemetry", "tokens", "input_tokens"),
+                6001,
+                r"cost\.total_usd is inconsistent",
+            ),
+            (
+                ("overall", "telemetry", "cost", "total_usd"),
+                0,
+                r"cost\.total_usd is inconsistent",
+            ),
+            (
+                ("overall", "telemetry", "duration_ms", "mean"),
+                1,
+                r"duration_ms\.mean is inconsistent",
+            ),
+            (
+                ("overall", "telemetry", "nudged", "trials"),
+                7,
+                r"nudged\.trials exceeds trial_count",
+            ),
+            (
+                ("overall", "telemetry", "caching_status"),
+                "uncached",
+                r"caching_status is inconsistent",
+            ),
+        )
+
+        for path, replacement, pattern in mutations:
+            with self.subTest(path=".".join(path)):
+                value = json.loads(self.safe_summary_bytes())
+                target = value
+                for field in path[:-1]:
+                    target = target[field]
+                target[path[-1]] = replacement
+
+                self.assert_rejected(value, pattern)
+
     def test_skill_membership_must_match_task_summaries(self):
         value = json.loads(self.safe_summary_bytes())
         value["skills"]["skill-a"]["task_ids"] = ["task-a"]

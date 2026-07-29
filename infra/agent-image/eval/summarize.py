@@ -727,6 +727,187 @@ def _validate_telemetry(value: object, description: str) -> None:
         )
 
 
+def _validate_derived_rate(
+    value: object,
+    numerator: int,
+    denominator: int,
+    description: str,
+) -> None:
+    actual = _finite_decimal(value, description)
+    expected = Decimal(str(_rate(numerator, denominator)))
+    if actual != expected:
+        raise EvalSummaryError(f"{description} is inconsistent with its scope")
+
+
+def _validate_scope_telemetry_consistency(
+    value: object,
+    description: str,
+    *,
+    task_count: int,
+    trial_count: int,
+    pricing: Mapping[str, object],
+) -> None:
+    """Validate telemetry fields that are derived from a scope's counters."""
+
+    scope = _mapping(value, description)
+    telemetry = _mapping(scope.get("telemetry"), f"{description}.telemetry")
+    tokens = _mapping(telemetry.get("tokens"), f"{description}.telemetry.tokens")
+    token_counts = {
+        field: _nonnegative_integer(
+            tokens.get(field),
+            f"{description}.telemetry.tokens.{field}",
+        )
+        for field in TOKEN_PRICE_KEYS
+    }
+    prices = {
+        field: _finite_decimal(
+            pricing.get(field),
+            f"model pricing {field}",
+        )
+        for field in TOKEN_PRICE_KEYS.values()
+    }
+    unrounded_cost = sum(
+        Decimal(token_counts[token_field]) * prices[price_field]
+        / Decimal(1_000_000)
+        for token_field, price_field in TOKEN_PRICE_KEYS.items()
+    )
+    expected_costs = {
+        "total_usd": Decimal(str(_rounded_usd(unrounded_cost))),
+        "per_trial_usd": Decimal(
+            str(_rounded_usd(unrounded_cost / Decimal(trial_count)))
+        ),
+        "per_task_usd": Decimal(
+            str(_rounded_usd(unrounded_cost / Decimal(task_count)))
+        ),
+    }
+    cost = _mapping(telemetry.get("cost"), f"{description}.telemetry.cost")
+    for field, expected in expected_costs.items():
+        actual = _finite_decimal(
+            cost.get(field),
+            f"{description}.telemetry.cost.{field}",
+        )
+        if actual != expected:
+            raise EvalSummaryError(
+                f"{description}.telemetry.cost.{field} is inconsistent "
+                "with tokens and model pricing"
+            )
+
+    for field in ("duration_ms", "latency_ms", "model_call_count"):
+        distribution = _mapping(
+            telemetry.get(field),
+            f"{description}.telemetry.{field}",
+        )
+        total = _nonnegative_integer(
+            distribution.get("total"),
+            f"{description}.telemetry.{field}.total",
+        )
+        expected_mean = Decimal(str(round(total / trial_count, 3)))
+        actual_mean = _finite_decimal(
+            distribution.get("mean"),
+            f"{description}.telemetry.{field}.mean",
+        )
+        if actual_mean != expected_mean:
+            raise EvalSummaryError(
+                f"{description}.telemetry.{field}.mean is inconsistent "
+                "with total and trial_count"
+            )
+        p50 = _nonnegative_integer(
+            distribution.get("p50"),
+            f"{description}.telemetry.{field}.p50",
+        )
+        p95 = _nonnegative_integer(
+            distribution.get("p95"),
+            f"{description}.telemetry.{field}.p95",
+        )
+        if p50 > p95 or p95 > total:
+            raise EvalSummaryError(
+                f"{description}.telemetry.{field} percentiles are "
+                "inconsistent with total"
+            )
+
+    nudged = _mapping(telemetry.get("nudged"), f"{description}.telemetry.nudged")
+    nudged_trials = _nonnegative_integer(
+        nudged.get("trials"),
+        f"{description}.telemetry.nudged.trials",
+    )
+    if nudged_trials > trial_count:
+        raise EvalSummaryError(
+            f"{description}.telemetry.nudged.trials exceeds trial_count"
+        )
+    _validate_derived_rate(
+        nudged.get("rate"),
+        nudged_trials,
+        trial_count,
+        f"{description}.telemetry.nudged.rate",
+    )
+
+    failures = _mapping(
+        telemetry.get("failures"),
+        f"{description}.telemetry.failures",
+    )
+    failed_trials = _nonnegative_integer(
+        failures.get("trials"),
+        f"{description}.telemetry.failures.trials",
+    )
+    if failed_trials > trial_count:
+        raise EvalSummaryError(
+            f"{description}.telemetry.failures.trials exceeds trial_count"
+        )
+    _validate_derived_rate(
+        failures.get("rate"),
+        failed_trials,
+        trial_count,
+        f"{description}.telemetry.failures.rate",
+    )
+    error_classes = _mapping(
+        failures.get("by_error_class"),
+        f"{description}.telemetry.failures.by_error_class",
+    )
+    if sum(int(count) for count in error_classes.values()) != failed_trials:
+        raise EvalSummaryError(
+            f"{description}.telemetry.failures.by_error_class is inconsistent "
+            "with failed trials"
+        )
+
+    graded_trials = _nonnegative_integer(
+        failures.get("graded_trials"),
+        f"{description}.telemetry.failures.graded_trials",
+    )
+    if graded_trials > trial_count:
+        raise EvalSummaryError(
+            f"{description}.telemetry.failures.graded_trials exceeds trial_count"
+        )
+    _validate_derived_rate(
+        failures.get("graded_rate"),
+        graded_trials,
+        trial_count,
+        f"{description}.telemetry.failures.graded_rate",
+    )
+    failed_graders = _mapping(
+        failures.get("by_failed_grader"),
+        f"{description}.telemetry.failures.by_failed_grader",
+    )
+    failed_grader_count = sum(int(count) for count in failed_graders.values())
+    if (graded_trials == 0 and failed_grader_count != 0) or (
+        graded_trials > 0 and failed_grader_count < graded_trials
+    ):
+        raise EvalSummaryError(
+            f"{description}.telemetry.failures.by_failed_grader is inconsistent "
+            "with graded failed trials"
+        )
+
+    expected_caching_status = (
+        "uncached"
+        if token_counts["cache_read_input_tokens"] == 0
+        else "cached"
+    )
+    if telemetry.get("caching_status") != expected_caching_status:
+        raise EvalSummaryError(
+            f"{description}.telemetry.caching_status is inconsistent "
+            "with cache-read tokens"
+        )
+
+
 def _validate_scope(
     value: object,
     description: str,
@@ -755,6 +936,7 @@ def _validate_scope_consistency(
     task_ids: Sequence[str],
     tasks: Mapping[str, Mapping[str, object]],
     description: str,
+    pricing: Mapping[str, object],
 ) -> None:
     """Ensure a scope's pass^3 headline is derived from its task summaries."""
 
@@ -770,6 +952,8 @@ def _validate_scope_consistency(
     expected_passed_tasks = sum(
         tasks[task_id].get("pass^3") is True for task_id in task_ids
     )
+    if expected_task_count == 0 or expected_trial_count == 0:
+        raise EvalSummaryError(f"{description} must contain evaluated tasks")
     if scope.get("task_count") != expected_task_count:
         raise EvalSummaryError(
             f"{description}.task_count is inconsistent with tasks"
@@ -797,6 +981,13 @@ def _validate_scope_consistency(
         raise EvalSummaryError(
             f"{description}.pass^3.rate is inconsistent with tasks"
         )
+    _validate_scope_telemetry_consistency(
+        scope,
+        description,
+        task_count=expected_task_count,
+        trial_count=expected_trial_count,
+        pricing=pricing,
+    )
 
 
 def _validate_summary_schema(root: Mapping[str, object], description: str) -> None:
@@ -964,6 +1155,7 @@ def _validate_summary_schema(root: Mapping[str, object], description: str) -> No
         task_ids,
         validated_tasks,
         f"{description}.overall",
+        pricing,
     )
 
     suites = _mapping(root.get("suites"), f"{description}.suites")
@@ -987,6 +1179,7 @@ def _validate_summary_schema(root: Mapping[str, object], description: str) -> No
             suite_task_ids,
             validated_tasks,
             f"{description}.suites.{suite}",
+            pricing,
         )
 
     skills = _mapping(root.get("skills"), f"{description}.skills")
@@ -1015,6 +1208,7 @@ def _validate_summary_schema(root: Mapping[str, object], description: str) -> No
             skill_task_ids,
             validated_tasks,
             f"{description}.skills.{skill}",
+            pricing,
         )
 
 
