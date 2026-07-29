@@ -168,28 +168,32 @@ jobs:
     # The remaining agent-image JavaScript suites are outside Jest's roots.
     # Run from the repository root so validated-fs permits shared root
     # dependencies (notably axe-core/jsdom) without broadening its runtime
-    # filesystem policy. Keep each skill in a fresh Bun process: several suites
-    # mock global fetch/module state and are not process-isolated when unrelated
-    # test files are passed to one `bun test` invocation.
+    # filesystem policy. Keep each test file in a fresh Bun process: several
+    # suites mock global fetch/module state and are not process-isolated when
+    # unrelated files are passed to one `bun test` invocation.
     - name: Run remaining agent-image skill tests (Bun)
       run: |
         set -euo pipefail
-        skill_suites=(
-          infra/agent-image/skills/chat-chart
-          infra/agent-image/skills/psd-aistudio
-          infra/agent-image/skills/psd-brand-guidelines
-          infra/agent-image/skills/psd-canva
-          infra/agent-image/skills/psd-credentials
-          infra/agent-image/skills/psd-data
-          infra/agent-image/skills/psd-html-artifact
-          infra/agent-image/skills/psd-learning-page
-          infra/agent-image/skills/psd-plaud
-          infra/agent-image/skills/psd-skills-meta
-          infra/agent-image/skills/psd-summarize
+        test_files=(
+          infra/agent-image/skills/chat-chart/run.test.js
+          infra/agent-image/skills/psd-aistudio/common.test.js
+          infra/agent-image/skills/psd-aistudio/run.test.js
+          infra/agent-image/skills/psd-brand-guidelines/brand.test.js
+          infra/agent-image/skills/psd-canva/common.test.js
+          infra/agent-image/skills/psd-canva/run.test.js
+          infra/agent-image/skills/psd-credentials/check_capability.test.js
+          infra/agent-image/skills/psd-data/common.test.js
+          infra/agent-image/skills/psd-data/run.test.js
+          infra/agent-image/skills/psd-html-artifact/a11y-audit.test.js
+          infra/agent-image/skills/psd-learning-page/run.test.js
+          infra/agent-image/skills/psd-plaud/common.test.js
+          infra/agent-image/skills/psd-plaud/run.test.js
+          infra/agent-image/skills/psd-skills-meta/authority.test.js
+          infra/agent-image/skills/psd-summarize/run.test.js
         )
-        for skill_suite in "${skill_suites[@]}"; do
-          echo "::group::${skill_suite}"
-          bun test "${skill_suite}"
+        for test_file in "${test_files[@]}"; do
+          echo "::group::${test_file}"
+          bun test "${test_file}"
           echo "::endgroup::"
         done
       env:
