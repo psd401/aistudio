@@ -153,7 +153,8 @@ Notes:
 
 - **`bad_args`** — missing/invalid `--user`, no composition, bad `--duration`/`--fps`/dimensions,
   a valueless `--css-file`/`--js-file`, an `--audio-url` that isn't `https://` / `data:audio/`,
-  a combined html+css+js payload over the 4 MB cap, or a
+  a combined html+css+js payload over the 4 MiB cap, a JSON-escaped request over
+  Lambda's 6 MiB synchronous invocation cap, or a
   composition whose declared `data-duration` exceeds the 180 s cap or whose root
   `data-width`/`data-height` exceeds the 3840 px cap. Fix and retry.
 - **`invoke_failed`** — the fixed relay or render Lambda could not complete the invocation

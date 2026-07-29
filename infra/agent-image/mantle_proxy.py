@@ -77,8 +77,17 @@ POLLY_TEXT_MAX_CHARS = 3_000
 POLLY_HTTP_REQUEST_MAX_BYTES = 16 * 1024
 POLLY_AUDIO_MAX_BYTES = 16 * 1024 * 1024
 HYPERFRAMES_REQUEST_MAX_BYTES = 4 * 1024 * 1024
-HYPERFRAMES_HTTP_REQUEST_MAX_BYTES = 6 * 1024 * 1024
+# Lambda's synchronous Invoke payload is capped at 6 MiB. Keep the loopback
+# body at that same exact ceiling, then check the compact serialized payload
+# independently: JSON escaping can make a <=4 MiB composition exceed 6 MiB.
+HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES = 6 * 1024 * 1024
+HYPERFRAMES_HTTP_REQUEST_MAX_BYTES = HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES
 HYPERFRAMES_RESPONSE_MAX_BYTES = 8 * 1024 * 1024
+# 13 minutes leaves 60 seconds under the interactive turn's 840-second budget.
+# The render process itself is capped at 720 seconds, leaving another minute
+# for Lambda cleanup/upload/response. Both the AWS client and Node relay client
+# use this value so neither disconnects while a supported render is still live.
+HYPERFRAMES_RELAY_TIMEOUT_SECONDS = 780
 HYPERFRAMES_MAX_DURATION_SECONDS = 180
 HYPERFRAMES_MAX_FRAMES = 3_600
 HYPERFRAMES_MIN_DIMENSION = 16
@@ -230,13 +239,38 @@ def _validate_hyperframes_payload(payload: object) -> dict:
         raise ValueError("invalid HyperFrames user")
     if "dryRun" in payload and not isinstance(payload["dryRun"], bool):
         raise ValueError("invalid HyperFrames dry-run flag")
+    _serialize_hyperframes_payload(payload)
     return payload
 
 
 def _new_lambda_client():
     import boto3
+    from botocore.config import Config
 
-    return boto3.client("lambda", region_name=AWS_REGION)
+    return boto3.client(
+        "lambda",
+        region_name=AWS_REGION,
+        config=Config(
+            connect_timeout=10,
+            read_timeout=HYPERFRAMES_RELAY_TIMEOUT_SECONDS,
+            # Retrying a timed-out synchronous invoke can start the same costly
+            # render twice. The caller can make an explicit retry after a
+            # definitive failure; the transport itself stays single-attempt.
+            retries={"total_max_attempts": 1, "mode": "standard"},
+        ),
+    )
+
+
+def _serialize_hyperframes_payload(payload: dict) -> bytes:
+    """Serialize exactly once within Lambda's synchronous invoke body limit."""
+    body = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(body) > HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES:
+        raise ValueError("HyperFrames serialized payload exceeds the configured limit")
+    return body
 
 
 def _invoke_hyperframes(payload: dict) -> dict:
@@ -247,7 +281,7 @@ def _invoke_hyperframes(payload: dict) -> dict:
     response = _new_lambda_client().invoke(
         FunctionName=function_name,
         InvocationType="RequestResponse",
-        Payload=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        Payload=_serialize_hyperframes_payload(payload),
     )
     stream = response.get("Payload")
     if stream is None:

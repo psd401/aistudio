@@ -57,8 +57,11 @@ import asyncio  # noqa: E402
 import mantle_proxy  # noqa: E402
 from mantle_proxy import (  # noqa: E402
     AgentBrokerResponseTooLarge,
+    HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES,
+    HYPERFRAMES_RELAY_TIMEOUT_SECONDS,
     POLLY_TEXT_MAX_CHARS,
     _invoke_hyperframes,
+    _new_lambda_client,
     _read_bounded_agent_broker_response,
     _resolve_agent_broker_route,
     _synthesize_polly,
@@ -183,6 +186,55 @@ class TestDirectAwsSkillRelay(unittest.TestCase):
                 "userEmail": "eval.issue1426@psd401.net",
                 "functionName": "attacker-selected-function",
             })
+
+    def test_hyperframes_serialization_enforces_lambda_invoke_limit(self):
+        with self.assertRaisesRegex(ValueError, "serialized payload"):
+            _validate_hyperframes_payload({
+                # NUL is one raw UTF-8 byte but six bytes after JSON escaping.
+                # This remains under the 4 MiB composition cap while exceeding
+                # 6 MiB once serialized for Lambda.
+                "html": "\0" * (
+                    HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES // 6 + 1
+                ),
+                "durationSeconds": 1,
+                "fps": 20,
+                "width": 640,
+                "height": 360,
+                "userEmail": "eval.issue1426@psd401.net",
+            })
+
+    def test_hyperframes_lambda_client_matches_the_turn_budget_without_retries(self):
+        config_instance = object()
+        config_constructor = mock.Mock(return_value=config_instance)
+        client_constructor = mock.Mock(return_value=object())
+        boto3_module = types.ModuleType("boto3")
+        boto3_module.client = client_constructor
+        botocore_module = types.ModuleType("botocore")
+        config_module = types.ModuleType("botocore.config")
+        config_module.Config = config_constructor
+        botocore_module.config = config_module
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "boto3": boto3_module,
+                "botocore": botocore_module,
+                "botocore.config": config_module,
+            },
+        ):
+            result = _new_lambda_client()
+
+        self.assertIs(result, client_constructor.return_value)
+        config_constructor.assert_called_once_with(
+            connect_timeout=10,
+            read_timeout=HYPERFRAMES_RELAY_TIMEOUT_SECONDS,
+            retries={"total_max_attempts": 1, "mode": "standard"},
+        )
+        client_constructor.assert_called_once_with(
+            "lambda",
+            region_name=mantle_proxy.AWS_REGION,
+            config=config_instance,
+        )
 
 
 class TestAgentBrokerRoute(unittest.TestCase):

@@ -24,6 +24,8 @@ const {
   invokeRender,
   validateEmail,
   main,
+  MAX_INVOKE_PAYLOAD_BYTES,
+  RELAY_TIMEOUT_MS,
 } = require('./render');
 
 const HTML =
@@ -160,6 +162,26 @@ test('buildPayload caps the combined html+css+js size', () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('buildPayload enforces the serialized Lambda limit after JSON escaping', () => {
+  // NUL is one UTF-8 byte in the composition budget but JSON encodes it as the
+  // six-byte sequence "\\u0000". The raw input is valid and well below 4 MiB;
+  // the serialized invoke body is intentionally just over Lambda's 6 MiB cap.
+  const html =
+    '<div data-composition-id="escaped">' +
+    '\u0000'.repeat(Math.floor(MAX_INVOKE_PAYLOAD_BYTES / 6) + 1) +
+    '</div>';
+  expect(Buffer.byteLength(html, 'utf8')).toBeLessThan(4 * 1024 * 1024);
+  expect(() => buildPayload(parseArgs(argv(
+    '--user', 'p@psd401.net', '--html', html, '--duration', '3',
+  )))).toThrow(ExitError);
+  expect(lastJson().error).toBe('bad_args');
+  expect(lastJson().message).toContain('6 MiB Lambda invocation limit');
+});
+
+test('relay timeout leaves cleanup headroom inside the interactive turn budget', () => {
+  expect(RELAY_TIMEOUT_MS).toBe(780_000);
 });
 
 test('buildPayload reads css/js from files and carries dryRun', () => {

@@ -27,6 +27,10 @@ const AWS_RELAY_HOST = '127.0.0.1';
 const AWS_RELAY_PORT = 18791;
 const AWS_RELAY_PATH = '/aws-skill/hyperframes/invoke';
 const MAX_RELAY_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_INVOKE_PAYLOAD_BYTES = 6 * 1024 * 1024;
+// The renderer is capped at 720s. Leave 60s for Lambda cleanup/upload and
+// another 60s under the interactive turn's 840s ceiling.
+const RELAY_TIMEOUT_MS = 780_000;
 // Keep in sync with the render Lambda (infra/hyperframes-render/handler.js) and
 // SKILL.md. Client-side checks fail fast; the Lambda re-validates authoritatively.
 const MAX_DURATION_SECONDS = 180;
@@ -38,9 +42,9 @@ const DEFAULT_WIDTH = 1920;
 const DEFAULT_HEIGHT = 1080;
 const MIN_DIMENSION = 16;
 const MAX_DIMENSION = 3840;
-// Combined html + css + js budget. Mirrors the render Lambda's MAX_HTML_BYTES
-// and keeps the JSON invoke payload under Lambda's 6 MB synchronous ceiling —
-// fail fast here with an actionable message rather than an opaque invoke error.
+// Combined html + css + js budget. Mirrors the render Lambda's MAX_HTML_BYTES.
+// A separate serialized-payload check below accounts for JSON escaping before
+// enforcing Lambda's exact 6 MiB synchronous invocation ceiling.
 const MAX_COMPOSITION_BYTES = 4 * 1024 * 1024;
 
 function fail(message, code = 'error') {
@@ -352,6 +356,13 @@ function buildPayload(args) {
   if (css) payload.css = css;
   if (js) payload.js = js;
   if (args.dry_run === true) payload.dryRun = true;
+  if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > MAX_INVOKE_PAYLOAD_BYTES) {
+    fail(
+      'Serialized render request exceeds the 6 MiB Lambda invocation limit. ' +
+        'Reduce escaped control characters or split the composition.',
+      'bad_args'
+    );
+  }
   return payload;
 }
 
@@ -396,7 +407,7 @@ function requestRenderRelay(payload) {
         }
       });
     });
-    request.setTimeout(190_000, () => {
+    request.setTimeout(RELAY_TIMEOUT_MS, () => {
       request.destroy(new Error('HyperFrames relay timed out'));
     });
     request.on('error', reject);
@@ -465,4 +476,6 @@ module.exports = {
   requestRenderRelay,
   validateEmail,
   MAX_DURATION_SECONDS,
+  MAX_INVOKE_PAYLOAD_BYTES,
+  RELAY_TIMEOUT_MS,
 };
