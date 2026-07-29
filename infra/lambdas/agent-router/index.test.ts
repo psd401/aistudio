@@ -405,6 +405,47 @@ describe("Google Chat response delivery", () => {
   })
 })
 
+describe("Google Chat response limits", () => {
+  test("truncates a DM fallback body to the Google Chat message limit", async () => {
+    const requests: Array<
+      Parameters<ChatResponseDependencies["createMessage"]>[0]
+    > = []
+    let createAttempt = 0
+
+    await expect(
+      sendGoogleChatResponseWithDependencies(
+        {
+          spaceName: "spaces/room",
+          threadName: "spaces/room/threads/thread-1",
+          text: "x".repeat(5000),
+          deliveryContext: {
+            isSharedSpace: true,
+            senderGoogleIdentity: "users/owner",
+          },
+        },
+        TEST_LOG,
+        chatResponseDependencies({
+          createMessage: async request => {
+            requests.push(request)
+            createAttempt += 1
+            if (createAttempt === 1) {
+              throw Object.assign(new Error("room post denied"), { code: 403 })
+            }
+          },
+          resolveDmSpace: async () => "spaces/owner-dm",
+        })
+      )
+    ).resolves.toBe("dm-fallback-delivered")
+
+    const fallbackText = requests[1]?.requestBody.text
+    expect(typeof fallbackText).toBe("string")
+    expect(fallbackText).toHaveLength(4096)
+    expect(fallbackText).toEndWith(
+      "I'm sending it to you privately instead."
+    )
+  })
+})
+
 describe("Google Chat response fallback failures", () => {
   test("records a missing sender DM without retrying the room post", async () => {
     const requests: Array<

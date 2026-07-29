@@ -73,6 +73,7 @@ import {
 } from './attachments';
 import {
   buildJobPayload,
+  jobChatDeliveryContext,
   shouldPromoteToJob,
 } from './job-promotion';
 import type { ScheduledRunWrite } from './scheduled-run-telemetry';
@@ -2220,14 +2221,7 @@ async function promoteToJob(
         '⏳ This is taking longer than one pass allows — I\'ve moved it to a ' +
         'background job and will post the result here when it\'s done.',
       log,
-      {
-        isSharedSpace: !input.isDM,
-        ...(!input.isDM
-          ? { senderGoogleIdentity: input.googleIdentity }
-          : {}),
-        userId: input.userEmail,
-        sessionId: input.sessionId,
-      }
+      jobChatDeliveryContext(input)
     );
 
     log.info('Turn promoted to background job', {
@@ -2442,6 +2436,7 @@ async function handleChatPostPermissionDenied(
     spaceName: string;
     threadName?: string;
     messageBody: Record<string, unknown>;
+    senderGoogleIdentity: string;
     deliveryContext: ChatResponseDeliveryContext;
     log: ReturnType<typeof createLogger>;
   },
@@ -2452,6 +2447,7 @@ async function handleChatPostPermissionDenied(
     spaceName,
     threadName,
     messageBody,
+    senderGoogleIdentity,
     deliveryContext,
     log,
   } = input;
@@ -2463,9 +2459,8 @@ async function handleChatPostPermissionDenied(
   };
 
   try {
-    const dmSpaceName = await dependencies.resolveDmSpace(
-      deliveryContext.senderGoogleIdentity ?? ''
-    );
+    const dmSpaceName =
+      await dependencies.resolveDmSpace(senderGoogleIdentity);
     if (!dmSpaceName) {
       log.error('Shared-space Chat reply failed and sender DM was not found', {
         space: spaceName,
@@ -2611,17 +2606,28 @@ async function sendGoogleChatResponseWithDependencies(
   try {
     await dependencies.createMessage(createRequest);
   } catch (error) {
-    const canFallbackToDm =
-      deliveryContext.isSharedSpace === true &&
-      Boolean(deliveryContext.senderGoogleIdentity) &&
-      isChatPostPermissionDenied(error);
-    if (!canFallbackToDm) throw error;
+    const senderGoogleIdentity =
+      deliveryContext.senderGoogleIdentity;
+    if (
+      deliveryContext.isSharedSpace !== true ||
+      !senderGoogleIdentity ||
+      !isChatPostPermissionDenied(error)
+    ) {
+      throw error;
+    }
+
+    // The AgentCore turn has already completed. A failed room+DM delivery is
+    // returned as an explicit outcome and recorded by the fallback handler
+    // instead of throwing back to SQS, because retrying the event would rerun
+    // a potentially side-effecting turn. Promoted jobs convert this outcome
+    // to exit code 3; interactive turns page through AGENT_FAILURE_RECORD.
     return handleChatPostPermissionDenied(
       {
         error,
         spaceName,
         threadName,
         messageBody,
+        senderGoogleIdentity,
         deliveryContext,
         log,
       },
