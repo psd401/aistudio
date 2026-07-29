@@ -216,6 +216,26 @@ class SuiteLoadingTests(unittest.TestCase):
                 f"{task_id} is counted as negative without a negative assertion",
             )
 
+        successful_tool_requirements = {
+            "failure-report-synthetic-missing-data": (
+                r"psd-failure-report/report\.js"
+            ),
+            "summarize-records-safe-projector-summary": (
+                r"psd-summarize/run\.js"
+            ),
+            "tts-synthetic-short-audio": r"psd-tts/scripts/synthesize\.py",
+        }
+        for task_id, args_pattern in successful_tool_requirements.items():
+            self.assertTrue(
+                any(
+                    grader.get("type") == "tool_call_succeeded"
+                    and grader.get("tool") == "exec"
+                    and grader.get("args_pattern") == args_pattern
+                    for grader in tasks_by_id[task_id].graders
+                ),
+                f"{task_id} does not prove its executable succeeded",
+            )
+
         def broker_body(task_id: str) -> dict[str, object]:
             spec = next(
                 grader
