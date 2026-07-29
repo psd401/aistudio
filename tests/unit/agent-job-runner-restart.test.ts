@@ -101,6 +101,7 @@ describe("job runner restart handling", () => {
     expect(source).toContain(
       "return deliveryOutcome === 'failed' ? 3 : agentResult.failed ? 2 : 0",
     )
+    expect(source).toContain("marker: 'JOB_RUNNER_FAILED_TURN'")
     expect(source).toContain("JOB_RUNNER_DELIVERY_FAILED")
   })
 

@@ -136,7 +136,11 @@ async function recordCompletedJobResult(
 
   if (deliveryFailed) {
     log.warn('Background job completed but no Chat response was delivered', {
-      marker: 'JOB_RUNNER_DELIVERY_FAILED',
+      // Keep this on the monitored job-runner failure marker so interactive
+      // promotions page through the existing JobRunnerFailures alarm too.
+      marker: 'JOB_RUNNER_FAILED_TURN',
+      failureKind: 'delivery',
+      deliveryMarker: 'JOB_RUNNER_DELIVERY_FAILED',
       sessionId: job.sessionId,
       latencyMs,
     });
