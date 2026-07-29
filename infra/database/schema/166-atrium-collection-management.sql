@@ -12,7 +12,7 @@
 -- ============================================================================
 
 ALTER TABLE content_collections
-  ADD COLUMN IF NOT EXISTS owner_user_id integer REFERENCES users(id) ON DELETE RESTRICT;
+  ADD COLUMN IF NOT EXISTS owner_user_id integer REFERENCES users(id) ON DELETE CASCADE;
 ALTER TABLE content_collections
   ADD COLUMN IF NOT EXISTS inherit_grants boolean NOT NULL DEFAULT true;
 ALTER TABLE content_collections

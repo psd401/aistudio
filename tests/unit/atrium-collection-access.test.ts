@@ -28,7 +28,10 @@ jest.mock("drizzle-orm", () => ({
   asc: (value: unknown) => value,
 }));
 
-import { collectionAccessSnapshot } from "@/lib/content/collection-access";
+import {
+  collectionAccessSnapshot,
+  collectionAccessSnapshotInTx,
+} from "@/lib/content/collection-access";
 import type { Requester } from "@/lib/content/types";
 
 interface CollectionFixture {
@@ -175,5 +178,27 @@ describe("Atrium collection access", () => {
     const access = await collectionAccessSnapshot(owner);
     expect(access.allowedCollectionIds.has("archived")).toBe(false);
     expect(access.selectableCollectionIds.has("archived")).toBe(false);
+  });
+
+  it("holds collection share locks for transaction-scoped authorization", async () => {
+    collections = [row("district")];
+    const forLock = jest.fn(async () => collections);
+    const orderBy = jest.fn(() => ({ for: forLock }));
+    const tx = {
+      select: jest
+        .fn()
+        .mockReturnValueOnce({
+          from: jest.fn(() => ({ orderBy })),
+        })
+        .mockReturnValueOnce({
+          from: jest.fn(async () => grants),
+        }),
+    };
+
+    const access = await collectionAccessSnapshotInTx(tx as never, owner);
+
+    expect(forLock).toHaveBeenCalledWith("share");
+    expect(access.selectableCollectionIds.has("district")).toBe(true);
+    expect(executeQueryMock).not.toHaveBeenCalled();
   });
 });

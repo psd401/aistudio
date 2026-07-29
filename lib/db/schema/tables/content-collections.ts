@@ -52,7 +52,9 @@ export const contentCollections = pgTable(
      * both the service and the database check below.
      */
     ownerUserId: integer("owner_user_id").references(() => users.id, {
-      onDelete: "restrict",
+      // Empty private trees are organizational metadata and follow their owner
+      // on account deletion. Content retains its independent owner FK.
+      onDelete: "cascade",
     }),
     inheritGrants: boolean("inherit_grants").default(true).notNull(),
     archivedAt: timestamp("archived_at"),

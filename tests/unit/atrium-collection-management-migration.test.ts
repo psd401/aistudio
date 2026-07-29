@@ -17,6 +17,9 @@ describe("Atrium collection management migration", () => {
   it("registers the additive migration and private-policy backstop", () => {
     expect(manifest.migrationFiles).toContain(migrationName);
     expect(migration).toContain("ADD COLUMN IF NOT EXISTS owner_user_id");
+    expect(migration).toMatch(
+      /owner_user_id integer REFERENCES users\(id\) ON DELETE CASCADE/
+    );
     expect(migration).toContain("ADD COLUMN IF NOT EXISTS inherit_grants");
     expect(migration).toContain("ADD COLUMN IF NOT EXISTS archived_at");
     expect(migration).toMatch(

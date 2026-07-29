@@ -211,7 +211,22 @@ describe("collection management naming and grants", () => {
       row("max", { position: 2_147_483_647 }),
       row("zero", { position: 0 }),
     ];
-    expect(collectionManagementInternals.nextPosition(rows, null)).toBe(1);
+    expect(collectionManagementInternals.nextPosition(rows, null, null)).toBe(1);
+  });
+
+  it("allocates top-level positions only within the same owner hierarchy", () => {
+    const rows = [
+      row("district", { position: 4 }),
+      row("owner-seven-max", {
+        ownerUserId: 7,
+        position: 2_147_483_647,
+      }),
+      row("owner-eight", { ownerUserId: 8, position: 2 }),
+    ];
+
+    expect(collectionManagementInternals.nextPosition(rows, null, null)).toBe(5);
+    expect(collectionManagementInternals.nextPosition(rows, null, 7)).toBe(0);
+    expect(collectionManagementInternals.nextPosition(rows, null, 8)).toBe(3);
   });
 
   it("normalizes/deduplicates grants and rejects malformed group values", () => {

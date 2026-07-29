@@ -11,7 +11,9 @@ REST v1, and the owner-bound `psd-atrium` skill.
 - A row with `owner_user_id = users.id` is an owner-bound private collection.
   Every Atrium author may manage their own private hierarchy. Private collections
   are forced to `default_visibility_level = 'private'`,
-  `inherit_grants = false`, and carry no grants.
+  `inherit_grants = false`, and carry no grants. Empty private collection trees
+  cascade away with a deleted owner account; content retains its independent
+  ownership foreign-key protections.
 - District administrators can inspect private collection metadata, owner, policy,
   direct/subtree counts, and collection audit events. They cannot enter, read,
   create in, or mutate another user's private collection. This is an additional
@@ -52,6 +54,11 @@ would make every content creation attempt fail.
 
 Collection access is enforced in both point reads and permission-pushed content
 listing/count queries. An archived collection admits neither reads nor creates.
+Content create/move performs a fast preflight, then re-resolves collection
+access, effective grants, and defaults under locks in the same transaction as
+the object write. Collection mutations take the conflicting lock before changing
+lifecycle, hierarchy, defaults, or grants, so a concurrent revocation cannot
+commit a stale placement.
 Slug/UUID resolution for list filters and content placement is requester-aware;
 an inaccessible private collection is reported exactly like an absent one.
 If an accessible child cuts off inheritance beneath a denied ancestor,

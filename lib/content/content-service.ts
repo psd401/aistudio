@@ -20,7 +20,6 @@ import {
 } from "@/lib/db/drizzle-client";
 import {
   contentAuditLogs,
-  contentCollections,
   contentObjects,
   contentPublications,
   contentVersions,
@@ -51,7 +50,8 @@ import { snapshotInTx, versionService } from "./version-service";
 import { visibilityService } from "./visibility-service";
 import {
   collectionAccessSnapshot,
-  requesterMayCreateInCollection,
+  collectionAccessSnapshotInTx,
+  type CollectionAccessSnapshot,
 } from "./collection-access";
 import {
   ConflictError,
@@ -176,13 +176,26 @@ async function uniqueSlug(tx: DbTransaction, title: string): Promise<string> {
 async function collectionDefaultOutsideTx(
   req: Requester,
   collectionId: string | undefined
-): Promise<{
+): Promise<CollectionDefault | null> {
+  if (!collectionId) return null;
+  return collectionDefaultFromAccess(
+    await collectionAccessSnapshot(req),
+    collectionId,
+    "create content in"
+  );
+}
+
+interface CollectionDefault {
   level: VisibilityLevel;
   ownerUserId: number | null;
   grants: VisibilityGrant[];
-} | null> {
-  if (!collectionId) return null;
-  const access = await collectionAccessSnapshot(req);
+}
+
+function collectionDefaultFromAccess(
+  access: CollectionAccessSnapshot,
+  collectionId: string,
+  operation: "create content in" | "move content into"
+): CollectionDefault {
   const collection = access.byId.get(collectionId);
   if (!collection) {
     throw new ValidationError("Collection not found", { collectionId });
@@ -191,9 +204,10 @@ async function collectionDefaultOutsideTx(
     collection.archivedAt ||
     !access.selectableCollectionIds.has(collectionId)
   ) {
-    throw new ForbiddenError("Not permitted to create content in this collection", {
-      collectionId,
-    });
+    throw new ForbiddenError(
+      `Not permitted to ${operation} this collection`,
+      { collectionId }
+    );
   }
   return {
     level: collection.defaultVisibilityLevel,
@@ -204,9 +218,18 @@ async function collectionDefaultOutsideTx(
   };
 }
 
-type CollectionDefault = NonNullable<
-  Awaited<ReturnType<typeof collectionDefaultOutsideTx>>
->;
+async function collectionDefaultInTx(
+  tx: DbTransaction,
+  req: Requester,
+  collectionId: string | undefined
+): Promise<CollectionDefault | null> {
+  if (!collectionId) return null;
+  return collectionDefaultFromAccess(
+    await collectionAccessSnapshotInTx(tx, req),
+    collectionId,
+    "create content in"
+  );
+}
 
 function createVisibilityGrants(
   input: CreateObjectInput,
@@ -234,51 +257,27 @@ function assertPrivateCollectionVisibility(
   }
 }
 
-/**
- * Validate that a collection exists, throwing a typed `ValidationError` (400) on
- * miss. Used by `update()` — which (unlike `create()`) does not call
- * `collectionDefault` — so an invalid `collectionId` surfaces as a user-facing
- * 400 rather than a raw Postgres FK violation (SQLSTATE 23503).
- */
-async function assertCollectionWritable(
+async function assertCollectionWritableInTx(
+  tx: DbTransaction,
   req: Requester,
   collectionId: string,
   objectOwnerUserId: number
 ): Promise<{ ownerUserId: number | null }> {
-  const rows = await executeQuery(
-    (db) =>
-      db
-        .select({
-          id: contentCollections.id,
-          ownerUserId: contentCollections.ownerUserId,
-          archivedAt: contentCollections.archivedAt,
-        })
-        .from(contentCollections)
-        .where(eq(contentCollections.id, collectionId))
-        .limit(1),
-    "content.assertCollectionExists"
+  const collection = collectionDefaultFromAccess(
+    await collectionAccessSnapshotInTx(tx, req),
+    collectionId,
+    "move content into"
   );
-  if (!rows[0]) {
-    throw new ValidationError("Collection not found", { collectionId });
-  }
   if (
-    rows[0].archivedAt ||
-    !(await requesterMayCreateInCollection(req, collectionId))
-  ) {
-    throw new ForbiddenError("Not permitted to move content into this collection", {
-      collectionId,
-    });
-  }
-  if (
-    rows[0].ownerUserId != null &&
-    rows[0].ownerUserId !== objectOwnerUserId
+    collection.ownerUserId != null &&
+    collection.ownerUserId !== objectOwnerUserId
   ) {
     throw new ForbiddenError(
       "A private collection may contain only content owned by its collection owner",
       { collectionId }
     );
   }
-  return { ownerUserId: rows[0].ownerUserId };
+  return { ownerUserId: collection.ownerUserId };
 }
 
 /**
@@ -381,20 +380,17 @@ async function queuePublicWidenForCreate(
  * `publicWidenRequested` is true when an unauthorized public create was
  * downgraded to private — the caller queues a `visibility_widen` post-commit.
  */
-async function resolveCreateVisibility(
+function resolveCreateVisibilityForCollection(
   req: Requester,
   input: CreateObjectInput,
-  mayPublishPublic: boolean
-): Promise<{
+  mayPublishPublic: boolean,
+  collection: CollectionDefault | null
+): {
   visibilityLevel: VisibilityLevel;
   grants: VisibilityGrant[];
   publicWidenRequested: boolean;
-}> {
+} {
   const explicitLevel = input.visibility?.level;
-  // Resolve and authorize collection placement even when visibility is explicit.
-  // The former `explicit ?? collectionDefault()` skipped this lookup entirely for
-  // explicit visibility and could defer a bad id to an opaque FK error.
-  const collection = await collectionDefaultOutsideTx(req, input.collectionId);
   const grants = createVisibilityGrants(input, collection);
 
   // A group object with no grants is invisible to everyone but the owner/admin
@@ -435,6 +431,38 @@ async function resolveCreateVisibility(
   return { visibilityLevel, grants, publicWidenRequested: false };
 }
 
+async function resolveCreateVisibilityOutsideTx(
+  req: Requester,
+  input: CreateObjectInput,
+  mayPublishPublic: boolean
+): Promise<ReturnType<typeof resolveCreateVisibilityForCollection>> {
+  // Resolve and authorize collection placement even when visibility is explicit.
+  // This is a fast-fail before agent screening/external I/O; create re-resolves
+  // the same policy under collection locks inside its write transaction.
+  const collection = await collectionDefaultOutsideTx(req, input.collectionId);
+  return resolveCreateVisibilityForCollection(
+    req,
+    input,
+    mayPublishPublic,
+    collection
+  );
+}
+
+async function resolveCreateVisibilityInTx(
+  tx: DbTransaction,
+  req: Requester,
+  input: CreateObjectInput,
+  mayPublishPublic: boolean
+): Promise<ReturnType<typeof resolveCreateVisibilityForCollection>> {
+  const collection = await collectionDefaultInTx(tx, req, input.collectionId);
+  return resolveCreateVisibilityForCollection(
+    req,
+    input,
+    mayPublishPublic,
+    collection
+  );
+}
+
 type ContentObjectSetValues = Partial<typeof contentObjects.$inferInsert>;
 
 function applyTitleAndTags(
@@ -453,7 +481,8 @@ function applyTitleAndTags(
   if (patch.tags !== undefined) setValues.tags = patch.tags ?? [];
 }
 
-async function applyCollectionChange(
+async function applyCollectionChangeInTx(
+  tx: DbTransaction,
   req: Requester,
   existing: ContentObjectDTO,
   patch: UpdatePatch,
@@ -461,7 +490,8 @@ async function applyCollectionChange(
 ): Promise<void> {
   if (patch.collectionId === undefined) return;
   if (patch.collectionId != null) {
-    const collection = await assertCollectionWritable(
+    const collection = await assertCollectionWritableInTx(
+      tx,
       req,
       patch.collectionId,
       existing.ownerUserId
@@ -476,6 +506,33 @@ async function applyCollectionChange(
     }
   }
   setValues.collectionId = patch.collectionId ?? null;
+}
+
+async function updateWithCollectionChange(
+  req: Requester,
+  existingId: string,
+  patch: UpdatePatch,
+  setValues: ContentObjectSetValues
+): Promise<ObjectRowAsText[]> {
+  return executeTransaction(async (tx) => {
+    const lockedRows = await tx
+      .select(objectSelectFields)
+      .from(contentObjects)
+      .where(eq(contentObjects.id, existingId))
+      .for("update")
+      .limit(1);
+    if (!lockedRows[0]) {
+      throw new NotFoundError("Content not found", { id: existingId });
+    }
+    const locked = rowToObjectDTO(lockedRows[0] as ObjectRowAsText);
+    assertCanEdit(req, locked.ownerUserId);
+    await applyCollectionChangeInTx(tx, req, locked, patch, setValues);
+    return (await tx
+      .update(contentObjects)
+      .set(setValues)
+      .where(eq(contentObjects.id, existingId))
+      .returning(objectSelectFields)) as ObjectRowAsText[];
+  }, "content.updateCollection");
 }
 
 function applyStatusChange(
@@ -606,11 +663,10 @@ export const contentService = {
     const createdByActor = actorKindOf(attributionRequester);
     const createdByAgentId = agentIdOf(attributionRequester);
 
-    // Resolve level + grants. An unauthorized public create is downgraded to
-    // private here (create-as-private, §26.4); `publicWidenRequested` then drives
-    // the post-commit `visibility_widen` queue below.
-    const { visibilityLevel, grants, publicWidenRequested } =
-      await resolveCreateVisibility(req, input, mayPublishPublic);
+    // Fast-fail invalid/inaccessible collection placement before screening.
+    // The result is deliberately not trusted for the write: the collection,
+    // grants, and default are re-resolved under locks inside the transaction.
+    await resolveCreateVisibilityOutsideTx(req, input, mayPublishPublic);
 
     // §28.3 — agent-authored bodies (a document's markdown AND an artifact's
     // code) are guardrails/PII-screened BEFORE any write, mirroring the agent
@@ -625,85 +681,106 @@ export const contentService = {
       null
     );
 
-    const { object, version, s3Writes } = await executeTransaction(
-      async (tx) => {
-        const slug = await uniqueSlug(tx, input.title);
+    const { object, version, s3Writes, publicWidenRequested } =
+      await executeTransaction(
+        async (tx) => {
+          const { visibilityLevel, grants, publicWidenRequested } =
+            await resolveCreateVisibilityInTx(
+              tx,
+              req,
+              input,
+              mayPublishPublic
+            );
+          const slug = await uniqueSlug(tx, input.title);
 
-        // Translate a slug unique-violation that slips past uniqueSlug (a
-        // concurrent create racing the SELECT) into a typed ConflictError.
-        const inserted = await tx
-          .insert(contentObjects)
-          .values({
-            kind: input.kind,
-            title: input.title,
-            slug,
-            ownerUserId,
-            createdByActor,
-            createdByAgentId,
-            collectionId: input.collectionId ?? null,
-            visibilityLevel,
-            status: "draft",
-            // Typed JSONB must use the postgres.js cast pattern.
-            sourceRef: sql`${safeJsonbStringify(
-              input.sourceRef ?? { type: "none" }
-            )}::jsonb`,
-            tags: input.tags ?? [],
-          })
-          .returning(objectSelectFields)
-          .catch((e: unknown) => {
-            if (isUniqueViolation(e)) {
-              if (
-                uniqueConstraint(e) === "uq_content_capture_source" &&
-                input.sourceRef?.type === "capture"
-              ) {
+          // Translate a slug unique-violation that slips past uniqueSlug (a
+          // concurrent create racing the SELECT) into a typed ConflictError.
+          const inserted = await tx
+            .insert(contentObjects)
+            .values({
+              kind: input.kind,
+              title: input.title,
+              slug,
+              ownerUserId,
+              createdByActor,
+              createdByAgentId,
+              collectionId: input.collectionId ?? null,
+              visibilityLevel,
+              status: "draft",
+              // Typed JSONB must use the postgres.js cast pattern.
+              sourceRef: sql`${safeJsonbStringify(
+                input.sourceRef ?? { type: "none" }
+              )}::jsonb`,
+              tags: input.tags ?? [],
+            })
+            .returning(objectSelectFields)
+            .catch((e: unknown) => {
+              if (isUniqueViolation(e)) {
+                if (
+                  uniqueConstraint(e) === "uq_content_capture_source" &&
+                  input.sourceRef?.type === "capture"
+                ) {
+                  throw new ConflictError(
+                    "This capture session already created a content object",
+                    {
+                      provider: input.sourceRef.provider,
+                      externalId: input.sourceRef.externalId,
+                    }
+                  );
+                }
                 throw new ConflictError(
-                  "This capture session already created a content object",
-                  {
-                    provider: input.sourceRef.provider,
-                    externalId: input.sourceRef.externalId,
-                  }
+                  "A content object with this slug already exists",
+                  { slug }
                 );
               }
-              throw new ConflictError("A content object with this slug already exists", {
-                slug,
-              });
-            }
-            throw e;
-          });
+              throw e;
+            });
 
-        const row = inserted[0];
-        if (!row) {
-          throw new ConflictError("Failed to create content object", { slug });
-        }
+          const row = inserted[0];
+          if (!row) {
+            throw new ConflictError("Failed to create content object", {
+              slug,
+            });
+          }
 
-        // Reconcile grants against the RESOLVED level (enforces group-≥1-grant
-        // even when the level came from the collection default, and the
-        // non-group / private rules) — the same invariant `setLevelInTx` applies.
-        await visibilityService.applyGrantsForLevel(
-          tx,
-          row.id,
-          visibilityLevel,
-          grants
-        );
-
-        const dto = rowToObjectDTO(row as ObjectRowAsText);
-
-        if (input.body !== undefined) {
-          const snap = await snapshotInTx(
+          // Reconcile grants against the RESOLVED level (enforces group-≥1-grant
+          // even when the level came from the collection default, and the
+          // non-group / private rules) — the same invariant `setLevelInTx` applies.
+          await visibilityService.applyGrantsForLevel(
             tx,
-            attributionRequester,
-            { id: dto.id, kind: input.kind },
-            { body: input.body, bodyFormat: input.bodyFormat },
-            { proof: screeningProof }
+            row.id,
+            visibilityLevel,
+            grants
           );
-          // Reflect the new head id without a re-select.
-          dto.currentVersionId = snap.version.id;
-          return { object: dto, version: snap.version, s3Writes: snap.s3Writes };
-        }
-        return { object: dto, version: null, s3Writes: [] };
-      },
-      "content.create"
-    );
+
+          const dto = rowToObjectDTO(row as ObjectRowAsText);
+
+          if (input.body !== undefined) {
+            const snap = await snapshotInTx(
+              tx,
+              attributionRequester,
+              { id: dto.id, kind: input.kind },
+              { body: input.body, bodyFormat: input.bodyFormat },
+              { proof: screeningProof }
+            );
+            // Reflect the new head id without a re-select.
+            dto.currentVersionId = snap.version.id;
+            return {
+              object: dto,
+              version: snap.version,
+              s3Writes: snap.s3Writes,
+              publicWidenRequested,
+            };
+          }
+          return {
+            object: dto,
+            version: null,
+            s3Writes: [],
+            publicWidenRequested,
+          };
+        },
+        "content.create"
+      );
 
     // §26.4 create-as-private (issue #1118 item 2): the object was created private
     // because the caller lacked public-publish authority — queue a durable widen
@@ -869,21 +946,28 @@ export const contentService = {
       updatedAt: new Date(),
     };
     applyTitleAndTags(patch, setValues);
-    await applyCollectionChange(req, existing, patch, setValues);
     applyStatusChange(patch, setValues);
     // Slice-F presentation fields (cover gradient + emoji icon), validated at the
     // action boundary and merged as a typed partial (see presentationSetValues).
     Object.assign(setValues, presentationSetValues(patch));
 
-    const rows = await executeQuery(
-      (db) =>
-        db
-          .update(contentObjects)
-          .set(setValues)
-          .where(eq(contentObjects.id, existing.id))
-          .returning(objectSelectFields),
-      "content.update"
-    );
+    const rows =
+      patch.collectionId === undefined
+        ? await executeQuery(
+            (db) =>
+              db
+                .update(contentObjects)
+                .set(setValues)
+                .where(eq(contentObjects.id, existing.id))
+                .returning(objectSelectFields),
+            "content.update"
+          )
+        : await updateWithCollectionChange(
+            req,
+            existing.id,
+            patch,
+            setValues
+          );
     // Guard against a concurrent delete between load and update (TOCTOU): the
     // RETURNING yields no row, so surface a clean NotFoundError, not a TypeError.
     if (!rows[0]) throw new NotFoundError("Content not found", { id });

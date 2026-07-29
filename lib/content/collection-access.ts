@@ -13,7 +13,10 @@
  */
 
 import { asc } from "drizzle-orm";
-import { executeQuery } from "@/lib/db/drizzle-client";
+import {
+  executeQuery,
+  type DbTransaction,
+} from "@/lib/db/drizzle-client";
 import {
   contentCollectionGrants,
   contentCollections,
@@ -141,6 +144,61 @@ async function loadRows(): Promise<{
   };
 }
 
+async function loadRowsInTx(tx: DbTransaction): Promise<{
+  collections: CollectionAccessRow[];
+  directGrants: Map<string, CollectionGrant[]>;
+}> {
+  // Collection-management mutations take FOR UPDATE locks on the same rows
+  // before changing lifecycle, hierarchy, defaults, or grants. Holding SHARE
+  // locks through the caller's content transaction therefore makes placement
+  // authorization and the object INSERT/UPDATE one serializable operation.
+  const collectionRows = await tx
+    .select({
+      id: contentCollections.id,
+      name: contentCollections.name,
+      slug: contentCollections.slug,
+      parentId: contentCollections.parentId,
+      ownerUserId: contentCollections.ownerUserId,
+      defaultVisibilityLevel: contentCollections.defaultVisibilityLevel,
+      inheritGrants: contentCollections.inheritGrants,
+      position: contentCollections.position,
+      archivedAt: contentCollections.archivedAt,
+    })
+    .from(contentCollections)
+    .orderBy(
+      asc(contentCollections.position),
+      asc(contentCollections.name)
+    )
+    .for("share");
+  const grantRows = await tx
+    .select({
+      collectionId: contentCollectionGrants.collectionId,
+      access: contentCollectionGrants.access,
+      kind: contentCollectionGrants.grantKind,
+      value: contentCollectionGrants.grantValue,
+    })
+    .from(contentCollectionGrants);
+
+  const directGrants = new Map<string, CollectionGrant[]>();
+  for (const row of grantRows) {
+    const grants = directGrants.get(row.collectionId) ?? [];
+    grants.push({
+      access: row.access,
+      kind: row.kind,
+      value: row.value,
+    });
+    directGrants.set(row.collectionId, grants);
+  }
+
+  return {
+    collections: collectionRows.map((row) => ({
+      ...row,
+      defaultVisibilityLevel: row.defaultVisibilityLevel as VisibilityLevel,
+    })),
+    directGrants,
+  };
+}
+
 function effectiveGrantResolver(
   byId: Map<string, CollectionAccessRow>,
   directGrants: Map<string, CollectionGrant[]>
@@ -191,6 +249,28 @@ export async function collectionAccessSnapshot(
   req: Requester
 ): Promise<CollectionAccessSnapshot> {
   const { collections, directGrants } = await loadRows();
+  return accessSnapshotFromRows(req, collections, directGrants);
+}
+
+/**
+ * Resolve collection access while holding collection SHARE locks until the
+ * caller's transaction commits. Content create/move paths use this variant so
+ * an archive, grant revocation, or default change cannot land between the
+ * authorization decision and the object write.
+ */
+export async function collectionAccessSnapshotInTx(
+  tx: DbTransaction,
+  req: Requester
+): Promise<CollectionAccessSnapshot> {
+  const { collections, directGrants } = await loadRowsInTx(tx);
+  return accessSnapshotFromRows(req, collections, directGrants);
+}
+
+function accessSnapshotFromRows(
+  req: Requester,
+  collections: CollectionAccessRow[],
+  directGrants: Map<string, CollectionGrant[]>
+): CollectionAccessSnapshot {
   const byId = new Map(collections.map((row) => [row.id, row]));
   const effectiveGrants = effectiveGrantResolver(byId, directGrants);
   const principal = principalOf(req);

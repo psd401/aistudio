@@ -372,9 +372,13 @@ function nextSlug(
 
 function nextPosition(
   rows: CollectionAccessRow[],
-  parentId: string | null
+  parentId: string | null,
+  ownerUserId: number | null
 ): number {
-  const siblings = rows.filter((row) => row.parentId === parentId);
+  const siblings = rows.filter(
+    (row) =>
+      row.parentId === parentId && row.ownerUserId === ownerUserId
+  );
   const highest = siblings.reduce(
     (value, row) => Math.max(value, row.position),
     -1
@@ -622,7 +626,11 @@ async function loadCollectionRows(
       position: contentCollections.position,
       archivedAt: contentCollections.archivedAt,
     })
-    .from(contentCollections)) as CollectionAccessRow[];
+    .from(contentCollections)
+    // Content create/move holds SHARE locks on these rows while it authorizes
+    // placement. Taking UPDATE locks before any lifecycle/default/grant change
+    // closes the corresponding authorization/write race.
+    .for("update")) as CollectionAccessRow[];
 }
 
 async function loadDirectCollectionGrants(
@@ -836,7 +844,7 @@ export const collectionManagementService = {
             ownerUserId,
             defaultVisibilityLevel: level,
             inheritGrants,
-            position: position ?? nextPosition(rows, parentId),
+            position: position ?? nextPosition(rows, parentId, ownerUserId),
           })
           .returning({ id: contentCollections.id });
         if (!inserted[0]) {

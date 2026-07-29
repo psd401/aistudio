@@ -2087,6 +2087,9 @@ paths:
         Creates a document or artifact. Does NOT publish it. When `body` is
         supplied, an initial version (v1) is snapshotted. Mirrors the MCP
         `create_document` / `create_artifact` tools. Requires `content:create`.
+        Collection placement is re-authorized under collection locks in the
+        object write transaction, which also resolves the current default and
+        inherited grants.
 
         **Public create-as-private (§26.4, issue #1118):** creating directly at
         `visibility.level: "public"` (explicitly, or via a collection whose default
@@ -2376,7 +2379,9 @@ paths:
         Updates object metadata only — `title`, `tags`, `collectionId`, and
         `status`. Body changes go through the versions endpoint. `collectionId`
         accepts a slug or UUID; `null` clears the collection, `null` tags clears
-        all tags. Mirrors the MCP `update_content` tool. Requires `content:update`.
+        all tags. A collection move re-authorizes the target under collection
+        locks in the same transaction as the update. Mirrors the MCP
+        `update_content` tool. Requires `content:update`.
       security:
         - BearerAuth: []
       requestBody:

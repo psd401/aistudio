@@ -1526,6 +1526,11 @@ initial version (v1) is snapshotted. Requires `content:create`.
 | `tags` | string[] | no | — |
 | `sourceRef` | object | no | Create-only typed provenance; see Capture provenance below |
 
+Collection placement is re-authorized inside the object write transaction under
+collection locks. The persisted default visibility and inherited grants are the
+locked current values; a concurrent archive or grant revocation cannot commit a
+stale create.
+
 **Capture provenance (#1290):** Atrium Capture may send
 `sourceRef: { type: "capture", provider, externalId, clientSurface, clientVersion,
 capturedAt, sourceOrigins? }`. `clientSurface` is `browser` or `mac`; identifiers
@@ -1659,6 +1664,10 @@ Requires `content:update`.
 | `tags` | string[] \| null | Replaces all tags; `null` clears them |
 | `collectionId` | string \| null | Collection slug or UUID; `null` clears the collection |
 | `status` | `draft` \| `published` \| `archived` | — |
+
+When `collectionId` changes, the target collection and its effective create
+grants are re-authorized under collection locks in the same transaction as the
+object update.
 
 **Example request:**
 
