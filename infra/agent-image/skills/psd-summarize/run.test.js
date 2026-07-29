@@ -1,7 +1,8 @@
 /**
- * Regression test for issue #1104 point 3: the Mantle Anthropic Messages
- * request body must include `anthropic_version` — Bedrock Mantle's Anthropic
- * path requires it and returns HTTP 400 without it.
+ * Regression tests for the Mantle Anthropic Messages request contract:
+ * - `anthropic_version` is required by Bedrock Mantle (issue #1104).
+ * - The model and output limit must match the trusted web broker allowlist
+ *   (issue #1440).
  *
  * run.js executes at require-time (no require.main guard — it's a stdin
  * pipe-oriented script, not one with argv-driven subcommands like psd-plaud),
@@ -53,11 +54,13 @@ afterEach(() => {
 
 function runSummarize({ stdin }) {
   return new Promise((resolve, reject) => {
+    const env = {
+      ...process.env,
+      MANTLE_ANTHROPIC_URL: `http://127.0.0.1:${serverPort}/anthropic/v1/messages`,
+    };
+    delete env.SUMMARIZE_MODEL_ID;
     const child = spawn('node', [path.join(__dirname, 'run.js')], {
-      env: {
-        ...process.env,
-        MANTLE_ANTHROPIC_URL: `http://127.0.0.1:${serverPort}/anthropic/v1/messages`,
-      },
+      env,
     });
     let stdout = '';
     let stderr = '';
@@ -69,15 +72,15 @@ function runSummarize({ stdin }) {
   });
 }
 
-test('request body to Mantle includes anthropic_version alongside model/max_tokens/system/messages', async () => {
+test('request body uses the broker-approved model and output limit', async () => {
   await startCaptureServer();
   const { code, stdout, stderr } = await runSummarize({ stdin: 'Some meeting notes to summarize.' });
   expect(stderr).toBe('');
   expect(code).toBe(0);
   expect(capturedBody).toMatchObject({
     anthropic_version: 'bedrock-2023-05-31',
-    model: expect.any(String),
-    max_tokens: expect.any(Number),
+    model: 'us.anthropic.claude-sonnet-5',
+    max_tokens: 2000,
     system: expect.any(String),
     messages: expect.any(Array),
   });
