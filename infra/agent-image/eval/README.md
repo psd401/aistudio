@@ -5,17 +5,22 @@ from the same `/invocations` endpoint AgentCore uses in production. It records
 outcomes and telemetry (#1422), injects a hermetic broker for L1 tasks, and
 applies deterministic request/output/trajectory graders (#1424).
 
-## Run the core suite
+## Run a suite
 
 From the repository root:
 
 ```bash
 python3 infra/agent-image/eval/runner.py \
   --image <tag-or-digest> \
-  --suite infra/agent-image/eval/suites/core.yaml \
+  --suite infra/agent-image/eval/suites/regression.yaml \
   --trials 3 \
-  --out /tmp/issue-1424-core.jsonl
+  --out /tmp/issue-1425-regression.jsonl \
+  --owner-email eval.issue1425@psd401.net \
+  --name-prefix psd-agent-eval-issue-1425
 ```
+
+Use `eval/suites/capability.yaml` for the harder daily-driver comparison set.
+The legacy `core.yaml` remains the three-task runner/isolation smoke suite.
 
 The runner uses the active AWS credential chain and discovers the dev web
 broker from the deployed router Lambda. Set `AGENT_EVAL_APP_BASE_URL` or pass
@@ -35,6 +40,14 @@ rejected rather than risking a mid-trial expiry.
 When a post-mint credential check recycles the runtime, the runner discards
 that authority and remints it for the ready container before invoking.
 
+Owner-bound skill tasks must pass an eval-only address on the real PSD domain
+with `--owner-email` (or `AGENT_EVAL_OWNER_EMAIL`). The signed context makes
+that address the trial's actor and owner, so the model exercises the same
+anti-impersonation rule as production. Use a synthetic address dedicated to
+the run, never another staff member's identity. L1 fixtures intercept the
+resulting broker operation before any owner credential or live side effect is
+used.
+
 JSONL output is created with owner-only (`0600`) permissions because complete
 metadata can contain prompts, messages, and tool details. Keep it in an
 issue-specific temporary path; do not commit run transcripts.
@@ -51,7 +64,8 @@ Every trial gets:
 
 - a fresh UUID in `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`;
 - a signed context minted for that exact UUID immediately before invocation;
-- one JSONL record containing the raw result and complete final-event metadata.
+- one JSONL record containing the task's suite classification, raw result, and
+  complete final-event metadata.
 
 `workspace: pure` tasks share one container while retaining conversational
 isolation through fresh session IDs. `workspace: mutating` tasks boot a fresh
@@ -77,7 +91,7 @@ containers.
 
 ## Task and suite files
 
-Phase-0 task files use a flat, dependency-free YAML subset. Double-quoted
+Task files use a flat, dependency-free YAML subset. Double-quoted
 scalars and inline lists/maps use JSON-compatible syntax. Single-quoted scalars
 use YAML escaping, so an apostrophe is written twice (`'Don''t use tools'`).
 Trailing inline comments are not part of this subset; use their own `#` line.
@@ -87,20 +101,26 @@ id: arithmetic-no-tools
 skill: runner-core
 level: L0
 workspace: pure
+suite: regression
 prompt: "Without using tools, calculate 17 times 19."
 trials: 3
 ```
 
-A suite contains relative task paths:
+A suite contains relative task paths. Production eval tasks live beside their
+skills under `skills/<skill>/evals/`; suite entries may point there:
 
 ```yaml
 tasks:
-  - tasks/session-seed.yaml
-  - tasks/session-recall.yaml
+  - ../../skills/chat-card/evals/ticket-confirmation.yaml
+  - ../../skills/psd-directory/evals/email-exact-match.yaml
 ```
 
-The committed `core.yaml` suite has three L0 tasks. Its seed/recall pair checks
-that a passphrase stated under one session is unknown under the next.
+Every production task declares `suite: regression` or `suite: capability`.
+Regression tasks should remain at or near 100%; capability tasks are harder
+comparisons. The classification is preserved in every JSONL record. The
+committed `core.yaml` suite has three unclassified L0 smoke tasks; its
+seed/recall pair checks that a passphrase stated under one session is unknown
+under the next.
 
 ## L1 fixtures and graders
 
@@ -113,6 +133,7 @@ id: directory-lookup
 skill: psd-directory
 level: L1
 workspace: pure
+suite: regression
 prompt: "Find Ada in the staff directory."
 trials: 3
 fixtures:
@@ -156,7 +177,10 @@ Available graders:
 - `broker_request` matches route/method and optional body fields. Body matchers
   are `exact`, `contains_any`, and `numeric_equals`; dot paths address nested
   fields.
-- `no_route_called` asserts the selected route/method received no request.
+- `no_route_called` asserts the selected route/method received no request. It
+  accepts the same optional `body` matchers as `broker_request`, which lets a
+  task forbid a send operation while permitting a draft on the shared
+  `/api/agent/workspace-execute` route.
 - Broker grader routes must be in the production agent-broker allowlist; an
   explicit method must be `POST`.
 - `output_match` applies a regular expression to the final result.
@@ -173,7 +197,7 @@ the per-grader boolean and human-readable reason. Task reliability uses
 ## Hermetic tests
 
 ```bash
-UV_CACHE_DIR=/tmp/issue-1424-uv-cache \
+UV_CACHE_DIR=/tmp/issue-1425-uv-cache \
   uv run --python 3.12 --no-project -m unittest \
   infra/agent-image/test_broker_stub.py \
   infra/agent-image/test_graders.py \

@@ -1,0 +1,23 @@
+[
+  {
+    "route": "/api/agent/workspace-execute",
+    "method": "POST",
+    "response": {
+      "status": 200,
+      "body": {
+        "stdout": "{\"id\":\"draft-projector-follow-up\",\"message\":{\"threadId\":\"thread-48291\"}}\n",
+        "stderr": ""
+      }
+    }
+  },
+  {
+    "route": "/api/agent/failures",
+    "method": "POST",
+    "response": {
+      "status": 200,
+      "body": {
+        "ok": true
+      }
+    }
+  }
+]

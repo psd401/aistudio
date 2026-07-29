@@ -1,0 +1,13 @@
+id: workspace-list-unread-mail
+skill: psd-workspace
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-workspace to list up to 20 unread messages in my inbox. Summarize the sender and subject of each result."
+trials: 3
+fixtures:
+  - fixtures/list-unread-mail.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/workspace-execute","method":"POST","body":{"scope":{"exact":"user"},"argv.0":{"exact":"gmail"},"argv.1":{"contains_any":["users","+triage"]},"argv":{"contains_any":["list","+triage"]}}}
+  - {"type":"output_match","pattern":"Alex Rivera"}
+  - {"type":"output_match","pattern":"Library projector follow-up"}

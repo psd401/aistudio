@@ -1,0 +1,6 @@
+# Harder daily-driver tasks used to compare model capability.
+tasks:
+  - ../../skills/chat-card/evals/morning-brief-card.yaml
+  - ../../skills/psd-directory/evals/chat-sender-identity.yaml
+  - ../../skills/psd-freshservice/evals/search-open-urgent-tickets.yaml
+  - ../../skills/psd-workspace/evals/create-calendar-event.yaml

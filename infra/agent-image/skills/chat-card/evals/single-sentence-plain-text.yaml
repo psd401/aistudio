@@ -1,0 +1,9 @@
+id: chat-card-single-sentence-plain-text
+skill: chat-card
+level: L0
+workspace: pure
+suite: regression
+prompt: "Reply exactly: The projector is back online. This is a single short sentence, so do not use a rich card or any tool."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"\\A(?![\\s\\S]*PSD_AGENT_RICH_V1)\\s*The projector is back online\\.\\s*\\Z"}

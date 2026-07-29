@@ -1,0 +1,13 @@
+id: workspace-create-calendar-event
+skill: psd-workspace
+level: L1
+workspace: mutating
+suite: capability
+prompt: "Use psd-workspace to create a 30-minute event on my primary calendar titled \"Library projector check\" from 9:00 AM to 9:30 AM Pacific on August 3, 2026."
+trials: 3
+fixtures:
+  - fixtures/create-calendar-event.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/workspace-execute","method":"POST","body":{"scope":{"exact":"user"},"argv.0":{"exact":"calendar"},"argv.1":{"contains_any":["events","+insert"]},"argv":{"contains_any":["insert","+insert"]}}}
+  - {"type":"output_match","pattern":"Library projector check"}
+  - {"type":"output_match","pattern":"created|scheduled","ignore_case":true}

@@ -147,7 +147,7 @@ def validate_grader_specs(
     normalized: list[dict[str, object]] = []
     allowed_fields = {
         "broker_request": {"type", "route", "method", "body"},
-        "no_route_called": {"type", "route", "method"},
+        "no_route_called": {"type", "route", "method", "body"},
         "output_match": {"type", "pattern", "ignore_case"},
         "trajectory_in_order": {"type", "tools"},
         "tools_catalog": {"type", "expected"},
@@ -169,9 +169,9 @@ def validate_grader_specs(
             )
         if grader in {"broker_request", "no_route_called"}:
             _validate_route(raw_spec, grader)
-        if grader == "broker_request":
+        if grader in {"broker_request", "no_route_called"}:
             _validate_body_matchers(raw_spec.get("body"))
-        elif grader == "output_match":
+        if grader == "output_match":
             pattern = _require_nonempty_string(
                 raw_spec.get("pattern"),
                 grader=grader,
@@ -334,18 +334,34 @@ def _grade_no_route_called(
     spec: Mapping[str, object],
     artifacts: TrialArtifacts,
 ) -> GraderResult:
-    matches = [
+    candidates = [
         request
         for request in artifacts.broker_requests
         if _request_matches_selector(request, spec)
     ]
+    matchers = spec.get("body")
+    matches = (
+        [
+            request
+            for request in candidates
+            if isinstance(matchers, Mapping)
+            and _match_body(request.get("body"), matchers)[0]
+        ]
+        if isinstance(matchers, Mapping) and matchers
+        else candidates
+    )
+    selector = (
+        f"{spec['route']} with matching body"
+        if isinstance(matchers, Mapping) and matchers
+        else str(spec["route"])
+    )
     return GraderResult(
         "no_route_called",
         not matches,
         (
-            f"no request captured for {spec['route']}"
+            f"no request captured for {selector}"
             if not matches
-            else f"captured {len(matches)} forbidden request(s) for {spec['route']}"
+            else f"captured {len(matches)} forbidden request(s) for {selector}"
         ),
     )
 

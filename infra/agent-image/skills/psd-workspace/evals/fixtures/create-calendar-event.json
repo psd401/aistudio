@@ -1,0 +1,16 @@
+[
+  {
+    "route": "/api/agent/workspace-execute",
+    "method": "POST",
+    "request_body": {
+      "scope": "user"
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "stdout": "{\"id\":\"evt-projector-check\",\"status\":\"confirmed\",\"summary\":\"Library projector check\",\"htmlLink\":\"https://calendar.google.com/calendar/event?eid=fixture\"}\n",
+        "stderr": ""
+      }
+    }
+  }
+]

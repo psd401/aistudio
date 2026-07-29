@@ -1,0 +1,32 @@
+[
+  {
+    "route": "/api/agent/credentials",
+    "method": "POST",
+    "request_body": {
+      "operation": "freshservice",
+      "method": "GET"
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "ok": true,
+        "status": 200,
+        "data": {
+          "tickets": [
+            {
+              "id": 48291,
+              "subject": "Projector outage at Harbor Ridge",
+              "status": 2,
+              "priority": 4,
+              "workspace_id": 2,
+              "responder_id": 9102,
+              "created_at": "2026-07-28T15:00:00Z",
+              "updated_at": "2026-07-28T17:00:00Z",
+              "due_by": "2026-07-29T17:00:00Z"
+            }
+          ]
+        }
+      }
+    }
+  }
+]

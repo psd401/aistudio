@@ -1,0 +1,13 @@
+id: freshservice-search-open-urgent-tickets
+skill: psd-freshservice
+level: L1
+workspace: pure
+suite: capability
+prompt: "Use the psd-freshservice search_tickets operation to find open urgent tickets in Technology workspace 2. Summarize the matching ticket IDs and subjects."
+trials: 3
+fixtures:
+  - fixtures/search-open-urgent-tickets.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"freshservice"},"path":{"contains_any":["/tickets/filter?query="]},"method":{"exact":"GET"}}}
+  - {"type":"output_match","pattern":"48291"}
+  - {"type":"output_match","pattern":"Projector outage"}

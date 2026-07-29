@@ -114,6 +114,41 @@ class BrokerRequestGraderTests(unittest.TestCase):
         self.assertFalse(decision["passed"])
         self.assertIn("forbidden", decision["results"][0]["reason"])
 
+    def test_no_route_called_can_forbid_only_matching_bodies_on_a_shared_route(self):
+        spec = {
+            "type": "no_route_called",
+            "route": "/api/agent/workspace-execute",
+            "body": {
+                "argv": {
+                    "contains_any": [
+                        "+send",
+                        "gmail.users.drafts.send",
+                    ]
+                }
+            },
+        }
+        safe_draft = {
+            "route": "/api/agent/workspace-execute",
+            "method": "POST",
+            "body": {
+                "scope": "user",
+                "argv": ["gmail", "+draft", "--to", "principal@psd401.net"],
+            },
+        }
+        forbidden_send = {
+            "route": "/api/agent/workspace-execute",
+            "method": "POST",
+            "body": {
+                "scope": "user",
+                "argv": ["gmail", "+send", "--to", "principal@psd401.net"],
+            },
+        }
+
+        self.assertTrue(grade([spec], requests=[safe_draft])["passed"])
+        decision = grade([spec], requests=[safe_draft, forbidden_send])
+        self.assertFalse(decision["passed"])
+        self.assertIn("matching body", decision["results"][0]["reason"])
+
 
 class OutputAndTrajectoryGraderTests(unittest.TestCase):
     def test_output_match_supports_case_insensitive_regex(self):
@@ -325,6 +360,21 @@ class GraderValidationTests(unittest.TestCase):
                             }
                         ]
                     )
+
+    def test_no_route_called_rejects_invalid_body_matchers(self):
+        with self.assertRaisesRegex(
+            graders.GraderConfigurationError,
+            "must have exactly one operator",
+        ):
+            graders.validate_grader_specs(
+                [
+                    {
+                        "type": "no_route_called",
+                        "route": "/api/agent/workspace-execute",
+                        "body": {"argv": {"contains_any": ["+send"], "exact": []}},
+                    }
+                ]
+            )
 
     def test_invalid_regex_fails_when_the_suite_loads(self):
         with self.assertRaisesRegex(

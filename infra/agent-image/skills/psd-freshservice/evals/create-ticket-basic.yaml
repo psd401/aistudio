@@ -1,0 +1,12 @@
+id: freshservice-create-ticket-basic
+skill: psd-freshservice
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-freshservice to create a normal-priority ticket for requester teacher@psd401.net. Use the exact subject \"Harbor Ridge library projector offline\" and description \"The ceiling projector has no power.\""
+trials: 3
+fixtures:
+  - fixtures/create-ticket-basic.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"freshservice"},"path":{"exact":"/tickets"},"method":{"exact":"POST"},"body.subject":{"exact":"Harbor Ridge library projector offline"},"body.email":{"exact":"teacher@psd401.net"},"body.priority":{"numeric_equals":2}}}
+  - {"type":"output_match","pattern":"48291"}

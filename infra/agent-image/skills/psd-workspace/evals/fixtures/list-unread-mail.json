@@ -1,0 +1,16 @@
+[
+  {
+    "route": "/api/agent/workspace-execute",
+    "method": "POST",
+    "request_body": {
+      "scope": "user"
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "stdout": "{\"messages\":[{\"id\":\"m-1001\",\"from\":\"Alex Rivera <arivera@psd401.net>\",\"subject\":\"Library projector follow-up\"}],\"resultSizeEstimate\":1}\n",
+        "stderr": ""
+      }
+    }
+  }
+]

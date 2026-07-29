@@ -1,0 +1,10 @@
+# Daily-driver tasks expected to remain at or near 100% pass^3.
+tasks:
+  - ../../skills/chat-card/evals/ticket-confirmation.yaml
+  - ../../skills/chat-card/evals/single-sentence-plain-text.yaml
+  - ../../skills/psd-directory/evals/email-exact-match.yaml
+  - ../../skills/psd-directory/evals/literal-address-no-lookup.yaml
+  - ../../skills/psd-freshservice/evals/create-ticket-basic.yaml
+  - ../../skills/psd-freshservice/evals/update-ticket-priority.yaml
+  - ../../skills/psd-workspace/evals/list-unread-mail.yaml
+  - ../../skills/psd-workspace/evals/draft-email-not-send.yaml

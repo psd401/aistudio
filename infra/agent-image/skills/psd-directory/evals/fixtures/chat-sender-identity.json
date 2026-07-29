@@ -1,0 +1,22 @@
+[
+  {
+    "route": "/api/agent/directory-lookup",
+    "method": "POST",
+    "request_body": {
+      "chatId": "users/116264913639920976203"
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "found": true,
+        "personId": "116264913639920976203",
+        "displayName": "Kris Hagel",
+        "email": "hagelk@psd401.net",
+        "title": "Chief Information Officer",
+        "department": "Technology Services",
+        "organization": "Peninsula School District",
+        "cached": false
+      }
+    }
+  }
+]

@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -121,6 +122,105 @@ class SuiteLoadingTests(unittest.TestCase):
         self.assertEqual({task.workspace for task in tasks}, {"pure"})
         self.assertEqual({task.trials for task in tasks}, {3})
 
+    def test_committed_daily_driver_suites_meet_issue_1425_contract(self):
+        suite_paths = {
+            "regression": AGENT_IMAGE_DIR / "eval" / "suites" / "regression.yaml",
+            "capability": AGENT_IMAGE_DIR / "eval" / "suites" / "capability.yaml",
+        }
+        tasks_by_suite = {
+            suite: runner.load_suite(path)
+            for suite, path in suite_paths.items()
+        }
+        tasks = [
+            task
+            for suite_tasks in tasks_by_suite.values()
+            for task in suite_tasks
+        ]
+
+        self.assertEqual(len(tasks), 12)
+        self.assertEqual(len({task.id for task in tasks}), 12)
+        self.assertEqual(
+            Counter(task.skill for task in tasks),
+            Counter(
+                {
+                    "chat-card": 3,
+                    "psd-directory": 3,
+                    "psd-freshservice": 3,
+                    "psd-workspace": 3,
+                }
+            ),
+        )
+        self.assertEqual({task.trials for task in tasks}, {3})
+        for suite, suite_tasks in tasks_by_suite.items():
+            self.assertEqual({task.suite for task in suite_tasks}, {suite})
+
+        required_fields = {
+            "id",
+            "skill",
+            "level",
+            "workspace",
+            "suite",
+            "prompt",
+            "trials",
+            "graders",
+        }
+        for suite_path in suite_paths.values():
+            suite_document = runner._load_document(suite_path)
+            self.assertIsInstance(suite_document, dict)
+            for relative_path in suite_document["tasks"]:
+                task_path = (suite_path.parent / relative_path).resolve()
+                task_document = runner._load_document(task_path)
+                self.assertTrue(
+                    required_fields.issubset(task_document),
+                    f"{task_path} omitted required task fields",
+                )
+
+        negative_task_ids = {
+            "chat-card-single-sentence-plain-text",
+            "directory-literal-address-no-lookup",
+            "workspace-draft-email-not-send",
+        }
+        self.assertGreaterEqual(len(negative_task_ids) * 4, len(tasks))
+        tasks_by_id = {task.id: task for task in tasks}
+        self.assertTrue(negative_task_ids.issubset(tasks_by_id))
+
+        chat_negative = tasks_by_id["chat-card-single-sentence-plain-text"]
+        self.assertTrue(
+            any(
+                spec.get("type") == "output_match"
+                and "(?!" in str(spec.get("pattern"))
+                and "PSD_AGENT_RICH_V1" in str(spec.get("pattern"))
+                for spec in chat_negative.graders
+            )
+        )
+        directory_negative = tasks_by_id["directory-literal-address-no-lookup"]
+        self.assertTrue(
+            any(
+                spec.get("type") == "no_route_called"
+                and spec.get("route") == "/api/agent/directory-lookup"
+                for spec in directory_negative.graders
+            )
+        )
+        workspace_negative = tasks_by_id["workspace-draft-email-not-send"]
+        self.assertTrue(
+            any(
+                spec.get("type") == "no_route_called"
+                and spec.get("route") == "/api/agent/workspace-execute"
+                and isinstance(spec.get("body"), dict)
+                for spec in workspace_negative.graders
+            )
+        )
+
+        for task in tasks:
+            expected_root = (
+                AGENT_IMAGE_DIR / "skills" / task.skill / "evals"
+            ).resolve()
+            for fixture_path in task.fixture_paths:
+                self.assertTrue(
+                    fixture_path.is_relative_to(expected_root),
+                    f"{fixture_path} is not co-located with {task.skill}",
+                )
+
     def test_invalid_workspace_fails_closed(self):
         with self.subTest("validation happens after parsing"):
             with self.assertRaises(runner.EvalRunnerError):
@@ -134,6 +234,36 @@ class SuiteLoadingTests(unittest.TestCase):
                     },
                     Path("inline.yaml"),
                 )
+
+    def test_suite_classification_is_validated(self):
+        task = runner._task_from_mapping(
+            {
+                "id": "classified-task",
+                "skill": "runner-core",
+                "level": "L0",
+                "workspace": "pure",
+                "suite": "regression",
+                "prompt": "hello",
+            },
+            Path("inline.yaml"),
+        )
+        self.assertEqual(task.suite, "regression")
+
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "suite must be regression or capability",
+        ):
+            runner._task_from_mapping(
+                {
+                    "id": "bad-suite",
+                    "skill": "runner-core",
+                    "level": "L0",
+                    "workspace": "pure",
+                    "suite": "nightly",
+                    "prompt": "hello",
+                },
+                Path("inline.yaml"),
+            )
 
     def test_non_integer_trial_counts_are_rejected(self):
         base_task: dict[str, object] = {
@@ -519,6 +649,10 @@ class EvaluationRunnerTests(unittest.TestCase):
             all(record["metadata"]["future_field"] == {"preserved": True} for record in records)
         )
         self.assertEqual({record["image"] for record in records}, {"unknown"})
+        self.assertEqual(
+            {record["suite"] for record in records},
+            {"unclassified"},
+        )
 
     def test_fresh_sessions_prevent_conversation_recall(self):
         clock = AdvancingClock()
@@ -952,7 +1086,7 @@ class ProbeContextMinterTests(unittest.TestCase):
                 {
                     "invocationContext": "context",
                     "requestProofKey": "proof",
-                    "ownerEmail": "canary@build-gate.invalid",
+                    "ownerEmail": "eval.issue1425@psd401.net",
                     "sessionId": "session-id",
                     "expiresAt": (
                         clock.now() + timedelta(seconds=965)
@@ -967,6 +1101,7 @@ class ProbeContextMinterTests(unittest.TestCase):
             AGENT_IMAGE_DIR.parent.parent,
             "dev",
             "us-east-1",
+            owner_email="eval.issue1425@psd401.net",
             credential_provider=provider,
             ttl_seconds=965,
             minimum_remaining_seconds=960,
@@ -987,8 +1122,43 @@ class ProbeContextMinterTests(unittest.TestCase):
         self.assertEqual(provider.calls, 1)
         call = executor.run.call_args
         self.assertEqual(call.args[0][-2:], ["--ttl", "965"])
+        self.assertEqual(
+            call.args[0][call.args[0].index("--owner") + 1],
+            "eval.issue1425@psd401.net",
+        )
         self.assertEqual(call.kwargs["env"]["AWS_ACCESS_KEY_ID"], "fresh")
         self.assertEqual(call.kwargs["env"]["AWS_SESSION_TOKEN"], "fresh-token")
+
+    def test_rejects_authority_for_a_different_owner(self):
+        executor = mock.Mock()
+        executor.run.return_value = runner.CommandResult(
+            0,
+            json.dumps(
+                {
+                    "invocationContext": "context",
+                    "requestProofKey": "proof",
+                    "ownerEmail": "other@psd401.net",
+                    "sessionId": "session-id",
+                    "expiresAt": (
+                        datetime.now(timezone.utc) + timedelta(minutes=20)
+                    ).isoformat(),
+                }
+            ),
+            "",
+        )
+        minter = runner.ProbeContextMinter(
+            executor,
+            AGENT_IMAGE_DIR.parent.parent,
+            "dev",
+            "us-east-1",
+            owner_email="eval.issue1425@psd401.net",
+        )
+
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "different owner",
+        ):
+            minter.mint("session-id")
 
 
 class DockerRuntimeTests(unittest.TestCase):

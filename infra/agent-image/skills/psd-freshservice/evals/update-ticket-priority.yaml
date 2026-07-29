@@ -1,0 +1,13 @@
+id: freshservice-update-ticket-priority
+skill: psd-freshservice
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-freshservice to update ticket 48291 to urgent priority. Make no other change."
+trials: 3
+fixtures:
+  - fixtures/update-ticket-priority.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"freshservice"},"path":{"exact":"/tickets/48291"},"method":{"exact":"PUT"},"body.priority":{"numeric_equals":4}}}
+  - {"type":"output_match","pattern":"48291"}
+  - {"type":"output_match","pattern":"urgent|priority\\s*4","ignore_case":true}
