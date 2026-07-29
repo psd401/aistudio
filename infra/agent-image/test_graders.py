@@ -57,6 +57,34 @@ def quickchart_result(
     return f"https://quickchart.io/chart?{query}"
 
 
+def rich_chart_result(url):
+    payload = {
+        "cardsV2": [
+            {
+                "cardId": "eval-chart",
+                "card": {
+                    "sections": [
+                        {
+                            "widgets": [
+                                {
+                                    "image": {
+                                        "imageUrl": url,
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    return (
+        "<<<PSD_AGENT_RICH_V1>>>\n"
+        f"{json.dumps(payload, separators=(',', ':'))}\n"
+        "<<<END_PSD_AGENT_RICH_V1>>>"
+    )
+
+
 def grade(
     specs,
     *,
@@ -335,11 +363,7 @@ class QuickChartImageGraderTests(unittest.TestCase):
         ):
             decision = grade(
                 [self.SPEC],
-                result=(
-                    "<<<PSD_AGENT_RICH_V1>>>\n"
-                    f"{quickchart_result()}\n"
-                    "<<<END_PSD_AGENT_RICH_V1>>>"
-                ),
+                result=rich_chart_result(quickchart_result()),
             )
 
         self.assertTrue(decision["passed"])
@@ -356,7 +380,25 @@ class QuickChartImageGraderTests(unittest.TestCase):
         ) as build_opener:
             decision = grade(
                 [self.SPEC],
-                result=quickchart_result(values=[2, 5, 99]),
+                result=rich_chart_result(
+                    quickchart_result(values=[2, 5, 99])
+                ),
+            )
+
+        self.assertFalse(decision["passed"])
+        self.assertIn("wrong values", decision["results"][0]["reason"])
+        build_opener.assert_not_called()
+
+    def test_correct_prose_url_cannot_mask_wrong_rich_card(self):
+        correct_url = quickchart_result()
+        wrong_url = quickchart_result(values=[2, 5, 99])
+        with mock.patch.object(
+            graders.urllib_request,
+            "build_opener",
+        ) as build_opener:
+            decision = grade(
+                [self.SPEC],
+                result=f"{correct_url}\n\n{rich_chart_result(wrong_url)}",
             )
 
         self.assertFalse(decision["passed"])
@@ -372,7 +414,10 @@ class QuickChartImageGraderTests(unittest.TestCase):
             "build_opener",
             return_value=opener,
         ):
-            decision = grade([self.SPEC], result=quickchart_result())
+            decision = grade(
+                [self.SPEC],
+                result=rich_chart_result(quickchart_result()),
+            )
 
         self.assertFalse(decision["passed"])
         self.assertIn("not image/png", decision["results"][0]["reason"])

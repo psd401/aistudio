@@ -310,11 +310,12 @@ Available graders:
   explicit method must be `POST`.
 - `output_match` applies a regular expression to the final result.
 - `quickchart_image` is an L2-only provider probe. It accepts only an exact
-  `https://quickchart.io/chart` URL, verifies the encoded chart type, title,
-  labels, and values against the task declaration, refuses redirects, and then
-  requires HTTP 200, `image/png`, and the PNG signature. This closes the gap
-  where a fabricated URL or a QuickChart outage could satisfy an envelope-only
-  assertion.
+  `https://quickchart.io/chart` image URL from a parsed rich-card envelope,
+  verifies the encoded chart type, title, labels, and values against the task
+  declaration, refuses redirects, and then requires HTTP 200, `image/png`, and
+  the PNG signature. This closes the gap where a correct prose URL could mask a
+  stale card URL, or a fabricated URL/QuickChart outage could satisfy an
+  envelope-only assertion.
 - `tool_call_succeeded` requires a tool invocation whose arguments match the
   declared regular expression and a successful completion status. It supports
   both current single-record telemetry and the legacy split completion shape.

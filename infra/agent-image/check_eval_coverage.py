@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,49 @@ LOCAL_EVAL_COVERAGE_OPT_OUTS: dict[str, str] = {
         "policy rather than an independently invoked skill."
     ),
 }
+
+
+def _docker_clone_sources(
+    dockerfile: str,
+    destination: str,
+) -> list[str]:
+    """Return GitHub clone source tokens for a specific Docker RUN target."""
+
+    logical_dockerfile = re.sub(r"\\\r?\n", " ", dockerfile)
+    sources: list[str] = []
+    for raw_line in logical_dockerfile.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("RUN "):
+            continue
+        lexer = shlex.shlex(
+            line.removeprefix("RUN "),
+            posix=True,
+            punctuation_chars="&;|",
+        )
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        try:
+            tokens = list(lexer)
+        except ValueError as error:
+            raise ValueError(
+                f"could not parse Dockerfile RUN command: {error}"
+            ) from error
+        for index in range(len(tokens) - 1):
+            if tokens[index : index + 2] != ["git", "clone"]:
+                continue
+            command: list[str] = []
+            for token in tokens[index + 2 :]:
+                if token in {"&&", "||", ";", "|"}:
+                    break
+                command.append(token)
+            if destination not in command:
+                continue
+            sources.extend(
+                token
+                for token in command
+                if token.startswith("https://github.com/")
+            )
+    return sources
 
 
 def load_upstream_skill_inventory(
@@ -109,9 +153,13 @@ def load_upstream_skill_inventory(
             "upstream skill manifest version "
             f"{version} does not match Dockerfile GWS_VERSION ({observed})"
         )
-    if f"https://github.com/{source}" not in dockerfile:
+    expected_clone_source = f"https://github.com/{source}"
+    clone_sources = _docker_clone_sources(dockerfile, "/tmp/gws-repo")
+    if clone_sources != [expected_clone_source]:
+        observed = ", ".join(clone_sources) or "missing"
         raise ValueError(
-            "upstream skill manifest source does not match the Dockerfile clone"
+            "upstream skill manifest source does not match the exact "
+            f"Dockerfile clone token ({observed})"
         )
     # Intentionally an exact substring match rather than a tolerant regex: this
     # gate exists to force a human to re-check the manifest whenever the gws-*

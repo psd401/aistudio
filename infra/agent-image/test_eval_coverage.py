@@ -122,6 +122,50 @@ class EvalCoverageTests(unittest.TestCase):
                     upstream_skills_root=upstream_skills_root,
                 )
 
+    def test_manifest_url_in_comment_cannot_mask_wrong_clone_token(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="issue-1426-upstream-clone-source-"
+        ) as directory:
+            root = Path(directory)
+            manifest_path = root / "inventory.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "source": "example/skills",
+                        "version": "1.2.3",
+                        "optOutReason": "documentation only",
+                        "skills": ["gws-example"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dockerfile_path = root / "Dockerfile"
+            dockerfile_path.write_text(
+                "\n".join(
+                    [
+                        "ARG GWS_VERSION=1.2.3",
+                        "# expected https://github.com/example/skills",
+                        "RUN git clone --depth 1 "
+                        "https://github.com/example/skills-fork "
+                        "/tmp/gws-repo && \\",
+                        "    cp -r /tmp/gws-repo/skills/gws-* "
+                        "/opt/psd-skills/",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "does not match the exact Dockerfile clone token",
+            ):
+                check_eval_coverage.load_upstream_skill_inventory(
+                    manifest_path,
+                    dockerfile_path,
+                )
+
     def test_build_added_skill_requires_a_documented_opt_out(self) -> None:
         with tempfile.TemporaryDirectory(
             prefix="issue-1426-build-added-skill-"

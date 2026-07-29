@@ -505,6 +505,10 @@ def _grade_output_match(
 _QUICKCHART_URL_RE = re.compile(
     r"https://quickchart\.io/chart\?[^\s\"'<>\\)\],}]+"
 )
+_RICH_ENVELOPE_RE = re.compile(
+    r"<<<PSD_AGENT_RICH_V1>>>\s*(.*?)\s*<<<END_PSD_AGENT_RICH_V1>>>",
+    flags=re.DOTALL,
+)
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -599,18 +603,65 @@ def _quickchart_config_error(
     return None
 
 
+def _rich_envelope_image_urls(result: str) -> list[str]:
+    """Extract only image widget URLs that the Router will send to Chat."""
+
+    urls: list[str] = []
+    for match in _RICH_ENVELOPE_RE.finditer(result):
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        cards = payload.get("cardsV2")
+        if not isinstance(cards, list):
+            continue
+        for card_entry in cards:
+            if not isinstance(card_entry, Mapping):
+                continue
+            card = card_entry.get("card")
+            if not isinstance(card, Mapping):
+                continue
+            sections = card.get("sections")
+            if not isinstance(sections, list):
+                continue
+            for section in sections:
+                if not isinstance(section, Mapping):
+                    continue
+                widgets = section.get("widgets")
+                if not isinstance(widgets, list):
+                    continue
+                for widget in widgets:
+                    if not isinstance(widget, Mapping):
+                        continue
+                    image = widget.get("image")
+                    if not isinstance(image, Mapping):
+                        continue
+                    image_url = image.get("imageUrl")
+                    if isinstance(image_url, str) and image_url:
+                        urls.append(image_url)
+    return urls
+
+
 def _grade_quickchart_image(
     spec: Mapping[str, object],
     result: str,
 ) -> GraderResult:
-    """Validate exact chart semantics, then prove QuickChart returned a PNG."""
+    """Validate the rich-card chart, then prove QuickChart returned a PNG."""
 
-    urls = list(dict.fromkeys(_QUICKCHART_URL_RE.findall(result)))
+    urls = list(
+        dict.fromkeys(
+            url
+            for url in _rich_envelope_image_urls(result)
+            if _QUICKCHART_URL_RE.fullmatch(url) is not None
+        )
+    )
     if not urls:
         return GraderResult(
             "quickchart_image",
             False,
-            "output contained no https://quickchart.io/chart URL",
+            "rich envelope contained no https://quickchart.io/chart image URL",
         )
     config_errors: list[str] = []
     for url in urls:
@@ -660,7 +711,7 @@ def _grade_quickchart_image(
         return GraderResult(
             "quickchart_image",
             True,
-            "exact QuickChart configuration returned HTTP 200 image/png",
+            "exact rich-card QuickChart configuration returned HTTP 200 image/png",
         )
     detail = config_errors[-1] if config_errors else "no usable chart URL"
     return GraderResult("quickchart_image", False, detail)

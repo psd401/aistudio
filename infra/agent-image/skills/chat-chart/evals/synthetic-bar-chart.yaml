@@ -8,4 +8,3 @@ trials: 3
 graders:
   - {"type":"tool_call_succeeded","tool":"exec","args_pattern":"chat-chart/run\\.js"}
   - {"type":"quickchart_image","chart_type":"bar","title":"EVAL-1426 Synthetic Volume","labels":["Monday","Tuesday","Wednesday"],"values":[2,5,3]}
-  - {"type":"output_match","pattern":"(?is)<<<PSD_AGENT_RICH_V1>>>.*https://quickchart\\.io/chart\\?.*<<<END_PSD_AGENT_RICH_V1>>>"}
