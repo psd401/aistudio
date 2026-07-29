@@ -81,15 +81,23 @@ action in a multi-user space. There are two control planes to check:
 
 1. In **Google Admin Console** → **Apps** → **Google Workspace** → **Google
    Chat** → **Chat apps**, select the **top-level organizational unit** and set
-   **Allow users to install Chat apps** to **On**. Do not enable this only on a
-   child OU: Google documents that Chat APIs and spaces might not work unless
-   the top-level OU is enabled.
+   **Allow users to install Chat apps** to **On**. This enables the Chat-app
+   capability; access to a specific Marketplace app is still controlled
+   separately by the app allowlist in step 2.
 2. If the district uses a Google Workspace Marketplace allowlist, go to
    **Apps** → **Google Workspace Marketplace apps** → **Apps list** and add the
-   production app by its exact name, **PSD AI Agent**. The unpublished
-   **PSD Agent Dev** app does not appear in the Marketplace allowlist; Google
-   permits an unpublished development app for up to five named testers while
-   Chat apps are enabled.
+   production app by its exact name, **PSD AI Agent**. Apply explicit allow
+   entries to the intended **`/Staff`** organizational unit and
+   **`/Miscellaneous/Agent Account`**, where OneSync places the `agnt_...`
+   identities. Do not allow the app for Students or broaden it to the top-level
+   organization without an explicit district policy decision. Google documents
+   that an app allowed on a child OU but not its parent can be rejected in
+   shared spaces. The router handles that intentional least-privilege
+   configuration by recording the room-post 403 and delivering the completed
+   response privately to the Staff sender instead. The unpublished **PSD Agent
+   Dev** app does not appear in the Marketplace allowlist; Google permits an
+   unpublished development app for up to five named testers while Chat apps are
+   enabled.
 3. Configure the two apps separately in **GCP Console** → **Google Chat API** →
    **Configuration**:
    - **Dev — `psd-aistudio-dev` / PSD Agent Dev:** enable **Interactive
@@ -105,10 +113,18 @@ action in a multi-user space. There are two control planes to check:
      must also be complete.
 4. Allow time for Workspace policy propagation. With each app's own service
    account credential and the `chat.bot` scope, call `spaces.get` for a ROOM
-   that app has joined. It must return `200`; a `403` stating that the
-   organization's administrator restricts the Chat app means the Workspace
-   policy is still blocking space access. Then @mention the app and confirm
-   that the response is posted in the mention's thread.
+   that app has joined:
+   - `200` means the app may post the response in the originating room thread.
+   - A `403` stating that the organization's administrator restricts the Chat
+     app is expected when the app is deliberately allowed only for Staff at a
+     child OU and Google rejects app-authenticated shared-space operations.
+     Confirm that the router records `ChatPostPermissionDenied` and sends the
+     completed response to the Staff sender's existing DM with the policy
+     notice. Do not broaden the app to Students to make this probe return 200.
+
+   Then @mention the app and confirm either the room-thread reply (when policy
+   permits it) or the private DM fallback (under the Staff-only child-OU
+   policy).
 
 These settings are console-managed. The Google Cloud CLI has no `gcloud chat`
 command, and `gcloud workspace-add-ons deployments` manages add-on deployments,
@@ -123,10 +139,15 @@ There are two distinct identities that can post to Chat:
 
 - The **Chat app service account** receives mentions and posts router replies
   with the `chat.bot` scope. Workspace app policy can restrict this identity
-  in spaces even while DMs work.
+  in spaces even while its DMs to allowed Staff users work. The router's 403
+  fallback is also sent by this Chat app identity; it does not bypass the
+  Staff-only audience.
 - The per-user **`agnt_...` Workspace account** is a real delegated user used
-  by the `psd-workspace` skill (`--scope agent`). Its ability to post or manage
-  memberships does not prove that the Chat app identity is allowed.
+  by the `psd-workspace` skill (`--scope agent`). OneSync places these accounts
+  in **`/Miscellaneous/Agent Account`**, which has its own explicit
+  **PSD AI Agent → Allow app** override. The account is not used for Chat reply
+  delivery, and its ability to post or manage memberships does not prove that
+  the Chat app identity is allowed.
 
 ### Phase 2: AWS Infrastructure Deploy
 
@@ -287,7 +308,11 @@ psql $DATABASE_URL -c "SELECT * FROM agent_sessions ORDER BY created_at DESC LIM
    - `agent_sessions` table has a new/updated row
 5. In a multi-user test space, @mention the agent in an existing thread and
    verify:
-   - The reply appears in the mention's thread, not as a new top-level message.
+   - When the Chat app may post to the room, the reply appears in the mention's
+     thread, not as a new top-level message.
+   - Under the intentional Staff-only child-OU policy, a room-post 403 produces
+     one private DM fallback with the policy notice and does not rerun the
+     completed agent turn.
    - A shared-space request does not volunteer private memory content.
    - Before reading or summarizing the caller's Gmail, Calendar, or Drive, the
      agent asks for confirmation that the result may be shared publicly.
@@ -533,7 +558,7 @@ intent text.
 | Lambda timeout | AgentCore Runtime not deployed | Deploy with `--context agentImageTag=<tag>` |
 | "Google credentials secret contains invalid JSON" | Secret not populated | Run `aws secretsmanager put-secret-value` from step 2.2 |
 | "Database not configured, skipping telemetry" | DATABASE_HOST not set | Check Lambda env vars in CloudWatch |
-| Mention in a space gets no reply, but DM works; Router logs `403 "This organization's administrator restricts this Chat app from performing this action"` | Workspace policy allows the Chat app in DMs but blocks its `chat.bot` identity in multi-user spaces | Repeat step 1.7 for the affected dev/prod app. Do not infer app access from the separate `agnt_...` Workspace user's ability to post. Verify app-credential `spaces.get` on the ROOM returns `200`, then retest the mention. |
+| Mention in a space gets no room reply; Router logs `403 "This organization's administrator restricts this Chat app from performing this action"` | The app is intentionally allowed only for Staff at a child OU, and Google blocks its `chat.bot` identity in the shared space | Do not broaden the app to Students. Confirm `ChatPostPermissionDenied` telemetry and the private DM fallback described in step 1.7. The separate `agnt_...` Workspace user's ability to post is unrelated. |
 | Guardrail blocks everything | GUARDRAIL_FAIL_OPEN=false + guardrail misconfigured | Check guardrail rules in Bedrock console |
 | DLQ alarm firing | Messages failing after 3 retries | Check CloudWatch logs for Router Lambda errors |
 | Pub/Sub push fails to SQS | SQS requires signed requests | Add API Gateway → SQS proxy in front of the queue |
