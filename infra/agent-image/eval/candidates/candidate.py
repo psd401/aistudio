@@ -35,21 +35,28 @@ CANONICAL_CONFIG = AGENT_IMAGE_DIR / "openclaw.json"
 CANONICAL_DOCKERFILE = AGENT_IMAGE_DIR / "Dockerfile"
 AXES = ("model", "harness", "prompt")
 UNCHANGED_BOOTSTRAP_FILES = ("IDENTITY.md", "USER.md", "MEMORY.md")
-PROVIDER_PATH_CONTRACTS: Mapping[str, tuple[str, str, str]] = {
+PROVIDER_PATH_CONTRACTS: Mapping[
+    str, tuple[str, str, re.Pattern[str], str]
+] = {
     "native-bedrock-sigv4": (
         "bedrock-converse-stream",
         "aws-sdk",
-        "https://bedrock-runtime.",
+        re.compile(
+            r"bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?"
+        ),
+        "",
     ),
     "mantle-openai-compatible": (
         "openai-completions",
         "api-key",
-        "https://bedrock-mantle.",
+        re.compile(r"bedrock-mantle\.[a-z0-9-]+\.api\.aws"),
+        "/v1",
     ),
     "mantle-anthropic-messages": (
         "anthropic-messages",
         "api-key",
-        "https://bedrock-mantle.",
+        re.compile(r"bedrock-mantle\.[a-z0-9-]+\.api\.aws"),
+        "/anthropic",
     ),
 }
 REQUIRED_SOURCE_FIELDS = ("api", "auth", "baseUrl", "iam", "model", "pricing")
@@ -195,7 +202,7 @@ def _provider_template(
     provider = _mapping(
         template.get("provider"), f"{template_path}: provider"
     )
-    expected_api, expected_auth, base_prefix = contract
+    expected_api, expected_auth, hostname_pattern, expected_path = contract
     if provider.get("api") != expected_api:
         raise CandidateError(
             f"{template_path}: {provider_path} requires api={expected_api!r}"
@@ -205,18 +212,28 @@ def _provider_template(
             f"{template_path}: {provider_path} requires auth={expected_auth!r}"
         )
     base_url = _string(provider.get("baseUrl"), f"{template_path}: baseUrl")
-    if not base_url.startswith(base_prefix):
+    parsed_base_url = urlparse(base_url)
+    try:
+        port = parsed_base_url.port
+    except ValueError as error:
         raise CandidateError(
-            f"{template_path}: {provider_path} requires an AWS {base_prefix} baseUrl"
-        )
-    if provider_path == "mantle-openai-compatible" and not base_url.endswith("/v1"):
-        raise CandidateError(f"{template_path}: Mantle OpenAI baseUrl must end in /v1")
+            f"{template_path}: {provider_path} baseUrl has an invalid port"
+        ) from error
     if (
-        provider_path == "mantle-anthropic-messages"
-        and not base_url.endswith("/anthropic")
+        parsed_base_url.scheme != "https"
+        or parsed_base_url.hostname is None
+        or not hostname_pattern.fullmatch(parsed_base_url.hostname)
+        or parsed_base_url.username is not None
+        or parsed_base_url.password is not None
+        or port is not None
+        or parsed_base_url.path != expected_path
+        or parsed_base_url.params
+        or parsed_base_url.query
+        or parsed_base_url.fragment
     ):
         raise CandidateError(
-            f"{template_path}: Mantle Anthropic baseUrl must end in /anthropic"
+            f"{template_path}: {provider_path} requires an exact AWS endpoint "
+            "hostname and path without credentials, port, query, or fragment"
         )
     if provider_path.startswith("mantle-") and provider.get("apiKey") != (
         "env:AWS_BEARER_TOKEN_BEDROCK"
@@ -363,6 +380,15 @@ def _load_contract(
             f"{manifest_path}: declaredAxis={declared_axis!r}, but changed axes "
             f"are {rendered}; candidates must vary exactly one axis"
         )
+    if declared_axis == "prompt" and _materialized_prompt_bytes(
+        axes["prompt"], f"{manifest_path}: axes.prompt"
+    ) == _materialized_prompt_bytes(
+        baseline_axes["prompt"], f"{baseline_path}: axes.prompt"
+    ):
+        raise CandidateError(
+            f"{manifest_path}: prompt candidates must change materialized "
+            "SOUL or rules bytes"
+        )
     template, template_path = _provider_template(axes, manifest_path)
 
     # The baseline itself is executable documentation: it must continue to
@@ -439,6 +465,27 @@ def _validate_prompt(axis: object, label: str) -> tuple[str, Path, Path]:
     soul = _safe_relative_file(prompt.get("soul"), f"{label}.soul")
     rules = _safe_relative_file(prompt.get("rules"), f"{label}.rules")
     return variant, soul, rules
+
+
+def _materialized_prompt_bytes(
+    axis: object, label: str
+) -> tuple[bytes, bytes]:
+    """Return the prompt bytes that survive the Dockerfile materialization."""
+    _, soul, rules = _validate_prompt(axis, label)
+    frontmatter_delimiters = 0
+    rules_body: list[str] = []
+    for line in rules.read_text(encoding="utf-8").splitlines():
+        if re.fullmatch(r"---\s*", line):
+            frontmatter_delimiters += 1
+            continue
+        if frontmatter_delimiters >= 2:
+            rules_body.append(line)
+    rendered_rules = (
+        ("\n".join(rules_body) + "\n").encode("utf-8")
+        if rules_body
+        else b""
+    )
+    return soul.read_bytes(), rendered_rules
 
 
 def _validate_baseline_harness_and_prompt(

@@ -204,12 +204,91 @@ class CandidateMatrixTests(unittest.TestCase):
                     source["axes"]["harness"]["hostVersion"] = "2026.7.2"
                 else:
                     source["axes"]["prompt"]["variant"] = "alternate"
+                    alternate_soul = Path(directory) / "alternate-SOUL.md"
+                    alternate_soul.write_text(
+                        (HERE / "SOUL.md").read_text(encoding="utf-8")
+                        + "\nCandidate prompt delta.\n",
+                        encoding="utf-8",
+                    )
+                    source["axes"]["prompt"]["soul"] = (
+                        alternate_soul.relative_to(HERE).as_posix()
+                    )
                 temporary_manifest = Path(directory) / "candidate.json"
                 temporary_manifest.write_text(json.dumps(source), encoding="utf-8")
 
                 summary = candidate.validate(temporary_manifest)
 
                 self.assertEqual(summary["variedAxis"], declared_axis)
+
+    def test_rejects_prompt_axis_without_materialized_byte_change(self):
+        baseline = json.loads(
+            (self.manifests_dir / "baseline.json").read_text(encoding="utf-8")
+        )
+        for case in ("variant-only", "identical-file"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(
+                dir=self.manifests_dir.parent, prefix=".candidate-contract-test."
+            ) as directory:
+                source = json.loads(json.dumps(baseline))
+                source["id"] = f"prompt-{case}"
+                source["baseline"] = "../manifests/baseline.json"
+                source["declaredAxis"] = "prompt"
+                source["axes"]["model"]["providerTemplate"] = (
+                    "../providers/native-bedrock-sonnet-5.json"
+                )
+                if case == "variant-only":
+                    source["axes"]["prompt"]["variant"] = "alternate"
+                else:
+                    identical_soul = Path(directory) / "identical-SOUL.md"
+                    identical_soul.write_bytes((HERE / "SOUL.md").read_bytes())
+                    source["axes"]["prompt"]["soul"] = (
+                        identical_soul.relative_to(HERE).as_posix()
+                    )
+                temporary_manifest = Path(directory) / "candidate.json"
+                temporary_manifest.write_text(json.dumps(source), encoding="utf-8")
+
+                with self.assertRaisesRegex(
+                    candidate.CandidateError, "must change materialized"
+                ):
+                    candidate.validate(temporary_manifest)
+
+    def test_rejects_lookalike_aws_provider_hostnames(self):
+        providers_dir = self.manifests_dir.parent / "providers"
+        cases = (
+            (
+                "glm-5-mantle-openai.json",
+                "mantle-openai-glm-5.json",
+                "https://bedrock-mantle.us-east-1.api.aws.attacker.example/v1",
+            ),
+            (
+                "glm-5-native.json",
+                "native-bedrock-glm-5.json",
+                "https://bedrock-runtime.us-east-1.amazonaws.com.attacker.example",
+            ),
+        )
+        for manifest_name, provider_name, base_url in cases:
+            with self.subTest(provider=provider_name), tempfile.TemporaryDirectory(
+                dir=self.manifests_dir.parent, prefix=".candidate-contract-test."
+            ) as directory:
+                source = json.loads(
+                    (self.manifests_dir / manifest_name).read_text(encoding="utf-8")
+                )
+                provider = json.loads(
+                    (providers_dir / provider_name).read_text(encoding="utf-8")
+                )
+                source["baseline"] = "../manifests/baseline.json"
+                source["axes"]["model"]["providerTemplate"] = "provider.json"
+                provider["provider"]["baseUrl"] = base_url
+                directory_path = Path(directory)
+                (directory_path / "provider.json").write_text(
+                    json.dumps(provider), encoding="utf-8"
+                )
+                temporary_manifest = directory_path / "candidate.json"
+                temporary_manifest.write_text(json.dumps(source), encoding="utf-8")
+
+                with self.assertRaisesRegex(
+                    candidate.CandidateError, "exact AWS endpoint hostname"
+                ):
+                    candidate.validate(temporary_manifest)
 
     def test_rejects_baseline_harness_or_prompt_drift_from_production(self):
         original_baseline = json.loads(
