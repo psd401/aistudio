@@ -146,6 +146,45 @@ class CandidateMatrixTests(unittest.TestCase):
             ):
                 candidate.validate(temporary_manifest)
 
+    def test_rejects_candidate_paths_that_escape_the_candidate_tree(self):
+        baseline = json.loads(
+            (self.manifests_dir / "baseline.json").read_text(encoding="utf-8")
+        )
+        model_candidate = json.loads(
+            (self.manifests_dir / "glm-5-native.json").read_text(encoding="utf-8")
+        )
+        cases = (
+            (
+                "provider-template",
+                model_candidate,
+                ("model", "providerTemplate"),
+                "../../../../etc/passwd",
+            ),
+            (
+                "prompt-file",
+                baseline,
+                ("prompt", "soul"),
+                "../../../../etc/passwd",
+            ),
+        )
+        for name, original, path, escape in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory(
+                dir=self.manifests_dir.parent, prefix=".candidate-contract-test."
+            ) as directory:
+                source = json.loads(json.dumps(original))
+                source["id"] = f"escape-{name}"
+                source["baseline"] = "../manifests/baseline.json"
+                source["declaredAxis"] = path[0]
+                source["axes"]["model"]["providerTemplate"] = (
+                    "../providers/native-bedrock-sonnet-5.json"
+                )
+                source["axes"][path[0]][path[1]] = escape
+                temporary_manifest = Path(directory) / "candidate.json"
+                temporary_manifest.write_text(json.dumps(source), encoding="utf-8")
+
+                with self.assertRaisesRegex(candidate.CandidateError, "escapes"):
+                    candidate.validate(temporary_manifest)
+
     def test_accepts_harness_only_and_prompt_only_candidates(self):
         baseline = json.loads(
             (self.manifests_dir / "baseline.json").read_text(encoding="utf-8")
