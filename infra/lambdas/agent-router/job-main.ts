@@ -50,6 +50,17 @@ type JobPayload = ReturnType<typeof parseJobPayload>;
 type AgentResult = Awaited<ReturnType<typeof invokeAgentCore>>;
 type JobLogger = ReturnType<typeof createLogger>;
 
+function jobChatDeliveryContext(job: JobPayload) {
+  return {
+    isSharedSpace: !job.isDM,
+    ...(!job.isDM && job.googleIdentity
+      ? { senderGoogleIdentity: job.googleIdentity }
+      : {}),
+    userId: job.userEmail,
+    sessionId: job.sessionId,
+  };
+}
+
 /**
  * Best-effort lock release when JOB_PAYLOAD fails full validation (review,
  * #1147): the router pre-acquired the kind='job' lock BEFORE launching this
@@ -170,7 +181,8 @@ async function handleJobRunnerError(
       '⚠️ The background job hit an internal error and could not finish. ' +
         'Some steps may have already completed — ask me to check before ' +
         'retrying.',
-      log
+      log,
+      jobChatDeliveryContext(job)
     );
   } catch (sendError) {
     log.error('Failed to post job-error message to Chat', {
@@ -278,6 +290,7 @@ async function main(): Promise<number> {
       {
         displayName: job.displayName,
         workspacePrefix: job.workspacePrefix,
+        ...(!job.isDM ? { audience: 'shared-space' } : {}),
         deadlineS: JOB_DEADLINE_S,
         runtimeIdOverride: job.runtimeId,
       }
@@ -290,7 +303,8 @@ async function main(): Promise<number> {
       job.spaceName,
       job.threadName,
       formatJobChatResponse(job, agentResult.response),
-      log
+      log,
+      jobChatDeliveryContext(job)
     );
 
     const latencyMs =

@@ -35,6 +35,7 @@ const BASE = {
   lockToken: 'tok-1',
   runtimeId: 'psd_agent_dev-XYZ',
   userEmail: 'hagelk@psd401.net',
+  googleIdentity: 'users/123456789',
   displayName: 'Kris Hagel',
   workspacePrefix: 'hagelk-abc123',
   spaceName: 'spaces/AAA',
@@ -49,6 +50,7 @@ describe('buildJobPayload / parseJobPayload round-trip', () => {
     expect(parsed.lockToken).toBe(BASE.lockToken);
     expect(parsed.runtimeId).toBe(BASE.runtimeId);
     expect(parsed.userEmail).toBe(BASE.userEmail);
+    expect(parsed.googleIdentity).toBe(BASE.googleIdentity);
     expect(parsed.workspacePrefix).toBe(BASE.workspacePrefix);
     expect(parsed.spaceName).toBe(BASE.spaceName);
     expect(parsed.threadName).toBe('spaces/AAA/threads/t1');

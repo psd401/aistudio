@@ -70,6 +70,35 @@ All GCP steps are done in the web console. No `gcloud` CLI required.
    - Logs: **Log errors to Logging**
 3. Click **Save**
 
+#### 1.7 Allow the Chat app to operate in spaces
+
+Complete this for the **dev and prod Chat apps separately**. A Chat app can
+work in 1:1 DMs while Workspace policy still blocks every API action in a
+multi-user space.
+
+1. In **Google Admin Console** → **Apps** → **Google Workspace Marketplace
+   apps**, verify the agent app is allowlisted and its app access is not
+   restricted.
+2. In **Google Admin Console** → **Apps** → **Google Workspace** → **Google
+   Chat** → **Chat apps installation settings**, allow the agent app for the
+   intended organizational units or groups.
+3. In **GCP Console** → **Google Chat API** → **Configuration**, verify:
+   - **Visibility** is domain-wide, not limited to named people or groups.
+   - **Interactive features** are enabled.
+4. After each policy change, use the app credential (`chat.bot` scope) to call
+   `spaces.get` for a ROOM space. It must return `200`; a `403` stating that
+   the organization's administrator restricts the Chat app means the policy
+   is still blocking space access.
+
+There are two distinct identities that can post to Chat:
+
+- The **Chat app service account** receives mentions and posts router replies
+  with the `chat.bot` scope. Workspace app policy can restrict this identity
+  in spaces even while DMs work.
+- The per-user **`agnt_...` Workspace account** is a real delegated user used
+  by the `psd-workspace` skill (`--scope agent`). Its ability to post or manage
+  memberships does not prove that the Chat app identity is allowed.
+
 ### Phase 2: AWS Infrastructure Deploy
 
 #### 2.1 Deploy CDK Stacks
@@ -227,6 +256,12 @@ psql $DATABASE_URL -c "SELECT * FROM agent_sessions ORDER BY created_at DESC LIM
    - CloudWatch logs show the full pipeline execution
    - `agent_messages` table has a new row
    - `agent_sessions` table has a new/updated row
+5. In a multi-user test space, @mention the agent in an existing thread and
+   verify:
+   - The reply appears in the mention's thread, not as a new top-level message.
+   - A shared-space request does not volunteer private memory content.
+   - Before reading or summarizing the caller's Gmail, Calendar, or Drive, the
+     agent asks for confirmation that the result may be shared publicly.
 
 #### 4.4 Guardrail Test
 
@@ -469,6 +504,7 @@ intent text.
 | Lambda timeout | AgentCore Runtime not deployed | Deploy with `--context agentImageTag=<tag>` |
 | "Google credentials secret contains invalid JSON" | Secret not populated | Run `aws secretsmanager put-secret-value` from step 2.2 |
 | "Database not configured, skipping telemetry" | DATABASE_HOST not set | Check Lambda env vars in CloudWatch |
+| Mention in a space gets no reply, but DM works; Router logs `403 "This organization's administrator restricts this Chat app from performing this action"` | Workspace policy allows the Chat app in DMs but blocks its `chat.bot` identity in multi-user spaces | Repeat step 1.7 for the affected dev/prod app. Do not infer app access from the separate `agnt_...` Workspace user's ability to post. Verify app-credential `spaces.get` on the ROOM returns `200`, then retest the mention. |
 | Guardrail blocks everything | GUARDRAIL_FAIL_OPEN=false + guardrail misconfigured | Check guardrail rules in Bedrock console |
 | DLQ alarm firing | Messages failing after 3 retries | Check CloudWatch logs for Router Lambda errors |
 | Pub/Sub push fails to SQS | SQS requires signed requests | Add API Gateway → SQS proxy in front of the queue |

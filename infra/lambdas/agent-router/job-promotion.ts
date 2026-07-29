@@ -61,6 +61,8 @@ export interface JobPayload {
   /** Resolved AgentCore runtime id/ARN (runner skips the SSM lookup). */
   runtimeId: string;
   userEmail: string;
+  /** Google Chat users/{id}; enables shared-space reply fallback to DM. */
+  googleIdentity?: string;
   displayName: string;
   workspacePrefix: string;
   spaceName: string;
@@ -154,6 +156,7 @@ export function buildJobPayload(input: {
   lockToken: string;
   runtimeId: string;
   userEmail: string;
+  googleIdentity?: string;
   displayName: string;
   workspacePrefix: string;
   spaceName: string;
@@ -172,6 +175,9 @@ export function buildJobPayload(input: {
     lockToken: input.lockToken,
     runtimeId: input.runtimeId,
     userEmail: input.userEmail,
+    ...(input.googleIdentity
+      ? { googleIdentity: input.googleIdentity }
+      : {}),
     displayName: input.displayName,
     workspacePrefix: input.workspacePrefix,
     spaceName: input.spaceName,
@@ -258,6 +264,7 @@ export function parseJobPayload(raw: string | undefined): JobPayload {
   );
   const scheduledRunId = readScheduledRunId(obj);
   const fireKey = boundedOptionalString(obj, 'fireKey', 192);
+  const googleIdentity = boundedOptionalString(obj, 'googleIdentity', 256);
   return {
     sessionId: requireString('sessionId'),
     // Unknown/absent -> 'deadline'. A payload from an older cron build must
@@ -268,6 +275,7 @@ export function parseJobPayload(raw: string | undefined): JobPayload {
     lockToken: requireString('lockToken'),
     runtimeId: requireString('runtimeId'),
     userEmail: requireString('userEmail'),
+    googleIdentity,
     displayName: typeof obj.displayName === 'string' ? obj.displayName : '',
     workspacePrefix: requireString('workspacePrefix'),
     spaceName: requireString('spaceName'),

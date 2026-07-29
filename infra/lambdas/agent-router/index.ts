@@ -1596,6 +1596,7 @@ interface AgentInvocationContext {
   displayName?: string;
   workspacePrefix?: string;
   invokedBy?: { email: string; displayName: string };
+  audience?: 'shared-space';
   threadContext?: string;
   attachments?: AgentAttachment[];
   deadlineS?: number;
@@ -1627,6 +1628,19 @@ interface AgentCoreResult {
   failed?: boolean;
   errorClass?: string;
   errorSource?: 'harness' | 'router';
+}
+
+interface FailureRecordParams {
+  source: 'router' | 'harness' | 'cron' | 'agent_self_report' | 'tool';
+  severity: 'error' | 'warn' | 'empty_response';
+  userId?: string | null;
+  sessionId?: string | null;
+  scheduleName?: string | null;
+  model?: string | null;
+  errorClass?: string | null;
+  errorMessage?: string | null;
+  stackExcerpt?: string | null;
+  context?: Record<string, unknown> | null;
 }
 
 function failedAgentCoreResult(
@@ -1702,6 +1716,7 @@ function addOptionalAgentContext(
     payload.invoked_by_email = context.invokedBy.email;
     payload.invoked_by_display_name = context.invokedBy.displayName;
   }
+  if (context.audience) payload.audience = context.audience;
   if (context.threadContext) payload.thread_context = context.threadContext;
   if (context.attachments?.length) payload.attachments = context.attachments;
   if (context.deadlineS) payload.deadline_s = context.deadlineS;
@@ -2057,6 +2072,7 @@ async function fetchChatUploads(
 interface JobPromotionInput {
   sessionId: string;
   userEmail: string;
+  googleIdentity: string;
   displayName: string;
   workspacePrefix: string;
   spaceName: string;
@@ -2166,6 +2182,7 @@ async function promoteToJob(
       lockToken: jobLockToken,
       runtimeId,
       userEmail: input.userEmail,
+      googleIdentity: input.googleIdentity,
       displayName: input.displayName,
       workspacePrefix: input.workspacePrefix,
       spaceName: input.spaceName,
@@ -2183,7 +2200,15 @@ async function promoteToJob(
       (input.acknowledgementPrefix ?? input.responsePrefix ?? '') +
         '⏳ This is taking longer than one pass allows — I\'ve moved it to a ' +
         'background job and will post the result here when it\'s done.',
-      log
+      log,
+      {
+        isSharedSpace: !input.isDM,
+        ...(!input.isDM
+          ? { senderGoogleIdentity: input.googleIdentity }
+          : {}),
+        userId: input.userEmail,
+        sessionId: input.sessionId,
+      }
     );
 
     log.info('Turn promoted to background job', {
@@ -2210,12 +2235,256 @@ async function sendGoogleChatResponse(
   spaceName: string,
   threadName: string | undefined,
   text: string,
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
+  deliveryContext: ChatResponseDeliveryContext = {}
 ): Promise<void> {
-  // Throw on failure so SQS marks the message as failed and retries (or DLQs).
-  // Callers must let the error propagate for retry semantics to work.
   const chatClient = await getChatClient();
+  await sendGoogleChatResponseWithDependencies(
+    {
+      spaceName,
+      threadName,
+      text,
+      deliveryContext,
+    },
+    log,
+    {
+      createMessage: async request => {
+        await chatClient.spaces.messages.create(request);
+      },
+      resolveDmSpace: googleIdentity =>
+        resolveDmSpace(chatClient, googleIdentity),
+      recordFailure,
+    }
+  );
+}
 
+interface ChatResponseDeliveryContext {
+  isSharedSpace?: boolean;
+  senderGoogleIdentity?: string;
+  userId?: string;
+  sessionId?: string;
+}
+
+interface ChatResponseInput {
+  spaceName: string;
+  threadName?: string;
+  text: string;
+  deliveryContext: ChatResponseDeliveryContext;
+}
+
+interface ChatMessageCreateRequest {
+  parent: string;
+  requestBody: Record<string, unknown>;
+  messageReplyOption?: 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD';
+}
+
+interface ChatResponseDependencies {
+  createMessage(request: ChatMessageCreateRequest): Promise<void>;
+  resolveDmSpace(googleIdentity: string): Promise<string | null>;
+  recordFailure(
+    params: FailureRecordParams,
+    log: ReturnType<typeof createLogger>
+  ): Promise<void>;
+}
+
+const CHAT_MESSAGE_MAX_LENGTH = 4096;
+const CHAT_SPACE_DM_FALLBACK_NOTE =
+  "⚠️ I couldn't post this reply in the shared space because your Workspace " +
+  "administrator currently restricts this Chat app there. I'm sending it " +
+  'to you privately instead.';
+
+function errorStatusCode(error: unknown): number | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const candidate = error as Record<string, unknown>;
+  const response =
+    typeof candidate.response === 'object' && candidate.response !== null
+      ? (candidate.response as Record<string, unknown>)
+      : undefined;
+  for (const value of [
+    candidate.code,
+    candidate.status,
+    response?.status,
+  ]) {
+    const parsed =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string'
+          ? Number.parseInt(value, 10)
+          : Number.NaN;
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function isChatPostPermissionDenied(error: unknown): boolean {
+  return errorStatusCode(error) === 403;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function dmFallbackMessageBody(
+  messageBody: Record<string, unknown>
+): Record<string, unknown> {
+  const fallbackBody = { ...messageBody };
+  delete fallbackBody.thread;
+  const responseText =
+    typeof fallbackBody.text === 'string' ? fallbackBody.text : '';
+  const separator = responseText ? '\n\n' : '';
+  const reservedLength =
+    separator.length + CHAT_SPACE_DM_FALLBACK_NOTE.length;
+  const availableResponseLength = Math.max(
+    CHAT_MESSAGE_MAX_LENGTH - reservedLength,
+    0
+  );
+  fallbackBody.text =
+    responseText.slice(0, availableResponseLength) +
+    separator +
+    CHAT_SPACE_DM_FALLBACK_NOTE;
+  return fallbackBody;
+}
+
+async function resolveDmSpace(
+  chatClient: NonNullable<typeof cachedChatClient>,
+  googleIdentity: string
+): Promise<string | null> {
+  let pageToken: string | undefined;
+  do {
+    const response = await chatClient.spaces.list({
+      pageToken,
+      pageSize: 100,
+    });
+    for (const space of response.data.spaces ?? []) {
+      if (!space.name || !space.singleUserBotDm) continue;
+      const members = await chatClient.spaces.members.list({
+        parent: space.name,
+        pageSize: 10,
+      });
+      const containsSender = (members.data.memberships ?? []).some(
+        membership =>
+          membership.member?.type === 'HUMAN' &&
+          membership.member?.name === googleIdentity
+      );
+      if (containsSender) return space.name;
+    }
+    pageToken = response.data.nextPageToken ?? undefined;
+  } while (pageToken);
+  return null;
+}
+
+async function recordDmFallbackFailure(
+  error: unknown,
+  deliveryContext: ChatResponseDeliveryContext,
+  context: Record<string, unknown>,
+  log: ReturnType<typeof createLogger>,
+  dependencies: ChatResponseDependencies
+): Promise<void> {
+  await dependencies.recordFailure(
+    {
+      source: 'router',
+      severity: 'error',
+      userId: deliveryContext.userId,
+      sessionId: deliveryContext.sessionId,
+      errorClass: 'ChatDmFallbackFailed',
+      errorMessage: sanitizeDiagnostic(errorMessage(error)),
+      context,
+    },
+    log
+  );
+}
+
+async function handleChatPostPermissionDenied(
+  input: {
+    error: unknown;
+    spaceName: string;
+    threadName?: string;
+    messageBody: Record<string, unknown>;
+    deliveryContext: ChatResponseDeliveryContext;
+    log: ReturnType<typeof createLogger>;
+  },
+  dependencies: ChatResponseDependencies
+): Promise<void> {
+  const {
+    error,
+    spaceName,
+    threadName,
+    messageBody,
+    deliveryContext,
+    log,
+  } = input;
+  const failureContext = {
+    phase: 'google_chat_response',
+    spaceName,
+    ...(threadName ? { threadName } : {}),
+    dmFallbackAttempted: true,
+  };
+  await dependencies.recordFailure(
+    {
+      source: 'router',
+      severity: 'error',
+      userId: deliveryContext.userId,
+      sessionId: deliveryContext.sessionId,
+      errorClass: 'ChatPostPermissionDenied',
+      errorMessage: sanitizeDiagnostic(errorMessage(error)),
+      context: failureContext,
+    },
+    log
+  );
+
+  try {
+    const dmSpaceName = await dependencies.resolveDmSpace(
+      deliveryContext.senderGoogleIdentity ?? ''
+    );
+    if (!dmSpaceName) {
+      log.error('Shared-space Chat reply failed and sender DM was not found', {
+        space: spaceName,
+        errorClass: 'ChatPostPermissionDenied',
+      });
+      await recordDmFallbackFailure(
+        new Error('No existing Google Chat DM space found for sender'),
+        deliveryContext,
+        { ...failureContext, dmFallbackOutcome: 'dm-space-not-found' },
+        log,
+        dependencies
+      );
+      return;
+    }
+
+    await dependencies.createMessage({
+      parent: dmSpaceName,
+      requestBody: dmFallbackMessageBody(messageBody),
+    });
+    log.warn('Shared-space Chat reply delivered by DM fallback', {
+      space: spaceName,
+      dmSpace: dmSpaceName,
+      errorClass: 'ChatPostPermissionDenied',
+    });
+  } catch (fallbackError) {
+    log.error('Shared-space Chat reply and DM fallback both failed', {
+      space: spaceName,
+      error: sanitizeDiagnostic(errorMessage(fallbackError)),
+      errorClass: 'ChatDmFallbackFailed',
+    });
+    await recordDmFallbackFailure(
+      fallbackError,
+      deliveryContext,
+      { ...failureContext, dmFallbackOutcome: 'failed' },
+      log,
+      dependencies
+    );
+  }
+}
+
+function prepareGoogleChatMessage(
+  spaceName: string,
+  text: string,
+  log: ReturnType<typeof createLogger>
+): {
+  messageBody: Record<string, unknown>;
+  hasCards: boolean;
+  hasAccessoryWidgets: boolean;
+} {
   // Pull a rich-output envelope out of the agent reply, if one is present.
   // The envelope carries cardsV2 / accessoryWidgets the chat-card / chat-chart
   // skills produced. Remaining prose becomes the message's `text` field
@@ -2241,20 +2510,61 @@ async function sendGoogleChatResponse(
   } else {
     messageBody.text = remaining || text;
   }
-  if (threadName) {
-    messageBody.thread = { name: threadName };
-  }
+  return {
+    messageBody,
+    hasCards: Boolean(envelope?.cardsV2),
+    hasAccessoryWidgets: Boolean(envelope?.accessoryWidgets),
+  };
+}
 
-  await chatClient.spaces.messages.create({
+async function sendGoogleChatResponseWithDependencies(
+  input: ChatResponseInput,
+  log: ReturnType<typeof createLogger>,
+  dependencies: ChatResponseDependencies
+): Promise<void> {
+  const { spaceName, threadName, text, deliveryContext } = input;
+  const prepared = prepareGoogleChatMessage(spaceName, text, log);
+  const messageBody: Record<string, unknown> = {
+    ...prepared.messageBody,
+    ...(threadName ? { thread: { name: threadName } } : {}),
+  };
+  const createRequest: ChatMessageCreateRequest = {
     parent: spaceName,
     requestBody: messageBody,
-  });
+    ...(threadName
+      ? {
+          messageReplyOption:
+            'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD',
+        }
+      : {}),
+  };
+  try {
+    await dependencies.createMessage(createRequest);
+  } catch (error) {
+    const canFallbackToDm =
+      deliveryContext.isSharedSpace === true &&
+      Boolean(deliveryContext.senderGoogleIdentity) &&
+      isChatPostPermissionDenied(error);
+    if (!canFallbackToDm) throw error;
+    await handleChatPostPermissionDenied(
+      {
+        error,
+        spaceName,
+        threadName,
+        messageBody,
+        deliveryContext,
+        log,
+      },
+      dependencies
+    );
+    return;
+  }
 
   log.info('Response sent to Google Chat', {
     space: spaceName,
     responseLength: text.length,
-    hasCards: !!envelope?.cardsV2,
-    hasAccessoryWidgets: !!envelope?.accessoryWidgets,
+    hasCards: prepared.hasCards,
+    hasAccessoryWidgets: prepared.hasAccessoryWidgets,
   });
 }
 
@@ -2541,18 +2851,7 @@ async function writeScheduledRun(params: ScheduledRunWrite): Promise<void> {
  * original failure remains discoverable there.
  */
 async function recordFailure(
-  params: {
-    source: 'router' | 'harness' | 'cron' | 'agent_self_report' | 'tool';
-    severity: 'error' | 'warn' | 'empty_response';
-    userId?: string | null;
-    sessionId?: string | null;
-    scheduleName?: string | null;
-    model?: string | null;
-    errorClass?: string | null;
-    errorMessage?: string | null;
-    stackExcerpt?: string | null;
-    context?: Record<string, unknown> | null;
-  },
+  params: FailureRecordParams,
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
   // Emit a structured CloudWatch line first so the metric filter ticks even
@@ -3037,11 +3336,20 @@ async function handleNonMessageEvent(
   const addedByEmail = chatEvent.message?.sender?.email;
   const addedByDomain = addedByEmail?.split('@')[1]?.toLowerCase();
   if (addedByDomain && ALLOWED_DOMAINS.includes(addedByDomain)) {
+    const isSharedSpace = chatEvent.space.type === 'ROOM';
+    const senderGoogleIdentity = chatEvent.message?.sender?.name;
     await sendGoogleChatResponse(
       chatEvent.space.name,
       undefined,
       "Hello! I'm your PSD AI Agent. Send me a message to get started.",
-      log
+      log,
+      {
+        isSharedSpace,
+        ...(isSharedSpace && senderGoogleIdentity
+          ? { senderGoogleIdentity }
+          : {}),
+        userId: addedByEmail,
+      }
     );
   } else {
     log.warn('ADDED_TO_SPACE from unverified domain, skipping welcome message', {
@@ -3203,6 +3511,38 @@ function createHumanMessage(incoming: IncomingMessage): HumanMessage {
   };
 }
 
+function humanChatDeliveryContext(
+  human: HumanMessage,
+  sessionId?: string
+): ChatResponseDeliveryContext {
+  return {
+    isSharedSpace: human.isSharedSpace,
+    ...(human.isSharedSpace
+      ? { senderGoogleIdentity: human.senderName }
+      : {}),
+    userId: human.senderEmail,
+    ...(sessionId ? { sessionId } : {}),
+  };
+}
+
+function buildAgentInvocationContext(
+  human: HumanMessage,
+  owner: Pick<AgentUser, 'displayName' | 'workspacePrefix'>,
+  invokedBy?: { email: string; displayName: string }
+): AgentInvocationContext {
+  return {
+    displayName: owner.displayName,
+    workspacePrefix: owner.workspacePrefix,
+    ...(invokedBy ? { invokedBy, threadContext: '' } : {}),
+    ...(human.isSharedSpace
+      ? { audience: 'shared-space' }
+      : {}),
+    ...(human.attachments.length > 0
+      ? { attachments: human.attachments }
+      : {}),
+  };
+}
+
 async function admitHumanMessage(
   human: HumanMessage,
   log: ReturnType<typeof createLogger>
@@ -3244,7 +3584,8 @@ async function admitHumanMessage(
     human.threadName,
     `Your message is too long (${human.messageText.length.toLocaleString()} characters). ` +
       `Please keep messages under ${MAX_MESSAGE_LENGTH.toLocaleString()} characters.`,
-    log
+    log,
+    humanChatDeliveryContext(human)
   );
   return false;
 }
@@ -3373,7 +3714,8 @@ async function invokeCrossUserAgent(
       human.spaceName,
       human.threadName,
       `[${ownerLabel}'s Agent] I'm currently busy processing another request. Please try again in a moment.`,
-      log
+      log,
+      humanChatDeliveryContext(human, sessionId)
     );
     return null;
   }
@@ -3382,18 +3724,14 @@ async function invokeCrossUserAgent(
     targetUser.email,
     sessionId,
     log,
-    {
-      displayName: targetUser.displayName,
-      workspacePrefix: targetUser.workspacePrefix,
-      invokedBy: {
+    buildAgentInvocationContext(
+      human,
+      targetUser,
+      {
         email: human.senderEmail,
         displayName: human.senderDisplayName,
-      },
-      threadContext: '',
-      ...(human.attachments.length > 0
-        ? { attachments: human.attachments }
-        : {}),
-    }
+      }
+    )
   ).finally(() => releaseSessionLock(sessionId, lockToken, log));
   return { result, sessionId };
 }
@@ -3497,7 +3835,8 @@ async function runCrossUserTurn(
       human.spaceName,
       human.threadName,
       emptyCrossUserQuestionHelp(invocation),
-      log
+      log,
+      humanChatDeliveryContext(human)
     );
     return;
   }
@@ -3518,7 +3857,8 @@ async function runCrossUserTurn(
     human.spaceName,
     human.threadName,
     buildCrossUserResponse(invocation, targetUser, turn.result, log),
-    log
+    log,
+    humanChatDeliveryContext(human, turn.sessionId)
   );
   await recordCrossUserResult(
     {
@@ -3548,7 +3888,8 @@ async function handleCrossUserInvocation(
       human.spaceName,
       human.threadName,
       crossUserUsageHelp(invocation),
-      log
+      log,
+      humanChatDeliveryContext(human)
     );
     return { handled: true, messageText: human.messageText };
   }
@@ -3568,7 +3909,8 @@ async function handleCrossUserInvocation(
       human.spaceName,
       human.threadName,
       'Agent not found. If you believe this is an error, contact your workspace admin.',
-      log
+      log,
+      humanChatDeliveryContext(human)
     );
     return { handled: true, messageText: human.messageText };
   }
@@ -3582,7 +3924,8 @@ async function handleCrossUserInvocation(
       human.spaceName,
       human.threadName,
       'Cross-user agent consultation is unavailable until the owner grants explicit access.',
-      log
+      log,
+      humanChatDeliveryContext(human)
     );
     return { handled: true, messageText: human.messageText };
   }
@@ -3599,7 +3942,8 @@ async function handleCrossUserInvocation(
       human.spaceName,
       human.threadName,
       help,
-      log
+      log,
+      humanChatDeliveryContext(human)
     );
     return { handled: true, messageText: human.messageText };
   }
@@ -3682,7 +4026,8 @@ async function invokeOwnerAgentWithDependencies(
       human.spaceName,
       human.threadName,
       'Usage: `/btw <question>`',
-      log
+      log,
+      humanChatDeliveryContext(human)
     );
     return null;
   }
@@ -3730,7 +4075,8 @@ async function invokeOwnerAgentWithDependencies(
         human.threadName,
         "I'm still working on your earlier task in the background — I'll post " +
           "the result here when it's done.",
-        log
+        log,
+        humanChatDeliveryContext(human, mainSessionId)
       );
       return null;
     }
@@ -3744,7 +4090,8 @@ async function invokeOwnerAgentWithDependencies(
       human.spaceName,
       human.threadName,
       OWNER_BUSY_RESPONSE,
-      log
+      log,
+      humanChatDeliveryContext(human, sessionId)
     );
     return null;
   }
@@ -3753,13 +4100,7 @@ async function invokeOwnerAgentWithDependencies(
     human.senderEmail,
     sessionId,
     log,
-    {
-      displayName: human.senderDisplayName,
-      workspacePrefix: user.workspacePrefix,
-      ...(human.attachments.length > 0
-        ? { attachments: human.attachments }
-        : {}),
-    }
+    buildAgentInvocationContext(human, user)
   ).finally(() =>
     dependencies.releaseSessionLock(sessionId, lockToken, log)
   );
@@ -3803,6 +4144,7 @@ function buildOwnerJobPromotionInput(
   return {
     sessionId: turn.sessionId,
     userEmail: human.senderEmail,
+    googleIdentity: human.senderName,
     displayName: human.senderDisplayName,
     workspacePrefix: user.workspacePrefix,
     spaceName: human.spaceName,
@@ -3954,7 +4296,8 @@ async function handleOwnerTurn(
     human.spaceName,
     human.threadName,
     buildOwnerResponse(human, turn.result, turn.responsePrefix),
-    log
+    log,
+    humanChatDeliveryContext(human, turn.sessionId)
   );
   await recordOwnerResult(human, prepared, turn, startTime, log);
 }
@@ -4001,6 +4344,9 @@ export const agentRouterTestHelpers = {
   buildOwnerResponse,
   buildOwnerJobPromotionInput,
   extractIncomingMessage,
+  addOptionalAgentContext,
+  buildAgentInvocationContext,
+  sendGoogleChatResponseWithDependencies,
   btwSlashCommandId: BTW_SLASH_COMMAND_ID,
 };
 

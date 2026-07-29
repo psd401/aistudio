@@ -14,6 +14,9 @@ const {
   buildOwnerResponse,
   buildOwnerJobPromotionInput,
   extractIncomingMessage,
+  addOptionalAgentContext,
+  buildAgentInvocationContext,
+  sendGoogleChatResponseWithDependencies,
   btwSlashCommandId,
 } = agentRouterTestHelpers
 
@@ -25,6 +28,9 @@ type OwnerDependencies = Parameters<
 type OwnerTurn = NonNullable<
   Awaited<ReturnType<typeof invokeOwnerAgentWithDependencies>>
 >
+type ChatResponseDependencies = Parameters<
+  typeof sendGoogleChatResponseWithDependencies
+>[2]
 
 const TEST_LOG = createLogger({ requestId: "agent-router-index-test" })
 
@@ -112,6 +118,17 @@ const AGENT_RESULT: OwnerTurn["result"] = {
   nudged: false,
   messages: [],
   toolCalls: [],
+}
+
+function chatResponseDependencies(
+  overrides: Partial<ChatResponseDependencies> = {}
+): ChatResponseDependencies {
+  return {
+    createMessage: async () => {},
+    resolveDmSpace: async () => null,
+    recordFailure: async () => {},
+    ...overrides,
+  }
 }
 
 function ownerDependencies(
@@ -240,6 +257,133 @@ describe("agent router result coercion", () => {
     expect(result.messages).toEqual([])
     expect(result.toolCalls).toEqual([])
     expect(result.failed).toBe(false)
+  })
+})
+
+describe("Google Chat response delivery", () => {
+  test("sets the reply option whenever a thread name is present", async () => {
+    const requests: Array<
+      Parameters<ChatResponseDependencies["createMessage"]>[0]
+    > = []
+
+    await sendGoogleChatResponseWithDependencies(
+      {
+        spaceName: "spaces/room",
+        threadName: "spaces/room/threads/thread-1",
+        text: "Threaded response",
+        deliveryContext: {},
+      },
+      TEST_LOG,
+      chatResponseDependencies({
+        createMessage: async request => {
+          requests.push(request)
+        },
+      })
+    )
+
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toEqual({
+      parent: "spaces/room",
+      requestBody: {
+        text: "Threaded response",
+        thread: { name: "spaces/room/threads/thread-1" },
+      },
+      messageReplyOption: "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
+    })
+  })
+
+  test("records a room-post 403 and delivers the response by DM without rethrowing", async () => {
+    const requests: Array<
+      Parameters<ChatResponseDependencies["createMessage"]>[0]
+    > = []
+    const failures: Array<
+      Parameters<ChatResponseDependencies["recordFailure"]>[0]
+    > = []
+    let createAttempt = 0
+
+    await expect(
+      sendGoogleChatResponseWithDependencies(
+        {
+          spaceName: "spaces/room",
+          threadName: "spaces/room/threads/thread-1",
+          text: "Private answer",
+          deliveryContext: {
+            isSharedSpace: true,
+            senderGoogleIdentity: "users/owner",
+            userId: "owner@psd401.net",
+            sessionId: "session-1",
+          },
+        },
+        TEST_LOG,
+        chatResponseDependencies({
+          createMessage: async request => {
+            requests.push(request)
+            createAttempt += 1
+            if (createAttempt === 1) {
+              throw Object.assign(
+                new Error(
+                  "This organization's administrator restricts this Chat app from performing this action"
+                ),
+                { code: 403, response: { status: 403 } }
+              )
+            }
+          },
+          resolveDmSpace: async googleIdentity => {
+            expect(googleIdentity).toBe("users/owner")
+            return "spaces/owner-dm"
+          },
+          recordFailure: async params => {
+            failures.push(params)
+          },
+        })
+      )
+    ).resolves.toBeUndefined()
+
+    expect(requests).toHaveLength(2)
+    expect(requests[1]?.parent).toBe("spaces/owner-dm")
+    expect(requests[1]?.messageReplyOption).toBeUndefined()
+    expect(requests[1]?.requestBody.thread).toBeUndefined()
+    expect(requests[1]?.requestBody.text).toContain("Private answer")
+    expect(requests[1]?.requestBody.text).toContain(
+      "administrator currently restricts this Chat app"
+    )
+    expect(failures.map(failure => failure.errorClass)).toEqual([
+      "ChatPostPermissionDenied",
+    ])
+  })
+})
+
+describe("AgentCore audience context", () => {
+  test("adds shared-space audience to owner and cross-user payloads", () => {
+    const roomHuman = ownerHuman({ spaceType: "ROOM" })
+    const ownerContext = buildAgentInvocationContext(roomHuman, OWNER_USER)
+    const crossUserContext = buildAgentInvocationContext(
+      roomHuman,
+      OWNER_USER,
+      {
+        email: "caller@psd401.net",
+        displayName: "Caller",
+      }
+    )
+    const ownerPayload: Record<string, unknown> = {}
+    const crossUserPayload: Record<string, unknown> = {}
+
+    addOptionalAgentContext(ownerPayload, ownerContext)
+    addOptionalAgentContext(crossUserPayload, crossUserContext)
+
+    expect(ownerPayload.audience).toBe("shared-space")
+    expect(crossUserPayload.audience).toBe("shared-space")
+    expect(crossUserPayload.invoked_by_email).toBe("caller@psd401.net")
+  })
+
+  test("omits audience from DM payloads", () => {
+    const dmContext = buildAgentInvocationContext(ownerHuman(), OWNER_USER)
+    const payload: Record<string, unknown> = {}
+
+    addOptionalAgentContext(payload, dmContext)
+
+    expect(dmContext.audience).toBeUndefined()
+    expect(payload.audience).toBeUndefined()
   })
 })
 
