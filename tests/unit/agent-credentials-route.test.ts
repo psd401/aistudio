@@ -256,7 +256,9 @@ describe("POST /api/agent/credentials", () => {
       referenceDataUrl: null,
     })
   })
+})
 
+describe("POST /api/agent/credentials Freshservice errors", () => {
   it("returns a specific input error for a rejected Freshservice route", async () => {
     executeFreshserviceOperationMock.mockRejectedValueOnce(
       new AgentCredentialInputError(
