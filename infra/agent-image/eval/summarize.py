@@ -1437,6 +1437,7 @@ def check_repository(repo_root: Path) -> list[Path]:
         for value in result.stdout.split(b"\0")
         if value
     ]
+    indexed_blobs: dict[Path, bytes] = {}
     for relative_path in tracked:
         indexed_blob = subprocess.run(
             [
@@ -1457,7 +1458,23 @@ def check_repository(repo_root: Path) -> list[Path]:
             raise EvalSummaryError(
                 f"could not read staged {relative_path}: {detail}"
             )
-        validate_committed_summary(relative_path, indexed_blob.stdout)
+        indexed_blobs[relative_path] = indexed_blob.stdout
+    for relative_path, content in indexed_blobs.items():
+        if relative_path.suffix == ".md":
+            # Imported lazily to keep the summary writer independent from the
+            # comparison renderer during normal summary generation.
+            import report
+
+            try:
+                report.validate_committed_report(
+                    relative_path,
+                    content,
+                    indexed_blobs,
+                )
+            except report.EvalReportError as error:
+                raise EvalSummaryError(str(error)) from error
+        else:
+            validate_committed_summary(relative_path, content)
     return tracked
 
 

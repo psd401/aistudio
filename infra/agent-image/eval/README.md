@@ -126,6 +126,66 @@ python3 infra/agent-image/eval/summarize.py --check-repository
 Committed summary filenames use `sha256-<64 lowercase hex>.json`; the file
 itself records the full immutable ECR URI and digest.
 
+## Compare two summaries
+
+`report.py` compares two schema-valid, digest-named summaries. It requires the
+same `eval_harness_commit`, task IDs, skill ownership, suite classification, and
+trial count in both arms so a harness or task-set change cannot masquerade as a
+model improvement:
+
+```bash
+python3 infra/agent-image/eval/report.py \
+  .eval-runs/sha256-<baseline-digest>.json \
+  .eval-runs/sha256-<candidate-digest>.json
+```
+
+The terminal report sorts the per-skill `pass^3` table by regression severity,
+then shows aggregate cost, duration, latency, model-call, nudge, and runtime
+failure-class deltas. Any task whose passed-trial count changed is shown as,
+for example, `2/3 (FAIL) -> 3/3 (PASS)`. The report does not invent confidence
+intervals from three trials.
+
+The promotion verdict implements the epic's three clauses independently:
+
+1. no skill's regression-suite `pass^3` rate drops below its baseline;
+2. overall capability-suite `pass^3` strictly improves; and
+3. cost per task increases by no more than 20%.
+
+Clause (3) and the report's total/per-task cost deltas reconstruct unrounded
+Decimal costs from each arm's stored token totals and model price block. The
+six-decimal summary cost remains a display value only, so two tiny real costs
+that both round to zero cannot accidentally pass the promotion gate or produce
+a contradictory `0.00%` report delta. Any exact increase above the 20% limit
+also carries an explicit `over 20% limit` marker, even if its two-decimal
+percentage display rounds to `20.00%`.
+
+Caching status is re-derived from each summary's observed
+`cache_read_input_tokens`, not from candidate configuration or the summary's
+status label. When only one arm observed cache reads, raw costs remain visible
+but their delta and clause (3) are marked `DECLINED`; the result can never be
+`PROMOTE`. A quality-clause failure still produces `REJECT`, while otherwise
+passing quality with an unavailable cost verdict produces `INDETERMINATE`.
+
+Render the same evidence as Markdown for a recorded comparison decision:
+
+```bash
+python3 infra/agent-image/eval/report.py \
+  .eval-runs/sha256-<baseline-digest>.json \
+  .eval-runs/sha256-<candidate-digest>.json \
+  --format markdown \
+  --out .eval-runs/comparison-sha256-<baseline-digest>-vs-sha256-<candidate-digest>.md
+```
+
+Markdown under `.eval-runs/` is accepted by the repository guard only with
+that digest-pair filename and only when its bytes exactly match a report
+regenerated from the two tracked summaries. Arbitrary Markdown, hand-edited
+reports, nested artifacts, and transcript-like files remain rejected.
+
+By default, reporting a rejected candidate succeeds so its evidence can be
+recorded. Add `--require-promotion` in an enforcement step to exit with status
+1 for `REJECT` or `INDETERMINATE`. Invalid or incomparable summaries exit with
+status 2.
+
 ## Nightly and on-demand runs
 
 `.github/workflows/agent-eval-nightly.yml` runs all 50 regression and capability
@@ -444,7 +504,8 @@ UV_CACHE_DIR=/tmp/issue-1426-uv-cache \
   infra/agent-image/test_broker_stub.py \
   infra/agent-image/test_graders.py \
   infra/agent-image/test_eval_runner.py \
-  infra/agent-image/test_eval_summary.py
+  infra/agent-image/test_eval_summary.py \
+  infra/agent-image/test_report.py
 ```
 
 The tests make no AWS, model, Docker, or external-network calls. Broker HTTP
