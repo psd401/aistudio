@@ -333,6 +333,68 @@ class CommittedArtifactGuardTests(unittest.TestCase):
                 json.dumps(value).encode("utf-8"),
             )
 
+    def assert_rejected(self, value: dict, pattern: str) -> None:
+        with self.assertRaisesRegex(summarize.EvalSummaryError, pattern):
+            summarize.validate_committed_summary(
+                Path(".eval-runs") / f"{IMAGE_DIGEST.replace(':', '-')}.json",
+                json.dumps(value).encode("utf-8"),
+            )
+
+    def test_transcript_under_an_unlisted_key_is_rejected(self):
+        for container, key in (
+            (("skills", "skill-a"), "notes"),
+            (("skills", "skill-a"), "grader_reason"),
+            (("tasks", "task-a"), "output"),
+            ((), "completion"),
+        ):
+            with self.subTest(key=key):
+                value = json.loads(self.safe_summary_bytes())
+                target = value
+                for step in container:
+                    target = target[step]
+                target[key] = "the model said something private"
+
+                self.assert_rejected(value, f"unexpected field.*{key}")
+
+    def test_differently_cased_transcript_key_is_rejected(self):
+        value = json.loads(self.safe_summary_bytes())
+        value["Prompt"] = "private"
+
+        self.assert_rejected(value, "unexpected field")
+
+    def test_secret_smuggled_beside_the_model_pricing_is_rejected(self):
+        value = json.loads(self.safe_summary_bytes())
+        value["model"]["api_key"] = "sk-not-a-real-key"
+
+        self.assert_rejected(value, "unexpected field")
+
+    def test_summary_missing_a_required_field_is_rejected(self):
+        value = json.loads(self.safe_summary_bytes())
+        del value["run"]["first_record_at"]
+
+        self.assert_rejected(value, "missing required field")
+
+    def test_summary_field_of_the_wrong_type_is_rejected(self):
+        value = json.loads(self.safe_summary_bytes())
+        value["overall"]["telemetry"]["caching_status"] = {"prompt": "private"}
+
+        self.assert_rejected(value, r"\$\.overall\.telemetry\.caching_status")
+
+    def test_transcript_smuggled_as_a_free_form_key_is_rejected(self):
+        value = json.loads(self.safe_summary_bytes())
+        failures = value["overall"]["telemetry"]["failures"]
+        failures["by_error_class"] = {"x" * 400: 1}
+
+        self.assert_rejected(value, "not a plain identifier")
+
+    def test_run_bounds_are_named_for_the_record_times_they_derive_from(self):
+        value = json.loads(self.safe_summary_bytes())
+
+        self.assertIn("first_record_at", value["run"])
+        self.assertIn("last_record_at", value["run"])
+        self.assertNotIn("started_at", value["run"])
+        self.assertNotIn("completed_at", value["run"])
+
     def test_filename_must_match_the_summarized_image_digest(self):
         with self.assertRaisesRegex(summarize.EvalSummaryError, "filename"):
             summarize.validate_committed_summary(

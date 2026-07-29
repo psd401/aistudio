@@ -54,10 +54,121 @@ TELEMETRY_INTEGER_FIELDS = (
     "latency_ms",
 )
 USD_QUANTUM = Decimal("0.000001")
+MAX_SUMMARY_KEY_LENGTH = 200
 
 
 class EvalSummaryError(RuntimeError):
     """Trial records could not be converted into a trustworthy summary."""
+
+
+class _MapOf:
+    """An object with free-form string keys whose values share one shape."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+
+class _ListOf:
+    """An array whose items share one shape."""
+
+    __slots__ = ("item",)
+
+    def __init__(self, item: object) -> None:
+        self.item = item
+
+
+class _Nullable:
+    """A field that may be null before it is bound for a committed summary."""
+
+    __slots__ = ("inner",)
+
+    def __init__(self, inner: object) -> None:
+        self.inner = inner
+
+
+_STRING = "string"
+_INTEGER = "integer"
+_NUMBER = "number"
+_BOOLEAN = "boolean"
+
+_DISTRIBUTION_SCHEMA = {
+    "total": _NUMBER,
+    "mean": _NUMBER,
+    "p50": _NUMBER,
+    "p95": _NUMBER,
+}
+_TELEMETRY_SCHEMA = {
+    "tokens": {field: _INTEGER for field in TOKEN_PRICE_KEYS},
+    "cost": {
+        "total_usd": _NUMBER,
+        "per_trial_usd": _NUMBER,
+        "per_task_usd": _NUMBER,
+    },
+    "duration_ms": _DISTRIBUTION_SCHEMA,
+    "latency_ms": _DISTRIBUTION_SCHEMA,
+    "model_call_count": _DISTRIBUTION_SCHEMA,
+    "nudged": {"trials": _INTEGER, "rate": _NUMBER},
+    "failures": {
+        "trials": _INTEGER,
+        "rate": _NUMBER,
+        "by_error_class": _MapOf(_INTEGER),
+        "graded_trials": _INTEGER,
+        "graded_rate": _NUMBER,
+        "by_failed_grader": _MapOf(_INTEGER),
+    },
+    "caching_status": _STRING,
+}
+_SCOPE_SCHEMA = {
+    "task_count": _INTEGER,
+    "trial_count": _INTEGER,
+    "pass^3": {
+        "passed_tasks": _INTEGER,
+        "total_tasks": _INTEGER,
+        "rate": _NUMBER,
+    },
+    "telemetry": _TELEMETRY_SCHEMA,
+}
+# The complete, closed shape of a committed run summary. Anything not named
+# here — including a differently cased or newly invented key — is rejected, so
+# transcript text cannot ride along under a name the denylist never anticipated.
+SUMMARY_SCHEMA = {
+    "schema_version": _INTEGER,
+    "summary_kind": _STRING,
+    "image": _STRING,
+    "image_digest": _STRING,
+    # Null only for uncommitted, ad-hoc runs; validate_committed_summary()
+    # separately requires a full Git object ID before an artifact may land.
+    "source_commit": _Nullable(_STRING),
+    "run": {
+        "first_record_at": _STRING,
+        "last_record_at": _STRING,
+        "task_count": _INTEGER,
+        "trial_count": _INTEGER,
+        "trials_per_task": _INTEGER,
+    },
+    "model": {
+        "primary": _STRING,
+        "provider": _STRING,
+        "model_id": _STRING,
+        "pricing_usd_per_million_tokens": {
+            price_key: _NUMBER for price_key in TOKEN_PRICE_KEYS.values()
+        },
+    },
+    "overall": _SCOPE_SCHEMA,
+    "suites": _MapOf(_SCOPE_SCHEMA),
+    "skills": _MapOf({**_SCOPE_SCHEMA, "task_ids": _ListOf(_STRING)}),
+    "tasks": _MapOf(
+        {
+            "skill": _STRING,
+            "suite": _STRING,
+            "trials": _INTEGER,
+            "passed_trials": _INTEGER,
+            "pass^3": _BOOLEAN,
+        }
+    ),
+}
 
 
 def _mapping(value: object, description: str) -> Mapping[str, object]:
@@ -489,8 +600,12 @@ def summarize_records(
         "image_digest": digest,
         "source_commit": source_commit,
         "run": {
-            "started_at": min(recorded_times).isoformat(),
-            "completed_at": max(recorded_times).isoformat(),
+            # Both bounds come from `recorded_at`, which runner.py stamps only
+            # after a trial has been graded — so these are the first and last
+            # *completion* times, not container start or run end. Named for what
+            # they are so elapsed-time math is not silently wrong.
+            "first_record_at": min(recorded_times).isoformat(),
+            "last_record_at": max(recorded_times).isoformat(),
             "task_count": len(task_summaries),
             "trial_count": len(records),
             "trials_per_task": 3,
@@ -515,6 +630,7 @@ def summarize_records(
         "tasks": task_summaries,
     }
     _assert_no_transcript_fields(summary)
+    _assert_summary_schema(summary, SUMMARY_SCHEMA)
     return summary
 
 
@@ -529,6 +645,68 @@ def _assert_no_transcript_fields(value: object, path: str = "$") -> None:
     elif isinstance(value, list):
         for index, child in enumerate(value):
             _assert_no_transcript_fields(child, f"{path}[{index}]")
+
+
+def _assert_summary_key(key: object, path: str) -> str:
+    if not isinstance(key, str) or not key:
+        raise EvalSummaryError(f"summary {path} keys must be non-empty strings")
+    if len(key) > MAX_SUMMARY_KEY_LENGTH or key.strip() != key or "\n" in key:
+        raise EvalSummaryError(f"summary {path}.{key[:40]!r} is not a plain identifier")
+    return key
+
+
+def _assert_summary_scalar(value: object, spec: str, path: str) -> None:
+    if spec == _BOOLEAN:
+        if not isinstance(value, bool):
+            raise EvalSummaryError(f"summary {path} must be a boolean")
+        return
+    if isinstance(value, bool):
+        raise EvalSummaryError(f"summary {path} must not be a boolean")
+    if spec == _STRING:
+        _nonempty_string(value, f"summary {path}")
+        return
+    if spec == _INTEGER:
+        _nonnegative_integer(value, f"summary {path}")
+        return
+    _finite_decimal(value, f"summary {path}")
+
+
+def _assert_summary_schema(value: object, spec: object, path: str = "$") -> None:
+    """Reject anything the committed summary schema does not explicitly allow."""
+
+    if isinstance(spec, _Nullable):
+        if value is None:
+            return
+        _assert_summary_schema(value, spec.inner, path)
+        return
+    if isinstance(spec, _MapOf):
+        mapping = _mapping(value, f"summary {path}")
+        for key, child in mapping.items():
+            _assert_summary_key(key, path)
+            _assert_summary_schema(child, spec.value, f"{path}.{key}")
+        return
+    if isinstance(spec, _ListOf):
+        if not isinstance(value, list):
+            raise EvalSummaryError(f"summary {path} must be an array")
+        for index, child in enumerate(value):
+            _assert_summary_schema(child, spec.item, f"{path}[{index}]")
+        return
+    if isinstance(spec, Mapping):
+        mapping = _mapping(value, f"summary {path}")
+        unexpected = sorted(str(key) for key in set(mapping) - set(spec))
+        if unexpected:
+            raise EvalSummaryError(
+                f"summary {path} contains unexpected field(s): {', '.join(unexpected)}"
+            )
+        missing = sorted(set(spec) - set(mapping))
+        if missing:
+            raise EvalSummaryError(
+                f"summary {path} is missing required field(s): {', '.join(missing)}"
+            )
+        for key, child_spec in spec.items():
+            _assert_summary_schema(mapping[key], child_spec, f"{path}.{key}")
+        return
+    _assert_summary_scalar(value, spec, path)
 
 
 def validate_committed_summary(path: Path, content: bytes) -> None:
@@ -563,6 +741,7 @@ def validate_committed_summary(path: Path, content: bytes) -> None:
     if not isinstance(source_commit, str) or GIT_OID_RE.fullmatch(source_commit) is None:
         raise EvalSummaryError(f"{path} source_commit must be a full Git object ID")
     _assert_no_transcript_fields(root)
+    _assert_summary_schema(root, SUMMARY_SCHEMA)
 
 
 def check_repository(repo_root: Path) -> list[Path]:

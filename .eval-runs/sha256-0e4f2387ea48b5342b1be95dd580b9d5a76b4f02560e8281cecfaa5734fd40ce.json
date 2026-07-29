@@ -71,8 +71,8 @@
     "trial_count": 150
   },
   "run": {
-    "completed_at": "2026-07-29T15:14:25.597252+00:00",
-    "started_at": "2026-07-29T14:30:18.577947+00:00",
+    "first_record_at": "2026-07-29T14:30:18.577947+00:00",
+    "last_record_at": "2026-07-29T15:14:25.597252+00:00",
     "task_count": 50,
     "trial_count": 150,
     "trials_per_task": 3
