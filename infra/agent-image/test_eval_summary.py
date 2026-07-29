@@ -655,6 +655,20 @@ class CommittedArtifactGuardTests(unittest.TestCase):
 
 
 class EvalAutomationContractTests(unittest.TestCase):
+    def test_image_context_excludes_local_environment_files(self):
+        dockerignore = (AGENT_IMAGE_DIR / ".dockerignore").read_text(
+            encoding="utf-8"
+        )
+
+        patterns = {
+            line.strip()
+            for line in dockerignore.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        self.assertTrue(
+            {".env", ".env.*", "**/.env", "**/.env.*"}.issubset(patterns)
+        )
+
     def test_ci_creates_model_uid_before_agent_image_python_suites(self):
         workflow = (
             AGENT_IMAGE_DIR.parent.parent / ".github" / "workflows" / "ci.yml"
