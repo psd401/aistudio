@@ -76,6 +76,7 @@ describe("RESOURCE_SERVER_SCOPES", () => {
         "content:read",
         "content:publish_internal",
         "platform:read",
+        "repositories:write",
       ])
     )
     expect(RESOURCE_SERVER_SCOPES).not.toEqual(
