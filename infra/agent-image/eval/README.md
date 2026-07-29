@@ -154,6 +154,13 @@ tools while the container starts. Run evals only on a trusted workstation. The
 runner removes its containers on completion and logs a warning if Docker cannot
 remove one.
 
+OpenClaw 2026.7.1 deliberately removes inherited AWS access-key and container-
+credential variables from model-launched `exec` subprocesses. Direct-AWS skills
+therefore use the image's root-owned fixed-operation relay: the relay inherits
+the candidate container's credential chain, while the skill process receives
+only the requested Polly audio or HyperFrames result and never reusable
+credential material. The TTS and HyperFrames L2 tasks cover this exact boundary.
+
 Every trial gets:
 
 - a fresh UUID in `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`;
@@ -317,10 +324,11 @@ role able to read the deployed runtime and ECR image, pull that image, discover
 the dev broker, mint signed probe authority, and perform the listed L2 calls.
 The role must permit a three-hour session, matching the workflow's requested
 duration.
-Until #1440 and #1442 are fixed, the retained Summarize and TTS canaries are
-expected to fail and should be treated as known defect signals, not workflow
-misconfiguration. HyperFrames exercises the same #1442 direct-AWS credential
-boundary and is omitted from the weekly subset to avoid a duplicate alert.
+Until #1440 is fixed, the retained Summarize canary is expected to fail and
+should be treated as a known defect signal, not workflow misconfiguration. TTS
+now gates the fixed-operation credential boundary from #1442. HyperFrames
+exercises the same boundary and is omitted from the weekly subset to avoid a
+duplicate live side effect.
 The workflow never uploads or commits JSONL transcripts. It prints only task
 IDs and failure reasons, then deletes the owner-only run file even on failure.
 

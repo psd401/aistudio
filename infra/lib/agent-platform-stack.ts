@@ -1499,13 +1499,15 @@ export class AgentPlatformStack extends cdk.Stack {
       ],
     }));
 
-    // Amazon Polly text-to-speech (psd-tts skill). It authenticates via this
-    // execution role's standard SigV4 credential chain. The
-    // skill uses only the synchronous SynthesizeSpeech API (it chunks long text
-    // and concatenates the MP3s), so we grant exactly that action and nothing
-    // else. SynthesizeSpeech does not support resource-level permissions, so the
-    // resource must be '*'. Synthesized MP3s are published through the
-    // owner-bound workspace storage broker; this role has no S3 permissions.
+    // Amazon Polly text-to-speech (psd-tts skill). The root-owned loopback
+    // relay authenticates via this execution role's standard SigV4 credential
+    // chain; OpenClaw's model-facing exec subprocess never receives reusable
+    // credentials. The fixed relay uses only the synchronous SynthesizeSpeech
+    // API (the skill chunks long text and concatenates the MP3s), so we grant
+    // exactly that action and nothing else. SynthesizeSpeech does not support
+    // resource-level permissions, so the resource must be '*'. Synthesized
+    // MP3s are published through the owner-bound workspace storage broker;
+    // this role has no S3 permissions.
     resources.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'PollyTextToSpeech',
       effect: iam.Effect.ALLOW,
@@ -1513,10 +1515,12 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: ['*'],
     }));
 
-    // HyperFrames render invocation (psd-hyperframes skill, #1175). Scoped to
-    // the single render function ARN. The skill invokes it synchronously using
-    // these execution-role credentials; the render Lambda owns publication of
-    // its output, so the model-facing role needs no S3 permissions.
+    // HyperFrames render invocation (psd-hyperframes skill, #1175/#1442).
+    // Scoped to the single render function ARN. The root-owned loopback relay
+    // invokes it synchronously using these execution-role credentials and
+    // never returns credential material or accepts a caller-selected target;
+    // the render Lambda owns publication of its output, so the model-facing
+    // role needs no S3 permissions.
     resources.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'HyperframesRenderInvoke',
       effect: iam.Effect.ALLOW,
@@ -1850,9 +1854,10 @@ export class AgentPlatformStack extends cdk.Stack {
       // components (this.region is already their hardcoded default).
       AWS_REGION: this.region,
       AWS_DEFAULT_REGION: this.region,
-      // Render function the psd-hyperframes skill invokes (#1175). The skill
-      // reads this to target the InvokeFunction call; the grant is the
-      // HyperframesRenderInvoke statement on the AgentCore execution role.
+      // Render function the root-owned direct-AWS relay invokes for the
+      // psd-hyperframes skill (#1175/#1442). The model-facing request cannot
+      // select a function; the grant is the HyperframesRenderInvoke statement
+      // on the AgentCore execution role.
       HYPERFRAMES_RENDER_FUNCTION: resources.hyperframesRenderFunction.function.functionName,
       GUARDRAIL_ARN: props.guardrailArn,
       SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:${resources.skillBuilderFunctionName}`,

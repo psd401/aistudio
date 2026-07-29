@@ -15,6 +15,9 @@ touch aiohttp, so we stub it in sys.modules before import — the test exercises
 the parsing logic, not the HTTP server.
 """
 
+import base64
+import json
+import os
 import sys
 import types
 import unittest
@@ -48,13 +51,33 @@ if "aiohttp" not in sys.modules:
     _aiohttp.ClientTimeout = object
     sys.modules["aiohttp"] = _aiohttp
 
+sys.path.insert(0, os.path.dirname(__file__))
+
 import asyncio  # noqa: E402
 
 import mantle_proxy  # noqa: E402
 from mantle_proxy import (  # noqa: E402
     AgentBrokerResponseTooLarge,
+    FINALIZATION_DRAIN_TIMEOUT_SECONDS,
+    HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS,
+    HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES,
+    HYPERFRAMES_LAMBDA_CONNECT_TIMEOUT_SECONDS,
+    HYPERFRAMES_LAMBDA_READ_TIMEOUT_SECONDS,
+    HYPERFRAMES_OWNER_BINDING_RESERVE_BYTES,
+    HYPERFRAMES_RELAY_TIMEOUT_SECONDS,
+    POLLY_TEXT_MAX_CHARS,
+    _bind_hyperframes_owner,
+    _decode_invocation_owner,
+    _invoke_hyperframes,
+    _new_lambda_client,
+    _owner_bound_hyperframes_payload,
+    _resolve_invocation_owner,
     _read_bounded_agent_broker_response,
+    _read_signed_identity_response,
     _resolve_agent_broker_route,
+    _synthesize_polly,
+    _validate_hyperframes_payload,
+    _validate_polly_payload,
     _workspace_flush_request_allowed,
     _extract_usage,
     _is_anthropic_model,
@@ -69,6 +92,338 @@ from mantle_proxy import (  # noqa: E402
     _parse_anthropic_stream,
     _parse_anthropic_response,
 )
+
+
+class _FakeAwsStream:
+    def __init__(self, body):
+        self._body = body
+        self._offset = 0
+        self.closed = False
+
+    def read(self, amount):
+        chunk = self._body[self._offset : self._offset + amount]
+        self._offset += len(chunk)
+        return chunk
+
+    def close(self):
+        self.closed = True
+
+
+class TestDirectAwsSkillRelay(unittest.TestCase):
+    def test_polly_relay_allows_only_one_bounded_synthesis_operation(self):
+        payload = _validate_polly_payload({
+            "text": "EVAL 1426 synthetic audio canary",
+            "voice": "Ruth",
+            "engine": "generative",
+        })
+        stream = _FakeAwsStream(b"synthetic-mp3")
+        client = mock.Mock()
+        client.synthesize_speech.return_value = {"AudioStream": stream}
+
+        with mock.patch.object(
+            mantle_proxy,
+            "_new_polly_client",
+            return_value=client,
+        ):
+            audio = _synthesize_polly(payload)
+
+        self.assertEqual(audio, b"synthetic-mp3")
+        self.assertTrue(stream.closed)
+        client.synthesize_speech.assert_called_once_with(
+            Text="EVAL 1426 synthetic audio canary",
+            OutputFormat="mp3",
+            VoiceId="Ruth",
+            Engine="generative",
+        )
+
+    def test_polly_relay_rejects_extra_fields_and_oversize_text(self):
+        with self.assertRaises(ValueError):
+            _validate_polly_payload({
+                "text": "canary",
+                "voice": "Ruth",
+                "engine": "generative",
+                "returnCredentials": True,
+            })
+        with self.assertRaises(ValueError):
+            _validate_polly_payload({
+                "text": "x" * (POLLY_TEXT_MAX_CHARS + 1),
+                "voice": "Ruth",
+                "engine": "generative",
+            })
+
+    def test_hyperframes_relay_chooses_the_function_outside_the_request(self):
+        payload = _validate_hyperframes_payload({
+            "html": '<div data-composition-id="eval">EVAL 1426</div>',
+            "durationSeconds": 1,
+            "fps": 20,
+            "width": 640,
+            "height": 360,
+        })
+        payload = _bind_hyperframes_owner(
+            payload,
+            "owner@psd401.net",
+        )
+        result_body = json.dumps({
+            "status": "ok",
+            "url": "https://example.invalid/synthetic.mp4",
+        }).encode("utf-8")
+        stream = _FakeAwsStream(result_body)
+        client = mock.Mock()
+        client.invoke.return_value = {"Payload": stream}
+
+        with mock.patch.dict(
+            mantle_proxy.os.environ,
+            {"HYPERFRAMES_RENDER_FUNCTION": "psd-hyperframes-render-dev"},
+            clear=False,
+        ), mock.patch.object(
+            mantle_proxy,
+            "_new_lambda_client",
+            return_value=client,
+        ):
+            result = _invoke_hyperframes(payload)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(stream.closed)
+        call = client.invoke.call_args.kwargs
+        self.assertEqual(call["FunctionName"], "psd-hyperframes-render-dev")
+        self.assertEqual(call["InvocationType"], "RequestResponse")
+        invoked_payload = json.loads(call["Payload"])
+        self.assertNotIn("FunctionName", invoked_payload)
+        self.assertEqual(invoked_payload["userEmail"], "owner@psd401.net")
+
+    def test_hyperframes_relay_rejects_caller_selected_function_or_owner(self):
+        with self.assertRaises(ValueError):
+            _validate_hyperframes_payload({
+                "html": '<div data-composition-id="eval">EVAL 1426</div>',
+                "durationSeconds": 1,
+                "fps": 20,
+                "width": 640,
+                "height": 360,
+                "functionName": "attacker-selected-function",
+            })
+        with self.assertRaises(ValueError):
+            _validate_hyperframes_payload({
+                "html": '<div data-composition-id="eval">EVAL 1426</div>',
+                "durationSeconds": 1,
+                "fps": 20,
+                "width": 640,
+                "height": 360,
+                "userEmail": "victim@psd401.net",
+            })
+
+    def test_hyperframes_owner_is_injected_only_after_trusted_resolution(self):
+        payload = _validate_hyperframes_payload({
+            "html": '<div data-composition-id="eval">EVAL 1426</div>',
+            "durationSeconds": 1,
+            "fps": 20,
+            "width": 640,
+            "height": 360,
+        })
+
+        owner_bound = _bind_hyperframes_owner(payload, "owner@psd401.net")
+
+        self.assertNotIn("userEmail", payload)
+        self.assertEqual(owner_bound["userEmail"], "owner@psd401.net")
+        with self.assertRaises(RuntimeError):
+            _bind_hyperframes_owner(payload, "Victim@psd401.net")
+
+    def test_hyperframes_serialization_enforces_lambda_invoke_limit(self):
+        with self.assertRaisesRegex(ValueError, "serialized payload"):
+            _validate_hyperframes_payload({
+                # NUL is one raw UTF-8 byte but six bytes after JSON escaping.
+                # This remains under the 4 MiB composition cap while exceeding
+                # 6 MiB once serialized for Lambda.
+                "html": "\0" * (
+                    HYPERFRAMES_INVOKE_PAYLOAD_MAX_BYTES // 6 + 1
+                ),
+                "durationSeconds": 1,
+                "fps": 20,
+                "width": 640,
+                "height": 360,
+            })
+
+    def test_hyperframes_lambda_client_matches_the_turn_budget_without_retries(self):
+        config_instance = object()
+        config_constructor = mock.Mock(return_value=config_instance)
+        client_constructor = mock.Mock(return_value=object())
+        boto3_module = types.ModuleType("boto3")
+        boto3_module.client = client_constructor
+        botocore_module = types.ModuleType("botocore")
+        config_module = types.ModuleType("botocore.config")
+        config_module.Config = config_constructor
+        botocore_module.config = config_module
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "boto3": boto3_module,
+                "botocore": botocore_module,
+                "botocore.config": config_module,
+            },
+        ):
+            result = _new_lambda_client()
+
+        self.assertIs(result, client_constructor.return_value)
+        config_constructor.assert_called_once_with(
+            connect_timeout=HYPERFRAMES_LAMBDA_CONNECT_TIMEOUT_SECONDS,
+            read_timeout=HYPERFRAMES_LAMBDA_READ_TIMEOUT_SECONDS,
+            retries={"total_max_attempts": 1, "mode": "standard"},
+        )
+        client_constructor.assert_called_once_with(
+            "lambda",
+            region_name=mantle_proxy.AWS_REGION,
+            config=config_instance,
+        )
+
+    def test_finalization_drain_outlives_the_longest_relay_request(self):
+        self.assertGreater(
+            HYPERFRAMES_RELAY_TIMEOUT_SECONDS,
+            (
+                HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS
+                + HYPERFRAMES_LAMBDA_CONNECT_TIMEOUT_SECONDS
+                + HYPERFRAMES_LAMBDA_READ_TIMEOUT_SECONDS
+            ),
+        )
+        self.assertGreater(
+            FINALIZATION_DRAIN_TIMEOUT_SECONDS,
+            HYPERFRAMES_RELAY_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(HYPERFRAMES_OWNER_BINDING_RESERVE_BYTES, 512)
+
+
+class TestHyperframesOwnerResolution(unittest.IsolatedAsyncioTestCase):
+    async def test_owner_resolution_has_one_total_deadline(self):
+        async def never_returns(*_args, **_kwargs):
+            await asyncio.Event().wait()
+
+        with mock.patch.object(
+            mantle_proxy,
+            "HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS",
+            0.01,
+        ), mock.patch.object(
+            mantle_proxy,
+            "_post_signed_identity_request",
+            new=mock.AsyncMock(side_effect=never_returns),
+        ) as post_identity:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "identity verification timed out",
+            ):
+                await _resolve_invocation_owner()
+
+        post_identity.assert_awaited_once_with(
+            mantle_proxy.INVOCATION_IDENTITY_ROUTE,
+            skip_not_found_body=True,
+        )
+
+    async def test_uses_only_the_web_verified_owner(self):
+        payload = {
+            "html": '<div data-composition-id="eval">EVAL 1426</div>',
+            "durationSeconds": 1,
+            "fps": 20,
+            "width": 640,
+            "height": 360,
+        }
+        with mock.patch.object(
+            mantle_proxy,
+            "_resolve_invocation_owner",
+            new=mock.AsyncMock(return_value="owner@psd401.net"),
+        ) as resolve_owner:
+            owner_bound = await _owner_bound_hyperframes_payload(payload)
+
+        resolve_owner.assert_awaited_once_with()
+        self.assertEqual(owner_bound["userEmail"], "owner@psd401.net")
+        self.assertNotIn("userEmail", payload)
+
+    async def test_prefers_owner_returned_by_the_dedicated_verified_route(self):
+        with mock.patch.object(
+            mantle_proxy,
+            "_post_signed_identity_request",
+            new=mock.AsyncMock(
+                return_value=(
+                    200,
+                    b'{"ownerEmail":"owner@psd401.net"}',
+                )
+            ),
+        ) as post_identity, mock.patch.object(
+            mantle_proxy,
+            "_read_authority",
+        ) as read_authority:
+            owner = await _resolve_invocation_owner()
+
+        self.assertEqual(owner, "owner@psd401.net")
+        post_identity.assert_awaited_once_with(
+            mantle_proxy.INVOCATION_IDENTITY_ROUTE,
+            skip_not_found_body=True,
+        )
+        read_authority.assert_not_called()
+
+    async def test_old_web_tier_probe_authenticates_before_decoding_owner(self):
+        claims = {
+            "version": 1,
+            "audience": "psd-agent-internal",
+            "ownerEmail": "owner@psd401.net",
+        }
+        encoded = base64.urlsafe_b64encode(
+            json.dumps(claims).encode("utf-8")
+        ).rstrip(b"=").decode("ascii")
+        context = f"v1.{encoded}.{'s' * 43}"
+        with mock.patch.object(
+            mantle_proxy,
+            "_post_signed_identity_request",
+            new=mock.AsyncMock(
+                side_effect=[
+                    (404, b'{"error":"Not found"}'),
+                    (404, b'{"error":"Unsupported model endpoint"}'),
+                ]
+            ),
+        ) as post_identity, mock.patch.object(
+            mantle_proxy,
+            "_read_authority",
+            return_value=(context, b"k" * 32),
+        ):
+            owner = await _resolve_invocation_owner()
+
+        self.assertEqual(owner, "owner@psd401.net")
+        self.assertEqual(
+            [
+                (call.args[0], call.kwargs)
+                for call in post_identity.await_args_list
+            ],
+            [
+                (
+                    mantle_proxy.INVOCATION_IDENTITY_ROUTE,
+                    {"skip_not_found_body": True},
+                ),
+                (mantle_proxy.INVOCATION_AUTHORITY_PROBE_ROUTE, {}),
+            ],
+        )
+
+    async def test_old_web_tier_probe_fails_closed_on_unverified_context(self):
+        with mock.patch.object(
+            mantle_proxy,
+            "_post_signed_identity_request",
+            new=mock.AsyncMock(
+                side_effect=[
+                    (404, b'{"error":"Not found"}'),
+                    (403, b'{"error":"Forbidden"}'),
+                ]
+            ),
+        ), mock.patch.object(
+            mantle_proxy,
+            "_read_authority",
+        ) as read_authority:
+            with self.assertRaises(RuntimeError):
+                await _resolve_invocation_owner()
+
+        read_authority.assert_not_called()
+
+    def test_decoded_owner_claim_requires_the_expected_context_shape(self):
+        encoded = base64.urlsafe_b64encode(
+            b'{"version":1,"audience":"other","ownerEmail":"owner@psd401.net"}'
+        ).rstrip(b"=").decode("ascii")
+        with self.assertRaises(RuntimeError):
+            _decode_invocation_owner(f"v1.{encoded}.{'s' * 43}")
 
 
 class TestAgentBrokerRoute(unittest.TestCase):
@@ -237,7 +592,8 @@ class _FakeResponseContent:
 
 
 class _FakeBrokerResponse:
-    def __init__(self, chunks, content_length=None):
+    def __init__(self, chunks, content_length=None, status=200):
+        self.status = status
         self.headers = {}
         if content_length is not None:
             self.headers["Content-Length"] = str(content_length)
@@ -249,6 +605,37 @@ class _FakeBrokerResponse:
 
 
 class TestBoundedAgentBrokerResponse(unittest.TestCase):
+    def test_skips_large_framework_404_body_only_when_caller_does_not_need_it(self):
+        response = _FakeBrokerResponse(
+            [b"not-read"],
+            content_length=16 * 1024,
+            status=404,
+        )
+        status, body = asyncio.run(
+            _read_signed_identity_response(
+                response,
+                skip_not_found_body=True,
+            )
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(body, b"")
+        self.assertTrue(response.closed)
+
+    def test_still_rejects_an_oversize_verified_probe_response(self):
+        response = _FakeBrokerResponse(
+            [b"not-read"],
+            content_length=16 * 1024,
+            status=404,
+        )
+        with self.assertRaises(AgentBrokerResponseTooLarge):
+            asyncio.run(
+                _read_signed_identity_response(
+                    response,
+                    skip_not_found_body=False,
+                )
+            )
+        self.assertTrue(response.closed)
+
     def test_accepts_response_at_limit(self):
         response = _FakeBrokerResponse([b"ab", b"cd"], content_length=4)
         body = asyncio.run(

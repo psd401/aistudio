@@ -355,6 +355,37 @@ Then update the `FROM` digest and the header block in `infra/agent-image/Dockerf
 and **always** finish with the Morning Brief smoke test (below) — a trivial
 "respond OK" prompt masks session-completion regressions.
 
+### Direct-AWS skill credential boundary
+
+The pinned OpenClaw release sanitizes the environment for every model-launched
+`exec` subprocess. In particular, it removes inherited `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and the ECS/AgentCore container-
+credential URI variables. This is intentional: forwarding those values would
+let arbitrary model-authored commands print or reuse the execution-role
+credentials.
+
+`psd-tts` and `psd-hyperframes` therefore do not instantiate AWS SDK clients in
+the model-facing subprocess. They call two fixed endpoints on the root-owned
+loopback relay in `mantle_proxy.py`. The relay inherits the AgentCore execution-
+role credential chain, validates bounded operation-specific payloads, and can
+only call Polly `SynthesizeSpeech` or the configured HyperFrames Lambda. It
+returns synthesized audio or the Lambda result, never credential values or a
+caller-selected AWS target. HyperFrames also rejects a model-supplied owner:
+the relay resolves `ownerEmail` through the signed
+`/api/agent/invocation-identity` web boundary and injects it only after
+verification. During a staggered rollout to an older web tier, it authenticates
+the installed token and proof through the existing model broker's fixed
+unsupported-path response before decoding the owner claim; any 403 or
+unexpected response fails closed. Owner resolution has one 30-second total
+budget across the dedicated and compatibility routes. The model-facing render
+client then allows 825 seconds for owner resolution, Lambda connection, its
+780-second response budget, and transport margin. Finalization gives active
+privileged requests a matching 830-second drain ceiling while retaining a
+separate 120-second workspace-flush budget, so a proxy restart cannot orphan
+an accepted Lambda render. Keep future direct-AWS skills behind the same kind
+of fixed-operation boundary; do not add AWS credential keys to OpenClaw's exec
+allowlist.
+
 ## Rich Chat output — cards, charts, button callbacks
 
 Phase 1 of native Chat interactivity (#TBD) added two skills and one shared

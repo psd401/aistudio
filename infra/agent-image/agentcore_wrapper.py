@@ -4,7 +4,7 @@ contract.
 
 Flow on container start:
   1. Log BUILD_MARKER so CloudWatch proves which image is running
-  2. Start a credential-isolating local model proxy
+  2. Start a credential-isolating local model/direct-AWS relay
   3. Start the OpenClaw gateway pointed only at that loopback proxy
   4. Register the agent_invocation entrypoint with BedrockAgentCoreApp
   5. Route incoming payloads through the harness adapter via WebSocket
@@ -88,6 +88,11 @@ _INVOCATION_CONTEXT_RE = re.compile(
 _REQUEST_PROOF_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _invocation_lock = asyncio.Lock()
 FINAL_WORKSPACE_FLUSH_SECONDS = 120
+# HyperFrames may legitimately spend 30s resolving owner authority, 10s
+# connecting to Lambda, 780s waiting for its response, and 5s on local
+# transport. Finalization must outlive that 825s relay ceiling instead of
+# restarting the proxy and orphaning an accepted Lambda render.
+PROXY_FINALIZATION_DRAIN_SECONDS = 830
 
 
 def _install_invocation_authority(token, request_proof_key) -> bool:
@@ -175,7 +180,7 @@ def _set_proxy_finalization(action: str, token: str) -> None:
         method="POST",
         headers={"X-Agent-Workspace-Flush": token},
     )
-    timeout = FINAL_WORKSPACE_FLUSH_SECONDS + 5 if action == "begin" else 5
+    timeout = PROXY_FINALIZATION_DRAIN_SECONDS + 5 if action == "begin" else 5
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             if response.status != 200:
@@ -345,9 +350,10 @@ def _serialize_invocations(function):
 
 def start_mantle_proxy() -> None:
     """
-    Launch the Mantle logging proxy on 127.0.0.1:18791 and block until
-    /health returns 200. If it can't come up, exit — OpenClaw's openclaw.json
-    points its baseUrl at the proxy, so no proxy means no model calls.
+    Launch the root-owned model/direct-AWS relay on 127.0.0.1:18791 and block
+    until /health returns 200. If it can't come up, exit — OpenClaw's
+    openclaw.json points its baseUrl at the relay, so no relay means no model
+    calls or direct-AWS skills.
     """
     global _mantle_proxy_process
     import urllib.request
