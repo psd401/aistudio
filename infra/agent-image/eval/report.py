@@ -20,6 +20,12 @@ import summarize
 
 
 MAX_COST_INCREASE = Decimal("0.20")
+TOKEN_PRICE_KEYS = {
+    "input_tokens": "input",
+    "output_tokens": "output",
+    "cache_read_input_tokens": "cacheRead",
+    "cache_write_input_tokens": "cacheWrite",
+}
 SAFE_REPORT_NAME_RE = re.compile(
     r"^comparison-(sha256-[0-9a-f]{64})-vs-(sha256-[0-9a-f]{64})\.md$"
 )
@@ -264,11 +270,40 @@ def _scope_cost_per_task(
     label: str,
 ) -> Decimal:
     telemetry = _telemetry(summary, label)
-    cost = _mapping(telemetry.get("cost"), f"{label}.overall.telemetry.cost")
-    return _decimal(
-        cost.get("per_task_usd"),
-        f"{label}.overall.telemetry.cost.per_task_usd",
+    tokens = _mapping(
+        telemetry.get("tokens"),
+        f"{label}.overall.telemetry.tokens",
     )
+    model = _mapping(summary.get("model"), f"{label}.model")
+    pricing = _mapping(
+        model.get("pricing_usd_per_million_tokens"),
+        f"{label}.model.pricing_usd_per_million_tokens",
+    )
+    total_cost = sum(
+        Decimal(
+            _integer(
+                tokens.get(token_field),
+                f"{label}.overall.telemetry.tokens.{token_field}",
+            )
+        )
+        * _decimal(
+            pricing.get(price_field),
+            (
+                f"{label}.model.pricing_usd_per_million_tokens."
+                f"{price_field}"
+            ),
+        )
+        / Decimal(1_000_000)
+        for token_field, price_field in TOKEN_PRICE_KEYS.items()
+    )
+    overall = _mapping(summary.get("overall"), f"{label}.overall")
+    task_count = _integer(
+        overall.get("task_count"),
+        f"{label}.overall.task_count",
+    )
+    if task_count <= 0:
+        raise EvalReportError(f"{label}.overall.task_count must be positive")
+    return total_cost / Decimal(task_count)
 
 
 def _percent_change(baseline: Decimal, candidate: Decimal) -> Decimal | None:

@@ -25,13 +25,13 @@ import summarize  # noqa: E402
 TaskSpecs = dict[str, tuple[str, str, int]]
 
 
-def pricing() -> dict[str, object]:
+def pricing(*, input_price: Decimal = Decimal("1")) -> dict[str, object]:
     return {
         "primary": "amazon-bedrock/synthetic-model",
         "provider": "amazon-bedrock",
         "model_id": "synthetic-model",
         "pricing_usd_per_million_tokens": {
-            "input": Decimal("1"),
+            "input": input_price,
             "output": Decimal("0"),
             "cacheRead": Decimal("0"),
             "cacheWrite": Decimal("0"),
@@ -47,6 +47,7 @@ def build_summary(
     cache_reads: int = 100,
     duration_ms: int = 1000,
     model_calls: int = 2,
+    input_price: Decimal = Decimal("1"),
     nudged_tasks: frozenset[str] = frozenset(),
     runtime_failures: dict[str, str] | None = None,
 ) -> dict[str, object]:
@@ -103,7 +104,7 @@ def build_summary(
             )
     return summarize.summarize_records(
         records,
-        pricing(),
+        pricing(input_price=input_price),
         expected_image=image,
         source_commit="c" * 40,
         source_commit_provenance="image-label",
@@ -218,6 +219,41 @@ class PromotionRuleTests(unittest.TestCase):
         self.assertTrue(clause(comparison, "a").passed)
         self.assertTrue(clause(comparison, "b").passed)
         self.assertFalse(clause(comparison, "c").passed)
+        self.assertEqual(comparison.verdict, "REJECT")
+
+    def test_cost_clause_uses_unrounded_tokens_and_prices(self):
+        baseline = build_summary(
+            {
+                "reg-a": ("skill-a", "regression", 3),
+                "cap-a": ("skill-a", "capability", 2),
+            },
+            digest_character="a",
+            input_tokens=1,
+            input_price=Decimal("0.05"),
+        )
+        candidate = build_summary(
+            {
+                "reg-a": ("skill-a", "regression", 3),
+                "cap-a": ("skill-a", "capability", 3),
+            },
+            digest_character="b",
+            input_tokens=3,
+            input_price=Decimal("0.05"),
+        )
+
+        self.assertEqual(
+            baseline["overall"]["telemetry"]["cost"]["per_task_usd"],
+            0.0,
+        )
+        self.assertEqual(
+            candidate["overall"]["telemetry"]["cost"]["per_task_usd"],
+            0.0,
+        )
+
+        comparison = eval_report.compare_summaries(baseline, candidate)
+
+        self.assertFalse(clause(comparison, "c").passed)
+        self.assertIn("200.00%", clause(comparison, "c").detail)
         self.assertEqual(comparison.verdict, "REJECT")
 
     def test_caching_mismatch_declines_cost_clause(self):
