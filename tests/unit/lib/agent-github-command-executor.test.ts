@@ -86,6 +86,18 @@ function defineGitHubCommandBoundarySuite1Part1() {
     expect(env.GH_PROMPT_DISABLED).toBe("1")
   })
 
+  it("makes the ECS temp mount writable before dropping application privileges", () => {
+    const entrypoint = validatedFs.readFileSync(
+      join(process.cwd(), "entrypoint.sh"),
+      "utf8"
+    )
+    const prepareTmp = entrypoint.indexOf("if ! chmod 1777 /tmp; then")
+    const dropPrivileges = entrypoint.indexOf('exec su-exec nextjs "$@"')
+
+    expect(prepareTmp).toBeGreaterThan(-1)
+    expect(dropPrivileges).toBeGreaterThan(prepareTmp)
+  })
+
   it("redacts the injected token and recognizable GitHub tokens from output", () => {
     const token = "github_pat_abcdefghijklmnopqrstuvwxyz123456"
     const output = redactGitHubToken(

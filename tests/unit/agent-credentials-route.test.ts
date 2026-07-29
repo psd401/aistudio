@@ -19,6 +19,7 @@ const requestMock = jest.fn()
 const canAccessSkillMock = jest.fn()
 const brokerConstructorMock = jest.fn()
 const executeOpenAiImageOperationMock = jest.fn()
+const executeFreshserviceOperationMock = jest.fn()
 
 jest.mock("@/lib/agent-workspace/invocation-context", () => ({
   verifyAgentInvocationContext: jest.fn(
@@ -68,11 +69,13 @@ jest.mock("@/lib/agent-credentials/owner-operation-broker", () => ({
     executeOpenAiImageOperationMock(...args),
   executePlaudOperation: jest.fn(),
   executePsdDataOperation: jest.fn(),
-  executeFreshserviceOperation: jest.fn(),
+  executeFreshserviceOperation: (...args: unknown[]) =>
+    executeFreshserviceOperationMock(...args),
 }))
 
 import type { NextRequest } from "next/server"
 import { POST } from "@/app/api/agent/credentials/route"
+import { AgentCredentialInputError } from "@/lib/agent-credentials/broker"
 
 function request(body: unknown): NextRequest {
   return {
@@ -103,6 +106,11 @@ beforeEach(() => {
   canAccessSkillMock.mockReset().mockResolvedValue(true)
   executeOpenAiImageOperationMock.mockReset().mockResolvedValue({
     imageBase64: "aGVsbG8=",
+  })
+  executeFreshserviceOperationMock.mockReset().mockResolvedValue({
+    status: 200,
+    ok: true,
+    data: { tickets: [] },
   })
 })
 
@@ -246,6 +254,27 @@ describe("POST /api/agent/credentials", () => {
       quality: "high",
       background: "opaque",
       referenceDataUrl: null,
+    })
+  })
+
+  it("returns a specific input error for a rejected Freshservice route", async () => {
+    executeFreshserviceOperationMock.mockRejectedValueOnce(
+      new AgentCredentialInputError(
+        "Freshservice route not allowed: GET /solutions/articles"
+      )
+    )
+
+    const response = await POST(
+      request({
+        operation: "freshservice",
+        path: "/solutions/articles",
+        method: "GET",
+      })
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: "Freshservice route not allowed: GET /solutions/articles",
     })
   })
 })
