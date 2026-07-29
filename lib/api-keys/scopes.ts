@@ -32,7 +32,7 @@ export const API_SCOPES = {
   "repositories:read": "Read authorized repository source segments and citations",
   "repositories:search": "Search authorized repositories",
   "repositories:changes": "Read authorized repository change feeds",
-  "repositories:write": "Add items to repositories owned by the API key user",
+  "repositories:write": "Add items to repositories the API principal can modify",
   "documents:read": "Read documents and attachments",
   "documents:write": "Upload and manage documents",
   "graph:read": "Read context graph nodes and edges",

@@ -71,7 +71,12 @@ export const POST = withApiAuth(
         );
       }
 
-      const parsed = await parseRequestBody(request, completeSchema, requestId);
+      const parsed = await parseRequestBody(
+        request,
+        completeSchema,
+        requestId,
+        { maximumBytes: 128 * 1024 },
+      );
       if (parsed instanceof Response) return parsed;
 
       const completed = await completeRepositoryUpload({

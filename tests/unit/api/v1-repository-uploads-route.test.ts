@@ -117,6 +117,15 @@ const initiateInput = {
 };
 const config = { enabled: true, maxFileSizeGb: 1 };
 
+function expectBoundedRequestBody(requestId: string): void {
+  expect(mockParseRequestBody).toHaveBeenCalledWith(
+    request,
+    expect.anything(),
+    requestId,
+    { maximumBytes: 128 * 1024 },
+  );
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockRequireScope.mockReturnValue(null);
@@ -158,7 +167,9 @@ beforeEach(() => {
 
 describe("repository write API scope", () => {
   it("is available to staff and administrators but not students", () => {
-    expect(API_SCOPES["repositories:write"]).toMatch(/Add items/);
+    expect(API_SCOPES["repositories:write"]).toBe(
+      "Add items to repositories the API principal can modify",
+    );
     expect(ROLE_SCOPES.staff).toContain("repositories:write");
     expect(ROLE_SCOPES.administrator).toContain("repositories:write");
     expect(ROLE_SCOPES.student).not.toContain("repositories:write");
@@ -191,6 +202,7 @@ describe("POST /api/v1/repositories/{id}/items/uploads", () => {
       7,
       auth.userId,
     );
+    expectBoundedRequestBody("req-initiate");
     expect(mockValidateRepositoryUploadFile).toHaveBeenCalledWith(
       initiateInput,
       config,
@@ -357,6 +369,7 @@ describe("POST /api/v1/repositories/{id}/items/uploads/{sessionId}/complete", ()
       7,
       auth.userId,
     );
+    expectBoundedRequestBody("req-complete");
     expect(mockCompleteRepositoryUpload).toHaveBeenCalledWith({
       repositoryId: 7,
       userId: auth.userId,

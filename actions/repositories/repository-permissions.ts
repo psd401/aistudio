@@ -10,6 +10,7 @@
 import "server-only"
 
 import {
+  checkUserRole,
   getRepositoryById,
   getUserIdByCognitoSubAsNumber
 } from "@/lib/db/drizzle"
@@ -65,7 +66,14 @@ export async function canModifyUserManagedDurableRepository(
     throw error
   }
 
-  return canModifyRepository(repositoryId, userId)
+  const repository = await getRepositoryById(repositoryId)
+  if (!repository) return false
+  if (repository.ownerId === userId) return true
+
+  // API-key and bearer-JWT callers do not necessarily have a browser session.
+  // Check the authenticated API principal directly instead of using hasRole(),
+  // which resolves the current session cookie.
+  return checkUserRole(userId, "administrator")
 }
 
 /**

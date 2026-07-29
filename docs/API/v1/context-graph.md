@@ -624,7 +624,8 @@ The `201` response contains `sessionId`, `objectKey`, `expiresAt`, and either:
 Upload the exact declared bytes with S3 `PUT` requests. Retain every multipart
 ETag. Invalid metadata returns `400 VALIDATION_ERROR`, exhausted upload quotas
 return `429 REPOSITORY_UPLOAD_QUOTA_EXCEEDED`, and a deployment where canonical
-uploads are disabled returns `503 UPLOAD_UNAVAILABLE`.
+uploads are disabled returns `503 UPLOAD_UNAVAILABLE`. JSON request bodies over
+128 KiB return `413 PAYLOAD_TOO_LARGE`.
 
 #### `POST /api/v1/repositories/{id}/items/uploads/{sessionId}/complete`
 
@@ -648,7 +649,9 @@ completion returns the same identifiers with `replayed: true` and the
 or foreign session returns `400 UPLOAD_COMPLETION_FAILED` without session
 details. Unexpected storage or database failures return
 `500 INTERNAL_ERROR`; callers can retry completion with the same session
-because registration is idempotent.
+because registration is idempotent. Completed-session replays remain valid
+after the original presigned upload URL expires. JSON request bodies over
+128 KiB return `413 PAYLOAD_TOO_LARGE`.
 
 ```json
 {

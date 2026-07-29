@@ -891,7 +891,8 @@ export function assertRepositoryUploadSessionActive(
   now = new Date()
 ): void {
   if (
-    session.expiresAt.getTime() <= now.getTime() ||
+    (session.status !== "completed" &&
+      session.expiresAt.getTime() <= now.getTime()) ||
     session.status === "aborted" ||
     session.status === "expired"
   ) {

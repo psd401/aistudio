@@ -5,8 +5,10 @@ jest.mock("server-only", () => ({}));
 const mockGetRepositoryById = jest.fn();
 const mockAssertNotSystemManagedRepository = jest.fn();
 const mockHasRole = jest.fn();
+const mockCheckUserRole = jest.fn();
 
 jest.mock("@/lib/db/drizzle", () => ({
+  checkUserRole: (...args: unknown[]) => mockCheckUserRole(...args),
   getRepositoryById: (...args: unknown[]) => mockGetRepositoryById(...args),
   getUserIdByCognitoSubAsNumber: jest.fn(),
 }));
@@ -29,6 +31,7 @@ describe("canModifyUserManagedDurableRepository", () => {
     mockAssertNotSystemManagedRepository.mockResolvedValue(undefined);
     mockGetRepositoryById.mockResolvedValue({ ownerId: 42 });
     mockHasRole.mockResolvedValue(false);
+    mockCheckUserRole.mockResolvedValue(false);
   });
 
   it("allows an owner after enforcing the durable repository boundary", async () => {
@@ -38,6 +41,19 @@ describe("canModifyUserManagedDurableRepository", () => {
 
     expect(mockAssertNotSystemManagedRepository).toHaveBeenCalledWith(7);
     expect(mockGetRepositoryById).toHaveBeenCalledWith(7);
+    expect(mockCheckUserRole).not.toHaveBeenCalled();
+  });
+
+  it("checks administrator access against the authenticated API principal", async () => {
+    mockGetRepositoryById.mockResolvedValue({ ownerId: 9 });
+    mockCheckUserRole.mockResolvedValue(true);
+
+    await expect(
+      canModifyUserManagedDurableRepository(7, 42),
+    ).resolves.toBe(true);
+
+    expect(mockCheckUserRole).toHaveBeenCalledWith(42, "administrator");
+    expect(mockHasRole).not.toHaveBeenCalled();
   });
 
   it("masks only the guard's deliberate not-found result", async () => {
@@ -65,7 +81,7 @@ describe("canModifyUserManagedDurableRepository", () => {
   it("propagates failures while checking ownership or administrator access", async () => {
     const failure = new Error("role lookup unavailable");
     mockGetRepositoryById.mockResolvedValue({ ownerId: 9 });
-    mockHasRole.mockRejectedValue(failure);
+    mockCheckUserRole.mockRejectedValue(failure);
 
     await expect(
       canModifyUserManagedDurableRepository(7, 42),

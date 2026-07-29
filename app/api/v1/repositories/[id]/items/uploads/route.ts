@@ -61,7 +61,12 @@ export const POST = withApiAuth(
         );
       }
 
-      const parsed = await parseRequestBody(request, initiateSchema, requestId);
+      const parsed = await parseRequestBody(
+        request,
+        initiateSchema,
+        requestId,
+        { maximumBytes: 128 * 1024 },
+      );
       if (parsed instanceof Response) return parsed;
 
       const config = await getContentPlatformConfig();

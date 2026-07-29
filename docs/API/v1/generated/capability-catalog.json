@@ -1067,7 +1067,7 @@
     },
     {
       "scope": "repositories:write",
-      "description": "Add items to repositories owned by the API key user",
+      "description": "Add items to repositories the API principal can modify",
       "roles": [
         "staff",
         "administrator"

@@ -20,6 +20,15 @@ describe("canonical upload completion lifecycle race", () => {
     ).not.toThrow();
   });
 
+  it("allows an idempotent completed-session replay after URL expiry", () => {
+    expect(() =>
+      assertRepositoryUploadSessionActive(
+        { status: "completed", expiresAt: PAST },
+        NOW,
+      ),
+    ).not.toThrow();
+  });
+
   const inactiveSessions: Array<
     [string, { status: RepositoryUploadStatus; expiresAt: Date }]
   > = [
