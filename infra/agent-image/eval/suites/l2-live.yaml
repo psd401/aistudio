@@ -1,7 +1,8 @@
 # Weekly live-dev fixture-drift subset. Every prompt uses synthetic test data.
-# Summarize (#1440) and TTS (#1442) are intentionally retained as fail-closed
-# signals until their known dev defects land. HyperFrames shares #1442's direct
-# AWS credential boundary and is omitted to avoid duplicating the same alert.
+# Summarize (#1440) is intentionally retained as a fail-closed signal until its
+# known dev defect lands. TTS gates the fixed-operation credential boundary
+# from #1442. HyperFrames shares that boundary and is omitted from the weekly
+# subset to avoid a duplicate live render.
 # Failure reporting remains in the regression suite but requires a @psd401.net
 # actor for attribution, so the RFC 2606 canary owner cannot exercise it live.
 tasks:

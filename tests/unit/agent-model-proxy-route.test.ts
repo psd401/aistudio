@@ -179,6 +179,9 @@ function defineAgentModelCredentialBrokerSuite1Part2() {it("rejects unapproved e
       { params: Promise.resolve({ path: ["arbitrary"] }) },
     )
     expect(wrongPath.status).toBe(404)
+    expect(await wrongPath.json()).toEqual({
+      error: "Unsupported model endpoint",
+    })
 
     const wrongModel = await POST(
       request({ model: "attacker/model", max_tokens: 100 }) as never,

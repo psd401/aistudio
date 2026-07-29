@@ -5,8 +5,8 @@ const { validatedFs } = require("../../../validated-fs.cjs");
 /**
  * Unit tests for psd-hyperframes/render.js (#1175).
  *
- * Covers CLI arg parsing + payload validation and the Lambda-invocation path
- * with a mocked LambdaClient (injected via `deps.client`) so no AWS is touched.
+ * Covers CLI arg parsing + payload validation and the root-owned Lambda-relay
+ * path with an injected relay so no AWS is touched.
  *
  * Run: cd infra/agent-image/skills/psd-hyperframes && bun test
  */
@@ -22,8 +22,14 @@ const {
   findCompositionRootOpenTagEnd,
   injectAudioElement,
   invokeRender,
-  validateEmail,
   main,
+  MAX_INVOKE_PAYLOAD_BYTES,
+  MAX_RELAY_PAYLOAD_BYTES,
+  IDENTITY_TIMEOUT_MS,
+  LAMBDA_CONNECT_TIMEOUT_MS,
+  LAMBDA_READ_TIMEOUT_MS,
+  RELAY_TRANSPORT_MARGIN_MS,
+  RELAY_TIMEOUT_MS,
 } = require('./render');
 
 const HTML =
@@ -51,14 +57,12 @@ beforeEach(() => {
   process.exit = (code) => { throw new ExitError(code); };
   process.stdout.write = (chunk) => { stdout += chunk; return true; };
   process.stderr.write = () => true;
-  process.env.HYPERFRAMES_RENDER_FUNCTION = 'psd-hyperframes-render-dev';
 });
 
 afterEach(() => {
   process.exit = originalExit;
   process.stdout.write = originalStdout;
   process.stderr.write = originalStderr;
-  delete process.env.HYPERFRAMES_RENDER_FUNCTION;
 });
 
 function lastJson() {
@@ -70,13 +74,7 @@ function argv(...rest) {
   return ['node', 'render.js', ...rest];
 }
 
-// ── validateEmail / parseArgs ────────────────────────────────────────────────
-
-test('validateEmail accepts real emails, rejects junk and path separators', () => {
-  expect(validateEmail('person@psd401.net')).toBe(true);
-  expect(validateEmail('nope')).toBe(false);
-  expect(validateEmail('a/b@psd401.net')).toBe(false);
-});
+// ── parseArgs ────────────────────────────────────────────────────────────────
 
 test('parseArgs maps --dashed-flags to underscore keys and boolean flags', () => {
   const args = parseArgs(argv('--user', 'x@y.z', '--css-file', '/tmp/a.css', '--dry-run'));
@@ -89,7 +87,9 @@ test('parseArgs maps --dashed-flags to underscore keys and boolean flags', () =>
 
 test('buildPayload assembles a valid payload with defaults', () => {
   const p = buildPayload(parseArgs(argv('--user', 'p@psd401.net', '--html', HTML, '--duration', '3')));
-  expect(p.userEmail).toBe('p@psd401.net');
+  // A legacy/model-supplied --user selector is ignored. The root relay injects
+  // only the owner resolved from the signed invocation context.
+  expect(p.userEmail).toBeUndefined();
   expect(p.html).toBe(HTML);
   expect(p.durationSeconds).toBe(3);
   expect(p.fps).toBe(30);
@@ -98,44 +98,39 @@ test('buildPayload assembles a valid payload with defaults', () => {
   expect(p.css).toBeUndefined();
 });
 
-test('buildPayload rejects a missing user', () => {
-  expect(() => buildPayload(parseArgs(argv('--html', HTML, '--duration', '3')))).toThrow(ExitError);
-  expect(lastJson().error).toBe('bad_args');
-});
-
 test('buildPayload rejects a missing composition', () => {
-  expect(() => buildPayload(parseArgs(argv('--user', 'p@psd401.net', '--duration', '3')))).toThrow(ExitError);
+  expect(() => buildPayload(parseArgs(argv('--duration', '3')))).toThrow(ExitError);
   expect(lastJson().error).toBe('bad_args');
 });
 
 test('buildPayload rejects a missing / non-positive / over-cap duration', () => {
-  const base = ['--user', 'p@psd401.net', '--html', HTML];
+  const base = ['--html', HTML];
   expect(() => buildPayload(parseArgs(argv(...base)))).toThrow(ExitError);
   expect(() => buildPayload(parseArgs(argv(...base, '--duration', '0')))).toThrow(ExitError);
   expect(() => buildPayload(parseArgs(argv(...base, '--duration', '181')))).toThrow(ExitError); // > 180s (3 min) cap
 });
 
 test('buildPayload allows up to the 3-minute cap at a budget-safe fps', () => {
-  const base = ['--user', 'p@psd401.net', '--html', HTML];
+  const base = ['--html', HTML];
   // 180s at 20fps = 3600 frames = exactly the render budget.
   expect(() => buildPayload(parseArgs(argv(...base, '--duration', '180', '--fps', '20')))).not.toThrow();
 });
 
 test('buildPayload rejects an over-budget frame count (fps × duration > 3600)', () => {
-  const base = ['--user', 'p@psd401.net', '--html', HTML];
+  const base = ['--html', HTML];
   // 120s at 60fps = 7200 frames — over the budget even though each is in range.
   expect(() => buildPayload(parseArgs(argv(...base, '--duration', '120', '--fps', '60')))).toThrow(ExitError);
   expect(lastJson().error).toBe('bad_args');
 });
 
 test('buildPayload rejects fps and dimensions out of range', () => {
-  const base = ['--user', 'p@psd401.net', '--html', HTML, '--duration', '3'];
+  const base = ['--html', HTML, '--duration', '3'];
   expect(() => buildPayload(parseArgs(argv(...base, '--fps', '61')))).toThrow(ExitError);
   expect(() => buildPayload(parseArgs(argv(...base, '--width', '9')))).toThrow(ExitError);
 });
 
 test('buildPayload fails on a valueless --css-file / --js-file instead of silently dropping it', () => {
-  const base = ['--user', 'p@psd401.net', '--html', HTML, '--duration', '3'];
+  const base = ['--html', HTML, '--duration', '3'];
   // --css-file as the last token parses to boolean true — must be a hard error.
   expect(() => buildPayload(parseArgs(argv(...base, '--css-file')))).toThrow(ExitError);
   expect(lastJson().error).toBe('bad_args');
@@ -145,7 +140,7 @@ test('buildPayload fails on a valueless --css-file / --js-file instead of silent
 });
 
 test('buildPayload rejects a --dry-run given a value', () => {
-  const base = ['--user', 'p@psd401.net', '--html', HTML, '--duration', '3'];
+  const base = ['--html', HTML, '--duration', '3'];
   expect(() => buildPayload(parseArgs(argv(...base, '--dry-run', 'true')))).toThrow(ExitError);
   expect(lastJson().error).toBe('bad_args');
 });
@@ -156,12 +151,40 @@ test('buildPayload caps the combined html+css+js size', () => {
   validatedFs.writeFileSync(cssPath, 'a'.repeat(5 * 1024 * 1024));
   try {
     expect(() => buildPayload(parseArgs(argv(
-      '--user', 'p@psd401.net', '--html', HTML, '--duration', '3', '--css-file', cssPath,
+      '--html', HTML, '--duration', '3', '--css-file', cssPath,
     )))).toThrow(ExitError);
     expect(lastJson().error).toBe('bad_args');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('buildPayload enforces the serialized Lambda limit after JSON escaping', () => {
+  // NUL is one UTF-8 byte in the composition budget but JSON encodes it as the
+  // six-byte sequence "\\u0000". The raw input is valid and well below 4 MiB;
+  // the serialized invoke body is intentionally just over Lambda's 6 MiB cap.
+  const html =
+    '<div data-composition-id="escaped">' +
+    '\u0000'.repeat(Math.floor(MAX_RELAY_PAYLOAD_BYTES / 6) + 1) +
+    '</div>';
+  expect(Buffer.byteLength(html, 'utf8')).toBeLessThan(4 * 1024 * 1024);
+  expect(() => buildPayload(parseArgs(argv(
+    '--html', html, '--duration', '3',
+  )))).toThrow(ExitError);
+  expect(lastJson().error).toBe('bad_args');
+  expect(lastJson().message).toContain('6 MiB Lambda invocation limit');
+});
+
+test('relay timeout covers identity, Lambda connect/read, and transport budgets', () => {
+  expect(RELAY_TIMEOUT_MS).toBe(
+    IDENTITY_TIMEOUT_MS +
+      LAMBDA_CONNECT_TIMEOUT_MS +
+      LAMBDA_READ_TIMEOUT_MS +
+      RELAY_TRANSPORT_MARGIN_MS,
+  );
+  expect(RELAY_TIMEOUT_MS).toBe(825_000);
+  expect(RELAY_TIMEOUT_MS).toBeLessThan(840_000);
+  expect(MAX_RELAY_PAYLOAD_BYTES).toBe(MAX_INVOKE_PAYLOAD_BYTES - 512);
 });
 
 test('buildPayload reads css/js from files and carries dryRun', () => {
@@ -170,7 +193,7 @@ test('buildPayload reads css/js from files and carries dryRun', () => {
   validatedFs.writeFileSync(cssPath, 'body{color:red}');
   try {
     const p = buildPayload(parseArgs(argv(
-      '--user', 'p@psd401.net', '--html', HTML, '--duration', '3',
+      '--html', HTML, '--duration', '3',
       '--css-file', cssPath, '--dry-run',
     )));
     expect(p.css).toBe('body{color:red}');
@@ -183,7 +206,7 @@ test('buildPayload reads css/js from files and carries dryRun', () => {
 test('buildPayload injects an <audio> track from --audio-url into the composition root', () => {
   const url = 'https://psd-agents-dev.s3.us-east-1.amazonaws.com/public-images/p@psd401.net/n.mp3';
   const p = buildPayload(parseArgs(argv(
-    '--user', 'p@psd401.net', '--html', HTML, '--duration', '3', '--audio-url', url,
+    '--html', HTML, '--duration', '3', '--audio-url', url,
   )));
   expect(p.html).toContain(`<audio src="${url}"`);
   expect(p.html).toContain('data-duration="3"');
@@ -211,7 +234,7 @@ test('composition-root lookup is linear and ignores attribute-like quoted text',
 });
 
 test('buildPayload rejects an unsafe / non-https --audio-url', () => {
-  const base = ['--user', 'p@psd401.net', '--html', HTML, '--duration', '3'];
+  const base = ['--html', HTML, '--duration', '3'];
   expect(() => buildPayload(parseArgs(argv(...base, '--audio-url', 'http://insecure.example/n.mp3')))).toThrow(ExitError);
   expect(lastJson().error).toBe('bad_args');
   stdout = ''; // reset so lastJson() reads only the second failure
@@ -219,21 +242,20 @@ test('buildPayload rejects an unsafe / non-https --audio-url', () => {
   expect(lastJson().error).toBe('bad_args');
 });
 
-// ── invokeRender (mocked LambdaClient) ───────────────────────────────────────
+// ── invokeRender (mocked root relay) ─────────────────────────────────────────
 
-function fakeClient(responder) {
-  const sent = [];
-  return {
-    sent,
-    send: async (command) => {
-      sent.push(command);
-      return responder(command);
-    },
+function fakeRelay(responder) {
+  const calls = [];
+  const relay = async (payload) => {
+    calls.push(payload);
+    return responder(payload);
   };
+  relay.calls = calls;
+  return relay;
 }
 
-function okPayload(extra = {}) {
-  return Buffer.from(JSON.stringify({
+function okResult(extra = {}) {
+  return {
     status: 'ok',
     url: 'https://psd-agents-dev.s3.us-east-1.amazonaws.com/public-images/p@psd401.net/uuid.mp4',
     s3Key: 'public-images/p@psd401.net/uuid.mp4',
@@ -244,48 +266,65 @@ function okPayload(extra = {}) {
     height: 1080,
     sharing: 'public-by-link',
     ...extra,
-  }));
+  };
 }
 
-test('invokeRender sends a RequestResponse invoke to the configured function and returns the parsed result', async () => {
-  const client = fakeClient(() => ({ Payload: okPayload() }));
-  const result = await invokeRender({ html: HTML, durationSeconds: 3 }, { client });
+test('invokeRender sends the validated payload through the fixed-operation relay', async () => {
+  const relay = fakeRelay(() => okResult());
+  const payload = { html: HTML, durationSeconds: 3 };
+  const result = await invokeRender(payload, { relay });
   expect(result.status).toBe('ok');
   expect(result.s3Key).toBe('public-images/p@psd401.net/uuid.mp4');
-  expect(client.sent).toHaveLength(1);
-  expect(client.sent[0].input.FunctionName).toBe('psd-hyperframes-render-dev');
-  expect(client.sent[0].input.InvocationType).toBe('RequestResponse');
-  const decoded = JSON.parse(Buffer.from(client.sent[0].input.Payload).toString('utf8'));
-  expect(decoded.html).toBe(HTML);
+  expect(relay.calls).toEqual([payload]);
 });
 
 test('invokeRender surfaces a structured render error (status:error) as an exit', async () => {
-  const client = fakeClient(() => ({
-    Payload: Buffer.from(JSON.stringify({ status: 'error', error: 'render_failed', message: 'chromium crashed' })),
+  const relay = fakeRelay(() => ({
+    status: 'error',
+    error: 'render_failed',
+    message: 'chromium crashed',
   }));
-  await expect(invokeRender({ html: HTML }, { client })).rejects.toThrow(ExitError);
+  await expect(invokeRender({ html: HTML }, { relay })).rejects.toThrow(ExitError);
   expect(lastJson().error).toBe('render_failed');
   expect(lastJson().message).toContain('chromium crashed');
 });
 
-test('invokeRender surfaces a Lambda FunctionError as render_failed', async () => {
-  const client = fakeClient(() => ({ FunctionError: 'Unhandled', Payload: Buffer.from('{"errorMessage":"Task timed out"}') }));
-  await expect(invokeRender({ html: HTML }, { client })).rejects.toThrow(ExitError);
-  expect(lastJson().error).toBe('render_failed');
+test('invokeRender surfaces a relay or Lambda transport failure without credentials', async () => {
+  const relay = fakeRelay(() => {
+    throw new Error('HyperFrames relay returned HTTP 502');
+  });
+  await expect(invokeRender({ html: HTML }, { relay })).rejects.toThrow(ExitError);
+  expect(lastJson().error).toBe('invoke_failed');
+  expect(lastJson().message).toContain('HTTP 502');
 });
 
-test('invokeRender fails misconfigured when the function name env var is unset', async () => {
-  delete process.env.HYPERFRAMES_RENDER_FUNCTION;
-  const client = fakeClient(() => ({ Payload: okPayload() }));
-  await expect(invokeRender({ html: HTML }, { client })).rejects.toThrow(ExitError);
-  expect(lastJson().error).toBe('misconfigured');
+test('invokeRender needs no AWS credential variables in the exec subprocess', async () => {
+  const credentialKeys = [
+    'AWS_ACCESS_KEY_ID',
+    'AWS_SECRET_ACCESS_KEY',
+    'AWS_SESSION_TOKEN',
+    'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+    'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
+  ];
+  const saved = Object.fromEntries(credentialKeys.map((key) => [key, process.env[key]]));
+  for (const key of credentialKeys) delete process.env[key];
+  try {
+    const relay = fakeRelay(() => okResult());
+    const result = await invokeRender({ html: HTML, durationSeconds: 3 }, { relay });
+    expect(result.status).toBe('ok');
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
-// ── main end-to-end (mocked client) ──────────────────────────────────────────
+// ── main end-to-end (mocked relay) ───────────────────────────────────────────
 
-test('main emits the bare result JSON with the url on success', async () => {
-  const client = fakeClient(() => ({ Payload: okPayload() }));
-  await main(argv('--user', 'p@psd401.net', '--html', HTML, '--duration', '3'), { client });
+test('main emits the bare result JSON with the url on relay success', async () => {
+  const relay = fakeRelay(() => okResult());
+  await main(argv('--html', HTML, '--duration', '3'), { relay });
   const out = lastJson();
   expect(out.url).toContain('/public-images/');
   expect(out.s3Key).toBe('public-images/p@psd401.net/uuid.mp4');

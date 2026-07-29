@@ -26,7 +26,7 @@ jobs:
         bun-version: "1.2.x"
 
     - name: Setup Python for agent eval gates
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
       with:
         python-version: "3.12"
 
@@ -139,6 +139,19 @@ jobs:
     # defaults, retention, and fatal self-reporting.
     - name: Run psd-morning-brief skill tests (Bun)
       run: bun run test:skill:morning-brief
+      env:
+        CI: true
+
+    # Direct-AWS credential boundary (#1442). OpenClaw strips inherited AWS
+    # credentials from model-launched exec subprocesses; these tests prove TTS
+    # and HyperFrames use only the root-owned fixed-operation relay and that the
+    # relay constrains both AWS targets and payloads.
+    - name: Run direct-AWS skill relay tests
+      run: |
+        python3 -m unittest \
+          infra/agent-image/test_mantle_proxy.py \
+          infra/agent-image/test_tts_synthesize.py
+        bun run test:skill:hyperframes
       env:
         CI: true
 

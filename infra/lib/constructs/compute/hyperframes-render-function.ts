@@ -113,13 +113,37 @@ export class HyperframesRenderFunction extends Construct {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     })
 
+    // The handler imports ../validated-fs.cjs from /var/task, so the Docker
+    // build context must include the canonical infra/validated-fs.cjs beside
+    // hyperframes-render/. Keep the context intentionally narrow: without
+    // these exclusions, every unrelated infra change would rebuild the large
+    // Chromium image and CDK would stage infra/node_modules.
+    const imageAssetRoot = path.join(__dirname, "..", "..", "..")
     this.function = new lambda.DockerImageFunction(this, "Function", {
       functionName,
       description: `Renders a HyperFrames HTML/CSS/JS composition to MP4 (#1175) — ${environment}`,
-      code: lambda.DockerImageCode.fromImageAsset(
-        path.join(__dirname, "..", "..", "..", "hyperframes-render"),
-        { platform: Platform.LINUX_AMD64 },
-      ),
+      code: lambda.DockerImageCode.fromImageAsset(imageAssetRoot, {
+        file: "hyperframes-render/Dockerfile",
+        exclude: [
+          "**",
+          "!validated-fs.cjs",
+          "!hyperframes-render/",
+          "!hyperframes-render/Dockerfile",
+          "!hyperframes-render/Dockerfile.dockerignore",
+          "!hyperframes-render/entrypoint.sh",
+          "!hyperframes-render/handler.js",
+          "!hyperframes-render/package.json",
+          // Docker-ignore negations re-include siblings when their parent is
+          // traversed. Exclude non-build inputs again so docs/tests do not
+          // churn the multi-gigabyte Lambda asset hash.
+          "hyperframes-render/.dockerignore",
+          "hyperframes-render/README.md",
+          "hyperframes-render/handler.test.js",
+          "hyperframes-render/sample-events",
+        ],
+        ignoreMode: cdk.IgnoreMode.DOCKER,
+        platform: Platform.LINUX_AMD64,
+      }),
       architecture: lambda.Architecture.X86_64,
       role,
       memorySize,

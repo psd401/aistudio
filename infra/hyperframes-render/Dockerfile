@@ -88,10 +88,14 @@ ENV HYPERFRAMES_FFPROBE_PATH=/opt/ffmpeg/ffprobe
 
 # Lambda handler + its runtime deps (aws-lambda-ric + @aws-sdk/client-s3).
 WORKDIR /var/task
-COPY package.json ./
+COPY hyperframes-render/package.json ./
 RUN npm install --omit=dev --no-audit --no-fund
-COPY handler.js ./
-COPY entrypoint.sh /entrypoint.sh
+COPY hyperframes-render/handler.js ./
+# handler.js resolves ../validated-fs.cjs to /var/validated-fs.cjs at runtime.
+# Build from the infra/ context so this is the canonical shared implementation,
+# not a duplicate that can drift from the repository security wrapper.
+COPY validated-fs.cjs /var/validated-fs.cjs
+COPY hyperframes-render/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # Runtime Interface Emulator — used only for local `docker run` smoke testing.

@@ -14,15 +14,17 @@ const { validatedFs } = require("../validated-fs.cjs");
  * This is the render half of the `psd-hyperframes` OpenClaw agent skill
  * (issue #1175). Chromium/FFmpeg live HERE, never in the agent image — the
  * AgentCore Firecracker overlay-mount snapshotter cannot carry that native
- * stack (see infra/agent-image/Dockerfile). The thin agent skill invokes
- * this function synchronously via the AWS SDK.
+ * stack (see infra/agent-image/Dockerfile). The thin agent skill sends a
+ * bounded request to the root-owned direct-AWS relay, which invokes this
+ * function synchronously without exposing reusable execution-role credentials
+ * to the model-facing subprocess.
  *
  * Event contract (RequestResponse invoke):
  *   {
  *     "html":            "<!doctype html>…",   // required — full composition
  *     "css":             "…",                   // optional — injected before </head>
  *     "js":              "…",                   // optional — injected before </body>
- *     "durationSeconds": 8,                     // required — cap-validated (<= 60)
+ *     "durationSeconds": 8,                     // required — cap-validated (<= 180)
  *     "fps":             30,                     // optional — default 30, 1..60
  *     "width":           1920,                   // optional — metadata + cap check
  *     "height":          1080,                   // optional — metadata + cap check

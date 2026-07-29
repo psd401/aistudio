@@ -10,7 +10,7 @@
  * psd-image-gen / psd-tts (issue #1175).
  *
  * Usage:
- *   node render.js --user <email> --file <composition.html> --duration <sec>
+ *   node render.js --file <composition.html> --duration <sec>
  *                  [--html "<inline composition>"]
  *                  [--css-file <path>] [--js-file <path>]
  *                  [--fps 30] [--width 1920] [--height 1080] [--dry-run]
@@ -22,12 +22,30 @@
 'use strict';
 const { validatedFs } = require("../../../validated-fs.cjs");
 
-
-
-
-const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
-
-const REGION = process.env.AWS_REGION || 'us-east-1';
+const http = require('node:http');
+const AWS_RELAY_HOST = '127.0.0.1';
+const AWS_RELAY_PORT = 18791;
+const AWS_RELAY_PATH = '/aws-skill/hyperframes/invoke';
+const MAX_RELAY_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_INVOKE_PAYLOAD_BYTES = 6 * 1024 * 1024;
+// The root relay injects the web-verified owner after receiving this body.
+// Reserve more than the maximum serialized ownerEmail field can consume.
+const OWNER_BINDING_RESERVE_BYTES = 512;
+const MAX_RELAY_PAYLOAD_BYTES =
+  MAX_INVOKE_PAYLOAD_BYTES - OWNER_BINDING_RESERVE_BYTES;
+// The renderer is capped at 720s. The root relay may then spend up to 60s on
+// Lambda cleanup/upload/response, but first it must resolve the signed owner
+// and connect to Lambda. Cover every sequential phase plus a transport margin;
+// 825s remains below the interactive turn's 840s ceiling.
+const IDENTITY_TIMEOUT_MS = 30_000;
+const LAMBDA_CONNECT_TIMEOUT_MS = 10_000;
+const LAMBDA_READ_TIMEOUT_MS = 780_000;
+const RELAY_TRANSPORT_MARGIN_MS = 5_000;
+const RELAY_TIMEOUT_MS =
+  IDENTITY_TIMEOUT_MS +
+  LAMBDA_CONNECT_TIMEOUT_MS +
+  LAMBDA_READ_TIMEOUT_MS +
+  RELAY_TRANSPORT_MARGIN_MS;
 // Keep in sync with the render Lambda (infra/hyperframes-render/handler.js) and
 // SKILL.md. Client-side checks fail fast; the Lambda re-validates authoritatively.
 const MAX_DURATION_SECONDS = 180;
@@ -39,9 +57,9 @@ const DEFAULT_WIDTH = 1920;
 const DEFAULT_HEIGHT = 1080;
 const MIN_DIMENSION = 16;
 const MAX_DIMENSION = 3840;
-// Combined html + css + js budget. Mirrors the render Lambda's MAX_HTML_BYTES
-// and keeps the JSON invoke payload under Lambda's 6 MB synchronous ceiling —
-// fail fast here with an actionable message rather than an opaque invoke error.
+// Combined html + css + js budget. Mirrors the render Lambda's MAX_HTML_BYTES.
+// A separate serialized-payload check below accounts for JSON escaping before
+// enforcing Lambda's exact 6 MiB synchronous invocation ceiling.
 const MAX_COMPOSITION_BYTES = 4 * 1024 * 1024;
 
 function fail(message, code = 'error') {
@@ -55,7 +73,7 @@ function emit(obj) {
   process.stdout.write(JSON.stringify(obj, null, 2) + '\n');
 }
 
-// parseArgs/fail/emit/validateEmail are intentionally duplicated from
+// parseArgs/fail/emit are intentionally duplicated from
 // psd-image-gen/generate.js — skills are standalone packages with no
 // cross-skill require(). Keep behavior in sync with that file.
 function parseArgs(argv) {
@@ -79,21 +97,6 @@ function parseArgs(argv) {
     }
   }
   return args;
-}
-
-function validateEmail(email) {
-  // Linear, non-backtracking validation. A regex with overlapping `[^\s@]+`
-  // groups around the dot trips CodeQL's js/polynomial-redos (ReDoS). The email
-  // is interpolated into the S3 key by the render Lambda, so a `/` (or any
-  // whitespace) is rejected explicitly.
-  if (typeof email !== 'string' || email.length === 0 || email.length > 320) return false;
-  if (email.includes('/') || /\s/.test(email)) return false;
-  const at = email.indexOf('@');
-  if (at <= 0 || email.includes('@', at + 1)) return false;
-  const domain = email.slice(at + 1);
-  const dot = domain.lastIndexOf('.');
-  if (dot <= 0 || dot === domain.length - 1) return false;
-  return true;
 }
 
 function readFileOrFail(filePath, flag) {
@@ -333,9 +336,6 @@ function resolveDimensions(args) {
  * Every invalid input fails fast with an actionable message.
  */
 function buildPayload(args) {
-  if (!validateEmail(args.user)) {
-    fail('--user is required and must be a valid email', 'bad_args');
-  }
   let html = resolveCompositionHtml(args);
   const css = resolveOptionalSource(args, 'css', 'css_file');
   const js = resolveOptionalSource(args, 'js', 'js_file');
@@ -349,51 +349,79 @@ function buildPayload(args) {
   }
   if (audioUrl) html = injectAudioElement(html, audioUrl, durationSeconds);
 
-  const payload = { html, durationSeconds, fps, width, height, userEmail: args.user };
+  // Identity is deliberately absent. The root relay resolves the owner from
+  // the installed signed invocation context and injects userEmail only after
+  // the trusted web tier verifies that context.
+  const payload = { html, durationSeconds, fps, width, height };
   if (css) payload.css = css;
   if (js) payload.js = js;
   if (args.dry_run === true) payload.dryRun = true;
+  if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > MAX_RELAY_PAYLOAD_BYTES) {
+    fail(
+      'Serialized render request exceeds the 6 MiB Lambda invocation limit after reserving trusted owner metadata. ' +
+        'Reduce escaped control characters or split the composition.',
+      'bad_args'
+    );
+  }
   return payload;
 }
 
 /**
- * Invoke the render Lambda synchronously and return its parsed result.
- * `deps.client` is a test seam; production leaves it unset.
+ * Ask the root-owned relay to invoke the configured render Lambda. OpenClaw
+ * intentionally strips AWS credential variables from model-launched exec
+ * subprocesses, so this process never receives or returns reusable credentials.
  */
+function requestRenderRelay(payload) {
+  const body = Buffer.from(JSON.stringify(payload), 'utf8');
+  return new Promise((resolve, reject) => {
+    const request = http.request({
+      host: AWS_RELAY_HOST,
+      port: AWS_RELAY_PORT,
+      path: AWS_RELAY_PATH,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': String(body.length),
+      },
+    }, (response) => {
+      const chunks = [];
+      let bytes = 0;
+      response.on('data', (chunk) => {
+        bytes += chunk.length;
+        if (bytes > MAX_RELAY_RESPONSE_BYTES) {
+          request.destroy(new Error('HyperFrames relay response exceeded the configured limit'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        if (response.statusCode !== 200) {
+          reject(new Error(`HyperFrames relay returned HTTP ${response.statusCode || 502}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(raw));
+        } catch {
+          reject(new Error('HyperFrames relay returned invalid JSON'));
+        }
+      });
+    });
+    request.setTimeout(RELAY_TIMEOUT_MS, () => {
+      request.destroy(new Error('HyperFrames relay timed out'));
+    });
+    request.on('error', reject);
+    request.end(body);
+  });
+}
+
 async function invokeRender(payload, deps = {}) {
-  const functionName = process.env.HYPERFRAMES_RENDER_FUNCTION;
-  if (!functionName) {
-    fail(
-      'HYPERFRAMES_RENDER_FUNCTION env var not set — the render Lambda name is injected by the agent runtime. Ask an administrator to redeploy the agent platform.',
-      'misconfigured',
-    );
-  }
-
-  const client = deps.client || new LambdaClient({ region: REGION });
-  let resp;
-  try {
-    resp = await client.send(new InvokeCommand({
-      FunctionName: functionName,
-      InvocationType: 'RequestResponse',
-      Payload: Buffer.from(JSON.stringify(payload), 'utf8'),
-    }));
-  } catch (err) {
-    fail(`Render Lambda invocation failed: ${err instanceof Error ? err.message : String(err)}`, 'invoke_failed');
-  }
-
-  const raw = resp.Payload ? Buffer.from(resp.Payload).toString('utf8') : '';
-
-  // Unhandled Lambda exception (the handler catches its own errors, so this is
-  // an infra-level failure — OOM, timeout kill, cold-start crash).
-  if (resp.FunctionError) {
-    fail(`Render Lambda failed (${resp.FunctionError}): ${raw.slice(0, 600)}`, 'render_failed');
-  }
-
+  const relay = deps.relay || requestRenderRelay;
   let result;
   try {
-    result = JSON.parse(raw);
-  } catch {
-    fail(`Render Lambda returned non-JSON output: ${raw.slice(0, 300)}`, 'render_failed');
+    result = await relay(payload);
+  } catch (err) {
+    fail(`Render Lambda invocation failed: ${err instanceof Error ? err.message : String(err)}`, 'invoke_failed');
   }
 
   if (!result || result.status !== 'ok') {
@@ -408,7 +436,7 @@ async function main(argv = process.argv, deps = {}) {
   const args = parseArgs(argv);
   if (args.help) {
     process.stdout.write(
-      'Usage: render.js --user <email> --file <composition.html> --duration <sec> ' +
+      'Usage: render.js --file <composition.html> --duration <sec> ' +
         '[--html "<inline>"] [--css-file <path>] [--js-file <path>] ' +
         '[--audio-url <https-mp3-url>] ' +
         '[--fps 30] [--width 1920] [--height 1080] [--dry-run]\n',
@@ -445,6 +473,13 @@ module.exports = {
   findCompositionRootOpenTagEnd,
   injectAudioElement,
   invokeRender,
-  validateEmail,
+  requestRenderRelay,
   MAX_DURATION_SECONDS,
+  MAX_INVOKE_PAYLOAD_BYTES,
+  MAX_RELAY_PAYLOAD_BYTES,
+  IDENTITY_TIMEOUT_MS,
+  LAMBDA_CONNECT_TIMEOUT_MS,
+  LAMBDA_READ_TIMEOUT_MS,
+  RELAY_TRANSPORT_MARGIN_MS,
+  RELAY_TIMEOUT_MS,
 };
