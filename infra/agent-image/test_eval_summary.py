@@ -708,8 +708,14 @@ class EvalAutomationContractTests(unittest.TestCase):
             "--source-commit \"${{ steps.candidate.outputs.source_commit }}\"",
             workflow,
         )
-        self.assertIn('--eval-harness-commit "${GITHUB_SHA}"', workflow)
+        self.assertIn("uses: actions/checkout@v7\n        with:\n          ref: dev", workflow)
+        self.assertIn('harness_commit="$(git rev-parse HEAD)"', workflow)
+        self.assertIn(
+            '--eval-harness-commit "${{ steps.harness.outputs.commit }}"',
+            workflow,
+        )
         self.assertNotIn('--source-commit "${GITHUB_SHA}"', workflow)
+        self.assertNotIn('--eval-harness-commit "${GITHUB_SHA}"', workflow)
 
 
 class SummaryCliTests(unittest.TestCase):

@@ -28,6 +28,18 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          ref: dev
+
+      - name: Capture eval harness commit
+        id: harness
+        run: |
+          harness_commit="$(git rev-parse HEAD)"
+          if [[ ! "${harness_commit}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Checked-out dev harness is not a full Git revision." >&2
+            exit 1
+          fi
+          echo "commit=${harness_commit}" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
@@ -136,7 +148,7 @@ jobs:
             --image "${CANDIDATE_IMAGE}" \
             --source-commit "${{ steps.candidate.outputs.source_commit }}" \
             --source-commit-provenance image-label \
-            --eval-harness-commit "${GITHUB_SHA}" \
+            --eval-harness-commit "${{ steps.harness.outputs.commit }}" \
             --model-config "${RUNNER_TEMP}/agent-eval-openclaw.json" \
             --out "${RUNNER_TEMP}/agent-eval-summary.json" \
             --require-all-pass
