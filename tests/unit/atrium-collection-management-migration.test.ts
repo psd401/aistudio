@@ -35,5 +35,8 @@ describe("Atrium collection management migration", () => {
     expect(migration).toContain("UNIQUE (collection_id, access, grant_kind, grant_value)");
     expect(migration).toContain("'PSD Staff Intranet'");
     expect(migration).toContain("'psd-staff-intranet'");
+    expect(migration).toContain("2147483647");
+    expect(migration).toContain("generate_series(");
+    expect(migration).not.toContain("SELECT MAX(position) + 1");
   });
 });

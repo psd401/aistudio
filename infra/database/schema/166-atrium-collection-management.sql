@@ -51,6 +51,38 @@ CREATE INDEX IF NOT EXISTS idx_ccg_lookup
 
 -- The collection that originally motivated #1438. Stable slug, district/shared,
 -- internal-by-default, and idempotent across fresh and upgraded installations.
+WITH district_top_level AS MATERIALIZED (
+  SELECT position
+  FROM content_collections
+  WHERE parent_id IS NULL AND owner_user_id IS NULL
+),
+next_position AS (
+  SELECT
+    CASE
+      WHEN COALESCE(MAX(position), -1) < 2147483647
+        THEN COALESCE(MAX(position), -1) + 1
+      ELSE (
+        -- int4 max is already occupied: mirror the service's bounded gap
+        -- allocator instead of overflowing MAX(position) + 1.
+        SELECT candidate
+        FROM generate_series(
+          0,
+          (
+            SELECT LEAST(COUNT(*), 2147483647)::integer
+            FROM district_top_level
+          )
+        ) AS gap(candidate)
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM district_top_level existing
+          WHERE existing.position = gap.candidate
+        )
+        ORDER BY candidate
+        LIMIT 1
+      )
+    END AS position
+  FROM district_top_level
+)
 INSERT INTO content_collections (
   name,
   slug,
@@ -65,14 +97,8 @@ SELECT
   'internal',
   NULL,
   true,
-  COALESCE(
-    (
-      SELECT MAX(position) + 1
-      FROM content_collections
-      WHERE parent_id IS NULL AND owner_user_id IS NULL
-    ),
-    0
-  )
+  next_position.position
+FROM next_position
 WHERE NOT EXISTS (
   SELECT 1 FROM content_collections WHERE slug = 'psd-staff-intranet'
 );

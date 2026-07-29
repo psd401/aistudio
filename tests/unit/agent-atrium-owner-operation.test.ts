@@ -15,6 +15,7 @@ const assetGetMock = jest.fn()
 const assetReadBytesMock = jest.fn()
 const assetInitiateMock = jest.fn()
 const assetCompleteMock = jest.fn()
+const collectionVisibleListMock = jest.fn()
 const collectionManageableListMock = jest.fn()
 const collectionCreateMock = jest.fn()
 const collectionUpdateMock = jest.fn()
@@ -84,6 +85,9 @@ jest.mock("@/lib/content", () => {
       create: (...args: unknown[]) => collectionCreateMock(...args),
       update: (...args: unknown[]) => collectionUpdateMock(...args),
     },
+    collectionService: {
+      discover: (...args: unknown[]) => collectionVisibleListMock(...args),
+    },
     contentSourceService: {
       read: (...args: unknown[]) => sourceReadMock(...args),
     },
@@ -134,6 +138,25 @@ beforeEach(() => {
 
 describe("signed-owner Atrium operations", () => {
   it("keeps archived manageable collections discoverable without widening content access", async () => {
+    const district = {
+      id: "d9999999-9999-4999-8999-999999999999",
+      scope: "district",
+      slug: "staff-intranet",
+      selectableForCreate: true,
+    }
+    const activePrivatePicker = {
+      id: "a9999999-9999-4999-8999-999999999999",
+      scope: "private",
+      slug: "active-private",
+      selectableForCreate: true,
+    }
+    const activePrivateManagement = {
+      ...activePrivatePicker,
+      archivedAt: null,
+      directContentCount: 1,
+      subtreeContentCount: 1,
+      grants: [],
+    }
     const archived = {
       id: "f9999999-9999-4999-8999-999999999999",
       scope: "private",
@@ -142,7 +165,14 @@ describe("signed-owner Atrium operations", () => {
       subtreeContentCount: 5,
       grants: [],
     }
-    collectionManageableListMock.mockResolvedValue([archived])
+    collectionVisibleListMock.mockResolvedValue([
+      district,
+      activePrivatePicker,
+    ])
+    collectionManageableListMock.mockResolvedValue([
+      activePrivateManagement,
+      archived,
+    ])
     const result = await executeOwnerAtriumOperation({
       ownerEmail: "owner@psd401.net",
       requestId: "request-collections",
@@ -151,8 +181,12 @@ describe("signed-owner Atrium operations", () => {
     })
     expect(result.httpStatus).toBe(200)
     expect(result.payload).toEqual({
-      data: [archived],
+      data: [district, activePrivateManagement, archived],
       meta: { requestId: "request-collections" },
+    })
+    expect(collectionVisibleListMock).toHaveBeenCalledWith(requester, {
+      shape: "flat",
+      includeCreateSelection: true,
     })
     expect(collectionManageableListMock).toHaveBeenCalledWith(requester)
     expect(assertContentAuthoringCapabilityMock).not.toHaveBeenCalled()

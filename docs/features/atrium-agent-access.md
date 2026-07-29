@@ -100,9 +100,11 @@ Subcommands include `find`, `read`, `create-document`, `create-artifact`, `edit`
 `archive-collection`, and `restore-collection`. Collection mutations use the same
 owner/admin hierarchy service as the UI and REST API: every owner can manage only
 their private tree, while district collection management requires administrator
-authority. `list-collections` uses the management projection, so it includes
-active and archived manageable rows plus grants and direct/subtree counts; an
-owner can therefore rediscover the UUID required to restore an archived subtree.
+authority. `list-collections` combines active requester-visible collections
+(including accessible district/shared rows) with active and archived manageable
+rows. Manageable rows include grants and direct/subtree counts, so an owner can
+rediscover the UUID required to restore an archived subtree without losing
+district collection discovery.
 The agent
 works **version-based** (create-as-private, owner permission and capability
 gating) and acts as the **signed workspace owner** — a `user` requester. Writes

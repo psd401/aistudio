@@ -4,6 +4,7 @@ import {
   ForbiddenError,
   contentAssetService,
   collectionManagementService,
+  collectionService,
   contentService,
   contentSourceService,
   isContentError,
@@ -260,12 +261,26 @@ async function executeSingleSegmentRead(
   requestId: string
 ): Promise<AgentAtriumOperationResult> {
   if (segment === "collections") {
-    // This command is the discovery surface for every collection mutation,
-    // including restore. Unlike the active-only picker projection, the
-    // management projection retains archived rows, UUIDs, grants, and counts.
-    // listManageable applies the owner/admin boundary before returning metadata.
-    const collections = await collectionManagementService.listManageable(req)
-    return success(collections, requestId)
+    // Active requester-visible rows retain district/shared collections the owner
+    // may read or create in. The management projection adds archived restore
+    // targets plus grants/counts, but intentionally excludes district rows a
+    // non-admin cannot manage. Merge both, preferring the richer management DTO
+    // for duplicate owned/admin-manageable rows.
+    const [visible, manageable] = await Promise.all([
+      collectionService.discover(req, {
+        shape: "flat",
+        includeCreateSelection: true,
+      }),
+      collectionManagementService.listManageable(req),
+    ])
+    const collectionsById = new Map<string, { id: string }>()
+    for (const collection of visible) {
+      collectionsById.set(collection.id, collection)
+    }
+    for (const collection of manageable) {
+      collectionsById.set(collection.id, collection)
+    }
+    return success([...collectionsById.values()], requestId)
   }
   const object = await contentService.get(req, segment)
   return success({ ...object, url: contentDeepLink(object.slug) }, requestId)
