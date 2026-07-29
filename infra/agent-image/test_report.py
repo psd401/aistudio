@@ -203,7 +203,7 @@ class PromotionRuleTests(unittest.TestCase):
                 "cap-a": ("skill-a", "capability", 2),
             },
             digest_character="a",
-            input_tokens=1000,
+            input_tokens=25000,
         )
         candidate = build_summary(
             {
@@ -211,7 +211,7 @@ class PromotionRuleTests(unittest.TestCase):
                 "cap-a": ("skill-a", "capability", 3),
             },
             digest_character="b",
-            input_tokens=1201,
+            input_tokens=30001,
         )
 
         comparison = eval_report.compare_summaries(baseline, candidate)
@@ -219,6 +219,17 @@ class PromotionRuleTests(unittest.TestCase):
         self.assertTrue(clause(comparison, "a").passed)
         self.assertTrue(clause(comparison, "b").passed)
         self.assertFalse(clause(comparison, "c").passed)
+        self.assertIn(
+            "20.00% (over 20% limit)",
+            clause(comparison, "c").detail,
+        )
+        self.assertEqual(
+            [row[3] for row in eval_report._metric_rows(comparison)[:2]],
+            [
+                "20.00% (over 20% limit)",
+                "20.00% (over 20% limit)",
+            ],
+        )
         self.assertEqual(comparison.verdict, "REJECT")
 
     def test_cost_clause_uses_unrounded_tokens_and_prices(self):
@@ -256,7 +267,10 @@ class PromotionRuleTests(unittest.TestCase):
         self.assertIn("200.00%", clause(comparison, "c").detail)
         self.assertEqual(
             [row[3] for row in eval_report._metric_rows(comparison)[:2]],
-            ["200.00%", "200.00%"],
+            [
+                "200.00% (over 20% limit)",
+                "200.00% (over 20% limit)",
+            ],
         )
         self.assertEqual(comparison.verdict, "REJECT")
 

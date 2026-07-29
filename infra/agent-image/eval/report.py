@@ -330,6 +330,13 @@ def _format_percent(value: Decimal) -> str:
     return f"{value * Decimal(100):.2f}%"
 
 
+def _format_cost_change(value: Decimal) -> str:
+    formatted = _format_percent(value)
+    if value > MAX_COST_INCREASE:
+        return f"{formatted} (over 20% limit)"
+    return formatted
+
+
 def _format_points(value: Decimal) -> str:
     return f"{value * Decimal(100):+.2f} pp"
 
@@ -489,7 +496,7 @@ def _promotion_clauses(
             change_label = "undefined increase from a zero-cost baseline"
         else:
             cost_passed = cost_change <= MAX_COST_INCREASE
-            change_label = _format_percent(cost_change)
+            change_label = _format_cost_change(cost_change)
         cost_clause = ClauseResult(
             key="c",
             title="Cost per task increases by no more than 20%",
@@ -664,7 +671,7 @@ def _metric_rows(comparison: Comparison) -> list[list[str]]:
         elif change is None:
             delta = "undefined from zero baseline"
         else:
-            delta = _format_percent(change)
+            delta = _format_cost_change(change)
         rows.append(
             [
                 title,

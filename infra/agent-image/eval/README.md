@@ -155,7 +155,9 @@ Clause (3) and the report's total/per-task cost deltas reconstruct unrounded
 Decimal costs from each arm's stored token totals and model price block. The
 six-decimal summary cost remains a display value only, so two tiny real costs
 that both round to zero cannot accidentally pass the promotion gate or produce
-a contradictory `0.00%` report delta.
+a contradictory `0.00%` report delta. Any exact increase above the 20% limit
+also carries an explicit `over 20% limit` marker, even if its two-decimal
+percentage display rounds to `20.00%`.
 
 Caching status is re-derived from each summary's observed
 `cache_read_input_tokens`, not from candidate configuration or the summary's
