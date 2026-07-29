@@ -1,0 +1,12 @@
+id: chat-card-ticket-confirmation
+skill: chat-card
+level: L0
+workspace: pure
+suite: regression
+prompt: "Use the chat-card skill to return a rich confirmation card for FreshService ticket 48291. The card title must be \"FreshService ticket created\", include Ticket ID 48291 and Status Open, and use the text fallback \"Ticket 48291 created\". Do not call external services."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"<<<PSD_AGENT_RICH_V1>>>[\\s\\S]*<<<END_PSD_AGENT_RICH_V1>>>"}
+  - {"type":"output_match","pattern":"FreshService ticket created"}
+  - {"type":"output_match","pattern":"48291"}
+  - {"type":"output_match","pattern":"\"textFallback\":\"Ticket 48291 created\""}

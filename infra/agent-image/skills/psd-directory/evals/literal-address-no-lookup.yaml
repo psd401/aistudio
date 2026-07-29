@@ -1,0 +1,10 @@
+id: directory-literal-address-no-lookup
+skill: psd-directory
+level: L1
+workspace: pure
+suite: regression
+prompt: "Return the literal placeholder address substitute@psd401.net exactly as written. Do not identify the person, query the directory, or use any tool."
+trials: 3
+graders:
+  - {"type":"no_route_called","route":"/api/agent/directory-lookup","method":"POST"}
+  - {"type":"output_match","pattern":"\\Asubstitute@psd401\\.net\\s*\\Z"}

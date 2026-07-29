@@ -1,0 +1,28 @@
+[
+  {
+    "route": "/api/agent/workspace-execute",
+    "method": "POST",
+    "request_body": {
+      "scope": "user",
+      "argv": {
+        "0": "gmail",
+        "1": "users",
+        "2": "messages",
+        "3": "list",
+        "4": "--params",
+        "5": {
+          "userId": "me",
+          "q": "is:unread",
+          "maxResults": 20
+        }
+      }
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "stdout": "{\"messages\":[{\"id\":\"m-1001\",\"from\":\"Alex Rivera <arivera@psd401.net>\",\"subject\":\"Library projector follow-up\"}],\"resultSizeEstimate\":1}\n",
+        "stderr": ""
+      }
+    }
+  }
+]

@@ -13,7 +13,9 @@ import os
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from contextlib import redirect_stdout
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -121,6 +123,255 @@ class SuiteLoadingTests(unittest.TestCase):
         self.assertEqual({task.workspace for task in tasks}, {"pure"})
         self.assertEqual({task.trials for task in tasks}, {3})
 
+    def test_committed_daily_driver_suites_meet_issue_1425_contract(self):
+        suite_paths = {
+            "regression": AGENT_IMAGE_DIR / "eval" / "suites" / "regression.yaml",
+            "capability": AGENT_IMAGE_DIR / "eval" / "suites" / "capability.yaml",
+        }
+        tasks_by_suite = {
+            suite: runner.load_suite(path)
+            for suite, path in suite_paths.items()
+        }
+        tasks = [
+            task
+            for suite_tasks in tasks_by_suite.values()
+            for task in suite_tasks
+        ]
+
+        self.assertEqual(len(tasks), 12)
+        self.assertEqual(len({task.id for task in tasks}), 12)
+        self.assertEqual(
+            Counter(task.skill for task in tasks),
+            Counter(
+                {
+                    "chat-card": 3,
+                    "psd-directory": 3,
+                    "psd-freshservice": 3,
+                    "psd-workspace": 3,
+                }
+            ),
+        )
+        self.assertEqual({task.trials for task in tasks}, {3})
+        for suite, suite_tasks in tasks_by_suite.items():
+            self.assertEqual({task.suite for task in suite_tasks}, {suite})
+
+        required_fields = {
+            "id",
+            "skill",
+            "level",
+            "workspace",
+            "suite",
+            "prompt",
+            "trials",
+            "graders",
+        }
+        for suite_path in suite_paths.values():
+            suite_document = runner._load_document(suite_path)
+            self.assertIsInstance(suite_document, dict)
+            for relative_path in suite_document["tasks"]:
+                task_path = (suite_path.parent / relative_path).resolve()
+                task_document = runner._load_document(task_path)
+                self.assertTrue(
+                    required_fields.issubset(task_document),
+                    f"{task_path} omitted required task fields",
+                )
+
+        negative_task_ids = {
+            "chat-card-single-sentence-plain-text",
+            "directory-literal-address-no-lookup",
+            "workspace-draft-email-not-send",
+        }
+        # Cross-multiply to keep the 25% threshold exact without float math.
+        self.assertGreaterEqual(len(negative_task_ids) * 4, len(tasks))
+        tasks_by_id = {task.id: task for task in tasks}
+        self.assertTrue(negative_task_ids.issubset(tasks_by_id))
+
+        def broker_body(task_id: str) -> dict[str, object]:
+            spec = next(
+                grader
+                for grader in tasks_by_id[task_id].graders
+                if grader.get("type") == "broker_request"
+            )
+            body = spec.get("body")
+            self.assertIsInstance(body, dict)
+            return body
+
+        def fixture_request_body(
+            task_id: str,
+            route: str,
+        ) -> dict[str, object]:
+            fixtures = runner._load_fixture_files(
+                tasks_by_id[task_id].fixture_paths
+            )
+            fixture = next(entry for entry in fixtures if entry["route"] == route)
+            body = fixture.get("request_body")
+            self.assertIsInstance(body, dict)
+            return body
+
+        chat_negative = tasks_by_id["chat-card-single-sentence-plain-text"]
+        self.assertTrue(
+            any(
+                spec.get("type") == "output_match"
+                and "(?!" in str(spec.get("pattern"))
+                and "PSD_AGENT_RICH_V1" in str(spec.get("pattern"))
+                for spec in chat_negative.graders
+            )
+        )
+        directory_negative = tasks_by_id["directory-literal-address-no-lookup"]
+        self.assertTrue(
+            any(
+                spec.get("type") == "no_route_called"
+                and spec.get("route") == "/api/agent/directory-lookup"
+                for spec in directory_negative.graders
+            )
+        )
+        workspace_negative = tasks_by_id["workspace-draft-email-not-send"]
+        workspace_negative_spec = next(
+            spec
+            for spec in workspace_negative.graders
+            if spec.get("type") == "no_route_called"
+            and spec.get("route") == "/api/agent/workspace-execute"
+        )
+        workspace_negative_body = workspace_negative_spec.get("body")
+        self.assertIsInstance(workspace_negative_body, dict)
+        forbidden_argv = workspace_negative_body["argv"]["contains_any"]
+        self.assertTrue(
+            {
+                "+send",
+                "send",
+                "+reply",
+                "reply",
+                "+reply-all",
+                "reply-all",
+                "+forward",
+                "forward",
+            }.issubset(forbidden_argv)
+        )
+
+        draft_body = broker_body("workspace-draft-email-not-send")
+        self.assertEqual(
+            {
+                field: draft_body[field]
+                for field in (
+                    "scope",
+                    "argv.0",
+                    "argv.1",
+                    "argv.2",
+                    "argv.3",
+                    "argv.4",
+                    "argv.5",
+                    "argv.6",
+                    "argv.7",
+                )
+            },
+            {
+                "scope": {"exact": "user"},
+                "argv.0": {"exact": "gmail"},
+                "argv.1": {"exact": "+draft"},
+                "argv.2": {"exact": "--to"},
+                "argv.3": {"exact": "principal@psd401.net"},
+                "argv.4": {"exact": "--subject"},
+                "argv.5": {"exact": "Projector follow-up"},
+                "argv.6": {"exact": "--body"},
+                "argv.7": {
+                    "text_equals": "The library projector is working again."
+                },
+            },
+        )
+        calendar_body = broker_body("workspace-create-calendar-event")
+        expected_calendar_argv = [
+            {
+                "0": "calendar",
+                "1": "events",
+                "2": "insert",
+                "3": "--params",
+                "4": {"calendarId": "primary"},
+                "5": "--json",
+                "6": {
+                    "summary": "Library projector check",
+                    "start": {
+                        "dateTime": "2026-08-03T09:00:00-07:00"
+                    },
+                    "end": {
+                        "dateTime": "2026-08-03T09:30:00-07:00"
+                    },
+                },
+            },
+            {
+                "0": "calendar",
+                "1": "+insert",
+                "2": "--summary",
+                "3": "Library projector check",
+                "4": "--start",
+                "5": "2026-08-03T09:00:00-07:00",
+                "6": "--end",
+                "7": "2026-08-03T09:30:00-07:00",
+            },
+        ]
+        self.assertEqual(
+            calendar_body["argv"],
+            {"matches_any": expected_calendar_argv},
+        )
+        unread_body = broker_body("workspace-list-unread-mail")
+        self.assertEqual(
+            unread_body["argv.5"],
+            {
+                "json_contains": {
+                    "userId": "me",
+                    "q": "is:unread",
+                    "maxResults": 20,
+                }
+            },
+        )
+        ticket_body = broker_body("freshservice-create-ticket-basic")
+        self.assertEqual(
+            ticket_body["body.description"],
+            {"exact": "The ceiling projector has no power."},
+        )
+
+        draft_fixture = fixture_request_body(
+            "workspace-draft-email-not-send",
+            "/api/agent/workspace-execute",
+        )
+        self.assertEqual(
+            draft_fixture["argv"]["7"],
+            {"$text_equals": "The library projector is working again."},
+        )
+        calendar_fixture = fixture_request_body(
+            "workspace-create-calendar-event",
+            "/api/agent/workspace-execute",
+        )
+        self.assertEqual(
+            calendar_fixture["argv"],
+            {"$matches_any": expected_calendar_argv},
+        )
+        unread_fixture = fixture_request_body(
+            "workspace-list-unread-mail",
+            "/api/agent/workspace-execute",
+        )
+        self.assertEqual(
+            unread_fixture["argv"]["5"],
+            {"userId": "me", "q": "is:unread", "maxResults": 20},
+        )
+        ticket_fixture = fixture_request_body(
+            "freshservice-create-ticket-basic",
+            "/api/agent/credentials",
+        )
+        self.assertEqual(
+            ticket_fixture["body"]["description"],
+            "The ceiling projector has no power.",
+        )
+
+        for task in tasks:
+            expected_root = (
+                AGENT_IMAGE_DIR / "skills" / task.skill / "evals"
+            ).resolve()
+            for fixture_path in task.fixture_paths:
+                self.assertTrue(
+                    fixture_path.is_relative_to(expected_root),
+                    f"{fixture_path} is not co-located with {task.skill}",
+                )
+
     def test_invalid_workspace_fails_closed(self):
         with self.subTest("validation happens after parsing"):
             with self.assertRaises(runner.EvalRunnerError):
@@ -134,6 +385,80 @@ class SuiteLoadingTests(unittest.TestCase):
                     },
                     Path("inline.yaml"),
                 )
+
+    def test_suite_classification_is_validated(self):
+        task = runner._task_from_mapping(
+            {
+                "id": "classified-task",
+                "skill": "runner-core",
+                "level": "L0",
+                "workspace": "pure",
+                "suite": "regression",
+                "prompt": "hello",
+            },
+            Path("inline.yaml"),
+        )
+        self.assertEqual(task.suite, "regression")
+
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "suite must be regression, capability, or unclassified",
+        ):
+            runner._task_from_mapping(
+                {
+                    "id": "bad-suite",
+                    "skill": "runner-core",
+                    "level": "L0",
+                    "workspace": "pure",
+                    "suite": "nightly",
+                    "prompt": "hello",
+                },
+                Path("inline.yaml"),
+            )
+
+    def test_docker_name_token_sanitizes_prefix_before_appending_pid(self):
+        self.assertEqual(
+            runner._docker_name_token("Issue 1425/Regression", 123),
+            "issue-1425-regression-123",
+        )
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "name prefix must contain a letter or number",
+        ):
+            runner._docker_name_token("***", 123)
+
+    def test_production_l1_suites_require_an_explicit_psd_owner(self):
+        task = runner.Task(
+            "owner-bound",
+            "psd-directory",
+            "L1",
+            "pure",
+            "Look up a fixture.",
+            3,
+            suite="regression",
+        )
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "explicit synthetic @psd401.net --owner-email",
+        ):
+            runner._validate_owner_email_for_tasks(
+                [task],
+                runner.DEFAULT_OWNER_EMAIL,
+            )
+        with self.assertRaises(runner.EvalRunnerError):
+            runner._validate_owner_email_for_tasks(
+                [task],
+                "eval@example.net",
+            )
+
+        runner._validate_owner_email_for_tasks(
+            [task],
+            "eval.issue1425@psd401.net",
+        )
+        runner._validate_owner_email_for_tasks(
+            [replace(task, suite="unclassified")],
+            runner.DEFAULT_OWNER_EMAIL,
+        )
 
     def test_non_integer_trial_counts_are_rejected(self):
         base_task: dict[str, object] = {
@@ -519,6 +844,10 @@ class EvaluationRunnerTests(unittest.TestCase):
             all(record["metadata"]["future_field"] == {"preserved": True} for record in records)
         )
         self.assertEqual({record["image"] for record in records}, {"unknown"})
+        self.assertEqual(
+            {record["suite"] for record in records},
+            {"unclassified"},
+        )
 
     def test_fresh_sessions_prevent_conversation_recall(self):
         clock = AdvancingClock()
@@ -952,7 +1281,7 @@ class ProbeContextMinterTests(unittest.TestCase):
                 {
                     "invocationContext": "context",
                     "requestProofKey": "proof",
-                    "ownerEmail": "canary@build-gate.invalid",
+                    "ownerEmail": "eval.issue1425@psd401.net",
                     "sessionId": "session-id",
                     "expiresAt": (
                         clock.now() + timedelta(seconds=965)
@@ -967,6 +1296,7 @@ class ProbeContextMinterTests(unittest.TestCase):
             AGENT_IMAGE_DIR.parent.parent,
             "dev",
             "us-east-1",
+            owner_email="eval.issue1425@psd401.net",
             credential_provider=provider,
             ttl_seconds=965,
             minimum_remaining_seconds=960,
@@ -987,8 +1317,43 @@ class ProbeContextMinterTests(unittest.TestCase):
         self.assertEqual(provider.calls, 1)
         call = executor.run.call_args
         self.assertEqual(call.args[0][-2:], ["--ttl", "965"])
+        self.assertEqual(
+            call.args[0][call.args[0].index("--owner") + 1],
+            "eval.issue1425@psd401.net",
+        )
         self.assertEqual(call.kwargs["env"]["AWS_ACCESS_KEY_ID"], "fresh")
         self.assertEqual(call.kwargs["env"]["AWS_SESSION_TOKEN"], "fresh-token")
+
+    def test_rejects_authority_for_a_different_owner(self):
+        executor = mock.Mock()
+        executor.run.return_value = runner.CommandResult(
+            0,
+            json.dumps(
+                {
+                    "invocationContext": "context",
+                    "requestProofKey": "proof",
+                    "ownerEmail": "other@psd401.net",
+                    "sessionId": "session-id",
+                    "expiresAt": (
+                        datetime.now(timezone.utc) + timedelta(minutes=20)
+                    ).isoformat(),
+                }
+            ),
+            "",
+        )
+        minter = runner.ProbeContextMinter(
+            executor,
+            AGENT_IMAGE_DIR.parent.parent,
+            "dev",
+            "us-east-1",
+            owner_email="eval.issue1425@psd401.net",
+        )
+
+        with self.assertRaisesRegex(
+            runner.EvalRunnerError,
+            "different owner",
+        ):
+            minter.mint("session-id")
 
 
 class DockerRuntimeTests(unittest.TestCase):

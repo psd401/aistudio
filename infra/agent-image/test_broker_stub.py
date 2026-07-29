@@ -360,6 +360,75 @@ class BrokerStubHttpTests(unittest.TestCase):
         ).st_mode & 0o777
         self.assertEqual(mode, 0o600)
 
+    def test_fixture_selector_matches_indexed_argv_and_decoded_json_subsets(self):
+        self.stub.configure(
+            [
+                {
+                    "route": "/api/agent/workspace-execute",
+                    "method": "POST",
+                    "request_body": {
+                        "scope": "user",
+                        "note": {"$text_equals": "body text"},
+                        "argv": {
+                            "$matches_any": [
+                                {
+                                    "0": "calendar",
+                                    "1": "events",
+                                    "2": "insert",
+                                    "3": "--params",
+                                    "4": {"calendarId": "primary"},
+                                    "5": "--json",
+                                    "6": {
+                                        "summary": "Library projector check",
+                                        "start": {
+                                            "dateTime": (
+                                                "2026-08-03T09:00:00-07:00"
+                                            )
+                                        },
+                                    },
+                                },
+                                {"0": "calendar", "1": "+insert"},
+                            ]
+                        },
+                    },
+                    "response": {"body": {"created": True}},
+                }
+            ]
+        )
+        correct_argv = [
+            "calendar",
+            "events",
+            "insert",
+            "--params",
+            '{"calendarId":"primary","conferenceDataVersion":1}',
+            "--json",
+            (
+                '{"summary":"Library projector check",'
+                '"start":{"dateTime":"2026-08-03T09:00:00-07:00"},'
+                '"description":"injected marker"}'
+            ),
+        ]
+
+        status, response = self.stub.request(
+            "/agent-broker/api/agent/workspace-execute",
+            method="POST",
+            body={"scope": "user", "note": "body text\n", "argv": correct_argv},
+        )
+        self.assertEqual((status, response), (200, {"created": True}))
+
+        wrong_argv = list(correct_argv)
+        wrong_argv[6] = (
+            '{"summary":"Wrong title",'
+            '"start":{"dateTime":"2026-08-03T09:00:00-07:00"}}'
+        )
+        status, response = self.stub.request(
+            "/agent-broker/api/agent/workspace-execute",
+            method="POST",
+            body={"scope": "user", "note": "body text\n", "argv": wrong_argv},
+        )
+        self.assertEqual(status, 501)
+        self.assertEqual(response["error"], broker_stub.MISSING_FIXTURE_ERROR)
+
     def test_summarization_endpoint_relays_with_root_authority(self):
         received: dict[str, object] = {}
 

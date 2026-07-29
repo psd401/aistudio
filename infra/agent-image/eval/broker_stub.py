@@ -321,19 +321,63 @@ def _strict_equal(actual: object, expected: object) -> bool:
     return type(actual) is type(expected) and actual == expected
 
 
-def _mapping_contains(actual: object, expected: object) -> bool:
+def mapping_contains(actual: object, expected: object) -> bool:
+    """Return whether ``actual`` recursively contains the fixture selector.
+
+    Mapping selectors may address list positions with non-negative integer
+    keys (JSON fixture files encode them as strings). When the actual value is
+    a JSON string, a mapping selector applies to the decoded value. This lets
+    fixtures constrain structured ``--params``/``--json`` argv tokens without
+    depending on key order or unrelated injected fields.
+    """
+
     if isinstance(expected, Mapping):
-        if not isinstance(actual, Mapping):
-            return False
-        return all(
-            key in actual and _mapping_contains(actual[key], value)
-            for key, value in expected.items()
-        )
+        if set(expected) == {"$matches_any"}:
+            alternatives = expected["$matches_any"]
+            return (
+                isinstance(alternatives, list)
+                and bool(alternatives)
+                and any(
+                    mapping_contains(actual, alternative)
+                    for alternative in alternatives
+                )
+            )
+        if set(expected) == {"$text_equals"}:
+            expected_text = expected["$text_equals"]
+            return (
+                isinstance(actual, str)
+                and isinstance(expected_text, str)
+                and actual.strip() == expected_text.strip()
+            )
+        if isinstance(actual, str):
+            try:
+                actual = json.loads(actual)
+            except json.JSONDecodeError:
+                return False
+        if isinstance(actual, Mapping):
+            return all(
+                key in actual and mapping_contains(actual[key], value)
+                for key, value in expected.items()
+            )
+        if isinstance(actual, list):
+            for key, value in expected.items():
+                if isinstance(key, bool):
+                    return False
+                if isinstance(key, int):
+                    index = key
+                elif isinstance(key, str) and key.isdigit():
+                    index = int(key)
+                else:
+                    return False
+                if index >= len(actual) or not mapping_contains(actual[index], value):
+                    return False
+            return True
+        return False
     if isinstance(expected, list):
         if not isinstance(actual, list) or len(actual) != len(expected):
             return False
         return all(
-            _mapping_contains(actual_value, expected_value)
+            mapping_contains(actual_value, expected_value)
             for actual_value, expected_value in zip(actual, expected, strict=True)
         )
     return _strict_equal(actual, expected)
@@ -429,7 +473,7 @@ class BrokerStubState:
             if not isinstance(fixture_method, str) or fixture_method.upper() != method:
                 continue
             expected_body = fixture.get("request_body")
-            if expected_body is not None and not _mapping_contains(body, expected_body):
+            if expected_body is not None and not mapping_contains(body, expected_body):
                 continue
             return fixture
         return None

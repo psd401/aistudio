@@ -3,7 +3,8 @@
 
 Example:
     python3 runner.py --image <tag-or-digest> --suite suites/core.yaml \
-        --trials 3 --out /tmp/issue-1424-run.jsonl
+        --trials 3 --out /tmp/issue-1425-run.jsonl \
+        --name-prefix psd-agent-eval-issue-1425
 """
 
 from __future__ import annotations
@@ -118,6 +119,7 @@ class Task:
     workspace: str
     prompt: str
     trials: int
+    suite: str = "unclassified"
     fixture_paths: tuple[Path, ...] = ()
     graders: tuple[dict[str, object], ...] = ()
 
@@ -260,6 +262,7 @@ class ProbeContextMinter:
         environment: str,
         region: str,
         *,
+        owner_email: str = DEFAULT_OWNER_EMAIL,
         credential_provider: CredentialProvider | None = None,
         ttl_seconds: int = DEFAULT_CONTEXT_TTL_SECONDS,
         minimum_remaining_seconds: int = 30,
@@ -277,6 +280,7 @@ class ProbeContextMinter:
         self._script = repo_root / "scripts/agent-workspace/mint-agent-probe-context.ts"
         self._environment = environment
         self._region = region
+        self._owner_email = owner_email
         self._credential_provider = credential_provider
         self._ttl_seconds = ttl_seconds
         self._minimum_remaining_seconds = minimum_remaining_seconds
@@ -299,6 +303,8 @@ class ProbeContextMinter:
                 "run",
                 str(self._script),
                 "--json",
+                "--owner",
+                self._owner_email,
                 "--session",
                 session_id,
                 "--ttl",
@@ -325,6 +331,10 @@ class ProbeContextMinter:
         if authority.session_id != session_id:
             raise EvalRunnerError(
                 "context minter returned a token for a different session"
+            )
+        if authority.owner_email != self._owner_email:
+            raise EvalRunnerError(
+                "context minter returned authority for a different owner"
             )
         if (
             authority.expires_at - self._now()
@@ -1044,6 +1054,7 @@ class EvaluationRunner:
             "task_id": task.id,
             "image": self._image,
             "skill": task.skill,
+            "suite": task.suite,
             "level": task.level,
             "workspace": task.workspace,
             "trial": trial_number,
@@ -1159,6 +1170,9 @@ def _task_from_mapping(value: Mapping[str, object], source: Path) -> Task:
     raw_trials = value.get("trials", 3)
     if isinstance(raw_trials, bool) or not isinstance(raw_trials, int):
         raise EvalRunnerError(f"{source}: task trials must be an integer")
+    raw_suite = value.get("suite", "unclassified")
+    if not isinstance(raw_suite, str):
+        raise EvalRunnerError(f"{source}: task suite must be a string")
     raw_fixture_paths = value.get("fixtures", [])
     if (
         not isinstance(raw_fixture_paths, list)
@@ -1191,6 +1205,7 @@ def _task_from_mapping(value: Mapping[str, object], source: Path) -> Task:
         workspace=text_fields["workspace"],
         prompt=text_fields["prompt"],
         trials=raw_trials,
+        suite=raw_suite,
         fixture_paths=tuple(fixture_paths),
         graders=graders,
     )
@@ -1202,6 +1217,10 @@ def _task_from_mapping(value: Mapping[str, object], source: Path) -> Task:
         raise EvalRunnerError(f"{source}: level must be L0, L1, or L2")
     if task.workspace not in {"pure", "mutating"}:
         raise EvalRunnerError(f"{source}: workspace must be pure or mutating")
+    if task.suite not in {"regression", "capability", "unclassified"}:
+        raise EvalRunnerError(
+            f"{source}: suite must be regression, capability, or unclassified"
+        )
     if task.trials < 1 or task.trials > 20:
         raise EvalRunnerError(f"{source}: trials must be between 1 and 20")
     broker_graders = sorted(
@@ -1380,6 +1399,33 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
+def _docker_name_token(prefix: str, pid: int) -> str:
+    sanitized_prefix = re.sub(
+        r"[^a-z0-9-]",
+        "-",
+        prefix.lower(),
+    ).strip("-")
+    if not sanitized_prefix:
+        raise EvalRunnerError("name prefix must contain a letter or number")
+    return f"{sanitized_prefix}-{pid}"
+
+
+def _validate_owner_email_for_tasks(tasks: Sequence[Task], owner_email: str) -> None:
+    requires_psd_owner = any(
+        task.level == "L1" and task.suite in {"regression", "capability"}
+        for task in tasks
+    )
+    if requires_psd_owner and not re.fullmatch(
+        r"[^@\s]+@psd401\.net",
+        owner_email,
+        flags=re.IGNORECASE,
+    ):
+        raise EvalRunnerError(
+            "production L1 suites require an explicit synthetic "
+            "@psd401.net --owner-email"
+        )
+
+
 def _context_ttl_seconds(invocation_timeout_seconds: int) -> int:
     ttl_seconds = (
         invocation_timeout_seconds
@@ -1420,11 +1466,21 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--environment", default=os.environ.get("ENVIRONMENT", "dev"))
     parser.add_argument("--region", default=os.environ.get("AWS_REGION", "us-east-1"))
+    parser.add_argument(
+        "--owner-email",
+        default=os.environ.get("AGENT_EVAL_OWNER_EMAIL", DEFAULT_OWNER_EMAIL),
+        help="synthetic owner identity embedded in signed trial contexts",
+    )
     parser.add_argument("--app-base-url")
     parser.add_argument("--platform", default="linux/arm64")
     parser.add_argument("--boot-timeout", type=_positive_integer, default=120)
     parser.add_argument("--invocation-timeout", type=_positive_integer, default=900)
     parser.add_argument("--poll-interval", type=_positive_float, default=2.0)
+    parser.add_argument(
+        "--name-prefix",
+        default="psd-agent-eval",
+        help="issue-specific prefix for temporary Docker container names",
+    )
     return parser
 
 
@@ -1436,6 +1492,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         tasks = load_suite(args.suite.resolve())
+        _validate_owner_email_for_tasks(tasks, args.owner_email)
         executor = CommandExecutor()
         repo_root = Path(__file__).resolve().parents[3]
         app_base_url = _resolve_app_base_url(
@@ -1451,11 +1508,7 @@ def main(argv: list[str] | None = None) -> int:
             "BUILD_MARKER": f"eval:{args.image}",
         }
         credential_provider = ActiveAwsCredentialProvider(executor)
-        name_token = re.sub(
-            r"[^a-z0-9-]",
-            "-",
-            f"issue-1424-{os.getpid()}".lower(),
-        )
+        name_token = _docker_name_token(args.name_prefix, os.getpid())
         runtime_factory = DockerRuntimeFactory(
             executor,
             args.image,
@@ -1465,7 +1518,7 @@ def main(argv: list[str] | None = None) -> int:
             boot_timeout_seconds=args.boot_timeout,
             invocation_timeout_seconds=args.invocation_timeout,
             poll_interval_seconds=args.poll_interval,
-            name_prefix=f"psd-agent-eval-{name_token}",
+            name_prefix=name_token,
             broker_stub_path=repo_root
             / "infra"
             / "agent-image"
@@ -1477,6 +1530,7 @@ def main(argv: list[str] | None = None) -> int:
             repo_root,
             args.environment,
             args.region,
+            owner_email=args.owner_email,
             credential_provider=credential_provider,
             ttl_seconds=_context_ttl_seconds(args.invocation_timeout),
             minimum_remaining_seconds=(
