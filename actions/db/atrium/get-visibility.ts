@@ -59,6 +59,7 @@ export async function getVisibilityAction(
     const viewable = await visibilityService.canView(requester, {
       id: obj.id,
       ownerUserId: obj.ownerUserId,
+      collectionId: obj.collectionId,
       visibilityLevel: obj.visibilityLevel,
     });
     if (!viewable) throw new NotFoundError("Content not found", { idOrSlug });

@@ -15,6 +15,10 @@ const assetGetMock = jest.fn()
 const assetReadBytesMock = jest.fn()
 const assetInitiateMock = jest.fn()
 const assetCompleteMock = jest.fn()
+const collectionVisibleListMock = jest.fn()
+const collectionManageableListMock = jest.fn()
+const collectionCreateMock = jest.fn()
+const collectionUpdateMock = jest.fn()
 
 jest.mock("@/lib/db/drizzle/users", () => ({
   getUserByEmail: (...args: unknown[]) => getUserByEmailMock(...args),
@@ -75,6 +79,15 @@ jest.mock("@/lib/content", () => {
       loadForEdit: jest.fn(),
       delete: (...args: unknown[]) => contentDeleteMock(...args),
     },
+    collectionManagementService: {
+      listManageable: (...args: unknown[]) =>
+        collectionManageableListMock(...args),
+      create: (...args: unknown[]) => collectionCreateMock(...args),
+      update: (...args: unknown[]) => collectionUpdateMock(...args),
+    },
+    collectionService: {
+      discover: (...args: unknown[]) => collectionVisibleListMock(...args),
+    },
     contentSourceService: {
       read: (...args: unknown[]) => sourceReadMock(...args),
     },
@@ -117,11 +130,103 @@ beforeEach(() => {
   })
   requesterForUserIdMock.mockResolvedValue(requester)
   assertContentAuthoringCapabilityMock.mockResolvedValue(undefined)
-  resolveCollectionIdMock.mockImplementation(async (value: unknown) => value)
+  resolveCollectionIdMock.mockImplementation(
+    async (_requester: unknown, value: unknown) => value
+  )
   auditMock.mockResolvedValue(undefined)
 })
 
 describe("signed-owner Atrium operations", () => {
+  it("keeps archived manageable collections discoverable without widening content access", async () => {
+    const district = {
+      id: "d9999999-9999-4999-8999-999999999999",
+      scope: "district",
+      slug: "staff-intranet",
+      selectableForCreate: true,
+    }
+    const activePrivatePicker = {
+      id: "a9999999-9999-4999-8999-999999999999",
+      scope: "private",
+      slug: "active-private",
+      selectableForCreate: true,
+    }
+    const activePrivateManagement = {
+      ...activePrivatePicker,
+      archivedAt: null,
+      directContentCount: 1,
+      subtreeContentCount: 1,
+      grants: [],
+    }
+    const archived = {
+      id: "f9999999-9999-4999-8999-999999999999",
+      scope: "private",
+      archivedAt: "2026-07-29T07:00:00.000Z",
+      directContentCount: 2,
+      subtreeContentCount: 5,
+      grants: [],
+    }
+    collectionVisibleListMock.mockResolvedValue([
+      district,
+      activePrivatePicker,
+    ])
+    collectionManageableListMock.mockResolvedValue([
+      activePrivateManagement,
+      archived,
+    ])
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "request-collections",
+      method: "GET",
+      path: "/collections",
+    })
+    expect(result.httpStatus).toBe(200)
+    expect(result.payload).toEqual({
+      data: [district, activePrivateManagement, archived],
+      meta: { requestId: "request-collections" },
+    })
+    expect(collectionVisibleListMock).toHaveBeenCalledWith(requester, {
+      shape: "flat",
+      includeCreateSelection: true,
+    })
+    expect(collectionManageableListMock).toHaveBeenCalledWith(requester)
+    expect(assertContentAuthoringCapabilityMock).not.toHaveBeenCalled()
+  })
+
+  it("creates and moves collections through the shared owner-bound service", async () => {
+    const id = "f9999999-9999-4999-8999-999999999999"
+    collectionCreateMock.mockResolvedValue({ id, name: "Projects" })
+    collectionUpdateMock.mockResolvedValue({ id, name: "Projects", parentId: null })
+
+    const created = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "request-create-collection",
+      method: "POST",
+      path: "/collections",
+      body: { name: "Projects", scope: "private" },
+    })
+    expect(created.httpStatus).toBe(201)
+    expect(collectionCreateMock).toHaveBeenCalledWith(
+      requester,
+      { name: "Projects", scope: "private" },
+      { surface: "rest", requestId: "request-create-collection" }
+    )
+
+    await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "request-move-collection",
+      method: "PATCH",
+      path: `/collections/${id}`,
+      body: { parentId: null, position: 0 },
+    })
+    expect(collectionUpdateMock).toHaveBeenCalledWith(
+      requester,
+      id,
+      { parentId: null, position: 0 },
+      { surface: "rest", requestId: "request-move-collection" }
+    )
+    expect(assertContentAuthoringCapabilityMock).toHaveBeenCalledTimes(2)
+  })
+
   it("resolves the signed email to the owner requester for reads", async () => {
     contentListMock.mockResolvedValue([
       { id: "content-1", slug: "staff-handbook" },

@@ -351,6 +351,8 @@ describe("listContentAuditAction", () => {
       {
         id: "a-1",
         objectId: "obj-1",
+        collectionId: null,
+        collectionName: null,
         action: "publish",
         surface: "mcp",
         actorKind: "agent",
@@ -375,6 +377,8 @@ describe("listContentAuditAction", () => {
       {
         id: "a-1",
         objectId: "obj-1",
+        collectionId: null,
+        collectionName: null,
         action: "publish",
         surface: "mcp",
         actorKind: "agent",

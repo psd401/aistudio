@@ -695,6 +695,7 @@ export const publishService = {
     const viewable = await visibilityService.canView(req, {
       id: objectId,
       ownerUserId: obj.ownerUserId,
+      collectionId: obj.collectionId,
       visibilityLevel: obj.visibilityLevel,
     });
     if (!viewable) {
@@ -807,6 +808,7 @@ export const publishService = {
     const viewable = await visibilityService.canView(req, {
       id: objectId,
       ownerUserId: obj.ownerUserId,
+      collectionId: obj.collectionId,
       visibilityLevel: obj.visibilityLevel,
     });
     if (!viewable) {
@@ -975,6 +977,7 @@ export const publishService = {
     const viewable = await visibilityService.canView(req, {
       id: objectId,
       ownerUserId: obj.ownerUserId,
+      collectionId: obj.collectionId,
       visibilityLevel: obj.visibilityLevel,
     });
     if (!viewable) {

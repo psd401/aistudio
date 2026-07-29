@@ -17,9 +17,10 @@
  * `canView(session)` here would leak non-public content to authenticated users
  * through the public URL (e.g. an `internal` object that was published to
  * `public_web` while its visibility stayed `internal`). `visibility_level ===
- * 'public'` is exactly the world-readable predicate (`canView` short-circuits to
- * `true` for `public` regardless of principal), so the strict check is both
- * simpler and strictly safer than a guest `canView`.
+ * 'public'` is the object-level world-readable predicate. A fixed anonymous
+ * requester is additionally checked against the object's collection so an
+ * archived or grant-restricted district collection cannot remain public through
+ * a stale `/p/` publication.
  *
  * ## Visibility gate (always 404, never 403)
  * No object for the slug, no live `public_web` publication, OR a non-`public`
@@ -55,7 +56,9 @@ import {
 import { s3Store } from "@/lib/content/storage/s3-store";
 import { versionService } from "@/lib/content/version-service";
 import { resolveDocumentParts } from "@/lib/content/embed-resolver";
+import { requesterMayViewCollection } from "@/lib/content/collection-access";
 import { extractDocumentHeadings } from "@/lib/content/render/headings";
+import type { Requester } from "@/lib/content/types";
 import { createLogger } from "@/lib/logger";
 import { ProvenanceFooter } from "@/components/atrium/ProvenanceFooter";
 import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
@@ -76,6 +79,14 @@ interface PublicReaderPageProps {
   params: Promise<{ slug: string }>;
 }
 
+const ANONYMOUS_REQUESTER: Requester = {
+  kind: "user",
+  userId: null,
+  roles: [],
+  groups: [],
+  isAdmin: false,
+};
+
 /**
  * Load the object + live `public_web` publication for a slug, but ONLY when the
  * object's visibility is `public`. Returns `null` otherwise (absent slug, no live
@@ -92,6 +103,7 @@ const loadPublicObject = cache(async (
   id: string;
   kind: "document" | "artifact";
   title: string;
+  collectionId: string | null;
   /** The object's collection name (via left join), for the reader meta line. */
   collectionName: string | null;
   /** Cover-gradient preset key + emoji icon (slice F) for the reader cover band. */
@@ -108,6 +120,7 @@ const loadPublicObject = cache(async (
           id: contentObjects.id,
           kind: contentObjects.kind,
           title: contentObjects.title,
+          collectionId: contentObjects.collectionId,
           visibilityLevel: contentObjects.visibilityLevel,
           // Left join → collection name (or null), for the reader meta. Rides on
           // the existing slug lookup — no extra query and no session read.
@@ -131,6 +144,14 @@ const loadPublicObject = cache(async (
   // A non-public object (even one published to public_web while its visibility
   // stayed internal/group) is treated as absent — 404, never 403.
   if (obj.visibilityLevel !== "public") return null;
+  if (
+    !(await requesterMayViewCollection(
+      ANONYMOUS_REQUESTER,
+      obj.collectionId
+    ))
+  ) {
+    return null;
+  }
 
   const [publication] = await executeQuery(
     (db) =>
@@ -156,6 +177,7 @@ const loadPublicObject = cache(async (
     id: obj.id,
     kind: obj.kind,
     title: obj.title,
+    collectionId: obj.collectionId,
     collectionName: obj.collectionName ?? null,
     coverGradient: obj.coverGradient,
     icon: obj.icon,

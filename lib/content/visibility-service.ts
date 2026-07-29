@@ -19,10 +19,16 @@ import {
   type DrizzleDB,
 } from "@/lib/db/drizzle-client";
 import {
+  contentCollections,
   contentObjects,
   contentVisibilityGrants,
   users,
 } from "@/lib/db/schema";
+import {
+  collectionAccessSnapshot,
+  requesterMayViewCollection,
+  type CollectionAccessSnapshot,
+} from "./collection-access";
 import {
   canPublishPublic,
   principalOf,
@@ -221,10 +227,28 @@ function buildVisibilitySql(principal: Principal): SQL {
   )`;
 }
 
+/**
+ * Additional collection boundary for permission-pushed object queries.
+ * Unfiled objects are unaffected. Filed objects must be in an active collection
+ * admitted by the requester (private ownership and inherited ACLs included).
+ */
+function buildCollectionAccessSql(allowedCollectionIds: Set<string>): SQL {
+  const ids = [...allowedCollectionIds];
+  const admitted =
+    ids.length > 0
+      ? sql`${contentObjects.collectionId} IN (${sql.join(
+          ids.map((id) => sql`${id}`),
+          sql`, `
+        )})`
+      : sql`false`;
+  return sql`(${contentObjects.collectionId} IS NULL OR ${admitted})`;
+}
+
 /** A loaded object's fields `canView` needs (subset of the DTO). */
 export interface ViewableObject {
   id: string;
   ownerUserId: number;
+  collectionId: string | null;
   visibilityLevel: "private" | "group" | "internal" | "public";
 }
 
@@ -397,6 +421,23 @@ async function setLevelInTx(
   const level = visibility.level;
   assertWritableLevel(level, visibility.grants);
 
+  if (level !== "private") {
+    const collectionRows = await tx
+      .select({ ownerUserId: contentCollections.ownerUserId })
+      .from(contentObjects)
+      .leftJoin(
+        contentCollections,
+        eq(contentObjects.collectionId, contentCollections.id)
+      )
+      .where(eq(contentObjects.id, objectId))
+      .limit(1);
+    if (collectionRows[0]?.ownerUserId != null) {
+      throw new ValidationError(
+        "Content in a private collection must remain private"
+      );
+    }
+  }
+
   // Reconcile the persisted grant set with the target level — both inside the one
   // transaction so the level and its grant set are never observed apart.
   await reconcileGrantsInTx(tx, objectId, level, visibility.grants);
@@ -460,7 +501,21 @@ export const visibilityService = {
    * disagree and leak (the mocked unit tests cannot catch a SQL-only divergence).
    * When you edit one, edit the other in the same commit.
    */
-  async canView(req: Requester, obj: ViewableObject): Promise<boolean> {
+  async canView(
+    req: Requester,
+    obj: ViewableObject,
+    collectionAccess?: CollectionAccessSnapshot
+  ): Promise<boolean> {
+    // Batch callers pass one request-scoped snapshot so N concurrent object
+    // checks do not each reload the complete collection/grant hierarchy.
+    const collectionVisible =
+      obj.collectionId == null ||
+      (collectionAccess
+        ? collectionAccess.allowedCollectionIds.has(obj.collectionId)
+        : await requesterMayViewCollection(req, obj.collectionId));
+    if (!collectionVisible) {
+      return false;
+    }
     if (obj.visibilityLevel === "public") return true;
 
     const principal = principalOf(req);
@@ -685,6 +740,9 @@ export const visibilityService = {
     const principal = principalOf(req);
     const o = contentObjects;
     const visiblePredicate = buildVisibilitySql(principal);
+    const collectionPredicate = buildCollectionAccessSql(
+      (await collectionAccessSnapshot(req)).allowedCollectionIds
+    );
     const rows = await executeQuery(
       (db: DrizzleDB) =>
         db
@@ -697,7 +755,8 @@ export const visibilityService = {
             and(
               sql`${o.status} <> 'archived'`,
               sql`${o.collectionId} IS NOT NULL`,
-              visiblePredicate
+              visiblePredicate,
+              collectionPredicate
             )
           )
           .groupBy(o.collectionId),
@@ -733,6 +792,9 @@ export const visibilityService = {
 
     const o = contentObjects;
     const visiblePredicate = buildVisibilitySql(principal);
+    const collectionPredicate = buildCollectionAccessSql(
+      (await collectionAccessSnapshot(req)).allowedCollectionIds
+    );
 
     const filters = [
       // archived objects are excluded unless explicitly requested.
@@ -740,6 +802,7 @@ export const visibilityService = {
         ? eq(o.status, filter.status)
         : sql`${o.status} <> 'archived'`,
       visiblePredicate,
+      collectionPredicate,
     ];
     if (filter.collectionId) filters.push(eq(o.collectionId, filter.collectionId));
     if (filter.kind) filters.push(eq(o.kind, filter.kind));

@@ -22,42 +22,41 @@ type AtriumBody = {
   body?: Record<string, unknown>
 }
 
+const ALLOWED_PATHS: Record<AtriumBody["method"], readonly RegExp[]> = {
+  GET: [
+    /^$/,
+    /^\/collections$/,
+    new RegExp(`^/${IDENTIFIER}$`),
+    // Committed markdown source — the ONLY way an agent can read a document's
+    // body text (`GET /<id>` returns bodyLocation "proof" with no text).
+    new RegExp(`^/${IDENTIFIER}/source$`),
+    // Authored image assets (#1284): metadata list, plus a bounded
+    // base64 byte read so an agent can copy an image between objects.
+    new RegExp(`^/${IDENTIFIER}/assets$`),
+    new RegExp(`^/${IDENTIFIER}/assets/${IDENTIFIER}/bytes$`),
+  ],
+  POST: [
+    /^$/,
+    /^\/collections$/,
+    new RegExp(`^/${IDENTIFIER}/(?:versions|publish)$`),
+    new RegExp(`^/${IDENTIFIER}/assets$`),
+    new RegExp(`^/${IDENTIFIER}/assets/${IDENTIFIER}/complete$`),
+  ],
+  PATCH: [
+    new RegExp(`^/${IDENTIFIER}(?:/visibility)?$`),
+    new RegExp(`^/collections/${IDENTIFIER}$`),
+  ],
+  DELETE: [
+    new RegExp(`^/${IDENTIFIER}$`),
+    new RegExp(
+      `^/${IDENTIFIER}/publish/(?:intranet|public_web|schoology|google)$`
+    ),
+  ],
+}
+
 function isAllowedMethodPath(method: string, path: string): boolean {
-  if (method === "GET") {
-    return (
-      path === "" ||
-      new RegExp(`^/${IDENTIFIER}$`).test(path) ||
-      // Committed markdown source — the ONLY way an agent can read a document's
-      // body text (`GET /<id>` returns bodyLocation "proof" with no text).
-      new RegExp(`^/${IDENTIFIER}/source$`).test(path) ||
-      // Authored image assets (#1284): metadata list, plus a bounded
-      // base64 byte read so an agent can copy an image from one object to
-      // another (assets are per-object; a directive may only reference an
-      // asset owned by the object it is embedded in).
-      new RegExp(`^/${IDENTIFIER}/assets$`).test(path) ||
-      new RegExp(`^/${IDENTIFIER}/assets/${IDENTIFIER}/bytes$`).test(path)
-    )
-  }
-  if (method === "POST") {
-    return (
-      path === "" ||
-      new RegExp(`^/${IDENTIFIER}/(?:versions|publish)$`).test(path) ||
-      new RegExp(`^/${IDENTIFIER}/assets$`).test(path) ||
-      new RegExp(`^/${IDENTIFIER}/assets/${IDENTIFIER}/complete$`).test(path)
-    )
-  }
-  if (method === "PATCH") {
-    return new RegExp(`^/${IDENTIFIER}(?:/visibility)?$`).test(path)
-  }
-  if (method === "DELETE") {
-    return (
-      new RegExp(`^/${IDENTIFIER}$`).test(path) ||
-      new RegExp(
-        `^/${IDENTIFIER}/publish/(?:intranet|public_web|schoology|google)$`
-      ).test(path)
-    )
-  }
-  return false
+  const patterns = ALLOWED_PATHS[method as AtriumBody["method"]]
+  return patterns?.some((pattern) => pattern.test(path)) ?? false
 }
 
 /** A non-null, non-array object — the shape both `query` and `body` must have. */

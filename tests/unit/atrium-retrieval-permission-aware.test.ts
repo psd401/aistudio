@@ -78,6 +78,24 @@ jest.mock("@/lib/db/drizzle-client", () => ({
         return loadAssistantScopeResult;
       case "content.grantsFor":
         return grantsForResult;
+      case "collectionAccess.loadCollections":
+        return [
+          {
+            id: "col-hs-staff",
+            name: "High School Staff",
+            slug: "high-school-staff",
+            parentId: null,
+            ownerUserId: null,
+            defaultVisibilityLevel: "group",
+            inheritGrants: true,
+            position: 0,
+            archivedAt: null,
+          },
+        ];
+      case "collectionAccess.loadGrants":
+        // No collection-level rows preserves the legacy district-wide boundary;
+        // the object-level role/group grants below remain the predicate under test.
+        return [];
       default:
         return [];
     }
@@ -155,6 +173,12 @@ import {
 import { s3Store } from "@/lib/content/storage/s3-store";
 import { visibilityService } from "@/lib/content/visibility-service";
 import type { Requester } from "@/lib/content/types";
+
+const executeQueryMock = (
+  jest.requireMock("@/lib/db/drizzle-client") as {
+    executeQuery: jest.Mock;
+  }
+).executeQuery;
 
 // The mocked s3Store.getText, retrieved from the mocked module so §16.3 tests
 // can assert it is (not) called without dereferencing it in a hoisted factory.
@@ -318,6 +342,14 @@ describe("§16.2 permission-aware search — the safety boundary", () => {
       // The draft hit was dropped by the cheap pre-filter — no canView DB call.
       const checkedIds = canViewSpy.mock.calls.map(([, obj]) => obj.id);
       expect(checkedIds).toEqual(["obj-1", "obj-3"]);
+      const snapshots = canViewSpy.mock.calls.map(([, , access]) => access);
+      expect(snapshots[0]).toBeDefined();
+      expect(snapshots[1]).toBe(snapshots[0]);
+      expect(
+        executeQueryMock.mock.calls.filter(
+          ([, label]) => label === "collectionAccess.loadCollections"
+        )
+      ).toHaveLength(1);
     } finally {
       canViewSpy.mockRestore();
     }

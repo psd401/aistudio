@@ -66,6 +66,7 @@ const docs = toPgRows(
           id: contentObjects.id,
           slug: contentObjects.slug,
           ownerUserId: contentObjects.ownerUserId,
+          collectionId: contentObjects.collectionId,
           visibilityLevel: contentObjects.visibilityLevel,
         })
         .from(contentObjects)
@@ -76,6 +77,7 @@ const docs = toPgRows(
   id: string;
   slug: string;
   ownerUserId: number;
+  collectionId: string | null;
   visibilityLevel: "private" | "group" | "internal" | "public";
 }[];
 const activeDoc = docs.find((d) => d.slug === ACTIVE_SLUG);

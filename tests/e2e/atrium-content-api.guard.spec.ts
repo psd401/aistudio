@@ -26,6 +26,18 @@ test.describe("Atrium content v1 endpoints — unauthenticated 401 (always-run)"
     ).toBe(401);
   });
 
+  test("collection mutations -> 401 before body parsing", async ({ request }) => {
+    const create = await request.post("/api/v1/content/collections", {
+      data: { name: "probe", scope: "private" },
+    });
+    const update = await request.patch(
+      `/api/v1/content/collections/${SOME_ID}`,
+      { data: { archived: true } }
+    );
+    expect(create.status()).toBe(401);
+    expect(update.status()).toBe(401);
+  });
+
   test("POST /api/v1/content -> 401 (auth before body parse)", async ({ request }) => {
     const res = await request.post("/api/v1/content", {
       data: { kind: "document", title: "probe" },

@@ -34,7 +34,11 @@ export type ContentAuditAction =
   | "export_okf"
   | "import_okf"
   | "initiate_asset"
-  | "complete_asset";
+  | "complete_asset"
+  | "collection_create"
+  | "collection_update"
+  | "collection_archive"
+  | "collection_restore";
 
 /**
  * The surface the mutation arrived on. `ui` is a human acting through an in-app

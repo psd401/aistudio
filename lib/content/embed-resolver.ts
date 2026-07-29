@@ -19,9 +19,10 @@
  *   uses. Expand links target `/c/<slug>`.
  * - `public` (the anonymous `/p/[slug]` reader) gates STRICTLY on
  *   `visibility_level === 'public'` AND a LIVE `public_web` publication, and
+ *   admits the fixed anonymous principal to the containing collection. It
  *   consults NO session — matching the public reader's own contract (a public
- *   surface must serve the same thing to everyone, and an unpublish must mask
- *   immediately). Expand links target `/p/<slug>`.
+ *   surface must serve the same thing to everyone, and an unpublish/archive must
+ *   mask immediately). Expand links target `/p/<slug>`.
  *
  * The resolved `code` is the artifact's CURRENT head for internal audiences (the
  * "live artifact" the mockup describes). The PUBLIC audience instead receives the
@@ -37,12 +38,24 @@ import { contentObjects, contentPublications } from "@/lib/db/schema";
 import { createLogger } from "@/lib/logger";
 import { versionService } from "./version-service";
 import { visibilityService } from "./visibility-service";
+import {
+  collectionAccessSnapshot,
+  requesterMayViewCollection,
+  type CollectionAccessSnapshot,
+} from "./collection-access";
 import { getArtifactSandboxRenderUrl } from "./artifact-sandbox-config";
 import { isArtifactId } from "./embed-directive";
 import { renderDocumentToParts } from "./render/document-parts";
-import type { Requester } from "./types";
+import type { Requester, VisibilityLevel } from "./types";
 
 const log = createLogger({ context: "atrium.embedResolver" });
+const ANONYMOUS_REQUESTER: Requester = {
+  kind: "user",
+  userId: null,
+  roles: [],
+  groups: [],
+  isAdmin: false,
+};
 
 /** A resolved embed: either a live sandbox render or an unavailable placeholder. */
 export interface ResolvedEmbed {
@@ -65,11 +78,39 @@ export interface ResolveEmbedOptions {
   audience: EmbedAudience;
   /** Required for the `internal` audience (the session principal); ignored for `public`. */
   requester?: Requester;
+  /** Request-scoped reuse for documents containing multiple embedded artifacts. */
+  collectionAccess?: CollectionAccessSnapshot;
 }
 
 /** The masked/unavailable result — identical for absent, non-artifact, and hidden. */
 function unavailable(artifactId: string): ResolvedEmbed {
   return { artifactId, available: false, title: null, href: null, code: "", sandboxSrc: null };
+}
+
+interface EmbedVisibilityObject {
+  id: string;
+  ownerUserId: number;
+  collectionId: string | null;
+  visibilityLevel: VisibilityLevel;
+}
+
+async function canResolveEmbed(
+  obj: EmbedVisibilityObject,
+  opts: ResolveEmbedOptions,
+  collectionAccess?: CollectionAccessSnapshot
+): Promise<boolean> {
+  if (opts.audience === "internal") {
+    return (
+      opts.requester != null &&
+      visibilityService.canView(opts.requester, obj, collectionAccess)
+    );
+  }
+  if (obj.visibilityLevel !== "public") return false;
+  if (obj.collectionId == null) return true;
+  if (collectionAccess) {
+    return collectionAccess.allowedCollectionIds.has(obj.collectionId);
+  }
+  return requesterMayViewCollection(ANONYMOUS_REQUESTER, obj.collectionId);
 }
 
 /**
@@ -78,9 +119,10 @@ function unavailable(artifactId: string): ResolvedEmbed {
  * see. Only a viewable artifact loads its code (best-effort — a missing body
  * degrades to an empty live preview rather than surfacing a raw S3 error).
  */
-export async function resolveEmbedForReader(
+async function resolveEmbedForReaderWithAccess(
   artifactId: string,
-  opts: ResolveEmbedOptions
+  opts: ResolveEmbedOptions,
+  collectionAccess?: CollectionAccessSnapshot
 ): Promise<ResolvedEmbed> {
   // Validate the id shape before any DB lookup so a malformed/injected value never
   // becomes a query key.
@@ -93,6 +135,7 @@ export async function resolveEmbedForReader(
           id: contentObjects.id,
           kind: contentObjects.kind,
           ownerUserId: contentObjects.ownerUserId,
+          collectionId: contentObjects.collectionId,
           visibilityLevel: contentObjects.visibilityLevel,
           title: contentObjects.title,
           slug: contentObjects.slug,
@@ -107,15 +150,7 @@ export async function resolveEmbedForReader(
   if (!obj || obj.kind !== "artifact") return unavailable(artifactId);
 
   // Visibility gate — on the ARTIFACT's own visibility for THIS viewer.
-  const visible =
-    opts.audience === "public"
-      ? obj.visibilityLevel === "public"
-      : opts.requester != null &&
-        (await visibilityService.canView(opts.requester, {
-          id: obj.id,
-          ownerUserId: obj.ownerUserId,
-          visibilityLevel: obj.visibilityLevel,
-        }));
+  const visible = await canResolveEmbed(obj, opts, collectionAccess);
   if (!visible) return unavailable(artifactId);
 
   // The PUBLIC audience is held to the public reader's stricter contract: only an
@@ -170,6 +205,18 @@ export async function resolveEmbedForReader(
   };
 }
 
+export async function resolveEmbedForReader(
+  artifactId: string,
+  opts: ResolveEmbedOptions
+): Promise<ResolvedEmbed> {
+  // A caller cannot smuggle an authenticated snapshot into the public audience.
+  // Public document batches use the private helper below with an anonymous
+  // snapshot created inside this module.
+  const collectionAccess =
+    opts.audience === "internal" ? opts.collectionAccess : undefined;
+  return resolveEmbedForReaderWithAccess(artifactId, opts, collectionAccess);
+}
+
 /** A rendered document body segment: sanitized HTML or a resolved embed. */
 export type RenderedDocumentPart =
   | { kind: "html"; html: string }
@@ -186,11 +233,27 @@ export async function resolveDocumentParts(
   opts: ResolveEmbedOptions
 ): Promise<RenderedDocumentPart[]> {
   const parts = renderDocumentToParts(markdown);
+  const hasEmbed = parts.some((part) => part.kind === "embed");
+  const snapshotRequester =
+    opts.audience === "public" ? ANONYMOUS_REQUESTER : opts.requester;
+  const collectionAccess =
+    opts.audience === "internal" && opts.collectionAccess
+      ? opts.collectionAccess
+      : hasEmbed && snapshotRequester
+        ? await collectionAccessSnapshot(snapshotRequester)
+        : undefined;
   return Promise.all(
     parts.map(async (part): Promise<RenderedDocumentPart> =>
       part.kind === "html"
         ? { kind: "html", html: part.html }
-        : { kind: "embed", embed: await resolveEmbedForReader(part.artifactId, opts) }
+        : {
+            kind: "embed",
+            embed: await resolveEmbedForReaderWithAccess(
+              part.artifactId,
+              opts,
+              collectionAccess
+            ),
+          }
     )
   );
 }

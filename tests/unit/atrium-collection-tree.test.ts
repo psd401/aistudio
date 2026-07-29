@@ -26,8 +26,12 @@ let allCollections: Array<{
   slug: string;
   parentId: string | null;
   defaultVisibilityLevel: string;
+  ownerUserId?: number | null;
+  inheritGrants?: boolean;
+  archivedAt?: Date | null;
   navItemId: number | null;
   position: number;
+  viewAllowed?: boolean;
 }> = [];
 
 let visibleObjects: Array<{ collectionId: string | null }> = [];
@@ -67,6 +71,41 @@ jest.mock("@/lib/content/visibility-service", () => ({
       return counts;
     }),
   },
+}));
+
+jest.mock("@/lib/content/collection-access", () => ({
+  collectionAccessSnapshot: jest.fn(
+    async (req: { kind: string; userId?: number | null }) => {
+    const collections = allCollections.map((row) => ({
+      ...row,
+      ownerUserId: row.ownerUserId ?? null,
+      inheritGrants: row.inheritGrants ?? true,
+      archivedAt: row.archivedAt ?? null,
+    }));
+    const allowedCollectionIds = new Set(
+      collections
+        .filter(
+          (row) =>
+            row.viewAllowed !== false &&
+            (row.ownerUserId == null ||
+              (req.kind === "user" && row.ownerUserId === req.userId))
+        )
+        .map((row) => row.id)
+    );
+      return {
+        collections,
+        byId: new Map(collections.map((row) => [row.id, row])),
+        directGrants: new Map(),
+        effectiveGrants: () => [],
+        allowedCollectionIds,
+        selectableCollectionIds: new Set(
+          req.kind === "user" && req.userId != null
+            ? [...allowedCollectionIds]
+            : []
+        ),
+      };
+    }
+  ),
 }));
 
 import { collectionService } from "@/lib/content/collection-service";
@@ -158,6 +197,45 @@ describe("collectionService.tree visibility filtering", () => {
     expect(tree).toHaveLength(1);
     expect(tree[0].id).toBe("root");
     expect(tree[0].children.map((c) => c.id)).toEqual(["child"]);
+  });
+
+  it("re-roots an admitted child without exposing a denied ancestor", async () => {
+    allCollections = [
+      {
+        id: "denied-root",
+        name: "Restricted Leadership",
+        slug: "restricted-leadership",
+        parentId: null,
+        defaultVisibilityLevel: "internal",
+        navItemId: null,
+        position: 0,
+        viewAllowed: false,
+      },
+      {
+        id: "admitted-child",
+        name: "Staff Handbook",
+        slug: "staff-handbook",
+        parentId: "denied-root",
+        defaultVisibilityLevel: "internal",
+        inheritGrants: false,
+        navItemId: null,
+        position: 0,
+      },
+    ];
+
+    const tree = await collectionService.tree(staff);
+
+    expect(tree).toHaveLength(1);
+    expect(tree[0]).toEqual(
+      expect.objectContaining({
+        id: "admitted-child",
+        name: "Staff Handbook",
+        parentId: null,
+      })
+    );
+    expect(JSON.stringify(tree)).not.toContain("denied-root");
+    expect(JSON.stringify(tree)).not.toContain("Restricted Leadership");
+    expect(JSON.stringify(tree)).not.toContain("restricted-leadership");
   });
 
   it("prunes an empty private subtree the requester cannot enter", async () => {

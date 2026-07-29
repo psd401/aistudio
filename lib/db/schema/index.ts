@@ -203,6 +203,7 @@ export * from "./tables/oauth-consent-decisions";
 // Atrium Content Workspace (#1058, Epic #1059)
 // ============================================
 export * from "./tables/content-collections";
+export * from "./tables/content-collection-grants";
 export * from "./tables/content-objects";
 export * from "./tables/content-versions";
 export * from "./tables/content-visibility-grants";

@@ -208,6 +208,7 @@ async function loadEditableObject(
   const viewable = await visibilityService.canView(req, {
     id: obj.id,
     ownerUserId: obj.ownerUserId,
+    collectionId: obj.collectionId,
     visibilityLevel: obj.visibilityLevel,
   });
   if (!viewable) return { error: NextResponse.json({ error: "Not found" }, { status: 404 }) };

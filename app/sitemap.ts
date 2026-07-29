@@ -7,6 +7,7 @@
  *   - `content_objects.visibility_level = 'public'`  (the strict public gate)
  *   - a LIVE `public_web` publication                 (destination + status)
  *   - `content_objects.status = 'published'`
+ *   - the anonymous requester may enter the active containing collection
  *
  * Because every condition here is at least as strict as the page's own gate,
  * the sitemap can never name a URL the reader would 404 (which would both leak
@@ -28,9 +29,19 @@ import { and, eq } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentObjects, contentPublications } from "@/lib/db/schema";
 import { publicReaderLink } from "@/lib/content/surface-helpers";
+import { collectionAccessSnapshot } from "@/lib/content/collection-access";
+import type { Requester } from "@/lib/content/types";
 import { createLogger } from "@/lib/logger";
 
 export const dynamic = "force-dynamic";
+
+const ANONYMOUS_REQUESTER: Requester = {
+  kind: "user",
+  userId: null,
+  roles: [],
+  groups: [],
+  isAdmin: false,
+};
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const log = createLogger({ action: "atrium.sitemap" });
@@ -44,37 +55,47 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   }
 
   try {
-    const rows = await executeQuery(
-      (db) =>
-        db
-          .select({
-            slug: contentObjects.slug,
-            updatedAt: contentObjects.updatedAt,
-          })
-          .from(contentObjects)
-          .innerJoin(
-            contentPublications,
-            eq(contentPublications.objectId, contentObjects.id)
-          )
-          .where(
-            and(
-              // The /p/[slug] strict public gate, exactly:
-              eq(contentObjects.visibilityLevel, "public"),
-              eq(contentPublications.destination, "public_web"),
-              eq(contentPublications.status, "live"),
-              // Lifecycle subset guard (publish sets it; unpublish reverts it):
-              eq(contentObjects.status, "published")
+    const [rows, collectionAccess] = await Promise.all([
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              slug: contentObjects.slug,
+              updatedAt: contentObjects.updatedAt,
+              collectionId: contentObjects.collectionId,
+            })
+            .from(contentObjects)
+            .innerJoin(
+              contentPublications,
+              eq(contentPublications.objectId, contentObjects.id)
             )
-          ),
-      "atrium.sitemap.publicObjects"
-    );
+            .where(
+              and(
+                // The /p/[slug] strict public gate, exactly:
+                eq(contentObjects.visibilityLevel, "public"),
+                eq(contentPublications.destination, "public_web"),
+                eq(contentPublications.status, "live"),
+                // Lifecycle subset guard (publish sets it; unpublish reverts it):
+                eq(contentObjects.status, "published")
+              )
+            ),
+        "atrium.sitemap.publicObjects"
+      ),
+      collectionAccessSnapshot(ANONYMOUS_REQUESTER),
+    ]);
 
-    return rows.map((row) => ({
-      // publicReaderLink is the SINGLE builder for /p/ URLs (the same one the
-      // publish adapter records as external_ref) — no second URL format here.
-      url: publicReaderLink(row.slug),
-      ...(row.updatedAt ? { lastModified: row.updatedAt } : {}),
-    }));
+    return rows
+      .filter(
+        (row) =>
+          row.collectionId == null ||
+          collectionAccess.allowedCollectionIds.has(row.collectionId)
+      )
+      .map((row) => ({
+        // publicReaderLink is the SINGLE builder for /p/ URLs (the same one the
+        // publish adapter records as external_ref) — no second URL format here.
+        url: publicReaderLink(row.slug),
+        ...(row.updatedAt ? { lastModified: row.updatedAt } : {}),
+      }));
   } catch (error) {
     // Fail soft: an unreachable DB must degrade to an empty sitemap, never a 500.
     log.warn("Failed to build sitemap; serving empty sitemap", {

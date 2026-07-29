@@ -58,6 +58,11 @@ export interface ContentAuditDetails {
   publicExposure?: boolean;
   /** Short human-readable summary accompanying `publicExposure`. */
   note?: string;
+  /** Collection mutation identity (#1438); object_id stays null for these rows. */
+  collectionId?: string;
+  collectionName?: string;
+  collectionScope?: "district" | "private";
+  parentId?: string | null;
 }
 
 export const contentAuditLogs = pgTable("content_audit_logs", {
