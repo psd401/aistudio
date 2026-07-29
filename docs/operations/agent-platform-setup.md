@@ -72,23 +72,48 @@ All GCP steps are done in the web console. No `gcloud` CLI required.
 
 #### 1.7 Allow the Chat app to operate in spaces
 
-Complete this for the **dev and prod Chat apps separately**. A Chat app can
-work in 1:1 DMs while Workspace policy still blocks every API action in a
-multi-user space.
+A Chat app can work in 1:1 DMs while Workspace policy still blocks every API
+action in a multi-user space. There are two control planes to check:
 
-1. In **Google Admin Console** → **Apps** → **Google Workspace Marketplace
-   apps**, verify the agent app is allowlisted and its app access is not
-   restricted.
-2. In **Google Admin Console** → **Apps** → **Google Workspace** → **Google
-   Chat** → **Chat apps installation settings**, allow the agent app for the
-   intended organizational units or groups.
-3. In **GCP Console** → **Google Chat API** → **Configuration**, verify:
-   - **Visibility** is domain-wide, not limited to named people or groups.
-   - **Interactive features** are enabled.
-4. After each policy change, use the app credential (`chat.bot` scope) to call
-   `spaces.get` for a ROOM space. It must return `200`; a `403` stating that
-   the organization's administrator restricts the Chat app means the policy
-   is still blocking space access.
+1. In **Google Admin Console** → **Apps** → **Google Workspace** → **Google
+   Chat** → **Chat apps**, select the **top-level organizational unit** and set
+   **Allow users to install Chat apps** to **On**. Do not enable this only on a
+   child OU: Google documents that Chat APIs and spaces might not work unless
+   the top-level OU is enabled.
+2. If the district uses a Google Workspace Marketplace allowlist, go to
+   **Apps** → **Google Workspace Marketplace apps** → **Apps list** and add the
+   production app by its exact name, **PSD AI Agent**. The unpublished
+   **PSD Agent Dev** app does not appear in the Marketplace allowlist; Google
+   permits an unpublished development app for up to five named testers while
+   Chat apps are enabled.
+3. Configure the two apps separately in **GCP Console** → **Google Chat API** →
+   **Configuration**:
+   - **Dev — `psd-aistudio-dev` / PSD Agent Dev:** enable **Interactive
+     features**, select **Join spaces and group conversations**, keep the
+     Cloud Pub/Sub topic `projects/psd-aistudio-dev/topics/agent-chat-messages`,
+     and keep **Visibility** limited to the named testers. Add every person who
+     will mention the app during the live test. Domain-wide visibility is not
+     required for a development app.
+   - **Prod — `aistudio-462612` / PSD AI Agent:** enable **Interactive
+     features**, select **Join spaces and group conversations**, keep the
+     configured production Pub/Sub topic, and make the app available to the
+     intended domain audience. If Marketplace access is allowlist-only, step 2
+     must also be complete.
+4. Allow time for Workspace policy propagation. With each app's own service
+   account credential and the `chat.bot` scope, call `spaces.get` for a ROOM
+   that app has joined. It must return `200`; a `403` stating that the
+   organization's administrator restricts the Chat app means the Workspace
+   policy is still blocking space access. Then @mention the app and confirm
+   that the response is posted in the mention's thread.
+
+These settings are console-managed. The Google Cloud CLI has no `gcloud chat`
+command, and `gcloud workspace-add-ons deployments` manages add-on deployments,
+not Chat API configuration or Workspace tenant policy. The Google Terraform
+provider manages the surrounding APIs, service accounts, Pub/Sub topics,
+subscriptions, and IAM, but has no resource for either setting above. Record
+the console state in the private `psd401/psd-gcp-infra` runbook; do not add an
+unsupported Terraform workaround or run `terraform apply` for this policy
+change.
 
 There are two distinct identities that can post to Chat:
 
