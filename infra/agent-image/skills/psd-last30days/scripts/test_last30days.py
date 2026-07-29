@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -459,11 +460,16 @@ class GatherTests(unittest.TestCase):
 
 
 class UploadTests(unittest.TestCase):
-    def test_missing_bucket_raises_misconfigured(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
+    def test_publisher_failure_raises_upstream_error(self):
+        publisher = types.ModuleType("artifact_publisher")
+        publisher.publish_artifact = mock.Mock(
+            side_effect=RuntimeError("broker unavailable"),
+        )
+        with mock.patch.dict(sys.modules, {"artifact_publisher": publisher}):
             with self.assertRaises(last30days.UploadError) as ctx:
                 last30days.upload_html("<html></html>", "a@psd401.net")
-        self.assertEqual(ctx.exception.code, "misconfigured")
+        self.assertEqual(ctx.exception.code, "upstream_error")
+        self.assertIn("broker unavailable", ctx.exception.message)
 
 
 if __name__ == "__main__":

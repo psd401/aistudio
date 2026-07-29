@@ -70,7 +70,8 @@ jobs:
           infra/agent-image/test_broker_stub.py \
           infra/agent-image/test_graders.py \
           infra/agent-image/test_eval_runner.py \
-          infra/agent-image/test_eval_summary.py
+          infra/agent-image/test_eval_summary.py \
+          infra/agent-image/skills/psd-last30days/scripts/test_last30days.py
 
     - name: Run model-UID isolation test as root
       run: |
@@ -184,6 +185,7 @@ jobs:
       run: |
         set -euo pipefail
         test_files=(
+          infra/agent-image/skills/_shared/agent-broker.test.js
           infra/agent-image/skills/chat-chart/run.test.js
           infra/agent-image/skills/psd-aistudio/common.test.js
           infra/agent-image/skills/psd-aistudio/run.test.js
