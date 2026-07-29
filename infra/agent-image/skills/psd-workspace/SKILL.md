@@ -152,6 +152,8 @@ node /opt/psd-skills/psd-workspace/run.js \
   --command "gmail +draft --to bill@psd401.net --subject 'Follow up' --body-file /tmp/draft-body.txt"
 
 # Chat message text (+send) uses --text-file (replaces --text)
+# Only send after the user explicitly confirms the message. Chat writes must
+# use the agent identity; the trusted broker rejects them on the human slot.
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net --scope agent \
   --command "chat +send --space spaces/XXXX --text-file /tmp/chatmsg.txt"

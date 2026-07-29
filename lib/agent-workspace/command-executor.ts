@@ -24,6 +24,7 @@ const READ_ACTIONS = new Set([
 ])
 
 const MUTATING_ACTIONS = new Set([
+  "+send",
   "batchdelete",
   "batchmodify",
   "batchupdate",
@@ -48,6 +49,8 @@ const MUTATING_ACTIONS = new Set([
 
 const ALLOWED_WRITES = new Set([
   "calendar events insert",
+  "chat +send",
+  "chat spaces messages create",
   "docs documents create",
   "drive files copy",
   "drive files create",
@@ -71,6 +74,8 @@ const REQUIRES_AGENT_CREATED_PROVENANCE = new Set([
 ])
 
 const AGENT_ONLY_WRITES = new Set([
+  "chat +send",
+  "chat spaces messages create",
   "docs documents create",
   "drive files copy",
   "drive files create",

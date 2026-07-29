@@ -116,6 +116,12 @@ describe("mintAgentWorkspaceToken", () => {
     process.env.GCP_DWD_SERVICE_ACCOUNT_EMAIL = SA
   })
 
+  it("requests the user-auth scope that permits Chat message creation", () => {
+    expect(AGENT_DWD_SCOPES).toContain(
+      "https://www.googleapis.com/auth/chat.messages"
+    )
+  })
+
   function fakeFetch(handlers: { sign?: () => unknown; token?: () => unknown }) {
     const calls: Array<{ url: string; init: RequestInit }> = []
     const impl = jest.fn(async (url: string, init: RequestInit) => {

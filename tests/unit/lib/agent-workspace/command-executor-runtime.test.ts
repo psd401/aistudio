@@ -29,6 +29,42 @@ afterEach(async () => {
 })
 
 describe("trusted Workspace command runtime", () => {
+  it("executes an agent-owned Chat send through the trusted CLI boundary", async () => {
+    await validatedFsPromises.writeFile(
+      executable,
+      [
+        "#!/usr/bin/env node",
+        "process.stdout.write(JSON.stringify({",
+        "  argv: process.argv.slice(2),",
+        "  token: process.env.GOOGLE_WORKSPACE_CLI_TOKEN,",
+        "}))",
+      ].join("\n"),
+      { mode: 0o700 },
+    )
+
+    const argv = [
+      "chat",
+      "+send",
+      "--space",
+      "spaces/AAQA13FQZFA",
+      "--text",
+      "Test summary",
+    ]
+    const result = await executeWorkspaceCommand(
+      { scope: "agent", argv },
+      "agent-bound-access-token",
+    )
+    const execution = JSON.parse(result.stdout) as {
+      argv: string[]
+      token: string
+    }
+
+    expect(execution).toEqual({
+      argv,
+      token: "agent-bound-access-token",
+    })
+  })
+
   it("contains implicit binary downloads in a private disposable directory", async () => {
     await validatedFsPromises.writeFile(
       executable,

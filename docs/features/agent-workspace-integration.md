@@ -80,6 +80,14 @@ tokens for two slots:
    exit 14 (the router has already kicked off auto-provisioning, #1233). No
    consent link — the user just retries in ~30 min.
 
+Outbound Google Chat messages are agent-slot-only. The trusted executor
+allowlists both the `chat +send` helper and the raw
+`chat spaces messages create` method, while rejecting both on the human user
+slot. The DWD assertion already carries `chat.messages`, which authorizes
+`spaces.messages.create` with user authentication; `chat.bot` is for Chat-app
+authentication and is not the credential mode used by the `agnt_*` identity.
+The skill still requires explicit user confirmation before posting.
+
 ## Runtime error contract
 
 The skill emits a single JSON line on stdout (or a stderr message for exit 12)

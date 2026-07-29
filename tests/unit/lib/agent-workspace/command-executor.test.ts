@@ -267,6 +267,77 @@ function defineTrustedWorkspaceCommandPolicySuite1Part3() {it("rejects Gmail mod
       validateWorkspaceCommand({ scope: "agent", argv })
     ).not.toThrow()
   })
+
+  it.each([
+    [
+      "helper",
+      [
+        "chat",
+        "+send",
+        "--space",
+        "spaces/AAQA13FQZFA",
+        "--text",
+        "Test summary",
+      ],
+    ],
+    [
+      "raw API",
+      [
+        "chat",
+        "spaces",
+        "messages",
+        "create",
+        "--params",
+        '{"parent":"spaces/AAQA13FQZFA"}',
+        "--json",
+        '{"text":"Test summary"}',
+      ],
+    ],
+  ])("allows agent-owned Chat messages through the %s form", (_name, argv) => {
+    expect(() =>
+      validateWorkspaceCommand({ scope: "agent", argv })
+    ).not.toThrow()
+  })
+
+  it.each([
+    [
+      "helper",
+      [
+        "chat",
+        "+send",
+        "--space",
+        "spaces/AAQA13FQZFA",
+        "--text",
+        "No",
+      ],
+    ],
+    [
+      "raw API",
+      [
+        "chat",
+        "spaces",
+        "messages",
+        "create",
+        "--params",
+        '{"parent":"spaces/AAQA13FQZFA"}',
+        "--json",
+        '{"text":"No"}',
+      ],
+    ],
+  ])("keeps Chat message writes off the human user slot via %s", (_name, argv) => {
+    expect(() =>
+      validateWorkspaceCommand({ scope: "user", argv })
+    ).toThrow(/agent-owned Workspace account/)
+  })
+
+  it("does not let the Chat send helper hide before a read action", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: ["chat", "+send", "list"],
+      })
+    ).toThrow(/contains a mutation/)
+  })
 }
 
 const defineTrustedWorkspaceCommandPolicySuite1 = () => {
