@@ -180,6 +180,7 @@ class SuiteLoadingTests(unittest.TestCase):
             "directory-literal-address-no-lookup",
             "workspace-draft-email-not-send",
         }
+        # Cross-multiply to keep the 25% threshold exact without float math.
         self.assertGreaterEqual(len(negative_task_ids) * 4, len(tasks))
         tasks_by_id = {task.id: task for task in tasks}
         self.assertTrue(negative_task_ids.issubset(tasks_by_id))
@@ -202,13 +203,26 @@ class SuiteLoadingTests(unittest.TestCase):
             )
         )
         workspace_negative = tasks_by_id["workspace-draft-email-not-send"]
+        workspace_negative_spec = next(
+            spec
+            for spec in workspace_negative.graders
+            if spec.get("type") == "no_route_called"
+            and spec.get("route") == "/api/agent/workspace-execute"
+        )
+        workspace_negative_body = workspace_negative_spec.get("body")
+        self.assertIsInstance(workspace_negative_body, dict)
+        forbidden_argv = workspace_negative_body["argv"]["contains_any"]
         self.assertTrue(
-            any(
-                spec.get("type") == "no_route_called"
-                and spec.get("route") == "/api/agent/workspace-execute"
-                and isinstance(spec.get("body"), dict)
-                for spec in workspace_negative.graders
-            )
+            {
+                "+send",
+                "send",
+                "+reply",
+                "reply",
+                "+reply-all",
+                "reply-all",
+                "+forward",
+                "forward",
+            }.issubset(forbidden_argv)
         )
 
         for task in tasks:

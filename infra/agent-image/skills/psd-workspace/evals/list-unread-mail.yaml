@@ -8,6 +8,6 @@ trials: 3
 fixtures:
   - fixtures/list-unread-mail.json
 graders:
-  - {"type":"broker_request","route":"/api/agent/workspace-execute","method":"POST","body":{"scope":{"exact":"user"},"argv.0":{"exact":"gmail"},"argv.1":{"contains_any":["users","+triage"]},"argv":{"contains_any":["list","+triage"]}}}
+  - {"type":"broker_request","route":"/api/agent/workspace-execute","method":"POST","body":{"scope":{"exact":"user"},"argv.0":{"exact":"gmail"},"argv.1":{"exact":"users"},"argv.2":{"exact":"messages"},"argv.3":{"exact":"list"}}}
   - {"type":"output_match","pattern":"Alex Rivera"}
   - {"type":"output_match","pattern":"Library projector follow-up"}
