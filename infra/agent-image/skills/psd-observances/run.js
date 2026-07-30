@@ -226,10 +226,23 @@ function explicitIsoDates(value) {
 }
 
 function wordTokens(value) {
-  return value
-    .split(/\s+/u)
-    .map((token) => token.replace(/[^\p{L}\p{N}-]/gu, ''))
-    .filter(Boolean);
+  const tokens = [];
+  let token = '';
+  const flushToken = () => {
+    if (!token) return;
+    tokens.push(token);
+    token = '';
+  };
+
+  for (const character of value) {
+    if (/[\p{L}\p{N}]/u.test(character)) {
+      token += character;
+    } else {
+      flushToken();
+    }
+  }
+  flushToken();
+  return tokens;
 }
 
 function numericDateTokens(value) {
@@ -310,11 +323,26 @@ function numericMonthYears(value) {
   return tokens.flatMap((_, index) => numericMonthYearAt(tokens, index));
 }
 
+function nearestYearIs2027(tokens, index) {
+  const targetYears = new Set(['2027']);
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  let nearestIncludes2027 = false;
+  for (const [yearIndex, token] of tokens.entries()) {
+    if (token.length !== 4 || !Number.isSafeInteger(Number(token))) continue;
+    const distance = Math.abs(yearIndex - index);
+    if (distance > nearestDistance) continue;
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestIncludes2027 = targetYears.has(token);
+    } else if (targetYears.has(token)) {
+      nearestIncludes2027 = true;
+    }
+  }
+  return nearestIncludes2027;
+}
+
 function rejectLate2027Month(value) {
   const tokens = wordTokens(value).map((token) => token.toLocaleLowerCase());
-  const yearIndexes = tokens
-    .map((token, index) => (token === '2027' ? index : -1))
-    .filter((index) => index >= 0);
   const lateMonths = new Set([
     'july',
     'jul',
@@ -331,11 +359,7 @@ function rejectLate2027Month(value) {
     'dec',
   ]);
   for (const [index, token] of tokens.entries()) {
-    if (!lateMonths.has(token) || yearIndexes.length === 0) continue;
-    const nearestYearDistance = Math.min(
-      ...yearIndexes.map((yearIndex) => Math.abs(yearIndex - index)),
-    );
-    if (nearestYearDistance <= 4) {
+    if (lateMonths.has(token) && nearestYearIs2027(tokens, index)) {
       fail(
         'The requested 2027 month is outside the January 2026 through June 2027 coverage window.',
         'out_of_range',
@@ -356,6 +380,55 @@ function rejectLate2027Month(value) {
   }
 }
 
+function rejectLate2027Period(value) {
+  const tokens = wordTokens(value).map((token) => token.toLocaleLowerCase());
+  const lateSeasons = new Set(['summer', 'fall', 'autumn']);
+  const latePeriodNames = new Set(['q3', 'q4', 'h2']);
+  const lateQuarterValues = new Set([
+    '3',
+    '3rd',
+    'three',
+    'third',
+    '4',
+    '4th',
+    'four',
+    'fourth',
+  ]);
+  const halfNames = new Set(['half']);
+  const quarterNames = new Set(['q', 'qtr', 'quarter']);
+  const describesLatePeriod = (token, index) => {
+    if (lateSeasons.has(token) || latePeriodNames.has(token)) return true;
+    if (halfNames.has(token)) {
+      return ['2', '2nd', 'second'].includes(tokens[index - 1]);
+    }
+    if (quarterNames.has(token)) {
+      return (
+        lateQuarterValues.has(tokens[index - 1]) ||
+        lateQuarterValues.has(tokens[index + 1])
+      );
+    }
+    return (
+      lateQuarterValues.has(token) &&
+      [tokens[index - 1], tokens[index + 1]].some((nearby) =>
+        quarterNames.has(nearby),
+      )
+    );
+  };
+
+  if (
+    tokens.some(
+      (token, index) =>
+        describesLatePeriod(token, index) && nearestYearIs2027(tokens, index),
+    )
+  ) {
+    fail(
+      'The requested 2027 period extends beyond the January 2026 through June 2027 coverage window.',
+      'out_of_range',
+      1,
+    );
+  }
+}
+
 function validateOrdinaryFreeForm(value) {
   for (const { year } of explicitYears(value)) {
     if (year < 2026 || year > 2027) {
@@ -370,6 +443,7 @@ function validateOrdinaryFreeForm(value) {
     assertCoveredDate(date, 'date');
   }
   rejectLate2027Month(value);
+  rejectLate2027Period(value);
 }
 
 function validateHolidayYearsName(value) {
@@ -384,13 +458,19 @@ function validateHolidayYearsName(value) {
   }
 }
 
-function commandResult(context, query, includePartIINotice = false) {
+function commandResult(
+  context,
+  query,
+  includePartIINotice = false,
+  searches = undefined,
+) {
   return {
     command: context.command,
     query,
     limit: context.limit,
     output: context.output,
     includePartIINotice,
+    ...(searches ? { searches } : {}),
   };
 }
 
@@ -435,13 +515,35 @@ function buildStateCommand(context) {
   ) {
     fail('--section must be legal or school');
   }
-  const sectionQuery =
-    section === 'legal'
-      ? 'legal holidays'
-      : section === 'school'
-        ? 'school holidays'
-        : 'legal holidays school holidays';
-  return commandResult(context, `${state} ${sectionQuery}`, true);
+  if (section === 'legal' || section === 'school') {
+    return commandResult(
+      context,
+      `${state} ${section} holidays`,
+      true,
+    );
+  }
+  if (context.limit < 2) {
+    fail(
+      'state without --section requires --limit 2 or greater so both legal and school holiday sections can be returned.',
+    );
+  }
+  return commandResult(
+    context,
+    `${state} legal and school holidays`,
+    true,
+    [
+      {
+        section: 'legal',
+        sectionLabel: 'Legal holidays',
+        query: `${state} legal holidays`,
+      },
+      {
+        section: 'school',
+        sectionLabel: 'School holidays',
+        query: `${state} school holidays`,
+      },
+    ],
+  );
 }
 
 function conferenceYear(value) {
@@ -665,6 +767,60 @@ function shapeSearchResponse(response, query, full, limit = MAX_LIMIT) {
   });
 }
 
+function interleaveResultGroups(groups, limit) {
+  const results = [];
+  for (let index = 0; results.length < limit; index += 1) {
+    let foundResult = false;
+    for (const group of groups) {
+      const result = group[index];
+      if (!result) continue;
+      results.push(result);
+      foundResult = true;
+      if (results.length === limit) break;
+    }
+    if (!foundResult) break;
+  }
+  return results;
+}
+
+async function searchRepository(command, repository, callTool) {
+  const searches = command.searches ?? [{ query: command.query }];
+  const groups = [];
+  for (const search of searches) {
+    const response = await callTool('repositories_search', {
+      query: search.query,
+      repositoryIds: [repository.id],
+      mode: 'hybrid',
+      limit: command.limit,
+    });
+    const results = shapeSearchResponse(
+      response,
+      search.query,
+      command.output.full,
+      command.limit,
+    ).map((result) => ({
+      ...result,
+      ...(search.section
+        ? {
+            section: search.section,
+            sectionLabel: search.sectionLabel,
+          }
+        : {}),
+    }));
+    if (command.searches && results.length === 0) {
+      fail(
+        `No cited ${search.sectionLabel.toLocaleLowerCase()} results were found for this state.`,
+        'no_results',
+        1,
+      );
+    }
+    groups.push(results);
+  }
+  return command.searches
+    ? interleaveResultGroups(groups, command.limit)
+    : groups[0];
+}
+
 async function executeCommand(
   command,
   requestAgentBroker = defaultRequestAgentBroker,
@@ -673,18 +829,7 @@ async function executeCommand(
     callRepositoryTool(toolName, toolArgs, requestAgentBroker);
   const resolveRepository = createRepositoryResolver(callTool);
   const repository = await resolveRepository();
-  const response = await callTool('repositories_search', {
-    query: command.query,
-    repositoryIds: [repository.id],
-    mode: 'hybrid',
-    limit: command.limit,
-  });
-  const results = shapeSearchResponse(
-    response,
-    command.query,
-    command.output.full,
-    command.limit,
-  );
+  const results = await searchRepository(command, repository, callTool);
   return {
     status: 'ok',
     command: command.command,
@@ -711,8 +856,9 @@ function renderText(result) {
   } else {
     for (const [index, item] of result.results.entries()) {
       const title = item.itemName ? `${item.itemName} — ` : '';
+      const section = item.sectionLabel ? `${item.sectionLabel}: ` : '';
       lines.push(
-        `${index + 1}. ${item.citation.label} — ${title}${item.excerpt}`,
+        `${index + 1}. ${section}${item.citation.label} — ${title}${item.excerpt}`,
       );
     }
   }

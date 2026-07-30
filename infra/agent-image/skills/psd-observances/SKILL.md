@@ -63,7 +63,7 @@ Global flags:
 
 | Flag | Behavior |
 |---|---|
-| `--limit N` | Return 1-50 results; default 5 |
+| `--limit N` | Return 1-50 results; default 5. A state lookup without `--section` requires at least 2 so both sections are represented |
 | `--full` | Expand each excerpt, while retaining a hard total-output bound |
 | `--json` | Emit one machine-readable JSON object without the text truncation banner |
 

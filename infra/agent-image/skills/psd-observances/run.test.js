@@ -40,7 +40,12 @@ function toolEnvelope(data, options = {}) {
 
 function factForQuery(query) {
   if (/washington/i.test(query)) {
-    return 'Washington — Legal holidays — School holidays';
+    if (/legal holidays/i.test(query)) {
+      return 'Washington — Legal holidays';
+    }
+    if (/school holidays/i.test(query)) {
+      return 'Washington — School holidays';
+    }
   }
   if (/conference|National PTA/i.test(query)) {
     return 'National PTA conference — June 18-21, 2026';
@@ -133,7 +138,10 @@ describe('documented command forms', () => {
     {
       name: 'state',
       argv: ['state', 'Washington'],
-      query: 'Washington legal holidays school holidays',
+      queries: [
+        'Washington legal holidays',
+        'Washington school holidays',
+      ],
     },
     {
       name: 'conferences',
@@ -152,7 +160,8 @@ describe('documented command forms', () => {
       const { broker, calls } = createBroker();
       const result = await invoke(commandCase.argv, broker);
       expect(result.exitCode).toBe(0);
-      expect(calls).toHaveLength(2);
+      const queries = commandCase.queries ?? [commandCase.query];
+      expect(calls).toHaveLength(1 + queries.length);
       expect(calls[0].route).toBe('/api/agent/aistudio');
       expect(calls[0].body).toEqual({
         method: 'tools/call',
@@ -161,18 +170,20 @@ describe('documented command forms', () => {
           arguments: { query: 'NSPRA', limit: 50 },
         },
       });
-      expect(calls[1].body).toEqual({
-        method: 'tools/call',
-        params: {
-          name: 'repositories_search',
-          arguments: {
-            query: commandCase.query,
-            repositoryIds: [1476],
-            mode: 'hybrid',
-            limit: 5,
+      for (const [index, query] of queries.entries()) {
+        expect(calls[index + 1].body).toEqual({
+          method: 'tools/call',
+          params: {
+            name: 'repositories_search',
+            arguments: {
+              query,
+              repositoryIds: [1476],
+              mode: 'hybrid',
+              limit: 5,
+            },
           },
-        },
-      });
+        });
+      }
       expect(result.stdout).toContain('Page 17');
     });
   }
@@ -190,13 +201,86 @@ test('lookup returns the acceptance date with a page citation', async () => {
 });
 
 test('state Washington includes both sections and the Part II disclaimer', async () => {
-  const { broker } = createBroker();
+  const { broker, calls } = createBroker();
   const result = await invoke(['state', 'Washington'], broker);
+  expect(result.exitCode).toBe(0);
+  expect(calls).toHaveLength(3);
+  expect(calls[1].body.params.arguments.query).toBe(
+    'Washington legal holidays',
+  );
+  expect(calls[2].body.params.arguments.query).toBe(
+    'Washington school holidays',
+  );
   expect(result.stdout).toContain('Legal holidays');
   expect(result.stdout).toContain('School holidays');
   expect(result.stdout).toContain(
     'not intended to serve as the official or legal listing',
   );
+});
+
+test('state section selection performs one targeted search', async () => {
+  const { broker, calls } = createBroker();
+  const result = await invoke(
+    ['state', 'Washington', '--section', 'legal'],
+    broker,
+  );
+  expect(result.exitCode).toBe(0);
+  expect(calls).toHaveLength(2);
+  expect(calls[1].body.params.arguments.query).toBe(
+    'Washington legal holidays',
+  );
+});
+
+test('state requires enough output space for both sections before broker access', async () => {
+  const { broker, calls } = createBroker();
+  const result = await invoke(
+    ['state', 'Washington', '--limit', '1'],
+    broker,
+  );
+  expect(result.exitCode).toBe(1);
+  expect(result.stdout).toContain('requires --limit 2 or greater');
+  expect(calls).toHaveLength(0);
+});
+
+test('state fails if either independently queried section has no cited result', async () => {
+  const { broker } = createBroker({
+    respond: (toolName, args) =>
+      toolName === 'repositories_search' &&
+      /school holidays/i.test(args.query)
+        ? toolEnvelope({ results: [], diagnostics: { returnedResults: 0 } })
+        : undefined,
+  });
+  const result = await invoke(['state', 'Washington'], broker);
+  expect(result.exitCode).toBe(1);
+  expect(result.stdout).toContain('no_results');
+  expect(result.stdout).toContain('school holidays');
+});
+
+test('state interleaves both sections within one global result limit', async () => {
+  const { broker } = createBroker({
+    respond: (toolName, args) => {
+      if (toolName !== 'repositories_search') return undefined;
+      return toolEnvelope({
+        results: Array.from({ length: 4 }, (_, index) =>
+          searchResult(args.query, {
+            sourceLocator: { page: 10 + index },
+            citations: [{ sourceLocator: { page: 10 + index } }],
+          }),
+        ),
+      });
+    },
+  });
+  const result = await invoke(
+    ['state', 'Washington', '--limit', '3', '--json'],
+    broker,
+  );
+  const payload = JSON.parse(result.stdout);
+  expect(payload.results).toHaveLength(3);
+  expect(payload.results.map((item) => item.section)).toEqual([
+    'legal',
+    'school',
+    'legal',
+  ]);
 });
 
 test('default lookup remains below an approximate 500-token bound', async () => {
@@ -463,6 +547,17 @@ test('free-form commands reject explicit out-of-range years and dates before bro
     ['search', 'observances on 07/01/2027'],
     ['lookup', 'observances on 2027/07/01'],
     ['search', 'observances in 2027/07'],
+    ['lookup', 'observances in Q3 2027'],
+    ['search', 'observances in Q4-2027'],
+    ['lookup', 'observances in Q 3 of 2027'],
+    ['search', 'observances in the 3rd qtr of 2027'],
+    ['lookup', 'observances in the third quarter of 2027'],
+    ['search', 'observances in quarter 4 of 2027'],
+    ['lookup', 'observances in summer 2027'],
+    ['search', 'observances in fall 2027'],
+    ['lookup', 'observances in autumn 2027'],
+    ['search', 'observances in H2 2027'],
+    ['lookup', 'observances in the second half of 2027'],
     ['holiday-years', 'Christmas 2032'],
   ]) {
     const result = await invoke(argv, broker);
@@ -484,6 +579,14 @@ for (const { label, argv } of [
   {
     label: 'a year-first June 2027 date',
     argv: ['lookup', 'observances on 2027/06/30'],
+  },
+  {
+    label: 'Q2 2027',
+    argv: ['search', 'observances in Q2 2027'],
+  },
+  {
+    label: 'spring 2027',
+    argv: ['lookup', 'observances in spring 2027'],
   },
 ]) {
   test(`free-form commands accept ${label}`, async () => {
