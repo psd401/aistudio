@@ -47,12 +47,6 @@ async function main() {
   validateSafeName(args.name, 'skill name');
 
   try {
-    const bundledSkillMd = readBundledSkill(args.name);
-    if (bundledSkillMd !== null) {
-      emit({ name: args.name, skillMd: bundledSkillMd });
-      return;
-    }
-
     const skill = await skillBroker('load', { name: args.name });
 
     if (!skill) {
@@ -62,6 +56,19 @@ async function main() {
           'Use skills.search to find available skills.',
       });
       process.exit(0);
+    }
+
+    if (skill.source === 'bundled') {
+      const bundledSkillMd = readBundledSkill(args.name);
+      if (bundledSkillMd === null) {
+        emit({
+          error: 'not_found',
+          message: `Skill "${args.name}" is approved but is not present in this agent image.`,
+        });
+        process.exit(0);
+      }
+      emit({ name: args.name, skillMd: bundledSkillMd });
+      return;
     }
 
     emit(skill);
