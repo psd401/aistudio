@@ -339,14 +339,23 @@ def _telemetry_summary(
         Decimal(tokens[token_field]) * prices[price_key] / Decimal(1_000_000)
         for token_field, price_key in TOKEN_PRICE_KEYS.items()
     )
+    usage_complete = tokens["output_tokens"] >= sum(model_calls)
     task_count = len({_nonempty_string(record.get("task_id"), "task_id") for record in records})
     return {
         "tokens": tokens,
-        "cost": {
-            "total_usd": _rounded_usd(cost),
-            "per_trial_usd": _rounded_usd(cost / Decimal(len(records))),
-            "per_task_usd": _rounded_usd(cost / Decimal(task_count)),
-        },
+        "cost": (
+            {
+                "total_usd": _rounded_usd(cost),
+                "per_trial_usd": _rounded_usd(cost / Decimal(len(records))),
+                "per_task_usd": _rounded_usd(cost / Decimal(task_count)),
+            }
+            if usage_complete
+            else {
+                "total_usd": None,
+                "per_trial_usd": None,
+                "per_task_usd": None,
+            }
+        ),
         "duration_ms": _distribution(durations),
         "latency_ms": _distribution(latencies),
         "model_call_count": _distribution(model_calls),
@@ -363,7 +372,13 @@ def _telemetry_summary(
             "by_failed_grader": dict(sorted(failed_graders.items())),
         },
         "caching_status": (
-            "uncached" if tokens["cache_read_input_tokens"] == 0 else "cached"
+            "unknown"
+            if not usage_complete
+            else (
+                "uncached"
+                if tokens["cache_read_input_tokens"] == 0
+                else "cached"
+            )
         ),
     }
 
@@ -676,8 +691,20 @@ def _validate_telemetry(value: object, description: str) -> None:
         {"total_usd", "per_trial_usd", "per_task_usd"},
         f"{description}.cost",
     )
+    caching_status = telemetry.get("caching_status")
+    if caching_status not in {"cached", "uncached", "unknown"}:
+        raise EvalSummaryError(
+            f"{description}.caching_status must be cached, uncached, or unknown"
+        )
     for field in ("total_usd", "per_trial_usd", "per_task_usd"):
-        _finite_decimal(cost.get(field), f"{description}.cost.{field}")
+        value = cost.get(field)
+        if caching_status == "unknown":
+            if value is not None:
+                raise EvalSummaryError(
+                    f"{description}.cost.{field} must be null when usage is unknown"
+                )
+        else:
+            _finite_decimal(value, f"{description}.cost.{field}")
     for field in ("duration_ms", "latency_ms", "model_call_count"):
         _validate_distribution(
             telemetry.get(field),
@@ -721,12 +748,6 @@ def _validate_telemetry(value: object, description: str) -> None:
         failures.get("by_failed_grader"),
         f"{description}.failures.by_failed_grader",
     )
-    if telemetry.get("caching_status") not in {"cached", "uncached"}:
-        raise EvalSummaryError(
-            f"{description}.caching_status must be cached or uncached"
-        )
-
-
 def _validate_derived_rate(
     value: object,
     numerator: int,
@@ -782,9 +803,39 @@ def _validate_scope_telemetry_consistency(
         ),
     }
     cost = _mapping(telemetry.get("cost"), f"{description}.telemetry.cost")
+    model_call_distribution = _mapping(
+        telemetry.get("model_call_count"),
+        f"{description}.telemetry.model_call_count",
+    )
+    model_call_total = _nonnegative_integer(
+        model_call_distribution.get("total"),
+        f"{description}.telemetry.model_call_count.total",
+    )
+    expected_caching_status = (
+        "unknown"
+        if token_counts["output_tokens"] < model_call_total
+        else (
+            "uncached"
+            if token_counts["cache_read_input_tokens"] == 0
+            else "cached"
+        )
+    )
+    if telemetry.get("caching_status") != expected_caching_status:
+        raise EvalSummaryError(
+            f"{description}.telemetry.caching_status is inconsistent "
+            "with observed usage"
+        )
     for field, expected in expected_costs.items():
+        value = cost.get(field)
+        if expected_caching_status == "unknown":
+            if value is not None:
+                raise EvalSummaryError(
+                    f"{description}.telemetry.cost.{field} must be null "
+                    "when usage is unknown"
+                )
+            continue
         actual = _finite_decimal(
-            cost.get(field),
+            value,
             f"{description}.telemetry.cost.{field}",
         )
         if actual != expected:
@@ -901,18 +952,6 @@ def _validate_scope_telemetry_consistency(
             f"{description}.telemetry.failures.by_failed_grader is inconsistent "
             "with graded failed trials"
         )
-
-    expected_caching_status = (
-        "uncached"
-        if token_counts["cache_read_input_tokens"] == 0
-        else "cached"
-    )
-    if telemetry.get("caching_status") != expected_caching_status:
-        raise EvalSummaryError(
-            f"{description}.telemetry.caching_status is inconsistent "
-            "with cache-read tokens"
-        )
-
 
 def _validate_partition_telemetry_consistency(
     root: Mapping[str, object],

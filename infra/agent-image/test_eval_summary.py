@@ -189,6 +189,24 @@ class SummaryAggregationTests(unittest.TestCase):
             "uncached",
         )
 
+    def test_incomplete_usage_marks_cache_and_cost_unknown(self):
+        records = complete_records(cache_reads=0)
+        for record in records:
+            record["metadata"]["output_tokens"] = 0
+
+        summary = summarize.summarize_records(records, pricing())
+        telemetry = summary["overall"]["telemetry"]
+
+        self.assertEqual(telemetry["caching_status"], "unknown")
+        self.assertEqual(
+            telemetry["cost"],
+            {
+                "total_usd": None,
+                "per_trial_usd": None,
+                "per_task_usd": None,
+            },
+        )
+
     def test_summary_contains_no_trial_transcript_fields_or_values(self):
         summary = summarize.summarize_records(complete_records(), pricing())
         encoded = json.dumps(summary)

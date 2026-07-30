@@ -44,6 +44,7 @@ def build_summary(
     *,
     digest_character: str,
     input_tokens: int = 1000,
+    output_tokens: int = 10,
     cache_reads: int = 100,
     duration_ms: int = 1000,
     model_calls: int = 2,
@@ -79,7 +80,7 @@ def build_summary(
                     "result": "synthetic result",
                     "metadata": {
                         "input_tokens": input_tokens,
-                        "output_tokens": 0,
+                        "output_tokens": output_tokens,
                         "cache_read_input_tokens": cache_reads,
                         "cache_write_input_tokens": 0,
                         "model_call_count": model_calls,
@@ -325,6 +326,34 @@ class PromotionRuleTests(unittest.TestCase):
         self.assertEqual(comparison.baseline_caching_status, "uncached")
         self.assertEqual(comparison.candidate_caching_status, "uncached")
         self.assertTrue(clause(comparison, "c").passed)
+
+    def test_incomplete_usage_declines_cache_and_cost(self):
+        baseline = build_summary(
+            {
+                "reg-a": ("skill-a", "regression", 3),
+                "cap-a": ("skill-a", "capability", 2),
+            },
+            digest_character="a",
+            cache_reads=100,
+        )
+        candidate = build_summary(
+            {
+                "reg-a": ("skill-a", "regression", 3),
+                "cap-a": ("skill-a", "capability", 3),
+            },
+            digest_character="b",
+            cache_reads=0,
+            output_tokens=0,
+        )
+
+        comparison = eval_report.compare_summaries(baseline, candidate)
+        rendered = eval_report.render_terminal(comparison)
+
+        self.assertEqual(comparison.candidate_caching_status, "unknown")
+        self.assertIsNone(clause(comparison, "c").passed)
+        self.assertIn("usage telemetry is incomplete", clause(comparison, "c").detail)
+        self.assertIn("unknown", rendered)
+        self.assertIn("declined: incomplete usage telemetry", rendered)
 
 
 class ReportRenderingTests(unittest.TestCase):
