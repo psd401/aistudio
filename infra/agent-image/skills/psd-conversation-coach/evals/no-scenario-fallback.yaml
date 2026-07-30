@@ -1,0 +1,12 @@
+id: conversation-coach-no-scenario-fallback
+skill: psd-conversation-coach
+level: L0
+workspace: pure
+suite: regression
+prompt: "I am a principal who wants to practice difficult conversations, but I do not have a specific situation in mind. Offer me relevant practice scenarios to choose from before we begin."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"(?:late|missing) grade|grade entr","ignore_case":true}
+  - {"type":"output_match","pattern":"classroom management","ignore_case":true}
+  - {"type":"output_match","pattern":"discipline","ignore_case":true}
+  - {"type":"output_match","pattern":"(?:choose|pick|which).*(?:scenario|option)|(?:scenario|option).*(?:choose|pick|which)","ignore_case":true}
