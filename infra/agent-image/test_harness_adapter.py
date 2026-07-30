@@ -195,6 +195,10 @@ class GatewayClientIdentityTests(unittest.TestCase):
             {"openclaw-control-ui", "openclaw-browser-copilot", "openclaw-tui"},
         )
 
+    def test_loopback_backend_socket_suppresses_browser_origin(self):
+        source = pathlib.Path(harness_adapter.__file__).read_text(encoding="utf-8")
+        self.assertIn("suppress_origin=True", source)
+
 
 # Bound staticmethod for readability.
 extract_text = OpenClawAdapter._extract_text

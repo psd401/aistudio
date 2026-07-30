@@ -390,8 +390,8 @@ class OpenClawAdapter(HarnessAdapter):
 
         websocket-client adds an Origin header unless told otherwise. Newer
         OpenClaw releases deliberately treat any Origin-bearing connection as
-        browser-originated and therefore refuse the privileged local-CLI auth
-        path. This adapter is a backend client on the same container loopback,
+        browser-originated and therefore refuse approved local-backend auth
+        paths. This adapter is a backend client on the same container loopback,
         not a browser, so suppress the synthetic header instead of weakening
         the gateway's browser-origin checks.
         """
