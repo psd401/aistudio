@@ -69,6 +69,7 @@ jobs:
           infra/agent-image/test_mantle_proxy_logging.py \
           infra/agent-image/test_check_bootstrap_budget.py \
           infra/agent-image/test_check_config_consistency.py \
+          infra/agent-image/test_candidate_matrix.py \
           infra/agent-image/test_workspace_sync.py \
           infra/agent-image/test_chat_format.py \
           infra/agent-image/test_artifact_publisher.py \
