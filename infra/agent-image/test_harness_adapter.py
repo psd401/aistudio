@@ -611,6 +611,24 @@ class TranscriptUsageTests(unittest.TestCase):
         self.assertTrue(complete)
         self.assertEqual(totals["input"], 30)
 
+    def test_only_allowlisted_terminal_stop_reasons_complete_capture(self):
+        cases = (
+            (None, False),
+            ("", False),
+            ("toolUse", False),
+            ("novel-terminal", False),
+            ("stop", True),
+            ("end_turn", True),
+        )
+        for index, (stop_reason, expected) in enumerate(cases, start=1):
+            with self.subTest(stop_reason=stop_reason):
+                path = self._write(
+                    f"terminal-{index}",
+                    [_assistant(5_000, inp=10, stop=stop_reason)],
+                )
+                _, complete = self.adapter._sum_transcript_usage(str(path), 0)
+                self.assertIs(complete, expected)
+
     def test_missing_transcript_returns_zeros_without_settling(self):
         started = time.monotonic()
         # Non-zero interval so a wrongly-taken settle path would be visible.

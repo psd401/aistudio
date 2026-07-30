@@ -997,6 +997,19 @@ def _validate_partition_telemetry_consistency(
         for key, scope in partitions.items()
     }
 
+    overall_caching_status = overall_telemetry.get("caching_status")
+    unknown_partitions = sorted(
+        key
+        for key, telemetry in partition_telemetries.items()
+        if telemetry.get("caching_status") == "unknown"
+    )
+    if unknown_partitions and overall_caching_status != "unknown":
+        raise EvalSummaryError(
+            f"{description}.overall.telemetry.caching_status must be unknown "
+            f"when {partition_field} partitions have incomplete usage: "
+            + ", ".join(unknown_partitions)
+        )
+
     overall_tokens = _mapping(
         overall_telemetry.get("tokens"),
         f"{description}.overall.telemetry.tokens",

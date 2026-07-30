@@ -27,6 +27,7 @@ logger = logging.getLogger("harness_adapter")
 # Session/agent ids from the gateway event stream are interpolated into a
 # transcript path, so they must be filename-safe before they touch the FS.
 _SAFE_PATH_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+TERMINAL_USAGE_STOP_REASONS = frozenset({"stop", "end_turn"})
 
 
 def _is_safe_path_component(value: str) -> bool:
@@ -392,12 +393,12 @@ class OpenClawAdapter(HarnessAdapter):
     ) -> Tuple[Dict[str, int], bool]:
         """Sum assistant-message usage in `path` for records at/after `since_ms`.
 
-        Returns `(totals, complete)`. `complete` is True once the newest
-        in-window assistant record carries a terminal stopReason — OpenClaw
-        writes `stopReason: "toolUse"` on every model call that hands off to a
-        tool and a terminal reason ("stop"/"end_turn") only on the call that
-        ends the turn, so that flag is an exact "no more model calls coming"
-        signal rather than a guess. Never raises.
+        Returns `(totals, complete)`. `complete` is True only when the newest
+        in-window assistant record carries an explicitly allowlisted terminal
+        stopReason. OpenClaw writes `stopReason: "toolUse"` on every model call
+        that hands off to a tool and "stop"/"end_turn" only on the call that
+        ends the turn, so missing or novel values cannot accidentally become a
+        "no more model calls coming" signal. Never raises.
         """
         totals = {"input": 0, "output": 0, "cache_read": 0,
                   "cache_write": 0, "model_calls": 0}
@@ -443,7 +444,7 @@ class OpenClawAdapter(HarnessAdapter):
                     # Recomputed per record so the LAST in-window record wins:
                     # an earlier terminal reason followed by more model calls
                     # (nudge/compaction legs) must not latch `complete` True.
-                    complete = stop_reason != "toolUse"
+                    complete = stop_reason in TERMINAL_USAGE_STOP_REASONS
         except OSError as exc:
             logger.warning(
                 "transcript usage read failed: %s", str(exc)[:200],

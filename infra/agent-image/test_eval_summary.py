@@ -667,6 +667,27 @@ class CommittedArtifactGuardTests(unittest.TestCase):
 
                 self.assert_rejected(value, pattern)
 
+    def test_unknown_partition_requires_unknown_overall_usage(self):
+        for partition_field, partition_key in (
+            ("suites", "capability"),
+            ("skills", "skill-a"),
+        ):
+            with self.subTest(partition_field=partition_field):
+                value = json.loads(self.safe_summary_bytes())
+                telemetry = value[partition_field][partition_key]["telemetry"]
+                telemetry["caching_status"] = "unknown"
+                telemetry["cost"] = {
+                    "total_usd": None,
+                    "per_trial_usd": None,
+                    "per_task_usd": None,
+                }
+
+                self.assert_rejected(
+                    value,
+                    rf"overall\.telemetry\.caching_status must be unknown "
+                    rf"when {partition_field} partitions have incomplete usage",
+                )
+
     def test_skill_membership_must_match_task_summaries(self):
         value = json.loads(self.safe_summary_bytes())
         value["skills"]["skill-a"]["task_ids"] = ["task-a"]

@@ -150,7 +150,11 @@ misprice a run. Each new trial carries an explicit `usage_capture_complete`
 flag from the selected proxy or transcript source. A false or legacy-missing
 flag makes its containing scope incomplete: its caching status is `unknown`
 and its cost fields are null. Completeness is evaluated per trial so fallback
-output or usage captured by another trial cannot mask a telemetry gap.
+output or usage captured by another trial cannot mask a telemetry gap. The
+transcript source sets the flag only after an explicit `stop` or `end_turn`;
+missing or novel stop reasons remain incomplete. Committed-artifact validation
+also rejects a known overall status when any complete suite or skill partition
+is unknown.
 Otherwise, zero `cache_read_input_tokens` means `uncached`.
 
 New runner records capture the actual invocation start before any container or
