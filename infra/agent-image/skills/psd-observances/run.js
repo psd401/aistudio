@@ -664,6 +664,27 @@ function createRepositoryResolver(callTool) {
   };
 }
 
+function explicitPrintedPageCitation(result, locators) {
+  const headingPaths = locators.flatMap((locator) =>
+    locator && Array.isArray(locator.headingPath) ? locator.headingPath : [],
+  );
+  const printed = /\bprinted pages?:\s*([0-9, -]+)/i.exec(
+    `${headingPaths.join('\n')}\n${resultContent(result)}`,
+  );
+  if (!printed) return undefined;
+  const pages = printed[1]
+    .split(/[^0-9]+/)
+    .filter(Boolean)
+    .map(Number)
+    .filter((page) => Number.isSafeInteger(page) && page > 0);
+  if (pages.length === 0) return undefined;
+  const page = Math.min(...pages);
+  const pageEnd = Math.max(...pages);
+  return pageEnd === page
+    ? { page, label: `Page ${page}` }
+    : { page, pageEnd, label: `Pages ${page}-${pageEnd}` };
+}
+
 function pageCitation(result) {
   const locators = [
     result && result.sourceLocator,
@@ -681,6 +702,12 @@ function pageCitation(result) {
     }
     return { page, label: `Page ${page}` };
   }
+  // Structured Markdown does not have a PDF-native source locator. The
+  // offline extractor therefore places the authorized publication's printed
+  // page fact inside every retrieval section. Prefer native locators above,
+  // then retain that explicit citation for Markdown-backed results.
+  const markdownCitation = explicitPrintedPageCitation(result, locators);
+  if (markdownCitation) return markdownCitation;
   fail(
     'AI Studio returned a result without the required page citation.',
     'upstream_error',

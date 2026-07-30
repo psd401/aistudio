@@ -523,6 +523,46 @@ test('a result without a page citation is rejected', async () => {
   expect(result.stdout).toContain('required page citation');
 });
 
+test('structured markdown retains its explicit printed-page citation', async () => {
+  const { broker } = createBroker({
+    results: [
+      searchResult('American Education Week', {
+        content: 'American Education Week — November 16-20, 2026',
+        sourceLocator: {
+          headingPath: [
+            'Observances 2026-11.md',
+            'American Education Week — printed page: 17',
+          ],
+        },
+        citations: [],
+      }),
+    ],
+  });
+  const result = await invoke(['lookup', 'American Education Week'], broker);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain('Page 17');
+});
+
+test('structured state markdown retains a printed-page range', async () => {
+  const { broker } = createBroker({
+    results: [
+      searchResult('Washington school holidays', {
+        content: 'Washington — School holidays',
+        sourceLocator: {
+          headingPath: [
+            'State Holidays — Washington.md',
+            'School holidays — printed pages: 74, 75',
+          ],
+        },
+        citations: [],
+      }),
+    ],
+  });
+  const result = await invoke(['state', 'Washington'], broker);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain('Pages 74-75');
+});
+
 test('invalid command-specific flags and out-of-range dates fail before broker access', async () => {
   const { broker, calls } = createBroker();
   const invalidSection = await invoke(
