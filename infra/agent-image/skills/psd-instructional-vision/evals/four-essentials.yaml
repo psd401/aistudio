@@ -9,7 +9,7 @@ graders:
   - {"type":"output_match","pattern":"(?:four|4)","ignore_case":true}
   - {"type":"output_match","pattern":"instructional essentials","ignore_case":true}
   - {"type":"output_match","pattern":"rigor\\s*(?:&|and)\\s*inclusion","ignore_case":true}
-  - {"type":"output_match","pattern":"data[- ]driven decisions","ignore_case":true}
+  - {"type":"output_match","pattern":"data[-\\u2010-\\u2015 ]driven decisions","ignore_case":true}
   - {"type":"output_match","pattern":"continuous growth","ignore_case":true}
   - {"type":"output_match","pattern":"innovation","ignore_case":true}
-  - {"type":"output_match","pattern":"tier 1","ignore_case":true}
+  - {"type":"output_match","pattern":"tier\\s*1","ignore_case":true}

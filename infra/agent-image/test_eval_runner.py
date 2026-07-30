@@ -293,6 +293,7 @@ class SuiteLoadingTests(unittest.TestCase):
         for valid_meeting_fact in (
             '"topLabel":"Meetings today","text":"3"',
             '"topLabel":"Meetings","text":"3 today"',
+            '"topLabel":"Meetings today","text":"3 meetings"',
         ):
             self.assertIsNotNone(
                 re.search(morning_brief_meetings, valid_meeting_fact),
@@ -304,6 +305,20 @@ class SuiteLoadingTests(unittest.TestCase):
                 '"topLabel":"Meetings","text":"4 today"',
             )
         )
+        morning_brief_follow_up = next(
+            str(grader.get("pattern"))
+            for grader in tasks_by_id["chat-card-morning-brief"].graders
+            if grader.get("type") == "output_match"
+            and "Follow" in str(grader.get("pattern"))
+        )
+        for valid_follow_up in (
+            '"topLabel":"Follow-up due","text":"1"',
+            '"topLabel":"Follow‑ups due","text":"1"',
+        ):
+            self.assertIsNotNone(
+                re.search(morning_brief_follow_up, valid_follow_up),
+                valid_follow_up,
+            )
 
         last30days_window = next(
             str(grader.get("pattern"))
@@ -325,6 +340,42 @@ class SuiteLoadingTests(unittest.TestCase):
                 valid_window,
             )
         self.assertIsNone(re.search(last30days_window, "past month"))
+
+        instructional_patterns = {
+            str(grader.get("pattern"))
+            for grader in tasks_by_id[
+                "instructional-vision-four-essentials"
+            ].graders
+            if grader.get("type") == "output_match"
+        }
+        self.assertTrue(
+            any(
+                re.search(pattern, "Data‑Driven Decisions", re.IGNORECASE)
+                for pattern in instructional_patterns
+            )
+        )
+        self.assertTrue(
+            any(
+                re.search(pattern, "Tier\u202f1", re.IGNORECASE)
+                for pattern in instructional_patterns
+            )
+        )
+
+        morning_self_check = next(
+            str(grader.get("pattern"))
+            for grader in tasks_by_id[
+                "morning-brief-offline-self-check"
+            ].graders
+            if grader.get("type") == "output_match"
+        )
+        for valid_self_check in (
+            "Offline self-check: PASS",
+            "All checks passed; the offline self‑check completed.",
+        ):
+            self.assertIsNotNone(
+                re.search(morning_self_check, valid_self_check),
+                valid_self_check,
+            )
 
         chart_probe = next(
             grader

@@ -6,4 +6,4 @@ suite: regression
 prompt: "Run the psd-morning-brief offline self-check mode only. Do not collect live sources, create an Atrium artifact, schedule anything, or publish. Report the mode and whether every check passed."
 trials: 3
 graders:
-  - {"type":"output_match","pattern":"(?is)(offline|self-check).*(pass|true|ok)"}
+  - {"type":"output_match","pattern":"(?is)(?=.*(?:offline|self[-\\u2010-\\u2015]?check))(?=.*(?:pass|true|ok))"}
