@@ -2621,6 +2621,48 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(triageWorkerLogGroup).add('Environment', environment);
     cdk.Tags.of(triageWorkerLogGroup).add('ManagedBy', 'cdk');
 
+    const triageMetricNamespace = `PSD/AgentPlatform/${environment}`;
+    const untrustedLabelMetricName = 'TriageUntrustedLabelMappings';
+    new logs.MetricFilter(this, 'TriageUntrustedLabelMappingMetric', {
+      logGroup: triageWorkerLogGroup,
+      metricNamespace: triageMetricNamespace,
+      metricName: untrustedLabelMetricName,
+      filterPattern: logs.FilterPattern.stringValue(
+        '$.evt',
+        '=',
+        'untrusted_label_mapping',
+      ),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    const untrustedLabelMappingAlarm = new cloudwatch.Alarm(
+      this,
+      'TriageUntrustedLabelMappingAlarm',
+      {
+        alarmName:
+          `psd-agent-triage-untrusted-label-mapping-${environment}`,
+        alarmDescription:
+          'Email triage rejected an untrusted label mapping — a user poll is fail-closed',
+        metric: new cloudwatch.Metric({
+          namespace: triageMetricNamespace,
+          metricName: untrustedLabelMetricName,
+          period: cdk.Duration.minutes(5),
+          statistic: 'Sum',
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    if (resources.agentAlarmTopic) {
+      untrustedLabelMappingAlarm.addAlarmAction(
+        new cloudwatchActions.SnsAction(resources.agentAlarmTopic),
+      );
+    }
+
     resources.triageWorkerRole.addToPolicy(new iam.PolicyStatement({
       sid: 'TriageWorkerLogsCorrectArn',
       effect: iam.Effect.ALLOW,

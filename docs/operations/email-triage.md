@@ -89,27 +89,33 @@ For each opted-in user every 5 minutes:
 1. **Refresh access token** via `workspace-token.ts` (Lambda-local copy
    of the helper in `lib/agent/`; reads the user's `user_account` slot
    from Secrets Manager, exchanges refresh token for an access token).
-2. **Pull Gmail history** since `lastHistoryId` (only `messageAdded`,
+2. **Validate the label mapping** against the owner's live Gmail labels.
+   A legacy row missing the trusted provenance stamp self-heals by resolving
+   the four code-constant label names with that owner token, requiring one
+   unique safe user-label id per name, and persisting the trusted mapping.
+   Ambiguous, missing, system, or duplicate ids remain fail-closed and emit
+   `untrusted_label_mapping`.
+3. **Pull Gmail history** since `lastHistoryId` (only `messageAdded`,
    `labelAdded`, `labelRemoved` events).
-3. For each new message: **deterministic rules first** (VIP → important,
+4. For each new message: **deterministic rules first** (VIP → important,
    mute → later, thread-with-user-reply → important, keyword rules in
    order). If undecided, **call Bedrock Nova Micro** with a small system
    prompt summarising the user's rules + sender/subject/snippet. Default
    to `later` if model confidence < 0.6.
-4. **Apply Gmail label** via `messages.modify`. **All three labels also
+5. **Apply Gmail label** via `messages.modify`. **All three labels also
    remove `INBOX`** — the design treats labels as mutually-exclusive
    folders so the user reviews each in one place. Inbox empty = triage
    caught up. The Chat escalation is the "look at this now" signal
    for the rare cases that warrant interruption.
-5. **Maybe escalate to Chat** — if the label matches the user's
+6. **Maybe escalate to Chat** — if the label matches the user's
    `escalation.labelTriggers` AND (no sender/keyword filter OR the
    sender/keyword matches), post a card to the user's DM via the Chat
    API.
-6. **Detect user-driven label changes** — if a recent classification
+7. **Detect user-driven label changes** — if a recent classification
    contradicts what the user just did (e.g. they moved an `@psd/Later`
    message back into Inbox), record as a `recentCorrections` entry
    (Phase 1 only records; Phase 2 acts on them).
-7. **Advance the cursor** in DDB.
+8. **Advance the cursor** in DDB.
 
 ---
 
@@ -190,6 +196,22 @@ Agent skill (in the container, env injected by `agent-platform-stack.ts`):
 | Daily digest never arrives | EventBridge Scheduler entry missing or Scheduler can't invoke the Lambda | Check `aws scheduler get-schedule --group-name psd-agent-<env> --name triage-digest-<userslug>` |
 | Admin sub-page shows "No triage row" but user says triage is on | DDB row was deleted (admin re-onboard) but user hasn't re-enabled yet | User runs `enable` again from chat |
 | Escalation posts not appearing in Chat | DM space resource name missing on the triage row OR Chat bot lacks DM space access | Check `dmSpaceName` field in DDB row; the user must have DM'd the bot at least once |
+| Worker logs `label_mapping_healed` | A legacy or stale row was safely rebuilt from the owner's live canonical Gmail labels | Expected once per affected row after rollout; confirm `lastPollAt` advances in the same tick |
+| Worker logs `untrusted_label_mapping` | Canonical Gmail labels are missing/ambiguous, contain unsafe or duplicate ids, or a trusted row no longer matches live Gmail | The poll intentionally fails closed and the `psd-agent-triage-untrusted-label-mapping-<env>` alarm fires; repair the Gmail label state, then let the next poll revalidate |
+
+### Provenance self-heal deploy verification
+
+After deploying the worker and stack:
+
+1. Confirm `label_mapping_healed` appears once for each affected user and
+   `untrusted_label_mapping` stops.
+2. Confirm each user's `lastPollAt` advances, proving the healed poll continued
+   in the same tick.
+3. If `cursor_too_old_reset` appears, run a manual `sweep` for the outage
+   window because Gmail could no longer replay the frozen history cursor.
+4. Confirm the
+   `psd-agent-triage-untrusted-label-mapping-<env>` alarm is present and wired
+   to the agent-platform alarm topic.
 
 ---
 
