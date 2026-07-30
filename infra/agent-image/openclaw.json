@@ -111,10 +111,7 @@
       "token": ""
     },
     "controlUi": {
-      "enabled": false,
-      "dangerouslyDisableDeviceAuth": true,
-      "dangerouslyAllowHostHeaderOriginFallback": true,
-      "allowedOrigins": ["*"]
+      "enabled": false
     }
   }
 }

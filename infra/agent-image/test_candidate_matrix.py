@@ -112,7 +112,7 @@ class CandidateMatrixTests(unittest.TestCase):
             self.assertEqual(metadata["contextTokens"], 180000)
             self.assertEqual(
                 metadata["harness"]["parallelPluginVersion"],
-                "2026.7.1",
+                "2026.7.2-beta.5",
             )
             self.assertEqual(
                 metadata["harness"]["parallelPluginEndpoint"],
@@ -576,11 +576,11 @@ class CandidateMatrixTests(unittest.TestCase):
             'grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT}"',
             dockerfile,
         )
-        self.assertIn("ARG BEDROCK_PLUGIN_VERSION=2026.7.1", dockerfile)
+        self.assertIn("ARG BEDROCK_PLUGIN_VERSION=2026.7.2-beta.5", dockerfile)
         self.assertIn(
             "ARG BEDROCK_PLUGIN_ASSERTION=claude-sonnet-5", dockerfile
         )
-        self.assertIn("ARG PARALLEL_PLUGIN_VERSION=2026.7.1", dockerfile)
+        self.assertIn("ARG PARALLEL_PLUGIN_VERSION=2026.7.2-beta.5", dockerfile)
         self.assertIn(
             "ARG PARALLEL_PLUGIN_ENDPOINT=https://search.parallel.ai/mcp",
             dockerfile,
@@ -593,6 +593,14 @@ class CandidateMatrixTests(unittest.TestCase):
         )
         self.assertIn(
             'grep -Fq -- "${BEDROCK_PLUGIN_ASSERTION}"', dockerfile
+        )
+        self.assertIn(
+            "openclaw plugins inspect amazon-bedrock --runtime --json",
+            dockerfile,
+        )
+        self.assertIn(
+            "openclaw plugins inspect parallel --runtime --json",
+            dockerfile,
         )
 
     def test_build_command_wires_manifest_inputs_and_digest_sidecar(self):

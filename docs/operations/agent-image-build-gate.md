@@ -34,6 +34,12 @@ The same static gate rejects the beta.5-retired
 canonical `memory.search` location, so host/config migrations fail before the
 Docker validator.
 
+The plugin-aware build gate also runs `openclaw plugins inspect --runtime` for
+the vendored Bedrock and Parallel plugins. Both must report `loaded` at the
+exact pins. This is deliberately stronger than `peerDependencies`: Bedrock
+plugin 2026.7.1 advertised a range that included the beta.5 host but imported a
+plugin-SDK export that host had removed.
+
 ## Why the runtime half needs a signed context
 
 Before PR #1353 the production probe handed the container a Bedrock API key

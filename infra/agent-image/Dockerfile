@@ -56,10 +56,11 @@
 #     that diagnostic and its no-repeat continuation prompt in the compiled
 #     runtime, so a tag/digest mistake cannot silently remove the fix.
 #
-# The amazon-bedrock and Parallel plugins remain on stable 2026.7.1. Their
-# published peer contract is OpenClaw >=2026.7.1, which beta.5 satisfies, and
-# 2026.7.1 is still the first Bedrock plugin whose prompt-caching allowlist
-# recognizes `claude-sonnet-5`.
+# Both host-coupled plugins are pinned to the matching beta.5 release. The
+# stable Bedrock plugin's published >=2026.7.1 peer range is too broad: it
+# imports `registerApiProvider`, which this host no longer exports, so it passes
+# semver checks but fails to register at runtime. The plugin-loader assertions
+# in the install RUN below enforce real registration and exact versions.
 #
 # Rollback targets (previous pins):
 #   2026.7.1        index sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c
@@ -352,9 +353,8 @@ COPY skills /opt/psd-skills
 # "Unknown memory embedding provider: bedrock" (2026-07-10). It must live under
 # /opt (image-owned): ~/.openclaw is runtime-persistent storage that shadows
 # anything written there at build time. Loaded via openclaw.json
-# plugins.load.paths. Version-pinned to stable 2026.7.1, whose published host
-# contract is compatible with the newer beta.5 runtime; npm verifies the
-# registry integrity hash on pack. The tarball is self-contained
+# plugins.load.paths. Version-pinned to the same beta.5 release as the host;
+# npm verifies the registry integrity hash on pack. The tarball is self-contained
 # (bundleDependencies: @aws-sdk clients ship inside it, with an
 # npm-shrinkwrap.json), so no npm install runs after extraction.
 #
@@ -382,9 +382,9 @@ COPY skills /opt/psd-skills
 # config only after both custom plugin paths exist. Config validation is fatal:
 # an invalid provider would otherwise boot successfully and fail only when a
 # user invokes web_search.
-ARG BEDROCK_PLUGIN_VERSION=2026.7.1
+ARG BEDROCK_PLUGIN_VERSION=2026.7.2-beta.5
 ARG BEDROCK_PLUGIN_ASSERTION=claude-sonnet-5
-ARG PARALLEL_PLUGIN_VERSION=2026.7.1
+ARG PARALLEL_PLUGIN_VERSION=2026.7.2-beta.5
 ARG PARALLEL_PLUGIN_ENDPOINT=https://search.parallel.ai/mcp
 RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no-fund && \
@@ -410,7 +410,16 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
     test -f /opt/openclaw-plugins/parallel/openclaw.plugin.json && \
     grep -RFq -- "${PARALLEL_PLUGIN_ENDPOINT}" \
       /opt/openclaw-plugins/parallel/dist && \
-    HOME=/home/node openclaw config validate
+    HOME=/home/node openclaw config validate && \
+    HOME=/home/node openclaw plugins inspect amazon-bedrock --runtime --json \
+      > /tmp/amazon-bedrock.inspect.json && \
+    node -e 'const fs=require("fs");const text=fs.readFileSync(process.argv[1],"utf8");const start=text.indexOf("{");const payload=JSON.parse(text.slice(start));const plugin=payload.plugin||{};const expected=process.argv[2];if(plugin.status!=="loaded"||plugin.version!==expected){console.error(`amazon-bedrock runtime registration failed: status=${plugin.status||"missing"} version=${plugin.version||"missing"} error=${plugin.error||"none"}`);process.exit(1)}' \
+      /tmp/amazon-bedrock.inspect.json "${BEDROCK_PLUGIN_VERSION}" && \
+    HOME=/home/node openclaw plugins inspect parallel --runtime --json \
+      > /tmp/parallel.inspect.json && \
+    node -e 'const fs=require("fs");const text=fs.readFileSync(process.argv[1],"utf8");const start=text.indexOf("{");const payload=JSON.parse(text.slice(start));const plugin=payload.plugin||{};const expected=process.argv[2];if(plugin.status!=="loaded"||plugin.version!==expected){console.error(`parallel runtime registration failed: status=${plugin.status||"missing"} version=${plugin.version||"missing"} error=${plugin.error||"none"}`);process.exit(1)}' \
+      /tmp/parallel.inspect.json "${PARALLEL_PLUGIN_VERSION}" && \
+    rm -f /tmp/amazon-bedrock.inspect.json /tmp/parallel.inspect.json
 # chat-card has zero npm deps. chat-chart's npm install is paired with the
 # matplotlib install above — both stay disabled until we figure out the
 # AgentCore overlay-mount failure. With both off the image boots cleanly

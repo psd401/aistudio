@@ -2,7 +2,7 @@
 """
 Config self-consistency gate for the agent image (issue #1161).
 
-Seven static asserts over openclaw.json + the Dockerfile, run on the host before
+Eight static asserts over openclaw.json + the Dockerfile, run on the host before
 build (no Docker):
 
   1. contextWindow sanity — every declared model's contextWindow must be a
@@ -47,6 +47,12 @@ build (no Docker):
      memory from `agents.defaults.memorySearch` to `memory.search` and retired
      `gateway.controlUi.allowInsecureAuth`. Catch those legacy keys before an
      expensive Docker build reaches `openclaw config validate`.
+
+  8. plugin runtime registration — the Docker build must load both host-coupled
+     plugins through OpenClaw and require status=loaded at their exact pins.
+     Published peer ranges are necessary but insufficient: Bedrock plugin
+     2026.7.1 claimed compatibility yet imported a plugin-SDK export removed by
+     the beta.5 host.
 
 Exit 0 when consistent, 1 on any violation.
 """
@@ -154,6 +160,11 @@ _SETTLED_TOOL_RECOVERY_BUILD_CONTRACT = (
     'its tool calls but did not produce a user-visible answer."',
     'grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_LOG}" /app/dist',
     'grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT}" /app/dist',
+)
+_PLUGIN_RUNTIME_BUILD_CONTRACT = (
+    "openclaw plugins inspect amazon-bedrock --runtime --json",
+    "openclaw plugins inspect parallel --runtime --json",
+    'plugin.status!=="loaded"||plugin.version!==expected',
 )
 
 
@@ -643,6 +654,28 @@ def check_settled_tool_recovery(dockerfile_path: str) -> List[str]:
     return violations
 
 
+def check_plugin_runtime_assertions(dockerfile_path: str) -> List[str]:
+    """Require the build to prove host/plugin API compatibility by loading."""
+    try:
+        with open(dockerfile_path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+    except OSError as exc:
+        return [f"cannot read Dockerfile {dockerfile_path}: {exc}"]
+
+    missing = [
+        contract
+        for contract in _PLUGIN_RUNTIME_BUILD_CONTRACT
+        if contract not in source
+    ]
+    if not missing:
+        return []
+    return [
+        "Dockerfile does not require exact-version runtime registration for "
+        "the host-coupled Bedrock and Parallel plugins: "
+        + "; ".join(missing)
+    ]
+
+
 def check_prompt_caching_reachable(
     config: dict, dockerfile_path: str,
 ) -> List[str]:
@@ -811,6 +844,20 @@ def check_tier_eval_config_schema(config: dict) -> List[str]:
             "gateway.controlUi.allowInsecureAuth is retired in OpenClaw "
             "v2026.7.2-beta.5; remove it (there is no replacement)"
         )
+    if isinstance(control_ui, dict) and "dangerouslyDisableDeviceAuth" in control_ui:
+        violations.append(
+            "gateway.controlUi.dangerouslyDisableDeviceAuth is retired in "
+            "OpenClaw v2026.7.2-beta.5"
+        )
+    if (
+        isinstance(control_ui, dict)
+        and control_ui.get("enabled") is False
+        and "dangerouslyAllowHostHeaderOriginFallback" in control_ui
+    ):
+        violations.append(
+            "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback must "
+            "not be enabled when the Control UI is disabled"
+        )
     return violations
 
 
@@ -877,6 +924,7 @@ def run_checks(
         + check_host_plugin_compatibility(dockerfile_path)
         + check_web_search_provider(config, dockerfile_path)
         + check_settled_tool_recovery(dockerfile_path)
+        + check_plugin_runtime_assertions(dockerfile_path)
     )
     if verify_upstream:
         violations += check_upstream_pins(dockerfile_path)
@@ -921,8 +969,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(
         "OK — openclaw.json context windows + apiKey hydration paths + "
         "prompt-caching reachability + host/plugin compatibility + web-search "
-        "provider readiness + settled-tool recovery + tier-eval schema "
-        "contracts consistent."
+        "provider readiness + settled-tool recovery + tier-eval schema + "
+        "runtime plugin registration contracts consistent."
     )
     return 0
 

@@ -98,6 +98,27 @@ class TierEvalConfigSchemaTests(unittest.TestCase):
             any("allowInsecureAuth is retired" in v for v in violations)
         )
 
+    def test_retired_and_unneeded_control_ui_danger_flags_are_rejected(self):
+        cfg = {
+            **self.CANONICAL,
+            "gateway": {
+                "controlUi": {
+                    "enabled": False,
+                    "dangerouslyDisableDeviceAuth": True,
+                    "dangerouslyAllowHostHeaderOriginFallback": True,
+                }
+            },
+        }
+        violations = ccc.check_tier_eval_config_schema(cfg)
+        self.assertTrue(
+            any("dangerouslyDisableDeviceAuth is retired" in v
+                for v in violations)
+        )
+        self.assertTrue(
+            any("dangerouslyAllowHostHeaderOriginFallback" in v
+                for v in violations)
+        )
+
     def test_semantic_memory_keeps_explicit_bedrock_model(self):
         cfg = {**self.CANONICAL, "memory": {"search": {}}}
         violations = ccc.check_tier_eval_config_schema(cfg)
@@ -533,7 +554,7 @@ class HostPluginCompatibilityTests(unittest.TestCase):
         version, violations = ccc.parse_pinned_plugin_version(
             os.path.join(here, "Dockerfile")
         )
-        self.assertEqual(version, "2026.7.1")
+        self.assertEqual(version, "2026.7.2-beta.5")
         self.assertEqual(violations, [])
 
 
@@ -605,6 +626,27 @@ class SettledToolRecoveryContractTests(unittest.TestCase):
         )
 
 
+class PluginRuntimeAssertionTests(unittest.TestCase):
+    def test_repo_dockerfile_loads_both_exact_plugin_pins(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        self.assertEqual(
+            ccc.check_plugin_runtime_assertions(
+                os.path.join(here, "Dockerfile")
+            ),
+            [],
+        )
+
+    def test_version_checks_without_runtime_loading_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dockerfile = os.path.join(directory, "Dockerfile")
+            with open(dockerfile, "w", encoding="utf-8") as fh:
+                fh.write("RUN openclaw config validate\n")
+            violations = ccc.check_plugin_runtime_assertions(dockerfile)
+        self.assertTrue(
+            any("runtime registration" in v for v in violations)
+        )
+
+
 class RealFilesTests(unittest.TestCase):
     def test_repo_config_is_consistent(self):
         here = os.path.dirname(os.path.abspath(__file__))
@@ -629,7 +671,7 @@ class RealFilesTests(unittest.TestCase):
         here = os.path.dirname(os.path.abspath(__file__))
         version, violations = ccc.parse_pinned_parallel_plugin_version(
             os.path.join(here, "Dockerfile"))
-        self.assertEqual(version, "2026.7.1")
+        self.assertEqual(version, "2026.7.2-beta.5")
         self.assertEqual(violations, [])
 
 
