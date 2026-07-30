@@ -256,6 +256,7 @@ class SuiteLoadingTests(unittest.TestCase):
             "Failure report recorded as ID 407.",
             "Logged as failure #408.",
             '{"logged":true,"failure_id":414}',
+            "Failure record `423` created.",
         ):
             self.assertIsNotNone(
                 re.search(failure_report_pattern, valid_confirmation),
@@ -315,10 +316,25 @@ class SuiteLoadingTests(unittest.TestCase):
         for valid_follow_up in (
             '"topLabel":"Follow-up due","text":"1"',
             '"topLabel":"Follow‑ups due","text":"1"',
+            '"topLabel":"Follow-up","text":"1 due"',
         ):
             self.assertIsNotNone(
                 re.search(morning_brief_follow_up, valid_follow_up),
                 valid_follow_up,
+            )
+        morning_brief_unread = next(
+            str(grader.get("pattern"))
+            for grader in tasks_by_id["chat-card-morning-brief"].graders
+            if grader.get("type") == "output_match"
+            and "Unread" in str(grader.get("pattern"))
+        )
+        for valid_unread in (
+            '"topLabel":"Unread messages","text":"7"',
+            '"topLabel":"Unread","text":"7 messages"',
+        ):
+            self.assertIsNotNone(
+                re.search(morning_brief_unread, valid_unread),
+                valid_unread,
             )
 
         last30days_window = next(

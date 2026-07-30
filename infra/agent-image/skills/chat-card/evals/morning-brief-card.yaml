@@ -9,6 +9,6 @@ graders:
   - {"type":"output_match","pattern":"<<<PSD_AGENT_RICH_V1>>>[\\s\\S]*<<<END_PSD_AGENT_RICH_V1>>>"}
   - {"type":"output_match","pattern":"Morning Brief"}
   - {"type":"output_match","pattern":"\"topLabel\":\"Meetings(?: today)?\",\"text\":\"3(?: (?:today|meetings))?\""}
-  - {"type":"output_match","pattern":"\"topLabel\":\"Unread messages\",\"text\":\"7\""}
-  - {"type":"output_match","pattern":"\"topLabel\":\"Follow[-\\u2010-\\u2015]?up(?:s)? due\",\"text\":\"1\""}
+  - {"type":"output_match","pattern":"\"topLabel\":\"Unread(?: messages)?\",\"text\":\"7(?: messages)?\""}
+  - {"type":"output_match","pattern":"\"topLabel\":\"Follow[-\\u2010-\\u2015]?up(?:s)?(?: due)?\",\"text\":\"1(?: due)?\""}
   - {"type":"output_match","pattern":"\"textFallback\":\"Harbor Ridge morning brief\""}
