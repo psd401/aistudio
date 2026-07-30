@@ -12,7 +12,7 @@ AgentCore runtime.
 - AI Studio image source:
   `68da9634b585515303031e14bf9f78f4db9808ca`
 - Final evaluator, suite, and grader revision:
-  `9ed4c27e26f29798c3f9780f37042acad54f0506`
+  `a6304936d49b5921139bac3fc999f5b138a7840d`
 - 50 tasks per arm: 32 regression and 18 capability
 - 3 trials per task; pass^3 requires all three to pass
 - Same ARM64 host and synthetic owner for every arm
@@ -29,7 +29,7 @@ Every candidate manifest varies exactly one complete axis from
 | OpenClaw `2026.7.2-beta.5` harness | `sha256:6aaa879b034bed2b44af8d25aa4a681a65c1f896d4632af7c18e2bc14eff5825` | unknown | regression PASS; capability FAIL (17/18 → 17/18); cost DECLINED | **REJECT** |
 | Conservative tool-routing prompt | `sha256:018087e485ce00dbba2698072dc9964b6321b2a2890fb63ea9e4dfd208f32762` | cached | regression FAIL; capability FAIL (17/18 → 17/18); cost PASS (+0.68%) | **REJECT** |
 | Z.AI GLM-5, native Bedrock | `sha256:48bdedab676e00d95d107e2f2dc86f159a1ab3123234f3ccb3d8ff224928711c` | uncached | regression FAIL; capability FAIL (17/18 → 17/18); cost DECLINED | **REJECT** |
-| OpenAI GPT OSS 120B, Mantle | `sha256:89a95ae81fde54daebf8d81f99fb9bed098481a4b6fa25277af3dffd97873333` | cached | regression FAIL; capability FAIL (17/18 → 6/18); cost PASS (-97.35%) | **REJECT** |
+| OpenAI GPT OSS 120B, Mantle | `sha256:89a95ae81fde54daebf8d81f99fb9bed098481a4b6fa25277af3dffd97873333` | unknown | regression FAIL; capability FAIL (17/18 → 6/18); cost DECLINED | **REJECT** |
 
 The baseline is Claude Sonnet 5 at
 `sha256:478ea37b04b53f8669e16d514dc6e079a5a148010cc39e726c6e3d48ef0bea42`
@@ -94,10 +94,12 @@ was not compatible with the current OpenClaw/Mantle path:
 - overall pass^3 was 13/50; and
 - capability pass^3 was 6/18.
 
-Observed cache-read telemetry classified both arms as cached even though the
-candidate config uses `cacheRetention: none`; the report intentionally follows
-observed telemetry. Cost fell 97.35%, but the quality clauses fail
-overwhelmingly.
+Ninety-three GPT OSS trials recorded fewer output tokens than model calls.
+Although complete trials made the aggregate output-token count look
+sufficient, the per-trial completeness check prevents those observations from
+masking the gaps. The summary therefore records cache status and cost as
+unknown, and the report declines the cost clause. The quality clauses fail
+overwhelmingly regardless.
 
 Decision: reject GPT OSS 120B. Follow-up:
 [#1484](https://github.com/psd401/aistudio/issues/1484).
@@ -119,8 +121,8 @@ tracked host and output-contract changes:
   documented identifier rendered as text or JSON, equivalent decision verbs,
   split label/value facts, Unicode typography, and reordered required terms.
 - Usage aggregation must not interpret missing transcript telemetry as zero:
-  fewer observed output tokens than model calls marks cache status and cost
-  unknown.
+  every trial is checked independently, and one incomplete trial marks its
+  containing scope's cache status and cost unknown.
 
 The candidate manifest now records version-specific migrations and identity,
 the backend socket suppresses its synthetic browser Origin, and focused tests

@@ -1,5 +1,5 @@
 {
-  "eval_harness_commit": "9ed4c27e26f29798c3f9780f37042acad54f0506",
+  "eval_harness_commit": "a6304936d49b5921139bac3fc999f5b138a7840d",
   "image": "390844780692.dkr.ecr.us-east-1.amazonaws.com/psd-agent-base-dev@sha256:89a95ae81fde54daebf8d81f99fb9bed098481a4b6fa25277af3dffd97873333",
   "image_digest": "sha256:89a95ae81fde54daebf8d81f99fb9bed098481a4b6fa25277af3dffd97873333",
   "model": {
@@ -21,11 +21,11 @@
     },
     "task_count": 50,
     "telemetry": {
-      "caching_status": "cached",
+      "caching_status": "unknown",
       "cost": {
-        "per_task_usd": 0.023264,
-        "per_trial_usd": 0.007755,
-        "total_usd": 1.1632
+        "per_task_usd": null,
+        "per_trial_usd": null,
+        "total_usd": null
       },
       "duration_ms": {
         "mean": 11329.807,
@@ -1917,11 +1917,11 @@
       },
       "task_count": 18,
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.026831,
-          "per_trial_usd": 0.008944,
-          "total_usd": 0.482966
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 15903.278,
@@ -1977,11 +1977,11 @@
       },
       "task_count": 32,
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.021257,
-          "per_trial_usd": 0.007086,
-          "total_usd": 0.680234
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 8757.229,

@@ -41,9 +41,10 @@ The beta host also changed the transcript usage shape. The runner observed 512
 model calls but could parse only 121 output tokens. Zero cache-read tokens in
 that incomplete record do not prove that the model was uncached, and pricing
 the partial token count produces a misleading near-zero cost. Summaries now
-mark caching and cost unknown whenever observed output tokens are fewer than
-model calls; comparison reports decline the cost clause instead of inferring a
-cache regression.
+check every trial independently and mark caching and cost unknown whenever a
+trial has fewer observed output tokens than model calls. Complete observations
+from other trials cannot mask that gap, and comparison reports decline the cost
+clause instead of inferring a cache regression.
 
 After binding the gateway client identity to the pinned harness, suppressing
 the synthetic browser Origin, and widening the graders to the valid output
@@ -80,8 +81,9 @@ the stable behavioral contract.
   Unicode typography when exact ASCII punctuation is not itself the contract.
 - Rerun affected tasks for both baseline and candidate, then regenerate both
   summaries with the same final evaluator commit.
-- Reconcile token usage with model-call counts before interpreting cache or
-  cost. Preserve observed counts, but classify incomplete usage as unknown.
+- Reconcile each trial's token usage with its model-call count before
+  interpreting cache or cost. Preserve observed counts, but classify any scope
+  containing incomplete usage as unknown.
 
 ## Prevention
 
