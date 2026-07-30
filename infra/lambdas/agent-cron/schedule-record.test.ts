@@ -6,6 +6,7 @@ import {
 
 const OWNER = 'owner@psd401.net';
 const SCHEDULE_ID = '36bb0456-1c51-4fb8-97d1-4e87d02765ce';
+const LEGACY_SCHEDULE_ID = '5123b45b';
 
 function record(overrides: Record<string, unknown> = {}) {
   return {
@@ -59,6 +60,42 @@ describe('authoritative cron schedule loading', () => {
       scheduleId: SCHEDULE_ID,
     });
     expect(input.ConsistentRead).toBe(true);
+  });
+
+  it('authorizes a preserved legacy hexadecimal schedule ID', async () => {
+    const legacyRecord = record({ scheduleId: LEGACY_SCHEDULE_ID });
+    const { result, get } = await load(
+      {
+        ownerEmail: OWNER,
+        scheduleId: LEGACY_SCHEDULE_ID,
+        version: 3,
+      },
+      legacyRecord,
+    );
+    expect(result).toEqual({
+      authorized: true,
+      schedule: legacyRecord,
+    });
+    expect(get.mock.calls[0][0].Key).toEqual({
+      userId: OWNER,
+      scheduleId: LEGACY_SCHEDULE_ID,
+    });
+  });
+
+  it('rejects arbitrary non-UUID schedule IDs', async () => {
+    const { result, get } = await load(
+      {
+        ownerEmail: OWNER,
+        scheduleId: 'schedule-id',
+        version: 3,
+      },
+      record({ scheduleId: 'schedule-id' }),
+    );
+    expect(result).toEqual({
+      authorized: false,
+      reason: 'invalid-reference',
+    });
+    expect(get).not.toHaveBeenCalled();
   });
 
   it.each([

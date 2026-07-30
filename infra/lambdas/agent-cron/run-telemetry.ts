@@ -227,8 +227,8 @@ export async function writePreflightRun(
             UNION ALL
             SELECT existing.status
             FROM agent_scheduled_runs AS existing
-            WHERE :fire_key IS NOT NULL
-              AND existing.fire_key = :fire_key
+            WHERE CAST(:fire_key AS text) IS NOT NULL
+              AND existing.fire_key = CAST(:fire_key AS text)
               AND NOT EXISTS (SELECT 1 FROM inserted)
             LIMIT 1`,
       parameters: scheduledRunParameters(params),

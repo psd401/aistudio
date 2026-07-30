@@ -86,6 +86,8 @@ export type PublicAgentSchedule = Pick<
   lastRunAt: string | null;
   lastRunStatus: string | null;
   lastRunError: string | null;
+  degraded: boolean;
+  degradedReason: string | null;
 };
 
 export interface CreateAgentScheduleInput {
@@ -271,8 +273,54 @@ function publicSchedule(
     lastRunError: lastRun?.errorMessage
       ? lastRun.errorMessage.slice(0, LAST_RUN_ERROR_MAX_LENGTH)
       : null,
+    degraded: false,
+    degradedReason: null,
   };
 }
+
+function degradedString(
+  value: unknown,
+  maximumLength: number,
+  fallback: string,
+): string {
+  return typeof value === "string" && value.length > 0
+    ? value.slice(0, maximumLength)
+    : fallback;
+}
+
+function publicDegradedSchedule(
+  value: Record<string, unknown>,
+  lastRun?: AgentScheduleLastRun,
+  runEnrichmentAvailable = true,
+): PublicAgentSchedule {
+  return {
+    scheduleId: degradedString(value.scheduleId, 128, "unknown"),
+    version:
+      Number.isInteger(value.version) && Number(value.version) >= 1
+        ? Number(value.version)
+        : 0,
+    name: degradedString(value.name, 120, "Invalid schedule"),
+    prompt: degradedString(value.prompt, 20_000, ""),
+    cronExpression: degradedString(value.cronExpression, 256, ""),
+    timezone: degradedString(value.timezone, 100, DEFAULT_TIMEZONE),
+    enabled: typeof value.enabled === "boolean" ? value.enabled : false,
+    createdAt: degradedString(value.createdAt, 64, ""),
+    updatedAt: degradedString(value.updatedAt, 64, ""),
+    lastRunAt: lastRun?.createdAt.toISOString() ?? null,
+    lastRunStatus: runEnrichmentAvailable
+      ? lastRun?.status ?? null
+      : "unknown",
+    lastRunError: lastRun?.errorMessage
+      ? lastRun.errorMessage.slice(0, LAST_RUN_ERROR_MAX_LENGTH)
+      : null,
+    degraded: true,
+    degradedReason: "Schedule record requires migration",
+  };
+}
+
+type ListableAgentSchedule =
+  | { kind: "valid"; record: AgentScheduleRecord }
+  | { kind: "degraded"; value: Record<string, unknown> };
 
 function parseRecord(
   value: unknown,
@@ -738,34 +786,73 @@ export class AgentScheduleService {
 
   async list(owner: string): Promise<PublicAgentSchedule[]> {
     const ownerEmail = normalizeOwnerEmail(owner);
-    const records = (await this.ownerItems(ownerEmail))
+    const candidates: ListableAgentSchedule[] = (await this.ownerItems(
+      ownerEmail,
+    ))
       .filter(
         (item) =>
           typeof item.scheduleId === "string" &&
           !item.scheduleId.startsWith("__"),
       )
-      .map((item) => parseRecord(item, ownerEmail))
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      .flatMap((item): ListableAgentSchedule[] => {
+        try {
+          return [{ kind: "valid", record: parseRecord(item, ownerEmail) }];
+        } catch (error) {
+          if (!hasValidScheduleOwner(item, ownerEmail)) {
+            log.warn("Skipping schedule with invalid owner binding", {
+              scheduleId: degradedString(item.scheduleId, 128, "unknown"),
+            });
+            return [];
+          }
+          log.warn("Returning degraded schedule record", {
+            scheduleId: degradedString(item.scheduleId, 128, "unknown"),
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return [{ kind: "degraded", value: item }];
+        }
+      })
+      .sort((left, right) => {
+        const leftCreatedAt =
+          left.kind === "valid"
+            ? left.record.createdAt
+            : degradedString(left.value.createdAt, 64, "");
+        const rightCreatedAt =
+          right.kind === "valid"
+            ? right.record.createdAt
+            : degradedString(right.value.createdAt, 64, "");
+        return leftCreatedAt.localeCompare(rightCreatedAt);
+      });
+    const scheduleIds = candidates.map((candidate) =>
+      candidate.kind === "valid"
+        ? candidate.record.scheduleId
+        : degradedString(candidate.value.scheduleId, 128, "unknown"),
+    );
     let lastRuns = new Map<string, AgentScheduleLastRun>();
     let runEnrichmentAvailable = true;
     try {
       lastRuns = await this.runReader.latestBySchedule(
         ownerEmail,
-        records.map((record) => record.scheduleId),
+        scheduleIds,
       );
     } catch (error) {
       runEnrichmentAvailable = false;
       log.warn("Latest schedule run enrichment unavailable", {
-        scheduleCount: records.length,
+        scheduleCount: candidates.length,
         error: error instanceof Error ? error.message : String(error),
       });
     }
-    return records.map((record) =>
-      publicSchedule(
-        record,
-        lastRuns.get(record.scheduleId),
-        runEnrichmentAvailable,
-      ),
+    return candidates.map((candidate, index) =>
+      candidate.kind === "valid"
+        ? publicSchedule(
+            candidate.record,
+            lastRuns.get(scheduleIds[index]),
+            runEnrichmentAvailable,
+          )
+        : publicDegradedSchedule(
+            candidate.value,
+            lastRuns.get(scheduleIds[index]),
+            runEnrichmentAvailable,
+          ),
     );
   }
 

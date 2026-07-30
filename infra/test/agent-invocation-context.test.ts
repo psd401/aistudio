@@ -67,6 +67,7 @@ interface Statement {
   Effect?: string;
   Action?: unknown;
   Resource?: unknown;
+  Condition?: unknown;
 }
 
 function allStatements(template: Template): Statement[] {
@@ -335,6 +336,75 @@ describe('Agent schedule reliability infrastructure', () => {
         AlarmActions: Match.anyValue(),
       });
     }
+  });
+
+  it('alarms schedule-reference rejections before invocation', () => {
+    template.hasResourceProperties('AWS::Logs::MetricFilter', {
+      MetricTransformations: Match.arrayWith([
+        Match.objectLike({
+          MetricName: 'ScheduleReferenceRejections',
+          MetricNamespace: `PSD/AgentPlatform/${ENV}`,
+          MetricValue: '1',
+        }),
+      ]),
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: `psd-agent-schedule-reference-rejections-${ENV}`,
+      Namespace: `PSD/AgentPlatform/${ENV}`,
+      MetricName: 'ScheduleReferenceRejections',
+      Threshold: 1,
+      AlarmActions: Match.anyValue(),
+    });
+  });
+
+  it('scopes legacy schedule backfill access to the required tables', () => {
+    const statements = allStatements(template);
+    const recordAccess = statements.find(
+      (statement) => statement.Sid === 'ScheduleTargetBackfillRecords'
+    );
+    expect(recordAccess).toMatchObject({
+      Effect: 'Allow',
+      Action: expect.arrayContaining([
+        'dynamodb:GetItem',
+        'dynamodb:PutItem',
+        'dynamodb:DeleteItem',
+        'dynamodb:UpdateItem',
+        'dynamodb:Scan',
+      ]),
+      Condition: {
+        StringEquals: {
+          'aws:ResourceTag/Environment': ENV,
+          'aws:ResourceTag/ManagedBy': 'cdk',
+        },
+      },
+    });
+    expect(JSON.stringify(recordAccess?.Resource)).toContain(
+      'AgentSchedulesTable'
+    );
+    expect(JSON.stringify(recordAccess?.Resource)).not.toContain(
+      'UsersTable'
+    );
+
+    const ownerAccess = statements.find(
+      (statement) => statement.Sid === 'ScheduleTargetBackfillReadOwners'
+    );
+    expect(ownerAccess).toMatchObject({
+      Effect: 'Allow',
+      Action: 'dynamodb:Query',
+      Condition: {
+        StringEquals: {
+          'aws:ResourceTag/Environment': ENV,
+          'aws:ResourceTag/ManagedBy': 'cdk',
+        },
+      },
+    });
+    expect(JSON.stringify(ownerAccess?.Resource)).toContain('UsersTable');
+    expect(JSON.stringify(ownerAccess?.Resource)).toContain(
+      '/index/email-index'
+    );
+    expect(JSON.stringify(ownerAccess?.Resource)).not.toContain(
+      'AgentSchedulesTable'
+    );
   });
 
   it('alarms Scheduler and Lambda DLQ depth through the agent alarm topic', () => {

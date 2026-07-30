@@ -1,7 +1,7 @@
 {
   "name": "agent-schedule-target-backfill",
   "version": "1.0.0",
-  "description": "One-time deployment backfill for EventBridge Scheduler fire identity",
+  "description": "Deployment backfill for legacy agent schedule records and targets",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
