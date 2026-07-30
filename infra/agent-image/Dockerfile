@@ -11,8 +11,10 @@
 
 # Pin base image to a known-good immutable digest.
 #
-# Pinned to OpenClaw 2026.6.11 — the latest stable release (cut 2026-06-30),
-# bumped from 2026.4.20 for issue #1082. Digests verified 2026-06-30.
+# Pinned to OpenClaw 2026.7.2-beta.5 for issue #1469. The release is
+# prerelease, but it is the first immutable published artifact that contains
+# the upstream settled-post-tool recovery described below. Digest verified
+# 2026-07-30.
 #
 # Background — why the old 2026.4.20 pin existed: `:latest` floated through
 # 2026.4.21–2026.4.23 and broke the runtime twice:
@@ -35,36 +37,44 @@
 #     smoke test (docs/operations/agent-platform-setup.md) before trusting it.
 #
 # Multi-arch index digest (Docker picks arm64 at build time via --platform):
-#   ghcr.io/openclaw/openclaw:2026.7.1
-#   index: sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c
+#   ghcr.io/openclaw/openclaw:2026.7.2-beta.5
+#   index: sha256:86e0a480a37d879311c9723ad2487cca9eb6c1925fa4732dec3f505b4728eee9
 #
-# Moved from the 2026.7.1-beta.2 PRERELEASE pin to 2026.7.1 STABLE (2026-07-27),
-# which is what the prerelease note below asked for. Two reasons:
-#   1. It is the release of the same line — it carries openclaw PR #99678
-#      ("reconcile is not a function" after auto-compaction, the P1 that
-#      aborted the 7/6 Plaud production run) plus the empty-reply and
-#      compaction-precheck fixes that motivated the prerelease pin.
-#   2. It is REQUIRED by the amazon-bedrock provider bump below. Plugin
-#      2026.7.1 is the first release whose prompt-caching allowlist knows
-#      `claude-sonnet-5`, and it declares `peerDependencies.openclaw >=2026.7.1`
-#      / `compat.pluginApi >=2026.7.1`. A prerelease sorts BELOW its release in
-#      semver (2026.7.1-beta.2 < 2026.7.1), so pairing plugin 2026.7.1 with the
-#      beta.2 host would violate the plugin's own host contract. Host and
-#      plugin move together or not at all.
+# Why this prerelease is required:
+#   - Production failure #260 ended after five tool calls with OpenClaw's
+#     `incomplete turn detected ... stopReason=toolUse ... replaySafe=no`
+#     path. OpenClaw 2026.7.1 correctly refused to replay possible side
+#     effects, but had no safe final-answer continuation and returned the
+#     generic "Agent couldn't generate a response" error.
+#   - Upstream PR #110565 / commit 8636bb698184 adds one isolated,
+#     tools-disabled finalization from already-settled tool results. It never
+#     replays completed tools, and its regression suite covers both successful
+#     recovery and fail-closed exhaustion. The commit is an ancestor of
+#     v2026.7.2-beta.5 but not of the 2026.7.1 release line.
+#   - The recovery emits `settled post-tool turn lacked a final answer` with
+#     run/session/provider context. The build assertions below require both
+#     that diagnostic and its no-repeat continuation prompt in the compiled
+#     runtime, so a tag/digest mistake cannot silently remove the fix.
+#
+# The amazon-bedrock and Parallel plugins remain on stable 2026.7.1. Their
+# published peer contract is OpenClaw >=2026.7.1, which beta.5 satisfies, and
+# 2026.7.1 is still the first Bedrock plugin whose prompt-caching allowlist
+# recognizes `claude-sonnet-5`.
 #
 # Rollback targets (previous pins):
+#   2026.7.1        index sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c
 #   2026.7.1-beta.2  index sha256:0e5680d7d58d3b6c08afa0fc992f4ad319b5586f60923e1985b7c6f838c535d5
 #   2026.6.11        index sha256:3814fb1f62f9cfc5944de088c5817c68c88b5d721feebe36420b666a90a61ce7
 #   2026.4.20        index sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
-# Rolling back the host REQUIRES rolling the plugin back to 2026.6.11 in the
-# same commit (see the host-contract note above) — at the cost of prompt
-# caching, which that plugin cannot do for this model.
+# Rolling back the host to 2026.7.1 reintroduces #1469 and requires an explicit
+# incident tradeoff. Rolling back below 2026.7.1 ALSO requires rolling both
+# plugins back to a compatible release, at the cost of Sonnet 5 prompt caching.
 #
 # DO NOT revert to `:latest` or bump without (a) confirming the workspace
 # double-nesting fix by commit ancestry and (b) a clean end-to-end test that
 # includes the Morning Brief payload — a trivial "respond OK" prompt masks
 # session-completion regressions.
-ARG OPENCLAW_BASE_IMAGE=ghcr.io/openclaw/openclaw@sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c
+ARG OPENCLAW_BASE_IMAGE=ghcr.io/openclaw/openclaw@sha256:86e0a480a37d879311c9723ad2487cca9eb6c1925fa4732dec3f505b4728eee9
 FROM ${OPENCLAW_BASE_IMAGE}
 
 # OpenClaw 2026.7.2 classifies the TUI as a Control UI client and requires
@@ -86,12 +96,20 @@ LABEL org.opencontainers.image.source="https://github.com/psd401/aistudio" \
 # Switch to root for installations
 USER root
 
+# Assert the pinned host contains the exact safe-recovery contract required by
+# issue #1469. Keep these in the existing OS-package layer: AgentCore has a
+# strict overlay-layer ceiling, so this must not become a standalone RUN.
+ARG OPENCLAW_SETTLED_TOOL_RECOVERY_LOG="settled post-tool turn lacked a final answer"
+ARG OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT="The previous assistant turn completed its tool calls but did not produce a user-visible answer."
+
 # Base OS packages FIRST so the checksum-verified installs below have the
 # tooling they need: `unzip` for bun's .zip release artifact, `curl` +
 # `ca-certificates` for the downloads, and the python3 venv stack for the
 # AgentCore SDK. (The exact Python version tracks the base image's distro;
 # verify with: docker run --rm psd-agent-base:latest python3 --version)
-RUN apt-get update && \
+RUN grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_LOG}" /app/dist && \
+    grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT}" /app/dist && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
       python3 python3-pip python3-venv tzdata ca-certificates curl unzip && \
     rm -rf /var/lib/apt/lists/*
@@ -334,10 +352,11 @@ COPY skills /opt/psd-skills
 # "Unknown memory embedding provider: bedrock" (2026-07-10). It must live under
 # /opt (image-owned): ~/.openclaw is runtime-persistent storage that shadows
 # anything written there at build time. Loaded via openclaw.json
-# plugins.load.paths. Version-pinned to the same OpenClaw release this image
-# pins (2026.7.1); npm verifies the registry integrity hash on pack. The
-# tarball is self-contained (bundleDependencies: @aws-sdk clients ship inside
-# it, with an npm-shrinkwrap.json), so no npm install runs after extraction.
+# plugins.load.paths. Version-pinned to stable 2026.7.1, whose published host
+# contract is compatible with the newer beta.5 runtime; npm verifies the
+# registry integrity hash on pack. The tarball is self-contained
+# (bundleDependencies: @aws-sdk clients ship inside it, with an
+# npm-shrinkwrap.json), so no npm install runs after extraction.
 #
 # 2026.6.11 -> 2026.7.1 (2026-07-27) RESTORES PROMPT CACHING, which had been
 # silently off for every turn since #1384 moved chat to this provider. The

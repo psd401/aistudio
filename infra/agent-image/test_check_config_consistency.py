@@ -478,6 +478,74 @@ class HostPluginCompatibilityTests(unittest.TestCase):
         self.assertEqual(violations, [])
 
 
+class SettledToolRecoveryContractTests(unittest.TestCase):
+    """The host must recover settled tool turns without replaying effects."""
+
+    FIXED = (
+        "2026.7.2-beta.5",
+        "sha256:" + "86e0a480a37d879311c9723ad2487cca9eb6c1925fa4732dec3f505b4728eee9",
+    )
+    OLD = (
+        "2026.7.1",
+        "sha256:" + "6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c",
+    )
+
+    def _dockerfile(self, host, digest, *, assert_runtime=True):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "Dockerfile")
+        contract = ""
+        if assert_runtime:
+            contract = (
+                'ARG OPENCLAW_SETTLED_TOOL_RECOVERY_LOG="settled post-tool turn '
+                'lacked a final answer"\n'
+                'ARG OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT="The previous assistant '
+                'turn completed its tool calls but did not produce a user-visible '
+                'answer."\n'
+                'RUN grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_LOG}" /app/dist '
+                '&& \\\n'
+                '    grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT}" '
+                "/app/dist\n"
+            )
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(
+                f"#   ghcr.io/openclaw/openclaw:{host}\n"
+                f"#   index: {digest}\n"
+                f"FROM ghcr.io/openclaw/openclaw@{digest}\n"
+                f"{contract}"
+            )
+        return p
+
+    def test_first_fixed_release_with_runtime_assertions_passes(self):
+        self.assertEqual(
+            ccc.check_settled_tool_recovery(self._dockerfile(*self.FIXED)),
+            [],
+        )
+
+    def test_previous_stable_release_is_rejected(self):
+        violations = ccc.check_settled_tool_recovery(
+            self._dockerfile(*self.OLD)
+        )
+        self.assertTrue(any("predates settled-tool recovery" in v for v in violations))
+
+    def test_missing_compiled_runtime_assertions_are_rejected(self):
+        violations = ccc.check_settled_tool_recovery(
+            self._dockerfile(*self.FIXED, assert_runtime=False)
+        )
+        self.assertTrue(
+            any("does not assert the compiled settled-tool recovery" in v
+                for v in violations)
+        )
+
+    def test_repo_dockerfile_keeps_recovery_contract(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        self.assertEqual(
+            ccc.check_settled_tool_recovery(
+                os.path.join(here, "Dockerfile")
+            ),
+            [],
+        )
+
+
 class RealFilesTests(unittest.TestCase):
     def test_repo_config_is_consistent(self):
         here = os.path.dirname(os.path.abspath(__file__))

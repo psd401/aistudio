@@ -452,7 +452,7 @@ release (Morning Brief "chat deadline expired"; nested
 workspace double-nesting fix is present — no Docker required, just `curl`/`jq`/`gh`:
 
 ```bash
-REPO=openclaw/openclaw; TAG=2026.7.1         # target the latest stable release
+REPO=openclaw/openclaw; TAG=2026.7.2-beta.5  # exact reviewed release; prefer stable when it contains required fixes
 TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:$REPO:pull&service=ghcr.io" | jq -r .token)
 
 # Multi-arch index digest (this is what goes in FROM):
@@ -469,6 +469,12 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 # MANDATORY gate: confirm the workspace double-nesting fix (PR #93520, merge
 # commit 52280351bb53) is an ancestor of the target tag. ahead_by==0 ⇒ present.
 gh api "repos/$REPO/compare/v$TAG...52280351bb53" --jq '{ahead_by, fix_present: (.ahead_by==0)}'
+
+# MANDATORY since #1469: confirm the safe settled-post-tool finalization
+# (upstream PR #110565) is present. The Docker build also checks its compiled
+# diagnostic and tools-disabled continuation prompt.
+gh api "repos/$REPO/compare/v$TAG...8636bb6981844e4674ee2cdbc0d8d32aa2a8b816" \
+  --jq '{ahead_by, settled_tool_recovery_present: (.ahead_by==0)}'
 ```
 
 Then update the `FROM` digest and the header block in `infra/agent-image/Dockerfile`,

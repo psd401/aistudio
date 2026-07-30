@@ -482,6 +482,187 @@ class TestChatDeadlineRegression(unittest.TestCase):
         self.assertGreaterEqual(failure["context"]["elapsed_s"], 600)
 
 
+class TestIncompleteToolTurnTelemetry(unittest.TestCase):
+    """Failure #260 must name and locate the exhausted OpenClaw recovery."""
+
+    @staticmethod
+    def _message(**fields):
+        return json.dumps(fields)
+
+    def test_replay_unsafe_chat_error_records_pipeline_context(self):
+        chat_id = None
+
+        class FakeWebSocket:
+            def __init__(self, messages):
+                self.messages = list(messages)
+                self.sent = []
+
+            def send(self, payload):
+                nonlocal chat_id
+                parsed = json.loads(payload)
+                self.sent.append(parsed)
+                if parsed.get("method") == "chat.send":
+                    chat_id = parsed["id"]
+
+            def recv(self):
+                message = self.messages.pop(0)
+                return message() if callable(message) else message
+
+            def settimeout(self, _timeout):
+                return None
+
+            def close(self):
+                return None
+
+        def current_run_event(event, payload):
+            return self._message(
+                type="event",
+                event=event,
+                payload={"runId": chat_id, **payload},
+            )
+
+        error_message = (
+            "⚠️ Agent couldn't generate a response. Note: some tool actions "
+            "may have already been executed — please verify before retrying."
+        )
+        messages = [
+            self._message(type="event", event="connect.challenge", payload={}),
+            lambda: self._message(
+                type="res",
+                id=socket.sent[-1]["id"],
+                ok=True,
+                payload={},
+            ),
+            lambda: self._message(
+                type="res",
+                id=socket.sent[-1]["id"],
+                ok=True,
+                payload={"tools": []},
+            ),
+            lambda: self._message(
+                type="res",
+                id=socket.sent[-1]["id"],
+                ok=True,
+                payload={},
+            ),
+            lambda: self._message(
+                type="res",
+                id=chat_id,
+                ok=True,
+                payload={"runId": chat_id, "status": "started"},
+            ),
+            lambda: current_run_event(
+                "agent",
+                {
+                    "stream": "lifecycle",
+                    "sessionId": "openclaw-session-260",
+                    "agentId": "main",
+                    "data": {"phase": "start"},
+                },
+            ),
+            lambda: current_run_event(
+                "agent",
+                {
+                    "stream": "assistant",
+                    "data": {"delta": "The"},
+                },
+            ),
+            lambda: current_run_event(
+                "agent",
+                {
+                    "stream": "item",
+                    "data": {
+                        "itemId": "tool-260",
+                        "phase": "start",
+                        "kind": "tool",
+                        "name": "edit",
+                    },
+                },
+            ),
+            lambda: current_run_event(
+                "agent",
+                {
+                    "stream": "item",
+                    "data": {
+                        "itemId": "tool-260",
+                        "phase": "end",
+                        "kind": "tool",
+                        "name": "edit",
+                        "status": "completed",
+                        "output": "updated",
+                    },
+                },
+            ),
+            lambda: current_run_event(
+                "chat",
+                {
+                    "seq": 34,
+                    "state": "error",
+                    "errorMessage": error_message,
+                },
+            ),
+        ]
+        socket = FakeWebSocket(messages)
+        fake_websocket_module = mock.Mock()
+        fake_websocket_module.create_connection.return_value = socket
+        fake_websocket_module.WebSocketTimeoutException = TimeoutError
+        empty_usage = {
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+            "model_calls": 0,
+        }
+        adapter = OpenClawAdapter()
+        adapter._ready = True
+
+        with (
+            mock.patch.dict(
+                sys.modules,
+                {"websocket": fake_websocket_module},
+            ),
+            mock.patch.object(
+                adapter,
+                "_read_turn_usage",
+                return_value=empty_usage,
+            ),
+            mock.patch(
+                "harness_adapter.record_failure",
+            ) as record_failure,
+            mock.patch(
+                "harness_adapter.time.time",
+                return_value=100.0,
+            ),
+        ):
+            result = adapter.process(
+                "Continue a multi-tool task",
+                "session-260",
+                deadline_s=600,
+            )
+
+        failure = record_failure.call_args.kwargs
+        context = failure["context"]
+        self.assertTrue(result.failed)
+        self.assertEqual(
+            result.error_class,
+            harness_adapter.INCOMPLETE_TOOL_TURN_ERROR_CLASS,
+        )
+        self.assertIn("The", result.text)
+        self.assertEqual(
+            failure["error_class"],
+            harness_adapter.INCOMPLETE_TOOL_TURN_ERROR_CLASS,
+        )
+        self.assertEqual(context["phase"], "chat_event_error")
+        self.assertEqual(context["run_id"], chat_id)
+        self.assertEqual(context["event_sequence"], 34)
+        self.assertEqual(context["response_chars"], 3)
+        self.assertEqual(context["tool_call_count"], 1)
+        self.assertEqual(context["active_tool_count"], 0)
+        self.assertEqual(context["deadline_s"], 600)
+        self.assertEqual(context["event_counts"]["event:chat"], 1)
+        self.assertIn("event:agent", context["first_events"])
+
+
 class TestRecordItemToolEvent(unittest.TestCase):
     """Native-mode tool items must land in tool_calls telemetry (#1138 r12)."""
 
@@ -777,7 +958,7 @@ class TurnResultCacheFieldTests(unittest.TestCase):
 
 
 class ChatErrorClassificationTests(unittest.TestCase):
-    """Context overflow must be distinguishable from a genuine crash.
+    """Recoverable and replay-unsafe failures must not look like crashes.
 
     Every chat-channel error used to arrive as the same OpenClawChatError, with
     the distinguishing detail buried in free text. That conflation is why the
@@ -815,6 +996,24 @@ class ChatErrorClassificationTests(unittest.TestCase):
                 f"should classify as overflow: {message!r}",
             )
 
+    def test_recognizes_the_replay_unsafe_message_from_failure_260(self):
+        message = (
+            "⚠️ Agent couldn't generate a response. Note: some tool actions "
+            "may have already been executed — please verify before retrying."
+        )
+        self.assertEqual(
+            harness_adapter._classify_chat_error(message),
+            harness_adapter.INCOMPLETE_TOOL_TURN_ERROR_CLASS,
+        )
+
+    def test_does_not_treat_a_side_effect_free_generic_error_as_tool_turn(self):
+        self.assertEqual(
+            harness_adapter._classify_chat_error(
+                "Agent couldn't generate a response. Please try again."
+            ),
+            "OpenClawChatError",
+        )
+
     def test_leaves_every_other_failure_generic(self):
         # These MUST NOT become promotable — each is a real fault where an
         # automatic two-hour retry is the wrong answer.
@@ -844,6 +1043,10 @@ class ChatErrorClassificationTests(unittest.TestCase):
         # A rename here silently stops every scheduled restart.
         self.assertEqual(
             harness_adapter.CONTEXT_OVERFLOW_ERROR_CLASS, "ContextOverflow"
+        )
+        self.assertEqual(
+            harness_adapter.INCOMPLETE_TOOL_TURN_ERROR_CLASS,
+            "OpenClawIncompleteToolTurn",
         )
 
 

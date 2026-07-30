@@ -565,7 +565,15 @@ class CandidateMatrixTests(unittest.TestCase):
         dockerfile = (HERE / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn(
             "ARG OPENCLAW_BASE_IMAGE=ghcr.io/openclaw/openclaw@sha256:"
-            "6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c",
+            "86e0a480a37d879311c9723ad2487cca9eb6c1925fa4732dec3f505b4728eee9",
+            dockerfile,
+        )
+        self.assertIn(
+            'grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_LOG}"',
+            dockerfile,
+        )
+        self.assertIn(
+            'grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT}"',
             dockerfile,
         )
         self.assertIn("ARG BEDROCK_PLUGIN_VERSION=2026.7.1", dockerfile)

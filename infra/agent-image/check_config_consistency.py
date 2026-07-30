@@ -2,7 +2,7 @@
 """
 Config self-consistency gate for the agent image (issue #1161).
 
-Five static asserts over openclaw.json + the Dockerfile, run on the host before
+Six static asserts over openclaw.json + the Dockerfile, run on the host before
 build (no Docker):
 
   1. contextWindow sanity — every declared model's contextWindow must be a
@@ -36,6 +36,12 @@ build (no Docker):
      enabled, and the build must assert its fixed Search MCP endpoint. Without
      an explicit provider, OpenClaw still exposes the tool but every call fails
      at runtime with "disabled or no provider available".
+
+  6. settled-tool recovery — the OpenClaw host must contain the upstream
+     tools-disabled finalization for a settled post-tool turn that produced no
+     visible answer, plus its structured diagnostic. Without this contract a
+     replay-unsafe turn fails with generic OpenClawChatError after its tools
+     have already run (issue #1469).
 
 Exit 0 when consistent, 1 on any violation.
 """
@@ -135,6 +141,14 @@ _HOST_IMAGE_ARG_RE = re.compile(
 )
 _HOST_FROM_ARG_RE = re.compile(
     r"^FROM\s+\$\{OPENCLAW_BASE_IMAGE\}\s*$", re.MULTILINE,
+)
+_SETTLED_TOOL_RECOVERY_MIN = "2026.7.2-beta.5"
+_SETTLED_TOOL_RECOVERY_BUILD_CONTRACT = (
+    'ARG OPENCLAW_SETTLED_TOOL_RECOVERY_LOG="settled post-tool turn lacked a final answer"',
+    'ARG OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT="The previous assistant turn completed '
+    'its tool calls but did not produce a user-visible answer."',
+    'grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_LOG}" /app/dist',
+    'grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT}" /app/dist',
 )
 
 
@@ -581,6 +595,49 @@ def check_host_plugin_compatibility(dockerfile_path: str) -> List[str]:
     return violations
 
 
+def check_settled_tool_recovery(dockerfile_path: str) -> List[str]:
+    """Keep the safe post-tool finalization and its diagnostic in the host.
+
+    OpenClaw 2026.7.1 detected replay-unsafe incomplete turns but could only
+    fail them. Upstream PR #110565 added one tools-disabled finalization from
+    settled results; v2026.7.2-beta.5 is the first immutable release artifact
+    containing it. The Docker build also greps the compiled runtime so a bad
+    tag/digest mapping fails closed rather than trusting this version string.
+    """
+    try:
+        with open(dockerfile_path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+    except OSError as exc:
+        return [f"cannot read Dockerfile {dockerfile_path}: {exc}"]
+
+    tag_match = _HOST_TAG_RE.search(source)
+    if not tag_match:
+        # check_host_plugin_compatibility reports the missing tag/digest pair.
+        return []
+
+    violations: List[str] = []
+    host_tag = tag_match.group(1)
+    if _version_key(host_tag) < _version_key(_SETTLED_TOOL_RECOVERY_MIN):
+        violations.append(
+            f"OpenClaw base image {host_tag} predates settled-tool recovery "
+            f"{_SETTLED_TOOL_RECOVERY_MIN}; replay-unsafe tool turns would "
+            f"regress to generic OpenClawChatError (#1469)"
+        )
+
+    missing = [
+        contract
+        for contract in _SETTLED_TOOL_RECOVERY_BUILD_CONTRACT
+        if contract not in source
+    ]
+    if missing:
+        violations.append(
+            "Dockerfile does not assert the compiled settled-tool recovery "
+            "diagnostic and no-repeat continuation prompt: "
+            + "; ".join(missing)
+        )
+    return violations
+
+
 def check_prompt_caching_reachable(
     config: dict, dockerfile_path: str,
 ) -> List[str]:
@@ -739,6 +796,7 @@ def run_checks(
         + check_prompt_caching_reachable(config, dockerfile_path)
         + check_host_plugin_compatibility(dockerfile_path)
         + check_web_search_provider(config, dockerfile_path)
+        + check_settled_tool_recovery(dockerfile_path)
     )
     if verify_upstream:
         violations += check_upstream_pins(dockerfile_path)
@@ -783,7 +841,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(
         "OK — openclaw.json context windows + apiKey hydration paths + "
         "prompt-caching reachability + host/plugin compatibility + web-search "
-        "provider readiness consistent."
+        "provider readiness + settled-tool recovery contract consistent."
     )
     return 0
 
