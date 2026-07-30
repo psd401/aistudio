@@ -2,10 +2,11 @@
  * Async-job promotion — pure logic (issue #1138, "the 14-minute wall").
  *
  * A multi-step agent turn that cannot finish inside the router Lambda's
- * ~14-minute window is promoted EXACTLY ONCE into a long-lived ECS Fargate
- * job-runner task, which re-invokes the SAME AgentCore session with a
- * continuation prompt and a 2-hour deadline (AgentCore invocations may run
- * up to 8h; the Lambda caller was the only 15-minute wall).
+ * ~14-minute window, or whose transcript overflows the model context, is
+ * promoted EXACTLY ONCE into a long-lived ECS Fargate job-runner task.
+ * Deadlines resume the same AgentCore session; overflow recovery starts a
+ * fresh session from the original request. Job invocations get a 2-hour
+ * ceiling (AgentCore itself may run up to 8h).
  *
  * This module holds the dependency-free pieces (promotion predicate, job
  * payload build/parse, continuation prompt) so they can be unit tested
@@ -19,24 +20,18 @@ const DEADLINE_ERROR_CLASSES = new Set([
 ]);
 
 /**
+ * Context overflow is also recoverable, but only in a fresh session. The
+ * harness assigns this class from OpenClaw's lifecycle error; generic chat
+ * failures remain intentionally unpromotable.
+ */
+const CONTEXT_OVERFLOW_ERROR_CLASS = 'ContextOverflow';
+
+/**
  * Job leg ceiling: 2 hours (approved 2026-07-07). Mirrors the harness clamp
  * in agent-image/harness_adapter.py (_resolve_deadline_s, max 7200).
  */
 export const JOB_DEADLINE_S = 7200;
 
-/** True when a failed turn should be promoted to a background job. */
-export function shouldPromoteToJob(errorClass: string | undefined): boolean {
-  return !!errorClass && DEADLINE_ERROR_CLASSES.has(errorClass);
-}
-
-/**
- * Everything the job-runner needs to resume and deliver the turn. Carried
- * as a single JSON env var on the RunTask container override — AWS caps the
- * total override payload at 8 KiB, hence the prompt excerpt truncation in
- * buildJobPayload (the session already holds the full original prompt in
- * its OpenClaw history; the excerpt is context garnish for the continuation
- * message, not the source of truth).
- */
 /**
  * Why a turn was promoted. Drives OPPOSITE handling in the runner:
  *
@@ -51,6 +46,33 @@ export function shouldPromoteToJob(errorClass: string | undefined): boolean {
  */
 export type PromotionReason = 'deadline' | 'context-overflow';
 
+/**
+ * Why this failed turn should be promoted, or null for a genuine fault.
+ *
+ * The reason must be resolved before building the job payload because the
+ * runner takes opposite recovery paths: deadlines resume; overflow restarts.
+ */
+export function promotionReason(
+  errorClass: string | undefined
+): PromotionReason | null {
+  if (!errorClass) return null;
+  if (DEADLINE_ERROR_CLASSES.has(errorClass)) return 'deadline';
+  if (errorClass === CONTEXT_OVERFLOW_ERROR_CLASS) return 'context-overflow';
+  return null;
+}
+
+/** True when a failed turn should be promoted to a background job. */
+export function shouldPromoteToJob(errorClass: string | undefined): boolean {
+  return promotionReason(errorClass) !== null;
+}
+
+/**
+ * Everything the job-runner needs to resume and deliver the turn. Carried as
+ * one JSON env var on the RunTask container override, which AWS caps at 8 KiB.
+ * Deadline continuations can truncate the prompt excerpt because the original
+ * request is already in session history. Overflow restarts must carry the
+ * complete request or fail promotion rather than silently execute half of it.
+ */
 export interface JobPayload {
   /** AgentCore session to resume (sticky-routes to the same microVM). */
   sessionId: string;

@@ -285,6 +285,144 @@ class TestResolveDeadline(unittest.TestCase):
             self.assertEqual(self.resolve(None), 840)
 
 
+class TestChatDeadlineRegression(unittest.TestCase):
+    """Aborted OpenClaw runs must retain their real lifecycle cause (#1461)."""
+
+    @staticmethod
+    def _message(**fields):
+        return json.dumps(fields)
+
+    def test_context_overflow_abort_is_not_recorded_as_deadline(self):
+        chat_id = None
+
+        class FakeWebSocket:
+            def __init__(self, messages):
+                self.messages = list(messages)
+                self.sent = []
+
+            def send(self, payload):
+                nonlocal chat_id
+                parsed = json.loads(payload)
+                self.sent.append(parsed)
+                if parsed.get("method") == "chat.send":
+                    chat_id = parsed["id"]
+
+            def recv(self):
+                message = self.messages.pop(0)
+                if callable(message):
+                    return message()
+                return message
+
+            def settimeout(self, _timeout):
+                return None
+
+            def close(self):
+                return None
+
+        def current_run_event(event, payload):
+            return self._message(
+                type="event",
+                event=event,
+                payload={"runId": chat_id, **payload},
+            )
+
+        socket = FakeWebSocket([
+            self._message(type="event", event="connect.challenge", payload={}),
+            lambda: self._message(
+                type="res",
+                id=socket.sent[-1]["id"],
+                ok=True,
+                payload={},
+            ),
+            lambda: self._message(
+                type="res",
+                id=socket.sent[-1]["id"],
+                ok=True,
+                payload={"tools": []},
+            ),
+            lambda: self._message(
+                type="res",
+                id=socket.sent[-1]["id"],
+                ok=True,
+                payload={},
+            ),
+            lambda: self._message(
+                type="res",
+                id=chat_id,
+                ok=True,
+                payload={"runId": chat_id, "status": "started"},
+            ),
+            lambda: current_run_event(
+                "agent",
+                {
+                    "stream": "assistant",
+                    "data": {"delta": "Working through the requested tools."},
+                },
+            ),
+            lambda: current_run_event(
+                "agent",
+                {
+                    "stream": "lifecycle",
+                    "data": {
+                        "phase": "error",
+                        "error": (
+                            "Context overflow: prompt too large for the model."
+                        ),
+                    },
+                },
+            ),
+            lambda: current_run_event(
+                "chat",
+                {"state": "aborted", "stopReason": "stop"},
+            ),
+        ])
+        fake_websocket_module = mock.Mock()
+        fake_websocket_module.create_connection.return_value = socket
+        fake_websocket_module.WebSocketTimeoutException = TimeoutError
+
+        adapter = OpenClawAdapter()
+        adapter._ready = True
+        empty_usage = {
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+            "model_calls": 0,
+        }
+        with (
+            mock.patch.dict(
+                sys.modules,
+                {"websocket": fake_websocket_module},
+            ),
+            mock.patch.object(
+                adapter,
+                "_read_turn_usage",
+                return_value=empty_usage,
+            ),
+            mock.patch(
+                "harness_adapter.record_failure",
+            ) as record_failure,
+        ):
+            result = adapter.process(
+                "Run a complex multi-tool request",
+                "session-1461",
+                deadline_s=600,
+            )
+
+        self.assertTrue(result.failed)
+        self.assertEqual(result.error_class, "ContextOverflow")
+        self.assertIn("Working through", result.text)
+        failure = record_failure.call_args.kwargs
+        self.assertEqual(failure["error_class"], "ContextOverflow")
+        self.assertNotEqual(
+            failure["error_class"],
+            "ChatDeadlineExpiredPartial",
+        )
+        self.assertEqual(failure["context"]["phase"], "chat_aborted")
+        self.assertEqual(failure["context"]["deadline_s"], 600)
+        self.assertLess(failure["context"]["elapsed_s"], 600)
+
+
 class TestRecordItemToolEvent(unittest.TestCase):
     """Native-mode tool items must land in tool_calls telemetry (#1138 r12)."""
 
