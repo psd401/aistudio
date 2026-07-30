@@ -8,11 +8,11 @@
       "providerTemplate": "../providers/native-bedrock-sonnet-5.json"
     },
     "harness": {
-      "baseImage": "ghcr.io/openclaw/openclaw@sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c",
-      "hostVersion": "2026.7.1",
-      "bedrockPluginVersion": "2026.7.1",
+      "baseImage": "ghcr.io/openclaw/openclaw@sha256:86e0a480a37d879311c9723ad2487cca9eb6c1925fa4732dec3f505b4728eee9",
+      "hostVersion": "2026.7.2-beta.5",
+      "bedrockPluginVersion": "2026.7.2-beta.5",
       "expectedPluginToken": "claude-sonnet-5",
-      "parallelPluginVersion": "2026.7.1",
+      "parallelPluginVersion": "2026.7.2-beta.5",
       "parallelPluginEndpoint": "https://search.parallel.ai/mcp"
     },
     "prompt": {

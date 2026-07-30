@@ -268,7 +268,7 @@ tools while the container starts. Run evals only on a trusted workstation. The
 runner removes its containers on completion and logs a warning if Docker cannot
 remove one.
 
-OpenClaw 2026.7.1 deliberately removes inherited AWS access-key and container-
+OpenClaw 2026.7.1 and later deliberately remove inherited AWS access-key and container-
 credential variables from model-launched `exec` subprocesses. Direct-AWS skills
 therefore use the image's root-owned fixed-operation relay: the relay inherits
 the candidate container's credential chain, while the skill process receives

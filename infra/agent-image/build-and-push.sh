@@ -550,6 +550,9 @@ except Exception:
     else
       echo "ERROR: canary turn failed (exit=${CANARY_STATUS}) or missed the expected output." >&2
       printf '%s\n' "${CANARY_OUT}" | tail -5 | sed 's/^/    [canary-raw] /' >&2
+      echo "    [canary-container] bounded runtime log tail:" >&2
+      docker logs "${CID}" 2>&1 | tail -80 | \
+        sed 's/^/    [canary-container] /' >&2
       CANARY_OK="false"
     fi
 

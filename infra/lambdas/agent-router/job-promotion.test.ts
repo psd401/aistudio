@@ -28,6 +28,7 @@ describe('shouldPromoteToJob', () => {
 
   test('real errors and clean turns do NOT promote', () => {
     expect(shouldPromoteToJob('OpenClawChatError')).toBe(false);
+    expect(shouldPromoteToJob('OpenClawIncompleteToolTurn')).toBe(false);
     expect(shouldPromoteToJob('EmptyAgentResponse')).toBe(false);
     expect(shouldPromoteToJob('AgentCoreHttpError_500')).toBe(false);
     expect(shouldPromoteToJob(undefined)).toBe(false);
@@ -39,6 +40,7 @@ describe('shouldPromoteToJob', () => {
     expect(promotionReason('ChatDeadlineExpiredPartial')).toBe('deadline');
     expect(promotionReason('ContextOverflow')).toBe('context-overflow');
     expect(promotionReason('OpenClawChatError')).toBeNull();
+    expect(promotionReason('OpenClawIncompleteToolTurn')).toBeNull();
     expect(promotionReason(undefined)).toBeNull();
   });
 });
