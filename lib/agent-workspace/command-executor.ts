@@ -161,7 +161,7 @@ function parseObjectArgument(argv: readonly string[], flag: string): Record<stri
   }
 }
 
-function driveResource(argv: readonly string[]): Record<string, unknown> | null {
+function jsonResource(argv: readonly string[]): Record<string, unknown> | null {
   const payload = parseObjectArgument(argv, "--json")
   if (!payload) return null
   const wrapped = payload.resource ?? payload.requestBody ?? payload
@@ -184,7 +184,7 @@ function carriesDriveContent(argv: readonly string[]): boolean {
 }
 
 function validateUserDriveFolderCreate(argv: readonly string[]): void {
-  const resource = driveResource(argv)
+  const resource = jsonResource(argv)
   const mimeType =
     typeof resource?.mimeType === "string"
       ? resource.mimeType.trim().toLowerCase()
@@ -205,7 +205,7 @@ function validateUserDriveFolderCreate(argv: readonly string[]): void {
 }
 
 function validateUserDriveMetadataUpdate(argv: readonly string[]): void {
-  const resource = driveResource(argv)
+  const resource = jsonResource(argv)
   const keys = Object.keys(resource ?? {})
   if (
     !resource ||
@@ -335,6 +335,20 @@ export interface WorkspaceOutboundAudit {
   textLength: number | null
 }
 
+function chatDestinationSpace(argv: readonly string[]): string | null {
+  const explicit = argumentValue(argv, "--space")
+  if (explicit !== null) return explicit
+  const params = parseObjectArgument(argv, "--params")
+  return typeof params?.parent === "string" ? params.parent : null
+}
+
+function chatMessageText(argv: readonly string[]): string | null {
+  const explicit = argumentValue(argv, "--text")
+  if (explicit !== null) return explicit
+  const body = jsonResource(argv)
+  return typeof body?.text === "string" ? body.text : null
+}
+
 /**
  * Chat sends are the only allowlisted writes that put content outside the
  * owner's own Workspace data, so the completion log has to record where the
@@ -345,22 +359,12 @@ export interface WorkspaceOutboundAudit {
 export function outboundMessageAudit(
   argv: readonly string[]
 ): WorkspaceOutboundAudit | null {
-  const operation = operationTokens(argv).join(" ")
-  if (!CHAT_SEND_OPERATIONS.has(operation)) return null
-  const params = parseObjectArgument(argv, "--params")
-  const payload = parseObjectArgument(argv, "--json")
-  const wrapped = payload?.resource ?? payload?.requestBody ?? payload
-  const body =
-    wrapped && typeof wrapped === "object" && !Array.isArray(wrapped)
-      ? (wrapped as Record<string, unknown>)
-      : null
-  const space =
-    argumentValue(argv, "--space") ??
-    (typeof params?.parent === "string" ? params.parent : null)
-  const text =
-    argumentValue(argv, "--text") ??
-    (typeof body?.text === "string" ? body.text : null)
-  return { space, textLength: text === null ? null : text.length }
+  if (!CHAT_SEND_OPERATIONS.has(operationTokens(argv).join(" "))) return null
+  const text = chatMessageText(argv)
+  return {
+    space: chatDestinationSpace(argv),
+    textLength: text === null ? null : text.length,
+  }
 }
 
 export interface WorkspaceScopeGap {
