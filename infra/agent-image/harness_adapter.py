@@ -269,16 +269,16 @@ class OpenClawAdapter(HarnessAdapter):
     # startup and --token overrides that config value, so the on-disk config
     # token is never the operative secret.
     # The image contract chooses the identity supported by its pinned host.
-    # Production 2026.7.1 retains the proven TUI path; 2026.7.2 harness
-    # candidates select OpenClaw's local CLI identity, whose container-local
-    # shared-auth path preserves operator scopes without classifying this
-    # non-browser adapter as Control UI. candidate.py and the Docker build
-    # accept only these two exact pairs.
+    # Production 2026.7.2-beta.5 uses OpenClaw's supported local-backend
+    # identity; harness candidates may select another explicitly approved pair
+    # for their pinned host. These loopback identities preserve operator scopes
+    # without classifying this non-browser adapter as Control UI.
     _gateway_client_pair = (
-        os.environ.get("PSD_OPENCLAW_GATEWAY_CLIENT_ID", "openclaw-tui"),
+        os.environ.get("PSD_OPENCLAW_GATEWAY_CLIENT_ID", "gateway-client"),
         os.environ.get("PSD_OPENCLAW_GATEWAY_CLIENT_MODE", "backend"),
     )
     if _gateway_client_pair not in {
+        ("gateway-client", "backend"),
         ("openclaw-tui", "backend"),
         ("cli", "cli"),
     }:
@@ -688,10 +688,10 @@ class OpenClawAdapter(HarnessAdapter):
                         # gateway protocol docs so we negotiate v4 against this
                         # gateway yet stay compatible with a v3 gateway on
                         # rollback. The v4 connect envelope + fields below are
-                        # unchanged. The harness-selected loopback identity
-                        # authenticates with the per-container shared token and
-                        # avoids the host's device-auth Control UI path, so no
-                        # device block is required.
+                        # unchanged. The harness-selected supported loopback
+                        # identity authenticates with the per-process shared
+                        # token, so no interactive operator-UI device identity
+                        # is involved.
                         "minProtocol": 3,
                         "maxProtocol": 4,
                         "client": self.CLIENT_INFO,

@@ -34,7 +34,7 @@ class CandidateMatrixTests(unittest.TestCase):
                 "glm-5-native",
                 "kimi-k2-5",
                 "openai-gpt-oss-120b",
-                "openclaw-2026-7-2-beta-5",
+                "openclaw-cli-gateway",
                 "qwen3-coder-next",
                 "conservative-tool-routing",
                 "sonnet-5-mantle-anthropic",
@@ -121,8 +121,8 @@ class CandidateMatrixTests(unittest.TestCase):
             self.assertIsNone(metadata["imageDigest"])
             self.assertEqual(set(metadata["cost"]), set(metadata["costSources"]))
 
-    def test_harness_candidate_applies_only_approved_config_migrations(self):
-        manifest = self.manifests_dir / "openclaw-2026-7-2-beta-5.json"
+    def test_harness_candidate_applies_only_approved_gateway_identity(self):
+        manifest = self.manifests_dir / "openclaw-cli-gateway.json"
         with tempfile.TemporaryDirectory(
             dir=HERE, prefix=".candidate-test."
         ) as directory:
@@ -130,33 +130,15 @@ class CandidateMatrixTests(unittest.TestCase):
             config = json.loads(
                 (Path(directory) / "openclaw.json").read_text(encoding="utf-8")
             )
-            self.assertNotIn("memorySearch", config["agents"]["defaults"])
             self.assertEqual(
-                config["memory"]["search"],
-                {
-                    "provider": "bedrock",
-                    "model": "amazon.titan-embed-text-v2:0",
-                },
-            )
-            self.assertNotIn(
-                "allowInsecureAuth",
-                config["gateway"]["controlUi"],
-            )
-            self.assertNotIn(
-                "dangerouslyDisableDeviceAuth",
-                config["gateway"]["controlUi"],
+                config,
+                json.loads((HERE / "openclaw.json").read_text(encoding="utf-8")),
             )
             metadata = json.loads(
                 Path(plan["metadata"]).read_text(encoding="utf-8")
             )
             self.assertEqual(metadata["variedAxis"], "harness")
-            expected_migrations = json.loads(
-                manifest.read_text(encoding="utf-8")
-            )["axes"]["harness"]["configMigrations"]
-            self.assertEqual(
-                metadata["harness"]["configMigrations"],
-                expected_migrations,
-            )
+            self.assertIsNone(metadata["harness"]["configMigrations"])
             self.assertEqual(
                 metadata["harness"]["gatewayClient"],
                 {
@@ -181,15 +163,15 @@ class CandidateMatrixTests(unittest.TestCase):
     def test_rejects_unapproved_harness_config_migration(self):
         source = json.loads(
             (
-                self.manifests_dir / "openclaw-2026-7-2-beta-5.json"
+                self.manifests_dir / "openclaw-cli-gateway.json"
             ).read_text(encoding="utf-8")
         )
-        source["axes"]["harness"]["configMigrations"].append(
+        source["axes"]["harness"]["configMigrations"] = [
             {
                 "op": "remove",
                 "path": "agents.defaults.model",
             }
-        )
+        ]
         with tempfile.TemporaryDirectory(
             dir=self.manifests_dir.parent, prefix=".candidate-contract-test."
         ) as directory:
@@ -209,7 +191,7 @@ class CandidateMatrixTests(unittest.TestCase):
     def test_rejects_unapproved_harness_gateway_client(self):
         source = json.loads(
             (
-                self.manifests_dir / "openclaw-2026-7-2-beta-5.json"
+                self.manifests_dir / "openclaw-cli-gateway.json"
             ).read_text(encoding="utf-8")
         )
         source["axes"]["harness"]["gatewayClient"] = {
@@ -586,7 +568,7 @@ class CandidateMatrixTests(unittest.TestCase):
             dockerfile,
         )
         self.assertIn(
-            "ARG OPENCLAW_GATEWAY_CLIENT_ID=openclaw-tui", dockerfile
+            "ARG OPENCLAW_GATEWAY_CLIENT_ID=gateway-client", dockerfile
         )
         self.assertIn(
             "ARG OPENCLAW_GATEWAY_CLIENT_MODE=backend", dockerfile

@@ -80,6 +80,7 @@ ALLOWED_HARNESS_CONFIG_MIGRATIONS = frozenset(
 )
 ALLOWED_HARNESS_GATEWAY_CLIENTS = frozenset(
     {
+        ("gateway-client", "backend"),
         ("openclaw-tui", "backend"),
         ("cli", "cli"),
     }
@@ -604,7 +605,7 @@ def _validate_harness(
     )
     gateway_client = harness.get("gatewayClient")
     if gateway_client is None:
-        gateway_client_id, gateway_client_mode = "openclaw-tui", "backend"
+        gateway_client_id, gateway_client_mode = "gateway-client", "backend"
     else:
         gateway_client_mapping = _mapping(
             gateway_client,

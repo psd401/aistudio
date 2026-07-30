@@ -97,11 +97,11 @@ class CatalogDiagnosticTests(unittest.TestCase):
 
 
 class GatewayTokenTests(unittest.TestCase):
-    def test_defaults_to_proven_baseline_gateway_identity(self):
+    def test_defaults_to_supported_baseline_gateway_identity(self):
         self.assertEqual(
             OpenClawAdapter.CLIENT_INFO,
             {
-                "id": "openclaw-tui",
+                "id": "gateway-client",
                 "mode": "backend",
                 "version": "dev",
                 "platform": "linux",
@@ -174,6 +174,25 @@ class GatewayTokenTests(unittest.TestCase):
             "ws://127.0.0.1:3100",
             timeout=120,
             suppress_origin=True,
+        )
+
+
+class GatewayClientIdentityTests(unittest.TestCase):
+    def test_loopback_adapter_uses_supported_backend_identity(self):
+        self.assertEqual(
+            OpenClawAdapter.CLIENT_INFO,
+            {
+                "id": "gateway-client",
+                "mode": "backend",
+                "version": "dev",
+                "platform": "linux",
+            },
+        )
+
+    def test_adapter_does_not_claim_an_interactive_operator_ui_identity(self):
+        self.assertNotIn(
+            OpenClawAdapter.CLIENT_INFO["id"],
+            {"openclaw-control-ui", "openclaw-browser-copilot", "openclaw-tui"},
         )
 
 

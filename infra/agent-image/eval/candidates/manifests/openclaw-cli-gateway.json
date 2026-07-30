@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "openclaw-2026-7-2-beta-5",
+  "id": "openclaw-cli-gateway",
   "baseline": "baseline.json",
   "declaredAxis": "harness",
   "axes": {
@@ -12,27 +12,12 @@
       "hostVersion": "2026.7.2-beta.5",
       "bedrockPluginVersion": "2026.7.2-beta.5",
       "expectedPluginToken": "claude-sonnet-5",
-      "parallelPluginVersion": "2026.7.1",
+      "parallelPluginVersion": "2026.7.2-beta.5",
       "parallelPluginEndpoint": "https://search.parallel.ai/mcp",
       "gatewayClient": {
         "id": "cli",
         "mode": "cli"
-      },
-      "configMigrations": [
-        {
-          "op": "move",
-          "from": "agents.defaults.memorySearch",
-          "to": "memory.search"
-        },
-        {
-          "op": "remove",
-          "path": "gateway.controlUi.allowInsecureAuth"
-        },
-        {
-          "op": "remove",
-          "path": "gateway.controlUi.dangerouslyDisableDeviceAuth"
-        }
-      ]
+      }
     },
     "prompt": {
       "variant": "default",

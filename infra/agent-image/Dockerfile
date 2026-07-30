@@ -78,11 +78,11 @@
 ARG OPENCLAW_BASE_IMAGE=ghcr.io/openclaw/openclaw@sha256:86e0a480a37d879311c9723ad2487cca9eb6c1925fa4732dec3f505b4728eee9
 FROM ${OPENCLAW_BASE_IMAGE}
 
-# OpenClaw 2026.7.2 classifies the TUI as a Control UI client and requires
-# device identity even for this non-browser loopback adapter. Harness
-# candidates can select the release's scope-preserving local CLI identity; the
-# production 2026.7.1 default keeps its proven TUI behavior.
-ARG OPENCLAW_GATEWAY_CLIENT_ID=openclaw-tui
+# OpenClaw 2026.7.2-beta.5 classifies TUI as a Control UI client and requires
+# device identity even for this non-browser loopback adapter. Production uses
+# the release's supported local-backend identity; harness candidates may select
+# another explicitly approved identity compatible with their pinned host.
+ARG OPENCLAW_GATEWAY_CLIENT_ID=gateway-client
 ARG OPENCLAW_GATEWAY_CLIENT_MODE=backend
 ENV PSD_OPENCLAW_GATEWAY_CLIENT_ID="${OPENCLAW_GATEWAY_CLIENT_ID}" \
     PSD_OPENCLAW_GATEWAY_CLIENT_MODE="${OPENCLAW_GATEWAY_CLIENT_MODE}"
