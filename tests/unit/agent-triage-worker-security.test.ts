@@ -247,6 +247,20 @@ describe("agent triage worker label sink", () => {
     expect(mockRecordPollResult).not.toHaveBeenCalled()
   })
 
+  it("fails closed before Gmail work for mismatched owner provenance", async () => {
+    await processUser(
+      row({
+        labelMappingOwnerEmail: "attacker@example.com",
+        lastHistoryId: "100",
+      })
+    )
+
+    expect(mockListLabels).not.toHaveBeenCalled()
+    expect(mockStampTrustedTriageLabelMapping).not.toHaveBeenCalled()
+    expect(mockListHistory).not.toHaveBeenCalled()
+    expect(mockRecordPollResult).not.toHaveBeenCalled()
+  })
+
   it("passes through a valid row without a provenance write", async () => {
     await processUser(row({ lastHistoryId: "100" }))
 

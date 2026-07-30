@@ -83,6 +83,12 @@ export function validateStoredTriageLabelMapping(
 ): TriageLabelMappingResolution {
   const resolvedAt = row.labelMappingResolvedAt;
   if (
+    row.labelMappingOwnerEmail !== undefined &&
+    row.labelMappingOwnerEmail !== row.userEmail
+  ) {
+    return { valid: false, reason: "owner-mismatch" };
+  }
+  if (
     row.labelMappingVersion !== TRIAGE_LABEL_MAPPING_VERSION ||
     row.labelMappingProvenance !== TRIAGE_LABEL_MAPPING_PROVENANCE ||
     row.labelMappingOwnerEmail !== row.userEmail ||

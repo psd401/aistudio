@@ -131,6 +131,27 @@ describe("trusted triage label mapping orchestration", () => {
     );
   });
 
+  it("fails closed without healing when stored owner provenance mismatches", async () => {
+    const deps = dependencies();
+
+    await expect(
+      loadTrustedLabelMappingForRow(
+        row({ labelMappingOwnerEmail: "attacker@example.com" }),
+        deps,
+      ),
+    ).resolves.toBeNull();
+    expect(deps.loadLiveLabels).not.toHaveBeenCalled();
+    expect(deps.stampTrustedMapping).not.toHaveBeenCalled();
+    expect(deps.log).toHaveBeenCalledWith(
+      "ERROR",
+      "untrusted_label_mapping",
+      {
+        user: OWNER,
+        reason: "owner-mismatch",
+      },
+    );
+  });
+
   it("passes a valid row through without a re-resolution write", async () => {
     const deps = dependencies();
 
