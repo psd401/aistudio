@@ -49,13 +49,13 @@ function isSafeUserLabelId(value: unknown): value is string {
 
 function createTrustedTriageLabelMapping(input: {
   ownerEmail: string;
-  labelIdsByKey: Partial<Record<TriageLabelKey, string>>;
+  labelIdsByKey?: Partial<Record<TriageLabelKey, string>>;
   resolvedAt: string;
 }): TriageLabelMappingResolution {
   const ids = Object.create(null) as Record<TriageLabelKey, string>;
   const seen = new Set<string>();
   for (const key of Object.keys(TRIAGE_LABEL_NAMES) as TriageLabelKey[]) {
-    const id = input.labelIdsByKey[key];
+    const id = input.labelIdsByKey?.[key];
     if (!isSafeUserLabelId(id)) {
       return { valid: false, reason: "invalid-or-system-label" };
     }

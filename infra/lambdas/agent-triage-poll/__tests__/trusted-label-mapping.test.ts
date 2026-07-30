@@ -110,6 +110,27 @@ describe("trusted triage label mapping orchestration", () => {
     );
   });
 
+  it("fails closed and logs when trusted provenance has no label id map", async () => {
+    const deps = dependencies();
+
+    await expect(
+      loadTrustedLabelMappingForRow(
+        row({ labelIdsByKey: undefined }),
+        deps,
+      ),
+    ).resolves.toBeNull();
+    expect(deps.loadLiveLabels).not.toHaveBeenCalled();
+    expect(deps.stampTrustedMapping).not.toHaveBeenCalled();
+    expect(deps.log).toHaveBeenCalledWith(
+      "ERROR",
+      "untrusted_label_mapping",
+      {
+        user: OWNER,
+        reason: "invalid-or-system-label",
+      },
+    );
+  });
+
   it("passes a valid row through without a re-resolution write", async () => {
     const deps = dependencies();
 
