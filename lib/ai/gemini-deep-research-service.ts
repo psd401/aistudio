@@ -48,7 +48,7 @@ const POLL_INTERVAL_MS = 10_000;
  * we keep writing status updates to the stream — see status emitter
  * cadence below.
  */
-const MAX_RUN_DURATION_MS = 25 * 60 * 1_000;
+export const MAX_DEEP_RESEARCH_RUN_DURATION_MS = 25 * 60 * 1_000;
 
 export interface DeepResearchCitation {
   url: string;
@@ -76,6 +76,15 @@ export interface DeepResearchStatusUpdate {
   elapsedSec: number;
   /** Human-friendly progress message — what the user sees. */
   message: string;
+}
+
+export type DeepResearchInteractionStatus = Interaction['status'];
+
+export interface DeepResearchInteractionSnapshot {
+  interactionId: string;
+  status: DeepResearchInteractionStatus;
+  report?: string;
+  citations?: DeepResearchCitation[];
 }
 
 export interface DeepResearchRequest {
@@ -232,7 +241,10 @@ function extractReportAndCitations(outputs: Interactions.Content[]): {
 }
 
 /** Map upstream errors onto our taxonomy by inspecting message + status. */
-function mapInteractionError(err: unknown): DeepResearchError {
+export function mapInteractionError(err: unknown): DeepResearchError {
+  if (err instanceof Error && 'type' in err) {
+    return err as DeepResearchError;
+  }
   const msg = err instanceof Error ? err.message : String(err);
   const lower = msg.toLowerCase();
 
@@ -251,6 +263,80 @@ function mapInteractionError(err: unknown): DeepResearchError {
     return createError('AUTHENTICATION', 'Google authentication failed.');
   }
   return createError('AGENT_FAILURE', `Deep Research failed: ${msg.slice(0, 300)}`);
+}
+
+async function createGoogleClient(): Promise<GoogleGenAI> {
+  const apiKey = await Settings.getGoogleAI();
+  if (!apiKey) {
+    throw ErrorFactories.sysConfigurationError('Google API key not configured');
+  }
+  return new GoogleGenAI({ apiKey });
+}
+
+/**
+ * Start one background Interactions API run without polling it.
+ *
+ * This split lifecycle is used by short-lived broker calls: the trusted web
+ * tier creates the paid interaction, then the agent checks it in later calls.
+ */
+export async function createDeepResearchInteraction(
+  prompt: string,
+  modelId: string
+): Promise<Pick<DeepResearchInteractionSnapshot, 'interactionId' | 'status'>> {
+  const client = await createGoogleClient();
+  try {
+    const interaction = await client.interactions.create({
+      input: prompt,
+      agent: modelId,
+      background: true,
+    });
+    return {
+      interactionId: interaction.id,
+      status: interaction.status,
+    };
+  } catch (error) {
+    throw mapInteractionError(error);
+  }
+}
+
+/**
+ * Fetch one interaction snapshot. Completed runs include the same flattened
+ * report and citations used by the existing Nexus path.
+ */
+export async function getDeepResearchInteraction(
+  interactionId: string
+): Promise<DeepResearchInteractionSnapshot> {
+  const client = await createGoogleClient();
+  try {
+    const interaction = await client.interactions.get(interactionId);
+    if (interaction.status !== 'completed') {
+      return { interactionId: interaction.id, status: interaction.status };
+    }
+    const outputBlocks = (interaction.steps ?? []).flatMap((step) =>
+      step.type === 'model_output' ? (step.content ?? []) : []
+    );
+    const { report, citations } = extractReportAndCitations(outputBlocks);
+    return {
+      interactionId: interaction.id,
+      status: interaction.status,
+      report,
+      citations,
+    };
+  } catch (error) {
+    throw mapInteractionError(error);
+  }
+}
+
+/** Cancel one background interaction without exposing the Google client. */
+export async function cancelDeepResearchInteraction(
+  interactionId: string
+): Promise<void> {
+  const client = await createGoogleClient();
+  try {
+    await client.interactions.cancel(interactionId);
+  } catch (error) {
+    throw mapInteractionError(error);
+  }
 }
 
 /**
@@ -306,11 +392,11 @@ async function pollUntilTerminal(
 
   while (true) {
     const elapsedMs = Date.now() - startMs;
-    if (elapsedMs > MAX_RUN_DURATION_MS) {
+    if (elapsedMs > MAX_DEEP_RESEARCH_RUN_DURATION_MS) {
       void client.interactions.cancel(last.id).catch(() => {});
       throw createError(
         'TIMEOUT',
-        `Deep Research exceeded the ${Math.round(MAX_RUN_DURATION_MS / 60_000)}-minute time limit.`
+        `Deep Research exceeded the ${Math.round(MAX_DEEP_RESEARCH_RUN_DURATION_MS / 60_000)}-minute time limit.`
       );
     }
 
@@ -383,12 +469,7 @@ export async function runDeepResearch(
     promptLength: request.prompt.length,
   });
 
-  const apiKey = await Settings.getGoogleAI();
-  if (!apiKey) {
-    throw ErrorFactories.sysConfigurationError('Google API key not configured');
-  }
-
-  const client = new GoogleGenAI({ apiKey });
+  const client = await createGoogleClient();
   const startMs = Date.now();
   let interactionId = '';
 

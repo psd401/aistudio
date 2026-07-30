@@ -230,7 +230,7 @@ status 2.
 
 ## Nightly and on-demand runs
 
-`.github/workflows/agent-eval-nightly.yml` runs all 50 regression and capability
+`.github/workflows/agent-eval-nightly.yml` runs all 53 regression and capability
 tasks at three trials nightly on an ARM64 runner. It resolves the immutable
 image currently exposed by the dev AgentCore runtime, verifies its AI Studio
 source labels, uploads only the safe summary, removes both JSONL transcripts
@@ -328,7 +328,7 @@ under the next.
 ### Coverage inventory and drift gate
 
 Coverage follows the final image inventory rather than a hard-coded epic
-count. The checked-in tree contains 31 directories with `SKILL.md`; 30 have
+count. The checked-in tree contains 32 directories with `SKILL.md`; 31 have
 one or more co-located tasks and `psd-rules` is a documented opt-out. `_shared`
 is not a skill because it has no `SKILL.md`.
 
@@ -348,7 +348,7 @@ CI workflow shallow-clones that exact release and compares its
 dependency to unrelated application PRs. Changing the pinned upstream release
 therefore requires reviewing the actual shipped skill inventory rather than
 only updating version strings.
-Together, the final image inventory is 75 skills: 30 directly evaluated and
+Together, the final image inventory is 76 skills: 31 directly evaluated and
 45 explicitly opted out (`psd-rules` plus the 44 documentation-only `gws-*`
 skills).
 
@@ -371,7 +371,7 @@ Run the path-filtered/scheduled upstream release comparison locally with:
 python3 infra/agent-image/check_eval_coverage.py --verify-upstream
 ```
 
-The regression and capability manifests contain 51 tasks total. At least 25%
+The regression and capability manifests contain 53 tasks total. At least 25%
 are explicit negative cases: they prove that a route or side effect is not
 used, rather than treating non-invocation as an unobserved success.
 

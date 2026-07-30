@@ -1,0 +1,15 @@
+id: deep-research-cited-report
+skill: psd-deep-research
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-deep-research now to research the evidence for later secondary-school start times. Relay the completed report with its citation URLs."
+trials: 3
+fixtures:
+  - fixtures/cited-report.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"deep-research-start"}}}
+  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"deep-research-status"},"interactionId":{"exact":"eval-deep-research-1465"}}}
+  - {"type":"output_match","pattern":"Later school start times"}
+  - {"type":"output_match","pattern":"https://www.cdc.gov/sleep/features/schools-start-too-early.html"}
+  - {"type":"output_match","pattern":"https://publications.aap.org/pediatrics/article/134/3/642/74175/School-Start-Times-for-Adolescents"}

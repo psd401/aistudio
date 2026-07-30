@@ -7,6 +7,9 @@ import {
   AgentCredentialNotConfiguredError,
 } from "@/lib/agent-credentials/broker"
 import {
+  DeepResearchOperationError,
+  executeDeepResearchStartOperation,
+  executeDeepResearchStatusOperation,
   executeOpenAiImageOperation,
   executePlaudOperation,
   executePsdDataOperation,
@@ -80,6 +83,25 @@ async function executeCredentialOperation(
         })
       )
     }
+    case "deep-research-start":
+      // Agent access is deliberately the authorization gate for Deep
+      // Research. The shared district credential is protected by the signed
+      // owner context and existing reservation ceilings, not canAccessSkill.
+      return NextResponse.json(
+        await executeDeepResearchStartOperation({
+          ownerEmail: invocation.ownerEmail,
+          prompt: body.prompt,
+        })
+      )
+    case "deep-research-status":
+      // Keep status checks on the same owner-context-only boundary as starts;
+      // the operation itself masks missing and foreign interaction ids.
+      return NextResponse.json(
+        await executeDeepResearchStatusOperation({
+          ownerEmail: invocation.ownerEmail,
+          interactionId: body.interactionId,
+        })
+      )
     case "freshservice": {
       // Freshservice uses the caller's own owner-scoped key, so that
       // credential is the authorization. Unlike operations backed by a shared
@@ -170,6 +192,12 @@ export async function POST(request: NextRequest) {
     }
     if (error instanceof AgentCredentialNotConfiguredError) {
       return NextResponse.json({ error: error.message }, { status: 503 })
+    }
+    if (error instanceof DeepResearchOperationError) {
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status }
+      )
     }
     log.error("Agent credential broker failed", {
       requestId,

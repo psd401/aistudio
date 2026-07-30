@@ -1,0 +1,16 @@
+[
+  {
+    "route": "/api/agent/credentials",
+    "method": "POST",
+    "request_body": {
+      "operation": "deep-research-start"
+    },
+    "response": {
+      "status": 429,
+      "body": {
+        "error": "Your hourly Deep Research budget is exhausted. Try again after the rolling one-hour window resets.",
+        "code": "user_budget"
+      }
+    }
+  }
+]

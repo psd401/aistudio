@@ -20,6 +20,8 @@ const canAccessSkillMock = jest.fn()
 const brokerConstructorMock = jest.fn()
 const executeOpenAiImageOperationMock = jest.fn()
 const executeFreshserviceOperationMock = jest.fn()
+const executeDeepResearchStartOperationMock = jest.fn()
+const executeDeepResearchStatusOperationMock = jest.fn()
 
 jest.mock("@/lib/agent-workspace/invocation-context", () => ({
   verifyAgentInvocationContext: jest.fn(
@@ -64,18 +66,35 @@ jest.mock("@/lib/logger", () => ({
   }),
   generateRequestId: () => "request-test",
 }))
-jest.mock("@/lib/agent-credentials/owner-operation-broker", () => ({
-  executeOpenAiImageOperation: (...args: unknown[]) =>
-    executeOpenAiImageOperationMock(...args),
-  executePlaudOperation: jest.fn(),
-  executePsdDataOperation: jest.fn(),
-  executeFreshserviceOperation: (...args: unknown[]) =>
-    executeFreshserviceOperationMock(...args),
-}))
+jest.mock("@/lib/agent-credentials/owner-operation-broker", () => {
+  class DeepResearchOperationError extends Error {
+    constructor(
+      readonly status: number,
+      readonly code: string,
+      message: string
+    ) {
+      super(message)
+    }
+  }
+  return {
+    DeepResearchOperationError,
+    executeDeepResearchStartOperation: (...args: unknown[]) =>
+      executeDeepResearchStartOperationMock(...args),
+    executeDeepResearchStatusOperation: (...args: unknown[]) =>
+      executeDeepResearchStatusOperationMock(...args),
+    executeOpenAiImageOperation: (...args: unknown[]) =>
+      executeOpenAiImageOperationMock(...args),
+    executePlaudOperation: jest.fn(),
+    executePsdDataOperation: jest.fn(),
+    executeFreshserviceOperation: (...args: unknown[]) =>
+      executeFreshserviceOperationMock(...args),
+  }
+})
 
 import type { NextRequest } from "next/server"
 import { POST } from "@/app/api/agent/credentials/route"
 import { AgentCredentialInputError } from "@/lib/agent-credentials/broker"
+import { DeepResearchOperationError } from "@/lib/agent-credentials/owner-operation-broker"
 
 function request(body: unknown): NextRequest {
   return {
@@ -111,6 +130,15 @@ beforeEach(() => {
     status: 200,
     ok: true,
     data: { tickets: [] },
+  })
+  executeDeepResearchStartOperationMock.mockReset().mockResolvedValue({
+    interactionId: "interaction-1",
+    status: "in_progress",
+  })
+  executeDeepResearchStatusOperationMock.mockReset().mockResolvedValue({
+    interactionId: "interaction-1",
+    status: "in_progress",
+    elapsedSec: 20,
   })
 })
 
@@ -256,6 +284,60 @@ describe("POST /api/agent/credentials", () => {
       referenceDataUrl: null,
     })
   })
+})
+
+describe("POST /api/agent/credentials Deep Research", () => {
+  it("runs Deep Research start and status from signed ownership without a capability check", async () => {
+    const startResponse = await POST(
+      request({
+        operation: "deep-research-start",
+        prompt: "Research later school start times",
+      })
+    )
+    const statusResponse = await POST(
+      request({
+        operation: "deep-research-status",
+        interactionId: "interaction-1",
+      })
+    )
+
+    expect(startResponse.status).toBe(200)
+    expect(statusResponse.status).toBe(200)
+    expect(executeDeepResearchStartOperationMock).toHaveBeenCalledWith({
+      ownerEmail: "owner@psd401.net",
+      prompt: "Research later school start times",
+    })
+    expect(executeDeepResearchStatusOperationMock).toHaveBeenCalledWith({
+      ownerEmail: "owner@psd401.net",
+      interactionId: "interaction-1",
+    })
+    expect(canAccessSkillMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ["user_concurrency", "A user run is already active"],
+    ["deployment_concurrency", "All deployment slots are active"],
+    ["user_budget", "The user hourly budget is exhausted"],
+    ["deployment_budget", "The deployment hourly budget is exhausted"],
+  ])(
+    "surfaces the %s Deep Research denial distinctly",
+    async (reason, message) => {
+      executeDeepResearchStartOperationMock.mockRejectedValueOnce(
+        new DeepResearchOperationError(429, reason, message)
+      )
+
+      const response = await POST(
+        request({
+          operation: "deep-research-start",
+          prompt: "Research a district topic",
+        })
+      )
+
+      expect(response.status).toBe(429)
+      expect(await response.json()).toEqual({ error: message, code: reason })
+      expect(canAccessSkillMock).not.toHaveBeenCalled()
+    }
+  )
 })
 
 describe("POST /api/agent/credentials Freshservice errors", () => {
