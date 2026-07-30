@@ -2,7 +2,7 @@
 """
 Config self-consistency gate for the agent image (issue #1161).
 
-Four static asserts over openclaw.json + the Dockerfile, run on the host before
+Five static asserts over openclaw.json + the Dockerfile, run on the host before
 build (no Docker):
 
   1. contextWindow sanity — every declared model's contextWindow must be a
@@ -30,6 +30,12 @@ build (no Docker):
      `npm pack`, which downloads a tarball and runs no install, so that peer
      requirement is enforced NOWHERE else in the build. This check is the only
      thing standing between a mismatched host/plugin pair and production.
+
+  5. web-search readiness — web_search must select the key-free
+     `parallel-free` provider, the pinned official plugin must be loaded and
+     enabled, and the build must assert its fixed Search MCP endpoint. Without
+     an explicit provider, OpenClaw still exposes the tool but every call fails
+     at runtime with "disabled or no provider available".
 
 Exit 0 when consistent, 1 on any violation.
 """
@@ -95,6 +101,21 @@ _PLUGIN_PACK_ARG_RE = re.compile(
     r'npm pack ["\']?@openclaw/amazon-bedrock-provider@'
     r'\$\{BEDROCK_PLUGIN_VERSION\}["\']?'
 )
+_PARALLEL_PLUGIN_PACK_RE = re.compile(
+    r"npm pack @openclaw/parallel-plugin@([0-9A-Za-z.\-]+)"
+)
+_PARALLEL_PLUGIN_VERSION_ARG_RE = re.compile(
+    r"^ARG\s+PARALLEL_PLUGIN_VERSION=([0-9A-Za-z.\-]+)\s*$", re.MULTILINE,
+)
+_PARALLEL_PLUGIN_PACK_ARG_RE = re.compile(
+    r'npm pack ["\']?@openclaw/parallel-plugin@'
+    r'\$\{PARALLEL_PLUGIN_VERSION\}["\']?'
+)
+_PARALLEL_PLUGIN_ENDPOINT = "https://search.parallel.ai/mcp"
+_PARALLEL_PLUGIN_ENDPOINT_ARG_RE = re.compile(
+    r"^ARG\s+PARALLEL_PLUGIN_ENDPOINT=(\S+)\s*$", re.MULTILINE,
+)
+_PARALLEL_PLUGIN_LOAD_PATH = "/opt/openclaw-plugins/parallel"
 
 # The base image is pinned by immutable digest, with the human-readable tag
 # recorded directly above it. Parsing both lets us cross-check them AND compare
@@ -214,6 +235,132 @@ def parse_pinned_plugin_version(dockerfile_path: str) -> Tuple[Optional[str], Li
     return version, violations
 
 
+def parse_pinned_parallel_plugin_version(
+    dockerfile_path: str,
+) -> Tuple[Optional[str], List[str]]:
+    """Read and validate the pinned @openclaw/parallel-plugin artifact."""
+
+    try:
+        with open(dockerfile_path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+    except OSError as exc:
+        return None, [f"cannot read Dockerfile {dockerfile_path}: {exc}"]
+
+    matches = _PARALLEL_PLUGIN_PACK_RE.findall(source)
+    argument_match = _PARALLEL_PLUGIN_VERSION_ARG_RE.search(source)
+    if argument_match and _PARALLEL_PLUGIN_PACK_ARG_RE.search(source):
+        matches.append(argument_match.group(1))
+    if not matches:
+        return None, [
+            "Dockerfile has no `npm pack @openclaw/parallel-plugin@<version>` "
+            "line — web_search has no verified provider artifact"
+        ]
+    if len(set(matches)) > 1:
+        return None, [
+            "Dockerfile pins conflicting parallel-plugin versions: "
+            + ", ".join(sorted(set(matches)))
+        ]
+
+    version = matches[0]
+    violations: List[str] = []
+    literal_filename = f"openclaw-parallel-plugin-{version}.tgz"
+    parameter_filename = "openclaw-parallel-plugin-${PARALLEL_PLUGIN_VERSION}.tgz"
+    if (
+        source.count(literal_filename) < 2
+        and source.count(parameter_filename) < 2
+    ):
+        violations.append(
+            f"Dockerfile pins parallel-plugin {version} but its tar/rm filenames "
+            "do not both reference the same version parameter"
+        )
+
+    endpoint_match = _PARALLEL_PLUGIN_ENDPOINT_ARG_RE.search(source)
+    endpoint = endpoint_match.group(1) if endpoint_match else None
+    if endpoint != _PARALLEL_PLUGIN_ENDPOINT:
+        violations.append(
+            "Dockerfile must pin the parallel-free endpoint as "
+            f"{_PARALLEL_PLUGIN_ENDPOINT!r}; found {endpoint!r}"
+        )
+    endpoint_assertion = re.search(
+        r'grep\s+-RFq\s+--\s+"\$\{PARALLEL_PLUGIN_ENDPOINT\}"\s*\\?\s*'
+        r"/opt/openclaw-plugins/parallel/dist",
+        source,
+    )
+    if not endpoint_assertion:
+        violations.append(
+            "Dockerfile does not assert the published parallel-plugin contains "
+            f"the expected endpoint {_PARALLEL_PLUGIN_ENDPOINT}"
+        )
+    return version, violations
+
+
+def check_web_search_provider(config: dict, dockerfile_path: str) -> List[str]:
+    """Fail closed unless the image has a usable, explicitly selected provider."""
+
+    violations: List[str] = []
+    tools = config.get("tools") or {}
+    web = tools.get("web") if isinstance(tools, dict) else None
+    search = web.get("search") if isinstance(web, dict) else None
+    if not isinstance(search, dict):
+        return [
+            "tools.web.search is missing — web_search would be exposed without "
+            "a usable provider"
+        ]
+    if search.get("enabled") is not True:
+        violations.append("tools.web.search.enabled must be true")
+    if search.get("provider") != "parallel-free":
+        violations.append(
+            "tools.web.search.provider must explicitly select 'parallel-free'; "
+            "key-free providers are never auto-detected"
+        )
+    if "apiKey" in search:
+        violations.append(
+            "tools.web.search must not contain an apiKey for key-free "
+            "parallel-free"
+        )
+
+    plugins = config.get("plugins") or {}
+    load = plugins.get("load") if isinstance(plugins, dict) else None
+    paths = load.get("paths") if isinstance(load, dict) else None
+    if (
+        not isinstance(paths, list)
+        or _PARALLEL_PLUGIN_LOAD_PATH not in paths
+    ):
+        violations.append(
+            f"plugins.load.paths must include {_PARALLEL_PLUGIN_LOAD_PATH!r}"
+        )
+    entries = plugins.get("entries") if isinstance(plugins, dict) else None
+    parallel = entries.get("parallel") if isinstance(entries, dict) else None
+    if not isinstance(parallel, dict) or parallel.get("enabled") is not True:
+        violations.append("plugins.entries.parallel.enabled must be true")
+    elif "config" in parallel:
+        violations.append(
+            "plugins.entries.parallel must not carry API-key configuration for "
+            "the key-free provider"
+        )
+
+    pinned, pin_violations = parse_pinned_parallel_plugin_version(dockerfile_path)
+    violations.extend(pin_violations)
+    try:
+        with open(dockerfile_path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+    except OSError as exc:
+        return violations + [f"cannot read Dockerfile {dockerfile_path}: {exc}"]
+
+    host_match = _HOST_TAG_RE.search(source)
+    if not host_match:
+        violations.append(
+            "cannot verify parallel-plugin compatibility because the OpenClaw "
+            "host tag comment is missing"
+        )
+    elif pinned and _version_key(host_match.group(1)) < _version_key(pinned):
+        violations.append(
+            f"OpenClaw base image {host_match.group(1)} is older than "
+            f"parallel-plugin {pinned}"
+        )
+    return violations
+
+
 def resolve_ghcr_digest(tag: str) -> Tuple[Optional[str], Optional[str]]:
     """Ask ghcr what digest a tag actually resolves to. Returns (digest, error)."""
     import urllib.error
@@ -246,26 +393,34 @@ def resolve_ghcr_digest(tag: str) -> Tuple[Optional[str], Optional[str]]:
         return None, f"ghcr lookup for {tag} failed: {str(exc)[:200]}"
 
 
-def resolve_plugin_peer_requirement(version: str) -> Tuple[Optional[str], Optional[str]]:
+def resolve_plugin_peer_requirement(
+    package_name: str,
+    version: str,
+) -> Tuple[Optional[str], Optional[str]]:
     """Read the plugin's PUBLISHED peerDependencies.openclaw. Returns (spec, error).
 
     Uses the npm registry HTTP API directly so the gate needs no npm binary.
     """
     import urllib.error
+    import urllib.parse
     import urllib.request
 
     url = (
         "https://registry.npmjs.org/"
-        f"@openclaw%2Famazon-bedrock-provider/{version}"
+        f"{urllib.parse.quote(package_name, safe='')}/{version}"
     )
     try:
         with urllib.request.urlopen(url, timeout=15) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        return None, f"npm lookup for plugin {version} failed: {str(exc)[:200]}"
+        return None, (
+            f"npm lookup for {package_name}@{version} failed: {str(exc)[:200]}"
+        )
     spec = (payload.get("peerDependencies") or {}).get("openclaw")
     if not isinstance(spec, str) or not spec:
-        return None, f"plugin {version} declares no peerDependencies.openclaw"
+        return None, (
+            f"{package_name}@{version} declares no peerDependencies.openclaw"
+        )
     return spec, None
 
 
@@ -304,7 +459,10 @@ def check_upstream_pins(dockerfile_path: str) -> List[str]:
     host_argument_match = _HOST_IMAGE_ARG_RE.search(source)
     if not from_match and host_argument_match and _HOST_FROM_ARG_RE.search(source):
         from_match = host_argument_match
-    plugin_version, _ = parse_pinned_plugin_version(dockerfile_path)
+    bedrock_plugin_version, _ = parse_pinned_plugin_version(dockerfile_path)
+    parallel_plugin_version, _ = parse_pinned_parallel_plugin_version(
+        dockerfile_path
+    )
     if not tag_match or not from_match:
         return ["cannot verify upstream pins — Dockerfile tag/FROM lines unreadable"]
 
@@ -321,22 +479,31 @@ def check_upstream_pins(dockerfile_path: str) -> List[str]:
             f"version"
         )
 
-    if plugin_version:
-        spec, error = resolve_plugin_peer_requirement(plugin_version)
+    plugin_versions = (
+        ("@openclaw/amazon-bedrock-provider", bedrock_plugin_version),
+        ("@openclaw/parallel-plugin", parallel_plugin_version),
+    )
+    for package_name, plugin_version in plugin_versions:
+        if not plugin_version:
+            continue
+        spec, error = resolve_plugin_peer_requirement(
+            package_name,
+            plugin_version,
+        )
         if error:
             violations.append(error)
         else:
             minimum = re.match(r"^>=\s*([0-9A-Za-z.\-]+)$", spec.strip())
             if not minimum:
                 violations.append(
-                    f"plugin {plugin_version} declares peerDependencies.openclaw="
-                    f"{spec!r}, which this gate cannot interpret — check it by hand "
-                    f"against host {host_tag}"
+                    f"{package_name}@{plugin_version} declares "
+                    f"peerDependencies.openclaw={spec!r}, which this gate cannot "
+                    f"interpret — check it by hand against host {host_tag}"
                 )
             elif _version_key(host_tag) < _version_key(minimum.group(1)):
                 violations.append(
                     f"OpenClaw host {host_tag} does not satisfy the PUBLISHED "
-                    f"requirement of plugin {plugin_version} "
+                    f"requirement of {package_name}@{plugin_version} "
                     f"(peerDependencies.openclaw={spec!r})"
                 )
     return violations
@@ -571,6 +738,7 @@ def run_checks(
         + check_apikey_hydration(config, wrapper_path)
         + check_prompt_caching_reachable(config, dockerfile_path)
         + check_host_plugin_compatibility(dockerfile_path)
+        + check_web_search_provider(config, dockerfile_path)
     )
     if verify_upstream:
         violations += check_upstream_pins(dockerfile_path)
@@ -614,7 +782,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print(
         "OK — openclaw.json context windows + apiKey hydration paths + "
-        "prompt-caching reachability + host/plugin compatibility consistent."
+        "prompt-caching reachability + host/plugin compatibility + web-search "
+        "provider readiness consistent."
     )
     return 0
 

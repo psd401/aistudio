@@ -137,7 +137,7 @@ class SuiteLoadingTests(unittest.TestCase):
             for task in suite_tasks
         ]
 
-        self.assertGreaterEqual(len(tasks), 50)
+        self.assertGreaterEqual(len(tasks), 51)
         self.assertEqual(len({task.id for task in tasks}), len(tasks))
         shipped_skills = {
             path.name
@@ -145,7 +145,13 @@ class SuiteLoadingTests(unittest.TestCase):
             if path.is_dir() and (path / "SKILL.md").is_file()
         }
         covered_skills = shipped_skills - {"psd-rules"}
-        self.assertEqual({task.skill for task in tasks}, covered_skills)
+        task_skills = {task.skill for task in tasks}
+        self.assertEqual(task_skills - {"runner-core"}, covered_skills)
+        self.assertIn(
+            "runner-core",
+            task_skills,
+            "platform-level runtime contracts belong to runner-core",
+        )
         self.assertEqual({task.trials for task in tasks}, {3})
         for suite, suite_tasks in tasks_by_suite.items():
             self.assertEqual({task.suite for task in suite_tasks}, {suite})
@@ -181,6 +187,14 @@ class SuiteLoadingTests(unittest.TestCase):
             path.resolve()
             for path in (AGENT_IMAGE_DIR / "skills").glob("*/evals/*.yaml")
         }
+        committed_task_paths.update(
+            path.resolve()
+            for path in (AGENT_IMAGE_DIR / "eval" / "suites" / "tasks").glob(
+                "*.yaml"
+            )
+            if runner._load_document(path).get("suite")
+            in {"regression", "capability"}
+        )
         self.assertEqual(suite_task_paths, committed_task_paths)
 
         negative_task_ids = {
@@ -458,7 +472,7 @@ class SuiteLoadingTests(unittest.TestCase):
             ),
         ]
 
-        self.assertEqual(len(l2_tasks), 4)
+        self.assertEqual(len(l2_tasks), 5)
         self.assertEqual({task.level for task in l2_tasks}, {"L2"})
         self.assertEqual({task.trials for task in l2_tasks}, {3})
         self.assertTrue(

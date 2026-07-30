@@ -372,6 +372,33 @@ bunx cdk deploy AIStudio-AgentPlatformStack-Dev \
   --context baseDomain=yourdomain.com
 ```
 
+### Agent web search
+
+The agent image explicitly selects OpenClaw's official `parallel-free`
+provider for `web_search`. OpenClaw does not auto-detect key-free providers,
+so removing `tools.web.search.provider` leaves the tool visible but makes calls
+fail with `disabled or no provider available`.
+
+- Provider: `parallel-free`
+- API key: none
+- Endpoint: `https://search.parallel.ai/mcp` (fixed by the pinned official
+  `@openclaw/parallel-plugin`)
+- Image config: `infra/agent-image/openclaw.json`
+- Supply-chain pin and endpoint assertion: `infra/agent-image/Dockerfile`
+- Live regression: `web-search-available` in
+  `infra/agent-image/eval/suites/l2-live.yaml`
+
+Run the static contract before building:
+
+```bash
+python3 infra/agent-image/check_config_consistency.py
+python3 -m unittest infra/agent-image/test_check_config_consistency.py
+```
+
+The Docker build then performs fatal plugin-aware `openclaw config validate`.
+After deployment, run the L2 live suite or the `web-search-available` task
+against the immutable image digest to confirm live results and citations.
+
 ### Agent image supply-chain pins (SEC-009)
 
 Every third-party artifact baked into the agent base image is pinned and
@@ -384,6 +411,7 @@ the Dockerfile (the enforcement gate that keeps these from regressing).
 |----------|-----|--------------|
 | OpenClaw base | `ghcr.io/openclaw/openclaw@sha256:6a31d4…` (2026.7.1) | Immutable digest in `FROM` |
 | amazon-bedrock provider plugin | `2026.7.1` | `npm pack` pin; must stay ≥ the minimum in `check_config_consistency.py` or prompt caching silently turns off |
+| Parallel web-search plugin | `2026.7.1` | `npm pack` pin; config gate requires host compatibility, explicit load/enable, and the fixed `https://search.parallel.ai/mcp` endpoint |
 | bun | `1.2.12` | `bun-linux-aarch64.zip` SHA256 vs `BUN_SHA256` ARG |
 | uv | `0.7.9` | `uv-aarch64-unknown-linux-gnu.tar.gz` SHA256 vs `UV_SHA256` ARG |
 | Google Workspace CLI (`gws`) | `0.22.5` | `.tar.gz` SHA256 vs `GWS_SHA256` ARG |
@@ -563,6 +591,7 @@ intent text.
 | "Database not configured, skipping telemetry" | DATABASE_HOST not set | Check Lambda env vars in CloudWatch |
 | Mention in a space gets no room reply; Router logs `403 "This organization's administrator restricts this Chat app from performing this action"` | The app is intentionally allowed only for Staff at a child OU, and Google blocks its `chat.bot` identity in the shared space | Do not broaden the app to Students. Confirm `ChatPostPermissionDenied` telemetry and the private DM fallback described in step 1.7. The separate `agnt_...` Workspace user's ability to post is unrelated. |
 | Guardrail blocks everything | GUARDRAIL_FAIL_OPEN=false + guardrail misconfigured | Check guardrail rules in Bedrock console |
+| `web_search` reports `disabled or no provider available` | `parallel-free` is not selected or its pinned plugin is missing | Run `check_config_consistency.py`, rebuild the agent image, and run the `web-search-available` L2 task |
 | DLQ alarm firing | Messages failing after 3 retries | Check CloudWatch logs for Router Lambda errors |
 | Pub/Sub push fails to SQS | SQS requires signed requests | Add API Gateway → SQS proxy in front of the queue |
 | Migration 065 failed | PL/pgSQL not compatible with RDS Data API | Fixed — redeploy DatabaseStack to retry |

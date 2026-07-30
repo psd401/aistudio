@@ -154,17 +154,18 @@ echo ""
 # ---------------------------------------------------------------------------
 # Build-time eval gate (issue #1161). The image is an artifact optimized
 # against an evaluator: it must pass an automated gate BEFORE it is pushed, so
-# the build loop stops being "deploy and chat." Four checks —
+# the build loop stops being "deploy and chat." Five checks —
 #   1. instruction-budget gate   (static, no Docker)   — over-budget bootstrap
-#   2. config self-consistency   (static, no Docker)   — bad contextWindow / apiKey
-#   3. boot probe                (runtime, needs image) — dead-boot (no BOOT_OK)
-#   4. canary turn               (runtime, needs image) — non-answering agent
+#   2. config self-consistency   (static, no Docker)   — bad config/provider pins
+#   3. plugin-aware validation   (Docker build)        — invalid complete config
+#   4. boot probe                (runtime, needs image) — dead-boot (no BOOT_OK)
+#   5. canary turn               (runtime, needs image) — non-answering agent
 # Would have stopped r10 (dead-boot), r11 (missing provider), and the weeks-long
 # SOUL.md truncation on a laptop instead of in prod.
 #
 # Two separate bypasses, so an emergency doesn't disable more than it must:
 #   SKIP_PROBE_GATE=1   skips only the RUNTIME boot-probe + canary turn (checks
-#                       3-4) — reserved for a broken probe blocking releases.
+#                       4-5) — reserved for a broken probe blocking releases.
 #   SKIP_STATIC_GATE=1  skips the cheap STATIC checks (1-2). These are pure file
 #                       checks with no external dependency and essentially never
 #                       need bypassing — this exists only for a true emergency,

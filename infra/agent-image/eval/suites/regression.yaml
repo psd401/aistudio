@@ -1,5 +1,6 @@
 # Stable contracts expected to remain at or near 100% pass^3.
 tasks:
+  - tasks/web-search-available.yaml
   - ../../skills/chat-chart/evals/synthetic-bar-chart.yaml
   - ../../skills/chat-card/evals/ticket-confirmation.yaml
   - ../../skills/chat-card/evals/single-sentence-plain-text.yaml

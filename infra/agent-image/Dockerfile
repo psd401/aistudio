@@ -252,21 +252,16 @@ RUN mkdir -p /home/node/.openclaw/memory
 #   it would have yielded. 60s is a ceiling, not a delay: fast calls return
 #   as before. Pair with psd-rules guidance to use SHORT yieldMs (≤10s) so
 #   long commands suspend early instead of racing this timeout.
+#
+#   tools.web.search.provider=parallel-free — the OpenClaw image exposes
+#   web_search even when no usable provider is configured, but executing it
+#   then fails with "disabled or no provider available". The official Parallel
+#   plugin supplies a key-free provider backed by its fixed Search MCP endpoint
+#   (https://search.parallel.ai/mcp). It is explicitly selected because
+#   key-free providers never win OpenClaw auto-detection. The plugin is pinned
+#   and installed below; no API key or secret belongs in this image.
 ARG OPENCLAW_CONFIG=openclaw.json
 COPY ${OPENCLAW_CONFIG} /home/node/.openclaw/openclaw.json
-# Build-time config sanity check (post-2026-07-02 config-risk hardening): surface
-# any openclaw.json schema/key errors at BUILD time instead of at runtime (a
-# rejected config would stop the gateway from starting = an outage). Non-fatal
-# for now — until we confirm `config validate` needs no live runtime env, we
-# only echo a marker on nonzero so a false-positive can't block the build. Read
-# the `[config-validate]` lines in the build log; harden to fatal once trusted.
-RUN HOME=/home/node openclaw config validate >/tmp/config-validate.log 2>&1; \
-    STATUS=$?; \
-    sed 's/^/[config-validate] /' /tmp/config-validate.log; \
-    rm -f /tmp/config-validate.log; \
-    if [ "$STATUS" -ne 0 ]; then \
-      echo "[config-validate] NONZERO EXIT — inspect openclaw.json before deploying"; \
-    fi
 # OpenClaw auto-injects SOUL.md as the system prompt every turn.
 # NOTE: Do NOT put HTML comments or TODO notes in this file — they are
 # visible to the LLM. Keep roadmap notes here in the Dockerfile instead.
@@ -321,8 +316,9 @@ COPY skills /opt/psd-skills
 # caused by adding the gws-wrapper COPY at 53). Absolute `cd` paths so the chain
 # is independent of prior CWD. Keep new skills in this RUN, not new RUNs.
 #
-# The tail of this RUN also vendors the @openclaw/amazon-bedrock-provider
-# plugin: it registers the "bedrock" memory-embedding adapter that
+# The tail of this RUN also vendors the @openclaw/amazon-bedrock-provider and
+# @openclaw/parallel-plugin plugins. The first registers the "bedrock"
+# memory-embedding adapter that
 # openclaw.json's memorySearch.provider names. The published OpenClaw base
 # image ships with NO bundled extensions (they're an opt-in OPENCLAW_EXTENSIONS
 # build arg of the upstream Dockerfile), so memory sync failed every cycle with
@@ -336,7 +332,7 @@ COPY skills /opt/psd-skills
 #
 # 2026.6.11 -> 2026.7.1 (2026-07-27) RESTORES PROMPT CACHING, which had been
 # silently off for every turn since #1384 moved chat to this provider. The
-# plugin only emits Bedrock Converse `cachePoint` blocks when
+# bedrock plugin only emits Bedrock Converse `cachePoint` blocks when
 # supportsBedrockPromptCaching() recognizes the model, and 2026.6.11's
 # allowlist predates Sonnet 5 — it matches only `-4-`, `claude-fable-5`,
 # `claude-3-7-sonnet` and `claude-3-5-haiku`, so `us.anthropic.claude-sonnet-5`
@@ -349,8 +345,19 @@ COPY skills /opt/psd-skills
 # that allowlist. Do not downgrade this plugin without also removing the
 # caching expectation — see check_config_consistency.py, which fails the build
 # if the two drift apart again.
+#
+# The Parallel plugin supplies the official `parallel-free` web-search provider
+# selected in openclaw.json. It requires no API key, but OpenClaw deliberately
+# does not auto-select key-free providers, and the base image does not bundle
+# this extension. Pin it to the host release, assert the fixed Search MCP
+# endpoint is present in the published artifact, then validate the complete
+# config only after both custom plugin paths exist. Config validation is fatal:
+# an invalid provider would otherwise boot successfully and fail only when a
+# user invokes web_search.
 ARG BEDROCK_PLUGIN_VERSION=2026.7.1
 ARG BEDROCK_PLUGIN_ASSERTION=claude-sonnet-5
+ARG PARALLEL_PLUGIN_VERSION=2026.7.1
+ARG PARALLEL_PLUGIN_ENDPOINT=https://search.parallel.ai/mcp
 RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund && \
@@ -366,7 +373,16 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
     rm "openclaw-amazon-bedrock-provider-${BEDROCK_PLUGIN_VERSION}.tgz" && \
     test -f /opt/openclaw-plugins/amazon-bedrock/openclaw.plugin.json && \
     grep -Fq -- "${BEDROCK_PLUGIN_ASSERTION}" \
-      /opt/openclaw-plugins/amazon-bedrock/dist/bedrock-options.js
+      /opt/openclaw-plugins/amazon-bedrock/dist/bedrock-options.js && \
+    cd /opt/openclaw-plugins && \
+    npm pack "@openclaw/parallel-plugin@${PARALLEL_PLUGIN_VERSION}" && \
+    tar -xzf "openclaw-parallel-plugin-${PARALLEL_PLUGIN_VERSION}.tgz" && \
+    mv package parallel && \
+    rm "openclaw-parallel-plugin-${PARALLEL_PLUGIN_VERSION}.tgz" && \
+    test -f /opt/openclaw-plugins/parallel/openclaw.plugin.json && \
+    grep -RFq -- "${PARALLEL_PLUGIN_ENDPOINT}" \
+      /opt/openclaw-plugins/parallel/dist && \
+    HOME=/home/node openclaw config validate
 # chat-card has zero npm deps. chat-chart's npm install is paired with the
 # matplotlib install above — both stay disabled until we figure out the
 # AgentCore overlay-mount failure. With both off the image boots cleanly
