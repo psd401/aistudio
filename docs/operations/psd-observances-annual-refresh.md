@@ -121,12 +121,38 @@ Run representative staff-authenticated lookups and confirm:
 - the expected repository was selected;
 - results include printed-page citations;
 - default output remains bounded; and
-- an account without repository access receives the connect/reconnect hint
-  instead of source data.
+- an authenticated, correctly scoped account without this repository's ACL
+  receives the "NSPRA repository is not available" response instead of source
+  data; and
+- a caller with missing, expired, or insufficient repository scope receives
+  the connect/reconnect hint.
 
-## 6. Update the documented coverage window
+## 6. Update runtime and documented coverage
 
-Update the coverage and accuracy section in
+Update the executable coverage contract in
+[`run.js`](../../infra/agent-image/skills/psd-observances/run.js) before
+changing the documentation:
+
+- set `COVERAGE_START`, `COVERAGE_END`, `ACCURACY_NOTICE`, and
+  `COVERAGE_NOTICE` for the new edition;
+- update ordinary free-form year/month/period validation, including any
+  hardcoded boundary year or partial-year rules;
+- update the accepted conference years and their error message; and
+- update the multi-year holiday bounds and the years placed into its search
+  query.
+
+Search the runtime for every old boundary year and verification date so an
+obsolete validator, notice, or query term cannot survive the refresh. Then
+update
+[`run.test.js`](../../infra/agent-image/skills/psd-observances/run.test.js) to
+prove the new first/last ordinary dates, refused out-of-range dates, accepted
+conference years, holiday-summary bounds/query, and coverage notices. Run:
+
+```bash
+bun run test:skill:psd-observances
+```
+
+Only after that contract passes, update the coverage and accuracy section in
 [`SKILL.md`](../../infra/agent-image/skills/psd-observances/SKILL.md) and the
 [feature guide](../features/psd-observances.md) to match the new edition.
 Update both the ordinary date window and the multi-year-summary end year.
@@ -191,7 +217,8 @@ The annual refresh is complete only when:
 - each selected repository is user-managed, staff-restricted, non-public, and
   named with the required substring;
 - every replacement item is active;
-- skill and feature documentation match the new date range;
+- runtime validation/query bounds, unit tests, `SKILL.md`, and feature
+  documentation all match the new date range;
 - real-repository evaluation passed in dev and production with citations
   recorded; and
 - retirement completed safely, or the retained prior edition and cleanup
