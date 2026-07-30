@@ -12,8 +12,8 @@ outside Git in the normal knowledge-repository data path.
 
 ## Coverage and accuracy
 
-- Ordinary observance, awareness-month, state-holiday, and conference lookups
-  cover **January 2026 through June 2027**.
+- Ordinary observance, state-holiday, and conference lookups cover **January
+  2026 through June 2027**.
 - The six-year major-holiday summary is the only surface that continues
   through **2031**.
 - The source data was verified as of **November 2025**.
