@@ -1864,9 +1864,6 @@ export class AgentPlatformStack extends cdk.Stack {
       GUARDRAIL_ARN: props.guardrailArn,
       SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:${resources.skillBuilderFunctionName}`,
       APP_BASE_URL: props.appBaseUrl ?? '',
-      PSD_DATA_MCP_URL:
-        (this.node.tryGetContext('psdDataMcpUrl') as string | undefined)
-        ?? 'https://l3jpggwgsojgql275k6axcboue0syeuq.lambda-url.us-west-2.on.aws/mcp',
       // Service credentials and their endpoint selectors intentionally stay out
       // of the model-facing runtime environment. Skills reach the fixed,
       // allowlisted web-tier brokers via APP_BASE_URL.
