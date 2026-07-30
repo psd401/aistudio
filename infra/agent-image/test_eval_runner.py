@@ -705,6 +705,10 @@ class SuiteLoadingTests(unittest.TestCase):
                 "`--params` and `--json` are not interchangeable",
                 "gmail users messages list --params",
             ),
+            "psd-rules": (
+                "**Fresh-interface gate:**",
+                "Never\n   construct a skill command from memory.",
+            ),
         }
 
         for skill, required_fragments in skill_contracts.items():
@@ -714,6 +718,13 @@ class SuiteLoadingTests(unittest.TestCase):
                 ).read_text(encoding="utf-8")
                 for fragment in required_fragments:
                     self.assertIn(fragment, document)
+
+        soul = (AGENT_IMAGE_DIR / "SOUL.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "read a skill's current SKILL.md before\n"
+            "   its first invocation in every user turn",
+            soul,
+        )
 
     def test_invalid_workspace_fails_closed(self):
         with self.subTest("validation happens after parsing"):

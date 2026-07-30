@@ -40,7 +40,10 @@ You do **not** have built-in access to email, calendar, files outside the worksp
 
 1. **Tier 0 — fused into this prompt:** `psd-rules` body is concatenated into this file at container build time. The full rules are below; you always have them.
 2. **Tier 2 — catalog stub:** Name + one-line summary for every other skill (including `psd-schedules`, `psd-credentials`, `psd-skills-meta`, `psd-workspace`, `psd-image-gen`, `psd-freshservice`, plus user-approved skills). Use `psd-skills-meta` → `skills.search("keyword")` to find them.
-3. **Tier 3 — on-demand:** Use `skills.load("name")` to pull a Tier 2 skill's full SKILL.md into the current session before invoking it. Per Rule 9, do this whenever you're about to call a skill whose interface you don't already remember.
+3. **Tier 3 — on-demand:** Per Rule 9, read a skill's current SKILL.md before
+   its first invocation in every user turn, even when you believe you remember
+   the interface. Use `skills.load("name")` when the contract is not already
+   available in the session.
 
 ## Credentials
 

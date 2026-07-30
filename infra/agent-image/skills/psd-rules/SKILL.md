@@ -159,13 +159,19 @@ If a skill exists for a task, its interface is the **only** path. Do not write B
 
 **How to apply:**
 
-1. Map the request to a skill (image → `psd-image-gen`, ticket → `psd-freshservice`, schedule → `psd-schedules`, secret → `psd-credentials`, Workspace API → `psd-workspace`) and call its CLI verbatim.
-2. Surface returned values *as-is*; don't generate a "fresh" one.
-3. **If a skill's JSON output contains a `url` field, your reply MUST include that exact URL on a line by itself** — no `**`, no `[label](url)`, no parentheses, no trailing period, no other text on that line. Narration (one short sentence at most) goes on a *separate* line, or is omitted.
-4. Describing the artifact in prose is **never** a substitute for pasting the URL. If you describe the image instead of pasting the URL, you have failed the rule.
-5. On an `error` field, surface the error text and stop — don't pivot to a custom pipeline.
-6. If you don't know what a skill does, call `psd-skills-meta load --name <skill>` first. Don't guess.
-7. Building the skill's behavior yourself in Bash is *always* wrong — even when the skill seems broken. Report the failure and stop.
+1. **Fresh-interface gate:** before the first invocation of any skill in every
+   user turn, read that skill's current `/opt/psd-skills/<skill>/SKILL.md`.
+   This is mandatory even if you used the skill in a previous turn, believe
+   you remember its interface, or the user included a likely command. Never
+   construct a skill command from memory. Copy its documented subcommand,
+   flags, and parameter/body roles exactly.
+2. Map the request to a skill (image → `psd-image-gen`, ticket → `psd-freshservice`, schedule → `psd-schedules`, secret → `psd-credentials`, Workspace API → `psd-workspace`) and call its CLI verbatim.
+3. Surface returned values *as-is*; don't generate a "fresh" one.
+4. **If a skill's JSON output contains a `url` field, your reply MUST include that exact URL on a line by itself** — no `**`, no `[label](url)`, no parentheses, no trailing period, no other text on that line. Narration (one short sentence at most) goes on a *separate* line, or is omitted.
+5. Describing the artifact in prose is **never** a substitute for pasting the URL. If you describe the image instead of pasting the URL, you have failed the rule.
+6. On an `error` field, surface the error text and stop — don't pivot to a custom pipeline.
+7. If you cannot read a skill contract, call `psd-skills-meta load --name <skill>` and use the returned contract before invoking it. Don't guess.
+8. Building the skill's behavior yourself in Bash is *always* wrong — even when the skill seems broken. Report the failure and stop.
 
 **Self-checks:**
 
