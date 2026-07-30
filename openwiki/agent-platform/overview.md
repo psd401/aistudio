@@ -1,7 +1,7 @@
 ---
 type: Platform Overview
 title: Agent Platform & Skills System
-description: Extensible agent skill system with 30 domain-specific capabilities, Google Workspace integration, Cedar governance, and MCP tool exposure for K-12 AI assistants.
+description: Extensible agent skill system with 31 domain-specific capabilities, Google Workspace integration, Cedar governance, and MCP tool exposure for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
 ---
 
@@ -32,6 +32,8 @@ infra/agent-image/skills/{skill-name}/
 - `psd-email-triage` — Automated email response drafting
 - `psd-schedules` — Schedule management
 - `psd-rules` — Tier-1 governance rules for agent behavior
+- `psd-conversation-coach` — Crucial Conversations framework coaching for difficult conversations
+- `psd-morning-brief` — Personalized daily newspaper/podcast delivered through private Atrium artifacts
 
 **Content & Media**
 - `psd-aistudio` — Live capability discovery + authenticated actions in AI Studio
@@ -51,7 +53,8 @@ infra/agent-image/skills/{skill-name}/
 - `psd-open-adaptive-district` — Adaptive learning platform
 
 **Analysis & Reporting**
-- `psd-classified-evaluation` — Staff evaluation document processing
+- `psd-deep-research` — Gemini Deep Research for cited multi-source reports
+- `psd-workflows` — Dynamic PSD gateway workflows (evaluations, requests, timesheets) with caller binding
 - `psd-failure-report` — Failure analysis and reporting
 - `psd-last30days` — Recent activity analysis
 - `psd-github` — GitHub integration
@@ -70,6 +73,17 @@ Skills run in the agent container defined by `/infra/agent-image/Dockerfile`. Th
 2. Validates governance policies via Cedar
 3. Executes skill logic with requested capabilities
 4. Audits all credential reads and tool invocations
+
+### Bundled Skill Manifest
+
+Agent image builds include a bundled skill catalog (`/infra/lib/bundled-skill-manifest.ts`) that enforces catalog approval for skill loads. The manifest:
+
+- Parses SKILL.md frontmatter (name, summary, allowed-tools)
+- Validates against image tag and source hash
+- Registers skills via CloudFormation custom resource (`agent-skill-initializer` Lambda)
+- Enforces catalog approval before execution
+
+The skill initializer (`infra/lambdas/agent-skill-initializer/`) handles both registration and retirement of bundled skills, ensuring only approved capabilities execute in the agent container.
 
 ---
 
