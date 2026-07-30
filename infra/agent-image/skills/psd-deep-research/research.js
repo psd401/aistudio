@@ -154,6 +154,18 @@ async function requestStatus(interactionId, broker) {
   );
 }
 
+async function requestRecoverableStatus(interactionId, user, broker) {
+  try {
+    return await requestStatus(interactionId, broker);
+  } catch (error) {
+    const output = errorOutput(error);
+    throw new ResearchCliError(output.error, output.message, {
+      interactionId,
+      resumeCommand: resumeCommand(user, interactionId),
+    });
+  }
+}
+
 function completedOutput(status) {
   return {
     report: status.report,
@@ -187,7 +199,11 @@ async function runResearch(
   const now = dependencies.now || Date.now;
 
   if (options.interactionId) {
-    const status = await requestStatus(options.interactionId, broker);
+    const status = await requestRecoverableStatus(
+      options.interactionId,
+      options.user,
+      broker,
+    );
     return status.status === "completed"
       ? completedOutput(status)
       : pendingOutput(status, options.user);
@@ -198,7 +214,11 @@ async function runResearch(
   const interactionId = started.interactionId;
 
   while (true) {
-    const status = await requestStatus(interactionId, broker);
+    const status = await requestRecoverableStatus(
+      interactionId,
+      options.user,
+      broker,
+    );
     if (status.status === "completed") {
       return completedOutput(status);
     }

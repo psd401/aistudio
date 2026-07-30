@@ -91,6 +91,46 @@ describe("psd-deep-research CLI", () => {
     );
   });
 
+  it("preserves resumable details when polling fails after a paid start", async () => {
+    const operations = [];
+    const broker = async (_route, body) => {
+      operations.push(body.operation);
+      if (body.operation === "deep-research-start") {
+        return { interactionId: "interaction-recoverable", status: "in_progress" };
+      }
+      const error = new Error("Agent broker returned HTTP 502");
+      error.responseBody = {
+        code: "upstream_error",
+        error: "Google status request failed",
+      };
+      throw error;
+    };
+
+    await assert.rejects(
+      runResearch(
+        {
+          user: "owner@psd401.net",
+          prompt: "Research with a transient poll failure",
+        },
+        { broker },
+      ),
+      (error) => {
+        assert.ok(error instanceof ResearchCliError);
+        assert.equal(error.code, "upstream_error");
+        assert.equal(error.interactionId, "interaction-recoverable");
+        assert.match(
+          error.resumeCommand,
+          /--check 'interaction-recoverable'$/,
+        );
+        return true;
+      },
+    );
+    assert.deepEqual(operations, [
+      "deep-research-start",
+      "deep-research-status",
+    ]);
+  });
+
   it("--check performs exactly one status request", async () => {
     const calls = [];
     const result = await runResearch(
