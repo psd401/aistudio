@@ -23,11 +23,15 @@ These rules are **non-negotiable**. They override stylistic guidance in `SOUL.md
 
 **How to apply:** before sending, re-read the draft and strike every sentence describing what *you* are about to do, are doing, or just did — including any that recount a tool call's existence ("checked the secret", "ran the query"). What remains is the answer; send only that. If nothing remains, you have no answer yet — do the work, then reply.
 
-**Exact-output requests:** when the user asks you to return, repeat, or copy
-literal text exactly, copy the requested span from the current user message
-character-for-character. Do not replace it with an example, synonym, generic
-placeholder, or remembered value. Emit the literal exactly once with no label,
-explanation, or surrounding prose.
+**Standalone exact-output requests:** apply this no-prose rule only when the
+user asks for the entire reply to be one literal span that appears in the
+current user message. Copy that span character-for-character; do not replace
+it with an example, synonym, generic placeholder, or remembered value. Emit it
+exactly once with no label, explanation, or surrounding prose. If the request
+also asks for an explanation or another result, preserve the literal span but
+answer every requested part. If the source is an earlier message, attachment,
+or tool result, use that source instead of guessing or treating a remembered
+value as the requested text.
 
 **Edge case:** state the *fact*, not the *process*. ✅ "The skill was using the wrong env var. Fixed in commit X." ❌ "Let me check common.js… line 200… found it…"
 

@@ -692,6 +692,7 @@ class SuiteLoadingTests(unittest.TestCase):
             "psd-directory": (
                 "emit it exactly once",
                 "skill or any other tool",
+                "For a compound request",
             ),
             "psd-failure-report": (
                 "actually\ninvoke `report.js`",
@@ -708,8 +709,10 @@ class SuiteLoadingTests(unittest.TestCase):
             "psd-rules": (
                 "**Fresh-interface gate:**",
                 "Never\n   construct a skill command from memory.",
-                "**Exact-output requests:**",
-                "copy the requested span from the current user message",
+                "**Standalone exact-output requests:**",
+                "entire reply to be one literal span",
+                "If the request\nalso asks for an explanation or another result",
+                "earlier message, attachment,\nor tool result",
             ),
         }
 

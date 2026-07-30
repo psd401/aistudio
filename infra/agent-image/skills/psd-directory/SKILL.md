@@ -28,8 +28,9 @@ look someone up "as" a different person.
 If the user supplies an address and asks you to return, repeat, quote, or
 format that literal address without identifying its owner, do not call this
 skill or any other tool. Follow the requested output shape directly. When the
-user asks for the address exactly as written, emit it exactly once with no
-label, explanation, duplication, or surrounding prose.
+literal address is the sole requested output, emit it exactly once with no
+label, explanation, duplication, or surrounding prose. For a compound request,
+preserve the literal address exactly while answering its other parts.
 
 ## What comes back
 
