@@ -305,6 +305,27 @@ class SuiteLoadingTests(unittest.TestCase):
             )
         )
 
+        last30days_window = next(
+            str(grader.get("pattern"))
+            for grader in tasks_by_id[
+                "last30days-keyless-eval-reliability-brief"
+            ].graders
+            if grader.get("type") == "output_match"
+            and "seven" in str(grader.get("pattern"))
+        )
+        for valid_window in (
+            "last 7 days",
+            "last\u202f7\u202fdays",
+            "past week",
+            "7-day",
+            "seven-day",
+        ):
+            self.assertIsNotNone(
+                re.search(last30days_window, valid_window),
+                valid_window,
+            )
+        self.assertIsNone(re.search(last30days_window, "past month"))
+
         chart_probe = next(
             grader
             for grader in tasks_by_id[

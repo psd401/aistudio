@@ -7,5 +7,5 @@ prompt: "Use psd-last30days to research recent public discussion of AI agent eva
 trials: 3
 graders:
   - {"type":"tool_call_succeeded","tool":"exec","args_pattern":"psd-last30days/scripts/last30days\\.py"}
-  - {"type":"output_match","pattern":"(?is)(?:\\b(?:last|past)[ -]?7 days\\b|\\b7-day\\b|\\bseven-day\\b)"}
+  - {"type":"output_match","pattern":"(?is)(?:\\b(?:last|past)(?:[\\s-]?7\\s+days|\\s+week)\\b|\\b(?:7|seven)[ -]?day\\b)"}
   - {"type":"output_match","pattern":"(?is)(?=.*https://(?:github\\.com|news\\.ycombinator\\.com|www\\.reddit\\.com)/)(?=.*https://(?:arxiv\\.org|news\\.google\\.com)/)"}
