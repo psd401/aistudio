@@ -108,6 +108,10 @@ When the caller supplies a query, sender, other filter, or page size, preserve
 those requested values inside `--params`; do not overwrite them with the
 defaults above.
 
+After a successful read/list call that the user asked only to summarize now,
+return the requested fields immediately. Do not read or write memory, and do
+not call an unrelated tool, before the final answer.
+
 ```bash
 node /opt/psd-skills/psd-workspace/run.js \
   --user <caller-email> \

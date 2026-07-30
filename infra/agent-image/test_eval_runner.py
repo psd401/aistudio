@@ -714,6 +714,8 @@ class SuiteLoadingTests(unittest.TestCase):
                 "generic unread-mail listing when the caller supplies no "
                 "different filter",
                 "preserve\nthose requested values inside `--params`",
+                "Do not read or write memory",
+                "before the final answer",
             ),
             "psd-rules": (
                 "**Fresh-interface gate:**",
@@ -724,6 +726,9 @@ class SuiteLoadingTests(unittest.TestCase):
                 "entire reply to\nbe one literal span",
                 "also asks for an explanation\nor another result",
                 "earlier message, attachment, or tool result",
+                "**Read-only exception:**",
+                "do not insert a memory tool call between the result and\n"
+                "the final answer",
             ),
         }
 
@@ -752,6 +757,11 @@ class SuiteLoadingTests(unittest.TestCase):
         )
         self.assertIn(
             "caller supplies no different filter or page size",
+            soul,
+        )
+        self.assertIn(
+            "return the requested summary\nbefore any memory or unrelated "
+            "tool call",
             soul,
         )
 

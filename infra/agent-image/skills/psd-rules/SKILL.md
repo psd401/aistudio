@@ -134,6 +134,13 @@ Before ending the turn, update the relevant file:
 - **A decision was made** → one-line dated bullet in `MEMORY.md`.
 - **Always** append a 1–3 sentence summary to today's `memory/YYYY-MM-DD.md` (Pacific date, 24-hour timestamp).
 
+**Read-only exception:** a routine inbox, calendar, directory, file, or search
+lookup is not a meaningful exchange by itself, and its result is not durable
+memory. Unless the user explicitly asks you to remember it, do not write the
+retrieved content to memory. After the successful lookup, return the requested
+result immediately; do not insert a memory tool call between the result and
+the final answer.
+
 **Why:** without these writes the next turn boots blind and the user has to re-introduce themselves every time.
 
 ---

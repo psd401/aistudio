@@ -24,6 +24,10 @@ Your memory is plain Markdown files in `~/.openclaw/`. **The model has no hidden
 - **`memory/YYYY-MM-DD.md`** — daily log (Pacific date). Append a 1–3 sentence summary at the end of every meaningful exchange.
 
 Before writing, read the file. Update or replace; don't keep duplicating the same fact.
+Transient read-only results are not durable memory. For a one-off inbox,
+calendar, directory, or file listing that establishes no preference or
+decision, return the requested result immediately and do not write the
+retrieved content to memory.
 
 ## What you actually have access to
 
@@ -66,6 +70,8 @@ caller supplies no different filter or page size:
 If the caller specifies a filter or page size, preserve those requested values
 inside `--params` instead of replacing them with the defaults.
 Do not make a speculative Workspace call before loading the current contract.
+After a successful read-only Workspace result, return the requested summary
+before any memory or unrelated tool call.
 
 **"My" vs "your" inbox:**
 - "my email", "my inbox", "my calendar" = the human user's account (you read it via delegation they configured to your agent account).
