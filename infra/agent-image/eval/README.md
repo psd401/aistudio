@@ -230,7 +230,7 @@ status 2.
 
 ## Nightly and on-demand runs
 
-`.github/workflows/agent-eval-nightly.yml` runs all 50 regression and capability
+`.github/workflows/agent-eval-nightly.yml` runs all 53 regression and capability
 tasks at three trials nightly on an ARM64 runner. It resolves the immutable
 image currently exposed by the dev AgentCore runtime, verifies its AI Studio
 source labels, uploads only the safe summary, removes both JSONL transcripts
@@ -328,7 +328,7 @@ under the next.
 ### Coverage inventory and drift gate
 
 Coverage follows the final image inventory rather than a hard-coded epic
-count. The checked-in tree contains 31 directories with `SKILL.md`; 30 have
+count. The checked-in tree contains 32 directories with `SKILL.md`; 31 have
 one or more co-located tasks and `psd-rules` is a documented opt-out. `_shared`
 is not a skill because it has no `SKILL.md`.
 
@@ -348,7 +348,7 @@ CI workflow shallow-clones that exact release and compares its
 dependency to unrelated application PRs. Changing the pinned upstream release
 therefore requires reviewing the actual shipped skill inventory rather than
 only updating version strings.
-Together, the final image inventory is 75 skills: 30 directly evaluated and
+Together, the final image inventory is 76 skills: 31 directly evaluated and
 45 explicitly opted out (`psd-rules` plus the 44 documentation-only `gws-*`
 skills).
 
@@ -371,7 +371,7 @@ Run the path-filtered/scheduled upstream release comparison locally with:
 python3 infra/agent-image/check_eval_coverage.py --verify-upstream
 ```
 
-The regression and capability manifests contain 50 tasks total. At least 25%
+The regression and capability manifests contain 53 tasks total. At least 25%
 are explicit negative cases: they prove that a route or side effect is not
 used, rather than treating non-invocation as an unobserved success.
 
@@ -383,7 +383,7 @@ Use the lowest hermeticity level that exercises the real skill boundary:
 |---|---|---|
 | L0 | No external network or live service | Local renderers/converters, bundled references, offline self-checks, and policy/clarification tasks |
 | L1 | All service traffic crosses the loopback broker and is fixture-backed or asserted absent | AI Studio, Atrium reads, Canva reads, credentials, data MCP, directory, email triage, Freshservice, GitHub, Plaud, schedules, skills catalog, workflow gateway, Workspace |
-| L2 | A required provider, AWS API, or out-of-band upload cannot be represented by the broker fixture contract | QuickChart, failure-report CloudWatch emission, HyperFrames Lambda, positive image generation/upload, keyless web research, records-safe model summarization, Polly/audio upload |
+| L2 | A required provider, AWS API, or out-of-band upload cannot be represented by the broker fixture contract | Native `web_search`, QuickChart, failure-report CloudWatch emission, HyperFrames Lambda, positive image generation/upload, keyless web research, records-safe model summarization, Polly/audio upload |
 
 Some skills support more than one level. `psd-html-artifact` is L0 when its
 `--audit-only` gate is evaluated, but a delivery task is L2 because the
@@ -413,6 +413,8 @@ The workflow uses `canary@build-gate.invalid`, the existing RFC 2606 disposable
 owner identity. Every live prompt is labeled `EVAL-1426` or synthetic. The
 subset is intentionally small:
 
+- native `web_search` verifies the configured key-free provider returns cited
+  results instead of a provider-unavailable error;
 - QuickChart and recent-source research use synthetic/public inputs;
 - summarization uses fabricated PII to verify exclusion;
 - TTS uploads only the phrase `EVAL 1426 synthetic audio canary`.

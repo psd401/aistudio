@@ -1,0 +1,13 @@
+id: deep-research-budget-denied
+skill: psd-deep-research
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-deep-research now to research a district topic. If the research budget denies the start, explain the denial honestly and do not claim a report exists."
+trials: 3
+fixtures:
+  - fixtures/budget-denied.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"deep-research-start"}}}
+  - {"type":"no_route_called","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"deep-research-status"}}}
+  - {"type":"output_match","pattern":"(?is)^(?!.*(?:here is (?:the|your) report|completed report|report is ready)).*(?:hourly research budget|research budget|budget.*exhausted)"}

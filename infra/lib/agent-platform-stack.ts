@@ -41,6 +41,7 @@ import { ServiceRoleFactory, usGuardrailProfileArns } from './constructs/securit
 import { AGENT_LAMBDA_RUNTIME } from './constructs/compute/lambda-construct';
 import { HyperframesRenderFunction } from './constructs/compute/hyperframes-render-function';
 import { validatedFs } from "./validated-fs";
+import { parseBundledSkillFrontmatter } from './bundled-skill-manifest';
 
 export interface AgentPlatformStackProps extends cdk.StackProps {
   environment: 'dev' | 'staging' | 'prod';
@@ -88,6 +89,7 @@ interface BundledSkillManifestEntry {
   name: string;
   summary: string;
   description?: string;
+  allowedTools: string[];
   sourceHash: string;
   imageTag: string;
 }
@@ -4562,7 +4564,21 @@ export class AgentPlatformStack extends cdk.Stack {
     // greetings-demo. Idempotent: same manifest = no DB churn; image
     // updates bump the s3_key → version increments.
 
+    const agentImageTagContext = this.node.tryGetContext('agentImageTag') ?? 'unset';
+    if (
+      typeof agentImageTagContext !== 'string' ||
+      !/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(agentImageTagContext)
+    ) {
+      throw new Error(
+        'agentImageTag must be a valid ECR tag before it can be used in the bundled-skill S3 prefix',
+      );
+    }
     const bundledSkillsManifest = this.loadBundledSkillsManifest();
+
+    const bundledSkillsDeployment = this.createBundledSkillsDeployment(
+      resources,
+      agentImageTagContext,
+    );
 
     // vpcEnabled: false — VPC access added manually via managed policy below
     // to avoid ServiceRoleFactory's wildcard-ENI policy validator. Same
@@ -4660,9 +4676,7 @@ export class AgentPlatformStack extends cdk.Stack {
       ...RETIRED_BUNDLED_SKILL_NAMES.map((name) => `retired:${name}`),
     ].sort().join(',');
 
-    const agentImageTagContext = this.node.tryGetContext('agentImageTag') ?? 'unset';
-
-    new customResources.AwsCustomResource(this, 'AgentSkillInitializerCR', {
+    const skillInitializerResource = new customResources.AwsCustomResource(this, 'AgentSkillInitializerCR', {
       onCreate: {
         service: 'Lambda',
         action: 'invoke',
@@ -4707,6 +4721,53 @@ export class AgentPlatformStack extends cdk.Stack {
       ]),
       installLatestAwsSdk: false,
     });
+    skillInitializerResource.node.addDependency(bundledSkillsDeployment);
+  }
+
+  private createBundledSkillsDeployment(
+    resources: AgentPlatformBuildResources,
+    agentImageTag: string,
+  ): s3deploy.BucketDeployment {
+    // The catalog's shared consumers all read skill artifacts through the
+    // workspace-bucket contract. Publish the same reviewed source tree that is
+    // copied into the agent image so web preview, Nexus injection, internal/MCP
+    // execution, and zip export resolve one authoritative artifact. Test files
+    // and local build caches are not runtime skill content.
+    return new s3deploy.BucketDeployment(this, 'BundledSkillsDeployment', {
+      sources: [
+        s3deploy.Source.asset(
+          path.join(__dirname, '..', 'agent-image', 'skills'),
+          {
+            exclude: [
+              '**/*.test.js',
+              '**/*.test.ts',
+              '**/test_*.py',
+              '**/*_test.py',
+              '**/__pycache__/**',
+              '**/*.pyc',
+              '**/*.pyo',
+              '**/node_modules/**',
+              '**/.env',
+              '**/.env.*',
+              '**/.DS_Store',
+              '**/*.icloud',
+              '**/.vscode/**',
+              '**/.idea/**',
+              '**/*.swp',
+              '**/.build-probes/**',
+              '**/.candidate-builds/**',
+              '**/mcp-test-support.js',
+            ],
+          },
+        ),
+      ],
+      destinationBucket: resources.workspaceBucket,
+      destinationKeyPrefix: `skills/bundled/${agentImageTag}/`,
+      prune: true,
+      // Initializer rows deliberately survive stack deletion; retain the
+      // matching artifacts as well so those rows never become dangling.
+      retainOnDelete: true,
+    });
   }
 
   private loadBundledSkillsManifest(): BundledSkillManifestEntry[] {
@@ -4722,35 +4783,21 @@ export class AgentPlatformStack extends cdk.Stack {
         continue;
       }
       const raw = validatedFs.readFileSync(skillMdPath, 'utf8');
-      const frontmatter = raw.match(/^---\n([\s\S]*?)\n---/);
+      const frontmatter = parseBundledSkillFrontmatter(raw);
       if (!frontmatter) {
         continue;
       }
-
-      let name = '';
-      let summary = '';
-      let description = '';
-      for (const line of frontmatter[1].split('\n')) {
-        const field = line.match(/^(name|summary|description):\s*(.*)$/);
-        if (!field) {
-          continue;
-        }
-        if (field[1] === 'name') {
-          name = field[2].trim();
-        } else if (field[1] === 'summary') {
-          summary = field[2].trim();
-        } else {
-          description = field[2].trim();
-        }
-      }
-      if (!name) {
-        continue;
+      if (frontmatter.name !== entry) {
+        throw new Error(
+          `Bundled skill folder "${entry}" must match frontmatter name "${frontmatter.name}"`,
+        );
       }
 
       manifest.push({
-        name,
-        summary: summary || `Bundled skill: ${name}`,
-        description,
+        name: frontmatter.name,
+        summary: frontmatter.summary,
+        description: frontmatter.description,
+        allowedTools: frontmatter.allowedTools,
         sourceHash: crypto.createHash('sha256').update(raw).digest('hex'),
         // Resolved by the Lambda at invoke time via its environment.
         imageTag: 'unknown',

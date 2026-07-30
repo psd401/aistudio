@@ -65,6 +65,8 @@ BEDROCK_PLUGIN_VERSION=""
 BEDROCK_PLUGIN_ASSERTION=""
 OPENCLAW_GATEWAY_CLIENT_ID=""
 OPENCLAW_GATEWAY_CLIENT_MODE=""
+PARALLEL_PLUGIN_VERSION=""
+PARALLEL_PLUGIN_ENDPOINT=""
 CID=""
 
 cleanup_build() {
@@ -120,6 +122,8 @@ if [ -n "${CANDIDATE_MANIFEST}" ]; then
   BEDROCK_PLUGIN_ASSERTION="$(candidate_plan_value expectedPluginToken)"
   OPENCLAW_GATEWAY_CLIENT_ID="$(candidate_plan_value gatewayClientId)"
   OPENCLAW_GATEWAY_CLIENT_MODE="$(candidate_plan_value gatewayClientMode)"
+  PARALLEL_PLUGIN_VERSION="$(candidate_plan_value parallelPluginVersion)"
+  PARALLEL_PLUGIN_ENDPOINT="$(candidate_plan_value parallelPluginEndpoint)"
   CANDIDATE_METADATA="$(candidate_plan_value metadata)"
 fi
 
@@ -158,17 +162,18 @@ echo ""
 # ---------------------------------------------------------------------------
 # Build-time eval gate (issue #1161). The image is an artifact optimized
 # against an evaluator: it must pass an automated gate BEFORE it is pushed, so
-# the build loop stops being "deploy and chat." Four checks —
+# the build loop stops being "deploy and chat." Five checks —
 #   1. instruction-budget gate   (static, no Docker)   — over-budget bootstrap
-#   2. config self-consistency   (static, no Docker)   — bad contextWindow / apiKey
-#   3. boot probe                (runtime, needs image) — dead-boot (no BOOT_OK)
-#   4. canary turn               (runtime, needs image) — non-answering agent
+#   2. config self-consistency   (static, no Docker)   — bad config/provider pins
+#   3. plugin-aware validation   (Docker build)        — invalid complete config
+#   4. boot probe                (runtime, needs image) — dead-boot (no BOOT_OK)
+#   5. canary turn               (runtime, needs image) — non-answering agent
 # Would have stopped r10 (dead-boot), r11 (missing provider), and the weeks-long
 # SOUL.md truncation on a laptop instead of in prod.
 #
 # Two separate bypasses, so an emergency doesn't disable more than it must:
 #   SKIP_PROBE_GATE=1   skips only the RUNTIME boot-probe + canary turn (checks
-#                       3-4) — reserved for a broken probe blocking releases.
+#                       4-5) — reserved for a broken probe blocking releases.
 #   SKIP_STATIC_GATE=1  skips the cheap STATIC checks (1-2). These are pure file
 #                       checks with no external dependency and essentially never
 #                       need bypassing — this exists only for a true emergency,
@@ -262,6 +267,8 @@ if [ -n "${CANDIDATE_ID}" ]; then
     --build-arg "BEDROCK_PLUGIN_ASSERTION=${BEDROCK_PLUGIN_ASSERTION}"
     --build-arg "OPENCLAW_GATEWAY_CLIENT_ID=${OPENCLAW_GATEWAY_CLIENT_ID}"
     --build-arg "OPENCLAW_GATEWAY_CLIENT_MODE=${OPENCLAW_GATEWAY_CLIENT_MODE}"
+    --build-arg "PARALLEL_PLUGIN_VERSION=${PARALLEL_PLUGIN_VERSION}"
+    --build-arg "PARALLEL_PLUGIN_ENDPOINT=${PARALLEL_PLUGIN_ENDPOINT}"
   )
 fi
 docker build "${DOCKER_BUILD_ARGS[@]}" "${SCRIPT_DIR}"

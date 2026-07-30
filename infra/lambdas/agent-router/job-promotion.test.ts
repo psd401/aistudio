@@ -14,13 +14,16 @@ import {
   jobChatDeliveryContext,
   JOB_DEADLINE_S,
   parseJobPayload,
+  promotionReason,
+  resolveJobInvocation,
   shouldPromoteToJob,
 } from './job-promotion';
 
 describe('shouldPromoteToJob', () => {
-  test('deadline classes promote', () => {
+  test('recoverable deadline and overflow classes promote', () => {
     expect(shouldPromoteToJob('ChatDeadlineExpired')).toBe(true);
     expect(shouldPromoteToJob('ChatDeadlineExpiredPartial')).toBe(true);
+    expect(shouldPromoteToJob('ContextOverflow')).toBe(true);
   });
 
   test('real errors and clean turns do NOT promote', () => {
@@ -29,6 +32,14 @@ describe('shouldPromoteToJob', () => {
     expect(shouldPromoteToJob('AgentCoreHttpError_500')).toBe(false);
     expect(shouldPromoteToJob(undefined)).toBe(false);
     expect(shouldPromoteToJob('')).toBe(false);
+  });
+
+  test('distinguishes resume deadlines from fresh-session overflow', () => {
+    expect(promotionReason('ChatDeadlineExpired')).toBe('deadline');
+    expect(promotionReason('ChatDeadlineExpiredPartial')).toBe('deadline');
+    expect(promotionReason('ContextOverflow')).toBe('context-overflow');
+    expect(promotionReason('OpenClawChatError')).toBeNull();
+    expect(promotionReason(undefined)).toBeNull();
   });
 });
 
@@ -70,6 +81,31 @@ describe('buildJobPayload / parseJobPayload round-trip', () => {
       buildJobPayload({ ...BASE, responsePrefix: '[aside] ' })
     );
     expect(parsed.responsePrefix).toBe('[aside] ');
+  });
+
+  test('round-trips context-overflow as a fresh-session restart', () => {
+    const parsed = parseJobPayload(
+      buildJobPayload({ ...BASE, reason: 'context-overflow' })
+    );
+    expect(parsed.reason).toBe('context-overflow');
+
+    const invocation = resolveJobInvocation(parsed);
+    expect(invocation.restart).toBe(true);
+    expect(invocation.invokeSessionId).not.toBe(BASE.sessionId);
+    expect(invocation.prompt).toContain('[job-restart]');
+    expect(invocation.prompt).toContain(BASE.originalPrompt);
+  });
+
+  test('never truncates the original request for a fresh-session restart', () => {
+    const originalPrompt = 'x'.repeat(5_000);
+    const parsed = parseJobPayload(
+      buildJobPayload({
+        ...BASE,
+        reason: 'context-overflow',
+        originalPrompt,
+      })
+    );
+    expect(parsed.promptExcerpt).toBe(originalPrompt);
   });
 
   test('round-trips optional scheduled-run context', () => {

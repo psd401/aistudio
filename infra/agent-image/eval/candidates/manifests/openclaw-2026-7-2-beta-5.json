@@ -12,6 +12,8 @@
       "hostVersion": "2026.7.2-beta.5",
       "bedrockPluginVersion": "2026.7.2-beta.5",
       "expectedPluginToken": "claude-sonnet-5",
+      "parallelPluginVersion": "2026.7.1",
+      "parallelPluginEndpoint": "https://search.parallel.ai/mcp",
       "gatewayClient": {
         "id": "cli",
         "mode": "cli"

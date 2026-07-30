@@ -74,7 +74,8 @@ import {
 import {
   buildJobPayload,
   jobChatDeliveryContext,
-  shouldPromoteToJob,
+  promotionReason,
+  type PromotionReason,
 } from './job-promotion';
 import type { ScheduledRunWrite } from './scheduled-run-telemetry';
 import {
@@ -2090,6 +2091,7 @@ async function fetchChatUploads(
  * worse than the status quo.
  */
 interface JobPromotionInput {
+  reason: PromotionReason;
   sessionId: string;
   userEmail: string;
   googleIdentity: string;
@@ -2198,6 +2200,7 @@ async function promoteToJob(
 
   try {
     const payload = buildJobPayload({
+      reason: input.reason,
       sessionId: input.sessionId,
       lockToken: jobLockToken,
       runtimeId,
@@ -2229,6 +2232,7 @@ async function promoteToJob(
       // is a "platform compensating for model behavior" counter — its trend is
       // an input to Loop-2 instruction tuning, so it's a metric without an alarm.
       marker: 'BACKGROUND_PROMOTION',
+      reason: input.reason,
       sessionId: input.sessionId,
       taskArn: taskArn ?? 'unknown',
     });
@@ -4242,9 +4246,11 @@ interface OwnerTurnContext {
 function buildOwnerJobPromotionInput(
   human: HumanMessage,
   user: AgentUser,
-  turn: OwnerAgentTurn
+  turn: OwnerAgentTurn,
+  reason: PromotionReason
 ): JobPromotionInput {
   return {
+    reason,
     sessionId: turn.sessionId,
     userEmail: human.senderEmail,
     googleIdentity: human.senderName,
@@ -4266,12 +4272,14 @@ async function promoteOwnerTurn(
   log: ReturnType<typeof createLogger>
 ): Promise<boolean> {
   const { human, prepared, turn, startTime } = context;
-  if (!shouldPromoteToJob(turn.result.errorClass)) return false;
+  const reason = promotionReason(turn.result.errorClass);
+  if (!reason) return false;
   const promoted = await promoteToJob(
     buildOwnerJobPromotionInput(
       human,
       prepared.user,
-      turn
+      turn,
+      reason
     ),
     log
   );

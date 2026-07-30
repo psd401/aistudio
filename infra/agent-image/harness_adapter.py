@@ -845,6 +845,14 @@ class OpenClawAdapter(HarnessAdapter):
                 last_state: Optional[str] = None
                 last_payload_sample: str = ""
                 raw_event_samples: list = []
+                # OpenClaw reports the real reason for an aborted chat on the
+                # agent lifecycle stream before the chat channel emits only
+                # `{state: "aborted", stopReason: "stop"}`. Preserve the
+                # lifecycle error so an overflow is not mislabeled as a turn
+                # deadline (issue #1461).
+                last_lifecycle_error: Optional[str] = None
+                chat_aborted = False
+                abort_stop_reason: Optional[str] = None
                 # Accumulator for streaming assistant deltas that arrive via
                 # the agent event channel (OpenClaw >= 2026.4 routes streaming
                 # content through `event:agent` with stream="assistant"; the
@@ -941,6 +949,15 @@ class OpenClawAdapter(HarnessAdapter):
                                     tokens_in = max(tokens_in, ti)
                                 if isinstance(to, int):
                                     tokens_out = max(tokens_out, to)
+                        if stream == "lifecycle" and isinstance(data, dict):
+                            phase = data.get("phase")
+                            lifecycle_error = data.get("error")
+                            if (
+                                phase in {"error", "finishing"}
+                                and isinstance(lifecycle_error, str)
+                                and lifecycle_error.strip()
+                            ):
+                                last_lifecycle_error = lifecycle_error.strip()
                         if stream == "assistant" and isinstance(data, dict):
                             # OpenClaw protocol v4 streams assistant text as
                             # `deltaText` (the incremental piece) alongside
@@ -1131,6 +1148,10 @@ class OpenClawAdapter(HarnessAdapter):
                             )
 
                         elif state == "aborted":
+                            chat_aborted = True
+                            stop_reason = payload.get("stopReason")
+                            if isinstance(stop_reason, str) and stop_reason:
+                                abort_stop_reason = stop_reason
                             logger.warning("chat aborted: payload=%s", json.dumps(payload)[:500])
                             break
 
@@ -1253,6 +1274,58 @@ class OpenClawAdapter(HarnessAdapter):
                 nudged=nudged,
             )
 
+        # A lifecycle error is terminal unless OpenClaw subsequently emits a
+        # successful final event. Usually chat follows it with `aborted`, but
+        # preserve the real cause even if that channel event never arrives and
+        # the receive loop instead runs to its deadline.
+        if chat_aborted or (not got_final and last_lifecycle_error):
+            if not response_text and agent_assistant_accum:
+                response_text = agent_assistant_accum
+            error_message = (
+                last_lifecycle_error
+                or f"chat aborted (stopReason={abort_stop_reason or 'unknown'})"
+            )
+            error_class = (
+                _classify_chat_error(last_lifecycle_error)
+                if last_lifecycle_error
+                else "OpenClawChatAborted"
+            )
+            terminal_phase = (
+                "chat_aborted" if chat_aborted else "lifecycle_error"
+            )
+            logger.error(
+                "chat failed before final: phase=%s error_class=%s "
+                "stop_reason=%s elapsed_s=%d deadline_s=%d event_counts=%s",
+                terminal_phase,
+                error_class,
+                abort_stop_reason or "unknown",
+                latency_ms // 1000,
+                deadline_s,
+                json.dumps(event_counts),
+            )
+            record_failure(
+                source="harness",
+                severity="error",
+                error_class=error_class,
+                error_message=error_message,
+                session_id=session_id,
+                model=observed_model or model_override,
+                context={
+                    "phase": terminal_phase,
+                    "last_state": last_state,
+                    "stop_reason": abort_stop_reason,
+                    "elapsed_s": latency_ms // 1000,
+                    "deadline_s": deadline_s,
+                    "event_counts": event_counts,
+                    "first_events": first_event_types,
+                },
+            )
+            return _result(
+                _frame_failed_partial(_format_for_chat(response_text.strip())),
+                failed=True,
+                error_class=error_class,
+            )
+
         if not got_final:
             if not response_text and agent_assistant_accum:
                 response_text = agent_assistant_accum
@@ -1282,6 +1355,8 @@ class OpenClawAdapter(HarnessAdapter):
                     context={
                         "phase": "deadline",
                         "last_state": last_state,
+                        "elapsed_s": latency_ms // 1000,
+                        "deadline_s": deadline_s,
                         "event_counts": event_counts,
                         "first_events": first_event_types,
                     },
@@ -1307,6 +1382,8 @@ class OpenClawAdapter(HarnessAdapter):
                 context={
                     "phase": "deadline",
                     "last_state": last_state,
+                    "elapsed_s": latency_ms // 1000,
+                    "deadline_s": deadline_s,
                     "event_counts": event_counts,
                     "first_events": first_event_types,
                 },

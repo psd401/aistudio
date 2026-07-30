@@ -166,6 +166,14 @@ jobs:
       env:
         CI: true
 
+    # psd-conversation-coach (#1464). This knowledge skill is outside Jest's
+    # roots. Its Bun suite guards the single-line frontmatter fields consumed
+    # by the deploy-time parser and the summary phrases used by skills.search.
+    - name: Run psd-conversation-coach skill tests (Bun)
+      run: bun run test:skill:conversation-coach
+      env:
+        CI: true
+
     # psd-morning-brief (#1413). The three-stage CLI is plain CJS outside
     # Jest's roots. This suite pins signed-owner authority boundaries, modular
     # source omission, custom desks, private Atrium-only delivery, podcast

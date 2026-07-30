@@ -272,6 +272,126 @@ class PromptCachingReachabilityTests(unittest.TestCase):
         self.assertTrue(any("no `npm pack" in item for item in v))
 
 
+class WebSearchProviderTests(unittest.TestCase):
+    CONFIG = {
+        "tools": {
+            "web": {
+                "search": {
+                    "enabled": True,
+                    "provider": "parallel-free",
+                },
+            },
+        },
+        "plugins": {
+            "load": {
+                "paths": [
+                    "/opt/openclaw-plugins/amazon-bedrock",
+                    "/opt/openclaw-plugins/parallel",
+                ],
+            },
+            "entries": {
+                "parallel": {"enabled": True},
+            },
+        },
+    }
+
+    def _dockerfile(
+        self,
+        *,
+        host: str = "2026.7.1",
+        plugin: str = "2026.7.1",
+        endpoint: str = "https://search.parallel.ai/mcp",
+        assert_endpoint: bool = True,
+    ) -> str:
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "Dockerfile")
+        endpoint_assertion = (
+            '    grep -RFq -- "${PARALLEL_PLUGIN_ENDPOINT}" '
+            "/opt/openclaw-plugins/parallel/dist\n"
+            if assert_endpoint
+            else ""
+        )
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(
+                f"#   ghcr.io/openclaw/openclaw:{host}\n"
+                f"#   index: {'sha256:' + '1' * 64}\n"
+                f"ARG PARALLEL_PLUGIN_VERSION={plugin}\n"
+                f"ARG PARALLEL_PLUGIN_ENDPOINT={endpoint}\n"
+                "RUN npm pack "
+                '"@openclaw/parallel-plugin@${PARALLEL_PLUGIN_VERSION}" && \\\n'
+                '    tar -xzf "openclaw-parallel-plugin-'
+                '${PARALLEL_PLUGIN_VERSION}.tgz" && \\\n'
+                '    rm "openclaw-parallel-plugin-'
+                '${PARALLEL_PLUGIN_VERSION}.tgz" && \\\n'
+                f"{endpoint_assertion}"
+            )
+        return path
+
+    def test_ready_key_free_provider_passes(self):
+        self.assertEqual(
+            ccc.check_web_search_provider(self.CONFIG, self._dockerfile()),
+            [],
+        )
+
+    def test_missing_search_config_fails_closed(self):
+        violations = ccc.check_web_search_provider({}, self._dockerfile())
+        self.assertEqual(len(violations), 1)
+        self.assertIn("tools.web.search is missing", violations[0])
+
+    def test_auto_detection_is_rejected_for_key_free_provider(self):
+        config = {
+            **self.CONFIG,
+            "tools": {"web": {"search": {"enabled": True}}},
+        }
+        violations = ccc.check_web_search_provider(config, self._dockerfile())
+        self.assertTrue(any("never auto-detected" in item for item in violations))
+
+    def test_key_configuration_is_rejected_for_key_free_provider(self):
+        config = {
+            **self.CONFIG,
+            "tools": {
+                "web": {
+                    "search": {
+                        "enabled": True,
+                        "provider": "parallel-free",
+                        "apiKey": "not-needed",
+                    },
+                },
+            },
+        }
+        violations = ccc.check_web_search_provider(config, self._dockerfile())
+        self.assertTrue(any("must not contain an apiKey" in item for item in violations))
+
+    def test_missing_plugin_load_path_is_rejected(self):
+        config = {
+            **self.CONFIG,
+            "plugins": {
+                "load": {"paths": ["/opt/openclaw-plugins/amazon-bedrock"]},
+                "entries": {"parallel": {"enabled": True}},
+            },
+        }
+        violations = ccc.check_web_search_provider(config, self._dockerfile())
+        self.assertTrue(any("plugins.load.paths" in item for item in violations))
+
+    def test_endpoint_drift_or_missing_build_assertion_is_rejected(self):
+        violations = ccc.check_web_search_provider(
+            self.CONFIG,
+            self._dockerfile(
+                endpoint="https://example.invalid/mcp",
+                assert_endpoint=False,
+            ),
+        )
+        self.assertTrue(any("must pin" in item for item in violations))
+        self.assertTrue(any("does not assert" in item for item in violations))
+
+    def test_plugin_newer_than_host_is_rejected(self):
+        violations = ccc.check_web_search_provider(
+            self.CONFIG,
+            self._dockerfile(host="2026.6.11"),
+        )
+        self.assertTrue(any("older than parallel-plugin" in item for item in violations))
+
+
 class HostPluginCompatibilityTests(unittest.TestCase):
     """`npm pack` never enforces peerDependencies — this gate is the only check.
 
@@ -377,6 +497,13 @@ class RealFilesTests(unittest.TestCase):
             ccc._version_key(version),
             ccc._version_key(ccc._CACHE_CAPABLE_PLUGIN_MIN["claude-sonnet-5"]),
         )
+
+    def test_repo_dockerfile_pins_the_web_search_plugin(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        version, violations = ccc.parse_pinned_parallel_plugin_version(
+            os.path.join(here, "Dockerfile"))
+        self.assertEqual(version, "2026.7.1")
+        self.assertEqual(violations, [])
 
 
 if __name__ == "__main__":

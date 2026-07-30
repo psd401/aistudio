@@ -3,9 +3,12 @@
 # known dev defect lands. TTS gates the fixed-operation credential boundary
 # from #1442. HyperFrames shares that boundary and is omitted from the weekly
 # subset to avoid a duplicate live render.
+# Native web search exercises the key-free provider configured in the agent
+# image and must return a cited result instead of a provider-unavailable error.
 # Failure reporting remains in the regression suite but requires a @psd401.net
 # actor for attribution, so the RFC 2606 canary owner cannot exercise it live.
 tasks:
+  - tasks/web-search-available.yaml
   - ../../skills/chat-chart/evals/synthetic-bar-chart.yaml
   - ../../skills/psd-last30days/evals/keyless-eval-reliability-brief.yaml
   - ../../skills/psd-summarize/evals/records-safe-projector-summary.yaml

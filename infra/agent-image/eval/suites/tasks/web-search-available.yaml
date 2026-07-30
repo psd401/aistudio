@@ -1,0 +1,11 @@
+id: web-search-available
+skill: runner-core
+level: L2
+workspace: pure
+suite: regression
+prompt: "Use web_search to find current information from the Washington Office of Superintendent of Public Instruction about career and technical student organizations (CTSOs). Summarize one current fact and include at least one source URL."
+trials: 3
+graders:
+  - {"type":"tool_call_succeeded","tool":"web_search","args_pattern":"(?i)(Washington|OSPI|career|technical|CTSO)"}
+  - {"type":"output_match","pattern":"(?i)CTSO|career and technical student organization"}
+  - {"type":"output_match","pattern":"https?://"}

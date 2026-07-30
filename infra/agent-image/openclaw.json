@@ -55,6 +55,15 @@
     "codeMode": {
       "timeoutMs": 60000
     },
+    "web": {
+      "search": {
+        "enabled": true,
+        "provider": "parallel-free",
+        "maxResults": 5,
+        "timeoutSeconds": 30,
+        "cacheTtlMinutes": 15
+      }
+    },
     "deny": ["cron", "nodes", "gateway"]
   },
   "skills": {
@@ -68,7 +77,10 @@
   },
   "plugins": {
     "load": {
-      "paths": ["/opt/openclaw-plugins/amazon-bedrock"]
+      "paths": [
+        "/opt/openclaw-plugins/amazon-bedrock",
+        "/opt/openclaw-plugins/parallel"
+      ]
     },
     "entries": {
       "active-memory": {
@@ -81,6 +93,9 @@
             "enabled": false
           }
         }
+      },
+      "parallel": {
+        "enabled": true
       }
     }
   },

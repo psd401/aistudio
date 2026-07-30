@@ -1,7 +1,7 @@
 # Agent Image Build-Time Eval Gate (#1161)
 
 `infra/agent-image/build-and-push.sh` refuses to push an agent image that has
-not been proven to boot and answer. This page documents the gate's four checks,
+not been proven to boot and answer. This page documents the gate's five checks,
 how to satisfy the runtime half, and how to override it when you must.
 
 The gate exists because the image is an artifact optimised against an
@@ -9,17 +9,19 @@ evaluator, and three separate regressions reached production before it did:
 a dead-boot image (r10), a missing provider (r11), and a silently truncated
 `SOUL.md`. Every one of them is caught on a laptop by the checks below.
 
-## The four checks
+## The five checks
 
 | # | Check | Kind | Fails on |
 |---|-------|------|----------|
 | 1 | Instruction-budget (`check_bootstrap_budget.py`) | static | a bootstrap file that would be truncated at boot |
-| 2 | Config self-consistency (`check_config_consistency.py`) | static | bad `contextWindow` / `apiKey` hydration in `openclaw.json` |
-| 3 | Boot probe | runtime | no `BOOT_OK` within `PROBE_BOOT_TIMEOUT` (default 120s) |
-| 4 | Canary turn | runtime | `/invocations` does not answer `OK` |
+| 2 | Config self-consistency (`check_config_consistency.py`) | static | bad `contextWindow`, `apiKey` hydration, plugin compatibility, or web-search provider readiness in `openclaw.json` / `Dockerfile` |
+| 3 | Plugin-aware config validation | build | the complete config is invalid after the pinned custom plugins are installed |
+| 4 | Boot probe | runtime | no `BOOT_OK` within `PROBE_BOOT_TIMEOUT` (default 120s) |
+| 5 | Canary turn | runtime | `/invocations` does not answer `OK` |
 
-Static checks run before the build. The runtime checks run against the freshly
-built image, before `docker push`.
+Static checks run before the build. Plugin-aware validation runs inside the
+image after the official Bedrock and Parallel plugins are installed. The
+runtime checks run against the freshly built image, before `docker push`.
 
 ## Why the runtime half needs a signed context
 
