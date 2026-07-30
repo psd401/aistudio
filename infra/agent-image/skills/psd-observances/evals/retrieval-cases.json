@@ -1,0 +1,706 @@
+{
+  "version": 1,
+  "publication": "Resources for Planning the School Calendar, 2026-2027",
+  "questions": [
+    {
+      "id": "named-american-education-week-2026",
+      "class": "A",
+      "question": "When is American Education Week in 2026?",
+      "argv": ["lookup", "American Education Week 2026"],
+      "expected": [
+        {
+          "name": "American Education Week",
+          "date": "Nov. 16-20, 2026",
+          "pages": [38]
+        }
+      ]
+    },
+    {
+      "id": "named-school-counseling-week-2027",
+      "class": "A",
+      "question": "When is National School Counseling Week in 2027?",
+      "argv": ["lookup", "National School Counseling Week 2027"],
+      "expected": [
+        {
+          "name": "National School Counseling Week",
+          "date": "Feb. 1-5, 2027",
+          "pages": [42]
+        }
+      ]
+    },
+    {
+      "id": "named-paraprofessionals-day-2026",
+      "class": "A",
+      "question": "When is Paraprofessionals Appreciation Day in 2026?",
+      "argv": ["lookup", "Paraprofessionals Appreciation Day 2026"],
+      "expected": [
+        {
+          "name": "Paraprofessionals Appreciation Day",
+          "date": "April 1, 2026",
+          "pages": [20]
+        }
+      ]
+    },
+    {
+      "id": "named-washington-school-holidays",
+      "class": "A",
+      "question": "What are Washington's school holidays?",
+      "argv": ["state", "Washington", "--section", "school"],
+      "expected": [
+        {
+          "name": "New Year's Day",
+          "date": "January 1",
+          "pages": [83]
+        },
+        {
+          "name": "Martin Luther King Jr.",
+          "date": "third Monday of January",
+          "pages": [83]
+        },
+        {
+          "name": "Presidents' Day",
+          "date": "third Monday of February",
+          "pages": [83]
+        },
+        {
+          "name": "Memorial Day",
+          "date": "last Monday of May",
+          "pages": [83]
+        },
+        {
+          "name": "Juneteenth",
+          "date": "June 19",
+          "pages": [83]
+        },
+        {
+          "name": "Independence Day",
+          "date": "July 4",
+          "pages": [83]
+        },
+        {
+          "name": "Labor Day",
+          "date": "first Monday in September",
+          "pages": [83]
+        },
+        {
+          "name": "Veterans Day",
+          "date": "November 11",
+          "pages": [83]
+        },
+        {
+          "name": "Thanksgiving Day",
+          "date": "fourth Thursday in November",
+          "pages": [83]
+        },
+        {
+          "name": "Native American Heritage Day",
+          "date": "Friday after the fourth Thursday in November",
+          "pages": [83]
+        },
+        {
+          "name": "Christmas Day",
+          "date": "December 25",
+          "pages": [83]
+        }
+      ]
+    },
+    {
+      "id": "named-national-pta-conference-2026",
+      "class": "A",
+      "question": "When is the National PTA conference in 2026?",
+      "argv": ["conferences", "--year", "2026", "--org", "National PTA"],
+      "expected": [
+        {
+          "name": "National PTA",
+          "date": "June 18-21, 2026",
+          "pages": [90]
+        }
+      ]
+    },
+    {
+      "id": "named-christmas-2029",
+      "class": "A",
+      "question": "What day of the week is Christmas in 2029?",
+      "argv": ["holiday-years", "Christmas 2029"],
+      "expected": [
+        {
+          "name": "Christmas",
+          "date": "Tuesday, Dec. 25, 2029",
+          "pages": [59]
+        }
+      ]
+    },
+    {
+      "id": "named-school-nurse-day-2026",
+      "class": "A",
+      "question": "When is National School Nurse Day in 2026?",
+      "argv": ["lookup", "National School Nurse Day 2026"],
+      "expected": [
+        {
+          "name": "National School Nurse Day",
+          "date": "May 6, 2026",
+          "pages": [25]
+        }
+      ]
+    },
+    {
+      "id": "named-principals-month-2026",
+      "class": "A",
+      "question": "When is National Principals Month in 2026?",
+      "argv": ["lookup", "National Principals Month 2026"],
+      "expected": [
+        {
+          "name": "National Principals Month",
+          "date": "Oct. 1-31, 2026",
+          "pages": [34]
+        }
+      ]
+    },
+    {
+      "id": "named-purim-2026",
+      "class": "A",
+      "question": "When is Purim in 2026?",
+      "argv": ["lookup", "Purim 2026"],
+      "expected": [
+        {
+          "name": "Purim",
+          "date": "March 2-3, 2026",
+          "pages": [16]
+        }
+      ]
+    },
+    {
+      "id": "named-rosh-hashanah-2026",
+      "class": "A",
+      "question": "When is Rosh Hashanah in 2026?",
+      "argv": ["lookup", "Rosh Hashanah 2026"],
+      "expected": [
+        {
+          "name": "Rosh Hashanah",
+          "date": "Sept. 11-13, 2026",
+          "pages": [32]
+        }
+      ]
+    },
+    {
+      "id": "named-teacher-appreciation-week-2027",
+      "class": "A",
+      "question": "When is National Teacher Appreciation Week in 2027?",
+      "argv": ["lookup", "National Teacher Appreciation Week 2027"],
+      "expected": [
+        {
+          "name": "National Teacher Appreciation Week",
+          "date": "May 3-7, 2027",
+          "pages": [52]
+        }
+      ]
+    },
+    {
+      "id": "named-independence-day-2031",
+      "class": "A",
+      "question": "What day of the week is Independence Day in 2031?",
+      "argv": ["holiday-years", "Independence Day 2031"],
+      "expected": [
+        {
+          "name": "Independence Day",
+          "date": "Friday, July 4, 2031",
+          "pages": [59]
+        }
+      ]
+    },
+    {
+      "id": "enumerate-november-2026",
+      "class": "B",
+      "question": "What observances are in November 2026?",
+      "argv": ["month", "2026-11"],
+      "expected": [
+        {
+          "name": "National Native American Heritage Month",
+          "date": "Nov. 1-30, 2026",
+          "pages": [37]
+        },
+        {
+          "name": "All Saints Day",
+          "date": "Nov. 1, 2026",
+          "pages": [37]
+        },
+        {
+          "name": "Standard Time",
+          "date": "Nov. 1, 2026",
+          "pages": [37]
+        },
+        {
+          "name": "Election Day",
+          "date": "Nov. 3, 2026",
+          "pages": [37]
+        },
+        {
+          "name": "Marie Curie's Birthday",
+          "date": "Nov. 7, 2026",
+          "pages": [37]
+        },
+        {
+          "name": "Diwali",
+          "date": "Nov. 8, 2026",
+          "pages": [37]
+        },
+        {
+          "name": "Birth of the Bab",
+          "date": "Nov. 10, 2026",
+          "pages": [37]
+        },
+        {
+          "name": "Veterans Day",
+          "date": "Nov. 11, 2026",
+          "pages": [37]
+        },
+        {
+          "name": "Elizabeth Cady Stanton's Birthday",
+          "date": "Nov. 12, 2026",
+          "pages": [37]
+        },
+        {
+          "name": "World Kindness Day",
+          "date": "Nov. 13, 2026",
+          "pages": [38]
+        },
+        {
+          "name": "World Diabetes Day",
+          "date": "Nov. 14, 2026",
+          "pages": [38]
+        },
+        {
+          "name": "America Recycles Day",
+          "date": "Nov. 15, 2026",
+          "pages": [38]
+        },
+        {
+          "name": "American Education Week",
+          "date": "Nov. 16-20, 2026",
+          "pages": [38]
+        },
+        {
+          "name": "Geography Awareness Week",
+          "date": "Nov. 16-20, 2026",
+          "pages": [38]
+        },
+        {
+          "name": "Education Support Professionals Day",
+          "date": "Nov. 18, 2026",
+          "pages": [38]
+        },
+        {
+          "name": "Gettysburg Address Anniversary",
+          "date": "Nov. 19, 2026",
+          "pages": [38]
+        },
+        {
+          "name": "National Parental Involvement Day",
+          "date": "Nov. 19, 2026",
+          "pages": [38]
+        },
+        {
+          "name": "Anniversary of the Mexican Revolution",
+          "date": "Nov. 20, 2026",
+          "pages": [38]
+        },
+        {
+          "name": "Substitute Educators Day",
+          "date": "Nov. 20, 2026",
+          "pages": [39]
+        },
+        {
+          "name": "National Family Week",
+          "date": "Nov. 22-28, 2026",
+          "pages": [39]
+        },
+        {
+          "name": "Guru Nanak Dev Sahib's Birthday Festival",
+          "date": "Nov. 24, 2026",
+          "pages": [39]
+        },
+        {
+          "name": "Thanksgiving Day",
+          "date": "Nov. 26, 2026",
+          "pages": [39]
+        },
+        {
+          "name": "Mark Twain's Birthday",
+          "date": "Nov. 30, 2026",
+          "pages": [39]
+        }
+      ]
+    },
+    {
+      "id": "enumerate-march-awareness-months-2027",
+      "class": "B",
+      "question": "List every awareness month in March 2027.",
+      "argv": ["month", "2027-03"],
+      "expected": [
+        {
+          "name": "American Red Cross Month",
+          "date": "March 1-31, 2027",
+          "pages": [44]
+        },
+        {
+          "name": "Irish American Heritage Month",
+          "date": "March 1-31, 2027",
+          "pages": [44]
+        },
+        {
+          "name": "Middle Level Education Month",
+          "date": "March 1-31, 2027",
+          "pages": [44]
+        },
+        {
+          "name": "Music in Our Schools Month",
+          "date": "March 1-31, 2027",
+          "pages": [45]
+        },
+        {
+          "name": "National Nutrition Month",
+          "date": "March 1-31, 2027",
+          "pages": [45]
+        },
+        {
+          "name": "Social Work Month",
+          "date": "March 1-31, 2027",
+          "pages": [45]
+        },
+        {
+          "name": "Women's History Month",
+          "date": "March 1-31, 2027",
+          "pages": [45]
+        },
+        {
+          "name": "Youth Art Month",
+          "date": "March 1-31, 2027",
+          "pages": [45]
+        }
+      ]
+    },
+    {
+      "id": "enumerate-june-conferences-2026",
+      "class": "B",
+      "question": "Which education conferences happen in June 2026?",
+      "argv": ["search", "education conferences June 2026"],
+      "expected": [
+        {
+          "name": "American Association of Family and Consumer Sciences",
+          "date": "June 18-21, 2026",
+          "pages": [90]
+        },
+        {
+          "name": "National PTA",
+          "date": "June 18-21, 2026",
+          "pages": [90]
+        },
+        {
+          "name": "Council of Chief State School Officers",
+          "date": "June 22-24, 2026",
+          "pages": [90]
+        },
+        {
+          "name": "American Library Association",
+          "date": "June 25-29, 2026",
+          "pages": [90]
+        },
+        {
+          "name": "ASCD",
+          "date": "June 28-July 1, 2026",
+          "pages": [90]
+        },
+        {
+          "name": "International Society for Technology in Education",
+          "date": "June 28-July 1, 2026",
+          "pages": [90]
+        },
+        {
+          "name": "National Association of School Nurses",
+          "date": "June 29-July 2, 2026",
+          "pages": [90]
+        }
+      ]
+    },
+    {
+      "id": "enumerate-jewish-holidays-2026",
+      "class": "B",
+      "question": "What are all the Jewish holidays listed for 2026?",
+      "argv": ["search", "Jewish holidays 2026"],
+      "expected": [
+        {
+          "name": "Purim",
+          "date": "March 2-3, 2026",
+          "pages": [16]
+        },
+        {
+          "name": "Passover First Days",
+          "date": "April 1-2, 2026",
+          "pages": [19]
+        },
+        {
+          "name": "Passover Concluding Days",
+          "date": "April 8-9, 2026",
+          "pages": [20]
+        },
+        {
+          "name": "Holocaust Remembrance Day Yom Hashoah",
+          "date": "April 13-14, 2026",
+          "pages": [21]
+        },
+        {
+          "name": "Shavuot Festival of Weeks",
+          "date": "May 21-23, 2026",
+          "pages": [26]
+        },
+        {
+          "name": "Rosh Hashanah",
+          "date": "Sept. 11-13, 2026",
+          "pages": [32]
+        },
+        {
+          "name": "Yom Kippur Day of Atonement",
+          "date": "Sept. 20-21, 2026",
+          "pages": [32]
+        },
+        {
+          "name": "Sukkot Feast of Tabernacles",
+          "date": "Sept. 25-Oct. 2, 2026",
+          "pages": [33]
+        },
+        {
+          "name": "Shemini Atzeret",
+          "date": "Oct. 2-3, 2026",
+          "pages": [34]
+        },
+        {
+          "name": "Simchat Torah",
+          "date": "Oct. 3-4, 2026",
+          "pages": [34]
+        },
+        {
+          "name": "Hanukkah Festival of Lights",
+          "date": "Dec. 4-12, 2026",
+          "pages": [39]
+        }
+      ]
+    },
+    {
+      "id": "enumerate-april-first-2026",
+      "class": "B",
+      "question": "What observances fall on April 1, 2026?",
+      "argv": ["on", "--date", "2026-04-01"],
+      "expected": [
+        {
+          "name": "APR Month",
+          "date": "April 1-30, 2026",
+          "pages": [19]
+        },
+        {
+          "name": "National Occupational Therapy Month",
+          "date": "April 1-30, 2026",
+          "pages": [19]
+        },
+        {
+          "name": "National Poetry Month",
+          "date": "April 1-30, 2026",
+          "pages": [19]
+        },
+        {
+          "name": "School Library Month",
+          "date": "April 1-30, 2026",
+          "pages": [19]
+        },
+        {
+          "name": "World Autism Month",
+          "date": "April 1-30, 2026",
+          "pages": [19]
+        },
+        {
+          "name": "Passover First Days",
+          "date": "April 1-2, 2026",
+          "pages": [19]
+        },
+        {
+          "name": "April Fools' Day",
+          "date": "April 1, 2026",
+          "pages": [19]
+        },
+        {
+          "name": "Paraprofessionals Appreciation Day",
+          "date": "April 1, 2026",
+          "pages": [20]
+        }
+      ]
+    },
+    {
+      "id": "enumerate-may-awareness-months-2026",
+      "class": "B",
+      "question": "List every awareness month in May 2026.",
+      "argv": ["month", "2026-05"],
+      "expected": [
+        {
+          "name": "Asian Pacific American Heritage Month",
+          "date": "May 1-31, 2026",
+          "pages": [23]
+        },
+        {
+          "name": "Jewish American Heritage Month",
+          "date": "May 1-31, 2026",
+          "pages": [23]
+        },
+        {
+          "name": "National Physical Fitness and Sports Month",
+          "date": "May 1-31, 2026",
+          "pages": [23]
+        },
+        {
+          "name": "National Speech-Language-Hearing Month",
+          "date": "May 1-31, 2026",
+          "pages": [23]
+        },
+        {
+          "name": "Preservation Month",
+          "date": "May 1-31, 2026",
+          "pages": [23]
+        }
+      ]
+    },
+    {
+      "id": "enumerate-major-holidays-2031",
+      "class": "B",
+      "question": "List the major civil and religious holidays in 2031.",
+      "argv": ["holiday-years", "major civil religious holidays"],
+      "expected": [
+        {
+          "name": "New Year's Day",
+          "date": "Wednesday, Jan. 1, 2031",
+          "pages": [59]
+        },
+        {
+          "name": "Martin Luther King Jr.'s Birthday",
+          "date": "Monday, Jan. 20, 2031",
+          "pages": [59]
+        },
+        {
+          "name": "Presidents' Day",
+          "date": "Monday, Feb. 17, 2031",
+          "pages": [59]
+        },
+        {
+          "name": "Passover",
+          "date": "Monday, April 7, 2031",
+          "pages": [59]
+        },
+        {
+          "name": "Easter",
+          "date": "Sunday, April 13, 2031",
+          "pages": [59]
+        },
+        {
+          "name": "Memorial Day",
+          "date": "Monday, May 26, 2031",
+          "pages": [59]
+        },
+        {
+          "name": "Juneteenth National Independence Day",
+          "date": "Thursday, June 19, 2031",
+          "pages": [59]
+        },
+        {
+          "name": "Independence Day",
+          "date": "Friday, July 4, 2031",
+          "pages": [59]
+        },
+        {
+          "name": "Labor Day",
+          "date": "Monday, Sept. 1, 2031",
+          "pages": [59]
+        },
+        {
+          "name": "Rosh Hashanah",
+          "date": "Wednesday, Sept. 17, 2031",
+          "pages": [59]
+        },
+        {
+          "name": "Yom Kippur",
+          "date": "Friday, Sept. 26, 2031",
+          "pages": [59]
+        },
+        {
+          "name": "Columbus Discoverers Indigenous People's Day",
+          "date": "Monday, Oct. 13, 2031",
+          "pages": [59]
+        },
+        {
+          "name": "Election Day",
+          "date": "Tuesday, Nov. 4, 2031",
+          "pages": [59]
+        },
+        {
+          "name": "Veterans Day",
+          "date": "Tuesday, Nov. 11, 2031",
+          "pages": [59]
+        },
+        {
+          "name": "Thanksgiving",
+          "date": "Thursday, Nov. 27, 2031",
+          "pages": [59]
+        },
+        {
+          "name": "Christmas",
+          "date": "Thursday, Dec. 25, 2031",
+          "pages": [59]
+        }
+      ]
+    },
+    {
+      "id": "enumerate-july-conferences-2026",
+      "class": "B",
+      "question": "Which education conferences happen in July 2026?",
+      "argv": ["search", "education conferences July 2026"],
+      "expected": [
+        {
+          "name": "National Education Association",
+          "date": "July 3-7, 2026",
+          "pages": [90]
+        },
+        {
+          "name": "American School Counselor Association",
+          "date": "July 11-14, 2026",
+          "pages": [90]
+        },
+        {
+          "name": "National Association of Educational Office Professionals",
+          "date": "July 12-15, 2026",
+          "pages": [91]
+        },
+        {
+          "name": "School Nutrition Association",
+          "date": "July 12-14, 2026",
+          "pages": [91]
+        },
+        {
+          "name": "National Association of Elementary School Principals",
+          "date": "July 13-15, 2026",
+          "pages": [91]
+        },
+        {
+          "name": "American Federation of Teachers",
+          "date": "July 16-19, 2026",
+          "pages": [91]
+        },
+        {
+          "name": "National School Public Relations Association",
+          "date": "July 19-22, 2026",
+          "pages": [91]
+        },
+        {
+          "name": "Society for Nutrition Education and Behavior",
+          "date": "July 29-August 1, 2026",
+          "pages": [91]
+        }
+      ]
+    }
+  ]
+}

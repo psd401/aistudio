@@ -166,8 +166,27 @@ phrasing intact so skill discovery continues to work.
 
 Run the committed `psd-observances` retrieval evaluation against the real
 repository in the target environment, not mocks. The evaluation gate is
-tracked in [#1477](https://github.com/psd401/aistudio/issues/1477); if its
-runnable harness is not yet available, the refresh cannot pass this step.
+documented in the
+[live retrieval evaluation guide](../../infra/agent-image/skills/psd-observances/evals/retrieval-eval.md).
+Provide a short-lived key through `PSD_OBSERVANCES_EVAL_API_KEY`; never pass a
+key on the command line:
+
+```bash
+export PSD_OBSERVANCES_EVAL_API_KEY="<short-lived repository-read key>"
+
+bun run eval:skill:psd-observances-retrieval -- \
+  --environment dev \
+  --base-url https://dev.aistudio.psd401.ai \
+  --out /tmp/psd-observances-dev-retrieval-report.json
+
+unset PSD_OBSERVANCES_EVAL_API_KEY
+```
+
+Change both the environment label and base URL for production. The key needs
+only `repositories:list`, `repositories:read`, and `repositories:search`.
+Reports are transcript-free, but keep them in an environment-specific
+temporary path until their names/dates, citations, and aggregate figures have
+been reviewed.
 
 Verify expected answers against the authorized printed source, then record:
 
