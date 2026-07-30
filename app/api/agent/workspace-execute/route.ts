@@ -8,8 +8,10 @@ import {
 import { getFreshAccessTokenForUser } from "@/lib/agent/workspace-token"
 import {
   executeWorkspaceCommand,
+  outboundMessageAudit,
   requiredWorkspaceScopeGap,
   validateEmailTaskWorkspaceCommand,
+  validateScheduledWorkspaceCommand,
   validateWorkspaceCommand,
   type WorkspaceCommand,
 } from "@/lib/agent-workspace/command-executor"
@@ -65,6 +67,8 @@ function validateCommandForMode(
   try {
     if (mode === "email-task") {
       validateEmailTaskWorkspaceCommand(command)
+    } else if (mode === "scheduled") {
+      validateScheduledWorkspaceCommand(command)
     } else {
       validateWorkspaceCommand(command)
     }
@@ -196,6 +200,7 @@ export async function POST(request: NextRequest) {
     const token = await workspaceAccessToken(body, context.ownerEmail)
     if (!token.ok) return token.response
     const result = await executeWorkspaceCommand(body, token.accessToken)
+    const outbound = outboundMessageAudit(body.argv)
     log.info(
       "Workspace command completed",
       sanitizeForLogging({
@@ -203,6 +208,12 @@ export async function POST(request: NextRequest) {
         ownerEmail: context.ownerEmail,
         scope: body.scope,
         operation: body.argv.slice(0, 4),
+        ...(outbound
+          ? {
+              outboundSpace: outbound.space,
+              outboundTextLength: outbound.textLength,
+            }
+          : {}),
       })
     )
     return NextResponse.json(result)

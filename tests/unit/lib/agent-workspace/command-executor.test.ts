@@ -1,6 +1,8 @@
 import {
+  outboundMessageAudit,
   requiredWorkspaceScopeGap,
   validateEmailTaskWorkspaceCommand,
+  validateScheduledWorkspaceCommand,
   validateWorkspaceCommand,
 } from "@/lib/agent-workspace/command-executor"
 
@@ -267,6 +269,105 @@ function defineTrustedWorkspaceCommandPolicySuite1Part3() {it("rejects Gmail mod
       validateWorkspaceCommand({ scope: "agent", argv })
     ).not.toThrow()
   })
+
+  it.each([
+    [
+      "helper",
+      [
+        "chat",
+        "+send",
+        "--space",
+        "spaces/AAQA13FQZFA",
+        "--text",
+        "Test summary",
+      ],
+    ],
+    [
+      "raw API",
+      [
+        "chat",
+        "spaces",
+        "messages",
+        "create",
+        "--params",
+        '{"parent":"spaces/AAQA13FQZFA"}',
+        "--json",
+        '{"text":"Test summary"}',
+      ],
+    ],
+  ])("allows agent-owned Chat messages through the %s form", (_name, argv) => {
+    expect(() =>
+      validateWorkspaceCommand({ scope: "agent", argv })
+    ).not.toThrow()
+  })
+
+  it.each([
+    [
+      "helper",
+      [
+        "chat",
+        "+send",
+        "--space",
+        "spaces/AAQA13FQZFA",
+        "--text",
+        "No",
+      ],
+    ],
+    [
+      "raw API",
+      [
+        "chat",
+        "spaces",
+        "messages",
+        "create",
+        "--params",
+        '{"parent":"spaces/AAQA13FQZFA"}',
+        "--json",
+        '{"text":"No"}',
+      ],
+    ],
+  ])("keeps Chat message writes off the human user slot via %s", (_name, argv) => {
+    expect(() =>
+      validateWorkspaceCommand({ scope: "user", argv })
+    ).toThrow(/agent-owned Workspace account/)
+  })
+
+  it("does not let the Chat send helper hide before a read action", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: ["chat", "+send", "list"],
+      })
+    ).toThrow(/contains a mutation/)
+  })
+
+  it.each([
+    [
+      "helper",
+      [
+        "chat",
+        "+send",
+        "--space",
+        "spaces/AAQA13FQZFA",
+        "--text",
+        "No",
+      ],
+    ],
+    ["raw API", ["chat", "spaces", "messages", "create", "--json", "{}"]],
+  ])("blocks %s Chat sends from scheduled runs", (_name, argv) => {
+    expect(() =>
+      validateScheduledWorkspaceCommand({ scope: "agent", argv })
+    ).toThrow(/without live user confirmation/)
+  })
+
+  it("keeps scheduled Workspace reads available", () => {
+    expect(() =>
+      validateScheduledWorkspaceCommand({
+        scope: "agent",
+        argv: ["chat", "spaces", "messages", "list"],
+      })
+    ).not.toThrow()
+  })
 }
 
 const defineTrustedWorkspaceCommandPolicySuite1 = () => {
@@ -314,3 +415,133 @@ const defineWorkspaceUserSlotScopeUpgradesSuite2 = () => {
 };
 
 describe("Workspace user-slot scope upgrades", defineWorkspaceUserSlotScopeUpgradesSuite2)
+
+const defineWorkspaceHelperVerbSmugglingSuite3 = () => {
+  it.each([
+    ["gmail +reply", ["gmail", "+reply", "list"]],
+    ["gmail +reply-all", ["gmail", "+reply-all", "list"]],
+    ["gmail +forward", ["gmail", "+forward", "get"]],
+    ["gmail +send", ["gmail", "+send", "list"]],
+    ["chat +send", ["chat", "+send", "get"]],
+  ])(
+    "refuses %s hidden behind a trailing read action on the user slot",
+    (_name, argv) => {
+      expect(() =>
+        validateWorkspaceCommand({ scope: "user", argv })
+      ).toThrow(/contains a mutation/)
+      expect(() =>
+        validateWorkspaceCommand({ scope: "agent", argv })
+      ).toThrow(/contains a mutation/)
+    }
+  )
+
+  it("still allows ordinary read commands", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: ["gmail", "users", "messages", "list"],
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: ["chat", "spaces", "list"],
+      })
+    ).not.toThrow()
+  })
+};
+
+describe("Workspace helper-verb read smuggling", defineWorkspaceHelperVerbSmugglingSuite3)
+
+const defineWorkspaceOutboundAuditSuite4 = () => {
+  it("records the destination and body length of a helper-form Chat send", () => {
+    expect(
+      outboundMessageAudit([
+        "chat",
+        "+send",
+        "--space",
+        "spaces/AAQA13FQZFA",
+        "--text",
+        "Daily digest",
+      ])
+    ).toEqual({ space: "spaces/AAQA13FQZFA", textLength: 12 })
+  })
+
+  it("recovers the destination the logged operation prefix cannot see", () => {
+    expect(
+      outboundMessageAudit([
+        "chat",
+        "spaces",
+        "messages",
+        "create",
+        "--params",
+        JSON.stringify({ parent: "spaces/AAQA13FQZFA" }),
+        "--json",
+        JSON.stringify({ text: "Daily digest" }),
+      ])
+    ).toEqual({ space: "spaces/AAQA13FQZFA", textLength: 12 })
+  })
+
+  it("unwraps a resource-wrapped raw payload", () => {
+    expect(
+      outboundMessageAudit([
+        "chat",
+        "spaces",
+        "messages",
+        "create",
+        "--params",
+        JSON.stringify({ parent: "spaces/AAQA13FQZFA" }),
+        "--json",
+        JSON.stringify({ resource: { text: "Hi" } }),
+      ])
+    ).toEqual({ space: "spaces/AAQA13FQZFA", textLength: 2 })
+  })
+
+  it("returns null for operations that do not leave the owner's Workspace", () => {
+    expect(
+      outboundMessageAudit(["gmail", "users", "drafts", "create"])
+    ).toBeNull()
+    expect(outboundMessageAudit(["chat", "spaces", "list"])).toBeNull()
+  })
+
+  it("reports a missing destination rather than inventing one", () => {
+    expect(
+      outboundMessageAudit(["chat", "+send", "--text", "orphan"])
+    ).toEqual({ space: null, textLength: 6 })
+  })
+
+  it.each([
+    ["helper", ["chat", "+send", "--space", "spaces/X", "--text", "hi"]],
+    [
+      "raw API",
+      ["chat", "spaces", "messages", "create", "--params", '{"parent":"s"}'],
+    ],
+  ])("audits every allowlisted Chat write via the %s form", (_name, argv) => {
+    expect(() => validateWorkspaceCommand({ scope: "agent", argv })).not.toThrow()
+    expect(outboundMessageAudit(argv)).not.toBeNull()
+  })
+};
+
+describe("Workspace outbound message audit", defineWorkspaceOutboundAuditSuite4)
+
+const defineEmailTaskChatRejectionSuite5 = () => {
+  it.each([
+    ["helper", ["chat", "+send", "--space", "spaces/X", "--text", "hi"]],
+    [
+      "raw API",
+      ["chat", "spaces", "messages", "create", "--params", '{"parent":"s"}'],
+    ],
+  ])("keeps sender-influenced email tasks from sending Chat via %s", (
+    _name,
+    argv
+  ) => {
+    expect(() =>
+      validateEmailTaskWorkspaceCommand({ scope: "agent", argv })
+    ).toThrow(/only insert a user-owned Google task/)
+    expect(() =>
+      validateEmailTaskWorkspaceCommand({ scope: "user", argv })
+    ).toThrow()
+  })
+};
+
+describe("Email-task mode excludes Chat sends", defineEmailTaskChatRejectionSuite5)
