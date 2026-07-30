@@ -34,7 +34,7 @@
     "test:smoke:unified-content": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run tests/smoke/unified-content-foundation.smoke.ts",
     "test:smoke:nexus-ephemeral": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run tests/smoke/nexus-ephemeral-repositories.smoke.ts",
     "test:smoke:repository-upload-quota": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run tests/smoke/repository-upload-quota.smoke.ts",
-    "test:smoke:repository-pending-deletion": "bun run tests/smoke/repository-pending-deletion.smoke.ts",
+    "test:smoke:repository-pending-deletion": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run tests/smoke/repository-pending-deletion.smoke.ts",
     "test:smoke:google-content": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run tests/smoke/google-content-connectors.smoke.ts",
     "test:smoke:roster-email-match": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run tests/smoke/roster-email-match-report.smoke.ts",
     "test:smoke:agents-projects": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun --preload ./tests/smoke/server-only-preload.js tests/smoke/unified-content-agents-projects.smoke.ts",
