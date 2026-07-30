@@ -4,7 +4,10 @@
 The eval runner bind-mounts this file over ``/app/mantle_proxy.py`` in L1
 candidate containers. The existing wrapper therefore starts it on
 127.0.0.1:18791 without modifying the image. Trial fixtures and captures move
-through a root-owned in-container tmpfs.
+through a root-owned in-container tmpfs. Mantle candidates also use that same
+root-owned process for model inference, so the stub preserves the production
+relay's exact, allowlisted model routes instead of intercepting them as fixture
+traffic.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import sys
 import threading
@@ -32,6 +36,30 @@ from urllib.parse import urlsplit
 
 
 LOGGER = logging.getLogger("agent_eval_broker_stub")
+CANDIDATE_MANTLE_API = os.environ.pop("CANDIDATE_MANTLE_API", "").strip()
+CANDIDATE_MANTLE_BASE_URL = os.environ.pop(
+    "CANDIDATE_MANTLE_BASE_URL", ""
+).strip()
+CANDIDATE_MANTLE_BEARER_TOKEN = os.environ.pop(
+    "CANDIDATE_MANTLE_BEARER_TOKEN", ""
+).strip()
+CANDIDATE_MANTLE_MODEL_ID = os.environ.pop(
+    "CANDIDATE_MANTLE_MODEL_ID", ""
+).strip()
+CANDIDATE_MANTLE_PREFIX = "candidate-mantle"
+CANDIDATE_MANTLE_OPERATIONS = {
+    "openai-completions": (
+        frozenset({("GET", "models"), ("POST", "chat/completions")}),
+        "/v1",
+    ),
+    "anthropic-messages": (
+        frozenset({("POST", "v1/messages")}),
+        "/anthropic",
+    ),
+}
+CANDIDATE_MANTLE_HOST_RE = re.compile(
+    r"bedrock-mantle\.[a-z0-9-]+\.api\.aws"
+)
 CONTROL_DIRECTORY_ENV = "AGENT_EVAL_BROKER_CONTROL_DIR"
 DEFAULT_CONTROL_DIRECTORY = "/run/psd-agent-eval-broker"
 DEFAULT_WORKSPACE_FLUSH_TOKEN_PATH = (
@@ -84,6 +112,92 @@ ALLOWED_AGENT_BROKER_ROUTES = frozenset(
 
 class BrokerStubConfigurationError(RuntimeError):
     """The runner supplied an invalid or unreadable trial fixture."""
+
+
+class CandidateMantleAuthorityUnavailable(BrokerStubConfigurationError):
+    """A paid candidate inference arrived outside an authorized trial."""
+
+
+def _candidate_mantle_configuration() -> tuple[str, str, str, str] | None:
+    """Validate the root-only direct-Mantle relay environment."""
+
+    values = (
+        CANDIDATE_MANTLE_API,
+        CANDIDATE_MANTLE_BASE_URL,
+        CANDIDATE_MANTLE_BEARER_TOKEN,
+        CANDIDATE_MANTLE_MODEL_ID,
+    )
+    if not any(values):
+        return None
+    if (
+        not all(values)
+        or CANDIDATE_MANTLE_API not in CANDIDATE_MANTLE_OPERATIONS
+    ):
+        raise BrokerStubConfigurationError(
+            "candidate Mantle relay configuration is incomplete"
+        )
+    _, expected_base_path = CANDIDATE_MANTLE_OPERATIONS[
+        CANDIDATE_MANTLE_API
+    ]
+    parsed = urlsplit(CANDIDATE_MANTLE_BASE_URL)
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise BrokerStubConfigurationError(
+            "candidate Mantle base URL has an invalid port"
+        ) from error
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname is None
+        or not CANDIDATE_MANTLE_HOST_RE.fullmatch(parsed.hostname)
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.path != expected_base_path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise BrokerStubConfigurationError(
+            "candidate Mantle base URL is not an exact AWS endpoint"
+        )
+    return values
+
+
+def _resolve_candidate_mantle_request(
+    method: str,
+    path: str,
+    body: bytes | None,
+    configuration: tuple[str, str, str, str] | None,
+) -> str | None:
+    """Map one fixed model operation to the configured AWS endpoint."""
+
+    prefix = f"/{CANDIDATE_MANTLE_PREFIX}/"
+    if not path.startswith(prefix):
+        return None
+    if configuration is None:
+        raise BrokerStubConfigurationError(
+            "candidate Mantle relay is disabled"
+        )
+    provider_api, base_url, _, model_id = configuration
+    allowed_operations, _ = CANDIDATE_MANTLE_OPERATIONS[provider_api]
+    relative_path = path[len(prefix) :]
+    if (method, relative_path) not in allowed_operations:
+        raise BrokerStubConfigurationError(
+            "unsupported candidate Mantle operation"
+        )
+    if method == "GET":
+        return f"{base_url}/{relative_path}"
+    try:
+        payload = json.loads(body) if body else None
+    except (TypeError, ValueError) as error:
+        raise BrokerStubConfigurationError(
+            "candidate Mantle request must be JSON"
+        ) from error
+    if not isinstance(payload, Mapping) or payload.get("model") != model_id:
+        raise BrokerStubConfigurationError(
+            "candidate Mantle request model does not match"
+        )
+    return f"{base_url}/{relative_path}"
 
 
 def _trusted_app_base_url(value: str) -> bool:
@@ -418,6 +532,9 @@ class BrokerStubState:
                 "APP_BASE_URL is not a trusted model broker URL"
             )
         self.model_upstream_base_url = configured_upstream
+        self.candidate_mantle_configuration = (
+            _candidate_mantle_configuration()
+        )
         self._runner_control_token = _ensure_runner_control_token(
             control_directory
         )
@@ -554,6 +671,99 @@ class BrokerStubState:
                 raise BrokerStubConfigurationError(
                     "model broker response exceeds eval stub limit"
                 )
+            return (
+                response.status,
+                response.headers.get(
+                    "Content-Type",
+                    "application/octet-stream",
+                ),
+                response_body,
+            )
+        finally:
+            response.close()
+
+    def forward_candidate_mantle_request(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None,
+        request_headers: Mapping[str, str],
+    ) -> tuple[int, str, bytes]:
+        """Preserve the production candidate relay while L1 fixtures are active.
+
+        Candidate model traffic is deliberately never written to the fixture
+        capture. It can contain prompts and tool arguments, while eval records
+        retain only the resulting pass/fail and operational metadata.
+        """
+
+        upstream = _resolve_candidate_mantle_request(
+            method,
+            path,
+            body,
+            self.candidate_mantle_configuration,
+        )
+        if upstream is None or self.candidate_mantle_configuration is None:
+            raise BrokerStubConfigurationError(
+                "candidate Mantle relay is unavailable"
+            )
+        if method != "GET":
+            try:
+                _read_invocation_authority(
+                    self.invocation_context_path,
+                    self.request_proof_key_path,
+                )
+            except (OSError, ValueError) as error:
+                raise CandidateMantleAuthorityUnavailable(
+                    "invocation authority is unavailable"
+                ) from error
+
+        _, _, bearer_token, model_id = self.candidate_mantle_configuration
+        excluded_headers = {
+            "accept-encoding",
+            "authorization",
+            "connection",
+            "content-length",
+            "host",
+            "transfer-encoding",
+            "x-api-key",
+            "x-agent-invocation-context",
+            "x-agent-request-proof-version",
+            "x-agent-request-proof-timestamp",
+            "x-agent-request-proof-nonce",
+            "x-agent-request-proof-body-sha256",
+            "x-agent-request-proof-signature",
+        }
+        headers = {
+            key: value
+            for key, value in request_headers.items()
+            if key.lower() not in excluded_headers
+        }
+        headers["Authorization"] = f"Bearer {bearer_token}"
+        request = urllib_request.Request(
+            upstream,
+            data=body if method != "GET" else None,
+            method=method,
+            headers=headers,
+        )
+        opener = urllib_request.build_opener(_NoRedirectHandler())
+        try:
+            response = opener.open(request, timeout=300)
+        except urllib_error.HTTPError as error:
+            response = error
+        try:
+            response_body = response.read(MAX_MODEL_RESPONSE_BYTES + 1)
+            if len(response_body) > MAX_MODEL_RESPONSE_BYTES:
+                raise BrokerStubConfigurationError(
+                    "candidate Mantle response exceeds eval stub limit"
+                )
+            LOGGER.info(
+                "candidate Mantle relay method=%s path=%s model=%s status=%d bytes=%d",
+                method,
+                path,
+                model_id,
+                response.status,
+                len(response_body),
+            )
             return (
                 response.status,
                 response.headers.get(
@@ -917,6 +1127,45 @@ class BrokerStubRequestHandler(BaseHTTPRequestHandler):
                 },
             )
 
+    def _handle_candidate_mantle(self, path: str) -> None:
+        try:
+            body: bytes | None = None
+            if self.command != "GET":
+                body, _ = self._read_body()
+            status, content_type, response_body = (
+                self.server.state.forward_candidate_mantle_request(
+                    self.command,
+                    path,
+                    body,
+                    {
+                        key: value
+                        for key, value in self.headers.items()
+                    },
+                )
+            )
+            self._send_body(status, response_body, content_type)
+        except CandidateMantleAuthorityUnavailable:
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"error": "Invocation authority is unavailable"},
+            )
+        except BrokerStubConfigurationError as error:
+            self._send_json(
+                HTTPStatus.NOT_FOUND,
+                {
+                    "error": "EvalUnsupportedCandidateModelOperation",
+                    "message": str(error),
+                },
+            )
+        except (OSError, urllib_error.URLError) as error:
+            self._send_json(
+                HTTPStatus.BAD_GATEWAY,
+                {
+                    "error": "EvalCandidateModelRelayUnavailable",
+                    "message": str(error),
+                },
+            )
+
     def _capture_finalization_rejection(self, route: str) -> None:
         try:
             trial = self.server.state.load_trial()
@@ -942,6 +1191,19 @@ class BrokerStubRequestHandler(BaseHTTPRequestHandler):
     def _handle(self) -> None:
         path = urlsplit(self.path).path
         if self._handle_control(path):
+            return
+        if path.startswith(f"/{CANDIDATE_MANTLE_PREFIX}/"):
+            entered, _ = self.server.state.enter_request()
+            if not entered:
+                self._send_json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": FINALIZING_ERROR},
+                )
+                return
+            try:
+                self._handle_candidate_mantle(path)
+            finally:
+                self.server.state.leave_request()
             return
         if path.startswith("/agent-broker/"):
             route = path[len("/agent-broker") :]

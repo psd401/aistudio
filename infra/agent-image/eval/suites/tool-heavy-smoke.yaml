@@ -1,0 +1,5 @@
+# Fast L1 smoke across three independent broker-backed tool paths.
+tasks:
+  - ../../skills/psd-credentials/evals/check-capability.yaml
+  - ../../skills/psd-aistudio/evals/repository-list.yaml
+  - ../../skills/psd-github/evals/view-issue-read-only.yaml
