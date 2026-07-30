@@ -12,7 +12,7 @@ AgentCore runtime.
 - AI Studio image source:
   `68da9634b585515303031e14bf9f78f4db9808ca`
 - Final evaluator, suite, and grader revision:
-  `b9425167de0359b2ba866086d9ae33ce411f3936`
+  `0e3ab3a712f8ca6334bfb807262d4e01dd9359f8`
 - 50 tasks per arm: 32 regression and 18 capability
 - 3 trials per task; pass^3 requires all three to pass
 - Same ARM64 host and synthetic owner for every arm

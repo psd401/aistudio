@@ -1,5 +1,5 @@
 {
-  "eval_harness_commit": "b9425167de0359b2ba866086d9ae33ce411f3936",
+  "eval_harness_commit": "0e3ab3a712f8ca6334bfb807262d4e01dd9359f8",
   "image": "390844780692.dkr.ecr.us-east-1.amazonaws.com/psd-agent-base-dev@sha256:6aaa879b034bed2b44af8d25aa4a681a65c1f896d4632af7c18e2bc14eff5825",
   "image_digest": "sha256:6aaa879b034bed2b44af8d25aa4a681a65c1f896d4632af7c18e2bc14eff5825",
   "model": {
