@@ -34,6 +34,7 @@ def metadata(session_id: str, **extra: object) -> dict[str, object]:
         "output_tokens": 2,
         "cache_read_input_tokens": 3,
         "cache_write_input_tokens": 4,
+        "usage_capture_complete": True,
         "model_call_count": 1,
         "duration_ms": 120,
         "latency_ms": 100,

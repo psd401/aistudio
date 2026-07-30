@@ -240,6 +240,14 @@ def _validate_record(
     for field in ("nudged", "failed"):
         if not isinstance(metadata.get(field), bool):
             raise EvalSummaryError(f"{label} metadata.{field} must be a boolean")
+    usage_capture_complete = metadata.get("usage_capture_complete")
+    if (
+        usage_capture_complete is not None
+        and not isinstance(usage_capture_complete, bool)
+    ):
+        raise EvalSummaryError(
+            f"{label} metadata.usage_capture_complete must be a boolean"
+        )
     error_class = metadata.get("error_class")
     if error_class is not None and not isinstance(error_class, str):
         raise EvalSummaryError(f"{label} metadata.error_class must be a string or null")
@@ -315,6 +323,7 @@ def _telemetry_summary(
         model_calls.append(record_model_calls)
         usage_complete = (
             usage_complete
+            and metadata.get("usage_capture_complete") is True
             and record_tokens["output_tokens"] >= record_model_calls
         )
         if metadata.get("nudged") is True:

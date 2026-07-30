@@ -69,6 +69,7 @@ def trial_record(
             "output_tokens": 200,
             "cache_read_input_tokens": cache_reads,
             "cache_write_input_tokens": 50,
+            "usage_capture_complete": True,
             "model_call_count": trial,
             "duration_ms": trial * 1000,
             "latency_ms": trial * 900,
@@ -192,7 +193,7 @@ class SummaryAggregationTests(unittest.TestCase):
     def test_incomplete_usage_marks_cache_and_cost_unknown(self):
         records = complete_records(cache_reads=0)
         for record in records:
-            record["metadata"]["output_tokens"] = 0
+            record["metadata"]["usage_capture_complete"] = False
 
         summary = summarize.summarize_records(records, pricing())
         telemetry = summary["overall"]["telemetry"]
@@ -209,7 +210,7 @@ class SummaryAggregationTests(unittest.TestCase):
 
     def test_one_incomplete_trial_is_not_masked_by_other_trials(self):
         records = complete_records()
-        records[0]["metadata"]["output_tokens"] = 0
+        records[0]["metadata"]["usage_capture_complete"] = False
 
         summary = summarize.summarize_records(records, pricing())
         telemetry = summary["overall"]["telemetry"]
@@ -226,6 +227,18 @@ class SummaryAggregationTests(unittest.TestCase):
                 "per_trial_usd": None,
                 "per_task_usd": None,
             },
+        )
+
+    def test_legacy_record_without_capture_flag_is_conservatively_unknown(self):
+        records = complete_records()
+        for record in records:
+            record["metadata"].pop("usage_capture_complete")
+
+        summary = summarize.summarize_records(records, pricing())
+
+        self.assertEqual(
+            summary["overall"]["telemetry"]["caching_status"],
+            "unknown",
         )
 
     def test_summary_contains_no_trial_transcript_fields_or_values(self):

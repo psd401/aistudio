@@ -88,6 +88,7 @@ REQUIRED_METADATA_FIELDS = frozenset(
         "output_tokens",
         "cache_read_input_tokens",
         "cache_write_input_tokens",
+        "usage_capture_complete",
         "model_call_count",
         "duration_ms",
         "latency_ms",

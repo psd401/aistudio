@@ -428,6 +428,7 @@ class TestChatDeadlineRegression(unittest.TestCase):
             "cache_read": 0,
             "cache_write": 0,
             "model_calls": 0,
+            "capture_complete": False,
         }
         with (
             mock.patch.dict(
@@ -582,6 +583,7 @@ class TranscriptUsageTests(unittest.TestCase):
             _assistant(6_000, inp=20, out=2, cr=30, cw=40),
         ])
         usage = self.adapter._read_turn_usage("s1", "main", 5_000)
+        self.assertTrue(usage["capture_complete"])
         self.assertEqual(usage["input"], 30)
         self.assertEqual(usage["output"], 3)
         self.assertEqual(usage["cache_read"], 30)
@@ -614,6 +616,7 @@ class TranscriptUsageTests(unittest.TestCase):
         # Non-zero interval so a wrongly-taken settle path would be visible.
         self.adapter.USAGE_SETTLE_INTERVAL_S = 0.05
         usage = self.adapter._read_turn_usage("nope", "main", 0)
+        self.assertFalse(usage["capture_complete"])
         self.assertEqual(usage["model_calls"], 0)
         self.assertLess(time.monotonic() - started, 0.05)
 
@@ -626,6 +629,7 @@ class TranscriptUsageTests(unittest.TestCase):
             encoding="utf-8",
         )
         usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertFalse(usage["capture_complete"])
         self.assertEqual(usage["input"], 11)
         self.assertEqual(usage["model_calls"], 1)
 
@@ -751,6 +755,7 @@ class TurnResultCacheFieldTests(unittest.TestCase):
         result = TurnResult(text="hi")
         self.assertEqual(result.cache_read, 0)
         self.assertEqual(result.cache_write, 0)
+        self.assertFalse(result.usage_capture_complete)
 
 
 class ChatErrorClassificationTests(unittest.TestCase):

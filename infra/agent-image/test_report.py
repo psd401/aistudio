@@ -83,6 +83,7 @@ def build_summary(
                         "output_tokens": output_tokens,
                         "cache_read_input_tokens": cache_reads,
                         "cache_write_input_tokens": 0,
+                        "usage_capture_complete": True,
                         "model_call_count": model_calls,
                         "duration_ms": duration_ms + trial,
                         "latency_ms": duration_ms - 100 + trial,

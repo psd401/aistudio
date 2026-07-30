@@ -97,9 +97,11 @@ class TurnResult:
     # Bedrock prompt-caching split (issue #1089). Sourced from the OpenClaw
     # session transcript alongside tokens_in/tokens_out — see
     # OpenClawAdapter._read_turn_usage. Zero when the model doesn't cache or
-    # the transcript read failed.
+    # the transcript read failed; usage_capture_complete distinguishes those
+    # cases so downstream cost logic never prices a failed capture.
     cache_read: int = 0
     cache_write: int = 0
+    usage_capture_complete: bool = False
     latency_ms: int = 0
     messages: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
     tool_calls: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
@@ -410,8 +412,11 @@ class OpenClawAdapter(HarnessAdapter):
                         record = json.loads(line)
                     except (json.JSONDecodeError, ValueError):
                         # A torn final line is expected when we read while the
-                        # runtime is mid-append. Skip it; the settle loop will
-                        # re-read once it lands whole.
+                        # runtime is mid-append. Clear completeness in case a
+                        # prior terminal record was followed by a new partial
+                        # model-call record; the settle loop will re-read once
+                        # it lands whole.
+                        complete = False
                         continue
                     if not isinstance(record, dict):
                         continue
@@ -467,7 +472,7 @@ class OpenClawAdapter(HarnessAdapter):
         session_uuid: Optional[str],
         agent_id: Optional[str],
         since_ms: int,
-    ) -> Dict[str, int]:
+    ) -> Dict[str, object]:
         """Read this turn's real token usage from the OpenClaw session transcript.
 
         This is the ground-truth capture point after #1159/#1384 moved chat off
@@ -492,10 +497,12 @@ class OpenClawAdapter(HarnessAdapter):
         alternative failure mode — reading a stale file and billing another
         turn's calls twice.
 
-        Returns zeros on any failure; telemetry must never break a chat turn.
+        Returns zeros with capture_complete=False on any failure; telemetry
+        must never break a chat turn.
         """
         empty = {"input": 0, "output": 0, "cache_read": 0,
-                 "cache_write": 0, "model_calls": 0}
+                 "cache_write": 0, "model_calls": 0,
+                 "capture_complete": False}
         if not session_uuid:
             logger.warning(
                 "transcript usage skipped — no sessionId on the event stream",
@@ -552,7 +559,7 @@ class OpenClawAdapter(HarnessAdapter):
         for attempt in range(self.USAGE_SETTLE_ATTEMPTS):
             totals, complete = self._sum_transcript_usage(path, since_ms)
             if complete:
-                return totals
+                return {**totals, "capture_complete": True}
             if attempt < self.USAGE_SETTLE_ATTEMPTS - 1:
                 time.sleep(self.USAGE_SETTLE_INTERVAL_S)
         logger.warning(
@@ -562,7 +569,7 @@ class OpenClawAdapter(HarnessAdapter):
             totals["model_calls"],
             session_uuid,
         )
-        return totals
+        return {**totals, "capture_complete": False}
 
     def process(
         self,
@@ -1140,6 +1147,9 @@ class OpenClawAdapter(HarnessAdapter):
                                 tokens_out=tokens_out,
                                 cache_read=cache_read,
                                 cache_write=cache_write,
+                                usage_capture_complete=bool(
+                                    err_usage.get("capture_complete")
+                                ),
                                 latency_ms=int((time.time() - chat_send_at) * 1000),
                                 messages=messages_log,
                                 tool_calls=tool_calls,
@@ -1266,6 +1276,9 @@ class OpenClawAdapter(HarnessAdapter):
                 tokens_out=tokens_out,
                 cache_read=cache_read,
                 cache_write=cache_write,
+                usage_capture_complete=bool(
+                    turn_usage.get("capture_complete")
+                ),
                 latency_ms=latency_ms,
                 messages=log,
                 tool_calls=tool_calls,
@@ -1452,6 +1465,10 @@ class OpenClawAdapter(HarnessAdapter):
                     tokens_out=tokens_out + nudged.tokens_out,
                     cache_read=cache_read + nudged.cache_read,
                     cache_write=cache_write + nudged.cache_write,
+                    usage_capture_complete=(
+                        bool(turn_usage.get("capture_complete"))
+                        and nudged.usage_capture_complete
+                    ),
                     latency_ms=int((time.time() - chat_send_at) * 1000),
                     messages=messages_log + nudged.messages,
                     tool_calls=merged_tools,

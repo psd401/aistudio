@@ -146,10 +146,11 @@ duration and latency distributions, model-call counts, nudge rate, failure
 classes, failed-grader counts, and caching status. When usage is complete, cost
 uses the primary model's `openclaw.json` price block; automation extracts that
 file from the exact immutable image so a repo/image skew cannot silently
-misprice a run. Any individual trial with fewer observed output tokens than
-model calls makes its containing scope incomplete: its caching status is
-`unknown` and its cost fields are null. Completeness is evaluated per trial so
-usage captured by one trial cannot mask a telemetry gap in another.
+misprice a run. Each new trial carries an explicit `usage_capture_complete`
+flag from the selected proxy or transcript source. A false or legacy-missing
+flag makes its containing scope incomplete: its caching status is `unknown`
+and its cost fields are null. Completeness is evaluated per trial so fallback
+output or usage captured by another trial cannot mask a telemetry gap.
 Otherwise, zero `cache_read_input_tokens` means `uncached`.
 
 New runner records capture the actual invocation start before any container or

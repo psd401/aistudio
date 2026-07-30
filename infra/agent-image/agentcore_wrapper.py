@@ -660,6 +660,14 @@ def proxy_delta_is_authoritative(
     return bool(proxy_reads_ok) and (proxy_in > 0 or proxy_out > 0)
 
 
+def usage_capture_is_complete(
+    proxy_measured: bool,
+    harness_capture_complete: bool,
+) -> bool:
+    """Whether the selected token/cache telemetry source was fully captured."""
+    return bool(proxy_measured or harness_capture_complete)
+
+
 def read_proxy_usage() -> dict:
     """Read cumulative token usage from the Mantle proxy's /usage endpoint
     (issue #1083). Returns a dict with input_tokens / output_tokens / model and
@@ -1353,6 +1361,7 @@ def main():
                 # no cache numbers), so they're 0 when the delta is untrusted.
                 "cache_read_input_tokens": proxy_cache_read,
                 "cache_write_input_tokens": proxy_cache_write,
+                "usage_capture_complete": proxy_measured,
                 # Iteration telemetry (issue #1161). The legacy-str adapter
                 # exposes no tool-call list, so model_call_count can only use the
                 # proxy delta (0 on the direct-Mantle path — see the TurnResult
@@ -1393,6 +1402,10 @@ def main():
                 "cache_write_input_tokens": (
                     proxy_cache_write if proxy_measured else result.cache_write
                 ),
+                "usage_capture_complete": usage_capture_is_complete(
+                    proxy_measured,
+                    result.usage_capture_complete,
+                ),
                 # Iteration telemetry (issue #1161).
                 # model_call_count: the proxy's usage_events delta is authoritative
                 #   WHEN the proxy is in the serving path — but #1159 ("direct-
@@ -1432,14 +1445,15 @@ def main():
 
         logger.info(
             "Invocation complete: session=%s response_length=%d elapsed_s=%d "
-            "model=%s tokens_in=%s tokens_out=%s tool_calls=%d "
-            "model_calls=%s duration_ms=%s nudged=%s",
+            "model=%s tokens_in=%s tokens_out=%s usage_complete=%s "
+            "tool_calls=%d model_calls=%s duration_ms=%s nudged=%s",
             session_id,
             len(reply_text),
             int(time.time() - invocation_start),
             metadata.get("model"),
             metadata.get("input_tokens"),
             metadata.get("output_tokens"),
+            metadata.get("usage_capture_complete"),
             len(metadata.get("tool_calls") or []),
             metadata.get("model_call_count"),
             metadata.get("duration_ms"),
