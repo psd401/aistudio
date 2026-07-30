@@ -267,6 +267,44 @@ class SuiteLoadingTests(unittest.TestCase):
             )
         )
 
+        learning_page_patterns = {
+            str(grader.get("pattern"))
+            for grader in tasks_by_id[
+                "learning-page-accessibility-contract"
+            ].graders
+            if grader.get("type") == "output_match"
+        }
+        self.assertEqual(
+            learning_page_patterns,
+            {
+                "(?i)caption",
+                "(?i)transcript",
+                "(?i)quiz",
+                "(?i)summary",
+            },
+        )
+
+        morning_brief_meetings = next(
+            str(grader.get("pattern"))
+            for grader in tasks_by_id["chat-card-morning-brief"].graders
+            if grader.get("type") == "output_match"
+            and "Meetings" in str(grader.get("pattern"))
+        )
+        for valid_meeting_fact in (
+            '"topLabel":"Meetings today","text":"3"',
+            '"topLabel":"Meetings","text":"3 today"',
+        ):
+            self.assertIsNotNone(
+                re.search(morning_brief_meetings, valid_meeting_fact),
+                valid_meeting_fact,
+            )
+        self.assertIsNone(
+            re.search(
+                morning_brief_meetings,
+                '"topLabel":"Meetings","text":"4 today"',
+            )
+        )
+
         chart_probe = next(
             grader
             for grader in tasks_by_id[
