@@ -97,11 +97,18 @@ Use `--params` for path and query parameters defined by the Google method
 (IDs, search queries, page sizes). Use `--json` only for a request body on a
 method that accepts one. Read/list methods such as
 `gmail users messages list` take `--params`; never replace it with `--json`.
-For unread mail, preserve this exact command shape:
+For unread mail, preserve this command and flag shape:
 
 ```bash
 gmail users messages list --params '{"userId":"me","q":"is:unread","maxResults":20}'
 ```
+
+`--params` is mandatory here and stays mandatory: never move `q`,
+`maxResults`, or any other query value into `--json`. The `q` and `maxResults`
+values above are the defaults for a bare "any unread mail?" request. When the
+caller asks for something narrower or a different count — five unread from one
+sender, mail from last week — carry their filter into `q` and their count into
+`maxResults` rather than sending the defaults back.
 
 ```bash
 node /opt/psd-skills/psd-workspace/run.js \
