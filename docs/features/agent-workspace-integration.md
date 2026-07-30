@@ -88,6 +88,18 @@ slot. The DWD assertion already carries `chat.messages`, which authorizes
 authentication and is not the credential mode used by the `agnt_*` identity.
 The skill still requires explicit user confirmation before posting.
 
+Two properties of that allowlist are worth stating plainly, because the
+confirmation requirement is a skill instruction rather than a code gate. The
+`workspace-execute` route accepts Chat sends in `scheduled` mode as well as
+`owner` mode, so a send can occur in a turn with no human present to confirm
+it. And the destination is bounded only by Chat membership — nothing ties the
+target space to the turn that triggered the send. The agent cannot widen that
+boundary itself: `chat spaces create`, `chat spaces setup` and
+`chat spaces members create` are all absent from the write allowlist, so the
+reachable set is the spaces the `agnt_*` identity already belongs to.
+Completed sends are logged with their resolved destination space and message
+length (never the body) so posts are auditable after the fact.
+
 ## Runtime error contract
 
 The skill emits a single JSON line on stdout (or a stderr message for exit 12)
