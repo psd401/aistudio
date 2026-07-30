@@ -183,6 +183,14 @@ jobs:
       env:
         CI: true
 
+    # psd-observances (#1476). This zero-dependency CJS skill sits outside
+    # Jest's roots. Its suite functionally exercises every documented command,
+    # repository-name resolution, citation/output bounds, and auth exit codes.
+    - name: Run psd-observances skill tests (Bun)
+      run: bun run test:skill:psd-observances
+      env:
+        CI: true
+
     # Direct-AWS credential boundary (#1442). OpenClaw strips inherited AWS
     # credentials from model-launched exec subprocesses; these tests prove TTS
     # and HyperFrames use only the root-owned fixed-operation relay and that the

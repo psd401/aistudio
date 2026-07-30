@@ -1,0 +1,11 @@
+{
+  "name": "psd-observances",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bounded, cited NSPRA school-calendar lookups through an authorized AI Studio knowledge repository.",
+  "main": "run.js",
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {}
+}

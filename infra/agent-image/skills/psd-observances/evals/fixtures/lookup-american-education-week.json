@@ -1,0 +1,72 @@
+[
+  {
+    "route": "/api/agent/aistudio",
+    "method": "POST",
+    "request_body": {
+      "method": "tools/call",
+      "params": {
+        "name": "repositories_list",
+        "arguments": {
+          "query": "NSPRA",
+          "limit": 50
+        }
+      }
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "httpStatus": 200,
+        "keySource": "oauth",
+        "payload": {
+          "jsonrpc": "2.0",
+          "id": "observances-list",
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"repositories\":[{\"id\":1476,\"name\":\"District NSPRA 2026-2027 Calendar\"}]}"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "route": "/api/agent/aistudio",
+    "method": "POST",
+    "request_body": {
+      "method": "tools/call",
+      "params": {
+        "name": "repositories_search",
+        "arguments": {
+          "query": "American Education Week",
+          "repositoryIds": [
+            1476
+          ],
+          "mode": "hybrid",
+          "limit": 5
+        }
+      }
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "httpStatus": 200,
+        "keySource": "oauth",
+        "payload": {
+          "jsonrpc": "2.0",
+          "id": "observances-search",
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"results\":[{\"itemName\":\"NSPRA calendar\",\"content\":\"American Education Week — November 16-20, 2026\",\"sourceLocator\":{\"page\":17},\"citations\":[{\"sourceLocator\":{\"page\":17},\"label\":\"Page 17\"}],\"similarity\":0.91}],\"diagnostics\":{\"returnedResults\":1}}"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+]
