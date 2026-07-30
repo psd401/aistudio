@@ -38,6 +38,15 @@ Returns `{"logged": true, "failure_id": <int>}` on success. Returns `{"logged": 
 
 `--user-facing` (default `true`): when `true`, your reply to the user should also acknowledge what went wrong. When `false`, this is a silent telemetry-only report (use sparingly).
 
+**Execution and evidence contract:** "call `report`" means you must actually
+invoke `report.js` before replying. Planning the call, describing it, or
+claiming that it happened is not a report. Say the failure was logged only
+after stdout returns `"logged": true`, and include the returned `failure_id`.
+Use the exact user-facing label `Failure ID: <failure_id>`; never rename it
+`Record ID`, `Report ID`, or `Ticket ID`.
+If stdout returns `"logged": false`, say that the database log failed and do
+not invent an ID or claim success.
+
 ## Examples
 
 ```bash

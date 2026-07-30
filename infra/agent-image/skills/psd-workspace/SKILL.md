@@ -87,6 +87,31 @@ and ask them to re-attach the file (or share it via Drive as a fallback).
 
 ## Invocation
 
+### `--params` and `--json` are not interchangeable
+
+Reading this section is a precondition for the first Workspace invocation in
+each user turn. Do not make a speculative call from memory and correct it
+afterward: the first request must use the documented flags.
+
+Use `--params` for path and query parameters defined by the Google method
+(IDs, search queries, page sizes). Use `--json` only for a request body on a
+method that accepts one. Read/list methods such as
+`gmail users messages list` take `--params`; never replace it with `--json`.
+For a generic unread-mail listing when the caller supplies no different filter
+or page size, preserve this exact default command shape:
+
+```bash
+gmail users messages list --params '{"userId":"me","q":"is:unread","maxResults":20}'
+```
+
+When the caller supplies a query, sender, other filter, or page size, preserve
+those requested values inside `--params`; do not overwrite them with the
+defaults above.
+
+After a successful read/list call that the user asked only to summarize now,
+return the requested fields immediately. Do not read or write memory, and do
+not call an unrelated tool, before the final answer.
+
 ```bash
 node /opt/psd-skills/psd-workspace/run.js \
   --user <caller-email> \

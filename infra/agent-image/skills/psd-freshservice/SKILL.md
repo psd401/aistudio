@@ -64,6 +64,21 @@ node update_ticket.js --user <email> --id <id> --data '{"status":4}'
 node add_note.js --user <email> --id <id> --data '{"body":"...","notify_emails":["a@b.com"]}'
 ```
 
+### Exact update contract
+
+Translate priority names exactly: Low `1`, Medium `2`, High `3`, Urgent `4`.
+For a request to change only priority, invoke `update_ticket.js` once with a
+body containing only that field. For example:
+
+```bash
+node update_ticket.js --user <email> --id <id> --data '{"priority":4}'
+```
+
+Do not issue a preflight or follow-up `get_ticket.js` call unless the user asks
+for ticket details or the update returns an ambiguous error. After a successful
+update, report the ticket ID and new priority once; do not duplicate the
+success message.
+
 ## Agents and Workspaces
 
 ```bash

@@ -677,6 +677,112 @@ class SuiteLoadingTests(unittest.TestCase):
             )
         )
 
+    def test_glm_contract_suite_reuses_unmodified_regression_tasks(self):
+        focused_tasks = runner.load_suite(
+            AGENT_IMAGE_DIR / "eval" / "suites" / "glm-5-contracts.yaml"
+        )
+        regression_tasks = {
+            task.id: task
+            for task in runner.load_suite(
+                AGENT_IMAGE_DIR / "eval" / "suites" / "regression.yaml"
+            )
+        }
+        expected_ids = [
+            "data-list-tables",
+            "directory-literal-address-no-lookup",
+            "failure-report-synthetic-missing-data",
+            "freshservice-update-ticket-priority",
+            "workspace-list-unread-mail",
+        ]
+
+        self.assertEqual([task.id for task in focused_tasks], expected_ids)
+        self.assertEqual({task.trials for task in focused_tasks}, {3})
+        self.assertEqual({task.suite for task in focused_tasks}, {"regression"})
+        for task in focused_tasks:
+            self.assertEqual(task, regression_tasks[task.id])
+
+    def test_glm_regression_skill_prompts_pin_exact_contracts(self):
+        # These exact fragments deliberately pin behavior-bearing instructions.
+        # A copyedit failure should trigger contract review, not weaker matching;
+        # the separate repeated model eval is the behavioral proof.
+        skill_contracts = {
+            "psd-data": (
+                "node /opt/psd-skills/psd-data/run.js tables --detailed",
+                "set `detailed` to false",
+            ),
+            "psd-directory": (
+                "emit it exactly once",
+                "skill or any other tool",
+                "For a compound request",
+            ),
+            "psd-failure-report": (
+                "actually\ninvoke `report.js`",
+                'stdout returns `"logged": true`',
+                "Failure ID: <failure_id>",
+                "never rename it\n`Record ID`",
+            ),
+            "psd-freshservice": (
+                "Urgent `4`",
+                """--data '{"priority":4}'""",
+            ),
+            "psd-workspace": (
+                "`--params` and `--json` are not interchangeable",
+                "the first request must use the documented flags",
+                "gmail users messages list --params",
+                "generic unread-mail listing when the caller supplies no "
+                "different filter",
+                "preserve\nthose requested values inside `--params`",
+                "Do not read or write memory",
+                "before the final answer",
+            ),
+            "psd-rules": (
+                "**Fresh-interface gate:**",
+                "Never\n   construct a skill command from memory.",
+                "observed that read succeed in the current turn",
+                "**Standalone exact-output requests:**",
+                "literal-only,\nno-surrounding-prose behavior",
+                "entire reply to\nbe one literal span",
+                "also asks for an explanation\nor another result",
+                "earlier message, attachment, or tool result",
+                "**Read-only exception:**",
+                "do not insert a memory tool call between the result and\n"
+                "the final answer",
+            ),
+        }
+
+        for skill, required_fragments in skill_contracts.items():
+            with self.subTest(skill=skill):
+                document = (
+                    AGENT_IMAGE_DIR / "skills" / skill / "SKILL.md"
+                ).read_text(encoding="utf-8")
+                for fragment in required_fragments:
+                    self.assertIn(fragment, document)
+
+        soul = (AGENT_IMAGE_DIR / "SOUL.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "read a skill's current SKILL.md before\n"
+            "   its first invocation in every user turn",
+            soul,
+        )
+        self.assertIn(
+            "available from a successful read in the current user turn",
+            soul,
+        )
+        self.assertIn(
+            "**Unread-mail command contract:** URL and query values belong "
+            "in `--params`,\nnever `--json`.",
+            soul,
+        )
+        self.assertIn(
+            "caller supplies no different filter or page size",
+            soul,
+        )
+        self.assertIn(
+            "return the requested summary\nbefore any memory or unrelated "
+            "tool call",
+            soul,
+        )
+
     def test_invalid_workspace_fails_closed(self):
         with self.subTest("validation happens after parsing"):
             with self.assertRaises(runner.EvalRunnerError):
