@@ -667,10 +667,10 @@ class OpenClawAdapter(HarnessAdapter):
                         # gateway protocol docs so we negotiate v4 against this
                         # gateway yet stay compatible with a v3 gateway on
                         # rollback. The v4 connect envelope + fields below are
-                        # unchanged. The reserved direct-local
-                        # gateway-client/backend path authenticates with the
-                        # per-container shared token, so no device block is
-                        # required.
+                        # unchanged. The harness-selected loopback identity
+                        # authenticates with the per-container shared token and
+                        # avoids the host's device-auth Control UI path, so no
+                        # device block is required.
                         "minProtocol": 3,
                         "maxProtocol": 4,
                         "client": self.CLIENT_INFO,

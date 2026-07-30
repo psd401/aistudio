@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -239,6 +240,32 @@ class SuiteLoadingTests(unittest.TestCase):
                 ),
                 f"{task_id} does not prove its executable succeeded",
             )
+
+        failure_report_output = next(
+            grader
+            for grader in tasks_by_id[
+                "failure-report-synthetic-missing-data"
+            ].graders
+            if grader.get("type") == "output_match"
+        )
+        failure_report_pattern = failure_report_output.get("pattern")
+        self.assertIsInstance(failure_report_pattern, str)
+        for valid_confirmation in (
+            "Logged — failure_id 394.",
+            "Failure record filed #396.",
+            "Failure report recorded as ID 407.",
+            "Logged as failure #408.",
+        ):
+            self.assertIsNotNone(
+                re.search(failure_report_pattern, valid_confirmation),
+                valid_confirmation,
+            )
+        self.assertIsNone(
+            re.search(
+                failure_report_pattern,
+                "The failure report could not be recorded.",
+            )
+        )
 
         chart_probe = next(
             grader
