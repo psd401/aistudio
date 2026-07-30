@@ -3,9 +3,11 @@ import {
   index,
   integer,
   pgTable,
+  text,
   timestamp,
   varchar,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { users } from "./users";
 
 export const deepResearchReservations = pgTable(
@@ -20,6 +22,7 @@ export const deepResearchReservations = pgTable(
     reservedAt: timestamp("reserved_at", { withTimezone: true }).notNull().defaultNow(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     releasedAt: timestamp("released_at", { withTimezone: true }),
+    interactionId: text("interaction_id"),
     sequence: bigserial("sequence", { mode: "number" }).notNull(),
   },
   (table) => [
@@ -29,5 +32,8 @@ export const deepResearchReservations = pgTable(
       table.expiresAt
     ),
     index("idx_deep_research_budget_window").on(table.reservedAt),
+    index("idx_deep_research_interaction_id")
+      .on(table.interactionId)
+      .where(sql`${table.interactionId} IS NOT NULL`),
   ]
 );
