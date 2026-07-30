@@ -12,6 +12,9 @@ const MAXIMUM_EVENT_AGE_SECONDS = 60 * 60;
 const MAXIMUM_RETRY_ATTEMPTS = 5;
 const IAM_PROPAGATION_ATTEMPTS = 8;
 const SAFE_EMAIL_RE = /^[\w%+.-]+@[\d.A-Za-z-]+\.[A-Za-z]{2,}$/;
+const SCHEDULE_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const LEGACY_SCHEDULE_ID_RE = /^[0-9a-f]{8}$/i;
 const DM_SPACE_RE = /^spaces\/[\w-]{1,256}$/;
 const UPDATEABLE_RECORD_FIELDS = [
   'version',
@@ -141,6 +144,10 @@ function normalizedEmail(value: unknown): string {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
 
+function isSupportedScheduleId(value: string): boolean {
+  return SCHEDULE_ID_RE.test(value) || LEGACY_SCHEDULE_ID_RE.test(value);
+}
+
 export function selectTrustedOwnerProfile(
   ownerEmail: string,
   values: Record<string, unknown>[],
@@ -221,8 +228,7 @@ export function scheduleRecordIdentity(
   const scheduleId = record.scheduleId.trim().toLowerCase();
   if (
     !SAFE_EMAIL_RE.test(ownerEmail)
-    || scheduleId.length === 0
-    || scheduleId.length > 128
+    || !isSupportedScheduleId(scheduleId)
   ) {
     throw new InvalidScheduleTargetError(
       'Legacy schedule record has no owner-bound identity',
@@ -400,8 +406,7 @@ export function scheduleTargetReference(
   const version = targetVersion(input);
   if (
     !SAFE_EMAIL_RE.test(ownerEmail)
-    || scheduleId.length === 0
-    || scheduleId.length > 128
+    || !isSupportedScheduleId(scheduleId)
   ) {
     throw new InvalidScheduleTargetError(
       'Schedule target Input has no owner-bound reference',

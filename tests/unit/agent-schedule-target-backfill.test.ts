@@ -19,13 +19,14 @@ import {
 } from "../../lib/agent-schedules/mutation-lock"
 import { stripComments } from "../helpers/strip-ts-comments"
 
+const LEGACY_SCHEDULE_ID = "5123b45b"
 const LEGACY_INPUT = JSON.stringify({
   ownerEmail: "owner@psd401.net",
-  scheduleId: "schedule-id",
+  scheduleId: LEGACY_SCHEDULE_ID,
   version: 4,
 })
 const INLINE_LEGACY_INPUT = JSON.stringify({
-  scheduleId: "schedule-id",
+  scheduleId: LEGACY_SCHEDULE_ID,
   scheduleName: "Morning dispatch",
   userEmail: "owner@psd401.net",
   googleIdentity: "users/12345",
@@ -48,7 +49,7 @@ function schedule(
   const parsedInput = JSON.parse(input)
   return {
     $metadata: {},
-    Name: "psd-agent-prod-schedule-id",
+    Name: `psd-agent-prod-${parsedInput.scheduleId}`,
     GroupName: "psd-agent-prod",
     ScheduleExpression:
       overrides.expression ?? "cron(0 6 * * ? *)",
@@ -56,7 +57,7 @@ function schedule(
     FlexibleTimeWindow: { Mode: "OFF" as const },
     State: overrides.state ?? ("ENABLED" as const),
     ActionAfterCompletion: "NONE" as const,
-    Description: "PSD agent schedule schedule-id",
+    Description: `PSD agent schedule ${parsedInput.scheduleId}`,
     Target: {
       Arn: "arn:aws:lambda:us-west-2:123:function:psd-agent-cron-prod",
       RoleArn: "arn:aws:iam::123:role/psd-agent-scheduler-invoke-prod",
@@ -86,7 +87,7 @@ function dependencies(
     getRecord: jest.fn().mockResolvedValue({
       userId: "owner@psd401.net",
       ownerEmail: "owner@psd401.net",
-      scheduleId: "schedule-id",
+      scheduleId: LEGACY_SCHEDULE_ID,
       version: 4,
     }),
     loadOwnerProfile: jest.fn().mockResolvedValue({
@@ -109,7 +110,7 @@ describe("agent schedule target deployment backfill", () => {
   it("uses the exact same mutation-lock key as the schedule service", () => {
     const identity = {
       ownerEmail: "Owner@PSD401.net ",
-      scheduleId: "schedule-id",
+      scheduleId: LEGACY_SCHEDULE_ID,
     }
     expect(backfillMutationLockKey(identity)).toEqual(
       serviceMutationLockKey(identity),
@@ -119,7 +120,7 @@ describe("agent schedule target deployment backfill", () => {
   it("adds immutable Scheduler context without changing the reference", () => {
     expect(JSON.parse(backfilledTargetInput(LEGACY_INPUT) ?? "")).toEqual({
       ownerEmail: "owner@psd401.net",
-      scheduleId: "schedule-id",
+      scheduleId: LEGACY_SCHEDULE_ID,
       version: 4,
       scheduledTime: "<aws.scheduler.scheduled-time>",
     })
@@ -136,7 +137,7 @@ describe("agent schedule target deployment backfill", () => {
       JSON.parse(backfilledTargetInput(INLINE_LEGACY_INPUT, 1) ?? ""),
     ).toEqual({
       ownerEmail: "owner@psd401.net",
-      scheduleId: "schedule-id",
+      scheduleId: LEGACY_SCHEDULE_ID,
       version: 1,
       scheduledTime: "<aws.scheduler.scheduled-time>",
     })
@@ -155,6 +156,10 @@ describe("agent schedule target deployment backfill", () => {
     expect(() => backfilledTargetInput(JSON.stringify({
       ...JSON.parse(LEGACY_INPUT),
       ownerEmail: " ",
+    }))).toThrow(/owner-bound/)
+    expect(() => backfilledTargetInput(JSON.stringify({
+      ...JSON.parse(LEGACY_INPUT),
+      scheduleId: "schedule-id",
     }))).toThrow(/owner-bound/)
   })
 
@@ -291,7 +296,7 @@ describe("agent schedule target backfill safety", () => {
       getRecord: jest.fn().mockResolvedValue({
         userId: "owner@psd401.net",
         ownerEmail: "owner@psd401.net",
-        scheduleId: "schedule-id",
+        scheduleId: LEGACY_SCHEDULE_ID,
         version: 1,
       }),
     })
@@ -302,7 +307,7 @@ describe("agent schedule target backfill safety", () => {
     const input = (deps.update as jest.Mock).mock.calls[0][0].Target.Input
     expect(JSON.parse(input)).toEqual({
       ownerEmail: "owner@psd401.net",
-      scheduleId: "schedule-id",
+      scheduleId: LEGACY_SCHEDULE_ID,
       version: 1,
       scheduledTime: "<aws.scheduler.scheduled-time>",
     })
@@ -374,7 +379,7 @@ describe("agent schedule target backfill safety", () => {
       getRecord: jest.fn().mockResolvedValue({
         userId: "owner@psd401.net",
         ownerEmail: "owner@psd401.net",
-        scheduleId: "schedule-id",
+        scheduleId: LEGACY_SCHEDULE_ID,
         version: 5,
       }),
       withMutationLock,
@@ -384,7 +389,7 @@ describe("agent schedule target backfill safety", () => {
 
     expect(observedLocks).toEqual([{
       ownerEmail: "owner@psd401.net",
-      scheduleId: "schedule-id",
+      scheduleId: LEGACY_SCHEDULE_ID,
       version: 4,
     }])
     expect(deps.update).toHaveBeenCalledWith(
@@ -402,7 +407,7 @@ describe("agent schedule target backfill safety", () => {
 describe("agent schedule legacy record backfill", () => {
   const legacyRecord = {
     userId: "owner@psd401.net",
-    scheduleId: "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
+    scheduleId: LEGACY_SCHEDULE_ID,
     name: "Morning Dispatch",
     prompt: "Generate my dispatch",
     cronExpression: "0 6 * * MON-FRI",

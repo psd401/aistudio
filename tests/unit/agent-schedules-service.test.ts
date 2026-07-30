@@ -56,6 +56,7 @@ import {
 
 const OWNER = "owner@psd401.net"
 const SCHEDULE_ID = "36bb0456-1c51-4fb8-97d1-4e87d02765ce"
+const LEGACY_SCHEDULE_ID = "5123b45b"
 
 const config = {
   region: "us-east-1",
@@ -166,6 +167,9 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
     })
     expect(created).not.toHaveProperty("ownerEmail")
     expect(created).not.toHaveProperty("dmSpaceName")
+    expect(created.scheduleId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    )
   })
 
   it("refreshes destination from the trusted owner row and versions updates", async () => {
@@ -226,6 +230,41 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
       kind: "schedule-mutation-lock",
     })
     expect(dynamoSend.mock.calls[6][0]).toBeInstanceOf(DeleteCommand)
+  })
+
+  it("updates a preserved legacy hexadecimal schedule ID", async () => {
+    const legacyRecord = scheduleRecord({ scheduleId: LEGACY_SCHEDULE_ID })
+    const { service, dynamoSend, schedulerSend } = harness()
+    dynamoSend
+      .mockResolvedValueOnce({ Items: [legacyRecord] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ Item: legacyRecord })
+      .mockResolvedValueOnce({
+        Items: [{
+          email: OWNER,
+          dmSpaceName: "spaces/trusted-owner-dm",
+          workspacePrefix: "owner-workspace",
+        }],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+    schedulerSend.mockResolvedValueOnce({})
+
+    await expect(service.update(OWNER, {
+      scheduleId: LEGACY_SCHEDULE_ID,
+      prompt: "Updated legacy prompt",
+    })).resolves.toMatchObject({
+      scheduleId: LEGACY_SCHEDULE_ID,
+      version: 2,
+    })
+
+    const update = schedulerSend.mock.calls[0][0] as UpdateScheduleCommand
+    expect(update.input.Name).toBe(`psd-agent-dev-${LEGACY_SCHEDULE_ID}`)
+    expect(JSON.parse(update.input.Target?.Input ?? "{}")).toMatchObject({
+      scheduleId: LEGACY_SCHEDULE_ID,
+      version: 2,
+    })
   })
 
   }
@@ -491,6 +530,26 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
       "dynamo",
       "dynamo",
     ])
+  })
+
+  it("deletes a preserved legacy hexadecimal schedule ID", async () => {
+    const legacyRecord = scheduleRecord({ scheduleId: LEGACY_SCHEDULE_ID })
+    const { service, dynamoSend, schedulerSend } = harness()
+    dynamoSend
+      .mockResolvedValueOnce({ Items: [legacyRecord] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ Item: legacyRecord })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+    schedulerSend.mockResolvedValueOnce({})
+
+    await expect(
+      service.delete(OWNER, LEGACY_SCHEDULE_ID),
+    ).resolves.toBe(LEGACY_SCHEDULE_ID)
+    const deletion = schedulerSend.mock.calls[0][0] as DeleteScheduleCommand
+    expect(deletion.input.Name).toBe(`psd-agent-dev-${LEGACY_SCHEDULE_ID}`)
   })
 
   it("keeps metadata retryable when scheduler deletion fails", async () => {

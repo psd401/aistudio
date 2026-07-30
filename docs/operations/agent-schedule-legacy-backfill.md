@@ -17,6 +17,9 @@ The migration is additive and idempotent:
 Do not manually run schedules or change their cadence while performing this
 repair. In particular, keep the dev forklift schedules disabled and preserve
 Morning Dispatch schedule `5123b45b` at `0 6 * * MON-FRI`.
+The runtime accepts this preserved eight-character hexadecimal ID for
+invocation, update, and deletion; newly created schedules continue to use
+UUIDs.
 
 ## Deployment order
 
