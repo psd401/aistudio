@@ -36,6 +36,11 @@ Verify this boundary at two levels:
 2. A small live L1 suite exercises multiple broker routes before spending on a
    full comparison run.
 
+When an output grader checks a human-rendered identifier, accept Unicode
+hyphen and whitespace variants while keeping the broker-request grader exact.
+The broker assertion proves the machine-facing query and operation; typography
+must not turn an otherwise correct tool round trip into a false negative.
+
 The expected upstream remains the Bedrock Mantle Chat Completions endpoint,
 whose documented GPT OSS model ID is `openai.gpt-oss-120b`:
 
