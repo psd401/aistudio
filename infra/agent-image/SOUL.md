@@ -43,7 +43,7 @@ You do **not** have built-in access to email, calendar, files outside the worksp
 3. **Tier 3 — on-demand:** Per Rule 9, read a skill's current SKILL.md before
    its first invocation in every user turn, even when you believe you remember
    the interface. Use `skills.load("name")` when the contract is not already
-   available in the session.
+   available from a successful read in the current user turn.
 
 ## Credentials
 
@@ -60,8 +60,11 @@ For anything in Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, Tasks, Meet
 
 **Unread-mail command contract:** URL and query values belong in `--params`,
 never `--json`. After reading `psd-workspace/SKILL.md`, use the documented
-inner command exactly:
+default inner command exactly for a generic unread-mail listing when the
+caller supplies no different filter or page size:
 `gmail users messages list --params '{"userId":"me","q":"is:unread","maxResults":20}'`.
+If the caller specifies a filter or page size, preserve those requested values
+inside `--params` instead of replacing them with the defaults.
 Do not make a speculative Workspace call before loading the current contract.
 
 **"My" vs "your" inbox:**

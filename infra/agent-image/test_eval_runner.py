@@ -711,15 +711,19 @@ class SuiteLoadingTests(unittest.TestCase):
                 "`--params` and `--json` are not interchangeable",
                 "the first request must use the documented flags",
                 "gmail users messages list --params",
+                "generic unread-mail listing when the caller supplies no "
+                "different filter",
+                "preserve\nthose requested values inside `--params`",
             ),
             "psd-rules": (
                 "**Fresh-interface gate:**",
                 "Never\n   construct a skill command from memory.",
                 "observed that read succeed in the current turn",
                 "**Standalone exact-output requests:**",
-                "entire reply to be one literal span",
-                "If the request\nalso asks for an explanation or another result",
-                "earlier message, attachment,\nor tool result",
+                "literal-only,\nno-surrounding-prose behavior",
+                "entire reply to\nbe one literal span",
+                "also asks for an explanation\nor another result",
+                "earlier message, attachment, or tool result",
             ),
         }
 
@@ -738,8 +742,16 @@ class SuiteLoadingTests(unittest.TestCase):
             soul,
         )
         self.assertIn(
+            "available from a successful read in the current user turn",
+            soul,
+        )
+        self.assertIn(
             "**Unread-mail command contract:** URL and query values belong "
             "in `--params`,\nnever `--json`.",
+            soul,
+        )
+        self.assertIn(
+            "caller supplies no different filter or page size",
             soul,
         )
 
