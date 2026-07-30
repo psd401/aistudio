@@ -48,6 +48,65 @@ class ContextWindowTests(unittest.TestCase):
         self.assertTrue(ccc.check_context_windows(cfg))
 
 
+class TierEvalConfigSchemaTests(unittest.TestCase):
+    CANONICAL = {
+        "agents": {"defaults": {}},
+        "memory": {
+            "search": {
+                "provider": "bedrock",
+                "model": "amazon.titan-embed-text-v2:0",
+            }
+        },
+        "gateway": {"controlUi": {"enabled": False}},
+    }
+
+    def test_canonical_memory_schema_passes(self):
+        self.assertEqual(
+            ccc.check_tier_eval_config_schema(self.CANONICAL),
+            [],
+        )
+
+    def test_legacy_default_memory_search_is_rejected(self):
+        cfg = {
+            **self.CANONICAL,
+            "agents": {
+                "defaults": {
+                    "memorySearch": {
+                        "provider": "bedrock",
+                        "model": "amazon.titan-embed-text-v2:0",
+                    }
+                }
+            },
+        }
+        violations = ccc.check_tier_eval_config_schema(cfg)
+        self.assertTrue(
+            any("agents.defaults.memorySearch moved" in v for v in violations)
+        )
+
+    def test_retired_insecure_auth_toggle_is_rejected(self):
+        cfg = {
+            **self.CANONICAL,
+            "gateway": {
+                "controlUi": {
+                    "enabled": False,
+                    "allowInsecureAuth": True,
+                }
+            },
+        }
+        violations = ccc.check_tier_eval_config_schema(cfg)
+        self.assertTrue(
+            any("allowInsecureAuth is retired" in v for v in violations)
+        )
+
+    def test_semantic_memory_keeps_explicit_bedrock_model(self):
+        cfg = {**self.CANONICAL, "memory": {"search": {}}}
+        violations = ccc.check_tier_eval_config_schema(cfg)
+        self.assertTrue(
+            any("memory.search.provider" in v for v in violations)
+        )
+        self.assertTrue(any("memory.search.model" in v for v in violations))
+
+
 class ApiKeyHydrationTests(unittest.TestCase):
     def _wrapper(self, text: str) -> str:
         d = tempfile.mkdtemp()

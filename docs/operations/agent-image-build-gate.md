@@ -14,7 +14,7 @@ a dead-boot image (r10), a missing provider (r11), and a silently truncated
 | # | Check | Kind | Fails on |
 |---|-------|------|----------|
 | 1 | Instruction-budget (`check_bootstrap_budget.py`) | static | a bootstrap file that would be truncated at boot |
-| 2 | Config self-consistency (`check_config_consistency.py`) | static | bad `contextWindow`, `apiKey` hydration, plugin compatibility, web-search readiness, or a host missing settled-tool finalization in `openclaw.json` / `Dockerfile` |
+| 2 | Config self-consistency (`check_config_consistency.py`) | static | bad `contextWindow`, `apiKey` hydration, plugin compatibility, web-search readiness, a stale host schema, or a host missing settled-tool finalization in `openclaw.json` / `Dockerfile` |
 | 3 | Plugin-aware config validation | build | the complete config is invalid after the pinned custom plugins are installed |
 | 4 | Boot probe | runtime | no `BOOT_OK` within `PROBE_BOOT_TIMEOUT` (default 120s) |
 | 5 | Canary turn | runtime | `/invocations` does not answer `OK` |
@@ -29,6 +29,10 @@ post-tool turn with no visible answer, plus the structured
 `settled post-tool turn lacked a final answer` diagnostic. The Docker build
 greps the compiled runtime for both the diagnostic and the no-repeat
 continuation prompt; version comments alone are not accepted as proof.
+The same static gate rejects the beta.5-retired
+`gateway.controlUi.allowInsecureAuth` key and requires semantic memory at its
+canonical `memory.search` location, so host/config migrations fail before the
+Docker validator.
 
 ## Why the runtime half needs a signed context
 

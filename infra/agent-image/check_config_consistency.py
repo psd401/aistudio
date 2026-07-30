@@ -2,7 +2,7 @@
 """
 Config self-consistency gate for the agent image (issue #1161).
 
-Six static asserts over openclaw.json + the Dockerfile, run on the host before
+Seven static asserts over openclaw.json + the Dockerfile, run on the host before
 build (no Docker):
 
   1. contextWindow sanity — every declared model's contextWindow must be a
@@ -42,6 +42,11 @@ build (no Docker):
      visible answer, plus its structured diagnostic. Without this contract a
      replay-unsafe turn fails with generic OpenClawChatError after its tools
      have already run (issue #1469).
+
+  7. tier-eval config schema — the recovery-bearing host also moved semantic
+     memory from `agents.defaults.memorySearch` to `memory.search` and retired
+     `gateway.controlUi.allowInsecureAuth`. Catch those legacy keys before an
+     expensive Docker build reaches `openclaw config validate`.
 
 Exit 0 when consistent, 1 on any violation.
 """
@@ -735,6 +740,80 @@ def check_context_windows(config: dict) -> List[str]:
     return violations
 
 
+def check_tier_eval_config_schema(config: dict) -> List[str]:
+    """Enforce config migrations required by the recovery-bearing host.
+
+    OpenClaw v2026.7.2-beta.5 rejects the legacy memorySearch location and the
+    retired allowInsecureAuth compatibility toggle. Semantic memory is a
+    production contract for this image, so require its canonical Bedrock
+    provider/model rather than merely checking that the old key disappeared.
+    """
+    violations: List[str] = []
+    agents = config.get("agents")
+    if not isinstance(agents, dict):
+        agents = {}
+    defaults = agents.get("defaults")
+    if not isinstance(defaults, dict):
+        defaults = {}
+    if "memorySearch" in defaults:
+        violations.append(
+            "agents.defaults.memorySearch moved to memory.search in OpenClaw "
+            "v2026.7.2-beta.5"
+        )
+
+    entries = agents.get("entries")
+    if isinstance(entries, dict):
+        for agent_id, entry in entries.items():
+            if isinstance(entry, dict) and "memorySearch" in entry:
+                violations.append(
+                    f"agents.entries.{agent_id}.memorySearch moved to "
+                    f"agents.entries.{agent_id}.memory.search"
+                )
+    legacy_list = agents.get("list")
+    if isinstance(legacy_list, list):
+        for index, entry in enumerate(legacy_list):
+            if isinstance(entry, dict) and "memorySearch" in entry:
+                violations.append(
+                    f"agents.list[{index}].memorySearch moved to "
+                    f"agents.list[{index}].memory.search"
+                )
+    if "memorySearch" in config:
+        violations.append(
+            "top-level memorySearch moved to memory.search in OpenClaw "
+            "v2026.7.2-beta.5"
+        )
+
+    memory = config.get("memory")
+    search = memory.get("search") if isinstance(memory, dict) else None
+    if not isinstance(search, dict):
+        violations.append(
+            "memory.search is missing — semantic memory would lose its "
+            "explicit Bedrock embedding provider"
+        )
+    else:
+        if search.get("provider") != "bedrock":
+            violations.append(
+                "memory.search.provider must be 'bedrock' for key-free "
+                "semantic memory"
+            )
+        if search.get("model") != "amazon.titan-embed-text-v2:0":
+            violations.append(
+                "memory.search.model must be "
+                "'amazon.titan-embed-text-v2:0'"
+            )
+
+    gateway = config.get("gateway")
+    control_ui = (
+        gateway.get("controlUi") if isinstance(gateway, dict) else None
+    )
+    if isinstance(control_ui, dict) and "allowInsecureAuth" in control_ui:
+        violations.append(
+            "gateway.controlUi.allowInsecureAuth is retired in OpenClaw "
+            "v2026.7.2-beta.5; remove it (there is no replacement)"
+        )
+    return violations
+
+
 def check_apikey_hydration(config: dict, wrapper_path: str) -> List[str]:
     violations: List[str] = []
     try:
@@ -792,6 +871,7 @@ def run_checks(
     config = _load(config_path)
     violations = (
         check_context_windows(config)
+        + check_tier_eval_config_schema(config)
         + check_apikey_hydration(config, wrapper_path)
         + check_prompt_caching_reachable(config, dockerfile_path)
         + check_host_plugin_compatibility(dockerfile_path)
@@ -841,7 +921,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(
         "OK — openclaw.json context windows + apiKey hydration paths + "
         "prompt-caching reachability + host/plugin compatibility + web-search "
-        "provider readiness + settled-tool recovery contract consistent."
+        "provider readiness + settled-tool recovery + tier-eval schema "
+        "contracts consistent."
     )
     return 0
 

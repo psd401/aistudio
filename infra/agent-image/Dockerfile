@@ -220,7 +220,7 @@ RUN mkdir -p /home/node/.openclaw/memory
 #   ours is ~30 tools, and Sonnet 5's prompt caching makes the schema prefix
 #   cheap. codeMode.timeoutMs is retained (inert unless code-mode returns).
 #
-#   agents.defaults.memorySearch — embedding provider for semantic search over
+#   memory.search — embedding provider for semantic search over
 #   the agent's local ~/.openclaw/memory/ files. OpenClaw's default provider is
 #   "openai", but this container provisions NO OpenAI key (it reaches models
 #   only through Bedrock Mantle), so memory indexing fails at runtime with
@@ -346,7 +346,7 @@ COPY skills /opt/psd-skills
 # The tail of this RUN also vendors the @openclaw/amazon-bedrock-provider and
 # @openclaw/parallel-plugin plugins. The first registers the "bedrock"
 # memory-embedding adapter that
-# openclaw.json's memorySearch.provider names. The published OpenClaw base
+# openclaw.json's memory.search.provider names. The published OpenClaw base
 # image ships with NO bundled extensions (they're an opt-in OPENCLAW_EXTENSIONS
 # build arg of the upstream Dockerfile), so memory sync failed every cycle with
 # "Unknown memory embedding provider: bedrock" (2026-07-10). It must live under

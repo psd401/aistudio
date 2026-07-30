@@ -1848,8 +1848,8 @@ export class AgentPlatformStack extends cdk.Stack {
       // Python wrapper and every in-image skill compensate with a hardcoded
       // `|| us-east-1` fallback (see agentcore_wrapper.py, workspace_sync.py),
       // but the vendored OpenClaw binary has no such fallback: its native
-      // `bedrock` memorySearch provider (openclaw.json agents.defaults.
-      // memorySearch) calls bedrock-runtime.<region>.amazonaws.com directly and
+      // `bedrock` memory search provider (openclaw.json memory.search) calls
+      // bedrock-runtime.<region>.amazonaws.com directly and
       // would fail region resolution without this. Set to this.region so the
       // SDK region matches the region the Bedrock IAM grants are scoped to
       // (arn:aws:bedrock:<region>::foundation-model/*). No-op for existing
