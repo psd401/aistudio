@@ -43,10 +43,10 @@ rejects zero changes, an undeclared change, or changes to two or more axes.
   cost, cost sources, and IAM. The context budget may not exceed the selected
   model's documented context window.
 - `harness` pins the immutable OpenClaw base digest, human-readable host
-  version, Bedrock plugin version, and the token that must exist in the
-  vendored plugin. The generated pin contract is passed through
-  `check_config_consistency.py`; `npm pack` and both tarball references share
-  the same build argument.
+  version, Bedrock plugin version/assertion, and Parallel plugin
+  version/endpoint. The generated pin contract is passed through
+  `check_config_consistency.py`; each `npm pack` and its tarball references
+  share the same build argument.
 - `prompt` selects the SOUL preamble and rules skill. The candidate versions
   are passed as Docker build inputs and checked against the materialized
   config's bootstrap budgets.
@@ -140,8 +140,8 @@ The finalized JSON sidecar records:
 
 - candidate and baseline IDs, the varied axis, and both sides of that delta;
 - model ID, provider name/path/API/auth/base URL, and cache retention;
-- immutable base image, host/plugin pins, plugin assertion token, prompt
-  variant and source paths;
+- immutable base image, host/plugin pins, Bedrock assertion token, Parallel
+  endpoint, prompt variant, and source paths;
 - model costs, a source URL for every cost, complete provider source/IAM
   metadata, manifest SHA-256, and AI Studio source commit;
 - pushed ECR tag, immutable image digest, preparation time, and finalization

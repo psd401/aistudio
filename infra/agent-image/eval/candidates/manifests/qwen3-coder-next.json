@@ -11,7 +11,9 @@
       "baseImage": "ghcr.io/openclaw/openclaw@sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c",
       "hostVersion": "2026.7.1",
       "bedrockPluginVersion": "2026.7.1",
-      "expectedPluginToken": "claude-sonnet-5"
+      "expectedPluginToken": "claude-sonnet-5",
+      "parallelPluginVersion": "2026.7.1",
+      "parallelPluginEndpoint": "https://search.parallel.ai/mcp"
     },
     "prompt": {
       "variant": "default",

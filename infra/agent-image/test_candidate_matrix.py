@@ -104,6 +104,14 @@ class CandidateMatrixTests(unittest.TestCase):
             self.assertEqual(metadata["modelId"], "zai.glm-5")
             self.assertEqual(metadata["cacheRetention"], "none")
             self.assertEqual(metadata["contextTokens"], 180000)
+            self.assertEqual(
+                metadata["harness"]["parallelPluginVersion"],
+                "2026.7.1",
+            )
+            self.assertEqual(
+                metadata["harness"]["parallelPluginEndpoint"],
+                "https://search.parallel.ai/mcp",
+            )
             self.assertIsNone(metadata["imageDigest"])
             self.assertEqual(set(metadata["cost"]), set(metadata["costSources"]))
 
@@ -219,6 +227,65 @@ class CandidateMatrixTests(unittest.TestCase):
                 summary = candidate.validate(temporary_manifest)
 
                 self.assertEqual(summary["variedAxis"], declared_axis)
+
+    def test_harness_candidate_threads_parallel_plugin_contract(self):
+        baseline = json.loads(
+            (self.manifests_dir / "baseline.json").read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory(
+            dir=self.manifests_dir.parent, prefix=".candidate-contract-test."
+        ) as manifest_directory, tempfile.TemporaryDirectory(
+            dir=HERE, prefix=".candidate-test."
+        ) as output_directory:
+            source = json.loads(json.dumps(baseline))
+            source["id"] = "future-harness"
+            source["baseline"] = "../manifests/baseline.json"
+            source["declaredAxis"] = "harness"
+            source["axes"]["model"]["providerTemplate"] = (
+                "../providers/native-bedrock-sonnet-5.json"
+            )
+            source["axes"]["harness"].update(
+                {
+                    "baseImage": "ghcr.io/openclaw/openclaw@sha256:" + "f" * 64,
+                    "hostVersion": "2026.7.2",
+                    "parallelPluginVersion": "2026.7.2",
+                }
+            )
+            manifest_path = Path(manifest_directory) / "candidate.json"
+            manifest_path.write_text(json.dumps(source), encoding="utf-8")
+
+            plan = candidate.prepare(
+                manifest_path,
+                Path(output_directory),
+                "e" * 40,
+            )
+
+            rendered = Path(plan["dockerfile"]).read_text(encoding="utf-8")
+            self.assertIn("ARG PARALLEL_PLUGIN_VERSION=2026.7.2", rendered)
+            self.assertIn(
+                "ARG PARALLEL_PLUGIN_ENDPOINT=https://search.parallel.ai/mcp",
+                rendered,
+            )
+            self.assertEqual(plan["parallelPluginVersion"], "2026.7.2")
+            self.assertEqual(
+                plan["parallelPluginEndpoint"],
+                "https://search.parallel.ai/mcp",
+            )
+            metadata = json.loads(
+                Path(plan["metadata"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                metadata["harness"]["parallelPluginVersion"],
+                "2026.7.2",
+            )
+            self.assertEqual(
+                consistency.run_checks(
+                    str(Path(output_directory) / "openclaw.json"),
+                    str(HERE / "agentcore_wrapper.py"),
+                    str(plan["dockerfile"]),
+                )[0],
+                [],
+            )
 
     def test_rejects_prompt_axis_without_materialized_byte_change(self):
         baseline = json.loads(
@@ -353,6 +420,11 @@ class CandidateMatrixTests(unittest.TestCase):
         self.assertIn(
             "ARG BEDROCK_PLUGIN_ASSERTION=claude-sonnet-5", dockerfile
         )
+        self.assertIn("ARG PARALLEL_PLUGIN_VERSION=2026.7.1", dockerfile)
+        self.assertIn(
+            "ARG PARALLEL_PLUGIN_ENDPOINT=https://search.parallel.ai/mcp",
+            dockerfile,
+        )
         self.assertIn(
             'grep -Fq -- "${BEDROCK_PLUGIN_ASSERTION}"', dockerfile
         )
@@ -365,6 +437,8 @@ class CandidateMatrixTests(unittest.TestCase):
             "OPENCLAW_BASE_IMAGE=",
             "BEDROCK_PLUGIN_VERSION=",
             "BEDROCK_PLUGIN_ASSERTION=",
+            "PARALLEL_PLUGIN_VERSION=",
+            "PARALLEL_PLUGIN_ENDPOINT=",
             "candidate.py\" finalize",
             '"grader":"output_match"',
         ):
