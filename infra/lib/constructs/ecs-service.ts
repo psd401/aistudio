@@ -14,6 +14,7 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as autoscaling from 'aws-cdk-lib/aws-applicationautoscaling';
 import { RedisCache } from './cache/redis-cache';
 import { usGuardrailProfileArns } from './security';
+import { DEFAULT_PSD_DATA_MCP_URL } from '../agent-endpoints';
 
 export interface EcsServiceConstructProps {
   vpc: ec2.IVpc;
@@ -1016,6 +1017,11 @@ export class EcsServiceConstruct extends Construct {
         `arn:aws:iam::${cdk.Stack.of(this).account}:role/psd-agent-scheduler-invoke-${environment}`,
       AGENT_SCHEDULE_DLQ_ARN:
         `arn:aws:sqs:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:psd-agent-async-dlq-${environment}`,
+      // The web-tier owner-operation broker calls psd-data-mcp on behalf of
+      // AgentCore skills, so the endpoint belongs on this trusted container.
+      PSD_DATA_MCP_URL:
+        (this.node.tryGetContext('psdDataMcpUrl') as string | undefined)
+        ?? DEFAULT_PSD_DATA_MCP_URL,
       // DWD token broker (#1232) + agnt_ auto-provisioning (#1233) config —
       // the GCP project number, WIF pool/provider ids, DWD service-account
       // email, and the OneSync provisioning sheet id all live in ONE JSON
