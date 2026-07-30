@@ -23,8 +23,9 @@ const READ_ACTIONS = new Set([
   "search",
 ])
 
+// Bare mutating verbs only. `+`-prefixed helper verbs are covered by the
+// prefix check in validateWorkspaceMutation and must not be enumerated here.
 const MUTATING_ACTIONS = new Set([
-  "+send",
   "batchdelete",
   "batchmodify",
   "batchupdate",
@@ -47,14 +48,10 @@ const MUTATING_ACTIONS = new Set([
   "watch",
 ])
 
-const CHAT_MESSAGE_CREATE_OPERATIONS = new Set([
-  "chat +send",
-  "chat spaces messages create",
-])
-
 const ALLOWED_WRITES = new Set([
   "calendar events insert",
-  ...CHAT_MESSAGE_CREATE_OPERATIONS,
+  "chat +send",
+  "chat spaces messages create",
   "docs documents create",
   "drive files copy",
   "drive files create",
@@ -77,8 +74,15 @@ const REQUIRES_AGENT_CREATED_PROVENANCE = new Set([
   "tasks tasks update",
 ])
 
+// Derived rather than enumerated: every allowlisted Chat write leaves the
+// owner's own Workspace data and therefore has to reach the audit log, so a
+// Chat operation cannot be added to ALLOWED_WRITES without being audited.
+const ALLOWED_CHAT_WRITES = new Set(
+  [...ALLOWED_WRITES].filter((operation) => operation.startsWith("chat "))
+)
+
 const AGENT_ONLY_WRITES = new Set([
-  ...CHAT_MESSAGE_CREATE_OPERATIONS,
+  ...ALLOWED_CHAT_WRITES,
   "docs documents create",
   "drive files copy",
   "drive files create",
@@ -357,7 +361,7 @@ function chatMessageText(argv: readonly string[]): string | null {
 export function outboundMessageAudit(
   argv: readonly string[]
 ): WorkspaceOutboundAudit | null {
-  if (!CHAT_MESSAGE_CREATE_OPERATIONS.has(operationTokens(argv).join(" "))) {
+  if (!ALLOWED_CHAT_WRITES.has(operationTokens(argv).join(" "))) {
     return null
   }
   const text = chatMessageText(argv)
@@ -420,7 +424,7 @@ export function validateScheduledWorkspaceCommand(
 ): void {
   validateWorkspaceCommand(command)
   const { operation } = normalizedOperation(command.argv)
-  if (CHAT_MESSAGE_CREATE_OPERATIONS.has(operation)) {
+  if (ALLOWED_CHAT_WRITES.has(operation)) {
     throw new Error(
       "Scheduled Workspace runs cannot post Google Chat messages without live user confirmation"
     )
