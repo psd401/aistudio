@@ -11,6 +11,11 @@ Help the user prepare for and practice one difficult conversation. Ground the
 coaching in the publicly documented *Crucial Conversations* framework while
 keeping the user's real goal, role, and context in control of the session.
 
+When running in the agent image, load references from the `/opt/psd-skills`
+paths below. A catalog runtime without that filesystem appends the same files
+under **Catalog-loaded references**; when that section is present, treat its
+contents as already read.
+
 ## Workflow
 
 ### 1. Intake

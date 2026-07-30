@@ -273,12 +273,14 @@ export async function invokeSkillScan(
  */
 export const MAX_EXPORT_FILES = 50
 export const MAX_EXPORT_TOTAL_BYTES = 10 * 1024 * 1024 // 10 MB
+export const MAX_INJECTED_REFERENCE_FILES = 10
+export const MAX_INJECTED_REFERENCE_BYTES = 512 * 1024 // 512 KiB
 
 export interface DownloadedSkillFile {
   /** Relative path within the skill folder, e.g. "SKILL.md". */
   path: string
-  /** UTF-8 text content. */
-  content: string
+  /** Raw object bytes; ZIP export must not UTF-8-decode binary assets. */
+  content: Uint8Array
 }
 
 async function requireBucket(): Promise<string> {
@@ -348,17 +350,97 @@ export async function downloadSkillObject(key: string): Promise<string> {
   return res.Body.transformToString("utf-8")
 }
 
+/** Download a single S3 object without decoding or changing its bytes. */
+export async function downloadSkillObjectBytes(
+  key: string
+): Promise<Uint8Array> {
+  const bucket = await requireBucket()
+  const s3 = getS3()
+  const res = await s3.send(
+    new GetObjectCommand({ Bucket: bucket, Key: key })
+  )
+  if (!res.Body) {
+    throw new Error(`No body returned from S3 for key "${key}"`)
+  }
+  return res.Body.transformToByteArray()
+}
+
+interface SkillMarkdownReference {
+  path: string
+  content: string
+}
+
+async function readBundledMarkdownReferences(
+  s3Prefix: string
+): Promise<SkillMarkdownReference[]> {
+  const prefix = s3Prefix.endsWith("/") ? s3Prefix.slice(0, -1) : s3Prefix
+  const referencesPrefix = `${prefix}/references`
+  const keyPrefix = `${referencesPrefix}/`
+  const keys = (await listSkillObjectKeys(referencesPrefix))
+    .filter((key) => key.toLowerCase().endsWith(".md"))
+    .sort()
+
+  if (keys.length > MAX_INJECTED_REFERENCE_FILES) {
+    throw new Error(
+      `Skill has ${keys.length} Markdown references, exceeding the injection limit of ${MAX_INJECTED_REFERENCE_FILES}.`
+    )
+  }
+
+  const references = await Promise.all(
+    keys.map(async (key) => ({
+      path: `references/${key.slice(keyPrefix.length)}`,
+      content: await downloadSkillObject(key),
+    }))
+  )
+  const totalBytes = references.reduce(
+    (sum, reference) =>
+      sum + Buffer.byteLength(reference.content, "utf-8"),
+    0
+  )
+  if (totalBytes > MAX_INJECTED_REFERENCE_BYTES) {
+    throw new Error(
+      `Skill Markdown references total ${totalBytes} bytes, exceeding the injection limit of ${MAX_INJECTED_REFERENCE_BYTES} bytes.`
+    )
+  }
+  return references
+}
+
+function appendBundledMarkdownReferences(
+  skillMd: string,
+  references: SkillMarkdownReference[]
+): string {
+  if (references.length === 0) return skillMd
+  const sections = references.map(
+    (reference) =>
+      `### ${reference.path}\n\n${reference.content.trimEnd()}`
+  )
+  return [
+    skillMd.trimEnd(),
+    "## Catalog-loaded references",
+    "The bundled reference files requested above are already loaded below. Use this content directly when a filesystem `Read` tool is unavailable.",
+    ...sections,
+    "",
+  ].join("\n\n")
+}
+
 /**
  * Read a skill's SKILL.md from its S3 prefix. Returns null if it is missing (the
  * skill row may exist before the folder is fully written, or the artifact may be
- * absent for legacy rows).
+ * absent for legacy rows). For reviewed bundled skills, append bounded Markdown
+ * references so catalog consumers that have no agent-image filesystem (Nexus,
+ * internal/MCP execution) receive the same required knowledge.
  */
 export async function readSkillMarkdown(s3Prefix: string): Promise<string | null> {
   const prefix = s3Prefix.endsWith("/") ? s3Prefix.slice(0, -1) : s3Prefix
   try {
-    return await downloadSkillObject(`${prefix}/SKILL.md`)
+    const skillMd = await downloadSkillObject(`${prefix}/SKILL.md`)
+    if (!prefix.startsWith("skills/bundled/")) {
+      return skillMd
+    }
+    const references = await readBundledMarkdownReferences(prefix)
+    return appendBundledMarkdownReferences(skillMd, references)
   } catch (error) {
-    log.warn("SKILL.md not readable for skill prefix", {
+    log.warn("Skill instructions not readable for skill prefix", {
       s3Prefix,
       error: error instanceof Error ? error.message : String(error),
     })
@@ -368,7 +450,7 @@ export async function readSkillMarkdown(s3Prefix: string): Promise<string | null
 
 /**
  * Download all authored files in a skill folder (for zip export). Returns each
- * file's path relative to the skill folder plus its UTF-8 content.
+ * file's path relative to the skill folder plus its unmodified object bytes.
  */
 export async function downloadSkillFolder(
   s3Prefix: string
@@ -387,14 +469,14 @@ export async function downloadSkillFolder(
   const files = await Promise.all(
     keys.map(async (key) => ({
       path: key.slice(prefix.length),
-      content: await downloadSkillObject(key),
+      content: await downloadSkillObjectBytes(key),
     }))
   )
 
-  // Cap total decoded size so an oversized folder cannot spike ECS task memory
+  // Cap total raw size so an oversized folder cannot spike ECS task memory
   // while the zip is built in-memory.
   const totalBytes = files.reduce(
-    (sum, f) => sum + Buffer.byteLength(f.content, "utf-8"),
+    (sum, file) => sum + file.content.byteLength,
     0
   )
   if (totalBytes > MAX_EXPORT_TOTAL_BYTES) {
