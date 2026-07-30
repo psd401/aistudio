@@ -97,6 +97,17 @@ class CatalogDiagnosticTests(unittest.TestCase):
 
 
 class GatewayTokenTests(unittest.TestCase):
+    def test_uses_reserved_direct_local_backend_identity(self):
+        self.assertEqual(
+            OpenClawAdapter.CLIENT_INFO,
+            {
+                "id": "gateway-client",
+                "mode": "backend",
+                "version": "dev",
+                "platform": "linux",
+            },
+        )
+
     def test_token_generated_and_nonempty(self):
         a = harness_adapter.OpenClawAdapter()
         # secrets.token_urlsafe(32) yields ~43 url-safe chars; assert it is a

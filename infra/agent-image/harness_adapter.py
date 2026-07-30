@@ -252,14 +252,13 @@ class OpenClawAdapter(HarnessAdapter):
     # agree within the process. OpenClaw overwrites the config file's token on
     # startup and --token overrides that config value, so the on-disk config
     # token is never the operative secret.
-    # client.id MUST be "openclaw-tui" — verified by reading OpenClaw source:
-    # - "cli" passes auth but scopes are cleared (not an operator UI client)
-    # - "openclaw-control-ui" triggers browser origin check (rejects non-browser)
-    # - "openclaw-tui" passes isOperatorUiClient (scopes preserved) without
-    #   triggering isBrowserOperatorUiClient (no origin check)
-    # See: /app/dist/message-channel-CBqCPFa_.js lines 80-85
+    # Use OpenClaw's reserved direct-local backend identity. Both 2026.7.1 and
+    # 2026.7.2-beta.5 explicitly admit gateway-client/backend when loopback
+    # shared-token auth succeeds, preserving its requested operator scopes
+    # without treating this non-browser adapter as a Control UI. TUI became a
+    # Control UI client in the beta and therefore requires device identity.
     CLIENT_INFO = {
-        "id": "openclaw-tui",
+        "id": "gateway-client",
         "mode": "backend",
         "version": "dev",
         "platform": "linux",
@@ -641,9 +640,10 @@ class OpenClawAdapter(HarnessAdapter):
                         # gateway protocol docs so we negotiate v4 against this
                         # gateway yet stay compatible with a v3 gateway on
                         # rollback. The v4 connect envelope + fields below are
-                        # unchanged, and device auth is disabled in the gateway
-                        # config (dangerouslyDisableDeviceAuth=true), so no
-                        # `device` block is required.
+                        # unchanged. The reserved direct-local
+                        # gateway-client/backend path authenticates with the
+                        # per-container shared token, so no device block is
+                        # required.
                         "minProtocol": 3,
                         "maxProtocol": 4,
                         "client": self.CLIENT_INFO,
