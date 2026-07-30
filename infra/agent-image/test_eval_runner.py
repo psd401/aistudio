@@ -377,6 +377,28 @@ class SuiteLoadingTests(unittest.TestCase):
                 valid_self_check,
             )
 
+        open_adaptive_decision = next(
+            str(grader.get("pattern"))
+            for grader in tasks_by_id[
+                "open-adaptive-decommission-vs-continuation"
+            ].graders
+            if grader.get("type") == "output_match"
+        )
+        for valid_decision in (
+            "Continuation is warranted by the revised hypothesis.",
+            "Continue only if the revised hypothesis is testable.",
+        ):
+            self.assertIsNotNone(
+                re.search(open_adaptive_decision, valid_decision),
+                valid_decision,
+            )
+        self.assertIsNone(
+            re.search(
+                open_adaptive_decision,
+                "Decommission because the original hypothesis failed.",
+            )
+        )
+
         chart_probe = next(
             grader
             for grader in tasks_by_id[
