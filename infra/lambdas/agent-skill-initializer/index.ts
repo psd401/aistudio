@@ -5,7 +5,7 @@
  * Receives the manifest of image-bundled skills (built at synth time
  * from `infra/agent-image/skills/{name}/SKILL.md` frontmatter) and
  * UPSERTs each one into `psd_agent_skills` with scope=shared and
- * scan_status=clean.
+ * scan_status=clean, including its declared allowed-tools pin.
  *
  * Bundled skills are pre-vetted (they ship in the agent image, code-
  * reviewed and built by us), so the security scan is skipped — the
@@ -23,7 +23,8 @@
  *   DATABASE_SECRET_ARN   — Aurora credentials secret
  *   DATABASE_NAME         — default 'aistudio'
  *   DATABASE_PORT         — default 5432
- *   IMAGE_TAG             — current agent image tag (stored in s3_key for traceability)
+ *
+ * Custom-resource properties include the current agent image tag.
  */
 
 import {
@@ -32,6 +33,10 @@ import {
 } from "@aws-sdk/client-secrets-manager"
 import postgres from "postgres"
 import { retirementCandidates } from "./retirement"
+import {
+  bundledSkillRegistration,
+  type SkillManifestEntry,
+} from "./registration"
 
 const DATABASE_HOST = process.env.DATABASE_HOST || ""
 const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || ""
@@ -63,14 +68,6 @@ async function getSql(): Promise<postgres.Sql> {
     connect_timeout: 10,
   })
   return sqlClient
-}
-
-interface SkillManifestEntry {
-  name: string
-  summary: string
-  description?: string
-  sourceHash: string
-  imageTag: string
 }
 
 interface CustomResourceEvent {
@@ -124,26 +121,37 @@ async function upsertSkills(
   let skipped = 0
 
   for (const skill of skills) {
-    if (!skill.name || !skill.summary || !skill.sourceHash) {
+    const registration = bundledSkillRegistration(skill, imageTag)
+    if (!registration) {
       skipped++
       continue
     }
-    // s3Key column stores `image:<tag>:<name>` for bundled skills — there's
-    // no real S3 object, but the column is NOT NULL and this string is
-    // both a stable identifier and a useful breadcrumb in the dashboard.
-    const s3Key = `image:${imageTag}:${skill.name}`
+    // CDK deploys the reviewed bundled tree to this versioned prefix before
+    // invoking the initializer. Using the same S3 contract as promoted skills
+    // keeps every catalog consumer on one read path.
     // UPSERT keyed on the partial unique index (name) WHERE scope='shared'.
-    // The summary and s3Key get refreshed on every deploy; version bumps
-    // when the source hash changes.
+    // The summary, s3Key, and tool pin get refreshed on every deploy; version
+    // bumps when the image tag changes.
     const result = await sql<{ id: string; version: number }[]>`
       INSERT INTO psd_agent_skills
-        (name, scope, s3_key, version, summary, scan_status, created_at, updated_at)
+        (name, scope, s3_key, version, summary, allowed_tools, scan_status, created_at, updated_at)
       VALUES
-        (${skill.name}, 'shared', ${s3Key}, 1, ${skill.summary}, 'clean', NOW(), NOW())
+        (
+          ${registration.name},
+          'shared',
+          ${registration.s3Key},
+          1,
+          ${registration.summary},
+          ${sql.json(registration.allowedTools)},
+          'clean',
+          NOW(),
+          NOW()
+        )
       ON CONFLICT (name) WHERE scope = 'shared'
       DO UPDATE SET
         s3_key = EXCLUDED.s3_key,
         summary = EXCLUDED.summary,
+        allowed_tools = EXCLUDED.allowed_tools,
         scan_status = 'clean',
         version = CASE
           WHEN psd_agent_skills.s3_key = EXCLUDED.s3_key THEN psd_agent_skills.version
