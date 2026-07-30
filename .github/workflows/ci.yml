@@ -308,6 +308,11 @@ jobs:
       env:
         CI: true
 
+    - name: Run repository pending-deletion constraint smoke
+      run: bun run test:smoke:repository-pending-deletion
+      env:
+        CI: true
+
     - name: Run Google content connector lifecycle smoke
       run: bun run test:smoke:google-content
       env:
