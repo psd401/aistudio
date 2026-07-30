@@ -68,6 +68,7 @@ IMAGE_RE = re.compile(
 )
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SOURCE_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+PARALLEL_PLUGIN_ENDPOINT = "https://search.parallel.ai/mcp"
 
 
 def _utc_now() -> str:
@@ -427,17 +428,20 @@ def _compose_config(template: dict[str, object]) -> dict[str, object]:
 
 def _validate_harness(
     axis: object, label: str
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str, str, str]:
     harness = _mapping(axis, label)
     if set(harness) != {
         "baseImage",
         "hostVersion",
         "bedrockPluginVersion",
         "expectedPluginToken",
+        "parallelPluginVersion",
+        "parallelPluginEndpoint",
     }:
         raise CandidateError(
             f"{label} must define baseImage, hostVersion, "
-            "bedrockPluginVersion, and expectedPluginToken"
+            "bedrockPluginVersion, expectedPluginToken, "
+            "parallelPluginVersion, and parallelPluginEndpoint"
         )
     base_image = _string(harness.get("baseImage"), f"{label}.baseImage")
     host_version = _string(harness.get("hostVersion"), f"{label}.hostVersion")
@@ -447,13 +451,37 @@ def _validate_harness(
     expected_token = _string(
         harness.get("expectedPluginToken"), f"{label}.expectedPluginToken"
     )
+    parallel_plugin_version = _string(
+        harness.get("parallelPluginVersion"),
+        f"{label}.parallelPluginVersion",
+    )
+    parallel_plugin_endpoint = _string(
+        harness.get("parallelPluginEndpoint"),
+        f"{label}.parallelPluginEndpoint",
+    )
     if not IMAGE_RE.fullmatch(base_image):
         raise CandidateError(f"{label}.baseImage must be an immutable OpenClaw digest")
-    if not PIN_RE.fullmatch(host_version) or not PIN_RE.fullmatch(plugin_version):
+    if (
+        not PIN_RE.fullmatch(host_version)
+        or not PIN_RE.fullmatch(plugin_version)
+        or not PIN_RE.fullmatch(parallel_plugin_version)
+    ):
         raise CandidateError(f"{label}: host/plugin versions are malformed")
     if not re.fullmatch(r"^[0-9A-Za-z._:-]+$", expected_token):
         raise CandidateError(f"{label}.expectedPluginToken is malformed")
-    return base_image, host_version, plugin_version, expected_token
+    if parallel_plugin_endpoint != PARALLEL_PLUGIN_ENDPOINT:
+        raise CandidateError(
+            f"{label}.parallelPluginEndpoint must be "
+            f"{PARALLEL_PLUGIN_ENDPOINT!r}"
+        )
+    return (
+        base_image,
+        host_version,
+        plugin_version,
+        expected_token,
+        parallel_plugin_version,
+        parallel_plugin_endpoint,
+    )
 
 
 def _validate_prompt(axis: object, label: str) -> tuple[str, Path, Path]:
@@ -564,6 +592,8 @@ def _render_pin_contract(
     host_version: str,
     plugin_version: str,
     expected_token: str,
+    parallel_plugin_version: str,
+    parallel_plugin_endpoint: str,
 ) -> str:
     source = CANONICAL_DOCKERFILE.read_text(encoding="utf-8")
     base_digest = base_image.rsplit("@", 1)[1]
@@ -588,6 +618,14 @@ def _render_pin_contract(
             r"^ARG BEDROCK_PLUGIN_ASSERTION=.*$",
             f"ARG BEDROCK_PLUGIN_ASSERTION={expected_token}",
         ),
+        (
+            r"^ARG PARALLEL_PLUGIN_VERSION=.*$",
+            f"ARG PARALLEL_PLUGIN_VERSION={parallel_plugin_version}",
+        ),
+        (
+            r"^ARG PARALLEL_PLUGIN_ENDPOINT=.*$",
+            f"ARG PARALLEL_PLUGIN_ENDPOINT={parallel_plugin_endpoint}",
+        ),
     )
     for pattern, replacement in replacements:
         source, count = re.subn(pattern, replacement, source, count=1, flags=re.MULTILINE)
@@ -611,9 +649,14 @@ def prepare(manifest_path: Path, output_dir: Path, source_commit: str) -> dict[s
     candidate_id = _string(manifest["_resolvedId"], "candidate id")
     baseline_id = _string(baseline["_resolvedId"], "baseline id")
     declared_axis = _string(manifest.get("declaredAxis"), "declaredAxis")
-    base_image, host_version, plugin_version, expected_token = _validate_harness(
-        axes["harness"], "axes.harness"
-    )
+    (
+        base_image,
+        host_version,
+        plugin_version,
+        expected_token,
+        parallel_plugin_version,
+        parallel_plugin_endpoint,
+    ) = _validate_harness(axes["harness"], "axes.harness")
     prompt_variant, soul_path, rules_path = _validate_prompt(
         axes["prompt"], "axes.prompt"
     )
@@ -631,7 +674,12 @@ def prepare(manifest_path: Path, output_dir: Path, source_commit: str) -> dict[s
     _atomic_json(config_path, _compose_config(template))
     dockerfile_path.write_text(
         _render_pin_contract(
-            base_image, host_version, plugin_version, expected_token
+            base_image,
+            host_version,
+            plugin_version,
+            expected_token,
+            parallel_plugin_version,
+            parallel_plugin_endpoint,
         ),
         encoding="utf-8",
     )
@@ -667,6 +715,8 @@ def prepare(manifest_path: Path, output_dir: Path, source_commit: str) -> dict[s
             "hostVersion": host_version,
             "bedrockPluginVersion": plugin_version,
             "expectedPluginToken": expected_token,
+            "parallelPluginVersion": parallel_plugin_version,
+            "parallelPluginEndpoint": parallel_plugin_endpoint,
         },
         "prompt": {
             "variant": prompt_variant,
@@ -702,6 +752,8 @@ def prepare(manifest_path: Path, output_dir: Path, source_commit: str) -> dict[s
         "baseImage": base_image,
         "bedrockPluginVersion": plugin_version,
         "expectedPluginToken": expected_token,
+        "parallelPluginVersion": parallel_plugin_version,
+        "parallelPluginEndpoint": parallel_plugin_endpoint,
         "metadata": str(metadata_path),
     }
     _atomic_json(output_dir / "plan.json", plan)
