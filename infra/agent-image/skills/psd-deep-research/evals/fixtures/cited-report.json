@@ -1,0 +1,43 @@
+[
+  {
+    "route": "/api/agent/credentials",
+    "method": "POST",
+    "request_body": {
+      "operation": "deep-research-start"
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "interactionId": "eval-deep-research-1465",
+        "status": "in_progress"
+      }
+    }
+  },
+  {
+    "route": "/api/agent/credentials",
+    "method": "POST",
+    "request_body": {
+      "operation": "deep-research-status",
+      "interactionId": "eval-deep-research-1465"
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "interactionId": "eval-deep-research-1465",
+        "status": "completed",
+        "elapsedSec": 480,
+        "report": "# Later school start times\n\nLater secondary-school start times are associated with longer student sleep and improved attendance. The CDC summarizes the sleep-duration concern: https://www.cdc.gov/sleep/features/schools-start-too-early.html. The American Academy of Pediatrics recommends start times that allow adequate adolescent sleep: https://publications.aap.org/pediatrics/article/134/3/642/74175/School-Start-Times-for-Adolescents.",
+        "citations": [
+          {
+            "url": "https://www.cdc.gov/sleep/features/schools-start-too-early.html",
+            "title": "Schools Start Too Early"
+          },
+          {
+            "url": "https://publications.aap.org/pediatrics/article/134/3/642/74175/School-Start-Times-for-Adolescents",
+            "title": "School Start Times for Adolescents"
+          }
+        ]
+      }
+    }
+  }
+]

@@ -2,7 +2,20 @@ import {
   AgentCredentialBroker,
   AgentCredentialInputError,
 } from "@/lib/agent-credentials/broker";
+import { hasCapability } from "@/lib/ai/capability-utils";
+import {
+  type DeepResearchCitation,
+  type DeepResearchInteractionStatus,
+} from "@/lib/ai/gemini-deep-research-service";
+import {
+  releaseDeepResearch,
+  reserveDeepResearch,
+  type DeepResearchReservation,
+} from "@/lib/ai/deep-research-budget";
+import { executeQuery } from "@/lib/db/drizzle-client";
+import { aiModels, deepResearchReservations, users } from "@/lib/db/schema";
 import { createLogger, sanitizeForLogging } from "@/lib/logger";
+import { and, eq, isNotNull, sql } from "drizzle-orm";
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 const MAX_OPERATION_BYTES = 2 * 1024 * 1024;
@@ -676,6 +689,446 @@ export async function executeOpenAiImageOperation(
   }
   const payload = await readBoundedJson(response, 32 * 1024 * 1024);
   return { imageBase64: imageBase64FromPayload(payload) };
+}
+
+// ---------------------------------------------------------------------------
+// Gemini Deep Research
+// ---------------------------------------------------------------------------
+
+type DeepResearchDenialReason = Extract<
+  DeepResearchReservation,
+  { allowed: false }
+>["reason"];
+
+const DEEP_RESEARCH_DENIAL_MESSAGES: Record<
+  DeepResearchDenialReason,
+  string
+> = {
+  user_concurrency:
+    "You already have a Deep Research run in progress. Wait for it to finish or resume that interaction.",
+  deployment_concurrency:
+    "Deep Research is at the deployment-wide concurrent-run limit. Try again after another run finishes.",
+  user_budget:
+    "Your hourly Deep Research budget is exhausted. Try again after the rolling one-hour window resets.",
+  deployment_budget:
+    "The deployment-wide hourly Deep Research budget is exhausted. Try again after the rolling one-hour window resets.",
+};
+
+const MAX_DEEP_RESEARCH_PROMPT_CHARS = 100_000;
+const MAX_DEEP_RESEARCH_INTERACTION_ID_CHARS = 512;
+
+export class DeepResearchOperationError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "DeepResearchOperationError";
+  }
+}
+
+export interface DeepResearchStartResult {
+  interactionId: string;
+  status: DeepResearchInteractionStatus;
+}
+
+export type DeepResearchStatusResult =
+  | {
+      interactionId: string;
+      status: Exclude<
+        DeepResearchInteractionStatus,
+        "completed" | "failed" | "cancelled" | "incomplete"
+      >;
+      elapsedSec: number;
+    }
+  | {
+      interactionId: string;
+      status: "completed";
+      elapsedSec: number;
+      report: string;
+      citations: DeepResearchCitation[];
+    };
+
+function validatedDeepResearchPrompt(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.trim().length === 0 ||
+    value.length > MAX_DEEP_RESEARCH_PROMPT_CHARS
+  ) {
+    throw new AgentCredentialInputError(
+      `Deep Research prompt must contain 1-${MAX_DEEP_RESEARCH_PROMPT_CHARS} characters`,
+    );
+  }
+  return value.trim();
+}
+
+function validatedInteractionId(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_DEEP_RESEARCH_INTERACTION_ID_CHARS ||
+    hasAsciiControl(value)
+  ) {
+    throw new AgentCredentialInputError("Invalid Deep Research interaction id");
+  }
+  return value;
+}
+
+/**
+ * A populated Cognito subject is the repository's active-user marker. The
+ * case-insensitive email join mirrors the owner lookup used by canAccessSkill.
+ */
+async function resolveActiveOwnerUserId(ownerEmail: string): Promise<number> {
+  const [owner] = await executeQuery(
+    (db) =>
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(
+          and(
+            sql`lower(${users.email}) = lower(${ownerEmail})`,
+            isNotNull(users.cognitoSub),
+          ),
+        )
+        .limit(1),
+    "resolveDeepResearchOwner",
+  );
+  if (!owner) {
+    throw new DeepResearchOperationError(
+      403,
+      "forbidden",
+      "The signed Deep Research owner is not an active user.",
+    );
+  }
+  return owner.id;
+}
+
+async function resolveDeepResearchModelId(): Promise<string | null> {
+  const models = await executeQuery(
+    (db) =>
+      db
+        .select({
+          modelId: aiModels.modelId,
+          capabilities: aiModels.capabilities,
+        })
+        .from(aiModels)
+        .where(and(eq(aiModels.active, true), eq(aiModels.provider, "google")))
+        .orderBy(aiModels.id),
+    "resolveDeepResearchModel",
+  );
+  const model = models.find((candidate) =>
+    hasCapability(candidate.capabilities, "deepResearch"),
+  );
+  return model?.modelId ?? null;
+}
+
+async function resolveDeepResearchModelIdForLog(): Promise<string | null> {
+  try {
+    return await resolveDeepResearchModelId();
+  } catch (error) {
+    log.warn("Failed to resolve Deep Research model for terminal log", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+async function bindDeepResearchInteraction(input: {
+  leaseId: string;
+  userId: number;
+  interactionId: string;
+}): Promise<void> {
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .update(deepResearchReservations)
+        .set({ interactionId: input.interactionId })
+        .where(
+          and(
+            eq(deepResearchReservations.id, input.leaseId),
+            eq(deepResearchReservations.userId, input.userId),
+            eq(deepResearchReservations.status, "active"),
+          ),
+        )
+        .returning({ id: deepResearchReservations.id }),
+    "bindDeepResearchInteraction",
+  );
+  if (!rows[0]) {
+    throw new Error("Deep Research reservation could not be bound");
+  }
+}
+
+async function releaseStartLease(
+  leaseId: string,
+  context: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await releaseDeepResearch(leaseId);
+  } catch (releaseError) {
+    log.error("Failed to release Deep Research start lease", {
+      ...context,
+      error:
+        releaseError instanceof Error
+          ? releaseError.message
+          : String(releaseError),
+    });
+  }
+}
+
+type DeepResearchService = typeof import(
+  "@/lib/ai/gemini-deep-research-service"
+);
+
+async function cleanupFailedDeepResearchStart(input: {
+  service: DeepResearchService | null;
+  leaseId: string;
+  interactionId: string | null;
+  context: Record<string, unknown>;
+}): Promise<"released_after_start_error" | "preserved_after_cancel_error"> {
+  if (input.service && input.interactionId) {
+    try {
+      await input.service.cancelDeepResearchInteraction(input.interactionId);
+    } catch (cancelError) {
+      log.error("Failed to cancel unbound Deep Research interaction", {
+        ...input.context,
+        error:
+          cancelError instanceof Error
+            ? cancelError.message
+            : String(cancelError),
+      });
+      // Keep the lease active so an unconfirmed cancellation cannot create a
+      // second concurrency slot. The existing lease expiry remains the final
+      // recovery boundary if Google is unreachable.
+      return "preserved_after_cancel_error";
+    }
+  }
+  await releaseStartLease(input.leaseId, input.context);
+  return "released_after_start_error";
+}
+
+export async function executeDeepResearchStartOperation(input: {
+  ownerEmail: string;
+  prompt: unknown;
+}): Promise<DeepResearchStartResult> {
+  const startedAt = Date.now();
+  const prompt = validatedDeepResearchPrompt(input.prompt);
+  const userId = await resolveActiveOwnerUserId(input.ownerEmail);
+  const reservation = await reserveDeepResearch(userId);
+  if (!reservation.allowed) {
+    log.warn("Deep Research broker start denied", {
+      caller: sanitizeForLogging(input.ownerEmail),
+      interactionId: null,
+      resolvedModel: null,
+      reservationOutcome: reservation.reason,
+      elapsedMs: Date.now() - startedAt,
+    });
+    throw new DeepResearchOperationError(
+      429,
+      reservation.reason,
+      DEEP_RESEARCH_DENIAL_MESSAGES[reservation.reason],
+    );
+  }
+
+  let interactionId: string | null = null;
+  let modelId: string | null = null;
+  let service: DeepResearchService | null = null;
+  try {
+    modelId = await resolveDeepResearchModelId();
+    if (!modelId) {
+      throw new DeepResearchOperationError(
+        503,
+        "upstream_error",
+        "Deep Research is unavailable because no active Google deep-research model is configured.",
+      );
+    }
+    service = await import("@/lib/ai/gemini-deep-research-service");
+    const interaction = await service.createDeepResearchInteraction(
+      prompt,
+      modelId,
+    );
+    interactionId = interaction.interactionId;
+    await bindDeepResearchInteraction({
+      leaseId: reservation.leaseId,
+      userId,
+      interactionId,
+    });
+    log.info("Deep Research broker start completed", {
+      caller: sanitizeForLogging(input.ownerEmail),
+      interactionId,
+      resolvedModel: modelId,
+      reservationOutcome: "reserved",
+      elapsedMs: Date.now() - startedAt,
+    });
+    return interaction;
+  } catch (error) {
+    const cleanupContext = {
+      caller: sanitizeForLogging(input.ownerEmail),
+      interactionId,
+      resolvedModel: modelId,
+      elapsedMs: Date.now() - startedAt,
+    };
+    const reservationOutcome = await cleanupFailedDeepResearchStart({
+      service,
+      leaseId: reservation.leaseId,
+      interactionId,
+      context: cleanupContext,
+    });
+    log.error("Deep Research broker start failed", {
+      ...cleanupContext,
+      reservationOutcome,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    if (error instanceof DeepResearchOperationError) throw error;
+    const message = service
+      ? service.mapInteractionError(error).message
+      : error instanceof Error
+        ? error.message
+        : String(error);
+    throw new DeepResearchOperationError(502, "upstream_error", message);
+  }
+}
+
+async function ownedDeepResearchReservation(
+  ownerEmail: string,
+  interactionId: string,
+): Promise<{
+  leaseId: string;
+  reservedAt: Date;
+  userId: number;
+}> {
+  const userId = await resolveActiveOwnerUserId(ownerEmail);
+  const [reservation] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          leaseId: deepResearchReservations.id,
+          userId: deepResearchReservations.userId,
+          reservedAt: deepResearchReservations.reservedAt,
+        })
+        .from(deepResearchReservations)
+        .where(eq(deepResearchReservations.interactionId, interactionId))
+        .limit(1),
+    "getDeepResearchInteractionReservation",
+  );
+  if (!reservation || reservation.userId !== userId) {
+    throw new DeepResearchOperationError(
+      404,
+      "not_found",
+      "Deep Research interaction not found.",
+    );
+  }
+  return reservation;
+}
+
+export async function executeDeepResearchStatusOperation(input: {
+  ownerEmail: string;
+  interactionId: unknown;
+}): Promise<DeepResearchStatusResult> {
+  const interactionId = validatedInteractionId(input.interactionId);
+  const reservation = await ownedDeepResearchReservation(
+    input.ownerEmail,
+    interactionId,
+  );
+
+  let service: DeepResearchService | null = null;
+  let interaction;
+  try {
+    service = await import("@/lib/ai/gemini-deep-research-service");
+    interaction = await service.getDeepResearchInteraction(interactionId);
+  } catch (error) {
+    const message = service
+      ? service.mapInteractionError(error).message
+      : error instanceof Error
+        ? error.message
+        : String(error);
+    throw new DeepResearchOperationError(502, "upstream_error", message);
+  }
+  const elapsedMs = Math.max(
+    0,
+    Date.now() - reservation.reservedAt.getTime(),
+  );
+
+  if (
+    interaction.status !== "completed" &&
+    interaction.status !== "failed" &&
+    interaction.status !== "cancelled" &&
+    interaction.status !== "incomplete"
+  ) {
+    if (elapsedMs >= service.MAX_DEEP_RESEARCH_RUN_DURATION_MS) {
+      try {
+        await service.cancelDeepResearchInteraction(interactionId);
+      } catch (error) {
+        log.error("Failed to cancel overdue Deep Research interaction", {
+          caller: sanitizeForLogging(input.ownerEmail),
+          interactionId,
+          resolvedModel: null,
+          reservationOutcome: "preserved_after_cancel_error",
+          elapsedMs,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw new DeepResearchOperationError(
+          502,
+          "upstream_error",
+          service.mapInteractionError(error).message,
+        );
+      }
+      await releaseDeepResearch(reservation.leaseId);
+      const modelId = await resolveDeepResearchModelIdForLog();
+      log.warn("Deep Research broker deadline reached", {
+        caller: sanitizeForLogging(input.ownerEmail),
+        interactionId,
+        resolvedModel: modelId,
+        reservationOutcome: "released",
+        elapsedMs,
+        status: "cancelled",
+      });
+      throw new DeepResearchOperationError(
+        504,
+        "upstream_error",
+        `Deep Research exceeded the ${Math.round(
+          service.MAX_DEEP_RESEARCH_RUN_DURATION_MS / 60_000,
+        )}-minute server time limit and was cancelled.`,
+      );
+    }
+    return {
+      interactionId,
+      status: interaction.status,
+      elapsedSec: Math.floor(elapsedMs / 1_000),
+    };
+  }
+
+  await releaseDeepResearch(reservation.leaseId);
+  const modelId = await resolveDeepResearchModelIdForLog();
+  log.info("Deep Research broker terminal status", {
+    caller: sanitizeForLogging(input.ownerEmail),
+    interactionId,
+    resolvedModel: modelId,
+    reservationOutcome: "released",
+    elapsedMs,
+    status: interaction.status,
+  });
+
+  if (interaction.status !== "completed") {
+    const mapped = service.mapInteractionError(
+      new Error(`Deep Research ended with status: ${interaction.status}.`),
+    );
+    throw new DeepResearchOperationError(502, "upstream_error", mapped.message);
+  }
+  if (!interaction.report) {
+    throw new DeepResearchOperationError(
+      502,
+      "upstream_error",
+      "Deep Research completed without report content.",
+    );
+  }
+  return {
+    interactionId,
+    status: interaction.status,
+    elapsedSec: Math.floor(elapsedMs / 1_000),
+    report: interaction.report,
+    citations: interaction.citations ?? [],
+  };
 }
 
 // ---------------------------------------------------------------------------
