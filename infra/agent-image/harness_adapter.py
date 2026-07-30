@@ -254,16 +254,17 @@ class OpenClawAdapter(HarnessAdapter):
     # token is never the operative secret.
     # The image contract chooses the identity supported by its pinned host.
     # Production 2026.7.1 retains the proven TUI path; 2026.7.2 harness
-    # candidates select OpenClaw's reserved direct-local backend identity so a
-    # non-browser adapter is not classified as Control UI. candidate.py and the
-    # Docker build accept only these two exact pairs.
+    # candidates select OpenClaw's local CLI identity, whose container-local
+    # shared-auth path preserves operator scopes without classifying this
+    # non-browser adapter as Control UI. candidate.py and the Docker build
+    # accept only these two exact pairs.
     _gateway_client_pair = (
         os.environ.get("PSD_OPENCLAW_GATEWAY_CLIENT_ID", "openclaw-tui"),
         os.environ.get("PSD_OPENCLAW_GATEWAY_CLIENT_MODE", "backend"),
     )
     if _gateway_client_pair not in {
         ("openclaw-tui", "backend"),
-        ("gateway-client", "backend"),
+        ("cli", "cli"),
     }:
         raise RuntimeError("Unsupported OpenClaw gateway client identity")
     CLIENT_INFO = {

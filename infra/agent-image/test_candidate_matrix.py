@@ -152,21 +152,21 @@ class CandidateMatrixTests(unittest.TestCase):
             self.assertEqual(
                 metadata["harness"]["gatewayClient"],
                 {
-                    "id": "gateway-client",
-                    "mode": "backend",
+                    "id": "cli",
+                    "mode": "cli",
                 },
             )
-            self.assertEqual(plan["gatewayClientId"], "gateway-client")
-            self.assertEqual(plan["gatewayClientMode"], "backend")
+            self.assertEqual(plan["gatewayClientId"], "cli")
+            self.assertEqual(plan["gatewayClientMode"], "cli")
             candidate_dockerfile = Path(plan["dockerfile"]).read_text(
                 encoding="utf-8"
             )
             self.assertIn(
-                "ARG OPENCLAW_GATEWAY_CLIENT_ID=gateway-client",
+                "ARG OPENCLAW_GATEWAY_CLIENT_ID=cli",
                 candidate_dockerfile,
             )
             self.assertIn(
-                "ARG OPENCLAW_GATEWAY_CLIENT_MODE=backend",
+                "ARG OPENCLAW_GATEWAY_CLIENT_MODE=cli",
                 candidate_dockerfile,
             )
 

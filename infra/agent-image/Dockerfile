@@ -69,7 +69,7 @@ FROM ${OPENCLAW_BASE_IMAGE}
 
 # OpenClaw 2026.7.2 classifies the TUI as a Control UI client and requires
 # device identity even for this non-browser loopback adapter. Harness
-# candidates can select the release's reserved backend helper identity; the
+# candidates can select the release's scope-preserving local CLI identity; the
 # production 2026.7.1 default keeps its proven TUI behavior.
 ARG OPENCLAW_GATEWAY_CLIENT_ID=openclaw-tui
 ARG OPENCLAW_GATEWAY_CLIENT_MODE=backend

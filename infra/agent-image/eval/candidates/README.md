@@ -44,8 +44,9 @@ baseline. It is a prerelease and is evaluated as a candidate only; building it
 does not change the production pin. Its manifest records the upstream-required
 move from `agents.defaults.memorySearch` to `memory.search` and removes two
 retired Control UI compatibility keys. It also selects the beta's reserved
-`gateway-client`/`backend` loopback helper identity because the beta reclassifies
-TUI as Control UI and requires device identity. The model and materialized
+`cli`/`cli` container-local identity because the beta reclassifies TUI as
+Control UI and requires device identity; the CLI path explicitly preserves
+operator scopes after loopback shared-token auth. The model and materialized
 prompt remain byte-identical to baseline.
 
 ## Axis contract
@@ -64,8 +65,8 @@ rejects zero changes, an undeclared change, or changes to two or more axes.
   `check_config_consistency.py`; `npm pack` and both tarball references share
   the same build argument. Harness candidates may also declare a narrowly
   allowlisted `configMigrations` list when the new host moves or retires
-  baseline keys, plus the exact `gateway-client`/`backend` pair when the host
-  requires its reserved loopback automation identity. These compatibility
+  baseline keys, plus the exact `cli`/`cli` pair when the host requires its
+  scope-preserving container-local identity. These compatibility
   inputs are part of the harness axis and cannot change model or prompt
   configuration.
 - `prompt` selects the SOUL preamble and rules skill. The candidate versions

@@ -81,7 +81,7 @@ ALLOWED_HARNESS_CONFIG_MIGRATIONS = frozenset(
 ALLOWED_HARNESS_GATEWAY_CLIENTS = frozenset(
     {
         ("openclaw-tui", "backend"),
-        ("gateway-client", "backend"),
+        ("cli", "cli"),
     }
 )
 
