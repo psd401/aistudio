@@ -255,6 +255,7 @@ class SuiteLoadingTests(unittest.TestCase):
             "Failure record filed #396.",
             "Failure report recorded as ID 407.",
             "Logged as failure #408.",
+            '{"logged":true,"failure_id":414}',
         ):
             self.assertIsNotNone(
                 re.search(failure_report_pattern, valid_confirmation),
