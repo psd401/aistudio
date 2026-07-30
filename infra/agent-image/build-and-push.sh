@@ -63,6 +63,8 @@ PSD_RULES_BUILD_PATH="skills/psd-rules/SKILL.md"
 OPENCLAW_BASE_IMAGE=""
 BEDROCK_PLUGIN_VERSION=""
 BEDROCK_PLUGIN_ASSERTION=""
+OPENCLAW_GATEWAY_CLIENT_ID=""
+OPENCLAW_GATEWAY_CLIENT_MODE=""
 CID=""
 
 cleanup_build() {
@@ -116,6 +118,8 @@ if [ -n "${CANDIDATE_MANIFEST}" ]; then
   OPENCLAW_BASE_IMAGE="$(candidate_plan_value baseImage)"
   BEDROCK_PLUGIN_VERSION="$(candidate_plan_value bedrockPluginVersion)"
   BEDROCK_PLUGIN_ASSERTION="$(candidate_plan_value expectedPluginToken)"
+  OPENCLAW_GATEWAY_CLIENT_ID="$(candidate_plan_value gatewayClientId)"
+  OPENCLAW_GATEWAY_CLIENT_MODE="$(candidate_plan_value gatewayClientMode)"
   CANDIDATE_METADATA="$(candidate_plan_value metadata)"
 fi
 
@@ -256,6 +260,8 @@ if [ -n "${CANDIDATE_ID}" ]; then
     --build-arg "OPENCLAW_BASE_IMAGE=${OPENCLAW_BASE_IMAGE}"
     --build-arg "BEDROCK_PLUGIN_VERSION=${BEDROCK_PLUGIN_VERSION}"
     --build-arg "BEDROCK_PLUGIN_ASSERTION=${BEDROCK_PLUGIN_ASSERTION}"
+    --build-arg "OPENCLAW_GATEWAY_CLIENT_ID=${OPENCLAW_GATEWAY_CLIENT_ID}"
+    --build-arg "OPENCLAW_GATEWAY_CLIENT_MODE=${OPENCLAW_GATEWAY_CLIENT_MODE}"
   )
 fi
 docker build "${DOCKER_BUILD_ARGS[@]}" "${SCRIPT_DIR}"

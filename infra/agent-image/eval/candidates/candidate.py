@@ -78,6 +78,12 @@ ALLOWED_HARNESS_CONFIG_MIGRATIONS = frozenset(
         ("remove", "gateway.controlUi.dangerouslyDisableDeviceAuth", None),
     }
 )
+ALLOWED_HARNESS_GATEWAY_CLIENTS = frozenset(
+    {
+        ("openclaw-tui", "backend"),
+        ("gateway-client", "backend"),
+    }
+)
 
 
 def _utc_now() -> str:
@@ -544,7 +550,7 @@ def _validate_config_migrations(
 
 def _validate_harness(
     axis: object, label: str
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str, str, str]:
     harness = _mapping(axis, label)
     required_fields = {
         "baseImage",
@@ -553,12 +559,12 @@ def _validate_harness(
         "expectedPluginToken",
     }
     if not required_fields.issubset(harness) or not set(harness).issubset(
-        required_fields | {"configMigrations"}
+        required_fields | {"configMigrations", "gatewayClient"}
     ):
         raise CandidateError(
             f"{label} must define baseImage, hostVersion, "
             "bedrockPluginVersion, and expectedPluginToken; only "
-            "configMigrations is optional"
+            "configMigrations and gatewayClient are optional"
         )
     base_image = _string(harness.get("baseImage"), f"{label}.baseImage")
     host_version = _string(harness.get("hostVersion"), f"{label}.hostVersion")
@@ -578,7 +584,41 @@ def _validate_harness(
         harness.get("configMigrations"),
         f"{label}.configMigrations",
     )
-    return base_image, host_version, plugin_version, expected_token
+    gateway_client = harness.get("gatewayClient")
+    if gateway_client is None:
+        gateway_client_id, gateway_client_mode = "openclaw-tui", "backend"
+    else:
+        gateway_client_mapping = _mapping(
+            gateway_client,
+            f"{label}.gatewayClient",
+        )
+        if set(gateway_client_mapping) != {"id", "mode"}:
+            raise CandidateError(
+                f"{label}.gatewayClient must define id and mode"
+            )
+        gateway_client_id = _string(
+            gateway_client_mapping.get("id"),
+            f"{label}.gatewayClient.id",
+        )
+        gateway_client_mode = _string(
+            gateway_client_mapping.get("mode"),
+            f"{label}.gatewayClient.mode",
+        )
+    if (
+        gateway_client_id,
+        gateway_client_mode,
+    ) not in ALLOWED_HARNESS_GATEWAY_CLIENTS:
+        raise CandidateError(
+            f"{label}.gatewayClient is not an approved host compatibility pair"
+        )
+    return (
+        base_image,
+        host_version,
+        plugin_version,
+        expected_token,
+        gateway_client_id,
+        gateway_client_mode,
+    )
 
 
 def _validate_prompt(axis: object, label: str) -> tuple[str, Path, Path]:
@@ -695,6 +735,8 @@ def _render_pin_contract(
     host_version: str,
     plugin_version: str,
     expected_token: str,
+    gateway_client_id: str,
+    gateway_client_mode: str,
 ) -> str:
     source = CANONICAL_DOCKERFILE.read_text(encoding="utf-8")
     base_digest = base_image.rsplit("@", 1)[1]
@@ -710,6 +752,14 @@ def _render_pin_contract(
         (
             r"^ARG OPENCLAW_BASE_IMAGE=.*$",
             f"ARG OPENCLAW_BASE_IMAGE={base_image}",
+        ),
+        (
+            r"^ARG OPENCLAW_GATEWAY_CLIENT_ID=.*$",
+            f"ARG OPENCLAW_GATEWAY_CLIENT_ID={gateway_client_id}",
+        ),
+        (
+            r"^ARG OPENCLAW_GATEWAY_CLIENT_MODE=.*$",
+            f"ARG OPENCLAW_GATEWAY_CLIENT_MODE={gateway_client_mode}",
         ),
         (
             r"^ARG BEDROCK_PLUGIN_VERSION=.*$",
@@ -742,9 +792,14 @@ def prepare(manifest_path: Path, output_dir: Path, source_commit: str) -> dict[s
     candidate_id = _string(manifest["_resolvedId"], "candidate id")
     baseline_id = _string(baseline["_resolvedId"], "baseline id")
     declared_axis = _string(manifest.get("declaredAxis"), "declaredAxis")
-    base_image, host_version, plugin_version, expected_token = _validate_harness(
-        axes["harness"], "axes.harness"
-    )
+    (
+        base_image,
+        host_version,
+        plugin_version,
+        expected_token,
+        gateway_client_id,
+        gateway_client_mode,
+    ) = _validate_harness(axes["harness"], "axes.harness")
     prompt_variant, soul_path, rules_path = _validate_prompt(
         axes["prompt"], "axes.prompt"
     )
@@ -762,7 +817,12 @@ def prepare(manifest_path: Path, output_dir: Path, source_commit: str) -> dict[s
     _atomic_json(config_path, _compose_config(template, axes["harness"]))
     dockerfile_path.write_text(
         _render_pin_contract(
-            base_image, host_version, plugin_version, expected_token
+            base_image,
+            host_version,
+            plugin_version,
+            expected_token,
+            gateway_client_id,
+            gateway_client_mode,
         ),
         encoding="utf-8",
     )
@@ -798,6 +858,10 @@ def prepare(manifest_path: Path, output_dir: Path, source_commit: str) -> dict[s
             "hostVersion": host_version,
             "bedrockPluginVersion": plugin_version,
             "expectedPluginToken": expected_token,
+            "gatewayClient": {
+                "id": gateway_client_id,
+                "mode": gateway_client_mode,
+            },
             "configMigrations": _mapping(
                 axes["harness"], "axes.harness"
             ).get("configMigrations"),
@@ -836,6 +900,8 @@ def prepare(manifest_path: Path, output_dir: Path, source_commit: str) -> dict[s
         "baseImage": base_image,
         "bedrockPluginVersion": plugin_version,
         "expectedPluginToken": expected_token,
+        "gatewayClientId": gateway_client_id,
+        "gatewayClientMode": gateway_client_mode,
         "metadata": str(metadata_path),
     }
     _atomic_json(output_dir / "plan.json", plan)

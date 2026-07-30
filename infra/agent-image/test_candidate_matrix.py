@@ -149,6 +149,26 @@ class CandidateMatrixTests(unittest.TestCase):
                 metadata["harness"]["configMigrations"],
                 expected_migrations,
             )
+            self.assertEqual(
+                metadata["harness"]["gatewayClient"],
+                {
+                    "id": "gateway-client",
+                    "mode": "backend",
+                },
+            )
+            self.assertEqual(plan["gatewayClientId"], "gateway-client")
+            self.assertEqual(plan["gatewayClientMode"], "backend")
+            candidate_dockerfile = Path(plan["dockerfile"]).read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(
+                "ARG OPENCLAW_GATEWAY_CLIENT_ID=gateway-client",
+                candidate_dockerfile,
+            )
+            self.assertIn(
+                "ARG OPENCLAW_GATEWAY_CLIENT_MODE=backend",
+                candidate_dockerfile,
+            )
 
     def test_rejects_unapproved_harness_config_migration(self):
         source = json.loads(
@@ -175,6 +195,32 @@ class CandidateMatrixTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 candidate.CandidateError,
                 "not approved for a harness-only candidate",
+            ):
+                candidate.validate(temporary_manifest)
+
+    def test_rejects_unapproved_harness_gateway_client(self):
+        source = json.loads(
+            (
+                self.manifests_dir / "openclaw-2026-7-2-beta-5.json"
+            ).read_text(encoding="utf-8")
+        )
+        source["axes"]["harness"]["gatewayClient"] = {
+            "id": "openclaw-control-ui",
+            "mode": "webchat",
+        }
+        with tempfile.TemporaryDirectory(
+            dir=self.manifests_dir.parent, prefix=".candidate-contract-test."
+        ) as directory:
+            temporary_manifest = Path(directory) / "candidate.json"
+            source["baseline"] = "../manifests/baseline.json"
+            source["axes"]["model"]["providerTemplate"] = (
+                "../providers/native-bedrock-sonnet-5.json"
+            )
+            temporary_manifest.write_text(json.dumps(source), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                candidate.CandidateError,
+                "not an approved host compatibility pair",
             ):
                 candidate.validate(temporary_manifest)
 
@@ -425,6 +471,12 @@ class CandidateMatrixTests(unittest.TestCase):
             "ARG BEDROCK_PLUGIN_ASSERTION=claude-sonnet-5", dockerfile
         )
         self.assertIn(
+            "ARG OPENCLAW_GATEWAY_CLIENT_ID=openclaw-tui", dockerfile
+        )
+        self.assertIn(
+            "ARG OPENCLAW_GATEWAY_CLIENT_MODE=backend", dockerfile
+        )
+        self.assertIn(
             'grep -Fq -- "${BEDROCK_PLUGIN_ASSERTION}"', dockerfile
         )
 
@@ -436,6 +488,8 @@ class CandidateMatrixTests(unittest.TestCase):
             "OPENCLAW_BASE_IMAGE=",
             "BEDROCK_PLUGIN_VERSION=",
             "BEDROCK_PLUGIN_ASSERTION=",
+            "OPENCLAW_GATEWAY_CLIENT_ID=",
+            "OPENCLAW_GATEWAY_CLIENT_MODE=",
             "candidate.py\" finalize",
             '"grader":"output_match"',
         ):

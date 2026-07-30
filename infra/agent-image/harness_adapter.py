@@ -252,14 +252,23 @@ class OpenClawAdapter(HarnessAdapter):
     # agree within the process. OpenClaw overwrites the config file's token on
     # startup and --token overrides that config value, so the on-disk config
     # token is never the operative secret.
-    # Use OpenClaw's reserved direct-local backend identity. Both 2026.7.1 and
-    # 2026.7.2-beta.5 explicitly admit gateway-client/backend when loopback
-    # shared-token auth succeeds, preserving its requested operator scopes
-    # without treating this non-browser adapter as a Control UI. TUI became a
-    # Control UI client in the beta and therefore requires device identity.
+    # The image contract chooses the identity supported by its pinned host.
+    # Production 2026.7.1 retains the proven TUI path; 2026.7.2 harness
+    # candidates select OpenClaw's reserved direct-local backend identity so a
+    # non-browser adapter is not classified as Control UI. candidate.py and the
+    # Docker build accept only these two exact pairs.
+    _gateway_client_pair = (
+        os.environ.get("PSD_OPENCLAW_GATEWAY_CLIENT_ID", "openclaw-tui"),
+        os.environ.get("PSD_OPENCLAW_GATEWAY_CLIENT_MODE", "backend"),
+    )
+    if _gateway_client_pair not in {
+        ("openclaw-tui", "backend"),
+        ("gateway-client", "backend"),
+    }:
+        raise RuntimeError("Unsupported OpenClaw gateway client identity")
     CLIENT_INFO = {
-        "id": "gateway-client",
-        "mode": "backend",
+        "id": _gateway_client_pair[0],
+        "mode": _gateway_client_pair[1],
         "version": "dev",
         "platform": "linux",
     }

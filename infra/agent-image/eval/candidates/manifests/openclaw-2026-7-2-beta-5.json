@@ -12,6 +12,10 @@
       "hostVersion": "2026.7.2-beta.5",
       "bedrockPluginVersion": "2026.7.2-beta.5",
       "expectedPluginToken": "claude-sonnet-5",
+      "gatewayClient": {
+        "id": "gateway-client",
+        "mode": "backend"
+      },
       "configMigrations": [
         {
           "op": "move",

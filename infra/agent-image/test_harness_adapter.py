@@ -97,11 +97,11 @@ class CatalogDiagnosticTests(unittest.TestCase):
 
 
 class GatewayTokenTests(unittest.TestCase):
-    def test_uses_reserved_direct_local_backend_identity(self):
+    def test_defaults_to_proven_baseline_gateway_identity(self):
         self.assertEqual(
             OpenClawAdapter.CLIENT_INFO,
             {
-                "id": "gateway-client",
+                "id": "openclaw-tui",
                 "mode": "backend",
                 "version": "dev",
                 "platform": "linux",

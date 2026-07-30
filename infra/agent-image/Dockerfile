@@ -67,6 +67,15 @@
 ARG OPENCLAW_BASE_IMAGE=ghcr.io/openclaw/openclaw@sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c
 FROM ${OPENCLAW_BASE_IMAGE}
 
+# OpenClaw 2026.7.2 classifies the TUI as a Control UI client and requires
+# device identity even for this non-browser loopback adapter. Harness
+# candidates can select the release's reserved backend helper identity; the
+# production 2026.7.1 default keeps its proven TUI behavior.
+ARG OPENCLAW_GATEWAY_CLIENT_ID=openclaw-tui
+ARG OPENCLAW_GATEWAY_CLIENT_MODE=backend
+ENV PSD_OPENCLAW_GATEWAY_CLIENT_ID="${OPENCLAW_GATEWAY_CLIENT_ID}" \
+    PSD_OPENCLAW_GATEWAY_CLIENT_MODE="${OPENCLAW_GATEWAY_CLIENT_MODE}"
+
 # Bind every pushed image to the exact clean AI Studio source revision used to
 # build it. The nightly evaluator reads this immutable config label instead of
 # attributing a deployed image to whichever commit happens to trigger the run.
