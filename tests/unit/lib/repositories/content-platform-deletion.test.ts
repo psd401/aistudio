@@ -77,7 +77,7 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-it("locks repository and items before cancelling work and entering deleting", async () => {
+it("locks a repository and cancels pending items before entering deleting", async () => {
   const execute = installTransaction([
     [activeRepository],
     [activeItem],
@@ -115,6 +115,14 @@ it("locks repository and items before cancelling work and entering deleting", as
     "job.metrics ->> 'bdaInvocationState'"
   );
   expect(sqlText(execute.mock.calls[3]![0])).toContain("<> 'terminal'");
+  const itemCancellation = sqlText(execute.mock.calls[6]![0]);
+  expect(itemCancellation).toContain(
+    "WHEN item.processing_status IN ('pending', 'processing')"
+  );
+  expect(itemCancellation).toContain("THEN 'cancelled'");
+  expect(itemCancellation).toContain(
+    "ELSE item.processing_status"
+  );
   expect(sqlText(execute.mock.calls.at(-1)![0])).toContain(
     "lifecycle_status = 'deleting'"
   );
@@ -169,7 +177,7 @@ it("keeps a deleting repository reachable as an idempotent cleanup retry", async
   await expect(beginRepositoryDeletion(7, NOW)).resolves.toHaveLength(1);
 });
 
-it("fences one item while its parent remains active", async () => {
+it("fences and cancels one pending item while its parent remains active", async () => {
   const execute = installTransaction([
     [activeRepository],
     [activeItem],
@@ -187,6 +195,14 @@ it("fences one item while its parent remains active", async () => {
     "FOR UPDATE OF repository"
   );
   expect(sqlText(execute.mock.calls[1]![0])).toContain("FOR UPDATE OF item");
+  const itemCancellation = sqlText(execute.mock.calls[6]![0]);
+  expect(itemCancellation).toContain(
+    "WHEN item.processing_status IN ('pending', 'processing')"
+  );
+  expect(itemCancellation).toContain("THEN 'cancelled'");
+  expect(itemCancellation).toContain(
+    "ELSE item.processing_status"
+  );
 });
 
 it("makes both upload completion and worker claim reject after deletion wins the lock", () => {
