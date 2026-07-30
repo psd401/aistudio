@@ -37,8 +37,12 @@ and waits up to 20 minutes by default. Override that cap when needed:
 node /opt/psd-skills/psd-deep-research/research.js \
   --user <caller-email> \
   --prompt "<research question>" \
-  --max-wait-min 30
+  --max-wait-min 25
 ```
+
+A run is capped server-side at 25 minutes. Past that, the next status check
+cancels it upstream and fails, so raising `--max-wait-min` above 25 only waits
+on a run that is already being cancelled. Narrow the question instead.
 
 Success prints:
 
