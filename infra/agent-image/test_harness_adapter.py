@@ -159,6 +159,23 @@ class GatewayTokenTests(unittest.TestCase):
         self.assertNotIn("BEDROCK_API_KEY_SECRET_ARN", child_environment)
         self.assertNotIn("CANDIDATE_MANTLE_BEARER_TOKEN", child_environment)
 
+    def test_gateway_socket_suppresses_browser_origin_header(self):
+        websocket_module = mock.Mock()
+        expected_socket = object()
+        websocket_module.create_connection.return_value = expected_socket
+
+        socket = OpenClawAdapter._open_gateway_socket(
+            websocket_module,
+            "ws://127.0.0.1:3100",
+        )
+
+        self.assertIs(socket, expected_socket)
+        websocket_module.create_connection.assert_called_once_with(
+            "ws://127.0.0.1:3100",
+            timeout=120,
+            suppress_origin=True,
+        )
+
 
 # Bound staticmethod for readability.
 extract_text = OpenClawAdapter._extract_text

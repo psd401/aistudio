@@ -368,6 +368,23 @@ class OpenClawAdapter(HarnessAdapter):
             f"OpenClaw gateway did not become ready within {timeout}s"
         )
 
+    @staticmethod
+    def _open_gateway_socket(websocket_module: Any, ws_url: str) -> Any:
+        """Open the adapter's non-browser loopback WebSocket.
+
+        websocket-client adds an Origin header unless told otherwise. Newer
+        OpenClaw releases deliberately treat any Origin-bearing connection as
+        browser-originated and therefore refuse the privileged local-CLI auth
+        path. This adapter is a backend client on the same container loopback,
+        not a browser, so suppress the synthetic header instead of weakening
+        the gateway's browser-origin checks.
+        """
+        return websocket_module.create_connection(
+            ws_url,
+            timeout=120,
+            suppress_origin=True,
+        )
+
     def _sum_transcript_usage(
         self, path: str, since_ms: int,
     ) -> Tuple[Dict[str, int], bool]:
@@ -610,7 +627,7 @@ class OpenClawAdapter(HarnessAdapter):
         last_error = None
         for attempt in range(3):
             try:
-                ws = websocket.create_connection(ws_url, timeout=120)
+                ws = self._open_gateway_socket(websocket, ws_url)
                 break
             except Exception as exc:
                 last_error = exc
