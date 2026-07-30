@@ -1,5 +1,5 @@
 {
-  "eval_harness_commit": "a6304936d49b5921139bac3fc999f5b138a7840d",
+  "eval_harness_commit": "b9425167de0359b2ba866086d9ae33ce411f3936",
   "image": "390844780692.dkr.ecr.us-east-1.amazonaws.com/psd-agent-base-dev@sha256:89a95ae81fde54daebf8d81f99fb9bed098481a4b6fa25277af3dffd97873333",
   "image_digest": "sha256:89a95ae81fde54daebf8d81f99fb9bed098481a4b6fa25277af3dffd97873333",
   "model": {
@@ -98,11 +98,11 @@
         "chat-card-ticket-confirmation"
       ],
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.034667,
-          "per_trial_usd": 0.011556,
-          "total_usd": 0.104001
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 14949.889,
@@ -159,11 +159,11 @@
         "chat-chart-synthetic-bar-chart"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.04722,
-          "per_trial_usd": 0.01574,
-          "total_usd": 0.04722
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 18912.333,
@@ -349,11 +349,11 @@
         "brand-guidelines-logo-variant-choice"
       ],
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.062578,
-          "per_trial_usd": 0.020859,
-          "total_usd": 0.125156
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 26650.667,
@@ -725,11 +725,11 @@
         "failure-report-synthetic-missing-data"
       ],
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.066279,
-          "per_trial_usd": 0.022093,
-          "total_usd": 0.066279
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 29126.333,
@@ -912,11 +912,11 @@
         "html-artifact-audit-minimal-report"
       ],
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.092266,
-          "per_trial_usd": 0.030755,
-          "total_usd": 0.092266
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 28318.333,
@@ -968,11 +968,11 @@
         "hyperframes-synthetic-title-card"
       ],
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.118553,
-          "per_trial_usd": 0.039518,
-          "total_usd": 0.118553
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 93817.0,
@@ -1086,11 +1086,11 @@
         "instructional-vision-four-essentials"
       ],
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.083096,
-          "per_trial_usd": 0.027699,
-          "total_usd": 0.083096
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 31687.333,
@@ -1142,11 +1142,11 @@
         "last30days-keyless-eval-reliability-brief"
       ],
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.052322,
-          "per_trial_usd": 0.017441,
-          "total_usd": 0.052322
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 24840.0,
@@ -1198,11 +1198,11 @@
         "learning-page-accessibility-contract"
       ],
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.033861,
-          "per_trial_usd": 0.011287,
-          "total_usd": 0.033861
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 22406.667,
@@ -1254,11 +1254,11 @@
         "morning-brief-offline-self-check"
       ],
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.044854,
-          "per_trial_usd": 0.014951,
-          "total_usd": 0.044854
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 15573.0,
@@ -1311,11 +1311,11 @@
         "open-adaptive-weekly-check-in-fields"
       ],
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.094255,
-          "per_trial_usd": 0.031418,
-          "total_usd": 0.188509
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 45522.167,
@@ -1367,11 +1367,11 @@
         "pdf-to-markdown-bundled-brand-guide"
       ],
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.05274,
-          "per_trial_usd": 0.01758,
-          "total_usd": 0.05274
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 17615.333,
@@ -1616,11 +1616,11 @@
         "sop-creator-required-interview-fields"
       ],
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.057586,
-          "per_trial_usd": 0.019195,
-          "total_usd": 0.057586
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 28466.667,
@@ -1672,11 +1672,11 @@
         "summarize-records-safe-projector-summary"
       ],
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.064624,
-          "per_trial_usd": 0.021541,
-          "total_usd": 0.064624
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 25013.0,
@@ -1730,11 +1730,11 @@
         "tts-synthetic-short-audio"
       ],
       "telemetry": {
-        "caching_status": "cached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.032134,
-          "per_trial_usd": 0.010711,
-          "total_usd": 0.032134
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 20329.667,

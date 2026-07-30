@@ -1,5 +1,5 @@
 {
-  "eval_harness_commit": "a6304936d49b5921139bac3fc999f5b138a7840d",
+  "eval_harness_commit": "b9425167de0359b2ba866086d9ae33ce411f3936",
   "image": "390844780692.dkr.ecr.us-east-1.amazonaws.com/psd-agent-base-dev@sha256:6aaa879b034bed2b44af8d25aa4a681a65c1f896d4632af7c18e2bc14eff5825",
   "image_digest": "sha256:6aaa879b034bed2b44af8d25aa4a681a65c1f896d4632af7c18e2bc14eff5825",
   "model": {
@@ -1562,11 +1562,11 @@
         "summarize-records-safe-projector-summary"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.005343,
-          "per_trial_usd": 0.001781,
-          "total_usd": 0.005343
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 15389.333,

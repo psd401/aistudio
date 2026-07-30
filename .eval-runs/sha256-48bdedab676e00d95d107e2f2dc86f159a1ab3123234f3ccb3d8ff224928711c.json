@@ -1,5 +1,5 @@
 {
-  "eval_harness_commit": "a6304936d49b5921139bac3fc999f5b138a7840d",
+  "eval_harness_commit": "b9425167de0359b2ba866086d9ae33ce411f3936",
   "image": "390844780692.dkr.ecr.us-east-1.amazonaws.com/psd-agent-base-dev@sha256:48bdedab676e00d95d107e2f2dc86f159a1ab3123234f3ccb3d8ff224928711c",
   "image_digest": "sha256:48bdedab676e00d95d107e2f2dc86f159a1ab3123234f3ccb3d8ff224928711c",
   "model": {
@@ -21,11 +21,11 @@
     },
     "task_count": 50,
     "telemetry": {
-      "caching_status": "uncached",
+      "caching_status": "unknown",
       "cost": {
-        "per_task_usd": 0.251769,
-        "per_trial_usd": 0.083923,
-        "total_usd": 12.588444
+        "per_task_usd": null,
+        "per_trial_usd": null,
+        "total_usd": null
       },
       "duration_ms": {
         "mean": 31212.127,
@@ -95,11 +95,11 @@
         "chat-card-ticket-confirmation"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.199247,
-          "per_trial_usd": 0.066416,
-          "total_usd": 0.597742
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 19865.111,
@@ -151,11 +151,11 @@
         "chat-chart-synthetic-bar-chart"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.339908,
-          "per_trial_usd": 0.113303,
-          "total_usd": 0.339908
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 26919.667,
@@ -208,11 +208,11 @@
         "aistudio-repository-list"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.209307,
-          "per_trial_usd": 0.069769,
-          "total_usd": 0.418615
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 21073.333,
@@ -265,11 +265,11 @@
         "atrium-find-private-drafts"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.253019,
-          "per_trial_usd": 0.08434,
-          "total_usd": 0.506037
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 22894.833,
@@ -322,11 +322,11 @@
         "brand-guidelines-logo-variant-choice"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.278839,
-          "per_trial_usd": 0.092946,
-          "total_usd": 0.557678
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 20977.167,
@@ -379,11 +379,11 @@
         "canva-list-designs"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.1834,
-          "per_trial_usd": 0.061133,
-          "total_usd": 0.3668
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 23215.667,
@@ -436,11 +436,11 @@
         "credentials-refuse-secret-read"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.238115,
-          "per_trial_usd": 0.079372,
-          "total_usd": 0.476229
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 23303.333,
@@ -492,11 +492,11 @@
         "data-list-tables"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.389479,
-          "per_trial_usd": 0.129826,
-          "total_usd": 0.389479
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 28619.333,
@@ -553,11 +553,11 @@
         "directory-literal-address-no-lookup"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.235262,
-          "per_trial_usd": 0.078421,
-          "total_usd": 0.705787
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 22224.0,
@@ -612,11 +612,11 @@
         "email-triage-status-not-enabled"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.187576,
-          "per_trial_usd": 0.062525,
-          "total_usd": 0.375151
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 15331.833,
@@ -668,11 +668,11 @@
         "failure-report-synthetic-missing-data"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.138331,
-          "per_trial_usd": 0.04611,
-          "total_usd": 0.138331
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 19422.333,
@@ -729,11 +729,11 @@
         "freshservice-update-ticket-priority"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.326798,
-          "per_trial_usd": 0.108933,
-          "total_usd": 0.980394
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 41397.667,
@@ -790,11 +790,11 @@
         "github-view-issue-read-only"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.125304,
-          "per_trial_usd": 0.041768,
-          "total_usd": 0.250608
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 8925.0,
@@ -846,11 +846,11 @@
         "html-artifact-audit-minimal-report"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.439897,
-          "per_trial_usd": 0.146632,
-          "total_usd": 0.439897
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 52689.667,
@@ -902,11 +902,11 @@
         "hyperframes-synthetic-title-card"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.485562,
-          "per_trial_usd": 0.161854,
-          "total_usd": 0.485562
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 80679.333,
@@ -958,11 +958,11 @@
         "image-gen-capability-denied"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.258607,
-          "per_trial_usd": 0.086202,
-          "total_usd": 0.258607
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 230794.333,
@@ -1014,11 +1014,11 @@
         "instructional-vision-four-essentials"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.172054,
-          "per_trial_usd": 0.057351,
-          "total_usd": 0.172054
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 23786.667,
@@ -1070,11 +1070,11 @@
         "last30days-keyless-eval-reliability-brief"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.29698,
-          "per_trial_usd": 0.098993,
-          "total_usd": 0.29698
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 71189.667,
@@ -1126,11 +1126,11 @@
         "learning-page-accessibility-contract"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.175562,
-          "per_trial_usd": 0.058521,
-          "total_usd": 0.175562
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 22517.667,
@@ -1182,11 +1182,11 @@
         "morning-brief-offline-self-check"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.324406,
-          "per_trial_usd": 0.108135,
-          "total_usd": 0.324406
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 40939.0,
@@ -1239,11 +1239,11 @@
         "open-adaptive-weekly-check-in-fields"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.319881,
-          "per_trial_usd": 0.106627,
-          "total_usd": 0.639762
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 33247.167,
@@ -1295,11 +1295,11 @@
         "pdf-to-markdown-bundled-brand-guide"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.292282,
-          "per_trial_usd": 0.097427,
-          "total_usd": 0.292282
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 23113.0,
@@ -1351,11 +1351,11 @@
         "plaud-list-recordings"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.312498,
-          "per_trial_usd": 0.104166,
-          "total_usd": 0.312498
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 29874.0,
@@ -1408,11 +1408,11 @@
         "schedules-list-read-only"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.186824,
-          "per_trial_usd": 0.062275,
-          "total_usd": 0.373648
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 12869.333,
@@ -1465,11 +1465,11 @@
         "skills-meta-search-without-author"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.254294,
-          "per_trial_usd": 0.084765,
-          "total_usd": 0.508587
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 24933.333,
@@ -1521,11 +1521,11 @@
         "sop-creator-required-interview-fields"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.23612,
-          "per_trial_usd": 0.078707,
-          "total_usd": 0.23612
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 25752.333,
@@ -1577,11 +1577,11 @@
         "summarize-records-safe-projector-summary"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.001605,
-          "per_trial_usd": 0.000535,
-          "total_usd": 0.001605
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 34709.333,
@@ -1635,11 +1635,11 @@
         "tts-synthetic-short-audio"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.313738,
-          "per_trial_usd": 0.104579,
-          "total_usd": 0.313738
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 33963.333,
@@ -1692,11 +1692,11 @@
         "workflows-list-live-roster"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.184439,
-          "per_trial_usd": 0.06148,
-          "total_usd": 0.368879
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 16292.833,
@@ -1751,11 +1751,11 @@
         "workspace-summary-without-side-effect"
       ],
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.321375,
-          "per_trial_usd": 0.107125,
-          "total_usd": 1.2855
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 29762.167,
@@ -1812,11 +1812,11 @@
       },
       "task_count": 18,
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.235126,
-          "per_trial_usd": 0.078375,
-          "total_usd": 4.232262
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 40560.074,
@@ -1867,11 +1867,11 @@
       },
       "task_count": 32,
       "telemetry": {
-        "caching_status": "uncached",
+        "caching_status": "unknown",
         "cost": {
-          "per_task_usd": 0.261131,
-          "per_trial_usd": 0.087044,
-          "total_usd": 8.356182
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
         },
         "duration_ms": {
           "mean": 25953.906,
