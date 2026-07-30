@@ -452,6 +452,29 @@ test('invalid command-specific flags and out-of-range dates fail before broker a
   expect(calls).toHaveLength(0);
 });
 
+test('free-form commands reject explicit out-of-range years and dates before broker access', async () => {
+  const { broker, calls } = createBroker();
+  for (const argv of [
+    ['lookup', 'Christmas 2030'],
+    ['search', 'Constitution Day', '2030'],
+    ['lookup', 'Observances on 2027-07-01'],
+    ['search', 'observances in July 2027'],
+    ['holiday-years', 'Christmas 2032'],
+  ]) {
+    const result = await invoke(argv, broker);
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain('out_of_range');
+  }
+  expect(calls).toHaveLength(0);
+});
+
+test('holiday-years accepts an in-range summary year', async () => {
+  const { broker, calls } = createBroker();
+  const result = await invoke(['holiday-years', 'Christmas 2030'], broker);
+  expect(result.exitCode).toBe(0);
+  expect(calls[1].body.params.arguments.query).toContain('Christmas 2030');
+});
+
 test('parser accepts bare subcommand positionals and rejects unknown flags', () => {
   expect(parseCli(['lookup', 'American', 'Education', 'Week']).positionals).toEqual([
     'American',

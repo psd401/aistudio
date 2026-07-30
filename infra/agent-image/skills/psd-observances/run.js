@@ -193,6 +193,101 @@ function buildAnyQuery(value) {
   return terms.length > 1 ? terms.join(' OR ') : value;
 }
 
+function explicitYears(value) {
+  const years = [];
+  for (let index = 0; index <= value.length - 4; index += 1) {
+    const candidate = value.slice(index, index + 4);
+    const digitsOnly = [...candidate].every(
+      (character) => character >= '0' && character <= '9',
+    );
+    const previous = value[index - 1];
+    const next = value[index + 4];
+    const bounded =
+      (previous === undefined || previous < '0' || previous > '9') &&
+      (next === undefined || next < '0' || next > '9');
+    if (digitsOnly && bounded) {
+      years.push({ year: Number(candidate), index });
+      index += 3;
+    }
+  }
+  return years;
+}
+
+function explicitIsoDates(value) {
+  const dates = [];
+  for (let index = 0; index <= value.length - 10; index += 1) {
+    const candidate = value.slice(index, index + 10);
+    if (validIsoDate(candidate)) {
+      dates.push(candidate);
+      index += 9;
+    }
+  }
+  return dates;
+}
+
+function wordTokens(value) {
+  return value
+    .split(/\s+/u)
+    .map((token) => token.replace(/[^\p{L}\p{N}-]/gu, ''))
+    .filter(Boolean);
+}
+
+function rejectLate2027Month(value) {
+  const tokens = wordTokens(value).map((token) => token.toLocaleLowerCase());
+  const yearIndexes = tokens
+    .map((token, index) => (token === '2027' ? index : -1))
+    .filter((index) => index >= 0);
+  const lateMonths = new Set([
+    'july',
+    'august',
+    'september',
+    'october',
+    'november',
+    'december',
+  ]);
+  for (const [index, token] of tokens.entries()) {
+    if (!lateMonths.has(token) || yearIndexes.length === 0) continue;
+    const nearestYearDistance = Math.min(
+      ...yearIndexes.map((yearIndex) => Math.abs(yearIndex - index)),
+    );
+    if (nearestYearDistance <= 4) {
+      fail(
+        'The requested 2027 month is outside the January 2026 through June 2027 coverage window.',
+        'out_of_range',
+        1,
+      );
+    }
+  }
+}
+
+function validateOrdinaryFreeForm(value) {
+  for (const { year } of explicitYears(value)) {
+    if (year < 2026 || year > 2027) {
+      fail(
+        `Year ${year} is outside ordinary coverage. Use holiday-years only for major holidays from 2026 through 2031.`,
+        'out_of_range',
+        1,
+      );
+    }
+  }
+  for (const date of explicitIsoDates(value)) {
+    assertCoveredDate(date, 'date');
+  }
+  rejectLate2027Month(value);
+}
+
+function validateHolidayYearsName(value) {
+  for (const { year } of explicitYears(value)) {
+    if (year < 2026 || year > 2031) {
+      fail(
+        `Year ${year} is outside the six-year holiday summary for 2026 through 2031.`,
+        'out_of_range',
+        1,
+      );
+    }
+  }
+}
+
 function commandResult(context, query, includePartIINotice = false) {
   return {
     command: context.command,
@@ -204,14 +299,17 @@ function commandResult(context, query, includePartIINotice = false) {
 }
 
 function buildLookupCommand(context) {
+  const name = joinedPositionals(context.positionals, 'observance name');
+  validateOrdinaryFreeForm(name);
   return commandResult(
     context,
-    joinedPositionals(context.positionals, 'observance name'),
+    name,
   );
 }
 
 function buildSearchCommand(context) {
   const terms = joinedPositionals(context.positionals, 'search terms');
+  validateOrdinaryFreeForm(terms);
   return commandResult(
     context,
     context.flags.any === true ? buildAnyQuery(terms) : terms,
@@ -278,6 +376,7 @@ function buildConferencesCommand(context) {
 
 function buildHolidayYearsCommand(context) {
   const name = joinedPositionals(context.positionals, 'holiday name');
+  validateHolidayYearsName(name);
   return commandResult(
     context,
     `${name} 2026 2027 2028 2029 2030 2031 six-year summary`,
@@ -405,10 +504,12 @@ function resultContent(result) {
 }
 
 function searchTerms(query) {
-  return query
-    .split(/\s+OR\s+|\s+/i)
-    .map((term) => term.replace(/[^\p{L}\p{N}-]/gu, ''))
-    .filter((term) => term.length >= 3 && !/^\d{4}$/.test(term));
+  return wordTokens(query).filter(
+    (term) =>
+      term.toLocaleUpperCase() !== 'OR' &&
+      term.length >= 3 &&
+      !/^\d{4}$/.test(term),
+  );
 }
 
 function excerptAround(content, query, maximum) {
