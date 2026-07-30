@@ -21,14 +21,18 @@ A test double that replaces a process boundary must inventory every
 responsibility of that process, not only the dependency under test. Preserve
 the production model transport with an exact method/path allowlist, exact AWS
 origin validation, configured-model validation, root-held authorization, and
-active invocation authority. Keep model bodies out of fixture captures.
+active invocation authority. Preserve compatibility rewrites on model request
+history, and keep read-only model discovery available before a trial opens so
+client startup matches production. Keep model bodies out of fixture captures.
 
 Verify this boundary at two levels:
 
 1. A hermetic relay test sends an OpenAI-compatible request containing an
    assistant `tool_calls` entry and its matching `tool` result, then asserts
-   the JSON shape is forwarded unchanged and model-supplied authorization is
-   replaced.
+   ordinary JSON shape is forwarded unchanged, production compatibility
+   rewrites repair known provider-specific history, and model-supplied
+   authorization is replaced. A separate pre-trial test proves read-only model
+   discovery does not require paid-call invocation authority.
 2. A small live L1 suite exercises multiple broker routes before spending on a
    full comparison run.
 

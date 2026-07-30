@@ -60,6 +60,9 @@ CANDIDATE_MANTLE_OPERATIONS = {
 CANDIDATE_MANTLE_HOST_RE = re.compile(
     r"bedrock-mantle\.[a-z0-9-]+\.api\.aws"
 )
+# Keep this request repair identical to the production proxy. OpenClaw strips
+# the separators from Kimi's native tool-call IDs when it replays history.
+_STRIPPED_TC_ID = re.compile(r"^functions([a-z][a-z0-9_]*?)(\d+)$")
 CONTROL_DIRECTORY_ENV = "AGENT_EVAL_BROKER_CONTROL_DIR"
 DEFAULT_CONTROL_DIRECTORY = "/run/psd-agent-eval-broker"
 DEFAULT_WORKSPACE_FLUSH_TOKEN_PATH = (
@@ -198,6 +201,48 @@ def _resolve_candidate_mantle_request(
             "candidate Mantle request model does not match"
         )
     return f"{base_url}/{relative_path}"
+
+
+def _restore_tool_call_id(raw: str) -> str:
+    """Rewrite `functionsexec0` → `functions.exec:0`. Untouched if already
+    contains `.` or `:` (already in native format), or if it doesn't match
+    the OpenClaw-stripped shape."""
+    if not isinstance(raw, str):
+        return raw
+    if "." in raw or ":" in raw:
+        return raw
+    m = _STRIPPED_TC_ID.match(raw)
+    if not m:
+        return raw
+    return f"functions.{m.group(1)}:{m.group(2)}"
+
+
+def repair_tool_call_ids(payload: dict) -> int:
+    """Walk the messages array, restore tool_call ids and tool_call_id
+    references to Kimi's native format. Returns count of fields rewritten."""
+    rewrites = 0
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return 0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        tcs = msg.get("tool_calls")
+        if isinstance(tcs, list):
+            for tc in tcs:
+                if not isinstance(tc, dict):
+                    continue
+                old_id = tc.get("id")
+                new_id = _restore_tool_call_id(old_id)
+                if new_id != old_id:
+                    tc["id"] = new_id
+                    rewrites += 1
+        ref = msg.get("tool_call_id")
+        new_ref = _restore_tool_call_id(ref)
+        if new_ref != ref:
+            msg["tool_call_id"] = new_ref
+            rewrites += 1
+    return rewrites
 
 
 def _trusted_app_base_url(value: str) -> bool:
@@ -717,7 +762,17 @@ class BrokerStubState:
                     "invocation authority is unavailable"
                 ) from error
 
-        _, _, bearer_token, model_id = self.candidate_mantle_configuration
+        provider_api, _, bearer_token, model_id = (
+            self.candidate_mantle_configuration
+        )
+        forwarded_body = body
+        if provider_api == "openai-completions" and body is not None:
+            payload = json.loads(body)
+            if isinstance(payload, dict) and repair_tool_call_ids(payload):
+                forwarded_body = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                ).encode("utf-8")
         excluded_headers = {
             "accept-encoding",
             "authorization",
@@ -741,7 +796,7 @@ class BrokerStubState:
         headers["Authorization"] = f"Bearer {bearer_token}"
         request = urllib_request.Request(
             upstream,
-            data=body if method != "GET" else None,
+            data=forwarded_body if method != "GET" else None,
             method=method,
             headers=headers,
         )
@@ -779,10 +834,11 @@ class BrokerStubState:
         self,
         *,
         final_flush: bool = False,
+        allow_closed: bool = False,
     ) -> tuple[bool, str]:
         with self._finalization_condition:
             state = self._finalization_state
-            if state in {"draining", "closed"}:
+            if state == "draining" or (state == "closed" and not allow_closed):
                 return False, state
             if state == "flushing" and not final_flush:
                 return False, state
@@ -1193,7 +1249,13 @@ class BrokerStubRequestHandler(BaseHTTPRequestHandler):
         if self._handle_control(path):
             return
         if path.startswith(f"/{CANDIDATE_MANTLE_PREFIX}/"):
-            entered, _ = self.server.state.enter_request()
+            candidate_discovery = (
+                self.command == "GET"
+                and path == f"/{CANDIDATE_MANTLE_PREFIX}/models"
+            )
+            entered, _ = self.server.state.enter_request(
+                allow_closed=candidate_discovery
+            )
             if not entered:
                 self._send_json(
                     HTTPStatus.SERVICE_UNAVAILABLE,

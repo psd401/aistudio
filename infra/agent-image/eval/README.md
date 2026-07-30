@@ -299,16 +299,19 @@ also use this loopback process for model inference. The stub preserves only the
 production relay's exact provider operations, validated AWS origin, and
 configured model ID; it replaces the model-facing authorization header with
 the root-held bearer token and requires active invocation authority for paid
-calls. Model request and response bodies are never written to the fixture
-capture. It also preserves the fixed `/anthropic/v1/messages` loopback endpoint
-used by `psd-summarize`, relaying only that model path to the trusted web tier
-with root-held invocation authority. Finalization drains already-active broker,
-candidate-model, and summarization requests and rejects new work before
-acknowledging the boundary. The wrapper's end transition leaves the stub closed
-through runner capture collection; installing the next trial uses a separate
-root-only token to reopen it, so delayed work cannot spill across trials. L0
-and L2 tasks retain the image's real proxy; pure live and stubbed tasks use
-separate containers.
+calls. Read-only model discovery remains available while the eval trial gate is
+closed so clients can finish startup before the runner opens the first trial.
+The OpenAI-compatible relay also applies the production Kimi tool-call ID
+repair before forwarding tool history. Model request and response bodies are
+never written to the fixture capture. It also preserves the fixed
+`/anthropic/v1/messages` loopback endpoint used by `psd-summarize`, relaying
+only that model path to the trusted web tier with root-held invocation
+authority. Finalization drains already-active broker, candidate-model, and
+summarization requests and rejects new work before acknowledging the boundary.
+The wrapper's end transition leaves the stub closed through runner capture
+collection; installing the next trial uses a separate root-only token to reopen
+it, so delayed work cannot spill across trials. L0 and L2 tasks retain the
+image's real proxy; pure live and stubbed tasks use separate containers.
 
 ## Task and suite files
 

@@ -88,6 +88,27 @@ def _python_literal(path: Path, variable: str) -> object:
     raise AssertionError(f"{variable} was not found in {path}")
 
 
+def _python_assignment_ast(path: Path, variable: str) -> str:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(
+            isinstance(target, ast.Name) and target.id == variable
+            for target in node.targets
+        ):
+            return ast.dump(node.value, include_attributes=False)
+    raise AssertionError(f"{variable} was not found in {path}")
+
+
+def _python_function_ast(path: Path, function: str) -> str:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function:
+            return ast.dump(node, include_attributes=False)
+    raise AssertionError(f"{function} was not found in {path}")
+
+
 def _javascript_allowlist(path: Path) -> set[str]:
     source = path.read_text(encoding="utf-8")
     match = re.search(
@@ -242,6 +263,7 @@ class BrokerRouteParityTests(unittest.TestCase):
 
     def test_stub_matches_the_production_candidate_mantle_contract(self):
         proxy_path = AGENT_IMAGE_DIR / "mantle_proxy.py"
+        stub_path = AGENT_IMAGE_DIR / "eval" / "broker_stub.py"
 
         self.assertEqual(
             broker_stub.CANDIDATE_MANTLE_PREFIX,
@@ -251,6 +273,15 @@ class BrokerRouteParityTests(unittest.TestCase):
             broker_stub.CANDIDATE_MANTLE_OPERATIONS,
             _python_literal(proxy_path, "CANDIDATE_MANTLE_OPERATIONS"),
         )
+        self.assertEqual(
+            _python_assignment_ast(stub_path, "_STRIPPED_TC_ID"),
+            _python_assignment_ast(proxy_path, "_STRIPPED_TC_ID"),
+        )
+        for function in ("_restore_tool_call_id", "repair_tool_call_ids"):
+            self.assertEqual(
+                _python_function_ast(stub_path, function),
+                _python_function_ast(proxy_path, function),
+            )
 
 
 class BrokerControlStorageTests(unittest.TestCase):
@@ -329,14 +360,18 @@ class BrokerControlStorageTests(unittest.TestCase):
 
 
 class CandidateMantleRelayTests(unittest.TestCase):
-    def _environment(self) -> dict[str, str]:
+    def _environment(
+        self,
+        *,
+        model_id: str = "openai.gpt-oss-120b",
+    ) -> dict[str, str]:
         return {
             "CANDIDATE_MANTLE_API": "openai-completions",
             "CANDIDATE_MANTLE_BASE_URL": (
                 "https://bedrock-mantle.us-east-1.api.aws/v1"
             ),
             "CANDIDATE_MANTLE_BEARER_TOKEN": "root-only-token",
-            "CANDIDATE_MANTLE_MODEL_ID": "openai.gpt-oss-120b",
+            "CANDIDATE_MANTLE_MODEL_ID": model_id,
         }
 
     def test_configuration_rejects_a_lookalike_mantle_origin(self):
@@ -471,6 +506,150 @@ class CandidateMantleRelayTests(unittest.TestCase):
             "Bearer root-only-token",
         )
         self.assertEqual(received["timeout"], 300)
+        self.assertEqual(stub.captures(), [])
+
+    def test_candidate_relay_repairs_kimi_tool_call_history_like_production(
+        self,
+    ):
+        model_id = "moonshotai.kimi-k2.5"
+        stub = RunningStub(
+            candidate_mantle_environment=self._environment(
+                model_id=model_id
+            )
+        )
+        received: dict[str, object] = {}
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def read(self, limit: int) -> bytes:
+                self.limit = limit
+                return b'{"choices":[]}'
+
+            def close(self) -> None:
+                return
+
+        class Opener:
+            def open(
+                self,
+                request: urllib.request.Request,
+                timeout: int,
+            ) -> Response:
+                received["body"] = request.data
+                return Response()
+
+        try:
+            stub.configure([])
+            with mock.patch.object(
+                broker_stub.urllib_request,
+                "build_opener",
+                return_value=Opener(),
+            ):
+                status, _ = stub.request(
+                    "/candidate-mantle/chat/completions",
+                    method="POST",
+                    body={
+                        "model": model_id,
+                        "messages": [
+                            {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "functionsexec0",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "exec",
+                                            "arguments": "{}",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "role": "tool",
+                                "tool_call_id": "functionsexec0",
+                                "content": "{}",
+                            },
+                        ],
+                    },
+                )
+        finally:
+            stub.close()
+
+        self.assertEqual(status, 200)
+        forwarded = json.loads(received["body"])
+        self.assertEqual(
+            forwarded["messages"][0]["tool_calls"][0]["id"],
+            "functions.exec:0",
+        )
+        self.assertEqual(
+            forwarded["messages"][1]["tool_call_id"],
+            "functions.exec:0",
+        )
+        self.assertEqual(stub.captures(), [])
+
+    def test_model_discovery_is_available_before_the_first_trial_opens(self):
+        stub = RunningStub(
+            candidate_mantle_environment=self._environment()
+        )
+        received: dict[str, object] = {}
+        response_body = {
+            "object": "list",
+            "data": [{"id": "openai.gpt-oss-120b"}],
+        }
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def read(self, limit: int) -> bytes:
+                self.limit = limit
+                return json.dumps(response_body).encode("utf-8")
+
+            def close(self) -> None:
+                return
+
+        class Opener:
+            def open(
+                self,
+                request: urllib.request.Request,
+                timeout: int,
+            ) -> Response:
+                received["url"] = request.full_url
+                received["headers"] = {
+                    key.lower(): value
+                    for key, value in request.header_items()
+                }
+                return Response()
+
+        try:
+            stub.invocation_context_path.unlink()
+            stub.request_proof_key_path.unlink()
+            with mock.patch.object(
+                broker_stub.urllib_request,
+                "build_opener",
+                return_value=Opener(),
+            ):
+                status, response = stub.request(
+                    "/candidate-mantle/models",
+                )
+        finally:
+            stub.close()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(response, response_body)
+        self.assertEqual(
+            received["url"],
+            "https://bedrock-mantle.us-east-1.api.aws/v1/models",
+        )
+        self.assertEqual(
+            received["headers"]["authorization"],
+            "Bearer root-only-token",
+        )
+        self.assertEqual(
+            stub.server.state.finalization_state,
+            "closed",
+        )
         self.assertEqual(stub.captures(), [])
 
     def test_candidate_relay_rejects_the_wrong_model_without_upstream_call(self):
