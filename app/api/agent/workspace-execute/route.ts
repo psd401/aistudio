@@ -10,6 +10,7 @@ import {
   executeWorkspaceCommand,
   requiredWorkspaceScopeGap,
   validateEmailTaskWorkspaceCommand,
+  validateScheduledWorkspaceCommand,
   validateWorkspaceCommand,
   type WorkspaceCommand,
 } from "@/lib/agent-workspace/command-executor"
@@ -65,6 +66,8 @@ function validateCommandForMode(
   try {
     if (mode === "email-task") {
       validateEmailTaskWorkspaceCommand(command)
+    } else if (mode === "scheduled") {
+      validateScheduledWorkspaceCommand(command)
     } else {
       validateWorkspaceCommand(command)
     }

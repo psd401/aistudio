@@ -1,6 +1,7 @@
 import {
   requiredWorkspaceScopeGap,
   validateEmailTaskWorkspaceCommand,
+  validateScheduledWorkspaceCommand,
   validateWorkspaceCommand,
 } from "@/lib/agent-workspace/command-executor"
 
@@ -337,6 +338,34 @@ function defineTrustedWorkspaceCommandPolicySuite1Part3() {it("rejects Gmail mod
         argv: ["chat", "+send", "list"],
       })
     ).toThrow(/contains a mutation/)
+  })
+
+  it.each([
+    [
+      "helper",
+      [
+        "chat",
+        "+send",
+        "--space",
+        "spaces/AAQA13FQZFA",
+        "--text",
+        "No",
+      ],
+    ],
+    ["raw API", ["chat", "spaces", "messages", "create", "--json", "{}"]],
+  ])("blocks %s Chat sends from scheduled runs", (_name, argv) => {
+    expect(() =>
+      validateScheduledWorkspaceCommand({ scope: "agent", argv })
+    ).toThrow(/without live user confirmation/)
+  })
+
+  it("keeps scheduled Workspace reads available", () => {
+    expect(() =>
+      validateScheduledWorkspaceCommand({
+        scope: "agent",
+        argv: ["chat", "spaces", "messages", "list"],
+      })
+    ).not.toThrow()
   })
 }
 

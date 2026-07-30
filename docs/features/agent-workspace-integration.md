@@ -86,7 +86,10 @@ allowlists both the `chat +send` helper and the raw
 slot. The DWD assertion already carries `chat.messages`, which authorizes
 `spaces.messages.create` with user authentication; `chat.bot` is for Chat-app
 authentication and is not the credential mode used by the `agnt_*` identity.
-The skill still requires explicit user confirmation before posting.
+The skill still requires explicit user confirmation before posting, and the
+broker refuses Chat message creation from scheduled invocation mode, where no
+live confirmation can exist. Scheduled job output continues through the
+router's existing configured delivery path rather than calling `chat +send`.
 
 ## Runtime error contract
 

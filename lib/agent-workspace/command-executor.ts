@@ -47,10 +47,14 @@ const MUTATING_ACTIONS = new Set([
   "watch",
 ])
 
-const ALLOWED_WRITES = new Set([
-  "calendar events insert",
+const CHAT_MESSAGE_CREATE_OPERATIONS = new Set([
   "chat +send",
   "chat spaces messages create",
+])
+
+const ALLOWED_WRITES = new Set([
+  "calendar events insert",
+  ...CHAT_MESSAGE_CREATE_OPERATIONS,
   "docs documents create",
   "drive files copy",
   "drive files create",
@@ -74,8 +78,7 @@ const REQUIRES_AGENT_CREATED_PROVENANCE = new Set([
 ])
 
 const AGENT_ONLY_WRITES = new Set([
-  "chat +send",
-  "chat spaces messages create",
+  ...CHAT_MESSAGE_CREATE_OPERATIONS,
   "docs documents create",
   "drive files copy",
   "drive files create",
@@ -362,6 +365,18 @@ export function validateEmailTaskWorkspaceCommand(
   const { operation } = normalizedOperation(command.argv)
   if (command.scope !== "user" || operation !== "tasks tasks insert") {
     throw new Error("Email tasks may only insert a user-owned Google task")
+  }
+}
+
+export function validateScheduledWorkspaceCommand(
+  command: WorkspaceCommand,
+): void {
+  validateWorkspaceCommand(command)
+  const { operation } = normalizedOperation(command.argv)
+  if (CHAT_MESSAGE_CREATE_OPERATIONS.has(operation)) {
+    throw new Error(
+      "Scheduled Workspace runs cannot post Google Chat messages without live user confirmation"
+    )
   }
 }
 
