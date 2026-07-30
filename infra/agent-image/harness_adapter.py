@@ -1121,17 +1121,6 @@ class OpenClawAdapter(HarnessAdapter):
                             )
 
                         elif state == "aborted":
-                            # A delayed abort event from the defensive
-                            # pre-send chat.abort belongs to the old run. It
-                            # must not terminate the new chat we just started.
-                            event_run_id = payload.get("runId")
-                            if event_run_id and event_run_id != chat_id:
-                                logger.info(
-                                    "ignoring stale chat abort: run_id=%s current_run_id=%s",
-                                    str(event_run_id)[:100],
-                                    chat_id,
-                                )
-                                continue
                             chat_aborted = True
                             stop_reason = payload.get("stopReason")
                             if isinstance(stop_reason, str) and stop_reason:
@@ -1258,7 +1247,11 @@ class OpenClawAdapter(HarnessAdapter):
                 nudged=nudged,
             )
 
-        if chat_aborted:
+        # A lifecycle error is terminal unless OpenClaw subsequently emits a
+        # successful final event. Usually chat follows it with `aborted`, but
+        # preserve the real cause even if that channel event never arrives and
+        # the receive loop instead runs to its deadline.
+        if chat_aborted or (not got_final and last_lifecycle_error):
             if not response_text and agent_assistant_accum:
                 response_text = agent_assistant_accum
             error_message = (
@@ -1270,9 +1263,13 @@ class OpenClawAdapter(HarnessAdapter):
                 if last_lifecycle_error
                 else "OpenClawChatAborted"
             )
+            terminal_phase = (
+                "chat_aborted" if chat_aborted else "lifecycle_error"
+            )
             logger.error(
-                "chat aborted before final: error_class=%s stop_reason=%s "
-                "elapsed_s=%d deadline_s=%d event_counts=%s",
+                "chat failed before final: phase=%s error_class=%s "
+                "stop_reason=%s elapsed_s=%d deadline_s=%d event_counts=%s",
+                terminal_phase,
                 error_class,
                 abort_stop_reason or "unknown",
                 latency_ms // 1000,
@@ -1287,7 +1284,7 @@ class OpenClawAdapter(HarnessAdapter):
                 session_id=session_id,
                 model=observed_model or model_override,
                 context={
-                    "phase": "chat_aborted",
+                    "phase": terminal_phase,
                     "last_state": last_state,
                     "stop_reason": abort_stop_reason,
                     "elapsed_s": latency_ms // 1000,

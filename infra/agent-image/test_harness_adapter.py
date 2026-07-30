@@ -292,8 +292,9 @@ class TestChatDeadlineRegression(unittest.TestCase):
     def _message(**fields):
         return json.dumps(fields)
 
-    def test_context_overflow_abort_is_not_recorded_as_deadline(self):
+    def _run_context_overflow(self, *, include_abort):
         chat_id = None
+        clock = [0.0]
 
         class FakeWebSocket:
             def __init__(self, messages):
@@ -326,7 +327,25 @@ class TestChatDeadlineRegression(unittest.TestCase):
                 payload={"runId": chat_id, **payload},
             )
 
-        socket = FakeWebSocket([
+        def lifecycle_error_event():
+            if not include_abort:
+                # Simulate the chat channel never following the terminal
+                # lifecycle error with its normal `state=aborted` event.
+                clock[0] = 601.0
+            return current_run_event(
+                "agent",
+                {
+                    "stream": "lifecycle",
+                    "data": {
+                        "phase": "error",
+                        "error": (
+                            "Context overflow: prompt too large for the model."
+                        ),
+                    },
+                },
+            )
+
+        messages = [
             self._message(type="event", event="connect.challenge", payload={}),
             lambda: self._message(
                 type="res",
@@ -359,23 +378,16 @@ class TestChatDeadlineRegression(unittest.TestCase):
                     "data": {"delta": "Working through the requested tools."},
                 },
             ),
-            lambda: current_run_event(
-                "agent",
-                {
-                    "stream": "lifecycle",
-                    "data": {
-                        "phase": "error",
-                        "error": (
-                            "Context overflow: prompt too large for the model."
-                        ),
-                    },
-                },
-            ),
-            lambda: current_run_event(
-                "chat",
-                {"state": "aborted", "stopReason": "stop"},
-            ),
-        ])
+            lifecycle_error_event,
+        ]
+        if include_abort:
+            messages.append(
+                lambda: current_run_event(
+                    "chat",
+                    {"state": "aborted", "stopReason": "stop"},
+                )
+            )
+        socket = FakeWebSocket(messages)
         fake_websocket_module = mock.Mock()
         fake_websocket_module.create_connection.return_value = socket
         fake_websocket_module.WebSocketTimeoutException = TimeoutError
@@ -402,6 +414,10 @@ class TestChatDeadlineRegression(unittest.TestCase):
             mock.patch(
                 "harness_adapter.record_failure",
             ) as record_failure,
+            mock.patch(
+                "harness_adapter.time.time",
+                side_effect=lambda: clock[0],
+            ),
         ):
             result = adapter.process(
                 "Run a complex multi-tool request",
@@ -409,10 +425,14 @@ class TestChatDeadlineRegression(unittest.TestCase):
                 deadline_s=600,
             )
 
+        return result, record_failure.call_args.kwargs
+
+    def test_context_overflow_abort_is_not_recorded_as_deadline(self):
+        result, failure = self._run_context_overflow(include_abort=True)
+
         self.assertTrue(result.failed)
         self.assertEqual(result.error_class, "ContextOverflow")
         self.assertIn("Working through", result.text)
-        failure = record_failure.call_args.kwargs
         self.assertEqual(failure["error_class"], "ContextOverflow")
         self.assertNotEqual(
             failure["error_class"],
@@ -421,6 +441,16 @@ class TestChatDeadlineRegression(unittest.TestCase):
         self.assertEqual(failure["context"]["phase"], "chat_aborted")
         self.assertEqual(failure["context"]["deadline_s"], 600)
         self.assertLess(failure["context"]["elapsed_s"], 600)
+
+    def test_lifecycle_overflow_without_abort_is_not_recorded_as_deadline(self):
+        result, failure = self._run_context_overflow(include_abort=False)
+
+        self.assertTrue(result.failed)
+        self.assertEqual(result.error_class, "ContextOverflow")
+        self.assertNotIn("deadline expired", failure["error_message"].lower())
+        self.assertEqual(failure["context"]["phase"], "lifecycle_error")
+        self.assertEqual(failure["context"]["deadline_s"], 600)
+        self.assertGreaterEqual(failure["context"]["elapsed_s"], 600)
 
 
 class TestRecordItemToolEvent(unittest.TestCase):
