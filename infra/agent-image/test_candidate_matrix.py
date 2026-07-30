@@ -34,7 +34,7 @@ class CandidateMatrixTests(unittest.TestCase):
                 "glm-5-native",
                 "kimi-k2-5",
                 "openai-gpt-oss-120b",
-                "openclaw-2026-7-2-beta-5",
+                "openclaw-cli-gateway",
                 "qwen3-coder-next",
                 "conservative-tool-routing",
                 "sonnet-5-mantle-anthropic",
@@ -112,7 +112,7 @@ class CandidateMatrixTests(unittest.TestCase):
             self.assertEqual(metadata["contextTokens"], 180000)
             self.assertEqual(
                 metadata["harness"]["parallelPluginVersion"],
-                "2026.7.1",
+                "2026.7.2-beta.5",
             )
             self.assertEqual(
                 metadata["harness"]["parallelPluginEndpoint"],
@@ -121,8 +121,8 @@ class CandidateMatrixTests(unittest.TestCase):
             self.assertIsNone(metadata["imageDigest"])
             self.assertEqual(set(metadata["cost"]), set(metadata["costSources"]))
 
-    def test_harness_candidate_applies_only_approved_config_migrations(self):
-        manifest = self.manifests_dir / "openclaw-2026-7-2-beta-5.json"
+    def test_harness_candidate_applies_only_approved_gateway_identity(self):
+        manifest = self.manifests_dir / "openclaw-cli-gateway.json"
         with tempfile.TemporaryDirectory(
             dir=HERE, prefix=".candidate-test."
         ) as directory:
@@ -130,33 +130,15 @@ class CandidateMatrixTests(unittest.TestCase):
             config = json.loads(
                 (Path(directory) / "openclaw.json").read_text(encoding="utf-8")
             )
-            self.assertNotIn("memorySearch", config["agents"]["defaults"])
             self.assertEqual(
-                config["memory"]["search"],
-                {
-                    "provider": "bedrock",
-                    "model": "amazon.titan-embed-text-v2:0",
-                },
-            )
-            self.assertNotIn(
-                "allowInsecureAuth",
-                config["gateway"]["controlUi"],
-            )
-            self.assertNotIn(
-                "dangerouslyDisableDeviceAuth",
-                config["gateway"]["controlUi"],
+                config,
+                json.loads((HERE / "openclaw.json").read_text(encoding="utf-8")),
             )
             metadata = json.loads(
                 Path(plan["metadata"]).read_text(encoding="utf-8")
             )
             self.assertEqual(metadata["variedAxis"], "harness")
-            expected_migrations = json.loads(
-                manifest.read_text(encoding="utf-8")
-            )["axes"]["harness"]["configMigrations"]
-            self.assertEqual(
-                metadata["harness"]["configMigrations"],
-                expected_migrations,
-            )
+            self.assertIsNone(metadata["harness"]["configMigrations"])
             self.assertEqual(
                 metadata["harness"]["gatewayClient"],
                 {
@@ -181,15 +163,15 @@ class CandidateMatrixTests(unittest.TestCase):
     def test_rejects_unapproved_harness_config_migration(self):
         source = json.loads(
             (
-                self.manifests_dir / "openclaw-2026-7-2-beta-5.json"
+                self.manifests_dir / "openclaw-cli-gateway.json"
             ).read_text(encoding="utf-8")
         )
-        source["axes"]["harness"]["configMigrations"].append(
+        source["axes"]["harness"]["configMigrations"] = [
             {
                 "op": "remove",
                 "path": "agents.defaults.model",
             }
-        )
+        ]
         with tempfile.TemporaryDirectory(
             dir=self.manifests_dir.parent, prefix=".candidate-contract-test."
         ) as directory:
@@ -209,7 +191,7 @@ class CandidateMatrixTests(unittest.TestCase):
     def test_rejects_unapproved_harness_gateway_client(self):
         source = json.loads(
             (
-                self.manifests_dir / "openclaw-2026-7-2-beta-5.json"
+                self.manifests_dir / "openclaw-cli-gateway.json"
             ).read_text(encoding="utf-8")
         )
         source["axes"]["harness"]["gatewayClient"] = {
@@ -565,26 +547,42 @@ class CandidateMatrixTests(unittest.TestCase):
         dockerfile = (HERE / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn(
             "ARG OPENCLAW_BASE_IMAGE=ghcr.io/openclaw/openclaw@sha256:"
-            "6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c",
+            "86e0a480a37d879311c9723ad2487cca9eb6c1925fa4732dec3f505b4728eee9",
             dockerfile,
         )
-        self.assertIn("ARG BEDROCK_PLUGIN_VERSION=2026.7.1", dockerfile)
+        self.assertIn(
+            'grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_LOG}"',
+            dockerfile,
+        )
+        self.assertIn(
+            'grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT}"',
+            dockerfile,
+        )
+        self.assertIn("ARG BEDROCK_PLUGIN_VERSION=2026.7.2-beta.5", dockerfile)
         self.assertIn(
             "ARG BEDROCK_PLUGIN_ASSERTION=claude-sonnet-5", dockerfile
         )
-        self.assertIn("ARG PARALLEL_PLUGIN_VERSION=2026.7.1", dockerfile)
+        self.assertIn("ARG PARALLEL_PLUGIN_VERSION=2026.7.2-beta.5", dockerfile)
         self.assertIn(
             "ARG PARALLEL_PLUGIN_ENDPOINT=https://search.parallel.ai/mcp",
             dockerfile,
         )
         self.assertIn(
-            "ARG OPENCLAW_GATEWAY_CLIENT_ID=openclaw-tui", dockerfile
+            "ARG OPENCLAW_GATEWAY_CLIENT_ID=gateway-client", dockerfile
         )
         self.assertIn(
             "ARG OPENCLAW_GATEWAY_CLIENT_MODE=backend", dockerfile
         )
         self.assertIn(
             'grep -Fq -- "${BEDROCK_PLUGIN_ASSERTION}"', dockerfile
+        )
+        self.assertIn(
+            "openclaw plugins inspect amazon-bedrock --runtime --json",
+            dockerfile,
+        )
+        self.assertIn(
+            "openclaw plugins inspect parallel --runtime --json",
+            dockerfile,
         )
 
     def test_build_command_wires_manifest_inputs_and_digest_sidecar(self):

@@ -48,6 +48,86 @@ class ContextWindowTests(unittest.TestCase):
         self.assertTrue(ccc.check_context_windows(cfg))
 
 
+class TierEvalConfigSchemaTests(unittest.TestCase):
+    CANONICAL = {
+        "agents": {"defaults": {}},
+        "memory": {
+            "search": {
+                "provider": "bedrock",
+                "model": "amazon.titan-embed-text-v2:0",
+            }
+        },
+        "gateway": {"controlUi": {"enabled": False}},
+    }
+
+    def test_canonical_memory_schema_passes(self):
+        self.assertEqual(
+            ccc.check_tier_eval_config_schema(self.CANONICAL),
+            [],
+        )
+
+    def test_legacy_default_memory_search_is_rejected(self):
+        cfg = {
+            **self.CANONICAL,
+            "agents": {
+                "defaults": {
+                    "memorySearch": {
+                        "provider": "bedrock",
+                        "model": "amazon.titan-embed-text-v2:0",
+                    }
+                }
+            },
+        }
+        violations = ccc.check_tier_eval_config_schema(cfg)
+        self.assertTrue(
+            any("agents.defaults.memorySearch moved" in v for v in violations)
+        )
+
+    def test_retired_insecure_auth_toggle_is_rejected(self):
+        cfg = {
+            **self.CANONICAL,
+            "gateway": {
+                "controlUi": {
+                    "enabled": False,
+                    "allowInsecureAuth": True,
+                }
+            },
+        }
+        violations = ccc.check_tier_eval_config_schema(cfg)
+        self.assertTrue(
+            any("allowInsecureAuth is retired" in v for v in violations)
+        )
+
+    def test_retired_and_unneeded_control_ui_danger_flags_are_rejected(self):
+        cfg = {
+            **self.CANONICAL,
+            "gateway": {
+                "controlUi": {
+                    "enabled": False,
+                    "dangerouslyDisableDeviceAuth": True,
+                    "dangerouslyAllowHostHeaderOriginFallback": True,
+                }
+            },
+        }
+        violations = ccc.check_tier_eval_config_schema(cfg)
+        self.assertTrue(
+            any("dangerouslyDisableDeviceAuth is retired" in v
+                for v in violations)
+        )
+        self.assertTrue(
+            any("dangerouslyAllowHostHeaderOriginFallback" in v
+                for v in violations)
+        )
+
+    def test_semantic_memory_keeps_explicit_bedrock_model(self):
+        cfg = {**self.CANONICAL, "memory": {"search": {}}}
+        violations = ccc.check_tier_eval_config_schema(cfg)
+        self.assertTrue(
+            any("memory.search.provider" in v for v in violations)
+        )
+        self.assertTrue(any("memory.search.model" in v for v in violations))
+
+
 class ApiKeyHydrationTests(unittest.TestCase):
     def _wrapper(self, text: str) -> str:
         d = tempfile.mkdtemp()
@@ -474,8 +554,97 @@ class HostPluginCompatibilityTests(unittest.TestCase):
         version, violations = ccc.parse_pinned_plugin_version(
             os.path.join(here, "Dockerfile")
         )
-        self.assertEqual(version, "2026.7.1")
+        self.assertEqual(version, "2026.7.2-beta.5")
         self.assertEqual(violations, [])
+
+
+class SettledToolRecoveryContractTests(unittest.TestCase):
+    """The host must recover settled tool turns without replaying effects."""
+
+    FIXED = (
+        "2026.7.2-beta.5",
+        "sha256:" + "86e0a480a37d879311c9723ad2487cca9eb6c1925fa4732dec3f505b4728eee9",
+    )
+    OLD = (
+        "2026.7.1",
+        "sha256:" + "6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c",
+    )
+
+    def _dockerfile(self, host, digest, *, assert_runtime=True):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "Dockerfile")
+        contract = ""
+        if assert_runtime:
+            contract = (
+                'ARG OPENCLAW_SETTLED_TOOL_RECOVERY_LOG="settled post-tool turn '
+                'lacked a final answer"\n'
+                'ARG OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT="The previous assistant '
+                'turn completed its tool calls but did not produce a user-visible '
+                'answer."\n'
+                'RUN grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_LOG}" /app/dist '
+                '&& \\\n'
+                '    grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT}" '
+                "/app/dist\n"
+            )
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(
+                f"#   ghcr.io/openclaw/openclaw:{host}\n"
+                f"#   index: {digest}\n"
+                f"FROM ghcr.io/openclaw/openclaw@{digest}\n"
+                f"{contract}"
+            )
+        return p
+
+    def test_first_fixed_release_with_runtime_assertions_passes(self):
+        self.assertEqual(
+            ccc.check_settled_tool_recovery(self._dockerfile(*self.FIXED)),
+            [],
+        )
+
+    def test_previous_stable_release_is_rejected(self):
+        violations = ccc.check_settled_tool_recovery(
+            self._dockerfile(*self.OLD)
+        )
+        self.assertTrue(any("predates settled-tool recovery" in v for v in violations))
+
+    def test_missing_compiled_runtime_assertions_are_rejected(self):
+        violations = ccc.check_settled_tool_recovery(
+            self._dockerfile(*self.FIXED, assert_runtime=False)
+        )
+        self.assertTrue(
+            any("does not assert the compiled settled-tool recovery" in v
+                for v in violations)
+        )
+
+    def test_repo_dockerfile_keeps_recovery_contract(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        self.assertEqual(
+            ccc.check_settled_tool_recovery(
+                os.path.join(here, "Dockerfile")
+            ),
+            [],
+        )
+
+
+class PluginRuntimeAssertionTests(unittest.TestCase):
+    def test_repo_dockerfile_loads_both_exact_plugin_pins(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        self.assertEqual(
+            ccc.check_plugin_runtime_assertions(
+                os.path.join(here, "Dockerfile")
+            ),
+            [],
+        )
+
+    def test_version_checks_without_runtime_loading_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dockerfile = os.path.join(directory, "Dockerfile")
+            with open(dockerfile, "w", encoding="utf-8") as fh:
+                fh.write("RUN openclaw config validate\n")
+            violations = ccc.check_plugin_runtime_assertions(dockerfile)
+        self.assertTrue(
+            any("runtime registration" in v for v in violations)
+        )
 
 
 class RealFilesTests(unittest.TestCase):
@@ -502,7 +671,7 @@ class RealFilesTests(unittest.TestCase):
         here = os.path.dirname(os.path.abspath(__file__))
         version, violations = ccc.parse_pinned_parallel_plugin_version(
             os.path.join(here, "Dockerfile"))
-        self.assertEqual(version, "2026.7.1")
+        self.assertEqual(version, "2026.7.2-beta.5")
         self.assertEqual(violations, [])
 
 

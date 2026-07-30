@@ -36,18 +36,15 @@ Issue #1429 adds two non-model calibration arms:
 
 | Manifest | Axis | Candidate |
 |---|---|---|
-| `openclaw-2026-7-2-beta-5.json` | Harness | OpenClaw and Bedrock plugin `2026.7.2-beta.5`, pinned to OCI index `sha256:86e0a480…` |
+| `openclaw-cli-gateway.json` | Harness | Uses OpenClaw's reserved `cli`/`cli` loopback identity instead of production `gateway-client`/`backend` |
 | `conservative-tool-routing.json` | Prompt | Adds minimum-capability and explicit-side-effect routing guidance |
 
-The harness arm uses the first published OpenClaw release after the `2026.7.1`
-baseline. It is a prerelease and is evaluated as a candidate only; building it
-does not change the production pin. Its manifest records the upstream-required
-move from `agents.defaults.memorySearch` to `memory.search` and removes two
-retired Control UI compatibility keys. It also selects the beta's reserved
-`cli`/`cli` container-local identity because the beta reclassifies TUI as
-Control UI and requires device identity; the CLI path explicitly preserves
-operator scopes after loopback shared-token auth. The model and materialized
-prompt remain byte-identical to baseline.
+The harness arm exercises the beta's reserved `cli`/`cli` container-local
+identity against production's supported `gateway-client`/`backend` loopback
+identity. The beta reclassifies TUI as Control UI and requires device identity;
+both approved non-UI paths preserve operator scopes after loopback shared-token
+auth. Host, plugins, model, config, and materialized prompt remain byte-identical
+to baseline.
 
 ## Axis contract
 
@@ -65,9 +62,10 @@ rejects zero changes, an undeclared change, or changes to two or more axes.
   `check_config_consistency.py`; each `npm pack` and its tarball references
   share the same build argument. Harness candidates may also declare a
   narrowly allowlisted `configMigrations` list when the new host moves or
-  retires baseline keys, plus the exact `cli`/`cli` pair when the host requires
-  its scope-preserving container-local identity. These compatibility inputs
-  are part of the harness axis and cannot change model or prompt configuration.
+  retires baseline keys, plus an exact allowlisted loopback client pair when a
+  host requires a different scope-preserving identity. These compatibility
+  inputs are part of the harness axis and cannot change model or prompt
+  configuration.
 - `prompt` selects the SOUL preamble and rules skill. The candidate versions
   are passed as Docker build inputs and checked against the materialized
   config's bootstrap budgets.
