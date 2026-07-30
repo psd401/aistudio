@@ -91,12 +91,13 @@ const baseInput = {
       expect(buildFromCron(baseInput)).toBe(buildFromRouter(baseInput))
     })
 
-    it("agrees with the router on the deadline classes", () => {
+    it("agrees with the router on every recoverable class", () => {
       // Two copies of the same error-class set. If the router gains a class
       // and cron does not, scheduled tasks silently stop being promoted.
       for (const cls of [
         "ChatDeadlineExpired",
         "ChatDeadlineExpiredPartial",
+        "ContextOverflow",
         "OpenClawChatError",
         "SomeFutureError",
         "",
@@ -104,25 +105,6 @@ const baseInput = {
       ]) {
         expect(shouldPromoteFromCron(cls)).toBe(shouldPromoteFromRouter(cls))
       }
-    })
-
-    it("INTENTIONALLY diverges from the router on context overflow", () => {
-      // Pinned rather than omitted, because the test above exists to catch
-      // exactly this kind of drift and would otherwise be routed around.
-      //
-      // Scheduled tasks restart on overflow: nobody is watching, the request
-      // is fully described by the stored schedule prompt, and the alternative
-      // is a silent failure every morning.
-      //
-      // Interactive turns do NOT, deliberately. A restart discards the user's
-      // conversation, and they are right there — they can /reset or rephrase,
-      // and they can see that something went wrong. Silently throwing away a
-      // chat history to retry is worse than telling them it failed.
-      //
-      // If interactive restart is ever wanted, change the router AND this
-      // test together.
-      expect(shouldPromoteFromCron("ContextOverflow")).toBe(true)
-      expect(shouldPromoteFromRouter("ContextOverflow")).toBe(false)
     })
 
     it("truncates a CONTINUATION prompt and stays inside the 8 KiB cap", () => {
