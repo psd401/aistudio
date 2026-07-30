@@ -23,8 +23,9 @@ const READ_ACTIONS = new Set([
   "search",
 ])
 
+// Bare mutating verbs only. `+`-prefixed helper verbs are covered by the
+// prefix check in validateWorkspaceMutation and must not be enumerated here.
 const MUTATING_ACTIONS = new Set([
-  "+send",
   "batchdelete",
   "batchmodify",
   "batchupdate",
@@ -73,10 +74,12 @@ const REQUIRES_AGENT_CREATED_PROVENANCE = new Set([
   "tasks tasks update",
 ])
 
-const CHAT_SEND_OPERATIONS = new Set([
-  "chat +send",
-  "chat spaces messages create",
-])
+// Derived rather than enumerated: every allowlisted Chat write leaves the
+// owner's own Workspace data and therefore has to reach the audit log, so a
+// Chat operation cannot be added to ALLOWED_WRITES without being audited.
+const CHAT_SEND_OPERATIONS = new Set(
+  [...ALLOWED_WRITES].filter((operation) => operation.startsWith("chat "))
+)
 
 const AGENT_ONLY_WRITES = new Set([
   "chat +send",

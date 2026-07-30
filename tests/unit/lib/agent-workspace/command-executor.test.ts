@@ -480,6 +480,39 @@ const defineWorkspaceOutboundAuditSuite4 = () => {
       outboundMessageAudit(["chat", "+send", "--text", "orphan"])
     ).toEqual({ space: null, textLength: 6 })
   })
+
+  it.each([
+    ["helper", ["chat", "+send", "--space", "spaces/X", "--text", "hi"]],
+    [
+      "raw API",
+      ["chat", "spaces", "messages", "create", "--params", '{"parent":"s"}'],
+    ],
+  ])("audits every allowlisted Chat write via the %s form", (_name, argv) => {
+    expect(() => validateWorkspaceCommand({ scope: "agent", argv })).not.toThrow()
+    expect(outboundMessageAudit(argv)).not.toBeNull()
+  })
 };
 
 describe("Workspace outbound message audit", defineWorkspaceOutboundAuditSuite4)
+
+const defineEmailTaskChatRejectionSuite5 = () => {
+  it.each([
+    ["helper", ["chat", "+send", "--space", "spaces/X", "--text", "hi"]],
+    [
+      "raw API",
+      ["chat", "spaces", "messages", "create", "--params", '{"parent":"s"}'],
+    ],
+  ])("keeps sender-influenced email tasks from sending Chat via %s", (
+    _name,
+    argv
+  ) => {
+    expect(() =>
+      validateEmailTaskWorkspaceCommand({ scope: "agent", argv })
+    ).toThrow(/only insert a user-owned Google task/)
+    expect(() =>
+      validateEmailTaskWorkspaceCommand({ scope: "user", argv })
+    ).toThrow()
+  })
+};
+
+describe("Email-task mode excludes Chat sends", defineEmailTaskChatRejectionSuite5)
