@@ -25,7 +25,15 @@ const {
     loadLiveLabels: () => Promise<
       Array<{ id: string; name: string; type: "user" }>
     >
-  ) => Promise<Record<keyof typeof IDS, string> | null>
+  ) => Promise<
+    | {
+        valid: true
+        mapping: {
+          labelIdsByKey: Record<keyof typeof IDS, string>
+        }
+      }
+    | { valid: false; reason: string }
+  >
   TRIAGE_LABEL_MAPPING_PROVENANCE: string
   TRIAGE_LABEL_MAPPING_VERSION: number
   TRIAGE_LABEL_NAMES: Record<keyof typeof IDS, string>
@@ -119,7 +127,10 @@ describe("trusted email triage label mapping", () => {
         },
         loadLiveLabels
       )
-    ).resolves.toBeNull()
+    ).resolves.toEqual({
+      valid: false,
+      reason: "untrusted-or-stale-provenance",
+    })
     expect(loadLiveLabels).not.toHaveBeenCalled()
   })
 
@@ -148,9 +159,9 @@ describe("trusted email triage label mapping", () => {
     expect(classifier.indexOf("trustedLabelIdsForRow(")).toBeLessThan(
       classifier.indexOf("getMessageMetadata(")
     )
-    expect(classifier.indexOf("if (!trustedLabelIds) return null")).toBeLessThan(
-      classifier.indexOf("modifyMessage(")
-    )
+    expect(
+      classifier.indexOf("if (!trustedLabelMapping) return null")
+    ).toBeLessThan(classifier.indexOf("modifyMessage("))
     expect(classifier).toContain(
       'modifyMessage(accessToken, msgRef.id, [labelId], ["INBOX"])'
     )

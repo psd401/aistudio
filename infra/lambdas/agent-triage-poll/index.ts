@@ -54,6 +54,7 @@ import {
   recordPollResult,
   recordTaskCreated,
   resetCursor,
+  stampTrustedTriageLabelMapping,
 } from "./storage";
 import { requestTaskCreation } from "./agentcore";
 import type {
@@ -63,15 +64,15 @@ import type {
   TriageRow,
 } from "./types";
 import {
-  resolveTrustedTriageLabelMapping,
-  validateStoredTriageLabelMapping,
+  type TrustedTriageLabelMapping,
 } from "./label-mapping";
+import { loadTrustedLabelMappingForRow } from "./trusted-label-mapping";
 
 const ENV = process.env.ENVIRONMENT ?? "dev";
 const REGION = process.env.AWS_REGION ?? "us-east-1";
 const validatedLabelMappings = new WeakMap<
   TriageRow,
-  Promise<Record<"important" | "later" | "news" | "task", string> | null>
+  Promise<TrustedTriageLabelMapping | null>
 >();
 
 export function log(
@@ -130,21 +131,14 @@ export async function acquireUserAccessToken(
 async function trustedLabelIdsForRow(
   row: TriageRow,
   accessToken: string,
-): Promise<Record<"important" | "later" | "news" | "task", string> | null> {
+): Promise<TrustedTriageLabelMapping | null> {
   let pending = validatedLabelMappings.get(row);
   if (!pending) {
-    const stored = validateStoredTriageLabelMapping(row);
-    if (!stored.valid) {
-      log("ERROR", "untrusted_label_mapping", {
-        user: row.userEmail,
-        reason: stored.reason,
-      });
-      return null;
-    }
-    pending = resolveTrustedTriageLabelMapping(
-      row,
-      () => listLabels(accessToken)
-    );
+    pending = loadTrustedLabelMappingForRow(row, {
+      loadLiveLabels: () => listLabels(accessToken),
+      stampTrustedMapping: stampTrustedTriageLabelMapping,
+      log,
+    });
     validatedLabelMappings.set(row, pending);
   }
   return pending;
@@ -269,9 +263,9 @@ export async function processUser(row: TriageRow): Promise<void> {
   // Acquire access token.
   const accessToken = await acquireUserAccessToken(row.userEmail);
   if (!accessToken) return;
-  const trustedLabelIds = await trustedLabelIdsForRow(row, accessToken);
-  if (!trustedLabelIds) return;
-  row = { ...row, labelIdsByKey: trustedLabelIds };
+  const trustedLabelMapping = await trustedLabelIdsForRow(row, accessToken);
+  if (!trustedLabelMapping) return;
+  row = { ...row, ...trustedLabelMapping };
 
   // Anchor cursor — when missing or on first run we capture "now" so we
   // only classify forward.
@@ -544,9 +538,9 @@ export async function classifyAndLabel(
   msgRef: { id: string; threadId: string; labelIds?: string[] },
   opts: { suppressEscalation?: boolean } = {},
 ): Promise<{ decision: DecisionRecord; escalated: boolean } | null> {
-  const trustedLabelIds = await trustedLabelIdsForRow(row, accessToken);
-  if (!trustedLabelIds) return null;
-  row = { ...row, labelIdsByKey: trustedLabelIds };
+  const trustedLabelMapping = await trustedLabelIdsForRow(row, accessToken);
+  if (!trustedLabelMapping) return null;
+  row = { ...row, ...trustedLabelMapping };
 
   // Fetch metadata — needed for sender + subject + snippet.
   const meta = await getMessageMetadata(accessToken, msgRef.id);

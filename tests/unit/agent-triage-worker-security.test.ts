@@ -13,6 +13,7 @@ const mockGetUserProfile = jest.fn()
 const mockRecordPollResult = jest.fn()
 const mockRecordTaskCreated = jest.fn()
 const mockReleaseTaskGestureClaim = jest.fn()
+const mockStampTrustedTriageLabelMapping = jest.fn()
 const mockRequestTaskCreation = jest.fn()
 const mockPostTaskOutcome = jest.fn()
 
@@ -64,6 +65,8 @@ jest.mock("@/infra/lambdas/agent-triage-poll/storage", () => ({
   releaseTaskGestureClaim: (...args: unknown[]) =>
     mockReleaseTaskGestureClaim(...args),
   resetCursor: jest.fn(),
+  stampTrustedTriageLabelMapping: (...args: unknown[]) =>
+    mockStampTrustedTriageLabelMapping(...args),
 }))
 
 jest.mock("@/infra/lambdas/agent-triage-poll/agentcore", () => ({
@@ -182,24 +185,89 @@ describe("agent triage worker label sink", () => {
     mockRecordPollResult.mockResolvedValue(undefined)
     mockRecordTaskCreated.mockResolvedValue(undefined)
     mockReleaseTaskGestureClaim.mockResolvedValue(undefined)
+    mockStampTrustedTriageLabelMapping.mockResolvedValue(undefined)
     mockPostTaskOutcome.mockResolvedValue(undefined)
     mockModifyThread.mockResolvedValue(undefined)
+    mockListHistory.mockResolvedValue({
+      events: [],
+      latestHistoryId: "101",
+      tooOld: false,
+    })
   })
 
-  it.each([
-    ["legacy", row({ labelMappingVersion: undefined })],
-    ["foreign", row({ labelMappingOwnerEmail: "attacker@example.com" })],
-  ])("fails closed before any Gmail call for %s state", async (_name, state) => {
-    await expect(
-      classifyAndLabel(state, "token", {
-        id: "message-1",
-        threadId: "thread-1",
+  it("heals a legacy mapping and continues the poll in the same tick", async () => {
+    await processUser(
+      row({
+        labelMappingVersion: undefined,
+        labelMappingProvenance: undefined,
+        labelMappingOwnerEmail: undefined,
+        labelMappingResolvedAt: undefined,
+        lastHistoryId: "100",
       })
-    ).resolves.toBeNull()
+    )
+
+    expect(mockStampTrustedTriageLabelMapping).toHaveBeenCalledWith(
+      expect.objectContaining({
+        labels: TRIAGE_LABEL_NAMES,
+        labelIdsByKey: IDS,
+        labelMappingVersion: TRIAGE_LABEL_MAPPING_VERSION,
+        labelMappingProvenance: TRIAGE_LABEL_MAPPING_PROVENANCE,
+        labelMappingOwnerEmail: "owner@example.com",
+        labelMappingResolvedAt: expect.any(String),
+      })
+    )
+    expect(mockListHistory).toHaveBeenCalledWith("token", "100")
+    expect(mockRecordPollResult).toHaveBeenCalledWith(
+      "owner@example.com",
+      expect.objectContaining({ lastHistoryId: "101" }),
+      [],
+      []
+    )
+  })
+
+  it("fails closed without stamping when live labels are ambiguous", async () => {
+    mockListLabels.mockResolvedValue([
+      ...liveLabels(),
+      {
+        id: "Label_important_duplicate",
+        name: TRIAGE_LABEL_NAMES.important,
+        type: "user",
+      },
+    ])
+
+    await processUser(
+      row({
+        labelMappingVersion: undefined,
+        lastHistoryId: "100",
+      })
+    )
+
+    expect(mockStampTrustedTriageLabelMapping).not.toHaveBeenCalled()
+    expect(mockListHistory).not.toHaveBeenCalled()
+    expect(mockRecordPollResult).not.toHaveBeenCalled()
+  })
+
+  it("fails closed before Gmail work for mismatched owner provenance", async () => {
+    await processUser(
+      row({
+        labelMappingOwnerEmail: "attacker@example.com",
+        lastHistoryId: "100",
+      })
+    )
+
     expect(mockListLabels).not.toHaveBeenCalled()
-    expect(mockGetMessageMetadata).not.toHaveBeenCalled()
-    expect(mockApplyRules).not.toHaveBeenCalled()
-    expect(mockModifyMessage).not.toHaveBeenCalled()
+    expect(mockStampTrustedTriageLabelMapping).not.toHaveBeenCalled()
+    expect(mockListHistory).not.toHaveBeenCalled()
+    expect(mockRecordPollResult).not.toHaveBeenCalled()
+  })
+
+  it("passes through a valid row without a provenance write", async () => {
+    await processUser(row({ lastHistoryId: "100" }))
+
+    expect(mockListLabels).toHaveBeenCalledTimes(1)
+    expect(mockStampTrustedTriageLabelMapping).not.toHaveBeenCalled()
+    expect(mockListHistory).toHaveBeenCalledWith("token", "100")
+    expect(mockRecordPollResult).toHaveBeenCalled()
   })
 
   it("fails closed when the live label was renamed", async () => {
