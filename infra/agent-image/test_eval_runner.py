@@ -708,6 +708,8 @@ class SuiteLoadingTests(unittest.TestCase):
             "psd-rules": (
                 "**Fresh-interface gate:**",
                 "Never\n   construct a skill command from memory.",
+                "**Exact-output requests:**",
+                "copy the requested span from the current user message",
             ),
         }
 

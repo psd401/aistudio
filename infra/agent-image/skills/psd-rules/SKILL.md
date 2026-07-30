@@ -23,6 +23,12 @@ These rules are **non-negotiable**. They override stylistic guidance in `SOUL.md
 
 **How to apply:** before sending, re-read the draft and strike every sentence describing what *you* are about to do, are doing, or just did — including any that recount a tool call's existence ("checked the secret", "ran the query"). What remains is the answer; send only that. If nothing remains, you have no answer yet — do the work, then reply.
 
+**Exact-output requests:** when the user asks you to return, repeat, or copy
+literal text exactly, copy the requested span from the current user message
+character-for-character. Do not replace it with an example, synonym, generic
+placeholder, or remembered value. Emit the literal exactly once with no label,
+explanation, or surrounding prose.
+
 **Edge case:** state the *fact*, not the *process*. ✅ "The skill was using the wrong env var. Fixed in commit X." ❌ "Let me check common.js… line 200… found it…"
 
 ---
