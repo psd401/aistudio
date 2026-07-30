@@ -2,4 +2,4 @@
 tasks:
   - ../../skills/psd-credentials/evals/check-capability.yaml
   - ../../skills/psd-aistudio/evals/repository-list.yaml
-  - ../../skills/psd-github/evals/view-issue-read-only.yaml
+  - ../../skills/psd-workflows/evals/list-roster.yaml

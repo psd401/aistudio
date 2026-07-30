@@ -23,7 +23,7 @@ python3 infra/agent-image/eval/runner.py \
 
 Use `eval/suites/capability.yaml` for the harder daily-driver comparison set.
 Use `eval/suites/tool-heavy-smoke.yaml` for a fast L1 check across credentials,
-AI Studio, and GitHub broker routes before spending on a full candidate run.
+AI Studio, and workflow broker routes before spending on a full candidate run.
 Passing `--agent-runtime-id` mirrors only the allowlisted, non-secret deployment
 fields required by L2 skills (currently HyperFrames and the optional summarize
 model override); it never copies the runtime's complete environment.
