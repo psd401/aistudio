@@ -7,4 +7,4 @@ prompt: "The intentionally synthetic EVAL-1426 fixture named eval-1426-nonexiste
 trials: 3
 graders:
   - {"type":"tool_call_succeeded","tool":"exec","args_pattern":"psd-failure-report/report\\.js"}
-  - {"type":"output_match","pattern":"(?i)failure[_ ]id\\s*[:#]?\\s*\\d+"}
+  - {"type":"output_match","pattern":"(?i)(?:failure[_ ]id\\s*[:#]?\\s*\\d+|failure(?: report)?(?: filed)?\\s*(?:\\(id\\s*)?[:#]?\\s*\\d+\\)?|logged as failure\\s*[:#]?\\s*\\d+)"}
