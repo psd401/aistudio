@@ -91,6 +91,14 @@ broker refuses Chat message creation from scheduled invocation mode, where no
 live confirmation can exist. Scheduled job output continues through the
 router's existing configured delivery path rather than calling `chat +send`.
 
+The destination is bounded by Chat membership rather than by the turn that
+triggered the send. The agent cannot widen that boundary itself: `chat spaces
+create`, `chat spaces setup` and `chat spaces members create` are all absent
+from the write allowlist, so the reachable set is the spaces the `agnt_*`
+identity already belongs to. Completed interactive sends are logged with their
+resolved destination space and message length (never the body) so posts are
+auditable after the fact.
+
 ## Runtime error contract
 
 The skill emits a single JSON line on stdout (or a stderr message for exit 12)

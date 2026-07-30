@@ -1,4 +1,5 @@
 import {
+  outboundMessageAudit,
   requiredWorkspaceScopeGap,
   validateEmailTaskWorkspaceCommand,
   validateScheduledWorkspaceCommand,
@@ -414,3 +415,100 @@ const defineWorkspaceUserSlotScopeUpgradesSuite2 = () => {
 };
 
 describe("Workspace user-slot scope upgrades", defineWorkspaceUserSlotScopeUpgradesSuite2)
+
+const defineWorkspaceHelperVerbSmugglingSuite3 = () => {
+  it.each([
+    ["gmail +reply", ["gmail", "+reply", "list"]],
+    ["gmail +reply-all", ["gmail", "+reply-all", "list"]],
+    ["gmail +forward", ["gmail", "+forward", "get"]],
+    ["gmail +send", ["gmail", "+send", "list"]],
+    ["chat +send", ["chat", "+send", "get"]],
+  ])(
+    "refuses %s hidden behind a trailing read action on the user slot",
+    (_name, argv) => {
+      expect(() =>
+        validateWorkspaceCommand({ scope: "user", argv })
+      ).toThrow(/contains a mutation/)
+      expect(() =>
+        validateWorkspaceCommand({ scope: "agent", argv })
+      ).toThrow(/contains a mutation/)
+    }
+  )
+
+  it("still allows ordinary read commands", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: ["gmail", "users", "messages", "list"],
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: ["chat", "spaces", "list"],
+      })
+    ).not.toThrow()
+  })
+};
+
+describe("Workspace helper-verb read smuggling", defineWorkspaceHelperVerbSmugglingSuite3)
+
+const defineWorkspaceOutboundAuditSuite4 = () => {
+  it("records the destination and body length of a helper-form Chat send", () => {
+    expect(
+      outboundMessageAudit([
+        "chat",
+        "+send",
+        "--space",
+        "spaces/AAQA13FQZFA",
+        "--text",
+        "Daily digest",
+      ])
+    ).toEqual({ space: "spaces/AAQA13FQZFA", textLength: 12 })
+  })
+
+  it("recovers the destination the logged operation prefix cannot see", () => {
+    expect(
+      outboundMessageAudit([
+        "chat",
+        "spaces",
+        "messages",
+        "create",
+        "--params",
+        JSON.stringify({ parent: "spaces/AAQA13FQZFA" }),
+        "--json",
+        JSON.stringify({ text: "Daily digest" }),
+      ])
+    ).toEqual({ space: "spaces/AAQA13FQZFA", textLength: 12 })
+  })
+
+  it("unwraps a resource-wrapped raw payload", () => {
+    expect(
+      outboundMessageAudit([
+        "chat",
+        "spaces",
+        "messages",
+        "create",
+        "--params",
+        JSON.stringify({ parent: "spaces/AAQA13FQZFA" }),
+        "--json",
+        JSON.stringify({ resource: { text: "Hi" } }),
+      ])
+    ).toEqual({ space: "spaces/AAQA13FQZFA", textLength: 2 })
+  })
+
+  it("returns null for operations that do not leave the owner's Workspace", () => {
+    expect(
+      outboundMessageAudit(["gmail", "users", "drafts", "create"])
+    ).toBeNull()
+    expect(outboundMessageAudit(["chat", "spaces", "list"])).toBeNull()
+  })
+
+  it("reports a missing destination rather than inventing one", () => {
+    expect(
+      outboundMessageAudit(["chat", "+send", "--text", "orphan"])
+    ).toEqual({ space: null, textLength: 6 })
+  })
+};
+
+describe("Workspace outbound message audit", defineWorkspaceOutboundAuditSuite4)
