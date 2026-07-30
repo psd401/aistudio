@@ -30,6 +30,13 @@ The failures came from two bench compatibility gaps:
    a denied image-generation request, and a failure record ID for a successfully
    filed failure report.
 
+The later model arms exposed the same class of grader error in more forms:
+Unicode hyphens and spaces, `Continue` versus `Continuation`, `last-7-days`
+versus `past week`, required terms in a different order, and facts split
+between a card's label and value. These variants preserved the task contract;
+malformed paths, duplicated exact output, wrong broker payloads, missing tool
+calls, and runtime errors did not.
+
 After binding the gateway client identity to the pinned harness, suppressing
 the synthetic browser Origin, and widening the graders to the valid output
 contract, the harness candidate had no regression-suite skill drops. The
@@ -61,6 +68,8 @@ the stable behavioral contract.
 - Unit-test the selected gateway identity and WebSocket options.
 - Accept every documented contract-valid denial/report identifier in code
   graders while continuing to reject missing side effects or unrelated text.
+- Match independent semantic components independently, and include equivalent
+  Unicode typography when exact ASCII punctuation is not itself the contract.
 - Rerun affected tasks for both baseline and candidate, then regenerate both
   summaries with the same final evaluator commit.
 
