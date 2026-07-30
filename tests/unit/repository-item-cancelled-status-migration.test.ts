@@ -13,6 +13,16 @@ const manifest = JSON.parse(
   )
 ) as { migrationFiles: string[] };
 
+function executableStatements(): string[] {
+  return migration
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("--"))
+    .join("\n")
+    .split(/;\s*(?:\r?\n|$)/)
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+}
+
 function processingStatuses(): string[] {
   const constraint = migration.match(
     /ADD CONSTRAINT repository_items_processing_status_check\s+CHECK\s*\(\s*processing_status IN\s*\(([\s\S]*?)\)\s*\);/
@@ -35,6 +45,7 @@ describe("migration 168 repository item cancellation", () => {
   });
 
   it("replaces the live legacy constraint and preserves every existing status", () => {
+    expect(executableStatements()).toHaveLength(1);
     expect(migration).toContain(
       "DROP CONSTRAINT IF EXISTS repository_items_processing_status_check"
     );

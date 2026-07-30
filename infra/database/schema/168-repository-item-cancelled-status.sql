@@ -8,10 +8,10 @@
 -- only the missing cancellation state.
 -- ============================================================================
 
+-- Keep the replacement in one statement: the production migration runner
+-- executes semicolon-delimited statements independently.
 ALTER TABLE repository_items
-  DROP CONSTRAINT IF EXISTS repository_items_processing_status_check;
-
-ALTER TABLE repository_items
+  DROP CONSTRAINT IF EXISTS repository_items_processing_status_check,
   ADD CONSTRAINT repository_items_processing_status_check
   CHECK (
     processing_status IN (
@@ -29,8 +29,7 @@ ALTER TABLE repository_items
 
 -- Manual rollback (only after removing or reclassifying all 'cancelled' rows):
 -- ALTER TABLE repository_items
---   DROP CONSTRAINT IF EXISTS repository_items_processing_status_check;
--- ALTER TABLE repository_items
+--   DROP CONSTRAINT IF EXISTS repository_items_processing_status_check,
 --   ADD CONSTRAINT repository_items_processing_status_check
 --   CHECK (
 --     processing_status IN (
