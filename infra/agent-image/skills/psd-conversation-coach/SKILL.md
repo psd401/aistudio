@@ -1,6 +1,6 @@
 ---
 name: psd-conversation-coach
-summary: Prepare for a crucial conversation or difficult conversation, practice through realistic role-play, and debrief with framework-named feedback.
+summary: Prepare for a crucial conversation or difficult conversation, practice a parent meeting, peer conflict, or coaching up through realistic role-play, and debrief with framework-named feedback.
 description: Coach Peninsula School District staff through preparing for, practicing, and debriefing difficult high-stakes conversations using the publicly documented Crucial Conversations framework. Use for feedback, parent meetings, peer conflict, coaching up, and other situations where opinions differ, emotions are strong, and stakes are high.
 allowed-tools: Read
 ---

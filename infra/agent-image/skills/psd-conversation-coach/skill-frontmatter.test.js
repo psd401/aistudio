@@ -81,6 +81,9 @@ describe('skills.search discoverability', () => {
     'difficult conversation',
     'practice',
     'role-play',
+    'parent meeting',
+    'peer conflict',
+    'coaching up',
   ];
 
   for (const phrase of requiredPhrases) {
