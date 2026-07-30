@@ -113,6 +113,71 @@ class CandidateMatrixTests(unittest.TestCase):
             self.assertIsNone(metadata["imageDigest"])
             self.assertEqual(set(metadata["cost"]), set(metadata["costSources"]))
 
+    def test_harness_candidate_applies_only_approved_config_migrations(self):
+        manifest = self.manifests_dir / "openclaw-2026-7-2-beta-5.json"
+        with tempfile.TemporaryDirectory(
+            dir=HERE, prefix=".candidate-test."
+        ) as directory:
+            plan = candidate.prepare(manifest, Path(directory), "e" * 40)
+            config = json.loads(
+                (Path(directory) / "openclaw.json").read_text(encoding="utf-8")
+            )
+            self.assertNotIn("memorySearch", config["agents"]["defaults"])
+            self.assertEqual(
+                config["memory"]["search"],
+                {
+                    "provider": "bedrock",
+                    "model": "amazon.titan-embed-text-v2:0",
+                },
+            )
+            self.assertNotIn(
+                "allowInsecureAuth",
+                config["gateway"]["controlUi"],
+            )
+            self.assertNotIn(
+                "dangerouslyDisableDeviceAuth",
+                config["gateway"]["controlUi"],
+            )
+            metadata = json.loads(
+                Path(plan["metadata"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["variedAxis"], "harness")
+            expected_migrations = json.loads(
+                manifest.read_text(encoding="utf-8")
+            )["axes"]["harness"]["configMigrations"]
+            self.assertEqual(
+                metadata["harness"]["configMigrations"],
+                expected_migrations,
+            )
+
+    def test_rejects_unapproved_harness_config_migration(self):
+        source = json.loads(
+            (
+                self.manifests_dir / "openclaw-2026-7-2-beta-5.json"
+            ).read_text(encoding="utf-8")
+        )
+        source["axes"]["harness"]["configMigrations"].append(
+            {
+                "op": "remove",
+                "path": "agents.defaults.model",
+            }
+        )
+        with tempfile.TemporaryDirectory(
+            dir=self.manifests_dir.parent, prefix=".candidate-contract-test."
+        ) as directory:
+            temporary_manifest = Path(directory) / "candidate.json"
+            source["baseline"] = "../manifests/baseline.json"
+            source["axes"]["model"]["providerTemplate"] = (
+                "../providers/native-bedrock-sonnet-5.json"
+            )
+            temporary_manifest.write_text(json.dumps(source), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                candidate.CandidateError,
+                "not approved for a harness-only candidate",
+            ):
+                candidate.validate(temporary_manifest)
+
     def test_finalize_binds_metadata_to_immutable_digest(self):
         manifest = self.manifests_dir / "glm-5-native.json"
         with tempfile.TemporaryDirectory(

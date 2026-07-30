@@ -68,6 +68,16 @@ IMAGE_RE = re.compile(
 )
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SOURCE_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+CONFIG_PATH_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z][A-Za-z0-9_-]*)*$"
+)
+ALLOWED_HARNESS_CONFIG_MIGRATIONS = frozenset(
+    {
+        ("move", "agents.defaults.memorySearch", "memory.search"),
+        ("remove", "gateway.controlUi.allowInsecureAuth", None),
+        ("remove", "gateway.controlUi.dangerouslyDisableDeviceAuth", None),
+    }
+)
 
 
 def _utc_now() -> str:
@@ -408,7 +418,10 @@ def _load_contract(
     return manifest, axes, baseline, template_path, template
 
 
-def _compose_config(template: dict[str, object]) -> dict[str, object]:
+def _compose_config(
+    template: dict[str, object],
+    harness: object | None = None,
+) -> dict[str, object]:
     config = copy.deepcopy(_load_json(CANONICAL_CONFIG, "canonical config"))
     provider_name = _string(template.get("providerName"), "providerName")
     provider = copy.deepcopy(_mapping(template.get("provider"), "provider"))
@@ -422,22 +435,130 @@ def _compose_config(template: dict[str, object]) -> dict[str, object]:
     defaults["contextTokens"] = template["contextTokens"]
     params = _mapping(defaults["params"], "canonical agents.defaults.params")
     params["cacheRetention"] = cache_retention
+    if harness is not None:
+        harness_mapping = _mapping(harness, "axes.harness")
+        _apply_config_migrations(
+            config,
+            _validate_config_migrations(
+                harness_mapping.get("configMigrations"),
+                "axes.harness.configMigrations",
+            ),
+        )
     return config
+
+
+def _config_parent(
+    config: dict[str, object],
+    path: str,
+    *,
+    create_missing: bool = False,
+) -> tuple[dict[str, object], str]:
+    parts = path.split(".")
+    current = config
+    for part in parts[:-1]:
+        nested = current.get(part)
+        if nested is None and create_missing:
+            nested = {}
+            current[part] = nested
+        if not isinstance(nested, dict):
+            raise CandidateError(
+                f"harness config migration path does not exist: {path}"
+            )
+        current = nested
+    return current, parts[-1]
+
+
+def _apply_config_migrations(
+    config: dict[str, object],
+    migrations: list[tuple[str, str, str | None]],
+) -> None:
+    for operation, source, destination in migrations:
+        source_parent, source_key = _config_parent(config, source)
+        if source_key not in source_parent:
+            raise CandidateError(
+                f"harness config migration source does not exist: {source}"
+            )
+        value = source_parent.pop(source_key)
+        if operation == "remove":
+            continue
+        if destination is None:
+            raise CandidateError("move migration is missing its destination")
+        destination_parent, destination_key = _config_parent(
+            config,
+            destination,
+            create_missing=True,
+        )
+        if destination_key in destination_parent:
+            raise CandidateError(
+                "harness config migration destination already exists: "
+                f"{destination}"
+            )
+        destination_parent[destination_key] = value
+
+
+def _validate_config_migrations(
+    value: object,
+    label: str,
+) -> list[tuple[str, str, str | None]]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not value:
+        raise CandidateError(f"{label} must be a non-empty list")
+    migrations: list[tuple[str, str, str | None]] = []
+    for index, raw_migration in enumerate(value):
+        migration_label = f"{label}[{index}]"
+        migration = _mapping(raw_migration, migration_label)
+        operation = _string(migration.get("op"), f"{migration_label}.op")
+        if operation == "move":
+            if set(migration) != {"op", "from", "to"}:
+                raise CandidateError(
+                    f"{migration_label}: move must define op, from, and to"
+                )
+            source = _string(migration.get("from"), f"{migration_label}.from")
+            destination = _string(migration.get("to"), f"{migration_label}.to")
+        elif operation == "remove":
+            if set(migration) != {"op", "path"}:
+                raise CandidateError(
+                    f"{migration_label}: remove must define op and path"
+                )
+            source = _string(migration.get("path"), f"{migration_label}.path")
+            destination = None
+        else:
+            raise CandidateError(
+                f"{migration_label}.op must be 'move' or 'remove'"
+            )
+        for path in (source, destination):
+            if path is not None and CONFIG_PATH_RE.fullmatch(path) is None:
+                raise CandidateError(f"{migration_label}: malformed config path")
+        normalized = (operation, source, destination)
+        if normalized not in ALLOWED_HARNESS_CONFIG_MIGRATIONS:
+            raise CandidateError(
+                f"{migration_label}: config migration is not approved for "
+                "a harness-only candidate"
+            )
+        if normalized in migrations:
+            raise CandidateError(f"{migration_label}: duplicate config migration")
+        migrations.append(normalized)
+    return migrations
 
 
 def _validate_harness(
     axis: object, label: str
 ) -> tuple[str, str, str, str]:
     harness = _mapping(axis, label)
-    if set(harness) != {
+    required_fields = {
         "baseImage",
         "hostVersion",
         "bedrockPluginVersion",
         "expectedPluginToken",
-    }:
+    }
+    if not required_fields.issubset(harness) or not set(harness).issubset(
+        required_fields | {"configMigrations"}
+    ):
         raise CandidateError(
             f"{label} must define baseImage, hostVersion, "
-            "bedrockPluginVersion, and expectedPluginToken"
+            "bedrockPluginVersion, and expectedPluginToken; only "
+            "configMigrations is optional"
         )
     base_image = _string(harness.get("baseImage"), f"{label}.baseImage")
     host_version = _string(harness.get("hostVersion"), f"{label}.hostVersion")
@@ -453,6 +574,10 @@ def _validate_harness(
         raise CandidateError(f"{label}: host/plugin versions are malformed")
     if not re.fullmatch(r"^[0-9A-Za-z._:-]+$", expected_token):
         raise CandidateError(f"{label}.expectedPluginToken is malformed")
+    _validate_config_migrations(
+        harness.get("configMigrations"),
+        f"{label}.configMigrations",
+    )
     return base_image, host_version, plugin_version, expected_token
 
 
@@ -497,6 +622,12 @@ def _validate_baseline_harness_and_prompt(
     harness = _validate_harness(
         axes["harness"], f"{baseline_path}: axes.harness"
     )
+    if _mapping(axes["harness"], f"{baseline_path}: axes.harness").get(
+        "configMigrations"
+    ) is not None:
+        raise CandidateError(
+            f"{baseline_path}: baseline harness cannot declare config migrations"
+        )
     dockerfile = CANONICAL_DOCKERFILE.read_text(encoding="utf-8")
     if _render_pin_contract(*harness) != dockerfile:
         raise CandidateError(
@@ -628,7 +759,7 @@ def prepare(manifest_path: Path, output_dir: Path, source_commit: str) -> dict[s
     soul_output = output_dir / "SOUL.md"
     rules_output = output_dir / "skills" / "psd-rules" / "SKILL.md"
     metadata_path = output_dir / "metadata.json"
-    _atomic_json(config_path, _compose_config(template))
+    _atomic_json(config_path, _compose_config(template, axes["harness"]))
     dockerfile_path.write_text(
         _render_pin_contract(
             base_image, host_version, plugin_version, expected_token
@@ -667,6 +798,9 @@ def prepare(manifest_path: Path, output_dir: Path, source_commit: str) -> dict[s
             "hostVersion": host_version,
             "bedrockPluginVersion": plugin_version,
             "expectedPluginToken": expected_token,
+            "configMigrations": _mapping(
+                axes["harness"], "axes.harness"
+            ).get("configMigrations"),
         },
         "prompt": {
             "variant": prompt_variant,

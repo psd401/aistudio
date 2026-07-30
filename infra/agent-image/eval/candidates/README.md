@@ -41,7 +41,10 @@ Issue #1429 adds two non-model calibration arms:
 
 The harness arm uses the first published OpenClaw release after the `2026.7.1`
 baseline. It is a prerelease and is evaluated as a candidate only; building it
-does not change the production pin.
+does not change the production pin. Its manifest records the upstream-required
+move from `agents.defaults.memorySearch` to `memory.search` and removes two
+retired Control UI compatibility keys. The model and materialized prompt remain
+byte-identical to baseline.
 
 ## Axis contract
 
@@ -57,7 +60,10 @@ rejects zero changes, an undeclared change, or changes to two or more axes.
   version, Bedrock plugin version, and the token that must exist in the
   vendored plugin. The generated pin contract is passed through
   `check_config_consistency.py`; `npm pack` and both tarball references share
-  the same build argument.
+  the same build argument. Harness candidates may also declare a narrowly
+  allowlisted `configMigrations` list when the new host moves or retires
+  baseline keys. These migrations are part of the harness axis and cannot
+  change model or prompt configuration.
 - `prompt` selects the SOUL preamble and rules skill. The candidate versions
   are passed as Docker build inputs and checked against the materialized
   config's bootstrap budgets.
