@@ -7,6 +7,7 @@ import {
   backfillUpdateRequest,
   legacyScheduleRecordUpgrade,
   legacySchedulerExpression,
+  selectTrustedOwnerProfile,
   type ScheduleTargetBackfillDependencies,
   withIamPropagationRetry,
 } from "../../infra/lambdas/agent-schedule-target-backfill/backfill"
@@ -428,6 +429,39 @@ describe("agent schedule legacy record backfill", () => {
       dmSpaceName: "spaces/trusted-owner-dm",
     })
     expect(legacyRecord.cronExpression).toBe("0 6 * * MON-FRI")
+  })
+
+  it("canonicalizes an owner that only differs by case or whitespace", () => {
+    expect(
+      legacyScheduleRecordUpgrade({
+        ...legacyRecord,
+        version: 1,
+        ownerEmail: " Owner@PSD401.net ",
+        schedulerExpression: "cron(0 6 ? * MON-FRI *)",
+        workspacePrefix: "owner-workspace",
+        dmSpaceName: "spaces/trusted-owner-dm",
+      }, null),
+    ).toEqual({
+      ownerEmail: "owner@psd401.net",
+    })
+  })
+
+  it("prefers a duplicate owner profile with a usable DM destination", () => {
+    expect(selectTrustedOwnerProfile("owner@psd401.net", [
+      {
+        email: "owner@psd401.net",
+        googleIdentity: "users/12345",
+        workspacePrefix: "stale-workspace",
+      },
+      {
+        email: "Owner@PSD401.net ",
+        workspacePrefix: "usable-workspace",
+        dmSpaceName: "spaces/usable-dm",
+      },
+    ])).toEqual({
+      workspacePrefix: "usable-workspace",
+      dmSpaceName: "spaces/usable-dm",
+    })
   })
 
   it("migrates an exact legacy row before queuing target migration", async () => {

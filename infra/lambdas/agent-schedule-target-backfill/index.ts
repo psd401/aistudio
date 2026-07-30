@@ -29,7 +29,7 @@ import {
   type ScheduleBackfillPhase,
   type ScheduleTargetBackfillDependencies,
   type ScheduleTargetBackfillResult,
-  type TrustedOwnerProfile,
+  selectTrustedOwnerProfile,
   withIamPropagationRetry,
 } from './backfill';
 import {
@@ -81,38 +81,6 @@ function decodeCursor(token?: string): Record<string, unknown> | undefined {
   } catch {
     throw new Error('Schedule record backfill cursor is invalid');
   }
-}
-
-function normalizedEmail(value: unknown): string {
-  return typeof value === 'string' ? value.trim().toLowerCase() : '';
-}
-
-function ownerProfile(
-  ownerEmail: string,
-  values: Record<string, unknown>[],
-): TrustedOwnerProfile | null {
-  const candidates = values.filter(
-    (value) => normalizedEmail(value.email) === ownerEmail,
-  );
-  const selected = candidates.find(
-    (value) =>
-      typeof value.googleIdentity === 'string'
-      && /^users\/\d+$/.test(value.googleIdentity),
-  ) ?? candidates[0];
-  if (!selected) return null;
-  const workspacePrefix =
-    typeof selected.workspacePrefix === 'string'
-    && selected.workspacePrefix.length > 0
-    && selected.workspacePrefix.length <= 128
-      ? selected.workspacePrefix
-      : ownerEmail.split('@')[0];
-  return {
-    workspacePrefix,
-    ...(typeof selected.dmSpaceName === 'string'
-      && /^spaces\/[\w-]{1,256}$/.test(selected.dmSpaceName)
-      ? { dmSpaceName: selected.dmSpaceName }
-      : {}),
-  };
 }
 
 function updateRecordRequest(
@@ -215,7 +183,7 @@ const runtimeDependencies: ScheduleTargetBackfillDependencies = {
       KeyConditionExpression: 'email = :email',
       ExpressionAttributeValues: { ':email': ownerEmail },
     }));
-    return ownerProfile(
+    return selectTrustedOwnerProfile(
       ownerEmail,
       (response.Items ?? []).filter(
         (item): item is Record<string, unknown> => Boolean(objectValue(item)),

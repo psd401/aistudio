@@ -141,6 +141,34 @@ function normalizedEmail(value: unknown): string {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
 
+export function selectTrustedOwnerProfile(
+  ownerEmail: string,
+  values: Record<string, unknown>[],
+): TrustedOwnerProfile | null {
+  const candidates = values.filter(
+    (value) =>
+      normalizedEmail(value.email) === ownerEmail
+      && typeof value.dmSpaceName === 'string'
+      && DM_SPACE_RE.test(value.dmSpaceName),
+  );
+  const selected = candidates.find(
+    (value) =>
+      typeof value.googleIdentity === 'string'
+      && /^users\/\d+$/.test(value.googleIdentity),
+  ) ?? candidates[0];
+  if (!selected || typeof selected.dmSpaceName !== 'string') return null;
+  const workspacePrefix =
+    typeof selected.workspacePrefix === 'string'
+    && selected.workspacePrefix.length > 0
+    && selected.workspacePrefix.length <= 128
+      ? selected.workspacePrefix
+      : ownerEmail.split('@')[0];
+  return {
+    workspacePrefix,
+    dmSpaceName: selected.dmSpaceName,
+  };
+}
+
 /**
  * Mirror the broker's five/six-field cron normalization for legacy records.
  * The migration deliberately preserves the stored cronExpression verbatim and
@@ -227,7 +255,7 @@ function legacyOwner(
       'Legacy schedule record owner conflicts with its partition',
     );
   }
-  return existingOwner ? undefined : partitionOwner;
+  return value === partitionOwner ? undefined : partitionOwner;
 }
 
 function legacyExpression(
