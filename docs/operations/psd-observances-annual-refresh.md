@@ -91,7 +91,10 @@ Confirm `passed` is `true` and `markdown_item_count` is exactly 76 before
 uploading. The expected item set is 18 monthly observance documents, 51
 state/DC documents, six conference-year documents, and one six-year holiday
 summary. Each observance and conference record begins with an ISO date and is
-placed under its own `##` heading.
+placed under its own `##` heading. Every retrieval section also carries an
+explicit `printed page:` or `printed pages:` fact in its heading (and record
+body). The skill prefers native PDF source locators and uses this heading-path
+fact only for structured-Markdown citations.
 
 The report contains names, dates, page references, and aggregate facts for
 failed reconciliation only; it does not copy source commentary. Keep it in the

@@ -1033,17 +1033,22 @@ def render_documents(extraction: Extraction) -> dict[str, str]:
             )
     for year, month in month_keys():
         title = f"Observances {year:04d}-{month:02d}"
-        lines = [f"# {title}", ""]
-        for item in sorted(
+        month_records = sorted(
             grouped_observances[(year, month)],
             key=lambda value: (
                 value.date.start if value.date else dt.date.max,
                 value.name.casefold(),
             ),
-        ):
+        )
+        month_pages = _printed_pages(item.pdf_page for item in month_records)
+        lines = [f"# {title} — printed pages: {month_pages}", ""]
+        for item in month_records:
             lines.extend(
                 [
-                    f"## {_safe_heading(item.name)}",
+                    (
+                        f"## {_safe_heading(item.name)} — "
+                        f"printed page: {item.pdf_page - 10}"
+                    ),
                     "",
                     (
                         f"{item.date.iso_text()} — {normalize_space(item.comments)}"
@@ -1060,10 +1065,11 @@ def render_documents(extraction: Extraction) -> dict[str, str]:
     for state_name in STATE_NAMES:
         state = extraction.states.get(state_name, StateDocument(name=state_name))
         title = f"State Holidays — {state_name}"
+        printed_pages = _printed_pages(state.pages)
         lines = [
-            f"# {title}",
+            f"# {title} — printed pages: {printed_pages}",
             "",
-            f"Printed pages: {_printed_pages(state.pages) or 'not found'}.",
+            f"Printed pages: {printed_pages or 'not found'}.",
             "",
         ]
         for section_name in ("State legal holiday", "School holidays"):
@@ -1072,7 +1078,9 @@ def render_documents(extraction: Extraction) -> dict[str, str]:
                 continue
             lines.extend(
                 [
-                    f"## {section_name}",
+                    f"## {section_name} — printed pages: {printed_pages}",
+                    "",
+                    f"Printed pages: {printed_pages}.",
                     "",
                     normalize_space(" ".join(fragments)),
                     "",
@@ -1086,7 +1094,6 @@ def render_documents(extraction: Extraction) -> dict[str, str]:
             grouped_conferences[item.year].append(item)
     for year in CONFERENCE_YEARS:
         title = f"Education Conferences {year}"
-        lines = [f"# {title}", ""]
         records = sorted(
             grouped_conferences[year],
             key=lambda item: (
@@ -1094,6 +1101,13 @@ def render_documents(extraction: Extraction) -> dict[str, str]:
                 item.organization.casefold(),
             ),
         )
+        conference_pages = _printed_pages(
+            item.pdf_page for item in records
+        ) or _printed_pages(CONFERENCE_PAGES)
+        lines = [
+            f"# {title} — printed pages: {conference_pages}",
+            "",
+        ]
         if not records:
             lines.extend(
                 [
@@ -1113,7 +1127,10 @@ def render_documents(extraction: Extraction) -> dict[str, str]:
             )
             lines.extend(
                 [
-                    f"## {_safe_heading(item.organization)}",
+                    (
+                        f"## {_safe_heading(item.organization)} — "
+                        f"printed page: {item.pdf_page - 10}"
+                    ),
                     "",
                     f"{item.date.iso_text()} — {details}".rstrip(" —"),
                     "",
@@ -1124,9 +1141,9 @@ def render_documents(extraction: Extraction) -> dict[str, str]:
         documents[f"{title}.md"] = "\n".join(lines).rstrip() + "\n"
 
     summary_title = "Six-Year Holiday Summary 2026-2031"
-    summary_lines = [f"# {summary_title}", ""]
+    summary_lines = [f"# {summary_title} — printed page: 49", ""]
     for year in SUMMARY_YEARS:
-        summary_lines.extend([f"## {year}", ""])
+        summary_lines.extend([f"## {year} — printed page: 49", ""])
         for item in extraction.summary.get(year, []):
             summary_lines.append(
                 f"{item.date.isoformat()} — {_safe_heading(item.name)} "
