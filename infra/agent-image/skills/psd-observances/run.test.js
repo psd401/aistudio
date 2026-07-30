@@ -459,6 +459,10 @@ test('free-form commands reject explicit out-of-range years and dates before bro
     ['search', 'Constitution Day', '2030'],
     ['lookup', 'Observances on 2027-07-01'],
     ['search', 'observances in July 2027'],
+    ['lookup', 'observances in Jul 2027'],
+    ['search', 'observances on 07/01/2027'],
+    ['lookup', 'observances on 2027/07/01'],
+    ['search', 'observances in 2027/07'],
     ['holiday-years', 'Christmas 2032'],
   ]) {
     const result = await invoke(argv, broker);
@@ -467,6 +471,28 @@ test('free-form commands reject explicit out-of-range years and dates before bro
   }
   expect(calls).toHaveLength(0);
 });
+
+for (const { label, argv } of [
+  {
+    label: 'an abbreviated June 2027 month',
+    argv: ['lookup', 'observances in Jun 2027'],
+  },
+  {
+    label: 'a month-first June 2027 date',
+    argv: ['search', 'observances on 06/30/2027'],
+  },
+  {
+    label: 'a year-first June 2027 date',
+    argv: ['lookup', 'observances on 2027/06/30'],
+  },
+]) {
+  test(`free-form commands accept ${label}`, async () => {
+    const { broker, calls } = createBroker();
+    const result = await invoke(argv, broker);
+    expect(result.exitCode).toBe(0);
+    expect(calls).toHaveLength(2);
+  });
+}
 
 test('holiday-years accepts an in-range summary year', async () => {
   const { broker, calls } = createBroker();

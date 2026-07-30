@@ -232,6 +232,84 @@ function wordTokens(value) {
     .filter(Boolean);
 }
 
+function numericDateTokens(value) {
+  const tokens = [];
+  let digits = '';
+  const flushDigits = () => {
+    if (!digits) return;
+    tokens.push(digits);
+    digits = '';
+  };
+
+  for (const character of value) {
+    if (character >= '0' && character <= '9') {
+      digits += character;
+      continue;
+    }
+    flushDigits();
+    if (character === '/' || character === '-' || character === '.') {
+      tokens.push(character);
+    } else if (tokens.at(-1) !== '|') {
+      tokens.push('|');
+    }
+  }
+  flushDigits();
+  return tokens;
+}
+
+function isNumericToken(value) {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    [...value].every(
+      (character) => character >= '0' && character <= '9',
+    )
+  );
+}
+
+function numericMonthYearAt(tokens, index) {
+  const candidates = [];
+  const first = tokens[index];
+  const separator = tokens[index + 1];
+  const second = tokens[index + 2];
+  if (
+    !isNumericToken(first) ||
+    !['/', '-', '.'].includes(separator) ||
+    !isNumericToken(second)
+  ) {
+    return candidates;
+  }
+
+  const followsNumericDatePart =
+    tokens[index - 1] === separator &&
+    isNumericToken(tokens[index - 2]);
+  if (first.length === 4 && second.length <= 2) {
+    candidates.push({ year: Number(first), month: Number(second) });
+  } else if (
+    second.length === 4 &&
+    first.length <= 2 &&
+    !followsNumericDatePart
+  ) {
+    candidates.push({ year: Number(second), month: Number(first) });
+  }
+
+  const third = tokens[index + 4];
+  if (
+    tokens[index + 3] === separator &&
+    typeof third === 'string' &&
+    third.length === 4 &&
+    first.length <= 2
+  ) {
+    candidates.push({ year: Number(third), month: Number(first) });
+  }
+  return candidates;
+}
+
+function numericMonthYears(value) {
+  const tokens = numericDateTokens(value);
+  return tokens.flatMap((_, index) => numericMonthYearAt(tokens, index));
+}
+
 function rejectLate2027Month(value) {
   const tokens = wordTokens(value).map((token) => token.toLocaleLowerCase());
   const yearIndexes = tokens
@@ -239,11 +317,18 @@ function rejectLate2027Month(value) {
     .filter((index) => index >= 0);
   const lateMonths = new Set([
     'july',
+    'jul',
     'august',
+    'aug',
     'september',
+    'sep',
+    'sept',
     'october',
+    'oct',
     'november',
+    'nov',
     'december',
+    'dec',
   ]);
   for (const [index, token] of tokens.entries()) {
     if (!lateMonths.has(token) || yearIndexes.length === 0) continue;
@@ -257,6 +342,17 @@ function rejectLate2027Month(value) {
         1,
       );
     }
+  }
+  if (
+    numericMonthYears(value).some(
+      ({ year, month }) => year === 2027 && month > 6,
+    )
+  ) {
+    fail(
+      'The requested 2027 month is outside the January 2026 through June 2027 coverage window.',
+      'out_of_range',
+      1,
+    );
   }
 }
 
