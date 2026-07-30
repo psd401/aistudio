@@ -119,9 +119,12 @@ and a non-zero exit code when auth isn't ready:
 | 12 | (stderr) | both | Broker, policy, CLI, or Google failure; inspect the error text and request ID |
 | 13 | `phase1-forbidden` | both | A Phase-1 hard gate refused the command |
 | 14 | `account-provisioning` | agent | agnt_ account being auto-created — retry later, nothing to click |
+| 15 | `scope-upgrade-required` | user | Stored grant predates required Drive scopes — send the returned consent URL so the user can grant the additional permission |
 
-User-slot 10/11 payloads carry `consent_url`; `SOUL.md` instructs the agent to
-paste it verbatim into Chat and stop the turn. Exit 14 carries **no** URL.
+User-slot 10/11/15 payloads carry `consent_url`; `SOUL.md` instructs the agent
+to paste it verbatim into Chat and stop the turn. For exit 15, explain that one
+additional Drive permission is needed rather than saying authorization was
+missing or revoked. Exit 14 carries **no** URL.
 
 ## Deployment checklist
 
