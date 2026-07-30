@@ -22,6 +22,8 @@ python3 infra/agent-image/eval/runner.py \
 ```
 
 Use `eval/suites/capability.yaml` for the harder daily-driver comparison set.
+Use `eval/suites/tool-heavy-smoke.yaml` for a fast L1 check across credentials,
+AI Studio, and workflow broker routes before spending on a full candidate run.
 Passing `--agent-runtime-id` mirrors only the allowlisted, non-secret deployment
 fields required by L2 skills (currently HyperFrames and the optional summarize
 model override); it never copies the runtime's complete environment.
@@ -290,17 +292,26 @@ modified. A root-owned `0700` in-container tmpfs carries only the active trial's
 fixtures and `0600` request capture; the runner installs and collects that state
 through root-only Docker execs, so the image's `node` user cannot read fixtures
 or forge grader inputs even when its numeric UID matches the host runner. The
-stub implements the same 16 fixed `/api/agent/*` routes as `agent-broker.js` and
-`mantle_proxy.py`, plus the health, usage, and finalization endpoints the wrapper
-needs. It also preserves the fixed `/anthropic/v1/messages` loopback endpoint
-used by `psd-summarize`, relaying only that model path to the trusted web tier
-with root-held invocation authority. Finalization drains already-active broker
-and summarization requests and rejects new work before acknowledging the
-boundary. The wrapper's end transition leaves the stub closed through runner
-capture collection; installing the next trial uses a separate root-only token
-to reopen it, so delayed work cannot spill across trials. L0 and L2 tasks
-retain the image's real proxy; pure live and stubbed tasks use separate
-containers.
+stub implements the same 16 fixed `/api/agent/*` routes as `agent-broker.js`
+and `mantle_proxy.py`, plus the health, usage, and finalization endpoints the
+wrapper needs. Candidate images configured for a direct Bedrock Mantle model
+also use this loopback process for model inference. The stub preserves only the
+production relay's exact provider operations, validated AWS origin, and
+configured model ID; it replaces the model-facing authorization header with
+the root-held bearer token and requires active invocation authority for paid
+calls. Read-only model discovery remains available while the eval trial gate is
+closed so clients can finish startup before the runner opens the first trial.
+The OpenAI-compatible relay also applies the production Kimi tool-call ID
+repair before forwarding tool history. Model request and response bodies are
+never written to the fixture capture. It also preserves the fixed
+`/anthropic/v1/messages` loopback endpoint used by `psd-summarize`, relaying
+only that model path to the trusted web tier with root-held invocation
+authority. Finalization drains already-active broker, candidate-model, and
+summarization requests and rejects new work before acknowledging the boundary.
+The wrapper's end transition leaves the stub closed through runner capture
+collection; installing the next trial uses a separate root-only token to reopen
+it, so delayed work cannot spill across trials. L0 and L2 tasks retain the
+image's real proxy; pure live and stubbed tasks use separate containers.
 
 ## Task and suite files
 
