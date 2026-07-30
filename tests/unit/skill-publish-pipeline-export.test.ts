@@ -52,13 +52,17 @@ import {
   downloadSkillFolder,
   MAX_EXPORT_FILES,
   MAX_EXPORT_TOTAL_BYTES,
+  readSkillMarkdown,
 } from "@/lib/skills/skill-publish-pipeline"
 
 const PREFIX = "skills/user/a@b.com/approved/my-skill/"
 
 // Drive the mocked S3 client: a single ListObjectsV2 page returning `keys`,
 // then a GetObject per key returning `bodyFor(key)`.
-function wireS3(keys: string[], bodyFor: (key: string) => string) {
+function wireS3(
+  keys: string[],
+  bodyFor: (key: string) => string | Uint8Array
+) {
   sendMock.mockReset()
   sendMock.mockImplementation((command: { input: Record<string, unknown> }) => {
     if ("Prefix" in command.input) {
@@ -68,8 +72,14 @@ function wireS3(keys: string[], bodyFor: (key: string) => string) {
       })
     }
     const key = command.input.Key as string
+    const content = bodyFor(key)
+    const bytes =
+      typeof content === "string" ? Buffer.from(content, "utf8") : content
     return Promise.resolve({
-      Body: { transformToString: async () => bodyFor(key) },
+      Body: {
+        transformToString: async () => Buffer.from(bytes).toString("utf8"),
+        transformToByteArray: async () => bytes,
+      },
     })
   })
 }
@@ -86,6 +96,20 @@ describe("downloadSkillFolder export bounds", () => {
     expect(files).toHaveLength(2)
     expect(files[0].path).toBe("SKILL.md")
     expect(files[1].path).toBe("helpers/util.md")
+    expect(Buffer.from(files[0].content).toString("utf8")).toBe(
+      `content of ${PREFIX}SKILL.md`
+    )
+  })
+
+  it("preserves binary object bytes exactly", async () => {
+    const binary = Uint8Array.from([0, 255, 1, 128, 13, 10])
+    wireS3([`${PREFIX}assets/logo.png`], () => binary)
+
+    const files = await downloadSkillFolder(PREFIX)
+
+    expect(files).toEqual([
+      { path: "assets/logo.png", content: binary },
+    ])
   })
 
   it("rejects folders exceeding the file-count cap", async () => {
@@ -121,5 +145,39 @@ describe("downloadSkillFolder export bounds", () => {
     await expect(downloadSkillFolder(PREFIX)).rejects.toThrow(
       /exceeding the export limit of .* bytes/
     )
+  })
+})
+
+describe("readSkillMarkdown bundled references", () => {
+  const bundledPrefix =
+    "skills/bundled/agent-v1/psd-conversation-coach/"
+
+  it("appends bundled Markdown references for catalog-only runtimes", async () => {
+    wireS3(
+      [
+        `${bundledPrefix}references/coaching-guide.md`,
+        `${bundledPrefix}references/framework.md`,
+        `${bundledPrefix}references/scenarios.md`,
+      ],
+      (key) => {
+        if (key.endsWith("SKILL.md")) return "# Coach instructions"
+        return `content for ${key.slice(bundledPrefix.length)}`
+      }
+    )
+
+    const skillMd = await readSkillMarkdown(bundledPrefix)
+
+    expect(skillMd).toContain("# Coach instructions")
+    expect(skillMd).toContain("## Catalog-loaded references")
+    expect(skillMd).toContain("### references/coaching-guide.md")
+    expect(skillMd).toContain("content for references/framework.md")
+    expect(skillMd).toContain("content for references/scenarios.md")
+  })
+
+  it("does not inject sibling files for user-authored skills", async () => {
+    wireS3([], () => "# User skill")
+
+    await expect(readSkillMarkdown(PREFIX)).resolves.toBe("# User skill")
+    expect(sendMock).toHaveBeenCalledTimes(1)
   })
 })

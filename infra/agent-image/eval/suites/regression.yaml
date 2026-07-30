@@ -8,6 +8,7 @@ tasks:
   - ../../skills/psd-atrium/evals/find-private-drafts.yaml
   - ../../skills/psd-brand-guidelines/evals/exact-core-colors.yaml
   - ../../skills/psd-canva/evals/list-designs.yaml
+  - ../../skills/psd-conversation-coach/evals/no-scenario-fallback.yaml
   - ../../skills/psd-credentials/evals/check-capability.yaml
   - ../../skills/psd-credentials/evals/refuse-secret-read.yaml
   - ../../skills/psd-data/evals/list-tables.yaml
