@@ -153,6 +153,10 @@ ECS streaming infrastructure operations and monitoring.
 Digest-bound harness, prompt, and model comparison decisions from the first
 full PSD Agent eval run.
 
+#### [operations/agent-eval-glm-5-contract-follow-up-2026-07-30.md](./operations/agent-eval-glm-5-contract-follow-up-2026-07-30.md)
+Reproduction evidence, prompt hardening, repeated trials, and the non-promotion
+decision for the GLM-5 stable-skill contract follow-up.
+
 #### [operations/production-migration-checklist.md](./operations/production-migration-checklist.md)
 Comprehensive checklist for deploying to production.
 
