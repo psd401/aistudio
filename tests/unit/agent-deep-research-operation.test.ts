@@ -4,6 +4,7 @@ const reserveDeepResearchMock = jest.fn()
 const releaseDeepResearchMock = jest.fn()
 const createDeepResearchInteractionMock = jest.fn()
 const getDeepResearchInteractionMock = jest.fn()
+const cancelDeepResearchInteractionMock = jest.fn()
 const mapInteractionErrorMock = jest.fn((error: unknown) => {
   const mapped = new Error(
     error instanceof Error ? error.message : String(error)
@@ -38,6 +39,9 @@ jest.mock("@/lib/ai/deep-research-budget", () => ({
 }))
 
 jest.mock("@/lib/ai/gemini-deep-research-service", () => ({
+  MAX_DEEP_RESEARCH_RUN_DURATION_MS: 25 * 60 * 1_000,
+  cancelDeepResearchInteraction: (...args: unknown[]) =>
+    cancelDeepResearchInteractionMock(...args),
   createDeepResearchInteraction: (...args: unknown[]) =>
     createDeepResearchInteractionMock(...args),
   getDeepResearchInteraction: (...args: unknown[]) =>
@@ -154,9 +158,10 @@ beforeEach(() => {
     interactionId: "interaction-1",
     status: "in_progress",
   })
+  cancelDeepResearchInteractionMock.mockResolvedValue(undefined)
 })
 
-describe("Deep Research owner operation broker", () => {
+describe("Deep Research start owner operation", () => {
   it("returns 403 for an unknown or inactive signed owner", async () => {
     queryResults = [[]]
 
@@ -247,8 +252,51 @@ describe("Deep Research owner operation broker", () => {
       "upstream_error"
     )
     expect(releaseDeepResearchMock).toHaveBeenCalledWith("lease-1")
+    expect(cancelDeepResearchInteractionMock).not.toHaveBeenCalled()
   })
 
+  it("cancels an interaction before releasing when reservation binding fails", async () => {
+    queryResults = [activeOwner(), deepResearchModel(), []]
+
+    await expectOperationError(
+      executeDeepResearchStartOperation({
+        ownerEmail: "owner@psd401.net",
+        prompt: "Research a topic",
+      }),
+      502,
+      "upstream_error"
+    )
+    expect(cancelDeepResearchInteractionMock).toHaveBeenCalledWith(
+      "interaction-1"
+    )
+    expect(releaseDeepResearchMock).toHaveBeenCalledWith("lease-1")
+  })
+
+  it("preserves the lease if an unbound interaction cannot be cancelled", async () => {
+    queryResults = [activeOwner(), deepResearchModel(), []]
+    cancelDeepResearchInteractionMock.mockRejectedValueOnce(
+      new Error("Google cancel unavailable")
+    )
+
+    await expectOperationError(
+      executeDeepResearchStartOperation({
+        ownerEmail: "owner@psd401.net",
+        prompt: "Research a topic",
+      }),
+      502,
+      "upstream_error"
+    )
+    expect(releaseDeepResearchMock).not.toHaveBeenCalled()
+    expect(logErrorMock).toHaveBeenCalledWith(
+      "Failed to cancel unbound Deep Research interaction",
+      expect.objectContaining({
+        interactionId: "interaction-1",
+      })
+    )
+  })
+})
+
+describe("Deep Research status owner operation", () => {
   it("masks an interaction owned by another caller with 404", async () => {
     queryResults = [activeOwner(), ownedReservation({ userId: 99 })]
 
@@ -296,6 +344,59 @@ describe("Deep Research owner operation broker", () => {
         status: "completed",
       })
     )
+  })
+
+  it("cancels and releases a non-terminal interaction at the server deadline", async () => {
+    queryResults = [
+      activeOwner(),
+      ownedReservation({
+        reservedAt: new Date(Date.now() - 26 * 60 * 1_000),
+      }),
+      deepResearchModel(),
+    ]
+
+    const message = await expectOperationError(
+      executeDeepResearchStatusOperation({
+        ownerEmail: "owner@psd401.net",
+        interactionId: "interaction-1",
+      }),
+      504,
+      "upstream_error"
+    )
+    expect(message).toMatch(/25-minute server time limit/)
+    expect(cancelDeepResearchInteractionMock).toHaveBeenCalledWith(
+      "interaction-1"
+    )
+    expect(releaseDeepResearchMock).toHaveBeenCalledWith("lease-1")
+    expect(logWarnMock).toHaveBeenCalledWith(
+      "Deep Research broker deadline reached",
+      expect.objectContaining({
+        reservationOutcome: "released",
+        status: "cancelled",
+      })
+    )
+  })
+
+  it("preserves an overdue lease if Google cancellation fails", async () => {
+    queryResults = [
+      activeOwner(),
+      ownedReservation({
+        reservedAt: new Date(Date.now() - 26 * 60 * 1_000),
+      }),
+    ]
+    cancelDeepResearchInteractionMock.mockRejectedValueOnce(
+      new Error("Google cancel unavailable")
+    )
+
+    await expectOperationError(
+      executeDeepResearchStatusOperation({
+        ownerEmail: "owner@psd401.net",
+        interactionId: "interaction-1",
+      }),
+      502,
+      "upstream_error"
+    )
+    expect(releaseDeepResearchMock).not.toHaveBeenCalled()
   })
 
   it.each(["failed", "cancelled", "incomplete"] as const)(

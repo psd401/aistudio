@@ -48,7 +48,7 @@ const POLL_INTERVAL_MS = 10_000;
  * we keep writing status updates to the stream — see status emitter
  * cadence below.
  */
-const MAX_RUN_DURATION_MS = 25 * 60 * 1_000;
+export const MAX_DEEP_RESEARCH_RUN_DURATION_MS = 25 * 60 * 1_000;
 
 export interface DeepResearchCitation {
   url: string;
@@ -327,6 +327,18 @@ export async function getDeepResearchInteraction(
   }
 }
 
+/** Cancel one background interaction without exposing the Google client. */
+export async function cancelDeepResearchInteraction(
+  interactionId: string
+): Promise<void> {
+  const client = await createGoogleClient();
+  try {
+    await client.interactions.cancel(interactionId);
+  } catch (error) {
+    throw mapInteractionError(error);
+  }
+}
+
 /**
  * Abortable sleep. Cleans up the abort listener on normal resolution so that
  * long polling loops (150+ iterations over 25 minutes) don't accumulate
@@ -380,11 +392,11 @@ async function pollUntilTerminal(
 
   while (true) {
     const elapsedMs = Date.now() - startMs;
-    if (elapsedMs > MAX_RUN_DURATION_MS) {
+    if (elapsedMs > MAX_DEEP_RESEARCH_RUN_DURATION_MS) {
       void client.interactions.cancel(last.id).catch(() => {});
       throw createError(
         'TIMEOUT',
-        `Deep Research exceeded the ${Math.round(MAX_RUN_DURATION_MS / 60_000)}-minute time limit.`
+        `Deep Research exceeded the ${Math.round(MAX_DEEP_RESEARCH_RUN_DURATION_MS / 60_000)}-minute time limit.`
       );
     }
 

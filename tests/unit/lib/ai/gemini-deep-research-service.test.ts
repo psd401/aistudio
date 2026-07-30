@@ -39,6 +39,7 @@ jest.mock("@/lib/error-utils", () => ({
 }))
 
 import {
+  cancelDeepResearchInteraction,
   createDeepResearchInteraction,
   getDeepResearchInteraction,
   mapInteractionError,
@@ -143,6 +144,15 @@ describe("Gemini Deep Research split lifecycle", () => {
       interactionId: "interaction-1",
       status: "in_progress",
     })
+  })
+
+  it("cancels one background interaction", async () => {
+    interactionCancelMock.mockResolvedValueOnce(undefined)
+
+    await expect(
+      cancelDeepResearchInteraction("interaction-1")
+    ).resolves.toBeUndefined()
+    expect(interactionCancelMock).toHaveBeenCalledWith("interaction-1")
   })
 
   it("preserves an already classified interaction error", () => {

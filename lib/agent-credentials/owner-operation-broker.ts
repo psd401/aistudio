@@ -823,6 +823,17 @@ async function resolveDeepResearchModelId(): Promise<string | null> {
   return model?.modelId ?? null;
 }
 
+async function resolveDeepResearchModelIdForLog(): Promise<string | null> {
+  try {
+    return await resolveDeepResearchModelId();
+  } catch (error) {
+    log.warn("Failed to resolve Deep Research model for terminal log", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
 async function bindDeepResearchInteraction(input: {
   leaseId: string;
   userId: number;
@@ -865,6 +876,37 @@ async function releaseStartLease(
   }
 }
 
+type DeepResearchService = typeof import(
+  "@/lib/ai/gemini-deep-research-service"
+);
+
+async function cleanupFailedDeepResearchStart(input: {
+  service: DeepResearchService | null;
+  leaseId: string;
+  interactionId: string | null;
+  context: Record<string, unknown>;
+}): Promise<"released_after_start_error" | "preserved_after_cancel_error"> {
+  if (input.service && input.interactionId) {
+    try {
+      await input.service.cancelDeepResearchInteraction(input.interactionId);
+    } catch (cancelError) {
+      log.error("Failed to cancel unbound Deep Research interaction", {
+        ...input.context,
+        error:
+          cancelError instanceof Error
+            ? cancelError.message
+            : String(cancelError),
+      });
+      // Keep the lease active so an unconfirmed cancellation cannot create a
+      // second concurrency slot. The existing lease expiry remains the final
+      // recovery boundary if Google is unreachable.
+      return "preserved_after_cancel_error";
+    }
+  }
+  await releaseStartLease(input.leaseId, input.context);
+  return "released_after_start_error";
+}
+
 export async function executeDeepResearchStartOperation(input: {
   ownerEmail: string;
   prompt: unknown;
@@ -890,9 +932,7 @@ export async function executeDeepResearchStartOperation(input: {
 
   let interactionId: string | null = null;
   let modelId: string | null = null;
-  let service:
-    | typeof import("@/lib/ai/gemini-deep-research-service")
-    | null = null;
+  let service: DeepResearchService | null = null;
   try {
     modelId = await resolveDeepResearchModelId();
     if (!modelId) {
@@ -922,19 +962,21 @@ export async function executeDeepResearchStartOperation(input: {
     });
     return interaction;
   } catch (error) {
-    await releaseStartLease(reservation.leaseId, {
+    const cleanupContext = {
       caller: sanitizeForLogging(input.ownerEmail),
       interactionId,
       resolvedModel: modelId,
-      reservationOutcome: "released_after_start_error",
       elapsedMs: Date.now() - startedAt,
+    };
+    const reservationOutcome = await cleanupFailedDeepResearchStart({
+      service,
+      leaseId: reservation.leaseId,
+      interactionId,
+      context: cleanupContext,
     });
     log.error("Deep Research broker start failed", {
-      caller: sanitizeForLogging(input.ownerEmail),
-      interactionId,
-      resolvedModel: modelId,
-      reservationOutcome: "released_after_start_error",
-      elapsedMs: Date.now() - startedAt,
+      ...cleanupContext,
+      reservationOutcome,
       error: error instanceof Error ? error.message : String(error),
     });
     if (error instanceof DeepResearchOperationError) throw error;
@@ -988,11 +1030,8 @@ export async function executeDeepResearchStatusOperation(input: {
     input.ownerEmail,
     interactionId,
   );
-  const modelId = await resolveDeepResearchModelId();
 
-  let service:
-    | typeof import("@/lib/ai/gemini-deep-research-service")
-    | null = null;
+  let service: DeepResearchService | null = null;
   let interaction;
   try {
     service = await import("@/lib/ai/gemini-deep-research-service");
@@ -1016,6 +1055,42 @@ export async function executeDeepResearchStatusOperation(input: {
     interaction.status !== "cancelled" &&
     interaction.status !== "incomplete"
   ) {
+    if (elapsedMs >= service.MAX_DEEP_RESEARCH_RUN_DURATION_MS) {
+      try {
+        await service.cancelDeepResearchInteraction(interactionId);
+      } catch (error) {
+        log.error("Failed to cancel overdue Deep Research interaction", {
+          caller: sanitizeForLogging(input.ownerEmail),
+          interactionId,
+          resolvedModel: null,
+          reservationOutcome: "preserved_after_cancel_error",
+          elapsedMs,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw new DeepResearchOperationError(
+          502,
+          "upstream_error",
+          service.mapInteractionError(error).message,
+        );
+      }
+      await releaseDeepResearch(reservation.leaseId);
+      const modelId = await resolveDeepResearchModelIdForLog();
+      log.warn("Deep Research broker deadline reached", {
+        caller: sanitizeForLogging(input.ownerEmail),
+        interactionId,
+        resolvedModel: modelId,
+        reservationOutcome: "released",
+        elapsedMs,
+        status: "cancelled",
+      });
+      throw new DeepResearchOperationError(
+        504,
+        "upstream_error",
+        `Deep Research exceeded the ${Math.round(
+          service.MAX_DEEP_RESEARCH_RUN_DURATION_MS / 60_000,
+        )}-minute server time limit and was cancelled.`,
+      );
+    }
     return {
       interactionId,
       status: interaction.status,
@@ -1024,6 +1099,7 @@ export async function executeDeepResearchStatusOperation(input: {
   }
 
   await releaseDeepResearch(reservation.leaseId);
+  const modelId = await resolveDeepResearchModelIdForLog();
   log.info("Deep Research broker terminal status", {
     caller: sanitizeForLogging(input.ownerEmail),
     interactionId,
