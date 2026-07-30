@@ -1,0 +1,13 @@
+id: observances-american-education-week
+skill: psd-observances
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-observances to answer: when is American Education Week? Include the printed-page citation."
+trials: 3
+fixtures:
+  - fixtures/lookup-american-education-week.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_list"},"params.arguments.query":{"exact":"NSPRA"}}}
+  - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_search"},"params.arguments.query":{"exact":"American Education Week"},"params.arguments.repositoryIds":{"contains_any":[1476]}}}
+  - {"type":"output_match","pattern":"(?is)(American Education Week.*November 16-20, 2026.*Page 17|Page 17.*American Education Week.*November 16-20, 2026)"}

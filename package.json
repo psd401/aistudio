@@ -49,6 +49,7 @@
     "test:skill:atrium": "cd infra/agent-image/skills/psd-atrium && bun test",
     "test:skill:sop-creator": "cd infra/agent-image/skills/psd-sop-creator && bun test",
     "test:skill:morning-brief": "cd infra/agent-image/skills/psd-morning-brief && bun test",
+    "test:skill:psd-observances": "cd infra/agent-image/skills/psd-observances && bun test",
     "test:smoke:atrium": "bun run test:smoke:atrium-render && bun run test:smoke:atrium-collab && bun run test:smoke:atrium-collab-token && bun run test:smoke:atrium-agent-bridge && bun run test:smoke:atrium-agent-read && bun run test:smoke:atrium-html-sanitize && bun run test:smoke:atrium-provenance-rail && bun run test:smoke:atrium-collab-schema && bun run test:smoke:atrium-suggestions-resolve && bun run test:smoke:atrium-suggestion-mode && bun run test:smoke:atrium-sandbox-config && bun run test:smoke:atrium-sandbox-host",
     "test:ci": "jest --config=jest.config.ci.js",
     "test:watch": "jest --watch",

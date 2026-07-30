@@ -22,6 +22,7 @@ tasks:
   - ../../skills/psd-html-artifact/evals/audit-minimal-report.yaml
   - ../../skills/psd-instructional-vision/evals/four-essentials.yaml
   - ../../skills/psd-morning-brief/evals/offline-self-check.yaml
+  - ../../skills/psd-observances/evals/lookup-american-education-week.yaml
   - ../../skills/psd-open-adaptive-district/evals/weekly-check-in-fields.yaml
   - ../../skills/psd-pdf-to-markdown/evals/convert-bundled-brand-guide.yaml
   - ../../skills/psd-plaud/evals/list-recordings.yaml
