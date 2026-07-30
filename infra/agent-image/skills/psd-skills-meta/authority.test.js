@@ -5,21 +5,19 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const loadScript = path.resolve(__dirname, 'load.js');
+const brokerPreload = path.resolve(
+  __dirname,
+  '../../../../tests/fixtures/agent-skills-broker-preload.cjs',
+);
 
 function runLoadWithBrokerResponse(name, status, body) {
-  const bootstrap = [
-    `globalThis.fetch = async () => new Response(${JSON.stringify(JSON.stringify(body))}, {`,
-    `status: ${status},`,
-    "headers: { 'Content-Type': 'application/json' },",
-    '});',
-    `process.argv = [process.execPath, ${JSON.stringify(loadScript)}, '--name', ${JSON.stringify(name)}];`,
-    `require(${JSON.stringify(loadScript)});`,
-  ].join('\n');
-  return spawnSync('node', ['-e', bootstrap], {
+  return spawnSync('node', ['--require', brokerPreload, loadScript, '--name', name], {
     encoding: 'utf8',
     env: {
       ...process.env,
       PSD_SKILLS_DIR: path.resolve(__dirname, '..'),
+      TEST_AGENT_BROKER_BODY: JSON.stringify(body),
+      TEST_AGENT_BROKER_STATUS: String(status),
     },
   });
 }
