@@ -331,6 +331,7 @@ class SuiteLoadingTests(unittest.TestCase):
         )
         for valid_window in (
             "last 7 days",
+            "last-7-days",
             "last\u202f7\u202fdays",
             "past week",
             "7-day",
