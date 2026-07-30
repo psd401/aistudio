@@ -289,6 +289,46 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part2() {it("rolls bac
     ).toEqual({ userId: OWNER, scheduleId: SCHEDULE_ID })
   })
 
+  it("returns a degraded legacy row alongside valid schedules", async () => {
+    const legacyId = "a273413f-7a93-4e43-9b49-1bc8880be024"
+    const { service, dynamoSend, latestBySchedule } = harness()
+    dynamoSend.mockResolvedValueOnce({
+      Items: [
+        {
+          userId: OWNER,
+          scheduleId: legacyId,
+          name: "Legacy dispatch",
+          prompt: "Generate it",
+          cronExpression: "0 6 * * MON-FRI",
+          timezone: "America/Los_Angeles",
+          enabled: true,
+          createdAt: "2026-07-24T00:00:00.000Z",
+          updatedAt: "2026-07-24T00:00:00.000Z",
+        },
+        scheduleRecord(),
+      ],
+    })
+
+    await expect(service.list(OWNER)).resolves.toEqual([
+      expect.objectContaining({
+        scheduleId: legacyId,
+        version: 0,
+        name: "Legacy dispatch",
+        degraded: true,
+        degradedReason: "Schedule record requires migration",
+      }),
+      expect.objectContaining({
+        scheduleId: SCHEDULE_ID,
+        degraded: false,
+        degradedReason: null,
+      }),
+    ])
+    expect(latestBySchedule).toHaveBeenCalledWith(OWNER, [
+      legacyId,
+      SCHEDULE_ID,
+    ])
+  })
+
   it("joins each schedule to its latest run and truncates the error", async () => {
     const latestRunAt = new Date("2026-07-28T15:30:00.000Z")
     const longError = "failure ".repeat(100)
@@ -347,7 +387,9 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part2() {it("rolls bac
       }),
     ])
   })
+}
 
+function defineAgentScheduleServiceAuthorityBoundarySuite1Part2b() {
   it("seeds legacy quota from all existing rows before admitting a create", async () => {
     const { service, dynamoSend, schedulerSend } = harness()
     const legacy = Array.from({ length: config.maxSchedulesPerOwner }, (_, i) =>
@@ -381,7 +423,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part2() {it("rolls bac
     ).toMatchObject({ activeCount: 50, reconciled: true })
   })
 
-  }
+}
 
 function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a reconciled but drifted quota on a subsequent mutation", async () => {
     const { service, dynamoSend, schedulerSend } = harness()
@@ -518,6 +560,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
 const defineAgentScheduleServiceAuthorityBoundarySuite1 = () => {
   defineAgentScheduleServiceAuthorityBoundarySuite1Part1()
   defineAgentScheduleServiceAuthorityBoundarySuite1Part2()
+  defineAgentScheduleServiceAuthorityBoundarySuite1Part2b()
   defineAgentScheduleServiceAuthorityBoundarySuite1Part3()
 };
 

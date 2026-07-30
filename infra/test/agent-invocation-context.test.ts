@@ -337,6 +337,25 @@ describe('Agent schedule reliability infrastructure', () => {
     }
   });
 
+  it('alarms schedule-reference rejections before invocation', () => {
+    template.hasResourceProperties('AWS::Logs::MetricFilter', {
+      MetricTransformations: Match.arrayWith([
+        Match.objectLike({
+          MetricName: 'ScheduleReferenceRejections',
+          MetricNamespace: `PSD/AgentPlatform/${ENV}`,
+          MetricValue: '1',
+        }),
+      ]),
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: `psd-agent-schedule-reference-rejections-${ENV}`,
+      Namespace: `PSD/AgentPlatform/${ENV}`,
+      MetricName: 'ScheduleReferenceRejections',
+      Threshold: 1,
+      AlarmActions: Match.anyValue(),
+    });
+  });
+
   it('alarms Scheduler and Lambda DLQ depth through the agent alarm topic', () => {
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       AlarmName: `psd-agent-async-dlq-${ENV}`,

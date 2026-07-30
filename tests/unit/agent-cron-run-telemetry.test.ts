@@ -4,6 +4,7 @@ import {
   isPromotedRunPending,
   reservePromotedRunId,
   updatePromotedRunTerminal,
+  writePreflightRun,
   type CronTelemetryLogger,
 } from "../../infra/lambdas/agent-cron/run-telemetry"
 
@@ -216,6 +217,39 @@ describe("agent-cron promoted run terminal repair", () => {
 })
 
 describe("agent-cron preflight run telemetry", () => {
+  it("types a nullable fire key through the preflight SQL path", async () => {
+    const execute = jest.fn().mockResolvedValue({
+      records: [[{ stringValue: "skipped" }]],
+    })
+
+    await expect(
+      writePreflightRun(
+        config,
+        { execute },
+        {
+          userEmail: "owner@psd401.net",
+          scheduleId: "legacy-schedule",
+          sessionId: "reference-session",
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 12,
+          status: "skipped",
+          errorMessage: "Schedule reference rejected: invalid-reference",
+        },
+      ),
+    ).resolves.toBe("skipped")
+
+    const input = execute.mock.calls[0][0]
+    expect(input.sql).toContain("CAST(:fire_key AS text) IS NOT NULL")
+    expect(input.sql).toContain(
+      "existing.fire_key = CAST(:fire_key AS text)",
+    )
+    expect(input.parameters).toContainEqual({
+      name: "fire_key",
+      value: { isNull: true },
+    })
+  })
+
   it("never overwrites an existing fire with stale preflight telemetry", async () => {
     const execute = jest.fn().mockResolvedValue({
       records: [[{ stringValue: "promoted" }]],
@@ -245,7 +279,9 @@ describe("agent-cron preflight run telemetry", () => {
     const input = execute.mock.calls[0][0]
     expect(input.sql).toContain("DO NOTHING")
     expect(input.sql).not.toContain("DO UPDATE")
-    expect(input.sql).toContain("existing.fire_key = :fire_key")
+    expect(input.sql).toContain(
+      "existing.fire_key = CAST(:fire_key AS text)",
+    )
   })
 })
 

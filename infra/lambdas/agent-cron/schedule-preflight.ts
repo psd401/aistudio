@@ -24,6 +24,13 @@ export interface SchedulePreflightResult {
   referencedScheduleId: string;
 }
 
+const ALARMED_REJECTION_REASONS = new Set([
+  'invalid-reference',
+  'owner-mismatch',
+  'version-mismatch',
+  'invalid-record',
+]);
+
 function boundedReferenceValue(
   value: unknown,
   maximumLength: number,
@@ -76,6 +83,9 @@ export async function runSchedulePreflight(
     const errorMessage = `Schedule reference rejected: ${loaded.reason}`;
     options.log.warn('Schedule reference rejected before invocation', {
       reason: loaded.reason,
+      ...(ALARMED_REJECTION_REASONS.has(loaded.reason)
+        ? { marker: 'SCHEDULE_REFERENCE_REJECTION' }
+        : {}),
     });
     await options.telemetry.recordPreflightRun(
       {

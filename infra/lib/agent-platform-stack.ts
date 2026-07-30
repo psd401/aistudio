@@ -2314,14 +2314,31 @@ export class AgentPlatformStack extends cdk.Stack {
                 },
               }),
               new iam.PolicyStatement({
-                sid: 'ScheduleTargetBackfillMutationLock',
+                sid: 'ScheduleTargetBackfillRecords',
                 effect: iam.Effect.ALLOW,
                 actions: [
+                  'dynamodb:GetItem',
                   'dynamodb:PutItem',
                   'dynamodb:DeleteItem',
                   'dynamodb:UpdateItem',
+                  'dynamodb:Scan',
                 ],
                 resources: [resources.schedulesTable.tableArn],
+                conditions: {
+                  StringEquals: {
+                    'aws:ResourceTag/Environment': environment,
+                    'aws:ResourceTag/ManagedBy': 'cdk',
+                  },
+                },
+              }),
+              new iam.PolicyStatement({
+                sid: 'ScheduleTargetBackfillReadOwners',
+                effect: iam.Effect.ALLOW,
+                actions: ['dynamodb:Query'],
+                resources: [
+                  resources.usersTable.tableArn,
+                  `${resources.usersTable.tableArn}/index/email-index`,
+                ],
                 conditions: {
                   StringEquals: {
                     'aws:ResourceTag/Environment': environment,
@@ -2398,6 +2415,7 @@ export class AgentPlatformStack extends cdk.Stack {
         environment: {
           SCHEDULE_GROUP: groupName,
           SCHEDULES_TABLE: resources.schedulesTable.tableName,
+          USERS_TABLE: resources.usersTable.tableName,
           SCHEDULE_DLQ_ARN: resources.agentAsyncDlq.queueArn,
         },
       },
@@ -3862,17 +3880,53 @@ export class AgentPlatformStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
+    resources.failureMetricNamespace = `PSD/AgentPlatform/${environment}`;
+    const scheduleReferenceRejectionMetricName =
+      'ScheduleReferenceRejections';
+    new logs.MetricFilter(this, 'CronScheduleReferenceRejectionMetric', {
+      logGroup: resources.cronLogGroup,
+      metricNamespace: resources.failureMetricNamespace,
+      metricName: scheduleReferenceRejectionMetricName,
+      filterPattern: logs.FilterPattern.stringValue(
+        '$.marker',
+        '=',
+        'SCHEDULE_REFERENCE_REJECTION',
+      ),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    const scheduleReferenceRejectionAlarm = new cloudwatch.Alarm(
+      this,
+      'CronScheduleReferenceRejectionAlarm',
+      {
+        alarmName: `psd-agent-schedule-reference-rejections-${environment}`,
+        alarmDescription:
+          'Agent schedule references were rejected before invocation — scheduled work is silently unavailable',
+        metric: new cloudwatch.Metric({
+          namespace: resources.failureMetricNamespace,
+          metricName: scheduleReferenceRejectionMetricName,
+          period: cdk.Duration.minutes(5),
+          statistic: 'Sum',
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+
     if (resources.agentAlarmTopic) {
       const alarmAction = new cloudwatchActions.SnsAction(resources.agentAlarmTopic);
       cronErrorAlarm.addAlarmAction(alarmAction);
       cronThrottleAlarm.addAlarmAction(alarmAction);
+      scheduleReferenceRejectionAlarm.addAlarmAction(alarmAction);
     }
 
     // CloudWatch metric filter — emit a metric every time an
     // AGENT_FAILURE_RECORD line lands in the router Lambda log. Combined with
     // the harness-image structured log line of the same shape, this gives us
     // a single "agent failures per period" metric across all chokepoints.
-    resources.failureMetricNamespace = `PSD/AgentPlatform/${environment}`;
     const failureMetricName = 'AgentFailures';
 
     // Both router and cron filters intentionally write to the same metric name.
