@@ -63,7 +63,9 @@ const customJestConfig = {
     '/node_modules/',
     '/tests/e2e/',
     '/.next/',
-    '/infra/',  // Infra has its own Jest config and CDK dependencies
+    // Infra has its own Jest config, except the triage worker's focused
+    // runtime-boundary tests (pure TypeScript with no CDK dependency).
+    '/infra/(?!lambdas/agent-triage-poll/__tests__/)',
     '/tests/performance/',  // EXCLUDE performance tests in CI
     '<rootDir>/.claude/worktrees/',  // Nested worktrees only - see note above
     'mock-sse-factory.ts',  // Utility file, not a test file
