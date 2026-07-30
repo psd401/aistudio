@@ -152,6 +152,8 @@ node /opt/psd-skills/psd-workspace/run.js \
   --command "gmail +draft --to bill@psd401.net --subject 'Follow up' --body-file /tmp/draft-body.txt"
 
 # Chat message text (+send) uses --text-file (replaces --text)
+# Only send after the user explicitly confirms the message. Chat writes must
+# use the agent identity; the trusted broker rejects them on the human slot.
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net --scope agent \
   --command "chat +send --space spaces/XXXX --text-file /tmp/chatmsg.txt"
@@ -194,7 +196,7 @@ and style ranges immediately after, back-to-front.
 
 These cannot be bypassed by phrasing. The skill returns exit code 13 with `status: phase1-forbidden`:
 
-- **No sending mail.** `gmail.users.messages.send`, `gmail.users.drafts.send`, `+send`, `+reply`, `+reply-all`, `+forward` — all blocked. Drafts only.
+- **No sending mail.** `gmail.users.messages.send`, `gmail.users.drafts.send`, and the Gmail helper verbs `gmail +send`, `gmail +reply`, `gmail +reply-all`, `gmail +forward` — all blocked. Drafts only. These gates are Gmail-scoped: `chat +send` is a separate, allowed operation (agent slot only, see above) and is not covered by this boundary.
 - **No deletes.** Mail (delete/trash/batchDelete), events, calendars, Drive files, drive trash, tasks, tasklists.
 - **No permission changes.** `drive.permissions.create/update/delete` (except the explicit in-district shapes below).
 - **No file creation as the user.** `drive files create/copy`, `docs documents create`, `sheets spreadsheets create`, `slides presentations create` on `--scope user` are hard-blocked — a file created there is owned by the user's account (impersonation; no attribution trail). Create with `--scope agent`, then share explicitly. **One exception, added 2026-07-25 (#1305):** `drive files create` with `mimeType` exactly `application/vnd.google-apps.folder` is allowed, because a folder carries no content and creating one is organizing, not authoring. The mimeType is matched exactly — a shortcut, a Doc, or a lookalike mimeType still refuses — and any media/upload flag alongside it refuses too. Nothing else gets through, and no phrasing changes that.

@@ -5,7 +5,7 @@ import { beforeAll, beforeEach, describe, expect, it, jest } from "@jest/globals
 type Invocation = {
   ownerEmail: string
   actorEmail: string
-  mode: "owner" | "email-task"
+  mode: "owner" | "scheduled" | "email-task"
   sessionId: string
   nonce: string
 }
@@ -67,6 +67,42 @@ jest.mock("@/lib/logger", () => ({
 
 function request(body: unknown) {
   return { json: async () => body }
+}
+
+function defineScheduledChatConfinementTest(
+  workspacePost: () =>
+    typeof import("@/app/api/agent/workspace-execute/route").POST,
+): void {
+  it("blocks scheduled Chat sends before minting an agent token", async () => {
+    verifyContextMock.mockResolvedValue({
+      ownerEmail: "owner@example.com",
+      actorEmail: "owner@example.com",
+      mode: "scheduled",
+      sessionId: "scheduled-session",
+      nonce: "scheduled-nonce",
+    })
+
+    const response = await workspacePost()(
+      request({
+        scope: "agent",
+        argv: [
+          "chat",
+          "+send",
+          "--space",
+          "spaces/AAQA13FQZFA",
+          "--text",
+          "Automated update",
+        ],
+      }) as never,
+    )
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({
+      error: expect.stringMatching(/without live user confirmation/),
+    })
+    expect(mintAgentTokenMock).not.toHaveBeenCalled()
+    expect(executeWorkspaceCommandMock).not.toHaveBeenCalled()
+  })
 }
 
 describe("email-task route confinement", () => {
@@ -163,6 +199,8 @@ describe("email-task route confinement", () => {
     expect(executeWorkspaceCommandMock).toHaveBeenCalledTimes(1)
     expect(mintAgentTokenMock).not.toHaveBeenCalled()
   })
+
+  defineScheduledChatConfinementTest(() => workspacePost)
 
   it("requires a scope upgrade before executing a newly authorized Drive read", async () => {
     verifyContextMock.mockResolvedValue({

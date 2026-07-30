@@ -299,6 +299,28 @@ describe('--text-file (chat +send message text)', () => {
   });
 });
 
+describe('Chat sends are broker-allowlisted, not Phase 1 forbidden', () => {
+  const AGENT_CTX = {
+    scope: 'agent_account',
+    ownerEmail: 'hagelk@psd401.net',
+  };
+
+  test('allows both the helper and raw create-message forms through the skill gate', () => {
+    expect(
+      enforcePhase1Gates(
+        'chat +send --space spaces/XXXX --text "Test summary"',
+        AGENT_CTX
+      )
+    ).toEqual({ allowed: true });
+    expect(
+      enforcePhase1Gates(
+        'chat spaces messages create --params \'{"parent":"spaces/XXXX"}\' --json \'{"text":"Test summary"}\'',
+        AGENT_CTX
+      )
+    ).toEqual({ allowed: true });
+  });
+});
+
 describe('quoted file paths (review finding 2)', () => {
   test('a quoted absolute path resolves like an unquoted one', () => {
     const payload = { a: 1 };
