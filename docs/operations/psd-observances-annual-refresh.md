@@ -52,7 +52,59 @@ unrelated, intentionally tracked PDF assets, so do not use a blanket
 "no PDFs anywhere" assertion. Review the refresh PR separately for copied NSPRA
 prose; a clean PDF check alone does not detect extracted text.
 
-## 3. Confirm content-platform settings
+## 3. Generate and verify structured Markdown
+
+Run the committed coordinate-aware extractor against the authorized PDF. The
+source, generated item directory, and verification report must all be outside
+every Git worktree. The command refuses repository-local paths and refuses to
+overwrite a nonempty output directory:
+
+```bash
+SOURCE_PDF="/approved/operator-storage/INSIDE-calendar.pdf"
+OUTPUT_DIR="$(mktemp -d /tmp/nspra-calendar-items.XXXXXX)"
+REPORT_FILE="$(mktemp /tmp/nspra-calendar-verification.XXXXXX.json)"
+
+uv run --python 3.12 --no-project --with pymupdf python \
+  infra/agent-image/skills/psd-observances/tools/nspra_markdown.py \
+  --pdf "$SOURCE_PDF" \
+  --out "$OUTPUT_DIR" \
+  --report "$REPORT_FILE"
+```
+
+The tool parses the alphabetical directory independently from Part I and uses
+word-level x-coordinates for every multi-column table. It exits nonzero unless
+all six verification gates pass:
+
+1. at least 99% of the independently parsed directory entries match a Part I
+   observance with identical dates, with every mismatch listed in the external
+   report;
+2. all 50 states and the District of Columbia have a section and statute
+   citation;
+3. every observance date parses inside the edition coverage window;
+4. all six holiday-summary blocks contain 15-18 records and every printed
+   weekday agrees with the computed weekday;
+5. every conference has an organization and start date, and at least 95% have
+   a website or email; and
+6. Git tracks neither generated output nor an unapproved PDF.
+
+Confirm `passed` is `true` and `markdown_item_count` is exactly 76 before
+uploading. The expected item set is 18 monthly observance documents, 51
+state/DC documents, six conference-year documents, and one six-year holiday
+summary. Each observance and conference record begins with an ISO date and is
+placed under its own `##` heading.
+
+The report contains names, dates, page references, and aggregate facts for
+failed reconciliation only; it does not copy source commentary. Keep it in the
+operational change record or other approved storage, not Git. Delete temporary
+source derivatives after ingestion and evidence capture.
+
+Run the fact-only unit and copyright guard independently:
+
+```bash
+bun run test:tool:psd-observances-extraction
+```
+
+## 4. Confirm content-platform settings
 
 In the target environment's settings administration path, confirm all three
 settings are `true`:
@@ -70,7 +122,7 @@ procedure. Do not upload and hope processing catches up later. A known symptom
 of a disabled canonical path is an item remaining `pending` with no
 `registerCanonicalUpload` activity.
 
-## 4. Create or verify the repository
+## 5. Create or verify the repository
 
 Use Repository Manager to create a new repository or inspect the repository
 that will receive the edition. It must satisfy every condition below:
@@ -99,18 +151,19 @@ skill's current selection rule. If the existing repository is reused instead,
 remove its prior-edition items from retrieval before evaluation so old and new
 dates cannot be mixed.
 
-## 5. Upload and verify processing
+## 6. Upload and verify processing
 
-Upload the new publication through Repository Manager. Do not add repository
-write access to the agent and do not add a new broker route or MCP tool for this
-operation.
+Upload all 76 generated `.md` items as `text/markdown` through the canonical
+repository upload API or Repository Manager. Do not upload the source PDF once
+the structured pipeline is in use. Do not add repository write access to the
+agent and do not add a new broker route or MCP tool for this operation.
 
 Wait until every new item is `active` before testing or promotion. Record the
 item count and final status, and inspect failures through the normal canonical
 content processing telemetry. Stop on any pending, failed, or partially
 processed item; do not treat partial retrieval as a successful refresh.
 
-Apply the repository-name cutover from step 4, then run a skill lookup. Each
+Apply the repository-name cutover from step 5, then run a skill lookup. Each
 invocation calls `repositories_list` and reports the selected repository;
 record that selection before scoring any lookup. If the replacement is not
 selected, stop and correct the names rather than accepting results from the
@@ -127,7 +180,7 @@ Run representative staff-authenticated lookups and confirm:
 - a caller with missing, expired, or insufficient repository scope receives
   the connect/reconnect hint.
 
-## 6. Update runtime and documented coverage
+## 7. Update runtime and documented coverage
 
 Update the executable coverage contract in
 [`run.js`](../../infra/agent-image/skills/psd-observances/run.js) before
@@ -162,7 +215,7 @@ as names and dates are permitted; remove or replace any fixture that contains
 source prose. Keep the `summary` frontmatter and calendar-oriented trigger
 phrasing intact so skill discovery continues to work.
 
-## 7. Re-run the retrieval evaluation
+## 8. Re-run the retrieval evaluation
 
 Run the committed `psd-observances` retrieval evaluation against the real
 repository in the target environment, not mocks. The evaluation gate is
@@ -206,11 +259,11 @@ Repeat the evaluation in dev and production. Do not infer production success
 from a dev result because flags, repository IDs, ACLs, and ingested items are
 environment-specific.
 
-## 8. Retire the prior edition
+## 9. Retire the prior edition
 
 Keep the old edition available until the replacement is active, the skill and
 feature guide describe the new range, and the target environment passes the
-retrieval gate. A prior repository renamed in step 4 remains the rollback copy
+retrieval gate. A prior repository renamed in step 5 remains the rollback copy
 until this point. Then remove the prior items or repository through Repository
 Manager and confirm the replacement still resolves by the "NSPRA" name rule.
 

@@ -80,7 +80,8 @@ jobs:
           infra/agent-image/test_eval_summary.py \
           infra/agent-image/test_report.py \
           infra/agent-image/test_tts_synthesize.py \
-          infra/agent-image/skills/psd-last30days/scripts/test_last30days.py
+          infra/agent-image/skills/psd-last30days/scripts/test_last30days.py \
+          infra/agent-image/skills/psd-observances/tools/test_nspra_markdown.py
 
     - name: Run model-UID isolation test as root
       run: |

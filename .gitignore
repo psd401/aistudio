@@ -24,6 +24,12 @@
 
 # misc
 .DS_Store
+
+# NSPRA source and generated derivatives are copyrighted operational inputs.
+# The extractor enforces external paths; these are defense-in-depth guards.
+/infra/agent-image/skills/psd-observances/generated/
+/infra/agent-image/skills/psd-observances/source/
+/infra/agent-image/skills/psd-observances/*.pdf
 *.pem
 
 # debug
